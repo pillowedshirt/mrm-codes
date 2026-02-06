@@ -1,0 +1,4217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson Scheduler</title>
+
+<style>
+:root {
+  --color-bg: #f5f5f5;
+  --color-surface: #ffffff;
+  --color-accent: #2f2f2f;
+  --color-accent-soft: rgba(0,0,0,0.08);
+  --color-text-main: #111111;
+  --color-text-muted: #666666;
+  --color-border: #dddddd;
+  --radius-lg: 18px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+  --color-gold: #c9a227;
+}
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text-main);
+}
+
+body.mrm-day-modal-open { overflow: hidden; }
+
+/* prevent background scrolling when the booking modal is open */
+body.mrm-booking-modal-open {
+  overflow: hidden;
+}
+
+.wrapper {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h1 {
+  font-size: 32px;
+  margin: 0 0 20px 0;
+  text-align: center;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px,1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.filters label {
+  display:block;
+  font-size:14px;
+  margin-bottom:4px;
+  color: var(--color-text-muted);
+}
+
+.filters select,
+.filters input {
+  width:100%;
+  padding:8px 10px;
+  border:1px solid var(--color-border);
+  border-radius:var(--radius-sm);
+  font-size:14px;
+}
+
+.city-heading {
+  margin: 22px 0 12px 0;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  color: var(--color-text-main);
+}
+
+.instructor {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  margin-bottom: 24px;
+}
+
+/* "Dog tag" header styling */
+.instructor-header {
+  font-size: 18px;
+  font-weight: 650;
+  margin-bottom: 14px;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(0,0,0,0.12);
+  background: rgba(0,0,0,0.02);
+  box-shadow: 0 8px 18px rgba(0,0,0,0.06);
+  transition: background 140ms ease, box-shadow 140ms ease, transform 140ms ease, border-color 140ms ease;
+}
+
+.instructor-header:focus { outline: none; }
+.instructor-header:focus-visible {
+  outline: 2px solid rgba(0,0,0,0.22);
+  outline-offset: 3px;
+}
+
+.instructor-header:hover {
+  background: rgba(0,0,0,0.04);
+  border-color: rgba(0,0,0,0.18);
+  box-shadow: 0 10px 22px rgba(0,0,0,0.08);
+}
+
+.instructor-header:active { transform: translateY(1px); }
+
+.instructor-header-left{
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+
+.instructor-avatar{
+  width:46px;
+  height:46px;
+  border-radius:50%;
+  object-fit:cover;
+  background:#eee;
+  flex:0 0 46px;
+}
+
+.instructor-title-line{
+  font-weight:700;
+  font-size:16px;
+  line-height:1.2;
+}
+
+.instructor-instruments{
+  font-weight:400;
+  color:#6b6b6b;
+}
+
+.instructor-shortdesc{
+  margin:6px 0 0;
+  color:#6b6b6b;
+  font-size:12.5px;
+  line-height:1.35;
+}
+
+.instructor-toggle {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--color-text-main);
+  flex: 0 0 auto;
+}
+
+.calendar {
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
+}
+
+.calendar.is-collapsed { display: none; }
+
+/* calendar body wrapper so we never wipe the confirm button */
+.calendar-body {}
+
+/* --- State selector (SVG map) --- */
+.state-selector-wrap{
+  max-width: 980px;
+  margin: 22px auto 10px;
+  padding: 14px 14px 18px;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.08);
+}
+
+.state-selector-title{
+  font-size: 18px;
+  font-weight: 800;
+  margin: 0 0 10px;
+}
+
+.state-selector-sub{
+  margin: 0 0 14px;
+  color: #6b6b6b;
+  font-size: 14px;
+}
+
+/* Map wrapper */
+.us-map-wrap{
+  width: 100%;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(0,0,0,0.08);
+  background: #fff;
+}
+
+/* The SVG itself */
+.us-map-wrap svg{
+  display:block;
+  width:100%;
+  height:auto;
+}
+
+/* State shapes inside the SVG (paths/polygons/etc) */
+.us-map-state{
+  fill: #ffffff;
+  stroke: rgba(0,0,0,0.18);
+  stroke-width: 1;
+  cursor: pointer;
+  transition: fill .12s ease, stroke .12s ease, opacity .12s ease;
+}
+
+.us-map-state:hover{
+  fill: #7B734A;
+  stroke: #7B734A;
+}
+
+.us-map-state.is-disabled{
+  fill: #f2f2f2;
+  stroke: rgba(0,0,0,0.10);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.us-map-state.is-disabled:hover{
+  fill: #f2f2f2;
+  stroke: rgba(0,0,0,0.10);
+}
+
+/* Selected state (optional visual) */
+.us-map-state.is-selected{
+  fill: #7B734A;
+  stroke: #7B734A;
+}
+
+/* Change-state dropdown */
+.state-filter-bar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 10px;
+  margin: 10px 0 18px;
+  padding: 10px 12px;
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 6px 22px rgba(0,0,0,.06);
+}
+
+.state-filter-pill{
+  font-weight: 900;
+}
+
+.state-change{
+  cursor: pointer;
+  color: #780000;
+  text-decoration: none;
+  font-weight: 600;
+  position: relative;
+}
+
+.state-change-popover{
+  margin-left: 12px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.state-change-select{
+  appearance: none;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(0,0,0,0.18);
+  background: rgba(255,255,255,0.85);
+  box-shadow: 0 10px 22px rgba(0,0,0,0.08);
+  font-size: 14px;
+  font-weight: 600;
+  color: #111;
+  outline: none;
+}
+
+.state-change-select:focus{
+  border-color: rgba(0,0,0,0.35);
+}
+
+/* Premium loader */
+.calendar-loader {
+  min-height: 560px;
+  display: grid;
+  place-items: center;
+}
+
+.calendar-loader-inner {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 22px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(0,0,0,0.10);
+  background: rgba(255,255,255,0.55);
+  box-shadow: 0 14px 30px rgba(0,0,0,0.06);
+  backdrop-filter: blur(6px);
+}
+
+.calendar-loader-title {
+  font-size: 14px;
+  letter-spacing: 0.2px;
+  color: rgba(0,0,0,0.65);
+  margin: 0;
+}
+
+.orbit {
+  width: 56px;
+  height: 56px;
+  position: relative;
+}
+
+.orbit::before,
+.orbit::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+}
+
+.orbit::before { border: 2px solid rgba(0,0,0,0.10); }
+
+.orbit::after {
+  border: 2px solid rgba(0,0,0,0.22);
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+  animation: orbitSpin 900ms linear infinite;
+}
+
+.orbit-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(0,0,0,0.45);
+  transform: translate(-50%,-50%) rotate(0deg) translateX(24px);
+  animation: orbitDot 900ms cubic-bezier(.55,.15,.25,1) infinite;
+}
+
+@keyframes orbitSpin { to { transform: rotate(360deg); } }
+
+@keyframes orbitDot {
+  0%   { transform: translate(-50%,-50%) rotate(0deg) translateX(24px); opacity: .85; }
+  60%  { opacity: .35; }
+  100% { transform: translate(-50%,-50%) rotate(360deg) translateX(24px); opacity: .85; }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit::after,
+  .orbit-dot { animation: none; }
+}
+
+.calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 0;
+  background: transparent;
+  border-bottom: none;
+}
+
+.calendar-header button {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  font-size: 22px;
+  line-height: 1;
+  color: var(--color-text-main);
+}
+
+.calendar-header button:hover { background: var(--color-accent-soft); }
+.calendar-header button:active { transform: translateY(1px); }
+
+.calendar-header > div {
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  text-align: center;
+}
+
+.calendar-grid {
+  display:grid;
+  grid-template-columns: repeat(7,1fr);
+  gap: 0;
+  background: transparent;
+}
+
+.calendar-day {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+
+  min-height: 90px;
+  padding: 6px;
+  cursor: pointer;
+  position: relative;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.calendar-day.inactive {
+  background: transparent;
+  color:#aaa;
+  cursor:default;
+}
+
+/* remove dot */
+.calendar-day.has-slots::after { content: none; display: none; }
+
+/* availability styling */
+.calendar-day.has-slots .calendar-day-number {
+  border-color: var(--color-text-main);
+  border-width: 3px;
+  color: var(--color-text-main);
+}
+
+.calendar-day:not(.has-slots):not(.inactive) .calendar-day-number {
+  border-color: rgba(0,0,0,0.20);
+  border-width: 1px;
+  color: rgba(0,0,0,0.45);
+}
+
+.calendar-day.has-selected .calendar-day-number {
+  background: var(--color-gold);
+  border-color: var(--color-gold);
+  color: var(--color-text-main);
+}
+
+.calendar-day-number {
+  width: 52px;
+  height: 52px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0;
+  line-height: 1;
+  color: var(--color-text-main);
+}
+
+.calendar-day.inactive .calendar-day-number {
+  color: #aaa;
+  border-color: var(--color-border);
+}
+
+.calendar-day.past { cursor: default; }
+
+.calendar-day.past .calendar-day-number {
+  background: transparent;
+  border-color: rgba(0,0,0,0.20);
+  border-width: 1px;
+  color: rgba(0,0,0,0.45);
+}
+
+.calendar-day.past.has-selected .calendar-day-number {
+  background: transparent;
+  border-color: rgba(0,0,0,0.20);
+  border-width: 1px;
+  color: rgba(0,0,0,0.45);
+}
+
+.day-slots {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.day-slots-summary {
+  font-size: 13px;
+  color: rgba(0,0,0,0.74);
+  margin-bottom: 10px;
+  text-align: left;
+}
+
+.day-slots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+
+  /* Keep the day expanded panel compact: show ~5 rows, scroll for the rest */
+  --slot-row-h: 40px;
+  grid-auto-rows: minmax(var(--slot-row-h), auto);
+  max-height: calc((var(--slot-row-h) * 5) + (8px * 4));
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-gutter: stable;
+}
+
+/* Ensure grid rows are consistent height for both slots and booked blocks */
+.day-slots-grid > .slot,
+.day-slots-grid > .slot-booked-block {
+  min-height: var(--slot-row-h);
+}
+
+.slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 10px;
+  font-size: 13px;
+  font-weight: 650;
+  border: 1px solid rgba(0,0,0,0.14);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.85);
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 10px 18px rgba(0,0,0,0.06);
+  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.slot.has-subline {
+  flex-direction: column;
+  gap: 3px;
+  line-height: 1.1;
+}
+
+.slot.has-subline {
+  text-align: center;
+}
+
+.slot-line {
+  width: 100%;
+  text-align: center;
+}
+
+.slot-line-time {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.slot-line-duration {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.slot-line-mode {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.78;
+}
+
+.slot:hover { transform: translateY(-1px); box-shadow: 0 12px 22px rgba(0,0,0,0.08); border-color: rgba(0,0,0,0.20); }
+.slot:active { transform: translateY(0px); }
+
+.slot.is-disabled {
+  cursor: not-allowed;
+  background: rgba(0,0,0,0.02);
+  box-shadow: none;
+  transform: none;
+  color: rgba(0,0,0,0.35);
+  border-color: rgba(0,0,0,0.10);
+}
+
+.slot.is-disabled:hover { transform: none; box-shadow: none; border-color: rgba(0,0,0,0.10); }
+
+.slot.selected {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+  box-shadow: 0 14px 26px rgba(0,0,0,0.16);
+}
+
+.slot.selected-range {
+  background: rgba(47,47,47,0.10);
+  border-color: rgba(47,47,47,0.18);
+  color: rgba(0,0,0,0.85);
+}
+
+.slot.selected-range.selected {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+
+/* NEW: consolidated booked run block */
+.slot-booked-block{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(0,0,0,0.10);
+  background: rgba(0,0,0,0.03);
+  box-shadow: none;
+  color: rgba(0,0,0,0.60);
+  font-size: 13px;
+  font-weight: 750;
+  cursor: not-allowed;
+  user-select: none;
+  line-height: 1.15;
+  text-align: center;
+  white-space: normal;
+  grid-column: auto;
+  width: 100%;
+}
+
+.slot-booked-block.is-booked {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.slot-booked-title {
+  font-weight: 800;
+}
+
+.slot-booked-time {
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.slot-booked-tag{
+  font-size: 10px;
+  line-height: 1.1;
+  margin-top: 2px;
+  opacity: 0.75;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Travel should look the same grey as booked blocks */
+.slot-booked-block.is-travel{
+  background: rgba(0,0,0,0.03);
+  border-color: rgba(0,0,0,0.10);
+  color: rgba(0,0,0,0.60);
+  font-weight: 750;
+}
+
+.slot-subline {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.75;
+  line-height: 1.1;
+}
+
+.day-slots-error {
+  padding: 10px 12px;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 12px;
+  background: rgba(0,0,0,0.03);
+  font-size: 13px;
+  color: rgba(0,0,0,0.70);
+}
+
+/* confirm area */
+.confirm-spacer { height: 10px; }
+.confirm-wrap {
+  display: block !important;
+  margin-top: 0;
+  text-align: right;
+}
+
+.confirm-selection {
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(0,0,0,0.18);
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.14);
+}
+
+.confirm-selection:hover { filter: brightness(1.03); }
+.confirm-selection:active { transform: translateY(1px); }
+
+.confirm-msg {
+  margin-top: 10px;
+  font-size: 13px;
+  color: rgba(0,0,0,0.72);
+  text-align: right;
+}
+
+/* Booking modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+
+  /* Must sit above the mobile day modal (99999) */
+  z-index: 100001;
+}
+
+.modal {
+  width: min(720px, 100%);
+  max-height: min(85vh, 820px);
+  overflow: auto;
+  background: var(--color-surface);
+  border: 1px solid rgba(0,0,0,0.14);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 22px 60px rgba(0,0,0,0.22);
+}
+
+.modal-header {
+  position: sticky;
+  top: 0;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.modal-close{
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: #000;
+  cursor: pointer;
+  color: #fff;
+
+  width: 36px;
+  height: 36px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  font-size: 22px;
+  line-height: 1;
+  padding: 0;
+  border-radius: 10px;
+}
+
+.modal-close:hover{
+  background: rgba(0,0,0,0.85);
+}
+.modal-body { padding: 16px; }
+
+.modal-section-title {
+  margin: 6px 0 10px 0;
+  font-size: 14px;
+  font-weight: 800;
+  color: rgba(0,0,0,0.70);
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+}
+
+.modal-slots {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 14px 0;
+  display: grid;
+  gap: 8px;
+}
+
+.modal-slot-item {
+  padding: 10px 12px;
+  border: 1px solid rgba(0,0,0,0.10);
+  border-radius: 12px;
+  background: rgba(0,0,0,0.02);
+  font-size: 14px;
+}
+
+.modal-form label {
+  display: block;
+  font-size: 14px;
+  margin-top: 10px;
+  margin-bottom: 4px;
+  color: var(--color-text-muted);
+}
+
+.modal-form input,
+.modal-form select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.terms-row{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
+  width: 100%;
+  text-align: center;
+}
+
+/* Themed checkbox (keeps a real checkbox input, but styles it) */
+.terms-row input[type="checkbox"]{
+  appearance: none;
+  -webkit-appearance: none;
+
+  width: 18px;
+  height: 18px;
+
+  margin: 0;
+  flex: 0 0 auto;
+
+  border: 2px solid var(--color-accent);
+  border-radius: 5px;
+  background: #fff;
+
+  display: inline-grid;
+  place-content: center;
+
+  cursor: pointer;
+}
+
+/* Checkmark */
+.terms-row input[type="checkbox"]::after{
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+  transform: rotate(-45deg);
+  opacity: 0;
+}
+
+/* Checked state */
+.terms-row input[type="checkbox"]:checked{
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.terms-row input[type="checkbox"]:checked::after{
+  opacity: 1;
+}
+
+/* Optional: keyboard focus ring */
+.terms-row input[type="checkbox"]:focus-visible{
+  outline: 3px solid rgba(0,0,0,0.18);
+  outline-offset: 2px;
+}
+
+.terms-text{
+  font-size: 13px;
+  color: var(--color-text-muted);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.terms-row .terms-text{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.terms-row{
+  gap: 8px;
+}
+
+/* Override the generic .modal-form label block styling for the terms row */
+.terms-row label.terms-text{
+  display: inline;
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+
+.modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.modal-submit {
+  padding: 10px 18px;
+  background: var(--color-accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.modal-message {
+  margin-top: 10px;
+  font-size: 14px;
+  color: rgba(0,0,0,0.75);
+}
+
+.mrm-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  background: var(--color-accent);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 12px 24px rgba(0,0,0,0.18);
+  opacity: 0;
+  transition: opacity 0.45s ease;
+  z-index: 10001;
+}
+
+.mrm-toast.is-visible {
+  opacity: 1;
+}
+
+/* =========================
+   SVG USA MAP (STATE PICKER)
+   ========================= */
+
+.state-map-wrap {
+  margin: 16px 0 22px 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  box-shadow: 0 10px 18px rgba(0,0,0,0.06);
+}
+
+.state-map-title {
+  margin: 0 0 6px 0;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}
+
+.state-map-subtitle {
+  margin: 0 0 14px 0;
+  font-size: 13px;
+  color: rgba(0,0,0,0.70);
+}
+
+.us-svg-map {
+  width: 100%;
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.us-svg-map svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* No labels on the map */
+.us-svg-map text { display: none !important; }
+
+/* --- USA SVG map --- */
+.mrm-us-map-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* default stroke so borders show */
+.mrm-us-map-svg .mrm-state-shape {
+  stroke: rgba(0,0,0,0.25);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+/* unavailable = greyed out */
+.mrm-us-map-svg .mrm-state-shape.is-unavailable {
+  fill: rgba(0,0,0,0.12) !important;
+}
+
+/* available = white */
+.mrm-us-map-svg .mrm-state-shape.is-available {
+  fill: #ffffff !important;
+}
+
+/* hover = gold */
+.mrm-us-map-svg .mrm-state-shape.is-available:hover {
+  fill: #7B734A !important;
+}
+
+/* =========================
+   CHANGE STATE DROPDOWN LIST
+   ========================= */
+
+.state-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 18px 0 10px 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(0,0,0,0.12);
+  background: rgba(0,0,0,0.02);
+  box-shadow: 0 8px 18px rgba(0,0,0,0.06);
+}
+
+.state-filter-pill {
+  font-size: 14px;
+  font-weight: 750;
+  color: rgba(0,0,0,0.85);
+}
+
+.state-change {
+  font-size: 14px;
+  font-weight: 750;
+  cursor: pointer;
+  user-select: none;
+  color: rgba(0,0,0,0.85);
+  padding: 8px 10px;
+  border-radius: 999px;
+}
+
+.state-change:hover {
+  background: rgba(0,0,0,0.06);
+}
+
+/* The bar that contains Change State + current state */
+.mrm-state-bar {
+  position: relative;
+}
+
+/* The dropdown panel itself */
+.mrm-state-dropdown-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 9999;
+  background: var(--color-surface);
+  border: 1px solid rgba(0,0,0,0.14);
+  border-radius: 12px;
+  box-shadow: 0 18px 44px rgba(0,0,0,0.16);
+  padding: 10px;
+}
+
+.mrm-state-dropdown-panel .state-dropdown-select {
+  width: 100%;
+  border: 1px solid rgba(0,0,0,0.18);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #fff;
+}
+
+#state-select {
+  font-size: 16px;
+  width: 100%;
+}
+
+.instructor-learnmore,
+.instructor-profile-back{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #111111;
+  color: #ffffff !important;
+  border: 1px solid rgba(0,0,0,0.15);
+  border-radius: 10px;
+  padding: 6px 10px;          /* smaller than before */
+  font-size: 13px;            /* slightly smaller */
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none !important;
+  cursor: pointer;
+}
+
+.instructor-learnmore:hover,
+.instructor-profile-back:hover{
+  opacity:0.9;
+}
+
+/* =========================
+   MOBILE RESPONSIVE LAYOUT
+   (CSS-only additions)
+   ========================= */
+
+/* Tablet and down */
+@media (max-width: 900px) {
+  .wrapper {
+    padding: 18px;
+  }
+
+  h1 {
+    font-size: 28px;
+    margin-bottom: 16px;
+  }
+
+  .state-selector-wrap {
+    padding: 12px 12px 16px;
+  }
+
+  .calendar-header > div {
+    font-size: 22px;
+  }
+}
+
+@media (max-width: 720px) {
+  /* Month grid: hard guarantee that 7 columns never overflow */
+  .calendar-grid {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .calendar-day {
+    box-sizing: border-box;
+    min-height: 64px;
+    padding: 2px;              /* critical: keeps circle inside narrow columns */
+    overflow: visible;         /* IMPORTANT: do not clip the mobile modal overlay */
+  }
+
+  .calendar-day-number {
+    box-sizing: border-box;
+
+    /* critical: circle scales to fit the cell width on any phone */
+    width: clamp(28px, 10.5vw, 40px);
+    height: clamp(28px, 10.5vw, 40px);
+
+    font-size: clamp(12px, 4.0vw, 16px);
+    line-height: 1;
+
+    max-width: 100%;
+    max-height: 100%;
+  }
+
+  /* When a day is expanded on mobile, show the day panel as a fullscreen modal */
+  .day-slots.is-mobile-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 99999;
+    margin: 0;
+    padding: 0;
+    border-top: none;
+    background: rgba(0,0,0,0.45);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+  }
+
+  .day-slots.is-mobile-modal .day-slots-sheet {
+    width: min(100%, 640px);
+    background: #fff;
+    border-radius: 18px 18px 0 0;
+    padding: 16px;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: calc(100vh - 24px);
+    overflow: hidden;
+    box-shadow: 0 -12px 30px rgba(0,0,0,0.18);
+  }
+
+  .day-slots.is-mobile-modal .day-slots-close {
+    align-self: flex-end;
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    border: 1px solid rgba(0,0,0,0.18);
+    background: #fff;
+    color: #111;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .day-slots.is-mobile-modal .day-slots-close:hover {
+    filter: brightness(0.98);
+  }
+
+  /* (leave the rest of your existing .day-slots.is-mobile-modal rules unchanged below) */
+}
+
+/* Phone and down */
+@media (max-width: 600px) {
+  .wrapper {
+    padding: 14px;
+  }
+
+  h1 {
+    font-size: 24px;
+    margin: 0 0 14px 0;
+  }
+
+  /* Instructor cards: prevent header overflow + make it wrap cleanly */
+  .instructor {
+    padding: 14px;
+    margin-bottom: 18px;
+  }
+
+  .instructor-header {
+    padding: 12px;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .instructor-header-left {
+    align-items: flex-start;
+  }
+
+  .instructor-avatar {
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+  }
+
+  .instructor-title-line {
+    font-size: 15px;
+  }
+
+  .instructor-shortdesc {
+    font-size: 13px;
+  }
+
+  .calendar-header button {
+    width: 36px;
+    height: 36px;
+    font-size: 20px;
+  }
+
+  .calendar-header > div {
+    font-size: 20px;
+  }
+
+  /* Expanded day slots: slightly narrower tiles, slightly shorter rows */
+  .day-slots-grid {
+    grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
+    --slot-row-h: 38px;
+    max-height: calc((var(--slot-row-h) * 5) + (8px * 4));
+  }
+
+  .slot,
+  .slot-booked-block {
+    padding: 8px 9px;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+
+  .slot-line-time {
+    font-size: 12px;
+  }
+
+  .slot-line-duration {
+    font-size: 11px;
+  }
+
+  .slot-line-mode {
+    font-size: 10px;
+  }
+
+  /* Confirm button: full width feels better on phones */
+  .confirm-wrap {
+    text-align: center;
+  }
+
+  .confirm-selection {
+    width: 100%;
+    justify-content: center;
+    display: inline-flex;
+  }
+
+  .confirm-msg {
+    text-align: center;
+  }
+
+  /* Modal: reduce padding + make content breathe on small screens */
+  .modal-overlay {
+    padding: 12px;
+  }
+
+  .modal-header {
+    padding: 12px 12px;
+  }
+
+  .modal-body {
+    padding: 12px;
+  }
+
+  .modal-title {
+    font-size: 16px;
+  }
+
+  .modal-close {
+    width: 34px;
+    height: 34px;
+    font-size: 20px;
+  }
+
+  /* State map wrapper: tighter padding on mobile */
+  .state-selector-wrap {
+    padding: 12px;
+  }
+
+  .state-selector-title {
+    font-size: 16px;
+  }
+
+  .state-selector-sub {
+    font-size: 13px;
+  }
+
+  .us-map-wrap {
+    border-radius: 12px;
+  }
+}
+
+/* Very small phones */
+@media (max-width: 420px) {
+  .wrapper {
+    padding: 12px;
+  }
+
+  h1 {
+    font-size: 22px;
+  }
+
+  .filters {
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+
+  .day-slots-grid {
+    grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+    --slot-row-h: 36px;
+  }
+}
+</style>
+</head>
+
+<body>
+<div class="wrapper" id="mainContainer">
+  <h1>Schedule Your Lesson</h1>
+
+  <div class="filters">
+    <div>
+      <label>Instrument</label>
+      <select id="instrument-input">
+        <option value="" selected>Choose instrument</option>
+        <option value="Trombone">Trombone</option>
+        <option value="Euphonium">Euphonium</option>
+        <option value="Tuba">Tuba</option>
+      </select>
+    </div>
+    <div>
+      <label>Lesson type</label>
+      <select id="lesson-option">
+        <option value="consultation" selected>Meet The Instructor (Free Consultation)</option>
+        <option value="online">Online</option>
+        <option value="in_person">In-Person</option>
+      </select>
+    </div>
+    <div>
+      <label>Lesson length</label>
+      <select id="length-select">
+        <option value="30">30 minutes</option>
+        <option value="60" selected>60 minutes</option>
+      </select>
+    </div>
+    <div style="display:none;">
+      <label>Lesson type (hidden)</label>
+      <select id="online-select">
+        <option value="0">In person</option>
+        <option value="1">Online</option>
+      </select>
+    </div>
+    <div>
+      <label>Frequency</label>
+      <select id="repeat-frequency">
+        <option value="weekly" selected>Weekly</option>
+        <option value="biweekly">Biweekly</option>
+        <option value="none">Do not repeat</option>
+      </select>
+    </div>
+
+    <div>
+      <label>Reserve time for</label>
+      <select id="repeat-duration">
+        <option value="--">--</option>
+        <option value="1_month" selected>One month</option>
+        <option value="3_months">Three months</option>
+        <option value="indefinitely">Indefinitely</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="instructor-container"></div>
+
+  <div class="booking" id="booking-panel" style="display:none;">
+    <h2>Complete Your Booking</h2>
+    <p>You have selected <span id="selected-count">0</span> slot(s).</p>
+
+    <label>Name</label>
+    <input id="student-name">
+
+    <label>Email</label>
+    <input id="student-email">
+
+    <label>Instrument</label>
+    <input id="confirm-instrument">
+
+    <label>
+      <input type="checkbox" id="agree-terms"> I agree to terms
+    </label>
+
+    <!-- Extra fields (kept hidden but synced) -->
+    <input id="first-name" type="hidden">
+    <input id="last-name" type="hidden">
+    <input id="address" type="hidden">
+    <input id="phone" type="hidden">
+    <input id="frequency" type="hidden">
+    <input id="reserve-duration" type="hidden">
+
+    <button id="submit-booking">Book now</button>
+    <div id="booking-message"></div>
+  </div>
+
+  <div id="booking-modal" class="modal-overlay" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="booking-modal-title">
+      <div class="modal-header">
+        <h2 id="booking-modal-title" class="modal-title">Confirm your booking</h2>
+        <button class="modal-close" id="modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-section-title">Selected times</div>
+        <ul id="modal-selected-list" class="modal-slots"></ul>
+
+        <div class="modal-section-title">Book now</div>
+        <div class="modal-form">
+          <label for="modal-first-name">First Name</label>
+          <input id="modal-first-name" autocomplete="given-name">
+
+          <label for="modal-last-name">Last Name</label>
+          <input id="modal-last-name" autocomplete="family-name">
+
+          <label for="modal-student-name">Student Name</label>
+          <input id="modal-student-name" autocomplete="name">
+
+          <label for="modal-instrument">Instrument</label>
+          <select id="modal-instrument">
+            <option value="" selected>Choose instrument</option>
+            <option value="Trombone">Trombone</option>
+            <option value="Euphonium">Euphonium</option>
+            <option value="Tuba">Tuba</option>
+          </select>
+
+          <label for="modal-student-email">Email</label>
+          <input id="modal-student-email" autocomplete="email">
+
+          <label for="modal-address">Address</label>
+          <input id="modal-address" autocomplete="street-address">
+
+          <label for="modal-phone">Phone</label>
+          <input id="modal-phone" autocomplete="tel">
+
+          <label for="modal-lesson-length">Lesson Length</label>
+          <input id="modal-lesson-length" readonly>
+
+          <label for="modal-lesson-type">Lesson Type</label>
+          <input id="modal-lesson-type" readonly>
+
+          <label for="modal-frequency">Frequency</label>
+          <input id="modal-frequency" readonly>
+
+          <label for="modal-repeat-duration">How long would you like to reserve this lesson time?</label>
+          <input id="modal-repeat-duration" readonly>
+
+          <div class="terms-row" style="margin-top:12px;">
+            <input type="checkbox" id="modal-agree-terms">
+            <label for="modal-agree-terms" class="terms-text">
+              I agree to terms of service —
+              <a href="/wp-content/uploads/terms.pdf" target="_blank" rel="noopener">view terms</a>
+            </label>
+          </div>
+
+          <div class="modal-actions">
+            <button class="modal-submit" id="modal-submit-booking">Book now</button>
+          </div>
+
+          <div id="modal-booking-message" class="modal-message"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="instructorProfileView" style="display:none;"></div>
+
+<script>
+const apiBase = '/wp-json/mrm-schedule/v1';
+const visitorTZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+let selectedSlots = [];
+let currentInstructor = null;
+
+const STATE_FULL_NAMES = {
+  AL:"Alabama", AK:"Alaska", AZ:"Arizona", AR:"Arkansas", CA:"California", CO:"Colorado", CT:"Connecticut", DE:"Delaware",
+  FL:"Florida", GA:"Georgia", HI:"Hawaii", ID:"Idaho", IL:"Illinois", IN:"Indiana", IA:"Iowa", KS:"Kansas", KY:"Kentucky",
+  LA:"Louisiana", ME:"Maine", MD:"Maryland", MA:"Massachusetts", MI:"Michigan", MN:"Minnesota", MS:"Mississippi", MO:"Missouri",
+  MT:"Montana", NE:"Nebraska", NV:"Nevada", NH:"New Hampshire", NJ:"New Jersey", NM:"New Mexico", NY:"New York", NC:"North Carolina",
+  ND:"North Dakota", OH:"Ohio", OK:"Oklahoma", OR:"Oregon", PA:"Pennsylvania", RI:"Rhode Island", SC:"South Carolina", SD:"South Dakota",
+  TN:"Tennessee", TX:"Texas", UT:"Utah", VT:"Vermont", VA:"Virginia", WA:"Washington", WV:"West Virginia", WI:"Wisconsin", WY:"Wyoming",
+  DC:"District of Columbia"
+};
+
+function stateFullName(code){
+  const k = (code || '').toString().trim().toUpperCase();
+  return STATE_FULL_NAMES[k] || k || '';
+}
+
+// ------------------------------
+// Lesson option (Consultation)
+// ------------------------------
+function applyLessonOptionDefaults(){
+  const opt = document.getElementById('lesson-option');
+  const len = document.getElementById('length-select');
+  const mode = document.getElementById('online-select');
+  const freq = document.getElementById('repeat-frequency');
+  const dur = document.getElementById('repeat-duration');
+  if(!opt || !len || !mode) return;
+
+  if(opt.value === 'consultation'){
+    // Consultation is ALWAYS: 30 min + Online, and NEVER recurring
+    len.value = '30';
+    mode.value = '1';
+
+    len.disabled = true;
+    mode.disabled = true;
+
+    if(freq){
+      freq.value = 'none';
+      freq.disabled = true;
+    }
+    if(dur){
+      // duration is irrelevant if it doesn't repeat, but keep a safe default
+      dur.value = '--';
+      dur.disabled = true;
+    }
+  } else {
+    // Standard lesson (online or in-person)
+    len.disabled = false;
+    mode.disabled = false;
+
+    // Set hidden mode from consolidated dropdown
+    if(opt.value === 'online') mode.value = '1';
+    if(opt.value === 'in_person') mode.value = '0';
+
+    // Recurrence controls enabled for normal lessons
+    if(freq) freq.disabled = false;
+    if(dur) dur.disabled = false;
+  }
+}
+
+function applyRepeatUIRules(){
+  const freqSel = document.getElementById('repeat-frequency');
+  const durSel  = document.getElementById('repeat-duration');
+
+  const hiddenFreq = document.getElementById('frequency');
+  const hiddenDur  = document.getElementById('reserve-duration');
+
+  const modalFreq = document.getElementById('modal-frequency');
+  const modalDur  = document.getElementById('modal-repeat-duration');
+
+  if(!freqSel || !durSel) return;
+
+  const freq = String(freqSel.value || 'weekly');
+  const dashOpt = durSel.querySelector('option[value="--"]');
+
+  // Helper: map UI values to display labels
+  const freqLabel = (v)=>{
+    if(v === 'none') return 'Do not repeat';
+    if(v === 'weekly') return 'Weekly';
+    if(v === 'biweekly') return 'Bi-weekly';
+    return v;
+  };
+  const durLabel = (v)=>{
+    if(v === '--') return '--';
+    if(v === '1_month') return 'One month';
+    if(v === '3_months') return 'Three months';
+    if(v === 'indefinitely') return 'Indefinitely';
+    return v;
+  };
+
+  if(freq === 'none'){
+    // No repeat => reserve forced to "--" and disabled
+    if(dashOpt) dashOpt.disabled = false;
+    durSel.value = '--';
+    durSel.disabled = true;
+  } else {
+    // Repeat => reserve enabled, and "--" must NOT be selectable
+    durSel.disabled = false;
+    if(dashOpt) dashOpt.disabled = true;
+
+    // If user somehow has "--" selected, snap to One month
+    if(!durSel.value || durSel.value === '--'){
+      durSel.value = '1_month';
+    }
+  }
+
+  // Sync hidden fields (what you actually POST)
+  if(hiddenFreq) hiddenFreq.value = freq;
+  if(hiddenDur)  hiddenDur.value  = durSel.value || '--';
+
+  // Sync modal readonly display fields
+  if(modalFreq) modalFreq.value = freqLabel(freq);
+  if(modalDur)  modalDur.value  = durLabel(durSel.value || '--');
+}
+
+// Optional: if user flips lesson option, enforce the defaults immediately.
+document.addEventListener('change', (e)=>{
+  if(e && e.target && e.target.id === 'lesson-option'){
+    applyLessonOptionDefaults();
+    applyRepeatUIRules();
+
+    // If you want already-open calendars to immediately reflect any duration change,
+    // you can force a soft rerender by "marking stale" and refreshing open instructor.
+    // This is safe and additive.
+    if(currentInstructor && typeof currentInstructor._mrmMarkStale === 'function'){
+      currentInstructor._mrmMarkStale();
+    }
+    if(currentInstructor && typeof currentInstructor._mrmRefreshOpenDay === 'function'){
+      currentInstructor._mrmRefreshOpenDay();
+    }
+  }
+});
+
+const repeatFrequencyEl = document.getElementById('repeat-frequency');
+const repeatDurationEl  = document.getElementById('repeat-duration');
+
+if (repeatFrequencyEl) repeatFrequencyEl.addEventListener('change', applyRepeatUIRules);
+if (repeatDurationEl)  repeatDurationEl.addEventListener('change', applyRepeatUIRules);
+
+// run once on page load to enforce defaults
+applyRepeatUIRules();
+
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, s => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[s]));
+}
+
+function formatLongTextToHtml(text){
+  const raw = (text == null) ? '' : String(text);
+
+  // Normalize newlines
+  const normalized = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // Split into paragraphs by blank lines
+  const paragraphs = normalized.split(/\n\s*\n+/g);
+
+  // Convert each paragraph: keep single newlines as <br>
+  const html = paragraphs
+    .map(p => p.trim())
+    .filter(Boolean)
+    .map(p => `<p>${escapeHtml(p).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+
+  return html || '';
+}
+
+function renderInstructorProfile(instr){
+  const host = document.getElementById('instructorProfileView');
+  host.style.display = 'block';
+  host.innerHTML = '';
+
+  const wrap = document.createElement('div');
+  wrap.style.maxWidth = '720px';
+  wrap.style.margin = '40px auto';
+  wrap.style.textAlign = 'center';
+
+  const img = document.createElement('img');
+  img.className = 'instructor-avatar';
+  img.style.width = '300px';
+  img.style.height = '300px';
+  img.style.borderRadius = '16px';   // rounded corners (NOT circle)
+  img.style.objectFit = 'cover';
+  img.src = (instr.profile_image_url || '').trim() || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+  img.alt = instr.name || 'Instructor';
+
+  const name = document.createElement('h2');
+  name.textContent = instr.name || '';
+  name.style.margin = '14px 0 6px';
+
+  const instrumentsText =
+    (Array.isArray(instr.instruments_display) && instr.instruments_display.length)
+      ? instr.instruments_display.join(', ')
+      : (instr.instruments_text || '');
+
+  const instruments = document.createElement('div');
+  instruments.textContent = instrumentsText ? instrumentsText : '';
+  instruments.style.color = '#6b6b6b';
+  instruments.style.marginBottom = '18px';
+
+  const longDesc = document.createElement('div');
+  longDesc.style.textAlign = 'left';
+  longDesc.style.margin = '0 auto 22px';
+  longDesc.style.maxWidth = '650px';
+  longDesc.style.color = '#222';
+  longDesc.style.lineHeight = '1.55';
+  longDesc.innerHTML = formatLongTextToHtml(instr.long_description || '');
+
+  const contact = document.createElement('div');
+  contact.style.marginTop = '22px';
+  contact.style.textAlign = 'center';
+  const city = (instr.city || '').trim();
+  const stateVal = (instr.state_full || instr.state || '').trim();
+  const locationText = city && stateVal ? (city + ', ' + stateVal) : (city || stateVal);
+
+  contact.innerHTML = `
+    <div style="font-weight:700; margin-bottom:8px;">Contact</div>
+    <div>${instr.email ? escapeHtml(instr.email) : ''}</div>
+    <div style="color:#6b6b6b;">${locationText ? escapeHtml(locationText) : ''}</div>
+    <div style="margin-top:18px;">
+      <a class="instructor-profile-back" href="${window.location.pathname}">Back to Calendar</a>
+    </div>
+  `;
+
+  wrap.appendChild(img);
+  wrap.appendChild(name);
+  if (instrumentsText) wrap.appendChild(instruments);
+  if (instr.long_description) wrap.appendChild(longDesc);
+  wrap.appendChild(contact);
+
+  host.appendChild(wrap);
+}
+
+function maybeShowInstructorProfile(instructors){
+  const params = new URLSearchParams(window.location.search);
+  const id = params.get('instructor');
+  if (!id) return false;
+
+  const instr = instructors.find(x => String(x.id) === String(id));
+  if (!instr) return false;
+
+  const main = document.getElementById('mainContainer') || document.body;
+  if (main) main.style.display = 'none';
+
+  renderInstructorProfile(instr);
+  return true;
+}
+
+function formatSlotLine(s, instrName){
+  const start = new Date(s.start);
+  const end = new Date(s.end);
+  const datePart = start.toLocaleDateString([], { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+  const timePart = start.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) + ' – ' + end.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' });
+  return (instrName ? (instrName + ' • ') : '') + datePart + ' • ' + timePart;
+}
+
+/* Testing mode: always visible, but keep function for compatibility */
+function updateConfirmButton(instructorId){
+  const wrap = document.querySelector('.confirm-wrap[data-instructor-id="'+instructorId+'"]');
+  if(wrap) wrap.style.display = 'block';
+}
+
+function openBookingModal(instr){
+  const overlay = document.getElementById('booking-modal');
+  const list = document.getElementById('modal-selected-list');
+  const msg = document.getElementById('modal-booking-message');
+
+  msg.textContent = '';
+  list.innerHTML = '';
+
+  const instrName = instr && instr.name ? instr.name : '';
+  const relevant = (instr && instr.id!=null)
+    ? selectedSlots.filter(s=>String(s.instructor_id)===String(instr.id))
+    : selectedSlots.slice();
+
+  relevant.forEach(s=>{
+    const li = document.createElement('li');
+    li.className = 'modal-slot-item';
+    li.textContent = formatSlotLine(s, instrName);
+    list.append(li);
+  });
+
+  document.getElementById('modal-student-name').value = document.getElementById('student-name').value || '';
+  document.getElementById('modal-student-email').value = document.getElementById('student-email').value || '';
+  document.getElementById('modal-instrument').value = document.getElementById('instrument-input').value || '';
+  document.getElementById('modal-agree-terms').checked = document.getElementById('agree-terms').checked || false;
+
+  // Prefill extra modal fields
+  document.getElementById('modal-first-name').value = document.getElementById('first-name')?.value || '';
+  document.getElementById('modal-last-name').value  = document.getElementById('last-name')?.value || '';
+  document.getElementById('modal-address').value    = document.getElementById('address')?.value || '';
+  document.getElementById('modal-phone').value      = document.getElementById('phone')?.value || '';
+
+  // Auto-populated read-only fields from dropdowns
+  const len = document.getElementById('length-select')?.value || '';
+  const type = (String(document.getElementById('online-select')?.value) === '1') ? 'Online' : 'In person';
+  const freq = document.getElementById('repeat-frequency')?.value || 'weekly';
+  const dur  = document.getElementById('repeat-duration')?.value || '1_month';
+
+  document.getElementById('modal-lesson-length').value = len ? (len + ' minutes') : '';
+  document.getElementById('modal-lesson-type').value   = type;
+
+  document.getElementById('modal-frequency').value = (freq === 'biweekly') ? 'Biweekly'
+    : (freq === 'none') ? 'Do not repeat'
+    : 'Weekly';
+
+  document.getElementById('modal-repeat-duration').value = (freq === 'none' || dur === '--') ? '--'
+    : (dur === '3_months') ? 'Three months'
+    : (dur === 'indefinitely') ? 'Indefinitely'
+    : 'One month';
+
+  // Show + lock scroll
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden','false');
+  document.body.classList.add('mrm-booking-modal-open');
+
+  // Focus the close button for clean UX/accessibility
+  requestAnimationFrame(()=>{
+    const close = document.getElementById('modal-close');
+    if(close) close.focus();
+  });
+}
+
+function closeBookingModal(){
+  const overlay = document.getElementById('booking-modal');
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden','true');
+  document.body.classList.remove('mrm-booking-modal-open');
+}
+
+function syncModalToLegacyFields(){
+  // Keep "student-name" (used as student_name in payload)
+  document.getElementById('student-name').value = document.getElementById('modal-student-name').value || '';
+  document.getElementById('student-email').value = document.getElementById('modal-student-email').value || '';
+  document.getElementById('confirm-instrument').value = document.getElementById('modal-instrument').value || '';
+  document.getElementById('agree-terms').checked = document.getElementById('modal-agree-terms').checked;
+
+  // Extra hidden legacy fields
+  const fn = document.getElementById('modal-first-name')?.value || '';
+  const ln = document.getElementById('modal-last-name')?.value || '';
+  const addr = document.getElementById('modal-address')?.value || '';
+  const phone = document.getElementById('modal-phone')?.value || '';
+
+  const freq = document.getElementById('repeat-frequency')?.value || 'weekly';
+  const dur  = document.getElementById('repeat-duration')?.value || '1_month';
+
+  const fnEl = document.getElementById('first-name'); if(fnEl) fnEl.value = fn;
+  const lnEl = document.getElementById('last-name');  if(lnEl) lnEl.value = ln;
+  const adEl = document.getElementById('address');    if(adEl) adEl.value = addr;
+  const phEl = document.getElementById('phone');      if(phEl) phEl.value = phone;
+  const frEl = document.getElementById('frequency');  if(frEl) frEl.value = freq;
+  const rdEl = document.getElementById('reserve-duration'); if(rdEl) rdEl.value = dur;
+}
+
+function ensureLegacyBookingHandler(){
+  const btn = document.getElementById('submit-booking');
+  if(!btn) return;
+  if(btn.dataset.mrmHooked==='1') return;
+  btn.dataset.mrmHooked='1';
+
+  btn.addEventListener('click', async (e)=>{
+    e.preventDefault();
+    const msgEl = document.getElementById('booking-message');
+    const modalMsg = document.getElementById('modal-booking-message');
+
+    const setMsg = (t)=>{
+      msgEl.textContent = t || '';
+      if(modalMsg) modalMsg.textContent = t || '';
+    };
+
+    setMsg('');
+
+    if(!selectedSlots.length){
+      setMsg('Please select at least one time slot.');
+      return;
+    }
+
+    const studentName = (document.getElementById('student-name').value||'').trim();
+    const email = (document.getElementById('student-email').value||'').trim();
+    const instrument = (document.getElementById('confirm-instrument').value||'').trim();
+
+    const firstName = (document.getElementById('first-name')?.value||'').trim();
+    const lastName  = (document.getElementById('last-name')?.value||'').trim();
+    const address   = (document.getElementById('address')?.value||'').trim();
+    const phone     = (document.getElementById('phone')?.value||'').trim();
+
+    const frequency = (document.getElementById('frequency')?.value||'weekly').trim();         // weekly|biweekly|none
+    const reserveDuration = (document.getElementById('reserve-duration')?.value||'--').trim(); // 1_month|3_months|indefinitely
+
+    const agree = document.getElementById('agree-terms').checked;
+
+    if(!firstName || !lastName || !studentName || !email){
+      setMsg('Please enter first name, last name, student name, and email.');
+      return;
+    }
+    if(!address){
+      setMsg('Please enter your address.');
+      return;
+    }
+    if(!phone){
+      setMsg('Please enter your phone number.');
+      return;
+    }
+    if(!instrument){
+      setMsg('Please choose an instrument.');
+      return;
+    }
+    if(!agree){
+      setMsg('Please agree to the terms of service.');
+      return;
+    }
+    if (frequency !== 'none' && reserveDuration === '--') {
+      setMsg('Please choose how long you would like to reserve this lesson time (One month, Three months, or Indefinitely).');
+      return;
+    }
+
+    const instrId = currentInstructor && currentInstructor.id!=null ? currentInstructor.id : null;
+
+    const relevantSelected = (instrId!=null)
+      ? selectedSlots.filter(s=>String(s.instructor_id)===String(instrId))
+      : selectedSlots.slice();
+
+    if(!relevantSelected.length){
+      setMsg('Please select at least one time slot for this instructor.');
+      return;
+    }
+
+    const leadTimeMs = Date.now() + 24 * 60 * 60 * 1000;
+    const hasTooSoon = relevantSelected.some(s=>{
+      const slotMs = new Date(s.start).getTime();
+      return isFinite(slotMs) && slotMs < leadTimeMs;
+    });
+    if(hasTooSoon){
+      setMsg('Please choose a lesson time at least 24 hours from now.');
+      return;
+    }
+
+    const slots = relevantSelected.map(s=>({
+      start: s.start,
+      end: s.end,
+      instructor_id: s.instructor_id
+    }));
+
+    const onlineValue = parseInt(document.getElementById('online-select').value,10)||0;
+    const lessonType = onlineValue === 1 ? 'online' : 'in_person';
+    const first = relevantSelected[0] || null;
+    const selectedMinutes = first
+      ? Math.round((new Date(first.end).getTime() - new Date(first.start).getTime()) / 60000)
+      : NaN;
+
+    const effectiveMinutes = (Number.isFinite(selectedMinutes) && selectedMinutes > 0)
+      ? selectedMinutes
+      : getSlotMinutes();
+
+    const lessonOptionEl = document.getElementById('lesson-option');
+    const lessonOptionVal = lessonOptionEl ? (lessonOptionEl.value || '') : '';
+    const appointmentType = (lessonOptionVal === 'consultation') ? 'consultation' : 'lesson';
+
+    const payload = {
+      instructor_id: instrId,
+      slots,
+      first_name: firstName,
+      last_name: lastName,
+      student_name: studentName,
+      student_email: email,
+      address,
+      phone,
+
+      // Auto populated
+      instrument,
+      slot_minutes: effectiveMinutes,
+      lesson_length: effectiveMinutes,
+      online: onlineValue,
+      lesson_type: lessonType,
+
+      // Recurrence controls
+      repeat_frequency: frequency,          // weekly | biweekly | none
+      repeat_duration: reserveDuration,     // 1_month | 3_months | indefinitely
+
+      visitor_tz: visitorTZ,
+
+      // new (plugin will read this)
+      appointment_type: appointmentType
+    };
+
+    setMsg('Submitting booking…');
+    btn.disabled = true;
+
+    try{
+      const r = await fetch(apiBase + '/book', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      let data = null;
+      try{ data = await r.json(); }catch(_){ data = null; }
+
+      if(!r.ok){
+        const err = (data && (data.message || data.error)) ? (data.message || data.error) : ('Booking failed (HTTP ' + r.status + ').');
+        setMsg(err);
+        return;
+      }
+
+      const ok = (data && (data.success===true || data.ok===true)) || (!data);
+      if(!ok){
+        const err = (data && (data.message || data.error)) ? (data.message || data.error) : 'Booking failed.';
+        setMsg(err);
+        return;
+      }
+
+      setMsg((data && data.message) ? data.message : 'Booking confirmed!');
+
+      selectedSlots.length = 0;
+      document.querySelectorAll('.slot.selected').forEach(el=>el.classList.remove('selected'));
+
+      const bookedInstructor = currentInstructor;
+      closeBookingModal();
+      updateBooking(currentInstructor);
+      if(bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function'){
+        bookedInstructor._mrmMarkStale();
+      }
+      if(bookedInstructor && typeof bookedInstructor._mrmRefreshOpenDay === 'function'){
+        bookedInstructor._mrmRefreshOpenDay();
+      }
+      if(bookedInstructor && typeof bookedInstructor._mrmRefreshVisibleMonth === 'function'){
+        bookedInstructor._mrmRefreshVisibleMonth();
+      }
+    }catch(err){
+      setMsg('Booking failed. Please try again.');
+    }finally{
+      btn.disabled = false;
+    }
+  });
+}
+
+function monthKey(y,m){
+  const sm = 15;
+  return y+'-'+String(m+1).padStart(2,'0')+'|'+sm;
+}
+function daysInMonth(y,m){ return new Date(y,m+1,0).getDate(); }
+
+function groupSlotsByDay(slots){
+  const map = {};
+  slots.forEach(s=>{
+    const d = new Date(s.start);
+    const key = d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+    if(!map[key]) map[key]=[];
+    map[key].push(s);
+  });
+  return map;
+}
+
+
+function groupBusyByDay(busy){
+  const map = {};
+  (busy||[]).forEach(b=>{
+    const sMs = new Date(b.start).getTime();
+    const eMs = new Date(b.end).getTime();
+    if(!isFinite(sMs) || !isFinite(eMs) || eMs<=sMs) return;
+    const d = new Date(sMs);
+    const key = d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+    if(!map[key]) map[key]=[];
+    map[key].push({
+      startMs: sMs,
+      endMs: eMs,
+      lesson_type: (typeof b.lesson_type === 'string') ? b.lesson_type : null,
+      lesson_minutes: (b.lesson_minutes != null) ? b.lesson_minutes : null,
+      source: (typeof b.source === 'string') ? b.source : null
+    });
+  });
+  Object.keys(map).forEach(k=>{
+    map[k].sort((a,b)=>a.startMs-b.startMs);
+  });
+  return map;
+}
+
+function isPastDay(y,m,day){
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const d = new Date(y,m,day);
+  d.setHours(0,0,0,0);
+  return d <= today;
+}
+
+function hasSelectedForDay(instructorId, y, m, day){
+  return selectedSlots.some(s=>{
+    if(String(s.instructor_id) !== String(instructorId)) return false;
+    const d = new Date(s.start);
+    return d.getFullYear()===y && d.getMonth()===m && d.getDate()===day;
+  });
+}
+
+function applySelectedDayClass(cell, instructorId, y, m, day){
+  if(!cell) return;
+  if(hasSelectedForDay(instructorId, y, m, day)) cell.classList.add('has-selected');
+  else cell.classList.remove('has-selected');
+}
+
+function _mrmFloorTo15(ms){
+  const step = 15 * 60 * 1000;
+  return Math.floor(ms / step) * step;
+}
+
+function _mrmCeilTo15(ms){
+  const step = 15 * 60 * 1000;
+  return Math.ceil(ms / step) * step;
+}
+
+function _mrmFormatTimeMs(ms){
+  return new Date(ms).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' });
+}
+
+function _mrmSameDay(a, y, m, d){
+  if(!a || !isFinite(a.getTime())) return false;
+  return a.getFullYear()===y && a.getMonth()===m && a.getDate()===d;
+}
+
+function _mrmNormalizeLessonType(type){
+  if(typeof type !== 'string') return null;
+  const t = type.trim().toLowerCase();
+  if(t === 'online') return 'online';
+  if(t === 'in_person') return 'in_person';
+  return null;
+}
+
+function _mrmGetBusyType(b){
+  const t = _mrmNormalizeLessonType(b.lesson_type); // 'online' | 'in_person' | null
+  if(t) return t;
+
+  // Travel-safe default: if the API didn't label the busy block,
+  // treat it as in_person so 30-min buffers protect scheduling.
+  return 'in_person';
+}
+
+function _mrmBusyBlocks(b){
+  const minuteMs = 60 * 1000;
+  const busyType = _mrmGetBusyType(b); // 'online' | 'in_person' | null
+  const travel = (busyType === 'in_person') ? (30 * minuteMs) : 0;
+  const blockStart = b.startMs - travel;
+  const blockEnd = b.endMs + travel;
+  return { blockStart, blockEnd, busyType };
+}
+
+function _mrmBlockedStartWindowForDuration(blockStart, blockEnd, durationMin){
+  const minuteMs = 60 * 1000;
+  const latestAllowedBeforeStart = blockStart - (durationMin * minuteMs);
+  const earliestAllowedAfterStart = blockEnd;
+  return { latestAllowedBeforeStart, earliestAllowedAfterStart };
+}
+
+function _mrmChooseOnlineChunkMinutes(b){
+  const totalMin = Math.round((b.endMs - b.startMs) / 60000);
+
+  // Never split a single normal lesson block
+  if(totalMin === 30 || totalMin === 60) return null;
+
+  // Only split when the block is LONGER than a single lesson
+  // (this is for the rare case a merged busy range still gets through)
+  if(totalMin > 60 && (totalMin % 60 === 0)) return 60;
+  if(totalMin > 30 && (totalMin % 30 === 0)) return 30;
+
+  return null;
+}
+
+function _closeMobileDayModal(){
+  document.querySelectorAll('.day-slots.is-mobile-modal').forEach(el => el.remove());
+  document.body.classList.remove('mrm-day-modal-open');
+}
+
+function renderCalendar(instr, state, container){
+  container.innerHTML='';
+
+  function showCourtesyToast(message){
+    const existing = document.querySelector('.mrm-toast');
+    if(existing) existing.remove();
+    const toast = document.createElement('div');
+    toast.className = 'mrm-toast';
+    toast.textContent = message;
+    (document.querySelector('.wrapper') || document.body).append(toast);
+    requestAnimationFrame(()=>toast.classList.add('is-visible'));
+    setTimeout(()=>toast.classList.remove('is-visible'), 2200);
+    setTimeout(()=>toast.remove(), 3000);
+  }
+
+  const header=document.createElement('div');
+  header.className='calendar-header';
+
+  const prev=document.createElement('button');
+  prev.textContent='‹';
+  prev.onclick=()=>changeMonth(instr,state,-1,container);
+
+  const label=document.createElement('div');
+  label.textContent=new Date(state.year,state.month).toLocaleDateString([],{
+    month:'long',year:'numeric'
+  });
+
+  const next=document.createElement('button');
+  next.textContent='›';
+  next.onclick=()=>changeMonth(instr,state,1,container);
+
+  header.append(prev,label,next);
+  container.append(header);
+
+  const grid=document.createElement('div');
+  grid.className='calendar-grid';
+
+  const firstDay=new Date(state.year,state.month,1).getDay();
+  const totalDays=daysInMonth(state.year,state.month);
+
+  for(let i=0;i<firstDay;i++){
+    const d=document.createElement('div');
+    d.className='calendar-day inactive';
+    grid.append(d);
+  }
+
+  const grouped=state.slotsByDay||{};
+  const busyGrouped=state.busyByDay||{};
+
+  for(let day=1;day<=totalDays;day++){
+    const cell=document.createElement('div');
+    cell.className='calendar-day';
+
+    const key=state.year+'-'+(state.month+1)+'-'+day;
+    const groupedForDay = Array.isArray(grouped[key]) ? grouped[key] : [];
+    const busyForDay = Array.isArray(busyGrouped[key]) ? busyGrouped[key] : [];
+    const hasAvailability = groupedForDay.length > 0;
+    const hasBusy = busyForDay.length > 0;
+    if(hasAvailability || hasBusy) cell.classList.add('has-slots');
+
+    if(isPastDay(state.year, state.month, day)) cell.classList.add('past');
+
+    applySelectedDayClass(cell, instr.id, state.year, state.month, day);
+
+    cell.innerHTML='<div class="calendar-day-number">'+day+'</div>';
+
+    cell.onclick=()=>{
+      if(cell.classList.contains('past')) return;
+      if(state.expandedDay===day){
+        state.expandedDay = null;
+        state._refreshingDay = null;
+        state._isStale = true;
+        _closeMobileDayModal();
+        renderCalendar(instr,state,container);
+        if(typeof state._refreshDayAvailability === 'function'){
+          state._refreshDayAvailability(day, { force: true, showLoading: false, renderOnComplete: false });
+        }
+        return;
+      }
+      state.expandedDay = day;
+      if(typeof state._refreshDayAvailability === 'function'){
+        state._refreshDayAvailability(day, { force: true });
+      } else {
+        renderCalendar(instr,state,container);
+      }
+    };
+
+    if(!cell.classList.contains('past') && state.expandedDay===day && (hasAvailability || hasBusy || state._refreshingDay===day)){
+      const panel=document.createElement('div');
+      panel.className='day-slots';
+      // MOBILE: render the expanded day as a fullscreen popup sheet (CSS-driven)
+      const isMobile = window.matchMedia && window.matchMedia('(max-width: 720px)').matches;
+      let modalContentHost = panel;
+
+      if(isMobile){
+        panel.classList.add('is-mobile-modal');
+
+        const sheet = document.createElement('div');
+        sheet.className = 'day-slots-sheet';
+        modalContentHost = sheet;
+        panel.append(sheet);
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'day-slots-close';
+        closeBtn.type = 'button';
+        closeBtn.setAttribute('aria-label', 'Close day');
+        closeBtn.textContent = '×';
+        closeBtn.onclick = ()=>{
+          state.expandedDay = null;
+          state._refreshingDay = null;
+          state._isStale = true;
+          _closeMobileDayModal();
+          renderCalendar(instr,state,container);
+        };
+        sheet.append(closeBtn);
+
+        panel.addEventListener('click', (e)=>{
+          if(e.target === panel){
+            state.expandedDay = null;
+            state._refreshingDay = null;
+            state._isStale = true;
+            _closeMobileDayModal();
+            renderCalendar(instr,state,container);
+          }
+        });
+      }
+
+      const mountPanel = ()=>{
+        if(isMobile){
+          // ensure we never leave orphan modals around
+          _closeMobileDayModal();
+          document.body.append(panel);
+          document.body.classList.add('mrm-day-modal-open');
+        } else {
+          cell.append(panel);
+        }
+      };
+
+      if(state._refreshingDay===day){
+        const info = document.createElement('div');
+        info.className = 'day-slots-error';
+        info.textContent = 'Refreshing availability…';
+        modalContentHost.append(info);
+        mountPanel();
+      } else {
+      const leadTimeThreshold = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const leadTimeMs = leadTimeThreshold.getTime();
+
+      let earliestStart = Infinity;
+      let latestEnd = -Infinity;
+      let earliestAvailMs = Infinity;
+      let latestAvailMs = -Infinity;
+      let ok = true;
+      const availByStartMs = new Map();
+      const availableTickStarts = new Set();
+
+      groupedForDay.forEach(slot=>{
+        const sMs = new Date(slot.start).getTime();
+        const eMs = new Date(slot.end).getTime();
+        if(!isFinite(sMs) || !isFinite(eMs)) { ok = false; return; }
+        if(sMs < earliestStart) earliestStart = sMs;
+        if(eMs > latestEnd) latestEnd = eMs;
+        if(sMs < earliestAvailMs) earliestAvailMs = sMs;
+        if(eMs > latestAvailMs) latestAvailMs = eMs;
+      });
+      if(Array.isArray(busyForDay) && busyForDay.length){
+        busyForDay.forEach(b=>{
+          if(!isFinite(b.startMs) || !isFinite(b.endMs)) return;
+          const busyBlock = _mrmBusyBlocks(b);
+          if(busyBlock.blockStart < earliestStart) earliestStart = busyBlock.blockStart;
+          if(busyBlock.blockEnd > latestEnd) latestEnd = busyBlock.blockEnd;
+        });
+      }
+
+      if(!ok || !isFinite(earliestStart) || !isFinite(latestEnd) || latestEnd <= earliestStart){
+        const err = document.createElement('div');
+        err.className = 'day-slots-error';
+        err.textContent = 'Availability data error';
+        modalContentHost.append(err);
+        mountPanel();
+      } else {
+        const startBound = _mrmFloorTo15(earliestStart);
+        const endBound = _mrmCeilTo15(latestEnd);
+        const availStartBound = isFinite(earliestAvailMs) ? _mrmFloorTo15(earliestAvailMs) : Infinity;
+        const availEndBound = isFinite(latestAvailMs) ? _mrmCeilTo15(latestAvailMs) : -Infinity;
+        const overlapsAvailWindow = (startMs, endMs)=>{
+          if(!hasAvailability) return true;
+          if(!isFinite(availStartBound) || !isFinite(availEndBound) || availEndBound <= availStartBound) return false;
+          return Math.max(startMs, availStartBound) < Math.min(endMs, availEndBound);
+        };
+
+        groupedForDay.forEach(slot=>{
+          const sMs = new Date(slot.start).getTime();
+          const eMs = new Date(slot.end).getTime();
+          if(!isFinite(sMs) || !isFinite(eMs)) return;
+          if(sMs < startBound || sMs >= endBound) return;
+          availByStartMs.set(sMs, slot);
+          availableTickStarts.add(sMs);
+        });
+
+        const y = state.year;
+        const m = state.month;
+        const d = day;
+
+        const durationMin = getSlotMinutes();
+        const durationTicks = Math.max(1, Math.round(durationMin / 15));
+        const stepMs = 15 * 60 * 1000;
+        const selectedForDay = selectedSlots.filter(s=>{
+          if(String(s.instructor_id) !== String(instr.id)) return false;
+          const dt = new Date(s.start);
+          return _mrmSameDay(dt, y, m, d);
+        });
+
+        const summary = document.createElement('div');
+        summary.className = 'day-slots-summary';
+        if(selectedForDay.length){
+          const base = new Date(selectedForDay[0].start).getTime();
+          if(isFinite(base)){
+            const end = base + durationMin * 60 * 1000;
+            summary.textContent = 'Selected: ' + _mrmFormatTimeMs(base) + '–' + _mrmFormatTimeMs(end) + ' (' + durationMin + ' min)';
+          } else {
+            summary.textContent = 'Selected: ' + selectedForDay.length + ' slot(s)';
+          }
+        } else if(!hasAvailability && hasBusy){
+          summary.textContent = 'Fully booked';
+        } else {
+          summary.textContent = 'Selected: none';
+        }
+        modalContentHost.append(summary);
+
+        const gridWrap = document.createElement('div');
+        gridWrap.className = 'day-slots-grid';
+
+        const renderItems = [];
+        const hasBusyForDay = Array.isArray(busyForDay) && busyForDay.length;
+        const blockedStartWindows60 = [];
+        const blockedStartWindows30 = [];
+        const pushRenderItem = (startMs, endMs, node)=>{
+          const normalizedEnd = isFinite(endMs) ? endMs : startMs;
+          if(!isFinite(startMs) || !isFinite(normalizedEnd)) return;
+          if(normalizedEnd <= startBound || startMs >= endBound) return;
+          const clampedStart = Math.max(startMs, startBound);
+          const clampedEnd = Math.min(normalizedEnd, endBound);
+          renderItems.push({ startMs: clampedStart, endMs: clampedEnd, node });
+        };
+        const makeBookedBlock = (startMs, endMs, modeLabel)=>{
+          const block = document.createElement('div');
+          block.className = 'slot-booked-block is-booked';
+          block.setAttribute('aria-disabled','true');
+
+          const title = document.createElement('div');
+          title.className = 'slot-booked-title';
+          title.textContent = 'Booked';
+
+          const time = document.createElement('div');
+          time.className = 'slot-booked-time';
+          time.textContent = _mrmFormatTimeMs(startMs) + ' – ' + _mrmFormatTimeMs(endMs);
+
+          block.append(title, time);
+
+          if(modeLabel){
+            const tag = document.createElement('div');
+            tag.className = 'slot-booked-tag';
+            tag.textContent = modeLabel;
+            block.append(tag);
+          }
+
+          return block;
+        };
+
+        // Collect travel blocks so we can merge adjacent ones (travel only)
+        const travelSegments = []; // [{ startMs, endMs }]
+        const addTravelSegment = (startMs, endMs)=>{
+          if(!isFinite(startMs) || !isFinite(endMs) || endMs <= startMs) return;
+          // Keep same logic as before: only include travel if it overlaps availability window
+          if(overlapsAvailWindow(startMs, endMs)){
+            travelSegments.push({ startMs, endMs });
+          }
+        };
+
+        const renderMergedTravelSegments = ()=>{
+          if(!travelSegments.length) return;
+
+          // Sort and merge touching/overlapping segments
+          travelSegments.sort((a,b)=>a.startMs-b.startMs);
+          const merged = [];
+          for(const seg of travelSegments){
+            const last = merged[merged.length - 1];
+            if(!last){
+              merged.push({ startMs: seg.startMs, endMs: seg.endMs });
+              continue;
+            }
+            // Merge if overlapping OR directly adjacent (touching)
+            if(seg.startMs <= last.endMs){
+              last.endMs = Math.max(last.endMs, seg.endMs);
+            } else {
+              merged.push({ startMs: seg.startMs, endMs: seg.endMs });
+            }
+          }
+
+          // Render ONE travel block per merged segment
+          merged.forEach(({ startMs, endMs })=>{
+            const travelBlock = document.createElement('div');
+            travelBlock.className = 'slot-booked-block is-travel';
+            travelBlock.setAttribute('aria-disabled','true');
+
+            // Text-only (simple). If you want times, tell me and I’ll add it.
+            travelBlock.textContent = 'Instructor Travel';
+
+            pushRenderItem(startMs, endMs, travelBlock);
+          });
+        };
+
+        window.__mrm_inPersonBlocked60 = null;
+        window.__mrm_inPersonBlocked30 = null;
+
+        if(hasBusyForDay){
+          // NEW: start-windows used ONLY when validating in-person
+          const blockedStartWindows60_inPerson = [];
+          const blockedStartWindows30_inPerson = [];
+
+          busyForDay.forEach(b=>{
+            const busyBlock = _mrmBusyBlocks(b);
+
+            // Base busy-window blocking applies to BOTH online and in-person
+            const w60 = _mrmBlockedStartWindowForDuration(busyBlock.blockStart, busyBlock.blockEnd, 60);
+            blockedStartWindows60.push({ bufferStart: w60.latestAllowedBeforeStart, bufferEnd: w60.earliestAllowedAfterStart });
+
+            const w30 = _mrmBlockedStartWindowForDuration(busyBlock.blockStart, busyBlock.blockEnd, 30);
+            blockedStartWindows30.push({ bufferStart: w30.latestAllowedBeforeStart, bufferEnd: w30.earliestAllowedAfterStart });
+
+            // For IN-PERSON validation, treat online busy blocks as blocking (no travel),
+            // and ALSO block in-person starts that are within 15 minutes of an online lesson.
+            // This makes those "near-online" courtesy options render as ONLINE (correct) instead of in-person.
+            const ONLINE_NEAR_MS = 30 * 60 * 1000;
+
+            const w60_inPerson = _mrmBlockedStartWindowForDuration(busyBlock.blockStart, busyBlock.blockEnd, 60);
+            const w30_inPerson = _mrmBlockedStartWindowForDuration(busyBlock.blockStart, busyBlock.blockEnd, 30);
+
+            if (busyBlock.busyType === 'online') {
+              blockedStartWindows60_inPerson.push({
+                bufferStart: w60_inPerson.latestAllowedBeforeStart - ONLINE_NEAR_MS,
+                bufferEnd: w60_inPerson.earliestAllowedAfterStart + ONLINE_NEAR_MS
+              });
+              blockedStartWindows30_inPerson.push({
+                bufferStart: w30_inPerson.latestAllowedBeforeStart - ONLINE_NEAR_MS,
+                bufferEnd: w30_inPerson.earliestAllowedAfterStart + ONLINE_NEAR_MS
+              });
+            } else {
+              // In-person busy blocks already include travel buffers via busyBlock.blockStart/blockEnd.
+              blockedStartWindows60_inPerson.push({
+                bufferStart: w60_inPerson.latestAllowedBeforeStart,
+                bufferEnd: w60_inPerson.earliestAllowedAfterStart
+              });
+              blockedStartWindows30_inPerson.push({
+                bufferStart: w30_inPerson.latestAllowedBeforeStart,
+                bufferEnd: w30_inPerson.earliestAllowedAfterStart
+              });
+            }
+
+            // Travel ONLY affects in-person validity
+            const applyTravel = busyBlock.busyType === 'in_person';
+            if(applyTravel){
+              const travelBeforeStart = b.startMs - (30 * 60 * 1000);
+              const travelBeforeEnd   = b.startMs;
+
+              const travelAfterStart  = b.endMs;
+              const travelAfterEnd    = b.endMs + (30 * 60 * 1000);
+
+              // Keep your existing travel rendering behavior
+              addTravelSegment(travelBeforeStart, travelBeforeEnd);
+              addTravelSegment(travelAfterStart, travelAfterEnd);
+
+              // NEW: treat travel segments as "busy" ONLY for in-person start validity
+              const tw60a = _mrmBlockedStartWindowForDuration(travelBeforeStart, travelBeforeEnd, 60);
+              blockedStartWindows60_inPerson.push({ bufferStart: tw60a.latestAllowedBeforeStart, bufferEnd: tw60a.earliestAllowedAfterStart });
+              const tw30a = _mrmBlockedStartWindowForDuration(travelBeforeStart, travelBeforeEnd, 30);
+              blockedStartWindows30_inPerson.push({ bufferStart: tw30a.latestAllowedBeforeStart, bufferEnd: tw30a.earliestAllowedAfterStart });
+
+              const tw60b = _mrmBlockedStartWindowForDuration(travelAfterStart, travelAfterEnd, 60);
+              blockedStartWindows60_inPerson.push({ bufferStart: tw60b.latestAllowedBeforeStart, bufferEnd: tw60b.earliestAllowedAfterStart });
+              const tw30b = _mrmBlockedStartWindowForDuration(travelAfterStart, travelAfterEnd, 30);
+              blockedStartWindows30_inPerson.push({ bufferStart: tw30b.latestAllowedBeforeStart, bufferEnd: tw30b.earliestAllowedAfterStart });
+            }
+
+            // Keep the rest of your existing booked-block rendering code BELOW this point
+            // (Do not remove your online chunk splitting / booked-block creation)
+            // ...
+
+            // Render booked blocks:
+            // - In-person: render as-is (one block per busy item)
+            // - Online: if the busy item spans multiple standard lessons (e.g., 120 min),
+            //   split into 60-min (or 30-min) display chunks so back-to-back lessons don't look merged.
+            const busyTypeHere = busyBlock.busyType; // 'online' | 'in_person' | null
+            const chunkMin = _mrmChooseOnlineChunkMinutes(b);
+            const modeLabel = busyTypeHere === 'online' ? '(online)' : null;
+
+            // If chunkMin is set, render multiple adjacent blocks; else render one block as before
+            if (busyTypeHere === 'online' && chunkMin != null) {
+              const chunkMs = chunkMin * 60 * 1000;
+              for (let s = b.startMs; s < b.endMs; s += chunkMs) {
+                const e = Math.min(s + chunkMs, b.endMs);
+                const block = makeBookedBlock(s, e, modeLabel);
+                pushRenderItem(s, e, block);
+              }
+            } else {
+              const block = makeBookedBlock(b.startMs, b.endMs, modeLabel);
+              pushRenderItem(b.startMs, b.endMs, block);
+            }
+          });
+
+          // IMPORTANT: expose these arrays to the slot loop below
+          // If your code already declared blockedStartWindows* outside this if-block,
+          // then also declare these outside and only assign here.
+          window.__mrm_inPersonBlocked60 = blockedStartWindows60_inPerson;
+          window.__mrm_inPersonBlocked30 = blockedStartWindows30_inPerson;
+        }
+
+        const blockedStartWindows60_inPerson = window.__mrm_inPersonBlocked60 || blockedStartWindows60;
+        const blockedStartWindows30_inPerson = window.__mrm_inPersonBlocked30 || blockedStartWindows30;
+
+        renderMergedTravelSegments();
+
+        /* A) stop at latest selectable start (inclusive) */
+        const ticksNeeded = Math.max(1, Math.round(durationMin / 15));
+        const latestSelectableStart = endBound - (durationMin * 60 * 1000);
+
+        /* B) consolidate invalid runs into one booked block (DISABLED) */
+        // We do not merge/summarize consecutive invalid starts.
+        // This keeps all "Booked" and "Travel" blocks visible individually.
+        const flushRun = ()=>{ /* disabled on purpose */ };
+
+        if(isFinite(latestSelectableStart) && latestSelectableStart >= startBound){
+          for(let t = startBound; t <= latestSelectableStart; t += stepMs){
+            // Helper: start blocked by window arrays
+            const isStartBlockedBy = (tMs, windows)=>{
+              if(!Array.isArray(windows) || !windows.length) return false;
+              return windows.some(w => tMs > w.bufferStart && tMs < w.bufferEnd);
+            };
+
+            // Helper: tick coverage check for N minutes (15-min ticks)
+            const hasTickCoverage = (tMs, minutes)=>{
+              const need = Math.max(1, Math.round(minutes / 15));
+              for(let i=0;i<need;i++){
+                const tt = tMs + i*stepMs;
+                if(!availableTickStarts.has(tt)) return false;
+              }
+              return true;
+            };
+
+            // Helper: availability for (mode, duration)
+            const isBookableAt = (tMs, mode, minutes)=>{
+              // blocked windows depend on mode
+              const windows =
+                (mode === 'in_person')
+                  ? (minutes === 60 ? blockedStartWindows60_inPerson : blockedStartWindows30_inPerson)
+                  : (minutes === 60 ? blockedStartWindows60 : blockedStartWindows30);
+
+              if(isStartBlockedBy(tMs, windows)) return false;
+              if(!hasTickCoverage(tMs, minutes)) return false;
+              return true;
+            };
+
+            // Helper: create slot tile with optional label lines (time / duration / mode)
+            const buildTile = ({ tMs, minutes, mode, labelLines })=>{
+              const tile = document.createElement('div');
+              tile.className = (labelLines && labelLines.length) ? 'slot has-subline' : 'slot';
+              tile.dataset.startMs = String(tMs);
+
+              // Line 1: Time (always)
+              const timeLine = document.createElement('div');
+              timeLine.className = 'slot-line slot-line-time';
+              timeLine.textContent = _mrmFormatTimeMs(tMs);
+              tile.append(timeLine);
+
+              // Lines 2–3: Optional labels
+              // Supports either:
+              //  - [durationLabel, modeLabel]
+              //  - [timeLabel, durationLabel, modeLabel]
+              if(labelLines && labelLines.length){
+                const has3 = labelLines.length >= 3;
+
+                // If 3-line payload is provided, it overrides the default time line
+                if (has3) {
+                  timeLine.textContent = labelLines[0] || timeLine.textContent;
+                }
+
+                const durLine = document.createElement('div');
+                durLine.className = 'slot-line slot-line-duration';
+                durLine.textContent = (has3 ? (labelLines[1] || '') : (labelLines[0] || ''));
+                tile.append(durLine);
+
+                const modeLine = document.createElement('div');
+                modeLine.className = 'slot-line slot-line-mode';
+                modeLine.textContent = (has3 ? (labelLines[2] || '') : (labelLines[1] || ''));
+                tile.append(modeLine);
+              }
+
+              const startISO = new Date(tMs).toISOString();
+              const endISO   = new Date(tMs + minutes*60*1000).toISOString();
+              const slotKey = instr.id+'|'+startISO+'|'+minutes;
+              if(selectedSlots.some(s=>s.key===slotKey)) tile.classList.add('selected');
+
+              const withinLeadTime = (isFinite(leadTimeMs) && tMs < leadTimeMs);
+              if(withinLeadTime){
+                tile.classList.add('is-disabled');
+                tile.setAttribute('aria-disabled','true');
+                tile.onclick=(e)=>{ e.stopPropagation(); };
+                pushRenderItem(tMs, tMs + minutes*60*1000, tile);
+                return;
+              }
+
+              tile.onclick = (e)=>{
+                e.stopPropagation();
+
+                // AUTO-switch the selectors to match the tile being clicked
+                const lengthSelect = document.getElementById('length-select');
+                const onlineSelect = document.getElementById('online-select');
+
+                const prevLen = lengthSelect ? String(lengthSelect.value) : null;
+                const prevMode = onlineSelect ? String(onlineSelect.value) : null;
+
+                const wantLen = String(minutes);
+                const wantMode = (mode === 'online') ? '1' : '0';
+
+                // only mark auto-change when we are changing away from the user's current selection
+                if(lengthSelect && prevLen !== wantLen){
+                  lengthSelect.dataset.mrmAutoFrom = prevLen;
+                  lengthSelect.value = wantLen;
+                }
+                if(onlineSelect && prevMode !== wantMode){
+                  onlineSelect.dataset.mrmAutoFrom = prevMode;
+                  onlineSelect.value = wantMode;
+                }
+
+                const wasSelected = selectedSlots.some(s => s.key === slotKey);
+                const startMs = tMs;
+                const endMs = startMs + (minutes * 60 * 1000);
+                toggleSlot(tile, {
+                  key: `${instr.id}|${new Date(startMs).toISOString()}|${minutes}`,
+                  start: new Date(startMs).toISOString(),
+                  end: new Date(endMs).toISOString(),
+                  instructor_id: instr.id,
+                  lesson_type: mode
+                }, instr);
+
+                // If user DE-selected a slot that caused auto switching, revert back
+                if(wasSelected){
+                  if(lengthSelect && lengthSelect.dataset.mrmAutoFrom){
+                    lengthSelect.value = lengthSelect.dataset.mrmAutoFrom;
+                    delete lengthSelect.dataset.mrmAutoFrom;
+                  }
+                  if(onlineSelect && onlineSelect.dataset.mrmAutoFrom){
+                    onlineSelect.value = onlineSelect.dataset.mrmAutoFrom;
+                    delete onlineSelect.dataset.mrmAutoFrom;
+                  }
+                }
+
+                renderCalendar(instr, state, container);
+              };
+
+              pushRenderItem(tMs, tMs + minutes*60*1000, tile);
+            };
+
+            // Read current selection
+            const lengthSelectEl = document.getElementById('length-select');
+            const onlineSelectEl = document.getElementById('online-select');
+
+            const selectedDuration = parseInt(lengthSelectEl ? lengthSelectEl.value : '60', 10) || 60;
+            const selectedMode = (onlineSelectEl && String(onlineSelectEl.value) === '1') ? 'online' : 'in_person';
+
+            const otherDuration = (selectedDuration === 60) ? 30 : 60;
+            const otherMode = (selectedMode === 'online') ? 'in_person' : 'online';
+
+            // Candidate ladder (Goal 4)
+            const candidates = [
+              { mode: selectedMode, dur: selectedDuration },      // exact match
+              { mode: selectedMode, dur: otherDuration },         // same mode other duration
+              { mode: otherMode,   dur: selectedDuration },       // other mode same duration
+              { mode: otherMode,   dur: otherDuration }           // other mode other duration
+            ];
+
+            // Special rule: when the "other mode" is online, prefer 60 over 30 at same start time (Goal 2/4)
+            const reorderOnlinePreference = (arr)=>{
+              return arr.sort((a,b)=>{
+                if(a.mode !== 'online' && b.mode === 'online') return -1;
+                if(a.mode === 'online' && b.mode !== 'online') return 1;
+                if(a.mode === 'online' && b.mode === 'online') return (b.dur - a.dur); // 60 first
+                return 0;
+              });
+            };
+
+            // We only apply that preference inside the ONLINE side of the ladder where both could match.
+            // So: keep first two as-is (selected-mode priority), but reorder among the online fallbacks.
+            const firstTwo = candidates.slice(0,2);
+            const lastTwo  = reorderOnlinePreference(candidates.slice(2,4));
+            const finalCandidates = firstTwo.concat(lastTwo);
+
+            // Pick the first bookable candidate at t
+            let chosen = null;
+            for(const c of finalCandidates){
+              if(isBookableAt(t, c.mode, c.dur)){
+                chosen = c;
+                break;
+              }
+            }
+
+            if(chosen){
+              const isExactMatch = (chosen.mode === selectedMode && chosen.dur === selectedDuration);
+
+              // Only show the 2 extra lines when this tile is NOT the exact user selection.
+              // (This keeps your normal clean grid for the primary selectable options.)
+              let labelLines = null;
+              if(!isExactMatch){
+                const modeText = (chosen.mode === 'online') ? 'online' : 'in person';
+                const timeText = _mrmFormatTimeMs(t);
+
+                // Always use the wording you requested
+                const durText = (chosen.dur === 30)
+                  ? '30 minute available'
+                  : `${chosen.dur} minute available`;
+
+                // 3 lines: time, "X minute available", mode
+                labelLines = [timeText, durText, modeText];
+              }
+
+              buildTile({
+                tMs: t,
+                minutes: chosen.dur,
+                mode: chosen.mode,
+                labelLines
+              });
+            } else {
+              // Nothing bookable at this start time.
+              // Keep your existing behavior (disabled/booked/travel) by doing nothing here;
+              // your booked/travel blocks are already pushed elsewhere into pushRenderItem().
+            }
+          }
+        }
+
+        // flushRun(); // disabled (no consolidation)
+
+        if(selectedForDay.length){
+          const inRange = new Set();
+          selectedForDay.forEach(sel=>{
+            const base = new Date(sel.start).getTime();
+            if(!isFinite(base)) return;
+            const baseBound = _mrmFloorTo15(base);
+            for(let i=0;i<durationTicks;i++) inRange.add(baseBound + i*15*60*1000);
+          });
+          renderItems.forEach(item=>{
+            const el = item.node;
+            if(!el.classList.contains('slot')) return;
+            const t = parseInt(el.dataset.startMs||'',10);
+            if(isFinite(t) && inRange.has(t)) el.classList.add('selected-range');
+          });
+        }
+
+        renderItems
+          .map((item, index)=>({ ...item, index }))
+          .sort((a,b)=>{
+            if(a.startMs !== b.startMs) return a.startMs - b.startMs;
+            return a.index - b.index;
+          })
+          .forEach(item=>gridWrap.append(item.node));
+
+        modalContentHost.append(gridWrap);
+        mountPanel();
+      }
+      }
+    }
+
+    grid.append(cell);
+  }
+
+  container.append(grid);
+}
+
+function loadMonth(instr,state,container){
+  const y=state.year,m=state.month;
+  const key = monthKey(y,m);
+
+  if(!state._monthCache) state._monthCache = {};
+  if(!state._monthInFlight) state._monthInFlight = {};
+  if(!state._monthReqId) state._monthReqId = {};
+  if(!state._reqSeq) state._reqSeq = 0;
+
+  if(state._monthCache[key]){
+    state.slotsByDay = state._monthCache[key].slotsByDay || {};
+    state.busyByDay = state._monthCache[key].busyByDay || {};
+    renderCalendar(instr,state,container);
+    if(typeof state._afterVisibleMonthRender === 'function') state._afterVisibleMonthRender();
+    return;
+  }
+
+  if(state._monthInFlight[key]) return;
+
+  const start=y+'-'+String(m+1).padStart(2,'0')+'-01';
+  const end=y+'-'+String(m+1).padStart(2,'0')+'-'+daysInMonth(y,m);
+
+  state._monthInFlight[key] = true;
+
+  const reqId = ++state._reqSeq;
+  state._monthReqId[key] = reqId;
+
+  fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&__ts=${Date.now()}`)
+    .then(r=>r.json())
+    .then(res=>{
+      const grouped = groupSlotsByDay(res.slots||[]);
+      const busyGrouped = groupBusyByDay(res.busy||[]);
+      state._monthCache[key] = { slotsByDay: grouped, busyByDay: busyGrouped };
+
+      const stillVisible = (state.year===y && state.month===m);
+      const stillLatestForKey = (state._monthReqId[key] === reqId);
+
+      if(stillVisible && stillLatestForKey){
+        state.slotsByDay = grouped;
+        state.busyByDay = busyGrouped;
+        renderCalendar(instr,state,container);
+        if(typeof state._afterVisibleMonthRender === 'function') state._afterVisibleMonthRender();
+      }
+    })
+    .finally(()=>{
+      delete state._monthInFlight[key];
+    });
+}
+
+function changeMonth(instr,state,delta,container){
+  const base=new Date();
+  const min=base.getFullYear()*12+base.getMonth();
+  const max=min+12;
+
+  const next=state.year*12+state.month+delta;
+  if(next<min||next>max) return;
+
+  state.year=Math.floor(next/12);
+  state.month=next%12;
+  state.expandedDay=null;
+  state.slotsByDay = {};
+  state.busyByDay = {};
+  renderCalendar(instr,state,container);
+  if(typeof state._refreshVisibleMonth === 'function'){
+    state._refreshVisibleMonth({ force: true, renderIfVisible: true, year: state.year, month: state.month });
+  }else{
+    loadMonth(instr,state,container);
+  }
+}
+
+function toggleSlot(el,slot,instr){
+  const leadTimeMs = Date.now() + 24 * 60 * 60 * 1000;
+  const slotMs = new Date(slot.start).getTime();
+  if(isFinite(leadTimeMs) && isFinite(slotMs) && slotMs < leadTimeMs) return;
+
+  const key = slot.key || (slot.start+'|'+slot.end+'|'+instr.id);
+  const i=selectedSlots.findIndex(s=>s.key===key);
+
+  if(i>=0){
+    selectedSlots.splice(i,1);
+    el.classList.remove('selected');
+  }else{
+    selectedSlots.push({key,start:slot.start,end:slot.end,instructor_id:instr.id});
+    el.classList.add('selected');
+  }
+
+  const msgEl = document.getElementById('booking-message');
+  const modalMsg = document.getElementById('modal-booking-message');
+  const inlineMsg = document.querySelector('.confirm-msg[data-instructor-id="'+instr.id+'"]');
+  if(msgEl) msgEl.textContent = '';
+  if(modalMsg) modalMsg.textContent = '';
+  if(inlineMsg) inlineMsg.textContent = '';
+
+  const cell = el.closest('.calendar-day');
+  if(cell){
+    const d = new Date(slot.start);
+    applySelectedDayClass(cell, instr.id, d.getFullYear(), d.getMonth(), d.getDate());
+  }
+
+  updateBooking(instr);
+}
+
+function updateBooking(instr){
+  const panel=document.getElementById('booking-panel');
+  panel.style.display='none';
+
+  if(selectedSlots.length){
+    document.getElementById('selected-count').textContent=selectedSlots.length;
+    currentInstructor=instr;
+    document.getElementById('confirm-instrument').value = document.getElementById('instrument-input').value;
+  }else{
+    currentInstructor=null;
+  }
+}
+
+function getSlotMinutes(){
+  return parseInt(document.getElementById('length-select').value,10)||60;
+}
+
+function loadInstructors(){
+  fetch(apiBase+'/instructors')
+    .then(r=>r.json())
+    .then(list=>{
+      if (Array.isArray(list)) {
+        const showed = maybeShowInstructorProfile(list);
+        if (showed) return;
+      }
+      const wrap = document.getElementById('instructor-container');
+      wrap.innerHTML = '';
+
+      // Persist selection for convenience
+      const STORAGE_KEY = 'mrm_selected_state';
+      let selectedState = null; // Always show map first; user must click a state
+
+      // --- Inline SVG goes here ---
+      // You MUST paste a "blank USA states" SVG (no labels) as a string.
+      // Requirements:
+      // - Each state shape element must have id="AZ" style 2-letter codes (AL, AK, ...)
+      // - The map must not include text labels (or you can delete <text> nodes).
+      // Full USA SVG map (inline). Paste the contents of /us.svg here.
+      const US_MAP_SVG = `
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   enable_background="new 0 0 1000 589"
+   height="589px"
+   pretty_print="False"
+   style="stroke-linejoin: round; stroke:#000; fill: none;"
+   version="1.1"
+   viewBox="0 0 1000 589"
+   width="1000px"
+   id="svg"
+   inkscape:version="0.48.4 r9939"
+   sodipodi:docname="us.svg">
+  <sodipodi:namedview
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1"
+     objecttolerance="10"
+     gridtolerance="10"
+     guidetolerance="10"
+     inkscape:pageopacity="0"
+     inkscape:pageshadow="2"
+     inkscape:window-width="1920"
+     inkscape:window-height="1137"
+     id="namedview69"
+     showgrid="false"
+     inkscape:zoom="0.80893016"
+     inkscape:cx="817.66365"
+     inkscape:cy="409.3738"
+     inkscape:window-x="1192"
+     inkscape:window-y="118"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg2" />
+  <defs
+     id="defs4">
+    <style
+       type="text/css"
+       id="style6">path { fill-rule: evenodd; }</style>
+  </defs>
+  <metadata
+     id="metadata8">
+    <views
+       id="views10">
+      <view
+         h="589.235294118"
+         padding="0"
+         w="1000"
+         id="view12">
+        <proj
+           id="laea-usa"
+           lat0="45"
+           lon0="-100" />
+        <bbox
+           h="321.97"
+           w="589.33"
+           x="690.09"
+           y="918.69"
+           id="bbox15" />
+      </view>
+    </views>
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title />
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <path
+     inkscape:connector-curvature="0"
+     id="MA"
+     data-name="Massachusetts"
+     data-id="MA"
+     d="m 956.31178,153.05085 -0.29118,-0.19412 0,0.29119 0.29118,-0.0971 z m -2.91189,-2.6207 0.67944,-0.29119 0,-0.38825 -0.67944,0.67944 z m 12.03583,-7.57092 -0.0971,-1.35889 -0.19412,-0.7765 0.29119,2.13539 z m -42.41659,-9.9975 -0.67944,0.29119 -5.5326,1.65007 -1.94126,0.67944 -2.23245,0.67944 -0.7765,0.29119 0,0.29119 0.29118,5.04728 0.29119,4.65903 0.29119,4.27078 0.48532,0.29119 1.74714,-0.48532 7.86211,-2.32951 0.19412,0.48531 13.97709,-5.33847 0.0971,0.19413 1.26182,-0.48532 4.4649,-1.74713 4.27078,5.14434 0,0 0.58238,-0.48531 0.29119,-1.45595 -0.0971,2.32952 0,0 0.97063,0 0.29119,1.16475 0.87357,1.65008 0,0 4.56197,-5.5326 3.78546,1.26182 0.87357,-1.94126 6.21204,-3.30015 -2.62071,-5.14435 0.67945,3.30015 -3.20309,2.42658 -3.59133,0.29119 -7.18267,-7.66799 -3.20309,-4.85315 3.20309,-3.39721 -3.30015,-0.19413 -1.35888,-3.20308 -0.0971,-0.19413 -5.53259,6.01791 -12.22996,4.07666 -3.97959,1.26182 0,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="MN"
+     data-name="Minnesota"
+     data-id="MN"
+     d="m 558.54712,73.847349 1.94126,6.891482 4.07665,24.848159 1.94126,9.90044 0.58238,8.73568 2.23246,5.24141 0.48531,4.4649 0.38825,1.45595 -0.0971,0.29119 -3.88252,6.40616 2.52364,4.27078 4.85315,34.16622 0.19413,4.4649 4.85315,-0.29119 19.12144,-1.06769 47.75505,-3.97959 4.7561,-0.48532 0,-0.48531 -1.35889,-7.47386 -5.92085,-3.00896 -4.65903,-4.85315 -7.37679,-4.46491 -2.32952,-0.19412 -3.59133,-2.71777 0.97063,-13.39471 -3.39721,-3.10602 1.16476,-5.43554 6.21204,-5.62966 -1.0677,-11.64757 2.23245,-2.52364 0,0 7.57093,-7.95918 8.63861,-11.065195 3.30015,-2.329514 5.82379,-2.814831 6.11497,-4.561967 -4.07665,0.776505 -2.42658,-1.844199 -9.31806,1.261821 -1.45594,-1.747136 -8.34743,3.397209 -6.69736,-2.814831 -1.84419,-2.232452 -5.33848,0.388253 -3.59133,-1.844199 1.16476,-1.358884 -4.56197,-1.455947 -4.07665,0 -6.50323,2.814831 -1.26182,-1.941263 -10.28869,-1.455947 -3.49427,-8.73568 -0.38826,-2.620705 -4.4649,-1.26182 0.38825,7.47386 -11.8417,0.873568 -14.65653,0.582379 -0.97063,0.09706 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="MT"
+     data-name="Montana"
+     data-id="MT"
+     d="m 465.65771,72.973781 -32.12789,-2.135389 -23.39221,-2.232451 -23.29515,-2.717768 -14.46241,-1.941262 -23.10102,-3.591336 -11.55051,-1.941262 -25.81879,-4.950219 -2.71777,-0.582379 -4.17371,19.800877 1.8442,3.591335 1.45595,5.532598 -0.87357,0.776505 1.8442,5.047282 2.52364,2.135389 7.18267,12.035829 0.67944,2.03832 2.91189,-0.19412 -3.39721,15.91835 -1.35888,0.38825 -1.8442,5.33847 9.60925,0.67944 0.77651,4.46491 5.43553,13.29765 0.97063,0.7765 3.78546,7.76505 0.97063,-0.7765 8.05624,-0.0971 10.19163,1.0677 2.52364,-3.30015 3.00896,5.43553 0.58238,0.29119 0.0971,-0.58237 1.35888,-9.51219 33.19559,4.07665 26.49823,2.52364 13.97709,1.16476 24.94522,1.45595 1.26182,0.0971 0.29119,0 0.0971,-1.35888 0.29119,-6.69736 0.38825,-8.83274 0.0971,-2.23246 0.19413,-3.88252 1.55301,-30.47782 1.26182,-23.683401 0.0971,-3.882525 -1.8442,-0.09706 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="ND"
+     data-name="North Dakota"
+     data-id="ND"
+     d="m 556.50879,73.847349 -29.31306,0.582379 -20.48032,-0.09706 -17.56842,-0.388253 -20.57738,-0.776505 -1.0677,-0.09706 -0.0971,3.882525 -1.26182,23.683405 -1.55301,30.47782 -0.19413,3.88252 3.78546,0.19413 42.80484,1.16476 39.50469,-0.29119 16.40367,-0.48532 3.30014,-0.19412 -0.38825,-1.45595 -0.48531,-4.4649 -2.23246,-5.24141 -0.58238,-8.73568 -1.94126,-9.90044 -4.07665,-24.848163 -1.94126,-6.891482 -2.03833,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="HI"
+     data-name="Hawaii"
+     data-id="HI"
+     d="m 416.34965,514.99923 -3.00896,-2.23245 -2.6207,0.67944 0.58238,5.43553 -3.59134,4.46491 3.10602,7.08561 0.87357,7.27973 3.59133,2.32951 2.23246,-3.59133 3.97958,-2.91189 4.85316,-1.26183 5.33847,-4.56196 -5.24141,-4.46491 -0.0971,-2.71776 -9.9975,-5.5326 z m -17.66549,-7.86211 -1.45595,-1.26182 -1.35888,1.8442 2.81483,-0.58238 z m -7.27973,-4.17372 0.38825,-3.59133 -1.8442,-0.29119 1.45595,3.88252 z m 6.11497,-5.92085 -1.65007,0.77651 1.16476,3.6884 2.52364,0.19412 0.7765,3.20308 2.71777,1.16476 6.01791,-2.81483 -5.62966,-4.65903 -5.92085,-1.55301 z m -12.42408,-3.97959 -0.87356,2.62071 4.17371,-0.0971 3.88252,0.97063 -2.03832,-3.20309 -5.14435,-0.29119 z m -12.22995,-7.66798 -2.23245,-2.13539 -4.27078,3.30015 2.71777,5.04728 1.94126,-2.03833 5.5326,1.16476 -0.48532,-2.32952 -3.20308,-3.00895 z m -43.48428,-4.27078 0.58238,-1.35888 1.65007,-0.87357 -2.23245,2.23245 z m 15.43304,-8.83274 -6.79442,2.52364 -0.67944,1.8442 2.71777,1.94126 3.78546,0.97063 2.71776,-5.33847 -1.74713,-1.94126 z m -47.07561,-17.85962 0,-0.0971 -0.19413,0 0.19413,0.0971 z m -51.44346,-12.71527 0,0.19413 0.0971,0 -0.0971,-0.19413 z m -26.98355,-4.4649 0.0971,0.0971 0,0 -0.0971,-0.0971 z m -1.06769,-1.94126 0,0 0,0 0,0 z m -0.87357,-0.97063 -0.19412,0 0,0.0971 0.19412,-0.0971 z m 0.67944,0 -0.0971,0 0.0971,0 0,0 z m -0.0971,-0.0971 0,0 0,0.0971 0,-0.0971 z m -30.47782,-25.04228 -0.0971,-0.29119 0,0.0971 0.0971,0.19413 z m -66.48824,-21.25682 -0.29119,0.29118 0.19413,0.0971 0.0971,-0.38825 z m -70.370758,-49.01688 0,0 0,0 0,0 z m 2.426578,0.0971 -0.09706,0 0,0 0.09706,0 z m -0.485316,-0.0971 0,0 0,0 0,0 z m -41.445952,-18.1508 0.291189,-0.0971 0,-0.19412 -0.291189,0.29119 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="ID"
+     data-name="Idaho"
+     data-id="ID"
+     d="m 309.0949,52.881715 -8.63862,-1.747136 -2.81483,-0.679442 -1.26182,-0.291189 -11.25932,50.666952 0.48532,4.17371 -0.38826,4.36784 0.19413,0.97063 0,0.0971 0.0971,1.84419 3.30015,3.59134 -4.75609,11.93876 -10.09457,13.20059 -0.29119,2.42658 2.62071,6.21204 -9.221,38.24287 -0.38825,2.03832 2.71776,0.58238 27.46887,5.43553 10.96813,2.03833 2.81483,0.48532 2.71777,0.48531 13.97709,2.23245 25.04228,3.78546 2.81483,0.38826 0.38825,-3.20309 0.87357,-6.3091 3.30015,-25.23641 1.74714,-12.52114 0.38825,-3.20309 -0.58238,-0.29119 -3.00896,-5.43553 -2.52364,3.30015 -10.19163,-1.0677 -8.05624,0.0971 -0.97063,0.7765 -3.78546,-7.76505 -0.97063,-0.7765 -5.43553,-13.29765 -0.77651,-4.46491 -9.60925,-0.67944 1.8442,-5.33847 1.35888,-0.38825 3.39721,-15.91835 -2.91189,0.19412 -0.67944,-2.03832 -7.18267,-12.035829 -2.52364,-2.135389 -1.8442,-5.047282 0.87357,-0.776505 -1.45595,-5.532598 -1.8442,-3.591335 4.17371,-19.800877 -0.0971,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="WA"
+     data-name="Washington"
+     data-id="WA"
+     d="m 192.13384,77.050432 0.0971,-1.650073 -0.19412,0.09706 0.0971,1.55301 z m 20.67445,-8.832744 0.58237,-0.970631 -0.67944,-0.09706 0.0971,1.067694 z m -1.8442,-1.747136 0.58237,-1.941262 -0.58237,-0.194127 0,2.135389 z m 7.0856,-2.814831 -0.0971,-1.941262 -1.65007,2.523641 1.74713,-0.582379 z m 0.19413,-4.076651 0.29119,-1.941262 -0.19413,-0.485316 -0.0971,2.426578 z m 0.29119,-9.512185 -0.0971,-1.067695 -0.38826,-0.09706 0.48532,1.164758 z m 3.10602,-6.406166 -0.87357,-0.09706 -1.74713,2.717767 2.6207,-2.620704 z m -2.42658,-2.620705 0.48532,-0.388252 0.0971,-0.291189 -0.58238,0.679441 z m -0.48531,0.29119 -0.29119,-1.941263 -0.87357,1.650073 1.16476,0.29119 z m -0.48532,-2.717768 -0.87357,-0.388252 0.67944,0.970631 0.19413,-0.582379 z m 2.91189,1.650074 0,-1.261821 -0.29119,0.485316 0.29119,0.776505 z m 0.87357,-1.261821 -0.38825,-0.291189 -0.0971,0 0.48531,0.291189 z m -5.5326,-2.135389 -0.48531,-0.388252 -0.19413,-0.09706 0.67944,0.485315 z m 3.59134,-0.388252 -2.6207,0.679442 0.67944,0.194126 1.94126,-0.873568 z m -2.13539,-0.194126 -0.48531,-0.582379 -0.0971,0.09706 0.58238,0.485316 z m 2.03833,-1.164758 -0.38826,0 0.48532,0.194126 -0.0971,-0.194126 z m -19.02438,49.793381 3.49428,3.785461 -0.58238,7.279734 0.67944,1.8442 5.24141,2.81483 14.75359,1.35888 0.58238,1.74714 6.98855,0.0971 6.60029,0.87357 10.774,-1.16476 5.33848,0.87357 1.45594,-0.67944 27.27474,6.21204 1.8442,0.38825 -0.19413,-0.97063 0.38826,-4.36784 -0.48532,-4.17371 11.25932,-50.666952 -1.55301,-0.29119 -22.71277,-5.338471 -19.80087,-5.047282 -22.42159,-6.21204 -6.69735,-1.650073 1.55301,8.444491 -1.45595,2.717768 -2.6207,-1.358884 2.52364,11.744637 -2.71777,3.882525 -1.26182,3.591336 0,3.688398 -5.72672,3.979588 -2.42658,-1.55301 -2.32952,1.164758 4.27078,-5.532598 -1.06769,3.785462 2.42658,-2.620705 1.94126,0.388253 -0.58238,-4.853156 1.26182,0.194126 2.6207,-5.823787 -0.87356,-0.873568 -3.39721,4.36784 -2.23246,0.09706 2.42658,-2.717767 2.71777,-0.679442 -0.97063,-4.950219 -2.71777,-0.679442 -1.35888,-2.329515 -1.65008,0.873568 -8.9298,-3.882524 -7.86211,-6.114977 -2.13539,5.92085 -0.19413,2.523641 1.65007,4.464904 -1.06769,14.462405 -0.77651,2.232452 4.36784,0.388252 -4.36784,3.10602 2.32952,1.164757 -1.8442,6.21204 -0.87357,-4.853156 -1.65007,5.629661 2.23245,2.717767 2.42658,-0.194126 2.91189,1.747136 1.45595,2.814831 1.74713,0 0,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="AZ"
+     data-name="Arizona"
+     data-id="AZ"
+     d="m 372.18593,309.90486 -32.71027,-4.07665 -17.56843,-2.52365 -25.04228,-3.97958 -2.52364,-0.38826 0,0.19413 -4.27078,18.83025 -2.23245,-0.0971 -3.39721,-3.00895 -4.27078,3.59133 -0.0971,15.43304 -1.55301,3.30014 0,0.29119 0,0.0971 -0.19413,2.42657 3.39721,9.12394 3.00896,4.07665 -5.43554,3.20308 -2.13539,3.97959 -3.49427,8.54155 -1.74713,0.38826 -0.0971,7.0856 3.00896,2.23246 -1.55301,4.27077 -3.49427,0.19413 0,0 -2.03833,3.78546 6.98855,4.36784 13.20058,7.3768 40.76651,21.64507 34.55447,4.27078 0.38825,0 2.71777,-28.63362 0.67944,-7.08561 7.27974,-75.12685 0.38825,-3.49427 -2.52364,-0.29119 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="CA"
+     data-name="California"
+     data-id="CA"
+     d="m 206.01387,363.77489 0.38825,2.13539 0,0.38825 -0.38825,-2.52364 z m -14.26828,-8.34743 0.67944,1.45595 0.38825,-0.0971 -1.06769,-1.35888 z m 16.98604,-0.29119 0.29119,2.52364 1.74714,1.26182 -2.03833,-3.78546 z m -11.74463,-13.78296 -1.0677,-0.29119 0.87357,0.38825 0.19413,-0.0971 z m -10.77401,-2.9119 -2.6207,1.55301 0.67944,0.67945 1.94126,-2.23246 z m -5.04728,-1.8442 -0.19413,0.77651 0.87357,0.19413 -0.67944,-0.97064 z m 8.54155,1.94127 4.27078,2.42658 0.77651,-0.67945 -5.04729,-1.74713 z m -33.09852,-85.51261 -0.0971,0.0971 0.0971,-0.0971 0,0 z m 10.38575,0.48531 -0.0971,-0.29119 0,0.38826 0.0971,-0.0971 z m 56.00542,-73.6709 -3.78546,-0.97064 -41.54301,-11.45344 -15.43304,-4.65903 0,0.38825 -0.87357,9.60925 -4.07665,11.35638 -6.79442,8.44449 -0.19412,4.27078 3.30014,5.92085 1.65008,7.76505 -2.32952,6.3091 0.38825,6.30911 -1.16475,2.6207 3.97958,8.63862 2.52364,3.30015 -0.19412,9.41512 6.01791,5.72672 3.49427,-5.82378 3.78547,3.00895 1.45594,-1.35888 -5.24141,0.97063 -0.0971,4.95022 1.0677,6.21204 -2.9119,-2.81483 -1.65007,-3.78546 -0.48532,5.2414 1.35889,10.38576 5.43553,6.69735 -3.59133,4.65903 0.58237,5.92085 3.88253,6.01792 6.79442,18.63612 2.13539,1.16475 -0.67945,12.9094 1.0677,1.55301 14.55947,5.24141 4.4649,4.75609 1.55301,3.10602 4.27078,2.42658 4.65903,0.87357 1.94126,5.33847 3.88252,1.8442 5.82379,6.89148 5.43554,9.02687 -0.38826,8.34743 3.00896,3.97958 39.69882,3.88253 0,0 3.49427,-0.19413 1.55301,-4.27077 -3.00896,-2.23246 0.0971,-7.0856 1.74713,-0.38826 3.49427,-8.54155 2.13539,-3.97959 5.43554,-3.20308 -3.00896,-4.07665 -3.39721,-9.12394 0.19413,-2.42657 0,-0.0971 -2.52364,-3.39721 -7.76505,-10.38575 -15.04479,-21.15976 -20.96563,-30.08957 -11.8417,-16.40366 -11.45345,-16.50074 13.20058,-56.00542 0.87357,-3.68839 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="CO"
+     data-name="Colorado"
+     data-id="CO"
+     d="m 489.6323,255.54951 0.38826,-19.02437 -4.65903,-0.19413 -23.6834,-0.87357 -2.32952,-0.0971 -1.94126,-0.0971 -28.82775,-1.8442 -19.2185,-1.55301 -23.97459,-2.32952 -2.32951,-0.29119 -0.29119,2.52365 -5.24141,50.56988 -1.8442,17.66549 -0.7765,7.66799 -0.19413,2.52364 3.00896,0.29119 48.91981,4.27077 21.54801,1.35889 21.45095,0.97063 3.10602,0.0971 1.94126,0.0971 4.07665,0.0971 1.94127,0.0971 6.11497,0.19413 1.55301,0 0,-1.94127 1.0677,-51.34639 0.0971,-5.72672 0,-1.8442 0.0971,-1.26182 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="NV"
+     data-name="Nevada"
+     data-id="NV"
+     d="m 294.82662,295.8307 10.09457,-62.79983 5.14434,-31.44846 0.58238,-3.10601 -2.81483,-0.48532 -10.96813,-2.03833 -27.46887,-5.43553 -2.71776,-0.58238 -2.71777,-0.58238 -13.6859,-3.00895 -24.55697,-5.82379 -2.71777,-0.67944 -0.87357,3.68839 -13.20058,56.00542 11.45345,16.50074 11.8417,16.40366 20.96563,30.08957 15.04479,21.15976 7.76505,10.38575 2.52364,3.39721 0,-0.29119 1.55301,-3.30014 0.0971,-15.43304 4.27078,-3.59133 3.39721,3.00895 2.23245,0.0971 4.27078,-18.83025 0,-0.19413 0.48531,-3.10602 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="NM"
+     data-name="New Mexico"
+     data-id="NM"
+     d="m 472.45213,324.75551 0.0971,-2.52364 0.0971,-2.52364 0.0971,-2.52364 -3.10602,-0.0971 -21.45095,-0.97063 -21.54801,-1.35889 -48.91981,-4.27077 -3.00896,-0.29119 -0.38825,3.49427 -7.27974,75.12685 -0.67944,7.08561 -2.71777,28.63362 0.38826,0.0971 13.39471,1.26183 1.26182,-6.79442 2.42658,-1.94127 27.17767,2.42658 0.19413,0 -2.42658,-4.75609 12.32701,0.87357 30.76901,1.74713 19.2185,0.87357 3.30015,-91.0452 0.67944,0.0971 0.0971,-2.62071 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="OR"
+     data-name="Oregon"
+     data-id="OR"
+     d="m 162.2384,162.75717 15.43304,4.65903 41.54301,11.45344 3.78546,0.97064 2.71777,0.67944 24.55697,5.82379 13.6859,3.00895 2.71777,0.58238 0.38825,-2.03832 9.221,-38.24287 -2.62071,-6.21204 0.29119,-2.42658 10.09457,-13.20059 4.75609,-11.93876 -3.30015,-3.59134 -0.0971,-1.84419 0,-0.0971 -1.8442,-0.38825 -27.27474,-6.21204 -1.45594,0.67944 -5.33848,-0.87357 -10.774,1.16476 -6.60029,-0.87357 -6.98855,-0.0971 -0.58238,-1.74714 -14.75359,-1.35888 -5.24141,-2.81483 -0.67944,-1.8442 0.58238,-7.279734 -3.49428,-3.785461 -0.29118,0.09706 -0.67945,0.485315 -4.85315,-2.523641 -2.9119,0.873568 -1.94126,-0.970631 -2.03832,8.347429 -1.35889,2.329514 -6.01791,14.656531 -1.74714,8.05624 -1.06769,0.0971 -5.62966,13.39471 -3.78546,5.72672 -1.35889,0.97063 -3.49427,6.79442 -0.67944,7.18267 -2.13539,6.40617 1.26182,5.82378 0,0.0971 z m 35.5251,-79.688825 -0.29119,-0.873568 -0.0971,0.679442 0.38825,0.194126 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="UT"
+     data-name="Utah"
+     data-id="UT"
+     d="m 352.38505,204.97962 -25.04228,-3.78546 -13.97709,-2.23245 -2.71777,-0.48531 -0.58238,3.10601 -5.14434,31.44846 -10.09457,62.79983 -0.48531,3.10602 2.52364,0.38826 25.04228,3.97958 17.56843,2.52365 32.71027,4.07665 2.52364,0.29119 0.19413,-2.52364 0.7765,-7.66799 1.8442,-17.66549 5.24141,-50.56988 0.29119,-2.52365 -1.94126,-0.19412 -24.7511,-3.00896 -3.78546,-0.48531 2.42658,-18.92731 0.19412,-1.26182 -2.81483,-0.38826 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="WY"
+     data-name="Wyoming"
+     data-id="WY"
+     d="m 461.38694,192.16729 0.7765,-15.14184 0.97063,-20.38326 0.0971,-2.52364 -1.26182,-0.0971 -24.94522,-1.45595 -13.97709,-1.16476 -26.49823,-2.52364 -33.19559,-4.07665 -1.35888,9.51219 -0.0971,0.58237 -0.38825,3.20309 -1.74714,12.52114 -3.30015,25.23641 -0.87357,6.3091 -0.38825,3.20309 -0.19412,1.26182 -2.42658,18.92731 3.78546,0.48531 24.7511,3.00896 1.94126,0.19412 2.32951,0.29119 23.97459,2.32952 19.2185,1.55301 28.82775,1.8442 1.94126,0.0971 0.0971,-2.52364 0.48532,-10.19163 0.87357,-17.76255 0.38825,-7.57092 0.0971,-2.52364 0.0971,-2.62071 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="AR"
+     data-name="Arkansas"
+     data-id="AR"
+     d="m 690.4559,328.05566 -10.48282,1.55301 4.27078,-6.79442 -1.8442,-3.78546 -36.98105,3.59134 -31.25432,2.52364 -4.56197,0.29119 0.58238,2.71776 3.78546,19.60675 0.0971,4.36784 1.0677,26.40117 0.0971,4.36784 0.29119,0.0971 1.45595,1.55301 5.82378,-0.19413 0.58238,8.54155 0.19413,2.42658 3.00896,-0.29119 9.22099,-0.67944 36.5928,-3.39721 0.19412,0 -0.0971,-2.13539 0.97063,-0.67944 -1.74713,-3.30014 3.6884,-15.5301 -1.45595,-1.74714 5.5326,-6.11498 -0.38826,-5.2414 4.07665,-6.79442 0,-0.0971 -0.19412,-0.19412 3.49427,-3.20309 -0.97063,-3.88252 2.71777,-4.27078 -0.58238,-3.97959 2.91189,-5.62966 0,-0.0971 -0.0971,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="IA"
+     data-name="Iowa"
+     data-id="IA"
+     d="m 661.53109,197.69989 -5.33847,-2.81483 -2.9119,-3.97959 -0.97063,-5.72672 0.77651,-2.62071 -2.81483,-3.39721 0,0 -4.7561,0.48532 -47.75505,3.97959 -19.12144,1.06769 -4.85315,0.29119 -2.03833,0.0971 1.65008,10.77401 -1.35889,5.14435 2.13539,3.20308 0,0.67944 0.67944,0.0971 3.10602,9.12394 3.00896,4.75609 0.19413,5.43554 3.30014,4.56196 -0.58238,1.94126 3.00896,12.22996 0,0.29119 0,0 19.89794,-0.58238 21.25682,-1.8442 20.86857,-2.62071 4.7561,4.17372 0.19412,0.19412 0.87357,-0.38825 -0.67944,-3.78546 3.59133,-2.23245 1.45595,-9.90044 -1.45595,-0.67944 0.87357,-5.04728 4.36784,-0.87357 4.85316,-3.49427 2.13539,-6.11498 0.0971,-3.10602 -3.88252,-3.6884 -1.16476,-2.32951 -3.6884,-2.32952 0.19413,-0.48531 0.0971,-0.48532 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="KS"
+     data-name="Kansas"
+     data-id="KS"
+     d="m 608.92288,312.71969 -2.42658,-41.0577 -4.36784,-2.52364 -0.38825,-1.94127 -3.49428,-3.10602 3.39721,-4.17371 -1.35888,-2.42658 -2.52364,0.0971 -2.32952,-1.65008 -0.97063,-0.7765 -3.30014,0.19412 -35.81629,1.35889 -16.40367,0.38825 -32.61321,0 -13.10352,-0.19413 -3.6884,-0.0971 0,1.8442 -0.0971,5.72672 -1.0677,51.34639 0,1.94127 4.17372,0.0971 22.51864,0.29119 52.70528,-0.77651 37.56342,-1.74713 3.6884,-0.29119 -0.0971,-2.52364 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="MO"
+     data-name="Missouri"
+     data-id="MO"
+     d="m 653.66898,242.44599 -4.7561,-4.17372 -20.86857,2.62071 -21.25682,1.8442 -19.89794,0.58238 0,0 -0.0971,0.58238 2.42657,4.65903 2.23246,1.553 2.6207,4.65903 0.38825,0.38826 0.97063,0.7765 2.32952,1.65008 2.52364,-0.0971 1.35888,2.42658 -3.39721,4.17371 3.49428,3.10602 0.38825,1.94127 4.36784,2.52364 2.42658,41.0577 0.0971,2.52364 0.19413,2.52364 0.0971,2.52364 0.19413,2.6207 0.0971,2.52365 4.56197,-0.29119 31.25432,-2.52364 36.98105,-3.59134 1.8442,3.78546 -4.27078,6.79442 10.48282,-1.55301 0.0971,0 0,-0.7765 0.19413,-4.46491 1.94126,-2.42658 -0.58238,-2.71776 -0.0971,-0.0971 -0.0971,-0.0971 0.38825,-1.26182 0.58238,0.19413 0.29119,0.7765 -0.0971,0.29119 0,0.0971 0,0.77651 0.38826,0.0971 0.7765,-0.97063 0,-0.0971 0.0971,-0.29119 2.52364,-1.55301 0.38826,-0.19413 0.87357,-7.95917 -0.19413,-0.38826 -0.29119,-0.0971 -6.89148,-5.62966 1.06769,-2.03833 -1.94126,-5.53259 -3.49427,-2.71777 -6.60029,-2.9119 -4.17372,-3.3972 0.48532,-6.98855 1.26182,-6.50323 -6.98855,0.38825 -2.13539,-2.23245 -0.97063,-4.4649 -11.06519,-9.31806 -3.10602,-8.63862 0.7765,-4.27078 0,0 -0.19412,-0.19412 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="NE"
+     data-name="Nebraska"
+     data-id="NE"
+     d="m 572.33008,204.68843 -3.00895,-3.00895 -10.57988,-3.10602 -3.39721,-0.0971 -5.14435,1.45594 -6.11498,-3.88252 -19.12143,0.19412 -27.85712,-0.29119 -32.90439,-1.06769 -2.9119,-0.0971 -0.0971,2.52364 -0.38825,7.57092 -0.87357,17.76255 -0.48532,10.19163 -0.0971,2.52364 2.32952,0.0971 23.6834,0.87357 4.65903,0.19413 -0.38826,19.02437 -0.0971,1.26182 3.6884,0.0971 13.10352,0.19413 32.61321,0 16.40367,-0.38825 35.81629,-1.35889 3.30014,-0.19412 -0.38825,-0.38826 -2.6207,-4.65903 -2.23246,-1.553 -2.42657,-4.65903 0.0971,-0.58238 0,-0.29119 -3.00896,-12.22996 0.58238,-1.94126 -3.30014,-4.56196 -0.19413,-5.43554 -3.00896,-4.75609 -3.10602,-9.12394 -0.67944,-0.0971 -1.8442,-0.19413 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="OK"
+     data-name="Oklahoma"
+     data-id="OK"
+     d="m 609.50526,322.91131 -0.19413,-2.6207 -0.0971,-2.52364 -0.19413,-2.52364 -3.6884,0.29119 -37.56342,1.74713 -52.70528,0.77651 -22.51864,-0.29119 -4.17372,-0.0971 -1.55301,0 -6.11497,-0.19413 -1.94127,-0.0971 -4.07665,-0.0971 -1.94126,-0.0971 -0.0971,2.52364 -0.0971,2.52364 -0.0971,2.52364 -0.0971,2.62071 0.58238,0 23.48927,0.58238 24.84816,0.29119 0.29119,33.19558 1.74714,5.82379 3.88252,3.6884 4.17372,0.19413 0.87356,-1.74714 5.72673,5.24141 7.47386,0.7765 1.35888,1.55301 2.71777,-1.26182 6.79442,3.20309 0,1.84419 2.52364,-0.0971 2.6207,-2.23245 4.85316,3.10602 4.56197,1.65007 3.10601,-4.27077 9.90044,4.65902 3.6884,-3.00895 3.00896,-1.16476 2.42658,0.58238 9.12393,-2.6207 4.85316,2.03832 4.36784,2.81483 3.78546,0.67944 0.0971,0 -0.0971,-4.36784 -1.0677,-26.40117 -0.0971,-4.36784 -3.78546,-19.60675 -0.58238,-2.71776 -0.0971,-2.52365 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="SD"
+     data-name="South Dakota"
+     data-id="SD"
+     d="m 566.89455,135.57949 -16.40367,0.48532 -39.50469,0.29119 -42.80484,-1.16476 -3.78546,-0.19413 -0.0971,2.23246 -0.38825,8.83274 -0.29119,6.69736 -0.0971,1.35888 -0.29119,0 -0.0971,2.52364 -0.97063,20.38326 -0.7765,15.14184 -0.0971,2.62071 2.9119,0.0971 32.90439,1.06769 27.85712,0.29119 19.12143,-0.19412 6.11498,3.88252 5.14435,-1.45594 3.39721,0.0971 10.57988,3.10602 3.00895,3.00895 1.8442,0.19413 0,-0.67944 -2.13539,-3.20308 1.35889,-5.14435 -1.65008,-10.77401 2.03833,-0.0971 -0.19413,-4.4649 -4.85315,-34.16622 -2.52364,-4.27078 3.88252,-6.40616 0.0971,-0.29119 -3.30014,0.19412 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="LA"
+     data-name="Louisiana"
+     data-id="LA"
+     d="m 688.99995,469.2825 -1.26182,0.29119 -0.58238,0.58238 1.8442,-0.87357 z m 4.07665,0 -0.67944,-0.29119 -0.19412,0.29119 0.87356,0 z m 2.32952,-0.77651 -0.67944,0 -0.38826,0.48532 1.0677,-0.48532 z m -1.16476,-0.67944 -0.19413,-0.29119 -0.0971,0.29119 0.29119,0 z m 7.76505,-5.14434 -0.29119,0.19412 0.48532,0 -0.19413,-0.19412 z m 13.58884,-5.72673 0.58238,-0.7765 -0.67945,0.87357 0.0971,-0.0971 z m 1.94126,-2.52364 -0.19413,0.0971 0,0.0971 0.19413,-0.19413 z m -49.89044,8.54156 1.45594,-1.8442 -3.97959,-1.0677 -1.74713,1.45595 4.27078,1.45595 z m 40.28119,-8.44449 -0.38825,-0.38826 -0.0971,0.19413 0.48532,0.19413 z m 1.06769,-1.74714 -0.97063,-0.29119 0.29119,0.97063 0.67944,-0.67944 z m 7.95918,-1.65007 0,-0.29119 0,0.0971 0,0.19413 z m 1.94126,-1.26182 -0.0971,-0.0971 0.0971,0.19413 0,-0.0971 z m -0.7765,-0.19413 -0.19413,-0.0971 -0.0971,0.29119 0.29119,-0.19413 z m -6.79442,-0.29119 0.87357,-0.29119 0,-0.29119 -0.87357,0.58238 z m 0.48532,-0.48532 0.48531,-0.48531 -0.0971,-0.0971 -0.38825,0.58237 z m -3.39721,-3.59133 -0.19413,0.19413 0.0971,0 0.0971,-0.19413 z m -35.8163,-54.35535 -0.19412,0 -36.5928,3.39721 -9.22099,0.67944 -3.00896,0.29119 0.0971,2.32952 1.94126,18.73318 3.20309,4.4649 0.0971,2.62071 3.10602,5.43553 2.52364,7.95918 -0.87357,4.4649 -0.67944,11.0652 -1.45594,3.59133 0.19412,0 0.29119,2.52364 -1.65007,2.32952 12.03582,-1.35889 9.41513,2.62071 6.69735,0.87357 3.39721,-2.42658 -1.8442,-2.42658 6.21204,-1.94126 -0.19412,2.13539 3.20308,-0.77651 2.6207,4.07665 2.23245,-0.7765 5.82379,3.97959 -3.59133,1.26182 8.25036,2.42657 3.10602,0 1.8442,-2.23245 3.97959,-2.13539 2.81483,4.07666 1.94126,-3.6884 -0.58238,-5.82379 5.24141,2.03833 0.58238,1.74713 6.21204,0.77651 3.10602,2.52364 -0.38825,2.03832 4.36784,-4.07665 -1.65008,-2.13539 -7.27973,-1.8442 -2.71777,-1.55301 -0.0971,-2.91189 3.00896,0.38825 2.32951,-4.75609 -3.00896,-4.17371 -1.65007,3.97958 -3.78546,-0.67944 2.6207,-4.27078 -1.74713,-0.48531 -4.27078,3.00896 -6.11498,0.38825 -1.74713,-1.35889 2.81483,-4.95021 3.30014,-0.0971 5.62967,1.8442 4.07665,0.38825 0,0 -2.23245,-2.81483 -4.27078,-8.34742 1.16476,-4.65903 -33.48678,3.68839 1.26182,-1.26182 -1.35888,-3.49427 2.03832,-3.00896 1.16476,-7.57092 7.3768,-12.6182 -3.59134,-4.36784 0.19413,-3.20309 -2.23246,-5.24141 0,-0.67944 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="TX"
+     data-name="Texas"
+     data-id="TX"
+     d="m 573.98015,536.93549 -4.65902,-17.56842 0,3.30015 4.65902,14.26827 z m -1.06769,-30.86607 -3.30015,6.21204 -0.38825,2.03833 3.6884,-8.25037 z m 2.6207,-4.56196 3.10602,-4.07666 -2.23245,1.35889 -0.87357,2.71777 z m 10.96814,-9.90044 -7.27974,3.78546 2.03833,-0.38825 5.24141,-3.39721 z m 0.97063,-1.35889 2.03832,-1.65007 -0.7765,0.19413 -1.26182,1.45594 z m -115.11686,-162.87191 -0.67944,-0.0971 -3.30015,91.0452 -19.2185,-0.87357 -30.76901,-1.74713 -12.32701,-0.87357 2.42658,4.75609 0.0971,0.0971 10.48282,10.48281 6.01791,7.08561 7.95917,5.92085 5.62967,10.28869 2.13538,10.77401 4.56197,3.00895 3.59134,3.97959 5.14434,1.8442 7.47386,4.75609 3.39721,1.26183 4.65903,-4.65903 1.45595,-4.95022 2.42658,-4.7561 7.57092,-3.00895 2.91189,1.45594 8.44449,0.67945 7.66799,4.75609 5.24141,0.97063 -1.45595,2.71777 3.00896,1.94126 2.81483,3.39721 0.58238,3.59133 1.8442,2.42658 4.27077,10.28869 4.27078,3.59134 3.30015,5.43553 4.17371,4.27078 1.8442,0.58238 1.55301,11.06519 4.56197,2.52365 0.19412,3.49427 1.16476,-0.29119 7.95918,9.70631 3.97959,0.87357 5.04728,3.00896 7.76505,0 5.62966,3.10601 6.69735,-1.45594 -3.00895,-2.81483 -2.71777,-8.1533 -1.06769,-7.08561 -1.55301,-2.32952 0.67944,-4.75609 -2.03833,-0.19413 -2.71777,-4.4649 3.10602,3.30015 3.59134,-1.26182 1.94126,-5.14435 -3.88252,-5.24141 5.82378,0.67944 2.71777,-4.17371 -0.38825,-1.45595 2.42658,-3.20308 -0.58238,2.81483 2.71777,-2.13539 -1.0677,-3.78546 3.49427,1.8442 4.46491,-2.52364 -4.36784,-4.56197 2.71776,1.0677 5.04729,0.29119 6.60029,-1.45595 7.3768,-4.95022 4.4649,-3.6884 0.67944,-2.71777 2.71777,-2.81483 -1.45595,-4.65903 0.29119,-2.91189 4.85316,-2.13539 -0.38826,5.14435 2.9119,0 -3.20308,2.71776 12.90939,-6.79441 2.13539,-0.0971 1.35888,-6.21204 0.38826,0 1.45594,-3.59133 0.67944,-11.0652 0.87357,-4.4649 -2.52364,-7.95918 -3.10602,-5.43553 -0.0971,-2.62071 -3.20309,-4.4649 -1.94126,-18.73318 -0.0971,-2.32952 -0.19413,-2.42658 -0.58238,-8.54155 -5.82378,0.19413 -1.45595,-1.55301 -0.29119,-0.0971 -0.0971,0 -3.78546,-0.67944 -4.36784,-2.81483 -4.85316,-2.03832 -9.12393,2.6207 -2.42658,-0.58238 -3.00896,1.16476 -3.6884,3.00895 -9.90044,-4.65902 -3.10601,4.27077 -4.56197,-1.65007 -4.85316,-3.10602 -2.6207,2.23245 -2.52364,0.0971 0,-1.84419 -6.79442,-3.20309 -2.71777,1.26182 -1.35888,-1.55301 -7.47386,-0.7765 -5.72673,-5.24141 -0.87356,1.74714 -4.17372,-0.19413 -3.88252,-3.6884 -1.74714,-5.82379 -0.29119,-33.19558 -24.84816,-0.29119 -23.48927,-0.58238 -0.58238,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="CT"
+     data-name="Connecticut"
+     data-id="CT"
+     d="m 936.99622,143.34454 -13.97709,5.33847 -0.19412,-0.48531 -7.86211,2.32951 -1.74714,0.48532 0.19413,0.97063 3.68839,14.26828 1.16476,1.45595 -2.52364,3.10602 1.74714,1.65007 0,0 5.62966,-5.43554 3.00895,-4.17371 0.58238,1.16476 14.17122,-6.30911 0.29119,-0.29118 -0.0971,-2.32952 -0.58237,-2.03833 -3.00896,-8.44449 -0.38825,-1.06769 -0.0971,-0.19413 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="NH"
+     data-name="New Hampshire"
+     data-id="NH"
+     d="m 923.8927,75.982738 -1.26182,1.55301 -1.45594,-0.29119 -0.77651,6.406166 0,0.09706 2.32952,8.735681 -0.19413,1.747136 -4.17372,5.532598 1.0677,5.047281 0,6.30911 -0.77651,5.82378 4.36784,15.91836 0,0 0,0 3.97959,-1.26182 12.22996,-4.07666 5.53259,-6.01791 0,0 0,-1.55301 0.29119,-2.52364 -0.67944,0.29119 -0.0971,-0.58238 -6.11498,-7.47386 -0.19413,-0.67944 -14.07415,-33.001465 0,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="RI"
+     data-name="Rhode Island"
+     data-id="RI"
+     d="m 946.50841,152.08022 -0.0971,-2.03832 -0.29119,0.7765 0.38825,1.26182 z m 1.94126,-1.55301 -1.26182,-2.42657 -0.0971,2.52364 1.35888,-0.0971 z m -0.58238,-3.00895 0.67944,1.74713 0.87357,1.55301 0.58238,-1.16475 -0.87357,-1.65008 -0.29119,-1.16475 -0.97063,0 0,0.67944 z m -10.774,-3.97959 0.38825,1.06769 3.00896,8.44449 0.58237,2.03833 0.0971,2.32952 0.19412,-0.29119 4.65903,-3.6884 -0.87356,-6.60029 1.94126,-0.38826 0,0 -4.27078,-5.14434 -4.4649,1.74713 -1.26182,0.48532 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="VT"
+     data-name="Vermont"
+     data-id="VT"
+     d="m 923.01913,132.86173 -4.36784,-15.91836 0.77651,-5.82378 0,-6.30911 -1.0677,-5.047278 4.17372,-5.532598 0.19413,-1.747136 -2.32952,-8.735681 -1.26182,0.485316 -5.33847,1.941262 -5.24141,2.038326 -12.03583,4.36784 -0.67944,0.194126 4.36784,10.191633 1.45595,9.60924 5.14434,8.05624 4.85316,15.91835 0.19413,-0.0971 0.7765,-0.29119 2.23245,-0.67944 1.94126,-0.67944 5.5326,-1.65007 0.67944,-0.29119 0,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="AL"
+     data-name="Alabama"
+     data-id="AL"
+     d="m 718.31301,344.84758 0.38826,0.77651 1.35888,0.87356 0.58238,39.79588 0.19413,21.8392 4.95021,29.89545 0.38826,-0.0971 4.36784,0.87357 1.16475,-8.63862 1.94127,4.85316 3.30014,3.00896 6.30911,-3.6884 -0.67945,-0.58238 0.19413,0.0971 -4.36784,-9.9975 41.93127,-6.79442 2.81483,-0.48531 0,-0.0971 -2.62071,-4.95022 -0.19412,-7.0856 -2.13539,-3.88253 1.06769,-7.57092 1.74714,-1.94126 -7.18267,-12.81234 -13.00646,-39.60175 -0.0971,-0.19413 -2.9119,0.48532 -15.5301,2.52364 -7.76504,0.97063 -16.30661,2.23245 0.0971,0.19413 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="FL"
+     data-name="Florida"
+     data-id="FL"
+     d="m 854.6867,535.28542 -0.19413,0 0.0971,0.0971 0.0971,-0.0971 z m -0.87357,-0.0971 0,0.0971 0.0971,0 -0.0971,-0.0971 z m 0.19413,-0.0971 0,-0.0971 0,0.0971 0,0 z m -13.20059,1.45594 0,0 0,0.0971 0,-0.0971 z m -0.19412,0.0971 0,-0.0971 0,0.0971 0,0 z m 0.0971,-0.0971 0,0 0,0 0,0 z m -0.97063,0.0971 -0.0971,0 0,0.0971 0.0971,-0.0971 z m 27.56592,-6.11498 -0.0971,0 0.0971,0.19412 0,-0.19412 z m 2.62071,-0.67944 0,-0.19413 -0.19413,0.29119 0.19413,-0.0971 z m -0.97063,-0.19413 -0.38826,-0.38825 -0.0971,0.0971 0.48532,0.29119 z m -0.29119,0.77651 -1.16476,-1.45595 0.67944,1.26182 0.48532,0.19413 z m 9.22099,-5.72673 0,0.38825 0.19413,-0.19412 -0.19413,-0.19413 z m 1.35889,-0.97063 0.29119,-0.48532 -0.38826,0.38826 0.0971,0.0971 z m 0.29119,-0.97063 -0.0971,0 0,0.0971 0.0971,-0.0971 z m -1.74714,-0.29119 -0.0971,-0.0971 0.0971,0.0971 0,0 z m 0.87357,-1.45595 -0.0971,-0.0971 0,0.19413 0.0971,-0.0971 z m -2.62071,-0.0971 -0.0971,-0.0971 0.0971,0.0971 0,0 z m 3.30015,-2.23245 -0.19413,0.0971 0.29119,0.0971 -0.0971,-0.19412 z m 0.38825,0 -0.19412,-0.19413 0.0971,0.29119 0.0971,-0.0971 z m -0.67944,-0.19413 -0.0971,-0.0971 0,0.19412 0.0971,-0.0971 z m 3.59134,-0.67944 0,-0.0971 -0.19413,0.38825 0.19413,-0.29119 z m -4.07665,0.38825 -0.19413,0 0.19413,0.0971 0,-0.0971 z m 2.03832,-1.16476 -0.29119,0 -0.0971,0.0971 0.38825,-0.0971 z m 0.77651,-0.48531 0,0 -0.0971,0 0.0971,0 z m -8.15331,0.38825 0,-0.19412 -0.0971,0.19412 0.0971,0 z m 0.87357,-0.29119 -0.29119,0 0.29119,0.58238 0,-0.58238 z m -2.32951,0.0971 0,-0.58238 -0.48532,0.0971 0.48532,0.48532 z m -1.35889,-0.97064 0.48532,0.48532 0,-0.19413 -0.48532,-0.29119 z m 14.26828,0.58238 -1.74713,0.77651 0.58237,0.0971 1.16476,-0.87357 z m -13.58883,-0.87356 -0.58238,0 0,0.19412 0.58238,-0.19412 z m 15.33597,-4.85316 0.0971,-0.48532 0.0971,-1.26182 -0.19412,1.74714 z m 0.0971,-5.43554 -0.38825,-0.97063 -0.19413,0.38826 0.58238,0.58237 z m -22.42158,2.42658 -0.19413,0.29119 0.48532,0.0971 -0.29119,-0.38825 z m -1.8442,-0.87357 -0.87357,0.29119 0.67945,0.0971 0.19412,-0.38826 z m -1.94126,0.19413 0,-0.29119 -0.0971,0.0971 0.0971,0.19413 z m -2.03833,-0.0971 -0.58238,0.38825 0.77651,0.38825 -0.19413,-0.7765 z m 2.71777,0.0971 -0.0971,-0.29119 -0.48532,-0.0971 0.58238,0.38825 z m -12.71527,-9.51219 -0.58238,0.29119 1.16476,0.38826 -0.58238,-0.67945 z m -2.32951,-3.10602 -0.77651,-1.16475 0.29119,0.87357 0.48532,0.29118 z m 3.00895,1.94127 -1.35888,-3.10602 -0.97063,-0.29119 2.32951,3.39721 z m -3.88252,-3.88253 -0.29119,-0.7765 -0.19413,-0.48532 0.48532,1.26182 z m -8.05624,-10.774 -1.74714,-1.26182 0.67945,0.67944 1.06769,0.58238 z m 43.6784,-6.50323 -7.0856,-11.8417 -0.38826,0 7.47386,11.8417 z m -49.01687,-18.92731 -0.29119,-0.0971 0.29119,0.19412 0,-0.0971 z m -0.58238,-0.67944 -0.0971,0.0971 0.0971,0.0971 0,-0.19412 z m -0.67944,-0.97063 0,-0.0971 -0.0971,0.0971 0.0971,0 z m 0.38825,-0.38826 0.29119,0.19413 0,-0.19413 -0.29119,0 z m 0.58238,-0.38825 -0.38825,0.0971 0.0971,0 0.29119,-0.0971 z m -0.67944,-0.0971 -0.29119,-0.29119 0.0971,0.0971 0.19413,0.19413 z m -0.67944,-1.0677 -0.19413,0 0.29119,0.0971 -0.0971,-0.0971 z m 0.67944,-1.16475 -0.38826,0 -0.0971,0.0971 0.48532,-0.0971 z m 0.38825,0.19412 -0.48532,-0.48531 0.19413,0.0971 0.29119,0.38825 z m -3.6884,-4.17371 -0.19413,-0.0971 0,0.0971 0.19413,0 z m -4.17371,0 -0.29119,-0.38825 0.0971,0.48531 0.19413,-0.0971 z m -35.33098,-3.20309 2.91189,-2.23245 -3.20308,2.13539 0.29119,0.0971 z m 5.82379,-4.65902 0.29119,-0.29119 -1.16476,0.48531 0.87357,-0.19412 z m -36.88399,-6.50323 -10.57988,3.39721 5.82379,-1.65008 4.75609,-1.74713 z m 26.30411,-16.50073 -2.81483,0.48531 -41.93127,6.79442 4.36784,9.9975 0.29119,0.0971 -1.06769,3.97959 3.10602,-1.35888 3.3972,-3.00896 5.82379,-0.19412 6.69736,-2.42658 4.56196,0.67944 -1.06769,1.65007 8.34743,2.81483 7.18267,3.49428 1.65007,3.88252 5.33847,-1.16476 12.61821,-10.28869 4.65903,0.19413 19.02437,14.36534 3.88252,-0.77651 4.07666,5.43554 0.7765,8.63862 -1.26182,5.43553 0.58238,2.71777 3.39721,6.79442 -1.55301,-5.33847 4.36784,-0.0971 0.38825,3.88253 -2.32951,6.01791 8.05624,11.0652 3.00895,0.0971 -2.52364,-3.39721 3.10602,0.38825 1.8442,-1.16475 -0.7765,6.21204 4.17371,3.30014 2.81483,7.57093 3.78546,2.32951 4.85316,1.26182 6.69735,8.54156 3.49428,1.84419 -4.65903,0.29119 2.13538,2.42658 7.66799,-2.52364 3.78546,-2.13539 3.49427,-12.22995 -1.74713,-19.02437 -0.38825,-1.94127 -9.31806,-15.53009 -7.95918,-11.25933 -4.4649,-9.22099 3.78546,3.20308 0.7765,-0.58238 1.65008,8.05624 4.27077,6.11498 -4.17371,-8.1533 0.19413,-3.88253 -12.52115,-15.23891 -3.00895,-4.75609 -3.97959,-8.05624 -2.71777,-6.79442 -2.13539,-2.42658 -0.48531,-3.10602 -0.0971,-0.0971 -6.69735,-0.38825 -2.62071,2.03832 -1.45594,7.47386 -1.35889,-3.49427 -45.81379,5.72672 -3.30014,-5.14434 0.0971,-0.0971 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="GA"
+     data-name="Georgia"
+     data-id="GA"
+     d="m 845.85395,396.09691 -0.0971,-2.9119 -0.67944,2.52364 0.7765,0.38826 z m 1.0677,-4.46491 -0.38825,-2.23245 -0.29119,1.35889 0.67944,0.87356 z m -45.42554,-61.14976 -1.26182,0.29119 -3.6884,0.7765 -13.58884,2.81483 -1.26182,0.29119 -1.35888,0.19413 -7.57093,1.45595 -2.03832,0.38825 -8.25037,1.55301 -1.74713,0.19412 0.0971,0.19413 13.00646,39.60175 7.18267,12.81234 -1.74714,1.94126 -1.06769,7.57092 2.13539,3.88253 0.19412,7.0856 2.62071,4.95022 0,0.0971 -0.0971,0.0971 3.30014,5.14434 45.81379,-5.72672 1.35889,3.49427 1.45594,-7.47386 2.62071,-2.03832 6.69735,0.38825 0,0 -0.58237,-10.48282 1.26182,-2.23245 -0.67945,-4.17371 1.35889,-3.97959 2.03832,-2.23245 -1.45594,-1.35889 3.39721,-4.17371 -0.0971,0 -5.82378,-5.43554 -7.95918,-11.35638 -4.36784,-2.03833 -18.73318,-15.72422 -4.56197,-5.82379 -8.83274,-3.6884 -0.48532,-1.94126 2.71777,-5.33847 0,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="MS"
+     data-name="Mississippi"
+     data-id="MS"
+     d="m 716.76,442.78427 -0.48531,0.0971 0,0.0971 0.48531,-0.19412 z m 9.02687,-1.16476 -1.35888,0 1.26182,0.0971 0.0971,-0.0971 z m -11.25932,0.97063 -0.38825,0.38825 0.0971,0.0971 0.29119,-0.48532 z m 9.12394,-0.7765 -3.6884,0 3.49427,0.0971 0.19413,-0.0971 z m -40.47533,-92.50116 0,0.0971 -4.07665,6.79442 0.38826,5.2414 -5.5326,6.11498 1.45595,1.74714 -3.6884,15.5301 1.74713,3.30014 -0.97063,0.67944 0.0971,2.13539 0,0.67944 2.23246,5.24141 -0.19413,3.20309 3.59134,4.36784 -7.3768,12.6182 -1.16476,7.57092 -2.03832,3.00896 1.35888,3.49427 -1.26182,1.26182 33.48678,-3.68839 -1.16476,4.65903 4.27078,8.34742 2.23245,2.81483 0,-0.0971 3.59133,-4.07665 7.57093,-1.65007 6.98854,0.7765 1.06769,-1.35888 0,-0.0971 -4.95021,-29.89545 -0.19413,-21.8392 -0.58238,-39.79588 -1.35888,-0.87356 -0.38826,-0.77651 -0.19412,0 -4.85316,0.67944 -8.54155,1.16476 -19.41263,2.42658 -2.13539,0.19412 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="SC"
+     data-name="South Carolina"
+     data-id="SC"
+     d="m 801.49611,330.48224 0,0 -2.71777,5.33847 0.48532,1.94126 8.83274,3.6884 4.56197,5.82379 18.73318,15.72422 4.36784,2.03833 7.95918,11.35638 5.82378,5.43554 0,0 0.97063,-4.4649 -1.55301,-4.27078 4.17372,3.10602 2.32951,-1.8442 -3.97959,-3.30015 4.85316,-0.29119 7.57092,-6.40616 -0.87356,-1.65008 4.65903,-3.59133 -0.48532,-1.74714 3.39721,-2.13539 0.19413,-4.95022 5.33847,-9.90043 3.59133,-4.56197 0.38826,-0.19413 -21.64508,-13.6859 -8.05624,1.55301 -10.96813,-0.38825 -5.43554,-2.81483 -32.22495,10.19163 -0.29119,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="IL"
+     data-name="Illinois"
+     data-id="IL"
+     d="m 661.43403,198.18521 -0.19413,0.48531 3.6884,2.32952 1.16476,2.32951 3.88252,3.6884 -0.0971,3.10602 -2.13539,6.11498 -4.85316,3.49427 -4.36784,0.87357 -0.87357,5.04728 1.45595,0.67944 -1.45595,9.90044 -3.59133,2.23245 0.67944,3.78546 -0.87357,0.38825 0,0 -0.7765,4.27078 3.10602,8.63862 11.06519,9.31806 0.97063,4.4649 2.13539,2.23245 6.98855,-0.38825 -1.26182,6.50323 -0.48532,6.98855 4.17372,3.3972 6.60029,2.9119 3.49427,2.71777 1.94126,5.53259 -1.06769,2.03833 6.89148,5.62966 0.29119,0.0971 -0.58238,-0.58238 1.94126,-4.56196 7.47386,2.03832 1.8442,-2.13539 -1.45594,-4.27077 6.11497,-3.59134 -1.65007,-2.32951 1.45595,-3.30015 0,-0.29119 -0.38826,-0.0971 0.0971,-8.63862 2.13539,-1.55301 3.68839,-8.63862 -0.7765,-3.78546 -2.42658,-4.56196 1.35888,-5.14435 -6.79441,-47.85212 -0.97064,-1.06769 -2.52364,-5.72673 -2.03832,-2.13539 -0.87357,-5.62966 0,-0.19412 -13.10352,1.8442 -7.86211,0.97063 -21.15976,2.42658 0,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="IN"
+     data-name="Indiana"
+     data-id="IN"
+     d="m 750.34384,200.22353 -14.85065,2.62071 -3.39721,0.67944 -12.03583,1.94126 -2.52364,2.03833 -3.78546,1.74713 -1.45595,-0.0971 -1.74714,-0.87357 -0.58237,-0.58238 6.79441,47.85212 -1.35888,5.14435 2.42658,4.56196 0.7765,3.78546 -3.68839,8.63862 -2.13539,1.55301 -0.0971,8.63862 0.38826,0.0971 0.38825,-0.0971 1.45595,-2.71777 3.59133,0 4.36784,-1.45595 5.43554,2.03833 0.58237,-2.23245 3.10602,-2.32952 4.65903,0.67945 2.52365,-4.95022 6.89148,0.58237 -0.0971,-2.81483 6.11498,-8.05623 -0.97063,-3.6884 4.27078,-0.0971 5.2414,-4.17371 -1.26182,-4.75609 0.19413,-0.19413 -0.19413,-1.65007 -5.82378,-34.36035 -2.62071,-14.65653 -0.29119,-1.55301 -0.29119,-1.26182 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="KY"
+     data-name="Kentucky"
+     data-id="KY"
+     d="m 693.17367,317.18459 -0.29119,-0.7765 -0.58238,-0.19413 -0.38825,1.26182 0.0971,0.0971 1.06769,-0.0971 0.0971,-0.29119 z m 66.39117,-63.47928 -0.19413,0.19413 1.26182,4.75609 -5.2414,4.17371 -4.27078,0.0971 0.97063,3.6884 -6.11498,8.05623 0.0971,2.81483 -6.89148,-0.58237 -2.52365,4.95022 -4.65903,-0.67945 -3.10602,2.32952 -0.58237,2.23245 -5.43554,-2.03833 -4.36784,1.45595 -3.59133,0 -1.45595,2.71777 -0.38825,0.0971 0,0.29119 -1.45595,3.30015 1.65007,2.32951 -6.11497,3.59134 1.45594,4.27077 -1.8442,2.13539 -7.47386,-2.03832 -1.94126,4.56196 0.58238,0.58238 0.19413,0.38826 -0.87357,7.95917 -0.38826,0.19413 -2.52364,1.55301 -0.0971,0.29119 2.81483,-0.38826 19.60675,-2.6207 -0.97063,-3.88252 3.30015,-0.0971 39.50469,-5.24141 27.76005,-4.65903 0.38825,-0.29119 0.67944,-0.7765 7.27974,-3.88252 5.62966,-7.3768 0.7765,-2.52364 3.6884,-2.9119 4.65903,-5.92085 0.67944,-0.97063 -0.29119,-0.0971 -2.42657,0 -3.10602,-1.74714 -5.5326,-6.69735 -1.94126,-6.79442 0,-0.19413 -0.19413,-0.19412 -4.07665,-2.32952 -1.8442,-3.10602 -3.6884,3.59134 -2.32951,0.58238 -2.9119,-1.16476 -2.52364,1.94126 -5.24141,-2.32951 -1.35888,0.58237 -4.95022,-4.27077 -2.52364,-1.26182 -4.75609,0.58238 -0.77651,0.7765 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="NC"
+     data-name="North Carolina"
+     data-id="NC"
+     d="m 890.2118,332.22937 -1.06769,1.0677 0.19412,0.19413 0.87357,-1.26183 z m 0.7765,-5.62966 -0.48531,0.77651 0.19413,0.7765 0.29118,-1.55301 z m 5.82379,-9.02687 -1.45594,0.97063 -0.77651,1.16476 2.23245,-2.13539 z m 12.52114,-6.11497 -0.58237,-0.38826 -1.26182,-0.0971 1.84419,0.48532 z m -2.6207,-0.58238 -0.87357,0 -1.45594,0.7765 2.32951,-0.7765 z m 3.00896,1.06769 2.81483,-6.98854 -1.94126,2.91189 -0.87357,4.07665 z m 4.17371,-9.22099 1.26182,-1.8442 -0.67944,0 -0.58238,1.8442 z m 8.1533,-7.57093 -2.13539,-10.774 1.8442,5.62966 0.29119,5.14434 z m -11.8417,-24.55697 -0.19412,0.0971 -0.29119,0.0971 0,0 0.0971,0 5.33847,9.02687 4.17372,4.17371 -9.12394,-13.39471 0,0 z m -1.74713,0.58238 -0.77651,0.19413 0,0 0.19413,0.0971 1.65007,0 -0.19413,-0.58238 0,0 -0.29118,0.0971 -0.29119,0 0,0 0,0.19412 -0.19413,0.0971 -0.0971,-0.0971 0,0 z m -89.78339,22.13039 -0.48532,1.45595 0.0971,4.17371 -1.0677,-0.0971 -2.52364,5.14435 -2.81483,0.29119 -5.24141,5.14434 -2.32951,-0.87357 -3.00896,4.46491 -7.95917,7.18267 -3.88253,0.97063 -4.07665,3.78546 -0.19413,2.52364 -3.59133,1.94126 0.0971,4.27078 0,0.97063 1.26182,-0.29119 13.58884,-2.81483 3.6884,-0.7765 1.26182,-0.29119 0.29119,0 32.22495,-10.19163 5.43554,2.81483 10.96813,0.38825 8.05624,-1.55301 21.64508,13.6859 0.38825,-0.29119 9.9975,-4.07665 0.0971,-5.33847 3.59134,-6.50323 3.88252,-3.6884 8.05624,-5.33847 1.0677,-1.94126 2.13538,0.97063 0.97064,-6.40616 -1.16476,2.23245 -4.07665,1.35888 -3.88253,0.0971 4.7561,-3.49427 -1.45595,-1.55301 1.65007,-3.49427 -9.12393,-1.45595 -0.38825,-0.48531 7.76505,-1.45595 2.52364,1.26182 3.20308,-0.29119 2.6207,-1.94126 1.94127,-3.78546 1.74713,-0.48532 -0.29119,-5.33847 -2.23245,-2.13539 -2.23245,2.03833 0.48531,5.14434 -1.65007,-6.3091 -1.26182,-0.29119 -9.60925,3.97959 4.27078,-4.17372 0.19413,-1.65007 4.4649,-1.06769 1.26182,-3.30015 3.00896,1.74714 -3.20309,-4.7561 -2.23245,-1.94126 0,0 -38.82525,11.0652 -24.75109,6.3091 -25.04229,4.65903 -0.0971,-0.19413 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="OH"
+     data-name="Ohio"
+     data-id="OH"
+     d="m 818.19096,206.6297 -2.42657,-10.48282 -0.48532,-2.13539 -2.71777,-11.93876 -3.49427,2.23245 -7.47386,5.72672 -4.85315,5.92085 -3.78547,0.58238 -6.98854,3.97959 -3.88253,-2.32951 -11.74463,-1.35889 0,0 -6.21204,1.55301 -6.11498,1.45595 -6.40617,1.35888 -0.97063,0.29119 0.29119,1.55301 2.62071,14.65653 5.82378,34.36035 0.19413,1.65007 0.77651,-0.7765 4.75609,-0.58238 2.52364,1.26182 4.95022,4.27077 1.35888,-0.58237 5.24141,2.32951 2.52364,-1.94126 2.9119,1.16476 2.32951,-0.58238 3.6884,-3.59134 1.8442,3.10602 4.07665,2.32952 0.19413,0.19412 0,0 4.17371,-2.03832 1.45595,-3.20309 -1.16476,-3.30014 3.30014,-5.04728 2.42658,-0.38826 -0.29119,-4.27077 3.97959,-5.43554 0.67944,0.77651 3.59134,-2.71777 3.10602,-4.65903 0.48531,-21.25682 0.19413,-0.0971 -0.48532,-2.03832 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="TN"
+     data-name="Tennessee"
+     data-id="TN"
+     d="m 786.2572,300.48973 -27.76005,4.65903 -39.50469,5.24141 -3.30015,0.0971 0.97063,3.88252 -19.60675,2.6207 -2.81483,0.38826 0,0.0971 -0.7765,0.97063 -0.38826,-0.0971 0,-0.77651 0,-0.0971 -1.06769,0.0971 0.0971,0.0971 0.58238,2.71776 -1.94126,2.42658 -0.19413,4.46491 0,0.7765 0,0.0971 -2.91189,5.62966 0.58238,3.97959 -2.71777,4.27078 0.97063,3.88252 -3.49427,3.20309 0.19412,0.19412 2.13539,-0.19412 19.41263,-2.42658 8.54155,-1.16476 4.85316,-0.67944 0.19412,0 -0.0971,-0.19413 16.30661,-2.23245 7.76504,-0.97063 15.5301,-2.52364 2.9119,-0.48532 1.74713,-0.19412 8.25037,-1.55301 2.03832,-0.38825 7.57093,-1.45595 1.35888,-0.19413 0,-0.97063 -0.0971,-4.27078 3.59133,-1.94126 0.19413,-2.52364 4.07665,-3.78546 3.88253,-0.97063 7.95917,-7.18267 3.00896,-4.46491 2.32951,0.87357 5.24141,-5.14434 2.81483,-0.29119 2.52364,-5.14435 1.0677,0.0971 -0.0971,-4.17371 0.48532,-1.45595 -1.55301,0.29119 -5.5326,1.55301 -6.60029,1.35889 -16.59779,3.39721 -1.74714,0.29118 -0.38825,0.29119 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="VA"
+     data-name="Virginia"
+     data-id="VA"
+     d="m 908.75086,270.98255 0.29119,0 0.29118,-0.0971 0,0 -0.19412,-0.48531 -0.38825,0.58238 0,0 z m -3.30015,-10.87107 0,0.48531 0.48532,-0.29119 -0.48532,-0.19412 z m 1.74714,-3.39721 -0.0971,-0.77651 0,0 0.0971,0.77651 z m -0.58238,1.16475 -0.19413,1.26183 -0.29119,0.48531 0.48532,-1.74714 z m 0.87357,-2.52364 0.0971,-0.58238 -0.19413,0.58238 0.0971,0 z m 0.58237,-2.6207 0.29119,-0.67944 -0.48531,1.74713 0.19412,-1.06769 z m 0.0971,-1.45595 0.38825,-2.13539 -0.48532,0.48532 0.0971,1.65007 z m 1.74713,-9.60925 0.19413,-0.87356 -0.0971,0.19412 -0.0971,0.67944 z m -0.38825,-2.23245 -1.26182,0.48532 -1.94126,0.87357 -0.67944,0.87356 0.29119,0.0971 -2.32952,14.4624 0.87357,2.32952 1.35888,-6.01792 2.52364,-7.86211 1.16476,-5.14435 0,-0.0971 z m 1.94126,-0.7765 -0.29119,0.0971 -0.0971,0.38825 -0.48531,3.00896 0.38825,-1.0677 0.48531,-2.42657 z m -101.43096,37.17517 -0.67944,0.97063 -4.65903,5.92085 -3.6884,2.9119 -0.7765,2.52364 -5.62966,7.3768 -7.27974,3.88252 -0.67944,0.7765 1.74714,-0.29118 16.59779,-3.39721 6.60029,-1.35889 5.5326,-1.55301 1.55301,-0.29119 0.0971,0.19413 25.04229,-4.65903 24.75109,-6.3091 38.82525,-11.0652 0,0 -0.29119,-0.48531 -0.0971,-0.29119 0.67944,0.67944 0,0 0,0 0.77651,-0.19413 -0.0971,-0.0971 -0.67944,-3.30015 0.48532,0.0971 1.55301,2.91189 0,0 0,0 0.29119,-0.0971 0.19412,-0.0971 -0.38825,-0.7765 -3.97959,-6.11498 -4.95022,0.87357 -2.23245,1.8442 -2.13539,-1.94126 -7.27973,-2.42658 -5.04728,-0.19413 9.80337,-0.87357 5.43554,3.6884 1.55301,-2.42658 -4.36784,-5.53259 3.10602,0.19412 -1.65008,-4.4649 -3.88252,0.19413 -9.221,-7.47386 -1.16476,0 13.00646,6.40616 -0.87357,-4.4649 0.87357,-1.45595 -6.60029,-2.52364 -5.72672,-0.38825 -2.81483,-2.52364 -2.32952,1.45594 -0.87357,-6.69735 0.97063,0.19412 -0.19412,-5.43553 -0.19413,-0.19413 -0.19413,0.0971 -0.19412,-0.0971 -0.48532,-0.38825 -0.29119,-0.29119 -3.10602,-1.35888 -3.20308,-2.32952 -4.4649,-1.16475 -0.29119,-0.0971 0,0.0971 -0.58238,4.07665 -9.02687,-3.88253 0.19413,5.62966 -4.95022,9.41513 -3.00896,3.30014 -1.94126,5.72673 -5.92085,-2.03833 -2.9119,13.20058 -2.32951,4.46491 -0.38825,5.82379 -1.74714,2.81483 -6.50323,1.94126 -5.33847,4.17371 -2.52364,0.38825 -2.42658,2.13539 -6.11498,-2.23245 -1.06769,-3.00896 -0.19413,-0.0971 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="WI"
+     data-name="Wisconsin"
+     data-id="WI"
+     d="m 705.79187,134.80299 -2.42658,3.00896 -1.45594,4.36784 0.67944,2.42657 3.20308,-9.80337 z m -55.71423,-22.80983 1.45595,-2.03833 -1.0677,0.97063 -0.38825,1.0677 z m 2.23245,-3.20309 -0.48531,-0.58238 -1.0677,0.67945 1.55301,-0.0971 z m -21.15976,5.43554 -2.23245,2.52364 1.0677,11.64757 -6.21204,5.62966 -1.16476,5.43554 3.39721,3.10602 -0.97063,13.39471 3.59133,2.71777 2.32952,0.19412 7.37679,4.46491 4.65903,4.85315 5.92085,3.00896 1.35889,7.47386 0,0.48531 0,0 2.81483,3.39721 -0.77651,2.62071 0.97063,5.72672 2.9119,3.97959 5.33847,2.81483 -0.0971,0.48532 0,0 21.15976,-2.42658 7.86211,-0.97063 13.10352,-1.8442 -0.38825,-1.45595 0,-4.56197 -2.62071,-4.85315 -0.67944,-6.11498 1.26182,-6.79442 -0.67944,-5.24141 2.32952,-6.50322 -0.87357,-1.0677 0.19412,-6.01791 1.26182,-4.56197 -1.45594,-1.55301 -2.81483,0.97063 -1.55301,4.07665 -3.6884,2.13539 1.16476,-5.14434 3.30014,-4.36784 0.19413,-1.94127 0.0971,-0.0971 -4.65903,-4.65903 0,-6.60029 -5.24141,-4.27078 -7.18267,-0.48531 -7.3768,-1.94127 -15.91835,-4.85315 -3.10602,-1.74714 -0.29119,0.29119 -4.95022,-0.67944 -1.65007,0.97063 0.67944,-7.08561 -7.95917,4.07665 -9.70631,1.55301 -0.0971,-0.19412 z m 19.02437,-5.14435 -0.19412,-0.67944 -0.67944,0.29119 0.87356,0.38825 z m -3.49427,-0.67944 0.29119,-0.58238 -0.19413,-0.19413 -0.0971,0.77651 z m 7.08561,-1.65007 -0.29119,-1.35889 -0.29119,1.65008 0.58238,-0.29119 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="WV"
+     data-name="West Virginia"
+     data-id="WV"
+     d="m 836.73002,223.71281 -13.78296,3.39721 -4.27078,-18.442 0,0 -0.19413,0.0971 -0.48531,21.25682 -3.10602,4.65903 -3.59134,2.71777 -0.67944,-0.77651 -3.97959,5.43554 0.29119,4.27077 -2.42658,0.38826 -3.30014,5.04728 1.16476,3.30014 -1.45595,3.20309 -4.17371,2.03832 0,0 0,0.19413 1.94126,6.79442 5.5326,6.69735 3.10602,1.74714 2.42657,0 0.29119,0.0971 0.19413,0.0971 1.06769,3.00896 6.11498,2.23245 2.42658,-2.13539 2.52364,-0.38825 5.33847,-4.17371 6.50323,-1.94126 1.74714,-2.81483 0.38825,-5.82379 2.32951,-4.46491 2.9119,-13.20058 5.92085,2.03833 1.94126,-5.72673 3.00896,-3.30014 4.95022,-9.41513 -0.19413,-5.62966 9.02687,3.88253 0.58238,-4.07665 0,-0.0971 0,0 -2.81483,-4.85315 -5.82379,-0.67945 -3.39721,2.62071 0,1.94126 -2.91189,0.67944 -4.27078,3.00896 -2.23245,0.48532 -4.46491,6.3091 -2.23245,-10.19163 -1.94126,0.48532 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="DE"
+     data-name="Delaware"
+     data-id="DE"
+     d="m 893.80314,207.69739 0.38825,1.45595 8.05624,23.00396 9.22099,-2.71777 -0.0971,-0.19413 0.19413,0 0.29119,0.0971 0,0 0.19412,-0.0971 -0.19412,-0.38825 -2.32952,-6.21204 -11.35638,-10.774 0.48531,-7.47386 0,0 -2.32951,0 -1.74714,1.35888 -0.7765,1.94126 0,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="DC"
+     data-name="District of Columbia"
+     data-id="DC"
+     d="m 878.17597,229.14834 0.48532,0.38825 0.19412,0.0971 0.19413,-0.0971 0.19413,0.0971 0.67944,0.38825 0.19413,0.29119 0,0.67944 0.19412,0.38825 1.26182,-2.32951 -1.35888,-0.77651 -1.65007,0.0971 -0.38826,0.7765 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="MD"
+     data-name="Maryland"
+     data-id="MD"
+     d="m 911.56569,238.27227 0.67944,-5.2414 -0.58238,3.88252 -0.38825,1.65007 -0.0971,0.19413 0.29119,-0.0971 0.0971,-0.38826 z m 0.48531,-9.02687 -0.19412,0.0971 0.19412,0.58238 0,1.16475 0,-1.8442 0,0 z m -73.37972,-6.01791 2.23245,10.19163 4.46491,-6.3091 2.23245,-0.48532 4.27078,-3.00896 2.91189,-0.67944 0,-1.94126 3.39721,-2.62071 5.82379,0.67945 2.81483,4.85315 0,0 0.29119,0.0971 4.4649,1.16475 3.20308,2.32952 3.10602,1.35888 0.29119,0.29119 0.38826,-0.7765 1.65007,-0.0971 1.35888,0.77651 -1.26182,2.32951 0,0.0971 -1.8442,5.62966 6.01792,3.88252 6.01791,0.29119 3.97959,1.8442 -1.65008,-4.65903 -5.14434,-1.74714 -1.26182,-3.97958 3.20308,4.27077 2.62071,0.38826 -2.32952,-2.32952 -1.8442,-6.89148 0.48532,-3.97959 -2.03833,-4.36784 2.13539,-1.74713 1.55301,-5.62967 -0.58238,8.34743 1.65007,2.81483 1.55301,-3.30014 0.87357,5.43553 -1.65007,3.97959 4.75609,1.74714 -4.07665,1.35888 2.13539,3.97959 3.49427,1.16475 1.94126,-3.3972 -0.19412,4.75609 3.30014,-0.0971 2.13539,2.42657 0.0971,0 0.67944,-0.87356 1.94126,-0.87357 1.26182,-0.48532 -0.0971,-0.19412 2.52364,-7.47386 0,-0.29119 -0.48532,-1.94127 0,-0.0971 -9.22099,2.71777 -8.05624,-23.00396 -0.38825,-1.45595 -1.65008,0.48532 -6.89148,2.13539 -37.95168,10.57988 -6.89148,1.8442 -1.74714,0.48531 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="NJ"
+     data-name="New Jersey"
+     data-id="NJ"
+     d="m 916.80709,207.30914 -0.48531,-1.16476 0,1.16476 0.48531,0 z m 0.97064,-3.59134 0.29119,-2.91189 -0.58238,2.52364 0.29119,0.38825 z m -3.97959,-29.79837 -10.19163,-2.52365 -1.74714,-0.48531 -1.65007,-0.38825 0,0 -4.07665,9.02687 1.74714,2.13539 -0.0971,6.50322 1.8442,0.29119 3.78546,9.90044 -0.19412,0.29119 -4.75609,6.98855 0.48531,5.33847 11.45345,3.88252 0.0971,4.46491 2.62071,-3.6884 0.38825,-5.33847 2.71777,-1.8442 -1.0677,-3.97959 2.03833,-4.75609 0,-10.38576 -0.67944,-3.39721 -4.56197,0.0971 1.16476,-4.65903 0.67944,-7.47386 0,0 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="NY"
+     data-name="New York"
+     data-id="NY"
+     d="m 913.50695,181.78154 -1.45595,2.03832 -0.38825,0.58238 1.8442,-2.6207 z m 13.39471,-4.75609 4.85316,-4.27078 0,-0.19413 -4.85316,4.46491 z m -12.71527,3.00895 0,-3.30014 -0.29119,1.74713 0.29119,1.55301 z m 22.51864,-15.5301 -1.16475,-0.29119 -0.19413,0.87357 1.35888,-0.58238 z m 2.62071,-1.74713 -0.0971,0.97063 0.19412,-0.58238 -0.0971,-0.38825 z m -2.71777,0.0971 -6.50323,6.01791 -9.9975,4.27078 -2.6207,2.23245 -0.19413,2.13539 -2.71777,2.23245 0.38826,2.9119 4.17371,-1.65008 6.11498,-4.95022 6.79441,-3.59133 10.2887,-9.70631 -7.27974,5.53259 -2.32951,0.97064 3.88252,-6.40617 z m 3.00896,-4.07665 0.38825,-0.58238 -1.16476,1.35888 0.77651,-0.7765 z m -109.09895,-3.59134 -1.55301,-0.19412 1.16476,1.55301 0.38825,-1.35889 z m 32.22496,-29.70131 0.19412,-1.0677 -0.7765,0.97064 0.58238,0.0971 z m 0.48531,-6.98855 -0.38825,0.19413 -0.48532,1.06769 0.87357,-1.26182 z m -41.0577,55.13186 0.67944,2.91189 5.14435,1.26182 29.50719,-8.05624 29.70131,-8.92981 5.43554,4.17372 1.06769,2.42658 6.3091,2.71776 0.19413,0.38826 1.65007,0.38825 1.74714,0.48531 10.19163,2.52365 -0.19413,-0.48532 0.87357,3.97959 1.94126,-0.48532 1.0677,-4.36784 0,-0.0971 -1.74714,-1.65007 2.52364,-3.10602 -1.16476,-1.45595 -3.68839,-14.26828 -0.19413,-0.97063 -0.48532,-0.29119 -0.29119,-4.27078 -0.29119,-4.65903 -0.29118,-5.04728 0,-0.29119 -0.19413,0.0971 -4.85316,-15.91835 -5.14434,-8.05624 -1.45595,-9.60924 -4.36784,-10.191633 -0.58238,0.29119 -20.28619,6.794418 -4.07665,4.367845 -4.56197,8.73568 0.19413,1.94126 -6.01791,9.12393 3.68839,1.26182 1.0677,6.89148 -4.27078,5.62967 -12.81233,7.76504 -2.42658,-0.97063 -9.51218,1.35889 -8.83275,5.33847 0.48532,2.81483 3.10602,2.71777 -1.74714,8.54155 -6.98854,8.1533 -0.0971,0.0971 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="PA"
+     data-name="Pennsylvania"
+     data-id="PA"
+     d="m 900.01517,170.13396 -6.3091,-2.71776 -1.06769,-2.42658 -5.43554,-4.17372 -29.70131,8.92981 -29.50719,8.05624 -5.14435,-1.26182 -0.67944,-2.91189 -1.65007,1.26182 -2.6207,1.8442 -4.7561,4.85315 -0.58238,0.48532 2.71777,11.93876 0.48532,2.13539 2.42657,10.48282 0.48532,2.03832 0,0 4.27078,18.442 13.78296,-3.39721 1.94126,-0.48532 1.74714,-0.48531 6.89148,-1.8442 37.95168,-10.57988 6.89148,-2.13539 1.65008,-0.48532 0,0 0.7765,-1.94126 1.74714,-1.35888 2.32951,0 0.29119,-0.87357 3.78546,-4.27078 0.38825,-0.67944 0.29119,-0.19413 -3.78546,-9.90044 -1.8442,-0.29119 0.0971,-6.50322 -1.74714,-2.13539 4.07665,-9.02687 0,0 -0.19413,-0.38826 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="ME"
+     data-name="Maine"
+     data-id="ME"
+     d="m 946.7996,118.39932 -0.0971,0 0.19412,0.0971 -0.0971,-0.0971 z m 7.18267,-20.674443 -0.77651,-1.164758 0,0.582379 0.77651,0.582379 z m -1.35888,-1.067695 0,-0.970631 -0.0971,-0.582379 0.0971,1.55301 z m 3.49427,-4.076651 -0.19413,-0.09706 0.0971,0.291189 0.0971,-0.194126 z m 9.70631,-4.853156 -0.19413,-1.455947 -0.38825,0.679442 0.58238,0.776505 z m -2.42658,0.582379 0.0971,-1.067694 -1.16476,0.194126 1.06769,0.873568 z m 3.59134,-3.203083 -0.38825,0 0,0.194126 0.38825,-0.194126 z m -4.85316,1.455947 -0.87357,-0.194126 -0.0971,0.873568 0.97063,-0.679442 z m 4.95022,-3.008957 0.87357,0.679442 -0.29119,-0.776505 -0.58238,0.09706 z m -2.6207,0.09706 -0.87357,1.650073 1.16476,-0.582379 -0.29119,-1.067694 z m -4.17372,0.09706 -0.38825,0.582379 0.29119,0.873568 0.0971,-1.455947 z m 5.72673,-3.203083 -0.0971,-0.776505 -0.29119,0.485316 0.38826,0.291189 z m -0.48532,0.388253 -0.87357,-0.776505 0,0.679442 0.87357,0.09706 z m -5.43553,2.232452 -0.19413,-1.067695 -0.38825,0.873568 0.58238,0.194127 z m 9.22099,-3.39721 -1.45594,2.135389 -0.0971,-1.55301 1.55301,-0.582379 z m 7.08561,-6.503229 -0.67944,-0.970631 -0.38825,0.194126 1.06769,0.776505 z m 2.6207,-4.36784 -0.58237,-0.291189 -0.0971,0.291189 0.67944,0 z m 1.26183,-7.570923 -0.87357,0 0.97063,0.291189 -0.0971,-0.291189 z m 1.45594,0.970631 -0.29119,-1.747136 -0.7765,-0.09706 1.06769,1.8442 z m -1.55301,-1.55301 -0.19412,-1.844199 -0.67945,1.26182 0.87357,0.582379 z m -56.29661,15.23891 14.07415,33.001458 0.19413,0.67944 6.11498,7.47386 0,-0.0971 0.97063,-0.29119 0.19413,-5.5326 1.55301,-1.94126 0.97063,-5.14435 -0.87357,-0.87357 1.65007,-5.047274 5.62966,-2.620704 3.6884,-4.464904 1.35888,-7.765049 5.92085,-0.388253 -0.7765,-3.979588 7.3768,-2.81483 0.48531,-4.36784 1.74714,0.388252 4.85315,-3.979588 2.13539,-5.144345 -4.95022,-4.950219 -5.2414,-1.067695 -1.94127,-3.979588 0,-2.329515 -3.20308,0.970632 -3.59134,-1.261821 0,-3.979588 -9.70631,-20.965634 -7.0856,-3.688398 -7.86212,6.600292 -2.13539,-0.388253 -1.8442,-3.397209 -2.52364,0.970631 -3.59133,17.859614 1.26182,5.823788 1.06769,11.8417 -2.81483,9.123934 1.94126,1.455946 -2.32951,4.464904 -2.52364,-0.388253 -0.19413,0.194127 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="MI"
+     data-name="Michigan"
+     data-id="MI"
+     d="m 719.96309,138.2002 -0.48532,-0.77651 -0.0971,0.97063 0.58238,-0.19412 z m 1.55301,-1.74714 -1.16476,-1.55301 -0.19413,0.67944 1.35889,0.87357 z m 0.97063,-6.98854 -0.97063,-0.87357 0,0.19412 0.97063,0.67945 z m -2.42658,76.00042 12.03583,-1.94126 3.39721,-0.67944 14.85065,-2.62071 0.29119,1.26182 0.97063,-0.29119 6.40617,-1.35888 6.11498,-1.45595 6.21204,-1.55301 -0.0971,-0.29119 3.20309,-6.3091 -0.29119,-5.24141 3.59133,-9.02687 2.81483,1.65007 1.0677,-2.03832 -0.29119,-7.76505 -2.62071,-4.85316 -3.88252,-10.28869 -3.39721,-3.78546 -1.74714,-0.48531 -6.3091,4.36784 0.67944,0.87356 -3.30014,6.21204 -3.20309,-0.58238 -0.97063,-6.50322 1.35889,-0.48532 2.81483,-6.50323 0.29119,-11.45345 -4.36784,-9.70631 -9.70632,-1.65007 -0.97063,-1.45595 -9.02687,-2.6207 -4.07665,5.04728 0.38825,4.36784 -3.10602,3.88252 0.67945,6.01792 -3.00896,2.13539 0,-7.57093 -2.71777,5.72673 -3.20308,5.04728 -2.13539,1.65007 1.06769,5.33847 -1.35888,5.5326 0.77651,6.89148 -0.97064,3.39721 6.98855,13.39471 0.87357,5.14435 -0.87357,9.51218 -4.65903,10.67695 -0.58238,0.38825 z m 20.77151,-87.45387 -2.52364,0.19412 1.55301,1.16476 0.97063,-1.35888 z m -14.7536,2.52364 -0.7765,0 0.87357,0.38825 -0.0971,-0.38825 z m 16.98605,-12.32702 -0.97063,-1.55301 -0.38825,0.0971 1.35888,1.45594 z m -87.93919,7.08561 3.10602,1.74714 15.91835,4.85315 7.3768,1.94127 7.18267,0.48531 5.24141,4.27078 0,6.60029 4.65903,4.65903 0,-0.0971 3.78546,-10.96814 4.56197,-3.20308 3.49427,-3.88252 0.58238,3.49427 3.59134,-5.5326 8.63861,-3.30014 0.67945,-1.35889 8.73568,1.0677 3.39721,1.74713 1.65007,-4.27077 1.55301,0.97063 6.79442,-1.0677 -1.65008,-2.71777 -3.00895,-1.74713 0.58238,-6.3091 -5.92085,3.30014 -5.43554,-0.67944 -1.74714,-4.17371 0.58238,-1.358888 -7.37679,3.494268 -4.7561,0.29119 -8.54155,5.24141 -0.97063,1.94126 -5.24141,-1.26182 -3.30015,1.45595 -6.60029,-5.72672 -14.65653,-4.46491 -0.29119,-1.747133 -9.41512,9.026873 -5.33847,1.35888 -7.57093,5.72673 -0.29119,0.19412 z m 34.36035,-22.033327 -11.35639,5.629661 3.78546,3.688396 1.45595,-3.688396 3.88253,-4.756093 2.23245,-0.873568 z M 676.77,79.962326 l -7.76505,5.338471 -0.38825,2.620704 6.11497,-4.464903 2.03833,-3.494272 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+  <path
+     inkscape:connector-curvature="0"
+     id="AK"
+     data-name="Alaska"
+     data-id="AK"
+     d="m 101.28276,542.95341 -0.48532,0.19412 0.38826,0.0971 0.0971,-0.29119 z m 3.59134,0.58238 0,0 0,0.0971 0,-0.0971 z m -1.74714,-1.65008 0,0.29119 0.19413,-0.0971 -0.19413,-0.19413 z m -0.87357,-0.48531 0,-0.0971 0,0 0,0.0971 z m 1.8442,0.97063 0,-0.19413 -0.0971,0.0971 0.0971,0.0971 z m -0.19413,-0.19413 0,-0.0971 -0.19412,0 0.19412,0.0971 z m -75.709229,-63.77047 -0.09706,0.67945 0.194126,1.94126 -0.09706,-2.62071 z m -0.485315,-2.6207 0.09706,0.87357 0.09706,-0.29119 -0.194126,-0.58238 z m 76.194544,65.22642 0.0971,-0.58238 -0.38825,0.19412 0.29118,0.38826 z m 11.0652,4.75609 -0.0971,-0.0971 0.19412,0.38825 -0.0971,-0.29119 z m -7.18267,-3.39721 -1.06769,-0.97063 0,2.32951 1.06769,-1.35888 z m 2.42658,2.13539 -0.0971,-0.67944 -1.65007,-0.0971 1.74714,0.77651 z m 5.82378,1.35888 -0.0971,0.19413 0.19413,0 -0.0971,-0.19413 z m 0.38826,0.0971 -0.19413,0 0.38825,0.0971 -0.19412,-0.0971 z m 1.16475,0.38826 -0.0971,0 -0.0971,0 0.19412,0 z m -85.70673,-65.8088 0.388252,0.0971 0.29119,-0.0971 -0.679442,0 z m 83.57135,64.44991 -0.77651,-0.0971 0.29119,0.29119 0.48532,-0.19413 z m -88.812759,-72.02083 -1.358883,-0.58238 -0.09706,0.29119 1.455947,0.29119 z m 91.239329,72.21496 -0.19412,-0.0971 0,0.0971 0.19412,0 z m 5.92085,1.16476 -3.78546,0.29119 -0.87357,0.38825 4.65903,-0.67944 z m -104.05166,-88.61863 -1.067695,0 0.194127,0.29119 0.873568,-0.29119 z m 115.7963,93.08353 0,-0.38825 -0.19412,0 0.19412,0.38825 z m 5.04728,0.0971 0.19413,-0.19412 -0.19413,-0.19413 0,0.38825 z m 3.78547,1.0677 0.19412,-0.0971 -0.0971,0 -0.0971,0.0971 z m -3.10602,-1.74714 -0.0971,-0.38825 -0.19412,0 0.29119,0.38825 z m 6.50322,1.45595 -0.0971,0.0971 0.0971,0 0,-0.0971 z m -127.443872,-98.90732 -1.455946,0.19413 1.844199,1.65007 -0.388253,-1.8442 z m 122.299532,97.45137 0.19413,-0.58238 -0.0971,0 -0.0971,0.58238 z m 16.40367,-1.45594 0.0971,-0.19413 -0.19413,-0.0971 0.0971,0.29119 z m -2.42658,-0.87357 -3.39721,3.00895 2.42658,-0.19412 2.81483,-2.23245 -1.8442,-0.58238 z m 6.11498,1.06769 -0.67945,-0.19412 0.48532,0.38825 0.19413,-0.19413 z m 1.35888,0.0971 -1.0677,-0.29118 -0.19412,0.0971 1.26182,0.19412 z m -3.6884,-1.35888 -1.06769,0 1.8442,0.48532 -0.77651,-0.48532 z m 4.4649,0.97063 -0.0971,-0.19412 -0.38825,0.0971 0.48531,0.0971 z m -2.91189,-1.16476 -0.38825,-0.19412 0,1.06769 0.38825,-0.87357 z m 12.42408,2.42658 -0.0971,-0.0971 -0.19413,0 0.29119,0.0971 z m 0.19413,-0.0971 0,-0.0971 -0.19413,-0.0971 0.19413,0.19413 z m -1.65008,-0.58238 0.19413,0.38825 0,-0.0971 -0.19413,-0.29119 z m 0.87357,0 -0.87357,-0.29119 1.0677,0.77651 -0.19413,-0.48532 z m 1.26182,-0.97063 0,0 0,0.0971 0,-0.0971 z m 11.55051,1.45595 -0.19412,-0.38826 -0.0971,0 0.29119,0.38826 z m 104.43992,-6.50323 -0.19413,-0.19413 0.0971,0.19413 0.0971,0 z m -117.6405,3.00895 0,-0.0971 -0.0971,0.0971 0.0971,0 z m 120.45533,-4.75609 0.29119,0.38825 0.19413,0 -0.48532,-0.38825 z m -106.08999,7.27974 -0.0971,0.0971 0,0.29119 0.0971,-0.38825 z m -12.03583,-1.74714 0.19413,-0.77651 -0.0971,0 -0.0971,0.77651 z m 123.75548,-7.76505 -0.87357,0.48532 0.77651,0.38825 0.0971,-0.87357 z m -122.00834,7.27973 -0.0971,-0.19412 0.0971,0.19412 0,0 z m -7.27973,-2.13539 -2.42658,0.48532 -2.13539,2.81483 4.56197,-3.30015 z m 17.37429,3.6884 -0.58237,0.48532 0.58237,-0.0971 0,-0.38826 z m 111.91378,-9.31806 -0.19412,-0.38825 -0.0971,0.19413 0.29119,0.19412 z m -121.23184,6.79442 -0.67944,-0.0971 0.67944,0.67944 0,-0.58238 z m 114.82568,-5.5326 -0.19413,0.19413 0.19413,0.67944 0,-0.87357 z m -113.27267,5.43554 -0.29118,0.0971 0.38825,0.29119 -0.0971,-0.38825 z m 7.18268,2.03832 -0.29119,0 -0.19413,-0.19412 0.48532,0.19412 z m -7.95918,-2.03832 -0.48532,-0.29119 0.19413,0.29119 0.29119,0 z m 6.50323,1.06769 -0.87357,0.29119 -0.58238,1.55301 1.45595,-1.8442 z m 105.41055,-6.79441 0,0.67944 0.38825,-0.48532 -0.38825,-0.19412 z m -116.864,3.68839 0.77651,-0.19412 -0.0971,0 -0.67944,0.19412 z m -0.97063,-0.58238 -0.19413,-0.19412 0,0.0971 0.19413,0.0971 z m 117.83463,-3.78546 -0.19413,-0.0971 -0.0971,0.29119 0.29119,-0.19413 z m -106.47825,5.82379 -0.19412,-0.0971 -0.19413,0.29119 0.38825,-0.19413 z m 105.50762,-5.62966 0.0971,-0.48532 -0.19413,-0.0971 0.0971,0.58238 z m -0.77651,-0.48532 -0.29119,0.38826 0.48532,0.0971 -0.19413,-0.48532 z m -100.65445,4.7561 -0.19413,-0.19413 -0.0971,0 0.29119,0.19413 z m 100.36326,-6.50323 0.77651,0.29119 0.29119,-0.38826 -1.0677,0.0971 z m 1.16476,-0.67944 -0.29119,0.19412 0.48532,0.29119 -0.19413,-0.48531 z m -2.23245,0.58237 -0.19413,-0.38825 -0.19413,0.19413 0.38826,0.19412 z m 9.70631,-3.59133 -1.26182,3.59133 1.26182,-0.7765 0,-2.81483 z m -115.0198,7.47386 -0.0971,0 0,0 0.0971,0 z m 106.47824,-6.11498 -0.87356,0.87357 0.19412,0.97063 0.67944,-1.8442 z m -90.36576,7.76505 0,-0.38825 -0.0971,0.19413 0.0971,0.19412 z m 89.29807,-8.73568 2.81483,4.27078 6.3091,3.97959 -1.45594,-3.39721 -6.01792,-5.14435 -1.65007,0.29119 z m -93.18059,7.18267 -0.0971,-0.29119 -0.19412,0.0971 0.29119,0.19412 z m 96.48074,-8.83274 -0.38826,1.45595 0.67945,-0.48532 -0.29119,-0.97063 z m 2.03832,0 -0.0971,0.97063 0.87357,0.29119 -0.77651,-1.26182 z m -95.41305,7.57092 -0.48531,-0.0971 -0.48532,0.19413 0.97063,-0.0971 z m 9.99751,0.77651 -0.38826,0.67944 0.19413,-0.58238 0.19413,-0.0971 z m 1.45594,0.0971 -0.87357,0.0971 0.48532,0.58238 0.38825,-0.67944 z m -58.82025,-12.42408 0.97063,0.48532 -0.19412,-0.19413 -0.77651,-0.29119 z m 38.53406,9.60925 0.0971,-0.0971 -0.0971,0.0971 0,0 z m 0.29119,-0.0971 0.0971,0 0,-0.0971 -0.0971,0.0971 z m 100.36327,-7.47386 0.48531,1.8442 0.97063,-0.58238 -1.45594,-1.26182 z m -97.74257,6.40616 0.0971,-0.0971 0,0 -0.0971,0.0971 z m 93.56885,-5.62966 0.48532,4.4649 0.97063,-0.97063 -1.45595,-3.49427 z m 0.48532,-1.45595 2.23245,3.10602 -0.29119,-2.03832 -1.94126,-1.0677 z m -6.89148,0.77651 -0.58238,1.8442 0.7765,-1.26182 -0.19412,-0.58238 z m -77.6505,4.75609 -0.0971,-0.0971 0.0971,0.0971 0,0 z m 9.221,0.19413 -0.19413,-0.29119 0.19413,0.38825 0,-0.0971 z m 68.62362,-6.40617 3.88253,6.40617 -0.58238,-4.36784 -3.30015,-2.03833 z m -63.18809,3.39721 -0.29119,0.29119 0.48532,0.19413 -0.19413,-0.48532 z m -1.26182,0.19413 0.0971,-0.29119 -0.38825,0 0.29119,0.29119 z m -0.97063,0 -2.52364,1.65007 -3.10602,4.07665 1.55301,1.65008 7.18267,-5.33848 -3.10602,-2.03832 z m 61.24683,-6.3091 -0.67944,-0.38826 0,0.58238 0.67944,-0.19412 z m -61.82921,5.14434 0.0971,0.38825 0.67945,0.38826 -0.77651,-0.77651 z m 63.67341,-6.98854 -1.94126,0.97063 1.84419,0.58238 0.0971,-1.55301 z m -1.26182,0 -0.19413,-0.19413 -0.0971,0.19413 0.29119,0 z m 5.92085,-1.55301 -0.77651,-0.29119 -0.19412,0.58238 0.97063,-0.29119 z m -4.17372,0.67944 -0.67944,-0.0971 0,0.19413 0.67944,-0.0971 z m 2.13539,-0.77651 3.97959,5.82379 -1.06769,-5.33847 -2.9119,-0.48532 z m -64.06166,6.30911 -2.32951,1.74713 1.06769,1.16476 3.10602,-2.32952 -1.8442,-0.58237 z m -26.40117,-3.6884 -0.0971,-0.0971 0,0.0971 0.0971,0 z m -1.06769,-0.48532 -0.0971,-0.48531 0,0.19412 0.0971,0.29119 z m 29.79838,1.26182 -0.19413,0.0971 0,0.0971 0.19413,-0.19413 z m -0.97063,-0.19412 -0.0971,0 -0.19412,0.29119 0.29119,-0.29119 z m 2.32951,-0.77651 -0.29119,-0.19413 0,0.0971 0.29119,0.0971 z m 0.77651,-0.0971 -0.29119,-0.19413 0,0.0971 0.29119,0.0971 z m -1.26182,-0.29119 -0.38826,0 0,0.0971 0.38826,-0.0971 z m 19.31556,-1.94126 0.0971,-0.29119 -0.19413,0.19412 0.0971,0.0971 z m 5.92085,-3.10602 1.16475,-1.45595 -0.38825,0.29119 -0.7765,1.16476 z m -11.8417,-0.19413 0.38825,-0.29119 0.0971,-0.38825 -0.48531,0.67944 z m 0,-1.06769 -0.38826,0.29118 0.67945,-0.19412 -0.29119,-0.0971 z m -15.91836,0 -0.0971,-0.38826 -0.0971,0 0.19412,0.38826 z m 15.5301,-0.0971 -0.38825,0.38825 -0.19412,0.38826 0.58237,-0.77651 z m 10.67695,-1.16476 0.0971,0 0.0971,0 -0.19412,0 z m 0.48531,0 -0.19412,-0.0971 0,0.0971 0.19412,0 z m -1.16475,-0.0971 0.0971,0.0971 0,-0.0971 -0.0971,0 z m -7.95918,0.58238 0.38825,-0.38825 -0.48531,0.38825 0.0971,0 z m 5.92085,-1.16476 0,0 0,0 0,0 z m -4.75609,0.29119 -2.32952,3.78546 3.00896,-3.49427 -0.67944,-0.29119 z m -3.00896,0.48532 -0.29119,-0.38825 -0.0971,0.19412 0.38825,0.19413 z m 7.3768,-0.87357 -0.19413,-0.0971 0.0971,0.0971 0.0971,0 z m 2.52364,0.19413 0,-0.67945 -0.19413,0.29119 0.19413,0.38826 z m -71.24433,-7.47386 -4.65903,-0.19413 3.20308,3.39721 1.45595,-3.20308 z m 66.29411,6.89148 0.19413,0.67944 0.48531,-0.77651 -0.67944,0.0971 z m -3.88253,-0.0971 -0.29119,2.13539 0.48532,-1.35888 -0.19413,-0.77651 z m -84.25078,-16.11247 0.0971,-0.38826 0,0 -0.0971,0.38826 z m 83.28015,14.75359 0.0971,0.29119 0.19412,-0.0971 -0.29119,-0.19413 z m -0.48531,0.38825 -0.19413,-0.58238 -0.29119,0.19413 0.48532,0.38825 z m 4.56196,-1.16475 0,-0.38826 -0.29119,0.19413 0.29119,0.19413 z m -4.36784,-0.58238 0,0.97063 0.29119,-0.67944 -0.29119,-0.29119 z m -7.37679,-1.16476 0,-0.29119 0,0 0,0.29119 z m -50.66695,-12.03583 0.19412,-0.58238 -0.0971,0.0971 -0.0971,0.48531 z m 0.29119,-0.97063 -0.0971,-0.0971 -0.0971,0.0971 0.19413,0 z m 4.27077,-2.32951 0,-0.0971 0,0 0,0.0971 z m 0,-0.38826 -0.0971,-0.19412 0,0 0.0971,0.19412 z m 1.74714,-2.52364 0,0 -0.0971,0 0.0971,0 z m 0.58238,0.19413 -0.38825,-0.19413 0,0.0971 0.38825,0.0971 z m -0.58238,-0.38825 0,-0.19413 -0.19413,0.19413 0.19413,0 z m -15.5301,-4.56197 -0.19412,-0.48532 -0.0971,-0.29118 0.29119,0.7765 z m 1.45595,-1.74714 0.0971,0 0.0971,0.0971 -0.19412,-0.0971 z m -2.62071,-0.48531 -0.7765,-0.97063 0.58238,0.7765 0.19412,0.19413 z m -1.55301,-1.55301 -0.19412,0 0.29119,0.0971 -0.0971,-0.0971 z m 0.19413,-1.0677 0,0 0,0 0,0 z m -0.19413,-0.0971 0,0 0.19413,0.0971 -0.19413,-0.0971 z m 25.72173,7.66799 -1.06769,0.0971 0.58238,0.29119 0.48531,-0.38825 z m -26.78942,-9.41513 -0.77651,2.9119 2.42658,0.38825 3.20309,3.30015 1.94126,-0.87357 -6.79442,-5.72673 z m 16.98605,1.16476 0,-0.19412 0,0.0971 0,0.0971 z m -4.85316,-10.28869 -0.19413,-0.0971 0.0971,0.0971 0.0971,0 z m 2.81483,0.97063 0.29119,-0.0971 -0.0971,0 -0.19413,0.0971 z m 1.94126,-0.58238 0.29119,0 0.87357,-0.38825 -1.16476,0.38825 z m 3.49428,-1.06769 0.19412,-0.19413 -0.29119,0.19413 0.0971,0 z m 0.48531,-0.0971 0.58238,-0.29119 -0.48532,0.0971 -0.0971,0.19413 z m 1.45595,-0.58238 -0.48532,0.0971 0,0.0971 0.48532,-0.19412 z m 0.58238,-0.0971 0,0 0,0 0,0 z m 61.73214,-17.47136 -0.38825,-0.29119 -0.67944,-0.29119 1.06769,0.58238 z m -50.86107,-2.13539 0.87356,-1.16475 -0.48531,0.38825 -0.38825,0.7765 z m 1.16475,-1.35888 0.38826,-0.58238 -0.19413,0.19413 -0.19413,0.38825 z m 0.58238,-0.7765 0.67944,-0.58238 -0.38825,0.19412 -0.29119,0.38826 z m 30.57488,0.19412 0.48532,0.48532 0.29119,0 -0.77651,-0.48532 z m -15.62716,-6.40616 -3.97959,3.30014 -2.42657,-0.67944 -5.62966,3.20308 -1.0677,-0.67944 -6.40616,7.18267 -6.50323,1.45595 0.58237,3.49427 2.9119,3.97959 5.43553,5.24141 -0.87356,2.03832 4.07665,1.74714 -2.13539,0.38825 -2.62071,-2.03832 1.35889,3.00895 -1.74714,1.0677 -5.5326,-5.04728 -4.36784,0.7765 -7.47386,2.81483 3.39721,3.78546 -0.48531,2.32952 2.23245,2.71776 7.37679,2.9119 5.33848,-2.71777 0.87356,2.03833 -1.45594,6.11497 -4.46491,0 -5.2414,2.32952 -0.29119,-1.65008 -2.71777,1.0677 -1.26182,2.81483 -4.46491,3.39721 0,4.95022 1.74714,0.7765 -1.35888,4.17372 5.82378,5.04728 3.6884,-1.55301 -0.7765,6.21204 1.06769,1.35888 4.46491,0.97063 1.65007,1.8442 3.88252,0.29119 1.8442,1.94127 3.97959,-1.16476 -1.8442,2.52364 -1.45595,5.14434 -11.8417,7.66799 -1.55301,1.55301 -2.23245,-0.87357 -3.59133,0.87357 -5.14435,3.39721 8.05624,-2.32952 1.16476,1.74714 10.38575,-3.39721 0.29119,1.35889 4.07665,-4.07666 8.54156,-5.92085 0.67944,0.38826 7.47386,-5.92085 -1.94126,-2.32952 2.52364,-4.17371 6.60029,-7.86212 5.04728,-0.97063 1.55301,1.0677 -6.11497,1.74713 -1.65008,6.50323 0.19413,3.49428 2.13539,-0.19413 10.28869,-6.21204 0.7765,-2.32952 -0.87356,-3.59133 3.10601,0.7765 2.23246,-1.45594 6.40616,3.88252 -0.48531,1.0677 14.55946,1.8442 3.39721,-1.0677 0.97064,1.45595 12.6182,6.01791 2.13539,-1.26182 0.19413,-7.27973 1.65007,3.30014 8.1533,5.92085 0.67944,2.42658 7.08561,3.97959 1.8442,5.14434 1.74714,-3.97958 3.59133,6.98854 2.42658,-3.97959 -1.94126,-4.95022 -7.47386,-0.7765 -11.45345,-10.96813 -6.21204,-4.56197 -4.75609,4.65903 -2.81483,0 -6.50323,-4.27078 -6.40617,-0.29119 -9.12393,-57.55843 -1.55301,-2.71776 -3.6884,-2.23246 -5.5326,1.0677 -4.27078,-0.87357 -5.43553,-2.13539 -5.72673,0.38825 -1.45594,-2.71776 -4.56197,-0.67945 -0.7765,-1.65007 -2.03833,2.32952 -0.58238,-4.36784 z"
+     style="stroke-width:0.97063118000000004;fill:#f9f9f9" />
+</svg>
+      `;
+
+      window._mrmInstructors = Array.isArray(list) ? list : [];
+
+      function getAvailableStateSet(){
+        const available = new Set();
+        const instructorList = Array.isArray(window._mrmInstructors) ? window._mrmInstructors : [];
+        instructorList.forEach(i=>{
+          const st = (i.state || '').trim().toUpperCase();
+          if(st) available.add(st);
+        });
+        return available;
+      }
+
+      function selectState(code){
+        selectedState = code;
+        localStorage.setItem(STORAGE_KEY, selectedState);
+        renderInstructorListForState(selectedState);
+      }
+
+      function renderStateSelector(){
+        wrap.innerHTML = '';
+
+        const availableStates = getAvailableStateSet();
+
+        const box = document.createElement('div');
+        box.className = 'state-map-wrap';
+
+        const h = document.createElement('div');
+        h.className = 'state-map-title';
+        h.textContent = 'Select your state';
+
+        const p = document.createElement('div');
+        p.className = 'state-map-subtitle';
+        p.textContent = '';
+        p.style.display = 'none';
+
+        const mapWrap = document.createElement('div');
+        mapWrap.className = 'us-svg-map';
+        mapWrap.innerHTML = US_MAP_SVG;
+
+        // ---- Wire up the inline SVG map (no labels) ----
+        const svg = mapWrap.querySelector('svg');
+        if (!svg) {
+          console.warn('US map SVG not found in DOM. Check US_MAP_SVG string.');
+          return;
+        }
+
+        // Make it responsive
+        svg.classList.add('mrm-us-map-svg');
+        svg.removeAttribute('width');
+        svg.removeAttribute('height');
+
+        // Target all state shapes in your us.svg (it uses data-id)
+        const stateEls = Array.from(svg.querySelectorAll('[data-id]'));
+
+        // (Optional) remove any labels if your svg ever contains <text> (you requested no labels)
+        svg.querySelectorAll('text').forEach(t => t.remove());
+
+        stateEls.forEach(el => {
+          const code = (el.getAttribute('data-id') || '').trim().toUpperCase();
+          if (!code) return;
+
+          el.classList.add('mrm-state-shape');
+          el.style.cursor = availableStates.has(code) ? 'pointer' : 'default';
+
+          if (availableStates.has(code)) {
+            el.classList.add('is-available');
+            el.classList.remove('is-unavailable');
+          } else {
+            el.classList.add('is-unavailable');
+            el.classList.remove('is-available');
+          }
+
+          el.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!availableStates.has(code)) return;
+
+            selectState(code);
+          });
+        });
+
+        // If you have a saved state and it's still available, go straight to it
+        if(selectedState && availableStates.has(selectedState)){
+          renderInstructorListForState(selectedState);
+          return;
+        }
+
+        box.appendChild(h);
+        box.appendChild(p);
+        box.appendChild(mapWrap);
+        wrap.appendChild(box);
+      }
+
+      function renderInstructorListForState(stateCode){
+        wrap.innerHTML = '';
+
+        // Header bar: selected state + change link (isolated)
+        const bar = document.createElement('div');
+        bar.className = 'state-filter-bar';
+        bar.classList.add('mrm-state-bar');
+
+        const pill = document.createElement('div');
+        pill.className = 'state-filter-pill';
+        pill.textContent = `State: ${stateFullName(stateCode)}`;
+
+        const change = document.createElement('div');
+        change.className = 'state-change';
+        change.textContent = 'Change state';
+
+        bar.appendChild(pill);
+        bar.appendChild(change);
+        wrap.appendChild(bar);
+
+        // Dropdown list container (hidden until Change state clicked)
+        let dropdownWrap = null;
+
+        const buildAvailableStateList = ()=>{
+          const set = new Set();
+          (list || []).forEach(i=>{
+            const st = (i.state || '').toString().trim().toUpperCase();
+            if(st) set.add(st);
+          });
+
+          const arr = Array.from(set).filter(Boolean);
+
+          // sort: selected state first, then alphabetical by full name
+          arr.sort((a,b)=>{
+            if(a === stateCode) return -1;
+            if(b === stateCode) return 1;
+            return stateFullName(a).localeCompare(stateFullName(b));
+          });
+
+          return arr;
+        };
+
+        const openDropdown = ()=>{
+          if(dropdownWrap){
+            dropdownWrap.remove();
+            dropdownWrap = null;
+          }
+
+          const states = buildAvailableStateList();
+
+          dropdownWrap = document.createElement('div');
+          dropdownWrap.className = 'mrm-state-dropdown-panel';
+
+          const sel = document.createElement('select');
+          sel.className = 'state-dropdown-select';
+          sel.id = 'state-select';
+
+          // "Pre-opened" list: size > 1 so options show immediately
+          sel.size = Math.max(10, Math.min(states.length, 14));
+          sel.style.fontSize = '16px';
+
+          states.forEach(code=>{
+            const opt = document.createElement('option');
+            opt.value = code;
+            opt.textContent = stateFullName(code);
+            if(code === stateCode) opt.selected = true;
+            sel.appendChild(opt);
+          });
+
+          sel.addEventListener('change', ()=>{
+            const next = (sel.value || '').toString().trim().toUpperCase();
+            if(!next) return;
+            selectedState = next;
+            localStorage.setItem(STORAGE_KEY, selectedState);
+            renderInstructorListForState(selectedState);
+          });
+
+          dropdownWrap.appendChild(sel);
+
+          // Must appear OVER the bar and not push instructor content down:
+          bar.appendChild(dropdownWrap);
+
+          // Focus without requiring another click
+          sel.focus();
+        };
+
+        change.onclick = () => {
+          // Clear the selected state so renderStateSelector shows the map
+          selectedState = null;
+          try { localStorage.removeItem('mrm_selected_state'); } catch(e) {}
+
+          // Optionally scroll back to top so the map is immediately visible
+          try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch(e) { window.scrollTo(0,0); }
+
+          renderStateSelector();
+        };
+
+        // Filter list to this state
+        const filtered = (list || []).filter(i=>{
+          const st = (i.state || '').toString().trim().toUpperCase();
+          return st === stateCode;
+        });
+
+        // Existing behavior: group by city (within state)
+        const byCity = {};
+        filtered.forEach(i=>{
+          const c = i.city || 'Other';
+          if(!byCity[c]) byCity[c] = [];
+          byCity[c].push(i);
+        });
+
+        const cities = Object.keys(byCity).sort((a,b)=>a.localeCompare(b));
+
+        cities.forEach(city=>{
+          const heading = document.createElement('h2');
+          heading.className = 'city-heading';
+          heading.textContent = city;
+          wrap.append(heading);
+
+          byCity[city].forEach(instr=>{
+            // ---- this section is your existing instructor card build ----
+            const card=document.createElement('div');
+            card.className='instructor';
+
+            const header=document.createElement('div');
+            header.className='instructor-header';
+            header.tabIndex = 0;
+
+            const left=document.createElement('div');
+            left.className='instructor-header-left';
+
+            const avatar=document.createElement('img');
+            avatar.className='instructor-avatar';
+            avatar.alt = instr.name || 'Instructor';
+            avatar.src = (instr.profile_image_url || '').trim() || 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+
+            const titleWrap=document.createElement('div');
+
+            const instrumentsText =
+              (Array.isArray(instr.instruments_display) && instr.instruments_display.length)
+                ? instr.instruments_display.join(', ')
+                : (instr.instruments_text || '');
+
+            const titleLine=document.createElement('div');
+            titleLine.className = 'instructor-title-line';
+
+            titleLine.innerHTML = `${escapeHtml(instr.name || '')}${
+              instrumentsText ? ` <span class="instructor-instruments">- ${escapeHtml(instrumentsText)}</span>` : ''
+            }`;
+
+            titleWrap.appendChild(titleLine);
+            left.appendChild(avatar);
+            left.appendChild(titleWrap);
+
+            const chev=document.createElement('span');
+            chev.className='instructor-toggle';
+            chev.textContent='▸';
+
+            header.append(left,chev);
+            card.append(header);
+
+            // Put short description + learn link INSIDE the header “titleWrap”
+            if (instr.short_description) {
+              const sd = document.createElement('p');
+              sd.className = 'instructor-shortdesc';
+              sd.textContent = instr.short_description;
+              titleWrap.appendChild(sd);
+            }
+
+            const learn = document.createElement('a');
+learn.className = 'instructor-learnmore';
+learn.textContent = 'Learn More';
+learn.href = `${window.location.pathname}?instructor=${encodeURIComponent(instr.id)}`;
+learn.rel = 'noopener noreferrer';
+
+// IMPORTANT: prevent instructor header click/keydown from firing
+learn.addEventListener('mousedown', (e) => {
+  e.stopPropagation();
+});
+learn.addEventListener('click', (e) => {
+  e.stopPropagation();
+});
+learn.addEventListener('keydown', (e) => {
+  // Stops Enter/Space from bubbling to the header keydown handler
+  e.stopPropagation();
+});
+
+titleWrap.appendChild(learn);
+
+
+            const cal=document.createElement('div');
+            cal.className='calendar is-collapsed';
+
+            const calBody=document.createElement('div');
+            calBody.className='calendar-body';
+            cal.append(calBody);
+
+            const spacer=document.createElement('div');
+            spacer.className='confirm-spacer';
+            cal.append(spacer);
+
+            const confirmWrap=document.createElement('div');
+            confirmWrap.className='confirm-wrap';
+            confirmWrap.setAttribute('data-instructor-id', instr.id);
+
+            const confirmBtn=document.createElement('button');
+            confirmBtn.className='confirm-selection';
+            confirmBtn.type='button';
+            confirmBtn.textContent='Book now';
+            confirmBtn.setAttribute('data-instructor-id', instr.id);
+            confirmBtn.onclick=(e)=>{
+              e.preventDefault();
+              e.stopPropagation();
+
+              // Only open booking if user has selected at least one slot for this instructor
+              const hasSelection = selectedSlots.some(s => String(s.instructor_id) === String(instr.id));
+              if(!hasSelection){
+                alert('Please select a time first.');
+                return;
+              }
+
+              currentInstructor = instr;
+
+              // Close the day modal first (prevents “booking behind day popup”)
+              state.expandedDay = null;
+              state._refreshingDay = null;
+              state._isStale = true;
+              _closeMobileDayModal();
+              renderCalendar(instr, state, calBody);
+
+              // Then open booking
+              setTimeout(()=>openBookingModal(instr), 0);
+            };
+
+            const confirmMsg=document.createElement('div');
+            confirmMsg.className='confirm-msg';
+            confirmMsg.setAttribute('data-instructor-id', instr.id);
+
+            confirmWrap.append(confirmBtn, confirmMsg);
+            cal.append(confirmWrap);
+
+            card.append(cal);
+            wrap.append(card);
+
+            const now=new Date();
+            const state = {
+              year:now.getFullYear(),
+              month:now.getMonth(),
+              expandedDay:null,
+              slotsByDay:{},
+              _monthCache:{},
+              _monthInFlight:{},
+              _monthPromises:{},
+              _monthReqId:{},
+              _reqSeq:0,
+              _opened:false,
+              _preloaded:false,
+              _preloadedSlotMinutes:null,
+              _isPreloading:false,
+              _preloadPromise:null,
+              _preloadSeq:0,
+              _afterVisibleMonthRender:null,
+              _refreshInFlight:{},
+              _refreshPromise:{},
+              _dayOpenSeq:0,
+              _refreshingDay:null,
+              _refreshDayAvailability:null,
+              _lastRefreshMs:0,
+              _isStale:true,
+              _refreshTtlMs:20000,
+              _refreshToken:0
+            };
+
+          function preloadMonth(y,m,sm){
+            const key = y+'-'+String(m+1).padStart(2,'0')+'|15';
+            sm = 15;
+            if(state._monthCache[key]) return Promise.resolve(state._monthCache[key]);
+            if(state._monthPromises[key]) return state._monthPromises[key];
+            if(state._monthInFlight[key]) return state._monthPromises[key] || Promise.resolve();
+
+            const start=y+'-'+String(m+1).padStart(2,'0')+'-01';
+            const end=y+'-'+String(m+1).padStart(2,'0')+'-'+daysInMonth(y,m);
+
+            state._monthInFlight[key] = true;
+
+            const reqId = ++state._reqSeq;
+            state._monthReqId[key] = reqId;
+
+            const p = fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&__ts=${Date.now()}`)
+              .then(r=>r.json())
+              .then(res=>{
+                const grouped = groupSlotsByDay(res.slots||[]);
+                const busyGrouped = groupBusyByDay(res.busy||[]);
+                state._monthCache[key] = { slotsByDay: grouped, busyByDay: busyGrouped };
+                return state._monthCache[key];
+              })
+              .finally(()=>{
+                delete state._monthInFlight[key];
+                delete state._monthPromises[key];
+              });
+
+            state._monthPromises[key] = p;
+            return p;
+          }
+
+          function startBackgroundPreload(sm){
+            sm = 15;
+            if(state._preloaded && state._preloadedSlotMinutes===sm) return Promise.resolve();
+            if(state._preloadPromise && state._preloadedSlotMinutes===sm) return state._preloadPromise;
+            state._isPreloading = true;
+            state._preloadedSlotMinutes = sm;
+
+            const base=new Date();
+            const min=base.getFullYear()*12+base.getMonth();
+            const max=min+12;
+
+            const promises=[];
+            for(let idx=min; idx<=max; idx++){
+              const y=Math.floor(idx/12);
+              const m=idx%12;
+              promises.push(preloadMonth(y,m,sm));
+            }
+
+            state._preloadPromise = Promise.all(promises)
+              .then(()=>{ state._preloaded = true; })
+              .finally(()=>{
+                state._isPreloading = false;
+                state._preloadPromise = null;
+              });
+
+            return state._preloadPromise;
+          }
+
+          function showLoader(){
+            calBody.innerHTML = '';
+            const w=document.createElement('div');
+            w.className='calendar-loader';
+            w.setAttribute('role','status');
+            w.setAttribute('aria-live','polite');
+
+            const inner=document.createElement('div');
+            inner.className='calendar-loader-inner';
+
+            const orbit=document.createElement('div');
+            orbit.className='orbit';
+            const dot=document.createElement('div');
+            dot.className='orbit-dot';
+            orbit.append(dot);
+
+            const t=document.createElement('p');
+            t.className='calendar-loader-title';
+            t.textContent='Loading availability…';
+
+            const sr=document.createElement('span');
+            sr.className='visually-hidden';
+            sr.textContent='Loading availability';
+
+            inner.append(orbit,t,sr);
+            w.append(inner);
+            calBody.append(w);
+          }
+
+          function rebuildMonthMarkers(y, m, grouped, busyGrouped, renderIfVisible){
+            const key = monthKey(y, m);
+            state._monthCache[key] = { slotsByDay: {}, busyByDay: {} };
+            state._monthCache[key].slotsByDay = grouped || {};
+            state._monthCache[key].busyByDay = busyGrouped || {};
+
+            if(renderIfVisible){
+              state.slotsByDay = {};
+              state.busyByDay = {};
+              state.slotsByDay = grouped || {};
+              state.busyByDay = busyGrouped || {};
+              state._lastRefreshMs = Date.now();
+              state._isStale = false;
+              renderCalendar(instr,state,calBody);
+              if(typeof state._afterVisibleMonthRender === 'function') state._afterVisibleMonthRender();
+            }
+          }
+
+          function refreshVisibleMonth(opts){
+            opts = opts || {};
+            const force = !!opts.force;
+            const renderIfVisible = opts.renderIfVisible !== false;
+            const y=Number.isInteger(opts.year) ? opts.year : state.year;
+            const m=Number.isInteger(opts.month) ? opts.month : state.month;
+            const key = monthKey(y,m);
+            const inlineMsg = document.querySelector('.confirm-msg[data-instructor-id="'+instr.id+'"]');
+            if(inlineMsg) inlineMsg.textContent = '';
+
+            if(state._refreshInFlight[key] && !force) return state._refreshPromise[key] || Promise.resolve();
+
+            const start=y+'-'+String(m+1).padStart(2,'0')+'-01';
+            const end=y+'-'+String(m+1).padStart(2,'0')+'-'+daysInMonth(y,m);
+
+            if(force && state._monthCache && state._monthCache[key]){
+              delete state._monthCache[key];
+            }
+
+            state._refreshInFlight[key] = true;
+            const reqId = ++state._reqSeq;
+            state._monthReqId[key] = reqId;
+
+            const p = fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&__ts=${Date.now()}`)
+              .then(r=>r.json())
+              .then(res=>{
+                const grouped = groupSlotsByDay(res.slots||[]);
+                const busyGrouped = groupBusyByDay(res.busy||[]);
+
+                const stillVisible = renderIfVisible && (state.year===y && state.month===m && !cal.classList.contains('is-collapsed'));
+                const stillLatestForKey = (state._monthReqId[key] === reqId);
+
+                if(!stillLatestForKey) return;
+                rebuildMonthMarkers(y, m, grouped, busyGrouped, stillVisible);
+              })
+              .catch(()=>{
+                if(state._monthReqId[key] !== reqId) return;
+                state._isStale = true;
+                if(inlineMsg) inlineMsg.textContent = 'Unable to refresh availability. Showing last saved availability.';
+                const cached = state._monthCache[key];
+                const stillVisible = renderIfVisible && (state.year===y && state.month===m && !cal.classList.contains('is-collapsed'));
+                if(stillVisible){
+                  const fallback = cached || { slotsByDay: state.slotsByDay || {}, busyByDay: state.busyByDay || {} };
+                  state.slotsByDay = fallback.slotsByDay || {};
+                  state.busyByDay = fallback.busyByDay || {};
+                  renderCalendar(instr,state,calBody);
+                  if(typeof state._afterVisibleMonthRender === 'function') state._afterVisibleMonthRender();
+                }
+              })
+              .finally(()=>{
+                if(state._monthReqId[key] === reqId){
+                  delete state._refreshInFlight[key];
+                  delete state._refreshPromise[key];
+                }
+              });
+
+            state._refreshPromise[key] = p;
+            return p;
+          }
+          state._refreshVisibleMonth = refreshVisibleMonth;
+
+          function refreshDayAvailability(day, opts){
+            opts = opts || {};
+            const showLoading = opts.showLoading !== false;
+            const renderOnComplete = opts.renderOnComplete !== false;
+            const force = !!opts.force;
+            const y=state.year,m=state.month;
+            const key = monthKey(y,m);
+            const inlineMsg = document.querySelector('.confirm-msg[data-instructor-id="'+instr.id+'"]');
+            if(inlineMsg) inlineMsg.textContent = '';
+
+            const dayStr = y+'-'+String(m+1).padStart(2,'0')+'-'+String(day).padStart(2,'0');
+            const dayKey = y+'-'+(m+1)+'-'+day;
+
+            const reqId = ++state._dayOpenSeq;
+            if(showLoading){
+              state._refreshingDay = day;
+              renderCalendar(instr,state,calBody);
+            }
+
+            return fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${dayStr}&end_date=${dayStr}&__ts=${Date.now()}`)
+              .then(r=>r.json())
+              .then(res=>{
+                if(reqId !== state._dayOpenSeq) return;
+
+                const grouped = groupSlotsByDay(res.slots||[]);
+                const busyGrouped = groupBusyByDay(res.busy||[]);
+
+                if(!state._monthCache[key]) state._monthCache[key] = { slotsByDay: {}, busyByDay: {} };
+                const cache = state._monthCache[key];
+
+                if(grouped[dayKey]) cache.slotsByDay[dayKey] = grouped[dayKey];
+                else delete cache.slotsByDay[dayKey];
+
+                if(busyGrouped[dayKey]) cache.busyByDay[dayKey] = busyGrouped[dayKey];
+                else delete cache.busyByDay[dayKey];
+
+                if(state.year===y && state.month===m){
+                  if(!state.slotsByDay) state.slotsByDay = {};
+                  if(!state.busyByDay) state.busyByDay = {};
+                  if(grouped[dayKey]) state.slotsByDay[dayKey] = grouped[dayKey];
+                  else delete state.slotsByDay[dayKey];
+                  if(busyGrouped[dayKey]) state.busyByDay[dayKey] = busyGrouped[dayKey];
+                  else delete state.busyByDay[dayKey];
+                }
+                state._lastRefreshMs = Date.now();
+                state._isStale = false;
+              })
+              .catch(()=>{
+                if(reqId !== state._dayOpenSeq) return;
+                state._isStale = true;
+                const stillVisible = (state.year===y && state.month===m && state.expandedDay===day && !cal.classList.contains('is-collapsed'));
+                if(inlineMsg && stillVisible) inlineMsg.textContent = "Couldn't refresh availability. Please try again.";
+              })
+              .finally(()=>{
+                if(reqId !== state._dayOpenSeq) return;
+                if(showLoading) state._refreshingDay = null;
+                const stillVisible = renderOnComplete && (state.year===y && state.month===m && state.expandedDay===day && !cal.classList.contains('is-collapsed'));
+                if(stillVisible){
+                  renderCalendar(instr,state,calBody);
+                  if(typeof state._afterVisibleMonthRender === 'function') state._afterVisibleMonthRender();
+                }
+              });
+          }
+
+          state._refreshDayAvailability = refreshDayAvailability;
+          instr._mrmRefreshOpenDay = ()=>{
+            if(state.expandedDay) refreshDayAvailability(state.expandedDay, { force: true });
+          };
+          instr._mrmMarkStale = ()=>{
+            state._isStale = true;
+          };
+          instr._mrmRefreshVisibleMonth = ()=>{
+            refreshVisibleMonth({ force: true });
+          };
+
+          function getRefreshMonths(){
+            const months = [];
+            const seen = {};
+            const add = (y, m)=>{
+              const k = y + '-' + m;
+              if(seen[k]) return;
+              seen[k] = true;
+              months.push({ year: y, month: m });
+            };
+
+            add(state.year, state.month);
+
+            Object.keys(state._monthCache || {}).forEach((key)=>{
+              const base = key.split('|')[0];
+              const parts = base.split('-');
+              if(parts.length !== 2) return;
+              const y = parseInt(parts[0], 10);
+              const m = parseInt(parts[1], 10) - 1;
+              if(!isFinite(y) || !isFinite(m)) return;
+              add(y, m);
+            });
+
+            return months;
+          }
+
+          function refreshMonthRange(opts){
+            opts = opts || {};
+            const months = getRefreshMonths();
+            return Promise.all(months.map(({ year, month })=>(
+              refreshVisibleMonth({
+                force: !!opts.force,
+                renderIfVisible: opts.renderIfVisible !== false,
+                year,
+                month
+              })
+            )));
+          }
+
+          function shouldRefresh(){
+            return state._isStale || (Date.now() - state._lastRefreshMs > state._refreshTtlMs);
+          }
+
+          function openCalendar(){
+            cal.classList.remove('is-collapsed');
+            chev.textContent='▾';
+            updateConfirmButton(instr.id);
+
+            showLoader();
+
+            const run = ()=>{
+              const sm = 15;
+              const token = ++state._preloadSeq;
+              startBackgroundPreload(sm);
+              const finishOpen = ()=>{
+                if(token !== state._preloadSeq) return;
+                if(cal.classList.contains('is-collapsed')) return;
+
+                state._opened = true;
+              };
+
+              refreshVisibleMonth({ force: true, renderIfVisible: true, year: state.year, month: state.month }).then(finishOpen);
+            };
+
+            run();
+          }
+
+          function closeCalendar(){
+            cal.classList.add('is-collapsed');
+            chev.textContent='▸';
+            state._isStale = true;
+            refreshMonthRange({ force: true, renderIfVisible: false });
+          }
+
+          function toggleOpen(){
+            if(cal.classList.contains('is-collapsed')) openCalendar();
+            else closeCalendar();
+          }
+
+          header.addEventListener('click', toggleOpen);
+          header.addEventListener('keydown', (e)=>{
+            if(e.key === 'Enter' || e.key === ' '){
+              e.preventDefault();
+              toggleOpen();
+            }
+          });
+          });
+        });
+      }
+
+      // ---- Initial render ----
+      if (selectedState) {
+        renderInstructorListForState(selectedState);
+      } else {
+        renderStateSelector();
+      }
+    })
+    .catch(err=>{
+      console.error('Failed to load instructors', err);
+    });
+}
+
+ensureLegacyBookingHandler();
+
+document.getElementById('modal-close').addEventListener('click', closeBookingModal);
+document.getElementById('booking-modal').addEventListener('click', (e)=>{
+  if(e.target && e.target.id==='booking-modal') closeBookingModal();
+});
+document.addEventListener('keydown', (e)=>{
+  if(e.key==='Escape') closeBookingModal();
+});
+
+document.getElementById('modal-submit-booking').addEventListener('click', (e)=>{
+  e.preventDefault();
+  syncModalToLegacyFields();
+  document.getElementById('submit-booking').click();
+});
+
+/* Instrument sync: top <-> modal <-> legacy hidden field */
+document.getElementById('instrument-input').addEventListener('change', ()=>{
+  const v = document.getElementById('instrument-input').value || '';
+  document.getElementById('confirm-instrument').value = v;
+  const modalSel = document.getElementById('modal-instrument');
+  if(modalSel) modalSel.value = v;
+});
+
+document.getElementById('modal-instrument').addEventListener('change', ()=>{
+  const v = document.getElementById('modal-instrument').value || '';
+  document.getElementById('instrument-input').value = v;
+  document.getElementById('confirm-instrument').value = v;
+});
+
+applyLessonOptionDefaults();
+loadInstructors();
+</script>
+</body>
+</html>

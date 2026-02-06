@@ -1,0 +1,1239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Piece Product</title>
+
+<style>
+/* ====== YOUR EXISTING STYLES (UNCHANGED) ====== */
+:root{
+  --color-bg:#f5f5f5;
+  --color-surface:#ffffff;
+  --color-accent:#2f2f2f;
+  --color-accent-soft:rgba(0,0,0,0.08);
+  --color-text-main:#111111;
+  --color-text-muted:#666666;
+  --color-border:#dddddd;
+
+  --radius-xl:24px;
+  --radius-lg:18px;
+  --radius-md:14px;
+  --radius-sm:10px;
+
+  --shadow: 0 18px 60px rgba(0,0,0,0.10);
+}
+
+html,body{height:100%;}
+body{
+  margin:0;
+  background:var(--color-bg);
+  font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  color:var(--color-text-main);
+}
+body.no-scroll{
+  overflow:hidden;
+  position:fixed;
+  width:100%;
+  left:0; right:0;
+}
+
+/* ✅ Mobile smoothing / "seamless" rendering helpers */
+*{ box-sizing:border-box; }
+img,canvas,svg,video{ max-width:100%; height:auto; }
+button,input,select,textarea{ font:inherit; }
+a{ -webkit-tap-highlight-color:transparent; }
+
+/* PAGE WRAP */
+.page{ padding: clamp(18px, 3vw, 42px); box-sizing:border-box; }
+.shell{ width:min(1100px, 100%); margin:0 auto; }
+
+/* CARD */
+.card{
+  background:var(--color-surface);
+  border:1px solid var(--color-border);
+  border-radius:var(--radius-xl);
+  box-shadow:var(--shadow);
+  overflow:hidden;
+}
+
+/* HEADER */
+.header{
+  padding: clamp(18px, 2.6vw, 34px);
+  border-bottom:1px solid rgba(0,0,0,0.08);
+  background: linear-gradient(180deg, rgba(0,0,0,0.03), rgba(0,0,0,0.00));
+  text-align:center;
+}
+.piece-title{
+  margin:0;
+  font-size: clamp(34px, 4vw, 56px);
+  font-weight: 850;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+.piece-composer{
+  margin: 14px 0 0 0;
+  font-size: 16px;
+  font-style: italic;
+  color: var(--color-text-muted);
+}
+.piece-composer a{ color:var(--color-text-muted); text-decoration:none; }
+.piece-composer a:hover{ opacity:0.85; }
+
+/* SECTIONS */
+.section{ padding: clamp(18px, 2.6vw, 34px); }
+.section + .section{ border-top:1px solid rgba(0,0,0,0.08); }
+.center{ display:flex; justify-content:center; }
+
+/* PDF */
+.pdf-preview{
+  width: min(860px, 100%);
+  height: clamp(420px, 56vh, 720px);
+  border-radius: var(--radius-lg);
+  overflow:hidden;
+  border:1px solid rgba(0,0,0,0.12);
+  background: linear-gradient(180deg, rgba(0,0,0,0.02), rgba(0,0,0,0.00));
+  position:relative;
+  cursor: zoom-in;
+  user-select:none;
+  -webkit-tap-highlight-color:transparent;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.pdf-preview canvas{ display:block; margin:0 auto; }
+.pdf-hint{
+  position:absolute;
+  left:14px; bottom:14px;
+  font-size:12px;
+  color: rgba(0,0,0,0.62);
+  background: rgba(255,255,255,0.86);
+  border:1px solid rgba(0,0,0,0.10);
+  padding:8px 10px;
+  border-radius:999px;
+  backdrop-filter: blur(6px);
+  pointer-events:none;
+}
+
+/* INFO UNDER PDF */
+.info-grid{
+  display:grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 18px;
+  align-items:start;
+}
+.description{ margin:0; font-size:16px; line-height:1.75; }
+.meta-panel{
+  border:1px solid rgba(0,0,0,0.10);
+  background: rgba(0,0,0,0.02);
+  border-radius: var(--radius-lg);
+  padding:14px;
+}
+.meta-row{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  padding:10px 10px;
+  border-radius: 12px;
+}
+.meta-row + .meta-row{ border-top:1px solid rgba(0,0,0,0.08); }
+.meta-k{ font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:var(--color-text-muted); }
+.meta-v{ font-size:14px; font-weight:750; text-align:right; }
+
+/* PURCHASING OPTIONS HEADING */
+.options-head{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  margin-bottom: 14px;
+}
+.options-title{
+  margin:0;
+  font-size: 22px;
+  font-weight: 950;
+  letter-spacing: -0.01em;
+}
+.options-sub{
+  margin:0;
+  font-size: 14px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+/* ✅ NEW: Spacer after Purchasing Options title/subtitle */
+.mrm-options-spacer{
+  height: 100px;
+  width: 100%;
+}
+
+/* OFFERS */
+/* ✅ CHANGE: make 25px spacer between each offering */
+.offers{ display:grid; gap:50px; }
+
+.offer{
+  border:1px solid rgba(0,0,0,0.12);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  overflow:hidden;
+}
+
+/* ✅ offer head (title bar) - centered vertically + shorter */
+.offer-head{
+  padding: 10px 16px;                 /* shorter overall */
+  border-bottom:1px solid rgba(0,0,0,0.08);
+  background: rgba(0,0,0,0.02);
+  display:flex;
+  align-items:center;                  /* vertical center */
+  justify-content:space-between;
+  gap:12px;
+  min-height: 44px;                    /* shorter box */
+}
+.offer-head-left{
+  display:flex;
+  width:100%;
+  align-items:center;                  /* vertical center */
+  justify-content:left;              /* center content horizontally (matches your request vibe) */
+  min-height: 0;
+}
+
+/* ✅ Display title: 24px + true vertical centering within head */
+.offer-title{
+  margin:0;
+  font-size:24px;
+  font-weight:950;
+  letter-spacing:-0.01em;
+  line-height:1.1;
+  text-align:left;
+}
+
+/* subtitle removed from head */
+.offer-subtitle{ display:none; }
+
+/* BODY LAYOUT */
+.offer-body{
+  padding: 14px;
+  display:grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items:stretch;
+}
+
+/* audio container: subtitle top, player bottom */
+.audio-stack{
+  width:100%;
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+  min-height: 160px;
+  gap: 14px;
+}
+
+/* Subtitle size (your choice) */
+.audio-subtitle{
+  margin:0;
+  font-size:17px;
+  color: var(--color-text-muted);
+  line-height:1.25;
+  text-align:left;
+}
+
+/* AUDIO PLAYER BOX */
+.audio-box{
+  width:100%;
+  border:1px solid rgba(0,0,0,0.12);
+  border-radius: var(--radius-lg);
+  padding:14px;
+  background: var(--color-surface);
+  box-sizing:border-box;
+  margin-top:auto;
+}
+
+/* audio controls layout */
+.audio-controls{
+  display:grid;
+  grid-template-columns: auto 1fr auto;
+  align-items:center;
+  gap: 14px;
+}
+
+.audio-row-top{ display:flex; align-items:center; gap: 14px; }
+.audio-row-seek{ min-width:0; }
+.audio-row-vol{ display:flex; align-items:center; justify-content:flex-end; gap: 10px; }
+
+.play-button{
+  width:56px; height:56px;
+  border-radius: 14px;
+  background: var(--color-accent);
+  color: var(--color-surface);
+  border:none;
+  cursor:pointer;
+  padding:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  line-height:1;
+  box-shadow: 0 10px 26px rgba(0,0,0,0.16);
+  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+}
+.play-button:hover{ transform: translateY(-1px); box-shadow: 0 14px 34px rgba(0,0,0,0.20); filter: brightness(1.02); }
+.play-button:active{ transform: translateY(0px); box-shadow: 0 10px 26px rgba(0,0,0,0.16); filter: brightness(0.98); }
+.play-button:focus-visible{
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(47,47,47,0.22), 0 10px 26px rgba(0,0,0,0.16);
+}
+
+.play-button svg{ width:22px; height:22px; display:block; fill: currentColor; }
+.play-button .icon-pause{ display:none; }
+.play-button.is-playing .icon-play{ display:none; }
+.play-button.is-playing .icon-pause{ display:block; }
+
+.time{
+  font-size:14px;
+  color: var(--color-text-muted);
+  min-width: 66px;
+  text-align:center;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress{
+  width:100%;
+  min-width:0;
+  appearance:none;
+  height: 10px;
+  border-radius:999px;
+  background: var(--color-accent-soft);
+  cursor:pointer;
+}
+.progress::-webkit-slider-thumb{
+  appearance:none;
+  width: 18px; height:18px;
+  border-radius:50%;
+  background: var(--color-accent);
+}
+
+.volume{ display:inline-flex; align-items:center; gap: 8px; color: var(--color-accent); }
+.volume svg{ width:20px; height:20px; }
+.volume input{ width: 140px; }
+
+/* RIGHT SIDE: price + buttons */
+.offer-actions{
+  display:grid;
+  gap:10px;
+  justify-items:stretch;
+  min-width: 240px;
+  align-content:center;
+}
+.price-box{
+  border:1px solid rgba(0,0,0,0.12);
+  border-radius: var(--radius-lg);
+  padding: 12px 12px;
+  background: rgba(0,0,0,0.02);
+  text-align:center;
+}
+.price-label{
+  font-size:12px;
+  text-transform:uppercase;
+  letter-spacing:0.10em;
+  color: var(--color-text-muted);
+  margin-bottom:6px;
+}
+.price{
+  font-size:24px;
+  font-weight:950;
+  letter-spacing:-0.02em;
+  color: var(--color-text-main);
+}
+.actions{ display:grid; gap:10px; }
+
+/* =========================
+   ✅ FIX: Never underline ANY button text (anchors or buttons)
+   + Professional hover/active/focus indication
+   ========================= */
+.button-primary,
+.button-secondary,
+.preview-more-row a{
+  text-decoration: none !important;
+  -webkit-text-decoration: none !important;
+  text-underline-offset: 0 !important;
+}
+
+.button-primary,.button-secondary{
+  padding: 11px 12px;
+  border-radius: 14px;
+  font-weight: 900;
+  border:1px solid var(--color-accent);
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  cursor:pointer;
+  user-select:none;
+  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease, background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.button-primary{
+  background: var(--color-accent);
+  color: var(--color-surface);
+  box-shadow: 0 10px 22px rgba(0,0,0,0.14);
+}
+.button-secondary{
+  background: transparent;
+  color: var(--color-accent);
+}
+.button-primary:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 14px 34px rgba(0,0,0,0.18);
+  filter: brightness(1.03);
+}
+.button-secondary:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.10);
+  background: rgba(0,0,0,0.03);
+}
+.button-primary:active,
+.button-secondary:active{
+  transform: translateY(0px);
+  filter: brightness(0.98);
+}
+.button-primary:focus-visible,
+.button-secondary:focus-visible{
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(47,47,47,0.22), 0 10px 22px rgba(0,0,0,0.14);
+}
+
+/* remove underlines for visited/hover states too */
+.button-primary:visited,
+.button-secondary:visited,
+.button-primary:hover,
+.button-secondary:hover{
+  text-decoration:none !important;
+}
+
+/* PREVIEW MORE */
+.preview-more-row{
+  margin-top: 18px;
+  display:flex;
+  justify-content:flex-start;
+}
+.preview-more-row a{
+  display:inline-flex;
+  align-items:center;
+  gap:10px;
+  text-decoration:none;
+  font-weight:900;
+  border-radius: 999px;
+  padding: 10px 14px;
+  border:1px solid rgba(0,0,0,0.12);
+  background: rgba(0,0,0,0.02);
+  color: var(--color-accent);
+  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease, opacity 120ms ease, background-color 120ms ease;
+}
+.preview-more-row a:hover{
+  opacity:1;
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.10);
+  background: rgba(0,0,0,0.03);
+  text-decoration:none !important;
+}
+.preview-more-row a:active{
+  transform: translateY(0px);
+  filter: brightness(0.98);
+  text-decoration:none !important;
+}
+.preview-more-row a:focus-visible{
+  outline:none;
+  box-shadow: 0 0 0 3px rgba(47,47,47,0.22), 0 12px 30px rgba(0,0,0,0.10);
+}
+.preview-more-row a:visited{ text-decoration:none !important; }
+
+/* PDF OVERLAY */
+.mrm-pdfOverlay{
+  position:fixed;
+  inset:0;
+  width:100vw;
+  height:100vh;
+  background: rgba(0,0,0,0.50);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display:none;
+  align-items:center;
+  justify-content:center;
+  padding:18px;
+  box-sizing:border-box;
+  z-index:2147483647;
+  cursor:zoom-out;
+  overscroll-behavior:none;
+  overflow:hidden;
+}
+.mrm-pdfOverlay.is-open{ display:flex; }
+
+.mrm-pdfModal{
+  width: min(1100px, calc(100vw - 36px));
+  height: min(92vh, 1400px);
+  border-radius: var(--radius-lg);
+  overflow:hidden;
+  background: var(--color-surface);
+  border:none;
+  box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+  display:flex;
+  cursor:zoom-out;
+}
+.mrm-pdfScroll{
+  width:100%;
+  height:100%;
+  overflow-y:auto;
+  overflow-x:hidden;
+  -webkit-overflow-scrolling:touch;
+  padding:18px;
+  box-sizing:border-box;
+}
+.mrm-pdfPage{
+  display:block;
+  margin:0 auto 18px;
+  max-width:100%;
+  height:auto;
+}
+
+/* OTP MODAL (unchanged) */
+.mrm-otpOverlay{
+  position:fixed;
+  inset:0;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index:2147483646;
+}
+.mrm-otpOverlay.is-open{ display:flex; }
+.hidden{ display:none; }
+
+/* ✅ RESPONSIVE: smoother mobile layout + less awkward stacking */
+@media (max-width: 980px){
+  .info-grid{ grid-template-columns: 1fr; }
+  .offer-body{ grid-template-columns: 1fr; }
+  .offer-actions{
+    min-width: 0;
+    grid-template-columns: 1fr;
+  }
+  .audio-stack{ min-height: 0; }
+}
+
+@media (max-width: 700px){
+  /* ✅ CHANGE YOU REQUESTED:
+     Expand the main content to screen edges so you don't see background.
+     - remove page padding
+     - let shell go full-width
+     - remove card radius + border so it blends edge-to-edge
+  */
+  .page{ padding: 0; }
+  .shell{ width: 100%; margin: 0; }
+  .card{
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    box-shadow: none;
+  }
+
+  /* Keep content comfortable with section padding (so text isn't glued to edges) */
+  .section{ padding: 16px; }
+  .header{ padding: 20px 16px; }
+
+  .pdf-preview{ height: clamp(320px, 46vh, 520px); }
+
+  .offer-body{ padding: 12px; gap: 12px; }
+  .offer-actions{ gap: 10px; }
+  .price-box{ padding: 12px; }
+  .actions{
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .button-primary, .button-secondary{
+    width:100%;
+    padding: 12px 12px;
+  }
+}
+
+@media (max-width: 620px){
+  .audio-controls{ grid-template-columns: 1fr; justify-items:center; gap: 10px; }
+  .audio-row-top{
+    width:100%;
+    display:grid;
+    grid-template-columns: 56px 1fr 1fr;
+    align-items:center;
+    column-gap:10px;
+  }
+  .audio-row-seek{ width:100%; }
+  .audio-row-seek .progress{ height:12px; }
+  .audio-row-vol{ width:100%; justify-content:center; }
+  .volume input{ width: min(280px, 78vw); }
+
+  .offer-head{ padding: 10px 12px; min-height: 42px; }
+  .offer-title{ font-size: 22px; }
+}
+
+@media (max-width: 420px){
+  .actions{ grid-template-columns: 1fr; }
+}
+</style>
+</head>
+
+<body>
+<main class="page">
+  <div class="shell">
+    <div class="card">
+
+      <article class="mrm-piece"
+        data-pdf-url=""
+        data-preview-page=""
+        data-api-base="/wp-json/mrm/v1"
+      >
+
+        <!-- TOP -->
+        <header class="header">
+          <h1 class="piece-title">Loading…</h1>
+          <div class="piece-composer">
+            <a href="#" aria-label="View composer page" style="text-decoration:none;"></a>
+          </div>
+        </header>
+
+        <!-- PDF -->
+        <section class="section">
+          <div class="center">
+            <div class="pdf-preview mrm-pdfPreview" role="button" tabindex="0" aria-label="Open PDF preview">
+              <canvas class="mrm-pdfCanvas"></canvas>
+              <div class="pdf-hint">Click to enlarge preview</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- INFO -->
+        <section class="section">
+          <div class="info-grid">
+            <p class="description"></p>
+
+            <aside class="meta-panel" aria-label="Piece details">
+              <div class="meta-row">
+                <div class="meta-k">Difficulty</div>
+                <div class="meta-v" data-meta="difficulty"></div>
+              </div>
+              <div class="meta-row">
+                <div class="meta-k">Instrumentation</div>
+                <div class="meta-v" data-meta="instrumentation"></div>
+              </div>
+              <div class="meta-row">
+                <div class="meta-k">Duration</div>
+                <div class="meta-v" data-meta="duration"></div>
+              </div>
+              <div class="meta-row">
+                <div class="meta-k">Year</div>
+                <div class="meta-v" data-meta="year"></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- PURCHASING OPTIONS -->
+        <section class="section">
+          <div class="options-head">
+            <h2 class="options-title">Purchasing Options</h2>
+            <p class="options-sub">
+              Choose the package that fits your needs. Each option includes the selected instrument part(s) plus associated audio files:
+              <strong>practice tracks</strong> and <strong>performance tracks</strong>.
+            </p>
+          </div>
+
+          <!-- ✅ NEW: 100px spacer after title/subtitle -->
+          <div class="mrm-options-spacer" aria-hidden="true"></div>
+
+          <div class="offers" id="mrmOffers"></div>
+
+          <div class="preview-more-row">
+            <a href="#" id="mrmPreviewMoreLink">&larr; Preview more pieces</a>
+          </div>
+        </section>
+
+        <!-- PDF Overlay -->
+        <div class="mrm-pdfOverlay" aria-hidden="true">
+          <div class="mrm-pdfModal" role="dialog" aria-label="Full size PDF preview">
+            <div class="mrm-pdfScroll" aria-label="Scrollable PDF pages"></div>
+          </div>
+        </div>
+
+        <!-- OTP Modal (kept minimal for functionality) -->
+        <div class="mrm-otpOverlay" aria-hidden="true">
+          <div class="modal" style="background:#fff;border-radius:22px;max-width:860px;width:94vw;padding:18px;border:1px solid rgba(0,0,0,0.10);box-shadow:0 26px 90px rgba(0,0,0,0.38);">
+            <h2 style="margin:0 0 14px 0;">Access Purchased Product</h2>
+
+            <div class="mrm-stepEmail">
+              <label style="display:block;font-weight:800;margin-bottom:8px;">Email address</label>
+              <input type="email" class="mrm-email" autocomplete="email" required style="width:100%;padding:14px;border-radius:14px;border:1px solid rgba(0,0,0,0.16);">
+              <button type="button" class="primary mrm-sendCodeBtn" style="margin-top:10px;padding:12px 14px;border-radius:14px;border:none;background:#2f2f2f;color:#fff;font-weight:900;cursor:pointer;text-decoration:none;">Send Code</button>
+            </div>
+
+            <div class="mrm-stepOtp hidden" style="margin-top:14px;">
+              <label style="display:block;font-weight:800;margin-bottom:8px;">Enter Code</label>
+              <input type="text" class="mrm-otp" inputmode="numeric" pattern="\\d*" required style="width:100%;padding:14px;border-radius:14px;border:1px solid rgba(0,0,0,0.16);">
+              <button type="button" class="primary mrm-verifyBtn" style="margin-top:10px;padding:12px 14px;border-radius:14px;border:none;background:#2f2f2f;color:#fff;font-weight:900;cursor:pointer;text-decoration:none;">Verify</button>
+            </div>
+
+            <div class="message mrm-message" style="margin-top:12px;min-height:24px;opacity:0.85;"></div>
+
+            <div style="margin-top:12px;display:flex;justify-content:flex-end;">
+              <button type="button" class="secondary mrm-closeBtn" style="padding:10px 14px;border-radius:14px;border:1px solid #2f2f2f;background:transparent;font-weight:900;cursor:pointer;text-decoration:none;">Close</button>
+            </div>
+          </div>
+        </div>
+
+      </article>
+
+    </div>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+<script>
+(function(){
+  if (window.__MRM_PIECE_PAGE_INIT__) return;
+  window.__MRM_PIECE_PAGE_INIT__ = true;
+
+  // pdf.js worker
+  if (window.pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+
+  function fmtTime(t) {
+    if (isNaN(t)) return "0:00";
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return `${m}:${String(s).padStart(2,'0')}`;
+  }
+
+  function setCanvasSize(canvas, cssW, cssH, dpr) {
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+  }
+
+  function getSlugFromUrl() {
+    // expects /product-slug/ (last non-empty segment)
+    const parts = window.location.pathname.split('/').filter(Boolean);
+    return (parts[parts.length - 1] || '').trim();
+  }
+
+  function escHtml(s){
+    return String(s || '')
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'","&#039;");
+  }
+
+  function applyAudioUrl(audioEl, url){
+    if(!audioEl) return;
+    const src = (url || '').trim();
+    const source = audioEl.querySelector('source') || (function(){
+      const s = document.createElement('source');
+      audioEl.appendChild(s);
+      return s;
+    })();
+
+    if(!src){
+      source.removeAttribute('src');
+      audioEl.removeAttribute('src');
+      audioEl.load();
+      return;
+    }
+
+    source.setAttribute('src', src);
+    source.setAttribute('type', 'audio/mpeg');
+    try { audioEl.src = src; } catch(e){}
+    audioEl.load();
+  }
+
+  function buildOfferDom(offer){
+    const productSlug  = (offer.product_slug || offer.productSlug || '').trim();
+    const displayTitle = offer.display_title || offer.displayTitle || '';
+    const subtitle     = offer.subtitle || '';
+    const priceDisplay = offer.price_display || offer.priceDisplay || '';
+    const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
+
+    const wrap = document.createElement('div');
+    wrap.className = 'offer mrm-offer';
+    wrap.dataset.productSlug = productSlug;
+    wrap.dataset.price = priceDisplay;
+
+    wrap.innerHTML = `
+      <div class="offer-head">
+        <div class="offer-head-left">
+          <h3 class="offer-title">${escHtml(displayTitle)}</h3>
+        </div>
+      </div>
+
+      <div class="offer-body">
+        <div class="audio-stack">
+          <p class="audio-subtitle">${escHtml(subtitle)}</p>
+
+          <div class="audio-box">
+            <audio class="mrm-audio" preload="metadata" crossorigin="anonymous">
+              <source src="" type="audio/mpeg">
+            </audio>
+
+            <div class="audio-controls">
+              <div class="audio-row-top">
+                <button class="play-button mrm-play" type="button" aria-label="Play/Pause">
+                  <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>
+                  <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"></path></svg>
+                </button>
+                <div class="time mrm-current">0:00</div>
+                <div class="time mrm-duration">0:00</div>
+              </div>
+
+              <div class="audio-row-seek">
+                <input class="progress mrm-seek" type="range" min="0" value="0" aria-label="Seek">
+              </div>
+
+              <div class="audio-row-vol">
+                <div class="volume" aria-label="Volume">
+                  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 5L6 9H2v6h4l5 4V5z"/></svg>
+                  <input class="mrm-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume slider">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="offer-actions">
+          <div class="price-box">
+            <div class="price-label">Price</div>
+            <div class="price">${escHtml(priceDisplay)}</div>
+          </div>
+
+          <div class="actions">
+            <a href="#" class="button-primary mrm-purchaseBtn">Purchase</a>
+            <a href="#" class="button-secondary mrm-accessBtn">Access</a>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // set audio
+    const audioEl = wrap.querySelector('.mrm-audio');
+    applyAudioUrl(audioEl, previewAudio);
+
+    return wrap;
+  }
+
+  async function initPiecePage(){
+    const pieceEl = document.querySelector('.mrm-piece');
+    if (!pieceEl) return;
+
+    const apiBase = (pieceEl.dataset.apiBase || '/wp-json/mrm/v1');
+    const slug = getSlugFromUrl();
+    if (!slug) {
+      pieceEl.querySelector('.piece-title').textContent = 'Missing slug in URL.';
+      return;
+    }
+
+    // Fetch piece config from plugin settings
+    let payload;
+    try {
+      const res = await fetch(`${apiBase.replace(/\/$/,'')}/piece?slug=${encodeURIComponent(slug)}`);
+      payload = await res.json();
+      if (!res.ok || !payload || !payload.ok) throw new Error(payload && payload.message ? payload.message : 'Failed to load piece.');
+    } catch (e) {
+      pieceEl.querySelector('.piece-title').textContent = 'Failed to load piece.';
+      const desc = pieceEl.querySelector('.description');
+      if (desc) desc.textContent = String(e && e.message ? e.message : e);
+      return;
+    }
+
+    const piece = payload.piece || {};
+    const catalogUrl = payload.catalog_url || '/sheet-music/';
+
+    // Fill top title/composer
+    const title = piece.piece_title || piece.title || '';
+    const composerName = piece.composer_name || piece.composer || '';
+    const composerUrl  = piece.composer_url || '#';
+
+    pieceEl.querySelector('.piece-title').textContent = title;
+    const composerLink = pieceEl.querySelector('.piece-composer a');
+    composerLink.textContent = composerName;
+    composerLink.href = composerUrl || '#';
+
+    // long description on piece page
+    const longDesc = (piece.long_description || piece.description || piece.longDescription || '').trim();
+    pieceEl.querySelector('.description').textContent = longDesc;
+
+    // Meta
+    const meta = {
+      difficulty: piece.difficulty || '',
+      instrumentation: piece.instrumentation || '',
+      duration: piece.duration || '',
+      year: piece.year || ''
+    };
+    pieceEl.querySelectorAll('[data-meta]').forEach(el => {
+      const k = el.getAttribute('data-meta');
+      el.textContent = meta[k] || '';
+    });
+
+    // PDF preview
+    const pdfUrl = (piece.main_preview_pdf_url || piece.pdf_preview_url || piece.mainPreviewPdfUrl || '').trim();
+    const previewPage = Number(piece.preview_page_number || piece.previewPageNumber || 1);
+
+    pieceEl.dataset.pdfUrl = pdfUrl;
+    pieceEl.dataset.previewPage = String(previewPage);
+
+    // Preview more link
+    const moreLink = document.getElementById('mrmPreviewMoreLink');
+    moreLink.href = catalogUrl;
+
+    // Offers
+    const offersWrap = document.getElementById('mrmOffers');
+    offersWrap.innerHTML = '';
+    const offers = Array.isArray(piece.offers) ? piece.offers : [];
+
+    offers.forEach(off => {
+      offersWrap.appendChild(buildOfferDom(off));
+    });
+
+    // Initialize PDF + audio + OTP now that DOM is built
+    initPdf(pieceEl);
+    initOffers(pieceEl, apiBase);
+    initOtp(pieceEl, apiBase);
+
+    // Update doc title
+    document.title = title || 'Piece Product';
+  }
+
+  // ---------- PDF ----------
+  async function initPdf(piece){
+    const PDF_URL = piece.dataset.pdfUrl || "";
+    const PREVIEW_PAGE = Number(piece.dataset.previewPage || "1");
+
+    const previewWrap = piece.querySelector('.mrm-pdfPreview');
+    const previewCanvas = piece.querySelector('.mrm-pdfCanvas');
+    const overlay = piece.querySelector('.mrm-pdfOverlay');
+    const pdfScroll = piece.querySelector('.mrm-pdfScroll');
+
+    let pdfDoc = null;
+    let overlayOpen = false;
+    let overlayRendered = false;
+    let resizeTimer = null;
+    let scrollY = 0;
+
+    async function renderSinglePageToCanvas(canvas, containerEl, pageNum) {
+      if (!pdfDoc) return;
+      const page = await pdfDoc.getPage(pageNum);
+      const unscaled = page.getViewport({ scale: 1 });
+
+      const cssW = containerEl.clientWidth;
+      const cssH = containerEl.clientHeight;
+
+      const scale = Math.min(cssW / unscaled.width, cssH / unscaled.height);
+      const viewport = page.getViewport({ scale });
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+      const drawW = Math.floor(viewport.width);
+      const drawH = Math.floor(viewport.height);
+      setCanvasSize(canvas, drawW, drawH, dpr);
+
+      const ctx = canvas.getContext('2d', { alpha: false });
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport }).promise;
+    }
+
+    async function renderPreview(){
+      await renderSinglePageToCanvas(previewCanvas, previewWrap, PREVIEW_PAGE);
+    }
+
+    async function renderOverlayAllPages(){
+      if (!pdfDoc || overlayRendered) return;
+      pdfScroll.innerHTML = "";
+      await new Promise(r => requestAnimationFrame(r));
+
+      const containerWidth = pdfScroll.clientWidth;
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+      for (let i=1; i<=pdfDoc.numPages; i++){
+        const page = await pdfDoc.getPage(i);
+        const unscaled = page.getViewport({ scale: 1 });
+
+        const scale = containerWidth / unscaled.width;
+        const viewport = page.getViewport({ scale });
+
+        const canvas = document.createElement('canvas');
+        canvas.className = "mrm-pdfPage";
+        canvas.style.width = Math.floor(viewport.width) + "px";
+        canvas.style.height = Math.floor(viewport.height) + "px";
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+
+        const ctx = canvas.getContext('2d', { alpha: false });
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+
+        pdfScroll.appendChild(canvas);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+      }
+
+      overlayRendered = true;
+    }
+
+    function openOverlay(){
+      overlayOpen = true;
+      overlayRendered = false;
+
+      scrollY = window.scrollY || window.pageYOffset || 0;
+      document.body.style.top = `-${scrollY}px`;
+      document.body.classList.add('no-scroll');
+
+      overlay.classList.add('is-open');
+      overlay.setAttribute('aria-hidden','false');
+
+      renderOverlayAllPages();
+    }
+
+    function closeOverlay(){
+      overlayOpen = false;
+
+      overlay.classList.remove('is-open');
+      overlay.setAttribute('aria-hidden','true');
+
+      document.body.classList.remove('no-scroll');
+      const top = document.body.style.top;
+      document.body.style.top = "";
+      const restoreY = top ? -parseInt(top,10) : scrollY;
+      window.scrollTo(0, restoreY);
+
+      pdfScroll.scrollTop = 0;
+    }
+
+    function toggleOverlay(){ overlayOpen ? closeOverlay() : openOverlay(); }
+
+    function debounceRerender(){
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        renderPreview();
+        if (overlayOpen) { overlayRendered = false; renderOverlayAllPages(); }
+      }, 150);
+    }
+
+    previewWrap.addEventListener('click', (e) => { e.preventDefault(); toggleOverlay(); });
+    previewWrap.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleOverlay(); }
+    });
+
+    overlay.addEventListener('click', () => { if (overlayOpen) closeOverlay(); });
+
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlayOpen) closeOverlay(); });
+    window.addEventListener('resize', debounceRerender);
+
+    (async function initPdfDoc(){
+      try{
+        if (!PDF_URL) throw new Error("Missing PDF preview URL in Pieces Catalog.");
+        pdfDoc = await pdfjsLib.getDocument({ url: PDF_URL }).promise;
+        await renderPreview();
+      }catch(err){
+        previewWrap.style.cursor='default';
+        previewWrap.innerHTML =
+          '<div style="padding:12px;font-size:13px;color:var(--color-text-muted);">PDF preview failed to load.</div>';
+        console.error(err);
+      }
+    })();
+  }
+
+  // ---------- OFFERS + AUDIO ----------
+  function initOffers(piece, apiBase){
+    function syncOfferAudio(offerEl){
+      const audio = offerEl.querySelector('.mrm-audio');
+      const play  = offerEl.querySelector('.mrm-play');
+      const seek  = offerEl.querySelector('.mrm-seek');
+      const cur   = offerEl.querySelector('.mrm-current');
+      const dur   = offerEl.querySelector('.mrm-duration');
+      const vol   = offerEl.querySelector('.mrm-volume');
+
+      function syncPlayUI(){
+        const playing = audio && !audio.paused && !audio.ended;
+        play.classList.toggle('is-playing', !!playing);
+      }
+
+      audio.addEventListener('loadedmetadata', () => {
+        dur.textContent = fmtTime(audio.duration);
+        seek.max = audio.duration || 0;
+      });
+
+      audio.addEventListener('timeupdate', () => {
+        cur.textContent = fmtTime(audio.currentTime);
+        if (!seek.matches(':active')) seek.value = audio.currentTime || 0;
+      });
+
+      play.addEventListener('click', async () => {
+        try{
+          if (audio.paused) await audio.play();
+          else audio.pause();
+          syncPlayUI();
+        }catch(e){ console.error(e); }
+      });
+
+      audio.addEventListener('play', syncPlayUI);
+      audio.addEventListener('pause', syncPlayUI);
+      audio.addEventListener('ended', syncPlayUI);
+
+      seek.addEventListener('input', () => { audio.currentTime = Number(seek.value || 0); });
+      vol.addEventListener('input', () => { audio.volume = Number(vol.value); });
+    }
+
+    piece.querySelectorAll('.mrm-offer').forEach(syncOfferAudio);
+
+    piece.querySelectorAll('.mrm-purchaseBtn').forEach(btn => {
+      btn.addEventListener('click', function(e){
+        e.preventDefault();
+        alert('Purchase flow is handled by Payments Hub. This page is currently configured for OTP access only.');
+      });
+    });
+
+    piece.querySelectorAll('.mrm-accessBtn').forEach(btn => {
+      btn.addEventListener('click', function(e){
+        e.preventDefault();
+        const offerEl = btn.closest('.mrm-offer');
+        const slug = offerEl ? (offerEl.dataset.productSlug || '') : '';
+        if (!slug) { alert('Missing offer product slug. Check Pieces Catalog offer config.'); return; }
+        openOtpModal(slug);
+      });
+    });
+  }
+
+  // ---------- OTP ----------
+  let activeProductSlug = '';
+
+  function openOtpModal(forSlug){
+    const otpOverlay = document.querySelector('.mrm-otpOverlay');
+    const stepEmail = document.querySelector('.mrm-stepEmail');
+    const stepOtp = document.querySelector('.mrm-stepOtp');
+    const emailInput = document.querySelector('.mrm-email');
+    const otpInput = document.querySelector('.mrm-otp');
+    const messageDiv = document.querySelector('.mrm-message');
+
+    activeProductSlug = forSlug || '';
+
+    otpOverlay.classList.add('is-open');
+    otpOverlay.setAttribute('aria-hidden','false');
+
+    const y = window.scrollY || window.pageYOffset || 0;
+    document.body.style.top = `-${y}px`;
+    document.body.classList.add('no-scroll');
+
+    stepEmail.classList.remove('hidden');
+    stepOtp.classList.add('hidden');
+    messageDiv.textContent = '';
+    emailInput.value = '';
+    otpInput.value = '';
+  }
+
+  function initOtp(piece, apiBase){
+    const otpOverlay = piece.querySelector('.mrm-otpOverlay');
+    const stepEmail = piece.querySelector('.mrm-stepEmail');
+    const stepOtp = piece.querySelector('.mrm-stepOtp');
+    const emailInput = piece.querySelector('.mrm-email');
+    const otpInput = piece.querySelector('.mrm-otp');
+    const sendBtn = piece.querySelector('.mrm-sendCodeBtn');
+    const verifyBtn = piece.querySelector('.mrm-verifyBtn');
+    const messageDiv = piece.querySelector('.mrm-message');
+    const closeBtn = piece.querySelector('.mrm-closeBtn');
+
+    function closeOtpModal(){
+      otpOverlay.classList.remove('is-open');
+      otpOverlay.setAttribute('aria-hidden','true');
+
+      document.body.classList.remove('no-scroll');
+      const top = document.body.style.top;
+      document.body.style.top = "";
+      const restoreY = top ? -parseInt(top,10) : 0;
+      window.scrollTo(0, restoreY);
+    }
+
+    closeBtn.addEventListener('click', closeOtpModal);
+    otpOverlay.addEventListener('click', (e) => { if (e.target === otpOverlay) closeOtpModal(); });
+
+    sendBtn.addEventListener('click', function(){
+      const email = (emailInput.value || '').trim();
+      if(!email){ messageDiv.textContent='Please enter your email.'; return; }
+      if(!activeProductSlug){ messageDiv.textContent='Missing product selection.'; return; }
+
+      messageDiv.textContent='Sending code...';
+
+      fetch(apiBase.replace(/\/$/,'') + '/request-otp', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ email: email, product_slug: activeProductSlug })
+      })
+      .then(async (r) => {
+        const txt = await r.text();
+        let data=null;
+        try{ data = JSON.parse(txt); }catch(e){ data=null; }
+        if(!r.ok){
+          console.log('RAW RESPONSE (request-otp):', activeProductSlug, r.status, txt);
+          messageDiv.textContent='Server error. Check Console.';
+          return null;
+        }
+        return data || {};
+      })
+      .then(data=>{
+        if(!data) return;
+        messageDiv.textContent = data.message || 'If this purchase exists, a code will be sent shortly.';
+        stepEmail.classList.add('hidden');
+        stepOtp.classList.remove('hidden');
+      })
+      .catch(err=>{ console.error(err); messageDiv.textContent='Error sending code.'; });
+    });
+
+    verifyBtn.addEventListener('click', function(){
+      const email = (emailInput.value || '').trim();
+      const otp = (otpInput.value || '').trim();
+      if(!otp){ messageDiv.textContent='Enter the code you received.'; return; }
+      if(!activeProductSlug){ messageDiv.textContent='Missing product selection.'; return; }
+
+      messageDiv.textContent='Verifying...';
+
+      fetch(apiBase.replace(/\/$/,'') + '/verify-otp', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ email: email, product_slug: activeProductSlug, otp: otp })
+      })
+      .then(async (r) => {
+        const txt = await r.text();
+        let data=null;
+        try{ data = JSON.parse(txt); }catch(e){ data=null; }
+        console.log('RAW RESPONSE (verify-otp):', activeProductSlug, r.status, txt);
+        if(!r.ok){
+          messageDiv.textContent=(data && data.message) ? data.message : 'Server error. Check Console.';
+          return null;
+        }
+        return data || {};
+      })
+      .then(data=>{
+        if(!data) return;
+        if(data.ok && data.access_url){
+          window.location.href = data.access_url;
+          return;
+        }
+        messageDiv.textContent = data.message || 'Invalid code.';
+      })
+      .catch(err=>{ console.error(err); messageDiv.textContent='Error verifying code.'; });
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', initPiecePage);
+})();
+</script>
+
+</body>
+</html>
