@@ -1787,6 +1787,11 @@ input.mrm-range::-moz-range-track{
         height: 60vh; /* better fit on phones */
       }
 
+      iframe.pdf{
+        width: 100%;
+        max-width: 100%;
+      }
+
       /* Make audio controls stack cleanly on mobile */
       .audio-controls{
         display: grid;
@@ -1862,7 +1867,13 @@ input.mrm-range::-moz-range-track{
           echo '  </div>';
           echo '  <div class="content">';
           if ( $type === 'pdf' ) {
-              echo '    <iframe class="pdf" src="' . esc_url( $inline_url ) . '" loading="lazy" title="' . esc_attr( $label ) . '"></iframe>';
+              $pdf_src = $inline_url;
+              if ( false === strpos( $pdf_src, '#' ) ) {
+                  // Hint most browser PDF viewers to fit-to-width
+                  $pdf_src .= '#zoom=page-width';
+              }
+
+              echo '    <iframe class="pdf" src="' . esc_url( $pdf_src ) . '" loading="lazy" title="' . esc_attr( $label ) . '"></iframe>';
           } else {
 echo '    <div class="audio-box mrm-audio-box" data-src="' . esc_url( $inline_url ) . '">';
 echo '      <audio class="mrm-audio" preload="metadata">';
@@ -1962,8 +1973,6 @@ echo '    </div>';
             echo '<div class="spacer"></div>';
         }
 
-        $catalog_url = $this->get_sheet_music_catalog_url();
-        echo '<div class="mrm-preview-more-row"><a class="home-btn" href="' . esc_url( $catalog_url ) . '">' . esc_html__( 'Preview more pieces', 'mrm-product-access' ) . '</a></div>';
     ?>
   </div>
 
@@ -3046,6 +3055,21 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           color: #111111 !important;
         }
 
+        /* Close button: force readable black text and an obvious button look */
+        .mrm-otpOverlay .mrm-closeBtn{
+          color: #000000 !important;
+          background: transparent;
+          border: 1px solid rgba(0,0,0,0.25);
+          border-radius: 14px;
+          padding: 12px 16px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .mrm-otpOverlay .mrm-closeBtn:hover{
+          background: rgba(0,0,0,0.06);
+        }
+
         .mrm-otpOverlay .modal {
           width: min(840px, 94vw);
           padding: 0;
@@ -3166,26 +3190,6 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           cursor: pointer;
         }
         .mrm-otpOverlay button.secondary:hover {
-          background: rgba(0,0,0,0.06);
-        }
-
-        /* If the modal close button has no text, show "Close" */
-        .mrm-otpOverlay .mrm-closeBtn:empty::after{
-          content: "Close";
-        }
-
-        /* Make the close button look intentional (matches your modal style) */
-        .mrm-otpOverlay .mrm-closeBtn{
-          font-size: 18px;
-          padding: 14px 18px;
-          border-radius: 14px;
-          font-weight: 700;
-          border: 1px solid var(--color-accent);
-          background: transparent;
-          cursor: pointer;
-        }
-
-        .mrm-otpOverlay .mrm-closeBtn:hover{
           background: rgba(0,0,0,0.06);
         }
 
@@ -3419,6 +3423,13 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             const verifyBtn = piece.querySelector('.mrm-verifyBtn');
             const messageDiv = piece.querySelector('.mrm-message');
             const closeBtn = piece.querySelector('.mrm-closeBtn');
+
+            // Force a visible, consistent close label (base behavior)
+            if (closeBtn) {
+              closeBtn.textContent = 'Close';
+              closeBtn.setAttribute('type', 'button');
+              closeBtn.setAttribute('aria-label', 'Close');
+            }
 
             function openOtpModal(){
               otpOverlay.classList.add('is-open');
