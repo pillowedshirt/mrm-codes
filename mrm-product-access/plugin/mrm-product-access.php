@@ -1554,6 +1554,7 @@ class MRM_Product_Access {
       --mrm-black: #000000;
       --mrm-radius: 14px;
     }
+    *, *::before, *::after{ box-sizing: border-box; }
     body{
       margin:0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
@@ -1765,6 +1766,47 @@ input.mrm-range::-moz-range-track{
       display:flex;
       justify-content:flex-start;
       margin-top: 18px;
+    }
+
+    /* Mobile scaling + layout fixes */
+    @media (max-width: 720px){
+      .wrap{ padding: 14px; }
+
+      .header{
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .header h1{
+        font-size: 18px;
+      }
+
+      .card{ padding: 14px; }
+
+      .pdf{
+        height: 60vh; /* better fit on phones */
+      }
+
+      /* Make audio controls stack cleanly on mobile */
+      .audio-controls{
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+        justify-items: stretch;
+      }
+
+      .audio-row-top{
+        width: 100%;
+        display: grid;
+        grid-template-columns: 42px 1fr 1fr;
+        align-items: center;
+        column-gap: 10px;
+      }
+
+      .audio-row-seek{ width: 100%; }
+      .audio-row-vol{ width: 100%; justify-content: flex-start; }
+
+      .volume input{ width: min(260px, 72vw); }
     }
   </style>
 </head>
@@ -2917,6 +2959,15 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           font-weight: 800;
           font-size: 14px;
         }
+
+        /* Theme-proof: never underline this button */
+        .mrm-view-options-btn,
+        .mrm-view-options-btn:visited,
+        .mrm-view-options-btn:hover,
+        .mrm-view-options-btn:focus,
+        .mrm-view-options-btn:active{
+          text-decoration: none !important;
+        }
         .mrm-view-options-btn:hover{ opacity: 0.88; }
 
         .mrm-preview-more-row{
@@ -3115,6 +3166,26 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           cursor: pointer;
         }
         .mrm-otpOverlay button.secondary:hover {
+          background: rgba(0,0,0,0.06);
+        }
+
+        /* If the modal close button has no text, show "Close" */
+        .mrm-otpOverlay .mrm-closeBtn:empty::after{
+          content: "Close";
+        }
+
+        /* Make the close button look intentional (matches your modal style) */
+        .mrm-otpOverlay .mrm-closeBtn{
+          font-size: 18px;
+          padding: 14px 18px;
+          border-radius: 14px;
+          font-weight: 700;
+          border: 1px solid var(--color-accent);
+          background: transparent;
+          cursor: pointer;
+        }
+
+        .mrm-otpOverlay .mrm-closeBtn:hover{
           background: rgba(0,0,0,0.06);
         }
 
