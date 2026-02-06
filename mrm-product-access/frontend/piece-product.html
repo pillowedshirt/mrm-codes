@@ -506,6 +506,15 @@ a{ -webkit-tap-highlight-color:transparent; }
   -webkit-backdrop-filter: blur(6px);
   z-index:2147483646;
 }
+/* OTP modal Close button: guarantee visible label */
+.mrm-otpOverlay .mrm-closeBtn{
+  color:#000000 !important;
+  font-size:14px !important;
+  line-height:1.1 !important;
+  opacity:1 !important;
+  text-shadow:none !important;
+  -webkit-text-fill-color:#000000 !important; /* Safari/Chrome edge cases */
+}
 .mrm-otpOverlay.is-open{ display:flex; }
 .hidden{ display:none; }
 
@@ -681,7 +690,14 @@ a{ -webkit-tap-highlight-color:transparent; }
             <div class="message mrm-message" style="margin-top:12px;min-height:24px;opacity:0.85;"></div>
 
             <div style="margin-top:12px;display:flex;justify-content:flex-end;">
-              <button type="button" class="secondary mrm-closeBtn" style="padding:10px 14px;border-radius:14px;border:1px solid #2f2f2f;background:transparent;font-weight:900;cursor:pointer;text-decoration:none;">Close</button>
+              <button
+                type="button"
+                class="secondary mrm-closeBtn"
+                aria-label="Close"
+                style="padding:10px 14px;border-radius:14px;border:1px solid #2f2f2f;background:#ffffff;color:#000000;font-weight:900;font-size:14px;line-height:1.1;cursor:pointer;text-decoration:none;"
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>
@@ -1148,6 +1164,11 @@ a{ -webkit-tap-highlight-color:transparent; }
     const verifyBtn = piece.querySelector('.mrm-verifyBtn');
     const messageDiv = piece.querySelector('.mrm-message');
     const closeBtn = piece.querySelector('.mrm-closeBtn');
+    // Force visible label for the Close button (base behavior)
+    if (closeBtn) {
+      closeBtn.textContent = 'Close';
+      closeBtn.setAttribute('aria-label', 'Close');
+    }
 
     function closeOtpModal(){
       otpOverlay.classList.remove('is-open');
