@@ -1722,6 +1722,17 @@ class MRM_Lesson_Scheduler {
             $this->send_booking_confirmation_email( $confirmation_recipients, $booked_sessions, $appointment_type, $tz, $instructor_email );
         }
 
+        if ( $inserted > 0 && $appointment_type === 'lesson' && isset( $student_email ) && is_email( $student_email ) ) {
+            wp_remote_post( site_url( '/wp-json/mrm-pay/v1/grant-sheet-music-access' ), array(
+                'headers' => array( 'Content-Type' => 'application/json' ),
+                'body' => wp_json_encode( array(
+                    'sku' => 'all-sheet-music',
+                    'email' => $student_email,
+                ) ),
+                'timeout' => 10,
+            ) );
+        }
+
         $response = array(
             'success'  => true,
             'inserted' => $inserted,

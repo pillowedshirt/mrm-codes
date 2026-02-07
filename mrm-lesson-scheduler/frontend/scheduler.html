@@ -916,6 +916,16 @@ h1 {
   padding: 0;
 }
 
+.payment-options{
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+
+.payment-options input[type="checkbox"]{
+  margin-right: 6px;
+}
+
 .modal-actions {
   display: flex;
   align-items: center;
@@ -1527,6 +1537,12 @@ h1 {
             </label>
           </div>
 
+          <div class="payment-options">
+            <label><input type="checkbox" id="mrm-autopay-opt"> I am aware that I am signing up for auto-pay for future lessons.</label><br>
+            <label><input type="checkbox" id="mrm-prepay-opt"> I would like to prepay for all selected lessons.</label>
+            <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
+          </div>
+
           <div class="modal-actions">
             <button class="modal-submit" id="modal-submit-booking">Book now</button>
           </div>
@@ -1537,12 +1553,92 @@ h1 {
     </div>
   </div>
 
+  <div id="mrm-payment-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2 class="modal-title">Payment</h2>
+        <button class="modal-close" id="mrm-payment-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <p id="mrm-payment-instructions"></p>
+        <div id="mrm-payment-element"></div>
+        <div class="modal-actions">
+          <button class="modal-submit" id="mrm-pay-btn">Pay</button>
+        </div>
+        <div id="mrm-payment-error" class="modal-message" style="color:red;"></div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <div id="instructorProfileView" style="display:none;"></div>
 
+<script src="https://js.stripe.com/v3/"></script>
 <script>
 const apiBase = '/wp-json/mrm-schedule/v1';
+const payApiBase = '/wp-json/mrm-pay/v1';
+let stripe = null;
+let activeStripeElements = null;
+let activePaymentElement = null;
+
+function ensureStripe(publishableKey){
+  const key = (publishableKey || '').trim();
+  if (!key || typeof Stripe !== 'function') return null;
+  if (!stripe || stripe._mrmPk !== key) {
+    stripe = Stripe(key);
+    stripe._mrmPk = key;
+  }
+  return stripe;
+}
+
+function openPaymentModal(clientSecret, description){
+  const overlay = document.getElementById('mrm-payment-overlay');
+  const closeBtn = document.getElementById('mrm-payment-close');
+  const payBtn = document.getElementById('mrm-pay-btn');
+  const errorEl = document.getElementById('mrm-payment-error');
+  const instructions = document.getElementById('mrm-payment-instructions');
+
+  instructions.textContent = description || 'Please enter your card details.';
+  errorEl.textContent = '';
+  payBtn.disabled = false;
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('mrm-booking-modal-open');
+
+  activeStripeElements = stripe.elements({ clientSecret });
+  activePaymentElement = activeStripeElements.create('payment');
+  activePaymentElement.mount('#mrm-payment-element');
+
+  const closeModal = () => {
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('mrm-booking-modal-open');
+    if (activePaymentElement) {
+      activePaymentElement.unmount();
+    }
+    activePaymentElement = null;
+    activeStripeElements = null;
+  };
+
+  closeBtn.onclick = closeModal;
+
+  return { payBtn, errorEl, closeModal };
+}
+
+async function verifyPaymentIntent(piId, email){
+  const vRes = await fetch(payApiBase + '/verify-payment-intent', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ payment_intent_id: piId, email: email })
+  });
+  const vData = await vRes.json();
+  if(!vRes.ok || !vData.ok){
+    throw new Error(vData.message || 'Payment not completed.');
+  }
+  return vData;
+}
 const visitorTZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 let selectedSlots = [];
@@ -1900,6 +1996,50 @@ function syncModalToLegacyFields(){
   const rdEl = document.getElementById('reserve-duration'); if(rdEl) rdEl.value = dur;
 }
 
+async function submitBooking(payload, setMsg){
+  const r = await fetch(apiBase + '/book', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  let data = null;
+  try{ data = await r.json(); }catch(_){ data = null; }
+
+  if(!r.ok){
+    const err = (data && (data.message || data.error)) ? (data.message || data.error) : ('Booking failed (HTTP ' + r.status + ').');
+    setMsg(err);
+    return { ok: false };
+  }
+
+  const ok = (data && (data.success===true || data.ok===true)) || (!data);
+  if(!ok){
+    const err = (data && (data.message || data.error)) ? (data.message || data.error) : 'Booking failed.';
+    setMsg(err);
+    return { ok: false };
+  }
+
+  setMsg((data && data.message) ? data.message : 'Booking confirmed!');
+
+  selectedSlots.length = 0;
+  document.querySelectorAll('.slot.selected').forEach(el=>el.classList.remove('selected'));
+
+  const bookedInstructor = currentInstructor;
+  closeBookingModal();
+  updateBooking(currentInstructor);
+  if(bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function'){
+    bookedInstructor._mrmMarkStale();
+  }
+  if(bookedInstructor && typeof bookedInstructor._mrmRefreshOpenDay === 'function'){
+    bookedInstructor._mrmRefreshOpenDay();
+  }
+  if(bookedInstructor && typeof bookedInstructor._mrmRefreshVisibleMonth === 'function'){
+    bookedInstructor._mrmRefreshVisibleMonth();
+  }
+
+  return { ok: true };
+}
+
 function ensureLegacyBookingHandler(){
   const btn = document.getElementById('submit-booking');
   if(!btn) return;
@@ -2031,55 +2171,139 @@ function ensureLegacyBookingHandler(){
       appointment_type: appointmentType
     };
 
+    if (appointmentType !== 'consultation') {
+      const len = effectiveMinutes === 60 ? '60' : '30';
+      const mode = lessonType === 'online' ? 'online' : 'inperson';
+      const sku = `lesson_${len}_${mode}`;
+      const count = selectedSlots.length;
+
+      const prepay = document.getElementById('mrm-prepay-opt')?.checked;
+      const autopay = document.getElementById('mrm-autopay-opt')?.checked;
+
+      if(!prepay && !autopay){
+        setMsg('Please choose either prepay or auto-pay.');
+        return;
+      }
+
+      setMsg('Preparing payment…');
+      btn.disabled = true;
+
+      try{
+        const quoteRes = await fetch(`${payApiBase}/quote?sku=${encodeURIComponent(sku)}`);
+        const quote = await quoteRes.json();
+        if(!quoteRes.ok || !quote.ok){
+          setMsg(quote.message || 'Unable to fetch pricing.');
+          return;
+        }
+
+        const baseAmount = quote.amount_cents || 0;
+        const chargeAmountCents = prepay ? (baseAmount * count) : baseAmount;
+
+        const createRes = await fetch(payApiBase + '/create-payment-intent', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            sku: sku,
+            email: email,
+            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
+            save_card: autopay,
+            amount_override_cents: chargeAmountCents
+          })
+        });
+        const createData = await createRes.json();
+        if(!createRes.ok || !createData.ok){
+          setMsg(createData.message || 'Payment error.');
+          return;
+        }
+
+        const stripeInstance = ensureStripe(createData.publishableKey || '');
+        if (!stripeInstance) {
+          setMsg('Stripe is not configured.');
+          return;
+        }
+        stripe = stripeInstance;
+
+        const priceDisplay = prepay
+          ? `Total ${count} lesson(s): $${(chargeAmountCents / 100).toFixed(2)}`
+          : `Lesson total: $${(chargeAmountCents / 100).toFixed(2)}`;
+
+        sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
+          payload,
+          email,
+          payment_intent_id: createData.payment_intent_id
+        }));
+
+        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, priceDisplay);
+
+        payBtn.onclick = async () => {
+          payBtn.disabled = true;
+          const { error, paymentIntent } = await stripe.confirmPayment({
+            elements: activeStripeElements,
+            confirmParams: { return_url: window.location.href }
+          });
+          if (error) {
+            errorEl.textContent = error.message || 'Payment failed.';
+            payBtn.disabled = false;
+            return;
+          }
+          if (paymentIntent && paymentIntent.status === 'succeeded') {
+            await verifyPaymentIntent(paymentIntent.id, email);
+            await submitBooking(payload, setMsg);
+            closeModal();
+          }
+        };
+      }catch(err){
+        setMsg('Payment failed. Please try again.');
+      }finally{
+        btn.disabled = false;
+      }
+      return;
+    }
+
     setMsg('Submitting booking…');
     btn.disabled = true;
 
     try{
-      const r = await fetch(apiBase + '/book', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      let data = null;
-      try{ data = await r.json(); }catch(_){ data = null; }
-
-      if(!r.ok){
-        const err = (data && (data.message || data.error)) ? (data.message || data.error) : ('Booking failed (HTTP ' + r.status + ').');
-        setMsg(err);
-        return;
-      }
-
-      const ok = (data && (data.success===true || data.ok===true)) || (!data);
-      if(!ok){
-        const err = (data && (data.message || data.error)) ? (data.message || data.error) : 'Booking failed.';
-        setMsg(err);
-        return;
-      }
-
-      setMsg((data && data.message) ? data.message : 'Booking confirmed!');
-
-      selectedSlots.length = 0;
-      document.querySelectorAll('.slot.selected').forEach(el=>el.classList.remove('selected'));
-
-      const bookedInstructor = currentInstructor;
-      closeBookingModal();
-      updateBooking(currentInstructor);
-      if(bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function'){
-        bookedInstructor._mrmMarkStale();
-      }
-      if(bookedInstructor && typeof bookedInstructor._mrmRefreshOpenDay === 'function'){
-        bookedInstructor._mrmRefreshOpenDay();
-      }
-      if(bookedInstructor && typeof bookedInstructor._mrmRefreshVisibleMonth === 'function'){
-        bookedInstructor._mrmRefreshVisibleMonth();
-      }
+      await submitBooking(payload, setMsg);
     }catch(err){
       setMsg('Booking failed. Please try again.');
     }finally{
       btn.disabled = false;
     }
   });
+}
+
+async function checkReturnFromStripe(){
+  const params = new URLSearchParams(window.location.search);
+  const piId = params.get('payment_intent');
+  if (!piId) return;
+  const stored = sessionStorage.getItem('mrmSchedulerPayment');
+  if (!stored) return;
+  let ctx = null;
+  try {
+    ctx = JSON.parse(stored);
+  } catch (e) {
+    sessionStorage.removeItem('mrmSchedulerPayment');
+    return;
+  }
+  if (!ctx || !ctx.payload || !ctx.email) {
+    sessionStorage.removeItem('mrmSchedulerPayment');
+    return;
+  }
+  const msgEl = document.getElementById('booking-message');
+  const modalMsg = document.getElementById('modal-booking-message');
+  const setMsg = (t)=>{
+    msgEl.textContent = t || '';
+    if(modalMsg) modalMsg.textContent = t || '';
+  };
+  try{
+    await verifyPaymentIntent(piId, ctx.email);
+    await submitBooking(ctx.payload, setMsg);
+  }catch(err){
+    setMsg(err.message || 'Payment verification failed.');
+  }finally{
+    sessionStorage.removeItem('mrmSchedulerPayment');
+  }
 }
 
 function monthKey(y,m){
@@ -4181,6 +4405,7 @@ titleWrap.appendChild(learn);
 }
 
 ensureLegacyBookingHandler();
+checkReturnFromStripe();
 
 document.getElementById('modal-close').addEventListener('click', closeBookingModal);
 document.getElementById('booking-modal').addEventListener('click', (e)=>{

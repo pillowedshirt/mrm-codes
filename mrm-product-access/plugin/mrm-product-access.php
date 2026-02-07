@@ -1554,6 +1554,7 @@ class MRM_Product_Access {
       --mrm-black: #000000;
       --mrm-radius: 14px;
     }
+    *, *::before, *::after{ box-sizing: border-box; }
     body{
       margin:0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
@@ -1766,6 +1767,52 @@ input.mrm-range::-moz-range-track{
       justify-content:flex-start;
       margin-top: 18px;
     }
+
+    /* Mobile scaling + layout fixes */
+    @media (max-width: 720px){
+      .wrap{ padding: 14px; }
+
+      .header{
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .header h1{
+        font-size: 18px;
+      }
+
+      .card{ padding: 14px; }
+
+      .pdf{
+        height: 60vh; /* better fit on phones */
+      }
+
+      iframe.pdf{
+        width: 100%;
+        max-width: 100%;
+      }
+
+      /* Make audio controls stack cleanly on mobile */
+      .audio-controls{
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+        justify-items: stretch;
+      }
+
+      .audio-row-top{
+        width: 100%;
+        display: grid;
+        grid-template-columns: 42px 1fr 1fr;
+        align-items: center;
+        column-gap: 10px;
+      }
+
+      .audio-row-seek{ width: 100%; }
+      .audio-row-vol{ width: 100%; justify-content: flex-start; }
+
+      .volume input{ width: min(260px, 72vw); }
+    }
   </style>
 </head>
 <body>
@@ -1820,7 +1867,13 @@ input.mrm-range::-moz-range-track{
           echo '  </div>';
           echo '  <div class="content">';
           if ( $type === 'pdf' ) {
-              echo '    <iframe class="pdf" src="' . esc_url( $inline_url ) . '" loading="lazy" title="' . esc_attr( $label ) . '"></iframe>';
+              $pdf_src = $inline_url;
+              if ( false === strpos( $pdf_src, '#' ) ) {
+                  // Hint most browser PDF viewers to fit-to-width
+                  $pdf_src .= '#zoom=page-width';
+              }
+
+              echo '    <iframe class="pdf" src="' . esc_url( $pdf_src ) . '" loading="lazy" title="' . esc_attr( $label ) . '"></iframe>';
           } else {
 echo '    <div class="audio-box mrm-audio-box" data-src="' . esc_url( $inline_url ) . '">';
 echo '      <audio class="mrm-audio" preload="metadata">';
@@ -1920,8 +1973,6 @@ echo '    </div>';
             echo '<div class="spacer"></div>';
         }
 
-        $catalog_url = $this->get_sheet_music_catalog_url();
-        echo '<div class="mrm-preview-more-row"><a class="home-btn" href="' . esc_url( $catalog_url ) . '">' . esc_html__( 'Preview more pieces', 'mrm-product-access' ) . '</a></div>';
     ?>
   </div>
 
@@ -2917,6 +2968,15 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           font-weight: 800;
           font-size: 14px;
         }
+
+        /* Theme-proof: never underline this button */
+        .mrm-view-options-btn,
+        .mrm-view-options-btn:visited,
+        .mrm-view-options-btn:hover,
+        .mrm-view-options-btn:focus,
+        .mrm-view-options-btn:active{
+          text-decoration: none !important;
+        }
         .mrm-view-options-btn:hover{ opacity: 0.88; }
 
         .mrm-preview-more-row{
@@ -2993,6 +3053,21 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         .mrm-otpOverlay .modal,
         .mrm-otpOverlay .modal * {
           color: #111111 !important;
+        }
+
+        /* Close button: force readable black text and an obvious button look */
+        .mrm-otpOverlay .mrm-closeBtn{
+          color: #000000 !important;
+          background: transparent;
+          border: 1px solid rgba(0,0,0,0.25);
+          border-radius: 14px;
+          padding: 12px 16px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .mrm-otpOverlay .mrm-closeBtn:hover{
+          background: rgba(0,0,0,0.06);
         }
 
         .mrm-otpOverlay .modal {
@@ -3348,6 +3423,13 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             const verifyBtn = piece.querySelector('.mrm-verifyBtn');
             const messageDiv = piece.querySelector('.mrm-message');
             const closeBtn = piece.querySelector('.mrm-closeBtn');
+
+            // Force a visible, consistent close label (base behavior)
+            if (closeBtn) {
+              closeBtn.textContent = 'Close';
+              closeBtn.setAttribute('type', 'button');
+              closeBtn.setAttribute('aria-label', 'Close');
+            }
 
             function openOtpModal(){
               otpOverlay.classList.add('is-open');
