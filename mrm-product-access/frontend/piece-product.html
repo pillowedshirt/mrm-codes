@@ -702,18 +702,53 @@ a{ -webkit-tap-highlight-color:transparent; }
           </div>
         </div>
 
+        <div id="mrm-payment-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+          <div class="modal" role="dialog" aria-modal="true">
+            <div class="modal-header"><h2>Purchase</h2><button class="close" id="payment-close">×</button></div>
+            <div class="modal-body">
+              <p id="payment-instructions"></p>
+              <div id="mrm-payment-element"></div>
+              <button id="mrm-pay-btn" class="button-primary">Pay</button>
+              <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
+            </div>
+          </div>
+        </div>
+
       </article>
 
     </div>
   </div>
 </main>
 
+<script src="https://js.stripe.com/v3/"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 
 <script>
 (function(){
   if (window.__MRM_PIECE_PAGE_INIT__) return;
   window.__MRM_PIECE_PAGE_INIT__ = true;
+
+  let stripe = null;
+  let activePaymentElement = null;
+  let activeStripeElements = null;
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const pk = (window.__mrmStripePk || '').trim();
+    if (pk && typeof Stripe === 'function') {
+      stripe = Stripe(pk);
+      stripe._mrmPk = pk;
+    }
+  });
+
+  function ensureStripe(publishableKey){
+    const key = (publishableKey || window.__mrmStripePk || '').trim();
+    if (!key || typeof Stripe !== 'function') return null;
+    if (!stripe || stripe._mrmPk !== key) {
+      stripe = Stripe(key);
+      stripe._mrmPk = key;
+    }
+    return stripe;
+  }
 
   // pdf.js worker
   if (window.pdfjsLib) {
@@ -739,6 +774,73 @@ a{ -webkit-tap-highlight-color:transparent; }
     // expects /product-slug/ (last non-empty segment)
     const parts = window.location.pathname.split('/').filter(Boolean);
     return (parts[parts.length - 1] || '').trim();
+  }
+
+  function openPaymentModal(clientSecret, priceDisplay) {
+    const overlay = document.getElementById('mrm-payment-overlay');
+    const payBtn = document.getElementById('mrm-pay-btn');
+    const closeBtn = document.getElementById('payment-close');
+    const errorEl = document.getElementById('mrm-payment-error');
+    const instructions = document.getElementById('payment-instructions');
+
+    instructions.textContent = `${priceDisplay} – please enter your card details.`;
+    overlay.style.display = 'block';
+    overlay.setAttribute('aria-hidden', 'false');
+    errorEl.textContent = '';
+    payBtn.disabled = false;
+
+    activeStripeElements = stripe.elements({ clientSecret });
+    activePaymentElement = activeStripeElements.create('payment');
+    activePaymentElement.mount('#mrm-payment-element');
+
+    const closeModal = () => {
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden', 'true');
+      if (activePaymentElement) {
+        activePaymentElement.unmount();
+      }
+      activePaymentElement = null;
+      activeStripeElements = null;
+      errorEl.textContent = '';
+    };
+
+    closeBtn.onclick = closeModal;
+
+    return { payBtn, errorEl, closeModal };
+  }
+
+  async function verifyAndGrant(piId, email, sku){
+    const vRes = await fetch('/wp-json/mrm-pay/v1/verify-payment-intent', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ payment_intent_id: piId, email: email })
+    });
+    const vData = await vRes.json();
+    if(!vRes.ok || !vData.ok){ alert('Payment not completed.'); return; }
+    const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ sku: sku, email: email, payment_intent_id: piId })
+    });
+    const gData = await gRes.json();
+    if(!gRes.ok || !gData.ok){ alert('Failed to grant access'); return; }
+    alert('Thank you!  Access has been granted.  Check your email for download instructions.');
+  }
+
+  function checkReturnFromStripe(){
+    const params = new URLSearchParams(window.location.search);
+    const piId = params.get('payment_intent');
+    if (!piId) return;
+    const stored = sessionStorage.getItem('mrmPiecePayment');
+    if (!stored) return;
+    try {
+      const ctx = JSON.parse(stored);
+      if (ctx && ctx.email && ctx.sku) {
+        verifyAndGrant(piId, ctx.email, ctx.sku).finally(() => {
+          sessionStorage.removeItem('mrmPiecePayment');
+        });
+      }
+    } catch (e) {
+      sessionStorage.removeItem('mrmPiecePayment');
+    }
   }
 
   function escHtml(s){
@@ -1110,9 +1212,52 @@ a{ -webkit-tap-highlight-color:transparent; }
     piece.querySelectorAll('.mrm-offer').forEach(syncOfferAudio);
 
     piece.querySelectorAll('.mrm-purchaseBtn').forEach(btn => {
-      btn.addEventListener('click', function(e){
+      btn.addEventListener('click', async function(e){
         e.preventDefault();
-        alert('Purchase flow is handled by Payments Hub. This page is currently configured for OTP access only.');
+        const offerEl = btn.closest('.mrm-offer');
+        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
+        const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
+        if(!sku){ alert('Missing SKU.'); return; }
+
+        const email = prompt('Enter your email:');
+        if(!email){ return; }
+
+        const piRes = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ sku: sku, email: email, context: { piece_type: offerEl.dataset.type || '', piece_slug: getSlugFromUrl() } })
+        });
+        const piData = await piRes.json();
+        if(!piRes.ok || !piData.ok){ alert(piData.message||'Error creating payment'); return; }
+
+        const stripeInstance = ensureStripe(piData.publishableKey || window.__mrmStripePk || '');
+        if (!stripeInstance) { alert('Stripe is not configured.'); return; }
+        stripe = stripeInstance;
+        window.__mrmStripePk = piData.publishableKey || window.__mrmStripePk || '';
+
+        sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
+          email: email,
+          sku: sku,
+          pi: piData.payment_intent_id,
+        }));
+
+        const { payBtn, errorEl } = openPaymentModal(piData.client_secret, priceDisplay);
+
+        payBtn.onclick = async () => {
+          payBtn.disabled = true;
+          const { error, paymentIntent } = await stripe.confirmPayment({
+            elements: activeStripeElements,
+            confirmParams: { return_url: window.location.href }
+          });
+          if (error) {
+            errorEl.textContent = error.message || 'Payment failed.';
+            payBtn.disabled = false;
+            return;
+          }
+          if (paymentIntent && paymentIntent.status === 'succeeded') {
+            await verifyAndGrant(paymentIntent.id, email, sku);
+          }
+        };
       });
     });
 
@@ -1253,6 +1398,7 @@ a{ -webkit-tap-highlight-color:transparent; }
   }
 
   document.addEventListener('DOMContentLoaded', initPiecePage);
+  document.addEventListener('DOMContentLoaded', checkReturnFromStripe);
 })();
 </script>
 
