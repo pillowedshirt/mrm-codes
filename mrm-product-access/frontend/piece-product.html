@@ -707,6 +707,7 @@ a{ -webkit-tap-highlight-color:transparent; }
             <div class="modal-header"><h2>Purchase</h2><button class="close" id="payment-close">×</button></div>
             <div class="modal-body">
               <p id="payment-instructions"></p>
+              <input type="email" id="mrm-payment-email" placeholder="Your email" required style="width:100%;padding:8px;margin-bottom:12px;" />
               <div id="mrm-payment-element"></div>
               <button id="mrm-pay-btn" class="button-primary">Pay</button>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
@@ -731,6 +732,8 @@ a{ -webkit-tap-highlight-color:transparent; }
   let stripe = null;
   let activePaymentElement = null;
   let activeStripeElements = null;
+  let pendingSku = '';
+  let pendingClientSecret = '';
 
   document.addEventListener('DOMContentLoaded', () => {
     const pk = (window.__mrmStripePk || '').trim();
@@ -776,22 +779,21 @@ a{ -webkit-tap-highlight-color:transparent; }
     return (parts[parts.length - 1] || '').trim();
   }
 
-  function openPaymentModal(clientSecret, priceDisplay) {
+  function openPaymentModal(priceDisplay) {
     const overlay = document.getElementById('mrm-payment-overlay');
     const payBtn = document.getElementById('mrm-pay-btn');
     const closeBtn = document.getElementById('payment-close');
     const errorEl = document.getElementById('mrm-payment-error');
     const instructions = document.getElementById('payment-instructions');
+    const emailInput = document.getElementById('mrm-payment-email');
 
-    instructions.textContent = `${priceDisplay} – please enter your card details.`;
+    instructions.textContent = `${priceDisplay} – please enter your email and card details.`;
     overlay.style.display = 'block';
     overlay.setAttribute('aria-hidden', 'false');
     errorEl.textContent = '';
     payBtn.disabled = false;
-
-    activeStripeElements = stripe.elements({ clientSecret });
-    activePaymentElement = activeStripeElements.create('payment');
-    activePaymentElement.mount('#mrm-payment-element');
+    payBtn.textContent = 'Pay';
+    emailInput.value = '';
 
     const closeModal = () => {
       overlay.style.display = 'none';
@@ -801,6 +803,8 @@ a{ -webkit-tap-highlight-color:transparent; }
       }
       activePaymentElement = null;
       activeStripeElements = null;
+      pendingSku = '';
+      pendingClientSecret = '';
       errorEl.textContent = '';
     };
 
@@ -875,16 +879,26 @@ a{ -webkit-tap-highlight-color:transparent; }
   }
 
   function buildOfferDom(offer){
-    const productSlug  = (offer.product_slug || offer.productSlug || '').trim();
     const displayTitle = offer.display_title || offer.displayTitle || '';
     const subtitle     = offer.subtitle || '';
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
+    const slug = getSlugFromUrl();
+    const typeMap = {
+      'Core Developmental Exercises': 'fundamentals',
+      'Fundamentals': 'fundamentals',
+      'Trombone/Euphonium Full Piece': 'trombone-euphonium',
+      'Tuba Full Piece': 'tuba',
+      'Complete Package': 'complete-package'
+    };
+    const typeSlug = typeMap[displayTitle] || '';
+    const productSlug = `piece-${slug}-${typeSlug}`;
 
     const wrap = document.createElement('div');
     wrap.className = 'offer mrm-offer';
     wrap.dataset.productSlug = productSlug;
     wrap.dataset.price = priceDisplay;
+    wrap.dataset.type = typeSlug;
 
     wrap.innerHTML = `
       <div class="offer-head">
@@ -1211,53 +1225,80 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     piece.querySelectorAll('.mrm-offer').forEach(syncOfferAudio);
 
+    const payBtn = document.getElementById('mrm-pay-btn');
+    if (payBtn) {
+      payBtn.onclick = async function(){
+        const emailInput = document.getElementById('mrm-payment-email');
+        const email = (emailInput.value || '').trim();
+        const errorEl = document.getElementById('mrm-payment-error');
+        if (!email) {
+          errorEl.textContent = 'Please enter a valid email address.';
+          return;
+        }
+        if (!pendingSku) {
+          errorEl.textContent = 'Missing SKU.';
+          return;
+        }
+        if (!pendingClientSecret) {
+          const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ sku: pendingSku, email: email, context: { piece_slug: getSlugFromUrl() } })
+          });
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            errorEl.textContent = data.message || 'Error creating payment.';
+            return;
+          }
+          const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
+          if (!stripeInstance) {
+            errorEl.textContent = 'Stripe is not configured.';
+            return;
+          }
+          stripe = stripeInstance;
+          window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
+          pendingClientSecret = data.client_secret;
+          activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
+          activePaymentElement = activeStripeElements.create('payment');
+          activePaymentElement.mount('#mrm-payment-element');
+          sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
+            email: email,
+            sku: pendingSku,
+            pi: data.payment_intent_id,
+          }));
+          this.textContent = 'Pay Now';
+          return;
+        }
+        this.disabled = true;
+        const { error, paymentIntent } = await stripe.confirmPayment({
+          elements: activeStripeElements,
+          confirmParams: { return_url: window.location.href }
+        });
+        if (error) {
+          errorEl.textContent = error.message || 'Payment failed.';
+          this.disabled = false;
+          return;
+        }
+        if (paymentIntent && paymentIntent.status === 'succeeded') {
+          await verifyAndGrant(paymentIntent.id, email, pendingSku);
+        }
+      };
+    }
+
     piece.querySelectorAll('.mrm-purchaseBtn').forEach(btn => {
-      btn.addEventListener('click', async function(e){
+      btn.addEventListener('click', function(e){
         e.preventDefault();
         const offerEl = btn.closest('.mrm-offer');
         const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
         if(!sku){ alert('Missing SKU.'); return; }
-
-        const email = prompt('Enter your email:');
-        if(!email){ return; }
-
-        const piRes = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ sku: sku, email: email, context: { piece_type: offerEl.dataset.type || '', piece_slug: getSlugFromUrl() } })
-        });
-        const piData = await piRes.json();
-        if(!piRes.ok || !piData.ok){ alert(piData.message||'Error creating payment'); return; }
-
-        const stripeInstance = ensureStripe(piData.publishableKey || window.__mrmStripePk || '');
-        if (!stripeInstance) { alert('Stripe is not configured.'); return; }
-        stripe = stripeInstance;
-        window.__mrmStripePk = piData.publishableKey || window.__mrmStripePk || '';
-
-        sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
-          email: email,
-          sku: sku,
-          pi: piData.payment_intent_id,
-        }));
-
-        const { payBtn, errorEl } = openPaymentModal(piData.client_secret, priceDisplay);
-
-        payBtn.onclick = async () => {
-          payBtn.disabled = true;
-          const { error, paymentIntent } = await stripe.confirmPayment({
-            elements: activeStripeElements,
-            confirmParams: { return_url: window.location.href }
-          });
-          if (error) {
-            errorEl.textContent = error.message || 'Payment failed.';
-            payBtn.disabled = false;
-            return;
-          }
-          if (paymentIntent && paymentIntent.status === 'succeeded') {
-            await verifyAndGrant(paymentIntent.id, email, sku);
-          }
-        };
+        pendingSku = sku;
+        pendingClientSecret = '';
+        if (activePaymentElement) {
+          activePaymentElement.unmount();
+          activePaymentElement = null;
+        }
+        openPaymentModal(priceDisplay);
       });
     });
 
@@ -1265,9 +1306,9 @@ a{ -webkit-tap-highlight-color:transparent; }
       btn.addEventListener('click', function(e){
         e.preventDefault();
         const offerEl = btn.closest('.mrm-offer');
-        const slug = offerEl ? (offerEl.dataset.productSlug || '') : '';
-        if (!slug) { alert('Missing offer product slug. Check Pieces Catalog offer config.'); return; }
-        openOtpModal(slug);
+        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
+        if (!sku) { alert('Missing offer product slug.'); return; }
+        openOtpModal(sku);
       });
     });
   }
