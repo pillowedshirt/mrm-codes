@@ -50,6 +50,11 @@ class MRM_Payments_Hub_Single {
     return $wpdb->prefix . 'mrm_sheet_music_access';
   }
 
+  private function table_customers() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_customers';
+  }
+
   private function install_or_upgrade_db() {
     global $wpdb;
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -58,6 +63,7 @@ class MRM_Payments_Hub_Single {
     $orders = $this->table_orders();
     $links  = $this->table_links();
     $access = $this->table_sheet_music_access();
+    $customers = $this->table_customers();
 
     $sql_orders = "CREATE TABLE {$orders} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -106,9 +112,21 @@ class MRM_Payments_Hub_Single {
       KEY email_sku_idx (email_hash, sku)
     ) {$charset};";
 
+    $sql_customers = "CREATE TABLE {$customers} (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      email_hash CHAR(64) NOT NULL,
+      stripe_customer_id VARCHAR(255) NOT NULL,
+      stripe_payment_method_id VARCHAR(255) NULL,
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY email_hash_idx (email_hash)
+    ) {$charset};";
+
     dbDelta($sql_orders);
     dbDelta($sql_links);
     dbDelta($sql_access);
+    dbDelta($sql_customers);
   }
 
   /* =========================================================
@@ -187,6 +205,13 @@ class MRM_Payments_Hub_Single {
         'product_type' => 'lesson',
         'active' => 1,
       ),
+      'all-sheet-music' => array(
+        'label' => 'All Sheet Music Access',
+        'amount_cents' => 0,
+        'currency' => 'usd',
+        'product_type' => 'sheet_music',
+        'active' => 1,
+      ),
     );
 
     foreach ($defaults as $sku => $cfg) {
@@ -222,6 +247,70 @@ class MRM_Payments_Hub_Single {
     $text = preg_replace('/-+/', '-', $text);
     $text = trim($text, '-');
     return $text ?: 'untitled';
+  }
+
+  /**
+   * Look up or create a Stripe Customer for an email.
+   */
+  private function get_or_create_customer($email) {
+    $email_hash = $this->email_hash($email);
+    global $wpdb;
+    $table = $this->table_customers();
+    $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE email_hash=%s", $email_hash), ARRAY_A);
+    if ($row && $row['stripe_customer_id']) return $row['stripe_customer_id'];
+
+    $resp = $this->stripe_api_request('POST', '/v1/customers', array('email' => $email));
+    if (is_wp_error($resp)) return null;
+    $customer_id = $resp['id'];
+
+    if ($row) {
+      $wpdb->update($table, array(
+        'stripe_customer_id' => $customer_id,
+        'updated_at' => current_time('mysql'),
+      ), array('email_hash' => $email_hash), array('%s','%s'), array('%s'));
+    } else {
+      $wpdb->insert($table, array(
+        'email_hash' => $email_hash,
+        'stripe_customer_id' => $customer_id,
+        'created_at' => current_time('mysql'),
+        'updated_at' => current_time('mysql'),
+      ), array('%s','%s','%s','%s'));
+    }
+
+    return $customer_id;
+  }
+
+  /**
+   * Create a SetupIntent to save a payment method for future off-session charges.
+   */
+  private function create_setup_intent($customer_id) {
+    return $this->stripe_api_request('POST', '/v1/setup_intents', array(
+      'customer' => $customer_id,
+      'payment_method_types[]' => 'card',
+    ));
+  }
+
+  /**
+   * Persist a saved payment method ID for a customer. Call this after a SetupIntent succeeds.
+   */
+  private function save_payment_method_for_customer($email, $payment_method_id) {
+    $email_hash = $this->email_hash($email);
+    global $wpdb;
+    $table = $this->table_customers();
+    $wpdb->update($table, array(
+      'stripe_payment_method_id' => $payment_method_id,
+      'updated_at' => current_time('mysql'),
+    ), array('email_hash' => $email_hash), array('%s','%s'), array('%s'));
+  }
+
+  /**
+   * Retrieve saved payment method for customer (returns null if none).
+   */
+  private function get_saved_payment_method($email) {
+    $email_hash = $this->email_hash($email);
+    global $wpdb;
+    $table = $this->table_customers();
+    return $wpdb->get_var($wpdb->prepare("SELECT stripe_payment_method_id FROM {$table} WHERE email_hash=%s", $email_hash));
   }
 
   /**
@@ -297,16 +386,21 @@ class MRM_Payments_Hub_Single {
     );
     if ($description) $params['description'] = $description;
 
-    foreach ((array)$metadata as $k => $v) {
-      $k = preg_replace('/[^a-zA-Z0-9_\-]/', '_', (string)$k);
-      $params["metadata[{$k}]"] = (string)$v;
-    }
+    $params = $this->apply_metadata_to_params($params, $metadata);
 
     return $this->stripe_api_request('POST', '/v1/payment_intents', $params);
   }
 
   private function stripe_retrieve_payment_intent($pi_id) {
     return $this->stripe_api_request('GET', '/v1/payment_intents/' . rawurlencode((string)$pi_id));
+  }
+
+  private function apply_metadata_to_params($params, $metadata) {
+    foreach ((array)$metadata as $k => $v) {
+      $k = preg_replace('/[^a-zA-Z0-9_\-]/', '_', (string)$k);
+      $params["metadata[{$k}]"] = (string)$v;
+    }
+    return $params;
   }
 
   /* =========================================================
@@ -458,6 +552,18 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/setup-intent', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_create_setup_intent'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/charge-saved', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_charge_saved_method'),
+      'permission_callback' => '__return_true',
+    ));
+
     register_rest_route('mrm-pay/v1', '/verify-payment-intent', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_verify_payment_intent'),
@@ -506,6 +612,8 @@ class MRM_Payments_Hub_Single {
     $sku = $this->sanitize_sku($data['sku'] ?? '');
     $email = sanitize_email((string)($data['email'] ?? ''));
     $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+    $save_card = !empty($data['save_card']);
+    $amount_override = isset($data['amount_override_cents']) ? (int)$data['amount_override_cents'] : 0;
 
     if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
     if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
@@ -517,6 +625,9 @@ class MRM_Payments_Hub_Single {
     $currency = (string)($p['currency'] ?? 'usd');
     $product_type = (string)($p['product_type'] ?? 'unknown');
 
+    if ($amount_override > 0) {
+      $amount = $amount_override;
+    }
     if ($amount <= 0) return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid product price.'), 400);
 
     $email_hash = $this->email_hash($email);
@@ -530,7 +641,24 @@ class MRM_Payments_Hub_Single {
 
     $description = ($product_type === 'lesson') ? 'MRM Lesson' : 'MRM Sheet Music';
 
-    $pi = $this->stripe_create_payment_intent($amount, $currency, $metadata, $description);
+    $params = array(
+      'amount' => $amount,
+      'currency' => $currency,
+      'automatic_payment_methods[enabled]' => 'true',
+    );
+    if ($description) $params['description'] = $description;
+
+    if ($save_card) {
+      $customer_id = $this->get_or_create_customer($email);
+      if (!$customer_id) {
+        return new WP_REST_Response(array('ok'=>false,'message'=>'Could not create customer.'), 500);
+      }
+      $params['customer'] = $customer_id;
+      $params['setup_future_usage'] = 'off_session';
+    }
+
+    $params = $this->apply_metadata_to_params($params, $metadata);
+    $pi = $this->stripe_api_request('POST', '/v1/payment_intents', $params);
     if (is_wp_error($pi)) {
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
     }
@@ -553,9 +681,75 @@ class MRM_Payments_Hub_Single {
     ), 200);
   }
 
+  public function rest_create_setup_intent(WP_REST_Request $req) {
+    $email = sanitize_email((string) ($req->get_param('email') ?? ''));
+    if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+
+    $customer_id = $this->get_or_create_customer($email);
+    if (!$customer_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Could not create customer.'), 500);
+
+    $si = $this->create_setup_intent($customer_id);
+    if (is_wp_error($si)) return new WP_REST_Response(array('ok'=>false,'message'=>$si->get_error_message()), 500);
+
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'client_secret' => (string)($si['client_secret'] ?? ''),
+      'customer_id' => $customer_id,
+    ), 200);
+  }
+
+  public function rest_charge_saved_method(WP_REST_Request $req) {
+    $email = sanitize_email((string) ($req->get_param('email') ?? ''));
+    $sku   = $this->sanitize_sku($req->get_param('sku') ?? '');
+    if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+    if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
+
+    $p = $this->get_product($sku);
+    if (!$p || empty($p['active'])) return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
+
+    $payment_method_id = $this->get_saved_payment_method($email);
+    if (!$payment_method_id) return new WP_REST_Response(array('ok'=>false,'message'=>'No saved payment method.'), 400);
+
+    $amount = (int) ($p['amount_cents'] ?? 0);
+    $currency = (string) ($p['currency'] ?? 'usd');
+    $product_type = (string) ($p['product_type'] ?? 'unknown');
+    $email_hash = $this->email_hash($email);
+
+    $metadata = $this->build_metadata($sku, $product_type, $email_hash, array(), $p);
+    $order_id = $this->create_order($email_hash, $sku, $product_type, $amount, $currency, $metadata);
+    $metadata['mrm_order_id'] = (string) $order_id;
+
+    $params = array(
+      'amount' => $amount,
+      'currency' => $currency,
+      'customer' => $this->get_or_create_customer($email),
+      'payment_method' => $payment_method_id,
+      'off_session' => 'true',
+      'confirm' => 'true',
+      'metadata[mrm_sku]' => $sku,
+    );
+    $params = $this->apply_metadata_to_params($params, $metadata);
+
+    $pi = $this->stripe_api_request('POST', '/v1/payment_intents', $params);
+    if (is_wp_error($pi)) return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
+
+    $this->attach_payment_intent_to_order($order_id, (string) $pi['id'], (string) ($pi['status'] ?? ''));
+    $ok = ((string) ($pi['status'] ?? '')) === 'succeeded';
+    if ($ok && $product_type === 'sheet_music') {
+      $this->grant_sheet_music_access($email_hash, $sku, 'stripe_pi', (string) $pi['id']);
+    }
+
+    return new WP_REST_Response(array(
+      'ok' => $ok,
+      'status' => (string) ($pi['status'] ?? ''),
+      'order_id' => $order_id,
+    ), 200);
+  }
+
   public function rest_verify_payment_intent(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
     $pi_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
+    $email = sanitize_email((string)($data['email'] ?? ''));
 
     if (!$pi_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing payment_intent_id.'), 400);
 
@@ -570,6 +764,13 @@ class MRM_Payments_Hub_Single {
     if ($order) {
       $new_status = $ok ? 'paid' : (($status === 'requires_payment_method' || $status === 'canceled') ? 'failed' : 'created');
       $this->update_order_status_from_pi($pi_id, $new_status, $status, $pi['metadata'] ?? null);
+    }
+
+    if ($ok && $email && is_email($email) && !empty($pi['charges']['data'][0]['payment_method'])) {
+      $payment_method_id = (string) $pi['charges']['data'][0]['payment_method'];
+      if ($payment_method_id) {
+        $this->save_payment_method_for_customer($email, $payment_method_id);
+      }
     }
 
     return new WP_REST_Response(array(
@@ -634,7 +835,15 @@ class MRM_Payments_Hub_Single {
       "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
       $email_hash, $sku
     ));
-    if ($existing) return true;
+    if ($existing) {
+      if (preg_match('/-complete-package$/', $sku)) {
+        $base = preg_replace('/-complete-package$/', '', $sku);
+        $this->grant_sheet_music_access($email_hash, $base . '-fundamentals', 'bundle', $source_id);
+        $this->grant_sheet_music_access($email_hash, $base . '-trombone-euphonium', 'bundle', $source_id);
+        $this->grant_sheet_music_access($email_hash, $base . '-tuba', 'bundle', $source_id);
+      }
+      return true;
+    }
 
     $ins = $wpdb->insert($table, array(
       'email_hash' => $email_hash,
@@ -644,6 +853,13 @@ class MRM_Payments_Hub_Single {
       'source' => $source,
       'source_id' => $source_id,
     ), array('%s','%s','%s','%s','%s','%s'));
+
+    if ($ins && preg_match('/-complete-package$/', $sku)) {
+      $base = preg_replace('/-complete-package$/', '', $sku);
+      $this->grant_sheet_music_access($email_hash, $base . '-fundamentals', 'bundle', $source_id);
+      $this->grant_sheet_music_access($email_hash, $base . '-trombone-euphonium', 'bundle', $source_id);
+      $this->grant_sheet_music_access($email_hash, $base . '-tuba', 'bundle', $source_id);
+    }
 
     return (bool)$ins;
   }
