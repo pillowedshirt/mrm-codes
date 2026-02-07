@@ -26,10 +26,6 @@ class MRM_Payments_Hub_Single {
 
     register_activation_hook(__FILE__, array($this, 'on_activate'));
 
-    // Re‑ensure lesson defaults whenever settings are updated
-    add_action('update_option_' . self::OPT_SETTINGS, function($old_value, $new_value) {
-      $this->ensure_default_products();
-    }, 10, 2);
   }
 
   /* =========================================================
@@ -38,7 +34,6 @@ class MRM_Payments_Hub_Single {
 
   public function on_activate() {
     $this->install_or_upgrade_db();
-    $this->ensure_default_products();
   }
 
   private function table_orders() {
@@ -885,23 +880,34 @@ class MRM_Payments_Hub_Single {
       );
 
       foreach ($skus as $index => $sku_raw) {
+        $label_raw = sanitize_text_field((string)($labels[$index] ?? ''));
+        $type = sanitize_text_field((string)($types[$index] ?? 'sheet_music'));
+        if (!in_array($type, $allowed_types, true)) $type = 'lesson';
+        $category = sanitize_text_field((string)($categories[$index] ?? ''));
+        if (!in_array($category, $allowed_categories[$type], true)) {
+          $category = $allowed_categories[$type][0];
+        }
+
         $sku = $this->sanitize_sku($sku_raw);
+        if (!$sku) {
+          $label_slug = sanitize_title($label_raw);
+          if ($type === 'sheet_music') {
+            $sku = 'piece-' . $label_slug . '-' . $category;
+          } else {
+            $sku = 'lesson_' . $category;
+          }
+          $sku = $this->sanitize_sku($sku);
+        }
         if (!$sku) continue;
         if (!empty($deletes[$index])) {
           unset($products[$sku]);
           continue;
         }
 
-        $label = sanitize_text_field((string)($labels[$index] ?? $sku));
+        $label = $label_raw !== '' ? $label_raw : $sku;
         $amount = intval($amounts[$index] ?? 0);
         $currency = sanitize_text_field((string)($currencies[$index] ?? 'usd'));
         if (!in_array($currency, $allowed_currencies, true)) $currency = 'usd';
-        $type = sanitize_text_field((string)($types[$index] ?? 'lesson'));
-        if (!in_array($type, $allowed_types, true)) $type = 'lesson';
-        $category = sanitize_text_field((string)($categories[$index] ?? ''));
-        if (!in_array($category, $allowed_categories[$type], true)) {
-          $category = $allowed_categories[$type][0];
-        }
 
         $composer_pct = null;
         if (isset($composer_pcts[$index]) && $composer_pcts[$index] !== '') {
@@ -947,7 +953,6 @@ class MRM_Payments_Hub_Single {
       }
 
       $this->save_products($products);
-      $this->ensure_default_products();
       add_settings_error('mrm_pay_hub', 'products_saved', 'Products saved.', 'updated');
     }
   }
@@ -1074,10 +1079,9 @@ class MRM_Payments_Hub_Single {
         <div class="card" style="padding:16px;border:1px dashed #ccd0d4;">
           <h3 style="margin-top:0;">Add New Product</h3>
           <p>
-            <label>SKU<br />
-              <input type="text" name="sku[<?php echo esc_attr($new_index); ?>]" value="" class="regular-text" />
-            </label>
+            SKU will be generated automatically based on the label and type.
           </p>
+          <input type="hidden" name="sku[<?php echo esc_attr($new_index); ?>]" value="" />
           <p>
             <label>Label<br />
               <input type="text" name="label[<?php echo esc_attr($new_index); ?>]" value="" class="regular-text" />
@@ -1157,12 +1161,45 @@ class MRM_Payments_Hub_Single {
             if (keys.length) categorySelect.value = keys[0];
           }
         }
+        function slugify(s) {
+          return String(s || '')
+            .toLowerCase()
+            .trim()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        }
+        function updateNewSku(card) {
+          var labelInput = card.querySelector('input[name^="label"]');
+          var typeSelect = card.querySelector('select[name^="product_type"]');
+          var catSelect = card.querySelector('select[name^="category"]');
+          var skuInput = card.querySelector('input[name^="sku"]');
+          if (!labelInput || !typeSelect || !catSelect || !skuInput) return;
+          var labelSlug = slugify(labelInput.value);
+          var type = typeSelect.value;
+          var category = catSelect.value;
+          var sku;
+          if (type === 'sheet_music') {
+            sku = 'piece-' + labelSlug + '-' + category;
+          } else {
+            sku = 'lesson_' + category;
+          }
+          skuInput.value = sku;
+        }
         document.querySelectorAll('.mrm-product-type').forEach(function(select) {
           select.addEventListener('change', function() {
             updateCategory(select);
           });
           updateCategory(select);
         });
+        var newCard = document.querySelector('.mrm-products-grid .card:last-child');
+        if (newCard) {
+          ['input', 'change'].forEach(function(evt) {
+            newCard.addEventListener(evt, function() {
+              updateNewSku(newCard);
+            });
+          });
+          updateNewSku(newCard);
+        }
       })();
     </script>
     <?php
@@ -1243,43 +1280,6 @@ class MRM_Payments_Hub_Single {
 
       <?php echo $this->render_products_ui(); ?>
 
-      <hr />
-
-      <h2>Sheet Music SKU Generator</h2>
-      <p>Pattern: <code>piece-&lt;title&gt;-&lt;type&gt;</code> with uniqueness auto-suffix.</p>
-      <form method="post" style="max-width:800px;">
-        <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
-        <table class="form-table">
-          <tr>
-            <th scope="row"><label for="gen_title">Piece Title</label></th>
-            <td><input type="text" id="gen_title" name="gen_title" value="<?php echo esc_attr((string)($_POST['gen_title'] ?? '')); ?>" class="regular-text" /></td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="gen_type">Type</label></th>
-            <td>
-              <select id="gen_type" name="gen_type">
-                <?php
-                  $t = (string)($_POST['gen_type'] ?? 'fundamentals');
-                  $opts = array('fundamentals','trombone-euphonium','tuba','complete-package');
-                  foreach ($opts as $o) {
-                    $sel = ($t === $o) ? 'selected' : '';
-                    echo '<option value="'.esc_attr($o).'" '.$sel.'>'.esc_html($o).'</option>';
-                  }
-                ?>
-              </select>
-            </td>
-          </tr>
-        </table>
-        <p class="submit">
-          <button type="submit" class="button">Generate SKU</button>
-        </p>
-      </form>
-      <?php
-        if (!empty($_POST['gen_title']) && isset($_POST['gen_type']) && isset($_POST['mrm_pay_hub_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_nonce'], 'mrm_pay_hub_save')) {
-          $gen_sku = $this->generate_sheet_music_sku((string)$_POST['gen_title'], (string)$_POST['gen_type']);
-          echo '<p><strong>Generated SKU:</strong> <code>'.esc_html($gen_sku).'</code></p>';
-        }
-      ?>
       <hr />
       <h2>REST Endpoints</h2>
       <ul>
