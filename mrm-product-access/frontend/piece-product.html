@@ -85,6 +85,38 @@ a{ -webkit-tap-highlight-color:transparent; }
 .section + .section{ border-top:1px solid rgba(0,0,0,0.08); }
 .center{ display:flex; justify-content:center; }
 
+/* PAYMENT MODAL */
+.modal-overlay{
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.modal{
+  background: #fff;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  width: 90%;
+  max-width: 480px;
+  padding: 24px;
+}
+.modal-header{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid rgba(0,0,0,0.1);
+  padding-bottom: 8px;
+}
+.modal-body{
+  margin-top: 20px;
+}
+
 /* PDF */
 .pdf-preview{
   width: min(860px, 100%);
@@ -702,14 +734,21 @@ a{ -webkit-tap-highlight-color:transparent; }
           </div>
         </div>
 
+        <!-- Payment Overlay -->
         <div id="mrm-payment-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
           <div class="modal" role="dialog" aria-modal="true">
-            <div class="modal-header"><h2>Purchase</h2><button class="close" id="payment-close">×</button></div>
+            <div class="modal-header">
+              <h2>Purchase</h2>
+              <button id="payment-close" class="close">×</button>
+            </div>
             <div class="modal-body">
               <p id="payment-instructions"></p>
-              <input type="email" id="mrm-payment-email" placeholder="Your email" required style="width:100%;padding:8px;margin-bottom:12px;" />
               <div id="mrm-payment-element"></div>
-              <button id="mrm-pay-btn" class="button-primary">Pay</button>
+              <!-- Spacer between Stripe form and email field -->
+              <div style="height:50px;"></div>
+              <input type="email" id="mrm-payment-email" placeholder="Your email" required
+                     style="width:100%;padding:12px;border:1px solid #ccc;border-radius:8px;" />
+              <button id="mrm-pay-btn" class="button-primary" style="margin-top:12px;">Pay</button>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
             </div>
           </div>
@@ -782,25 +821,28 @@ a{ -webkit-tap-highlight-color:transparent; }
   function openPaymentModal(priceDisplay) {
     const overlay = document.getElementById('mrm-payment-overlay');
     const payBtn = document.getElementById('mrm-pay-btn');
-    const closeBtn = document.getElementById('payment-close');
     const errorEl = document.getElementById('mrm-payment-error');
     const instructions = document.getElementById('payment-instructions');
     const emailInput = document.getElementById('mrm-payment-email');
 
     instructions.textContent = `${priceDisplay} – please enter your email and card details.`;
-    overlay.style.display = 'block';
+    overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden', 'false');
     errorEl.textContent = '';
     payBtn.disabled = false;
     payBtn.textContent = 'Pay';
     emailInput.value = '';
 
-    const closeModal = () => {
+    if (activePaymentElement) {
+      activePaymentElement.unmount();
+      activePaymentElement = null;
+      activeStripeElements = null;
+    }
+
+    document.getElementById('payment-close').onclick = function() {
       overlay.style.display = 'none';
-      overlay.setAttribute('aria-hidden', 'true');
-      if (activePaymentElement) {
-        activePaymentElement.unmount();
-      }
+      overlay.setAttribute('aria-hidden','true');
+      if (activePaymentElement) activePaymentElement.unmount();
       activePaymentElement = null;
       activeStripeElements = null;
       pendingSku = '';
@@ -808,9 +850,7 @@ a{ -webkit-tap-highlight-color:transparent; }
       errorEl.textContent = '';
     };
 
-    closeBtn.onclick = closeModal;
-
-    return { payBtn, errorEl, closeModal };
+    return { payBtn, errorEl };
   }
 
   async function verifyAndGrant(piId, email, sku){
