@@ -271,7 +271,7 @@ class MRM_Payments_Hub_Single {
    * fundamentals, trombone-euphonium, tuba or complete-package.  If the base
    * SKU already exists, a numeric suffix is added to make it unique.
    */
-  private function generate_sheet_music_sku($title, $type) {
+  private function generate_sheet_music_sku($title, $type, $current_sku = '') {
     $type = strtolower(trim((string)$type));
     $allowed = array('fundamentals','trombone-euphonium','tuba','complete-package');
     if (!in_array($type, $allowed, true)) $type = 'fundamentals';
@@ -281,6 +281,10 @@ class MRM_Payments_Hub_Single {
 
     $sku = $base;
     $all = $this->all_products();
+    $current_sku = $this->sanitize_sku($current_sku);
+    if ($current_sku && isset($all[$current_sku])) {
+      unset($all[$current_sku]);
+    }
     $i = 2;
     while (isset($all[$sku])) {
       $sku = $base . '-' . $i;
@@ -863,6 +867,7 @@ class MRM_Payments_Hub_Single {
       $products = is_array($existing) ? $existing : array();
 
       $skus = isset($_POST['sku']) ? (array)$_POST['sku'] : array();
+      $original_skus = isset($_POST['original_sku']) ? (array)$_POST['original_sku'] : array();
       $labels = isset($_POST['label']) ? (array)$_POST['label'] : array();
       $amounts = isset($_POST['amount_cents']) ? (array)$_POST['amount_cents'] : array();
       $currencies = isset($_POST['currency']) ? (array)$_POST['currency'] : array();
@@ -888,21 +893,27 @@ class MRM_Payments_Hub_Single {
           $category = $allowed_categories[$type][0];
         }
 
-        $sku = $this->sanitize_sku($sku_raw);
-        if (!$sku) {
-          $label_slug = sanitize_title($label_raw);
-          if ($type === 'sheet_music') {
-            $sku = 'piece-' . $label_slug . '-' . $category;
-          } else {
-            $sku = 'lesson_' . $category;
-          }
-          $sku = $this->sanitize_sku($sku);
-        }
-        if (!$sku) continue;
+        $original_sku = $this->sanitize_sku((string)($original_skus[$index] ?? ''));
+        $current_sku = $original_sku ? $original_sku : $this->sanitize_sku($sku_raw);
         if (!empty($deletes[$index])) {
-          unset($products[$sku]);
+          if ($current_sku) {
+            unset($products[$current_sku]);
+          }
           continue;
         }
+        if ($type === 'sheet_music') {
+          $sku = $this->generate_sheet_music_sku($label_raw, $category, $current_sku);
+          if ($current_sku && $current_sku !== $sku) {
+            unset($products[$current_sku]);
+          }
+        } else {
+          $sku = 'lesson_' . $category;
+          if ($current_sku && $current_sku !== $sku) {
+            unset($products[$current_sku]);
+          }
+        }
+        $sku = $this->sanitize_sku($sku);
+        if (!$sku) continue;
 
         $label = $label_raw !== '' ? $label_raw : $sku;
         $amount = intval($amounts[$index] ?? 0);
@@ -1009,7 +1020,13 @@ class MRM_Payments_Hub_Single {
         ?>
           <div class="card" style="padding:16px;">
             <h3 style="margin-top:0;"><?php echo esc_html($sku); ?></h3>
-            <input type="hidden" name="sku[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr($sku); ?>" />
+            <p>
+              <label>SKU<br />
+                <input type="text" class="regular-text mrm-sku-display" value="<?php echo esc_attr($sku); ?>" disabled />
+                <input type="hidden" name="sku[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr($sku); ?>" />
+                <input type="hidden" name="original_sku[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr($sku); ?>" />
+              </label>
+            </p>
             <p>
               <label>Label<br />
                 <input type="text" name="label[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['label'] ?? $sku)); ?>" class="regular-text" />
@@ -1081,7 +1098,13 @@ class MRM_Payments_Hub_Single {
           <p>
             SKU will be generated automatically based on the label and type.
           </p>
-          <input type="hidden" name="sku[<?php echo esc_attr($new_index); ?>]" value="" />
+          <p>
+            <label>SKU<br />
+              <input type="text" class="regular-text mrm-sku-display" value="" disabled />
+              <input type="hidden" name="sku[<?php echo esc_attr($new_index); ?>]" value="" />
+              <input type="hidden" name="original_sku[<?php echo esc_attr($new_index); ?>]" value="" />
+            </label>
+          </p>
           <p>
             <label>Label<br />
               <input type="text" name="label[<?php echo esc_attr($new_index); ?>]" value="" class="regular-text" />
@@ -1162,17 +1185,17 @@ class MRM_Payments_Hub_Single {
           }
         }
         function slugify(s) {
-          return String(s || '')
-            .toLowerCase()
-            .trim()
-            .replace(/[^a-z0-9]+/g, '-')
-            .replace(/^-+|-+$/g, '');
+          var text = String(s || '').trim().toLowerCase();
+          text = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          text = text.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+          return text || 'untitled';
         }
-        function updateNewSku(card) {
+        function updateSku(card) {
           var labelInput = card.querySelector('input[name^="label"]');
           var typeSelect = card.querySelector('select[name^="product_type"]');
           var catSelect = card.querySelector('select[name^="category"]');
           var skuInput = card.querySelector('input[name^="sku"]');
+          var skuDisplay = card.querySelector('.mrm-sku-display');
           if (!labelInput || !typeSelect || !catSelect || !skuInput) return;
           var labelSlug = slugify(labelInput.value);
           var type = typeSelect.value;
@@ -1184,22 +1207,23 @@ class MRM_Payments_Hub_Single {
             sku = 'lesson_' + category;
           }
           skuInput.value = sku;
+          if (skuDisplay) skuDisplay.value = sku;
         }
         document.querySelectorAll('.mrm-product-type').forEach(function(select) {
           select.addEventListener('change', function() {
             updateCategory(select);
+            updateSku(select.closest('.card'));
           });
           updateCategory(select);
         });
-        var newCard = document.querySelector('.mrm-products-grid .card:last-child');
-        if (newCard) {
+        document.querySelectorAll('.mrm-products-grid .card').forEach(function(card) {
           ['input', 'change'].forEach(function(evt) {
-            newCard.addEventListener(evt, function() {
-              updateNewSku(newCard);
+            card.addEventListener(evt, function() {
+              updateSku(card);
             });
           });
-          updateNewSku(newCard);
-        }
+          updateSku(card);
+        });
       })();
     </script>
     <?php
