@@ -812,10 +812,23 @@ a{ -webkit-tap-highlight-color:transparent; }
     canvas.height = Math.floor(cssH * dpr);
   }
 
-  function getSlugFromUrl() {
-    // expects /product-slug/ (last non-empty segment)
+  function mrmSlugify(input) {
+    // Match Payments Hub style: lowercase, hyphenate, strip unsafe chars
+    return String(input || '')
+      .trim()
+      .toLowerCase()
+      .replace(/%[0-9a-f]{2}/gi, '-')     // guard against encoded remnants
+      .replace(/&/g, 'and')
+      .replace(/[^a-z0-9]+/g, '-')       // anything non-alnum -> hyphen
+      .replace(/-+/g, '-')               // collapse hyphens
+      .replace(/^-|-$/g, '');            // trim hyphens
+  }
+
+  function getPieceSlugFromUrl() {
+    // expects /piece-slug/ (last non-empty segment)
     const parts = window.location.pathname.split('/').filter(Boolean);
-    return (parts[parts.length - 1] || '').trim();
+    const raw = (parts[parts.length - 1] || '').trim();
+    return mrmSlugify(raw);
   }
 
   function openPaymentModal(priceDisplay) {
@@ -923,16 +936,54 @@ a{ -webkit-tap-highlight-color:transparent; }
     const subtitle     = offer.subtitle || '';
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
-    const slug = getSlugFromUrl();
-    const typeMap = {
-      'Core Developmental Exercises': 'fundamentals',
-      'Fundamentals': 'fundamentals',
-      'Trombone/Euphonium Full Piece': 'trombone-euphonium',
-      'Tuba Full Piece': 'tuba',
-      'Complete Package': 'complete-package'
+    const pieceSlug = getPieceSlugFromUrl();
+
+    // Normalize the incoming title so minor text differences don't break SKU generation
+    const normalizedTitle = mrmSlugify(displayTitle);
+
+    // Accept multiple variants safely
+    const typeSlugMap = {
+      'core-developmental-exercises': 'fundamentals',
+      'developmental-exercises': 'fundamentals',
+      'fundamentals': 'fundamentals',
+
+      'trombone-euphonium-full-piece': 'trombone-euphonium',
+      'trombone-euphonium': 'trombone-euphonium',
+      'trombone-euphonium-full': 'trombone-euphonium',
+
+      'tuba-full-piece': 'tuba',
+      'tuba-full': 'tuba',
+      'tuba': 'tuba',
+
+      'complete-package': 'complete-package',
+      'complete': 'complete-package'
     };
-    const typeSlug = typeMap[displayTitle] || '';
-    const productSlug = `piece-${slug}-${typeSlug}`;
+
+    const typeSlug = typeSlugMap[normalizedTitle] || '';
+
+    // HARD FAIL if we can't compute a valid SKU (prevents silent `piece-xyz-` bugs)
+    if (!typeSlug) {
+      console.error('[MRM] Unknown offer title -> cannot map to SKU type:', displayTitle, normalizedTitle);
+      // Return a disabled card so you immediately see the problem on the page
+      const wrap = document.createElement('div');
+      wrap.className = 'offer mrm-offer';
+      wrap.innerHTML = `
+        <div class="offer-head">
+          <div class="offer-head-left">
+            <h3 class="offer-title">${escHtml(displayTitle || 'Unknown Offer')}</h3>
+          </div>
+        </div>
+        <div class="offer-body">
+          <div style="grid-column:1 / -1; padding:12px; border:1px solid rgba(255,0,0,0.25); border-radius:14px;">
+            <strong>Configuration error:</strong> This offer title doesn't map to a valid SKU type.<br>
+            Open DevTools Console to see details.
+          </div>
+        </div>
+      `;
+      return wrap;
+    }
+
+    const productSlug = `piece-${pieceSlug}-${typeSlug}`;
 
     const wrap = document.createElement('div');
     wrap.className = 'offer mrm-offer';
@@ -1006,7 +1057,7 @@ a{ -webkit-tap-highlight-color:transparent; }
     if (!pieceEl) return;
 
     const apiBase = (pieceEl.dataset.apiBase || '/wp-json/mrm/v1');
-    const slug = getSlugFromUrl();
+    const slug = getPieceSlugFromUrl();
     if (!slug) {
       pieceEl.querySelector('.piece-title').textContent = 'Missing slug in URL.';
       return;
@@ -1283,7 +1334,7 @@ a{ -webkit-tap-highlight-color:transparent; }
           const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ sku: pendingSku, email: email, context: { piece_slug: getSlugFromUrl() } })
+            body: JSON.stringify({ sku: pendingSku, email: email, context: { piece_slug: getPieceSlugFromUrl() } })
           });
           const data = await res.json();
           if (!res.ok || !data.ok) {
@@ -1333,6 +1384,7 @@ a{ -webkit-tap-highlight-color:transparent; }
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
         if(!sku){ alert('Missing SKU.'); return; }
         pendingSku = sku;
+        console.log('[MRM] Purchase clicked. Sending SKU:', pendingSku);
         pendingClientSecret = '';
         if (activePaymentElement) {
           activePaymentElement.unmount();
