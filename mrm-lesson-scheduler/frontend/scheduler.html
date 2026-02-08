@@ -2175,7 +2175,9 @@ function ensureLegacyBookingHandler(){
       const len = effectiveMinutes === 60 ? '60' : '30';
       const mode = lessonType === 'online' ? 'online' : 'inperson';
       const sku = `lesson_${len}_${mode}`;
-      const count = selectedSlots.length;
+      // IMPORTANT: count must match the slots we’re actually booking for THIS instructor
+      // (selectedSlots is global and may include other instructors / other context)
+      const count = relevantSelected.length;
 
       const prepay = document.getElementById('mrm-prepay-opt')?.checked;
       const autopay = document.getElementById('mrm-autopay-opt')?.checked;
