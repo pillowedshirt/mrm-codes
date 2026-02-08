@@ -1978,37 +1978,104 @@ class MRM_Product_Access {
 
 .time{ font-size: 13px; color: var(--mrm-muted); min-width: 52px; text-align:center; flex:0 0 auto; }
 
-/* Seek + Volume tracks stay black/soft; THUMB is gold */
-input.mrm-range{
-  width: 100%;
+/* ✅ MATCH piece-product.html: seek + volume sliders */
+.audio-row-seek{
   min-width: 0;
-  appearance: none;
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(0,0,0,0.10);
-  cursor: pointer;
+  width: 100%;
 }
-input.mrm-range::-webkit-slider-thumb{
-  appearance: none;
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: var(--mrm-gold);
-}
-input.mrm-range::-moz-range-thumb{
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: var(--mrm-gold);
-  border: none;
-}
-input.mrm-range::-moz-range-track{
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(0,0,0,0.10);
+.audio-row-seek .progress{
+  display:block;          /* helps ensure full width in grid/flex contexts */
+  width:100%;
+  min-width:0;
 }
 
-.volume{ display:inline-flex; align-items:center; gap:6px; color: var(--mrm-black); }
-.volume svg{ width:18px; height:18px; }
-.volume input{ width: 110px; }
+/* Seek bar */
+.progress{
+  width:100%;
+  min-width:0;
+  appearance:none;
+  -webkit-appearance:none;
+  height: 10px;
+  border-radius:999px;
+  background: rgba(0,0,0,0.10); /* same intent as piece-product's accent-soft */
+  cursor:pointer;
+}
+.progress::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  appearance:none;
+  width: 18px;
+  height: 18px;
+  border-radius:50%;
+  background: var(--mrm-black); /* ✅ knob color matches piece-product design (accent) */
+  border: none;
+}
+.progress::-moz-range-thumb{
+  width: 18px;
+  height: 18px;
+  border-radius:50%;
+  background: var(--mrm-black); /* ✅ knob color */
+  border:none;
+}
+.progress::-moz-range-track{
+  height: 10px;
+  border-radius:999px;
+  background: rgba(0,0,0,0.10);
+  border:none;
+}
+
+/* Volume row matches piece-product sizing */
+.volume{ display:inline-flex; align-items:center; gap: 8px; color: var(--mrm-black); }
+.volume svg{ width:20px; height:20px; }
+
+/* Volume slider */
+.volume input.mrm-volume{
+  width: 140px;           /* ✅ piece-product default */
+  min-width: 0;
+  appearance:none;
+  -webkit-appearance:none;
+  height: 10px;
+  border-radius:999px;
+  background: rgba(0,0,0,0.10);
+  cursor:pointer;
+}
+.volume input.mrm-volume::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  appearance:none;
+  width: 18px;
+  height: 18px;
+  border-radius:50%;
+  background: var(--mrm-black); /* ✅ knob color matches piece-product design */
+  border: none;
+}
+.volume input.mrm-volume::-moz-range-thumb{
+  width: 18px;
+  height: 18px;
+  border-radius:50%;
+  background: var(--mrm-black);
+  border:none;
+}
+.volume input.mrm-volume::-moz-range-track{
+  height: 10px;
+  border-radius:999px;
+  background: rgba(0,0,0,0.10);
+  border:none;
+}
+
+/* ✅ Mobile behavior (mirrors piece-product.html so bars fill properly) */
+@media (max-width: 620px){
+  .audio-controls{ grid-template-columns: 1fr; justify-items:center; gap: 10px; }
+  .audio-row-top{
+    width:100%;
+    display:grid;
+    grid-template-columns: 56px 1fr 1fr;
+    align-items:center;
+    column-gap:10px;
+  }
+  .audio-row-seek{ width:100%; }
+  .audio-row-seek .progress{ height:12px; }
+  .audio-row-vol{ width:100%; justify-content:center; }
+  .volume input.mrm-volume{ width: min(280px, 78vw); }
+}
     .note{
       color: var(--mrm-muted);
       font-size: 13px;
