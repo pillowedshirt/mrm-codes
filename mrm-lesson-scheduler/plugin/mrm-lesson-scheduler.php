@@ -1424,27 +1424,94 @@ class MRM_Lesson_Scheduler {
      * Availability is derived from explicit "Free" events on the calendar.
      */
     public function rest_get_availability( WP_REST_Request $request ) {
+        // =========================
+        // Inputs (canonical + legacy)
+        // =========================
+        $instructor_id = absint( $request->get_param( 'instructor_id' ) );
 
-        $instructor_id = intval( $request->get_param( 'instructor_id' ) );
-        // Canonical params
+        // Canonical params (preferred)
         $start = sanitize_text_field( (string) $request->get_param( 'start_date' ) );
         $end   = sanitize_text_field( (string) $request->get_param( 'end_date' ) );
 
-        // Legacy fallback (keep 30 days)
-        if ( ! $start ) $start = sanitize_text_field( (string) $request->get_param( 'start' ) );
-        if ( ! $end )   $end   = sanitize_text_field( (string) $request->get_param( 'end' ) );
+        // Legacy fallback (keep for 30 days)
+        if ( $start === '' ) { $start = sanitize_text_field( (string) $request->get_param( 'start' ) ); }
+        if ( $end   === '' ) { $end   = sanitize_text_field( (string) $request->get_param( 'end' ) ); }
 
-        $slot_minutes = intval( $request->get_param( 'slot_minutes' ) );
-        if ( $slot_minutes < 10 ) $slot_minutes = 0;
+        $slot_minutes = absint( $request->get_param( 'slot_minutes' ) );
 
-        if ( ! $instructor_id || ! $start || ! $end ) {
+        // =========================
+        // Diagnostics helper
+        // =========================
+        $log_prefix = 'MRM_SCHED availability: ';
+
+        // =========================
+        // Validate instructor_id
+        // =========================
+        if ( ! $instructor_id ) {
+            error_log( $log_prefix . 'missing/invalid instructor_id' );
             return new WP_REST_Response( array(
                 'ok'      => false,
-                'message' => 'Missing required parameters.'
+                'message' => 'Invalid instructor_id.',
             ), 400 );
         }
 
-        // Fetch explicit availability events from Google Calendar
+        // Confirm instructor exists (so we can log “invalid instructor_id” explicitly)
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_instructors';
+        $exists = (int) $wpdb->get_var(
+            $wpdb->prepare( "SELECT COUNT(1) FROM {$table} WHERE id = %d", $instructor_id )
+        );
+        if ( $exists <= 0 ) {
+            error_log( $log_prefix . 'invalid instructor_id=' . $instructor_id . ' (not found in DB)' );
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Instructor not found.',
+            ), 404 );
+        }
+
+        // =========================
+        // Validate date params (strict YYYY-MM-DD)
+        // =========================
+        if ( $start === '' || $end === '' ) {
+            error_log( $log_prefix . 'missing start/end date params. Got start=' . $start . ' end=' . $end );
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Missing required parameters: start_date/end_date.',
+            ), 400 );
+        }
+
+        if ( ! $this->mrm_is_valid_ymd( $start ) || ! $this->mrm_is_valid_ymd( $end ) ) {
+            error_log( $log_prefix . 'invalid date format. start=' . $start . ' end=' . $end . ' (expected YYYY-MM-DD)' );
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Invalid date format. Expected YYYY-MM-DD.',
+            ), 400 );
+        }
+
+        // Optional: basic range sanity (end >= start)
+        if ( strtotime( $end . ' 00:00:00' ) < strtotime( $start . ' 00:00:00' ) ) {
+            error_log( $log_prefix . 'invalid date range. start=' . $start . ' end=' . $end );
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Invalid date range: end_date must be >= start_date.',
+            ), 400 );
+        }
+
+        // =========================
+        // Validate slot_minutes bounds
+        // =========================
+        // Scheduler uses 15. If caller sends something weird, fall back to default-slot behavior (0).
+        if ( $slot_minutes !== 0 ) {
+            // sensible bounds: 10..180
+            if ( $slot_minutes < 10 || $slot_minutes > 180 ) {
+                error_log( $log_prefix . 'slot_minutes out of bounds: ' . $slot_minutes . ' (forcing default)' );
+                $slot_minutes = 0;
+            }
+        }
+
+        // =========================
+        // Fetch availability events from Google Calendar
+        // =========================
         $availability_events = $this->get_calendar_availability_events(
             $instructor_id,
             $start,
@@ -1453,14 +1520,17 @@ class MRM_Lesson_Scheduler {
 
         if ( empty( $availability_events ) ) {
             return new WP_REST_Response( array(
-                'ok' => true,
-                'slots' => array(),
-                'busy' => array(),
-                // Legacy alias (30 days)
-                'availability' => array(),
+                'ok'          => true,
+                'slots'       => array(),
+                'busy'        => array(),
+                // Legacy alias (keep ~30 days)
+                'availability'=> array(),
             ), 200 );
         }
 
+        // =========================
+        // Split into bookable slots
+        // =========================
         $slots = array();
 
         foreach ( $availability_events as $event ) {
@@ -1471,7 +1541,6 @@ class MRM_Lesson_Scheduler {
                 continue;
             }
 
-            // Split each availability event into bookable slots
             $event_slots = $this->split_into_lesson_slots(
                 $event_start,
                 $event_end,
@@ -1483,12 +1552,23 @@ class MRM_Lesson_Scheduler {
         }
 
         return new WP_REST_Response( array(
-            'ok' => true,
-            'slots' => array_values( $slots ),
-            'busy'  => array(), // reserved for future busy-window support
-            // Legacy alias (30 days)
-            'availability' => array_values( $slots ),
+            'ok'          => true,
+            'slots'       => array_values( $slots ),
+            'busy'        => array(), // reserved for future busy-window support
+            // Legacy alias (keep ~30 days)
+            'availability'=> array_values( $slots ),
         ), 200 );
+    }
+
+    private function mrm_is_valid_ymd( $s ) {
+        $s = (string) $s;
+        if ( ! preg_match( '/^\\d{4}-\\d{2}-\\d{2}$/', $s ) ) {
+            return false;
+        }
+        $y = (int) substr( $s, 0, 4 );
+        $m = (int) substr( $s, 5, 2 );
+        $d = (int) substr( $s, 8, 2 );
+        return checkdate( $m, $d, $y );
     }
 
     private function get_calendar_availability_events( $instructor_id, $start, $end ) {
@@ -1512,8 +1592,19 @@ class MRM_Lesson_Scheduler {
         }
 
         try {
-            $start_local = new DateTime( $start, new DateTimeZone( $tz ) );
-            $end_local   = new DateTime( $end, new DateTimeZone( $tz ) );
+            // We require strict YYYY-MM-DD from the REST layer, so interpret as local-day boundaries:
+            // - start_date => inclusive at 00:00:00
+            // - end_date   => inclusive, implemented as EXCLUSIVE upper bound (end + 1 day at 00:00:00)
+            $start_local = DateTime::createFromFormat( 'Y-m-d', $start, new DateTimeZone( $tz ) );
+            $end_local   = DateTime::createFromFormat( 'Y-m-d', $end,   new DateTimeZone( $tz ) );
+
+            if ( ! $start_local || ! $end_local ) {
+                return array();
+            }
+
+            $start_local->setTime( 0, 0, 0 );
+            $end_local->setTime( 0, 0, 0 );
+            $end_local->modify( '+1 day' ); // makes end_date inclusive
         } catch ( Exception $e ) {
             return array();
         }

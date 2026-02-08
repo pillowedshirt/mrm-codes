@@ -557,7 +557,8 @@ class MRM_Product_Access {
                     $slug = preg_replace( '/[^a-z0-9\-_]+/', '', $slug );
 
                     $name = isset( $names[ $i ] ) ? sanitize_text_field( (string) $names[ $i ] ) : '';
-                    $url  = isset( $urls[ $i ] ) ? esc_url_raw( (string) $urls[ $i ] ) : '';
+                    $raw_url = isset( $urls[ $i ] ) ? (string) $urls[ $i ] : '';
+                    $url     = $this->sanitize_track_location( $raw_url );
 
                     // Allow empty rows; store as-is; runtime ignores invalid ones
                     $rows[] = array(
@@ -1040,6 +1041,22 @@ class MRM_Product_Access {
                   .mrm-tracks-map-slug{ width: 180px; }
                   .mrm-tracks-map-name{ width: 220px; }
                   .mrm-tracks-map-url{ width: 100%; }
+                  .mrm-drag-handle{
+                    cursor: grab;
+                    user-select: none;
+                    text-align: center;
+                    font-size: 16px;
+                    opacity: 0.9;
+                  }
+                  .mrm-track-row.is-dragging{
+                    opacity: 0.55;
+                  }
+                  .mrm-order-controls{
+                    white-space: nowrap;
+                  }
+                  .mrm-order-controls .button{
+                    min-width: 34px;
+                  }
                 </style>
 
                 <?php
@@ -1050,25 +1067,41 @@ class MRM_Product_Access {
                 <table class="widefat striped mrm-tracks-map-table" id="mrmTracksMapTable" style="max-width: 1100px;">
                   <thead>
                     <tr>
+                      <th style="width:36px;"></th>
                       <th style="width:200px;">product_slug</th>
                       <th style="width:240px;">Track / PDF Display Name</th>
-                      <th>URL</th>
+                      <th>URL / Path</th>
+                      <th style="width:120px;">Order</th>
                     </tr>
                   </thead>
                   <tbody>
                     <?php foreach ( $rows as $r ) : ?>
-                      <tr>
+                      <tr class="mrm-track-row" draggable="true">
+                        <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
+
                         <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="<?php echo esc_attr( $r['product_slug'] ?? '' ); ?>" /></td>
                         <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="<?php echo esc_attr( $r['display_name'] ?? '' ); ?>" /></td>
-                        <td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="<?php echo esc_attr( $r['url'] ?? '' ); ?>" /></td>
+                        <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="<?php echo esc_attr( $r['url'] ?? '' ); ?>" /></td>
+
+                        <td class="mrm-order-controls">
+                          <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
+                          <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
+                        </td>
                       </tr>
                     <?php endforeach; ?>
 
                     <!-- Always include at least one blank row -->
-                    <tr>
+                    <tr class="mrm-track-row" draggable="true">
+                      <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
+
                       <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
                       <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="" /></td>
+
+                      <td class="mrm-order-controls">
+                        <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
+                        <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
+                      </td>
                     </tr>
                   </tbody>
                 </table>
@@ -1083,17 +1116,91 @@ class MRM_Product_Access {
                   const table = document.getElementById('mrmTracksMapTable');
                   if(!btn || !table) return;
 
-                  btn.addEventListener('click', function(){
-                    const tbody = table.querySelector('tbody');
+                  const tbody = table.querySelector('tbody');
+                  if(!tbody) return;
+
+                  function makeRow(){
                     const tr = document.createElement('tr');
+                    tr.className = 'mrm-track-row';
+                    tr.setAttribute('draggable', 'true');
                     tr.innerHTML = `
+                      <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
                       <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
                       <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="" /></td>
+                      <td class="mrm-order-controls">
+                        <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
+                        <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
+                      </td>
                     `;
+                    return tr;
+                  }
+
+                  // Add Row button
+                  btn.addEventListener('click', function(){
+                    const tr = makeRow();
                     tbody.appendChild(tr);
                     const first = tr.querySelector('input');
                     if(first) first.focus();
+                  });
+
+                  // Up/Down controls (event delegation)
+                  tbody.addEventListener('click', function(e){
+                    const up = e.target.closest('.mrm-move-up');
+                    const down = e.target.closest('.mrm-move-down');
+                    if(!up && !down) return;
+
+                    const row = e.target.closest('tr');
+                    if(!row) return;
+
+                    if(up){
+                      const prev = row.previousElementSibling;
+                      if(prev) tbody.insertBefore(row, prev);
+                    } else if(down){
+                      const next = row.nextElementSibling;
+                      if(next) tbody.insertBefore(row, next);
+                    }
+                  });
+
+                  // Drag & Drop (HTML5) - no libraries
+                  let dragRow = null;
+
+                  function isHandle(el){
+                    return !!(el && el.closest && el.closest('.mrm-drag-handle'));
+                  }
+
+                  tbody.addEventListener('dragstart', function(e){
+                    const row = e.target.closest('tr.mrm-track-row');
+                    if(!row) return;
+
+                    // Only allow dragging from the handle to avoid accidental drags while selecting text
+                    if(!isHandle(e.target)){
+                      e.preventDefault();
+                      return;
+                    }
+
+                    dragRow = row;
+                    row.classList.add('is-dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                    try { e.dataTransfer.setData('text/plain', 'mrm-track-row'); } catch(err){}
+                  });
+
+                  tbody.addEventListener('dragend', function(){
+                    if(dragRow) dragRow.classList.remove('is-dragging');
+                    dragRow = null;
+                  });
+
+                  tbody.addEventListener('dragover', function(e){
+                    if(!dragRow) return;
+                    e.preventDefault();
+
+                    const target = e.target.closest('tr.mrm-track-row');
+                    if(!target || target === dragRow) return;
+
+                    const rect = target.getBoundingClientRect();
+                    const before = (e.clientY - rect.top) < (rect.height / 2);
+                    if(before) tbody.insertBefore(dragRow, target);
+                    else tbody.insertBefore(dragRow, target.nextElementSibling);
                   });
                 })();
                 </script>
@@ -1132,8 +1239,7 @@ class MRM_Product_Access {
             }
             $slug = $this->sanitize_product_slug( $row['product_slug'] ?? '' );
             $name = sanitize_text_field( (string) ( $row['display_name'] ?? '' ) );
-            $url  = trim( (string) ( $row['url'] ?? '' ) );
-            $url  = $url !== '' ? esc_url_raw( $url ) : '';
+            $url  = $this->sanitize_track_location( (string) ( $row['url'] ?? '' ) );
 
             if ( $slug === '' || $url === '' ) {
                 continue;
@@ -1152,6 +1258,40 @@ class MRM_Product_Access {
         return $map;
     }
 
+    protected function sanitize_track_location( $raw ) {
+        $raw = trim( (string) $raw );
+        if ( $raw === '' ) return '';
+
+        // Block traversal patterns early
+        if ( strpos( $raw, '..' ) !== false ) return '';
+
+        // Allow full URLs
+        if ( preg_match( '#^https?://#i', $raw ) ) {
+            return esc_url_raw( $raw );
+        }
+
+        // Allow site-relative paths like /wp-content/uploads/...
+        if ( strpos( $raw, '/' ) === 0 ) {
+            // Keep it simple and safe: strip control chars
+            $raw = preg_replace( '/[\\x00-\\x1F\\x7F]/u', '', $raw );
+            return $raw;
+        }
+
+        // Optionally allow absolute filesystem paths only if they live under ABSPATH
+        // (This supports cases where you store server paths, but prevents leaking arbitrary server files.)
+        if ( preg_match( '#^/[A-Za-z0-9_\\-./]+$#', $raw ) ) {
+            $rp = realpath( $raw );
+            if ( ! $rp ) return '';
+            $root = realpath( ABSPATH );
+            if ( $root && strpos( $rp, $root ) === 0 ) {
+                return $rp;
+            }
+            return '';
+        }
+
+        return '';
+    }
+
     protected function get_tracks_for_slug( $product_slug ) {
         $product_slug = $this->sanitize_product_slug( $product_slug );
         if ( $product_slug === '' ) {
@@ -1168,8 +1308,7 @@ class MRM_Product_Access {
                 continue;
             }
             $name = sanitize_text_field( (string) ( $it['name'] ?? '' ) );
-            $url  = trim( (string) ( $it['url'] ?? '' ) );
-            $url  = $url !== '' ? esc_url_raw( $url ) : '';
+            $url  = $this->sanitize_track_location( (string) ( $it['url'] ?? '' ) );
             if ( $url === '' ) {
                 continue;
             }
@@ -1988,7 +2127,7 @@ input.mrm-range::-moz-range-track{
                 <div class="label"><?php echo esc_html( $label ); ?></div>
                 <?php if ( $download_url ) : ?>
                   <a class="btn primary" href="<?php echo esc_url( $download_url ); ?>" target="_blank" rel="noopener">
-                    <?php echo $type === 'pdf' ? 'Open' : ( $type === 'audio' ? 'Play/Download' : 'Open' ); ?>
+                    <?php echo 'Download'; ?>
                   </a>
                 <?php endif; ?>
               </div>
@@ -1996,11 +2135,36 @@ input.mrm-range::-moz-range-track{
                 <?php if ( $type === 'pdf' && $download_url ) : ?>
                   <iframe class="pdf" src="<?php echo esc_url( $download_url ); ?>"></iframe>
                 <?php elseif ( $type === 'audio' && $download_url ) : ?>
-                  <audio controls preload="metadata" style="width:100%;">
-                    <source src="<?php echo esc_url( $download_url ); ?>">
-                  </audio>
+                  <div class="audio-box mrm-audio-box">
+                    <button type="button" class="play mrm-play" aria-label="Play/Pause"></button>
+
+                    <div class="audio-meta">
+                      <div class="time">
+                        <span class="mrm-current">0:00</span>
+                        <span class="sep">/</span>
+                        <span class="mrm-duration">0:00</span>
+                      </div>
+
+                      <div class="audio-grid">
+                        <div class="audio-row audio-row-seek">
+                          <input class="seek mrm-seek" type="range" min="0" max="0" value="0" step="1" aria-label="Seek">
+                        </div>
+
+                        <div class="audio-row audio-row-vol">
+                          <div class="volume">
+                            <span class="vol-icon" aria-hidden="true"></span>
+                            <input class="mrm-volume" type="range" min="0" max="1" value="1" step="0.01" aria-label="Volume">
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <audio class="mrm-audio" preload="metadata">
+                      <source src="<?php echo esc_url( $download_url ); ?>" type="audio/mpeg">
+                    </audio>
+                  </div>
                 <?php else : ?>
-                  <a class="btn" href="<?php echo esc_url( $download_url ); ?>" target="_blank" rel="noopener"><?php echo esc_html__( 'Open Link', 'mrm-product-access' ); ?></a>
+                  <a class="btn" href="<?php echo esc_url( $download_url ); ?>" target="_blank" rel="noopener"><?php echo esc_html__( 'Download', 'mrm-product-access' ); ?></a>
                 <?php endif; ?>
               </div>
             </div>
