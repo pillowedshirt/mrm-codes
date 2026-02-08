@@ -367,19 +367,22 @@ class MRM_Product_Access {
                 $preview_pages       = isset( $_POST['piece_preview_page_number'] ) ? (array) $_POST['piece_preview_page_number'] : array();
                 $preview_audio_urls  = isset( $_POST['piece_preview_audio_url'] ) ? (array) $_POST['piece_preview_audio_url'] : array();
 
-                // Offers: offer_piece_index[], offer_product_slug[], offer_display_title[], offer_subtitle[], offer_price_display[], offer_preview_audio_url[]
-                $offer_piece_index       = isset( $_POST['offer_piece_index'] ) ? (array) $_POST['offer_piece_index'] : array();
-                $offer_product_slug      = isset( $_POST['offer_product_slug'] ) ? (array) $_POST['offer_product_slug'] : array();
-                $offer_display_title     = isset( $_POST['offer_display_title'] ) ? (array) $_POST['offer_display_title'] : array();
-                $offer_subtitle          = isset( $_POST['offer_subtitle'] ) ? (array) $_POST['offer_subtitle'] : array();
-                $offer_price_display     = isset( $_POST['offer_price_display'] ) ? (array) $_POST['offer_price_display'] : array();
-                $offer_preview_audio_url = isset( $_POST['offer_preview_audio_url'] ) ? (array) $_POST['offer_preview_audio_url'] : array();
+                // Offers:
+                // - offer_payment_hub_sku[] is the source of truth for purchase/access (Payments Hub SKU).
+                $offer_piece_index        = isset( $_POST['offer_piece_index'] ) ? (array) $_POST['offer_piece_index'] : array();
+                $offer_product_slug       = isset( $_POST['offer_product_slug'] ) ? (array) $_POST['offer_product_slug'] : array(); // legacy/optional
+                $offer_payment_hub_sku    = isset( $_POST['offer_payment_hub_sku'] ) ? (array) $_POST['offer_payment_hub_sku'] : array();
+                $offer_display_title      = isset( $_POST['offer_display_title'] ) ? (array) $_POST['offer_display_title'] : array();
+                $offer_subtitle           = isset( $_POST['offer_subtitle'] ) ? (array) $_POST['offer_subtitle'] : array();
+                $offer_price_display      = isset( $_POST['offer_price_display'] ) ? (array) $_POST['offer_price_display'] : array();
+                $offer_preview_audio_url  = isset( $_POST['offer_preview_audio_url'] ) ? (array) $_POST['offer_preview_audio_url'] : array();
 
                 // First, bucket offers by piece index.
                 $offers_by_piece = array();
                 $offer_count     = max(
                     count( $offer_piece_index ),
                     count( $offer_product_slug ),
+                    count( $offer_payment_hub_sku ),
                     count( $offer_display_title ),
                     count( $offer_subtitle ),
                     count( $offer_price_display ),
@@ -393,18 +396,21 @@ class MRM_Product_Access {
                     }
                     $pi = intval( $pi_raw );
 
-                    $pslug = sanitize_title( (string) ( $offer_product_slug[ $oi ] ?? '' ) );
+                    $pslug = sanitize_title( (string) ( $offer_product_slug[ $oi ] ?? '' ) ); // legacy/optional
+                    $hub_sku_raw = (string) ( $offer_payment_hub_sku[ $oi ] ?? '' );
+                    $hub_sku = sanitize_title( $hub_sku_raw ); // SKUs are slug-like (piece-...-fundamentals, etc.)
                     $dt    = sanitize_text_field( (string) ( $offer_display_title[ $oi ] ?? '' ) );
                     $sub   = sanitize_text_field( (string) ( $offer_subtitle[ $oi ] ?? '' ) );
                     $price = sanitize_text_field( (string) ( $offer_price_display[ $oi ] ?? '' ) );
                     $aud   = trim( (string) ( $offer_preview_audio_url[ $oi ] ?? '' ) );
 
-                    // Require at least a product slug or display title to keep an offer row.
-                    if ( $pslug === '' && $dt === '' ) {
+                    // Require at least a SKU or display title to keep an offer row.
+                    if ( $hub_sku === '' && $dt === '' ) {
                         continue;
                     }
 
-                    // If product slug missing but display title exists, derive a stable slug-ish value.
+                    // If Payments Hub SKU missing but title exists, leave SKU blank (we want explicit SKU).
+                    // Keep legacy product_slug fallback for backward compatibility only.
                     if ( $pslug === '' && $dt !== '' ) {
                         $pslug = sanitize_title( $dt );
                     }
@@ -414,11 +420,12 @@ class MRM_Product_Access {
                     }
 
                     $offers_by_piece[ $pi ][] = array(
-                        'product_slug'      => $pslug,
-                        'display_title'     => $dt,
-                        'subtitle'          => $sub,
-                        'price_display'     => $price,
-                        'preview_audio_url' => $aud,
+                        'product_slug'       => $pslug,     // legacy/optional
+                        'payment_hub_sku'    => $hub_sku,   // source of truth
+                        'display_title'      => $dt,
+                        'subtitle'           => $sub,
+                        'price_display'      => $price,
+                        'preview_audio_url'  => $aud,
                     );
                 }
 
@@ -473,6 +480,49 @@ class MRM_Product_Access {
                 }
             }
 
+            // Tracks (per piece, per type): piece_tracks_by_type[pieceIndex][typeKey][trackKey] = public URL
+            $posted_tracks = isset( $_POST['piece_tracks_by_type'] ) && is_array( $_POST['piece_tracks_by_type'] )
+                ? $_POST['piece_tracks_by_type']
+                : array();
+
+            // Helper: sanitize a public URL (must be http/https; allow blank)
+            $sanitize_public_url = function( $url ) {
+                $url = trim( (string) $url );
+                if ( $url === '' ) {
+                    return '';
+                }
+                $url = esc_url_raw( $url );
+                if ( $url === '' ) {
+                    return '';
+                }
+                $scheme = wp_parse_url( $url, PHP_URL_SCHEME );
+                if ( ! in_array( strtolower( (string) $scheme ), array( 'http', 'https' ), true ) ) {
+                    return '';
+                }
+                return $url;
+            };
+
+            // Attach sanitized tracks_by_type to each piece by index
+            foreach ( $pieces as $pi => &$piece_ref ) {
+                $t = array();
+                if ( isset( $posted_tracks[ $pi ] ) && is_array( $posted_tracks[ $pi ] ) ) {
+                    foreach ( $posted_tracks[ $pi ] as $type_key => $map ) {
+                        $type_key = sanitize_key( $type_key );
+                        if ( ! is_array( $map ) ) {
+                            continue;
+                        }
+
+                        $t[ $type_key ] = array();
+                        foreach ( $map as $track_key => $url ) {
+                            $track_key = sanitize_key( $track_key );
+                            $t[ $type_key ][ $track_key ] = $sanitize_public_url( $url );
+                        }
+                    }
+                }
+                $piece_ref['tracks_by_type'] = $t;
+            }
+            unset( $piece_ref );
+
             $options['pieces'] = $pieces;
 
             // Verified emails.
@@ -490,107 +540,8 @@ class MRM_Product_Access {
                 $options['verified_emails'] = array_values( array_unique( $verified ) );
             }
 
-            // Products configuration.
-            $products = array();
-            if ( ! empty( $_POST['product_slug'] ) && is_array( $_POST['product_slug'] ) ) {
-                $slugs       = array_map( 'sanitize_title', $_POST['product_slug'] );
-                $prices      = array_map( 'intval', $_POST['product_price_cents'] );
-                $currencies  = array_map( 'sanitize_text_field', $_POST['product_currency'] );
-                $payouts     = isset( $_POST['product_payout'] ) ? $_POST['product_payout'] : array();
-                // The PDF, audio and zip paths fields have been removed from the UI. Retain any existing
-                // values by not parsing these from the submitted form.
-                $tracks_json = isset( $_POST['product_tracks_json'] ) ? $_POST['product_tracks_json'] : array();
-                $approved_emails_raw = isset( $_POST['product_approved_emails'] ) ? $_POST['product_approved_emails'] : null;
-
-                foreach ( $slugs as $idx => $slug ) {
-                    if ( empty( $slug ) ) {
-                        continue;
-                    }
-
-                    $product = array();
-                    $product['price_cents'] = isset( $prices[ $idx ] ) ? $prices[ $idx ] : 0;
-                    $product['currency']    = isset( $currencies[ $idx ] ) ? strtolower( $currencies[ $idx ] ) : 'usd';
-
-                    // Parse payout definitions: dest:pct;dest:pct.
-                    $product['payouts'] = array();
-                    if ( isset( $payouts[ $idx ] ) && ! empty( $payouts[ $idx ] ) ) {
-                        $pairs = explode( ';', $payouts[ $idx ] );
-                        foreach ( $pairs as $pair ) {
-                            $parts = explode( ':', $pair );
-                            if ( count( $parts ) === 2 ) {
-                                $dest = trim( $parts[0] );
-                                $pct  = floatval( $parts[1] );
-                                if ( $dest !== '' && $pct > 0 ) {
-                                    $product['payouts'][] = array(
-                                        'stripe_account_id' => $dest,
-                                        'pct'               => $pct,
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    // Preserve any existing file paths from the options since these fields are no longer editable
-                    $product['pdf_path']   = isset( $options['products'][ $slug ]['pdf_path'] ) ? sanitize_text_field( $options['products'][ $slug ]['pdf_path'] ) : '';
-                    $product['audio_path'] = isset( $options['products'][ $slug ]['audio_path'] ) ? sanitize_text_field( $options['products'][ $slug ]['audio_path'] ) : '';
-                    $product['zip_path']   = isset( $options['products'][ $slug ]['zip_path'] ) ? sanitize_text_field( $options['products'][ $slug ]['zip_path'] ) : '';
-
-                    // Tracks JSON.
-                    $product['tracks'] = array();
-                    if ( isset( $tracks_json[ $idx ] ) && trim( $tracks_json[ $idx ] ) !== '' ) {
-                        $decoded = json_decode( wp_unslash( $tracks_json[ $idx ] ), true );
-                        if ( is_array( $decoded ) ) {
-                            // Determine if sequential array (new format) or associative map (legacy).
-                            if ( array_keys( $decoded ) === range( 0, count( $decoded ) - 1 ) ) {
-                                foreach ( $decoded as $item ) {
-                                    if ( is_array( $item ) && isset( $item['type'] ) && isset( $item['path'] ) ) {
-                                        $type  = sanitize_key( $item['type'] );
-                                        $title = isset( $item['title'] ) ? sanitize_text_field( $item['title'] ) : '';
-                                        $path  = sanitize_text_field( $item['path'] );
-                                        $product['tracks'][] = array(
-                                            'type'  => $type,
-                                            'title' => $title,
-                                            'path'  => $path,
-                                        );
-                                    }
-                                }
-                            } else {
-                                foreach ( $decoded as $k => $v ) {
-                                    $key  = sanitize_key( $k );
-                                    $path = sanitize_text_field( $v );
-                                    if ( $key && $path ) {
-                                        $product['tracks'][ $key ] = $path;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    
-                    // Approved emails (per product): semicolon-separated list.
-                    // If the new field isn't present (older versions), preserve existing values.
-                    if ( is_array( $approved_emails_raw ) && array_key_exists( $idx, $approved_emails_raw ) ) {
-                        $approved_list = array();
-                        $raw = (string) $approved_emails_raw[ $idx ];
-                        $parts = explode( ';', $raw );
-                        foreach ( $parts as $em ) {
-                            $em = sanitize_email( trim( $em ) );
-                            if ( ! empty( $em ) ) {
-                                $approved_list[] = strtolower( $em );
-                            }
-                        }
-                        $product['approved_emails'] = array_values( array_unique( $approved_list ) );
-                    } else {
-                        $product['approved_emails'] = isset( $options['products'][ $slug ]['approved_emails'] ) && is_array( $options['products'][ $slug ]['approved_emails'] )
-                            ? array_values( array_unique( array_map( 'strtolower', $options['products'][ $slug ]['approved_emails'] ) ) )
-                            : array();
-                    }
-
-                    $products[ $slug ] = $product;
-                }
-            }
-
-            $options['products'] = $products;
+            // Products configuration UI removed.
+            // Preserve any existing $options['products'] by not modifying it here.
 
             update_option( $this->option_key, $options );
             $this->options = $options;
@@ -603,17 +554,6 @@ class MRM_Product_Access {
 
         ?>
         <div class="wrap">
-            <!-- Inline style to ensure product configuration inputs and textareas do not overlap. -->
-            <style>
-            /* Make inputs and textareas stretch to fill their cells without overflowing. */
-            .mrm-pa-products-table td input[type="text"],
-            .mrm-pa-products-table td input[type="number"],
-            .mrm-pa-products-table td textarea {
-                width: 100%;
-                max-width: 100%;
-                box-sizing: border-box;
-            }
-            </style>
             <h1><?php esc_html_e( 'MRM Product Access Settings', 'mrm-product-access' ); ?></h1>
             <form method="post">
                 <?php wp_nonce_field( 'mrm_pa_save_settings' ); ?>
@@ -770,6 +710,49 @@ class MRM_Product_Access {
                     );
                 }
 
+                $track_keysets = array(
+                    'fundamentals' => array(
+                        'exercises_pdf',
+                        'exercise_1_practice',
+                        'exercise_2_practice',
+                        'exercise_3_practice',
+                        'exercise_4_practice',
+                        'exercise_5_practice',
+                    ),
+                    'te' => array(
+                        'te_pdf',
+                        'te_practice_met',
+                        'te_practice',
+                        'te_performance_met',
+                        'te_performance',
+                    ),
+                    'tuba' => array(
+                        'tuba_pdf',
+                        'tuba_practice_met',
+                        'tuba_practice',
+                        'tuba_performance_met',
+                        'tuba_performance',
+                    ),
+                    'complete' => array(
+                        'exercises_pdf',
+                        'exercise_1_practice',
+                        'exercise_2_practice',
+                        'exercise_3_practice',
+                        'exercise_4_practice',
+                        'exercise_5_practice',
+                        'te_pdf',
+                        'te_practice_met',
+                        'te_practice',
+                        'te_performance_met',
+                        'te_performance',
+                        'tuba_pdf',
+                        'tuba_practice_met',
+                        'tuba_practice',
+                        'tuba_performance_met',
+                        'tuba_performance',
+                    ),
+                );
+
                 foreach ( $pieces as $i => $piece ) :
                     $slug   = $piece['slug'] ?? '';
                     $title  = $piece['piece_title'] ?? '';
@@ -876,7 +859,8 @@ class MRM_Product_Access {
                             <table class="widefat striped">
                                 <thead>
                                     <tr>
-                                        <th style="width:180px;"><?php esc_html_e( 'Product Slug', 'mrm-product-access' ); ?></th>
+                                        <th style="width:260px;"><?php esc_html_e( 'Payments Hub SKU', 'mrm-product-access' ); ?></th>
+                                        <th style="width:180px;"><?php esc_html_e( 'Legacy Product Slug (optional)', 'mrm-product-access' ); ?></th>
                                         <th style="width:220px;"><?php esc_html_e( 'Display Title', 'mrm-product-access' ); ?></th>
                                         <th><?php esc_html_e( 'Subtitle', 'mrm-product-access' ); ?></th>
                                         <th style="width:110px;"><?php esc_html_e( 'Price Display', 'mrm-product-access' ); ?></th>
@@ -899,7 +883,15 @@ class MRM_Product_Access {
                                     <tr class="mrm-pa-offer-row">
                                         <td>
                                             <input type="hidden" name="offer_piece_index[]" value="<?php echo esc_attr( $i ); ?>">
-                                            <input type="text" name="offer_product_slug[]" value="<?php echo esc_attr( $ps ); ?>" placeholder="blackbeards-revenge-tuba-full-piece">
+                                            <input
+                                                type="text"
+                                                name="offer_payment_hub_sku[]"
+                                                value="<?php echo esc_attr( (string) ( $off['payment_hub_sku'] ?? '' ) ); ?>"
+                                                placeholder="piece-blackbeards-revenge-fundamentals"
+                                            >
+                                        </td>
+                                        <td>
+                                            <input type="text" name="offer_product_slug[]" value="<?php echo esc_attr( $ps ); ?>" placeholder="(optional legacy)">
                                         </td>
                                         <td><input type="text" name="offer_display_title[]" value="<?php echo esc_attr( $dt ); ?>" placeholder="Tuba Full Piece"></td>
                                         <td><input type="text" name="offer_subtitle[]" value="<?php echo esc_attr( $st ); ?>" placeholder="Includes the Tuba part..."></td>
@@ -912,8 +904,66 @@ class MRM_Product_Access {
                             </table>
 
                             <div class="mrm-pa-help" style="margin-top:8px;">
-                                <?php esc_html_e( 'These offer fields map 1:1 with the legacy HTML mrmConfig.offers: productSlug, displayTitle, subtitle, priceDisplay, previewAudioUrl.', 'mrm-product-access' ); ?>
+                                <?php esc_html_e( 'These offer fields map 1:1 with the legacy HTML mrmConfig.offers: paymentHubSku, productSlug, displayTitle, subtitle, priceDisplay, previewAudioUrl.', 'mrm-product-access' ); ?>
                             </div>
+                        </div>
+
+                        <?php
+                        $tracks_by_type = isset( $piece['tracks_by_type'] ) && is_array( $piece['tracks_by_type'] ) ? $piece['tracks_by_type'] : array();
+                        ?>
+
+                        <div class="mrm-pa-offers" style="margin-top:14px;">
+                            <div class="mrm-pa-offers-head">
+                                <strong><?php esc_html_e( 'Tracks (Public URLs) — no JSON editing', 'mrm-product-access' ); ?></strong>
+                            </div>
+
+                            <p class="description" style="margin:6px 0 12px 0;">
+                                <?php esc_html_e( 'Paste PUBLIC URLs (https://...) for each item. Leave blank if not applicable. These URLs will be used on the access/download page.', 'mrm-product-access' ); ?>
+                            </p>
+
+                            <?php foreach ( $track_keysets as $type_key => $keys ) : ?>
+                                <div style="margin:12px 0; padding:12px; border:1px solid #ececec; border-radius:12px; background:#fff;">
+                                    <div style="font-weight:800; margin-bottom:8px;">
+                                        <?php
+                                            echo esc_html(
+                                                $type_key === 'fundamentals' ? 'Fundamentals (Fundamental Exercises)' :
+                                                ( $type_key === 'te' ? 'Trombone/Euphonium Full Piece' :
+                                                ( $type_key === 'tuba' ? 'Tuba Full Piece' : 'Complete Package' ) )
+                                            );
+                                        ?>
+                                    </div>
+
+                                    <table class="widefat striped" style="margin-top:8px;">
+                                        <thead>
+                                            <tr>
+                                                <th style="width:260px;"><?php esc_html_e( 'Track Key', 'mrm-product-access' ); ?></th>
+                                                <th><?php esc_html_e( 'Public URL (https://...)', 'mrm-product-access' ); ?></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <?php foreach ( $keys as $k ) :
+                                                $val = '';
+                                                if ( isset( $tracks_by_type[ $type_key ] ) && is_array( $tracks_by_type[ $type_key ] ) ) {
+                                                    $val = (string) ( $tracks_by_type[ $type_key ][ $k ] ?? '' );
+                                                }
+                                            ?>
+                                                <tr>
+                                                    <td><code><?php echo esc_html( $k ); ?></code></td>
+                                                    <td>
+                                                        <input
+                                                            type="url"
+                                                            name="piece_tracks_by_type[<?php echo esc_attr( $i ); ?>][<?php echo esc_attr( $type_key ); ?>][<?php echo esc_attr( $k ); ?>]"
+                                                            value="<?php echo esc_attr( $val ); ?>"
+                                                            placeholder="https://example.com/wp-content/uploads/..."
+                                                            style="width:100%;"
+                                                        />
+                                                    </td>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            <?php endforeach; ?>
                         </div>
                     </div>
                 <?php endforeach; ?>
@@ -1019,7 +1069,8 @@ class MRM_Product_Access {
                                 <table class="widefat striped">
                                     <thead>
                                         <tr>
-                                            <th style="width:180px;">Product Slug</th>
+                                            <th style="width:260px;">Payments Hub SKU</th>
+                                            <th style="width:180px;">Legacy Product Slug (optional)</th>
                                             <th style="width:220px;">Display Title</th>
                                             <th>Subtitle</th>
                                             <th style="width:110px;">Price Display</th>
@@ -1033,8 +1084,61 @@ class MRM_Product_Access {
                                 </table>
 
                                 <div class="mrm-pa-help" style="margin-top:8px;">
-                                    These map to legacy HTML mrmConfig.offers: productSlug, displayTitle, subtitle, priceDisplay, previewAudioUrl.
+                                    These map to legacy HTML mrmConfig.offers: paymentHubSku, productSlug, displayTitle, subtitle, priceDisplay, previewAudioUrl.
                                 </div>
+                            </div>
+
+                            <div class="mrm-pa-offers" style="margin-top:14px;">
+                                <div class="mrm-pa-offers-head">
+                                    <strong>Tracks (Public URLs) — no JSON editing</strong>
+                                </div>
+                                <p class="description" style="margin:6px 0 12px 0;">
+                                    Paste PUBLIC URLs (https://...) for each item. Leave blank if not applicable.
+                                </p>
+
+                                ${(() => {
+                                    const sets = {
+                                        fundamentals: ["exercises_pdf","exercise_1_practice","exercise_2_practice","exercise_3_practice","exercise_4_practice","exercise_5_practice"],
+                                        te: ["te_pdf","te_practice_met","te_practice","te_performance_met","te_performance"],
+                                        tuba: ["tuba_pdf","tuba_practice_met","tuba_practice","tuba_performance_met","tuba_performance"],
+                                        complete: ["exercises_pdf","exercise_1_practice","exercise_2_practice","exercise_3_practice","exercise_4_practice","exercise_5_practice","te_pdf","te_practice_met","te_practice","te_performance_met","te_performance","tuba_pdf","tuba_practice_met","tuba_practice","tuba_performance_met","tuba_performance"]
+                                    };
+
+                                    const label = (t) => (
+                                        t === "fundamentals" ? "Fundamentals (Fundamental Exercises)" :
+                                        (t === "te" ? "Trombone/Euphonium Full Piece" :
+                                        (t === "tuba" ? "Tuba Full Piece" : "Complete Package"))
+                                    );
+
+                                    return Object.keys(sets).map(t => `
+                                        <div style="margin:12px 0; padding:12px; border:1px solid #ececec; border-radius:12px; background:#fff;">
+                                            <div style="font-weight:800; margin-bottom:8px;">${label(t)}</div>
+                                            <table class="widefat striped" style="margin-top:8px;">
+                                                <thead>
+                                                    <tr>
+                                                        <th style="width:260px;">Track Key</th>
+                                                        <th>Public URL (https://...)</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    ${sets[t].map(k => `
+                                                        <tr>
+                                                            <td><code>${k}</code></td>
+                                                            <td>
+                                                                <input type="url"
+                                                                    name="piece_tracks_by_type[${index}][${t}][${k}]"
+                                                                    value=""
+                                                                    placeholder="https://example.com/wp-content/uploads/..."
+                                                                    style="width:100%;"
+                                                                />
+                                                            </td>
+                                                        </tr>
+                                                    `).join("")}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    `).join("");
+                                })()}
                             </div>
                         </div>`;
                     }
@@ -1044,7 +1148,10 @@ class MRM_Product_Access {
                         <tr class="mrm-pa-offer-row">
                             <td>
                                 <input type="hidden" name="offer_piece_index[]" value="${pieceIndex}">
-                                <input type="text" name="offer_product_slug[]" value="" placeholder="blackbeards-revenge-tuba-full-piece">
+                                <input type="text" name="offer_payment_hub_sku[]" value="" placeholder="piece-blackbeards-revenge-fundamentals">
+                            </td>
+                            <td>
+                                <input type="text" name="offer_product_slug[]" value="" placeholder="(optional legacy)">
                             </td>
                             <td><input type="text" name="offer_display_title[]" value="" placeholder="Tuba Full Piece"></td>
                             <td><input type="text" name="offer_subtitle[]" value="" placeholder="Includes the Tuba part..."></td>
@@ -1093,71 +1200,6 @@ class MRM_Product_Access {
                 })();
                 </script>
 
-                <h2 class="title"><?php esc_html_e( 'Products Configuration', 'mrm-product-access' ); ?></h2>
-                <p><?php esc_html_e( 'Define your products below. Payouts format: connectedAccountId:pct;anotherId:pct. Percentages should add up to 100.', 'mrm-product-access' ); ?></p>
-
-                <table class="widefat fixed striped mrm-pa-products-table" cellspacing="0" style="max-width:1200px;">
-                    <thead>
-                        <tr>
-                            <th style="width:130px; "><?php esc_html_e( 'Product Slug', 'mrm-product-access' ); ?></th>
-                            <th style="width:120px; "><?php esc_html_e( 'Price (cents)', 'mrm-product-access' ); ?></th>
-                            <th style="width:90px; "><?php esc_html_e( 'Currency', 'mrm-product-access' ); ?></th>
-                            <th style="width:220px; "><?php esc_html_e( 'Payouts (dest:pct;...)', 'mrm-product-access' ); ?></th>
-                            <?php
-                            // Removed PDF Path, Audio Path and ZIP Path columns per user request.
-                            ?>
-                            <th style="width:240px; "><?php esc_html_e( 'Approved Emails (semicolon separated)', 'mrm-product-access' ); ?></th>
-                            <th style="width:320px; "><?php esc_html_e( 'Tracks JSON (ordered items)', 'mrm-product-access' ); ?></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        if ( ! empty( $options['products'] ) && is_array( $options['products'] ) ) {
-                            foreach ( $options['products'] as $slug => $pconf ) {
-                                $pairs = array();
-                                if ( ! empty( $pconf['payouts'] ) && is_array( $pconf['payouts'] ) ) {
-                                    foreach ( $pconf['payouts'] as $p ) {
-                                        $pairs[] = ( $p['stripe_account_id'] ?? '' ) . ':' . ( $p['pct'] ?? 0 );
-                                    }
-                                }
-                                $tracks_text = '';
-                                if ( ! empty( $pconf['tracks'] ) && is_array( $pconf['tracks'] ) ) {
-                                    $tracks_text = wp_json_encode( $pconf['tracks'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES );
-                                }
-                                ?>
-                                <tr>
-                                    <td><input type="text" name="product_slug[]" value="<?php echo esc_attr( $slug ); ?>" class="regular-text"></td>
-                                    <td><input type="number" name="product_price_cents[]" value="<?php echo esc_attr( $pconf['price_cents'] ?? 0 ); ?>" class="small-text"></td>
-                                    <td><input type="text" name="product_currency[]" value="<?php echo esc_attr( $pconf['currency'] ?? 'usd' ); ?>" class="small-text"></td>
-                                    <td><input type="text" name="product_payout[]" value="<?php echo esc_attr( implode( ';', $pairs ) ); ?>" class="regular-text"></td>
-                                    <td><input type="text" name="product_approved_emails[]" value="<?php echo esc_attr( isset( $pconf['approved_emails'] ) && is_array( $pconf['approved_emails'] ) ? implode( ';', $pconf['approved_emails'] ) : '' ); ?>" class="regular-text" placeholder="email1@example.com;email2@example.com"></td>
-                                    <td>
-                                        <textarea name="product_tracks_json[]" rows="6" style="width:100%; font-family: monospace;"><?php echo esc_textarea( $tracks_text ); ?></textarea>
-                                        <div class="description" style="font-size:12px; opacity:.9;">
-                                            <?php
-                                            /* Translators: example of the new tracks JSON array format */
-                                            echo esc_html__( 'Example', 'mrm-product-access' );
-                                            ?>:
-                                            <?php echo esc_html( '[{"type":"pdf","title":"PDF Title","path":"/full/path/file.pdf"},{"type":"audio","title":"Track 1","path":"/full/path/file.mp3"}]' ); ?>
-                                        </div>
-                                    </td>
-                                </tr>
-                                <?php
-                            }
-                        }
-                        // Always provide an empty row to allow adding another product.
-                        ?>
-                        <tr>
-                            <td><input type="text" name="product_slug[]" value="" class="regular-text"></td>
-                            <td><input type="number" name="product_price_cents[]" value="" class="small-text"></td>
-                            <td><input type="text" name="product_currency[]" value="usd" class="small-text"></td>
-                            <td><input type="text" name="product_payout[]" value="" class="regular-text"></td>
-                            <td><input type="text" name="product_approved_emails[]" value="" class="regular-text" placeholder="email1@example.com;email2@example.com"></td>
-                            <td><textarea name="product_tracks_json[]" rows="6" style="width:100%; font-family: monospace;"></textarea></td>
-                        </tr>
-                    </tbody>
-                </table>
-
                 <?php submit_button( __( 'Save Settings', 'mrm-product-access' ), 'primary', 'mrm_pa_save_settings' ); ?>
             </form>
 
@@ -1166,21 +1208,131 @@ class MRM_Product_Access {
             <p><strong><?php esc_html_e( 'Important:', 'mrm-product-access' ); ?></strong> <?php esc_html_e( 'After updating, go to Settings → Permalinks and click Save Changes once.', 'mrm-product-access' ); ?></p>
         </div>
         <?php
-        // No client-side script is required for the settings page since the
-        // Verified Emails section has been removed per user request.
+        // Inline scripts above handle piece/offer UI interactions.
         ?>
         <?php
     }
 
     /**
-     * Get product configuration by slug.
+     * Get product configuration by SKU (Payments Hub SKU).
      *
-     * @param string $slug
+     * Supports:
+     * - Legacy: options['products'][$sku]
+     * - New: per-piece tracks_by_type, matched via offers[].payment_hub_sku
+     *
+     * @param string $slug  Payments Hub SKU (piece-...-fundamentals etc)
      * @return array|null
      */
     protected function get_product_config( $slug ) {
+        $sku = sanitize_title( (string) $slug );
+        if ( $sku === '' ) {
+            return null;
+        }
+
         $options = $this->get_options();
-        return isset( $options['products'][ $slug ] ) ? $options['products'][ $slug ] : null;
+
+        // 1) Legacy fallback
+        if ( isset( $options['products'][ $sku ] ) ) {
+            return $options['products'][ $sku ];
+        }
+
+        // 2) New per-piece tracks
+        $pieces = isset( $options['pieces'] ) && is_array( $options['pieces'] ) ? $options['pieces'] : array();
+        if ( empty( $pieces ) ) {
+            return null;
+        }
+
+        // Determine type from SKU suffix
+        $type = '';
+        if ( preg_match( '/-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m ) ) {
+            $type = (string) $m[1];
+        }
+
+        // Map SKU type -> tracks_by_type key
+        $type_key =
+            ( $type === 'fundamentals' ) ? 'fundamentals' :
+            ( $type === 'trombone-euphonium' ) ? 'te' :
+            ( $type === 'tuba' ) ? 'tuba' :
+            ( $type === 'complete-package' ) ? 'complete' :
+            '';
+
+        // Label map for access page display
+        $label_for_key = function( $k ) {
+            $k = (string) $k;
+            $map = array(
+                'exercises_pdf' => 'Exercises PDF',
+                'exercise_1_practice' => 'Exercise 1 (Practice)',
+                'exercise_2_practice' => 'Exercise 2 (Practice)',
+                'exercise_3_practice' => 'Exercise 3 (Practice)',
+                'exercise_4_practice' => 'Exercise 4 (Practice)',
+                'exercise_5_practice' => 'Exercise 5 (Practice)',
+
+                'te_pdf' => 'Trombone/Euphonium PDF',
+                'te_practice_met' => 'T/E Practice (With Met)',
+                'te_practice' => 'T/E Practice',
+                'te_performance_met' => 'T/E Performance (With Met)',
+                'te_performance' => 'T/E Performance',
+
+                'tuba_pdf' => 'Tuba PDF',
+                'tuba_practice_met' => 'Tuba Practice (With Met)',
+                'tuba_practice' => 'Tuba Practice',
+                'tuba_performance_met' => 'Tuba Performance (With Met)',
+                'tuba_performance' => 'Tuba Performance',
+            );
+
+            if ( isset( $map[ $k ] ) ) {
+                return $map[ $k ];
+            }
+
+            // generic fallback
+            return ucwords( str_replace( array( '_', '-' ), ' ', $k ) );
+        };
+
+        foreach ( $pieces as $piece ) {
+            $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
+            foreach ( $offers as $offer ) {
+                $offer_sku = sanitize_title( (string) ( $offer['payment_hub_sku'] ?? '' ) );
+                if ( $offer_sku === '' ) {
+                    continue;
+                }
+
+                if ( $offer_sku !== $sku ) {
+                    continue;
+                }
+
+                $tracks_by_type = isset( $piece['tracks_by_type'] ) && is_array( $piece['tracks_by_type'] )
+                    ? $piece['tracks_by_type']
+                    : array();
+
+                $map = ( $type_key && isset( $tracks_by_type[ $type_key ] ) && is_array( $tracks_by_type[ $type_key ] ) )
+                    ? $tracks_by_type[ $type_key ]
+                    : array();
+
+                // Convert mapping into the sequential list format your access page already supports.
+                $tracks_list = array();
+                foreach ( $map as $track_key => $url ) {
+                    $url = trim( (string) $url );
+                    if ( $url === '' ) {
+                        continue;
+                    }
+
+                    $track_key = sanitize_key( $track_key );
+                    $is_pdf = ( substr( $track_key, -4 ) === '_pdf' ) || ( $track_key === 'exercises_pdf' ) || ( $track_key === 'te_pdf' ) || ( $track_key === 'tuba_pdf' );
+
+                    $tracks_list[] = array(
+                        'type'  => $is_pdf ? 'pdf' : 'audio',
+                        'title' => $label_for_key( $track_key ),
+                        'path'  => $url, // now public URL
+                    );
+                }
+
+                return array(
+                    'tracks' => $tracks_list,
+                );
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -1220,7 +1372,9 @@ class MRM_Product_Access {
             $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
             foreach ( $offers as $offer ) {
                 $offer_slug = sanitize_title( (string) ( $offer['product_slug'] ?? '' ) );
-                if ( $offer_slug !== '' && $offer_slug === $product_slug ) {
+                $offer_sku  = sanitize_title( (string) ( $offer['payment_hub_sku'] ?? '' ) );
+                if ( ( $offer_slug !== '' && $offer_slug === $product_slug )
+                    || ( $offer_sku !== '' && $offer_sku === $product_slug ) ) {
                     return $piece_slug;
                 }
             }
@@ -3578,8 +3732,6 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         $product_slug = isset( $_GET['product_slug'] ) ? sanitize_title( $_GET['product_slug'] ) : '';
         $asset_type   = isset( $_GET['asset_type'] ) ? sanitize_key( $_GET['asset_type'] ) : '';
         $track        = isset( $_GET['track'] ) ? sanitize_key( $_GET['track'] ) : '';
-        $inline       = ! empty( $_GET['inline'] );
-        $force_dl     = ! empty( $_GET['download'] );
 
         if ( empty( $product_slug ) || empty( $asset_type ) ) {
             return new WP_REST_Response( array( 'error' => 'Invalid request.' ), 400 );
@@ -3673,129 +3825,28 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             }
         }
 
-        if ( empty( $file ) || ! file_exists( $file ) ) {
+        if ( empty( $file ) ) {
             return new WP_REST_Response( array( 'error' => 'File not found.' ), 404 );
         }
 
-        // Determine MIME type.
-        $mime      = wp_check_filetype( $file );
-        $mime_type = ! empty( $mime['type'] ) ? $mime['type'] : '';
-        if ( empty( $mime_type ) && function_exists( 'mime_content_type' ) ) {
-            $detected = @mime_content_type( $file );
-            if ( ! empty( $detected ) ) {
-                $mime_type = $detected;
-            }
-        }
-        if ( empty( $mime_type ) ) {
-            $ext = strtolower( pathinfo( $file, PATHINFO_EXTENSION ) );
-            switch ( $ext ) {
-                case 'mp3':
-                case 'm4a':
-                case 'aac':
-                    $mime_type = 'audio/mpeg';
-                    break;
-                case 'wav':
-                case 'wave':
-                    $mime_type = 'audio/wav';
-                    break;
-                case 'ogg':
-                case 'oga':
-                    $mime_type = 'audio/ogg';
-                    break;
-                case 'flac':
-                    $mime_type = 'audio/flac';
-                    break;
-                default:
-                    $mime_type = 'application/octet-stream';
+        // Convert site-relative to absolute URL
+        $file_url = trim( (string) $file );
+        if ( $file_url !== '' && strpos( $file_url, 'http' ) !== 0 ) {
+            // If it looks like /wp-content/uploads/... turn into full URL
+            if ( strpos( $file_url, '/' ) === 0 ) {
+                $file_url = home_url( $file_url );
             }
         }
 
-        // Prevent timeouts on large files.
-        @set_time_limit( 0 );
-        @ignore_user_abort( true );
-
-        // Disable compression to avoid corrupting binary output.
-        if ( function_exists( 'apache_setenv' ) ) {
-            @apache_setenv( 'no-gzip', '1' );
-        }
-        @ini_set( 'zlib.output_compression', 'Off' );
-
-        // Clear all buffers.
-        while ( ob_get_level() > 0 ) {
-            @ob_end_clean();
+        // Validate scheme http/https
+        $file_url = esc_url_raw( $file_url );
+        $scheme = wp_parse_url( $file_url, PHP_URL_SCHEME );
+        if ( empty( $file_url ) || ! in_array( strtolower( (string) $scheme ), array( 'http', 'https' ), true ) ) {
+            return new WP_REST_Response( array( 'error' => 'File not found.' ), 404 );
         }
 
-        // Headers.
-        header( 'Content-Type: ' . $mime_type );
-        header( 'X-Content-Type-Options: nosniff' );
-        header( 'Cache-Control: private, max-age=0, no-cache, no-store, must-revalidate' );
-        header( 'Pragma: no-cache' );
-        header( 'Expires: 0' );
-        header( 'Accept-Ranges: bytes' );
-
-        $filename    = basename( $file );
-        $disposition = ( $inline && ! $force_dl ) ? 'inline' : 'attachment';
-        header( 'Content-Disposition: ' . $disposition . '; filename="' . $filename . '"' );
-
-        $size  = filesize( $file );
-        $start = 0;
-        $end   = $size - 1;
-
-        $fp = fopen( $file, 'rb' );
-        if ( $fp === false ) {
-            return new WP_REST_Response( array( 'error' => 'File not readable.' ), 500 );
-        }
-
-        // Range support for audio seeking.
-        if ( ! empty( $_SERVER['HTTP_RANGE'] ) && preg_match( '/bytes=\s*(\d*)-(\d*)/i', $_SERVER['HTTP_RANGE'], $m ) ) {
-            if ( $m[1] !== '' ) {
-                $start = (int) $m[1];
-            }
-            if ( $m[2] !== '' ) {
-                $end = (int) $m[2];
-            }
-            if ( $start > $end || $start >= $size ) {
-                fclose( $fp );
-                header( 'Content-Range: bytes */' . $size );
-                status_header( 416 );
-                exit;
-            }
-            if ( $end >= $size ) {
-                $end = $size - 1;
-            }
-
-            $length = ( $end - $start ) + 1;
-            status_header( 206 );
-            header( 'Content-Range: bytes ' . $start . '-' . $end . '/' . $size );
-            header( 'Content-Length: ' . $length );
-            fseek( $fp, $start );
-        } else {
-            header( 'Content-Length: ' . $size );
-        }
-
-        $chunk = 1024 * 1024; // 1MB
-        while ( ! feof( $fp ) ) {
-            $pos = ftell( $fp );
-            if ( $pos === false ) {
-                break;
-            }
-            if ( $pos > $end ) {
-                break;
-            }
-            $bytes_to_read = $chunk;
-            $remaining     = ( $end - $pos ) + 1;
-            if ( $remaining < $bytes_to_read ) {
-                $bytes_to_read = $remaining;
-            }
-            $buffer = fread( $fp, $bytes_to_read );
-            if ( $buffer === false ) {
-                break;
-            }
-            echo $buffer;
-            @flush();
-        }
-
-        fclose( $fp );
+        // Redirect (do not read from disk)
+        wp_safe_redirect( $file_url, 302 );
         exit;
     }
 }
