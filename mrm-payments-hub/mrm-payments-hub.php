@@ -14,6 +14,7 @@ class MRM_Payments_Hub_Single {
   // Options keys
   const OPT_SETTINGS = 'mrm_pay_hub_settings';
   const OPT_PRODUCTS = 'mrm_pay_hub_products';
+  const OPT_EMAIL_LISTS = 'mrm_pay_hub_email_lists';
 
   // Admin menu
   const MENU_SLUG = 'mrm-payments-hub';
@@ -169,6 +170,33 @@ class MRM_Payments_Hub_Single {
     $sku = $this->sanitize_sku($sku);
     $all = $this->all_products();
     return isset($all[$sku]) && is_array($all[$sku]) ? $all[$sku] : null;
+  }
+
+  private function get_email_lists() {
+    $m = get_option(self::OPT_EMAIL_LISTS, array());
+    return is_array($m) ? $m : array();
+  }
+
+  private function save_email_lists($lists) {
+    update_option(self::OPT_EMAIL_LISTS, is_array($lists) ? $lists : array());
+  }
+
+  private function normalize_email_lines($raw) {
+    $raw = (string)$raw;
+    $lines = preg_split("/\r\n|\n|\r/", $raw);
+    $out = array();
+    foreach ($lines as $line) {
+      $e = sanitize_email(trim($line));
+      if ($e && is_email($e)) $out[strtolower($e)] = true;
+    }
+    return array_keys($out);
+  }
+
+  private function get_all_sheet_music_sku() {
+    // Admin-configurable in settings; fallback to a reasonable default that matches your SKU pattern.
+    $settings = $this->get_settings();
+    $sku = $this->sanitize_sku((string)($settings['all_sheet_music_sku'] ?? 'piece-all-sheet-music-access-complete-package'));
+    return $sku;
   }
 
   /**
@@ -729,6 +757,16 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Failed to grant access.'), 500);
     }
 
+    // Also append plaintext email to the approved list for admin visibility.
+    $lists = $this->get_email_lists();
+    if (!isset($lists[$sku]) || !is_array($lists[$sku])) $lists[$sku] = array();
+    $lower = strtolower($email);
+    if (!in_array($lower, $lists[$sku], true)) {
+      $lists[$sku][] = $lower;
+      sort($lists[$sku]);
+      $this->save_email_lists($lists);
+    }
+
     return new WP_REST_Response(array(
       'ok' => true,
       'email_hash' => $email_hash,
@@ -864,6 +902,7 @@ class MRM_Payments_Hub_Single {
       $settings['stripe_test_publishable_key'] = sanitize_text_field((string)($_POST['stripe_test_publishable_key'] ?? ''));
       $settings['stripe_test_secret_key'] = sanitize_text_field((string)($_POST['stripe_test_secret_key'] ?? ''));
       $settings['stripe_test_webhook_secret'] = sanitize_text_field((string)($_POST['stripe_test_webhook_secret'] ?? ''));
+      $settings['all_sheet_music_sku'] = $this->sanitize_sku((string)($_POST['all_sheet_music_sku'] ?? 'piece-all-sheet-music-access-complete-package'));
 
       $this->save_settings($settings);
       add_settings_error('mrm_pay_hub', 'saved', 'Settings saved.', 'updated');
@@ -882,6 +921,8 @@ class MRM_Payments_Hub_Single {
       $categories = isset($_POST['category']) ? (array)$_POST['category'] : array();
       $composer_pcts = isset($_POST['composer_pct']) ? (array)$_POST['composer_pct'] : array();
       $deletes = isset($_POST['delete']) ? (array)$_POST['delete'] : array();
+      $approved_emails = isset($_POST['approved_emails']) ? (array)$_POST['approved_emails'] : array();
+      $email_lists = $this->get_email_lists();
 
       $allowed_currencies = array('usd', 'eur');
       $allowed_types = array('lesson', 'sheet_music');
@@ -951,12 +992,85 @@ class MRM_Payments_Hub_Single {
       }
 
       $this->save_products($products);
+      // Save approved email lists per SKU (sheet_music only) and mirror into access table.
+      $access_table = $this->table_sheet_music_access();
+      global $wpdb;
+
+      foreach ($skus as $index => $sku_raw) {
+        $original_sku = $this->sanitize_sku((string)($original_skus[$index] ?? ''));
+        $current_sku = $original_sku ? $original_sku : $this->sanitize_sku($sku_raw);
+        if (!empty($deletes[$index])) {
+          if ($current_sku) {
+            unset($email_lists[$current_sku]);
+          }
+          continue;
+        }
+
+        // Resolve final SKU the same way the product save loop does.
+        $type = sanitize_text_field((string)($types[$index] ?? 'sheet_music'));
+        if ($type !== 'sheet_music') continue;
+
+        $label_raw = sanitize_text_field((string)($labels[$index] ?? ''));
+        $category = sanitize_text_field((string)($categories[$index] ?? 'fundamentals'));
+        $final_sku = $this->generate_sheet_music_sku($label_raw, $category, $current_sku);
+        $final_sku = $this->sanitize_sku($final_sku);
+        if (!$final_sku) continue;
+
+        $raw_lines = (string)($approved_emails[$index] ?? '');
+        $emails = $this->normalize_email_lines($raw_lines);
+
+        // Persist plaintext list
+        $email_lists[$final_sku] = $emails;
+
+        // Mirror to access table:
+        // - grant for all in list
+        // - revoke any previously granted by 'manual_list' not in the list
+        $now = current_time('mysql');
+        $wanted_hashes = array();
+        foreach ($emails as $e) {
+          $eh = $this->email_hash($e);
+          $wanted_hashes[$eh] = true;
+
+          // Insert if not exists active
+          $existing_id = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$access_table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+            $eh, $final_sku
+          ));
+          if (!$existing_id) {
+            $wpdb->insert($access_table, array(
+              'email_hash' => $eh,
+              'sku' => $final_sku,
+              'granted_at' => $now,
+              'revoked_at' => null,
+              'source' => 'manual_list',
+              'source_id' => null,
+            ), array('%s','%s','%s','%s','%s','%s'));
+          }
+        }
+
+        // Revoke entries sourced from manual_list that are no longer wanted
+        $rows = $wpdb->get_results($wpdb->prepare(
+          "SELECT id,email_hash FROM {$access_table} WHERE sku=%s AND revoked_at IS NULL AND source='manual_list'",
+          $final_sku
+        ), ARRAY_A);
+
+        foreach ($rows as $r) {
+          $eh = (string)$r['email_hash'];
+          if (!isset($wanted_hashes[$eh])) {
+            $wpdb->update($access_table, array('revoked_at' => $now), array('id' => intval($r['id'])), array('%s'), array('%d'));
+          }
+        }
+      }
+
+      $this->save_email_lists($email_lists);
       add_settings_error('mrm_pay_hub', 'products_saved', 'Products saved.', 'updated');
     }
   }
 
   private function render_products_ui() {
     $products = $this->all_products();
+    $email_lists = $this->get_email_lists();
+    $all_sku = $this->get_all_sheet_music_sku();
     $lesson_categories = array(
       '60_online' => '60 Online',
       '60_inperson' => '60 In-Person',
@@ -1055,6 +1169,19 @@ class MRM_Payments_Hub_Single {
                 <input type="number" name="composer_pct[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['composer_pct'] ?? '')); ?>" class="small-text" min="0" max="100" />
               </label>
             </p>
+            <?php if ($type === 'sheet_music') :
+              $emails = isset($email_lists[$sku]) && is_array($email_lists[$sku]) ? $email_lists[$sku] : array();
+              $text = esc_textarea(implode("\n", $emails));
+            ?>
+              <hr />
+              <p><strong>Approved Emails (OTP Access)</strong><br />
+                <small><?php echo ($sku === $all_sku) ? 'This is the ALL-SHEET-MUSIC override SKU.' : 'Checked after the ALL-SHEET-MUSIC list.'; ?></small>
+              </p>
+              <p>
+                <textarea name="approved_emails[<?php echo esc_attr($current_index); ?>]" rows="6" style="width:100%;font-family:monospace;"><?php echo $text; ?></textarea>
+                <small>One email per line.</small>
+              </p>
+            <?php endif; ?>
             <p>
               <label>
                 <input type="checkbox" name="delete[<?php echo esc_attr($current_index); ?>]" value="1" />
@@ -1210,6 +1337,7 @@ class MRM_Payments_Hub_Single {
     $sk_test   = esc_attr((string)($settings['stripe_test_secret_key'] ?? ''));
     $wh_test   = esc_attr((string)($settings['stripe_test_webhook_secret'] ?? ''));
     $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
+    $allSku    = esc_attr((string)($settings['all_sheet_music_sku'] ?? 'piece-all-sheet-music-access-complete-package'));
 
     ?>
     <div class="wrap">
@@ -1228,6 +1356,15 @@ class MRM_Payments_Hub_Single {
                 <label><input type="radio" name="stripe_mode" value="live" <?php checked($mode, 'live'); ?> /> Live</label><br />
                 <label><input type="radio" name="stripe_mode" value="test" <?php checked($mode, 'test'); ?> /> Test (Sandbox)</label>
               </fieldset>
+            </td>
+          </tr>
+        </table>
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="all_sheet_music_sku">All Sheet Music SKU (override)</label></th>
+            <td>
+              <input type="text" id="all_sheet_music_sku" name="all_sheet_music_sku" value="<?php echo $allSku; ?>" class="regular-text" />
+              <p class="description">If an email has access to this SKU, OTP will be issued for any piece without checking the piece SKU list.</p>
             </td>
           </tr>
         </table>

@@ -162,7 +162,6 @@ class MRM_Product_Access {
                 'auth_secret'                => wp_generate_password( 32, true, true ),
                 'email_subject'              => 'Your access code',
                 'email_body'                 => "Your one-time code is: {{OTP}}\n\nIf you did not request this, ignore this email.",
-                'sheet_music_catalog_url'    => '/sheet-music/',
                 'pieces'                     => array(),
                 'offerings'                  => array(
                     array( 'key' => 'full', 'label' => 'Full Package', 'amount_cents' => 0 ),
@@ -365,17 +364,8 @@ class MRM_Product_Access {
         }
 
         if ( isset( $_POST['mrm_pa_save_settings'] ) && check_admin_referer( 'mrm_pa_save_settings' ) ) {
-            // Stripe configuration.
-            $options['test_mode']                  = isset( $_POST['test_mode'] );
-            $options['stripe_test_secret_key']     = sanitize_text_field( $_POST['stripe_test_secret_key'] );
-            $options['stripe_test_webhook_secret'] = sanitize_text_field( $_POST['stripe_test_webhook_secret'] );
-            $options['stripe_live_secret_key']     = sanitize_text_field( $_POST['stripe_live_secret_key'] );
-            $options['stripe_live_webhook_secret'] = sanitize_text_field( $_POST['stripe_live_webhook_secret'] );
             $options['email_subject']              = sanitize_text_field( $_POST['email_subject'] );
             $options['email_body']                 = wp_kses_post( $_POST['email_body'] );
-            $options['sheet_music_catalog_url']    = isset( $_POST['sheet_music_catalog_url'] )
-                ? sanitize_text_field( $_POST['sheet_music_catalog_url'] )
-                : ( $options['sheet_music_catalog_url'] ?? '/sheet-music/' );
 
             /**
              * Pieces Catalog (sheet music listings)
@@ -594,11 +584,6 @@ class MRM_Product_Access {
                     $tracks_by_slug[ $slug ] = array();
                 }
 
-                // Enforce max 25 rows per slug
-                if ( count( $tracks_by_slug[ $slug ] ) >= 25 ) {
-                    continue;
-                }
-
                 $tracks_by_slug[ $slug ][] = array(
                     'name' => $name !== '' ? $name : 'Track',
                     'url'  => $url,
@@ -636,35 +621,6 @@ class MRM_Product_Access {
             <form method="post">
                 <?php wp_nonce_field( 'mrm_pa_save_settings' ); ?>
 
-                <h2 class="title"><?php esc_html_e( 'Stripe Configuration', 'mrm-product-access' ); ?></h2>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Test Mode', 'mrm-product-access' ); ?></th>
-                        <td>
-                            <label>
-                                <input type="checkbox" name="test_mode" <?php checked( ! empty( $options['test_mode'] ) ); ?> />
-                                <?php esc_html_e( 'Enable test mode', 'mrm-product-access' ); ?>
-                            </label>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Test Secret Key', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_test_secret_key" value="<?php echo esc_attr( $options['stripe_test_secret_key'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Test Webhook Secret', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_test_webhook_secret" value="<?php echo esc_attr( $options['stripe_test_webhook_secret'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Live Secret Key', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_live_secret_key" value="<?php echo esc_attr( $options['stripe_live_secret_key'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Live Webhook Secret', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_live_webhook_secret" value="<?php echo esc_attr( $options['stripe_live_webhook_secret'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                </table>
-
                 <h2 class="title"><?php esc_html_e( 'Email Template', 'mrm-product-access' ); ?></h2>
                 <table class="form-table" role="presentation">
                     <tr>
@@ -689,18 +645,6 @@ class MRM_Product_Access {
                 <p class="description">
                     <?php esc_html_e( 'Enter the piece fields + purchasing options (offers) exactly like the old product HTML. URLs can be full URLs or site-relative paths (e.g. /wp-content/uploads/...).', 'mrm-product-access' ); ?>
                 </p>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Sheet Music Catalog Page URL', 'mrm-product-access' ); ?></th>
-                        <td>
-                            <input type="text" class="regular-text" name="sheet_music_catalog_url"
-                                value="<?php echo esc_attr( $options['sheet_music_catalog_url'] ?? '/sheet-music/' ); ?>"
-                                placeholder="/sheet-music/" />
-                            <p class="description"><?php esc_html_e( 'Used for the “Preview more pieces” button on piece detail pages.', 'mrm-product-access' ); ?></p>
-                        </td>
-                    </tr>
-                </table>
-
                 <style>
                 /* Admin-only styling for a cleaner “card” editor */
                 .mrm-pa-piece-card{
@@ -1113,7 +1057,7 @@ class MRM_Product_Access {
 
                 <h2 class="title"><?php esc_html_e( 'Tracks Mapping (by Product Slug)', 'mrm-product-access' ); ?></h2>
                 <p class="description">
-                    <?php esc_html_e( 'This replaces Products Configuration. Add up to 25 rows per product slug. Empty rows are allowed and ignored at runtime.', 'mrm-product-access' ); ?>
+                    <?php esc_html_e( 'This replaces Products Configuration. Empty rows are allowed and ignored at runtime.', 'mrm-product-access' ); ?>
                 </p>
 
                 <?php
@@ -1145,6 +1089,10 @@ class MRM_Product_Access {
                     </code></p>
                 <?php endif; ?>
 
+                <p style="margin:10px 0 6px;">
+                    <button type="button" class="button" id="mrm-pa-add-25">Add 25 rows</button>
+                    <button type="button" class="button" id="mrm-pa-add-100">Add 100 rows</button>
+                </p>
                 <table class="widefat fixed striped" cellspacing="0" style="max-width:1200px;">
                     <thead>
                         <tr>
@@ -1180,8 +1128,8 @@ class MRM_Product_Access {
                             $r = $rows[ $i ] ?? array( 'slug' => '', 'name' => '', 'url' => '' );
                             ?>
                             <tr>
-                                <td><input type="text" name="track_product_slug[]" value="<?php echo esc_attr( $r['slug'] ); ?>" class="regular-text" placeholder="blackbeards-revenge-tuba-full-piece"></td>
-                                <td><input type="text" name="track_display_name[]" value="<?php echo esc_attr( $r['name'] ); ?>" class="regular-text" placeholder="Exercise 1 (PDF)"></td>
+                                <td><input type="text" name="track_product_slug[]" value="<?php echo esc_attr( $r['slug'] ); ?>" style="width:190px;max-width:100%;" placeholder="piece-blackbeards-revenge-tuba"></td>
+                                <td><input type="text" name="track_display_name[]" value="<?php echo esc_attr( $r['name'] ); ?>" style="width:240px;max-width:100%;" placeholder="Exercise 1 (PDF)"></td>
                                 <td><input type="text" name="track_url[]" value="<?php echo esc_attr( $r['url'] ); ?>" class="large-text" placeholder="/home/.../file.pdf OR https://.../file.mp3"></td>
                             </tr>
                             <?php
@@ -1191,7 +1139,7 @@ class MRM_Product_Access {
                 </table>
 
                 <p class="description" style="margin-top:8px;">
-                    <?php esc_html_e( 'Runtime ignores rows missing slug or url. Max 25 stored per slug.', 'mrm-product-access' ); ?>
+                    <?php esc_html_e( 'Runtime ignores rows missing slug or url.', 'mrm-product-access' ); ?>
                 </p>
 
                 <?php submit_button( __( 'Save Settings', 'mrm-product-access' ), 'primary', 'mrm_pa_save_settings' ); ?>
@@ -1201,10 +1149,27 @@ class MRM_Product_Access {
             <p><strong><?php esc_html_e( 'Access URL pattern:', 'mrm-product-access' ); ?></strong> <code><?php echo esc_html( home_url( '/mrm-access/{product_slug}/{token}/' ) ); ?></code></p>
             <p><strong><?php esc_html_e( 'Important:', 'mrm-product-access' ); ?></strong> <?php esc_html_e( 'After updating, go to Settings → Permalinks and click Save Changes once.', 'mrm-product-access' ); ?></p>
         </div>
-        <?php
-        // No client-side script is required for the settings page since the
-        // Verified Emails section has been removed per user request.
-        ?>
+        <script>
+        (function(){
+          function addRows(n){
+            const tbody = document.getElementById('mrm-pa-tracks-body');
+            if(!tbody) return;
+            for(let i=0;i<n;i++){
+              const tr = document.createElement('tr');
+              tr.innerHTML = `
+                <td><input type="text" name="track_product_slug[]" style="width:190px;max-width:100%;" placeholder="piece-blackbeards-revenge-tuba"></td>
+                <td><input type="text" name="track_display_name[]" style="width:240px;max-width:100%;" placeholder="Track name"></td>
+                <td><input type="text" name="track_url[]" class="large-text" placeholder="/home/.../file.pdf OR https://.../file.mp3"></td>
+              `;
+              tbody.appendChild(tr);
+            }
+          }
+          const b25 = document.getElementById('mrm-pa-add-25');
+          const b100 = document.getElementById('mrm-pa-add-100');
+          if(b25) b25.addEventListener('click', ()=>addRows(25));
+          if(b100) b100.addEventListener('click', ()=>addRows(100));
+        })();
+        </script>
         <?php
     }
 
@@ -1233,7 +1198,7 @@ class MRM_Product_Access {
         $m = $this->get_tracks_mapping();
         $items = isset( $m[ $product_slug ] ) && is_array( $m[ $product_slug ] ) ? $m[ $product_slug ] : array();
 
-        // Normalize and cap at 25.
+        // Normalize track mapping.
         $out = array();
         foreach ( $items as $it ) {
             if ( ! is_array( $it ) ) {
@@ -1250,9 +1215,6 @@ class MRM_Product_Access {
                 'name' => $name !== '' ? $name : 'Track',
                 'url'  => $url,
             );
-            if ( count( $out ) >= 25 ) {
-                break;
-            }
         }
         return $out;
     }
@@ -1358,9 +1320,7 @@ class MRM_Product_Access {
      * @return string
      */
     private function get_sheet_music_catalog_url() {
-        $options   = $this->get_options();
-        $raw_value = $options['sheet_music_catalog_url'] ?? '/sheet-music/';
-        return ( strpos( $raw_value, 'http' ) === 0 ) ? $raw_value : home_url( $raw_value );
+        return home_url( '/sheet-music/' );
     }
 
     /**
@@ -1406,24 +1366,47 @@ class MRM_Product_Access {
 
     private function payments_hub_has_access( $email_hash, $sku ) {
         global $wpdb;
+
+        $email_hash = sanitize_text_field( (string) $email_hash );
+        $sku        = $this->sanitize_product_slug( (string) $sku );
+
+        if ( $email_hash === '' || $sku === '' ) {
+            return false;
+        }
+
+        // Pull the All Sheet Music SKU from Payments Hub settings (single source of truth).
+        $hub_settings = get_option( 'mrm_pay_hub_settings', array() );
+        $all_sku      = isset( $hub_settings['all_sheet_music_sku'] ) ? (string) $hub_settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
+        $all_sku      = $this->sanitize_product_slug( $all_sku );
+
         $table = $wpdb->prefix . 'mrm_sheet_music_access';
 
-        // If Payments Hub isn't installed yet, fail closed.
-        $exists = $wpdb->get_var( $wpdb->prepare(
-            "SHOW TABLES LIKE %s",
-            $table
-        ) );
+        // Fail closed if table missing
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
         if ( $exists !== $table ) {
             return false;
         }
 
-        $id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
-            (string) $email_hash,
-            (string) $sku
+        // 1) ALL-SHEET-MUSIC override first
+        if ( $all_sku !== '' ) {
+            $id = $wpdb->get_var( $wpdb->prepare(
+                "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+                $email_hash,
+                $all_sku
+            ) );
+            if ( ! empty( $id ) ) {
+                return true;
+            }
+        }
+
+        // 2) Then specific product SKU
+        $id2 = $wpdb->get_var( $wpdb->prepare(
+            "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+            $email_hash,
+            $sku
         ) );
 
-        return ! empty( $id );
+        return ! empty( $id2 );
     }
 
 
