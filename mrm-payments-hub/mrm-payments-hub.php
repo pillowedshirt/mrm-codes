@@ -33,7 +33,10 @@ class MRM_Payments_Hub_Single {
    * ======================================================= */
 
   public function on_activate() {
+    // Create or upgrade database tables
     $this->install_or_upgrade_db();
+    // Ensure the default lesson products are present
+    $this->ensure_default_products();
   }
 
   private function table_orders() {
@@ -183,7 +186,6 @@ class MRM_Payments_Hub_Single {
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '60_online',
-        'emails' => array(),
         'active' => 1,
       ),
       'lesson_60_inperson' => array(
@@ -193,7 +195,6 @@ class MRM_Payments_Hub_Single {
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '60_inperson',
-        'emails' => array(),
         'active' => 1,
       ),
       'lesson_30_online' => array(
@@ -203,7 +204,6 @@ class MRM_Payments_Hub_Single {
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '30_online',
-        'emails' => array(),
         'active' => 1,
       ),
       'lesson_30_inperson' => array(
@@ -213,7 +213,6 @@ class MRM_Payments_Hub_Single {
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '30_inperson',
-        'emails' => array(),
         'active' => 1,
       ),
     );
@@ -419,43 +418,6 @@ class MRM_Payments_Hub_Single {
     ), array('%d','%s','%s','%s'));
   }
 
-  /* =========================================================
-   * Product access helpers
-   * ======================================================= */
-
-  private function get_sheet_music_purchasers(string $sku): array {
-    global $wpdb;
-    $table = $this->table_sheet_music_access();
-    $rows = $wpdb->get_results($wpdb->prepare(
-      "SELECT email_hash FROM {$table} WHERE sku = %s AND revoked_at IS NULL",
-      $sku
-    ));
-    $emails = array();
-    foreach ((array)$rows as $row) {
-      $email = $this->decode_email_hash((string)$row->email_hash);
-      if ($email) $emails[] = $email;
-    }
-    return array_unique($emails);
-  }
-
-  private function get_recent_lesson_purchasers(): array {
-    global $wpdb;
-    $orders = $this->table_orders();
-    $rows = $wpdb->get_results(
-      "SELECT DISTINCT email_hash
-       FROM {$orders}
-       WHERE product_type = 'lesson'
-         AND status = 'succeeded'
-         AND updated_at >= ( NOW() - INTERVAL 28 DAY )"
-    );
-    $emails = array();
-    foreach ((array)$rows as $row) {
-      $email = $this->decode_email_hash((string)$row->email_hash);
-      if ($email) $emails[] = $email;
-    }
-    return array_unique($emails);
-  }
-
   private function decode_email_hash(string $hash): ?string {
     $map = get_option('mrm_pay_hub_email_map', array());
     if (!is_array($map)) return null;
@@ -534,12 +496,6 @@ class MRM_Payments_Hub_Single {
    * ======================================================= */
 
   public function register_routes() {
-    register_rest_route('mrm-pay/v1', '/pk', array(
-      'methods' => WP_REST_Server::READABLE,
-      'callback' => array($this, 'rest_pk'),
-      'permission_callback' => '__return_true',
-    ));
-
     register_rest_route('mrm-pay/v1', '/quote', array(
       'methods' => WP_REST_Server::READABLE,
       'callback' => array($this, 'rest_quote'),
@@ -570,17 +526,6 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
-    register_rest_route('mrm-pay/v1', '/link-order', array(
-      'methods' => WP_REST_Server::CREATABLE,
-      'callback' => array($this, 'rest_link_order'),
-      'permission_callback' => '__return_true',
-    ));
-  }
-
-  public function rest_pk() {
-    return new WP_REST_Response(array(
-      'publishableKey' => $this->publishable_key(),
-    ), 200);
   }
 
   public function rest_quote(WP_REST_Request $req) {
@@ -601,7 +546,6 @@ class MRM_Payments_Hub_Single {
       'product_type' => (string)($p['product_type'] ?? 'unknown'),
       'category' => (string)($p['category'] ?? ''),
       'composer_pct' => isset($p['composer_pct']) ? (int)$p['composer_pct'] : null,
-      'emails' => array_values((array)($p['emails'] ?? array())),
     ), 200);
   }
 
@@ -705,7 +649,6 @@ class MRM_Payments_Hub_Single {
       'product_type' => $product_type,
       'category' => (string)($p['category'] ?? ''),
       'composer_pct' => isset($p['composer_pct']) ? (int)$p['composer_pct'] : null,
-      'emails' => array_values((array)($p['emails'] ?? array())),
       // For debugging. Remove later if you want.
       'metadata' => $metadata,
     ), 200);
@@ -721,12 +664,15 @@ class MRM_Payments_Hub_Single {
     if (is_wp_error($pi)) return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
 
     $status = (string)($pi['status'] ?? '');
-    $ok = ($status === 'succeeded');
+    $terminal_statuses = array('succeeded', 'requires_capture');
+    $fail_statuses = array('requires_payment_method', 'canceled');
+
+    $ok = in_array($status, $terminal_statuses, true);
 
     // Update local order status if it exists
     $order = $this->get_order_by_pi($pi_id);
     if ($order) {
-      $new_status = $ok ? 'paid' : (($status === 'requires_payment_method' || $status === 'canceled') ? 'failed' : 'created');
+      $new_status = $ok ? 'paid' : (in_array($status, $fail_statuses, true) ? 'failed' : 'created');
       $this->update_order_status_from_pi($pi_id, $new_status, $status, $pi['metadata'] ?? null);
     }
 
@@ -840,43 +786,6 @@ class MRM_Payments_Hub_Single {
       ));
     }
 
-    $products = $this->all_products();
-    $changed = false;
-    foreach ($expired as $hash) {
-      $email = $this->decode_email_hash((string)$hash);
-      if (!$email) continue;
-      foreach ($products as $sku => $product) {
-        if (!is_array($product)) continue;
-        $emails = array_values(array_filter((array)($product['emails'] ?? array())));
-        $filtered = array_values(array_diff($emails, array($email)));
-        if ($filtered !== $emails) {
-          $products[$sku]['emails'] = $filtered;
-          $changed = true;
-        }
-      }
-    }
-
-    if ($changed) {
-      $this->save_products($products);
-    }
-  }
-
-  public function rest_link_order(WP_REST_Request $req) {
-    $data = (array) $req->get_json_params();
-    $pi_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
-    $source = sanitize_text_field((string)($data['source'] ?? ''));
-    $source_object_id = sanitize_text_field((string)($data['source_object_id'] ?? ''));
-
-    if (!$pi_id || !$source || !$source_object_id) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'payment_intent_id, source, source_object_id required.'), 400);
-    }
-
-    $order = $this->get_order_by_pi($pi_id);
-    if (!$order) return new WP_REST_Response(array('ok'=>false,'message'=>'Order not found for payment_intent_id.'), 404);
-
-    $this->link_order((int)$order['id'], $source, $source_object_id);
-
-    return new WP_REST_Response(array('ok'=>true,'order_id'=>(int)$order['id']), 200);
   }
 
   /* =========================================================
@@ -928,7 +837,6 @@ class MRM_Payments_Hub_Single {
       $types = isset($_POST['product_type']) ? (array)$_POST['product_type'] : array();
       $categories = isset($_POST['category']) ? (array)$_POST['category'] : array();
       $composer_pcts = isset($_POST['composer_pct']) ? (array)$_POST['composer_pct'] : array();
-      $emails_text = isset($_POST['emails']) ? (array)$_POST['emails'] : array();
       $deletes = isset($_POST['delete']) ? (array)$_POST['delete'] : array();
 
       $allowed_currencies = array('usd', 'eur');
@@ -981,24 +889,6 @@ class MRM_Payments_Hub_Single {
           if ($composer_pct > 100) $composer_pct = 100;
         }
 
-        $emails = array();
-        $raw_emails = (string)($emails_text[$index] ?? '');
-        $lines = preg_split('/\r\n|\r|\n/', wp_unslash($raw_emails));
-        foreach ((array)$lines as $line) {
-          $email = strtolower(trim($line));
-          if (!$email || !is_email($email)) continue;
-          $emails[] = $email;
-        }
-        $emails = array_values(array_unique($emails));
-
-        if ($type === 'sheet_music') {
-          $auto = array_unique(array_merge(
-            $this->get_sheet_music_purchasers($sku),
-            $this->get_recent_lesson_purchasers()
-          ));
-          $emails = array_values(array_diff($emails, $auto));
-        }
-
         $products[$sku] = array(
           'sku' => $sku,
           'label' => $label,
@@ -1006,7 +896,6 @@ class MRM_Payments_Hub_Single {
           'currency' => $currency,
           'product_type' => $type,
           'category' => $category,
-          'emails' => $emails,
           'active' => 1,
         );
 
@@ -1061,16 +950,6 @@ class MRM_Payments_Hub_Single {
               $category = $match[1];
             }
           }
-          $emails = (array)($product['emails'] ?? array());
-          $auto_emails = array();
-          if ($type === 'sheet_music') {
-            $auto_emails = array_unique(array_merge(
-              $this->get_sheet_music_purchasers($sku),
-              $this->get_recent_lesson_purchasers()
-            ));
-          }
-          $display_emails = array_unique(array_merge($emails, $auto_emails));
-          $emails_text = esc_textarea(implode("\n", $display_emails));
         ?>
           <div class="card" style="padding:16px;">
             <h3 style="margin-top:0;"><?php echo esc_html($sku); ?></h3>
@@ -1130,11 +1009,6 @@ class MRM_Payments_Hub_Single {
             <p>
               <label>Composer %<br />
                 <input type="number" name="composer_pct[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['composer_pct'] ?? '')); ?>" class="small-text" min="0" max="100" />
-              </label>
-            </p>
-            <p>
-              <label>Emails (one per line)<br />
-                <textarea name="emails[<?php echo esc_attr($current_index); ?>]" rows="4" style="width:100%;"><?php echo $emails_text; ?></textarea>
               </label>
             </p>
             <p>
@@ -1199,11 +1073,6 @@ class MRM_Payments_Hub_Single {
           <p>
             <label>Composer %<br />
               <input type="number" name="composer_pct[<?php echo esc_attr($new_index); ?>]" value="" class="small-text" min="0" max="100" />
-            </label>
-          </p>
-          <p>
-            <label>Emails (one per line)<br />
-              <textarea name="emails[<?php echo esc_attr($new_index); ?>]" rows="4" style="width:100%;"></textarea>
             </label>
           </p>
           <input type="hidden" name="delete[<?php echo esc_attr($new_index); ?>]" value="0" />
@@ -1361,11 +1230,11 @@ class MRM_Payments_Hub_Single {
       <hr />
       <h2>REST Endpoints</h2>
       <ul>
-        <li><code>GET  /wp-json/mrm-pay/v1/pk</code></li>
         <li><code>GET  /wp-json/mrm-pay/v1/quote?sku=lesson_60_online</code></li>
+        <li><code>GET  /wp-json/mrm-pay/v1/resolve?piece_slug=example&amp;type=fundamentals</code></li>
         <li><code>POST /wp-json/mrm-pay/v1/create-payment-intent</code></li>
         <li><code>POST /wp-json/mrm-pay/v1/verify-payment-intent</code></li>
-        <li><code>POST /wp-json/mrm-pay/v1/link-order</code></li>
+        <li><code>POST /wp-json/mrm-pay/v1/grant-sheet-music-access</code></li>
       </ul>
     </div>
     <?php

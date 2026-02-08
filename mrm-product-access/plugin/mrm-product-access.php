@@ -109,56 +109,8 @@ class MRM_Product_Access {
      * Creates custom database tables and initialises default options.
      */
     public function activate() {
-        global $wpdb;
-        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-        $charset_collate = $wpdb->get_charset_collate();
-
-        $table_purchases = $wpdb->prefix . 'mrm_purchases';
-        $sql1 = "CREATE TABLE $table_purchases (
-            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-            product_slug VARCHAR(200) NOT NULL,
-            purchaser_email VARCHAR(255) NOT NULL,
-            email_hash VARCHAR(64) NOT NULL,
-            payout_json LONGTEXT NULL,
-            stripe_checkout_session_id VARCHAR(255) NOT NULL,
-            stripe_payment_intent_id VARCHAR(255) NOT NULL,
-            amount_total BIGINT UNSIGNED NOT NULL,
-            currency VARCHAR(10) NOT NULL,
-            status VARCHAR(50) NOT NULL DEFAULT 'pending',
-            created_at DATETIME NOT NULL,
-            updated_at DATETIME NOT NULL,
-            PRIMARY KEY  (id),
-            KEY email_hash_idx (email_hash),
-            KEY product_slug_idx (product_slug)
-        ) $charset_collate;";
-
-        $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
-        $sql2 = "CREATE TABLE $table_otps (
-            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-            product_slug VARCHAR(200) NOT NULL,
-            purchaser_email VARCHAR(255) NOT NULL,
-            email_hash VARCHAR(64) NOT NULL,
-            otp_hash VARCHAR(255) NOT NULL,
-            expires_at DATETIME NOT NULL,
-            used_at DATETIME NULL,
-            request_ip VARCHAR(45) NOT NULL,
-            attempt_count INT UNSIGNED NOT NULL DEFAULT 0,
-            created_at DATETIME NOT NULL,
-            PRIMARY KEY  (id),
-            KEY email_hash_idx (email_hash),
-            KEY product_slug_idx (product_slug)
-        ) $charset_collate;";
-
-        dbDelta( $sql1 );
-        dbDelta( $sql2 );
-
         if ( ! get_option( $this->option_key ) ) {
             $default = array(
-                'test_mode'                  => true,
-                'stripe_test_secret_key'     => '',
-                'stripe_live_secret_key'     => '',
-                'stripe_test_webhook_secret' => '',
-                'stripe_live_webhook_secret' => '',
                 'auth_secret'                => wp_generate_password( 32, true, true ),
                 'email_subject'              => 'Your access code',
                 'email_body'                 => "Your one-time code is: {{OTP}}\n\nIf you did not request this, ignore this email.",
@@ -253,8 +205,7 @@ class MRM_Product_Access {
      *
      * This method runs on the 'admin_notices' hook. It surfaces quality issues
      * identified by analysing current options. Administrators are alerted
-     * to things like missing Stripe keys, payout totals exceeding 100% or
-     * omitted OTP placeholders.
+     * to things like omitted OTP placeholders.
      */
     public function admin_quality_checks() {
         if ( ! current_user_can( 'manage_options' ) ) {
@@ -271,21 +222,6 @@ class MRM_Product_Access {
         $body = isset( $opts['email_body'] ) ? $opts['email_body'] : '';
         if ( stripos( $body, '{{OTP}}' ) === false ) {
             $notices[] = __( 'The Email Body does not contain the {{OTP}} placeholder, so recipients will not see the code.', 'mrm-product-access' );
-        }
-
-        // Check payouts per product.
-        if ( ! empty( $opts['products'] ) && is_array( $opts['products'] ) ) {
-            foreach ( $opts['products'] as $slug => $conf ) {
-                $total = 0;
-                if ( ! empty( $conf['payouts'] ) && is_array( $conf['payouts'] ) ) {
-                    foreach ( $conf['payouts'] as $p ) {
-                        $total += floatval( $p['pct'] ?? 0 );
-                    }
-                }
-                if ( $total > 100 ) {
-                    $notices[] = sprintf( __( 'Payout percentages for product "%s" exceed 100%%.', 'mrm-product-access' ), esc_html( $slug ) );
-                }
-            }
         }
 
         foreach ( $notices as $msg ) {
@@ -308,12 +244,6 @@ class MRM_Product_Access {
         $options = $this->get_options();
 
         if ( isset( $_POST['mrm_pa_save_settings'] ) && check_admin_referer( 'mrm_pa_save_settings' ) ) {
-            // Stripe configuration.
-            $options['test_mode']                  = isset( $_POST['test_mode'] );
-            $options['stripe_test_secret_key']     = sanitize_text_field( $_POST['stripe_test_secret_key'] );
-            $options['stripe_test_webhook_secret'] = sanitize_text_field( $_POST['stripe_test_webhook_secret'] );
-            $options['stripe_live_secret_key']     = sanitize_text_field( $_POST['stripe_live_secret_key'] );
-            $options['stripe_live_webhook_secret'] = sanitize_text_field( $_POST['stripe_live_webhook_secret'] );
             $options['email_subject']              = sanitize_text_field( $_POST['email_subject'] );
             $options['email_body']                 = wp_kses_post( $_POST['email_body'] );
             $options['sheet_music_catalog_url']    = isset( $_POST['sheet_music_catalog_url'] )
@@ -475,32 +405,15 @@ class MRM_Product_Access {
 
             $options['pieces'] = $pieces;
 
-            // Verified emails.
-            // Only update the verified_emails option when inputs are provided. If no
-            // verified_email inputs exist (e.g. the UI has been removed), retain
-            // existing values to avoid clearing the list unintentionally.
-            if ( isset( $_POST['verified_email'] ) && is_array( $_POST['verified_email'] ) ) {
-                $verified = array();
-                foreach ( $_POST['verified_email'] as $email ) {
-                    $email = sanitize_email( $email );
-                    if ( ! empty( $email ) ) {
-                        $verified[] = $email;
-                    }
-                }
-                $options['verified_emails'] = array_values( array_unique( $verified ) );
-            }
-
             // Products configuration.
             $products = array();
             if ( ! empty( $_POST['product_slug'] ) && is_array( $_POST['product_slug'] ) ) {
                 $slugs       = array_map( 'sanitize_title', $_POST['product_slug'] );
                 $prices      = array_map( 'intval', $_POST['product_price_cents'] );
                 $currencies  = array_map( 'sanitize_text_field', $_POST['product_currency'] );
-                $payouts     = isset( $_POST['product_payout'] ) ? $_POST['product_payout'] : array();
                 // The PDF, audio and zip paths fields have been removed from the UI. Retain any existing
                 // values by not parsing these from the submitted form.
                 $tracks_json = isset( $_POST['product_tracks_json'] ) ? $_POST['product_tracks_json'] : array();
-                $approved_emails_raw = isset( $_POST['product_approved_emails'] ) ? $_POST['product_approved_emails'] : null;
 
                 foreach ( $slugs as $idx => $slug ) {
                     if ( empty( $slug ) ) {
@@ -510,25 +423,6 @@ class MRM_Product_Access {
                     $product = array();
                     $product['price_cents'] = isset( $prices[ $idx ] ) ? $prices[ $idx ] : 0;
                     $product['currency']    = isset( $currencies[ $idx ] ) ? strtolower( $currencies[ $idx ] ) : 'usd';
-
-                    // Parse payout definitions: dest:pct;dest:pct.
-                    $product['payouts'] = array();
-                    if ( isset( $payouts[ $idx ] ) && ! empty( $payouts[ $idx ] ) ) {
-                        $pairs = explode( ';', $payouts[ $idx ] );
-                        foreach ( $pairs as $pair ) {
-                            $parts = explode( ':', $pair );
-                            if ( count( $parts ) === 2 ) {
-                                $dest = trim( $parts[0] );
-                                $pct  = floatval( $parts[1] );
-                                if ( $dest !== '' && $pct > 0 ) {
-                                    $product['payouts'][] = array(
-                                        'stripe_account_id' => $dest,
-                                        'pct'               => $pct,
-                                    );
-                                }
-                            }
-                        }
-                    }
 
                     // Preserve any existing file paths from the options since these fields are no longer editable
                     $product['pdf_path']   = isset( $options['products'][ $slug ]['pdf_path'] ) ? sanitize_text_field( $options['products'][ $slug ]['pdf_path'] ) : '';
@@ -567,25 +461,6 @@ class MRM_Product_Access {
                     }
 
                     
-                    // Approved emails (per product): semicolon-separated list.
-                    // If the new field isn't present (older versions), preserve existing values.
-                    if ( is_array( $approved_emails_raw ) && array_key_exists( $idx, $approved_emails_raw ) ) {
-                        $approved_list = array();
-                        $raw = (string) $approved_emails_raw[ $idx ];
-                        $parts = explode( ';', $raw );
-                        foreach ( $parts as $em ) {
-                            $em = sanitize_email( trim( $em ) );
-                            if ( ! empty( $em ) ) {
-                                $approved_list[] = strtolower( $em );
-                            }
-                        }
-                        $product['approved_emails'] = array_values( array_unique( $approved_list ) );
-                    } else {
-                        $product['approved_emails'] = isset( $options['products'][ $slug ]['approved_emails'] ) && is_array( $options['products'][ $slug ]['approved_emails'] )
-                            ? array_values( array_unique( array_map( 'strtolower', $options['products'][ $slug ]['approved_emails'] ) ) )
-                            : array();
-                    }
-
                     $products[ $slug ] = $product;
                 }
             }
@@ -618,35 +493,6 @@ class MRM_Product_Access {
             <form method="post">
                 <?php wp_nonce_field( 'mrm_pa_save_settings' ); ?>
 
-                <h2 class="title"><?php esc_html_e( 'Stripe Configuration', 'mrm-product-access' ); ?></h2>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Test Mode', 'mrm-product-access' ); ?></th>
-                        <td>
-                            <label>
-                                <input type="checkbox" name="test_mode" <?php checked( ! empty( $options['test_mode'] ) ); ?> />
-                                <?php esc_html_e( 'Enable test mode', 'mrm-product-access' ); ?>
-                            </label>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Test Secret Key', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_test_secret_key" value="<?php echo esc_attr( $options['stripe_test_secret_key'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Test Webhook Secret', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_test_webhook_secret" value="<?php echo esc_attr( $options['stripe_test_webhook_secret'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Live Secret Key', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_live_secret_key" value="<?php echo esc_attr( $options['stripe_live_secret_key'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Live Webhook Secret', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_live_webhook_secret" value="<?php echo esc_attr( $options['stripe_live_webhook_secret'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                </table>
-
                 <h2 class="title"><?php esc_html_e( 'Email Template', 'mrm-product-access' ); ?></h2>
                 <table class="form-table" role="presentation">
                     <tr>
@@ -661,11 +507,6 @@ class MRM_Product_Access {
                         </td>
                     </tr>
                 </table>
-
-                <?php
-                // Verified Emails section removed per user request. Keeping the underlying
-                // verified_emails option in place but no longer rendering inputs.
-                ?>
 
                 <h2 class="title"><?php esc_html_e( 'Pieces Catalog (Sheet Music Listings)', 'mrm-product-access' ); ?></h2>
                 <p class="description">
@@ -1094,7 +935,7 @@ class MRM_Product_Access {
                 </script>
 
                 <h2 class="title"><?php esc_html_e( 'Products Configuration', 'mrm-product-access' ); ?></h2>
-                <p><?php esc_html_e( 'Define your products below. Payouts format: connectedAccountId:pct;anotherId:pct. Percentages should add up to 100.', 'mrm-product-access' ); ?></p>
+                <p><?php esc_html_e( 'Define your products below.', 'mrm-product-access' ); ?></p>
 
                 <table class="widefat fixed striped mrm-pa-products-table" cellspacing="0" style="max-width:1200px;">
                     <thead>
@@ -1102,11 +943,9 @@ class MRM_Product_Access {
                             <th style="width:130px; "><?php esc_html_e( 'Product Slug', 'mrm-product-access' ); ?></th>
                             <th style="width:120px; "><?php esc_html_e( 'Price (cents)', 'mrm-product-access' ); ?></th>
                             <th style="width:90px; "><?php esc_html_e( 'Currency', 'mrm-product-access' ); ?></th>
-                            <th style="width:220px; "><?php esc_html_e( 'Payouts (dest:pct;...)', 'mrm-product-access' ); ?></th>
                             <?php
                             // Removed PDF Path, Audio Path and ZIP Path columns per user request.
                             ?>
-                            <th style="width:240px; "><?php esc_html_e( 'Approved Emails (semicolon separated)', 'mrm-product-access' ); ?></th>
                             <th style="width:320px; "><?php esc_html_e( 'Tracks JSON (ordered items)', 'mrm-product-access' ); ?></th>
                         </tr>
                     </thead>
@@ -1114,12 +953,6 @@ class MRM_Product_Access {
                         <?php
                         if ( ! empty( $options['products'] ) && is_array( $options['products'] ) ) {
                             foreach ( $options['products'] as $slug => $pconf ) {
-                                $pairs = array();
-                                if ( ! empty( $pconf['payouts'] ) && is_array( $pconf['payouts'] ) ) {
-                                    foreach ( $pconf['payouts'] as $p ) {
-                                        $pairs[] = ( $p['stripe_account_id'] ?? '' ) . ':' . ( $p['pct'] ?? 0 );
-                                    }
-                                }
                                 $tracks_text = '';
                                 if ( ! empty( $pconf['tracks'] ) && is_array( $pconf['tracks'] ) ) {
                                     $tracks_text = wp_json_encode( $pconf['tracks'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES );
@@ -1129,8 +962,6 @@ class MRM_Product_Access {
                                     <td><input type="text" name="product_slug[]" value="<?php echo esc_attr( $slug ); ?>" class="regular-text"></td>
                                     <td><input type="number" name="product_price_cents[]" value="<?php echo esc_attr( $pconf['price_cents'] ?? 0 ); ?>" class="small-text"></td>
                                     <td><input type="text" name="product_currency[]" value="<?php echo esc_attr( $pconf['currency'] ?? 'usd' ); ?>" class="small-text"></td>
-                                    <td><input type="text" name="product_payout[]" value="<?php echo esc_attr( implode( ';', $pairs ) ); ?>" class="regular-text"></td>
-                                    <td><input type="text" name="product_approved_emails[]" value="<?php echo esc_attr( isset( $pconf['approved_emails'] ) && is_array( $pconf['approved_emails'] ) ? implode( ';', $pconf['approved_emails'] ) : '' ); ?>" class="regular-text" placeholder="email1@example.com;email2@example.com"></td>
                                     <td>
                                         <textarea name="product_tracks_json[]" rows="6" style="width:100%; font-family: monospace;"><?php echo esc_textarea( $tracks_text ); ?></textarea>
                                         <div class="description" style="font-size:12px; opacity:.9;">
@@ -1151,8 +982,6 @@ class MRM_Product_Access {
                             <td><input type="text" name="product_slug[]" value="" class="regular-text"></td>
                             <td><input type="number" name="product_price_cents[]" value="" class="small-text"></td>
                             <td><input type="text" name="product_currency[]" value="usd" class="small-text"></td>
-                            <td><input type="text" name="product_payout[]" value="" class="regular-text"></td>
-                            <td><input type="text" name="product_approved_emails[]" value="" class="regular-text" placeholder="email1@example.com;email2@example.com"></td>
                             <td><textarea name="product_tracks_json[]" rows="6" style="width:100%; font-family: monospace;"></textarea></td>
                         </tr>
                     </tbody>
@@ -1165,11 +994,6 @@ class MRM_Product_Access {
             <p><strong><?php esc_html_e( 'Access URL pattern:', 'mrm-product-access' ); ?></strong> <code><?php echo esc_html( home_url( '/mrm-access/{product_slug}/{token}/' ) ); ?></code></p>
             <p><strong><?php esc_html_e( 'Important:', 'mrm-product-access' ); ?></strong> <?php esc_html_e( 'After updating, go to Settings → Permalinks and click Save Changes once.', 'mrm-product-access' ); ?></p>
         </div>
-        <?php
-        // No client-side script is required for the settings page since the
-        // Verified Emails section has been removed per user request.
-        ?>
-        <?php
     }
 
     /**
@@ -1247,8 +1071,8 @@ class MRM_Product_Access {
      * @return string
      */
     protected function hash_email( $email ) {
-        $email = strtolower( trim( $email ) );
-        return hash( 'sha256', $email . NONCE_SALT );
+        $email = strtolower( trim( (string) $email ) );
+        return hash( 'sha256', $email );
     }
 
     private function payments_hub_has_access( $email_hash, $sku ) {
@@ -1273,98 +1097,15 @@ class MRM_Product_Access {
         return ! empty( $id );
     }
 
-
-    /**
-     * Check whether a given email hash is allowed for a product via the per-product approved list.
-     *
-     * @param string $product_slug
-     * @param string $email_hash
-     * @return bool
-     */
-    protected function is_email_hash_approved_for_product( $product_slug, $email_hash ) {
-        $conf = $this->get_product_config( $product_slug );
-        if ( ! empty( $conf ) ) {
-            $list = isset( $conf['approved_emails'] ) && is_array( $conf['approved_emails'] ) ? $conf['approved_emails'] : array();
-            foreach ( $list as $email ) {
-                $email = sanitize_email( $email );
-                if ( empty( $email ) ) {
-                    continue;
-                }
-                if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
-                    return true;
-                }
-            }
-        }
-
-        $products = get_option( 'mrm_pay_hub_products', array() );
-
-        if ( isset( $products[ $product_slug ] ) && ! empty( $products[ $product_slug ]['emails'] ) ) {
-            foreach ( $products[ $product_slug ]['emails'] as $email ) {
-                $email = sanitize_email( $email );
-                if ( empty( $email ) ) {
-                    continue;
-                }
-                if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
-                    return true;
-                }
-            }
-        }
-
-        if ( isset( $products['all-sheet-music'] ) && ! empty( $products['all-sheet-music']['emails'] ) ) {
-            foreach ( $products['all-sheet-music']['emails'] as $email ) {
-                $email = sanitize_email( $email );
-                if ( empty( $email ) ) {
-                    continue;
-                }
-                if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
-                    return true;
-                }
-            }
-        }
-
-        // Capture everything after "piece-" up to the last hyphen before the type.
-        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug, $matches ) ) {
-            $piece_slug = $matches[1];
-            $package_sku = 'piece-' . $piece_slug . '-complete-package';
-            if ( isset( $products[ $package_sku ] ) && ! empty( $products[ $package_sku ]['emails'] ) ) {
-                foreach ( $products[ $package_sku ]['emails'] as $email ) {
-                    $email = sanitize_email( $email );
-                    if ( empty( $email ) ) {
-                        continue;
-                    }
-                    if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Check whether a given email hash is in the global verified_emails list.
-     * (UI removed, but option may still exist for backwards compatibility.)
-     *
-     * @param string $email_hash
-     * @return bool
-     */
-    protected function is_email_hash_globally_verified( $email_hash ) {
-        $options   = $this->get_options();
-        $whitelist = isset( $options['verified_emails'] ) && is_array( $options['verified_emails'] ) ? $options['verified_emails'] : array();
-        if ( empty( $whitelist ) ) {
-            return false;
-        }
-        foreach ( $whitelist as $email ) {
-            $email = sanitize_email( $email );
-            if ( empty( $email ) ) {
-                continue;
-            }
-            if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
-                return true;
-            }
-        }
-        return false;
+    private function has_access_via_hub( $email_hash, $sku ) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_sheet_music_access';
+        $count = $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL",
+            $email_hash,
+            $sku
+        ) );
+        return (int) $count > 0;
     }
 
 
@@ -1525,25 +1266,11 @@ class MRM_Product_Access {
             exit;
         }
 
-        global $wpdb;
-        $table    = $wpdb->prefix . 'mrm_purchases';
-        $purchase = $wpdb->get_row( $wpdb->prepare(
-            "SELECT id FROM $table WHERE product_slug = %s AND email_hash = %s AND status = 'paid' LIMIT 1",
-            $product_slug,
-            $payload['email_hash']
-        ) );
-
-        // Allow access if purchase exists OR the email has been manually approved for this product
-        // (or is in the legacy global verified list).
-        if ( ! $purchase ) {
-            $email_hash = (string) $payload['email_hash'];
-            $approved   = $this->is_email_hash_approved_for_product( $product_slug, $email_hash );
-            $verified   = $this->is_email_hash_globally_verified( $email_hash );
-            if ( ! $approved && ! $verified ) {
-                status_header( 403 );
-                echo 'Unauthorized.';
-                exit;
-            }
+        $email_hash = (string) $payload['email_hash'];
+        if ( ! $this->has_access_via_hub( $email_hash, $product_slug ) ) {
+            status_header( 403 );
+            echo 'Unauthorized.';
+            exit;
         }
 
         $config = $this->get_product_config( $product_slug );
@@ -2121,7 +1848,7 @@ echo '    </div>';
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Valid email required.' ), 400 );
         }
 
-        $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
+        $email_hash = $this->hash_email( $email );
 
         // Require Payments Hub access to exist (fail closed).
         if ( ! $this->payments_hub_has_access( $email_hash, $sku ) ) {
@@ -2234,37 +1961,20 @@ echo '    </div>';
         $email_hash       = $this->hash_email( $normalized_email );
         $ip               = $_SERVER['REMOTE_ADDR'] ?? '';
 
-        global $wpdb;
-        $table_purchases = $wpdb->prefix . 'mrm_purchases';
-        $table_otps      = $wpdb->prefix . 'mrm_otp_tokens';
+        $options = $this->get_options();
 
-        // Verify that the purchase exists OR the email is allowed via approved lists.
-        $purchase = $wpdb->get_row( $wpdb->prepare(
-            "SELECT id FROM $table_purchases WHERE product_slug = %s AND email_hash = %s AND status = 'paid' LIMIT 1",
-            $product_slug,
-            $email_hash
-        ) );
-
-        $is_globally_verified = $this->is_email_hash_globally_verified( $email_hash );
-        $is_product_approved  = $this->is_email_hash_approved_for_product( $product_slug, $email_hash );
-
-        if ( ! $purchase && ! $is_globally_verified && ! $is_product_approved ) {
+        // Check access via the Payments Hub instead of local purchases.
+        if ( ! $this->has_access_via_hub( $email_hash, $product_slug ) ) {
             return new WP_REST_Response( $generic, 200 );
         }
 
         // Limit OTP requests per product, per hour.
-        $one_hour_ago   = gmdate( 'Y-m-d H:i:s', time() - 3600 );
-        $count_requests = $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM $table_otps WHERE product_slug = %s AND (email_hash = %s OR request_ip = %s) AND created_at >= %s",
-            $product_slug,
-            $email_hash,
-            $ip,
-            $one_hour_ago
-        ) );
-        if ( intval( $count_requests ) >= 10 ) {
-            // Lower threshold per product.
+        $rate_key = 'mrm_pa_otp_rate_' . md5( $product_slug . '|' . $email_hash . '|' . $ip );
+        $count_requests = (int) get_transient( $rate_key );
+        if ( $count_requests >= 10 ) {
             return new WP_REST_Response( $generic, 200 );
         }
+        set_transient( $rate_key, $count_requests + 1, HOUR_IN_SECONDS );
 
         try {
             $otp = str_pad( (string) random_int( 0, 999999 ), 6, '0', STR_PAD_LEFT );
@@ -2272,18 +1982,13 @@ echo '    </div>';
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Server error generating code.' ), 500 );
         }
         $otp_hash   = password_hash( $otp, PASSWORD_DEFAULT );
-        $expires_at = gmdate( 'Y-m-d H:i:s', time() + ( 30 * 60 ) );
-
-        $wpdb->insert( $table_otps, array(
-            'product_slug'    => $product_slug,
-            'purchaser_email' => $normalized_email,
-            'email_hash'      => $email_hash,
-            'otp_hash'        => $otp_hash,
-            'expires_at'      => $expires_at,
-            'request_ip'      => $ip,
-            'attempt_count'   => 0,
-            'created_at'      => gmdate( 'Y-m-d H:i:s' ),
-        ) );
+        $expires_at = time() + ( 30 * 60 );
+        $otp_key = 'mrm_pa_otp_' . md5( $product_slug . '|' . $email_hash );
+        set_transient( $otp_key, array(
+            'otp_hash' => $otp_hash,
+            'expires' => $expires_at,
+            'attempt_count' => 0,
+        ), 30 * MINUTE_IN_SECONDS );
 
         $subject = $options['email_subject'] ?? __( 'Sheet Music Access Code', 'mrm-product-access' );
         $body    = str_replace( '{{OTP}}', $otp, ( $options['email_body'] ?? 'Hello,
@@ -2323,43 +2028,28 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         $normalized_email = strtolower( trim( $email ) );
         $email_hash       = $this->hash_email( $normalized_email );
 
-        global $wpdb;
-        $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
+        $otp_key = 'mrm_pa_otp_' . md5( $product_slug . '|' . $email_hash );
+        $otp_data = get_transient( $otp_key );
 
-        $now = gmdate( 'Y-m-d H:i:s' );
-        $row = $wpdb->get_row( $wpdb->prepare(
-            "SELECT * FROM $table_otps
-             WHERE product_slug = %s AND email_hash = %s AND expires_at >= %s AND used_at IS NULL
-             ORDER BY id DESC LIMIT 1",
-            $product_slug,
-            $email_hash,
-            $now
-        ) );
-
-        if ( ! $row ) {
+        if ( empty( $otp_data ) || ! is_array( $otp_data ) ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Invalid or expired code.' ), 400 );
         }
-        if ( intval( $row->attempt_count ) >= 5 ) {
+        if ( ! empty( $otp_data['expires'] ) && time() > (int) $otp_data['expires'] ) {
+            delete_transient( $otp_key );
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Invalid or expired code.' ), 400 );
+        }
+        if ( (int) ( $otp_data['attempt_count'] ?? 0 ) >= 5 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Too many attempts.' ), 429 );
         }
 
-        $is_valid = password_verify( $otp, $row->otp_hash );
-
-        $wpdb->update( $table_otps, array(
-            'attempt_count' => intval( $row->attempt_count ) + 1,
-        ), array(
-            'id' => $row->id,
-        ) );
+        $is_valid = password_verify( $otp, (string) ( $otp_data['otp_hash'] ?? '' ) );
+        $otp_data['attempt_count'] = (int) ( $otp_data['attempt_count'] ?? 0 ) + 1;
+        set_transient( $otp_key, $otp_data, 30 * MINUTE_IN_SECONDS );
 
         if ( ! $is_valid ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Invalid or expired code.' ), 400 );
         }
-
-        $wpdb->update( $table_otps, array(
-            'used_at' => gmdate( 'Y-m-d H:i:s' ),
-        ), array(
-            'id' => $row->id,
-        ) );
+        delete_transient( $otp_key );
 
         // Download auth cookie.
         $options     = $this->get_options();
@@ -2369,6 +2059,10 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             $options['auth_secret'] = $auth_secret;
             update_option( $this->option_key, $options );
             $this->options = $options;
+        }
+
+        if ( ! $this->has_access_via_hub( $email_hash, $product_slug ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Access not granted.' ), 403 );
         }
 
         $payload = array(
@@ -3619,20 +3313,8 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
         }
 
-        global $wpdb;
-        $table    = $wpdb->prefix . 'mrm_purchases';
-        $purchase = $wpdb->get_row( $wpdb->prepare(
-            "SELECT id FROM $table WHERE product_slug = %s AND email_hash = %s AND status = 'paid'",
-            $product_slug,
-            $email_hash
-        ) );
-
-        if ( ! $purchase ) {
-            $approved = $this->is_email_hash_approved_for_product( $product_slug, (string) $email_hash );
-            $verified = $this->is_email_hash_globally_verified( (string) $email_hash );
-            if ( ! $approved && ! $verified ) {
-                return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
-            }
+        if ( ! $this->has_access_via_hub( (string) $email_hash, $product_slug ) ) {
+            return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
         }
 
         $config = $this->get_product_config( $product_slug );
