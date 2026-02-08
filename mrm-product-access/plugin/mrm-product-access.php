@@ -306,6 +306,13 @@ class MRM_Product_Access {
 
         $options = $this->get_options();
 
+        // Migration: old option -> new option
+        $legacy = get_option( 'mrm_pa_product_tracks_by_slug', null );
+        $current = get_option( 'product_tracks_by_slug', null );
+        if ( is_array( $legacy ) && ! is_array( $current ) ) {
+            update_option( 'product_tracks_by_slug', $legacy );
+        }
+
         // One-time migration: legacy options['products'][slug]['tracks'] -> mrm_pa_product_tracks_by_slug
         $existing_map = get_option( 'mrm_pa_product_tracks_by_slug', null );
         if ( $existing_map === null ) {
@@ -538,59 +545,29 @@ class MRM_Product_Access {
                 $options['verified_emails'] = array_values( array_unique( $verified ) );
             }
 
-            /**
-             * Tracks Mapping (by canonical product_slug)
-             * Persisted in a single WP option: mrm_pa_product_tracks_by_slug
-             *
-             * Shape:
-             * [
-             *   'some-sku' => [
-             *      ['name' => 'PDF', 'url' => '/path/or/url.pdf'],
-             *      ['name' => 'Track 1', 'url' => '/path/or/url.mp3'],
-             *   ],
-             * ]
-             */
-            $tracks_by_slug = array();
+            // Save Tracks Mapping (by Product Slug) to a single option: product_tracks_by_slug
+            $rows = array();
+            if ( isset( $_POST['tracks_map_slug'] ) && is_array( $_POST['tracks_map_slug'] ) ) {
+                $slugs = (array) $_POST['tracks_map_slug'];
+                $names = isset( $_POST['tracks_map_name'] ) ? (array) $_POST['tracks_map_name'] : array();
+                $urls  = isset( $_POST['tracks_map_url'] ) ? (array) $_POST['tracks_map_url'] : array();
 
-            $row_slugs = isset( $_POST['track_product_slug'] ) && is_array( $_POST['track_product_slug'] )
-                ? (array) $_POST['track_product_slug']
-                : array();
-            $row_names = isset( $_POST['track_display_name'] ) && is_array( $_POST['track_display_name'] )
-                ? (array) $_POST['track_display_name']
-                : array();
-            $row_urls  = isset( $_POST['track_url'] ) && is_array( $_POST['track_url'] )
-                ? (array) $_POST['track_url']
-                : array();
+                foreach ( $slugs as $i => $raw_slug ) {
+                    $slug = strtolower( trim( (string) $raw_slug ) );
+                    $slug = preg_replace( '/[^a-z0-9\-_]+/', '', $slug );
 
-            $row_count = max( count( $row_slugs ), count( $row_names ), count( $row_urls ) );
+                    $name = isset( $names[ $i ] ) ? sanitize_text_field( (string) $names[ $i ] ) : '';
+                    $url  = isset( $urls[ $i ] ) ? esc_url_raw( (string) $urls[ $i ] ) : '';
 
-            for ( $ri = 0; $ri < $row_count; $ri++ ) {
-                $slug = $this->sanitize_product_slug( (string) ( $row_slugs[ $ri ] ?? '' ) );
-                $name = sanitize_text_field( (string) ( $row_names[ $ri ] ?? '' ) );
-                $url  = trim( (string) ( $row_urls[ $ri ] ?? '' ) );
-                $url  = $url !== '' ? esc_url_raw( $url ) : '';
-
-                // Empty rows allowed; ignore at runtime.
-                if ( $slug === '' && $name === '' && $url === '' ) {
-                    continue;
+                    // Allow empty rows; store as-is; runtime ignores invalid ones
+                    $rows[] = array(
+                        'product_slug' => $slug,
+                        'display_name' => $name,
+                        'url' => $url,
+                    );
                 }
-
-                // Require slug + url to store
-                if ( $slug === '' || $url === '' ) {
-                    continue;
-                }
-
-                if ( ! isset( $tracks_by_slug[ $slug ] ) ) {
-                    $tracks_by_slug[ $slug ] = array();
-                }
-
-                $tracks_by_slug[ $slug ][] = array(
-                    'name' => $name !== '' ? $name : 'Track',
-                    'url'  => $url,
-                );
             }
-
-            update_option( 'mrm_pa_product_tracks_by_slug', $tracks_by_slug );
+            update_option( 'product_tracks_by_slug', $rows );
 
             // Keep legacy options['products'] around for back-compat only (do not update it here).
             // $options['products'] no longer drives access, pricing, or gating.
@@ -1055,92 +1032,71 @@ class MRM_Product_Access {
                 })();
                 </script>
 
-                <h2 class="title"><?php esc_html_e( 'Tracks Mapping (by Product Slug)', 'mrm-product-access' ); ?></h2>
-                <p class="description">
-                    <?php esc_html_e( 'This replaces Products Configuration. Empty rows are allowed and ignored at runtime.', 'mrm-product-access' ); ?>
-                </p>
+                <h2 class="title">Tracks Mapping (by Product Slug)</h2>
+                <p>Unlimited rows. Empty rows are allowed and ignored at runtime. Stored in <code>product_tracks_by_slug</code>.</p>
+
+                <style>
+                  .mrm-tracks-map-table input[type="text"]{ box-sizing:border-box; }
+                  .mrm-tracks-map-slug{ width: 180px; }
+                  .mrm-tracks-map-name{ width: 220px; }
+                  .mrm-tracks-map-url{ width: 100%; }
+                </style>
 
                 <?php
-                $tracks_by_slug = get_option( 'mrm_pa_product_tracks_by_slug', array() );
-                if ( ! is_array( $tracks_by_slug ) ) {
-                    $tracks_by_slug = array();
-                }
-
-                // Helpful: show slugs used in offers (so you can copy/paste).
-                $offer_slugs = array();
-                $pieces_for_slugs = isset( $options['pieces'] ) && is_array( $options['pieces'] ) ? $options['pieces'] : array();
-                foreach ( $pieces_for_slugs as $pc ) {
-                    $offers = isset( $pc['offers'] ) && is_array( $pc['offers'] ) ? $pc['offers'] : array();
-                    foreach ( $offers as $off ) {
-                        $s = $this->sanitize_product_slug( $off['product_slug'] ?? '' );
-                        if ( $s ) {
-                            $offer_slugs[ $s ] = true;
-                        }
-                    }
-                }
-                $offer_slugs = array_keys( $offer_slugs );
-                sort( $offer_slugs );
+                  $rows = get_option( 'product_tracks_by_slug', array() );
+                  if ( ! is_array( $rows ) ) $rows = array();
                 ?>
 
-                <?php if ( ! empty( $offer_slugs ) ) : ?>
-                    <p><strong><?php esc_html_e( 'Offer slugs currently in use:', 'mrm-product-access' ); ?></strong>
-                    <code style="display:inline-block;max-width:100%;white-space:normal;">
-                        <?php echo esc_html( implode( ', ', $offer_slugs ) ); ?>
-                    </code></p>
-                <?php endif; ?>
+                <table class="widefat striped mrm-tracks-map-table" id="mrmTracksMapTable" style="max-width: 1100px;">
+                  <thead>
+                    <tr>
+                      <th style="width:200px;">product_slug</th>
+                      <th style="width:240px;">Track / PDF Display Name</th>
+                      <th>URL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php foreach ( $rows as $r ) : ?>
+                      <tr>
+                        <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="<?php echo esc_attr( $r['product_slug'] ?? '' ); ?>" /></td>
+                        <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="<?php echo esc_attr( $r['display_name'] ?? '' ); ?>" /></td>
+                        <td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="<?php echo esc_attr( $r['url'] ?? '' ); ?>" /></td>
+                      </tr>
+                    <?php endforeach; ?>
 
-                <p style="margin:10px 0 6px;">
-                    <button type="button" class="button" id="mrm-pa-add-25">Add 25 rows</button>
-                    <button type="button" class="button" id="mrm-pa-add-100">Add 100 rows</button>
-                </p>
-                <table class="widefat fixed striped" cellspacing="0" style="max-width:1200px;">
-                    <thead>
-                        <tr>
-                            <th style="width:220px;"><?php esc_html_e( 'Product Slug (SKU)', 'mrm-product-access' ); ?></th>
-                            <th style="width:320px;"><?php esc_html_e( 'Track / PDF Display Name', 'mrm-product-access' ); ?></th>
-                            <th><?php esc_html_e( 'URL (or local path)', 'mrm-product-access' ); ?></th>
-                        </tr>
-                    </thead>
-                    <tbody id="mrm-pa-tracks-body">
-                        <?php
-                        // Flatten existing mapping into rows for editing.
-                        $rows = array();
-                        foreach ( $tracks_by_slug as $slug => $items ) {
-                            if ( ! is_array( $items ) ) {
-                                continue;
-                            }
-                            foreach ( $items as $it ) {
-                                if ( ! is_array( $it ) ) {
-                                    continue;
-                                }
-                                $rows[] = array(
-                                    'slug' => $slug,
-                                    'name' => (string) ( $it['name'] ?? '' ),
-                                    'url'  => (string) ( $it['url'] ?? '' ),
-                                );
-                            }
-                        }
-
-                        // Provide a generous number of blank rows so you can enter multiple slugs.
-                        $min_rows = max( 50, count( $rows ) + 25 );
-
-                        for ( $i = 0; $i < $min_rows; $i++ ) {
-                            $r = $rows[ $i ] ?? array( 'slug' => '', 'name' => '', 'url' => '' );
-                            ?>
-                            <tr>
-                                <td><input type="text" name="track_product_slug[]" value="<?php echo esc_attr( $r['slug'] ); ?>" style="width:190px;max-width:100%;" placeholder="piece-blackbeards-revenge-tuba"></td>
-                                <td><input type="text" name="track_display_name[]" value="<?php echo esc_attr( $r['name'] ); ?>" style="width:240px;max-width:100%;" placeholder="Exercise 1 (PDF)"></td>
-                                <td><input type="text" name="track_url[]" value="<?php echo esc_attr( $r['url'] ); ?>" class="large-text" placeholder="/home/.../file.pdf OR https://.../file.mp3"></td>
-                            </tr>
-                            <?php
-                        }
-                        ?>
-                    </tbody>
+                    <!-- Always include at least one blank row -->
+                    <tr>
+                      <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="" /></td>
+                    </tr>
+                  </tbody>
                 </table>
 
-                <p class="description" style="margin-top:8px;">
-                    <?php esc_html_e( 'Runtime ignores rows missing slug or url.', 'mrm-product-access' ); ?>
+                <p>
+                  <button type="button" class="button" id="mrmAddTrackRow">Add Row</button>
                 </p>
+
+                <script>
+                (function(){
+                  const btn = document.getElementById('mrmAddTrackRow');
+                  const table = document.getElementById('mrmTracksMapTable');
+                  if(!btn || !table) return;
+
+                  btn.addEventListener('click', function(){
+                    const tbody = table.querySelector('tbody');
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                      <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="" /></td>
+                    `;
+                    tbody.appendChild(tr);
+                    const first = tr.querySelector('input');
+                    if(first) first.focus();
+                  });
+                })();
+                </script>
 
                 <?php submit_button( __( 'Save Settings', 'mrm-product-access' ), 'primary', 'mrm_pa_save_settings' ); ?>
             </form>
@@ -1149,27 +1105,6 @@ class MRM_Product_Access {
             <p><strong><?php esc_html_e( 'Access URL pattern:', 'mrm-product-access' ); ?></strong> <code><?php echo esc_html( home_url( '/mrm-access/{product_slug}/{token}/' ) ); ?></code></p>
             <p><strong><?php esc_html_e( 'Important:', 'mrm-product-access' ); ?></strong> <?php esc_html_e( 'After updating, go to Settings → Permalinks and click Save Changes once.', 'mrm-product-access' ); ?></p>
         </div>
-        <script>
-        (function(){
-          function addRows(n){
-            const tbody = document.getElementById('mrm-pa-tracks-body');
-            if(!tbody) return;
-            for(let i=0;i<n;i++){
-              const tr = document.createElement('tr');
-              tr.innerHTML = `
-                <td><input type="text" name="track_product_slug[]" style="width:190px;max-width:100%;" placeholder="piece-blackbeards-revenge-tuba"></td>
-                <td><input type="text" name="track_display_name[]" style="width:240px;max-width:100%;" placeholder="Track name"></td>
-                <td><input type="text" name="track_url[]" class="large-text" placeholder="/home/.../file.pdf OR https://.../file.mp3"></td>
-              `;
-              tbody.appendChild(tr);
-            }
-          }
-          const b25 = document.getElementById('mrm-pa-add-25');
-          const b100 = document.getElementById('mrm-pa-add-100');
-          if(b25) b25.addEventListener('click', ()=>addRows(25));
-          if(b100) b100.addEventListener('click', ()=>addRows(100));
-        })();
-        </script>
         <?php
     }
 
@@ -1185,8 +1120,36 @@ class MRM_Product_Access {
     }
 
     protected function get_tracks_mapping() {
-        $m = get_option( 'mrm_pa_product_tracks_by_slug', array() );
-        return is_array( $m ) ? $m : array();
+        $rows = get_option( 'product_tracks_by_slug', array() );
+        if ( ! is_array( $rows ) ) {
+            return array();
+        }
+
+        $map = array();
+        foreach ( $rows as $row ) {
+            if ( ! is_array( $row ) ) {
+                continue;
+            }
+            $slug = $this->sanitize_product_slug( $row['product_slug'] ?? '' );
+            $name = sanitize_text_field( (string) ( $row['display_name'] ?? '' ) );
+            $url  = trim( (string) ( $row['url'] ?? '' ) );
+            $url  = $url !== '' ? esc_url_raw( $url ) : '';
+
+            if ( $slug === '' || $url === '' ) {
+                continue;
+            }
+
+            if ( ! isset( $map[ $slug ] ) ) {
+                $map[ $slug ] = array();
+            }
+
+            $map[ $slug ][] = array(
+                'name' => $name !== '' ? $name : 'Track',
+                'url'  => $url,
+            );
+        }
+
+        return $map;
     }
 
     protected function get_tracks_for_slug( $product_slug ) {
@@ -1366,47 +1329,49 @@ class MRM_Product_Access {
 
     private function payments_hub_has_access( $email_hash, $sku ) {
         global $wpdb;
-
-        $email_hash = sanitize_text_field( (string) $email_hash );
-        $sku        = $this->sanitize_product_slug( (string) $sku );
-
-        if ( $email_hash === '' || $sku === '' ) {
-            return false;
-        }
-
-        // Pull the All Sheet Music SKU from Payments Hub settings (single source of truth).
-        $hub_settings = get_option( 'mrm_pay_hub_settings', array() );
-        $all_sku      = isset( $hub_settings['all_sheet_music_sku'] ) ? (string) $hub_settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
-        $all_sku      = $this->sanitize_product_slug( $all_sku );
-
         $table = $wpdb->prefix . 'mrm_sheet_music_access';
 
-        // Fail closed if table missing
-        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
-        if ( $exists !== $table ) {
-            return false;
-        }
+        $sku = strtolower( trim( (string) $sku ) );
+        $sku = preg_replace( '/[^a-z0-9\-_]+/', '', $sku );
+        if ( ! $sku ) return false;
 
-        // 1) ALL-SHEET-MUSIC override first
-        if ( $all_sku !== '' ) {
-            $id = $wpdb->get_var( $wpdb->prepare(
-                "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
-                $email_hash,
-                $all_sku
-            ) );
-            if ( ! empty( $id ) ) {
-                return true;
+        // Pull lists from Payments Hub (source of truth for email lists)
+        $lists = get_option( 'mrm_pay_hub_access_lists', array() );
+        if ( ! is_array( $lists ) ) $lists = array();
+
+        // Convert hash -> compare against list (we only have hash here).
+        // We can safely compare by hashing list emails with the same hash_email.
+        $hash_of = function( $email ) {
+            return $this->hash_email( strtolower( trim( (string) $email ) ) );
+        };
+
+        // Rule 1: master list
+        if ( isset( $lists['all-sheet-music'] ) && is_array( $lists['all-sheet-music'] ) ) {
+            foreach ( $lists['all-sheet-music'] as $em ) {
+                $em = sanitize_email( $em );
+                if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
             }
         }
 
-        // 2) Then specific product SKU
-        $id2 = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
-            $email_hash,
-            $sku
+        // Rule 2: per-product list
+        if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
+            foreach ( $lists[ $sku ] as $em ) {
+                $em = sanitize_email( $em );
+                if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
+            }
+        }
+
+        // Rule 3: DB row exists (also controlled by Payments Hub)
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        if ( $exists !== $table ) return false;
+
+        $id = $wpdb->get_var( $wpdb->prepare(
+            "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
+            (string) $email_hash,
+            (string) $sku
         ) );
 
-        return ! empty( $id2 );
+        return ! empty( $id );
     }
 
 

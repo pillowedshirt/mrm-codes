@@ -14,6 +14,7 @@ class MRM_Payments_Hub_Single {
   // Options keys
   const OPT_SETTINGS = 'mrm_pay_hub_settings';
   const OPT_PRODUCTS = 'mrm_pay_hub_products';
+  const OPT_ACCESS_LISTS = 'mrm_pay_hub_access_lists';
   const OPT_EMAIL_LISTS = 'mrm_pay_hub_email_lists';
 
   // Admin menu
@@ -23,6 +24,8 @@ class MRM_Payments_Hub_Single {
     add_action('admin_menu', array($this, 'admin_menu'));
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('rest_api_init', array($this, 'register_routes'));
+    // Ensure DB tables exist even after plugin updates (activation hook is not enough).
+    add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
     add_action('mrm_pay_hub_cleanup_access', array($this, 'cleanup_access'));
 
     register_activation_hook(__FILE__, array($this, 'on_activate'));
@@ -53,6 +56,27 @@ class MRM_Payments_Hub_Single {
   private function table_sheet_music_access() {
     global $wpdb;
     return $wpdb->prefix . 'mrm_sheet_music_access';
+  }
+
+  public function maybe_install_or_upgrade_db() {
+    // Run a lightweight existence check; only dbDelta if needed.
+    global $wpdb;
+
+    $orders = $this->table_orders();
+    $links  = $this->table_links();
+    $access = $this->table_sheet_music_access();
+
+    $missing = false;
+
+    foreach (array($orders, $links, $access) as $t) {
+      $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
+      if ($found !== $t) { $missing = true; break; }
+    }
+
+    if ($missing) {
+      error_log('[MRM Payments Hub] DB tables missing; running install_or_upgrade_db().');
+      $this->install_or_upgrade_db();
+    }
   }
 
   private function install_or_upgrade_db() {
@@ -164,6 +188,34 @@ class MRM_Payments_Hub_Single {
 
   private function save_products($products) {
     update_option(self::OPT_PRODUCTS, $products);
+  }
+
+  private function all_access_lists() {
+    $x = get_option(self::OPT_ACCESS_LISTS, array());
+    return is_array($x) ? $x : array();
+  }
+
+  private function save_access_lists($lists) {
+    update_option(self::OPT_ACCESS_LISTS, $lists);
+  }
+
+  private function normalize_email_list_textarea($raw) {
+    $raw = (string)$raw;
+    $parts = preg_split('/[\s,;]+/', $raw);
+    $out = array();
+    foreach ($parts as $p) {
+      $em = sanitize_email(trim($p));
+      if ($em && is_email($em)) $out[] = strtolower($em);
+    }
+    $out = array_values(array_unique($out));
+    return $out;
+  }
+
+  private function sanitize_product_slug($slug) {
+    // Lowercase, hyphen/underscore only (your requirement)
+    $slug = strtolower(trim((string)$slug));
+    $slug = preg_replace('/[^a-z0-9\-_]+/', '', $slug);
+    return $slug;
   }
 
   private function get_product($sku) {
@@ -722,7 +774,9 @@ class MRM_Payments_Hub_Single {
   public function rest_grant_sheet_music_access(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
 
-    $sku   = $this->sanitize_sku($data['sku'] ?? '');
+    // Accept sku or product_slug (canonical is product_slug)
+    $incoming_slug = isset($data['product_slug']) ? $data['product_slug'] : ($data['sku'] ?? '');
+    $sku   = $this->sanitize_sku($incoming_slug); // keep sanitize_sku for now, but we treat sku == product_slug
     $email = sanitize_email((string)($data['email'] ?? ''));
     $pi_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
 
@@ -750,12 +804,39 @@ class MRM_Payments_Hub_Single {
       }
     }
 
+    // DB guard (updates can skip activation hook)
+    $this->maybe_install_or_upgrade_db();
+
+    // Verify access table exists
+    global $wpdb;
+    $access_table = $this->table_sheet_music_access();
+    $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $access_table));
+    if ($found !== $access_table) {
+      error_log('[MRM Payments Hub] grant access failed: missing table ' . $access_table);
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Server is updating. Please try again in a moment.',
+        'debug' => 'missing_access_table'
+      ), 500);
+    }
+
     $email_hash = $this->email_hash($email);
 
     $ok = $this->grant_sheet_music_access($email_hash, $sku, $pi_id ? 'stripe_pi' : 'manual', $pi_id);
     if (!$ok) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Failed to grant access.'), 500);
+      global $wpdb;
+      $last = $wpdb->last_error ? $wpdb->last_error : 'unknown_db_error';
+      error_log('[MRM Payments Hub] grant_sheet_music_access insert failed sku=' . $sku . ' email_hash=' . $email_hash . ' err=' . $last);
+
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Failed to grant access.',
+        'debug' => 'db_insert_failed'
+      ), 500);
     }
+
+    // Granting rule: add to per-product list as well
+    $this->add_email_to_access_list($sku, $email);
 
     // Also append plaintext email to the approved list for admin visibility.
     $lists = $this->get_email_lists();
@@ -836,6 +917,17 @@ class MRM_Payments_Hub_Single {
     return (bool)$ins;
   }
 
+  public function grant_all_sheet_music_db_row($email, $source = null, $source_id = null) {
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) return false;
+
+    $this->maybe_install_or_upgrade_db();
+
+    $email_hash = $this->email_hash($email);
+    // sku == product_slug
+    return $this->grant_sheet_music_access($email_hash, 'all-sheet-music', $source, $source_id);
+  }
+
   public function has_sheet_music_access($email_hash, $sku) {
     global $wpdb;
     $table = $this->table_sheet_music_access();
@@ -844,6 +936,45 @@ class MRM_Payments_Hub_Single {
       $email_hash, $sku
     ));
     return !empty($id);
+  }
+
+  public function email_has_access_for_slug($email, $product_slug) {
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) return false;
+
+    $product_slug = $this->sanitize_product_slug($product_slug);
+    if (!$product_slug) return false;
+
+    $lists = $this->all_access_lists();
+
+    // Rule 1: master list grants access to ANY piece
+    $master = isset($lists['all-sheet-music']) && is_array($lists['all-sheet-music'])
+      ? $lists['all-sheet-music'] : array();
+    if (in_array(strtolower($email), $master, true)) return true;
+
+    // Rule 2: per-product list
+    $per = isset($lists[$product_slug]) && is_array($lists[$product_slug])
+      ? $lists[$product_slug] : array();
+    if (in_array(strtolower($email), $per, true)) return true;
+
+    // Rule 3: DB table check (idempotent truth)
+    $email_hash = $this->email_hash($email);
+    return $this->has_sheet_music_access($email_hash, $product_slug);
+  }
+
+  public function add_email_to_access_list($product_slug, $email) {
+    $product_slug = $this->sanitize_product_slug($product_slug);
+    $email = sanitize_email((string)$email);
+    if (!$product_slug || !$email || !is_email($email)) return false;
+
+    $lists = $this->all_access_lists();
+    if (!isset($lists[$product_slug]) || !is_array($lists[$product_slug])) {
+      $lists[$product_slug] = array();
+    }
+    $lists[$product_slug][] = strtolower($email);
+    $lists[$product_slug] = array_values(array_unique($lists[$product_slug]));
+    $this->save_access_lists($lists);
+    return true;
   }
 
   public function cleanup_access() {
@@ -905,6 +1036,27 @@ class MRM_Payments_Hub_Single {
       $settings['all_sheet_music_sku'] = $this->sanitize_sku((string)($_POST['all_sheet_music_sku'] ?? 'piece-all-sheet-music-access-complete-package'));
 
       $this->save_settings($settings);
+
+      // Save Access Lists
+      if (isset($_POST['mrm_access_slug']) && is_array($_POST['mrm_access_slug'])
+          && isset($_POST['mrm_access_emails']) && is_array($_POST['mrm_access_emails'])) {
+
+        $new_lists = array();
+
+        foreach ($_POST['mrm_access_slug'] as $i => $slug_raw) {
+          $slug = $this->sanitize_product_slug($slug_raw);
+          if (!$slug) continue;
+
+          $emails_raw = isset($_POST['mrm_access_emails'][$i]) ? $_POST['mrm_access_emails'][$i] : '';
+          $new_lists[$slug] = $this->normalize_email_list_textarea($emails_raw);
+        }
+
+        // Ensure master exists
+        if (!isset($new_lists['all-sheet-music'])) $new_lists['all-sheet-music'] = array();
+
+        $this->save_access_lists($new_lists);
+      }
+
       add_settings_error('mrm_pay_hub', 'saved', 'Settings saved.', 'updated');
     }
 
@@ -1401,6 +1553,51 @@ class MRM_Payments_Hub_Single {
           </tr>
         </table>
 
+        <h2>Sheet Music Access Lists (Email-based)</h2>
+        <p>Master list: <code>all-sheet-music</code> grants access to any piece.</p>
+
+        <table class="widefat striped" style="max-width: 980px;">
+          <thead>
+            <tr>
+              <th style="width:220px;">product_slug</th>
+              <th>Approved emails (comma / newline / semicolon separated)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php
+              $lists = $this->all_access_lists();
+
+              // Always show master row
+              if (!isset($lists['all-sheet-music']) || !is_array($lists['all-sheet-music'])) {
+                $lists['all-sheet-music'] = array();
+              }
+
+              // Build a stable list of rows: master + any existing keys
+              $keys = array_keys($lists);
+              sort($keys);
+
+              // Ensure master is first
+              $keys = array_values(array_unique(array_merge(array('all-sheet-music'), $keys)));
+
+              foreach ($keys as $k) {
+                $safe_k = esc_attr($k);
+                $val = isset($lists[$k]) && is_array($lists[$k]) ? implode("\n", $lists[$k]) : '';
+                ?>
+                <tr>
+                  <td><input type="text" name="mrm_access_slug[]" value="<?php echo $safe_k; ?>" style="width:100%;" /></td>
+                  <td><textarea name="mrm_access_emails[]" rows="4" style="width:100%; font-family: monospace;"><?php echo esc_textarea($val); ?></textarea></td>
+                </tr>
+                <?php
+              }
+            ?>
+            <!-- blank row to add a new slug -->
+            <tr>
+              <td><input type="text" name="mrm_access_slug[]" value="" placeholder="new-product-slug" style="width:100%;" /></td>
+              <td><textarea name="mrm_access_emails[]" rows="4" style="width:100%; font-family: monospace;" placeholder="email1@example.com&#10;email2@example.com"></textarea></td>
+            </tr>
+          </tbody>
+        </table>
+
         <p class="submit">
           <button type="submit" class="button button-primary">Save Settings</button>
         </p>
@@ -1422,7 +1619,13 @@ class MRM_Payments_Hub_Single {
   }
 }
 
-new MRM_Payments_Hub_Single();
+global $mrm_pay_hub_singleton;
+$mrm_pay_hub_singleton = new MRM_Payments_Hub_Single();
+
+function mrm_pay_hub_singleton() {
+  global $mrm_pay_hub_singleton;
+  return $mrm_pay_hub_singleton instanceof MRM_Payments_Hub_Single ? $mrm_pay_hub_singleton : null;
+}
 
 register_activation_hook(__FILE__, function() {
   if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
