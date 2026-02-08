@@ -1582,6 +1582,37 @@ let stripe = null;
 let activeStripeElements = null;
 let activePaymentElement = null;
 
+function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDuration){
+  const base = parseInt(baseSelectedCount, 10) || 0;
+  const freq = String(repeatFrequency || '').toLowerCase();
+  const dur  = String(repeatDuration || '').toLowerCase();
+
+  // No recurrence => pay only what is selected
+  if (!freq || freq === 'none') return base;
+
+  // You cannot meaningfully “prepay” indefinitely (no finite count)
+  if (dur === 'indefinitely') return null;
+
+  // Approximate recurrence counts in your UI terms
+  // 1_month ≈ 4 weeks, 3_months ≈ 12 weeks
+  const totalWeeks =
+    (dur === '1_month')  ? 4 :
+    (dur === '3_months') ? 12 :
+    null;
+
+  if (!totalWeeks) return base;
+
+  const intervalWeeks =
+    (freq === 'weekly')   ? 1 :
+    (freq === 'biweekly') ? 2 :
+    1;
+
+  const occurrences = Math.max(1, Math.floor(totalWeeks / intervalWeeks));
+
+  // If baseSelectedCount is >1 (user selected multiple starters), multiply accordingly
+  return Math.max(1, base * occurrences);
+}
+
 function ensureStripe(publishableKey){
   const key = (publishableKey || '').trim();
   if (!key || typeof Stripe !== 'function') return null;
@@ -2175,9 +2206,6 @@ function ensureLegacyBookingHandler(){
       const len = effectiveMinutes === 60 ? '60' : '30';
       const mode = lessonType === 'online' ? 'online' : 'inperson';
       const sku = `lesson_${len}_${mode}`;
-      // IMPORTANT: count must match the slots we’re actually booking for THIS instructor
-      // (selectedSlots is global and may include other instructors / other context)
-      const count = relevantSelected.length;
 
       const prepay = document.getElementById('mrm-prepay-opt')?.checked;
       const autopay = document.getElementById('mrm-autopay-opt')?.checked;
@@ -2185,6 +2213,20 @@ function ensureLegacyBookingHandler(){
       if(!prepay && !autopay){
         setMsg('Please choose either prepay or auto-pay.');
         return;
+      }
+
+      // Count logic:
+      // - Base is the instructor-filtered selection count
+      // - If “prepay” is checked and recurrence is enabled, derive a finite lesson count
+      let count = relevantSelected.length;
+
+      if (prepay) {
+        const derived = estimatePrepayLessonCount(count, frequency, reserveDuration);
+        if (derived === null) {
+          setMsg('Prepay is not available when "Reserve time for" is set to "Indefinitely". Please choose One month or Three months.');
+          return;
+        }
+        count = derived;
       }
 
       setMsg('Preparing payment…');
