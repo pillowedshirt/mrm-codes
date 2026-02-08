@@ -862,33 +862,119 @@ a{ -webkit-tap-highlight-color:transparent; }
     const errorEl = document.getElementById('mrm-payment-error');
     const instructions = document.getElementById('payment-instructions');
     const emailInput = document.getElementById('mrm-payment-email');
+    const paymentMount = document.getElementById('mrm-payment-element');
 
-    instructions.textContent = `${priceDisplay} – please enter your email and card details.`;
+    instructions.textContent = `${priceDisplay} – enter your email below to load payment options.`;
     overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden', 'false');
+
     errorEl.textContent = '';
-    payBtn.disabled = false;
+    payBtn.disabled = true;
     payBtn.textContent = 'Pay';
+
     emailInput.value = '';
 
+    pendingClientSecret = '';
     if (activePaymentElement) {
-      activePaymentElement.unmount();
-      activePaymentElement = null;
-      activeStripeElements = null;
+      try { activePaymentElement.unmount(); } catch (e) {}
     }
+    activePaymentElement = null;
+    activeStripeElements = null;
 
-    document.getElementById('payment-close').onclick = function() {
+    paymentMount.innerHTML = `
+      <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+        Enter your email to load the secure payment form.
+      </div>
+    `;
+
+    document.getElementById('payment-close').onclick = function () {
       overlay.style.display = 'none';
-      overlay.setAttribute('aria-hidden','true');
-      if (activePaymentElement) activePaymentElement.unmount();
+      overlay.setAttribute('aria-hidden', 'true');
+
+      if (activePaymentElement) {
+        try { activePaymentElement.unmount(); } catch (e) {}
+      }
       activePaymentElement = null;
       activeStripeElements = null;
+
       pendingSku = '';
       pendingClientSecret = '';
       errorEl.textContent = '';
     };
 
-    return { payBtn, errorEl };
+    const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
+
+    let loadTimer = null;
+    emailInput.oninput = function () {
+      clearTimeout(loadTimer);
+      loadTimer = setTimeout(async () => {
+        const email = (emailInput.value || '').trim();
+
+        if (!isEmailLike(email)) {
+          payBtn.disabled = true;
+          return;
+        }
+
+        if (pendingClientSecret || activePaymentElement) return;
+
+        if (!pendingSku) {
+          errorEl.textContent = 'Missing SKU.';
+          payBtn.disabled = true;
+          return;
+        }
+
+        try {
+          errorEl.textContent = '';
+
+          const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sku: pendingSku,
+              email: email,
+              context: { piece_slug: getPieceSlugFromUrl() }
+            })
+          });
+
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            errorEl.textContent = data.message || 'Error creating payment.';
+            payBtn.disabled = true;
+            return;
+          }
+
+          const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
+          if (!stripeInstance) {
+            errorEl.textContent = 'Stripe is not configured.';
+            payBtn.disabled = true;
+            return;
+          }
+
+          stripe = stripeInstance;
+          window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
+
+          pendingClientSecret = data.client_secret;
+          activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
+          activePaymentElement = activeStripeElements.create('payment');
+
+          paymentMount.innerHTML = '';
+          activePaymentElement.mount('#mrm-payment-element');
+
+          sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
+            email: email,
+            sku: pendingSku,
+            pi: data.payment_intent_id
+          }));
+
+          payBtn.disabled = false;
+        } catch (err) {
+          errorEl.textContent = 'Payment setup failed. Please try again.';
+          payBtn.disabled = true;
+        }
+      }, 350);
+    };
+
+    return { payBtn, errorEl, emailInput };
   }
 
   async function verifyAndGrant(piId, email, sku){
@@ -973,20 +1059,35 @@ a{ -webkit-tap-highlight-color:transparent; }
 
       // tolerant map (handles small title wording differences)
       const typeSlugMap = {
-        'core-developmental-exercises': 'fundamentals',
-        'developmental-exercises': 'fundamentals',
+        // --- fundamentals ---
         'fundamentals': 'fundamentals',
+        'fundamentals-exercises': 'fundamentals',
+        'fundamental-exercises': 'fundamentals',
+        'fundamental-exercise': 'fundamentals',
+        'fundamental': 'fundamentals',
+        'core-exercises': 'fundamentals',
 
-        'trombone-euphonium-full-piece': 'trombone-euphonium',
+        // --- trombone/euphonium full piece ---
         'trombone-euphonium': 'trombone-euphonium',
         'trombone-euphonium-full': 'trombone-euphonium',
+        'trombone-euphonium-full-piece': 'trombone-euphonium',
+        'trombone-euphonium-piece': 'trombone-euphonium',
+        'trombone-and-euphonium': 'trombone-euphonium',
+        'trombone-and-euphonium-full-piece': 'trombone-euphonium',
+        'tromboneeuphonium': 'trombone-euphonium',
 
-        'tuba-full-piece': 'tuba',
-        'tuba-full': 'tuba',
+        // --- tuba full piece ---
         'tuba': 'tuba',
+        'tuba-full': 'tuba',
+        'tuba-full-piece': 'tuba',
+        'tuba-piece': 'tuba',
 
+        // --- complete package ---
         'complete-package': 'complete-package',
-        'complete': 'complete-package'
+        'complete': 'complete-package',
+        'full-package': 'complete-package',
+        'complete-bundle': 'complete-package',
+        'bundle': 'complete-package'
       };
 
       typeSlug = typeSlugMap[normalizedTitle] || '';
@@ -1358,48 +1459,19 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     const payBtn = document.getElementById('mrm-pay-btn');
     if (payBtn) {
-      payBtn.onclick = async function(){
-        const emailInput = document.getElementById('mrm-payment-email');
-        const email = (emailInput.value || '').trim();
+      payBtn.onclick = async function () {
         const errorEl = document.getElementById('mrm-payment-error');
-        if (!email) {
-          errorEl.textContent = 'Please enter a valid email address.';
-          return;
-        }
+        const email = (document.getElementById('mrm-payment-email').value || '').trim();
+
         if (!pendingSku) {
           errorEl.textContent = 'Missing SKU.';
           return;
         }
-        if (!pendingClientSecret) {
-          const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ sku: pendingSku, email: email, context: { piece_slug: getPieceSlugFromUrl() } })
-          });
-          const data = await res.json();
-          if (!res.ok || !data.ok) {
-            errorEl.textContent = data.message || 'Error creating payment.';
-            return;
-          }
-          const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
-          if (!stripeInstance) {
-            errorEl.textContent = 'Stripe is not configured.';
-            return;
-          }
-          stripe = stripeInstance;
-          window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
-          pendingClientSecret = data.client_secret;
-          activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
-          activePaymentElement = activeStripeElements.create('payment');
-          activePaymentElement.mount('#mrm-payment-element');
-          sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
-            email: email,
-            sku: pendingSku,
-            pi: data.payment_intent_id,
-          }));
-          this.textContent = 'Pay Now';
+        if (!pendingClientSecret || !activeStripeElements) {
+          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email.';
           return;
         }
+
         this.disabled = true;
         const { error, paymentIntent } = await stripe.confirmPayment({
           elements: activeStripeElements,
