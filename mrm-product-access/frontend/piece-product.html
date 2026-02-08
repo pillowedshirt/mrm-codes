@@ -85,6 +85,38 @@ a{ -webkit-tap-highlight-color:transparent; }
 .section + .section{ border-top:1px solid rgba(0,0,0,0.08); }
 .center{ display:flex; justify-content:center; }
 
+/* PAYMENT MODAL */
+.modal-overlay{
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.modal{
+  background: #fff;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  width: 90%;
+  max-width: 480px;
+  padding: 24px;
+}
+.modal-header{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid rgba(0,0,0,0.1);
+  padding-bottom: 8px;
+}
+.modal-body{
+  margin-top: 20px;
+}
+
 /* PDF */
 .pdf-preview{
   width: min(860px, 100%);
@@ -702,13 +734,29 @@ a{ -webkit-tap-highlight-color:transparent; }
           </div>
         </div>
 
+        <!-- Payment Overlay -->
         <div id="mrm-payment-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
           <div class="modal" role="dialog" aria-modal="true">
-            <div class="modal-header"><h2>Purchase</h2><button class="close" id="payment-close">×</button></div>
+            <div class="modal-header">
+              <h2>Purchase</h2>
+              <button id="payment-close" class="close">×</button>
+            </div>
             <div class="modal-body">
               <p id="payment-instructions"></p>
+
               <div id="mrm-payment-element"></div>
-              <button id="mrm-pay-btn" class="button-primary">Pay</button>
+
+              <div style="height:50px;"></div>
+
+              <input
+                type="email"
+                id="mrm-payment-email"
+                placeholder="Your email"
+                required
+                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+              />
+
+              <button id="mrm-pay-btn" class="button-primary" style="width:100%;">Pay</button>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
             </div>
           </div>
@@ -731,6 +779,8 @@ a{ -webkit-tap-highlight-color:transparent; }
   let stripe = null;
   let activePaymentElement = null;
   let activeStripeElements = null;
+  let pendingSku = '';
+  let pendingClientSecret = '';
 
   document.addEventListener('DOMContentLoaded', () => {
     const pk = (window.__mrmStripePk || '').trim();
@@ -770,43 +820,172 @@ a{ -webkit-tap-highlight-color:transparent; }
     canvas.height = Math.floor(cssH * dpr);
   }
 
-  function getSlugFromUrl() {
-    // expects /product-slug/ (last non-empty segment)
-    const parts = window.location.pathname.split('/').filter(Boolean);
-    return (parts[parts.length - 1] || '').trim();
+  function mrmSlugify(input) {
+    // Match Payments Hub style: lowercase, hyphenate, strip unsafe chars
+    return String(input || '')
+      .trim()
+      .toLowerCase()
+      .replace(/%[0-9a-f]{2}/gi, '-')     // guard against encoded remnants
+      .replace(/&/g, 'and')
+      .replace(/[^a-z0-9]+/g, '-')       // anything non-alnum -> hyphen
+      .replace(/-+/g, '-')               // collapse hyphens
+      .replace(/^-|-$/g, '');            // trim hyphens
   }
 
-  function openPaymentModal(clientSecret, priceDisplay) {
+  function getPieceSlugFromUrl() {
+    // expects /piece-slug/ (last non-empty segment)
+    const parts = window.location.pathname.split('/').filter(Boolean);
+    const raw = (parts[parts.length - 1] || '').trim();
+    return mrmSlugify(raw);
+  }
+
+  async function resolveSkuFromHub(typeSlug) {
+    const pieceSlug = getPieceSlugFromUrl();
+    const url = `/wp-json/mrm-pay/v1/resolve?piece_slug=${encodeURIComponent(pieceSlug)}&type=${encodeURIComponent(typeSlug)}`;
+    const res = await fetch(url, { method: 'GET' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok || !data.sku) {
+      throw new Error(data.message || 'Unable to resolve SKU from hub.');
+    }
+    return data.sku;
+  }
+
+  function normalizeSkuFromOffer(offer) {
+    // Prefer server-configured product slug (most reliable)
+    const raw =
+      (offer && (offer.product_slug || offer.productSlug || offer.product_slug_id || offer.productSlugId)) || '';
+
+    return String(raw || '').trim().toLowerCase();
+  }
+
+  function inferTypeFromSku(sku) {
+    const s = String(sku || '').trim().toLowerCase();
+    if (s.endsWith('-fundamentals')) return 'fundamentals';
+    if (s.endsWith('-trombone-euphonium')) return 'trombone-euphonium';
+    if (s.endsWith('-tuba')) return 'tuba';
+    if (s.endsWith('-complete-package')) return 'complete-package';
+    return '';
+  }
+
+  function openPaymentModal(priceDisplay) {
     const overlay = document.getElementById('mrm-payment-overlay');
     const payBtn = document.getElementById('mrm-pay-btn');
-    const closeBtn = document.getElementById('payment-close');
     const errorEl = document.getElementById('mrm-payment-error');
     const instructions = document.getElementById('payment-instructions');
+    const emailInput = document.getElementById('mrm-payment-email');
+    const paymentMount = document.getElementById('mrm-payment-element');
 
-    instructions.textContent = `${priceDisplay} – please enter your card details.`;
-    overlay.style.display = 'block';
+    instructions.textContent = `${priceDisplay} – enter your email below to load payment options.`;
+    overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden', 'false');
+
     errorEl.textContent = '';
-    payBtn.disabled = false;
+    payBtn.disabled = true;
+    payBtn.textContent = 'Pay';
 
-    activeStripeElements = stripe.elements({ clientSecret });
-    activePaymentElement = activeStripeElements.create('payment');
-    activePaymentElement.mount('#mrm-payment-element');
+    emailInput.value = '';
 
-    const closeModal = () => {
+    pendingClientSecret = '';
+    if (activePaymentElement) {
+      try { activePaymentElement.unmount(); } catch (e) {}
+    }
+    activePaymentElement = null;
+    activeStripeElements = null;
+
+    paymentMount.innerHTML = `
+      <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+        Enter your email to load the secure payment form.
+      </div>
+    `;
+
+    document.getElementById('payment-close').onclick = function () {
       overlay.style.display = 'none';
       overlay.setAttribute('aria-hidden', 'true');
+
       if (activePaymentElement) {
-        activePaymentElement.unmount();
+        try { activePaymentElement.unmount(); } catch (e) {}
       }
       activePaymentElement = null;
       activeStripeElements = null;
+
+      pendingSku = '';
+      pendingClientSecret = '';
       errorEl.textContent = '';
     };
 
-    closeBtn.onclick = closeModal;
+    const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
 
-    return { payBtn, errorEl, closeModal };
+    let loadTimer = null;
+    emailInput.oninput = function () {
+      clearTimeout(loadTimer);
+      loadTimer = setTimeout(async () => {
+        const email = (emailInput.value || '').trim();
+
+        if (!isEmailLike(email)) {
+          payBtn.disabled = true;
+          return;
+        }
+
+        if (pendingClientSecret || activePaymentElement) return;
+
+        if (!pendingSku) {
+          errorEl.textContent = 'Missing SKU.';
+          payBtn.disabled = true;
+          return;
+        }
+
+        try {
+          errorEl.textContent = '';
+
+          const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sku: pendingSku,
+              email: email,
+              context: { piece_slug: getPieceSlugFromUrl() }
+            })
+          });
+
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            errorEl.textContent = data.message || 'Error creating payment.';
+            payBtn.disabled = true;
+            return;
+          }
+
+          const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
+          if (!stripeInstance) {
+            errorEl.textContent = 'Stripe is not configured.';
+            payBtn.disabled = true;
+            return;
+          }
+
+          stripe = stripeInstance;
+          window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
+
+          pendingClientSecret = data.client_secret;
+          activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
+          activePaymentElement = activeStripeElements.create('payment');
+
+          paymentMount.innerHTML = '';
+          activePaymentElement.mount('#mrm-payment-element');
+
+          sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
+            email: email,
+            sku: pendingSku,
+            pi: data.payment_intent_id
+          }));
+
+          payBtn.disabled = false;
+        } catch (err) {
+          errorEl.textContent = 'Payment setup failed. Please try again.';
+          payBtn.disabled = true;
+        }
+      }, 350);
+    };
+
+    return { payBtn, errorEl, emailInput };
   }
 
   async function verifyAndGrant(piId, email, sku){
@@ -875,16 +1054,94 @@ a{ -webkit-tap-highlight-color:transparent; }
   }
 
   function buildOfferDom(offer){
-    const productSlug  = (offer.product_slug || offer.productSlug || '').trim();
     const displayTitle = offer.display_title || offer.displayTitle || '';
     const subtitle     = offer.subtitle || '';
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
+    const pieceSlug = getPieceSlugFromUrl();
+
+    // 1) Use the product slug provided by Product Access (best source of truth)
+    let productSlug = normalizeSkuFromOffer(offer);
+
+    // 2) If Product Access didn’t provide a product_slug, fall back to generating it
+    let typeSlug = '';
+    if (!productSlug) {
+      const normalizedTitle = mrmSlugify(displayTitle);
+
+      // tolerant map (handles small title wording differences)
+      const typeSlugMap = {
+        // --- fundamentals ---
+        'fundamentals': 'fundamentals',
+        'fundamentals-exercises': 'fundamentals',
+        'fundamental-exercises': 'fundamentals',
+        'fundamental-exercise': 'fundamentals',
+        'fundamental': 'fundamentals',
+        'core-exercises': 'fundamentals',
+
+        // --- trombone/euphonium full piece ---
+        'trombone-euphonium': 'trombone-euphonium',
+        'trombone-euphonium-full': 'trombone-euphonium',
+        'trombone-euphonium-full-piece': 'trombone-euphonium',
+        'trombone-euphonium-piece': 'trombone-euphonium',
+        'trombone-and-euphonium': 'trombone-euphonium',
+        'trombone-and-euphonium-full-piece': 'trombone-euphonium',
+        'tromboneeuphonium': 'trombone-euphonium',
+
+        // --- tuba full piece ---
+        'tuba': 'tuba',
+        'tuba-full': 'tuba',
+        'tuba-full-piece': 'tuba',
+        'tuba-piece': 'tuba',
+
+        // --- complete package ---
+        'complete-package': 'complete-package',
+        'complete': 'complete-package',
+        'full-package': 'complete-package',
+        'complete-bundle': 'complete-package',
+        'bundle': 'complete-package'
+      };
+
+      typeSlug = typeSlugMap[normalizedTitle] || '';
+      if (!typeSlug) {
+        console.error('[MRM] Cannot map offer title -> SKU type:', displayTitle, normalizedTitle, offer);
+        // show the visible error card (same behavior you saw)
+        const wrap = document.createElement('div');
+        wrap.className = 'offer mrm-offer';
+        wrap.innerHTML = `
+          <div class="offer-head">
+            <div class="offer-head-left">
+              <h3 class="offer-title">${escHtml(displayTitle || 'Unknown Offer')}</h3>
+            </div>
+          </div>
+          <div class="offer-body">
+            <div style="grid-column:1 / -1; padding:12px; border:1px solid rgba(255,0,0,0.25); border-radius:14px;">
+              <strong>Configuration error:</strong> This offer title doesn't map to a valid SKU type.<br>
+              Open DevTools Console to see details.
+            </div>
+          </div>
+        `;
+        return wrap;
+      }
+
+      productSlug = `piece-${pieceSlug}-${typeSlug}`;
+    }
+
+    // 3) For safety: ensure it starts with "piece-" and is slug-safe
+    productSlug = productSlug.replace(/[^a-z0-9\-_]/g, '');
+    if (!productSlug.startsWith('piece-')) {
+      // If someone accidentally saved "blackbeards-revenge-fundamentals", fix it
+      productSlug = `piece-${productSlug}`;
+    }
+
+    if (!typeSlug) {
+      typeSlug = inferTypeFromSku(productSlug);
+    }
 
     const wrap = document.createElement('div');
     wrap.className = 'offer mrm-offer';
     wrap.dataset.productSlug = productSlug;
     wrap.dataset.price = priceDisplay;
+    wrap.dataset.type = typeSlug;
 
     wrap.innerHTML = `
       <div class="offer-head">
@@ -952,7 +1209,7 @@ a{ -webkit-tap-highlight-color:transparent; }
     if (!pieceEl) return;
 
     const apiBase = (pieceEl.dataset.apiBase || '/wp-json/mrm/v1');
-    const slug = getSlugFromUrl();
+    const slug = getPieceSlugFromUrl();
     if (!slug) {
       pieceEl.querySelector('.piece-title').textContent = 'Missing slug in URL.';
       return;
@@ -1211,63 +1468,84 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     piece.querySelectorAll('.mrm-offer').forEach(syncOfferAudio);
 
+    const payBtn = document.getElementById('mrm-pay-btn');
+    if (payBtn) {
+      payBtn.onclick = async function () {
+        const errorEl = document.getElementById('mrm-payment-error');
+        const email = (document.getElementById('mrm-payment-email').value || '').trim();
+
+        if (!pendingSku) {
+          errorEl.textContent = 'Missing SKU.';
+          return;
+        }
+        if (!pendingClientSecret || !activeStripeElements) {
+          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email.';
+          return;
+        }
+
+        this.disabled = true;
+        const { error, paymentIntent } = await stripe.confirmPayment({
+          elements: activeStripeElements,
+          confirmParams: { return_url: window.location.href }
+        });
+        if (error) {
+          errorEl.textContent = error.message || 'Payment failed.';
+          this.disabled = false;
+          return;
+        }
+        if (paymentIntent && paymentIntent.status === 'succeeded') {
+          await verifyAndGrant(paymentIntent.id, email, pendingSku);
+        }
+      };
+    }
+
     piece.querySelectorAll('.mrm-purchaseBtn').forEach(btn => {
       btn.addEventListener('click', async function(e){
         e.preventDefault();
+
         const offerEl = btn.closest('.mrm-offer');
-        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
+        const typeSlug = offerEl ? (offerEl.dataset.type || '').trim() : '';
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
-        if(!sku){ alert('Missing SKU.'); return; }
+        if (!typeSlug) { alert('Missing offer type (data-type).'); return; }
 
-        const email = prompt('Enter your email:');
-        if(!email){ return; }
+        try {
+          // ✅ Ask the hub which SKU is correct (handles -2 / -3 suffixes)
+          pendingSku = await resolveSkuFromHub(typeSlug);
+        } catch (err) {
+          console.error('[MRM] SKU resolve failed:', err);
+          alert(err.message || 'Could not resolve SKU.');
+          return;
+        }
 
-        const piRes = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ sku: sku, email: email, context: { piece_type: offerEl.dataset.type || '', piece_slug: getSlugFromUrl() } })
-        });
-        const piData = await piRes.json();
-        if(!piRes.ok || !piData.ok){ alert(piData.message||'Error creating payment'); return; }
+        console.log('[MRM] Purchase clicked. Resolved SKU:', pendingSku);
 
-        const stripeInstance = ensureStripe(piData.publishableKey || window.__mrmStripePk || '');
-        if (!stripeInstance) { alert('Stripe is not configured.'); return; }
-        stripe = stripeInstance;
-        window.__mrmStripePk = piData.publishableKey || window.__mrmStripePk || '';
-
-        sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
-          email: email,
-          sku: sku,
-          pi: piData.payment_intent_id,
-        }));
-
-        const { payBtn, errorEl } = openPaymentModal(piData.client_secret, priceDisplay);
-
-        payBtn.onclick = async () => {
-          payBtn.disabled = true;
-          const { error, paymentIntent } = await stripe.confirmPayment({
-            elements: activeStripeElements,
-            confirmParams: { return_url: window.location.href }
-          });
-          if (error) {
-            errorEl.textContent = error.message || 'Payment failed.';
-            payBtn.disabled = false;
-            return;
-          }
-          if (paymentIntent && paymentIntent.status === 'succeeded') {
-            await verifyAndGrant(paymentIntent.id, email, sku);
-          }
-        };
+        pendingClientSecret = '';
+        if (activePaymentElement) {
+          try { activePaymentElement.unmount(); } catch (e) {}
+          activePaymentElement = null;
+        }
+        openPaymentModal(priceDisplay);
       });
     });
 
     piece.querySelectorAll('.mrm-accessBtn').forEach(btn => {
-      btn.addEventListener('click', function(e){
+      btn.addEventListener('click', async function(e){
         e.preventDefault();
+
         const offerEl = btn.closest('.mrm-offer');
-        const slug = offerEl ? (offerEl.dataset.productSlug || '') : '';
-        if (!slug) { alert('Missing offer product slug. Check Pieces Catalog offer config.'); return; }
-        openOtpModal(slug);
+        const typeSlug = offerEl ? (offerEl.dataset.type || '').trim() : '';
+        if (!typeSlug) { alert('Missing offer type (data-type).'); return; }
+
+        let sku = '';
+        try {
+          sku = await resolveSkuFromHub(typeSlug);
+        } catch (err) {
+          console.error('[MRM] SKU resolve failed (access):', err);
+          alert(err.message || 'Could not resolve SKU for access.');
+          return;
+        }
+
+        openOtpModal(sku);
       });
     });
   }

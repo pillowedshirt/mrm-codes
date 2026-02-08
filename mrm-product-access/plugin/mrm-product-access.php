@@ -1283,22 +1283,62 @@ class MRM_Product_Access {
      */
     protected function is_email_hash_approved_for_product( $product_slug, $email_hash ) {
         $conf = $this->get_product_config( $product_slug );
-        if ( empty( $conf ) ) {
-            return false;
-        }
-        $list = isset( $conf['approved_emails'] ) && is_array( $conf['approved_emails'] ) ? $conf['approved_emails'] : array();
-        if ( empty( $list ) ) {
-            return false;
-        }
-        foreach ( $list as $email ) {
-            $email = sanitize_email( $email );
-            if ( empty( $email ) ) {
-                continue;
-            }
-            if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
-                return true;
+        if ( ! empty( $conf ) ) {
+            $list = isset( $conf['approved_emails'] ) && is_array( $conf['approved_emails'] ) ? $conf['approved_emails'] : array();
+            foreach ( $list as $email ) {
+                $email = sanitize_email( $email );
+                if ( empty( $email ) ) {
+                    continue;
+                }
+                if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
+                    return true;
+                }
             }
         }
+
+        $products = get_option( 'mrm_pay_hub_products', array() );
+
+        if ( isset( $products[ $product_slug ] ) && ! empty( $products[ $product_slug ]['emails'] ) ) {
+            foreach ( $products[ $product_slug ]['emails'] as $email ) {
+                $email = sanitize_email( $email );
+                if ( empty( $email ) ) {
+                    continue;
+                }
+                if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
+                    return true;
+                }
+            }
+        }
+
+        if ( isset( $products['all-sheet-music'] ) && ! empty( $products['all-sheet-music']['emails'] ) ) {
+            foreach ( $products['all-sheet-music']['emails'] as $email ) {
+                $email = sanitize_email( $email );
+                if ( empty( $email ) ) {
+                    continue;
+                }
+                if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
+                    return true;
+                }
+            }
+        }
+
+        // Capture everything after "piece-" up to the last hyphen before the type.
+        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug, $matches ) ) {
+            $piece_slug = $matches[1];
+            $package_sku = 'piece-' . $piece_slug . '-complete-package';
+            if ( isset( $products[ $package_sku ] ) && ! empty( $products[ $package_sku ]['emails'] ) ) {
+                foreach ( $products[ $package_sku ]['emails'] as $email ) {
+                    $email = sanitize_email( $email );
+                    if ( empty( $email ) ) {
+                        continue;
+                    }
+                    if ( hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email ) ) ) ) ) {
+                        return true;
+                    }
+                }
+            }
+        }
+
         return false;
     }
 
