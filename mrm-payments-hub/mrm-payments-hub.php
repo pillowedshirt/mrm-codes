@@ -252,7 +252,8 @@ class MRM_Payments_Hub_Single {
   }
 
   /**
-   * Ensure that lesson default products are present and up to date.
+   * Ensure that lesson default products are present AND valid.
+   * If a default SKU already exists but has an invalid amount/shape, repair it.
    */
   private function ensure_default_products() {
     $all = $this->all_products();
@@ -298,9 +299,35 @@ class MRM_Payments_Hub_Single {
     );
 
     foreach ($defaults as $sku => $cfg) {
-      if (!isset($all[$sku])) {
+      if (!isset($all[$sku]) || !is_array($all[$sku])) {
+        // Missing => add
         $all[$sku] = $cfg;
         $changed = true;
+        continue;
+      }
+
+      // Exists => validate and repair only if needed
+      $current = $all[$sku];
+
+      $cur_amount = isset($current['amount_cents']) ? (int)$current['amount_cents'] : 0;
+      $cur_currency = isset($current['currency']) ? (string)$current['currency'] : '';
+      $cur_type = isset($current['product_type']) ? (string)$current['product_type'] : '';
+      $cur_label = isset($current['label']) ? (string)$current['label'] : '';
+      $cur_active = isset($current['active']) ? (int)$current['active'] : 0;
+
+      $needs_repair =
+        ($cur_amount <= 0) ||
+        (!$cur_currency) ||
+        (!$cur_type) ||
+        (!$cur_label) ||
+        ($cur_active !== 1); // keep lesson defaults active unless you explicitly disable them
+
+      if ($needs_repair) {
+        // Preserve any extra fields the admin may have added, but repair core shape.
+        $all[$sku] = array_merge($current, $cfg);
+        $changed = true;
+
+        error_log('[MRM Payments Hub] Repaired default product: ' . $sku . ' (was amount=' . $cur_amount . ')');
       }
     }
 
@@ -413,13 +440,21 @@ class MRM_Payments_Hub_Single {
     return $json;
   }
 
-  private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '') {
+  private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array()) {
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => $currency ?: 'usd',
       'automatic_payment_methods[enabled]' => 'true',
     );
     if ($description) $params['description'] = $description;
+
+    // Allow additional Stripe params (customer, setup_future_usage, etc.)
+    if (is_array($extra_params)) {
+      foreach ($extra_params as $k => $v) {
+        if ($v === null || $v === '') continue;
+        $params[(string)$k] = (string)$v;
+      }
+    }
 
     foreach ((array)$metadata as $k => $v) {
       $k = preg_replace('/[^a-zA-Z0-9_\-]/', '_', (string)$k);
@@ -431,6 +466,30 @@ class MRM_Payments_Hub_Single {
 
   private function stripe_retrieve_payment_intent($pi_id) {
     return $this->stripe_api_request('GET', '/v1/payment_intents/' . rawurlencode((string)$pi_id));
+  }
+
+  private function stripe_find_or_create_customer($email) {
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) return new WP_Error('bad_email', 'Valid email required for customer.');
+
+    // Try to find existing customer by email
+    $list = $this->stripe_api_request('GET', '/v1/customers', array(
+      'email' => $email,
+      'limit' => 1,
+    ));
+    if (is_wp_error($list)) return $list;
+
+    if (isset($list['data'][0]['id'])) {
+      return (string)$list['data'][0]['id'];
+    }
+
+    // Create new customer
+    $created = $this->stripe_api_request('POST', '/v1/customers', array(
+      'email' => $email,
+    ));
+    if (is_wp_error($created)) return $created;
+
+    return isset($created['id']) ? (string)$created['id'] : new WP_Error('stripe_error', 'Unable to create customer.');
   }
 
   /* =========================================================
@@ -702,6 +761,24 @@ class MRM_Payments_Hub_Single {
     $currency = (string)($p['currency'] ?? 'usd');
     $product_type = (string)($p['product_type'] ?? 'unknown');
 
+    // Optional: scheduler may request a one-time override (e.g., prepay multiple lessons).
+    // We only allow overrides that are sensible and non-zero.
+    $override = isset($data['amount_override_cents']) ? absint($data['amount_override_cents']) : 0;
+    if ($override > 0) {
+      $base = (int)$amount;
+
+      // Guard rails: override must be at least base amount and not unreasonably large.
+      // (50x is a generous upper bound for prepay bundles without letting garbage through.)
+      $max = ($base > 0) ? ($base * 50) : 0;
+
+      if ($base > 0 && $override >= $base && $override <= $max) {
+        $amount = $override;
+      } else {
+        error_log('[MRM Payments Hub] Rejected amount_override_cents for sku=' . $sku . ' base=' . $base . ' override=' . $override);
+        return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid override amount.'), 400);
+      }
+    }
+
     if ($amount <= 0) return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid product price.'), 400);
 
     $email_hash = $this->email_hash($email);
@@ -715,7 +792,25 @@ class MRM_Payments_Hub_Single {
 
     $description = ($product_type === 'lesson') ? 'MRM Lesson' : 'MRM Sheet Music';
 
-    $pi = $this->stripe_create_payment_intent($amount, $currency, $metadata, $description);
+    $save_card = !empty($data['save_card']);
+
+    $extra = array();
+    $customer_id = '';
+
+    if ($save_card) {
+      $customer_id = $this->stripe_find_or_create_customer($email);
+      if (is_wp_error($customer_id)) {
+        return new WP_REST_Response(array('ok'=>false,'message'=>$customer_id->get_error_message()), 500);
+      }
+
+      // This tells Stripe to attach the payment method to the customer for future off-session charges.
+      $extra['customer'] = $customer_id;
+      $extra['setup_future_usage'] = 'off_session';
+
+      $metadata['mrm_save_card'] = 'yes';
+    }
+
+    $pi = $this->stripe_create_payment_intent($amount, $currency, $metadata, $description, $extra);
     if (is_wp_error($pi)) {
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
     }
@@ -728,6 +823,7 @@ class MRM_Payments_Hub_Single {
       'client_secret' => (string)($pi['client_secret'] ?? ''),
       'payment_intent_id' => (string)$pi['id'],
       'order_id' => (int)$order_id,
+      'customer_id' => $customer_id ? (string)$customer_id : '',
       'sku' => $sku,
       'label' => (string)($p['label'] ?? $sku),
       'amount_cents' => $amount,
