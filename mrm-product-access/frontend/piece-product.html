@@ -839,32 +839,12 @@ a{ -webkit-tap-highlight-color:transparent; }
     return mrmSlugify(raw);
   }
 
-  async function resolveSkuFromHub(typeSlug) {
-    const pieceSlug = getPieceSlugFromUrl();
-    const url = `/wp-json/mrm-pay/v1/resolve?piece_slug=${encodeURIComponent(pieceSlug)}&type=${encodeURIComponent(typeSlug)}`;
-    const res = await fetch(url, { method: 'GET' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok || !data.sku) {
-      throw new Error(data.message || 'Unable to resolve SKU from hub.');
-    }
-    return data.sku;
-  }
-
   function normalizeSkuFromOffer(offer) {
     // Prefer server-configured product slug (most reliable)
     const raw =
       (offer && (offer.product_slug || offer.productSlug || offer.product_slug_id || offer.productSlugId)) || '';
 
     return String(raw || '').trim().toLowerCase();
-  }
-
-  function inferTypeFromSku(sku) {
-    const s = String(sku || '').trim().toLowerCase();
-    if (s.endsWith('-fundamentals')) return 'fundamentals';
-    if (s.endsWith('-trombone-euphonium')) return 'trombone-euphonium';
-    if (s.endsWith('-tuba')) return 'tuba';
-    if (s.endsWith('-complete-package')) return 'complete-package';
-    return '';
   }
 
   function openPaymentModal(priceDisplay) {
@@ -1058,90 +1038,35 @@ a{ -webkit-tap-highlight-color:transparent; }
     const subtitle     = offer.subtitle || '';
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
-    const pieceSlug = getPieceSlugFromUrl();
-
-    // 1) Use the product slug provided by Product Access (best source of truth)
     let productSlug = normalizeSkuFromOffer(offer);
 
-    // 2) If Product Access didn’t provide a product_slug, fall back to generating it
-    let typeSlug = '';
-    if (!productSlug) {
-      const normalizedTitle = mrmSlugify(displayTitle);
+    // ✅ Canonical SKU must be provided by Product Access offers.
+    productSlug = String(productSlug || '').trim().toLowerCase();
 
-      // tolerant map (handles small title wording differences)
-      const typeSlugMap = {
-        // --- fundamentals ---
-        'fundamentals': 'fundamentals',
-        'fundamentals-exercises': 'fundamentals',
-        'fundamental-exercises': 'fundamentals',
-        'fundamental-exercise': 'fundamentals',
-        'fundamental': 'fundamentals',
-        'core-exercises': 'fundamentals',
-
-        // --- trombone/euphonium full piece ---
-        'trombone-euphonium': 'trombone-euphonium',
-        'trombone-euphonium-full': 'trombone-euphonium',
-        'trombone-euphonium-full-piece': 'trombone-euphonium',
-        'trombone-euphonium-piece': 'trombone-euphonium',
-        'trombone-and-euphonium': 'trombone-euphonium',
-        'trombone-and-euphonium-full-piece': 'trombone-euphonium',
-        'tromboneeuphonium': 'trombone-euphonium',
-
-        // --- tuba full piece ---
-        'tuba': 'tuba',
-        'tuba-full': 'tuba',
-        'tuba-full-piece': 'tuba',
-        'tuba-piece': 'tuba',
-
-        // --- complete package ---
-        'complete-package': 'complete-package',
-        'complete': 'complete-package',
-        'full-package': 'complete-package',
-        'complete-bundle': 'complete-package',
-        'bundle': 'complete-package'
-      };
-
-      typeSlug = typeSlugMap[normalizedTitle] || '';
-      if (!typeSlug) {
-        console.error('[MRM] Cannot map offer title -> SKU type:', displayTitle, normalizedTitle, offer);
-        // show the visible error card (same behavior you saw)
-        const wrap = document.createElement('div');
-        wrap.className = 'offer mrm-offer';
-        wrap.innerHTML = `
-          <div class="offer-head">
-            <div class="offer-head-left">
-              <h3 class="offer-title">${escHtml(displayTitle || 'Unknown Offer')}</h3>
-            </div>
+    // Allow underscores + hyphens only
+    if (!/^[a-z0-9][a-z0-9\-_]{0,199}$/.test(productSlug)) {
+      const wrap = document.createElement('div');
+      wrap.className = 'offer mrm-offer';
+      wrap.innerHTML = `
+        <div class="offer-head">
+          <div class="offer-head-left">
+            <h3 class="offer-title">${escHtml(displayTitle || 'Unknown Offer')}</h3>
           </div>
-          <div class="offer-body">
-            <div style="grid-column:1 / -1; padding:12px; border:1px solid rgba(255,0,0,0.25); border-radius:14px;">
-              <strong>Configuration error:</strong> This offer title doesn't map to a valid SKU type.<br>
-              Open DevTools Console to see details.
-            </div>
+        </div>
+        <div class="offer-body">
+          <div style="grid-column:1 / -1; padding:12px; border:1px solid rgba(255,0,0,0.25); border-radius:14px;">
+            <strong>Configuration error:</strong> This offer is missing a valid <code>product_slug</code>.<br>
+            Fix it in <strong>MRM Access → Purchasing Options (Offers)</strong>.
           </div>
-        `;
-        return wrap;
-      }
-
-      productSlug = `piece-${pieceSlug}-${typeSlug}`;
-    }
-
-    // 3) For safety: ensure it starts with "piece-" and is slug-safe
-    productSlug = productSlug.replace(/[^a-z0-9\-_]/g, '');
-    if (!productSlug.startsWith('piece-')) {
-      // If someone accidentally saved "blackbeards-revenge-fundamentals", fix it
-      productSlug = `piece-${productSlug}`;
-    }
-
-    if (!typeSlug) {
-      typeSlug = inferTypeFromSku(productSlug);
+        </div>
+      `;
+      return wrap;
     }
 
     const wrap = document.createElement('div');
     wrap.className = 'offer mrm-offer';
     wrap.dataset.productSlug = productSlug;
     wrap.dataset.price = priceDisplay;
-    wrap.dataset.type = typeSlug;
 
     wrap.innerHTML = `
       <div class="offer-head">
@@ -1504,20 +1429,23 @@ a{ -webkit-tap-highlight-color:transparent; }
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
-        const typeSlug = offerEl ? (offerEl.dataset.type || '').trim() : '';
+        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
-        if (!typeSlug) { alert('Missing offer type (data-type).'); return; }
 
+        if (!sku) { alert('Missing product_slug for this offer.'); return; }
+
+        // 1) Quote (validates sku exists + active in hub)
         try {
-          // ✅ Ask the hub which SKU is correct (handles -2 / -3 suffixes)
-          pendingSku = await resolveSkuFromHub(typeSlug);
+          const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?sku=${encodeURIComponent(sku)}`, { method: 'GET' });
+          const qData = await qRes.json().catch(() => ({}));
+          if (!qRes.ok || !qData.ok) throw new Error(qData.message || 'Quote failed.');
         } catch (err) {
-          console.error('[MRM] SKU resolve failed:', err);
-          alert(err.message || 'Could not resolve SKU.');
+          console.error('[MRM] Quote failed:', err);
+          alert(err.message || 'This offer is not available for purchase.');
           return;
         }
 
-        console.log('[MRM] Purchase clicked. Resolved SKU:', pendingSku);
+        pendingSku = sku;
 
         pendingClientSecret = '';
         if (activePaymentElement) {
@@ -1533,17 +1461,8 @@ a{ -webkit-tap-highlight-color:transparent; }
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
-        const typeSlug = offerEl ? (offerEl.dataset.type || '').trim() : '';
-        if (!typeSlug) { alert('Missing offer type (data-type).'); return; }
-
-        let sku = '';
-        try {
-          sku = await resolveSkuFromHub(typeSlug);
-        } catch (err) {
-          console.error('[MRM] SKU resolve failed (access):', err);
-          alert(err.message || 'Could not resolve SKU for access.');
-          return;
-        }
+        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
+        if (!sku) { alert('Missing product_slug for this offer.'); return; }
 
         openOtpModal(sku);
       });

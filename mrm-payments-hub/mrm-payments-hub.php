@@ -526,6 +526,12 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/has-access', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_has_access'),
+      'permission_callback' => '__return_true',
+    ));
+
   }
 
   public function rest_quote(WP_REST_Request $req) {
@@ -727,6 +733,44 @@ class MRM_Payments_Hub_Single {
       'ok' => true,
       'email_hash' => $email_hash,
       'sku' => $sku,
+    ), 200);
+  }
+
+  public function rest_has_access(WP_REST_Request $req) {
+    $data = (array) $req->get_json_params();
+    $sku   = $this->sanitize_sku($data['sku'] ?? '');
+    $email = sanitize_email((string)($data['email'] ?? ''));
+
+    // Privacy-safe: do not leak whether access exists unless caller already has context.
+    // We still return ok with has_access boolean (needed for internal systems / admin tools).
+    if (!$sku) {
+      return new WP_REST_Response(array('ok' => false, 'message' => 'Missing sku.'), 400);
+    }
+    if (!$email || !is_email($email)) {
+      return new WP_REST_Response(array('ok' => false, 'message' => 'Valid email required.'), 400);
+    }
+
+    $email_hash = $this->email_hash($email);
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'mrm_sheet_music_access';
+
+    // If table doesn't exist, fail closed.
+    $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($exists !== $table) {
+      return new WP_REST_Response(array('ok' => true, 'sku' => $sku, 'has_access' => false), 200);
+    }
+
+    $id = $wpdb->get_var($wpdb->prepare(
+      "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+      (string)$email_hash,
+      (string)$sku
+    ));
+
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'sku' => $sku,
+      'has_access' => !empty($id),
     ), 200);
   }
 
