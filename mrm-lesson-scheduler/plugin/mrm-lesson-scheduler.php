@@ -475,6 +475,145 @@ class MRM_Lesson_Scheduler {
         ) );
     }
 
+    private function grant_all_sheet_music_access_for_email( $email, $source = 'lesson_booking', $source_id = '' ) {
+        $email = sanitize_email( (string) $email );
+        if ( ! $email || ! is_email( $email ) ) {
+            return;
+        }
+
+        $hub_settings = get_option( 'mrm_pay_hub_settings', array() );
+        $all_sku      = isset( $hub_settings['all_sheet_music_sku'] ) ? (string) $hub_settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
+        $all_sku      = strtolower( trim( $all_sku ) );
+        $all_sku      = preg_replace( '/[^a-z0-9\-_]/', '', $all_sku );
+        if ( $all_sku === '' ) {
+            return;
+        }
+
+        $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
+
+        global $wpdb;
+        $table  = $wpdb->prefix . 'mrm_sheet_music_access';
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        if ( $exists !== $table ) {
+            return;
+        }
+
+        $now = current_time( 'mysql' );
+
+        // If already active, do nothing.
+        $id = $wpdb->get_var( $wpdb->prepare(
+            "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+            $email_hash,
+            $all_sku
+        ) );
+        if ( $id ) {
+            return;
+        }
+
+        $wpdb->insert( $table, array(
+            'email_hash' => $email_hash,
+            'sku'        => $all_sku,
+            'granted_at' => $now,
+            'revoked_at' => null,
+            'source'     => $source,
+            'source_id'  => $source_id !== '' ? (string) $source_id : null,
+        ), array( '%s','%s','%s','%s','%s','%s' ) );
+    }
+
+    public function rest_book_lesson( WP_REST_Request $request ) {
+        global $wpdb;
+
+        $data = (array) $request->get_json_params();
+
+        $instructor_id = intval( $data['instructor_id'] ?? 0 );
+        $slots         = isset( $data['slots'] ) && is_array( $data['slots'] ) ? $data['slots'] : array();
+
+        $student_name  = sanitize_text_field( (string) ( $data['student_name'] ?? '' ) );
+        $student_email = sanitize_email( (string) ( $data['student_email'] ?? '' ) );
+        $instrument    = sanitize_text_field( (string) ( $data['instrument'] ?? '' ) );
+        $is_online     = ! empty( $data['online'] ) ? 1 : 0;
+        $lesson_length = intval( $data['lesson_length'] ?? ( $data['slot_minutes'] ?? 60 ) );
+
+        if ( $instructor_id <= 0 ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
+        }
+        if ( ! $student_email || ! is_email( $student_email ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Valid student_email required.' ), 400 );
+        }
+        if ( empty( $slots ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'No slots selected.' ), 400 );
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $lessons_table ) );
+        if ( $exists !== $lessons_table ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Lessons table missing.' ), 500 );
+        }
+
+        $now = current_time( 'mysql' );
+        $created_ids = array();
+
+        foreach ( $slots as $slot ) {
+            $start_raw = (string) ( $slot['start'] ?? '' );
+            $end_raw   = (string) ( $slot['end'] ?? '' );
+
+            $start_ts = strtotime( $start_raw );
+            $end_ts   = strtotime( $end_raw );
+
+            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                continue;
+            }
+
+            $start_mysql = gmdate( 'Y-m-d H:i:s', $start_ts );
+            $end_mysql   = gmdate( 'Y-m-d H:i:s', $end_ts );
+
+            $token = bin2hex( random_bytes( 16 ) );
+            $token_hash = hash( 'sha256', $token );
+
+            $ok = $wpdb->insert( $lessons_table, array(
+                'instructor_id' => $instructor_id,
+                'series_id'     => null,
+                'student_name'  => $student_name !== '' ? $student_name : $student_email,
+                'student_email' => $student_email,
+                'instrument'    => $instrument !== '' ? $instrument : 'unknown',
+                'is_online'     => $is_online,
+                'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
+                'start_time'    => $start_mysql,
+                'end_time'      => $end_mysql,
+                'status'        => 'scheduled',
+                'google_event_id' => null,
+                'google_meet_url' => null,
+                'agreement_id'    => null,
+                'created_at'      => $now,
+                'updated_at'      => $now,
+                'reminder_token'  => $token,
+                'reminder_token_hash' => $token_hash,
+                'reminder_scheduled_at' => null,
+                'reminder_sent_at' => null,
+            ), array(
+                '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'
+            ) );
+
+            if ( $ok ) {
+                $created_ids[] = (int) $wpdb->insert_id;
+            }
+        }
+
+        if ( empty( $created_ids ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
+        }
+
+        // Grant ALL-SHEET-MUSIC access for this student email.
+        $this->grant_all_sheet_music_access_for_email( $student_email, 'lesson_booking', (string) $created_ids[0] );
+
+        return new WP_REST_Response( array(
+            'ok' => true,
+            'success' => true,
+            'message' => 'Booking confirmed!',
+            'lesson_ids' => $created_ids,
+        ), 200 );
+    }
+
     /* =========================================================
      * Join Gate Page (virtual route)
      * URL: /join-video-lesson/?token=XXXX
