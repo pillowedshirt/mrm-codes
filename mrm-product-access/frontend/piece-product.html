@@ -743,12 +743,20 @@ a{ -webkit-tap-highlight-color:transparent; }
             </div>
             <div class="modal-body">
               <p id="payment-instructions"></p>
+
               <div id="mrm-payment-element"></div>
-              <!-- Spacer between Stripe form and email field -->
+
               <div style="height:50px;"></div>
-              <input type="email" id="mrm-payment-email" placeholder="Your email" required
-                     style="width:100%;padding:12px;border:1px solid #ccc;border-radius:8px;" />
-              <button id="mrm-pay-btn" class="button-primary" style="margin-top:12px;">Pay</button>
+
+              <input
+                type="email"
+                id="mrm-payment-email"
+                placeholder="Your email"
+                required
+                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+              />
+
+              <button id="mrm-pay-btn" class="button-primary" style="width:100%;">Pay</button>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
             </div>
           </div>
@@ -829,6 +837,23 @@ a{ -webkit-tap-highlight-color:transparent; }
     const parts = window.location.pathname.split('/').filter(Boolean);
     const raw = (parts[parts.length - 1] || '').trim();
     return mrmSlugify(raw);
+  }
+
+  function normalizeSkuFromOffer(offer) {
+    // Prefer server-configured product slug (most reliable)
+    const raw =
+      (offer && (offer.product_slug || offer.productSlug || offer.product_slug_id || offer.productSlugId)) || '';
+
+    return String(raw || '').trim().toLowerCase();
+  }
+
+  function inferTypeFromSku(sku) {
+    const s = String(sku || '').trim().toLowerCase();
+    if (s.endsWith('-fundamentals')) return 'fundamentals';
+    if (s.endsWith('-trombone-euphonium')) return 'trombone-euphonium';
+    if (s.endsWith('-tuba')) return 'tuba';
+    if (s.endsWith('-complete-package')) return 'complete-package';
+    return '';
   }
 
   function openPaymentModal(priceDisplay) {
@@ -938,52 +963,67 @@ a{ -webkit-tap-highlight-color:transparent; }
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
     const pieceSlug = getPieceSlugFromUrl();
 
-    // Normalize the incoming title so minor text differences don't break SKU generation
-    const normalizedTitle = mrmSlugify(displayTitle);
+    // 1) Use the product slug provided by Product Access (best source of truth)
+    let productSlug = normalizeSkuFromOffer(offer);
 
-    // Accept multiple variants safely
-    const typeSlugMap = {
-      'core-developmental-exercises': 'fundamentals',
-      'developmental-exercises': 'fundamentals',
-      'fundamentals': 'fundamentals',
+    // 2) If Product Access didn’t provide a product_slug, fall back to generating it
+    let typeSlug = '';
+    if (!productSlug) {
+      const normalizedTitle = mrmSlugify(displayTitle);
 
-      'trombone-euphonium-full-piece': 'trombone-euphonium',
-      'trombone-euphonium': 'trombone-euphonium',
-      'trombone-euphonium-full': 'trombone-euphonium',
+      // tolerant map (handles small title wording differences)
+      const typeSlugMap = {
+        'core-developmental-exercises': 'fundamentals',
+        'developmental-exercises': 'fundamentals',
+        'fundamentals': 'fundamentals',
 
-      'tuba-full-piece': 'tuba',
-      'tuba-full': 'tuba',
-      'tuba': 'tuba',
+        'trombone-euphonium-full-piece': 'trombone-euphonium',
+        'trombone-euphonium': 'trombone-euphonium',
+        'trombone-euphonium-full': 'trombone-euphonium',
 
-      'complete-package': 'complete-package',
-      'complete': 'complete-package'
-    };
+        'tuba-full-piece': 'tuba',
+        'tuba-full': 'tuba',
+        'tuba': 'tuba',
 
-    const typeSlug = typeSlugMap[normalizedTitle] || '';
+        'complete-package': 'complete-package',
+        'complete': 'complete-package'
+      };
 
-    // HARD FAIL if we can't compute a valid SKU (prevents silent `piece-xyz-` bugs)
-    if (!typeSlug) {
-      console.error('[MRM] Unknown offer title -> cannot map to SKU type:', displayTitle, normalizedTitle);
-      // Return a disabled card so you immediately see the problem on the page
-      const wrap = document.createElement('div');
-      wrap.className = 'offer mrm-offer';
-      wrap.innerHTML = `
-        <div class="offer-head">
-          <div class="offer-head-left">
-            <h3 class="offer-title">${escHtml(displayTitle || 'Unknown Offer')}</h3>
+      typeSlug = typeSlugMap[normalizedTitle] || '';
+      if (!typeSlug) {
+        console.error('[MRM] Cannot map offer title -> SKU type:', displayTitle, normalizedTitle, offer);
+        // show the visible error card (same behavior you saw)
+        const wrap = document.createElement('div');
+        wrap.className = 'offer mrm-offer';
+        wrap.innerHTML = `
+          <div class="offer-head">
+            <div class="offer-head-left">
+              <h3 class="offer-title">${escHtml(displayTitle || 'Unknown Offer')}</h3>
+            </div>
           </div>
-        </div>
-        <div class="offer-body">
-          <div style="grid-column:1 / -1; padding:12px; border:1px solid rgba(255,0,0,0.25); border-radius:14px;">
-            <strong>Configuration error:</strong> This offer title doesn't map to a valid SKU type.<br>
-            Open DevTools Console to see details.
+          <div class="offer-body">
+            <div style="grid-column:1 / -1; padding:12px; border:1px solid rgba(255,0,0,0.25); border-radius:14px;">
+              <strong>Configuration error:</strong> This offer title doesn't map to a valid SKU type.<br>
+              Open DevTools Console to see details.
+            </div>
           </div>
-        </div>
-      `;
-      return wrap;
+        `;
+        return wrap;
+      }
+
+      productSlug = `piece-${pieceSlug}-${typeSlug}`;
     }
 
-    const productSlug = `piece-${pieceSlug}-${typeSlug}`;
+    // 3) For safety: ensure it starts with "piece-" and is slug-safe
+    productSlug = productSlug.replace(/[^a-z0-9\-_]/g, '');
+    if (!productSlug.startsWith('piece-')) {
+      // If someone accidentally saved "blackbeards-revenge-fundamentals", fix it
+      productSlug = `piece-${productSlug}`;
+    }
+
+    if (!typeSlug) {
+      typeSlug = inferTypeFromSku(productSlug);
+    }
 
     const wrap = document.createElement('div');
     wrap.className = 'offer mrm-offer';
