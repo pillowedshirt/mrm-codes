@@ -468,6 +468,24 @@ class MRM_Payments_Hub_Single {
     return $this->stripe_api_request('GET', '/v1/payment_intents/' . rawurlencode((string)$pi_id));
   }
 
+  private function stripe_attach_payment_method_to_customer($payment_method_id, $customer_id) {
+    $payment_method_id = sanitize_text_field((string)$payment_method_id);
+    $customer_id = sanitize_text_field((string)$customer_id);
+    if (!$payment_method_id || !$customer_id) return new WP_Error('stripe_invalid_args', 'Missing payment method or customer id.');
+    return $this->stripe_api_request('POST', '/v1/payment_methods/' . rawurlencode($payment_method_id) . '/attach', array(
+      'customer' => $customer_id,
+    ));
+  }
+
+  private function stripe_set_default_payment_method($customer_id, $payment_method_id) {
+    $customer_id = sanitize_text_field((string)$customer_id);
+    $payment_method_id = sanitize_text_field((string)$payment_method_id);
+    if (!$customer_id || !$payment_method_id) return new WP_Error('stripe_invalid_args', 'Missing customer id or payment method id.');
+    return $this->stripe_api_request('POST', '/v1/customers/' . rawurlencode($customer_id), array(
+      'invoice_settings[default_payment_method]' => $payment_method_id,
+    ));
+  }
+
   private function stripe_find_or_create_customer($email) {
     $email = sanitize_email((string)$email);
     if (!$email || !is_email($email)) return new WP_Error('bad_email', 'Valid email required for customer.');
@@ -675,22 +693,61 @@ class MRM_Payments_Hub_Single {
 
   public function rest_quote(WP_REST_Request $req) {
     $sku = $this->sanitize_sku($req->get_param('sku'));
-    if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
+    if (!$sku) {
+      error_log('[MRM Payments Hub] /quote missing sku');
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
+    }
 
     $p = $this->get_product($sku);
-    if (!$p || empty($p['active'])) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
+    if (!$p) {
+      error_log('[MRM Payments Hub] /quote unmapped sku=' . $sku);
+      return new WP_REST_Response(array(
+        'ok'=>false,
+        'message'=>'Unknown sku.',
+        'debug'=>array('sku'=>$sku)
+      ), 404);
+    }
+
+    if (empty($p['active'])) {
+      error_log('[MRM Payments Hub] /quote inactive sku=' . $sku);
+      return new WP_REST_Response(array(
+        'ok'=>false,
+        'message'=>'Inactive sku.',
+        'debug'=>array('sku'=>$sku)
+      ), 404);
+    }
+
+    $amount_cents = isset($p['amount_cents']) ? (int)$p['amount_cents'] : 0;
+    $currency = strtolower((string)($p['currency'] ?? 'usd'));
+    $price_id = isset($p['stripe_price_id']) ? trim((string)$p['stripe_price_id']) : '';
+
+    // Hard fail: NEVER report ok:true with a non-positive amount
+    if ($amount_cents <= 0) {
+      error_log('[MRM Payments Hub] /quote invalid amount for sku=' . $sku . ' amount_cents=' . $amount_cents);
+      return new WP_REST_Response(array(
+        'ok'=>false,
+        'message'=>'Pricing is not configured for this sku.',
+        'debug'=>array('sku'=>$sku,'amount_cents'=>$amount_cents)
+      ), 500);
+    }
+
+    if (!$currency) {
+      error_log('[MRM Payments Hub] /quote missing currency for sku=' . $sku);
+      return new WP_REST_Response(array(
+        'ok'=>false,
+        'message'=>'Currency is not configured for this sku.',
+        'debug'=>array('sku'=>$sku)
+      ), 500);
     }
 
     return new WP_REST_Response(array(
       'ok' => true,
       'sku' => $sku,
       'label' => (string)($p['label'] ?? $sku),
-      'amount_cents' => (int)($p['amount_cents'] ?? 0),
-      'currency' => (string)($p['currency'] ?? 'usd'),
-      'product_type' => (string)($p['product_type'] ?? 'unknown'),
-      'category' => (string)($p['category'] ?? ''),
-      'composer_pct' => isset($p['composer_pct']) ? (int)$p['composer_pct'] : null,
+      'amount_cents' => $amount_cents,
+      'currency' => $currency,
+      // Optional: only returned if you’ve stored it in products
+      'price_id' => $price_id ? $price_id : null,
     ), 200);
   }
 
@@ -761,25 +818,73 @@ class MRM_Payments_Hub_Single {
     $currency = (string)($p['currency'] ?? 'usd');
     $product_type = (string)($p['product_type'] ?? 'unknown');
 
+    $base_amount = (int)$amount;
+
+    // Diagnostics for misconfigured products
+    if ($base_amount <= 0) {
+      error_log('[MRM Payments Hub] create-payment-intent invalid base amount sku=' . $sku . ' amount_cents=' . $base_amount);
+      return new WP_REST_Response(array(
+        'ok'=>false,
+        'message'=>'Invalid product price.',
+        'debug'=>array('sku'=>$sku,'amount_cents'=>$base_amount)
+      ), 400);
+    }
+
+    // Read scheduler intent
+    $lesson_count = isset($context['lesson_count']) ? absint($context['lesson_count']) : 0;
+    $prepay_flag  = isset($context['prepay']) ? strtolower((string)$context['prepay']) : 'no';
+
     // Optional: scheduler may request a one-time override (e.g., prepay multiple lessons).
-    // We only allow overrides that are sensible and non-zero.
     $override = isset($data['amount_override_cents']) ? absint($data['amount_override_cents']) : 0;
-    if ($override > 0) {
-      $base = (int)$amount;
 
-      // Guard rails: override must be at least base amount and not unreasonably large.
-      // (50x is a generous upper bound for prepay bundles without letting garbage through.)
-      $max = ($base > 0) ? ($base * 50) : 0;
+    // If prepay is enabled and count > 1, enforce exact math: override MUST equal base * count.
+    // (This prevents “prepay but only paid for one”.)
+    if ($prepay_flag === 'yes' && $lesson_count > 1) {
+      $expected = $base_amount * $lesson_count;
 
-      if ($base > 0 && $override >= $base && $override <= $max) {
-        $amount = $override;
-      } else {
-        error_log('[MRM Payments Hub] Rejected amount_override_cents for sku=' . $sku . ' base=' . $base . ' override=' . $override);
-        return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid override amount.'), 400);
+      if ($override > 0 && $override !== $expected) {
+        error_log('[MRM Payments Hub] prepay mismatch sku=' . $sku . ' base=' . $base_amount . ' count=' . $lesson_count . ' override=' . $override . ' expected=' . $expected);
+        return new WP_REST_Response(array(
+          'ok'=>false,
+          'message'=>'Prepay total mismatch. Please refresh and try again.',
+          'debug'=>array(
+            'sku'=>$sku,
+            'base_amount_cents'=>$base_amount,
+            'lesson_count'=>$lesson_count,
+            'expected_amount_cents'=>$expected,
+            'amount_override_cents'=>$override
+          )
+        ), 400);
+      }
+
+      // If frontend didn’t send override for some reason, compute it server-side
+      if ($override <= 0) {
+        $override = $expected;
+      }
+
+      $amount = $override;
+    } else {
+      // Non-prepay: accept override with reasonable bounds (existing behavior)
+      if ($override > 0) {
+        $max = $base_amount * 50; // generous cap
+        if ($override >= $base_amount && $override <= $max) {
+          $amount = $override;
+        } else {
+          error_log('[MRM Payments Hub] Rejected amount_override_cents sku=' . $sku . ' base=' . $base_amount . ' override=' . $override);
+          return new WP_REST_Response(array(
+            'ok'=>false,
+            'message'=>'Invalid override amount.',
+            'debug'=>array('sku'=>$sku,'base_amount_cents'=>$base_amount,'amount_override_cents'=>$override)
+          ), 400);
+        }
       }
     }
 
-    if ($amount <= 0) return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid product price.'), 400);
+    // Final safety: NEVER create PI with amount=0
+    if ($amount <= 0) {
+      error_log('[MRM Payments Hub] Refused PI with non-positive amount sku=' . $sku . ' amount=' . $amount);
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid product price.'), 400);
+    }
 
     $email_hash = $this->email_hash($email);
 
@@ -812,6 +917,8 @@ class MRM_Payments_Hub_Single {
 
     $pi = $this->stripe_create_payment_intent($amount, $currency, $metadata, $description, $extra);
     if (is_wp_error($pi)) {
+      $data = $pi->get_error_data();
+      error_log('[MRM Payments Hub] Stripe PI error sku=' . $sku . ' msg=' . $pi->get_error_message() . ' data=' . wp_json_encode($data));
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
     }
 
@@ -850,6 +957,36 @@ class MRM_Payments_Hub_Single {
     $fail_statuses = array('requires_payment_method', 'canceled');
 
     $ok = in_array($status, $terminal_statuses, true);
+
+    // If this PaymentIntent was created with a customer + setup_future_usage,
+    // Stripe should attach the payment method to the customer.
+    // We log proof and force-set default PM for off-session charges.
+    if ($ok) {
+      $customer_id = isset($pi['customer']) ? (string)$pi['customer'] : '';
+      $pm_id = isset($pi['payment_method']) ? (string)$pi['payment_method'] : '';
+      $sfu = isset($pi['setup_future_usage']) ? (string)$pi['setup_future_usage'] : '';
+
+      if ($customer_id && $pm_id) {
+        error_log('[MRM Payments Hub] verify PI succeeded. customer=' . $customer_id . ' pm=' . $pm_id . ' setup_future_usage=' . $sfu);
+
+        // Best-effort attach (harmless if already attached; Stripe may error if already attached to another customer)
+        $attach = $this->stripe_attach_payment_method_to_customer($pm_id, $customer_id);
+        if (is_wp_error($attach)) {
+          error_log('[MRM Payments Hub] attach PM failed: ' . $attach->get_error_message() . ' data=' . wp_json_encode($attach->get_error_data()));
+        }
+
+        // Set as default for off-session usage
+        $set = $this->stripe_set_default_payment_method($customer_id, $pm_id);
+        if (is_wp_error($set)) {
+          error_log('[MRM Payments Hub] set default PM failed: ' . $set->get_error_message() . ' data=' . wp_json_encode($set->get_error_data()));
+        } else {
+          error_log('[MRM Payments Hub] default PM set for customer=' . $customer_id);
+        }
+      } else {
+        // If user expected autopay but no customer/pm is present, log it loudly
+        error_log('[MRM Payments Hub] verify PI succeeded but missing customer/pm. customer=' . $customer_id . ' pm=' . $pm_id . ' setup_future_usage=' . $sfu);
+      }
+    }
 
     // Update local order status if it exists
     $order = $this->get_order_by_pi($pi_id);
