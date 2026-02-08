@@ -85,28 +85,32 @@ a{ -webkit-tap-highlight-color:transparent; }
 .section + .section{ border-top:1px solid rgba(0,0,0,0.08); }
 .center{ display:flex; justify-content:center; }
 
-/* PAYMENT MODAL */
+/* PAYMENT MODAL (scroll-safe) */
 .modal-overlay{
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  inset: 0;
   background: rgba(0,0,0,0.5);
   display: flex;
-  align-items: center;
+  align-items: flex-start;           /* was center */
   justify-content: center;
+  padding: 18px 12px;                /* breathing room */
+  overflow-y: auto;                  /* allow overlay scroll */
+  -webkit-overflow-scrolling: touch;
   z-index: 9999;
 }
 .modal{
   background: #fff;
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
-  width: 90%;
+  width: 100%;
   max-width: 480px;
-  padding: 24px;
+  padding: 18px;
+  max-height: calc(100vh - 36px);    /* constrain */
+  display: flex;
+  flex-direction: column;
 }
 .modal-header{
+  flex: 0 0 auto;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -114,7 +118,11 @@ a{ -webkit-tap-highlight-color:transparent; }
   padding-bottom: 8px;
 }
 .modal-body{
-  margin-top: 20px;
+  flex: 1 1 auto;
+  margin-top: 14px;
+  overflow: auto;                    /* internal scroll */
+  -webkit-overflow-scrolling: touch;
+  padding-right: 2px;                /* prevents scrollbar overlap */
 }
 
 /* PDF */
@@ -977,10 +985,14 @@ a{ -webkit-tap-highlight-color:transparent; }
     if(!vRes.ok || !vData.ok){ alert('Payment not completed.'); return; }
     const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ sku: sku, email: email, payment_intent_id: piId })
+      body: JSON.stringify({ product_slug: sku, email: email, payment_intent_id: piId })
     });
     const gData = await gRes.json();
-    if(!gRes.ok || !gData.ok){ alert('Failed to grant access'); return; }
+    if(!gRes.ok || !gData.ok){
+      const debug = (gData && (gData.message || gData.debug)) ? `\n\nDetails: ${gData.message || gData.debug}` : '';
+      alert('We could not finalize access yet. Please try again in a moment.' + debug);
+      return;
+    }
     alert('Thank you!  Access has been granted.  Check your email for download instructions.');
   }
 
@@ -1039,6 +1051,21 @@ a{ -webkit-tap-highlight-color:transparent; }
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
     let productSlug = normalizeSkuFromOffer(offer);
+
+    if (!productSlug) {
+      // REQUIRE product_slug now
+      const card = document.createElement('div');
+      card.className = 'offer-card';
+      card.innerHTML = `
+        <div style="padding:14px;border:1px solid rgba(0,0,0,0.14);border-radius:16px;background:#fff;">
+          <div style="font-weight:900;">Product misconfigured</div>
+          <div style="opacity:0.75;margin-top:6px;">
+            This offer is missing <code>product_slug</code>. Purchasing is disabled.
+          </div>
+        </div>
+      `;
+      return card;
+    }
 
     // ✅ Canonical SKU must be provided by Product Access offers.
     productSlug = String(productSlug || '').trim().toLowerCase();

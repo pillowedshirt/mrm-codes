@@ -453,8 +453,16 @@ class MRM_Lesson_Scheduler {
             'callback' => array( $this, 'rest_get_availability' ),
             'args' => array(
                 'instructor_id' => array( 'type' => 'integer', 'required' => true ),
-                'start' => array( 'type' => 'string', 'required' => true ),
-                'end' => array( 'type' => 'string', 'required' => true ),
+                // Canonical (scheduler.html uses these)
+                'start_date' => array( 'type' => 'string', 'required' => false ),
+                'end_date'   => array( 'type' => 'string', 'required' => false ),
+
+                // Legacy (keep for 30 days)
+                'start' => array( 'type' => 'string', 'required' => false ),
+                'end'   => array( 'type' => 'string', 'required' => false ),
+
+                // Optional slot size (scheduler.html sends slot_minutes=15)
+                'slot_minutes' => array( 'type' => 'integer', 'required' => false ),
             ),
             'permission_callback' => '__return_true',
         ) );
@@ -603,8 +611,21 @@ class MRM_Lesson_Scheduler {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
         }
 
-        // Grant ALL-SHEET-MUSIC access for this student email.
-        $this->grant_all_sheet_music_access_for_email( $student_email, 'lesson_booking', (string) $created_ids[0] );
+        // FEATURE: lesson booking grants all-sheet-music access (email-based, no accounts)
+        $student_email = isset( $data['student_email'] ) ? sanitize_email( $data['student_email'] ) : '';
+        if ( $student_email && is_email( $student_email ) ) {
+            $hub = function_exists( 'mrm_pay_hub_singleton' ) ? mrm_pay_hub_singleton() : null;
+            if ( $hub ) {
+                // add to master list + access table row (sku == product_slug)
+                $hub->add_email_to_access_list( 'all-sheet-music', $student_email );
+
+                // also ensure DB table row exists
+                $hub->maybe_install_or_upgrade_db();
+                $hub->grant_all_sheet_music_db_row( $student_email, 'lesson_booking', (string) ( $created_ids[0] ?? '' ) );
+            } else {
+                error_log( '[MRM Lesson Scheduler] Payments Hub not available; could not grant all-sheet-music.' );
+            }
+        }
 
         return new WP_REST_Response( array(
             'ok' => true,
@@ -1405,8 +1426,16 @@ class MRM_Lesson_Scheduler {
     public function rest_get_availability( WP_REST_Request $request ) {
 
         $instructor_id = intval( $request->get_param( 'instructor_id' ) );
-        $start         = sanitize_text_field( $request->get_param( 'start' ) );
-        $end           = sanitize_text_field( $request->get_param( 'end' ) );
+        // Canonical params
+        $start = sanitize_text_field( (string) $request->get_param( 'start_date' ) );
+        $end   = sanitize_text_field( (string) $request->get_param( 'end_date' ) );
+
+        // Legacy fallback (keep 30 days)
+        if ( ! $start ) $start = sanitize_text_field( (string) $request->get_param( 'start' ) );
+        if ( ! $end )   $end   = sanitize_text_field( (string) $request->get_param( 'end' ) );
+
+        $slot_minutes = intval( $request->get_param( 'slot_minutes' ) );
+        if ( $slot_minutes < 10 ) $slot_minutes = 0;
 
         if ( ! $instructor_id || ! $start || ! $end ) {
             return new WP_REST_Response( array(
@@ -1424,8 +1453,11 @@ class MRM_Lesson_Scheduler {
 
         if ( empty( $availability_events ) ) {
             return new WP_REST_Response( array(
-                'ok'          => true,
-                'availability'=> array()
+                'ok' => true,
+                'slots' => array(),
+                'busy' => array(),
+                // Legacy alias (30 days)
+                'availability' => array(),
             ), 200 );
         }
 
@@ -1443,15 +1475,19 @@ class MRM_Lesson_Scheduler {
             $event_slots = $this->split_into_lesson_slots(
                 $event_start,
                 $event_end,
-                $instructor_id
+                $instructor_id,
+                $slot_minutes
             );
 
             $slots = array_merge( $slots, $event_slots );
         }
 
         return new WP_REST_Response( array(
-            'ok'          => true,
-            'availability'=> array_values( $slots )
+            'ok' => true,
+            'slots' => array_values( $slots ),
+            'busy'  => array(), // reserved for future busy-window support
+            // Legacy alias (30 days)
+            'availability' => array_values( $slots ),
         ), 200 );
     }
 
@@ -1509,9 +1545,9 @@ class MRM_Lesson_Scheduler {
         return $availability;
     }
 
-    private function split_into_lesson_slots( $start_ts, $end_ts, $instructor_id ) {
+    private function split_into_lesson_slots( $start_ts, $end_ts, $instructor_id, $slot_minutes_override = 0 ) {
         $opts = $this->get_settings();
-        $slot_minutes = isset( $opts['default_slot_minutes'] ) ? (int) $opts['default_slot_minutes'] : 30;
+        $slot_minutes = $slot_minutes_override ? (int)$slot_minutes_override : ( isset( $opts['default_slot_minutes'] ) ? (int) $opts['default_slot_minutes'] : 30 );
         if ( $slot_minutes < 10 ) {
             $slot_minutes = 30;
         }
