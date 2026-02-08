@@ -546,6 +546,12 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/resolve', array(
+      'methods' => WP_REST_Server::READABLE,
+      'callback' => array($this, 'rest_resolve'),
+      'permission_callback' => '__return_true',
+    ));
+
     register_rest_route('mrm-pay/v1', '/create-payment-intent', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_create_payment_intent'),
@@ -596,6 +602,54 @@ class MRM_Payments_Hub_Single {
       'category' => (string)($p['category'] ?? ''),
       'composer_pct' => isset($p['composer_pct']) ? (int)$p['composer_pct'] : null,
       'emails' => array_values((array)($p['emails'] ?? array())),
+    ), 200);
+  }
+
+  private function resolve_sheet_music_sku($piece_slug, $type) {
+    $piece_slug = $this->slugify((string)$piece_slug);
+
+    $type = strtolower(trim((string)$type));
+    $allowed = array('fundamentals','trombone-euphonium','tuba','complete-package');
+    if (!in_array($type, $allowed, true)) return null;
+
+    $base = 'piece-' . $piece_slug . '-' . $type;
+
+    $all = $this->all_products();
+
+    // Exact match first
+    if (isset($all[$base]) && is_array($all[$base]) && !empty($all[$base]['active'])) {
+      return $base;
+    }
+
+    // Fall back to any numeric-suffix SKU the hub may have generated
+    for ($i = 2; $i <= 999; $i++) {
+      $candidate = $base . '-' . $i;
+      if (isset($all[$candidate]) && is_array($all[$candidate]) && !empty($all[$candidate]['active'])) {
+        return $candidate;
+      }
+    }
+
+    return null;
+  }
+
+  public function rest_resolve(WP_REST_Request $req) {
+    $piece_slug = (string)$req->get_param('piece_slug');
+    $type = (string)$req->get_param('type');
+
+    if (!$piece_slug) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing piece_slug.'), 400);
+    if (!$type) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing type.'), 400);
+
+    $sku = $this->resolve_sheet_music_sku($piece_slug, $type);
+    if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
+
+    $p = $this->get_product($sku);
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'sku' => $sku,
+      'label' => (string)($p['label'] ?? $sku),
+      'amount_cents' => (int)($p['amount_cents'] ?? 0),
+      'currency' => (string)($p['currency'] ?? 'usd'),
+      'product_type' => (string)($p['product_type'] ?? 'unknown'),
     ), 200);
   }
 

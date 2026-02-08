@@ -839,6 +839,17 @@ a{ -webkit-tap-highlight-color:transparent; }
     return mrmSlugify(raw);
   }
 
+  async function resolveSkuFromHub(typeSlug) {
+    const pieceSlug = getPieceSlugFromUrl();
+    const url = `/wp-json/mrm-pay/v1/resolve?piece_slug=${encodeURIComponent(pieceSlug)}&type=${encodeURIComponent(typeSlug)}`;
+    const res = await fetch(url, { method: 'GET' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok || !data.sku) {
+      throw new Error(data.message || 'Unable to resolve SKU from hub.');
+    }
+    return data.sku;
+  }
+
   function normalizeSkuFromOffer(offer) {
     // Prefer server-configured product slug (most reliable)
     const raw =
@@ -1489,17 +1500,28 @@ a{ -webkit-tap-highlight-color:transparent; }
     }
 
     piece.querySelectorAll('.mrm-purchaseBtn').forEach(btn => {
-      btn.addEventListener('click', function(e){
+      btn.addEventListener('click', async function(e){
         e.preventDefault();
+
         const offerEl = btn.closest('.mrm-offer');
-        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
+        const typeSlug = offerEl ? (offerEl.dataset.type || '').trim() : '';
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
-        if(!sku){ alert('Missing SKU.'); return; }
-        pendingSku = sku;
-        console.log('[MRM] Purchase clicked. Sending SKU:', pendingSku);
+        if (!typeSlug) { alert('Missing offer type (data-type).'); return; }
+
+        try {
+          // ✅ Ask the hub which SKU is correct (handles -2 / -3 suffixes)
+          pendingSku = await resolveSkuFromHub(typeSlug);
+        } catch (err) {
+          console.error('[MRM] SKU resolve failed:', err);
+          alert(err.message || 'Could not resolve SKU.');
+          return;
+        }
+
+        console.log('[MRM] Purchase clicked. Resolved SKU:', pendingSku);
+
         pendingClientSecret = '';
         if (activePaymentElement) {
-          activePaymentElement.unmount();
+          try { activePaymentElement.unmount(); } catch (e) {}
           activePaymentElement = null;
         }
         openPaymentModal(priceDisplay);
@@ -1507,11 +1529,22 @@ a{ -webkit-tap-highlight-color:transparent; }
     });
 
     piece.querySelectorAll('.mrm-accessBtn').forEach(btn => {
-      btn.addEventListener('click', function(e){
+      btn.addEventListener('click', async function(e){
         e.preventDefault();
+
         const offerEl = btn.closest('.mrm-offer');
-        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
-        if (!sku) { alert('Missing offer product slug.'); return; }
+        const typeSlug = offerEl ? (offerEl.dataset.type || '').trim() : '';
+        if (!typeSlug) { alert('Missing offer type (data-type).'); return; }
+
+        let sku = '';
+        try {
+          sku = await resolveSkuFromHub(typeSlug);
+        } catch (err) {
+          console.error('[MRM] SKU resolve failed (access):', err);
+          alert(err.message || 'Could not resolve SKU for access.');
+          return;
+        }
+
         openOtpModal(sku);
       });
     });
