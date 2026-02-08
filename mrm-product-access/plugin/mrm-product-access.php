@@ -2136,31 +2136,37 @@ input.mrm-range::-moz-range-track{
                   <iframe class="pdf" src="<?php echo esc_url( $download_url ); ?>"></iframe>
                 <?php elseif ( $type === 'audio' && $download_url ) : ?>
                   <div class="audio-box mrm-audio-box">
-                    <button type="button" class="play mrm-play" aria-label="Play/Pause"></button>
+                    <div class="audio-controls">
+                      <div class="audio-row-top">
+                        <button class="play-button mrm-play" type="button" aria-label="Play/Pause">
+                          <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M8 5v14l11-7z"></path>
+                          </svg>
+                          <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M6 5h4v14H6zM14 5h4v14h-4z"></path>
+                          </svg>
+                        </button>
 
-                    <div class="audio-meta">
-                      <div class="time">
-                        <span class="mrm-current">0:00</span>
-                        <span class="sep">/</span>
-                        <span class="mrm-duration">0:00</span>
+                        <div class="time mrm-current">0:00</div>
+                        <div class="time mrm-duration">0:00</div>
                       </div>
 
-                      <div class="audio-grid">
-                        <div class="audio-row audio-row-seek">
-                          <input class="seek mrm-seek" type="range" min="0" max="0" value="0" step="1" aria-label="Seek">
-                        </div>
+                      <div class="audio-row-seek">
+                        <input class="progress mrm-seek" type="range" min="0" max="0" value="0" step="1" aria-label="Seek">
+                      </div>
 
-                        <div class="audio-row audio-row-vol">
-                          <div class="volume">
-                            <span class="vol-icon" aria-hidden="true"></span>
-                            <input class="mrm-volume" type="range" min="0" max="1" value="1" step="0.01" aria-label="Volume">
-                          </div>
+                      <div class="audio-row-vol">
+                        <div class="volume" aria-label="Volume">
+                          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <path d="M11 5L6 9H2v6h4l5 4V5z"></path>
+                          </svg>
+                          <input class="mrm-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume slider">
                         </div>
                       </div>
                     </div>
 
                     <audio class="mrm-audio" preload="metadata">
-                      <source src="<?php echo esc_url( $download_url ); ?>" type="audio/mpeg">
+                      <source src="<?php echo esc_url( $download_url ); ?>">
                     </audio>
                   </div>
                 <?php else : ?>
