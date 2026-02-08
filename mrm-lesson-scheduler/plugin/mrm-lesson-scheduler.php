@@ -9,8 +9,7 @@
  * Google Calendar integration:
  * - Service Account JSON stored in wp_options (autoload disabled)
  * - /availability supports:
- *   Mode A: Working hours minus Busy blocks (classic)
- *   Mode B: "Free" events define availability windows minus Busy blocks (YouCanBookMe-style)
+ *   "Free" events define availability windows (calendar-driven scheduling)
  *
  * SECURITY NOTE:
  * Service Account JSON contains a private key. Restrict admin access and keep backups safe.
@@ -292,7 +291,6 @@ class MRM_Lesson_Scheduler {
     latitude DECIMAL(10,6) DEFAULT NULL,
     longitude DECIMAL(10,6) DEFAULT NULL,
     calendar_id VARCHAR(255) NOT NULL,
-    stripe_recipient_id VARCHAR(255) DEFAULT NULL,
     timezone VARCHAR(50) NOT NULL,
     hire_date DATE DEFAULT NULL,
     PRIMARY KEY (id),
@@ -359,7 +357,6 @@ class MRM_Lesson_Scheduler {
 
         $instructor_cols = $wpdb->get_col( "DESC {$instructors}", 0 );
         $need_instructors = array(
-            'stripe_recipient_id',
             'timezone',
             'hire_date',
             'calendar_id',
@@ -456,9 +453,8 @@ class MRM_Lesson_Scheduler {
             'callback' => array( $this, 'rest_get_availability' ),
             'args' => array(
                 'instructor_id' => array( 'type' => 'integer', 'required' => true ),
-                'start_date' => array( 'type' => 'string', 'required' => false ),
-                'end_date' => array( 'type' => 'string', 'required' => false ),
-                'slot_minutes' => array( 'type' => 'integer', 'required' => false ),
+                'start' => array( 'type' => 'string', 'required' => true ),
+                'end' => array( 'type' => 'string', 'required' => true ),
             ),
             'permission_callback' => '__return_true',
         ) );
@@ -1197,7 +1193,6 @@ class MRM_Lesson_Scheduler {
             'latitude' => null,
             'longitude' => null,
             'calendar_id' => '',
-            'stripe_recipient_id' => null,
             'timezone' => '',
             'hire_date' => null,
         );
@@ -1266,559 +1261,128 @@ class MRM_Lesson_Scheduler {
     /**
      * AVAILABILITY
      *
-     * Mode A: working hours minus Busy (FreeBusy)
-     * Mode B: "Free" events define availability windows minus Busy (FreeBusy)
+     * Availability is derived from explicit "Free" events on the calendar.
      */
     public function rest_get_availability( WP_REST_Request $request ) {
-        global $wpdb;
-        $instructor_id = absint( $request->get_param( 'instructor_id' ) );
-        $start_date = sanitize_text_field( (string) $request->get_param( 'start_date' ) );
-        $end_date = sanitize_text_field( (string) $request->get_param( 'end_date' ) );
-        $slot_minutes = absint( $request->get_param( 'slot_minutes' ) );
-        $no_cache_headers = array(
-            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
-            'Pragma' => 'no-cache',
-            'Expires' => '0',
+
+        $instructor_id = intval( $request->get_param( 'instructor_id' ) );
+        $start         = sanitize_text_field( $request->get_param( 'start' ) );
+        $end           = sanitize_text_field( $request->get_param( 'end' ) );
+
+        if ( ! $instructor_id || ! $start || ! $end ) {
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Missing required parameters.'
+            ), 400 );
+        }
+
+        // Fetch explicit availability events from Google Calendar
+        $availability_events = $this->get_calendar_availability_events(
+            $instructor_id,
+            $start,
+            $end
         );
-        $apply_no_cache = function( WP_REST_Response $response ) use ( $no_cache_headers ) {
-            foreach ( $no_cache_headers as $header => $value ) {
-                $response->header( $header, $value );
+
+        if ( empty( $availability_events ) ) {
+            return new WP_REST_Response( array(
+                'ok'          => true,
+                'availability'=> array()
+            ), 200 );
+        }
+
+        $slots = array();
+
+        foreach ( $availability_events as $event ) {
+            $event_start = strtotime( $event['start'] );
+            $event_end   = strtotime( $event['end'] );
+
+            if ( ! $event_start || ! $event_end || $event_end <= $event_start ) {
+                continue;
             }
-            return $response;
-        };
-        $work = $this->google_get_working_hours();
-        if ( $slot_minutes <= 0 ) $slot_minutes = (int) $work['default_slot_minutes'];
-        if ( $slot_minutes <= 0 ) $slot_minutes = 30;
-        $start_date = $start_date ?: gmdate( 'Y-m-d' );
-        $end_date   = $end_date   ?: gmdate( 'Y-m-d', strtotime( '+30 days' ) );
-        // Fetch instructor (calendar_id + timezone)
+
+            // Split each availability event into bookable slots
+            $event_slots = $this->split_into_lesson_slots(
+                $event_start,
+                $event_end,
+                $instructor_id
+            );
+
+            $slots = array_merge( $slots, $event_slots );
+        }
+
+        return new WP_REST_Response( array(
+            'ok'          => true,
+            'availability'=> array_values( $slots )
+        ), 200 );
+    }
+
+    private function get_calendar_availability_events( $instructor_id, $start, $end ) {
+        global $wpdb;
         $table = $wpdb->prefix . 'mrm_instructors';
-        $row = $wpdb->get_row( $wpdb->prepare( "SELECT calendar_id, timezone, email FROM {$table} WHERE id = %d", $instructor_id ), ARRAY_A );
-        if ( ! $row ) return $apply_no_cache( new WP_REST_Response( array( 'error' => 'Instructor not found.' ), 404 ) );
-        $calendar_id = (string) $row['calendar_id'];
-        $tz = (string) $row['timezone'];
-        $instructor_email = isset( $row['email'] ) ? (string) $row['email'] : '';
-        $block_cal_ids = array();
-        if ( $calendar_id ) $block_cal_ids[] = $calendar_id;
-        if ( ! empty( $instructor_email ) && $instructor_email !== $calendar_id ) $block_cal_ids[] = $instructor_email;
-        $block_cal_ids = array_values( array_unique( array_filter( $block_cal_ids ) ) );
-        if ( empty( $block_cal_ids ) ) $block_cal_ids = array( $calendar_id );
-        if ( ! $tz ) $tz = 'America/Phoenix';
+        $row = $wpdb->get_row( $wpdb->prepare( "SELECT calendar_id, timezone FROM {$table} WHERE id = %d", (int) $instructor_id ), ARRAY_A );
+        if ( ! $row ) {
+            return array();
+        }
+        $calendar_id = (string) ( $row['calendar_id'] ?? '' );
+        if ( $calendar_id === '' ) {
+            return array();
+        }
         if ( ! $this->google_is_configured() ) {
-            return $apply_no_cache( new WP_REST_Response( array(
-                'mode' => 'dummy',
-                'warning' => 'Google Calendar not configured. Returning dummy slots.',
-                'slots'  => $this->dummy_slots( $start_date ),
-                'busy'   => array(),
-            ), 200 ) );
+            return array();
         }
-        // Build window as UTC for API
+
+        $tz = (string) ( $row['timezone'] ?? '' );
+        if ( ! $tz ) {
+            $tz = 'America/Phoenix';
+        }
+
         try {
-            $window_start_local = new DateTime( $start_date . ' 00:00:00', new DateTimeZone( $tz ) );
-            $window_end_local   = new DateTime( $end_date   . ' 23:59:59', new DateTimeZone( $tz ) );
-            $window_start_utc   = clone $window_start_local;
-            $window_start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
-            $window_end_utc     = clone $window_end_local;
-            $window_end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+            $start_local = new DateTime( $start, new DateTimeZone( $tz ) );
+            $end_local   = new DateTime( $end, new DateTimeZone( $tz ) );
         } catch ( Exception $e ) {
-            return $apply_no_cache( new WP_REST_Response( array(
-                'error' => 'Invalid date/timezone.',
-                'details' => $e->getMessage(),
-            ), 400 ) );
+            return array();
         }
-        $timeMin = $window_start_utc->format( 'Y-m-d\TH:i:s\Z' );
-        $timeMax = $window_end_utc->format( 'Y-m-d\TH:i:s\Z' );
 
-        // Calendars to treat as blocking (availability calendar + optional primary calendar/email)
-        $block_cal_ids = array();
-        if ( $calendar_id ) $block_cal_ids[] = $calendar_id;
-        if ( ! empty( $instructor_email ) && $instructor_email !== $calendar_id ) $block_cal_ids[] = $instructor_email;
-        $block_cal_ids = array_values( array_unique( array_filter( $block_cal_ids ) ) );
-        if ( empty( $block_cal_ids ) ) $block_cal_ids = array( $calendar_id );
-        $cache_bust = $this->get_cache_bust_token( implode(',', $block_cal_ids ) );
-        $cache_key_busy = 'mrm_busy_' . md5( implode( ',', $block_cal_ids ) . '|' . $timeMin . '|' . $timeMax . '|' . $cache_bust );
-        $busy_intervals = get_transient( $cache_key_busy );
+        $start_utc = clone $start_local;
+        $end_utc   = clone $end_local;
+        $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+        $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+        $time_min = $start_utc->format( 'Y-m-d\\TH:i:s\\Z' );
+        $time_max = $end_utc->format( 'Y-m-d\\TH:i:s\\Z' );
 
-        if ( ! is_array( $busy_intervals ) ) {
-            // IMPORTANT: use per-event intervals (not FreeBusy), so back-to-back lessons stay distinct
-            $busy_intervals = $this->google_busy_intervals_from_events( $block_cal_ids, $timeMin, $timeMax, $tz );
-            if ( is_wp_error( $busy_intervals ) ) {
-                return $apply_no_cache( new WP_REST_Response( array(
-                    'error' => 'Google Events list failed.',
-                    'details' => $busy_intervals->get_error_message(),
-                ), 500 ) );
+        $events_payload = $this->google_list_events( $calendar_id, $time_min, $time_max );
+        if ( is_wp_error( $events_payload ) ) {
+            return array();
+        }
+        $events = isset( $events_payload['items'] ) && is_array( $events_payload['items'] ) ? $events_payload['items'] : array();
+
+        $windows = $this->events_to_availability_windows( $events, '' );
+        $availability = array();
+        foreach ( $windows as $win ) {
+            if ( empty( $win['start_ts'] ) || empty( $win['end_ts'] ) ) {
+                continue;
             }
-            set_transient( $cache_key_busy, $busy_intervals, 5 * MINUTE_IN_SECONDS );
-        }
-
-        // Merge overlaps only (touching does NOT merge after Step 1A)
-        $busy_intervals = $this->merge_intervals( $busy_intervals );
-        $mode    = $this->google_get_availability_mode(); // 'working_hours' or 'free_events'
-        $keyword = $this->google_get_availability_keyword();
-        // MODE B: "Free events define availability windows"
-        if ( $mode === 'free_events' ) {
-            $cache_key_ev = 'mrm_ev_' . md5( $calendar_id . '|' . $timeMin . '|' . $timeMax . '|' . $keyword . '|' . $cache_bust );
-            $events = get_transient( $cache_key_ev );
-            if ( ! is_array( $events ) ) {
-                $events_payload = $this->google_list_events( $calendar_id, $timeMin, $timeMax );
-                if ( is_wp_error( $events_payload ) ) {
-                    return $apply_no_cache( new WP_REST_Response( array(
-                        'error'   => 'Google Events list failed.',
-                        'details' => $events_payload->get_error_message(),
-                    ), 500 ) );
-                }
-                $events = isset( $events_payload['items'] ) && is_array( $events_payload['items'] ) ? $events_payload['items'] : array();
-                set_transient( $cache_key_ev, $events, 5 * MINUTE_IN_SECONDS );
-            }
-            // Extract availability windows strictly from events with Show as = Free (transparency==transparent)
-            // Ignore summary/keyword entirely (keyword is passed for UI only)
-            $availability_windows = $this->events_to_availability_windows( $events, '' );
-            // Subtract busy blocks
-            $free_windows = $this->subtract_busy_from_availability( $availability_windows, $busy_intervals );
-            // Build slots
-            $slots = $this->build_slots_from_windows( $free_windows, $slot_minutes );
-            return $apply_no_cache( new WP_REST_Response( array(
-                'mode'                 => 'google_free_events',
-                'calendar_id'          => $calendar_id,
-                'timezone'             => $tz,
-                'slot_minutes'         => $slot_minutes,
-                'availability_keyword' => $keyword,
-                'slots'                => $slots,
-                'busy'                 => array_map( function( $x ) {
-                    return array(
-                        'start' => $x['start'],
-                        'end' => $x['end'],
-                        'lesson_type' => isset( $x['lesson_type'] ) ? $x['lesson_type'] : null,
-                        'lesson_minutes' => isset( $x['lesson_minutes'] ) ? $x['lesson_minutes'] : null,
-                        'source' => isset( $x['source'] ) ? $x['source'] : null,
-                    );
-                }, $busy_intervals ),
-                'availability_windows' => array_map( function( $w ) {
-                    return array(
-                        'start' => gmdate( 'c', $w['start_ts'] ),
-                        'end'   => gmdate( 'c', $w['end_ts'] ),
-                    );
-                }, $availability_windows ),
-            ), 200 ) );
-        }
-        // MODE A: working hours minus busy
-        $slots = $this->build_available_slots( $start_date, $end_date, $tz, $slot_minutes, $work, $busy_intervals );
-        return $apply_no_cache( new WP_REST_Response( array(
-            'mode'         => 'google_working_hours',
-            'calendar_id'  => $calendar_id,
-            'timezone'     => $tz,
-            'slot_minutes' => $slot_minutes,
-            'working_hours'=> $work,
-            'slots'        => $slots,
-            'busy'         => array_map( function( $x ) {
-                return array(
-                    'start' => $x['start'],
-                    'end' => $x['end'],
-                    'lesson_type' => isset( $x['lesson_type'] ) ? $x['lesson_type'] : null,
-                    'lesson_minutes' => isset( $x['lesson_minutes'] ) ? $x['lesson_minutes'] : null,
-                    'source' => isset( $x['source'] ) ? $x['source'] : null,
-                );
-            }, $busy_intervals ),
-        ), 200 ) );
-    }
-
-    public function rest_book_lesson( WP_REST_Request $request ) {
-        global $wpdb;
-        $data = (array) $request->get_json_params();
-        $instructor_id = isset( $data['instructor_id'] ) ? absint( $data['instructor_id'] ) : 0;
-        $slots         = isset( $data['slots'] ) && is_array( $data['slots'] ) ? $data['slots'] : array();
-        $student_name  = isset( $data['student_name'] ) ? sanitize_text_field( (string) $data['student_name'] ) : '';
-        $student_email = isset( $data['student_email'] ) ? sanitize_email( (string) $data['student_email'] ) : '';
-        $instrument    = isset( $data['instrument'] ) ? sanitize_text_field( (string) $data['instrument'] ) : '';
-        $first_name = isset( $data['first_name'] ) ? sanitize_text_field( $data['first_name'] ) : '';
-        $last_name  = isset( $data['last_name'] ) ? sanitize_text_field( $data['last_name'] ) : '';
-        $address    = isset( $data['address'] ) ? sanitize_text_field( $data['address'] ) : '';
-        $phone      = isset( $data['phone'] ) ? sanitize_text_field( $data['phone'] ) : '';
-
-        $repeat_frequency = isset( $data['repeat_frequency'] ) ? sanitize_text_field( $data['repeat_frequency'] ) : 'weekly'; // weekly|biweekly|none
-        $repeat_duration  = isset( $data['repeat_duration'] ) ? sanitize_text_field( $data['repeat_duration'] ) : '1_month'; // 1_month|3_months|indefinitely
-        $lesson_type = isset( $data['lesson_type'] ) ? sanitize_text_field( (string) $data['lesson_type'] ) : '';
-        if ( ! in_array( $lesson_type, array( 'in_person', 'online' ), true ) ) {
-            $lesson_type = '';
-        }
-        if ( $lesson_type !== '' ) {
-            $is_online = ( $lesson_type === 'online' );
-        } else {
-            if ( array_key_exists( 'is_online', $data ) ) {
-                $is_online = ! empty( $data['is_online'] );
-            } elseif ( array_key_exists( 'online', $data ) ) {
-                $is_online = ( (int) $data['online'] ) === 1;
-            } else {
-                $is_online = false;
-            }
-            $lesson_type = $is_online ? 'online' : 'in_person';
-        }
-        $lesson_length = isset( $data['lesson_length'] ) ? absint( $data['lesson_length'] ) : 60;
-        $appointment_type = isset( $data['appointment_type'] ) ? sanitize_text_field( (string) $data['appointment_type'] ) : '';
-        if ( ! in_array( $appointment_type, array( 'consultation', 'lesson', 'standard', '' ), true ) ) {
-            $appointment_type = '';
-        }
-        $agreement_version = isset( $data['agreement_version'] ) ? sanitize_text_field( (string) $data['agreement_version'] ) : '';
-        $signature         = isset( $data['signature'] ) ? (string) $data['signature'] : '';
-        $ip_address = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( (string) $_SERVER['REMOTE_ADDR'] ) : '';
-        if ( ! $instructor_id || empty( $slots ) || ! $student_name || ! $student_email || ! $instrument ) {
-            return new WP_REST_Response( array( 'error' => 'Missing required fields.' ), 400 );
-        }
-        $agreement_id = $this->maybe_store_agreement( $student_email, $agreement_version, $signature, $ip_address );
-        $table_lessons = $wpdb->prefix . 'mrm_lessons';
-        $now = current_time( 'mysql' );
-        $inserted = 0;
-        $booked_sessions = array();
-        $google_errors = array();
-        // Fetch instructor calendar + timezone
-        $table_instructors = $wpdb->prefix . 'mrm_instructors';
-        $instr = $wpdb->get_row( $wpdb->prepare( "SELECT calendar_id, timezone, email FROM {$table_instructors} WHERE id = %d", $instructor_id ), ARRAY_A );
-        $calendar_id = isset( $instr['calendar_id'] ) ? (string) $instr['calendar_id'] : '';
-        $tz          = isset( $instr['timezone'] ) ? (string) $instr['timezone'] : 'America/Phoenix';
-        $instructor_email = isset( $instr['email'] ) ? (string) $instr['email'] : '';
-        // Calendars to consult for conflicts (Google only). Currently: instructor calendar_id.
-        $block_cal_ids = array();
-        if ( $calendar_id !== '' ) { $block_cal_ids[] = $calendar_id; }
-
-        foreach ( $slots as $slot ) {
-            $start = isset( $slot['start'] ) ? sanitize_text_field( (string) $slot['start'] ) : '';
-            $end   = isset( $slot['end'] )   ? sanitize_text_field( (string) $slot['end'] )   : '';
-            if ( ! $start || ! $end ) continue;
-
-            // Prevent double-booking + enforce 30-min travel buffer for in-person lessons.
-            $conflict = $this->slot_conflicts( $instructor_id, $block_cal_ids, $start, $end, $is_online );
-            if ( is_wp_error( $conflict ) ) {
-                $err_data = $conflict->get_error_data();
-                return new WP_REST_Response( array(
-                    'success' => false,
-                    'error'   => $conflict->get_error_message(),
-                    'code'    => $conflict->get_error_code(),
-                    'data'    => is_array( $err_data ) ? $err_data : array(),
-                ), 409 );
-            }
-            // Insert into DB
-            // Second token specifically for the 1-hour reminder email:
-            $reminder_token_raw  = wp_generate_password( 32, false, false );
-            $reminder_token_hash = hash( 'sha256', $reminder_token_raw );
-            $result = $wpdb->insert( $table_lessons, array(
-                'instructor_id'  => $instructor_id,
-                'series_id'      => null,
-                'student_name'   => $student_name,
-                'student_email'  => $student_email,
-                'instrument'     => $instrument,
-                'is_online'      => $is_online ? 1 : 0,
-                'lesson_length'  => $lesson_length,
-                'start_time'     => gmdate( 'Y-m-d H:i:s', strtotime( $start ) ),
-                'end_time'       => gmdate( 'Y-m-d H:i:s', strtotime( $end ) ),
-                'status'         => 'scheduled',
-                'agreement_id'   => $agreement_id ? $agreement_id : null,
-                'created_at'     => $now,
-                'updated_at'     => $now,
-                'reminder_token'       => $reminder_token_raw,
-                'reminder_token_hash'  => $reminder_token_hash,
-                'reminder_scheduled_at'=> null,
-                'reminder_sent_at'     => null,
-            ), array( '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%d','%s','%s','%s','%s','%s','%s' ) );
-            if ( false === $result ) {
-                return new WP_REST_Response( array(
-                    'error'   => 'Database insert failed.',
-                    'details' => $wpdb->last_error,
-                ), 500 );
-            }
-            $lesson_id = (int) $wpdb->insert_id;
-            $inserted++;
-            // Create Google event marked busy
-            if ( $calendar_id !== '' && $this->google_is_configured() ) {
-                // Convert UTC ISO strings to instructor timezone dateTimes
-                try {
-                    $start_dt = new DateTime( $start );
-                    $end_dt   = new DateTime( $end );
-                    $tzObj    = new DateTimeZone( $tz );
-                    $start_dt->setTimezone( $tzObj );
-                    $end_dt->setTimezone( $tzObj );
-                    $start_local = $start_dt->format( 'c' );
-                    $end_local   = $end_dt->format( 'c' );
-                } catch ( Exception $e ) {
-                    $start_local = $start;
-                    $end_local   = $end;
-                }
-                $lesson_minutes = $lesson_length;
-                $slot_start_ts = strtotime( $start );
-                $slot_end_ts = strtotime( $end );
-                if ( $slot_start_ts && $slot_end_ts && $slot_end_ts > $slot_start_ts ) {
-                    $lesson_minutes = (int) round( ( $slot_end_ts - $slot_start_ts ) / 60 );
-                }
-                $lesson_type_label = $is_online ? 'Online' : 'In person';
-
-                if ( $appointment_type === 'consultation' ) {
-                    // Consultation calendar title: "[online] [lesson type] [parent first and last name]"
-                    $parent_name = trim( $first_name . ' ' . $last_name );
-                    $consult_label = 'Meet The Instructor (Free Consultation)';
-                    $title = 'Online ' . $consult_label . ' ' . $parent_name;
-
-                    // Consultations are always online in labels (even if something upstream mis-sent)
-                    $lesson_type_label = 'Online';
-                } else {
-                    // Normal lesson title stays as your current behavior
-                    $title = $student_name . ' - ' . $lesson_minutes . ' minute ' . $lesson_type_label;
-                }
-                if ( $appointment_type === 'consultation' ) {
-                    $repeat_frequency = 'none';
-                    $repeat_duration = '1_month';
-                }
-                $description_lines = array(
-                    'First Name: ' . $first_name,
-                    'Last Name: ' . $last_name,
-                    'Student Name: ' . $student_name,
-                    'Email: ' . $student_email,
-                    'Address: ' . $address,
-                    'Phone: ' . $phone,
-                    'Lesson Length: ' . $lesson_minutes . ' minutes',
-                    'Lesson Type: ' . $lesson_type_label,
-                    'Instrument: ' . $instrument,
-                    'Frequency: ' . ( ( $repeat_frequency === 'biweekly' ) ? 'Biweekly' : ( ( $repeat_frequency === 'none' ) ? 'Do not repeat' : 'Weekly' ) ),
-                    'How long would you like to reserve this lesson time?: ' . (
-                        ( $repeat_frequency === 'none' ) ? '--' :
-                        ( ( $repeat_duration === '3_months' ) ? 'Three months' :
-                            ( ( $repeat_duration === 'indefinitely' ) ? 'Indefinitely' : 'One month' )
-                        )
-                    ),
-                );
-                $session_join_link = '';
-
-                // Gate link for online lessons AND consultations (same token used by the reminder email)
-                if ( $is_online || $appointment_type === 'consultation' ) {
-                    $join_url = home_url( '/join-online/' );
-                    $join_link = add_query_arg( array( 'token' => $reminder_token_raw ), $join_url );
-
-                    $session_join_link = $join_link;
-
-                    // Put the join link at the TOP of the description so it’s immediately visible.
-                    array_unshift( $description_lines, 'Join online lesson: ' . $join_link, '' );
-                }
-                $description = implode( "\n", $description_lines );
-
-                // For online lessons/consultations: do NOT set a Calendar "location".
-                // For in-person lessons: set location to the student address.
-                $location = $is_online ? '' : (string) $address;
-                $extended_private = array(
-                    'source' => 'mrm_scheduler',
-                    'lesson_type' => $lesson_type,
-                    'lesson_minutes' => (string) $lesson_minutes,
-                    'instructor_id' => (string) $instructor_id,
-                    'appointment_type' => $appointment_type,
-                );
-                if ( $lesson_id > 0 ) {
-                    $extended_private['booking_id'] = (string) $lesson_id;
-                }
-                $recurrence = array();
-
-                // Consultations never recur (ignore any UI defaults)
-                if ( $appointment_type === 'consultation' ) {
-                    $repeat_frequency = 'none';
-                }
-                if ( $repeat_frequency !== 'none' ) {
-                    $interval = ( $repeat_frequency === 'biweekly' ) ? 2 : 1;
-
-                    // Hard counts requested:
-                    // - "One month" => 4 total lessons
-                    // - "Three months" => 12 total lessons
-                    // - "Indefinitely" => no COUNT/UNTIL (keeps running)
-                    $count = 0;
-
-                    // Weekly counts:
-                    // - 1 month  => 4 total lessons
-                    // - 3 months => 12 total lessons
-                    // Biweekly should be HALF the number of lessons scheduled as weekly.
-                    if ( $repeat_duration === '1_month' ) {
-                        $count = ( $interval === 2 ) ? 2 : 4;
-                    } elseif ( $repeat_duration === '3_months' ) {
-                        $count = ( $interval === 2 ) ? 6 : 12;
-                    } elseif ( $repeat_duration === 'indefinitely' ) {
-                        $count = 0; // no COUNT/UNTIL
-                    } else {
-                        // If UI sent '--' or anything unexpected, default safely to weekly-1-month behavior
-                        $count = ( $interval === 2 ) ? 2 : 4;
-                    }
-
-                    $rrule = 'RRULE:FREQ=WEEKLY;INTERVAL=' . $interval;
-                    if ( $count > 0 ) {
-                        $rrule .= ';COUNT=' . $count;
-                    }
-
-                    $recurrence = array( $rrule );
-                }
-
-                // Attendees for Calendar-managed reminders (Option A)
-                // IMPORTANT: Only invite/email the parent (student_email). Do NOT add instructor here.
-                $attendee_emails = array();
-                if ( is_email( $student_email ) ) {
-                    $attendee_emails[] = $student_email;
-                }
-
-                $res = $this->google_insert_event(
-                    $calendar_id,
-                    $title,
-                    $description,
-                    $location,
-                    $start_local,
-                    $end_local,
-                    $tz,
-                    $extended_private,
-                    $recurrence,
-                    false, // do not generate Google Meet links here; gate flow handles joining
-                    $attendee_emails
-                );
-                if ( is_wp_error( $res ) ) {
-                    $google_errors[] = array(
-                        'slot_start' => $start,
-                        'error'      => $res->get_error_message(),
-                    );
-                } elseif ( is_array( $res ) ) {
-                    $booked_sessions[] = array(
-                        'when'      => $start_local,
-                        'start_utc' => $start,
-                        'duration'  => $lesson_minutes . ' minutes',
-                        'type'      => ( $appointment_type === 'consultation' ) ? 'Consultation' : ( $is_online ? 'Online lesson' : 'In-person lesson' ),
-                        'join'      => $session_join_link,
-                        'location'  => ( $is_online ? '' : (string) $address ),
-                    );
-
-                    $update = array();
-                    $update_format = array();
-                    if ( ! empty( $res['id'] ) ) {
-                        $update['google_event_id'] = (string) $res['id'];
-                        $update_format[] = '%s';
-                        $update['google_meet_url'] = null; // explicitly clear any Meet link (gate flow owns joining)
-                        $update_format[] = '%s';
-                    }
-                    if ( ! empty( $update ) ) {
-                        $wpdb->update(
-                            $table_lessons,
-                            $update,
-                            array( 'id' => $lesson_id ),
-                            $update_format,
-                            array( '%d' )
-                        );
-                    }
-                }
-            }
-        }
-        if ( $inserted > 0 ) {
-            $this->bump_cache_bust_token();
-        }
-
-        // Confirmation email: send once per booking action (to parent + instructor if valid)
-        $confirmation_recipients = array();
-
-        if ( isset( $student_email ) && is_email( $student_email ) ) {
-            $confirmation_recipients[] = $student_email;
-        }
-        if ( isset( $instructor_email ) && is_email( $instructor_email ) ) {
-            $confirmation_recipients[] = $instructor_email;
-        }
-
-        if ( $inserted > 0 && ! empty( $booked_sessions ) && ! empty( $confirmation_recipients ) ) {
-            $this->send_booking_confirmation_email( $confirmation_recipients, $booked_sessions, $appointment_type, $tz, $instructor_email );
-        }
-
-        if ( $inserted > 0 && $appointment_type === 'lesson' && isset( $student_email ) && is_email( $student_email ) ) {
-            wp_remote_post( site_url( '/wp-json/mrm-pay/v1/grant-sheet-music-access' ), array(
-                'headers' => array( 'Content-Type' => 'application/json' ),
-                'body' => wp_json_encode( array(
-                    'sku' => 'all-sheet-music',
-                    'email' => $student_email,
-                ) ),
-                'timeout' => 10,
-            ) );
-        }
-
-        $response = array(
-            'success'  => true,
-            'inserted' => $inserted,
-        );
-        if ( ! empty( $google_errors ) ) {
-            $response['google_event_errors'] = $google_errors;
-        }
-        return new WP_REST_Response( $response, 200 );
-    }
-
-    protected function send_booking_confirmation_email( $recipients, $sessions, $appointment_type = '', $instructor_timezone = '', $instructor_email = '' ) {
-        $recipients = array_filter( array_map( 'sanitize_email', (array) $recipients ) );
-        $recipients = array_filter( $recipients, 'is_email' );
-        if ( empty( $recipients ) ) return;
-
-        if ( ! is_array( $sessions ) || empty( $sessions ) ) return;
-
-        $details_html = '<div><strong>Sessions booked:</strong></div>';
-        $details_html .= '<ul style="padding-left:18px;margin:8px 0 0 0;">';
-        $gate_url = '';
-        foreach ( $sessions as $s ) {
-            $when = isset( $s['when'] ) ? (string) $s['when'] : '';
-            $start_utc = isset( $s['start_utc'] ) ? (string) $s['start_utc'] : '';
-            $dur  = isset( $s['duration'] ) ? (string) $s['duration'] : '';
-            $type = isset( $s['type'] ) ? (string) $s['type'] : '';
-            $join = isset( $s['join'] ) ? (string) $s['join'] : '';
-            $loc  = isset( $s['location'] ) ? trim( (string) $s['location'] ) : '';
-
-            $tz_obj = new DateTimeZone( $instructor_timezone ?: 'UTC' );
-            $dt = new DateTime( $start_utc !== '' ? $start_utc : $when, new DateTimeZone( 'UTC' ) );
-            $dt->setTimezone( $tz_obj );
-            $time_display = $dt->format( 'F j, Y \a\t g:i A' ) . ' (' . $tz_obj->getName() . ')';
-
-            $details_html .= '<li style="margin:0 0 12px 0;">' .
-                '<div><strong>Time:</strong> ' . esc_html( $time_display ) . '</div>' .
-                '<div><strong>Duration:</strong> ' . esc_html( $dur ) . '</div>' .
-                '<div><strong>Type:</strong> ' . esc_html( $type ) . '</div>';
-            if ( $loc !== '' ) {
-                $details_html .= '<div style="margin-top:4px;"><strong>Location:</strong> ' . esc_html( $loc ) . '</div>';
-            }
-            if ( $join !== '' && $gate_url === '' ) {
-                $gate_url = $join;
-            }
-            $details_html .= '</li>';
-        }
-        $details_html .= '</ul>';
-
-        $subject = 'Booking Confirmation';
-        $title = ''; // Prevent duplicate “Booking confirmed” (keep the centered H2 below)
-        $intro_html = '<div style="text-align:center;">' .
-            '<h2 style="margin:0 0 8px 0;">Booking Confirmed</h2>' .
-            '<p style="margin:0;">Your booking has been confirmed.</p>' .
-        '</div>';
-        $is_consultation = ( $appointment_type === 'consultation' );
-        $button_label = $is_consultation ? 'Join Consultation' : 'Join Lesson';
-        $details_html .= '<div style="margin-top:24px;text-align:center;font-size:14px;color:#555;">' .
-            '<p style="margin-bottom:4px;">Need to cancel or reschedule?</p>' .
-            '<p style="margin:0;">Please contact your instructor directly:<br><strong>' . esc_html( $instructor_email ) . '</strong></p>' .
-        '</div>';
-        $email_html = $this->mrm_wrap_email_html(
-            $title,
-            $intro_html,
-            $details_html,
-            $gate_url,
-            $button_label,
-            array(
-                'button_color' => '#000000',
-                'button_align' => 'center',
-            )
-        );
-
-        $headers = array( 'Content-Type: text/html; charset=UTF-8' );
-
-        foreach ( $recipients as $to ) {
-            wp_mail( $to, $subject, $email_html, $headers );
-        }
-    }
-
-    public function register_custom_cron_schedules( $schedules ) {
-        if ( ! isset( $schedules['mrm_10min'] ) ) {
-            $schedules['mrm_10min'] = array(
-                'interval' => 10 * MINUTE_IN_SECONDS,
-                'display'  => 'Every 10 minutes (MRM)',
+            $availability[] = array(
+                'start' => gmdate( 'c', (int) $win['start_ts'] ),
+                'end'   => gmdate( 'c', (int) $win['end_ts'] ),
             );
         }
-        return $schedules;
+        return $availability;
+    }
+
+    private function split_into_lesson_slots( $start_ts, $end_ts, $instructor_id ) {
+        $opts = $this->get_settings();
+        $slot_minutes = isset( $opts['default_slot_minutes'] ) ? (int) $opts['default_slot_minutes'] : 30;
+        if ( $slot_minutes < 10 ) {
+            $slot_minutes = 30;
+        }
+        $windows = array(
+            array(
+                'start_ts' => (int) $start_ts,
+                'end_ts'   => (int) $end_ts,
+            ),
+        );
+        return $this->build_slots_from_windows( $windows, $slot_minutes );
     }
 
     /**
@@ -2209,7 +1773,6 @@ class MRM_Lesson_Scheduler {
             $latitude_in  = ( isset( $_POST['latitude'] ) && $_POST['latitude'] !== '' ) ? (string) wp_unslash( $_POST['latitude'] ) : '';
             $longitude_in = ( isset( $_POST['longitude'] ) && $_POST['longitude'] !== '' ) ? (string) wp_unslash( $_POST['longitude'] ) : '';
             $calendar_id = isset( $_POST['calendar_id'] ) ? sanitize_text_field( wp_unslash( $_POST['calendar_id'] ) ) : '';
-            $stripe_id   = isset( $_POST['stripe_recipient_id'] ) ? sanitize_text_field( wp_unslash( $_POST['stripe_recipient_id'] ) ) : '';
             $timezone    = isset( $_POST['timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['timezone'] ) ) : '';
             $hire_date   = isset( $_POST['hire_date'] ) ? sanitize_text_field( wp_unslash( $_POST['hire_date'] ) ) : '';
             $profile_image_url = isset( $_POST['profile_image_url'] ) ? esc_url_raw( wp_unslash( $_POST['profile_image_url'] ) ) : '';
@@ -2245,7 +1808,6 @@ class MRM_Lesson_Scheduler {
                     'latitude' => ( $latitude_in === '' ? null : (string) $latitude_in ),
                     'longitude' => ( $longitude_in === '' ? null : (string) $longitude_in ),
                     'calendar_id' => $calendar_id,
-                    'stripe_recipient_id' => ( $stripe_id === '' ? null : $stripe_id ),
                     'timezone' => $timezone,
                     'hire_date' => ( $hire_date === '' ? null : $hire_date ),
                     'profile_image_url' => ( $profile_image_url === '' ? null : $profile_image_url ),
@@ -2389,13 +1951,6 @@ class MRM_Lesson_Scheduler {
                         <td><input name="calendar_id" id="calendar_id" type="text" class="regular-text" required placeholder="...@group.calendar.google.com" value="<?php echo esc_attr( $editing['calendar_id'] ?? '' ); ?>"></td>
                     </tr>
                     <tr>
-                        <th scope="row"><label for="stripe_recipient_id">Stripe Recipient ID</label></th>
-                        <td>
-                            <input name="stripe_recipient_id" id="stripe_recipient_id" type="text" class="regular-text" placeholder="acct_..." value="<?php echo esc_attr( $editing['stripe_recipient_id'] ?? '' ); ?>">
-                            <p class="description">Stripe Connect Account ID used later to route payouts.</p>
-                        </td>
-                    </tr>
-                    <tr>
                         <th scope="row"><label for="timezone">Timezone</label></th>
                         <td>
                             <select name="timezone" id="timezone" class="regular-text" required style="max-width:420px;">
@@ -2424,7 +1979,7 @@ class MRM_Lesson_Scheduler {
                 <table class="widefat striped">
                     <thead>
                         <tr>
-                            <th>ID</th><th>Name</th><th>Email</th><th>City</th><th>Start Date</th><th>Stripe ID</th><th>Calendar ID</th><th>Timezone</th><th>Actions</th>
+                            <th>ID</th><th>Name</th><th>Email</th><th>City</th><th>Start Date</th><th>Calendar ID</th><th>Timezone</th><th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -2435,7 +1990,6 @@ class MRM_Lesson_Scheduler {
                                 <td><?php echo esc_html( $r['email'] ); ?></td>
                                 <td><?php echo esc_html( $r['city'] ); ?></td>
                                 <td><?php echo esc_html( $r['hire_date'] ); ?></td>
-                                <td><code><?php echo esc_html( $r['stripe_recipient_id'] ); ?></code></td>
                                 <td><code><?php echo esc_html( $r['calendar_id'] ); ?></code></td>
                                 <td><code><?php echo esc_html( $r['timezone'] ); ?></code></td>
                                 <td>
@@ -2461,12 +2015,6 @@ class MRM_Lesson_Scheduler {
         $opts = $this->get_settings();
         $json = isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
         $delegated = isset( $opts['google_delegated_user'] ) ? (string) $opts['google_delegated_user'] : '';
-        $mode = isset( $opts['availability_mode'] ) ? (string) $opts['availability_mode'] : 'free_events';
-        if ( ! in_array( $mode, array( 'working_hours', 'free_events' ), true ) ) $mode = 'free_events';
-        $keyword = isset( $opts['availability_keyword'] ) ? (string) $opts['availability_keyword'] : 'AVAILABLE';
-        $work_start = isset( $opts['working_hours_start'] ) ? (string) $opts['working_hours_start'] : '09:00';
-        $work_end   = isset( $opts['working_hours_end'] ) ? (string) $opts['working_hours_end'] : '17:00';
-        $weekdays   = isset( $opts['working_weekdays'] ) && is_array( $opts['working_weekdays'] ) ? $opts['working_weekdays'] : array('1','2','3','4','5');
         $slot_default= isset( $opts['default_slot_minutes'] ) ? (int) $opts['default_slot_minutes'] : 30;
         $sa_email = '';
         $parsed = $this->parse_service_account_json( $json );
@@ -2510,58 +2058,12 @@ class MRM_Lesson_Scheduler {
                 <?php submit_button( 'Save Google Settings' ); ?>
             </form>
             <hr>
-            <h2>2) Availability Mode (THIS is Option A vs Option B)</h2>
-            <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
-                <?php wp_nonce_field( 'mrm_scheduler_save_google', 'mrm_scheduler_google_nonce' ); ?>
-                <input type="hidden" name="action" value="mrm_scheduler_save_google">
-                <input type="hidden" name="save_availability_mode" value="1">
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row">Mode</th>
-                        <td>
-                            <label style="display:block; margin-bottom:8px;">
-                                <input type="radio" name="availability_mode" value="free_events" <?php checked( $mode, 'free_events' ); ?>>
-                                <strong>Option B:</strong> “Free” events define availability windows (recommended for your workflow)
-                            </label>
-                            <label style="display:block;">
-                                <input type="radio" name="availability_mode" value="working_hours" <?php checked( $mode, 'working_hours' ); ?>>
-                                <strong>Option A:</strong> Working hours minus Busy blocks
-                            </label>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row">Availability Keyword (optional)</th>
-                        <td>
-                            <input type="text" class="regular-text" name="availability_keyword" value="<?php echo esc_attr( $keyword ); ?>" placeholder="AVAILABLE">
-                            <p class="description"> If set, only “Free” events whose title contains this keyword will count as availability windows. Leave blank to treat all “Free” events as availability. (Note: keyword filtering is ignored for Option B in this version.) </p>
-                        </td>
-                    </tr>
-                </table>
-                <?php submit_button( 'Save Availability Mode' ); ?>
-            </form>
-            <hr>
-            <h2>3) Slot Rules (used for Option A; also slot length for Option B)</h2>
+            <h2>2) Slot Rules</h2>
             <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
                 <?php wp_nonce_field( 'mrm_scheduler_save_google', 'mrm_scheduler_google_nonce' ); ?>
                 <input type="hidden" name="action" value="mrm_scheduler_save_google">
                 <input type="hidden" name="save_slot_rules" value="1">
                 <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row">Working Hours (Option A)</th>
-                        <td>
-                            <input type="time" name="working_hours_start" value="<?php echo esc_attr( $work_start ); ?>"> to <input type="time" name="working_hours_end" value="<?php echo esc_attr( $work_end ); ?>">
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row">Working Days (Option A)</th>
-                        <td>
-                            <?php $days = array( '1'=>'Mon','2'=>'Tue','3'=>'Wed','4'=>'Thu','5'=>'Fri','6'=>'Sat','7'=>'Sun' );
-                            foreach ( $days as $k => $label ) {
-                                $checked = in_array( (string) $k, $weekdays, true ) ? 'checked' : '';
-                                echo '<label style="margin-right:12px;"><input type="checkbox" name="working_weekdays[]" value="' . esc_attr($k) . '" ' . $checked . '> ' . esc_html($label) . '</label>';
-                            } ?>
-                        </td>
-                    </tr>
                     <tr>
                         <th scope="row">Default Slot Minutes</th>
                         <td>
@@ -2573,7 +2075,7 @@ class MRM_Lesson_Scheduler {
                 <?php submit_button( 'Save Slot Rules' ); ?>
             </form>
             <hr>
-            <h2>4) Test Connection</h2>
+            <h2>3) Test Connection</h2>
             <p>After saving your JSON, click test. If it fails, you’ll get a readable error.</p>
             <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
                 <?php wp_nonce_field( 'mrm_scheduler_test_google', 'mrm_scheduler_google_test_nonce' ); ?>
@@ -2584,15 +2086,13 @@ class MRM_Lesson_Scheduler {
             <h2>Sharing Calendars (required)</h2>
             <ol>
                 <li>Open the instructor availability calendar → <strong>Settings and sharing</strong>.</li>
-                <li>Under <strong>Share with specific people</strong>, add the Service Account Email and give it at least <strong>See all event details</strong> (recommended for Option B).</li>
+                <li>Under <strong>Share with specific people</strong>, add the Service Account Email and give it at least <strong>See all event details</strong>.</li>
                 <li>Do <strong>NOT</strong> make the calendar public.</li>
             </ol>
-            <h3>How to create availability windows (Option B)</h3>
+            <h3>How to create availability windows</h3>
             <ol>
                 <li>Create events for availability (e.g. <code>AVAILABLE – Lessons</code>).</li>
                 <li>Set <strong>Show as</strong> = <strong>Free</strong>.</li>
-                <li>(Optional) Ensure the event title includes your keyword (default: <code>AVAILABLE</code>). Note that keyword filtering is now ignored; all Free events count.</li>
-                <li>Busy events (Show as = Busy) will subtract/block those times.</li>
             </ol>
         </div>
         <?php
@@ -2609,25 +2109,7 @@ class MRM_Lesson_Scheduler {
         if ( isset( $_POST['google_delegated_user'] ) ) {
             $opts['google_delegated_user'] = sanitize_email( wp_unslash( $_POST['google_delegated_user'] ) );
         }
-        if ( isset( $_POST['save_availability_mode'] ) ) {
-            $mode = isset($_POST['availability_mode']) ? sanitize_text_field( wp_unslash($_POST['availability_mode']) ) : 'free_events';
-            if ( ! in_array( $mode, array('working_hours','free_events'), true ) ) $mode = 'free_events';
-            $opts['availability_mode'] = $mode;
-            $kw = isset($_POST['availability_keyword']) ? sanitize_text_field( wp_unslash($_POST['availability_keyword']) ) : '';
-            $opts['availability_keyword'] = trim($kw);
-        }
         if ( isset( $_POST['save_slot_rules'] ) ) {
-            $opts['working_hours_start'] = isset($_POST['working_hours_start']) ? sanitize_text_field( wp_unslash($_POST['working_hours_start']) ) : '09:00';
-            $opts['working_hours_end']   = isset($_POST['working_hours_end']) ? sanitize_text_field( wp_unslash($_POST['working_hours_end']) )   : '17:00';
-            $weekdays = array();
-            if ( isset($_POST['working_weekdays']) && is_array($_POST['working_weekdays']) ) {
-                foreach ( $_POST['working_weekdays'] as $d ) {
-                    $d = sanitize_text_field( wp_unslash($d) );
-                    if ( in_array( $d, array('1','2','3','4','5','6','7'), true ) ) $weekdays[] = $d;
-                }
-            }
-            if ( empty($weekdays) ) $weekdays = array('1','2','3','4','5');
-            $opts['working_weekdays'] = $weekdays;
             $slot = isset($_POST['default_slot_minutes']) ? absint($_POST['default_slot_minutes']) : 30;
             if ( $slot < 10 ) $slot = 30;
             $opts['default_slot_minutes'] = $slot;
@@ -2670,19 +2152,6 @@ class MRM_Lesson_Scheduler {
         $json = isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
         $parsed = $this->parse_service_account_json( $json );
         return ( is_array( $parsed ) && ! empty( $parsed['client_email'] ) && ! empty( $parsed['private_key'] ) );
-    }
-
-    protected function google_get_availability_mode() {
-        $opts = $this->get_settings();
-        $mode = isset($opts['availability_mode']) ? (string) $opts['availability_mode'] : 'free_events';
-        if ( ! in_array( $mode, array('working_hours','free_events'), true ) ) $mode = 'free_events';
-        return $mode;
-    }
-
-    protected function google_get_availability_keyword() {
-        $opts = $this->get_settings();
-        $kw = isset($opts['availability_keyword']) ? (string) $opts['availability_keyword'] : 'AVAILABLE';
-        return trim($kw);
     }
 
     protected function parse_service_account_json( $json ) {
@@ -2806,17 +2275,6 @@ class MRM_Lesson_Scheduler {
         return $merged;
     }
 
-    protected function google_get_working_hours() {
-        $opts = $this->get_settings();
-        return array(
-            'start' => isset($opts['working_hours_start']) ? (string) $opts['working_hours_start'] : '09:00',
-            'end'   => isset($opts['working_hours_end']) ? (string) $opts['working_hours_end']   : '17:00',
-            'weekdays' => isset($opts['working_weekdays']) && is_array($opts['working_weekdays']) ? $opts['working_weekdays'] : array('1','2','3','4','5'),
-            'default_slot_minutes' => isset($opts['default_slot_minutes']) ? (int) $opts['default_slot_minutes'] : 30,
-        );
-    }
-
-    
     /**
      * Normalize any strtotime-parseable time string to an RFC3339 UTC string ending in 'Z'.
      * This avoids '+' characters in query params (which can be misinterpreted as spaces by proxies),
@@ -3151,56 +2609,6 @@ protected function base64url_encode( $data ) {
     }
 
     /**
-     * Subtract busy intervals from availability windows (splitting as needed).
-     */
-    protected function subtract_busy_from_availability( $availability_windows, $busy_intervals ) {
-        // Convert busy to ts-only list
-        $busy = array();
-        foreach ( $busy_intervals as $b ) {
-            $bs = isset( $b['start_ts'] ) ? (int) $b['start_ts'] : 0;
-            $be = isset( $b['end_ts'] )   ? (int) $b['end_ts']   : 0;
-            if ( $bs && $be && $be > $bs ) $busy[] = array( 'start_ts' => $bs, 'end_ts' => $be );
-        }
-        usort( $busy, function( $a, $b ) {
-            return $a['start_ts'] <=> $b['start_ts'];
-        } );
-        $result = array();
-        foreach ( $availability_windows as $win ) {
-            $segments = array( $win );
-            foreach ( $busy as $b ) {
-                $new_segments = array();
-                foreach ( $segments as $seg ) {
-                    $s1 = $seg['start_ts'];
-                    $e1 = $seg['end_ts'];
-                    $s2 = $b['start_ts'];
-                    $e2 = $b['end_ts'];
-                    // no overlap
-                    if ( $e2 <= $s1 || $s2 >= $e1 ) {
-                        $new_segments[] = $seg;
-                        continue;
-                    }
-                    // overlap -> split possible left/right
-                    if ( $s2 > $s1 ) {
-                        $new_segments[] = array( 'start_ts' => $s1, 'end_ts' => min( $s2, $e1 ) );
-                    }
-                    if ( $e2 < $e1 ) {
-                        $new_segments[] = array( 'start_ts' => max( $e2, $s1 ), 'end_ts' => $e1 );
-                    }
-                }
-                $segments = $new_segments;
-                if ( empty( $segments ) ) break;
-            }
-            foreach ( $segments as $seg ) {
-                if ( $seg['end_ts'] > $seg['start_ts'] ) $result[] = $seg;
-            }
-        }
-        usort( $result, function( $a, $b ) {
-            return $a['start_ts'] <=> $b['start_ts'];
-        } );
-        return $result;
-    }
-
-    /**
      * Build slots from free windows in UTC, aligned to slot_minutes.
      */
     protected function build_slots_from_windows( $windows, $slot_minutes ) {
@@ -3218,71 +2626,6 @@ protected function base64url_encode( $data ) {
             }
         }
         return $slots;
-    }
-
-    /**
-     * Existing Mode A slot builder: iterate days, working hours, remove overlaps with busy.
-     */
-    protected function build_available_slots( $start_date, $end_date, $tz, $slot_minutes, $work, $busy_intervals ) {
-        $slots = array();
-        $weekdays = isset( $work['weekdays'] ) && is_array( $work['weekdays'] ) ? $work['weekdays'] : array('1','2','3','4','5');
-        $work_start = isset( $work['start'] ) ? (string) $work['start'] : '09:00';
-        $work_end   = isset( $work['end'] )   ? (string) $work['end']   : '17:00';
-        try {
-            $tzObj = new DateTimeZone( $tz );
-            $utc   = new DateTimeZone( 'UTC' );
-        } catch ( Exception $e ) {
-            $tzObj = new DateTimeZone( 'UTC' );
-            $utc   = new DateTimeZone( 'UTC' );
-        }
-        $day = new DateTime( $start_date . ' 00:00:00', $tzObj );
-        $end = new DateTime( $end_date   . ' 00:00:00', $tzObj );
-        while ( $day <= $end ) {
-            $dow = $day->format( 'N' ); // 1..7
-            if ( in_array( (string) $dow, $weekdays, true ) ) {
-                $dayStr    = $day->format( 'Y-m-d' );
-                $startLocal= new DateTime( $dayStr . ' ' . $work_start . ':00', $tzObj );
-                $endLocal  = new DateTime( $dayStr . ' ' . $work_end   . ':00', $tzObj );
-                $cursor    = clone $startLocal;
-                while ( $cursor < $endLocal ) {
-                    $slotEnd = clone $cursor;
-                    $slotEnd->modify( '+' . (int) $slot_minutes . ' minutes' );
-                    if ( $slotEnd > $endLocal ) break;
-                    $slotStartUtc = clone $cursor;
-                    $slotStartUtc->setTimezone( $utc );
-                    $slotEndUtc   = clone $slotEnd;
-                    $slotEndUtc->setTimezone( $utc );
-                    $slotStartTs  = $slotStartUtc->getTimestamp();
-                    $slotEndTs    = $slotEndUtc->getTimestamp();
-                    $overlap = false;
-                    foreach ( $busy_intervals as $b ) {
-                        $bs = isset( $b['start_ts'] ) ? (int) $b['start_ts'] : 0;
-                        $be = isset( $b['end_ts'] )   ? (int) $b['end_ts']   : 0;
-                        if ( $bs && $be && $slotStartTs < $be && $slotEndTs > $bs ) {
-                            $overlap = true;
-                            break;
-                        }
-                    }
-                    if ( ! $overlap ) {
-                        $slots[] = array(
-                            'start' => gmdate( 'c', $slotStartTs ),
-                            'end'   => gmdate( 'c', $slotEndTs ),
-                        );
-                    }
-                    $cursor->modify( '+' . (int) $slot_minutes . ' minutes' );
-                }
-            }
-            $day->modify( '+1 day' );
-        }
-        return $slots;
-    }
-
-    protected function dummy_slots( $start_date ) {
-        return array(
-            array( 'start' => $start_date . 'T15:00:00Z', 'end' => $start_date . 'T15:30:00Z' ),
-            array( 'start' => $start_date . 'T16:00:00Z', 'end' => $start_date . 'T16:30:00Z' ),
-            array( 'start' => gmdate( 'Y-m-d', strtotime( $start_date . ' +1 day' ) ) . 'T17:00:00Z', 'end' => gmdate( 'Y-m-d', strtotime( $start_date . ' +1 day' ) ) . 'T17:30:00Z' ),
-        );
     }
 
     /* =========================================================
