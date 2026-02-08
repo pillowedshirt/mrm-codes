@@ -1323,8 +1323,8 @@ class MRM_Product_Access {
         }
 
         // Capture everything after "piece-" up to the last hyphen before the type.
-        if ( preg_match( '/^piece-(.+)-[^-]+$/', $product_slug, $matches ) ) {
-            $piece_slug  = $matches[1];
+        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug, $matches ) ) {
+            $piece_slug = $matches[1];
             $package_sku = 'piece-' . $piece_slug . '-complete-package';
             if ( isset( $products[ $package_sku ] ) && ! empty( $products[ $package_sku ]['emails'] ) ) {
                 foreach ( $products[ $package_sku ]['emails'] as $email ) {
