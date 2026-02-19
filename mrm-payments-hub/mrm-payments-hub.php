@@ -126,6 +126,7 @@ class MRM_Payments_Hub_Single {
       sku VARCHAR(120) NOT NULL,
       granted_at DATETIME NOT NULL,
       revoked_at DATETIME DEFAULT NULL,
+      expires_at DATETIME DEFAULT NULL,
       source VARCHAR(60) DEFAULT NULL,
       source_id VARCHAR(255) DEFAULT NULL,
       PRIMARY KEY (id),
@@ -468,6 +469,29 @@ class MRM_Payments_Hub_Single {
     return $this->stripe_api_request('GET', '/v1/payment_intents/' . rawurlencode((string)$pi_id));
   }
 
+  private function stripe_create_setup_intent($customer_id, $metadata = array(), $extra_params = array()) {
+    $params = array(
+      'customer' => $customer_id,
+      'usage' => 'off_session',
+      'metadata' => $metadata,
+    );
+    foreach ((array)$extra_params as $k => $v) $params[$k] = $v;
+    foreach ((array)$metadata as $k => $v) {
+      $k = preg_replace('/[^a-zA-Z0-9_\-]/', '_', (string)$k);
+      $params["metadata[{$k}]"] = (string)$v;
+    }
+    unset($params['metadata']);
+    return $this->stripe_api_request('POST', '/v1/setup_intents', $params);
+  }
+
+  private function stripe_create_subscription_schedule($params) {
+    return $this->stripe_api_request('POST', '/v1/subscription_schedules', $params);
+  }
+
+  private function stripe_retrieve_setup_intent($si_id) {
+    return $this->stripe_api_request('GET', '/v1/setup_intents/' . rawurlencode((string)$si_id));
+  }
+
   private function stripe_attach_payment_method_to_customer($payment_method_id, $customer_id) {
     $payment_method_id = sanitize_text_field((string)$payment_method_id);
     $customer_id = sanitize_text_field((string)$customer_id);
@@ -674,6 +698,30 @@ class MRM_Payments_Hub_Single {
     register_rest_route('mrm-pay/v1', '/verify-payment-intent', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_verify_payment_intent'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/create-setup-intent', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_create_setup_intent'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/create-lesson-subscription-schedule', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_create_lesson_subscription_schedule'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/create-sheetmusic-subscription-schedule', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_create_sheetmusic_subscription_schedule'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/create-subscriptions-from-payment-intent', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_create_subscriptions_from_payment_intent'),
       'permission_callback' => '__return_true',
     ));
 
@@ -1004,6 +1052,189 @@ class MRM_Payments_Hub_Single {
     ), 200);
   }
 
+
+  private function duration_to_months($duration) {
+    $duration = strtolower(trim((string)$duration));
+    if ($duration === '3_months') return 3;
+    if ($duration === 'indefinitely') return 12;
+    return 1;
+  }
+
+  private function resolve_setup_intent_customer_pm($setup_intent_id, $email) {
+    $si = $this->stripe_retrieve_setup_intent($setup_intent_id);
+    if (is_wp_error($si)) return $si;
+
+    $status = (string)($si['status'] ?? '');
+    if ($status !== 'succeeded') return new WP_Error('setup_not_succeeded', 'SetupIntent not succeeded.');
+
+    $customer_id = (string)($si['customer'] ?? '');
+    $payment_method_id = (string)($si['payment_method'] ?? '');
+    if (!$customer_id) {
+      $customer_id = $this->stripe_find_or_create_customer($email);
+      if (is_wp_error($customer_id)) return $customer_id;
+    }
+
+    if ($payment_method_id) {
+      $this->stripe_attach_payment_method_to_customer($payment_method_id, $customer_id);
+      $this->stripe_set_default_payment_method($customer_id, $payment_method_id);
+    }
+
+    return array($customer_id, $payment_method_id);
+  }
+
+  public function rest_create_setup_intent(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+
+    $customer_id = $this->stripe_find_or_create_customer($email);
+    if (is_wp_error($customer_id)) return new WP_REST_Response(array('ok'=>false,'message'=>$customer_id->get_error_message()), 500);
+
+    $si = $this->stripe_create_setup_intent($customer_id, array('mrm_email_hash'=>$this->email_hash($email)));
+    if (is_wp_error($si)) return new WP_REST_Response(array('ok'=>false,'message'=>$si->get_error_message()), 500);
+
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'publishableKey' => $this->publishable_key(),
+      'client_secret' => (string)($si['client_secret'] ?? ''),
+      'setup_intent_id' => (string)($si['id'] ?? ''),
+      'customer_id' => $customer_id,
+    ), 200);
+  }
+
+  public function rest_create_lesson_subscription_schedule(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $sku = $this->sanitize_sku($data['sku'] ?? '');
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $setup_intent_id = sanitize_text_field((string)($data['setup_intent_id'] ?? ''));
+    $frequency = strtolower(trim((string)($data['frequency'] ?? 'weekly')));
+    $duration = strtolower(trim((string)($data['duration'] ?? '1_month')));
+
+    if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
+    if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+    if (!$setup_intent_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing setup_intent_id.'), 400);
+
+    $p = $this->get_product($sku);
+    if (!$p || empty($p['active'])) return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
+
+    $price_id = '';
+    if ($frequency === 'biweekly') {
+      $price_id = trim((string)($p['stripe_price_id_biweekly'] ?? ''));
+    } else {
+      $price_id = trim((string)($p['stripe_price_id_weekly'] ?? ''));
+    }
+    if (!$price_id) $price_id = trim((string)($p['stripe_price_id'] ?? ''));
+    if (!$price_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing Stripe recurring price id for lessons.'), 400);
+
+    $resolved = $this->resolve_setup_intent_customer_pm($setup_intent_id, $email);
+    if (is_wp_error($resolved)) return new WP_REST_Response(array('ok'=>false,'message'=>$resolved->get_error_message()), 400);
+    list($customer_id, $payment_method_id) = $resolved;
+
+    $months = $this->duration_to_months($duration);
+    $iterations = max(1, (int)$months);
+
+    $params = array(
+      'customer' => $customer_id,
+      'start_date' => 'now',
+      'phases[0][items][0][price]' => $price_id,
+      'phases[0][iterations]' => $iterations,
+      'end_behavior' => ($duration === 'indefinitely' ? 'release' : 'cancel'),
+    );
+    if ($payment_method_id) $params['default_settings[default_payment_method]'] = $payment_method_id;
+
+    $out = $this->stripe_create_subscription_schedule($params);
+    if (is_wp_error($out)) return new WP_REST_Response(array('ok'=>false,'message'=>$out->get_error_message()), 500);
+
+    return new WP_REST_Response(array('ok'=>true,'schedule_id'=>(string)($out['id'] ?? '')), 200);
+  }
+
+  public function rest_create_sheetmusic_subscription_schedule(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $setup_intent_id = sanitize_text_field((string)($data['setup_intent_id'] ?? ''));
+    $duration = strtolower(trim((string)($data['duration'] ?? '1_month')));
+
+    if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+    if (!$setup_intent_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing setup_intent_id.'), 400);
+
+    $sku = $this->sanitize_sku('all-sheet-music');
+    $p = $this->get_product($sku);
+    if (!$p || empty($p['active'])) return new WP_REST_Response(array('ok'=>false,'message'=>'Sheet music subscription product not configured.'), 404);
+
+    $price_id = trim((string)($p['stripe_price_id_monthly'] ?? ''));
+    if (!$price_id) $price_id = trim((string)($p['stripe_price_id'] ?? ''));
+    if (!$price_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing Stripe monthly price id for sheet music.'), 400);
+
+    $resolved = $this->resolve_setup_intent_customer_pm($setup_intent_id, $email);
+    if (is_wp_error($resolved)) return new WP_REST_Response(array('ok'=>false,'message'=>$resolved->get_error_message()), 400);
+    list($customer_id, $payment_method_id) = $resolved;
+
+    $months = $this->duration_to_months($duration);
+
+    $params = array(
+      'customer' => $customer_id,
+      'start_date' => 'now',
+      'phases[0][items][0][price]' => $price_id,
+      'phases[0][iterations]' => max(1, (int)$months),
+      'phases[0][automatic_tax][enabled]' => 'true',
+      'end_behavior' => 'cancel',
+    );
+    if ($payment_method_id) $params['default_settings[default_payment_method]'] = $payment_method_id;
+
+    $out = $this->stripe_create_subscription_schedule($params);
+    if (is_wp_error($out)) return new WP_REST_Response(array('ok'=>false,'message'=>$out->get_error_message()), 500);
+
+    $this->grant_sheet_music_access_for_days($email, 'all-sheet-music', 30, 'sheetmusic_subscription', (string)($out['id'] ?? ''));
+
+    return new WP_REST_Response(array('ok'=>true,'schedule_id'=>(string)($out['id'] ?? '')), 200);
+  }
+
+  public function rest_create_subscriptions_from_payment_intent(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $pi_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $duration = strtolower(trim((string)($data['duration'] ?? '1_month')));
+
+    if (!$pi_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing payment_intent_id.'), 400);
+    if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+
+    $pi = $this->stripe_retrieve_payment_intent($pi_id);
+    if (is_wp_error($pi)) return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
+    if ((string)($pi['status'] ?? '') !== 'succeeded') return new WP_REST_Response(array('ok'=>false,'message'=>'PaymentIntent not succeeded.'), 400);
+
+    $customer_id = (string)($pi['customer'] ?? '');
+    if (!$customer_id) return new WP_REST_Response(array('ok'=>false,'message'=>'No customer found on PaymentIntent.'), 400);
+
+    $payment_method_id = (string)($pi['payment_method'] ?? '');
+    if ($payment_method_id) $this->stripe_set_default_payment_method($customer_id, $payment_method_id);
+
+    // Build schedule directly to avoid requiring setup intent
+    $sku = $this->sanitize_sku('all-sheet-music');
+    $p = $this->get_product($sku);
+    if (!$p || empty($p['active'])) return new WP_REST_Response(array('ok'=>false,'message'=>'Sheet music subscription product not configured.'), 404);
+    $price_id = trim((string)($p['stripe_price_id_monthly'] ?? ''));
+    if (!$price_id) $price_id = trim((string)($p['stripe_price_id'] ?? ''));
+    if (!$price_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing Stripe monthly price id for sheet music.'), 400);
+
+    $months = $this->duration_to_months($duration);
+    $params = array(
+      'customer' => $customer_id,
+      'start_date' => 'now',
+      'phases[0][items][0][price]' => $price_id,
+      'phases[0][iterations]' => max(1, (int)$months),
+      'phases[0][automatic_tax][enabled]' => 'true',
+      'end_behavior' => 'cancel',
+    );
+    if ($payment_method_id) $params['default_settings[default_payment_method]'] = $payment_method_id;
+
+    $out = $this->stripe_create_subscription_schedule($params);
+    if (is_wp_error($out)) return new WP_REST_Response(array('ok'=>false,'message'=>$out->get_error_message()), 500);
+
+    $this->grant_sheet_music_access_for_days($email, 'all-sheet-music', 30, 'sheetmusic_subscription', (string)($out['id'] ?? ''));
+
+    return new WP_REST_Response(array('ok'=>true,'schedule_id'=>(string)($out['id'] ?? '')), 200);
+  }
+
   public function rest_grant_sheet_music_access(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
 
@@ -1114,7 +1345,7 @@ class MRM_Payments_Hub_Single {
     }
 
     $id = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+      "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
       (string)$email_hash,
       (string)$sku
     ));
@@ -1133,7 +1364,7 @@ class MRM_Payments_Hub_Single {
 
     // If already granted (active row exists), treat as idempotent success.
     $existing = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
+      "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
       $email_hash, $sku
     ));
     if ($existing) return true;
@@ -1148,6 +1379,36 @@ class MRM_Payments_Hub_Single {
     ), array('%s','%s','%s','%s','%s','%s'));
 
     return (bool)$ins;
+  }
+
+  public function grant_sheet_music_access_for_days($email, $sku, $days, $source = null, $source_id = null) {
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) return false;
+
+    $sku = $this->sanitize_sku($sku);
+    if (!$sku) return false;
+
+    $email_hash = hash('sha256', strtolower(trim($email)));
+
+    global $wpdb;
+    $table = $this->table_sheet_music_access();
+    $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($exists !== $table) return false;
+
+    $now = current_time('mysql');
+    $expires = gmdate('Y-m-d H:i:s', time() + ((int)$days * 86400));
+
+    $ok = $wpdb->insert($table, array(
+      'email_hash' => $email_hash,
+      'sku' => $sku,
+      'granted_at' => $now,
+      'revoked_at' => null,
+      'expires_at' => $expires,
+      'source' => $source,
+      'source_id' => $source_id,
+    ), array('%s','%s','%s','%s','%s','%s','%s'));
+
+    return (bool)$ok;
   }
 
   public function grant_all_sheet_music_db_row($email, $source = null, $source_id = null) {
@@ -1165,7 +1426,7 @@ class MRM_Payments_Hub_Single {
     global $wpdb;
     $table = $this->table_sheet_music_access();
     $id = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
+      "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
       $email_hash, $sku
     ));
     return !empty($id);
@@ -1418,7 +1679,7 @@ class MRM_Payments_Hub_Single {
 
           // Insert if not exists active
           $existing_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$access_table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+            "SELECT id FROM {$access_table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
             $eh, $final_sku
           ));
           if (!$existing_id) {

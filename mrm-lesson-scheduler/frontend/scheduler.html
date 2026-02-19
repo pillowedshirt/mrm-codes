@@ -916,6 +916,70 @@ h1 {
   padding: 0;
 }
 
+/* =========================
+   MRM styled checkbox rows (match Terms checkbox)
+   ========================= */
+.mrm-check-row{
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  width: 100%;
+}
+
+.mrm-check-row input[type="checkbox"]{
+  appearance: none;
+  -webkit-appearance: none;
+
+  width: 18px;
+  height: 18px;
+
+  margin: 0;
+  flex: 0 0 auto;
+
+  border: 2px solid var(--color-accent);
+  border-radius: 5px;
+  background: #fff;
+
+  display: inline-grid;
+  place-content: center;
+
+  cursor: pointer;
+}
+
+.mrm-check-row input[type="checkbox"]::after{
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+  transform: rotate(-45deg);
+  opacity: 0;
+}
+
+.mrm-check-row input[type="checkbox"]:checked{
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.mrm-check-row input[type="checkbox"]:checked::after{
+  opacity: 1;
+}
+
+.mrm-check-row input[type="checkbox"]:focus-visible{
+  outline: 3px solid rgba(0,0,0,0.18);
+  outline-offset: 2px;
+}
+
+.mrm-check-row label{
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  line-height: 1.2;
+}
+
 .payment-options{
   margin-top: 10px;
   font-size: 12.5px;
@@ -1538,9 +1602,32 @@ h1 {
           </div>
 
           <div class="payment-options">
-            <label><input type="checkbox" id="mrm-autopay-opt"> I am aware that I am signing up for auto-pay for future lessons.</label><br>
-            <label><input type="checkbox" id="mrm-prepay-opt"> I would like to prepay for all selected lessons.</label>
-            <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
+
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-autopay-opt">
+              <label for="mrm-autopay-opt">
+                I am aware that I am signing up for auto-pay for future lessons.
+              </label>
+            </div>
+
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-prepay-opt">
+              <label for="mrm-prepay-opt">
+                I would like to prepay for all selected lessons.
+              </label>
+            </div>
+
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-sheetmusic-sub-opt">
+              <label for="mrm-sheetmusic-sub-opt">
+                subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)
+              </label>
+            </div>
+
+            <div style="margin-top:6px;">
+              By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.
+            </div>
+
           </div>
 
           <div class="modal-actions">
@@ -2209,9 +2296,10 @@ function ensureLegacyBookingHandler(){
 
       const prepay = document.getElementById('mrm-prepay-opt')?.checked;
       const autopay = document.getElementById('mrm-autopay-opt')?.checked;
+      const sheetMusicSub = document.getElementById('mrm-sheetmusic-sub-opt')?.checked;
 
-      if(!prepay && !autopay){
-        setMsg('Please choose either prepay or auto-pay.');
+      if ((!prepay && !autopay) || (prepay && autopay)) {
+        setMsg('Please choose exactly one: prepay OR auto-pay.');
         return;
       }
 
@@ -2243,59 +2331,162 @@ function ensureLegacyBookingHandler(){
         const baseAmount = quote.amount_cents || 0;
         const chargeAmountCents = prepay ? (baseAmount * count) : baseAmount;
 
-        const createRes = await fetch(payApiBase + '/create-payment-intent', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({
-            sku: sku,
-            email: email,
-            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
-            save_card: autopay,
-            amount_override_cents: chargeAmountCents
-          })
-        });
-        const createData = await createRes.json();
-        if(!createRes.ok || !createData.ok){
-          setMsg(createData.message || 'Payment error.');
-          return;
-        }
-
-        const stripeInstance = ensureStripe(createData.publishableKey || '');
-        if (!stripeInstance) {
-          setMsg('Stripe is not configured.');
-          return;
-        }
-        stripe = stripeInstance;
-
-        const priceDisplay = prepay
-          ? `Total ${count} lesson(s): $${(chargeAmountCents / 100).toFixed(2)}`
-          : `Lesson total: $${(chargeAmountCents / 100).toFixed(2)}`;
-
-        sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
-          payload,
-          email,
-          payment_intent_id: createData.payment_intent_id
-        }));
-
-        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, priceDisplay);
-
-        payBtn.onclick = async () => {
-          payBtn.disabled = true;
-          const { error, paymentIntent } = await stripe.confirmPayment({
-            elements: activeStripeElements,
-            confirmParams: { return_url: window.location.href }
+        if (autopay) {
+          const createSetupRes = await fetch(payApiBase + '/create-setup-intent', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ email })
           });
-          if (error) {
-            errorEl.textContent = error.message || 'Payment failed.';
-            payBtn.disabled = false;
+          const setupData = await createSetupRes.json();
+          if(!createSetupRes.ok || !setupData.ok){
+            setMsg(setupData.message || 'Unable to start auto-pay setup.');
             return;
           }
-          if (paymentIntent && paymentIntent.status === 'succeeded') {
-            await verifyPaymentIntent(paymentIntent.id, email);
+
+          const stripeInstance = ensureStripe(setupData.publishableKey || '');
+          if (!stripeInstance) {
+            setMsg('Stripe is not configured.');
+            return;
+          }
+          stripe = stripeInstance;
+
+          const { payBtn, errorEl, closeModal } = openPaymentModal(setupData.client_secret, 'Authorize auto-pay for future lessons');
+          payBtn.textContent = 'Authorize';
+
+          payBtn.onclick = async () => {
+            payBtn.disabled = true;
+            const { error, setupIntent } = await stripe.confirmSetup({
+              elements: activeStripeElements,
+              redirect: 'if_required',
+              confirmParams: { return_url: window.location.href }
+            });
+
+            if (error) {
+              errorEl.textContent = error.message || 'Setup failed.';
+              payBtn.disabled = false;
+              return;
+            }
+
+            if (!setupIntent || setupIntent.status !== 'succeeded') {
+              errorEl.textContent = 'Card setup was not completed.';
+              payBtn.disabled = false;
+              return;
+            }
+
+            const lessonSubRes = await fetch(payApiBase + '/create-lesson-subscription-schedule', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({
+                sku,
+                email,
+                frequency,
+                duration: reserveDuration,
+                first_lesson_start: relevantSelected[0]?.start || '',
+                setup_intent_id: setupIntent.id,
+                address
+              })
+            });
+            const lessonSubData = await lessonSubRes.json();
+            if (!lessonSubRes.ok || !lessonSubData.ok) {
+              errorEl.textContent = lessonSubData.message || 'Unable to create lesson subscription.';
+              payBtn.disabled = false;
+              return;
+            }
+
+            if (sheetMusicSub) {
+              const smRes = await fetch(payApiBase + '/create-sheetmusic-subscription-schedule', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({
+                  email,
+                  duration: reserveDuration,
+                  setup_intent_id: setupIntent.id,
+                  address
+                })
+              });
+              const smData = await smRes.json();
+              if (!smRes.ok || !smData.ok) {
+                errorEl.textContent = smData.message || 'Unable to create sheet music subscription.';
+                payBtn.disabled = false;
+                return;
+              }
+            }
+
             await submitBooking(payload, setMsg);
             closeModal();
+          };
+        } else {
+          const createRes = await fetch(payApiBase + '/create-payment-intent', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+              sku: sku,
+              email: email,
+              context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
+              save_card: (autopay || sheetMusicSub),
+              amount_override_cents: chargeAmountCents
+            })
+          });
+          const createData = await createRes.json();
+          if(!createRes.ok || !createData.ok){
+            setMsg(createData.message || 'Payment error.');
+            return;
           }
-        };
+
+          const stripeInstance = ensureStripe(createData.publishableKey || '');
+          if (!stripeInstance) {
+            setMsg('Stripe is not configured.');
+            return;
+          }
+          stripe = stripeInstance;
+
+          const priceDisplay = prepay
+            ? `Total ${count} lesson(s): $${(chargeAmountCents / 100).toFixed(2)}`
+            : `Lesson total: $${(chargeAmountCents / 100).toFixed(2)}`;
+
+          sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
+            payload,
+            email,
+            payment_intent_id: createData.payment_intent_id,
+            sheet_music_sub: !!sheetMusicSub,
+            duration: reserveDuration,
+            address
+          }));
+
+          const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, priceDisplay);
+
+          payBtn.onclick = async () => {
+            payBtn.disabled = true;
+            const { error, paymentIntent } = await stripe.confirmPayment({
+              elements: activeStripeElements,
+              confirmParams: { return_url: window.location.href }
+            });
+            if (error) {
+              errorEl.textContent = error.message || 'Payment failed.';
+              payBtn.disabled = false;
+              return;
+            }
+            if (paymentIntent && paymentIntent.status === 'succeeded') {
+              await verifyPaymentIntent(paymentIntent.id, email);
+              await submitBooking(payload, setMsg);
+
+              if (sheetMusicSub) {
+                await fetch(payApiBase + '/create-subscriptions-from-payment-intent', {
+                  method:'POST',
+                  headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({
+                    payment_intent_id: paymentIntent.id,
+                    email,
+                    duration: reserveDuration,
+                    address
+                  })
+                });
+              }
+
+              closeModal();
+            }
+          };
+        }
       }catch(err){
         setMsg('Payment failed. Please try again.');
       }finally{
@@ -2343,6 +2534,19 @@ async function checkReturnFromStripe(){
   try{
     await verifyPaymentIntent(piId, ctx.email);
     await submitBooking(ctx.payload, setMsg);
+
+    if (ctx.sheet_music_sub) {
+      await fetch(payApiBase + '/create-subscriptions-from-payment-intent', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          payment_intent_id: piId,
+          email: ctx.email,
+          duration: ctx.duration || '1_month',
+          address: ctx.address || ''
+        })
+      });
+    }
   }catch(err){
     setMsg(err.message || 'Payment verification failed.');
   }finally{

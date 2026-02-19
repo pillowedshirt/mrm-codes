@@ -1505,7 +1505,12 @@ class MRM_Product_Access {
         if ( $exists !== $table ) return false;
 
         $id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
+            "SELECT id FROM {$table}
+             WHERE email_hash = %s
+               AND sku = %s
+               AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > NOW())
+             LIMIT 1",
             (string) $email_hash,
             (string) $sku
         ) );

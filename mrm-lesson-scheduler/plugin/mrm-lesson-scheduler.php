@@ -483,51 +483,6 @@ class MRM_Lesson_Scheduler {
         ) );
     }
 
-    private function grant_all_sheet_music_access_for_email( $email, $source = 'lesson_booking', $source_id = '' ) {
-        $email = sanitize_email( (string) $email );
-        if ( ! $email || ! is_email( $email ) ) {
-            return;
-        }
-
-        $hub_settings = get_option( 'mrm_pay_hub_settings', array() );
-        $all_sku      = isset( $hub_settings['all_sheet_music_sku'] ) ? (string) $hub_settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
-        $all_sku      = strtolower( trim( $all_sku ) );
-        $all_sku      = preg_replace( '/[^a-z0-9\-_]/', '', $all_sku );
-        if ( $all_sku === '' ) {
-            return;
-        }
-
-        $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
-
-        global $wpdb;
-        $table  = $wpdb->prefix . 'mrm_sheet_music_access';
-        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
-        if ( $exists !== $table ) {
-            return;
-        }
-
-        $now = current_time( 'mysql' );
-
-        // If already active, do nothing.
-        $id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
-            $email_hash,
-            $all_sku
-        ) );
-        if ( $id ) {
-            return;
-        }
-
-        $wpdb->insert( $table, array(
-            'email_hash' => $email_hash,
-            'sku'        => $all_sku,
-            'granted_at' => $now,
-            'revoked_at' => null,
-            'source'     => $source,
-            'source_id'  => $source_id !== '' ? (string) $source_id : null,
-        ), array( '%s','%s','%s','%s','%s','%s' ) );
-    }
-
     public function rest_book_lesson( WP_REST_Request $request ) {
         global $wpdb;
 
@@ -609,22 +564,6 @@ class MRM_Lesson_Scheduler {
 
         if ( empty( $created_ids ) ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
-        }
-
-        // FEATURE: lesson booking grants all-sheet-music access (email-based, no accounts)
-        $student_email = isset( $data['student_email'] ) ? sanitize_email( $data['student_email'] ) : '';
-        if ( $student_email && is_email( $student_email ) ) {
-            $hub = function_exists( 'mrm_pay_hub_singleton' ) ? mrm_pay_hub_singleton() : null;
-            if ( $hub ) {
-                // add to master list + access table row (sku == product_slug)
-                $hub->add_email_to_access_list( 'all-sheet-music', $student_email );
-
-                // also ensure DB table row exists
-                $hub->maybe_install_or_upgrade_db();
-                $hub->grant_all_sheet_music_db_row( $student_email, 'lesson_booking', (string) ( $created_ids[0] ?? '' ) );
-            } else {
-                error_log( '[MRM Lesson Scheduler] Payments Hub not available; could not grant all-sheet-music.' );
-            }
         }
 
         return new WP_REST_Response( array(
