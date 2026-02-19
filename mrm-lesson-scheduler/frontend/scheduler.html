@@ -916,6 +916,20 @@ h1 {
   padding: 0;
 }
 
+/* ✅ Allow long checkbox labels to wrap neatly */
+.terms-text.wrap {
+  white-space: normal;
+  line-height: 1.35;
+  text-align: left;
+}
+
+/* ✅ Make checkbox rows align nicely when label wraps */
+.terms-row.is-wrap {
+  align-items: flex-start;
+  justify-content: flex-start;
+  text-align: left;
+}
+
 .payment-options{
   margin-top: 10px;
   font-size: 12.5px;
@@ -1538,9 +1552,31 @@ h1 {
           </div>
 
           <div class="payment-options">
-            <label><input type="checkbox" id="mrm-autopay-opt"> I am aware that I am signing up for auto-pay for future lessons.</label><br>
-            <label><input type="checkbox" id="mrm-prepay-opt"> I would like to prepay for all selected lessons.</label>
-            <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
+            <div class="terms-row is-wrap" style="margin-top:10px;">
+              <input type="checkbox" id="mrm-autopay-opt">
+              <label for="mrm-autopay-opt" class="terms-text wrap">
+                auto-pay for future lessons (charges repeat on your selected frequency while your lesson time is reserved)
+              </label>
+            </div>
+
+            <div class="terms-row is-wrap" style="margin-top:10px;">
+              <input type="checkbox" id="mrm-prepay-opt">
+              <label for="mrm-prepay-opt" class="terms-text wrap">
+                prepay for all selected lessons (one-time payment today)
+              </label>
+            </div>
+
+            <div class="terms-row is-wrap" style="margin-top:10px;">
+              <input type="checkbox" id="mrm-sheetmusic-opt">
+              <label for="mrm-sheetmusic-opt" class="terms-text wrap">
+                subscribe for sheet music and backing track access
+                <strong>($5 per month — auto-cancelled when no longer enrolled in lessons)</strong>
+              </label>
+            </div>
+
+            <div style="margin-top:10px;" class="terms-text wrap">
+              by selecting auto-pay, you authorize mrm to store your card and charge for future lessons.
+            </div>
           </div>
 
           <div class="modal-actions">
@@ -1611,6 +1647,24 @@ function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDur
 
   // If baseSelectedCount is >1 (user selected multiple starters), multiply accordingly
   return Math.max(1, base * occurrences);
+}
+
+function fetchTaxRateForLocation(address) {
+  const rates = {
+    AL: 0.04, AK: 0, AZ: 0.056, AR: 0.065, CA: 0.0725, CO: 0.029, CT: 0.0635,
+    DE: 0, FL: 0.06, GA: 0.04, HI: 0.04, ID: 0.06, IL: 0.0625, IN: 0.07,
+    IA: 0.06, KS: 0.065, KY: 0.06, LA: 0.0445, ME: 0.055, MD: 0.06,
+    MA: 0.0625, MI: 0.06, MN: 0.06875, MS: 0.07, MO: 0.04225, MT: 0,
+    NE: 0.055, NV: 0.0685, NH: 0, NJ: 0.06625, NM: 0.05125, NY: 0.04,
+    NC: 0.0475, ND: 0.05, OH: 0.0575, OK: 0.045, OR: 0, PA: 0.06,
+    RI: 0.07, SC: 0.06, SD: 0.045, TN: 0.07, TX: 0.0625, UT: 0.061,
+    VT: 0.06, VA: 0.053, WA: 0.065, WV: 0.06, WI: 0.05, WY: 0.04,
+    DC: 0.06
+  };
+  const upper = String(address || '').toUpperCase();
+  const match = upper.match(/\b([A-Z]{2})\b(?:\s+\d{5}(?:-\d{4})?)?$/);
+  const state = match ? match[1] : '';
+  return Promise.resolve(rates[state] ?? 0);
 }
 
 function ensureStripe(publishableKey){
@@ -2209,6 +2263,7 @@ function ensureLegacyBookingHandler(){
 
       const prepay = document.getElementById('mrm-prepay-opt')?.checked;
       const autopay = document.getElementById('mrm-autopay-opt')?.checked;
+      const subscribeAddOn = document.getElementById('mrm-sheetmusic-opt')?.checked;
 
       if(!prepay && !autopay){
         setMsg('Please choose either prepay or auto-pay.');
@@ -2241,7 +2296,53 @@ function ensureLegacyBookingHandler(){
         }
 
         const baseAmount = quote.amount_cents || 0;
-        const chargeAmountCents = prepay ? (baseAmount * count) : baseAmount;
+        const lessonPrice = Math.max(0, baseAmount - 500);
+        const lessonTotal = prepay ? (lessonPrice * count) : lessonPrice;
+        const addOnPrice = subscribeAddOn ? 500 : 0;
+        const taxRate = await fetchTaxRateForLocation(address);
+        const addOnTax = subscribeAddOn ? Math.round(addOnPrice * taxRate) : 0;
+        const chargeAmountCents = lessonTotal + addOnPrice + addOnTax;
+
+        if (autopay && !prepay) {
+          const metadata = {
+            sku,
+            lesson_length: len,
+            lesson_mode: lessonType,
+            lesson_count: String(count),
+            repeat_frequency: frequency,
+            repeat_duration: reserveDuration,
+            subscribe_sheet_music: subscribeAddOn ? 'yes' : 'no'
+          };
+
+          let addOnPriceId = '';
+          if (subscribeAddOn) {
+            const addOnQuoteRes = await fetch(`${payApiBase}/quote?sku=sheet_music_monthly_addon`);
+            const addOnQuote = await addOnQuoteRes.json();
+            if (addOnQuoteRes.ok && addOnQuote.ok) {
+              addOnPriceId = addOnQuote.price_id || '';
+            }
+          }
+
+          const subRes = await fetch(payApiBase + '/create-subscription', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+              email,
+              lesson_price_id: quote.price_id || '',
+              sheet_music_price_id: addOnPriceId,
+              metadata
+            })
+          });
+          const subData = await subRes.json();
+          if (!subRes.ok || !subData.ok) {
+            setMsg(subData.message || 'Unable to create subscription.');
+            return;
+          }
+
+          await submitBooking(payload, setMsg);
+          setMsg('Subscription created and booking confirmed.');
+          return;
+        }
 
         const createRes = await fetch(payApiBase + '/create-payment-intent', {
           method:'POST',
@@ -2249,7 +2350,7 @@ function ensureLegacyBookingHandler(){
           body: JSON.stringify({
             sku: sku,
             email: email,
-            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
+            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no', subscribe_sheet_music: subscribeAddOn ? 'yes' : 'no' },
             save_card: autopay,
             amount_override_cents: chargeAmountCents
           })
@@ -2292,6 +2393,13 @@ function ensureLegacyBookingHandler(){
           }
           if (paymentIntent && paymentIntent.status === 'succeeded') {
             await verifyPaymentIntent(paymentIntent.id, email);
+            if (subscribeAddOn) {
+              await fetch(payApiBase + '/grant-sheet-music-add-on', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ email })
+              });
+            }
             await submitBooking(payload, setMsg);
             closeModal();
           }
