@@ -263,37 +263,63 @@ class MRM_Payments_Hub_Single {
       'lesson_60_online' => array(
         'sku' => 'lesson_60_online',
         'label' => '60 Minute Online Lesson',
-        'amount_cents' => 6700,
+        'amount_cents' => 6200,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '60_online',
+        'stripe_price_id' => '',
+        'stripe_price_id_weekly' => '',
+        'stripe_price_id_biweekly' => '',
+        'stripe_price_id_monthly' => '',
         'active' => 1,
       ),
       'lesson_60_inperson' => array(
         'sku' => 'lesson_60_inperson',
         'label' => '60 Minute In-Person Lesson',
-        'amount_cents' => 7200,
+        'amount_cents' => 6700,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '60_inperson',
+        'stripe_price_id' => '',
+        'stripe_price_id_weekly' => '',
+        'stripe_price_id_biweekly' => '',
+        'stripe_price_id_monthly' => '',
         'active' => 1,
       ),
       'lesson_30_online' => array(
         'sku' => 'lesson_30_online',
         'label' => '30 Minute Online Lesson',
-        'amount_cents' => 3800,
+        'amount_cents' => 3300,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '30_online',
+        'stripe_price_id' => '',
+        'stripe_price_id_weekly' => '',
+        'stripe_price_id_biweekly' => '',
+        'stripe_price_id_monthly' => '',
         'active' => 1,
       ),
       'lesson_30_inperson' => array(
         'sku' => 'lesson_30_inperson',
         'label' => '30 Minute In-Person Lesson',
-        'amount_cents' => 4300,
+        'amount_cents' => 3800,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '30_inperson',
+        'stripe_price_id' => '',
+        'stripe_price_id_weekly' => '',
+        'stripe_price_id_biweekly' => '',
+        'stripe_price_id_monthly' => '',
+        'active' => 1,
+      ),
+      'sheet_music_subscription_addon' => array(
+        'sku' => 'sheet_music_subscription_addon',
+        'label' => 'Sheet Music Subscription Add-On',
+        'amount_cents' => 500,
+        'currency' => 'usd',
+        'product_type' => 'sheet_music',
+        'category' => 'subscription_addon',
+        'stripe_price_id' => '',
         'active' => 1,
       ),
     );
@@ -689,6 +715,18 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/grant-sheet-music-add-on', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_grant_sheet_music_add_on'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/create-subscription', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_create_subscription'),
+      'permission_callback' => '__return_true',
+    ));
+
   }
 
   public function rest_quote(WP_REST_Request $req) {
@@ -748,6 +786,9 @@ class MRM_Payments_Hub_Single {
       'currency' => $currency,
       // Optional: only returned if you’ve stored it in products
       'price_id' => $price_id ? $price_id : null,
+      'stripe_price_id_weekly' => !empty($p['stripe_price_id_weekly']) ? (string)$p['stripe_price_id_weekly'] : null,
+      'stripe_price_id_biweekly' => !empty($p['stripe_price_id_biweekly']) ? (string)$p['stripe_price_id_biweekly'] : null,
+      'stripe_price_id_monthly' => !empty($p['stripe_price_id_monthly']) ? (string)$p['stripe_price_id_monthly'] : null,
     ), 200);
   }
 
@@ -1085,6 +1126,92 @@ class MRM_Payments_Hub_Single {
       'ok' => true,
       'email_hash' => $email_hash,
       'sku' => $sku,
+    ), 200);
+  }
+
+
+  public function rest_grant_sheet_music_add_on(WP_REST_Request $req) {
+    $data = (array) $req->get_json_params();
+    $email = sanitize_email((string)($data['email'] ?? $req->get_param('email') ?? ''));
+    if (!$email || !is_email($email)) {
+      return new WP_REST_Response(array('ok' => false, 'message' => 'Valid email required.'), 400);
+    }
+
+    $this->maybe_install_or_upgrade_db();
+    $sku = $this->get_all_sheet_music_sku();
+    $email_hash = $this->email_hash($email);
+    $now = current_time('mysql');
+    $future = gmdate('Y-m-d H:i:s', strtotime('+1 month', current_time('timestamp', true)));
+
+    global $wpdb;
+    $table = $this->table_sheet_music_access();
+    $ok = $wpdb->insert($table, array(
+      'email_hash' => $email_hash,
+      'sku'        => $sku,
+      'granted_at' => $now,
+      'revoked_at' => $future,
+      'source'     => 'sheet_music_add_on',
+      'source_id'  => null,
+    ), array('%s','%s','%s','%s','%s','%s'));
+
+    if (!$ok) {
+      return new WP_REST_Response(array('ok' => false, 'message' => 'Failed to grant add-on access.'), 500);
+    }
+
+    return new WP_REST_Response(array('ok' => true), 200);
+  }
+
+  public function rest_create_subscription(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $lesson_price_id = sanitize_text_field((string)($data['lesson_price_id'] ?? ''));
+    $sheet_music_price_id = sanitize_text_field((string)($data['sheet_music_price_id'] ?? ''));
+    $metadata = isset($data['metadata']) && is_array($data['metadata']) ? $data['metadata'] : array();
+
+    if (!$email || !is_email($email) || !$lesson_price_id) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Missing email or price.'), 400);
+    }
+
+    $customer_id = $this->stripe_find_or_create_customer($email);
+    if (is_wp_error($customer_id)) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>$customer_id->get_error_message()), 500);
+    }
+
+    $params = array(
+      'customer' => $customer_id,
+      'items[0][price]' => $lesson_price_id,
+      'cancel_at_period_end' => 'false',
+      'payment_behavior' => 'default_incomplete',
+      'payment_settings[save_default_payment_method]' => 'on_subscription',
+      'expand[]' => 'latest_invoice.payment_intent',
+    );
+
+    if ($sheet_music_price_id) {
+      $params['items[1][price]'] = $sheet_music_price_id;
+    }
+
+    foreach ((array)$metadata as $k => $v) {
+      $k = preg_replace('/[^a-zA-Z0-9_\-]/', '_', (string)$k);
+      $params["metadata[{$k}]"] = (string)$v;
+    }
+
+    $subscription = $this->stripe_api_request('POST', '/v1/subscriptions', $params);
+    if (is_wp_error($subscription)) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>$subscription->get_error_message()), 500);
+    }
+
+    $client_secret = '';
+    if (!empty($subscription['latest_invoice']['payment_intent']['client_secret'])) {
+      $client_secret = (string)$subscription['latest_invoice']['payment_intent']['client_secret'];
+    }
+
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'subscription_id' => (string)($subscription['id'] ?? ''),
+      'customer_id' => (string)$customer_id,
+      'client_secret' => $client_secret,
+      'publishableKey' => $this->publishable_key(),
+      'status' => (string)($subscription['status'] ?? ''),
     ), 200);
   }
 

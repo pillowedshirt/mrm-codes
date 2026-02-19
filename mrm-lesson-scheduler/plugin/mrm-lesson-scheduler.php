@@ -611,21 +611,7 @@ class MRM_Lesson_Scheduler {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
         }
 
-        // FEATURE: lesson booking grants all-sheet-music access (email-based, no accounts)
-        $student_email = isset( $data['student_email'] ) ? sanitize_email( $data['student_email'] ) : '';
-        if ( $student_email && is_email( $student_email ) ) {
-            $hub = function_exists( 'mrm_pay_hub_singleton' ) ? mrm_pay_hub_singleton() : null;
-            if ( $hub ) {
-                // add to master list + access table row (sku == product_slug)
-                $hub->add_email_to_access_list( 'all-sheet-music', $student_email );
-
-                // also ensure DB table row exists
-                $hub->maybe_install_or_upgrade_db();
-                $hub->grant_all_sheet_music_db_row( $student_email, 'lesson_booking', (string) ( $created_ids[0] ?? '' ) );
-            } else {
-                error_log( '[MRM Lesson Scheduler] Payments Hub not available; could not grant all-sheet-music.' );
-            }
-        }
+        // Removed: do not auto-enrol lesson bookings into all sheet-music access.
 
         return new WP_REST_Response( array(
             'ok' => true,

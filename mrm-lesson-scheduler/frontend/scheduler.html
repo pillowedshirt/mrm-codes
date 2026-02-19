@@ -1538,9 +1538,21 @@ h1 {
           </div>
 
           <div class="payment-options">
-            <label><input type="checkbox" id="mrm-autopay-opt"> I am aware that I am signing up for auto-pay for future lessons.</label><br>
-            <label><input type="checkbox" id="mrm-prepay-opt"> I would like to prepay for all selected lessons.</label>
-            <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
+            <div class="terms-row">
+              <input type="checkbox" id="mrm-autopay-opt">
+              <label for="mrm-autopay-opt" class="terms-text">I am aware that I am signing up for auto-pay for future lessons.</label>
+            </div>
+            <div class="terms-row" style="margin-top:6px;">
+              <input type="checkbox" id="mrm-prepay-opt">
+              <label for="mrm-prepay-opt" class="terms-text">I would like to prepay for all selected lessons.</label>
+            </div>
+            <div class="terms-row" style="margin-top:6px;">
+              <input type="checkbox" id="mrm-sheetmusic-opt">
+              <label for="mrm-sheetmusic-opt" class="terms-text">
+                Subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)
+              </label>
+            </div>
+            <div style="margin-top:6px;" class="terms-text">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
           </div>
 
           <div class="modal-actions">
@@ -1581,6 +1593,26 @@ const payApiBase = '/wp-json/mrm-pay/v1';
 let stripe = null;
 let activeStripeElements = null;
 let activePaymentElement = null;
+
+async function fetchTaxRateForLocation(address){
+  const stateRates = {
+    AL: 0.04, AK: 0, AZ: 0.056, AR: 0.065, CA: 0.0725, CO: 0.029, CT: 0.0635,
+    DE: 0, FL: 0.06, GA: 0.04, HI: 0.04, ID: 0.06, IL: 0.0625, IN: 0.07,
+    IA: 0.06, KS: 0.065, KY: 0.06, LA: 0.0445, ME: 0.055, MD: 0.06, MA: 0.0625,
+    MI: 0.06, MN: 0.0688, MS: 0.07, MO: 0.0423, MT: 0, NE: 0.055, NV: 0.0685,
+    NH: 0, NJ: 0.0663, NM: 0.0513, NY: 0.04, NC: 0.0475, ND: 0.05, OH: 0.0575,
+    OK: 0.045, OR: 0, PA: 0.06, RI: 0.07, SC: 0.06, SD: 0.045, TN: 0.07,
+    TX: 0.0625, UT: 0.061, VT: 0.06, VA: 0.053, WA: 0.065, WV: 0.06, WI: 0.05,
+    WY: 0.04, DC: 0.06
+  };
+
+  const normalized = String(address || '').toUpperCase();
+  const stateMatch = normalized.match(/\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/);
+  if (stateMatch && stateRates[stateMatch[1]] != null) {
+    return stateRates[stateMatch[1]];
+  }
+  return 0;
+}
 
 function ensureStripe(publishableKey){
   const key = (publishableKey || '').trim();
@@ -2181,6 +2213,7 @@ function ensureLegacyBookingHandler(){
 
       const prepay = document.getElementById('mrm-prepay-opt')?.checked;
       const autopay = document.getElementById('mrm-autopay-opt')?.checked;
+      const subscribeAddOn = document.getElementById('mrm-sheetmusic-opt')?.checked;
 
       if(!prepay && !autopay){
         setMsg('Please choose either prepay or auto-pay.');
@@ -2198,8 +2231,80 @@ function ensureLegacyBookingHandler(){
           return;
         }
 
+        const addOnQuoteRes = await fetch(`${payApiBase}/quote?sku=${encodeURIComponent('sheet_music_subscription_addon')}`);
+        const addOnQuote = await addOnQuoteRes.json();
+        if(!addOnQuoteRes.ok || !addOnQuote.ok){
+          setMsg(addOnQuote.message || 'Unable to fetch add-on pricing.');
+          return;
+        }
+
         const baseAmount = quote.amount_cents || 0;
-        const chargeAmountCents = prepay ? (baseAmount * count) : baseAmount;
+        const lessonTotal = prepay ? (baseAmount * count) : baseAmount;
+        const addOnPrice = subscribeAddOn ? (addOnQuote.amount_cents || 500) : 0;
+        const taxRate = await fetchTaxRateForLocation(address);
+        const addOnTax = subscribeAddOn ? Math.round(addOnPrice * taxRate) : 0;
+        const chargeAmountCents = lessonTotal + addOnPrice + addOnTax;
+
+        if (autopay) {
+          const frequencyToPriceKey = {
+            weekly: 'stripe_price_id_weekly',
+            biweekly: 'stripe_price_id_biweekly',
+            monthly: 'stripe_price_id_monthly'
+          };
+          const lessonPriceId = quote[frequencyToPriceKey[frequency]] || quote.price_id || '';
+          const sheetMusicPriceId = subscribeAddOn ? (addOnQuote.price_id || '') : '';
+
+          const subRes = await fetch(payApiBase + '/create-subscription', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+              email,
+              lesson_price_id: lessonPriceId,
+              sheet_music_price_id: sheetMusicPriceId,
+              metadata: {
+                lesson_length: len,
+                lesson_mode: lessonType,
+                lesson_count: String(count),
+                prepay: prepay ? 'yes' : 'no',
+                subscribe_sheet_music: subscribeAddOn ? 'yes' : 'no',
+                repeat_frequency: frequency || 'weekly'
+              }
+            })
+          });
+          const subData = await subRes.json();
+          if (!subRes.ok || !subData.ok) {
+            setMsg(subData.message || 'Unable to create subscription.');
+            return;
+          }
+
+          const stripeInstance = ensureStripe(subData.publishableKey || '');
+          if (!stripeInstance || !subData.client_secret) {
+            setMsg('Subscription created. Please contact support to complete payment setup.');
+            return;
+          }
+          stripe = stripeInstance;
+
+          const recurringTotalDisplay = `Recurring lesson: $${(baseAmount / 100).toFixed(2)}${subscribeAddOn ? ` + add-on $${((addOnPrice + addOnTax) / 100).toFixed(2)}` : ''}`;
+          const { payBtn, errorEl, closeModal } = openPaymentModal(subData.client_secret, recurringTotalDisplay);
+          payBtn.onclick = async () => {
+            payBtn.disabled = true;
+            const { error, paymentIntent } = await stripe.confirmPayment({
+              elements: activeStripeElements,
+              confirmParams: { return_url: window.location.href }
+            });
+            if (error) {
+              errorEl.textContent = error.message || 'Subscription setup failed.';
+              payBtn.disabled = false;
+              return;
+            }
+            if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'processing')) {
+              await submitBooking(payload, setMsg);
+              setMsg('Subscription created successfully. Recurring payments are now active.');
+              closeModal();
+            }
+          };
+          return;
+        }
 
         const createRes = await fetch(payApiBase + '/create-payment-intent', {
           method:'POST',
@@ -2207,7 +2312,7 @@ function ensureLegacyBookingHandler(){
           body: JSON.stringify({
             sku: sku,
             email: email,
-            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
+            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no', subscribe_sheet_music: subscribeAddOn ? 'yes' : 'no' },
             save_card: autopay,
             amount_override_cents: chargeAmountCents
           })
@@ -2250,6 +2355,13 @@ function ensureLegacyBookingHandler(){
           }
           if (paymentIntent && paymentIntent.status === 'succeeded') {
             await verifyPaymentIntent(paymentIntent.id, email);
+            if (subscribeAddOn) {
+              await fetch(payApiBase + '/grant-sheet-music-add-on', {
+                method:'POST',
+                headers:{ 'Content-Type':'application/json' },
+                body: JSON.stringify({ email })
+              });
+            }
             await submitBooking(payload, setMsg);
             closeModal();
           }
