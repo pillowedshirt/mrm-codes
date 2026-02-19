@@ -2296,51 +2296,20 @@ function ensureLegacyBookingHandler(){
         }
 
         const baseAmount = quote.amount_cents || 0;
-        const lessonPrice = Math.max(0, baseAmount - 500);
-        const lessonTotal = prepay ? (lessonPrice * count) : lessonPrice;
-        const addOnPrice = subscribeAddOn ? 500 : 0;
-        const taxRate = await fetchTaxRateForLocation(address);
-        const addOnTax = subscribeAddOn ? Math.round(addOnPrice * taxRate) : 0;
-        const chargeAmountCents = lessonTotal + addOnPrice + addOnTax;
 
-        if (autopay && !prepay) {
-          const metadata = {
-            sku,
-            lesson_length: len,
-            lesson_mode: lessonType,
-            lesson_count: String(count),
-            repeat_frequency: frequency,
-            repeat_duration: reserveDuration,
-            subscribe_sheet_music: subscribeAddOn ? 'yes' : 'no'
-          };
+        // IMPORTANT:
+        // - For PREPAY, let the server compute the final amount (it already does this safely).
+        // - For NON-prepay, no override is needed either.
+        const amountOverrideCents = 0;
 
-          let addOnPriceId = '';
-          if (subscribeAddOn) {
-            const addOnQuoteRes = await fetch(`${payApiBase}/quote?sku=sheet_music_monthly_addon`);
-            const addOnQuote = await addOnQuoteRes.json();
-            if (addOnQuoteRes.ok && addOnQuote.ok) {
-              addOnPriceId = addOnQuote.price_id || '';
-            }
-          }
+        // For PREPAY, we want the server to know how many lessons you’re prepaying for.
+        // Right now your “count” equals how many slots were selected for this instructor.
+        const lessonCount = prepay ? count : 1;
 
-          const subRes = await fetch(payApiBase + '/create-subscription', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({
-              email,
-              lesson_price_id: quote.price_id || '',
-              sheet_music_price_id: addOnPriceId,
-              metadata
-            })
-          });
-          const subData = await subRes.json();
-          if (!subRes.ok || !subData.ok) {
-            setMsg(subData.message || 'Unable to create subscription.');
-            return;
-          }
+        const emailTrim = (email || '').trim();
 
-          await submitBooking(payload, setMsg);
-          setMsg('Subscription created and booking confirmed.');
+        if (!emailTrim || !emailTrim.includes('@')) {
+          setMsg('Please enter a valid email address.');
           return;
         }
 
@@ -2349,10 +2318,10 @@ function ensureLegacyBookingHandler(){
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify({
             sku: sku,
-            email: email,
-            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no', subscribe_sheet_music: subscribeAddOn ? 'yes' : 'no' },
-            save_card: autopay,
-            amount_override_cents: chargeAmountCents
+            email: emailTrim,
+            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: lessonCount, prepay: prepay ? 'yes' : 'no', subscribe_sheet_music: subscribeAddOn ? 'yes' : 'no' },
+            save_card: autopay ? true : false,
+            amount_override_cents: amountOverrideCents
           })
         });
         const createData = await createRes.json();
@@ -2368,13 +2337,15 @@ function ensureLegacyBookingHandler(){
         }
         stripe = stripeInstance;
 
+        const estimatedTotal = prepay ? (baseAmount * count) : baseAmount;
+
         const priceDisplay = prepay
-          ? `Total ${count} lesson(s): $${(chargeAmountCents / 100).toFixed(2)}`
-          : `Lesson total: $${(chargeAmountCents / 100).toFixed(2)}`;
+          ? `Total ${count} lesson(s): $${(estimatedTotal / 100).toFixed(2)}`
+          : `Lesson total: $${(estimatedTotal / 100).toFixed(2)}`;
 
         sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
           payload,
-          email,
+          email: emailTrim,
           payment_intent_id: createData.payment_intent_id
         }));
 
@@ -2392,12 +2363,12 @@ function ensureLegacyBookingHandler(){
             return;
           }
           if (paymentIntent && paymentIntent.status === 'succeeded') {
-            await verifyPaymentIntent(paymentIntent.id, email);
+            await verifyPaymentIntent(paymentIntent.id, emailTrim);
             if (subscribeAddOn) {
               await fetch(payApiBase + '/grant-sheet-music-add-on', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ email })
+                body: JSON.stringify({ email: emailTrim })
               });
             }
             await submitBooking(payload, setMsg);
