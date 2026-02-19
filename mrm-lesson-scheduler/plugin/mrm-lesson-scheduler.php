@@ -560,6 +560,7 @@ class MRM_Lesson_Scheduler {
 
         $now = current_time( 'mysql' );
         $created_ids = array();
+        $new_lessons = array();
 
         foreach ( $slots as $slot ) {
             $start_raw = (string) ( $slot['start'] ?? '' );
@@ -603,12 +604,102 @@ class MRM_Lesson_Scheduler {
             ) );
 
             if ( $ok ) {
-                $created_ids[] = (int) $wpdb->insert_id;
+                $new_id = (int) $wpdb->insert_id;
+                $created_ids[] = $new_id;
+                $new_lessons[] = array(
+                    'id'            => $new_id,
+                    'start_mysql'   => $start_mysql,
+                    'end_mysql'     => $end_mysql,
+                    'is_online'     => (int) $is_online,
+                    'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
+                );
             }
         }
 
         if ( empty( $created_ids ) ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
+        }
+
+        $instr_info = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT name,email,calendar_id,timezone FROM {$wpdb->prefix}mrm_instructors WHERE id = %d LIMIT 1",
+                $instructor_id
+            ),
+            ARRAY_A
+        );
+        $instr_calendar_id = is_array( $instr_info ) && ! empty( $instr_info['calendar_id'] ) ? (string) $instr_info['calendar_id'] : '';
+        $instr_timezone    = is_array( $instr_info ) && ! empty( $instr_info['timezone'] ) ? (string) $instr_info['timezone'] : '';
+        $instr_email       = is_array( $instr_info ) && ! empty( $instr_info['email'] ) ? (string) $instr_info['email'] : '';
+        $instr_name        = is_array( $instr_info ) && ! empty( $instr_info['name'] ) ? (string) $instr_info['name'] : '';
+
+        if ( $instr_calendar_id !== '' && $this->google_is_configured() ) {
+            foreach ( $new_lessons as $info ) {
+                $lesson_id      = (int) $info['id'];
+                $start_mysql    = (string) $info['start_mysql'];
+                $end_mysql      = (string) $info['end_mysql'];
+                $online_flag    = (int) $info['is_online'];
+                $length_minutes = (int) $info['lesson_length'];
+
+                // Convert stored UTC timestamps to instructor local timezone for RFC3339
+                $start_dt = new DateTime( $start_mysql, new DateTimeZone( 'UTC' ) );
+                $end_dt   = new DateTime( $end_mysql, new DateTimeZone( 'UTC' ) );
+                if ( $instr_timezone ) {
+                    $tz = new DateTimeZone( $instr_timezone );
+                    $start_dt->setTimezone( $tz );
+                    $end_dt->setTimezone( $tz );
+                }
+                $start_rfc3339 = $start_dt->format( DateTime::ATOM );
+                $end_rfc3339   = $end_dt->format( DateTime::ATOM );
+
+                // Event title and description
+                $event_title = $student_name !== '' ? $student_name . ' Lesson' : 'Lesson';
+                $mode_label  = $online_flag ? 'Online' : 'In-Person';
+                $event_desc  = 'Lesson booked via scheduler (' . $mode_label . ').';
+
+                // Extended properties let cron_sync_upcoming_events match the booking later
+                $extended_private = array(
+                    'booking_id'       => $lesson_id,
+                    'lesson_length'    => (string) $length_minutes,
+                    'appointment_type' => $online_flag ? 'online' : 'in_person',
+                );
+
+                // Add the student and instructor as attendees so both receive calendar notifications
+                $attendees = array();
+                if ( is_email( $student_email ) ) {
+                    $attendees[] = $student_email;
+                }
+                if ( is_email( $instr_email ) ) {
+                    $attendees[] = $instr_email;
+                }
+
+                $insert = $this->google_insert_event(
+                    $instr_calendar_id,
+                    $event_title,
+                    $event_desc,
+                    '',
+                    $start_rfc3339,
+                    $end_rfc3339,
+                    $instr_timezone ?: 'UTC',
+                    $extended_private,
+                    array(),
+                    false,
+                    $attendees
+                );
+
+                // If an event ID is returned, store it on the lesson record
+                if ( is_array( $insert ) && ! empty( $insert['id'] ) ) {
+                    $wpdb->update(
+                        $lessons_table,
+                        array(
+                            'google_event_id' => (string) $insert['id'],
+                            'updated_at'      => current_time( 'mysql' ),
+                        ),
+                        array( 'id' => $lesson_id ),
+                        array( '%s', '%s' ),
+                        array( '%d' )
+                    );
+                }
+            }
         }
 
         // Removed: do not auto-enrol lesson bookings into all sheet-music access.

@@ -263,7 +263,7 @@ class MRM_Payments_Hub_Single {
       'lesson_60_online' => array(
         'sku' => 'lesson_60_online',
         'label' => '60 Minute Online Lesson',
-        'amount_cents' => 6200,
+        'amount_cents' => 5700,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '60_online',
@@ -273,7 +273,7 @@ class MRM_Payments_Hub_Single {
       'lesson_60_inperson' => array(
         'sku' => 'lesson_60_inperson',
         'label' => '60 Minute In-Person Lesson',
-        'amount_cents' => 6700,
+        'amount_cents' => 6200,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '60_inperson',
@@ -283,7 +283,7 @@ class MRM_Payments_Hub_Single {
       'lesson_30_online' => array(
         'sku' => 'lesson_30_online',
         'label' => '30 Minute Online Lesson',
-        'amount_cents' => 3300,
+        'amount_cents' => 2800,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '30_online',
@@ -293,7 +293,7 @@ class MRM_Payments_Hub_Single {
       'lesson_30_inperson' => array(
         'sku' => 'lesson_30_inperson',
         'label' => '30 Minute In-Person Lesson',
-        'amount_cents' => 3800,
+        'amount_cents' => 3300,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '30_inperson',
@@ -887,6 +887,21 @@ class MRM_Payments_Hub_Single {
 
     $base_amount = (int)$amount;
 
+    // If the scheduler requested the sheet-music add-on, add the add-on price
+    $subscribe_addon = isset($context['subscribe_sheet_music']) &&
+                       strtolower((string)$context['subscribe_sheet_music']) === 'yes';
+    if ($subscribe_addon) {
+      $sheet = $this->get_product('sheet_music_monthly_addon');
+      if ($sheet && is_array($sheet) && !empty($sheet['active'])) {
+        $addon_amount = isset($sheet['amount_cents']) ? (int)$sheet['amount_cents'] : 0;
+        if ($addon_amount > 0) {
+          // Add the $5 only once per booking
+          $base_amount += $addon_amount;
+          $amount      += $addon_amount;
+        }
+      }
+    }
+
     // Diagnostics for misconfigured products
     if ($base_amount <= 0) {
       error_log('[MRM Payments Hub] create-payment-intent invalid base amount sku=' . $sku . ' amount_cents=' . $base_amount);
@@ -1356,7 +1371,7 @@ class MRM_Payments_Hub_Single {
        WHERE product_type = 'lesson'
          AND status = 'succeeded'
        GROUP BY email_hash
-       HAVING MAX(updated_at) < ( NOW() - INTERVAL 28 DAY )"
+       HAVING MAX(updated_at) < ( NOW() - INTERVAL 31 DAY )"
     );
     if (empty($expired)) return;
 
