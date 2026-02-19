@@ -453,8 +453,16 @@ class MRM_Lesson_Scheduler {
             'callback' => array( $this, 'rest_get_availability' ),
             'args' => array(
                 'instructor_id' => array( 'type' => 'integer', 'required' => true ),
-                'start' => array( 'type' => 'string', 'required' => true ),
-                'end' => array( 'type' => 'string', 'required' => true ),
+                // Canonical (scheduler.html uses these)
+                'start_date' => array( 'type' => 'string', 'required' => false ),
+                'end_date'   => array( 'type' => 'string', 'required' => false ),
+
+                // Legacy (keep for 30 days)
+                'start' => array( 'type' => 'string', 'required' => false ),
+                'end'   => array( 'type' => 'string', 'required' => false ),
+
+                // Optional slot size (scheduler.html sends slot_minutes=15)
+                'slot_minutes' => array( 'type' => 'integer', 'required' => false ),
             ),
             'permission_callback' => '__return_true',
         ) );
@@ -473,6 +481,158 @@ class MRM_Lesson_Scheduler {
             },
             'permission_callback' => '__return_true',
         ) );
+    }
+
+    private function grant_all_sheet_music_access_for_email( $email, $source = 'lesson_booking', $source_id = '' ) {
+        $email = sanitize_email( (string) $email );
+        if ( ! $email || ! is_email( $email ) ) {
+            return;
+        }
+
+        $hub_settings = get_option( 'mrm_pay_hub_settings', array() );
+        $all_sku      = isset( $hub_settings['all_sheet_music_sku'] ) ? (string) $hub_settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
+        $all_sku      = strtolower( trim( $all_sku ) );
+        $all_sku      = preg_replace( '/[^a-z0-9\-_]/', '', $all_sku );
+        if ( $all_sku === '' ) {
+            return;
+        }
+
+        $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
+
+        global $wpdb;
+        $table  = $wpdb->prefix . 'mrm_sheet_music_access';
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        if ( $exists !== $table ) {
+            return;
+        }
+
+        $now = current_time( 'mysql' );
+
+        // If already active, do nothing.
+        $id = $wpdb->get_var( $wpdb->prepare(
+            "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+            $email_hash,
+            $all_sku
+        ) );
+        if ( $id ) {
+            return;
+        }
+
+        $wpdb->insert( $table, array(
+            'email_hash' => $email_hash,
+            'sku'        => $all_sku,
+            'granted_at' => $now,
+            'revoked_at' => null,
+            'source'     => $source,
+            'source_id'  => $source_id !== '' ? (string) $source_id : null,
+        ), array( '%s','%s','%s','%s','%s','%s' ) );
+    }
+
+    public function rest_book_lesson( WP_REST_Request $request ) {
+        global $wpdb;
+
+        $data = (array) $request->get_json_params();
+
+        $instructor_id = intval( $data['instructor_id'] ?? 0 );
+        $slots         = isset( $data['slots'] ) && is_array( $data['slots'] ) ? $data['slots'] : array();
+
+        $student_name  = sanitize_text_field( (string) ( $data['student_name'] ?? '' ) );
+        $student_email = sanitize_email( (string) ( $data['student_email'] ?? '' ) );
+        $instrument    = sanitize_text_field( (string) ( $data['instrument'] ?? '' ) );
+        $is_online     = ! empty( $data['online'] ) ? 1 : 0;
+        $lesson_length = intval( $data['lesson_length'] ?? ( $data['slot_minutes'] ?? 60 ) );
+
+        if ( $instructor_id <= 0 ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
+        }
+        if ( ! $student_email || ! is_email( $student_email ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Valid student_email required.' ), 400 );
+        }
+        if ( empty( $slots ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'No slots selected.' ), 400 );
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $lessons_table ) );
+        if ( $exists !== $lessons_table ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Lessons table missing.' ), 500 );
+        }
+
+        $now = current_time( 'mysql' );
+        $created_ids = array();
+
+        foreach ( $slots as $slot ) {
+            $start_raw = (string) ( $slot['start'] ?? '' );
+            $end_raw   = (string) ( $slot['end'] ?? '' );
+
+            $start_ts = strtotime( $start_raw );
+            $end_ts   = strtotime( $end_raw );
+
+            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                continue;
+            }
+
+            $start_mysql = gmdate( 'Y-m-d H:i:s', $start_ts );
+            $end_mysql   = gmdate( 'Y-m-d H:i:s', $end_ts );
+
+            $token = bin2hex( random_bytes( 16 ) );
+            $token_hash = hash( 'sha256', $token );
+
+            $ok = $wpdb->insert( $lessons_table, array(
+                'instructor_id' => $instructor_id,
+                'series_id'     => null,
+                'student_name'  => $student_name !== '' ? $student_name : $student_email,
+                'student_email' => $student_email,
+                'instrument'    => $instrument !== '' ? $instrument : 'unknown',
+                'is_online'     => $is_online,
+                'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
+                'start_time'    => $start_mysql,
+                'end_time'      => $end_mysql,
+                'status'        => 'scheduled',
+                'google_event_id' => null,
+                'google_meet_url' => null,
+                'agreement_id'    => null,
+                'created_at'      => $now,
+                'updated_at'      => $now,
+                'reminder_token'  => $token,
+                'reminder_token_hash' => $token_hash,
+                'reminder_scheduled_at' => null,
+                'reminder_sent_at' => null,
+            ), array(
+                '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'
+            ) );
+
+            if ( $ok ) {
+                $created_ids[] = (int) $wpdb->insert_id;
+            }
+        }
+
+        if ( empty( $created_ids ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
+        }
+
+        // FEATURE: lesson booking grants all-sheet-music access (email-based, no accounts)
+        $student_email = isset( $data['student_email'] ) ? sanitize_email( $data['student_email'] ) : '';
+        if ( $student_email && is_email( $student_email ) ) {
+            $hub = function_exists( 'mrm_pay_hub_singleton' ) ? mrm_pay_hub_singleton() : null;
+            if ( $hub ) {
+                // add to master list + access table row (sku == product_slug)
+                $hub->add_email_to_access_list( 'all-sheet-music', $student_email );
+
+                // also ensure DB table row exists
+                $hub->maybe_install_or_upgrade_db();
+                $hub->grant_all_sheet_music_db_row( $student_email, 'lesson_booking', (string) ( $created_ids[0] ?? '' ) );
+            } else {
+                error_log( '[MRM Lesson Scheduler] Payments Hub not available; could not grant all-sheet-music.' );
+            }
+        }
+
+        return new WP_REST_Response( array(
+            'ok' => true,
+            'success' => true,
+            'message' => 'Booking confirmed!',
+            'lesson_ids' => $created_ids,
+        ), 200 );
     }
 
     /* =========================================================
@@ -1264,19 +1424,94 @@ class MRM_Lesson_Scheduler {
      * Availability is derived from explicit "Free" events on the calendar.
      */
     public function rest_get_availability( WP_REST_Request $request ) {
+        // =========================
+        // Inputs (canonical + legacy)
+        // =========================
+        $instructor_id = absint( $request->get_param( 'instructor_id' ) );
 
-        $instructor_id = intval( $request->get_param( 'instructor_id' ) );
-        $start         = sanitize_text_field( $request->get_param( 'start' ) );
-        $end           = sanitize_text_field( $request->get_param( 'end' ) );
+        // Canonical params (preferred)
+        $start = sanitize_text_field( (string) $request->get_param( 'start_date' ) );
+        $end   = sanitize_text_field( (string) $request->get_param( 'end_date' ) );
 
-        if ( ! $instructor_id || ! $start || ! $end ) {
+        // Legacy fallback (keep for 30 days)
+        if ( $start === '' ) { $start = sanitize_text_field( (string) $request->get_param( 'start' ) ); }
+        if ( $end   === '' ) { $end   = sanitize_text_field( (string) $request->get_param( 'end' ) ); }
+
+        $slot_minutes = absint( $request->get_param( 'slot_minutes' ) );
+
+        // =========================
+        // Diagnostics helper
+        // =========================
+        $log_prefix = 'MRM_SCHED availability: ';
+
+        // =========================
+        // Validate instructor_id
+        // =========================
+        if ( ! $instructor_id ) {
+            error_log( $log_prefix . 'missing/invalid instructor_id' );
             return new WP_REST_Response( array(
                 'ok'      => false,
-                'message' => 'Missing required parameters.'
+                'message' => 'Invalid instructor_id.',
             ), 400 );
         }
 
-        // Fetch explicit availability events from Google Calendar
+        // Confirm instructor exists (so we can log “invalid instructor_id” explicitly)
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_instructors';
+        $exists = (int) $wpdb->get_var(
+            $wpdb->prepare( "SELECT COUNT(1) FROM {$table} WHERE id = %d", $instructor_id )
+        );
+        if ( $exists <= 0 ) {
+            error_log( $log_prefix . 'invalid instructor_id=' . $instructor_id . ' (not found in DB)' );
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Instructor not found.',
+            ), 404 );
+        }
+
+        // =========================
+        // Validate date params (strict YYYY-MM-DD)
+        // =========================
+        if ( $start === '' || $end === '' ) {
+            error_log( $log_prefix . 'missing start/end date params. Got start=' . $start . ' end=' . $end );
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Missing required parameters: start_date/end_date.',
+            ), 400 );
+        }
+
+        if ( ! $this->mrm_is_valid_ymd( $start ) || ! $this->mrm_is_valid_ymd( $end ) ) {
+            error_log( $log_prefix . 'invalid date format. start=' . $start . ' end=' . $end . ' (expected YYYY-MM-DD)' );
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Invalid date format. Expected YYYY-MM-DD.',
+            ), 400 );
+        }
+
+        // Optional: basic range sanity (end >= start)
+        if ( strtotime( $end . ' 00:00:00' ) < strtotime( $start . ' 00:00:00' ) ) {
+            error_log( $log_prefix . 'invalid date range. start=' . $start . ' end=' . $end );
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Invalid date range: end_date must be >= start_date.',
+            ), 400 );
+        }
+
+        // =========================
+        // Validate slot_minutes bounds
+        // =========================
+        // Scheduler uses 15. If caller sends something weird, fall back to default-slot behavior (0).
+        if ( $slot_minutes !== 0 ) {
+            // sensible bounds: 10..180
+            if ( $slot_minutes < 10 || $slot_minutes > 180 ) {
+                error_log( $log_prefix . 'slot_minutes out of bounds: ' . $slot_minutes . ' (forcing default)' );
+                $slot_minutes = 0;
+            }
+        }
+
+        // =========================
+        // Fetch availability events from Google Calendar
+        // =========================
         $availability_events = $this->get_calendar_availability_events(
             $instructor_id,
             $start,
@@ -1286,10 +1521,16 @@ class MRM_Lesson_Scheduler {
         if ( empty( $availability_events ) ) {
             return new WP_REST_Response( array(
                 'ok'          => true,
-                'availability'=> array()
+                'slots'       => array(),
+                'busy'        => array(),
+                // Legacy alias (keep ~30 days)
+                'availability'=> array(),
             ), 200 );
         }
 
+        // =========================
+        // Split into bookable slots
+        // =========================
         $slots = array();
 
         foreach ( $availability_events as $event ) {
@@ -1300,11 +1541,11 @@ class MRM_Lesson_Scheduler {
                 continue;
             }
 
-            // Split each availability event into bookable slots
             $event_slots = $this->split_into_lesson_slots(
                 $event_start,
                 $event_end,
-                $instructor_id
+                $instructor_id,
+                $slot_minutes
             );
 
             $slots = array_merge( $slots, $event_slots );
@@ -1312,8 +1553,22 @@ class MRM_Lesson_Scheduler {
 
         return new WP_REST_Response( array(
             'ok'          => true,
-            'availability'=> array_values( $slots )
+            'slots'       => array_values( $slots ),
+            'busy'        => array(), // reserved for future busy-window support
+            // Legacy alias (keep ~30 days)
+            'availability'=> array_values( $slots ),
         ), 200 );
+    }
+
+    private function mrm_is_valid_ymd( $s ) {
+        $s = (string) $s;
+        if ( ! preg_match( '/^\\d{4}-\\d{2}-\\d{2}$/', $s ) ) {
+            return false;
+        }
+        $y = (int) substr( $s, 0, 4 );
+        $m = (int) substr( $s, 5, 2 );
+        $d = (int) substr( $s, 8, 2 );
+        return checkdate( $m, $d, $y );
     }
 
     private function get_calendar_availability_events( $instructor_id, $start, $end ) {
@@ -1337,8 +1592,19 @@ class MRM_Lesson_Scheduler {
         }
 
         try {
-            $start_local = new DateTime( $start, new DateTimeZone( $tz ) );
-            $end_local   = new DateTime( $end, new DateTimeZone( $tz ) );
+            // We require strict YYYY-MM-DD from the REST layer, so interpret as local-day boundaries:
+            // - start_date => inclusive at 00:00:00
+            // - end_date   => inclusive, implemented as EXCLUSIVE upper bound (end + 1 day at 00:00:00)
+            $start_local = DateTime::createFromFormat( 'Y-m-d', $start, new DateTimeZone( $tz ) );
+            $end_local   = DateTime::createFromFormat( 'Y-m-d', $end,   new DateTimeZone( $tz ) );
+
+            if ( ! $start_local || ! $end_local ) {
+                return array();
+            }
+
+            $start_local->setTime( 0, 0, 0 );
+            $end_local->setTime( 0, 0, 0 );
+            $end_local->modify( '+1 day' ); // makes end_date inclusive
         } catch ( Exception $e ) {
             return array();
         }
@@ -1370,9 +1636,9 @@ class MRM_Lesson_Scheduler {
         return $availability;
     }
 
-    private function split_into_lesson_slots( $start_ts, $end_ts, $instructor_id ) {
+    private function split_into_lesson_slots( $start_ts, $end_ts, $instructor_id, $slot_minutes_override = 0 ) {
         $opts = $this->get_settings();
-        $slot_minutes = isset( $opts['default_slot_minutes'] ) ? (int) $opts['default_slot_minutes'] : 30;
+        $slot_minutes = $slot_minutes_override ? (int)$slot_minutes_override : ( isset( $opts['default_slot_minutes'] ) ? (int) $opts['default_slot_minutes'] : 30 );
         if ( $slot_minutes < 10 ) {
             $slot_minutes = 30;
         }

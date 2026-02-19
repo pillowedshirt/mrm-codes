@@ -162,7 +162,6 @@ class MRM_Product_Access {
                 'auth_secret'                => wp_generate_password( 32, true, true ),
                 'email_subject'              => 'Your access code',
                 'email_body'                 => "Your one-time code is: {{OTP}}\n\nIf you did not request this, ignore this email.",
-                'sheet_music_catalog_url'    => '/sheet-music/',
                 'pieces'                     => array(),
                 'offerings'                  => array(
                     array( 'key' => 'full', 'label' => 'Full Package', 'amount_cents' => 0 ),
@@ -307,18 +306,73 @@ class MRM_Product_Access {
 
         $options = $this->get_options();
 
+        // Migration: old option -> new option
+        $legacy = get_option( 'mrm_pa_product_tracks_by_slug', null );
+        $current = get_option( 'product_tracks_by_slug', null );
+        if ( is_array( $legacy ) && ! is_array( $current ) ) {
+            update_option( 'product_tracks_by_slug', $legacy );
+        }
+
+        // One-time migration: legacy options['products'][slug]['tracks'] -> mrm_pa_product_tracks_by_slug
+        $existing_map = get_option( 'mrm_pa_product_tracks_by_slug', null );
+        if ( $existing_map === null ) {
+            $migrated = array();
+            if ( ! empty( $options['products'] ) && is_array( $options['products'] ) ) {
+                foreach ( $options['products'] as $slug => $conf ) {
+                    $slug = $this->sanitize_product_slug( $slug );
+                    if ( $slug === '' ) {
+                        continue;
+                    }
+
+                    $items = array();
+
+                    // Legacy "tracks" could be sequential items or associative map
+                    if ( ! empty( $conf['tracks'] ) && is_array( $conf['tracks'] ) ) {
+                        if ( array_keys( $conf['tracks'] ) === range( 0, count( $conf['tracks'] ) - 1 ) ) {
+                            foreach ( $conf['tracks'] as $it ) {
+                                if ( ! is_array( $it ) ) {
+                                    continue;
+                                }
+                                $title = sanitize_text_field( (string) ( $it['title'] ?? '' ) );
+                                $path  = sanitize_text_field( (string) ( $it['path'] ?? '' ) );
+                                if ( $path !== '' ) {
+                                    $items[] = array(
+                                        'name' => $title !== '' ? $title : 'Track',
+                                        'url'  => $path,
+                                    );
+                                }
+                                if ( count( $items ) >= 25 ) {
+                                    break;
+                                }
+                            }
+                        } else {
+                            foreach ( $conf['tracks'] as $k => $v ) {
+                                $k = sanitize_text_field( (string) $k );
+                                $v = sanitize_text_field( (string) $v );
+                                if ( $v !== '' ) {
+                                    $items[] = array(
+                                        'name' => $k !== '' ? $k : 'Track',
+                                        'url'  => $v,
+                                    );
+                                }
+                                if ( count( $items ) >= 25 ) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if ( ! empty( $items ) ) {
+                        $migrated[ $slug ] = $items;
+                    }
+                }
+            }
+            add_option( 'mrm_pa_product_tracks_by_slug', $migrated );
+        }
+
         if ( isset( $_POST['mrm_pa_save_settings'] ) && check_admin_referer( 'mrm_pa_save_settings' ) ) {
-            // Stripe configuration.
-            $options['test_mode']                  = isset( $_POST['test_mode'] );
-            $options['stripe_test_secret_key']     = sanitize_text_field( $_POST['stripe_test_secret_key'] );
-            $options['stripe_test_webhook_secret'] = sanitize_text_field( $_POST['stripe_test_webhook_secret'] );
-            $options['stripe_live_secret_key']     = sanitize_text_field( $_POST['stripe_live_secret_key'] );
-            $options['stripe_live_webhook_secret'] = sanitize_text_field( $_POST['stripe_live_webhook_secret'] );
             $options['email_subject']              = sanitize_text_field( $_POST['email_subject'] );
             $options['email_body']                 = wp_kses_post( $_POST['email_body'] );
-            $options['sheet_music_catalog_url']    = isset( $_POST['sheet_music_catalog_url'] )
-                ? sanitize_text_field( $_POST['sheet_music_catalog_url'] )
-                : ( $options['sheet_music_catalog_url'] ?? '/sheet-music/' );
 
             /**
              * Pieces Catalog (sheet music listings)
@@ -393,7 +447,7 @@ class MRM_Product_Access {
                     }
                     $pi = intval( $pi_raw );
 
-                    $pslug = sanitize_title( (string) ( $offer_product_slug[ $oi ] ?? '' ) );
+                    $pslug = $this->sanitize_product_slug( (string) ( $offer_product_slug[ $oi ] ?? '' ) );
                     $dt    = sanitize_text_field( (string) ( $offer_display_title[ $oi ] ?? '' ) );
                     $sub   = sanitize_text_field( (string) ( $offer_subtitle[ $oi ] ?? '' ) );
                     $price = sanitize_text_field( (string) ( $offer_price_display[ $oi ] ?? '' ) );
@@ -404,9 +458,10 @@ class MRM_Product_Access {
                         continue;
                     }
 
-                    // If product slug missing but display title exists, derive a stable slug-ish value.
+                    // Back-compat only: if older configs relied on derived slugs, keep behavior ONLY if an admin saved an empty slug.
+                    // Prefer explicit product_slug always.
                     if ( $pslug === '' && $dt !== '' ) {
-                        $pslug = sanitize_title( $dt );
+                        $pslug = $this->sanitize_product_slug( $dt );
                     }
 
                     if ( ! isset( $offers_by_piece[ $pi ] ) ) {
@@ -490,107 +545,33 @@ class MRM_Product_Access {
                 $options['verified_emails'] = array_values( array_unique( $verified ) );
             }
 
-            // Products configuration.
-            $products = array();
-            if ( ! empty( $_POST['product_slug'] ) && is_array( $_POST['product_slug'] ) ) {
-                $slugs       = array_map( 'sanitize_title', $_POST['product_slug'] );
-                $prices      = array_map( 'intval', $_POST['product_price_cents'] );
-                $currencies  = array_map( 'sanitize_text_field', $_POST['product_currency'] );
-                $payouts     = isset( $_POST['product_payout'] ) ? $_POST['product_payout'] : array();
-                // The PDF, audio and zip paths fields have been removed from the UI. Retain any existing
-                // values by not parsing these from the submitted form.
-                $tracks_json = isset( $_POST['product_tracks_json'] ) ? $_POST['product_tracks_json'] : array();
-                $approved_emails_raw = isset( $_POST['product_approved_emails'] ) ? $_POST['product_approved_emails'] : null;
+            // Save Tracks Mapping (by Product Slug) to a single option: product_tracks_by_slug
+            $rows = array();
+            if ( isset( $_POST['tracks_map_slug'] ) && is_array( $_POST['tracks_map_slug'] ) ) {
+                $slugs = (array) $_POST['tracks_map_slug'];
+                $names = isset( $_POST['tracks_map_name'] ) ? (array) $_POST['tracks_map_name'] : array();
+                $urls  = isset( $_POST['tracks_map_url'] ) ? (array) $_POST['tracks_map_url'] : array();
 
-                foreach ( $slugs as $idx => $slug ) {
-                    if ( empty( $slug ) ) {
-                        continue;
-                    }
+                foreach ( $slugs as $i => $raw_slug ) {
+                    $slug = strtolower( trim( (string) $raw_slug ) );
+                    $slug = preg_replace( '/[^a-z0-9\-_]+/', '', $slug );
 
-                    $product = array();
-                    $product['price_cents'] = isset( $prices[ $idx ] ) ? $prices[ $idx ] : 0;
-                    $product['currency']    = isset( $currencies[ $idx ] ) ? strtolower( $currencies[ $idx ] ) : 'usd';
+                    $name = isset( $names[ $i ] ) ? sanitize_text_field( (string) $names[ $i ] ) : '';
+                    $raw_url = isset( $urls[ $i ] ) ? (string) $urls[ $i ] : '';
+                    $url     = $this->sanitize_track_location( $raw_url );
 
-                    // Parse payout definitions: dest:pct;dest:pct.
-                    $product['payouts'] = array();
-                    if ( isset( $payouts[ $idx ] ) && ! empty( $payouts[ $idx ] ) ) {
-                        $pairs = explode( ';', $payouts[ $idx ] );
-                        foreach ( $pairs as $pair ) {
-                            $parts = explode( ':', $pair );
-                            if ( count( $parts ) === 2 ) {
-                                $dest = trim( $parts[0] );
-                                $pct  = floatval( $parts[1] );
-                                if ( $dest !== '' && $pct > 0 ) {
-                                    $product['payouts'][] = array(
-                                        'stripe_account_id' => $dest,
-                                        'pct'               => $pct,
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    // Preserve any existing file paths from the options since these fields are no longer editable
-                    $product['pdf_path']   = isset( $options['products'][ $slug ]['pdf_path'] ) ? sanitize_text_field( $options['products'][ $slug ]['pdf_path'] ) : '';
-                    $product['audio_path'] = isset( $options['products'][ $slug ]['audio_path'] ) ? sanitize_text_field( $options['products'][ $slug ]['audio_path'] ) : '';
-                    $product['zip_path']   = isset( $options['products'][ $slug ]['zip_path'] ) ? sanitize_text_field( $options['products'][ $slug ]['zip_path'] ) : '';
-
-                    // Tracks JSON.
-                    $product['tracks'] = array();
-                    if ( isset( $tracks_json[ $idx ] ) && trim( $tracks_json[ $idx ] ) !== '' ) {
-                        $decoded = json_decode( wp_unslash( $tracks_json[ $idx ] ), true );
-                        if ( is_array( $decoded ) ) {
-                            // Determine if sequential array (new format) or associative map (legacy).
-                            if ( array_keys( $decoded ) === range( 0, count( $decoded ) - 1 ) ) {
-                                foreach ( $decoded as $item ) {
-                                    if ( is_array( $item ) && isset( $item['type'] ) && isset( $item['path'] ) ) {
-                                        $type  = sanitize_key( $item['type'] );
-                                        $title = isset( $item['title'] ) ? sanitize_text_field( $item['title'] ) : '';
-                                        $path  = sanitize_text_field( $item['path'] );
-                                        $product['tracks'][] = array(
-                                            'type'  => $type,
-                                            'title' => $title,
-                                            'path'  => $path,
-                                        );
-                                    }
-                                }
-                            } else {
-                                foreach ( $decoded as $k => $v ) {
-                                    $key  = sanitize_key( $k );
-                                    $path = sanitize_text_field( $v );
-                                    if ( $key && $path ) {
-                                        $product['tracks'][ $key ] = $path;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    
-                    // Approved emails (per product): semicolon-separated list.
-                    // If the new field isn't present (older versions), preserve existing values.
-                    if ( is_array( $approved_emails_raw ) && array_key_exists( $idx, $approved_emails_raw ) ) {
-                        $approved_list = array();
-                        $raw = (string) $approved_emails_raw[ $idx ];
-                        $parts = explode( ';', $raw );
-                        foreach ( $parts as $em ) {
-                            $em = sanitize_email( trim( $em ) );
-                            if ( ! empty( $em ) ) {
-                                $approved_list[] = strtolower( $em );
-                            }
-                        }
-                        $product['approved_emails'] = array_values( array_unique( $approved_list ) );
-                    } else {
-                        $product['approved_emails'] = isset( $options['products'][ $slug ]['approved_emails'] ) && is_array( $options['products'][ $slug ]['approved_emails'] )
-                            ? array_values( array_unique( array_map( 'strtolower', $options['products'][ $slug ]['approved_emails'] ) ) )
-                            : array();
-                    }
-
-                    $products[ $slug ] = $product;
+                    // Allow empty rows; store as-is; runtime ignores invalid ones
+                    $rows[] = array(
+                        'product_slug' => $slug,
+                        'display_name' => $name,
+                        'url' => $url,
+                    );
                 }
             }
+            update_option( 'product_tracks_by_slug', $rows );
 
-            $options['products'] = $products;
+            // Keep legacy options['products'] around for back-compat only (do not update it here).
+            // $options['products'] no longer drives access, pricing, or gating.
 
             update_option( $this->option_key, $options );
             $this->options = $options;
@@ -618,35 +599,6 @@ class MRM_Product_Access {
             <form method="post">
                 <?php wp_nonce_field( 'mrm_pa_save_settings' ); ?>
 
-                <h2 class="title"><?php esc_html_e( 'Stripe Configuration', 'mrm-product-access' ); ?></h2>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Test Mode', 'mrm-product-access' ); ?></th>
-                        <td>
-                            <label>
-                                <input type="checkbox" name="test_mode" <?php checked( ! empty( $options['test_mode'] ) ); ?> />
-                                <?php esc_html_e( 'Enable test mode', 'mrm-product-access' ); ?>
-                            </label>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Test Secret Key', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_test_secret_key" value="<?php echo esc_attr( $options['stripe_test_secret_key'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Test Webhook Secret', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_test_webhook_secret" value="<?php echo esc_attr( $options['stripe_test_webhook_secret'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Live Secret Key', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_live_secret_key" value="<?php echo esc_attr( $options['stripe_live_secret_key'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Stripe Live Webhook Secret', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="stripe_live_webhook_secret" value="<?php echo esc_attr( $options['stripe_live_webhook_secret'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                </table>
-
                 <h2 class="title"><?php esc_html_e( 'Email Template', 'mrm-product-access' ); ?></h2>
                 <table class="form-table" role="presentation">
                     <tr>
@@ -671,18 +623,6 @@ class MRM_Product_Access {
                 <p class="description">
                     <?php esc_html_e( 'Enter the piece fields + purchasing options (offers) exactly like the old product HTML. URLs can be full URLs or site-relative paths (e.g. /wp-content/uploads/...).', 'mrm-product-access' ); ?>
                 </p>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Sheet Music Catalog Page URL', 'mrm-product-access' ); ?></th>
-                        <td>
-                            <input type="text" class="regular-text" name="sheet_music_catalog_url"
-                                value="<?php echo esc_attr( $options['sheet_music_catalog_url'] ?? '/sheet-music/' ); ?>"
-                                placeholder="/sheet-music/" />
-                            <p class="description"><?php esc_html_e( 'Used for the “Preview more pieces” button on piece detail pages.', 'mrm-product-access' ); ?></p>
-                        </td>
-                    </tr>
-                </table>
-
                 <style>
                 /* Admin-only styling for a cleaner “card” editor */
                 .mrm-pa-piece-card{
@@ -1093,70 +1033,177 @@ class MRM_Product_Access {
                 })();
                 </script>
 
-                <h2 class="title"><?php esc_html_e( 'Products Configuration', 'mrm-product-access' ); ?></h2>
-                <p><?php esc_html_e( 'Define your products below. Payouts format: connectedAccountId:pct;anotherId:pct. Percentages should add up to 100.', 'mrm-product-access' ); ?></p>
+                <h2 class="title">Tracks Mapping (by Product Slug)</h2>
+                <p>Unlimited rows. Empty rows are allowed and ignored at runtime. Stored in <code>product_tracks_by_slug</code>.</p>
 
-                <table class="widefat fixed striped mrm-pa-products-table" cellspacing="0" style="max-width:1200px;">
-                    <thead>
-                        <tr>
-                            <th style="width:130px; "><?php esc_html_e( 'Product Slug', 'mrm-product-access' ); ?></th>
-                            <th style="width:120px; "><?php esc_html_e( 'Price (cents)', 'mrm-product-access' ); ?></th>
-                            <th style="width:90px; "><?php esc_html_e( 'Currency', 'mrm-product-access' ); ?></th>
-                            <th style="width:220px; "><?php esc_html_e( 'Payouts (dest:pct;...)', 'mrm-product-access' ); ?></th>
-                            <?php
-                            // Removed PDF Path, Audio Path and ZIP Path columns per user request.
-                            ?>
-                            <th style="width:240px; "><?php esc_html_e( 'Approved Emails (semicolon separated)', 'mrm-product-access' ); ?></th>
-                            <th style="width:320px; "><?php esc_html_e( 'Tracks JSON (ordered items)', 'mrm-product-access' ); ?></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php
-                        if ( ! empty( $options['products'] ) && is_array( $options['products'] ) ) {
-                            foreach ( $options['products'] as $slug => $pconf ) {
-                                $pairs = array();
-                                if ( ! empty( $pconf['payouts'] ) && is_array( $pconf['payouts'] ) ) {
-                                    foreach ( $pconf['payouts'] as $p ) {
-                                        $pairs[] = ( $p['stripe_account_id'] ?? '' ) . ':' . ( $p['pct'] ?? 0 );
-                                    }
-                                }
-                                $tracks_text = '';
-                                if ( ! empty( $pconf['tracks'] ) && is_array( $pconf['tracks'] ) ) {
-                                    $tracks_text = wp_json_encode( $pconf['tracks'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES );
-                                }
-                                ?>
-                                <tr>
-                                    <td><input type="text" name="product_slug[]" value="<?php echo esc_attr( $slug ); ?>" class="regular-text"></td>
-                                    <td><input type="number" name="product_price_cents[]" value="<?php echo esc_attr( $pconf['price_cents'] ?? 0 ); ?>" class="small-text"></td>
-                                    <td><input type="text" name="product_currency[]" value="<?php echo esc_attr( $pconf['currency'] ?? 'usd' ); ?>" class="small-text"></td>
-                                    <td><input type="text" name="product_payout[]" value="<?php echo esc_attr( implode( ';', $pairs ) ); ?>" class="regular-text"></td>
-                                    <td><input type="text" name="product_approved_emails[]" value="<?php echo esc_attr( isset( $pconf['approved_emails'] ) && is_array( $pconf['approved_emails'] ) ? implode( ';', $pconf['approved_emails'] ) : '' ); ?>" class="regular-text" placeholder="email1@example.com;email2@example.com"></td>
-                                    <td>
-                                        <textarea name="product_tracks_json[]" rows="6" style="width:100%; font-family: monospace;"><?php echo esc_textarea( $tracks_text ); ?></textarea>
-                                        <div class="description" style="font-size:12px; opacity:.9;">
-                                            <?php
-                                            /* Translators: example of the new tracks JSON array format */
-                                            echo esc_html__( 'Example', 'mrm-product-access' );
-                                            ?>:
-                                            <?php echo esc_html( '[{"type":"pdf","title":"PDF Title","path":"/full/path/file.pdf"},{"type":"audio","title":"Track 1","path":"/full/path/file.mp3"}]' ); ?>
-                                        </div>
-                                    </td>
-                                </tr>
-                                <?php
-                            }
-                        }
-                        // Always provide an empty row to allow adding another product.
-                        ?>
-                        <tr>
-                            <td><input type="text" name="product_slug[]" value="" class="regular-text"></td>
-                            <td><input type="number" name="product_price_cents[]" value="" class="small-text"></td>
-                            <td><input type="text" name="product_currency[]" value="usd" class="small-text"></td>
-                            <td><input type="text" name="product_payout[]" value="" class="regular-text"></td>
-                            <td><input type="text" name="product_approved_emails[]" value="" class="regular-text" placeholder="email1@example.com;email2@example.com"></td>
-                            <td><textarea name="product_tracks_json[]" rows="6" style="width:100%; font-family: monospace;"></textarea></td>
-                        </tr>
-                    </tbody>
+                <style>
+                  .mrm-tracks-map-table input[type="text"]{ box-sizing:border-box; }
+                  .mrm-tracks-map-slug{ width: 180px; }
+                  .mrm-tracks-map-name{ width: 220px; }
+                  .mrm-tracks-map-url{ width: 100%; }
+                  .mrm-drag-handle{
+                    cursor: grab;
+                    user-select: none;
+                    text-align: center;
+                    font-size: 16px;
+                    opacity: 0.9;
+                  }
+                  .mrm-track-row.is-dragging{
+                    opacity: 0.55;
+                  }
+                  .mrm-order-controls{
+                    white-space: nowrap;
+                  }
+                  .mrm-order-controls .button{
+                    min-width: 34px;
+                  }
+                </style>
+
+                <?php
+                  $rows = get_option( 'product_tracks_by_slug', array() );
+                  if ( ! is_array( $rows ) ) $rows = array();
+                ?>
+
+                <table class="widefat striped mrm-tracks-map-table" id="mrmTracksMapTable" style="max-width: 1100px;">
+                  <thead>
+                    <tr>
+                      <th style="width:36px;"></th>
+                      <th style="width:200px;">product_slug</th>
+                      <th style="width:240px;">Track / PDF Display Name</th>
+                      <th>URL / Path</th>
+                      <th style="width:120px;">Order</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php foreach ( $rows as $r ) : ?>
+                      <tr class="mrm-track-row" draggable="true">
+                        <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
+
+                        <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="<?php echo esc_attr( $r['product_slug'] ?? '' ); ?>" /></td>
+                        <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="<?php echo esc_attr( $r['display_name'] ?? '' ); ?>" /></td>
+                        <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="<?php echo esc_attr( $r['url'] ?? '' ); ?>" /></td>
+
+                        <td class="mrm-order-controls">
+                          <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
+                          <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
+                        </td>
+                      </tr>
+                    <?php endforeach; ?>
+
+                    <!-- Always include at least one blank row -->
+                    <tr class="mrm-track-row" draggable="true">
+                      <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
+
+                      <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="" /></td>
+
+                      <td class="mrm-order-controls">
+                        <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
+                        <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
+                      </td>
+                    </tr>
+                  </tbody>
                 </table>
+
+                <p>
+                  <button type="button" class="button" id="mrmAddTrackRow">Add Row</button>
+                </p>
+
+                <script>
+                (function(){
+                  const btn = document.getElementById('mrmAddTrackRow');
+                  const table = document.getElementById('mrmTracksMapTable');
+                  if(!btn || !table) return;
+
+                  const tbody = table.querySelector('tbody');
+                  if(!tbody) return;
+
+                  function makeRow(){
+                    const tr = document.createElement('tr');
+                    tr.className = 'mrm-track-row';
+                    tr.setAttribute('draggable', 'true');
+                    tr.innerHTML = `
+                      <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
+                      <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
+                      <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="" /></td>
+                      <td class="mrm-order-controls">
+                        <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
+                        <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
+                      </td>
+                    `;
+                    return tr;
+                  }
+
+                  // Add Row button
+                  btn.addEventListener('click', function(){
+                    const tr = makeRow();
+                    tbody.appendChild(tr);
+                    const first = tr.querySelector('input');
+                    if(first) first.focus();
+                  });
+
+                  // Up/Down controls (event delegation)
+                  tbody.addEventListener('click', function(e){
+                    const up = e.target.closest('.mrm-move-up');
+                    const down = e.target.closest('.mrm-move-down');
+                    if(!up && !down) return;
+
+                    const row = e.target.closest('tr');
+                    if(!row) return;
+
+                    if(up){
+                      const prev = row.previousElementSibling;
+                      if(prev) tbody.insertBefore(row, prev);
+                    } else if(down){
+                      const next = row.nextElementSibling;
+                      if(next) tbody.insertBefore(row, next);
+                    }
+                  });
+
+                  // Drag & Drop (HTML5) - no libraries
+                  let dragRow = null;
+
+                  function isHandle(el){
+                    return !!(el && el.closest && el.closest('.mrm-drag-handle'));
+                  }
+
+                  tbody.addEventListener('dragstart', function(e){
+                    const row = e.target.closest('tr.mrm-track-row');
+                    if(!row) return;
+
+                    // Only allow dragging from the handle to avoid accidental drags while selecting text
+                    if(!isHandle(e.target)){
+                      e.preventDefault();
+                      return;
+                    }
+
+                    dragRow = row;
+                    row.classList.add('is-dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                    try { e.dataTransfer.setData('text/plain', 'mrm-track-row'); } catch(err){}
+                  });
+
+                  tbody.addEventListener('dragend', function(){
+                    if(dragRow) dragRow.classList.remove('is-dragging');
+                    dragRow = null;
+                  });
+
+                  tbody.addEventListener('dragover', function(e){
+                    if(!dragRow) return;
+                    e.preventDefault();
+
+                    const target = e.target.closest('tr.mrm-track-row');
+                    if(!target || target === dragRow) return;
+
+                    const rect = target.getBoundingClientRect();
+                    const before = (e.clientY - rect.top) < (rect.height / 2);
+                    if(before) tbody.insertBefore(dragRow, target);
+                    else tbody.insertBefore(dragRow, target.nextElementSibling);
+                  });
+                })();
+                </script>
 
                 <?php submit_button( __( 'Save Settings', 'mrm-product-access' ), 'primary', 'mrm_pa_save_settings' ); ?>
             </form>
@@ -1165,10 +1212,6 @@ class MRM_Product_Access {
             <p><strong><?php esc_html_e( 'Access URL pattern:', 'mrm-product-access' ); ?></strong> <code><?php echo esc_html( home_url( '/mrm-access/{product_slug}/{token}/' ) ); ?></code></p>
             <p><strong><?php esc_html_e( 'Important:', 'mrm-product-access' ); ?></strong> <?php esc_html_e( 'After updating, go to Settings → Permalinks and click Save Changes once.', 'mrm-product-access' ); ?></p>
         </div>
-        <?php
-        // No client-side script is required for the settings page since the
-        // Verified Emails section has been removed per user request.
-        ?>
         <?php
     }
 
@@ -1181,6 +1224,150 @@ class MRM_Product_Access {
     protected function get_product_config( $slug ) {
         $options = $this->get_options();
         return isset( $options['products'][ $slug ] ) ? $options['products'][ $slug ] : null;
+    }
+
+    protected function get_tracks_mapping() {
+        $rows = get_option( 'product_tracks_by_slug', array() );
+        if ( ! is_array( $rows ) ) {
+            return array();
+        }
+
+        $map = array();
+        foreach ( $rows as $row ) {
+            if ( ! is_array( $row ) ) {
+                continue;
+            }
+            $slug = $this->sanitize_product_slug( $row['product_slug'] ?? '' );
+            $name = sanitize_text_field( (string) ( $row['display_name'] ?? '' ) );
+            $url  = $this->sanitize_track_location( (string) ( $row['url'] ?? '' ) );
+
+            if ( $slug === '' || $url === '' ) {
+                continue;
+            }
+
+            if ( ! isset( $map[ $slug ] ) ) {
+                $map[ $slug ] = array();
+            }
+
+            $map[ $slug ][] = array(
+                'name' => $name !== '' ? $name : 'Track',
+                'url'  => $url,
+            );
+        }
+
+        return $map;
+    }
+
+    protected function sanitize_track_location( $raw ) {
+        $raw = trim( (string) $raw );
+        if ( $raw === '' ) return '';
+
+        // Block traversal patterns early
+        if ( strpos( $raw, '..' ) !== false ) return '';
+
+        // Allow full URLs
+        if ( preg_match( '#^https?://#i', $raw ) ) {
+            return esc_url_raw( $raw );
+        }
+
+        // Allow site-relative paths like /wp-content/uploads/...
+        if ( strpos( $raw, '/' ) === 0 ) {
+            // Keep it simple and safe: strip control chars
+            $raw = preg_replace( '/[\\x00-\\x1F\\x7F]/u', '', $raw );
+            return $raw;
+        }
+
+        // Optionally allow absolute filesystem paths only if they live under ABSPATH
+        // (This supports cases where you store server paths, but prevents leaking arbitrary server files.)
+        if ( preg_match( '#^/[A-Za-z0-9_\\-./]+$#', $raw ) ) {
+            $rp = realpath( $raw );
+            if ( ! $rp ) return '';
+            $root = realpath( ABSPATH );
+            if ( $root && strpos( $rp, $root ) === 0 ) {
+                return $rp;
+            }
+            return '';
+        }
+
+        return '';
+    }
+
+    protected function get_tracks_for_slug( $product_slug ) {
+        $product_slug = $this->sanitize_product_slug( $product_slug );
+        if ( $product_slug === '' ) {
+            return array();
+        }
+
+        $m = $this->get_tracks_mapping();
+        $items = isset( $m[ $product_slug ] ) && is_array( $m[ $product_slug ] ) ? $m[ $product_slug ] : array();
+
+        // Normalize track mapping.
+        $out = array();
+        foreach ( $items as $it ) {
+            if ( ! is_array( $it ) ) {
+                continue;
+            }
+            $name = sanitize_text_field( (string) ( $it['name'] ?? '' ) );
+            $url  = $this->sanitize_track_location( (string) ( $it['url'] ?? '' ) );
+            if ( $url === '' ) {
+                continue;
+            }
+
+            $out[] = array(
+                'name' => $name !== '' ? $name : 'Track',
+                'url'  => $url,
+            );
+        }
+        return $out;
+    }
+
+    protected function infer_asset_type_from_url( $url ) {
+        $u = strtolower( (string) $url );
+        $path = wp_parse_url( $u, PHP_URL_PATH );
+        $ext = $path ? strtolower( pathinfo( $path, PATHINFO_EXTENSION ) ) : '';
+        if ( $ext === 'pdf' ) {
+            return 'pdf';
+        }
+        if ( in_array( $ext, array( 'mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'flac' ), true ) ) {
+            return 'audio';
+        }
+        return 'link';
+    }
+
+    protected function resolve_local_path_from_url_or_path( $raw ) {
+        $raw = trim( (string) $raw );
+        if ( $raw === '' ) {
+            return '';
+        }
+
+        // If it's already a real path on disk.
+        if ( file_exists( $raw ) ) {
+            return $raw;
+        }
+
+        // Convert uploads URL -> local path
+        $uploads = wp_upload_dir();
+        $baseurl = $uploads['baseurl'] ?? '';
+        $basedir = $uploads['basedir'] ?? '';
+
+        if ( $baseurl && $basedir && strpos( $raw, $baseurl ) === 0 ) {
+            $candidate = $basedir . substr( $raw, strlen( $baseurl ) );
+            if ( file_exists( $candidate ) ) {
+                return $candidate;
+            }
+        }
+
+        // Convert site URL -> ABSPATH relative (best effort)
+        $home = home_url( '/' );
+        if ( $home && strpos( $raw, $home ) === 0 ) {
+            $rel = '/' . ltrim( substr( $raw, strlen( $home ) ), '/' );
+            $candidate = untrailingslashit( ABSPATH ) . $rel;
+            if ( file_exists( $candidate ) ) {
+                return $candidate;
+            }
+        }
+
+        return '';
     }
 
     /**
@@ -1235,9 +1422,7 @@ class MRM_Product_Access {
      * @return string
      */
     private function get_sheet_music_catalog_url() {
-        $options   = $this->get_options();
-        $raw_value = $options['sheet_music_catalog_url'] ?? '/sheet-music/';
-        return ( strpos( $raw_value, 'http' ) === 0 ) ? $raw_value : home_url( $raw_value );
+        return home_url( '/sheet-music/' );
     }
 
     /**
@@ -1251,18 +1436,73 @@ class MRM_Product_Access {
         return hash( 'sha256', $email . NONCE_SALT );
     }
 
+    /**
+     * Sanitize a product slug (canonical SKU).
+     * Requirements:
+     * - lowercase
+     * - only a-z 0-9 hyphen underscore
+     * - must start with alnum
+     */
+    protected function sanitize_product_slug( $raw ) {
+        $raw = strtolower( trim( (string) $raw ) );
+        // Convert spaces to hyphen first, then strip invalid chars.
+        $raw = preg_replace( '/\s+/', '-', $raw );
+        $raw = preg_replace( '/[^a-z0-9\-_]/', '', $raw );
+        $raw = preg_replace( '/-+/', '-', $raw );
+        $raw = preg_replace( '/_+/', '_', $raw );
+        $raw = trim( $raw, "-_" );
+
+        if ( $raw === '' ) {
+            return '';
+        }
+        if ( ! preg_match( '/^[a-z0-9][a-z0-9\-_]{0,199}$/', $raw ) ) {
+            return '';
+        }
+        return $raw;
+    }
+
+    protected function is_valid_product_slug( $slug ) {
+        $slug = (string) $slug;
+        return ( $slug !== '' && preg_match( '/^[a-z0-9][a-z0-9\-_]{0,199}$/', $slug ) );
+    }
+
     private function payments_hub_has_access( $email_hash, $sku ) {
         global $wpdb;
         $table = $wpdb->prefix . 'mrm_sheet_music_access';
 
-        // If Payments Hub isn't installed yet, fail closed.
-        $exists = $wpdb->get_var( $wpdb->prepare(
-            "SHOW TABLES LIKE %s",
-            $table
-        ) );
-        if ( $exists !== $table ) {
-            return false;
+        $sku = strtolower( trim( (string) $sku ) );
+        $sku = preg_replace( '/[^a-z0-9\-_]+/', '', $sku );
+        if ( ! $sku ) return false;
+
+        // Pull lists from Payments Hub (source of truth for email lists)
+        $lists = get_option( 'mrm_pay_hub_access_lists', array() );
+        if ( ! is_array( $lists ) ) $lists = array();
+
+        // Convert hash -> compare against list (we only have hash here).
+        // We can safely compare by hashing list emails with the same hash_email.
+        $hash_of = function( $email ) {
+            return $this->hash_email( strtolower( trim( (string) $email ) ) );
+        };
+
+        // Rule 1: master list
+        if ( isset( $lists['all-sheet-music'] ) && is_array( $lists['all-sheet-music'] ) ) {
+            foreach ( $lists['all-sheet-music'] as $em ) {
+                $em = sanitize_email( $em );
+                if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
+            }
         }
+
+        // Rule 2: per-product list
+        if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
+            foreach ( $lists[ $sku ] as $em ) {
+                $em = sanitize_email( $em );
+                if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
+            }
+        }
+
+        // Rule 3: DB row exists (also controlled by Payments Hub)
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        if ( $exists !== $table ) return false;
 
         $id = $wpdb->get_var( $wpdb->prepare(
             "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
@@ -1433,7 +1673,7 @@ class MRM_Product_Access {
             return null;
         }
 
-        $slug  = sanitize_title( $parts[1] );
+        $slug  = $this->sanitize_product_slug( $parts[1] );
         $token = sanitize_text_field( $parts[2] );
 
         if ( ! $slug || ! $token ) {
@@ -1474,7 +1714,7 @@ class MRM_Product_Access {
         // Primary: query vars (rewrite).
         $is_access = get_query_var( 'mrm_access' );
         if ( $is_access == '1' ) {
-            $product_slug = sanitize_title( get_query_var( 'mrm_access_product' ) );
+            $product_slug = $this->sanitize_product_slug( get_query_var( 'mrm_access_product' ) );
             $token        = sanitize_text_field( get_query_var( 'mrm_access_token' ) );
         } else {
             // Fallback: parse REQUEST_URI.
@@ -1525,35 +1765,21 @@ class MRM_Product_Access {
             exit;
         }
 
-        global $wpdb;
-        $table    = $wpdb->prefix . 'mrm_purchases';
-        $purchase = $wpdb->get_row( $wpdb->prepare(
-            "SELECT id FROM $table WHERE product_slug = %s AND email_hash = %s AND status = 'paid' LIMIT 1",
-            $product_slug,
-            $payload['email_hash']
-        ) );
-
-        // Allow access if purchase exists OR the email has been manually approved for this product
-        // (or is in the legacy global verified list).
-        if ( ! $purchase ) {
-            $email_hash = (string) $payload['email_hash'];
-            $approved   = $this->is_email_hash_approved_for_product( $product_slug, $email_hash );
-            $verified   = $this->is_email_hash_globally_verified( $email_hash );
-            if ( ! $approved && ! $verified ) {
-                status_header( 403 );
-                echo 'Unauthorized.';
-                exit;
-            }
-        }
-
-        $config = $this->get_product_config( $product_slug );
-        if ( empty( $config ) ) {
-            status_header( 404 );
-            echo 'Product not found.';
+        // ✅ Hub is the ONLY source of truth for access.
+        if ( ! $this->payments_hub_has_access( (string) $payload['email_hash'], $product_slug ) ) {
+            status_header( 403 );
+            echo 'Unauthorized.';
             exit;
         }
 
-        $this->render_access_page( $product_slug, $config, $payload );
+        $tracks = $this->get_tracks_for_slug( $product_slug );
+        if ( empty( $tracks ) ) {
+            status_header( 404 );
+            echo 'No tracks configured for this product.';
+            exit;
+        }
+
+        $this->render_access_page( $product_slug, $tracks, $payload );
         exit;
     }
 
@@ -1561,16 +1787,16 @@ class MRM_Product_Access {
      * Render the purchased content access page.
      *
      * @param string $product_slug
-     * @param array  $config
+     * @param array  $tracks
      */
-    protected function render_access_page( $product_slug, $config, $payload ) {
+    protected function render_access_page( $product_slug, $tracks, $payload ) {
         $api_base = home_url( '/wp-json/mrm/v1/download' );
 
         $build = function( $args ) use ( $api_base ) {
             return esc_url( add_query_arg( $args, $api_base ) );
         };
 
-        $has_tracks = ! empty( $config['tracks'] ) && is_array( $config['tracks'] );
+        $has_tracks = ! empty( $tracks ) && is_array( $tracks );
         // Use the same accent colour as the main site (golden‑olive tone).
         $accent = '#7b734a';
 
@@ -1752,37 +1978,104 @@ class MRM_Product_Access {
 
 .time{ font-size: 13px; color: var(--mrm-muted); min-width: 52px; text-align:center; flex:0 0 auto; }
 
-/* Seek + Volume tracks stay black/soft; THUMB is gold */
-input.mrm-range{
-  width: 100%;
+/* ✅ MATCH piece-product.html: seek + volume sliders */
+.audio-row-seek{
   min-width: 0;
-  appearance: none;
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(0,0,0,0.10);
-  cursor: pointer;
+  width: 100%;
 }
-input.mrm-range::-webkit-slider-thumb{
-  appearance: none;
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: var(--mrm-gold);
-}
-input.mrm-range::-moz-range-thumb{
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: var(--mrm-gold);
-  border: none;
-}
-input.mrm-range::-moz-range-track{
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(0,0,0,0.10);
+.audio-row-seek .progress{
+  display:block;          /* helps ensure full width in grid/flex contexts */
+  width:100%;
+  min-width:0;
 }
 
-.volume{ display:inline-flex; align-items:center; gap:6px; color: var(--mrm-black); }
-.volume svg{ width:18px; height:18px; }
-.volume input{ width: 110px; }
+/* Seek bar */
+.progress{
+  width:100%;
+  min-width:0;
+  appearance:none;
+  -webkit-appearance:none;
+  height: 10px;
+  border-radius:999px;
+  background: rgba(0,0,0,0.10); /* same intent as piece-product's accent-soft */
+  cursor:pointer;
+}
+.progress::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  appearance:none;
+  width: 18px;
+  height: 18px;
+  border-radius:50%;
+  background: var(--mrm-black); /* ✅ knob color matches piece-product design (accent) */
+  border: none;
+}
+.progress::-moz-range-thumb{
+  width: 18px;
+  height: 18px;
+  border-radius:50%;
+  background: var(--mrm-black); /* ✅ knob color */
+  border:none;
+}
+.progress::-moz-range-track{
+  height: 10px;
+  border-radius:999px;
+  background: rgba(0,0,0,0.10);
+  border:none;
+}
+
+/* Volume row matches piece-product sizing */
+.volume{ display:inline-flex; align-items:center; gap: 8px; color: var(--mrm-black); }
+.volume svg{ width:20px; height:20px; }
+
+/* Volume slider */
+.volume input.mrm-volume{
+  width: 140px;           /* ✅ piece-product default */
+  min-width: 0;
+  appearance:none;
+  -webkit-appearance:none;
+  height: 10px;
+  border-radius:999px;
+  background: rgba(0,0,0,0.10);
+  cursor:pointer;
+}
+.volume input.mrm-volume::-webkit-slider-thumb{
+  -webkit-appearance:none;
+  appearance:none;
+  width: 18px;
+  height: 18px;
+  border-radius:50%;
+  background: var(--mrm-black); /* ✅ knob color matches piece-product design */
+  border: none;
+}
+.volume input.mrm-volume::-moz-range-thumb{
+  width: 18px;
+  height: 18px;
+  border-radius:50%;
+  background: var(--mrm-black);
+  border:none;
+}
+.volume input.mrm-volume::-moz-range-track{
+  height: 10px;
+  border-radius:999px;
+  background: rgba(0,0,0,0.10);
+  border:none;
+}
+
+/* ✅ Mobile behavior (mirrors piece-product.html so bars fill properly) */
+@media (max-width: 620px){
+  .audio-controls{ grid-template-columns: 1fr; justify-items:center; gap: 10px; }
+  .audio-row-top{
+    width:100%;
+    display:grid;
+    grid-template-columns: 56px 1fr 1fr;
+    align-items:center;
+    column-gap:10px;
+  }
+  .audio-row-seek{ width:100%; }
+  .audio-row-seek .progress{ height:12px; }
+  .audio-row-vol{ width:100%; justify-content:center; }
+  .volume input.mrm-volume{ width: min(280px, 78vw); }
+}
     .note{
       color: var(--mrm-muted);
       font-size: 13px;
@@ -1871,149 +2164,87 @@ input.mrm-range::-moz-range-track{
       </div>
       <div class="pill"><?php echo esc_html( $product_slug ); ?></div>
     </div>
-    <?php
-      $render_item = function( $track_key, $type, $label ) use ( $build, $product_slug, $has_tracks, $config ) {
-          $inline_url = $build( array(
-              'product_slug' => $product_slug,
-              'asset_type'   => $type,
-              'track'        => $track_key,
-              'inline'       => 1,
-          ) );
-          $download_url = $build( array(
-              'product_slug' => $product_slug,
-              'asset_type'   => $type,
-              'track'        => $track_key,
-              'download'     => 1,
-          ) );
-          if ( ! $has_tracks ) {
-              if ( $type === 'pdf' && ! empty( $config['pdf_path'] ) ) {
-                  $inline_url   = $build( array( 'product_slug' => $product_slug, 'asset_type' => 'pdf', 'inline' => 1 ) );
-                  $download_url = $build( array( 'product_slug' => $product_slug, 'asset_type' => 'pdf', 'download' => 1 ) );
-              }
-              if ( $type === 'audio' && ! empty( $config['audio_path'] ) ) {
-                  $inline_url   = $build( array( 'product_slug' => $product_slug, 'asset_type' => 'audio', 'inline' => 1 ) );
-                  $download_url = $build( array( 'product_slug' => $product_slug, 'asset_type' => 'audio', 'download' => 1 ) );
-              }
-          }
-          echo '<div class="item">';
-          echo '  <div class="top">';
-          echo '    <div class="label">' . esc_html( $label ) . '</div>';
-          echo '    <div style="display:flex; gap:10px; align-items:center;">';
-          if ( $type === 'pdf' ) {
-              echo '      <a class="btn" target="_blank" rel="noopener" href="' . esc_url( $inline_url ) . '">' . esc_html__( 'Full Screen', 'mrm-product-access' ) . '</a>';
-          }
-          echo '      <a class="btn primary" href="' . esc_url( $download_url ) . '">' . esc_html__( 'Download', 'mrm-product-access' ) . '</a>';
-          echo '    </div>';
-          echo '  </div>';
-          echo '  <div class="content">';
-          if ( $type === 'pdf' ) {
-              $pdf_src = $inline_url;
-              if ( false === strpos( $pdf_src, '#' ) ) {
-                  // Hint most browser PDF viewers to fit-to-width
-                  $pdf_src .= '#zoom=page-width';
-              }
+    <?php if ( $has_tracks ) : ?>
+      <div class="card">
+        <h2 class="section-title"><?php echo esc_html__( 'Your Files', 'mrm-product-access' ); ?></h2>
+        <div class="grid">
+          <?php foreach ( $tracks as $idx => $it ) :
+              $label = (string) ( $it['name'] ?? ( 'Track ' . ( $idx + 1 ) ) );
+              $raw   = (string) ( $it['url'] ?? '' );
+              $type  = $this->infer_asset_type_from_url( $raw );
 
-              echo '    <iframe class="pdf" src="' . esc_url( $pdf_src ) . '" loading="lazy" title="' . esc_attr( $label ) . '"></iframe>';
-          } else {
-echo '    <div class="audio-box mrm-audio-box" data-src="' . esc_url( $inline_url ) . '">';
-echo '      <audio class="mrm-audio" preload="metadata">';
-echo '        <source src="' . esc_url( $inline_url ) . '" type="audio/mpeg">';
-echo '      </audio>';
-echo '      <div class="audio-controls">';
-echo '        <div class="audio-row-top">';
-echo '          <button class="play-button mrm-play" type="button" aria-label="Play/Pause">';
-echo '            <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>';
-echo '            <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"></path></svg>';
-echo '          </button>';
-echo '          <div class="time mrm-current">0:00</div>';
-echo '          <div class="time mrm-duration">0:00</div>';
-echo '        </div>';
-echo '        <div class="audio-row-seek">';
-echo '          <input class="mrm-range mrm-seek" type="range" min="0" value="0" aria-label="Seek">';
-echo '        </div>';
-echo '        <div class="audio-row-vol">';
-echo '          <div class="volume" aria-label="Volume">';
-echo '            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 5L6 9H2v6h4l5 4V5z"/></svg>';
-echo '            <input class="mrm-range mrm-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume slider">';
-echo '          </div>';
-echo '        </div>';
-echo '      </div>';
-echo '    </div>';
-          }
-          echo '  </div>';
-          echo '</div>';
-      };
-    ?>
-    <?php
-        // Dynamically build sections based on tracks configuration
-        $tracks = isset( $config['tracks'] ) && is_array( $config['tracks'] ) ? $config['tracks'] : array();
-        $sections = array();
-        if ( ! empty( $tracks ) ) {
-            if ( array_keys( $tracks ) === range( 0, count( $tracks ) - 1 ) ) {
-                // New array format: sequential list of items
-                $currentSection = array( 'pdf' => null, 'audios' => array() );
-                foreach ( $tracks as $i => $item ) {
-                    if ( is_array( $item ) && isset( $item['type'] ) ) {
-                        $type  = $item['type'];
-                        $title = isset( $item['title'] ) ? $item['title'] : '';
-                        if ( $type === 'pdf' ) {
-                            if ( $currentSection['pdf'] !== null || ! empty( $currentSection['audios'] ) ) {
-                                $sections[] = $currentSection;
-                            }
-                            $currentSection = array( 'pdf' => array( 'idx' => $i, 'title' => $title ), 'audios' => array() );
-                        } else {
-                            $currentSection['audios'][] = array( 'idx' => $i, 'title' => $title );
-                        }
-                    }
-                }
-                if ( $currentSection['pdf'] !== null || ! empty( $currentSection['audios'] ) ) {
-                    $sections[] = $currentSection;
-                }
-            } else {
-                // Legacy associative map: group by PDF vs audio based on key or file extension
-                $currentSection = array( 'pdf' => null, 'audios' => array() );
-                foreach ( $tracks as $k => $v ) {
-                    $label  = $k;
-                    $is_pdf = ( strpos( $k, '_pdf' ) !== false ) || preg_match( '/\.pdf$/i', $v );
-                    if ( $is_pdf ) {
-                        if ( $currentSection['pdf'] !== null || ! empty( $currentSection['audios'] ) ) {
-                            $sections[] = $currentSection;
-                        }
-                        $currentSection = array( 'pdf' => array( 'idx' => $k, 'title' => $label ), 'audios' => array() );
-                    } else {
-                        $currentSection['audios'][] = array( 'idx' => $k, 'title' => $label );
-                    }
-                }
-                if ( $currentSection['pdf'] !== null || ! empty( $currentSection['audios'] ) ) {
-                    $sections[] = $currentSection;
-                }
-            }
-        }
-        // Output each section
-        foreach ( $sections as $sec ) {
-            $secTitle = '';
-            if ( $sec['pdf'] !== null ) {
-                $secTitle = $sec['pdf']['title'];
-            } else {
-                $secTitle = __( 'Audio', 'mrm-product-access' );
-            }
-            echo '<div class="card">';
-            echo '<h2 class="section-title">' . esc_html( $secTitle ) . '</h2>';
-            echo '<div class="grid">';
-            if ( $sec['pdf'] !== null ) {
-                $idx = $sec['pdf']['idx'];
-                $render_item( is_string( $idx ) ? $idx : (string) $idx, 'pdf', $sec['pdf']['title'] );
-            }
-            foreach ( $sec['audios'] as $audio ) {
-                $idx = $audio['idx'];
-                $render_item( is_string( $idx ) ? $idx : (string) $idx, 'audio', $audio['title'] );
-            }
-            echo '</div>';
-            echo '</div>';
-            echo '<div class="spacer"></div>';
-        }
+              // If we can resolve to a local path, serve via download proxy (gated).
+              $local = $this->resolve_local_path_from_url_or_path( $raw );
 
-    ?>
+              $download_url = '';
+              if ( $local !== '' ) {
+                  $download_url = $build( array(
+                      'product_slug' => $product_slug,
+                      'asset_type'   => $type,
+                      'track'        => (string) $idx,
+                      'inline'       => $type === 'pdf' ? '1' : '0',
+                  ) );
+              } else {
+                  // Fallback: direct URL (not gated) if admin provided a remote URL.
+                  $download_url = esc_url( $raw );
+              }
+          ?>
+            <div class="item">
+              <div class="top">
+                <div class="label"><?php echo esc_html( $label ); ?></div>
+                <?php if ( $download_url ) : ?>
+                  <a class="btn primary" href="<?php echo esc_url( $download_url ); ?>" target="_blank" rel="noopener">
+                    <?php echo 'Download'; ?>
+                  </a>
+                <?php endif; ?>
+              </div>
+              <div class="content">
+                <?php if ( $type === 'pdf' && $download_url ) : ?>
+                  <iframe class="pdf" src="<?php echo esc_url( $download_url ); ?>"></iframe>
+                <?php elseif ( $type === 'audio' && $download_url ) : ?>
+                  <div class="audio-box mrm-audio-box">
+                    <div class="audio-controls">
+                      <div class="audio-row-top">
+                        <button class="play-button mrm-play" type="button" aria-label="Play/Pause">
+                          <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M8 5v14l11-7z"></path>
+                          </svg>
+                          <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M6 5h4v14H6zM14 5h4v14h-4z"></path>
+                          </svg>
+                        </button>
+
+                        <div class="time mrm-current">0:00</div>
+                        <div class="time mrm-duration">0:00</div>
+                      </div>
+
+                      <div class="audio-row-seek">
+                        <input class="progress mrm-seek" type="range" min="0" max="0" value="0" step="1" aria-label="Seek">
+                      </div>
+
+                      <div class="audio-row-vol">
+                        <div class="volume" aria-label="Volume">
+                          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <path d="M11 5L6 9H2v6h4l5 4V5z"></path>
+                          </svg>
+                          <input class="mrm-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume slider">
+                        </div>
+                      </div>
+                    </div>
+
+                    <audio class="mrm-audio" preload="metadata">
+                      <source src="<?php echo esc_url( $download_url ); ?>">
+                    </audio>
+                  </div>
+                <?php else : ?>
+                  <a class="btn" href="<?php echo esc_url( $download_url ); ?>" target="_blank" rel="noopener"><?php echo esc_html__( 'Download', 'mrm-product-access' ); ?></a>
+                <?php endif; ?>
+              </div>
+            </div>
+          <?php endforeach; ?>
+        </div>
+      </div>
+    <?php endif; ?>
   </div>
 
 <script>
@@ -2215,9 +2446,9 @@ echo '    </div>';
     public function api_request_otp( $request ) {
         $params       = $request->get_json_params();
         $email        = isset( $params['email'] ) ? sanitize_email( $params['email'] ) : '';
-        $product_slug = isset( $params['product_slug'] ) ? sanitize_title( $params['product_slug'] ) : '';
+        $product_slug = isset( $params['product_slug'] ) ? $this->sanitize_product_slug( $params['product_slug'] ) : '';
         if ( empty( $product_slug ) && ! empty( $params['piece_slug'] ) ) {
-            $product_slug = sanitize_title( $params['piece_slug'] );
+            $product_slug = $this->sanitize_product_slug( $params['piece_slug'] );
         }
 
         // Generic privacy-preserving response.
@@ -2235,20 +2466,13 @@ echo '    </div>';
         $ip               = $_SERVER['REMOTE_ADDR'] ?? '';
 
         global $wpdb;
-        $table_purchases = $wpdb->prefix . 'mrm_purchases';
-        $table_otps      = $wpdb->prefix . 'mrm_otp_tokens';
+        $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
 
-        // Verify that the purchase exists OR the email is allowed via approved lists.
-        $purchase = $wpdb->get_row( $wpdb->prepare(
-            "SELECT id FROM $table_purchases WHERE product_slug = %s AND email_hash = %s AND status = 'paid' LIMIT 1",
-            $product_slug,
-            $email_hash
-        ) );
+        // ✅ Hub is the ONLY source of truth for access.
+        $has_access = $this->payments_hub_has_access( $email_hash, $product_slug );
 
-        $is_globally_verified = $this->is_email_hash_globally_verified( $email_hash );
-        $is_product_approved  = $this->is_email_hash_approved_for_product( $product_slug, $email_hash );
-
-        if ( ! $purchase && ! $is_globally_verified && ! $is_product_approved ) {
+        // Privacy-preserving: always return generic success.
+        if ( ! $has_access ) {
             return new WP_REST_Response( $generic, 200 );
         }
 
@@ -2310,9 +2534,9 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
     public function api_verify_otp( $request ) {
         $params       = $request->get_json_params();
         $email        = isset( $params['email'] ) ? sanitize_email( $params['email'] ) : '';
-        $product_slug = isset( $params['product_slug'] ) ? sanitize_title( $params['product_slug'] ) : '';
+        $product_slug = isset( $params['product_slug'] ) ? $this->sanitize_product_slug( $params['product_slug'] ) : '';
         if ( empty( $product_slug ) && ! empty( $params['piece_slug'] ) ) {
-            $product_slug = sanitize_title( $params['piece_slug'] );
+            $product_slug = $this->sanitize_product_slug( $params['piece_slug'] );
         }
         $otp          = isset( $params['otp'] ) ? trim( $params['otp'] ) : '';
 
@@ -2360,6 +2584,11 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         ), array(
             'id' => $row->id,
         ) );
+
+        // ✅ Re-check access in Payments Hub before granting session cookies.
+        if ( ! $this->payments_hub_has_access( $email_hash, $product_slug ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Unauthorized.' ), 403 );
+        }
 
         // Download auth cookie.
         $options     = $this->get_options();
@@ -3575,7 +3804,7 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
      * @return WP_REST_Response|void
      */
     public function api_download( $request ) {
-        $product_slug = isset( $_GET['product_slug'] ) ? sanitize_title( $_GET['product_slug'] ) : '';
+        $product_slug = isset( $_GET['product_slug'] ) ? $this->sanitize_product_slug( $_GET['product_slug'] ) : '';
         $asset_type   = isset( $_GET['asset_type'] ) ? sanitize_key( $_GET['asset_type'] ) : '';
         $track        = isset( $_GET['track'] ) ? sanitize_key( $_GET['track'] ) : '';
         $inline       = ! empty( $_GET['inline'] );
@@ -3619,57 +3848,23 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
         }
 
-        global $wpdb;
-        $table    = $wpdb->prefix . 'mrm_purchases';
-        $purchase = $wpdb->get_row( $wpdb->prepare(
-            "SELECT id FROM $table WHERE product_slug = %s AND email_hash = %s AND status = 'paid'",
-            $product_slug,
-            $email_hash
-        ) );
-
-        if ( ! $purchase ) {
-            $approved = $this->is_email_hash_approved_for_product( $product_slug, (string) $email_hash );
-            $verified = $this->is_email_hash_globally_verified( (string) $email_hash );
-            if ( ! $approved && ! $verified ) {
-                return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
-            }
+        // ✅ Hub is the ONLY source of truth for access (download time enforcement).
+        if ( ! $this->payments_hub_has_access( (string) $email_hash, $product_slug ) ) {
+            return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
         }
 
-        $config = $this->get_product_config( $product_slug );
-        if ( empty( $config ) ) {
+        $tracks = $this->get_tracks_for_slug( $product_slug );
+        if ( empty( $tracks ) ) {
             return new WP_REST_Response( array( 'error' => 'File not found.' ), 404 );
         }
 
         $file = '';
-        // Resolve file path based on track/index or asset type
-        if ( $track !== '' ) {
-            if ( ! empty( $config['tracks'] ) && is_array( $config['tracks'] ) ) {
-                // New format: sequential array of track items (numeric index)
-                if ( array_keys( $config['tracks'] ) === range( 0, count( $config['tracks'] ) - 1 ) && ctype_digit( (string) $track ) ) {
-                    $i = intval( $track );
-                    if ( isset( $config['tracks'][ $i ] ) && is_array( $config['tracks'][ $i ] ) && ! empty( $config['tracks'][ $i ]['path'] ) ) {
-                        $file = $config['tracks'][ $i ]['path'];
-                    }
-                } else {
-                    // Legacy associative map: use key lookup
-                    if ( isset( $config['tracks'][ $track ] ) ) {
-                        $file = $config['tracks'][ $track ];
-                    }
-                }
-            }
-        }
-        // Fallback to legacy single PDF/audio/zip paths when no track specified or not found
-        if ( empty( $file ) ) {
-            switch ( $asset_type ) {
-                case 'pdf':
-                    $file = $config['pdf_path'] ?? '';
-                    break;
-                case 'audio':
-                    $file = $config['audio_path'] ?? '';
-                    break;
-                case 'zip':
-                    $file = $config['zip_path'] ?? '';
-                    break;
+
+        // Tracks are indexed by row position (0..24).
+        if ( $track !== '' && ctype_digit( (string) $track ) ) {
+            $i = intval( $track );
+            if ( isset( $tracks[ $i ] ) && is_array( $tracks[ $i ] ) && ! empty( $tracks[ $i ]['url'] ) ) {
+                $file = $this->resolve_local_path_from_url_or_path( (string) $tracks[ $i ]['url'] );
             }
         }
 
