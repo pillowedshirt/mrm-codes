@@ -897,6 +897,20 @@ h1 {
   white-space: nowrap;
 }
 
+/* ✅ Allow long checkbox labels to wrap neatly */
+.terms-text.wrap {
+  white-space: normal;
+  line-height: 1.35;
+  text-align: left;
+}
+
+/* ✅ Make checkbox rows align nicely when label wraps */
+.terms-row.is-wrap {
+  align-items: flex-start;
+  justify-content: flex-start;
+  text-align: left;
+}
+
 .terms-row .terms-text{
   display: inline-flex;
   align-items: center;
@@ -1538,21 +1552,33 @@ h1 {
           </div>
 
           <div class="payment-options">
-            <div class="terms-row">
+
+            <div class="terms-row is-wrap" style="margin-top:10px;">
               <input type="checkbox" id="mrm-autopay-opt">
-              <label for="mrm-autopay-opt" class="terms-text">I am aware that I am signing up for auto-pay for future lessons.</label>
-            </div>
-            <div class="terms-row" style="margin-top:6px;">
-              <input type="checkbox" id="mrm-prepay-opt">
-              <label for="mrm-prepay-opt" class="terms-text">I would like to prepay for all selected lessons.</label>
-            </div>
-            <div class="terms-row" style="margin-top:6px;">
-              <input type="checkbox" id="mrm-sheetmusic-opt">
-              <label for="mrm-sheetmusic-opt" class="terms-text">
-                Subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)
+              <label for="mrm-autopay-opt" class="terms-text wrap">
+                auto-pay for future lessons (charges repeat on your selected frequency while your lesson time is reserved)
               </label>
             </div>
-            <div style="margin-top:6px;" class="terms-text">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
+
+            <div class="terms-row is-wrap" style="margin-top:10px;">
+              <input type="checkbox" id="mrm-prepay-opt">
+              <label for="mrm-prepay-opt" class="terms-text wrap">
+                prepay for all selected lessons (one-time payment today)
+              </label>
+            </div>
+
+            <div class="terms-row is-wrap" style="margin-top:10px;">
+              <input type="checkbox" id="mrm-sheetmusic-opt">
+              <label for="mrm-sheetmusic-opt" class="terms-text wrap">
+                subscribe for sheet music and backing track access
+                <strong>($5 per month — auto-cancelled when no longer enrolled in lessons)</strong>
+              </label>
+            </div>
+
+            <div style="margin-top:10px;" class="terms-text wrap">
+              by selecting auto-pay, you authorize mrm to store your card and charge for future lessons.
+            </div>
+
           </div>
 
           <div class="modal-actions">

@@ -737,6 +737,13 @@ class MRM_Payments_Hub_Single {
     }
 
     $p = $this->get_product($sku);
+
+    // ✅ If products were never seeded (or option was cleared), reseed defaults and retry once
+    if (!$p) {
+      $this->ensure_default_products();
+      $p = $this->get_product($sku);
+    }
+
     if (!$p) {
       error_log('[MRM Payments Hub] /quote unmapped sku=' . $sku);
       return new WP_REST_Response(array(
@@ -851,6 +858,13 @@ class MRM_Payments_Hub_Single {
     if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
 
     $p = $this->get_product($sku);
+
+    // ✅ Reseed defaults if needed and retry once
+    if (!$p) {
+      $this->ensure_default_products();
+      $p = $this->get_product($sku);
+    }
+
     if (!$p || empty($p['active'])) {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
     }
