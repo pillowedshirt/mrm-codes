@@ -962,6 +962,13 @@ h1 {
   outline-offset:2px;
 }
 
+.mrm-check-row.is-disabled {
+  opacity: 0.45;
+}
+.mrm-check-row.is-disabled label {
+  cursor: not-allowed;
+}
+
 .modal-actions {
   display: flex;
   align-items: center;
@@ -1563,26 +1570,26 @@ h1 {
           <input id="modal-phone" autocomplete="tel">
 
           <label for="modal-length">Lesson length</label>
-          <select id="modal-length">
+          <select id="modal-length" disabled>
             <option value="30">30 minutes</option>
             <option value="60">60 minutes</option>
           </select>
 
           <label for="modal-type">Lesson type</label>
-          <select id="modal-type">
+          <select id="modal-type" disabled>
             <option value="1">Online</option>
             <option value="0">In person</option>
           </select>
 
           <label for="modal-frequency">Frequency</label>
-          <select id="modal-frequency">
+          <select id="modal-frequency" disabled>
             <option value="weekly">Weekly</option>
             <option value="biweekly">Biweekly</option>
             <option value="none">Do not repeat</option>
           </select>
 
           <label for="modal-repeat-duration">How long would you like to reserve this lesson time?</label>
-          <select id="modal-repeat-duration">
+          <select id="modal-repeat-duration" disabled>
             <option value="--">--</option>
             <option value="1_month">One month</option>
             <option value="3_months">Three months</option>
@@ -1861,28 +1868,94 @@ function applyRepeatUIRules(){
 }
 
 function updatePaymentCheckboxVisibility() {
-  const appointmentType = document.getElementById('lesson-option')?.value;
+  const appointmentType = document.getElementById('lesson-option')?.value; // 'consultation' or lesson type
+  const frequency = document.getElementById('repeat-frequency')?.value || 'none'; // weekly | biweekly | none
+
   const termsRow = document.querySelector('.terms-row');
-  const autopayRow = document.getElementById('mrm-autopay-opt')?.closest('.mrm-check-row');
-  const prepayRow = document.getElementById('mrm-prepay-opt')?.closest('.mrm-check-row');
-  const sheetRow = document.getElementById('mrm-sheet-music-addon-opt')?.closest('.mrm-check-row');
+
+  const autopayCb = document.getElementById('mrm-autopay-opt');
+  const prepayCb  = document.getElementById('mrm-prepay-opt');
+  const sheetCb   = document.getElementById('mrm-sheet-music-addon-opt');
+
+  const autopayRow = autopayCb?.closest('.mrm-check-row');
+  const prepayRow  = prepayCb?.closest('.mrm-check-row');
+  const sheetRow   = sheetCb?.closest('.mrm-check-row');
+
   if (!termsRow || !autopayRow || !prepayRow || !sheetRow) return;
 
-  termsRow.style.display = 'none';
+  // Default: hide everything
+  termsRow.style.display  = 'none';
   autopayRow.style.display = 'none';
-  prepayRow.style.display = 'none';
-  sheetRow.style.display = 'none';
+  prepayRow.style.display  = 'none';
+  sheetRow.style.display   = 'none';
 
+  // Consultation: ONLY terms of service
   if (appointmentType === 'consultation') {
     termsRow.style.display = '';
-    sheetRow.style.display = '';
+
+    // Ensure hidden options are not selected
+    if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
+    if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
+    if (sheetCb)   { sheetCb.checked   = false; }
+
+    // Remove any disabled styling
+    autopayRow.classList.remove('is-disabled');
+    prepayRow.classList.remove('is-disabled');
     return;
   }
 
+  // Non-consultation lesson: terms always visible
   termsRow.style.display = '';
-  autopayRow.style.display = '';
-  prepayRow.style.display = '';
+
+  // Sheet music subscription: always visible for online/in-person lessons
   sheetRow.style.display = '';
+
+  // Auto-pay + Prepay only visible for repeating lessons
+  const isRepeating = (frequency === 'weekly' || frequency === 'biweekly');
+
+  if (isRepeating) {
+    autopayRow.style.display = '';
+    prepayRow.style.display  = '';
+  } else {
+    autopayRow.style.display = 'none';
+    prepayRow.style.display  = 'none';
+
+    // If lesson does not repeat, force these off + fully enabled
+    if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
+    if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
+    autopayRow.classList.remove('is-disabled');
+    prepayRow.classList.remove('is-disabled');
+  }
+
+  // Apply mutual-exclusion state if they are visible
+  applyAutoPrepayMutualExclusion();
+}
+
+function applyAutoPrepayMutualExclusion() {
+  const autopayCb = document.getElementById('mrm-autopay-opt');
+  const prepayCb  = document.getElementById('mrm-prepay-opt');
+  if (!autopayCb || !prepayCb) return;
+
+  const autopayRow = autopayCb.closest('.mrm-check-row');
+  const prepayRow  = prepayCb.closest('.mrm-check-row');
+
+  const autopayOn = !!autopayCb.checked;
+  const prepayOn  = !!prepayCb.checked;
+
+  // Reset
+  autopayCb.disabled = false;
+  prepayCb.disabled  = false;
+  autopayRow?.classList.remove('is-disabled');
+  prepayRow?.classList.remove('is-disabled');
+
+  // If one is selected, disable the other
+  if (autopayOn) {
+    prepayCb.disabled = true;
+    prepayRow?.classList.add('is-disabled');
+  } else if (prepayOn) {
+    autopayCb.disabled = true;
+    autopayRow?.classList.add('is-disabled');
+  }
 }
 
 function clearSelectedSlots() {
@@ -4649,10 +4722,24 @@ document.getElementById('modal-instrument').addEventListener('change', ()=>{
 document.getElementById('lesson-option').addEventListener('change', updatePaymentCheckboxVisibility);
 document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
 
-['modal-length','modal-type','modal-frequency','modal-repeat-duration'].forEach((id)=>{
-  const el = document.getElementById(id);
-  if (el) el.addEventListener('change', syncMainToModal);
-});
+const autopayEl = document.getElementById('mrm-autopay-opt');
+const prepayEl  = document.getElementById('mrm-prepay-opt');
+
+if (autopayEl) {
+  autopayEl.addEventListener('change', () => {
+    // If turning on autopay, force prepay off
+    if (autopayEl.checked && prepayEl) prepayEl.checked = false;
+    applyAutoPrepayMutualExclusion();
+  });
+}
+
+if (prepayEl) {
+  prepayEl.addEventListener('change', () => {
+    // If turning on prepay, force autopay off
+    if (prepayEl.checked && autopayEl) autopayEl.checked = false;
+    applyAutoPrepayMutualExclusion();
+  });
+}
 
 applyLessonOptionDefaults();
 updatePaymentCheckboxVisibility();
