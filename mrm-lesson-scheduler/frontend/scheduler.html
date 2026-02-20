@@ -2744,9 +2744,9 @@ function _mrmGetBusyType(b){
   const t = _mrmNormalizeLessonType(b.lesson_type); // 'online' | 'in_person' | null
   if(t) return t;
 
-  // Travel-safe default: if the API didn't label the busy block,
-  // treat it as in_person so 30-min buffers protect scheduling.
-  return 'in_person';
+  // Legacy behavior for unlabeled busy blocks (e.g., Google FreeBusy):
+  // do NOT apply travel buffers and do NOT force an online label.
+  return null;
 }
 
 function _mrmBusyBlocks(b){
