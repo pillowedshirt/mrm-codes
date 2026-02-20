@@ -2558,10 +2558,11 @@ function daysInMonth(y,m){ return new Date(y,m+1,0).getDate(); }
 
 function groupSlotsByDay(slots){
   const map = {};
-  slots.forEach(s=>{
+  slots.forEach(s => {
     const d = new Date(s.start);
-    const key = d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
-    if(!map[key]) map[key]=[];
+    const key =
+      `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    if(!map[key]) map[key] = [];
     map[key].push(s);
   });
   return map;
@@ -2574,8 +2575,11 @@ function groupBusyByDay(busy){
     const sMs = new Date(b.start).getTime();
     const eMs = new Date(b.end).getTime();
     if(!isFinite(sMs) || !isFinite(eMs) || eMs<=sMs) return;
+
     const d = new Date(sMs);
-    const key = d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+    const key =
+      `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
     if(!map[key]) map[key]=[];
     map[key].push({
       startMs: sMs,
@@ -2585,11 +2589,13 @@ function groupBusyByDay(busy){
       source: (typeof b.source === 'string') ? b.source : null
     });
   });
+
   Object.keys(map).forEach(k=>{
     map[k].sort((a,b)=>a.startMs-b.startMs);
   });
   return map;
 }
+
 
 function isPastDay(y,m,day){
   const today = new Date();
