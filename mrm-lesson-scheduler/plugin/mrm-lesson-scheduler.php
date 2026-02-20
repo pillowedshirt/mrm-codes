@@ -1597,7 +1597,9 @@ class MRM_Lesson_Scheduler {
         $availability = $this->get_calendar_availability_events( $instructor_id, $start, $end );
 
         // 2) Busy windows (ALWAYS compute: DB lessons + Google opaque events)
-        $busy = array();
+        // IMPORTANT: Keep DB busy separate from Google busy so we don't lose lesson_type metadata.
+        $busy_db = array();
+        $busy_google = array();
 
         // Build time_min/time_max UTC using instructor timezone (same approach your file already uses elsewhere)
         global $wpdb;
@@ -1630,21 +1632,19 @@ class MRM_Lesson_Scheduler {
                 $time_min = $start_utc->format( 'Y-m-d\TH:i:s\Z' );
                 $time_max = $end_utc->format( 'Y-m-d\TH:i:s\Z' );
 
-                // DB busy (scheduled lessons table)
+                // DB busy (scheduled lessons table) — includes lesson_type/lesson_minutes
                 $db_busy = $this->db_busy_intervals_for_instructor( $instructor_id, $time_min, $time_max );
                 foreach ( (array) $db_busy as $b ) {
                     if ( empty( $b['start_ts'] ) || empty( $b['end_ts'] ) ) continue;
-                    $busy[] = array(
+                    $busy_db[] = array(
                         'start'          => (string) ( $b['start'] ?? gmdate( 'c', (int) $b['start_ts'] ) ),
                         'end'            => (string) ( $b['end']   ?? gmdate( 'c', (int) $b['end_ts'] ) ),
                         'start_ts'       => (int) $b['start_ts'],
                         'end_ts'         => (int) $b['end_ts'],
 
-                        // ✅ CRITICAL legacy fields the frontend needs
-                        'lesson_type'    => (string) ( $b['lesson_type'] ?? '' ),
-                        'lesson_minutes' => (int)    ( $b['lesson_minutes'] ?? 0 ),
-
-                        'source'         => (string) ( $b['source'] ?? 'db' ),
+                        'lesson_type'    => (string) ( $b['lesson_type'] ?? '' ),    // 'online' | 'in_person'
+                        'lesson_minutes' => (int)    ( $b['lesson_minutes'] ?? 0 ),  // 30 | 60
+                        'source'         => 'db',
                     );
                 }
 
@@ -1657,19 +1657,42 @@ class MRM_Lesson_Scheduler {
                             $bs = strtotime( (string) $b['start'] );
                             $be = strtotime( (string) $b['end'] );
                             if ( ! $bs || ! $be || $be <= $bs ) continue;
-                            $busy[] = array(
+                            $busy_google[] = array(
                                 'start'       => gmdate( 'c', (int) $bs ),
                                 'end'         => gmdate( 'c', (int) $be ),
                                 'start_ts' => (int) $bs,
                                 'end_ts'   => (int) $be,
-                                'lesson_type' => '',
+                                // leave lesson_type unset for google
                                 'source'   => 'google',
                             );
                         }
                     }
                 }
 
-                $busy = $this->merge_intervals( $busy );
+                // Merge within each source ONLY (keeps DB lesson_type intact)
+                $busy_db = $this->merge_intervals( $busy_db );
+                $busy_google = $this->merge_intervals( $busy_google );
+
+                // Drop google intervals that overlap DB intervals (prevents dupes and metadata loss)
+                if ( ! empty( $busy_db ) && ! empty( $busy_google ) ) {
+                    $filtered_google = array();
+                    foreach ( $busy_google as $g ) {
+                        $overlap = false;
+                        foreach ( $busy_db as $d ) {
+                            if ( max( (int)$g['start_ts'], (int)$d['start_ts'] ) < min( (int)$g['end_ts'], (int)$d['end_ts'] ) ) {
+                                $overlap = true;
+                                break;
+                            }
+                        }
+                        if ( ! $overlap ) $filtered_google[] = $g;
+                    }
+                    $busy_google = $filtered_google;
+                }
+
+                // Final busy list: DB first (metadata-rich), then google
+                $busy = array_merge( $busy_db, $busy_google );
+            } else {
+                $busy = array();
             }
         } catch ( Exception $e ) {
             $busy = array();
