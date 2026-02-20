@@ -1197,8 +1197,6 @@ class MRM_Lesson_Scheduler {
      * Returns meet URL (string) or WP_Error.
      */
     protected function google_add_meet_to_event( $calendar_id, $event_id ) {
-        // Safety: do not write Meet links into Calendar events (architecture rule).
-        return new WP_Error( 'meet_calendar_write_disabled', 'Meet links are not written into Google Calendar events in this system.' );
         if ( ! $this->google_is_configured() ) {
             return new WP_Error( 'google_not_configured', 'Google Calendar is not configured.' );
         }
@@ -3016,9 +3014,10 @@ protected function base64url_encode( $data ) {
         }
 
         // If requested, generate a unique Google Meet link for this event.
-        // IMPORTANT: do NOT force Meet creation based on lesson_type / appointment_type.
-        // Meet creation must be explicitly requested by the caller.
-        $want_meet = (bool) $create_meet;
+        // Also honor online appointment metadata as a fallback for legacy callers.
+        $appointment_type = isset( $extended_private['appointment_type'] ) ? strtolower( (string) $extended_private['appointment_type'] ) : '';
+        $lesson_type = isset( $extended_private['lesson_type'] ) ? strtolower( (string) $extended_private['lesson_type'] ) : '';
+        $want_meet = (bool) $create_meet || $appointment_type === 'online' || $lesson_type === 'online';
         if ( $want_meet ) {
             // requestId must be unique per createRequest
             $request_id = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 8 ) );
