@@ -1565,17 +1565,32 @@ h1 {
           <label for="modal-phone">Phone</label>
           <input id="modal-phone" autocomplete="tel">
 
-          <label for="modal-lesson-length">Lesson Length</label>
-          <input id="modal-lesson-length" readonly>
+          <label for="modal-length">Lesson length</label>
+          <select id="modal-length">
+            <option value="30">30 minutes</option>
+            <option value="60">60 minutes</option>
+          </select>
 
-          <label for="modal-lesson-type">Lesson Type</label>
-          <input id="modal-lesson-type" readonly>
+          <label for="modal-type">Lesson type</label>
+          <select id="modal-type">
+            <option value="1">Online</option>
+            <option value="0">In person</option>
+          </select>
 
           <label for="modal-frequency">Frequency</label>
-          <input id="modal-frequency" readonly>
+          <select id="modal-frequency">
+            <option value="weekly">Weekly</option>
+            <option value="biweekly">Biweekly</option>
+            <option value="none">Do not repeat</option>
+          </select>
 
           <label for="modal-repeat-duration">How long would you like to reserve this lesson time?</label>
-          <input id="modal-repeat-duration" readonly>
+          <select id="modal-repeat-duration">
+            <option value="--">--</option>
+            <option value="1_month">One month</option>
+            <option value="3_months">Three months</option>
+            <option value="indefinitely">Indefinitely</option>
+          </select>
 
           <div class="terms-row" style="margin-top:12px;">
             <input type="checkbox" id="modal-agree-terms">
@@ -1605,6 +1620,7 @@ h1 {
             <button class="modal-submit" id="modal-submit-booking">Book now</button>
           </div>
 
+          <div id="modal-availability-message" class="modal-message" style="color:#a70000;"></div>
           <div id="modal-booking-message" class="modal-message"></div>
         </div>
       </div>
@@ -1681,14 +1697,14 @@ function ensureStripe(publishableKey){
   return stripe;
 }
 
-function openPaymentModal(clientSecret, description){
+function openPaymentModal(clientSecret, finalAmountDollars){
   const overlay = document.getElementById('mrm-payment-overlay');
   const closeBtn = document.getElementById('mrm-payment-close');
   const payBtn = document.getElementById('mrm-pay-btn');
   const errorEl = document.getElementById('mrm-payment-error');
   const instructions = document.getElementById('mrm-payment-instructions');
 
-  instructions.textContent = description || 'Please enter your card details.';
+  instructions.textContent = `Total due: $${finalAmountDollars || '0.00'} – enter your card details below.`;
   errorEl.textContent = '';
   payBtn.disabled = false;
 
@@ -1701,6 +1717,7 @@ function openPaymentModal(clientSecret, description){
   activePaymentElement.mount('#mrm-payment-element');
 
   const closeModal = () => {
+    clearSelectedSlots();
     overlay.style.display = 'none';
     overlay.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('mrm-booking-modal-open');
@@ -1841,9 +1858,131 @@ function applyRepeatUIRules(){
   if(hiddenFreq) hiddenFreq.value = freq;
   if(hiddenDur)  hiddenDur.value  = durSel.value || '--';
 
-  // Sync modal readonly display fields
-  if(modalFreq) modalFreq.value = freqLabel(freq);
-  if(modalDur)  modalDur.value  = durLabel(durSel.value || '--');
+  // Sync modal controls
+  if(modalFreq) modalFreq.value = freq;
+  if(modalDur)  modalDur.value  = durSel.value || '--';
+}
+
+function updatePaymentCheckboxVisibility() {
+  const appointmentType = document.getElementById('lesson-option')?.value;
+  const repeatFrequency = document.getElementById('repeat-frequency')?.value;
+  const termsRow = document.querySelector('.terms-row');
+  const autopayRow = document.getElementById('mrm-autopay-opt')?.closest('.mrm-check-row');
+  const prepayRow = document.getElementById('mrm-prepay-opt')?.closest('.mrm-check-row');
+  const sheetRow = document.getElementById('mrm-sheet-music-addon-opt')?.closest('.mrm-check-row');
+  if (!termsRow || !autopayRow || !prepayRow || !sheetRow) return;
+
+  termsRow.style.display = 'none';
+  autopayRow.style.display = 'none';
+  prepayRow.style.display = 'none';
+  sheetRow.style.display = 'none';
+
+  if (appointmentType === 'consultation') {
+    termsRow.style.display = '';
+    return;
+  }
+
+  if (repeatFrequency === 'none') {
+    termsRow.style.display = '';
+    sheetRow.style.display = '';
+    return;
+  }
+
+  termsRow.style.display = '';
+  autopayRow.style.display = '';
+  prepayRow.style.display = '';
+}
+
+function clearSelectedSlots() {
+  selectedSlots = [];
+  document.querySelectorAll('.slot.selected, .selected-slot').forEach(el => {
+    el.classList.remove('selected');
+    el.classList.remove('selected-slot');
+  });
+  if (currentInstructor) updateBooking(currentInstructor);
+}
+
+function syncModalToMain() {
+  const mainLength = document.getElementById('length-select');
+  const mainType = document.getElementById('online-select');
+  const mainFrequency = document.getElementById('repeat-frequency');
+  const mainDuration = document.getElementById('repeat-duration');
+  const modalLength = document.getElementById('modal-length');
+  const modalType = document.getElementById('modal-type');
+  const modalFrequency = document.getElementById('modal-frequency');
+  const modalDuration = document.getElementById('modal-repeat-duration');
+  if (!mainLength || !mainType || !mainFrequency || !mainDuration || !modalLength || !modalType || !modalFrequency || !modalDuration) return;
+
+  modalLength.value = mainLength.value;
+  modalType.value = mainType.value;
+  modalFrequency.value = mainFrequency.value;
+  modalDuration.value = mainDuration.value;
+}
+
+function checkAvailabilityConflict() {
+  const msg = document.getElementById('modal-availability-message');
+  const bookBtn = document.getElementById('modal-submit-booking');
+  if (!msg || !bookBtn) return false;
+
+  const instr = currentInstructor;
+  const state = instr && instr._mrmState ? instr._mrmState : null;
+  const duration = parseInt(document.getElementById('length-select')?.value || '0', 10);
+  const mode = String(document.getElementById('online-select')?.value || '');
+  const modeLabel = mode === '1' ? 'online' : 'in_person';
+  const relevantSelected = instr && instr.id != null
+    ? selectedSlots.filter(s => String(s.instructor_id) === String(instr.id))
+    : selectedSlots.slice();
+
+  let hasConflict = false;
+  if (state && state.slotsByDay && relevantSelected.length && duration > 0) {
+    for (const chosen of relevantSelected) {
+      const chosenStart = new Date(chosen.start).getTime();
+      const chosenEnd = new Date(chosen.end).getTime();
+      if (!isFinite(chosenStart)) continue;
+
+      const d = new Date(chosen.start);
+      const key = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+      const daySlots = Array.isArray(state.slotsByDay[key]) ? state.slotsByDay[key] : [];
+
+      const found = daySlots.some(slot => {
+        const slotStart = new Date(slot.start).getTime();
+        const slotEnd = new Date(slot.end).getTime();
+        const slotType = slot.lesson_type === 'online' ? 'online' : (slot.lesson_type === 'in_person' ? 'in_person' : null);
+        const slotMinutes = Math.round((slotEnd - slotStart) / 60000);
+        return slotStart === chosenStart && slotMinutes === duration && (!slotType || slotType === modeLabel);
+      });
+
+      if (!found || (isFinite(chosenEnd) && Math.round((chosenEnd - chosenStart) / 60000) !== duration)) {
+        hasConflict = true;
+        break;
+      }
+    }
+  }
+
+  msg.textContent = hasConflict ? 'The specified time is not available; please choose another time.' : '';
+  bookBtn.disabled = hasConflict;
+  return hasConflict;
+}
+
+function syncMainToModal() {
+  const modalLength = document.getElementById('modal-length');
+  const modalType = document.getElementById('modal-type');
+  const modalFrequency = document.getElementById('modal-frequency');
+  const modalDuration = document.getElementById('modal-repeat-duration');
+  const mainLength = document.getElementById('length-select');
+  const mainType = document.getElementById('online-select');
+  const mainFrequency = document.getElementById('repeat-frequency');
+  const mainDuration = document.getElementById('repeat-duration');
+  if (!modalLength || !modalType || !modalFrequency || !modalDuration || !mainLength || !mainType || !mainFrequency || !mainDuration) return;
+
+  mainLength.value = modalLength.value;
+  mainType.value = modalType.value;
+  mainFrequency.value = modalFrequency.value;
+  mainDuration.value = modalDuration.value;
+
+  applyRepeatUIRules();
+  updatePaymentCheckboxVisibility();
+  checkAvailabilityConflict();
 }
 
 // Optional: if user flips lesson option, enforce the defaults immediately.
@@ -1867,11 +2006,12 @@ document.addEventListener('change', (e)=>{
 const repeatFrequencyEl = document.getElementById('repeat-frequency');
 const repeatDurationEl  = document.getElementById('repeat-duration');
 
-if (repeatFrequencyEl) repeatFrequencyEl.addEventListener('change', applyRepeatUIRules);
+if (repeatFrequencyEl) repeatFrequencyEl.addEventListener('change', ()=>{ applyRepeatUIRules(); updatePaymentCheckboxVisibility(); });
 if (repeatDurationEl)  repeatDurationEl.addEventListener('change', applyRepeatUIRules);
 
 // run once on page load to enforce defaults
 applyRepeatUIRules();
+updatePaymentCheckboxVisibility();
 
 function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s => ({
@@ -1999,6 +2139,8 @@ function openBookingModal(instr){
   const msg = document.getElementById('modal-booking-message');
 
   msg.textContent = '';
+  const availabilityMsg = document.getElementById('modal-availability-message');
+  if (availabilityMsg) availabilityMsg.textContent = '';
   list.innerHTML = '';
 
   const instrName = instr && instr.name ? instr.name : '';
@@ -2027,23 +2169,8 @@ function openBookingModal(instr){
   document.getElementById('modal-country').value    = document.getElementById('address-country')?.value || 'US';
   document.getElementById('modal-phone').value      = document.getElementById('phone')?.value || '';
 
-  // Auto-populated read-only fields from dropdowns
-  const len = document.getElementById('length-select')?.value || '';
-  const type = (String(document.getElementById('online-select')?.value) === '1') ? 'Online' : 'In person';
-  const freq = document.getElementById('repeat-frequency')?.value || 'weekly';
-  const dur  = document.getElementById('repeat-duration')?.value || '1_month';
-
-  document.getElementById('modal-lesson-length').value = len ? (len + ' minutes') : '';
-  document.getElementById('modal-lesson-type').value   = type;
-
-  document.getElementById('modal-frequency').value = (freq === 'biweekly') ? 'Biweekly'
-    : (freq === 'none') ? 'Do not repeat'
-    : 'Weekly';
-
-  document.getElementById('modal-repeat-duration').value = (freq === 'none' || dur === '--') ? '--'
-    : (dur === '3_months') ? 'Three months'
-    : (dur === 'indefinitely') ? 'Indefinitely'
-    : 'One month';
+  syncModalToMain();
+  checkAvailabilityConflict();
 
   // Show + lock scroll
   overlay.style.display = 'flex';
@@ -2059,6 +2186,7 @@ function openBookingModal(instr){
 
 function closeBookingModal(){
   const overlay = document.getElementById('booking-modal');
+  clearSelectedSlots();
   overlay.style.display = 'none';
   overlay.setAttribute('aria-hidden','true');
   document.body.classList.remove('mrm-booking-modal-open');
@@ -2281,7 +2409,7 @@ function ensureLegacyBookingHandler(){
       const autopay = document.getElementById('mrm-autopay-opt')?.checked;
       const sheetMusicAddon = document.getElementById('mrm-sheet-music-addon-opt')?.checked;
 
-      if(!prepay && !autopay){
+      if(appointmentType !== 'consultation' && frequency !== 'none' && !prepay && !autopay){
         setMsg('Please choose either prepay or auto-pay.');
         return;
       }
@@ -2312,7 +2440,11 @@ function ensureLegacyBookingHandler(){
         }
 
         const baseAmount = quote.amount_cents || 0;
-        const chargeAmountCents = prepay ? (baseAmount * count) : baseAmount;
+        const chargeAmountCents = baseAmount * count;
+        const sheetAddonCents = sheetMusicAddon ? 500 : 0;
+        const sheetAddonTax = sheetMusicAddon ? (quote.addon_tax_cents || 0) : 0;
+        const finalAmountCents = chargeAmountCents + sheetAddonCents + sheetAddonTax;
+        const finalAmountDollars = (finalAmountCents / 100).toFixed(2);
 
         const createRes = await fetch(payApiBase + '/create-payment-intent', {
           method:'POST',
@@ -2345,17 +2477,13 @@ function ensureLegacyBookingHandler(){
         }
         stripe = stripeInstance;
 
-        const priceDisplay = prepay
-          ? `Total ${count} lesson(s): $${(chargeAmountCents / 100).toFixed(2)}`
-          : `Lesson total: $${(chargeAmountCents / 100).toFixed(2)}`;
-
         sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
           payload,
           email,
           payment_intent_id: createData.payment_intent_id
         }));
 
-        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, priceDisplay);
+        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, finalAmountDollars);
 
         payBtn.onclick = async () => {
           payBtn.disabled = true;
@@ -4414,6 +4542,7 @@ titleWrap.appendChild(learn);
               });
           }
 
+          instr._mrmState = state;
           state._refreshDayAvailability = refreshDayAvailability;
           instr._mrmRefreshOpenDay = ()=>{
             if(state.expandedDay) refreshDayAvailability(state.expandedDay, { force: true });
@@ -4557,7 +4686,16 @@ document.getElementById('modal-instrument').addEventListener('change', ()=>{
   document.getElementById('confirm-instrument').value = v;
 });
 
+document.getElementById('lesson-option').addEventListener('change', updatePaymentCheckboxVisibility);
+document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
+
+['modal-length','modal-type','modal-frequency','modal-repeat-duration'].forEach((id)=>{
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', syncMainToModal);
+});
+
 applyLessonOptionDefaults();
+updatePaymentCheckboxVisibility();
 loadInstructors();
 </script>
 </body>
