@@ -516,6 +516,22 @@ class MRM_Lesson_Scheduler {
         $now = current_time( 'mysql' );
         $created_ids = array();
 
+        // Fetch instructor calendar + timezone (required for Google event insert)
+        $table_instructors = $wpdb->prefix . 'mrm_instructors';
+        $instr = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT id, name, email, calendar_id, timezone
+                 FROM {$table_instructors}
+                 WHERE id = %d
+                 LIMIT 1",
+                $instructor_id
+            ),
+            ARRAY_A
+        );
+
+        $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
+        $instr_tz    = ( is_array( $instr ) && ! empty( $instr['timezone'] ) ) ? (string) $instr['timezone'] : 'UTC';
+
         foreach ( $slots as $slot ) {
             $start_raw = (string) ( $slot['start'] ?? '' );
             $end_raw   = (string) ( $slot['end'] ?? '' );
@@ -558,7 +574,85 @@ class MRM_Lesson_Scheduler {
             ) );
 
             if ( $ok ) {
-                $created_ids[] = (int) $wpdb->insert_id;
+                $booking_id = (int) $wpdb->insert_id;
+                $created_ids[] = $booking_id;
+
+                // Call existing Google Calendar insert function (already defined in this plugin)
+                // Only do this if Google is configured and the instructor has a calendar_id.
+                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+
+                    // Build join gate link (this route already exists in your plugin)
+                    $join_link = add_query_arg( array( 'token' => $token ), home_url( '/join-online/' ) );
+
+                    // Minimal, consistent event content (no Meet link created here)
+                    // NOTE: Your join gate creates Meet later (deferred), and your code explicitly says it does NOT write Meet back into Google Calendar.
+                    $title = 'MRM ' . ( $is_online ? 'Online' : 'In-Person' ) . ' Lesson - ' . ( $student_name !== '' ? $student_name : $student_email );
+
+                    $location = $is_online ? 'Online (Join link in description)' : '';
+
+                    $description_lines = array();
+                    $description_lines[] = 'Student: ' . ( $student_name !== '' ? $student_name : $student_email );
+                    $description_lines[] = 'Email: ' . $student_email;
+                    if ( $instrument !== '' ) $description_lines[] = 'Instrument: ' . $instrument;
+                    $description_lines[] = 'Length: ' . (int) ( $lesson_length > 0 ? $lesson_length : 60 ) . ' minutes';
+                    $description_lines[] = 'Join link: ' . $join_link;
+                    $description = implode( "\n", $description_lines );
+
+                    // Your sync logic expects this to exist:
+                    // extendedProperties.private.booking_id
+                    $extended_private = array(
+                        'booking_id'          => (string) $booking_id,
+                        'student_email'       => (string) $student_email,
+                        'student_name'        => (string) $student_name,
+                        'instrument'          => (string) $instrument,
+                        'reminder_token'      => (string) $token,
+                    );
+
+                    // Use your existing RFC3339 UTC helper (already in this file)
+                    $start_rfc3339 = $this->to_rfc3339_utc( $start_raw );
+                    $end_rfc3339   = $this->to_rfc3339_utc( $end_raw );
+
+                    // If conversion fails, do not break booking — just log
+                    if ( ! is_wp_error( $start_rfc3339 ) && ! is_wp_error( $end_rfc3339 ) ) {
+
+                        // IMPORTANT: We pass create_meet = false to respect your existing design:
+                        // Meet is created later by the join gate / reminder flow, not on calendar insert.
+                        $ins = $this->google_insert_event(
+                            $calendar_id,
+                            $title,
+                            $description,
+                            $location,
+                            $start_rfc3339,
+                            $end_rfc3339,
+                            'UTC',              // dateTime values are UTC Z strings
+                            $extended_private,
+                            array(),            // recurrence not used here; your UI sends explicit slots
+                            false,              // create_meet disabled (deferred Meet is your current architecture)
+                            array()             // attendee emails omitted (keeps behavior conservative)
+                        );
+
+                        if ( ! is_wp_error( $ins ) && is_array( $ins ) && ! empty( $ins['id'] ) ) {
+                            // Store google_event_id so your sync code can find/update later
+                            $wpdb->update(
+                                $lessons_table,
+                                array(
+                                    'google_event_id' => (string) $ins['id'],
+                                    'updated_at'      => $now,
+                                ),
+                                array( 'id' => $booking_id ),
+                                array( '%s', '%s' ),
+                                array( '%d' )
+                            );
+                        } else {
+                            $msg = is_wp_error( $ins ) ? $ins->get_error_message() : 'Unknown insert response.';
+                            error_log( 'MRM google_insert_event failed for booking_id ' . $booking_id . ': ' . $msg );
+                        }
+
+                    } else {
+                        $msg = is_wp_error( $start_rfc3339 ) ? $start_rfc3339->get_error_message() : $end_rfc3339->get_error_message();
+                        error_log( 'MRM time->RFC3339 failed for booking_id ' . $booking_id . ': ' . $msg );
+                    }
+                }
             }
         }
 
