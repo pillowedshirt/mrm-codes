@@ -922,8 +922,44 @@ h1 {
   color: var(--color-text-muted);
 }
 
-.payment-options input[type="checkbox"]{
-  margin-right: 6px;
+.mrm-check-row{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-top:10px;
+}
+
+.mrm-check-row input[type="checkbox"]{
+  appearance:none;
+  -webkit-appearance:none;
+  width:18px;height:18px;
+  border:2px solid var(--color-accent);
+  border-radius:5px;
+  background:#fff;
+  display:inline-grid;
+  place-content:center;
+  cursor:pointer;
+}
+
+.mrm-check-row input[type="checkbox"]::after{
+  content:"";
+  width:9px;height:5px;
+  border-left:2px solid #fff;
+  border-bottom:2px solid #fff;
+  transform:rotate(-45deg);
+  opacity:0;
+}
+
+.mrm-check-row input[type="checkbox"]:checked{
+  background:var(--color-accent);
+  border-color:var(--color-accent);
+}
+
+.mrm-check-row input[type="checkbox"]:checked::after{opacity:1;}
+
+.mrm-check-row input[type="checkbox"]:focus-visible{
+  outline:3px solid rgba(0,0,0,0.18);
+  outline-offset:2px;
 }
 
 .modal-actions {
@@ -1471,6 +1507,9 @@ h1 {
     <input id="first-name" type="hidden">
     <input id="last-name" type="hidden">
     <input id="address" type="hidden">
+    <input id="address-state" type="hidden">
+    <input id="address-postal" type="hidden">
+    <input id="address-country" type="hidden">
     <input id="phone" type="hidden">
     <input id="frequency" type="hidden">
     <input id="reserve-duration" type="hidden">
@@ -1514,6 +1553,15 @@ h1 {
           <label for="modal-address">Address</label>
           <input id="modal-address" autocomplete="street-address">
 
+          <label for="modal-state">State</label>
+          <input id="modal-state" autocomplete="address-level1">
+
+          <label for="modal-postal-code">Postal Code</label>
+          <input id="modal-postal-code" autocomplete="postal-code">
+
+          <label for="modal-country">Country</label>
+          <input id="modal-country" value="US" autocomplete="country">
+
           <label for="modal-phone">Phone</label>
           <input id="modal-phone" autocomplete="tel">
 
@@ -1538,8 +1586,18 @@ h1 {
           </div>
 
           <div class="payment-options">
-            <label><input type="checkbox" id="mrm-autopay-opt"> I am aware that I am signing up for auto-pay for future lessons.</label><br>
-            <label><input type="checkbox" id="mrm-prepay-opt"> I would like to prepay for all selected lessons.</label>
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-autopay-opt">
+              <label for="mrm-autopay-opt">I am aware that I am signing up for auto-pay for future lessons.</label>
+            </div>
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-prepay-opt">
+              <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
+            </div>
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-sheet-music-addon-opt">
+              <label for="mrm-sheet-music-addon-opt">subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)</label>
+            </div>
             <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
           </div>
 
@@ -1964,6 +2022,9 @@ function openBookingModal(instr){
   document.getElementById('modal-first-name').value = document.getElementById('first-name')?.value || '';
   document.getElementById('modal-last-name').value  = document.getElementById('last-name')?.value || '';
   document.getElementById('modal-address').value    = document.getElementById('address')?.value || '';
+  document.getElementById('modal-state').value      = document.getElementById('address-state')?.value || '';
+  document.getElementById('modal-postal-code').value= document.getElementById('address-postal')?.value || '';
+  document.getElementById('modal-country').value    = document.getElementById('address-country')?.value || 'US';
   document.getElementById('modal-phone').value      = document.getElementById('phone')?.value || '';
 
   // Auto-populated read-only fields from dropdowns
@@ -2014,6 +2075,9 @@ function syncModalToLegacyFields(){
   const fn = document.getElementById('modal-first-name')?.value || '';
   const ln = document.getElementById('modal-last-name')?.value || '';
   const addr = document.getElementById('modal-address')?.value || '';
+  const addrState = document.getElementById('modal-state')?.value || '';
+  const addrPostal = document.getElementById('modal-postal-code')?.value || '';
+  const addrCountry = document.getElementById('modal-country')?.value || 'US';
   const phone = document.getElementById('modal-phone')?.value || '';
 
   const freq = document.getElementById('repeat-frequency')?.value || 'weekly';
@@ -2022,6 +2086,9 @@ function syncModalToLegacyFields(){
   const fnEl = document.getElementById('first-name'); if(fnEl) fnEl.value = fn;
   const lnEl = document.getElementById('last-name');  if(lnEl) lnEl.value = ln;
   const adEl = document.getElementById('address');    if(adEl) adEl.value = addr;
+  const asEl = document.getElementById('address-state'); if(asEl) asEl.value = addrState;
+  const apEl = document.getElementById('address-postal'); if(apEl) apEl.value = addrPostal;
+  const acEl = document.getElementById('address-country'); if(acEl) acEl.value = addrCountry;
   const phEl = document.getElementById('phone');      if(phEl) phEl.value = phone;
   const frEl = document.getElementById('frequency');  if(frEl) frEl.value = freq;
   const rdEl = document.getElementById('reserve-duration'); if(rdEl) rdEl.value = dur;
@@ -2101,6 +2168,9 @@ function ensureLegacyBookingHandler(){
     const firstName = (document.getElementById('first-name')?.value||'').trim();
     const lastName  = (document.getElementById('last-name')?.value||'').trim();
     const address   = (document.getElementById('address')?.value||'').trim();
+    const addressState = (document.getElementById('address-state')?.value||'').trim();
+    const addressPostal = (document.getElementById('address-postal')?.value||'').trim();
+    const addressCountry = (document.getElementById('address-country')?.value||'US').trim() || 'US';
     const phone     = (document.getElementById('phone')?.value||'').trim();
 
     const frequency = (document.getElementById('frequency')?.value||'weekly').trim();         // weekly|biweekly|none
@@ -2209,6 +2279,7 @@ function ensureLegacyBookingHandler(){
 
       const prepay = document.getElementById('mrm-prepay-opt')?.checked;
       const autopay = document.getElementById('mrm-autopay-opt')?.checked;
+      const sheetMusicAddon = document.getElementById('mrm-sheet-music-addon-opt')?.checked;
 
       if(!prepay && !autopay){
         setMsg('Please choose either prepay or auto-pay.');
@@ -2251,7 +2322,14 @@ function ensureLegacyBookingHandler(){
             email: email,
             context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
             save_card: autopay,
-            amount_override_cents: chargeAmountCents
+            amount_override_cents: chargeAmountCents,
+            sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
+            address: {
+              line1: address,
+              state: addressState,
+              postal_code: addressPostal,
+              country: addressCountry
+            }
           })
         });
         const createData = await createRes.json();
