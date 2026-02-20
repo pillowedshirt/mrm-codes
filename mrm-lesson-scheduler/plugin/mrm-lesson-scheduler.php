@@ -605,10 +605,44 @@ class MRM_Lesson_Scheduler {
                     // ------------------------------------------------------------
                     $display_student = ( $student_name !== '' ) ? $student_name : $student_email;
 
+                    // =========================
+                    // Title format (REQUIRED):
+                    // <lesson length> <lesson type> <instrument> Lesson <Parent Name>
+                    // =========================
                     $minutes = (int) ( $lesson_length > 0 ? $lesson_length : 60 );
 
-                    // Legacy-ish title format
-                    $title = 'MRM ' . ( $is_online ? 'Online' : 'In-Person' ) . ' Lesson - ' . $display_student;
+                    // Parent full name becomes the primary display name everywhere in Calendar
+                    $parent_full = trim( trim( (string) $parent_first ) . ' ' . trim( (string) $parent_last ) );
+                    $name_for_calendar = ( $parent_full !== '' ) ? $parent_full : ( ( $student_name !== '' ) ? $student_name : $student_email );
+
+                    // Lesson type label (from the actual selection if provided; otherwise fallback)
+                    $lt_raw = strtolower( trim( (string) $lesson_type ) );
+                    if ( $lt_raw === '' ) {
+                        $lesson_type_label = $is_online ? 'Online' : 'In person';
+                    } elseif ( $lt_raw === 'online' ) {
+                        $lesson_type_label = 'Online';
+                    } elseif ( $lt_raw === 'in_person' || $lt_raw === 'inperson' || $lt_raw === 'in person' ) {
+                        $lesson_type_label = 'In person';
+                    } elseif ( $lt_raw === 'consultation' ) {
+                        $lesson_type_label = 'Consultation';
+                    } else {
+                        // Use whatever the system provided, but keep it readable
+                        $lesson_type_label = ucfirst( $lt_raw );
+                    }
+
+                    // Instrument
+                    $inst = trim( (string) $instrument );
+
+                    // Build exact order:
+                    // length, lesson type, instrument, "Lesson", parent name
+                    $title_parts = array();
+                    $title_parts[] = $minutes . ' minutes';
+                    $title_parts[] = $lesson_type_label;
+                    if ( $inst !== '' ) $title_parts[] = $inst;
+                    $title_parts[] = 'Lesson';
+                    $title_parts[] = $name_for_calendar;
+
+                    $title = implode( ' ', $title_parts );
 
                     // Compute student last name (best-effort, from student_name)
                     $student_last_name = '';
@@ -633,58 +667,54 @@ class MRM_Lesson_Scheduler {
                         }
                     }
 
-                    // Description: key/value lines for easy plugin parsing
+                    // =========================
+                    // Description format (REQUIRED):
+                    // 1) Gate URL FIRST (online lessons + consultations)
+                    // 2) "Details:" line
+                    // 3) Every fillable box label WORD-FOR-WORD from scheduler.html + selected value
+                    // =========================
                     $description_lines = array();
 
-                    // Parent name (first + last)
-                    $parent_full = trim( trim( (string) $parent_first ) . ' ' . trim( (string) $parent_last ) );
-                    if ( $parent_full !== '' ) {
-                        $description_lines[] = 'Parent: ' . $parent_full;
+                    // Gate URL: same token-gate system you already use (±10 minutes enforced by gate page)
+                    $gate_url = add_query_arg( array( 'token' => $token ), home_url( '/join-online/' ) );
+
+                    // Show gate for: (a) online lessons OR (b) consultations (even if flagged oddly)
+                    $is_consultation = ( strtolower( (string) $appointment_type ) === 'consultation' ) || ( strtolower( (string) $lt_raw ) === 'consultation' );
+                    if ( $is_online || $is_consultation ) {
+                        // First line must be the URL
+                        $description_lines[] = $gate_url;
+                        $description_lines[] = ''; // blank line
                     }
 
-                    // Student + student last name
-                    $description_lines[] = 'Student: ' . $display_student;
-                    if ( $student_last_name !== '' ) {
-                        $description_lines[] = 'Student last name: ' . $student_last_name;
-                    }
+                    $description_lines[] = 'Details:';
 
-                    // Core contact info
-                    $description_lines[] = 'Email: ' . $student_email;
-                    if ( $phone !== '' ) {
-                        $description_lines[] = 'Phone: ' . $phone;
-                    }
+                    // WORD-FOR-WORD labels from scheduler.html modal:
+                    $description_lines[] = 'First Name: ' . (string) $parent_first;
+                    $description_lines[] = 'Last Name: ' . (string) $parent_last;
+                    $description_lines[] = 'Student Name: ' . (string) $student_name;
+                    $description_lines[] = 'Instrument: ' . (string) $instrument;
+                    $description_lines[] = 'Email: ' . (string) $student_email;
+                    $description_lines[] = 'Phone: ' . (string) $phone;
 
-                    // Instrument (requested to be in description, but NOT in title)
-                    if ( $instrument !== '' ) {
-                        $description_lines[] = 'Instrument: ' . $instrument;
-                    }
-
-                    // Lesson details
+                    // These labels match the exact casing in scheduler.html:
                     $description_lines[] = 'Lesson length: ' . $minutes . ' minutes';
+                    $description_lines[] = 'Lesson type: ' . $lesson_type_label;
 
-                    if ( $lesson_type !== '' ) {
-                        $description_lines[] = 'Lesson type: ' . $lesson_type;
-                    } else {
-                        $description_lines[] = 'Lesson type: ' . ( $is_online ? 'online' : 'inperson' );
-                    }
-
+                    // Frequency (label is "Frequency")
                     if ( $repeat_frequency !== '' ) {
-                        $description_lines[] = 'Frequency: ' . $repeat_frequency;
-                    }
-                    if ( $repeat_duration !== '' ) {
-                        $description_lines[] = 'Reserved for: ' . $repeat_duration;
-                    }
-                    if ( $appointment_type !== '' ) {
-                        $description_lines[] = 'Appointment type: ' . $appointment_type;
+                        $description_lines[] = 'Frequency: ' . (string) $repeat_frequency;
                     }
 
-                    // Include in-person address details in description too (for plugin access),
-                    // but ONLY put the actual address in the Calendar LOCATION field.
-                    if ( ! $is_online ) {
-                        if ( $address !== '' )        $description_lines[] = 'Address: ' . $address;
-                        if ( $address_state !== '' )  $description_lines[] = 'State: ' . $address_state;
-                        if ( $address_postal !== '' ) $description_lines[] = 'Postal code: ' . $address_postal;
+                    // Reserve duration label must match scheduler.html exactly:
+                    if ( $repeat_duration !== '' ) {
+                        $description_lines[] = 'How long would you like to reserve this lesson time?: ' . (string) $repeat_duration;
                     }
+
+                    // Address fields (these are fillable boxes in the modal)
+                    // Keep them present in details for plugin access; location field can still remain in-person only elsewhere.
+                    $description_lines[] = 'Address: ' . (string) $address;
+                    $description_lines[] = 'State: ' . (string) $address_state;
+                    $description_lines[] = 'Postal Code: ' . (string) $address_postal;
 
                     $description = implode( "\n", $description_lines );
 
@@ -693,7 +723,8 @@ class MRM_Lesson_Scheduler {
                     $extended_private = array(
                         'booking_id'          => (string) $booking_id,
                         'student_email'       => (string) $student_email,
-                        'student_name'        => (string) $student_name,
+                        // Store parent name as primary display name for calendar-based workflows
+                        'student_name'        => (string) $name_for_calendar,
                         'student_last_name'   => (string) $student_last_name,
                         'instrument'          => (string) $instrument,
 
