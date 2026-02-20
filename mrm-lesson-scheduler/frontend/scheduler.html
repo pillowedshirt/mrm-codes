@@ -1912,58 +1912,15 @@ function syncModalToMain() {
 }
 
 function checkAvailabilityConflict() {
+  // Availability conflict messaging/locking has been removed by request.
+  // Never block booking from the Confirm Your Booking modal.
   const msg = document.getElementById('modal-availability-message');
   const bookBtn = document.getElementById('modal-submit-booking');
-  if (!msg || !bookBtn) return false;
 
-  const instr = currentInstructor;
-  const state = instr && instr._mrmState ? instr._mrmState : null;
-  if (!state || !state.slotsByDay) {
-    // no availability loaded – do not block booking
-    msg.textContent = '';
-    bookBtn.disabled = false;
-    return false;
-  }
-  const duration = parseInt(document.getElementById('length-select')?.value || '0', 10);
-  const mode = String(document.getElementById('online-select')?.value || '');
-  const modeLabel = mode === '1' ? 'online' : 'in_person';
-  const relevantSelected = instr && instr.id != null
-    ? selectedSlots.filter(s => String(s.instructor_id) === String(instr.id))
-    : selectedSlots.slice();
+  if (msg) msg.textContent = '';
+  if (bookBtn) bookBtn.disabled = false;
 
-  let hasConflict = false;
-  if (relevantSelected.length && duration > 0) {
-    for (const chosen of relevantSelected) {
-      const chosenStart = new Date(chosen.start).getTime();
-      const chosenEnd = new Date(chosen.end).getTime();
-      if (!isFinite(chosenStart)) continue;
-
-      const d = new Date(chosen.start);
-      // build YYYY-MM-DD to match API keys
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      const key = `${d.getFullYear()}-${mm}-${dd}`;
-      const daySlots = Array.isArray(state.slotsByDay[key]) ? state.slotsByDay[key] : [];
-
-      const found = daySlots.some(slot => {
-        const slotStart = new Date(slot.start).getTime();
-        const slotEnd = new Date(slot.end).getTime();
-        const slotType = slot.lesson_type === 'online' ? 'online' : (slot.lesson_type === 'in_person' ? 'in_person' : null);
-        const slotMinutes = Math.round((slotEnd - slotStart) / 60000);
-        const chosenMinutes = Math.round((chosenEnd - chosenStart) / 60000);
-        return slotStart === chosenStart && slotMinutes === chosenMinutes && (!slotType || slotType === modeLabel);
-      });
-
-      if (!found) {
-        hasConflict = true;
-        break;
-      }
-    }
-  }
-
-  msg.textContent = hasConflict ? 'The specified time is not available; please choose another time.' : '';
-  bookBtn.disabled = hasConflict;
-  return hasConflict;
+  return false;
 }
 
 function syncMainToModal() {
