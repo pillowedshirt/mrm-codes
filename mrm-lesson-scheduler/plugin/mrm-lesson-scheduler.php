@@ -606,17 +606,33 @@ class MRM_Lesson_Scheduler {
                     $display_student = ( $student_name !== '' ) ? $student_name : $student_email;
 
                     // =========================
-                    // Title format (REQUIRED):
-                    // <lesson length> <lesson type> <instrument> Lesson <Parent Name>
+                    // Title format (UPDATED):
+                    // <Student or Parent Name> <Lesson Type> <Instrument> <30min/60min> Lesson
+                    // - Lessons: use STUDENT name
+                    // - Consultations: use PARENT name
                     // =========================
                     $minutes = (int) ( $lesson_length > 0 ? $lesson_length : 60 );
+                    $minutes_label = ( $minutes === 30 ) ? '30min' : ( ( $minutes === 60 ) ? '60min' : ( $minutes . 'min' ) );
 
-                    // Parent full name becomes the primary display name everywhere in Calendar
+                    // Parent full name
                     $parent_full = trim( trim( (string) $parent_first ) . ' ' . trim( (string) $parent_last ) );
-                    $name_for_calendar = ( $parent_full !== '' ) ? $parent_full : ( ( $student_name !== '' ) ? $student_name : $student_email );
 
-                    // Lesson type label (from the actual selection if provided; otherwise fallback)
+                    // Student display
+                    $student_full = trim( (string) $student_name );
+                    $student_display = ( $student_full !== '' ) ? $student_full : ( (string) $student_email );
+
+                    // Determine consultation vs lesson
                     $lt_raw = strtolower( trim( (string) $lesson_type ) );
+                    $is_consultation = ( strtolower( (string) $appointment_type ) === 'consultation' ) || ( $lt_raw === 'consultation' );
+
+                    // Name in title depends on consultation vs lesson:
+                    if ( $is_consultation ) {
+                        $name_for_title = ( $parent_full !== '' ) ? $parent_full : $student_display;
+                    } else {
+                        $name_for_title = $student_display;
+                    }
+
+                    // Lesson type label (keep readable)
                     if ( $lt_raw === '' ) {
                         $lesson_type_label = $is_online ? 'Online' : 'In person';
                     } elseif ( $lt_raw === 'online' ) {
@@ -626,21 +642,18 @@ class MRM_Lesson_Scheduler {
                     } elseif ( $lt_raw === 'consultation' ) {
                         $lesson_type_label = 'Consultation';
                     } else {
-                        // Use whatever the system provided, but keep it readable
                         $lesson_type_label = ucfirst( $lt_raw );
                     }
 
-                    // Instrument
                     $inst = trim( (string) $instrument );
 
-                    // Build exact order:
-                    // length, lesson type, instrument, "Lesson", parent name
+                    // Build exact order: Name, Type, Instrument, Length, Lesson
                     $title_parts = array();
-                    $title_parts[] = $minutes . ' minutes';
+                    $title_parts[] = $name_for_title;
                     $title_parts[] = $lesson_type_label;
                     if ( $inst !== '' ) $title_parts[] = $inst;
+                    $title_parts[] = $minutes_label;
                     $title_parts[] = 'Lesson';
-                    $title_parts[] = $name_for_calendar;
 
                     $title = implode( ' ', $title_parts );
 
@@ -682,7 +695,7 @@ class MRM_Lesson_Scheduler {
                     $is_consultation = ( strtolower( (string) $appointment_type ) === 'consultation' ) || ( strtolower( (string) $lt_raw ) === 'consultation' );
                     if ( $is_online || $is_consultation ) {
                         // First line must be the URL
-                        $description_lines[] = $gate_url;
+                        $description_lines[] = 'Join video call: ' . $gate_url;
                         $description_lines[] = ''; // blank line
                     }
 
@@ -1663,9 +1676,29 @@ class MRM_Lesson_Scheduler {
                 $time_min = $start_utc->format( 'Y-m-d\TH:i:s\Z' );
                 $time_max = $end_utc->format( 'Y-m-d\TH:i:s\Z' );
 
+                // Build a set of existing Google event IDs for this window so DB busy can be reconciled
+                $existing_google_ids = array();
+
+                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+                    $events = $this->google_list_events( $calendar_id, $time_min, $time_max );
+                    if ( ! is_wp_error( $events ) && is_array( $events ) ) {
+                        $items = isset( $events['items'] ) && is_array( $events['items'] ) ? $events['items'] : $events;
+                        foreach ( $items as $ev ) {
+                            if ( ! empty( $ev['id'] ) ) {
+                                $existing_google_ids[ (string) $ev['id'] ] = true;
+                            }
+                        }
+                    }
+                }
+
                 // DB busy (scheduled lessons table) — includes lesson_type/lesson_minutes
                 $db_busy = $this->db_busy_intervals_for_instructor( $instructor_id, $time_min, $time_max );
                 foreach ( (array) $db_busy as $b ) {
+                    $geid = (string) ( $b['google_event_id'] ?? '' );
+                    if ( $geid !== '' && empty( $existing_google_ids[ $geid ] ) ) {
+                        // Google event was deleted — ignore this DB busy interval so scheduler frees it
+                        continue;
+                    }
                     if ( empty( $b['start_ts'] ) || empty( $b['end_ts'] ) ) continue;
                     $busy_db[] = array(
                         'start'          => (string) ( $b['start'] ?? gmdate( 'c', (int) $b['start_ts'] ) ),
@@ -2680,7 +2713,7 @@ class MRM_Lesson_Scheduler {
         $min_dt = gmdate( 'Y-m-d H:i:s', $min_ts - $pad );
         $max_dt = gmdate( 'Y-m-d H:i:s', $max_ts + $pad );
         $rows = $wpdb->get_results( $wpdb->prepare(
-            "SELECT start_time, end_time, is_online FROM {$table} WHERE instructor_id = %d AND status = %s AND end_time >= %s AND start_time <= %s",
+            "SELECT start_time, end_time, is_online, google_event_id FROM {$table} WHERE instructor_id = %d AND status = %s AND end_time >= %s AND start_time <= %s",
             (int) $instructor_id, 'scheduled', $min_dt, $max_dt
         ), ARRAY_A );
         if ( ! is_array( $rows ) ) return array();
@@ -2704,6 +2737,7 @@ class MRM_Lesson_Scheduler {
                 // Metadata so the frontend can render/split online blocks correctly
                 'lesson_type'    => $lesson_type,
                 'lesson_minutes' => $raw_duration_minutes,
+                'google_event_id' => (string) ( $r['google_event_id'] ?? '' ),
 
                 'source'         => 'db',
             );
