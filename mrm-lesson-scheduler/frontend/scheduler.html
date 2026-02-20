@@ -4652,36 +4652,50 @@ titleWrap.appendChild(learn);
 ensureLegacyBookingHandler();
 checkReturnFromStripe();
 
-document.getElementById('modal-close').addEventListener('click', closeBookingModal);
-document.getElementById('booking-modal').addEventListener('click', (e)=>{
+function bindById(id, eventName, handler){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.addEventListener(eventName, handler);
+}
+
+bindById('modal-close', 'click', closeBookingModal);
+bindById('booking-modal', 'click', (e)=>{
   if(e.target && e.target.id==='booking-modal') closeBookingModal();
 });
 document.addEventListener('keydown', (e)=>{
   if(e.key==='Escape') closeBookingModal();
 });
 
-document.getElementById('modal-submit-booking').addEventListener('click', (e)=>{
+bindById('modal-submit-booking', 'click', (e)=>{
   e.preventDefault();
   syncModalToLegacyFields();
-  document.getElementById('submit-booking').click();
+  const legacySubmit = document.getElementById('submit-booking');
+  if(legacySubmit) legacySubmit.click();
 });
 
 /* Instrument sync: top <-> modal <-> legacy hidden field */
-document.getElementById('instrument-input').addEventListener('change', ()=>{
-  const v = document.getElementById('instrument-input').value || '';
-  document.getElementById('confirm-instrument').value = v;
+bindById('instrument-input', 'change', ()=>{
+  const input = document.getElementById('instrument-input');
+  const confirm = document.getElementById('confirm-instrument');
+  if(!input || !confirm) return;
+  const v = input.value || '';
+  confirm.value = v;
   const modalSel = document.getElementById('modal-instrument');
   if(modalSel) modalSel.value = v;
 });
 
-document.getElementById('modal-instrument').addEventListener('change', ()=>{
-  const v = document.getElementById('modal-instrument').value || '';
-  document.getElementById('instrument-input').value = v;
-  document.getElementById('confirm-instrument').value = v;
+bindById('modal-instrument', 'change', ()=>{
+  const modalInstrument = document.getElementById('modal-instrument');
+  const input = document.getElementById('instrument-input');
+  const confirm = document.getElementById('confirm-instrument');
+  if(!modalInstrument || !input || !confirm) return;
+  const v = modalInstrument.value || '';
+  input.value = v;
+  confirm.value = v;
 });
 
-document.getElementById('lesson-option').addEventListener('change', updatePaymentCheckboxVisibility);
-document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
+bindById('lesson-option', 'change', updatePaymentCheckboxVisibility);
+bindById('repeat-frequency', 'change', updatePaymentCheckboxVisibility);
 
 ['modal-length','modal-type','modal-frequency','modal-repeat-duration'].forEach((id)=>{
   const el = document.getElementById(id);
