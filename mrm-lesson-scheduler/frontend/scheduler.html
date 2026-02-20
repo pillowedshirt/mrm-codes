@@ -1862,27 +1862,28 @@ function applyRepeatUIRules(){
 
 function updatePaymentCheckboxVisibility() {
   const appointmentType = document.getElementById('lesson-option')?.value;
-  const termsRow = document.querySelector('.terms-row');
+  const termsRow  = document.querySelector('.terms-row');
   const autopayRow = document.getElementById('mrm-autopay-opt')?.closest('.mrm-check-row');
-  const prepayRow = document.getElementById('mrm-prepay-opt')?.closest('.mrm-check-row');
-  const sheetRow = document.getElementById('mrm-sheet-music-addon-opt')?.closest('.mrm-check-row');
+  const prepayRow  = document.getElementById('mrm-prepay-opt')?.closest('.mrm-check-row');
+  const sheetRow   = document.getElementById('mrm-sheet-music-addon-opt')?.closest('.mrm-check-row');
   if (!termsRow || !autopayRow || !prepayRow || !sheetRow) return;
 
-  termsRow.style.display = 'none';
+  // Hide everything by default
+  termsRow.style.display  = 'none';
   autopayRow.style.display = 'none';
-  prepayRow.style.display = 'none';
-  sheetRow.style.display = 'none';
+  prepayRow.style.display  = 'none';
+  sheetRow.style.display   = 'none';
 
   if (appointmentType === 'consultation') {
+    // For consultations: only show terms of service
     termsRow.style.display = '';
-    sheetRow.style.display = '';
     return;
   }
-
-  termsRow.style.display = '';
+  // For other lessons: show all options
+  termsRow.style.display  = '';
   autopayRow.style.display = '';
-  prepayRow.style.display = '';
-  sheetRow.style.display = '';
+  prepayRow.style.display  = '';
+  sheetRow.style.display   = '';
 }
 
 function clearSelectedSlots() {
@@ -1912,58 +1913,48 @@ function syncModalToMain() {
 }
 
 function checkAvailabilityConflict() {
-  const msg = document.getElementById('modal-availability-message');
+  const msg    = document.getElementById('modal-availability-message');
   const bookBtn = document.getElementById('modal-submit-booking');
   if (!msg || !bookBtn) return false;
 
   const instr = currentInstructor;
   const state = instr && instr._mrmState ? instr._mrmState : null;
   if (!state || !state.slotsByDay) {
-    // no availability loaded – do not block booking
     msg.textContent = '';
     bookBtn.disabled = false;
     return false;
   }
-  const duration = parseInt(document.getElementById('length-select')?.value || '0', 10);
-  const mode = String(document.getElementById('online-select')?.value || '');
-  const modeLabel = mode === '1' ? 'online' : 'in_person';
-  const relevantSelected = instr && instr.id != null
-    ? selectedSlots.filter(s => String(s.instructor_id) === String(instr.id))
-    : selectedSlots.slice();
 
-  let hasConflict = false;
-  if (relevantSelected.length && duration > 0) {
-    for (const chosen of relevantSelected) {
-      const chosenStart = new Date(chosen.start).getTime();
-      const chosenEnd = new Date(chosen.end).getTime();
-      if (!isFinite(chosenStart)) continue;
+  const modeVal   = String(document.getElementById('online-select')?.value || '');
+  const modeLabel = (modeVal === '1' ? 'online' : 'in_person');
 
-      const d = new Date(chosen.start);
-      // build YYYY-MM-DD to match API keys
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      const key = `${d.getFullYear()}-${mm}-${dd}`;
-      const daySlots = Array.isArray(state.slotsByDay[key]) ? state.slotsByDay[key] : [];
+  let conflict = false;
+  const relevant = (instr && instr.id != null) ? selectedSlots.filter(s => String(s.instructor_id) === String(instr.id)) : selectedSlots.slice();
 
-      const found = daySlots.some(slot => {
-        const slotStart = new Date(slot.start).getTime();
-        const slotEnd = new Date(slot.end).getTime();
-        const slotType = slot.lesson_type === 'online' ? 'online' : (slot.lesson_type === 'in_person' ? 'in_person' : null);
-        const slotMinutes = Math.round((slotEnd - slotStart) / 60000);
-        const chosenMinutes = Math.round((chosenEnd - chosenStart) / 60000);
-        return slotStart === chosenStart && slotMinutes === chosenMinutes && (!slotType || slotType === modeLabel);
-      });
-
-      if (!found) {
-        hasConflict = true;
-        break;
-      }
+  for (const chosen of relevant) {
+    const chosenStart = new Date(chosen.start).getTime();
+    const chosenEnd   = new Date(chosen.end).getTime();
+    if (!isFinite(chosenStart) || !isFinite(chosenEnd)) continue;
+    // Build day key
+    const d  = new Date(chosen.start);
+    const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    const daySlots = Array.isArray(state.slotsByDay[key]) ? state.slotsByDay[key] : [];
+    // Find a slot whose window fully covers the chosen time and matches the lesson type (if specified)
+    const found = daySlots.some(slot => {
+      const slotStart = new Date(slot.start).getTime();
+      const slotEnd   = new Date(slot.end).getTime();
+      if (!isFinite(slotStart) || !isFinite(slotEnd)) return false;
+      const slotType = (slot.lesson_type === 'online') ? 'online' : (slot.lesson_type === 'in_person' ? 'in_person' : null);
+      return (chosenStart >= slotStart && chosenEnd <= slotEnd) && (!slotType || slotType === modeLabel);
+    });
+    if (!found) {
+      conflict = true;
+      break;
     }
   }
-
-  msg.textContent = hasConflict ? 'The specified time is not available; please choose another time.' : '';
-  bookBtn.disabled = hasConflict;
-  return hasConflict;
+  msg.textContent = conflict ? 'The specified time is not available; please choose another time.' : '';
+  bookBtn.disabled = conflict;
+  return conflict;
 }
 
 function syncMainToModal() {
@@ -4699,6 +4690,31 @@ document.getElementById('repeat-frequency').addEventListener('change', updatePay
 
 applyLessonOptionDefaults();
 updatePaymentCheckboxVisibility();
+
+// Ensure auto-pay and pre-pay are mutually exclusive
+document.addEventListener('DOMContentLoaded', () => {
+  const autopayBox = document.getElementById('mrm-autopay-opt');
+  const prepayBox  = document.getElementById('mrm-prepay-opt');
+  if (autopayBox && prepayBox) {
+    autopayBox.addEventListener('change', () => {
+      if (autopayBox.checked) {
+        prepayBox.checked = false;
+        prepayBox.disabled = true;
+      } else {
+        prepayBox.disabled = false;
+      }
+    });
+    prepayBox.addEventListener('change', () => {
+      if (prepayBox.checked) {
+        autopayBox.checked = false;
+        autopayBox.disabled = true;
+      } else {
+        autopayBox.disabled = false;
+      }
+    });
+  }
+});
+
 loadInstructors();
 </script>
 </body>
