@@ -595,26 +595,33 @@ class MRM_Lesson_Scheduler {
                 // Only do this if Google is configured and the instructor has a calendar_id.
                 if ( $calendar_id !== '' && $this->google_is_configured() ) {
 
-                    // Build join gate link (this route already exists in your plugin)
-                    $join_link = add_query_arg( array( 'token' => $token ), home_url( '/join-online/' ) );
-
                     // ------------------------------------------------------------
                     // Event title/location/description (minimal but complete)
                     // Requirements:
-                    // - Short title, instrument-less: "MRM Lesson - <Student Name>"
+                    // - Title format: "<length>m <instrument> <lesson type> - <student>"
                     // - Online: NO location field at all (handled by google_insert_event() omission below)
-                    // - Online: Join link at TOP of description
                     // - Description includes ALL confirm popup fillable fields
                     // - In-person: address goes in LOCATION only (street + state + postal)
                     // ------------------------------------------------------------
                     $display_student = ( $student_name !== '' ) ? $student_name : $student_email;
 
-                    // Title: short + instrument-less
-                    if ( strtolower( $appointment_type ) === 'consultation' ) {
-                        $title = 'MRM Consultation - ' . $display_student;
-                    } else {
-                        $title = 'MRM Lesson - ' . $display_student;
+                    $minutes = (int) ( $lesson_length > 0 ? $lesson_length : 60 );
+
+                    // Lesson type label (what shows in title)
+                    $lesson_type_label = $is_online ? 'Online' : 'In-Person';
+
+                    // Build: "<length>m <instrument> <lesson type> - <student>"
+                    $parts = array();
+                    $parts[] = $minutes . 'm';
+
+                    $inst = trim( (string) $instrument );
+                    if ( $inst !== '' ) {
+                        $parts[] = $inst;
                     }
+
+                    $parts[] = $lesson_type_label;
+
+                    $title = implode( ' ', $parts ) . ' - ' . $display_student;
 
                     // Compute student last name (best-effort, from student_name)
                     $student_last_name = '';
@@ -639,13 +646,8 @@ class MRM_Lesson_Scheduler {
                         }
                     }
 
-                    // Description: Join link first (online), then key/value lines for easy plugin parsing
+                    // Description: key/value lines for easy plugin parsing
                     $description_lines = array();
-
-                    if ( $is_online ) {
-                        $description_lines[] = 'Join link: ' . $join_link;
-                        $description_lines[] = '';
-                    }
 
                     // Parent name (first + last)
                     $parent_full = trim( trim( (string) $parent_first ) . ' ' . trim( (string) $parent_last ) );
@@ -671,7 +673,6 @@ class MRM_Lesson_Scheduler {
                     }
 
                     // Lesson details
-                    $minutes = (int) ( $lesson_length > 0 ? $lesson_length : 60 );
                     $description_lines[] = 'Lesson length: ' . $minutes . ' minutes';
 
                     if ( $lesson_type !== '' ) {
@@ -1702,10 +1703,101 @@ class MRM_Lesson_Scheduler {
             $slots = array_merge( $slots, $event_slots );
         }
 
+        // =========================
+        // Busy windows (DB lessons + Google opaque events)
+        // =========================
+        $busy = array();
+
+        // Get instructor calendar_id + timezone
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_instructors';
+        $row = $wpdb->get_row( $wpdb->prepare( "SELECT calendar_id, timezone FROM {$table} WHERE id = %d", (int) $instructor_id ), ARRAY_A );
+
+        $calendar_id = is_array( $row ) ? (string) ( $row['calendar_id'] ?? '' ) : '';
+        $tz = is_array( $row ) ? (string) ( $row['timezone'] ?? '' ) : '';
+        if ( ! $tz ) $tz = 'America/Phoenix';
+
+        try {
+            $start_local = DateTime::createFromFormat( 'Y-m-d', $start, new DateTimeZone( $tz ) );
+            $end_local   = DateTime::createFromFormat( 'Y-m-d', $end,   new DateTimeZone( $tz ) );
+            if ( $start_local && $end_local ) {
+                $start_local->setTime( 0, 0, 0 );
+                $end_local->setTime( 0, 0, 0 );
+                $end_local->modify( '+1 day' ); // inclusive end_date
+
+                $start_utc = clone $start_local;
+                $end_utc   = clone $end_local;
+                $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+                $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+                $time_min = $start_utc->format( 'Y-m-d\TH:i:s\Z' );
+                $time_max = $end_utc->format( 'Y-m-d\TH:i:s\Z' );
+
+                // 1) Busy from DB scheduled lessons (already includes 30m travel buffer for in-person lessons)
+                $db_busy = $this->db_busy_intervals_for_instructor( $instructor_id, $time_min, $time_max );
+                foreach ( (array) $db_busy as $b ) {
+                    if ( empty( $b['start_ts'] ) || empty( $b['end_ts'] ) ) continue;
+                    $busy[] = array(
+                        'start'    => gmdate( 'c', (int) $b['start_ts'] ),
+                        'end'      => gmdate( 'c', (int) $b['end_ts'] ),
+                        'start_ts' => (int) $b['start_ts'],
+                        'end_ts'   => (int) $b['end_ts'],
+                        'source'   => 'db',
+                    );
+                }
+
+                // 2) Busy from Google FreeBusy (opaque events)
+                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+                    $fb = $this->google_freebusy( array( $calendar_id ), $time_min, $time_max );
+                    if ( ! is_wp_error( $fb ) ) {
+                        foreach ( $fb as $b ) {
+                            if ( empty( $b['start'] ) || empty( $b['end'] ) ) continue;
+                            $bs = strtotime( (string) $b['start'] );
+                            $be = strtotime( (string) $b['end'] );
+                            if ( ! $bs || ! $be || $be <= $bs ) continue;
+                            $busy[] = array(
+                                'start'    => gmdate( 'c', $bs ),
+                                'end'      => gmdate( 'c', $be ),
+                                'start_ts' => $bs,
+                                'end_ts'   => $be,
+                                'source'   => 'google',
+                            );
+                        }
+                    }
+                }
+
+                $busy = $this->merge_intervals( $busy );
+            }
+        } catch ( Exception $e ) {
+            // If busy calc fails, don't break availability. Just return empty busy.
+            $busy = array();
+        }
+
+        // Filter out slots that overlap busy windows
+        if ( ! empty( $busy ) ) {
+            $filtered = array();
+            foreach ( $slots as $slot ) {
+                $sMs = strtotime( (string) ( $slot['start'] ?? '' ) );
+                $eMs = strtotime( (string) ( $slot['end'] ?? '' ) );
+                if ( ! $sMs || ! $eMs || $eMs <= $sMs ) continue;
+
+                $conflict = false;
+                foreach ( $busy as $b ) {
+                    $bs = (int) ( $b['start_ts'] ?? 0 );
+                    $be = (int) ( $b['end_ts'] ?? 0 );
+                    if ( $bs && $be && max( $sMs, $bs ) < min( $eMs, $be ) ) {
+                        $conflict = true;
+                        break;
+                    }
+                }
+                if ( ! $conflict ) $filtered[] = $slot;
+            }
+            $slots = $filtered;
+        }
+
         return new WP_REST_Response( array(
             'ok'          => true,
             'slots'       => array_values( $slots ),
-            'busy'        => array(), // reserved for future busy-window support
+            'busy'        => array_values( $busy ),
             // Legacy alias (keep ~30 days)
             'availability'=> array_values( $slots ),
         ), 200 );
@@ -3230,28 +3322,20 @@ protected function base64url_encode( $data ) {
             }
         }
 
-        // If requested, generate a unique Google Meet link for this event.
-        // Also honor online appointment metadata as a fallback for legacy callers.
-        $appointment_type = isset( $extended_private['appointment_type'] ) ? strtolower( (string) $extended_private['appointment_type'] ) : '';
-        $lesson_type = isset( $extended_private['lesson_type'] ) ? strtolower( (string) $extended_private['lesson_type'] ) : '';
-        $want_meet = (bool) $create_meet || $appointment_type === 'online' || $lesson_type === 'online';
+        // If requested explicitly, generate a Google Meet link for this event.
+        // IMPORTANT: We no longer auto-create Meet for online lessons.
+        $want_meet = (bool) $create_meet;
+
         if ( $want_meet ) {
-            // requestId must be unique per createRequest
             $request_id = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 8 ) );
             $payload['conferenceData'] = array(
                 'createRequest' => array(
                     'requestId' => $request_id,
                     'conferenceSolutionKey' => array(
-                        // Google Meet
                         'type' => 'hangoutsMeet',
                     ),
                 ),
             );
-
-            // Optional: make location clearly “online”
-            if ( empty( $payload['location'] ) || stripos( (string) $payload['location'], 'meet' ) === false ) {
-                $payload['location'] = 'Google Meet';
-            }
         }
 
         $url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( $calendar_id ) . '/events';
