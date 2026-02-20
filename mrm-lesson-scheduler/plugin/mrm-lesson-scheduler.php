@@ -607,21 +607,8 @@ class MRM_Lesson_Scheduler {
 
                     $minutes = (int) ( $lesson_length > 0 ? $lesson_length : 60 );
 
-                    // Lesson type label (what shows in title)
-                    $lesson_type_label = $is_online ? 'Online' : 'In-Person';
-
-                    // Build: "<length>m <instrument> <lesson type> - <student>"
-                    $parts = array();
-                    $parts[] = $minutes . 'm';
-
-                    $inst = trim( (string) $instrument );
-                    if ( $inst !== '' ) {
-                        $parts[] = $inst;
-                    }
-
-                    $parts[] = $lesson_type_label;
-
-                    $title = implode( ' ', $parts ) . ' - ' . $display_student;
+                    // Legacy-ish title format
+                    $title = 'MRM ' . ( $is_online ? 'Online' : 'In-Person' ) . ' Lesson - ' . $display_student;
 
                     // Compute student last name (best-effort, from student_name)
                     $student_last_name = '';
@@ -1648,8 +1635,16 @@ class MRM_Lesson_Scheduler {
                 foreach ( (array) $db_busy as $b ) {
                     if ( empty( $b['start_ts'] ) || empty( $b['end_ts'] ) ) continue;
                     $busy[] = array(
-                        'start_ts' => (int) $b['start_ts'],
-                        'end_ts'   => (int) $b['end_ts'],
+                        'start'          => (string) ( $b['start'] ?? gmdate( 'c', (int) $b['start_ts'] ) ),
+                        'end'            => (string) ( $b['end']   ?? gmdate( 'c', (int) $b['end_ts'] ) ),
+                        'start_ts'       => (int) $b['start_ts'],
+                        'end_ts'         => (int) $b['end_ts'],
+
+                        // ✅ CRITICAL legacy fields the frontend needs
+                        'lesson_type'    => (string) ( $b['lesson_type'] ?? '' ),
+                        'lesson_minutes' => (int)    ( $b['lesson_minutes'] ?? 0 ),
+
+                        'source'         => (string) ( $b['source'] ?? 'db' ),
                     );
                 }
 
@@ -1663,8 +1658,12 @@ class MRM_Lesson_Scheduler {
                             $be = strtotime( (string) $b['end'] );
                             if ( ! $bs || ! $be || $be <= $bs ) continue;
                             $busy[] = array(
+                                'start'       => gmdate( 'c', (int) $bs ),
+                                'end'         => gmdate( 'c', (int) $be ),
                                 'start_ts' => (int) $bs,
                                 'end_ts'   => (int) $be,
+                                'lesson_type' => '',
+                                'source'   => 'google',
                             );
                         }
                     }
@@ -1718,14 +1717,7 @@ class MRM_Lesson_Scheduler {
         return new WP_REST_Response( array(
             'ok'           => true,
             'slots'        => array_values( $slots ),
-            'busy'         => array_map( function( $b ) {
-                return array(
-                    'start'    => gmdate( 'c', (int) $b['start_ts'] ),
-                    'end'      => gmdate( 'c', (int) $b['end_ts'] ),
-                    'start_ts' => (int) $b['start_ts'],
-                    'end_ts'   => (int) $b['end_ts'],
-                );
-            }, array_values( $busy ) ),
+            'busy'         => array_values( $busy ),
             'availability' => array_values( $slots ),
         ), 200 );
     }
