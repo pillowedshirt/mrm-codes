@@ -496,6 +496,9 @@ class MRM_Lesson_Scheduler {
         $instrument    = sanitize_text_field( (string) ( $data['instrument'] ?? '' ) );
         $is_online     = ! empty( $data['online'] ) ? 1 : 0;
         $lesson_length = intval( $data['lesson_length'] ?? ( $data['slot_minutes'] ?? 60 ) );
+        $address         = sanitize_text_field( (string) ( $data['address'] ?? '' ) );
+        $appointment_type = sanitize_text_field( (string) ( $data['appointment_type'] ?? 'lesson' ) );
+        $lesson_type_in   = sanitize_text_field( (string) ( $data['lesson_type'] ?? '' ) );
 
         if ( $instructor_id <= 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
@@ -515,6 +518,28 @@ class MRM_Lesson_Scheduler {
 
         $now = current_time( 'mysql' );
         $created_ids = array();
+
+        $table_instructors = $wpdb->prefix . 'mrm_instructors';
+
+        $instr = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT id, name, email, calendar_id, timezone
+                 FROM {$table_instructors}
+                 WHERE id = %d
+                 LIMIT 1",
+                $instructor_id
+            ),
+            ARRAY_A
+        );
+
+        if ( ! is_array( $instr ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Instructor not found.' ), 404 );
+        }
+
+        $calendar_id = isset( $instr['calendar_id'] ) ? trim( (string) $instr['calendar_id'] ) : '';
+        $instr_tz    = isset( $instr['timezone'] ) ? trim( (string) $instr['timezone'] ) : '';
+
+        if ( $instr_tz === '' ) $instr_tz = 'UTC';
 
         foreach ( $slots as $slot ) {
             $start_raw = (string) ( $slot['start'] ?? '' );
@@ -558,7 +583,113 @@ class MRM_Lesson_Scheduler {
             ) );
 
             if ( $ok ) {
-                $created_ids[] = (int) $wpdb->insert_id;
+                $booking_id = (int) $wpdb->insert_id;
+                $created_ids[] = $booking_id;
+
+                // ---- Create Google Calendar event (minimal-change: right after DB insert) ----
+                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+
+                    // Build join gate link using the lesson reminder token you already generated
+                    $join_url  = home_url( '/join-online/' );
+                    $join_link = add_query_arg( array( 'token' => $token ), $join_url );
+
+                    // Title
+                    $title_base = ( strtolower( $appointment_type ) === 'consultation' ) ? 'MRM Consultation' : 'MRM Lesson';
+                    $who = ( $student_name !== '' ) ? $student_name : $student_email;
+                    $title = $title_base . ' - ' . $who;
+
+                    // Location
+                    $location = $is_online ? 'Google Meet' : $address;
+
+                    // Description
+                    $desc_lines = array();
+                    $desc_lines[] = 'Student: ' . ( $student_name !== '' ? $student_name : $student_email );
+                    $desc_lines[] = 'Email: ' . $student_email;
+                    if ( $instrument !== '' ) $desc_lines[] = 'Instrument: ' . $instrument;
+                    $desc_lines[] = 'Type: ' . ( $is_online ? 'Online' : 'In Person' );
+                    $desc_lines[] = 'Join: ' . $join_link;
+                    $description = implode( "\n", $desc_lines );
+
+                    // Extended private properties (IMPORTANT: booking_id is used by your cron sync)
+                    $extended_private = array(
+                        'booking_id'       => (string) $booking_id,
+                        'student_email'    => (string) $student_email,
+                        'student_name'     => (string) $student_name,
+                        'instrument'       => (string) $instrument,
+                        'lesson_type'      => (string) ( $lesson_type_in !== '' ? $lesson_type_in : ( $is_online ? 'online' : 'in_person' ) ),
+                        'appointment_type' => (string) $appointment_type,
+                        'reminder_token'   => (string) $token,
+                    );
+
+                    // Convert the slot timestamps into RFC3339 in the instructor timezone
+                    $start_rfc3339 = '';
+                    $end_rfc3339   = '';
+
+                    try {
+                        $tz = new DateTimeZone( $instr_tz );
+
+                        $dt_start = new DateTime( '@' . $start_ts );
+                        $dt_start->setTimezone( $tz );
+                        $start_rfc3339 = $dt_start->format( 'c' );
+
+                        $dt_end = new DateTime( '@' . $end_ts );
+                        $dt_end->setTimezone( $tz );
+                        $end_rfc3339 = $dt_end->format( 'c' );
+                    } catch ( Exception $e ) {
+                        // If timezone conversion fails, fall back to UTC RFC3339
+                        $start_rfc3339 = gmdate( 'c', $start_ts );
+                        $end_rfc3339   = gmdate( 'c', $end_ts );
+                        $instr_tz      = 'UTC';
+                    }
+
+                    $create_meet = (bool) $is_online;
+
+                    // Invite the student (optional but consistent with your sendUpdates=all behavior)
+                    $attendees = array();
+                    if ( $student_email && is_email( $student_email ) ) {
+                        $attendees[] = $student_email;
+                    }
+
+                    $ins = $this->google_insert_event(
+                        $calendar_id,
+                        $title,
+                        $description,
+                        $location,
+                        $start_rfc3339,
+                        $end_rfc3339,
+                        $instr_tz,
+                        $extended_private,
+                        array(),        // recurrence (leave empty; your UI already sends multiple slots)
+                        $create_meet,
+                        $attendees
+                    );
+
+                    if ( ! is_wp_error( $ins ) ) {
+                        $google_event_id = null;
+                        $google_meet_url = null;
+
+                        if ( is_array( $ins ) ) {
+                            $google_event_id = isset( $ins['id'] ) ? (string) $ins['id'] : null;
+                            $google_meet_url = isset( $ins['meet_url'] ) ? (string) $ins['meet_url'] : null;
+                        }
+
+                        $wpdb->update(
+                            $lessons_table,
+                            array(
+                                'google_event_id' => $google_event_id,
+                                'google_meet_url' => $google_meet_url,
+                                'updated_at'      => current_time( 'mysql' ),
+                            ),
+                            array( 'id' => $booking_id ),
+                            array( '%s', '%s', '%s' ),
+                            array( '%d' )
+                        );
+
+                    } else {
+                        // Don’t break booking flow; log for debugging
+                        error_log( 'MRM google_insert_event failed for booking_id ' . $booking_id . ': ' . $ins->get_error_message() );
+                    }
+                }
             }
         }
 
