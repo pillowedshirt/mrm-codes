@@ -2020,13 +2020,43 @@ class MRM_Payments_Hub_Single {
               // Ensure master is first
               $keys = array_values(array_unique(array_merge(array('all-sheet-music'), $keys)));
 
+              global $wpdb;
+              $access_table = $wpdb->prefix . 'mrm_sheet_music_access';
+
               foreach ($keys as $k) {
                 $safe_k = esc_attr($k);
                 $val = isset($lists[$k]) && is_array($lists[$k]) ? implode("\n", $lists[$k]) : '';
+                $results = $wpdb->get_results($wpdb->prepare(
+                  "SELECT email_plain, start_at, expires_at FROM {$access_table} WHERE sku = %s AND revoked_at IS NULL ORDER BY start_at DESC",
+                  $k
+                ));
                 ?>
                 <tr>
                   <td><input type="text" name="mrm_access_slug[]" value="<?php echo $safe_k; ?>" style="width:100%;" /></td>
-                  <td><textarea name="mrm_access_emails[]" rows="4" style="width:100%; font-family: monospace;"><?php echo esc_textarea($val); ?></textarea></td>
+                  <td>
+                    <textarea name="mrm_access_emails[]" rows="4" style="width:100%; font-family: monospace;"><?php echo esc_textarea($val); ?></textarea>
+                    <table class="widefat" style="margin-top:8px;">
+                      <thead>
+                        <tr><th>Email</th><th>Start date</th><th>Expires</th></tr>
+                      </thead>
+                      <tbody>
+                        <?php if (!empty($results)) : ?>
+                          <?php foreach ($results as $row) :
+                            $start = $row->start_at ? date_i18n('Y-m-d', strtotime($row->start_at)) : '';
+                            $expire = $row->expires_at ? date_i18n('Y-m-d', strtotime($row->expires_at)) : '';
+                          ?>
+                            <tr>
+                              <td><?php echo esc_html((string)$row->email_plain); ?></td>
+                              <td><?php echo esc_html($start); ?></td>
+                              <td><?php echo esc_html($expire); ?></td>
+                            </tr>
+                          <?php endforeach; ?>
+                        <?php else : ?>
+                          <tr><td colspan="3"><em>No active access rows.</em></td></tr>
+                        <?php endif; ?>
+                      </tbody>
+                    </table>
+                  </td>
                 </tr>
                 <?php
               }
