@@ -2569,7 +2569,9 @@ function groupSlotsByDay(slots){
   const map = {};
   slots.forEach(s=>{
     const d = new Date(s.start);
-    const key = d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const key = `${d.getFullYear()}-${mm}-${dd}`;
     if(!map[key]) map[key]=[];
     map[key].push(s);
   });
@@ -2584,7 +2586,9 @@ function groupBusyByDay(busy){
     const eMs = new Date(b.end).getTime();
     if(!isFinite(sMs) || !isFinite(eMs) || eMs<=sMs) return;
     const d = new Date(sMs);
-    const key = d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const key = `${d.getFullYear()}-${mm}-${dd}`;
     if(!map[key]) map[key]=[];
     map[key].push({
       startMs: sMs,
@@ -2746,7 +2750,9 @@ function renderCalendar(instr, state, container){
     const cell=document.createElement('div');
     cell.className='calendar-day';
 
-    const key=state.year+'-'+(state.month+1)+'-'+day;
+    const mm = String(state.month + 1).padStart(2, '0');
+    const dd = String(day).padStart(2, '0');
+    const key = `${state.year}-${mm}-${dd}`;
     const groupedForDay = Array.isArray(grouped[key]) ? grouped[key] : [];
     const busyForDay = Array.isArray(busyGrouped[key]) ? busyGrouped[key] : [];
     const hasAvailability = groupedForDay.length > 0;
@@ -4492,7 +4498,7 @@ titleWrap.appendChild(learn);
             if(inlineMsg) inlineMsg.textContent = '';
 
             const dayStr = y+'-'+String(m+1).padStart(2,'0')+'-'+String(day).padStart(2,'0');
-            const dayKey = y+'-'+(m+1)+'-'+day;
+            const dayKey = y+'-'+String(m+1).padStart(2,'0')+'-'+String(day).padStart(2,'0');
 
             const reqId = ++state._dayOpenSeq;
             if(showLoading){
