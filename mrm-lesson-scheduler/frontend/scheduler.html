@@ -1811,6 +1811,8 @@ function applyLessonOptionDefaults(){
   const mode = document.getElementById('online-select');
   const freq = document.getElementById('repeat-frequency');
   const dur = document.getElementById('repeat-duration');
+  const modalFreq = document.getElementById('modal-frequency');
+  const modalDur  = document.getElementById('modal-repeat-duration');
   if(!opt || !len || !mode) return;
 
   if(opt.value === 'consultation'){
@@ -1830,6 +1832,16 @@ function applyLessonOptionDefaults(){
       dur.value = '--';
       dur.disabled = true;
     }
+
+    // Also disable the modal controls for consultations
+    if(modalFreq){
+      modalFreq.value = 'none';
+      modalFreq.disabled = true;
+    }
+    if(modalDur){
+      modalDur.value = '--';
+      modalDur.disabled = true;
+    }
   } else {
     // Standard lesson (online or in-person)
     len.disabled = false;
@@ -1842,6 +1854,8 @@ function applyLessonOptionDefaults(){
     // Recurrence controls enabled for normal lessons
     if(freq) freq.disabled = false;
     if(dur) dur.disabled = false;
+    if(modalFreq) modalFreq.disabled = false;
+    if(modalDur)  modalDur.disabled  = false;
   }
 }
 
@@ -2448,8 +2462,11 @@ function ensureLegacyBookingHandler(){
       instructor_id: s.instructor_id
     }));
 
-    const onlineValue = parseInt(document.getElementById('online-select').value,10)||0;
-    const lessonType = onlineValue === 1 ? 'online' : 'in_person';
+    const appointmentType = document.getElementById('lesson-option')?.value; // 'consultation' | 'online' | 'in_person'
+
+    // Derive mode directly from appointmentType (avoids hidden-select desync bugs)
+    const onlineValue = (appointmentType === 'consultation' || appointmentType === 'online') ? 1 : 0;
+    const lessonType  = onlineValue === 1 ? 'online' : 'in_person';
     const first = relevantSelected[0] || null;
     const selectedMinutes = first
       ? Math.round((new Date(first.end).getTime() - new Date(first.start).getTime()) / 60000)
@@ -2459,9 +2476,6 @@ function ensureLegacyBookingHandler(){
       ? selectedMinutes
       : getSlotMinutes();
 
-    const lessonOptionEl = document.getElementById('lesson-option');
-    const lessonOptionVal = lessonOptionEl ? (lessonOptionEl.value || '') : '';
-    const appointmentType = (lessonOptionVal === 'consultation') ? 'consultation' : 'lesson';
 
     const payload = {
       instructor_id: instrId,

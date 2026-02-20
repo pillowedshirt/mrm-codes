@@ -1079,6 +1079,9 @@ class MRM_Payments_Hub_Single {
     $extra = array();
     $customer_id = '';
 
+    // Enable Stripe receipt emails
+    $extra['receipt_email'] = $email;
+
     if ($save_card) {
       $customer_id = $this->stripe_find_or_create_customer($email);
       if (is_wp_error($customer_id)) {
