@@ -1559,9 +1559,6 @@ h1 {
           <label for="modal-postal-code">Postal Code</label>
           <input id="modal-postal-code" autocomplete="postal-code">
 
-          <label for="modal-country">Country</label>
-          <input id="modal-country" value="US" autocomplete="country">
-
           <label for="modal-phone">Phone</label>
           <input id="modal-phone" autocomplete="tel">
 
@@ -1865,7 +1862,6 @@ function applyRepeatUIRules(){
 
 function updatePaymentCheckboxVisibility() {
   const appointmentType = document.getElementById('lesson-option')?.value;
-  const repeatFrequency = document.getElementById('repeat-frequency')?.value;
   const termsRow = document.querySelector('.terms-row');
   const autopayRow = document.getElementById('mrm-autopay-opt')?.closest('.mrm-check-row');
   const prepayRow = document.getElementById('mrm-prepay-opt')?.closest('.mrm-check-row');
@@ -1879,11 +1875,6 @@ function updatePaymentCheckboxVisibility() {
 
   if (appointmentType === 'consultation') {
     termsRow.style.display = '';
-    return;
-  }
-
-  if (repeatFrequency === 'none') {
-    termsRow.style.display = '';
     sheetRow.style.display = '';
     return;
   }
@@ -1891,6 +1882,7 @@ function updatePaymentCheckboxVisibility() {
   termsRow.style.display = '';
   autopayRow.style.display = '';
   prepayRow.style.display = '';
+  sheetRow.style.display = '';
 }
 
 function clearSelectedSlots() {
@@ -1926,6 +1918,12 @@ function checkAvailabilityConflict() {
 
   const instr = currentInstructor;
   const state = instr && instr._mrmState ? instr._mrmState : null;
+  if (!state || !state.slotsByDay) {
+    // no availability loaded – do not block booking
+    msg.textContent = '';
+    bookBtn.disabled = false;
+    return false;
+  }
   const duration = parseInt(document.getElementById('length-select')?.value || '0', 10);
   const mode = String(document.getElementById('online-select')?.value || '');
   const modeLabel = mode === '1' ? 'online' : 'in_person';
@@ -1934,14 +1932,17 @@ function checkAvailabilityConflict() {
     : selectedSlots.slice();
 
   let hasConflict = false;
-  if (state && state.slotsByDay && relevantSelected.length && duration > 0) {
+  if (relevantSelected.length && duration > 0) {
     for (const chosen of relevantSelected) {
       const chosenStart = new Date(chosen.start).getTime();
       const chosenEnd = new Date(chosen.end).getTime();
       if (!isFinite(chosenStart)) continue;
 
       const d = new Date(chosen.start);
-      const key = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+      // build YYYY-MM-DD to match API keys
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const key = `${d.getFullYear()}-${mm}-${dd}`;
       const daySlots = Array.isArray(state.slotsByDay[key]) ? state.slotsByDay[key] : [];
 
       const found = daySlots.some(slot => {
@@ -1949,10 +1950,11 @@ function checkAvailabilityConflict() {
         const slotEnd = new Date(slot.end).getTime();
         const slotType = slot.lesson_type === 'online' ? 'online' : (slot.lesson_type === 'in_person' ? 'in_person' : null);
         const slotMinutes = Math.round((slotEnd - slotStart) / 60000);
-        return slotStart === chosenStart && slotMinutes === duration && (!slotType || slotType === modeLabel);
+        const chosenMinutes = Math.round((chosenEnd - chosenStart) / 60000);
+        return slotStart === chosenStart && slotMinutes === chosenMinutes && (!slotType || slotType === modeLabel);
       });
 
-      if (!found || (isFinite(chosenEnd) && Math.round((chosenEnd - chosenStart) / 60000) !== duration)) {
+      if (!found) {
         hasConflict = true;
         break;
       }
@@ -2166,7 +2168,6 @@ function openBookingModal(instr){
   document.getElementById('modal-address').value    = document.getElementById('address')?.value || '';
   document.getElementById('modal-state').value      = document.getElementById('address-state')?.value || '';
   document.getElementById('modal-postal-code').value= document.getElementById('address-postal')?.value || '';
-  document.getElementById('modal-country').value    = document.getElementById('address-country')?.value || 'US';
   document.getElementById('modal-phone').value      = document.getElementById('phone')?.value || '';
 
   syncModalToMain();
@@ -2176,6 +2177,9 @@ function openBookingModal(instr){
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden','false');
   document.body.classList.add('mrm-booking-modal-open');
+
+  const hiddenCountry = document.getElementById('address-country');
+  if (hiddenCountry) hiddenCountry.value = 'US';
 
   // Focus the close button for clean UX/accessibility
   requestAnimationFrame(()=>{
@@ -2205,7 +2209,6 @@ function syncModalToLegacyFields(){
   const addr = document.getElementById('modal-address')?.value || '';
   const addrState = document.getElementById('modal-state')?.value || '';
   const addrPostal = document.getElementById('modal-postal-code')?.value || '';
-  const addrCountry = document.getElementById('modal-country')?.value || 'US';
   const phone = document.getElementById('modal-phone')?.value || '';
 
   const freq = document.getElementById('repeat-frequency')?.value || 'weekly';
@@ -2216,7 +2219,7 @@ function syncModalToLegacyFields(){
   const adEl = document.getElementById('address');    if(adEl) adEl.value = addr;
   const asEl = document.getElementById('address-state'); if(asEl) asEl.value = addrState;
   const apEl = document.getElementById('address-postal'); if(apEl) apEl.value = addrPostal;
-  const acEl = document.getElementById('address-country'); if(acEl) acEl.value = addrCountry;
+  const acEl = document.getElementById('address-country'); if(acEl) acEl.value = 'US';
   const phEl = document.getElementById('phone');      if(phEl) phEl.value = phone;
   const frEl = document.getElementById('frequency');  if(frEl) frEl.value = freq;
   const rdEl = document.getElementById('reserve-duration'); if(rdEl) rdEl.value = dur;
