@@ -777,7 +777,7 @@ class MRM_Lesson_Scheduler {
                             $extended_private,
                             array(),            // recurrence not used here; your UI sends explicit slots
                             false,              // create_meet disabled (deferred Meet is your current architecture)
-                            array()             // attendee emails omitted (keeps behavior conservative)
+                            (array) ( is_email( $student_email ) ? array( $student_email ) : array() )
                         );
 
                         if ( ! is_wp_error( $ins ) && is_array( $ins ) && ! empty( $ins['id'] ) ) {
