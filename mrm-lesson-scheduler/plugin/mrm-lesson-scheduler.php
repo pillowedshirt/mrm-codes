@@ -494,8 +494,19 @@ class MRM_Lesson_Scheduler {
         $student_name  = sanitize_text_field( (string) ( $data['student_name'] ?? '' ) );
         $student_email = sanitize_email( (string) ( $data['student_email'] ?? '' ) );
         $instrument    = sanitize_text_field( (string) ( $data['instrument'] ?? '' ) );
+
+        // "online" in payload, plus some legacy fields
         $is_online     = ! empty( $data['online'] ) ? 1 : 0;
         $lesson_length = intval( $data['lesson_length'] ?? ( $data['slot_minutes'] ?? 60 ) );
+
+        // Optional extra fields from scheduler.html
+        $first_name = sanitize_text_field( (string) ( $data['first_name'] ?? '' ) );
+        $last_name  = sanitize_text_field( (string) ( $data['last_name'] ?? '' ) );
+        $address    = sanitize_text_field( (string) ( $data['address'] ?? '' ) );
+        $phone      = sanitize_text_field( (string) ( $data['phone'] ?? '' ) );
+
+        $appointment_type = sanitize_text_field( (string) ( $data['appointment_type'] ?? '' ) ); // lesson|consultation etc.
+        $lesson_type      = sanitize_text_field( (string) ( $data['lesson_type'] ?? '' ) );      // online|inperson
 
         if ( $instructor_id <= 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
@@ -507,14 +518,39 @@ class MRM_Lesson_Scheduler {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No slots selected.' ), 400 );
         }
 
-        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $lessons_table     = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+        // Ensure tables exist
         $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $lessons_table ) );
         if ( $exists !== $lessons_table ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Lessons table missing.' ), 500 );
         }
 
+        $instr = $wpdb->get_row(
+            $wpdb->prepare( "SELECT * FROM {$instructors_table} WHERE id = %d", $instructor_id ),
+            ARRAY_A
+        );
+        if ( ! is_array( $instr ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Instructor not found.' ), 404 );
+        }
+
+        $calendar_id = isset( $instr['calendar_id'] ) ? (string) $instr['calendar_id'] : '';
+        $timezone    = isset( $instr['timezone'] ) ? (string) $instr['timezone'] : '';
+        $instr_name  = isset( $instr['name'] ) ? (string) $instr['name'] : '';
+        $instr_email = isset( $instr['email'] ) ? (string) $instr['email'] : '';
+
+        if ( trim( $calendar_id ) === '' ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Instructor calendar_id is missing.' ), 500 );
+        }
+        if ( trim( $timezone ) === '' ) {
+            $timezone = 'America/Phoenix'; // safe default
+        }
+
         $now = current_time( 'mysql' );
+
         $created_ids = array();
+        $calendar_failures = array();
 
         foreach ( $slots as $slot ) {
             $start_raw = (string) ( $slot['start'] ?? '' );
@@ -527,12 +563,15 @@ class MRM_Lesson_Scheduler {
                 continue;
             }
 
+            // Store in DB as UTC (existing behavior)
             $start_mysql = gmdate( 'Y-m-d H:i:s', $start_ts );
             $end_mysql   = gmdate( 'Y-m-d H:i:s', $end_ts );
 
+            // Token for join-gate or reminders
             $token = bin2hex( random_bytes( 16 ) );
             $token_hash = hash( 'sha256', $token );
 
+            // Insert lesson row
             $ok = $wpdb->insert( $lessons_table, array(
                 'instructor_id' => $instructor_id,
                 'series_id'     => null,
@@ -557,17 +596,138 @@ class MRM_Lesson_Scheduler {
                 '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'
             ) );
 
-            if ( $ok ) {
-                $created_ids[] = (int) $wpdb->insert_id;
+            if ( ! $ok ) {
+                continue;
             }
+
+            $lesson_id = (int) $wpdb->insert_id;
+            $created_ids[] = $lesson_id;
+
+            // Convert timestamps to instructor timezone for Calendar payload
+            try {
+                $tzObj = new DateTimeZone( $timezone );
+            } catch ( Exception $e ) {
+                $tzObj = new DateTimeZone( 'America/Phoenix' );
+                $timezone = 'America/Phoenix';
+            }
+
+            $dtStart = new DateTime( '@' . $start_ts );
+            $dtStart->setTimezone( $tzObj );
+            $dtEnd = new DateTime( '@' . $end_ts );
+            $dtEnd->setTimezone( $tzObj );
+
+            $start_rfc3339 = $dtStart->format( 'Y-m-d\TH:i:s' );
+            $end_rfc3339   = $dtEnd->format( 'Y-m-d\TH:i:s' );
+
+            // Build event title/description/location
+            $title = 'MRM Lesson';
+            if ( $appointment_type !== '' ) {
+                $title = 'MRM ' . ucwords( str_replace( array('-', '_'), ' ', $appointment_type ) );
+            }
+            if ( $student_name !== '' ) {
+                $title .= ' - ' . $student_name;
+            }
+
+            $location = '';
+            $want_meet = false;
+
+            // Determine online/in-person
+            $mode = strtolower( $lesson_type !== '' ? $lesson_type : ( $is_online ? 'online' : 'inperson' ) );
+            if ( $mode === 'online' ) {
+                $want_meet = true;
+                $location = 'Online (Google Meet)';
+            } else {
+                $location = $address !== '' ? $address : '';
+            }
+
+            $desc_lines = array();
+            $desc_lines[] = 'Student: ' . ( $student_name !== '' ? $student_name : $student_email );
+            $desc_lines[] = 'Email: ' . $student_email;
+            if ( $instrument !== '' ) $desc_lines[] = 'Instrument: ' . $instrument;
+            if ( $phone !== '' ) $desc_lines[] = 'Phone: ' . $phone;
+            if ( $first_name !== '' || $last_name !== '' ) $desc_lines[] = 'Name: ' . trim( $first_name . ' ' . $last_name );
+            if ( $instr_name !== '' ) $desc_lines[] = 'Instructor: ' . $instr_name;
+
+            // Optional join gate URL if you use it elsewhere
+            // (kept generic so it won't break if not used)
+            $desc_lines[] = 'Lesson ID: ' . $lesson_id;
+
+            $description = implode( "\n", $desc_lines );
+
+            // Extended private properties (useful for debugging + future automations)
+            $extended_private = array(
+                'mrm_lesson_id' => (string) $lesson_id,
+                'appointment_type' => $appointment_type,
+                'lesson_type' => $lesson_type,
+                'student_email' => $student_email,
+                'instructor_email' => $instr_email,
+            );
+
+            // Add attendees so Google can email confirmations/updates if desired
+            $attendees = array();
+            if ( is_email( $student_email ) ) $attendees[] = $student_email;
+
+            // Create event on Google Calendar
+            $insert = $this->google_insert_event(
+                $calendar_id,
+                $title,
+                $description,
+                $location,
+                $start_rfc3339,
+                $end_rfc3339,
+                $timezone,
+                $extended_private,
+                array(),          // recurrence (not used here)
+                $want_meet,
+                $attendees
+            );
+
+            if ( is_wp_error( $insert ) ) {
+                $calendar_failures[] = array(
+                    'lesson_id' => $lesson_id,
+                    'error'     => $insert->get_error_message(),
+                );
+                // Keep the lesson row, but mark updated_at so you can identify it
+                $wpdb->update(
+                    $lessons_table,
+                    array( 'updated_at' => current_time( 'mysql' ) ),
+                    array( 'id' => $lesson_id ),
+                    array( '%s' ),
+                    array( '%d' )
+                );
+                continue;
+            }
+
+            // Store Google Event ID + Meet URL back into DB
+            $event_id = is_array( $insert ) && isset( $insert['event_id'] ) ? (string) $insert['event_id'] : '';
+            $meet_url = is_array( $insert ) && isset( $insert['meet_url'] ) ? (string) $insert['meet_url'] : '';
+
+            $wpdb->update(
+                $lessons_table,
+                array(
+                    'google_event_id' => $event_id !== '' ? $event_id : null,
+                    'google_meet_url' => $meet_url !== '' ? $meet_url : null,
+                    'updated_at'      => current_time( 'mysql' ),
+                ),
+                array( 'id' => $lesson_id ),
+                array( '%s', '%s', '%s' ),
+                array( '%d' )
+            );
         }
 
         if ( empty( $created_ids ) ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
         }
 
-        // Removed: lesson purchases should NOT grant "all sheet music" access.
-        // Only the $5 sheet-music add-on payment grants ledger access.
+        if ( ! empty( $calendar_failures ) ) {
+            return new WP_REST_Response( array(
+                'ok' => false,
+                'success' => false,
+                'message' => 'Booking saved, but one or more Google Calendar events failed to create.',
+                'lesson_ids' => $created_ids,
+                'calendar_failures' => $calendar_failures,
+            ), 500 );
+        }
 
         return new WP_REST_Response( array(
             'ok' => true,
@@ -576,6 +736,7 @@ class MRM_Lesson_Scheduler {
             'lesson_ids' => $created_ids,
         ), 200 );
     }
+
 
     /* =========================================================
      * Join Gate Page (virtual route)
@@ -3078,12 +3239,15 @@ protected function base64url_encode( $data ) {
                     }
                 }
             }
+
             return array(
-                'id' => (string) $data['id'],
-                'meet_url' => $meet_url,
+                'event_id'  => (string) $data['id'],
+                'meet_url'  => $meet_url,
+                'raw_event' => $data, // helpful for debugging if needed later
             );
         }
-        return true;
+
+        return new WP_Error( 'google_insert_event_failed', 'Google insert failed: response missing event id.' );
     }
 }
 
