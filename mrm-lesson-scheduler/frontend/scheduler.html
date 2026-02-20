@@ -1582,14 +1582,14 @@ h1 {
           </select>
 
           <label for="modal-frequency">Frequency</label>
-          <select id="modal-frequency" disabled>
+          <select id="modal-frequency">
             <option value="weekly">Weekly</option>
             <option value="biweekly">Biweekly</option>
             <option value="none">Do not repeat</option>
           </select>
 
           <label for="modal-repeat-duration">How long would you like to reserve this lesson time?</label>
-          <select id="modal-repeat-duration" disabled>
+          <select id="modal-repeat-duration">
             <option value="--">--</option>
             <option value="1_month">One month</option>
             <option value="3_months">Three months</option>
@@ -1720,11 +1720,23 @@ function openPaymentModal(clientSecret, finalAmountDollars){
   activePaymentElement = activeStripeElements.create('payment');
   activePaymentElement.mount('#mrm-payment-element');
 
-  const closeModal = () => {
-    clearSelectedSlots();
+  const closeModal = (opts = {}) => {
+    const shouldClear = !!opts.clearSelection;
+
+    if (shouldClear) {
+      clearSelectedSlots();
+    }
+
     overlay.style.display = 'none';
     overlay.setAttribute('aria-hidden', 'true');
-    document.body.classList.remove('mrm-booking-modal-open');
+
+    // Only remove the body lock if the Confirm Booking modal is not still open
+    const bookingOverlay = document.getElementById('booking-modal');
+    const bookingStillOpen = bookingOverlay && bookingOverlay.getAttribute('aria-hidden') === 'false';
+    if (!bookingStillOpen) {
+      document.body.classList.remove('mrm-booking-modal-open');
+    }
+
     if (activePaymentElement) {
       activePaymentElement.unmount();
     }
@@ -1732,7 +1744,7 @@ function openPaymentModal(clientSecret, finalAmountDollars){
     activeStripeElements = null;
   };
 
-  closeBtn.onclick = closeModal;
+  closeBtn.onclick = () => closeModal({ clearSelection: false });
 
   return { payBtn, errorEl, closeModal };
 }
@@ -1753,6 +1765,27 @@ const visitorTZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 let selectedSlots = [];
 let currentInstructor = null;
+
+const MRM_SELECTED_SLOTS_KEY = 'mrmSchedulerSelectedSlotsV1';
+
+function persistSelectedSlots(){
+  try{ sessionStorage.setItem(MRM_SELECTED_SLOTS_KEY, JSON.stringify(selectedSlots || [])); }catch(_){}
+}
+
+function restoreSelectedSlots(){
+  try{
+    const raw = sessionStorage.getItem(MRM_SELECTED_SLOTS_KEY);
+    if(!raw) return;
+    const parsed = JSON.parse(raw);
+    if(Array.isArray(parsed)) selectedSlots = parsed;
+  }catch(_){}
+}
+
+function clearPersistedSelectedSlots(){
+  try{ sessionStorage.removeItem(MRM_SELECTED_SLOTS_KEY); }catch(_){}
+}
+
+restoreSelectedSlots();
 
 const STATE_FULL_NAMES = {
   AL:"Alabama", AK:"Alaska", AZ:"Arizona", AR:"Arkansas", CA:"California", CO:"Colorado", CT:"Connecticut", DE:"Delaware",
@@ -1960,6 +1993,7 @@ function applyAutoPrepayMutualExclusion() {
 
 function clearSelectedSlots() {
   selectedSlots = [];
+  clearPersistedSelectedSlots();
   document.querySelectorAll('.slot.selected, .selected-slot').forEach(el => {
     el.classList.remove('selected');
     el.classList.remove('selected-slot');
@@ -2202,6 +2236,29 @@ function openBookingModal(instr){
 
   syncModalToMain();
   checkAvailabilityConflict();
+
+  // Allow changing frequency + reserve duration inside the modal (lesson type/length stay locked)
+  const modalFrequency = document.getElementById('modal-frequency');
+  const modalDuration = document.getElementById('modal-repeat-duration');
+
+  // Attach once
+  if (modalFrequency && !modalFrequency.dataset.mrmBound) {
+    modalFrequency.dataset.mrmBound = '1';
+    modalFrequency.addEventListener('change', ()=>{
+      syncMainToModal();
+      syncModalToLegacyFields();
+      persistSelectedSlots();
+    });
+  }
+
+  if (modalDuration && !modalDuration.dataset.mrmBound) {
+    modalDuration.dataset.mrmBound = '1';
+    modalDuration.addEventListener('change', ()=>{
+      syncMainToModal();
+      syncModalToLegacyFields();
+      persistSelectedSlots();
+    });
+  }
 
   // Show + lock scroll
   overlay.style.display = 'flex';
@@ -2510,6 +2567,8 @@ function ensureLegacyBookingHandler(){
         }
         stripe = stripeInstance;
 
+        persistSelectedSlots();
+
         sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
           payload,
           email,
@@ -2532,7 +2591,7 @@ function ensureLegacyBookingHandler(){
           if (paymentIntent && paymentIntent.status === 'succeeded') {
             await verifyPaymentIntent(paymentIntent.id, email);
             await submitBooking(payload, setMsg);
-            closeModal();
+            closeModal({ clearSelection: true });
           }
         };
       }catch(err){
@@ -3191,6 +3250,11 @@ function renderCalendar(instr, state, container){
               const tile = document.createElement('div');
               tile.className = (labelLines && labelLines.length) ? 'slot has-subline' : 'slot';
               tile.dataset.startMs = String(tMs);
+              const slotKey = `${instr.id}|${new Date(tMs).toISOString()}|${minutes}`;
+              tile.dataset.slotKey = slotKey;
+              if (selectedSlots.some(s => s.key === slotKey)) {
+                tile.classList.add('selected');
+              }
 
               // Line 1: Time (always)
               const timeLine = document.createElement('div');
@@ -3220,11 +3284,6 @@ function renderCalendar(instr, state, container){
                 modeLine.textContent = (has3 ? (labelLines[2] || '') : (labelLines[1] || ''));
                 tile.append(modeLine);
               }
-
-              const startISO = new Date(tMs).toISOString();
-              const endISO   = new Date(tMs + minutes*60*1000).toISOString();
-              const slotKey = instr.id+'|'+startISO+'|'+minutes;
-              if(selectedSlots.some(s=>s.key===slotKey)) tile.classList.add('selected');
 
               const withinLeadTime = (isFinite(leadTimeMs) && tMs < leadTimeMs);
               if(withinLeadTime){
@@ -3486,6 +3545,8 @@ function toggleSlot(el,slot,instr){
     selectedSlots.push({key,start:slot.start,end:slot.end,instructor_id:instr.id});
     el.classList.add('selected');
   }
+
+  persistSelectedSlots();
 
   const msgEl = document.getElementById('booking-message');
   const modalMsg = document.getElementById('modal-booking-message');
