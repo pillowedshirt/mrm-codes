@@ -1575,151 +1575,61 @@ class MRM_Lesson_Scheduler {
      *
      * Availability is derived from explicit "Free" events on the calendar.
      */
-    public function rest_get_availability( WP_REST_Request $request ) {
-        // =========================
-        // Inputs (canonical + legacy)
-        // =========================
+    function rest_get_availability( WP_REST_Request $request ) {
+
         $instructor_id = absint( $request->get_param( 'instructor_id' ) );
 
-        // Canonical params (preferred)
+        // Preferred params (new front-end)
         $start = sanitize_text_field( (string) $request->get_param( 'start_date' ) );
         $end   = sanitize_text_field( (string) $request->get_param( 'end_date' ) );
 
-        // Legacy fallback (keep for 30 days)
+        // Legacy fallback
         if ( $start === '' ) { $start = sanitize_text_field( (string) $request->get_param( 'start' ) ); }
         if ( $end   === '' ) { $end   = sanitize_text_field( (string) $request->get_param( 'end' ) ); }
 
         $slot_minutes = absint( $request->get_param( 'slot_minutes' ) );
+        if ( ! $slot_minutes ) $slot_minutes = 15;
 
-        // =========================
-        // Diagnostics helper
-        // =========================
-        $log_prefix = 'MRM_SCHED availability: ';
-
-        // =========================
-        // Validate instructor_id
-        // =========================
-        if ( ! $instructor_id ) {
-            error_log( $log_prefix . 'missing/invalid instructor_id' );
+        // Minimal validation
+        if ( ! $instructor_id || ! $start || ! $end ) {
             return new WP_REST_Response( array(
                 'ok'      => false,
-                'message' => 'Invalid instructor_id.',
+                'message' => 'Missing required parameters.',
             ), 400 );
         }
 
-        // Confirm instructor exists (so we can log “invalid instructor_id” explicitly)
-        global $wpdb;
-        $table = $wpdb->prefix . 'mrm_instructors';
-        $exists = (int) $wpdb->get_var(
-            $wpdb->prepare( "SELECT COUNT(1) FROM {$table} WHERE id = %d", $instructor_id )
-        );
-        if ( $exists <= 0 ) {
-            error_log( $log_prefix . 'invalid instructor_id=' . $instructor_id . ' (not found in DB)' );
+        // We expect YYYY-MM-DD (scheduler.html sends this)
+        if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $start ) || ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $end ) ) {
             return new WP_REST_Response( array(
                 'ok'      => false,
-                'message' => 'Instructor not found.',
-            ), 404 );
-        }
-
-        // =========================
-        // Validate date params (strict YYYY-MM-DD)
-        // =========================
-        if ( $start === '' || $end === '' ) {
-            error_log( $log_prefix . 'missing start/end date params. Got start=' . $start . ' end=' . $end );
-            return new WP_REST_Response( array(
-                'ok'      => false,
-                'message' => 'Missing required parameters: start_date/end_date.',
+                'message' => 'Invalid date format. Use YYYY-MM-DD.',
             ), 400 );
         }
 
-        if ( ! $this->mrm_is_valid_ymd( $start ) || ! $this->mrm_is_valid_ymd( $end ) ) {
-            error_log( $log_prefix . 'invalid date format. start=' . $start . ' end=' . $end . ' (expected YYYY-MM-DD)' );
-            return new WP_REST_Response( array(
-                'ok'      => false,
-                'message' => 'Invalid date format. Expected YYYY-MM-DD.',
-            ), 400 );
-        }
+        // 1) Availability windows from Google (your “free/transparent” availability blocks)
+        $availability = $this->get_calendar_availability_events( $instructor_id, $start, $end );
 
-        // Optional: basic range sanity (end >= start)
-        if ( strtotime( $end . ' 00:00:00' ) < strtotime( $start . ' 00:00:00' ) ) {
-            error_log( $log_prefix . 'invalid date range. start=' . $start . ' end=' . $end );
-            return new WP_REST_Response( array(
-                'ok'      => false,
-                'message' => 'Invalid date range: end_date must be >= start_date.',
-            ), 400 );
-        }
-
-        // =========================
-        // Validate slot_minutes bounds
-        // =========================
-        // Scheduler uses 15. If caller sends something weird, fall back to default-slot behavior (0).
-        if ( $slot_minutes !== 0 ) {
-            // sensible bounds: 10..180
-            if ( $slot_minutes < 10 || $slot_minutes > 180 ) {
-                error_log( $log_prefix . 'slot_minutes out of bounds: ' . $slot_minutes . ' (forcing default)' );
-                $slot_minutes = 0;
-            }
-        }
-
-        // =========================
-        // Fetch availability events from Google Calendar
-        // =========================
-        $availability_events = $this->get_calendar_availability_events(
-            $instructor_id,
-            $start,
-            $end
-        );
-
-        if ( empty( $availability_events ) ) {
-            return new WP_REST_Response( array(
-                'ok'          => true,
-                'slots'       => array(),
-                'busy'        => array(),
-                // Legacy alias (keep ~30 days)
-                'availability'=> array(),
-            ), 200 );
-        }
-
-        // =========================
-        // Split into bookable slots
-        // =========================
-        $slots = array();
-
-        foreach ( $availability_events as $event ) {
-            $event_start = strtotime( $event['start'] );
-            $event_end   = strtotime( $event['end'] );
-
-            if ( ! $event_start || ! $event_end || $event_end <= $event_start ) {
-                continue;
-            }
-
-            $event_slots = $this->split_into_lesson_slots(
-                $event_start,
-                $event_end,
-                $instructor_id,
-                $slot_minutes
-            );
-
-            $slots = array_merge( $slots, $event_slots );
-        }
-
-        // =========================
-        // Busy windows (DB lessons + Google opaque events)
-        // =========================
+        // 2) Busy windows (ALWAYS compute: DB lessons + Google opaque events)
         $busy = array();
 
-        // Get instructor calendar_id + timezone
+        // Build time_min/time_max UTC using instructor timezone (same approach your file already uses elsewhere)
         global $wpdb;
-        $table = $wpdb->prefix . 'mrm_instructors';
-        $row = $wpdb->get_row( $wpdb->prepare( "SELECT calendar_id, timezone FROM {$table} WHERE id = %d", (int) $instructor_id ), ARRAY_A );
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT calendar_id, timezone FROM {$wpdb->prefix}mrm_instructors WHERE id = %d",
+                (int) $instructor_id
+            ),
+            ARRAY_A
+        );
 
         $calendar_id = is_array( $row ) ? (string) ( $row['calendar_id'] ?? '' ) : '';
-        $tz = is_array( $row ) ? (string) ( $row['timezone'] ?? '' ) : '';
+        $tz          = is_array( $row ) ? (string) ( $row['timezone'] ?? '' ) : '';
         if ( ! $tz ) $tz = 'America/Phoenix';
 
         try {
             $start_local = DateTime::createFromFormat( 'Y-m-d', $start, new DateTimeZone( $tz ) );
             $end_local   = DateTime::createFromFormat( 'Y-m-d', $end,   new DateTimeZone( $tz ) );
+
             if ( $start_local && $end_local ) {
                 $start_local->setTime( 0, 0, 0 );
                 $end_local->setTime( 0, 0, 0 );
@@ -1729,37 +1639,32 @@ class MRM_Lesson_Scheduler {
                 $end_utc   = clone $end_local;
                 $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
                 $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+
                 $time_min = $start_utc->format( 'Y-m-d\TH:i:s\Z' );
                 $time_max = $end_utc->format( 'Y-m-d\TH:i:s\Z' );
 
-                // 1) Busy from DB scheduled lessons (already includes 30m travel buffer for in-person lessons)
+                // DB busy (scheduled lessons table)
                 $db_busy = $this->db_busy_intervals_for_instructor( $instructor_id, $time_min, $time_max );
                 foreach ( (array) $db_busy as $b ) {
                     if ( empty( $b['start_ts'] ) || empty( $b['end_ts'] ) ) continue;
                     $busy[] = array(
-                        'start'    => gmdate( 'c', (int) $b['start_ts'] ),
-                        'end'      => gmdate( 'c', (int) $b['end_ts'] ),
                         'start_ts' => (int) $b['start_ts'],
                         'end_ts'   => (int) $b['end_ts'],
-                        'source'   => 'db',
                     );
                 }
 
-                // 2) Busy from Google FreeBusy (opaque events)
+                // Google FreeBusy busy (opaque events)
                 if ( $calendar_id !== '' && $this->google_is_configured() ) {
                     $fb = $this->google_freebusy( array( $calendar_id ), $time_min, $time_max );
                     if ( ! is_wp_error( $fb ) ) {
-                        foreach ( $fb as $b ) {
+                        foreach ( (array) $fb as $b ) {
                             if ( empty( $b['start'] ) || empty( $b['end'] ) ) continue;
                             $bs = strtotime( (string) $b['start'] );
                             $be = strtotime( (string) $b['end'] );
                             if ( ! $bs || ! $be || $be <= $bs ) continue;
                             $busy[] = array(
-                                'start'    => gmdate( 'c', $bs ),
-                                'end'      => gmdate( 'c', $be ),
-                                'start_ts' => $bs,
-                                'end_ts'   => $be,
-                                'source'   => 'google',
+                                'start_ts' => (int) $bs,
+                                'end_ts'   => (int) $be,
                             );
                         }
                     }
@@ -1768,23 +1673,35 @@ class MRM_Lesson_Scheduler {
                 $busy = $this->merge_intervals( $busy );
             }
         } catch ( Exception $e ) {
-            // If busy calc fails, don't break availability. Just return empty busy.
             $busy = array();
         }
 
-        // Filter out slots that overlap busy windows
-        if ( ! empty( $busy ) ) {
+        // 3) Split availability into slots
+        $slots = array();
+        foreach ( (array) $availability as $win ) {
+            $s = strtotime( (string) ( $win['start'] ?? '' ) );
+            $e = strtotime( (string) ( $win['end'] ?? '' ) );
+            if ( ! $s || ! $e || $e <= $s ) continue;
+
+            $slots = array_merge(
+                $slots,
+                (array) $this->split_into_lesson_slots( $s, $e, $instructor_id, $slot_minutes )
+            );
+        }
+
+        // 4) Filter slots by busy overlaps
+        if ( ! empty( $busy ) && ! empty( $slots ) ) {
             $filtered = array();
             foreach ( $slots as $slot ) {
-                $sMs = strtotime( (string) ( $slot['start'] ?? '' ) );
-                $eMs = strtotime( (string) ( $slot['end'] ?? '' ) );
-                if ( ! $sMs || ! $eMs || $eMs <= $sMs ) continue;
+                $ss = strtotime( (string) ( $slot['start'] ?? '' ) );
+                $se = strtotime( (string) ( $slot['end'] ?? '' ) );
+                if ( ! $ss || ! $se || $se <= $ss ) continue;
 
                 $conflict = false;
                 foreach ( $busy as $b ) {
                     $bs = (int) ( $b['start_ts'] ?? 0 );
                     $be = (int) ( $b['end_ts'] ?? 0 );
-                    if ( $bs && $be && max( $sMs, $bs ) < min( $eMs, $be ) ) {
+                    if ( $bs && $be && max( $ss, $bs ) < min( $se, $be ) ) {
                         $conflict = true;
                         break;
                     }
@@ -1794,14 +1711,25 @@ class MRM_Lesson_Scheduler {
             $slots = $filtered;
         }
 
+        // Return in the format scheduler.html expects
+        // - slots: for booking
+        // - busy: for calendar shading / busy markers
+        // - availability: legacy alias used in older code paths
         return new WP_REST_Response( array(
-            'ok'          => true,
-            'slots'       => array_values( $slots ),
-            'busy'        => array_values( $busy ),
-            // Legacy alias (keep ~30 days)
-            'availability'=> array_values( $slots ),
+            'ok'           => true,
+            'slots'        => array_values( $slots ),
+            'busy'         => array_map( function( $b ) {
+                return array(
+                    'start'    => gmdate( 'c', (int) $b['start_ts'] ),
+                    'end'      => gmdate( 'c', (int) $b['end_ts'] ),
+                    'start_ts' => (int) $b['start_ts'],
+                    'end_ts'   => (int) $b['end_ts'],
+                );
+            }, array_values( $busy ) ),
+            'availability' => array_values( $slots ),
         ), 200 );
     }
+
 
     private function mrm_is_valid_ymd( $s ) {
         $s = (string) $s;
