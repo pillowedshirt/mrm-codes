@@ -647,15 +647,20 @@ class MRM_Lesson_Scheduler {
 
                     $inst = trim( (string) $instrument );
 
-                    // Build exact order: Name, Type, Instrument, Length, Lesson
-                    $title_parts = array();
-                    $title_parts[] = $name_for_title;
-                    $title_parts[] = $lesson_type_label;
-                    if ( $inst !== '' ) $title_parts[] = $inst;
-                    $title_parts[] = $minutes_label;
-                    $title_parts[] = 'Lesson';
-
-                    $title = implode( ' ', $title_parts );
+                    // Consultations must title as: "<Parent Name> Online Consultation"
+                    if ( $is_consultation ) {
+                        $parent_for_title = ( $parent_full !== '' ) ? $parent_full : $student_display;
+                        $title = $parent_for_title . ' Online Consultation';
+                    } else {
+                        // Lessons: "<Student Name> <Lesson Type> <Instrument> <30min/60min> Lesson"
+                        $title_parts = array();
+                        $title_parts[] = $name_for_title;         // student
+                        $title_parts[] = $lesson_type_label;      // Online / In person
+                        if ( $inst !== '' ) $title_parts[] = $inst;
+                        $title_parts[] = $minutes_label;          // 30min/60min
+                        $title_parts[] = 'Lesson';
+                        $title = implode( ' ', $title_parts );
+                    }
 
                     // Compute student last name (best-effort, from student_name)
                     $student_last_name = '';
@@ -1676,17 +1681,28 @@ class MRM_Lesson_Scheduler {
                 $time_min = $start_utc->format( 'Y-m-d\TH:i:s\Z' );
                 $time_max = $end_utc->format( 'Y-m-d\TH:i:s\Z' );
 
-                // Build a set of existing Google event IDs for this window so DB busy can be reconciled
-                $existing_google_ids = array();
+                // Map Google event IDs -> actual start/end timestamps for reconciliation (deletes/moves)
+                $google_event_map = array();
 
                 if ( $calendar_id !== '' && $this->google_is_configured() ) {
                     $events = $this->google_list_events( $calendar_id, $time_min, $time_max );
                     if ( ! is_wp_error( $events ) && is_array( $events ) ) {
                         $items = isset( $events['items'] ) && is_array( $events['items'] ) ? $events['items'] : $events;
                         foreach ( $items as $ev ) {
-                            if ( ! empty( $ev['id'] ) ) {
-                                $existing_google_ids[ (string) $ev['id'] ] = true;
-                            }
+                            $id = (string) ( $ev['id'] ?? '' );
+                            if ( $id === '' ) continue;
+
+                            $start_dt = $ev['start']['dateTime'] ?? '';
+                            $end_dt   = $ev['end']['dateTime'] ?? '';
+
+                            // Skip all-day events
+                            if ( ! $start_dt || ! $end_dt ) continue;
+
+                            $s = strtotime( (string) $start_dt );
+                            $e = strtotime( (string) $end_dt );
+                            if ( ! $s || ! $e || $e <= $s ) continue;
+
+                            $google_event_map[ $id ] = array( 'start_ts' => $s, 'end_ts' => $e );
                         }
                     }
                 }
@@ -1695,9 +1711,16 @@ class MRM_Lesson_Scheduler {
                 $db_busy = $this->db_busy_intervals_for_instructor( $instructor_id, $time_min, $time_max );
                 foreach ( (array) $db_busy as $b ) {
                     $geid = (string) ( $b['google_event_id'] ?? '' );
-                    if ( $geid !== '' && empty( $existing_google_ids[ $geid ] ) ) {
-                        // Google event was deleted — ignore this DB busy interval so scheduler frees it
-                        continue;
+                    if ( $geid !== '' ) {
+                        if ( empty( $google_event_map[ $geid ] ) ) {
+                            // Event was deleted from Google -> do NOT treat as booked
+                            continue;
+                        }
+                        // Event exists but may have moved -> override DB timestamps with Google timestamps
+                        $b['start_ts'] = (int) $google_event_map[ $geid ]['start_ts'];
+                        $b['end_ts']   = (int) $google_event_map[ $geid ]['end_ts'];
+                        $b['start']    = gmdate( 'c', (int) $b['start_ts'] );
+                        $b['end']      = gmdate( 'c', (int) $b['end_ts'] );
                     }
                     if ( empty( $b['start_ts'] ) || empty( $b['end_ts'] ) ) continue;
                     $busy_db[] = array(
