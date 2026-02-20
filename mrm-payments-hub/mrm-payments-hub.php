@@ -27,6 +27,9 @@ class MRM_Payments_Hub_Single {
     // Ensure DB tables exist even after plugin updates (activation hook is not enough).
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
     add_action('mrm_pay_hub_cleanup_access', array($this, 'cleanup_access'));
+    if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
+      wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
+    }
 
     register_activation_hook(__FILE__, array($this, 'on_activate'));
 
@@ -41,6 +44,9 @@ class MRM_Payments_Hub_Single {
     $this->install_or_upgrade_db();
     // Ensure the default lesson products are present
     $this->ensure_default_products();
+    if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
+      wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
+    }
   }
 
   private function table_orders() {
@@ -124,6 +130,9 @@ class MRM_Payments_Hub_Single {
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       email_hash CHAR(64) NOT NULL,
       sku VARCHAR(120) NOT NULL,
+      start_at DATETIME DEFAULT NULL,
+      expires_at DATETIME DEFAULT NULL,
+      month_key VARCHAR(7) DEFAULT NULL,
       granted_at DATETIME NOT NULL,
       revoked_at DATETIME DEFAULT NULL,
       source VARCHAR(60) DEFAULT NULL,
@@ -132,7 +141,10 @@ class MRM_Payments_Hub_Single {
       KEY email_hash_idx (email_hash),
       KEY sku_idx (sku),
       KEY active_idx (sku, revoked_at),
-      KEY email_sku_idx (email_hash, sku)
+      KEY email_sku_idx (email_hash, sku),
+      KEY expires_idx (expires_at),
+      KEY month_idx (month_key),
+      KEY email_month_idx (email_hash, month_key)
     ) {$charset};";
 
     dbDelta($sql_orders);
@@ -244,6 +256,35 @@ class MRM_Payments_Hub_Single {
     return array_keys($out);
   }
 
+
+  /* =========================================================
+   * Time helpers (WP timezone)
+   * ======================================================= */
+
+  private function wp_tz() {
+    if (function_exists('wp_timezone')) return wp_timezone();
+    $tz = get_option('timezone_string');
+    if ($tz) return new DateTimeZone($tz);
+    $offset = (float) get_option('gmt_offset', 0);
+    $hours = (int) $offset;
+    $mins = (int) round(abs($offset - $hours) * 60);
+    $sign = ($offset < 0) ? '-' : '+';
+    return new DateTimeZone(sprintf('%s%02d:%02d', $sign, abs($hours), $mins));
+  }
+
+  private function month_key_from_ts($ts) {
+    $ts = (int)$ts;
+    if (function_exists('wp_date')) return wp_date('Y-m', $ts, $this->wp_tz());
+    $dt = new DateTime('@' . $ts);
+    $dt->setTimezone($this->wp_tz());
+    return $dt->format('Y-m');
+  }
+
+  private function mysql_from_ts($ts) {
+    $dt = new DateTime('@' . (int)$ts);
+    $dt->setTimezone($this->wp_tz());
+    return $dt->format('Y-m-d H:i:s');
+  }
   private function get_all_sheet_music_sku() {
     // Admin-configurable in settings; fallback to a reasonable default that matches your SKU pattern.
     $settings = $this->get_settings();
@@ -689,6 +730,24 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/create-lesson-subscription-schedule', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_create_lesson_subscription_schedule'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/ensure-addon-subscription', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_ensure_addon_subscription'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/stripe-webhook', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_stripe_webhook'),
+      'permission_callback' => '__return_true',
+    ));
+
   }
 
   public function rest_quote(WP_REST_Request $req) {
@@ -805,6 +864,9 @@ class MRM_Payments_Hub_Single {
     $sku = $this->sanitize_sku($data['sku'] ?? '');
     $email = sanitize_email((string)($data['email'] ?? ''));
     $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+    $sheet_music_addon = (string)($data['sheet_music_addon'] ?? 'no');
+    $addon_selected = (strtolower($sheet_music_addon) === 'yes');
+    $address = isset($data['address']) && is_array($data['address']) ? $data['address'] : array();
 
     if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
     if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
@@ -886,13 +948,28 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid product price.'), 400);
     }
 
+    $base_amount_cents = (int)$amount;
+    $addon_amount_cents = $addon_selected ? 500 : 0;
+    $addon_tax_cents = 0;
+    if ($addon_selected) {
+      $tax = $this->stripe_tax_for_addon($address);
+      $addon_tax_cents = (int)($tax['tax_cents'] ?? 0);
+    }
+    $final_amount_cents = $base_amount_cents + $addon_amount_cents + $addon_tax_cents;
+
     $email_hash = $this->email_hash($email);
 
     // Build labels
     $metadata = $this->build_metadata($sku, $product_type, $email_hash, $context, $p);
+    $metadata['mrm_email'] = $email;
+    $metadata['mrm_sheet_music_addon'] = $addon_selected ? 'yes' : 'no';
+    $metadata['mrm_base_amount_cents'] = (string)$base_amount_cents;
+    $metadata['mrm_addon_amount_cents'] = (string)$addon_amount_cents;
+    $metadata['mrm_addon_tax_cents'] = (string)$addon_tax_cents;
+    $metadata['mrm_total_amount_cents'] = (string)$final_amount_cents;
 
     // Create internal order first so order_id can be labeled in Stripe metadata
-    $order_id = $this->create_order($email_hash, $sku, $product_type, $amount, $currency, $metadata);
+    $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
     $metadata['mrm_order_id'] = (string)$order_id;
 
     $description = ($product_type === 'lesson') ? 'MRM Lesson' : 'MRM Sheet Music';
@@ -915,7 +992,7 @@ class MRM_Payments_Hub_Single {
       $metadata['mrm_save_card'] = 'yes';
     }
 
-    $pi = $this->stripe_create_payment_intent($amount, $currency, $metadata, $description, $extra);
+    $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra);
     if (is_wp_error($pi)) {
       $data = $pi->get_error_data();
       error_log('[MRM Payments Hub] Stripe PI error sku=' . $sku . ' msg=' . $pi->get_error_message() . ' data=' . wp_json_encode($data));
@@ -933,7 +1010,7 @@ class MRM_Payments_Hub_Single {
       'customer_id' => $customer_id ? (string)$customer_id : '',
       'sku' => $sku,
       'label' => (string)($p['label'] ?? $sku),
-      'amount_cents' => $amount,
+      'amount_cents' => $final_amount_cents,
       'currency' => $currency,
       'product_type' => $product_type,
       'category' => (string)($p['category'] ?? ''),
@@ -985,6 +1062,18 @@ class MRM_Payments_Hub_Single {
       } else {
         // If user expected autopay but no customer/pm is present, log it loudly
         error_log('[MRM Payments Hub] verify PI succeeded but missing customer/pm. customer=' . $customer_id . ' pm=' . $pm_id . ' setup_future_usage=' . $sfu);
+      }
+    }
+
+    if ($ok) {
+      $meta = (array)($pi['metadata'] ?? array());
+      $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
+      if ($addon_yes) {
+        $email_for_addon = sanitize_email((string)($meta['mrm_email'] ?? ($data['email'] ?? '')));
+        if ($email_for_addon && is_email($email_for_addon)) {
+          $start_ts = isset($pi['charges']['data'][0]['created']) ? (int)$pi['charges']['data'][0]['created'] : (int)($pi['created'] ?? time());
+          $this->grant_all_sheet_music_ledger_entry($email_for_addon, $start_ts, 'stripe_pi_addon', $pi_id);
+        }
       }
     }
 
@@ -1113,10 +1202,13 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok' => true, 'sku' => $sku, 'has_access' => false), 200);
     }
 
+    $now = current_time('mysql');
     $id = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+      "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL AND ((expires_at IS NOT NULL AND expires_at > %s) OR (expires_at IS NULL AND DATE_ADD(granted_at, INTERVAL 31 DAY) > %s)) LIMIT 1",
       (string)$email_hash,
-      (string)$sku
+      (string)$sku,
+      (string)$now,
+      (string)$now
     ));
 
     return new WP_REST_Response(array(
@@ -1124,6 +1216,76 @@ class MRM_Payments_Hub_Single {
       'sku' => $sku,
       'has_access' => !empty($id),
     ), 200);
+  }
+
+
+  public function rest_create_lesson_subscription_schedule(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $customer_id = sanitize_text_field((string)($data['customer_id'] ?? ''));
+    $price_id = sanitize_text_field((string)($data['price_id'] ?? ''));
+    if (!$email || !$customer_id || !$price_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing required fields.'), 400);
+
+    $frequency = sanitize_text_field((string)($data['frequency'] ?? 'weekly'));
+    $duration = sanitize_text_field((string)($data['duration'] ?? 'indefinitely'));
+
+    $params = array(
+      'customer' => $customer_id,
+      'start_date' => 'now',
+      'phases[0][items][0][price]' => $price_id,
+      'phases[0][iterations]' => $duration === 'indefinitely' ? '' : ($duration === '3_months' ? 12 : 4),
+      'metadata[mrm_email]' => $email,
+      'metadata[mrm_frequency]' => $frequency,
+      'metadata[mrm_duration]' => $duration,
+    );
+    if ($frequency === 'biweekly') $params['phases[0][billing_cycle_anchor]'] = 'phase_start';
+
+    $resp = $this->stripe_api_request('POST', '/v1/subscription_schedules', $params);
+    if (is_wp_error($resp)) return new WP_REST_Response(array('ok'=>false,'message'=>$resp->get_error_message()), 500);
+    return new WP_REST_Response(array('ok'=>true,'schedule_id'=>(string)($resp['id'] ?? '')), 200);
+  }
+
+  public function rest_ensure_addon_subscription(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $customer_id = sanitize_text_field((string)($data['customer_id'] ?? ''));
+    $price_id = sanitize_text_field((string)($data['price_id'] ?? ''));
+    if (!$email || !$customer_id || !$price_id) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing required fields.'), 400);
+
+    $existing = $this->stripe_api_request('GET', '/v1/subscriptions', array('customer'=>$customer_id, 'status'=>'all', 'limit'=>20));
+    if (!is_wp_error($existing) && !empty($existing['data'])) {
+      foreach ((array)$existing['data'] as $sub) {
+        $meta = (array)($sub['metadata'] ?? array());
+        if (($meta['mrm_sheet_music_addon'] ?? '') === 'yes' && in_array((string)($sub['status'] ?? ''), array('active','trialing','past_due'), true)) {
+          return new WP_REST_Response(array('ok'=>true,'subscription_id'=>(string)$sub['id'],'existing'=>true), 200);
+        }
+      }
+    }
+
+    $created = $this->stripe_api_request('POST', '/v1/subscriptions', array(
+      'customer' => $customer_id,
+      'items[0][price]' => $price_id,
+      'metadata[mrm_sheet_music_addon]' => 'yes',
+      'metadata[mrm_email]' => $email,
+    ));
+    if (is_wp_error($created)) return new WP_REST_Response(array('ok'=>false,'message'=>$created->get_error_message()), 500);
+    return new WP_REST_Response(array('ok'=>true,'subscription_id'=>(string)($created['id'] ?? '')), 200);
+  }
+
+  public function rest_stripe_webhook(WP_REST_Request $req) {
+    $event = (array)$req->get_json_params();
+    $type = (string)($event['type'] ?? '');
+    if ($type === 'invoice.payment_succeeded') {
+      $obj = (array)($event['data']['object'] ?? array());
+      $meta = (array)($obj['lines']['data'][0]['metadata'] ?? $obj['metadata'] ?? array());
+      $email = sanitize_email((string)($meta['mrm_email'] ?? ''));
+      $addon = strtolower((string)($meta['mrm_sheet_music_addon'] ?? '')) === 'yes';
+      if ($addon && $email) {
+        $start_ts = (int)($obj['status_transitions']['paid_at'] ?? time());
+        $this->grant_all_sheet_music_ledger_entry($email, $start_ts, 'stripe_invoice_addon', (string)($obj['id'] ?? ''));
+      }
+    }
+    return new WP_REST_Response(array('ok'=>true), 200);
   }
 
   private function grant_sheet_music_access($email_hash, $sku, $source = null, $source_id = null) {
@@ -1150,23 +1312,102 @@ class MRM_Payments_Hub_Single {
     return (bool)$ins;
   }
 
+
+  private function stripe_tax_for_addon($address) {
+    $addr = is_array($address) ? $address : array();
+    $state = strtoupper(sanitize_text_field((string)($addr['state'] ?? '')));
+    $zip = sanitize_text_field((string)($addr['postal_code'] ?? ''));
+    if (!$state || !$zip) return array('tax_cents' => 0, 'total_cents' => 500);
+
+    $payload = array(
+      'currency' => 'usd',
+      'customer_details[address][line1]' => sanitize_text_field((string)($addr['line1'] ?? '')),
+      'customer_details[address][city]' => sanitize_text_field((string)($addr['city'] ?? '')),
+      'customer_details[address][state]' => $state,
+      'customer_details[address][postal_code]' => $zip,
+      'customer_details[address][country]' => strtoupper(sanitize_text_field((string)($addr['country'] ?? 'US'))),
+      'line_items[0][amount]' => 500,
+      'line_items[0][quantity]' => 1,
+      'line_items[0][reference]' => 'sheet_music_addon',
+    );
+
+    $calc = $this->stripe_api_request('POST', '/v1/tax/calculations', $payload);
+    if (is_wp_error($calc)) return array('tax_cents' => 0, 'total_cents' => 500);
+
+    return array(
+      'tax_cents' => max(0, (int)($calc['tax_amount_exclusive'] ?? 0)),
+      'total_cents' => max(500, (int)($calc['amount_total'] ?? 500)),
+    );
+  }
+
+  public function grant_all_sheet_music_ledger_entry($email, $start_ts, $source = null, $source_id = null) {
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) return false;
+
+    $this->maybe_install_or_upgrade_db();
+    global $wpdb;
+    $table = $this->table_sheet_music_access();
+
+    $settings = $this->get_settings();
+    $master_sku = $this->sanitize_sku((string)($settings['all_sheet_music_sku'] ?? 'piece-all-sheet-music-access-complete-package'));
+    if (!$master_sku) $master_sku = 'piece-all-sheet-music-access-complete-package';
+
+    $email_hash = $this->email_hash($email);
+    $start_ts = (int)$start_ts;
+    if ($start_ts <= 0) $start_ts = time();
+
+    $month_key = $this->month_key_from_ts($start_ts);
+    $existing_id = $wpdb->get_var($wpdb->prepare(
+      "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND month_key=%s AND revoked_at IS NULL ORDER BY id DESC LIMIT 1",
+      $email_hash, $master_sku, $month_key
+    ));
+    if ($existing_id) return true;
+
+    return (bool)$wpdb->insert($table, array(
+      'email_hash' => $email_hash,
+      'sku' => $master_sku,
+      'start_at' => $this->mysql_from_ts($start_ts),
+      'expires_at' => $this->mysql_from_ts($start_ts + (31 * 24 * 60 * 60)),
+      'month_key' => $month_key,
+      'granted_at' => current_time('mysql'),
+      'revoked_at' => null,
+      'source' => $source,
+      'source_id' => $source_id,
+    ), array('%s','%s','%s','%s','%s','%s','%s','%s','%s'));
+  }
+
+  public function prune_expired_all_sheet_music() {
+    $this->maybe_install_or_upgrade_db();
+    global $wpdb;
+    $table = $this->table_sheet_music_access();
+
+    $settings = $this->get_settings();
+    $master_sku = $this->sanitize_sku((string)($settings['all_sheet_music_sku'] ?? 'piece-all-sheet-music-access-complete-package'));
+    if (!$master_sku) $master_sku = 'piece-all-sheet-music-access-complete-package';
+
+    $now_mysql = current_time('mysql');
+    $wpdb->query($wpdb->prepare(
+      "UPDATE {$table} SET revoked_at = %s WHERE sku=%s AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at <= %s",
+      $now_mysql, $master_sku, $now_mysql
+    ));
+  }
+
   public function grant_all_sheet_music_db_row($email, $source = null, $source_id = null) {
     $email = sanitize_email((string)$email);
     if (!$email || !is_email($email)) return false;
 
     $this->maybe_install_or_upgrade_db();
 
-    $email_hash = $this->email_hash($email);
-    // sku == product_slug
-    return $this->grant_sheet_music_access($email_hash, 'all-sheet-music', $source, $source_id);
+    return $this->grant_all_sheet_music_ledger_entry($email, time(), $source, $source_id);
   }
 
   public function has_sheet_music_access($email_hash, $sku) {
     global $wpdb;
     $table = $this->table_sheet_music_access();
+    $now = current_time('mysql');
     $id = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
-      $email_hash, $sku
+      "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL AND ((expires_at IS NOT NULL AND expires_at > %s) OR (expires_at IS NULL AND DATE_ADD(granted_at, INTERVAL 31 DAY) > %s)) LIMIT 1",
+      $email_hash, $sku, $now, $now
     ));
     return !empty($id);
   }
@@ -1180,10 +1421,9 @@ class MRM_Payments_Hub_Single {
 
     $lists = $this->all_access_lists();
 
-    // Rule 1: master list grants access to ANY piece
-    $master = isset($lists['all-sheet-music']) && is_array($lists['all-sheet-music'])
-      ? $lists['all-sheet-music'] : array();
-    if (in_array(strtolower($email), $master, true)) return true;
+    // Rule 1: master ledger row grants access to any piece.
+    $email_hash = $this->email_hash($email);
+    if ($this->has_sheet_music_access($email_hash, $this->get_all_sheet_music_sku())) return true;
 
     // Rule 2: per-product list
     $per = isset($lists[$product_slug]) && is_array($lists[$product_slug])
@@ -1191,7 +1431,6 @@ class MRM_Payments_Hub_Single {
     if (in_array(strtolower($email), $per, true)) return true;
 
     // Rule 3: DB table check (idempotent truth)
-    $email_hash = $this->email_hash($email);
     return $this->has_sheet_music_access($email_hash, $product_slug);
   }
 
@@ -1211,27 +1450,7 @@ class MRM_Payments_Hub_Single {
   }
 
   public function cleanup_access() {
-    global $wpdb;
-    $orders = $this->table_orders();
-    $access = $this->table_sheet_music_access();
-
-    $expired = $wpdb->get_col(
-      "SELECT DISTINCT email_hash
-       FROM {$orders}
-       WHERE product_type = 'lesson'
-         AND status = 'succeeded'
-       GROUP BY email_hash
-       HAVING MAX(updated_at) < ( NOW() - INTERVAL 28 DAY )"
-    );
-    if (empty($expired)) return;
-
-    foreach ($expired as $hash) {
-      $wpdb->query($wpdb->prepare(
-        "UPDATE {$access} SET revoked_at = NOW() WHERE email_hash = %s AND revoked_at IS NULL",
-        $hash
-      ));
-    }
-
+    $this->prune_expired_all_sheet_music();
   }
 
   /* =========================================================
@@ -1255,6 +1474,24 @@ class MRM_Payments_Hub_Single {
     if (!current_user_can('manage_options')) return;
 
     if (isset($_POST['mrm_pay_hub_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_nonce'], 'mrm_pay_hub_save')) {
+
+      if (!empty($_POST['ledger_remove_id'])) {
+        global $wpdb;
+        $wpdb->update($this->table_sheet_music_access(), array('revoked_at' => current_time('mysql')), array('id' => absint($_POST['ledger_remove_id'])), array('%s'), array('%d'));
+      }
+      if (!empty($_POST['ledger_edit_id']) && !empty($_POST['ledger_edit_start'])) {
+        global $wpdb;
+        $id = absint($_POST['ledger_edit_id']);
+        $start_raw = sanitize_text_field((string)$_POST['ledger_edit_start']);
+        $start_ts = strtotime($start_raw);
+        if ($id > 0 && $start_ts) {
+          $wpdb->update($this->table_sheet_music_access(), array(
+            'start_at' => $this->mysql_from_ts($start_ts),
+            'expires_at' => $this->mysql_from_ts($start_ts + (31 * 24 * 60 * 60)),
+            'month_key' => $this->month_key_from_ts($start_ts),
+          ), array('id' => $id), array('%s','%s','%s'), array('%d'));
+        }
+      }
       $settings = $this->get_settings();
       // Stripe environment mode: 'live' or 'test'
       $settings['stripe_mode'] = sanitize_text_field((string)($_POST['stripe_mode'] ?? 'live'));
@@ -1284,8 +1521,7 @@ class MRM_Payments_Hub_Single {
           $new_lists[$slug] = $this->normalize_email_list_textarea($emails_raw);
         }
 
-        // Ensure master exists
-        if (!isset($new_lists['all-sheet-music'])) $new_lists['all-sheet-music'] = array();
+        if (isset($new_lists['all-sheet-music'])) unset($new_lists['all-sheet-music']);
 
         $this->save_access_lists($new_lists);
       }
@@ -1362,7 +1598,7 @@ class MRM_Payments_Hub_Single {
         $products[$sku] = array(
           'sku' => $sku,
           'label' => $label,
-          'amount_cents' => $amount,
+          'amount_cents' => $final_amount_cents,
           'currency' => $currency,
           'product_type' => $type,
           'category' => $category,
@@ -1786,8 +2022,36 @@ class MRM_Payments_Hub_Single {
           </tr>
         </table>
 
-        <h2>Sheet Music Access Lists (Email-based)</h2>
-        <p>Master list: <code>all-sheet-music</code> grants access to any piece.</p>
+        <h2>All Sheet Music Ledger (DB)</h2>
+        <?php
+          global $wpdb;
+          $ledger_rows = $wpdb->get_results("SELECT * FROM {$this->table_sheet_music_access()} ORDER BY id DESC LIMIT 200", ARRAY_A);
+          $email_map = get_option('mrm_pay_hub_email_map', array());
+          $now_mysql = current_time('mysql');
+        ?>
+        <table class="widefat striped" style="max-width: 1100px; margin-bottom:18px;">
+          <thead><tr><th>Email</th><th>Start</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            <?php foreach ((array)$ledger_rows as $r):
+              $em = isset($email_map[$r['email_hash']]) ? $email_map[$r['email_hash']] : $r['email_hash'];
+              $active = (empty($r['revoked_at']) && !empty($r['expires_at']) && $r['expires_at'] > $now_mysql);
+            ?>
+              <tr>
+                <td><?php echo esc_html($em); ?></td>
+                <td><?php echo esc_html((string)($r['start_at'] ?: $r['granted_at'])); ?></td>
+                <td><?php echo esc_html((string)($r['expires_at'] ?: '')); ?></td>
+                <td><?php echo $active ? 'active' : 'inactive'; ?></td>
+                <td>
+                  <input type="hidden" name="ledger_edit_id" value="<?php echo (int)$r['id']; ?>" />
+                  <input type="text" name="ledger_edit_start" value="<?php echo esc_attr((string)($r['start_at'] ?: '')); ?>" placeholder="YYYY-MM-DD HH:MM:SS" />
+                  <button class="button" name="ledger_remove_id" value="<?php echo (int)$r['id']; ?>">Remove entry</button>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+
+        <h2>Per-product Access Lists (Email-based)</h2>
 
         <table class="widefat striped" style="max-width: 980px;">
           <thead>
@@ -1800,17 +2064,9 @@ class MRM_Payments_Hub_Single {
             <?php
               $lists = $this->all_access_lists();
 
-              // Always show master row
-              if (!isset($lists['all-sheet-music']) || !is_array($lists['all-sheet-music'])) {
-                $lists['all-sheet-music'] = array();
-              }
-
-              // Build a stable list of rows: master + any existing keys
               $keys = array_keys($lists);
+              $keys = array_values(array_filter($keys, function($k){ return $k !== 'all-sheet-music'; }));
               sort($keys);
-
-              // Ensure master is first
-              $keys = array_values(array_unique(array_merge(array('all-sheet-music'), $keys)));
 
               foreach ($keys as $k) {
                 $safe_k = esc_attr($k);
@@ -1862,7 +2118,7 @@ function mrm_pay_hub_singleton() {
 
 register_activation_hook(__FILE__, function() {
   if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
-    wp_schedule_event(time(), 'daily', 'mrm_pay_hub_cleanup_access');
+    wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
   }
 });
 

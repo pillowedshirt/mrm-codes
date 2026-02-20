@@ -1474,25 +1474,32 @@ class MRM_Product_Access {
         $sku = preg_replace( '/[^a-z0-9\-_]+/', '', $sku );
         if ( ! $sku ) return false;
 
-        // Pull lists from Payments Hub (source of truth for email lists)
         $lists = get_option( 'mrm_pay_hub_access_lists', array() );
         if ( ! is_array( $lists ) ) $lists = array();
 
-        // Convert hash -> compare against list (we only have hash here).
-        // We can safely compare by hashing list emails with the same hash_email.
         $hash_of = function( $email ) {
             return $this->hash_email( strtolower( trim( (string) $email ) ) );
         };
 
-        // Rule 1: master list
-        if ( isset( $lists['all-sheet-music'] ) && is_array( $lists['all-sheet-music'] ) ) {
-            foreach ( $lists['all-sheet-music'] as $em ) {
-                $em = sanitize_email( $em );
-                if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
-            }
+        $settings = get_option('mrm_pay_hub_settings', array());
+        $master_sku = isset($settings['all_sheet_music_sku']) ? (string)$settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
+        $master_sku = strtolower(trim($master_sku));
+        $master_sku = preg_replace('/[^a-z0-9\-_]+/', '', $master_sku);
+        if (!$master_sku) $master_sku = 'piece-all-sheet-music-access-complete-package';
+
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        if ( $exists === $table ) {
+            $now = current_time('mysql');
+            $id = $wpdb->get_var( $wpdb->prepare(
+                "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL AND ((expires_at IS NOT NULL AND expires_at > %s) OR (expires_at IS NULL AND DATE_ADD(granted_at, INTERVAL 31 DAY) > %s)) ORDER BY id DESC LIMIT 1",
+                (string) $email_hash,
+                (string) $master_sku,
+                (string) $now,
+                (string) $now
+            ) );
+            if ( ! empty( $id ) ) return true;
         }
 
-        // Rule 2: per-product list
         if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
             foreach ( $lists[ $sku ] as $em ) {
                 $em = sanitize_email( $em );
@@ -1500,18 +1507,19 @@ class MRM_Product_Access {
             }
         }
 
-        // Rule 3: DB row exists (also controlled by Payments Hub)
-        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
         if ( $exists !== $table ) return false;
-
+        $now = current_time('mysql');
         $id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
+            "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL AND ((expires_at IS NOT NULL AND expires_at > %s) OR (expires_at IS NULL AND DATE_ADD(granted_at, INTERVAL 31 DAY) > %s)) ORDER BY id DESC LIMIT 1",
             (string) $email_hash,
-            (string) $sku
+            (string) $sku,
+            (string) $now,
+            (string) $now
         ) );
 
         return ! empty( $id );
     }
+
 
 
     /**

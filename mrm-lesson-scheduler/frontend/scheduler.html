@@ -922,9 +922,14 @@ h1 {
   color: var(--color-text-muted);
 }
 
-.payment-options input[type="checkbox"]{
-  margin-right: 6px;
-}
+/* Reusable checkbox row: matches Terms styling exactly */
+.mrm-check-row{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px;width:100%;text-align:center;}
+.mrm-check-row input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:18px;height:18px;margin:0;flex:0 0 auto;border:2px solid var(--color-accent);border-radius:5px;background:#fff;display:inline-grid;place-content:center;cursor:pointer;}
+.mrm-check-row input[type="checkbox"]::after{content:"";width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg);opacity:0;}
+.mrm-check-row input[type="checkbox"]:checked{background:var(--color-accent);border-color:var(--color-accent);}
+.mrm-check-row input[type="checkbox"]:checked::after{opacity:1;}
+.mrm-check-row input[type="checkbox"]:focus-visible{outline:3px solid rgba(0,0,0,0.18);outline-offset:2px;}
+.mrm-check-row label{font-size:13px;color:var(--color-text-muted);line-height:1.2;}
 
 .modal-actions {
   display: flex;
@@ -1514,6 +1519,15 @@ h1 {
           <label for="modal-address">Address</label>
           <input id="modal-address" autocomplete="street-address">
 
+          <label for="modal-city">City</label>
+          <input id="modal-city" autocomplete="address-level2">
+
+          <label for="modal-state">State</label>
+          <input id="modal-state" autocomplete="address-level1" maxlength="2" placeholder="AZ">
+
+          <label for="modal-zip">ZIP</label>
+          <input id="modal-zip" autocomplete="postal-code" inputmode="numeric">
+
           <label for="modal-phone">Phone</label>
           <input id="modal-phone" autocomplete="tel">
 
@@ -1537,10 +1551,27 @@ h1 {
             </label>
           </div>
 
-          <div class="payment-options">
-            <label><input type="checkbox" id="mrm-autopay-opt"> I am aware that I am signing up for auto-pay for future lessons.</label><br>
-            <label><input type="checkbox" id="mrm-prepay-opt"> I would like to prepay for all selected lessons.</label>
-            <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
+          <div class="payment-options" style="margin-top:14px;">
+            <div class="mrm-check-row" style="justify-content:flex-start;">
+              <input type="checkbox" id="mrm-autopay-opt">
+              <label for="mrm-autopay-opt">I am aware that I am signing up for auto-pay for future lessons.</label>
+            </div>
+
+            <div class="mrm-check-row" style="justify-content:flex-start; margin-top:10px;">
+              <input type="checkbox" id="mrm-prepay-opt">
+              <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
+            </div>
+
+            <div style="margin-top:8px; font-size:12.5px; color: var(--color-text-muted);">
+              By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.
+            </div>
+          </div>
+
+          <div class="mrm-check-row" style="justify-content:flex-start; margin-top:14px;">
+            <input type="checkbox" id="mrm-sheet-music-addon-opt">
+            <label for="mrm-sheet-music-addon-opt">
+              subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)
+            </label>
           </div>
 
           <div class="modal-actions">
@@ -1964,6 +1995,9 @@ function openBookingModal(instr){
   document.getElementById('modal-first-name').value = document.getElementById('first-name')?.value || '';
   document.getElementById('modal-last-name').value  = document.getElementById('last-name')?.value || '';
   document.getElementById('modal-address').value    = document.getElementById('address')?.value || '';
+  document.getElementById('modal-city').value = '';
+  document.getElementById('modal-state').value = '';
+  document.getElementById('modal-zip').value = '';
   document.getElementById('modal-phone').value      = document.getElementById('phone')?.value || '';
 
   // Auto-populated read-only fields from dropdowns
@@ -2249,9 +2283,17 @@ function ensureLegacyBookingHandler(){
           body: JSON.stringify({
             sku: sku,
             email: email,
-            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
+            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no', repeat_frequency: (document.getElementById('repeat-frequency')?.value || ''), repeat_duration: (document.getElementById('repeat-duration')?.value || '') },
             save_card: autopay,
-            amount_override_cents: chargeAmountCents
+            amount_override_cents: chargeAmountCents,
+            sheet_music_addon: (document.getElementById('mrm-sheet-music-addon-opt')?.checked ? 'yes' : 'no'),
+            address: {
+              line1: (document.getElementById('modal-address')?.value || '').trim(),
+              city: (document.getElementById('modal-city')?.value || '').trim(),
+              state: (document.getElementById('modal-state')?.value || '').trim().toUpperCase(),
+              postal_code: (document.getElementById('modal-zip')?.value || '').trim(),
+              country: 'US'
+            }
           })
         });
         const createData = await createRes.json();
@@ -2274,7 +2316,11 @@ function ensureLegacyBookingHandler(){
         sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
           payload,
           email,
-          payment_intent_id: createData.payment_intent_id
+          payment_intent_id: createData.payment_intent_id,
+          autopay,
+          addonSelected: !!document.getElementById('mrm-sheet-music-addon-opt')?.checked,
+          customer_id: createData.customer_id || '',
+          subscription_price_id: createData.subscription_price_id || ''
         }));
 
         const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, priceDisplay);
@@ -2291,7 +2337,13 @@ function ensureLegacyBookingHandler(){
             return;
           }
           if (paymentIntent && paymentIntent.status === 'succeeded') {
-            await verifyPaymentIntent(paymentIntent.id, email);
+            const verified = await verifyPaymentIntent(paymentIntent.id, email);
+            if (autopay && createData.customer_id && createData.subscription_price_id) {
+              await fetch(payApiBase + '/create-lesson-subscription-schedule', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, customer_id:createData.customer_id, price_id:createData.subscription_price_id, frequency:(document.getElementById('repeat-frequency')?.value || 'weekly'), duration:(document.getElementById('repeat-duration')?.value || 'indefinitely') })});
+            }
+            if (document.getElementById('mrm-sheet-music-addon-opt')?.checked && createData.customer_id && createData.addon_price_id) {
+              await fetch(payApiBase + '/ensure-addon-subscription', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, customer_id:createData.customer_id, price_id:createData.addon_price_id })});
+            }
             await submitBooking(payload, setMsg);
             closeModal();
           }
@@ -2342,6 +2394,9 @@ async function checkReturnFromStripe(){
   };
   try{
     await verifyPaymentIntent(piId, ctx.email);
+    if (ctx.autopay && ctx.customer_id && ctx.subscription_price_id) {
+      await fetch(payApiBase + '/create-lesson-subscription-schedule', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email:ctx.email, customer_id:ctx.customer_id, price_id:ctx.subscription_price_id, frequency:(document.getElementById('repeat-frequency')?.value || 'weekly'), duration:(document.getElementById('repeat-duration')?.value || 'indefinitely') })});
+    }
     await submitBooking(ctx.payload, setMsg);
   }catch(err){
     setMsg(err.message || 'Payment verification failed.');
