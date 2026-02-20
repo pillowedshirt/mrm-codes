@@ -497,6 +497,20 @@ class MRM_Lesson_Scheduler {
         $is_online     = ! empty( $data['online'] ) ? 1 : 0;
         $lesson_length = intval( $data['lesson_length'] ?? ( $data['slot_minutes'] ?? 60 ) );
 
+        $parent_first  = sanitize_text_field( (string) ( $data['first_name'] ?? '' ) );
+        $parent_last   = sanitize_text_field( (string) ( $data['last_name'] ?? '' ) );
+
+        $phone         = sanitize_text_field( (string) ( $data['phone'] ?? '' ) );
+
+        $address       = sanitize_text_field( (string) ( $data['address'] ?? '' ) );
+        $address_state = sanitize_text_field( (string) ( $data['address_state'] ?? '' ) );
+        $address_postal= sanitize_text_field( (string) ( $data['address_postal'] ?? '' ) );
+
+        $lesson_type       = sanitize_text_field( (string) ( $data['lesson_type'] ?? '' ) );          // online | inperson | consultation (per your UI)
+        $repeat_frequency  = sanitize_text_field( (string) ( $data['repeat_frequency'] ?? 'none' ) ); // weekly | biweekly | none
+        $repeat_duration   = sanitize_text_field( (string) ( $data['repeat_duration'] ?? '' ) );      // 1_month | 3_months | indefinitely (per UI)
+        $appointment_type  = sanitize_text_field( (string) ( $data['appointment_type'] ?? 'lesson' ) ); // lesson | consultation
+
         if ( $instructor_id <= 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
         }
@@ -584,18 +598,106 @@ class MRM_Lesson_Scheduler {
                     // Build join gate link (this route already exists in your plugin)
                     $join_link = add_query_arg( array( 'token' => $token ), home_url( '/join-online/' ) );
 
-                    // Minimal, consistent event content (no Meet link created here)
-                    // NOTE: Your join gate creates Meet later (deferred), and your code explicitly says it does NOT write Meet back into Google Calendar.
-                    $title = 'MRM ' . ( $is_online ? 'Online' : 'In-Person' ) . ' Lesson - ' . ( $student_name !== '' ? $student_name : $student_email );
+                    // ------------------------------------------------------------
+                    // Event title/location/description (minimal but complete)
+                    // Requirements:
+                    // - Short title, instrument-less: "MRM Lesson - <Student Name>"
+                    // - Online: NO location field at all (handled by google_insert_event() omission below)
+                    // - Online: Join link at TOP of description
+                    // - Description includes ALL confirm popup fillable fields
+                    // - In-person: address goes in LOCATION only (street + state + postal)
+                    // ------------------------------------------------------------
+                    $display_student = ( $student_name !== '' ) ? $student_name : $student_email;
 
-                    $location = $is_online ? 'Online (Join link in description)' : '';
+                    // Title: short + instrument-less
+                    if ( strtolower( $appointment_type ) === 'consultation' ) {
+                        $title = 'MRM Consultation - ' . $display_student;
+                    } else {
+                        $title = 'MRM Lesson - ' . $display_student;
+                    }
 
+                    // Compute student last name (best-effort, from student_name)
+                    $student_last_name = '';
+                    $sn = trim( (string) $student_name );
+                    if ( $sn !== '' && preg_match( '/\s+/', $sn ) ) {
+                        $parts = preg_split( '/\s+/', $sn );
+                        if ( is_array( $parts ) && ! empty( $parts ) ) {
+                            $student_last_name = (string) end( $parts );
+                        }
+                    }
+
+                    // Location: in-person ONLY (street + state + postal). Online => blank (and omitted later).
+                    $location = '';
+                    if ( ! $is_online ) {
+                        $state_zip = trim( trim( (string) $address_state ) . ' ' . trim( (string) $address_postal ) );
+                        if ( $address !== '' && $state_zip !== '' ) {
+                            $location = trim( $address . ', ' . $state_zip );
+                        } elseif ( $address !== '' ) {
+                            $location = trim( $address );
+                        } elseif ( $state_zip !== '' ) {
+                            $location = $state_zip;
+                        }
+                    }
+
+                    // Description: Join link first (online), then key/value lines for easy plugin parsing
                     $description_lines = array();
-                    $description_lines[] = 'Student: ' . ( $student_name !== '' ? $student_name : $student_email );
+
+                    if ( $is_online ) {
+                        $description_lines[] = 'Join link: ' . $join_link;
+                        $description_lines[] = '';
+                    }
+
+                    // Parent name (first + last)
+                    $parent_full = trim( trim( (string) $parent_first ) . ' ' . trim( (string) $parent_last ) );
+                    if ( $parent_full !== '' ) {
+                        $description_lines[] = 'Parent: ' . $parent_full;
+                    }
+
+                    // Student + student last name
+                    $description_lines[] = 'Student: ' . $display_student;
+                    if ( $student_last_name !== '' ) {
+                        $description_lines[] = 'Student last name: ' . $student_last_name;
+                    }
+
+                    // Core contact info
                     $description_lines[] = 'Email: ' . $student_email;
-                    if ( $instrument !== '' ) $description_lines[] = 'Instrument: ' . $instrument;
-                    $description_lines[] = 'Length: ' . (int) ( $lesson_length > 0 ? $lesson_length : 60 ) . ' minutes';
-                    $description_lines[] = 'Join link: ' . $join_link;
+                    if ( $phone !== '' ) {
+                        $description_lines[] = 'Phone: ' . $phone;
+                    }
+
+                    // Instrument (requested to be in description, but NOT in title)
+                    if ( $instrument !== '' ) {
+                        $description_lines[] = 'Instrument: ' . $instrument;
+                    }
+
+                    // Lesson details
+                    $minutes = (int) ( $lesson_length > 0 ? $lesson_length : 60 );
+                    $description_lines[] = 'Lesson length: ' . $minutes . ' minutes';
+
+                    if ( $lesson_type !== '' ) {
+                        $description_lines[] = 'Lesson type: ' . $lesson_type;
+                    } else {
+                        $description_lines[] = 'Lesson type: ' . ( $is_online ? 'online' : 'inperson' );
+                    }
+
+                    if ( $repeat_frequency !== '' ) {
+                        $description_lines[] = 'Frequency: ' . $repeat_frequency;
+                    }
+                    if ( $repeat_duration !== '' ) {
+                        $description_lines[] = 'Reserved for: ' . $repeat_duration;
+                    }
+                    if ( $appointment_type !== '' ) {
+                        $description_lines[] = 'Appointment type: ' . $appointment_type;
+                    }
+
+                    // Include in-person address details in description too (for plugin access),
+                    // but ONLY put the actual address in the Calendar LOCATION field.
+                    if ( ! $is_online ) {
+                        if ( $address !== '' )        $description_lines[] = 'Address: ' . $address;
+                        if ( $address_state !== '' )  $description_lines[] = 'State: ' . $address_state;
+                        if ( $address_postal !== '' ) $description_lines[] = 'Postal code: ' . $address_postal;
+                    }
+
                     $description = implode( "\n", $description_lines );
 
                     // Your sync logic expects this to exist:
@@ -604,7 +706,22 @@ class MRM_Lesson_Scheduler {
                         'booking_id'          => (string) $booking_id,
                         'student_email'       => (string) $student_email,
                         'student_name'        => (string) $student_name,
+                        'student_last_name'   => (string) $student_last_name,
                         'instrument'          => (string) $instrument,
+
+                        'parent_first_name'   => (string) $parent_first,
+                        'parent_last_name'    => (string) $parent_last,
+                        'phone'               => (string) $phone,
+
+                        'address'             => (string) $address,
+                        'address_state'       => (string) $address_state,
+                        'address_postal'      => (string) $address_postal,
+
+                        'lesson_type'         => (string) $lesson_type,
+                        'repeat_frequency'    => (string) $repeat_frequency,
+                        'repeat_duration'     => (string) $repeat_duration,
+                        'appointment_type'    => (string) $appointment_type,
+
                         'reminder_token'      => (string) $token,
                     );
 
@@ -3053,7 +3170,6 @@ protected function base64url_encode( $data ) {
         $payload = array(
             'summary' => (string) $title,
             'description' => (string) $description,
-            'location' => (string) $location,
             // Force yellow regardless of calendar color
             'colorId' => '5',
             'start' => array(
@@ -3067,6 +3183,13 @@ protected function base64url_encode( $data ) {
             // Show as Busy
             'transparency' => 'opaque',
         );
+
+        // Only set location when we have a real in-person location.
+        // (Online lessons: omit location entirely so it doesn't show up at all.)
+        $loc = trim( (string) $location );
+        if ( $loc !== '' ) {
+            $payload['location'] = $loc;
+        }
 
         // Disable Calendar reminders for events created by this plugin.
         // (You requested to remove the 1-hour-before reminder entirely.)
