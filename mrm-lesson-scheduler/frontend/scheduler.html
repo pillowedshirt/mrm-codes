@@ -3481,14 +3481,25 @@ function getSlotMinutes(){
   return parseInt(document.getElementById('length-select').value,10)||60;
 }
 
+function normalizeInstructorList(raw){
+  if (Array.isArray(raw)) return raw;
+  if (!raw || typeof raw !== 'object') return [];
+
+  const candidateKeys = ['instructors', 'items', 'data', 'results'];
+  for (const key of candidateKeys) {
+    if (Array.isArray(raw[key])) return raw[key];
+  }
+
+  return [];
+}
+
 function loadInstructors(){
   fetch(apiBase+'/instructors')
     .then(r=>r.json())
-    .then(list=>{
-      if (Array.isArray(list)) {
-        const showed = maybeShowInstructorProfile(list);
-        if (showed) return;
-      }
+    .then(raw=>{
+      const list = normalizeInstructorList(raw);
+      const showed = maybeShowInstructorProfile(list);
+      if (showed) return;
       const wrap = document.getElementById('instructor-container');
       wrap.innerHTML = '';
 
@@ -3938,7 +3949,7 @@ function loadInstructors(){
 </svg>
       `;
 
-      window._mrmInstructors = Array.isArray(list) ? list : [];
+      window._mrmInstructors = list;
 
       function getAvailableStateSet(){
         const available = new Set();
@@ -4056,7 +4067,7 @@ function loadInstructors(){
 
         const buildAvailableStateList = ()=>{
           const set = new Set();
-          (list || []).forEach(i=>{
+          (window._mrmInstructors || []).forEach(i=>{
             const st = (i.state || '').toString().trim().toUpperCase();
             if(st) set.add(st);
           });
@@ -4129,7 +4140,7 @@ function loadInstructors(){
         };
 
         // Filter list to this state
-        const filtered = (list || []).filter(i=>{
+        const filtered = (window._mrmInstructors || []).filter(i=>{
           const st = (i.state || '').toString().trim().toUpperCase();
           return st === stateCode;
         });
