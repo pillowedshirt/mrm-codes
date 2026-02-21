@@ -907,7 +907,6 @@ class MRM_Payments_Hub_Single {
 
     $details = '';
     $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
-    if ($sku) $details .= '<div><strong>SKU:</strong> ' . esc_html($sku) . '</div>';
     if (!empty($order_row['id'])) $details .= '<div><strong>Order #:</strong> ' . esc_html((string)$order_row['id']) . '</div>';
     if ($pi_id) $details .= '<div><strong>Payment ID:</strong> ' . esc_html($pi_id) . '</div>';
 
@@ -939,6 +938,7 @@ class MRM_Payments_Hub_Single {
 
       if (!empty($instructor['email'])) {
         $name = $instructor['name'] ? $instructor['name'] : 'Your instructor';
+        $details .= '<div style="margin-top:10px;">Please contact instructor if you need any changes or want to cancel.</div>';
         $details .= '<div style="margin-top:10px;"><strong>Instructor contact:</strong> '
           . esc_html($name) . ' — <a href="mailto:' . esc_attr($instructor['email']) . '">'
           . esc_html($instructor['email']) . '</a></div>';
@@ -951,8 +951,6 @@ class MRM_Payments_Hub_Single {
     }
 
     $contact_url = $this->mrm_get_contact_url();
-
-    $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel?</strong></div>';
 
     $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
 

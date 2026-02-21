@@ -789,6 +789,23 @@ h1 {
 .modal-close:hover{
   background: rgba(0,0,0,0.85);
 }
+
+.mrm-success-icon{
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #111;
+  margin: 6px auto 0 auto;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.mrm-success-check{
+  color:#fff;
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1;
+}
 .modal-body { padding: 16px; }
 
 .modal-section-title {
@@ -1779,6 +1796,25 @@ h1 {
     </div>
   </div>
 
+  <div id="mrm-success-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2 class="modal-title">Success</h2>
+        <button class="modal-close" id="mrm-success-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="mrm-success-icon" aria-hidden="true">
+          <span class="mrm-success-check">✓</span>
+        </div>
+        <div id="mrm-success-title" style="font-weight:700;font-size:16px;margin-top:10px;text-align:center;"></div>
+        <div id="mrm-success-sub" style="margin-top:8px;text-align:center;"></div>
+        <div class="modal-actions" style="margin-top:14px;">
+          <button class="modal-submit" id="mrm-success-ok">OK</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <div id="instructorProfileView" style="display:none;"></div>
@@ -2428,6 +2464,45 @@ function closeBookingModal(){
   document.body.classList.remove('mrm-booking-modal-open');
 }
 
+function openSchedulerSuccessModal(payload){
+  const overlay = document.getElementById('mrm-success-overlay');
+  const closeBtn = document.getElementById('mrm-success-close');
+  const okBtn = document.getElementById('mrm-success-ok');
+  const titleEl = document.getElementById('mrm-success-title');
+  const subEl = document.getElementById('mrm-success-sub');
+
+  if(!overlay || !titleEl || !subEl) return;
+
+  const appt = String(payload?.appointment_type || '').toLowerCase(); // consultation|online|in_person
+  const minutes = payload?.lesson_length ? Number(payload.lesson_length) : null;
+
+  const prettyType =
+    appt === 'consultation' ? 'Online Consultation' :
+    appt === 'online' ? 'Online Lesson' :
+    appt === 'in_person' ? 'In-Person Lesson' :
+    'Lesson';
+
+  const minsTxt = (minutes && Number.isFinite(minutes)) ? `${minutes} min` : '';
+
+  titleEl.textContent = `Thank you for scheduling your ${prettyType}${minsTxt ? ' ('+minsTxt+')' : ''}.`;
+  subEl.textContent = 'Please check your email for a confirmation and calendar event invite.';
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden','false');
+  document.body.classList.add('mrm-booking-modal-open');
+
+  const close = ()=>{
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden','true');
+    document.body.classList.remove('mrm-booking-modal-open');
+  };
+
+  closeBtn.onclick = close;
+  okBtn.onclick = close;
+
+  requestAnimationFrame(()=> okBtn.focus());
+}
+
 function syncModalToLegacyFields(){
   // Keep "student-name" (used as student_name in payload)
   document.getElementById('student-name').value = document.getElementById('modal-student-name').value || '';
@@ -2498,6 +2573,7 @@ async function submitBooking(payload, setMsg){
     bookedInstructor._mrmRefreshVisibleMonth();
   }
 
+  openSchedulerSuccessModal(payload);
   return { ok: true };
 }
 

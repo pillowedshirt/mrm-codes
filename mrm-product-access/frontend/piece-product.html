@@ -147,6 +147,23 @@ a{ -webkit-tap-highlight-color:transparent; }
   outline-offset: 2px;
 }
 
+.mrm-success-icon{
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #111;
+  margin: 6px auto 0 auto;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.mrm-success-check{
+  color:#fff;
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1;
+}
+
 /* PDF */
 .pdf-preview{
   width: min(860px, 100%);
@@ -792,6 +809,25 @@ a{ -webkit-tap-highlight-color:transparent; }
           </div>
         </div>
 
+        <div id="mrm-success-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+          <div class="modal" role="dialog" aria-modal="true">
+            <div class="modal-header">
+              <h2 class="modal-title">Success</h2>
+              <button id="mrm-success-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="mrm-success-icon" aria-hidden="true">
+                <span class="mrm-success-check">✓</span>
+              </div>
+              <div id="mrm-success-title" style="font-weight:700;font-size:16px;margin-top:10px;text-align:center;"></div>
+              <div id="mrm-success-sub" style="margin-top:8px;text-align:center;"></div>
+              <div class="modal-actions" style="margin-top:14px;">
+                <button class="modal-submit" id="mrm-success-ok">OK</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </article>
 
     </div>
@@ -998,24 +1034,62 @@ a{ -webkit-tap-highlight-color:transparent; }
     return { payBtn, errorEl, emailInput };
   }
 
+
+  function openPieceSuccessModal(titleText, subText){
+    const overlay = document.getElementById('mrm-success-overlay');
+    const closeBtn = document.getElementById('mrm-success-close');
+    const okBtn = document.getElementById('mrm-success-ok');
+    const titleEl = document.getElementById('mrm-success-title');
+    const subEl = document.getElementById('mrm-success-sub');
+
+    if(!overlay || !titleEl || !subEl) return;
+
+    titleEl.textContent = titleText || 'Thank you for your purchase.';
+    subEl.textContent = subText || 'Please check your email for a confirmation email.';
+
+    overlay.style.display = 'flex';
+    overlay.setAttribute('aria-hidden','false');
+    document.body.classList.add('mrm-booking-modal-open');
+
+    const close = ()=>{
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden','true');
+      document.body.classList.remove('mrm-booking-modal-open');
+    };
+
+    closeBtn.onclick = close;
+    okBtn.onclick = close;
+
+    requestAnimationFrame(()=> okBtn.focus());
+  }
+
   async function verifyAndGrant(piId, email, sku){
     const vRes = await fetch('/wp-json/mrm-pay/v1/verify-payment-intent', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ payment_intent_id: piId, email: email })
     });
     const vData = await vRes.json();
-    if(!vRes.ok || !vData.ok){ alert('Payment not completed.'); return; }
+    if(!vRes.ok || !vData.ok){
+      const msg = (vData && vData.message) ? vData.message : 'Payment not completed.';
+      openPieceSuccessModal('Payment not completed', msg);
+      return;
+    }
     const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ product_slug: sku, email: email, payment_intent_id: piId })
     });
     const gData = await gRes.json();
     if(!gRes.ok || !gData.ok){
-      const debug = (gData && (gData.message || gData.debug)) ? `\n\nDetails: ${gData.message || gData.debug}` : '';
-      alert('We could not finalize access yet. Please try again in a moment.' + debug);
+      openPieceSuccessModal(
+        'We could not finalize access yet.',
+        'Please try again in a moment. If the issue persists, contact support.'
+      );
       return;
     }
-    alert('Thank you!  Access has been granted.  Check your email for download instructions.');
+    openPieceSuccessModal(
+      'Thank you for your purchase.',
+      'Please check your email for a confirmation email. After you receive it, you can access your purchase using the Access button on this page.'
+    );
   }
 
   function checkReturnFromStripe(){
