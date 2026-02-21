@@ -1664,6 +1664,9 @@ class MRM_Payments_Hub_Single {
     if (!is_admin()) return;
     if (!current_user_can('manage_options')) return;
 
+    // Repair default lesson SKUs if they were wiped to 0 by a prior update bug
+    $this->ensure_default_products();
+
     if (isset($_POST['mrm_pay_hub_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_nonce'], 'mrm_pay_hub_save')) {
       $settings = $this->get_settings();
       // Stripe environment mode: 'live' or 'test'
@@ -1759,6 +1762,11 @@ class MRM_Payments_Hub_Single {
 
         $label = $label_raw !== '' ? $label_raw : $sku;
         $amount = intval($amounts[$index] ?? 0);
+        $final_amount_cents = max(0, $amount);
+        if ($final_amount_cents <= 0) {
+          // You can choose to allow 0 for certain SKUs if you want, but generally this avoids accidental free products.
+          $final_amount_cents = 0;
+        }
         $currency = sanitize_text_field((string)($currencies[$index] ?? 'usd'));
         if (!in_array($currency, $allowed_currencies, true)) $currency = 'usd';
 
