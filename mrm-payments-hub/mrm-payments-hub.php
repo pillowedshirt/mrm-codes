@@ -722,7 +722,21 @@ class MRM_Payments_Hub_Single {
     $fmt = array('%s','%s','%s');
 
     if ($metadata !== null) {
-      $data['metadata_json'] = wp_json_encode($metadata);
+      // Merge with any existing metadata_json so we can store local flags (like receipt sent)
+      $existing_json = $wpdb->get_var($wpdb->prepare(
+        "SELECT metadata_json FROM {$this->table_orders()} WHERE stripe_payment_intent_id=%s LIMIT 1",
+        $payment_intent_id
+      ));
+      $existing = array();
+      if ($existing_json) {
+        $decoded = json_decode((string)$existing_json, true);
+        if (is_array($decoded)) $existing = $decoded;
+      }
+
+      $incoming = is_array($metadata) ? $metadata : array();
+      $merged = array_merge($existing, $incoming);
+
+      $data['metadata_json'] = wp_json_encode($merged);
       $fmt[] = '%s';
     }
 
@@ -744,6 +758,191 @@ class MRM_Payments_Hub_Single {
     if (!is_array($map)) return null;
     $email = $map[$hash] ?? null;
     return $email && is_email($email) ? $email : null;
+  }
+
+  /* =========================================================
+   * Purchase receipt email (custom)
+   * ======================================================= */
+
+  private function mrm_email_wrap_html($title, $intro_html, $details_html, $cta_url = '', $cta_label = '') {
+    $title_safe = esc_html((string)$title);
+    $cta = '';
+    if ($cta_url && $cta_label) {
+      $cta = '<p style="margin:20px 0 0 0;">
+      <a href="'.esc_url($cta_url).'" style="display:inline-block;padding:12px 16px;background:#111;color:#fff;text-decoration:none;border-radius:10px;">
+        '.esc_html($cta_label).'
+      </a>
+    </p>';
+    }
+
+    return '
+  <div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;padding:18px;">
+    <div style="border:1px solid #e7e7e7;border-radius:14px;padding:18px;">
+      <h2 style="margin:0 0 10px 0;font-size:18px;line-height:1.2;">'.$title_safe.'</h2>
+      <div style="font-size:14px;line-height:1.5;color:#222;">'.$intro_html.'</div>
+      <div style="margin-top:12px;font-size:14px;line-height:1.5;color:#222;">'.$details_html.'</div>
+      '.$cta.'
+      <div style="margin-top:18px;font-size:12px;color:#666;">
+        If you need help, use the contact link above.
+      </div>
+    </div>
+  </div>';
+  }
+
+  private function mrm_get_instructor_contact_from_id($instructor_id) {
+    global $wpdb;
+    $iid = (int)$instructor_id;
+    if (!$iid) return array('name'=>'','email'=>'');
+
+    $table = $wpdb->prefix . 'mrm_instructors';
+    $row = $wpdb->get_row($wpdb->prepare(
+      "SELECT name,email FROM {$table} WHERE id=%d LIMIT 1",
+      $iid
+    ), ARRAY_A);
+
+    if (!is_array($row)) return array('name'=>'','email'=>'');
+    return array(
+      'name'  => (string)($row['name'] ?? ''),
+      'email' => (string)($row['email'] ?? ''),
+    );
+  }
+
+  private function mrm_set_order_meta_flag($order_id, $key, $value) {
+    global $wpdb;
+    $order_id = (int)$order_id;
+    if (!$order_id) return;
+
+    $orders = $this->table_orders();
+    $existing_json = $wpdb->get_var($wpdb->prepare(
+      "SELECT metadata_json FROM {$orders} WHERE id=%d LIMIT 1",
+      $order_id
+    ));
+    $meta = array();
+    if ($existing_json) {
+      $decoded = json_decode((string)$existing_json, true);
+      if (is_array($decoded)) $meta = $decoded;
+    }
+    $meta[(string)$key] = $value;
+
+    $wpdb->update($orders, array(
+      'metadata_json' => wp_json_encode($meta),
+      'updated_at'    => current_time('mysql'),
+    ), array('id'=>$order_id), array('%s','%s'), array('%d'));
+  }
+
+  private function mrm_maybe_send_purchase_receipt_email($pi, $order_row) {
+    if (!is_array($pi) || !is_array($order_row)) return;
+
+    $pi_id = (string)($pi['id'] ?? '');
+    $pi_meta = (isset($pi['metadata']) && is_array($pi['metadata'])) ? $pi['metadata'] : array();
+
+    // Determine customer email
+    $email = sanitize_email((string)($pi_meta['mrm_customer_email'] ?? ''));
+    if (!$email || !is_email($email)) {
+      // fallback: try decode from order email_hash if available
+      $email_hash = (string)($order_row['email_hash'] ?? '');
+      if ($email_hash) {
+        $decoded = $this->decode_email_hash($email_hash);
+        if ($decoded) $email = $decoded;
+      }
+    }
+    if (!$email || !is_email($email)) return;
+
+    // Check idempotency flag
+    $existing_meta = array();
+    if (!empty($order_row['metadata_json'])) {
+      $decoded = json_decode((string)$order_row['metadata_json'], true);
+      if (is_array($decoded)) $existing_meta = $decoded;
+    }
+    if (!empty($existing_meta['mrm_receipt_sent_at'])) {
+      return; // already sent
+    }
+
+    $sku = (string)($pi_meta['mrm_sku'] ?? ($order_row['sku'] ?? ''));
+    $product_type = (string)($pi_meta['mrm_product_type'] ?? ($order_row['product_type'] ?? 'unknown'));
+    $p = $sku ? $this->get_product($sku) : null;
+    $label = (is_array($p) && !empty($p['label'])) ? (string)$p['label'] : ($sku ?: 'Purchase');
+
+    $amount_cents = 0;
+    if (isset($pi['amount_received'])) $amount_cents = (int)$pi['amount_received'];
+    elseif (isset($pi['amount'])) $amount_cents = (int)$pi['amount'];
+    else $amount_cents = (int)($order_row['amount_cents'] ?? 0);
+
+    $base_cents  = (int)($pi_meta['mrm_base_amount_cents'] ?? 0);
+    $addon_cents = (int)($pi_meta['mrm_addon_amount_cents'] ?? 0);
+    $tax_cents   = (int)($pi_meta['mrm_addon_tax_cents'] ?? 0);
+
+    $fmt_money = function($c){ return '$' . number_format(((int)$c)/100, 2); };
+
+    $title = 'Thank you for your purchase!';
+    $intro = '<p>We’ve received your payment successfully.</p>';
+
+    $details = '';
+    $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
+    if ($sku) $details .= '<div><strong>SKU:</strong> ' . esc_html($sku) . '</div>';
+    if (!empty($order_row['id'])) $details .= '<div><strong>Order #:</strong> ' . esc_html((string)$order_row['id']) . '</div>';
+    if ($pi_id) $details .= '<div><strong>Payment ID:</strong> ' . esc_html($pi_id) . '</div>';
+
+    // Pricing breakdown when present
+    if ($base_cents > 0) {
+      $details .= '<div style="margin-top:10px;"><strong>Base:</strong> '.$fmt_money($base_cents).'</div>';
+      if ($addon_cents > 0) $details .= '<div><strong>Sheet music add-on:</strong> '.$fmt_money($addon_cents).'</div>';
+      if ($tax_cents > 0) $details .= '<div><strong>Add-on tax:</strong> '.$fmt_money($tax_cents).'</div>';
+      $details .= '<div><strong>Total:</strong> '.$fmt_money($amount_cents).'</div>';
+    } else {
+      $details .= '<div style="margin-top:10px;"><strong>Total:</strong> '.$fmt_money($amount_cents).'</div>';
+    }
+
+    // Lesson-specific helpful info (when available)
+    if ($product_type === 'lesson') {
+      $iid = (string)($pi_meta['mrm_instructor_id'] ?? '');
+      $instructor = $iid ? $this->mrm_get_instructor_contact_from_id($iid) : array('name'=>'','email'=>'');
+
+      $len  = (string)($pi_meta['mrm_lesson_length'] ?? '');
+      $mode = (string)($pi_meta['mrm_lesson_mode'] ?? '');
+      $count = (string)($pi_meta['mrm_lesson_count'] ?? '');
+      $prepay = (string)($pi_meta['mrm_prepay'] ?? '');
+
+      $details .= '<div style="margin-top:12px;"><strong>Lesson details</strong></div>';
+      if ($len)  $details .= '<div>Length: ' . esc_html($len) . ' minutes</div>';
+      if ($mode) $details .= '<div>Mode: ' . esc_html($mode) . '</div>';
+      if ($count) $details .= '<div>Count: ' . esc_html($count) . '</div>';
+      if ($prepay) $details .= '<div>Plan: ' . esc_html($prepay === 'yes' ? 'Prepay' : 'Auto-pay') . '</div>';
+
+      if (!empty($instructor['email'])) {
+        $name = $instructor['name'] ? $instructor['name'] : 'Your instructor';
+        $details .= '<div style="margin-top:10px;"><strong>Instructor contact:</strong> '
+          . esc_html($name) . ' — <a href="mailto:' . esc_attr($instructor['email']) . '">'
+          . esc_html($instructor['email']) . '</a></div>';
+      }
+    }
+
+    // Sheet music specific hint
+    if ($product_type === 'sheet_music') {
+      $details .= '<div style="margin-top:12px;">If you purchased sheet music, you can access it from the product page using your email + OTP.</div>';
+    }
+
+    $contact_url = home_url('/contact/');
+    $scheduler_url = home_url('/schedule-your-lesson/'); // adjust if your scheduler page slug differs
+
+    $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel?</strong></div>';
+    $details .= '<div>Use the contact page: <a href="'.esc_url($contact_url).'">'.esc_html($contact_url).'</a></div>';
+    $details .= '<div>Or return to the scheduler: <a href="'.esc_url($scheduler_url).'">'.esc_html($scheduler_url).'</a></div>';
+
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+
+    $subject = 'Purchase confirmation – ' . $label;
+
+    $headers = array(
+      'Content-Type: text/html; charset=UTF-8',
+      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+    );
+
+    $sent = wp_mail($email, $subject, $html, $headers);
+
+    if ($sent && !empty($order_row['id'])) {
+      $this->mrm_set_order_meta_flag((int)$order_row['id'], 'mrm_receipt_sent_at', current_time('mysql'));
+    }
   }
 
   /* =========================================================
@@ -789,11 +988,15 @@ class MRM_Payments_Hub_Single {
       $instructor_id = sanitize_text_field((string)($context['instructor_id'] ?? ''));
       $lesson_length = sanitize_text_field((string)($context['lesson_length'] ?? '')); // "30" or "60"
       $lesson_mode = sanitize_text_field((string)($context['lesson_mode'] ?? ''));     // "online" or "in_person"
+      $lesson_count = sanitize_text_field((string)($context['lesson_count'] ?? ''));
+      $prepay = sanitize_text_field((string)($context['prepay'] ?? ''));
 
       if ($lesson_id) $metadata['mrm_lesson_id'] = $lesson_id;
       if ($instructor_id) $metadata['mrm_instructor_id'] = $instructor_id;
       if ($lesson_length) $metadata['mrm_lesson_length'] = $lesson_length;
       if ($lesson_mode) $metadata['mrm_lesson_mode'] = $lesson_mode;
+      if ($lesson_count) $metadata['mrm_lesson_count'] = $lesson_count;
+      if ($prepay) $metadata['mrm_prepay'] = $prepay;
 
       // Fixed composer cut cents for your automation
       $composer_cut_cents = 0;
@@ -1191,6 +1394,13 @@ class MRM_Payments_Hub_Single {
     if ($order) {
       $new_status = $ok ? 'paid' : (in_array($status, $fail_statuses, true) ? 'failed' : 'created');
       $this->update_order_status_from_pi($pi_id, $new_status, $status, $pi['metadata'] ?? null);
+    }
+
+    // Send custom receipt email once (idempotent)
+    if ($ok && $order) {
+      // refresh order row because metadata_json may have been merged/updated
+      $order = $this->get_order_by_pi($pi_id);
+      $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
     }
 
     return new WP_REST_Response(array(
