@@ -1432,12 +1432,127 @@ h1 {
     --slot-row-h: 36px;
   }
 }
+
+/* Initial preferences popup */
+.mrm-pref-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 999999;
+}
+.mrm-pref-modal{
+  width: 100%;
+  max-width: 560px;
+  background: #fff;
+  border-radius: 16px;
+  padding: 14px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+}
+.mrm-pref-head{
+  display:flex;
+  align-items:center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.mrm-pref-title{
+  font-size: 16px;
+  font-weight: 700;
+}
+.mrm-pref-close{
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid #e7e7e7;
+  background: #fff;
+  font-size: 20px;
+  cursor: pointer;
+}
+.mrm-pref-grid{
+  display:grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.mrm-pref-grid label{
+  display:block;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: #222;
+}
+.mrm-pref-grid select{
+  width: 100%;
+  padding: 10px 10px;
+  border: 1px solid #e1e1e1;
+  border-radius: 12px;
+  background: #fff;
+}
+.mrm-pref-see{
+  width: 100%;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: none;
+  background: #111;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mrm-pref-note{
+  margin-top: 10px;
+  font-size: 12px;
+  color: #666;
+}
+@media (max-width: 520px){
+  .mrm-pref-grid{ grid-template-columns: 1fr; }
+}
+
 </style>
 </head>
 
 <body>
 <div class="wrapper" id="mainContainer">
   <h1>Schedule Your Lesson</h1>
+
+
+  <!-- Initial preferences popup -->
+  <div id="mrm-pref-overlay" class="mrm-pref-overlay" aria-hidden="false" style="display:none;">
+    <div class="mrm-pref-modal" role="dialog" aria-modal="true" aria-label="Choose lesson preferences">
+      <div class="mrm-pref-head">
+        <div class="mrm-pref-title">Choose your lesson details</div>
+        <button type="button" id="mrm-pref-close" class="mrm-pref-close" aria-label="Close">×</button>
+      </div>
+
+      <div class="mrm-pref-grid">
+        <div>
+          <label>Instrument</label>
+          <select id="mrm-pref-instrument"></select>
+        </div>
+        <div>
+          <label>Lesson type</label>
+          <select id="mrm-pref-lesson-option"></select>
+        </div>
+        <div>
+          <label>Lesson length</label>
+          <select id="mrm-pref-length"></select>
+        </div>
+        <div>
+          <label>Frequency</label>
+          <select id="mrm-pref-frequency"></select>
+        </div>
+        <div>
+          <label>Reserve time for</label>
+          <select id="mrm-pref-duration"></select>
+        </div>
+      </div>
+
+      <button type="button" id="mrm-pref-see" class="mrm-pref-see">See availability</button>
+      <div class="mrm-pref-note">You can still adjust these options after availability loads.</div>
+    </div>
+  </div>
 
   <div class="filters">
     <div>
@@ -2558,7 +2673,13 @@ function ensureLegacyBookingHandler(){
           body: JSON.stringify({
             sku: sku,
             email: email,
-            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
+            context:{
+              instructor_id: instrId,
+              lesson_length: len,
+              lesson_mode: lessonType,
+              lesson_count: count,
+              prepay: prepay ? 'yes' : 'no'
+            },
             save_card: autopay,
             amount_override_cents: chargeAmountCents,
             sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
@@ -4799,6 +4920,9 @@ document.getElementById('modal-instrument').addEventListener('change', ()=>{
 document.getElementById('lesson-option').addEventListener('change', updatePaymentCheckboxVisibility);
 document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
 
+document.getElementById('mrm-pref-see')?.addEventListener('click', mrmApplyPrefAndLoad);
+document.getElementById('mrm-pref-close')?.addEventListener('click', mrmApplyPrefAndLoad);
+
 const autopayEl = document.getElementById('mrm-autopay-opt');
 const prepayEl  = document.getElementById('mrm-prepay-opt');
 
@@ -4818,9 +4942,91 @@ if (prepayEl) {
   });
 }
 
+
+// ------------------------------
+// Initial preferences popup flow
+// ------------------------------
+function mrmOpenPrefPopup(){
+  const overlay = document.getElementById('mrm-pref-overlay');
+  if(!overlay) return;
+
+  // Copy options from main selects so there is only one “source of truth”
+  const mainInstrument = document.getElementById('instrument-input');
+  const mainOpt        = document.getElementById('lesson-option');
+  const mainLen        = document.getElementById('length-select');
+  const mainFreq       = document.getElementById('repeat-frequency');
+  const mainDur        = document.getElementById('repeat-duration');
+
+  const pInstrument = document.getElementById('mrm-pref-instrument');
+  const pOpt        = document.getElementById('mrm-pref-lesson-option');
+  const pLen        = document.getElementById('mrm-pref-length');
+  const pFreq       = document.getElementById('mrm-pref-frequency');
+  const pDur        = document.getElementById('mrm-pref-duration');
+
+  if(mainInstrument && pInstrument) pInstrument.innerHTML = mainInstrument.innerHTML;
+  if(mainOpt && pOpt)              pOpt.innerHTML        = mainOpt.innerHTML;
+  if(mainLen && pLen)              pLen.innerHTML        = mainLen.innerHTML;
+  if(mainFreq && pFreq)            pFreq.innerHTML       = mainFreq.innerHTML;
+  if(mainDur && pDur)              pDur.innerHTML        = mainDur.innerHTML;
+
+  // Default values from the current page state
+  if(mainInstrument && pInstrument) pInstrument.value = mainInstrument.value || '';
+  if(mainOpt && pOpt)              pOpt.value        = mainOpt.value || 'consultation';
+  if(mainLen && pLen)              pLen.value        = mainLen.value || '60';
+  if(mainFreq && pFreq)            pFreq.value       = mainFreq.value || 'weekly';
+  if(mainDur && pDur)              pDur.value        = mainDur.value || '1_month';
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden','false');
+  document.body.classList.add('mrm-booking-modal-open');
+}
+
+function mrmClosePrefPopup(){
+  const overlay = document.getElementById('mrm-pref-overlay');
+  if(!overlay) return;
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden','true');
+
+  // Only unlock body if booking modal is not open
+  const bookingOverlay = document.getElementById('booking-modal');
+  const bookingStillOpen = bookingOverlay && bookingOverlay.getAttribute('aria-hidden') === 'false';
+  if (!bookingStillOpen) {
+    document.body.classList.remove('mrm-booking-modal-open');
+  }
+}
+
+function mrmApplyPrefAndLoad(){
+  const mainInstrument = document.getElementById('instrument-input');
+  const mainOpt        = document.getElementById('lesson-option');
+  const mainLen        = document.getElementById('length-select');
+  const mainFreq       = document.getElementById('repeat-frequency');
+  const mainDur        = document.getElementById('repeat-duration');
+
+  const pInstrument = document.getElementById('mrm-pref-instrument');
+  const pOpt        = document.getElementById('mrm-pref-lesson-option');
+  const pLen        = document.getElementById('mrm-pref-length');
+  const pFreq       = document.getElementById('mrm-pref-frequency');
+  const pDur        = document.getElementById('mrm-pref-duration');
+
+  if(mainInstrument && pInstrument) mainInstrument.value = pInstrument.value || '';
+  if(mainOpt && pOpt)              mainOpt.value        = pOpt.value || 'consultation';
+  if(mainLen && pLen)              mainLen.value        = pLen.value || '60';
+  if(mainFreq && pFreq)            mainFreq.value       = pFreq.value || 'weekly';
+  if(mainDur && pDur)              mainDur.value        = pDur.value || '1_month';
+
+  // Apply consultation rules and checkbox visibility rules immediately
+  applyLessonOptionDefaults();
+  updatePaymentCheckboxVisibility();
+
+  mrmClosePrefPopup();
+
+  // Now load availability
+  loadInstructors();
+}
+
 applyLessonOptionDefaults();
 updatePaymentCheckboxVisibility();
-loadInstructors();
+mrmOpenPrefPopup();
 </script>
 </body>
 </html>
