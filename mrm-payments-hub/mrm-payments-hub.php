@@ -764,8 +764,35 @@ class MRM_Payments_Hub_Single {
    * Purchase receipt email (custom)
    * ======================================================= */
 
+  private function mrm_get_site_logo_url(): string {
+    $custom_logo_id = (int) get_theme_mod('custom_logo');
+    if ($custom_logo_id > 0) {
+      $img = wp_get_attachment_image_src($custom_logo_id, 'full');
+      if (is_array($img) && !empty($img[0])) return (string) $img[0];
+    }
+    return '';
+  }
+
+  private function mrm_get_contact_url(): string {
+    // Prefer a real Contact page if it exists, otherwise fallback to an on-page anchor.
+    $page = get_page_by_path('contact');
+    $url = ($page && !empty($page->ID)) ? get_permalink($page->ID) : home_url('/#contact');
+
+    // Allow you to override later without editing plugin code:
+    // add_filter('mrm_contact_url', fn($u)=>'https://example.com/contact');
+    $url = (string) apply_filters('mrm_contact_url', $url);
+    return $url;
+  }
+
   private function mrm_email_wrap_html($title, $intro_html, $details_html, $cta_url = '', $cta_label = '') {
     $title_safe = esc_html((string)$title);
+    $logo_url = $this->mrm_get_site_logo_url();
+    $logo_html = '';
+    if ($logo_url) {
+      $logo_html = '<div style="text-align:center;margin:0 0 12px 0;">
+    <img src="'.esc_url($logo_url).'" alt="Logo" style="max-width:180px;height:auto;display:inline-block;">
+  </div>';
+    }
     $cta = '';
     if ($cta_url && $cta_label) {
       $cta = '<p style="margin:20px 0 0 0;">
@@ -778,7 +805,8 @@ class MRM_Payments_Hub_Single {
     return '
   <div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;padding:18px;">
     <div style="border:1px solid #e7e7e7;border-radius:14px;padding:18px;">
-      <h2 style="margin:0 0 10px 0;font-size:18px;line-height:1.2;">'.$title_safe.'</h2>
+      '.$logo_html.'
+      <h2 style="margin:0 0 10px 0;font-size:18px;line-height:1.2;text-align:center;">'.$title_safe.'</h2>
       <div style="font-size:14px;line-height:1.5;color:#222;">'.$intro_html.'</div>
       <div style="margin-top:12px;font-size:14px;line-height:1.5;color:#222;">'.$details_html.'</div>
       '.$cta.'
@@ -922,12 +950,9 @@ class MRM_Payments_Hub_Single {
       $details .= '<div style="margin-top:12px;">If you purchased sheet music, you can access it from the product page using your email + OTP.</div>';
     }
 
-    $contact_url = home_url('/contact/');
-    $scheduler_url = home_url('/schedule-your-lesson/'); // adjust if your scheduler page slug differs
+    $contact_url = $this->mrm_get_contact_url();
 
     $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel?</strong></div>';
-    $details .= '<div>Use the contact page: <a href="'.esc_url($contact_url).'">'.esc_html($contact_url).'</a></div>';
-    $details .= '<div>Or return to the scheduler: <a href="'.esc_url($scheduler_url).'">'.esc_html($scheduler_url).'</a></div>';
 
     $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
 
