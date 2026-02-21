@@ -125,6 +125,28 @@ a{ -webkit-tap-highlight-color:transparent; }
   padding-right: 2px;                /* prevents scrollbar overlap */
 }
 
+.mrm-xbtn{
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid #d7d7d7;
+  background: #ffffff;
+  color: #111111;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.mrm-xbtn:hover{ border-color:#bdbdbd; }
+.mrm-xbtn:focus{
+  outline: 2px solid rgba(0,0,0,0.25);
+  outline-offset: 2px;
+}
+
 /* PDF */
 .pdf-preview{
   width: min(860px, 100%);
@@ -747,7 +769,7 @@ a{ -webkit-tap-highlight-color:transparent; }
           <div class="modal" role="dialog" aria-modal="true">
             <div class="modal-header">
               <h2>Purchase</h2>
-              <button id="payment-close" class="close">×</button>
+              <button id="payment-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
             </div>
             <div class="modal-body">
               <p id="payment-instructions"></p>

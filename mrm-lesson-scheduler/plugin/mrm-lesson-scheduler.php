@@ -650,7 +650,7 @@ class MRM_Lesson_Scheduler {
                     // Consultations must title as: "<Parent Name> Online Consultation"
                     if ( $is_consultation ) {
                         $parent_for_title = ( $parent_full !== '' ) ? $parent_full : $student_display;
-                        $title = $parent_for_title . ' Online Consultation';
+                        $title = $parent_for_title . ' Online 30 min Consultation';
                     } else {
                         // Lessons: "<Student Name> <Lesson Type> <Instrument> <30min/60min> Lesson"
                         $title_parts = array();

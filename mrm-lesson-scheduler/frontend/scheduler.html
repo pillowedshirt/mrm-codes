@@ -1467,14 +1467,28 @@ h1 {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  border: 1px solid #e7e7e7;
-  background: #fff;
-  font-size: 20px;
+  border: 1px solid #d7d7d7;
+  background: #ffffff;
+  color: #111111;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
+  padding: 0;
+}
+.mrm-pref-close:hover{
+  border-color:#bdbdbd;
+}
+.mrm-pref-close:focus{
+  outline: 2px solid rgba(0,0,0,0.25);
+  outline-offset: 2px;
 }
 .mrm-pref-grid{
   display:grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 12px;
 }
 .mrm-pref-grid label{
@@ -1489,6 +1503,11 @@ h1 {
   border: 1px solid #e1e1e1;
   border-radius: 12px;
   background: #fff;
+}
+.mrm-pref-grid select:disabled{
+  opacity: 0.65;
+  background: #f3f3f3;
+  cursor: not-allowed;
 }
 .mrm-pref-see{
   width: 100%;
@@ -1505,9 +1524,6 @@ h1 {
   margin-top: 10px;
   font-size: 12px;
   color: #666;
-}
-@media (max-width: 520px){
-  .mrm-pref-grid{ grid-template-columns: 1fr; }
 }
 
 </style>
@@ -4976,6 +4992,10 @@ function mrmOpenPrefPopup(){
   if(mainFreq && pFreq)            pFreq.value       = mainFreq.value || 'weekly';
   if(mainDur && pDur)              pDur.value        = mainDur.value || '1_month';
 
+  // Keep popup fields consistent with consultation rules
+  pOpt?.addEventListener('change', mrmPrefApplyDefaults);
+  mrmPrefApplyDefaults();
+
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden','false');
   document.body.classList.add('mrm-booking-modal-open');
@@ -4992,6 +5012,31 @@ function mrmClosePrefPopup(){
   const bookingStillOpen = bookingOverlay && bookingOverlay.getAttribute('aria-hidden') === 'false';
   if (!bookingStillOpen) {
     document.body.classList.remove('mrm-booking-modal-open');
+  }
+}
+
+function mrmPrefApplyDefaults(){
+  const pOpt  = document.getElementById('mrm-pref-lesson-option');
+  const pLen  = document.getElementById('mrm-pref-length');
+  const pFreq = document.getElementById('mrm-pref-frequency');
+  const pDur  = document.getElementById('mrm-pref-duration');
+  if(!pOpt || !pLen || !pFreq || !pDur) return;
+
+  if(pOpt.value === 'consultation'){
+    // consultation defaults (match main form behavior)
+    pLen.value = '30';
+    pLen.disabled = true;
+
+    pFreq.value = 'none';
+    pFreq.disabled = true;
+
+    pDur.value = '--';
+    pDur.disabled = true;
+  } else {
+    // lessons can choose these
+    pLen.disabled = false;
+    pFreq.disabled = false;
+    pDur.disabled = false;
   }
 }
 
