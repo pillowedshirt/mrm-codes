@@ -2860,7 +2860,12 @@ function ensureLegacyBookingHandler(){
           payBtn.disabled = true;
           const { error, paymentIntent } = await stripe.confirmPayment({
             elements: activeStripeElements,
-            confirmParams: { return_url: window.location.href }
+            
+            // Keep return_url for cases where Stripe MUST redirect (3DS/SCA).
+            confirmParams: { return_url: window.location.href },
+
+            // CRITICAL: prevents a full page reload for normal successful payments.
+            redirect: 'if_required'
           });
           if (error) {
             errorEl.textContent = error.message || 'Payment failed.';
