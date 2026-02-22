@@ -647,6 +647,68 @@ a{ -webkit-tap-highlight-color:transparent; }
 @media (max-width: 420px){
   .actions{ grid-template-columns: 1fr; }
 }
+
+/* =========================================================
+   Piece Purchase Success Popup (matches scheduler success)
+   ========================================================= */
+.mrm-success-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: none;              /* shown via JS */
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 10050;             /* above payment modal (9999) */
+}
+
+.mrm-success-modal{
+  width: min(460px, 100%);
+  background: var(--color-surface);
+  border: 1px solid rgba(0,0,0,0.14);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 22px 60px rgba(0,0,0,0.22);
+  padding: 22px 18px 18px;
+  text-align: center;
+}
+
+.mrm-success-icon{
+  width: 74px;
+  height: 74px;
+  border-radius: 999px;
+  margin: 4px auto 14px;
+  background: rgba(0,0,0,0.06);
+  display: grid;
+  place-items: center;
+  color: var(--color-accent);
+}
+
+.mrm-success-icon svg{
+  width: 40px;
+  height: 40px;
+  display: block;
+}
+
+.mrm-success-title{
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--color-text-main);
+}
+
+.mrm-success-text{
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.mrm-success-actions{
+  display: flex;
+  justify-content: center;
+  margin-top: 6px;
+}
+
 </style>
 </head>
 
@@ -788,6 +850,33 @@ a{ -webkit-tap-highlight-color:transparent; }
 
               <button id="mrm-pay-btn" class="button-primary" style="width:100%;">Pay</button>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
+            </div>
+          </div>
+        </div>
+
+
+        <!-- =========================================================
+             Piece Purchase Success Popup
+             ========================================================= -->
+        <div id="mrm-success-overlay" class="mrm-success-overlay" aria-hidden="true">
+          <div class="mrm-success-modal" role="dialog" aria-modal="true" aria-labelledby="mrm-success-title">
+            <div class="mrm-success-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M20 6L9 17l-5-5"
+                      stroke="currentColor"
+                      stroke-width="2.6"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"></path>
+              </svg>
+            </div>
+
+            <h2 id="mrm-success-title" class="mrm-success-title">Thank you!</h2>
+            <p id="mrm-success-text" class="mrm-success-text">
+              Access has been granted. Check your email for download instructions.
+            </p>
+
+            <div class="mrm-success-actions">
+              <button id="mrm-success-close" class="button-primary" type="button">Close</button>
             </div>
           </div>
         </div>
@@ -998,6 +1087,47 @@ a{ -webkit-tap-highlight-color:transparent; }
     return { payBtn, errorEl, emailInput };
   }
 
+
+  /* =========================================================
+     Piece Purchase Success Popup (reload only on Close click)
+     ========================================================= */
+  function mrmShowPieceSuccessPopup(titleText, bodyText){
+    const overlay  = document.getElementById('mrm-success-overlay');
+    const titleEl  = document.getElementById('mrm-success-title');
+    const textEl   = document.getElementById('mrm-success-text');
+    const closeBtn = document.getElementById('mrm-success-close');
+
+    if(!overlay || !titleEl || !textEl || !closeBtn) return;
+
+    if(typeof titleText === 'string' && titleText.trim()){
+      titleEl.textContent = titleText.trim();
+    }
+    if(typeof bodyText === 'string' && bodyText.trim()){
+      textEl.textContent = bodyText.trim();
+    }
+
+    // Hide payment overlay if it's still open
+    const payOverlay = document.getElementById('mrm-payment-overlay');
+    if (payOverlay) {
+      payOverlay.style.display = 'none';
+      payOverlay.setAttribute('aria-hidden', 'true');
+    }
+
+    overlay.style.display = 'flex';
+    overlay.setAttribute('aria-hidden', 'false');
+
+    closeBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden', 'true');
+
+      // Reload only after Close is pressed (and after DOM updates apply)
+      setTimeout(() => window.location.reload(), 0);
+    };
+  }
+
   async function verifyAndGrant(piId, email, sku){
     const vRes = await fetch('/wp-json/mrm-pay/v1/verify-payment-intent', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -1015,7 +1145,10 @@ a{ -webkit-tap-highlight-color:transparent; }
       alert('We could not finalize access yet. Please try again in a moment.' + debug);
       return;
     }
-    alert('Thank you!  Access has been granted.  Check your email for download instructions.');
+    mrmShowPieceSuccessPopup(
+      'Thank you!',
+      'Access has been granted. Check your email for download instructions.'
+    );
   }
 
   function checkReturnFromStripe(){
