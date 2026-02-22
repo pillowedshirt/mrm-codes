@@ -996,14 +996,9 @@ a{ -webkit-tap-highlight-color:transparent; }
     return String(raw || '').trim().toLowerCase();
   }
 
-  function openPaymentModal(breakdown) {
-    const overlay = document.getElementById('mrm-payment-overlay');
-    const payBtn = document.getElementById('mrm-pay-btn');
-    const errorEl = document.getElementById('mrm-payment-error');
+  function renderPiecePaymentBreakdown(breakdown){
     const instructions = document.getElementById('payment-instructions');
-    const zipInput = document.getElementById('mrm-payment-zip');
-    const emailInput = document.getElementById('mrm-payment-email');
-    const paymentMount = document.getElementById('mrm-payment-element');
+    if (!instructions) return;
 
     const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
     const base = Number(breakdown?.base_amount_cents || 0);
@@ -1014,16 +1009,25 @@ a{ -webkit-tap-highlight-color:transparent; }
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music</span><strong>${money(base)}</strong></div>`);
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Enter ZIP to calculate'}</strong></div>`);
     rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+
     instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+  }
+
+  function openPaymentModal(breakdown) {
+    const overlay = document.getElementById('mrm-payment-overlay');
+    const payBtn = document.getElementById('mrm-pay-btn');
+    const errorEl = document.getElementById('mrm-payment-error');
+    const zipInput = document.getElementById('mrm-payment-zip');
+    const emailInput = document.getElementById('mrm-payment-email');
+    const paymentMount = document.getElementById('mrm-payment-element');
+
+    renderPiecePaymentBreakdown(breakdown);
     overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden', 'false');
 
     errorEl.textContent = '';
     payBtn.disabled = true;
     payBtn.textContent = 'Pay';
-
-    emailInput.value = '';
-    zipInput.value = '';
 
     pendingClientSecret = '';
     pendingOrderId = 0;
@@ -1158,7 +1162,7 @@ a{ -webkit-tap-highlight-color:transparent; }
                   tax_cents: uData.tax_cents,
                   amount_cents: uData.total_cents
                 };
-                openPaymentModal(pendingBreakdown); // refresh breakdown UI
+                renderPiecePaymentBreakdown(pendingBreakdown); // refresh breakdown UI (does NOT reset Stripe element)
 
                 if (activeStripeElements && typeof activeStripeElements.fetchUpdates === 'function') {
                   await activeStripeElements.fetchUpdates();

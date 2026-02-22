@@ -1408,6 +1408,11 @@ class MRM_Payments_Hub_Single {
     $addon_selected = (isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes');
     $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
 
+    // Harden: default country to US when omitted (prevents Stripe Tax from skipping calculation)
+    if (empty($address['country'])) {
+      $address['country'] = 'US';
+    }
+
     $base_amount_cents = (int)$amount;
     $addon_amount_cents = $addon_selected ? 500 : 0;
 
@@ -1522,6 +1527,10 @@ class MRM_Payments_Hub_Single {
     $data = (array) $req->get_json_params();
     $order_id = isset($data['order_id']) ? absint($data['order_id']) : 0;
     $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
+
+    if (empty($address['country'])) {
+      $address['country'] = 'US';
+    }
 
     if ($order_id <= 0) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing order_id.'), 400);
 
