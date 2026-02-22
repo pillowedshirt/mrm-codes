@@ -1877,48 +1877,41 @@ let activePaymentElement = null;
 
 /* =========================================================
    Calendar Success Popup (Event Created)
+   Reload happens ONLY when Close is clicked.
    ========================================================= */
 function mrmShowCalendarSuccessPopup(customText){
-  const overlay = document.getElementById('mrm-success-overlay');
-  const textEl  = document.getElementById('mrm-success-text');
+  const overlay  = document.getElementById('mrm-success-overlay');
+  const textEl   = document.getElementById('mrm-success-text');
   const closeBtn = document.getElementById('mrm-success-close');
 
   if(!overlay || !textEl || !closeBtn) return;
 
+  // Set message text
   if(typeof customText === 'string' && customText.trim()){
     textEl.textContent = customText.trim();
   }else{
     textEl.textContent = 'Please check your email for our confirmation.';
   }
 
+  // Show overlay
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden', 'false');
 
-  // Focus the close button for accessibility/keyboard users
-  try{ closeBtn.focus(); }catch(_){ }
+  // Ensure ONLY the Close button can dismiss + reload
+  closeBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
 
-  // Close behavior: refresh page
-  const onClose = () => {
+    // Hide popup first
     overlay.style.display = 'none';
     overlay.setAttribute('aria-hidden', 'true');
-    window.location.reload();
+
+    // Reload at the very end of this click handler sequence
+    // (setTimeout 0 ensures the DOM hide applies before reload)
+    setTimeout(() => {
+      window.location.reload();
+    }, 0);
   };
-
-  // Avoid stacking multiple listeners if popup is shown more than once
-  closeBtn.onclick = onClose;
-
-  // Click outside modal closes too (optional but nice)
-  overlay.onclick = (e) => {
-    if(e.target === overlay) onClose();
-  };
-
-  // ESC closes too
-  document.addEventListener('keydown', function escOnce(ev){
-    if(ev.key === 'Escape'){
-      document.removeEventListener('keydown', escOnce);
-      onClose();
-    }
-  });
 }
 
 function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDuration){
