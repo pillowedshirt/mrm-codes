@@ -992,6 +992,66 @@ h1 {
   color: rgba(0,0,0,0.75);
 }
 
+/* =========================================================
+   Calendar Success Popup (Event Created)
+   ========================================================= */
+.mrm-success-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: none;              /* shown via JS */
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 100002;            /* above booking modal overlay */
+}
+
+.mrm-success-modal{
+  width: min(460px, 100%);
+  background: var(--color-surface);
+  border: 1px solid rgba(0,0,0,0.14);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 22px 60px rgba(0,0,0,0.22);
+  padding: 22px 18px 18px;
+  text-align: center;
+}
+
+.mrm-success-icon{
+  width: 74px;
+  height: 74px;
+  border-radius: 999px;
+  margin: 4px auto 14px;
+  background: rgba(0,0,0,0.06);
+  display: grid;
+  place-items: center;
+}
+
+.mrm-success-icon svg{
+  width: 40px;
+  height: 40px;
+  display: block;
+}
+
+.mrm-success-title{
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.mrm-success-text{
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.mrm-success-actions{
+  display: flex;
+  justify-content: center;
+  margin-top: 6px;
+}
+
 .mrm-toast {
   position: fixed;
   left: 50%;
@@ -1783,6 +1843,30 @@ h1 {
 
 <div id="instructorProfileView" style="display:none;"></div>
 
+<!-- =========================================================
+     Calendar Success Popup (Event Created)
+     ========================================================= -->
+<div id="mrm-success-overlay" class="mrm-success-overlay" aria-hidden="true">
+  <div class="mrm-success-modal" role="dialog" aria-modal="true" aria-labelledby="mrm-success-title">
+    <div class="mrm-success-icon" aria-hidden="true">
+      <!-- Checkmark icon -->
+      <svg viewBox="0 0 24 24" fill="none">
+        <path d="M20 6L9 17l-5-5" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+    </div>
+
+    <h2 id="mrm-success-title" class="mrm-success-title">Your event has been created</h2>
+    <p id="mrm-success-text" class="mrm-success-text">
+      Please check your email for our confirmation.
+    </p>
+
+    <div class="mrm-success-actions">
+      <!-- Reuse your existing button styling -->
+      <button id="mrm-success-close" class="modal-submit" type="button">Close</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://js.stripe.com/v3/"></script>
 <script>
 const apiBase = '/wp-json/mrm-schedule/v1';
@@ -1790,6 +1874,52 @@ const payApiBase = '/wp-json/mrm-pay/v1';
 let stripe = null;
 let activeStripeElements = null;
 let activePaymentElement = null;
+
+/* =========================================================
+   Calendar Success Popup (Event Created)
+   ========================================================= */
+function mrmShowCalendarSuccessPopup(customText){
+  const overlay = document.getElementById('mrm-success-overlay');
+  const textEl  = document.getElementById('mrm-success-text');
+  const closeBtn = document.getElementById('mrm-success-close');
+
+  if(!overlay || !textEl || !closeBtn) return;
+
+  if(typeof customText === 'string' && customText.trim()){
+    textEl.textContent = customText.trim();
+  }else{
+    textEl.textContent = 'Please check your email for our confirmation.';
+  }
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden', 'false');
+
+  // Focus the close button for accessibility/keyboard users
+  try{ closeBtn.focus(); }catch(_){ }
+
+  // Close behavior: refresh page
+  const onClose = () => {
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
+    window.location.reload();
+  };
+
+  // Avoid stacking multiple listeners if popup is shown more than once
+  closeBtn.onclick = onClose;
+
+  // Click outside modal closes too (optional but nice)
+  overlay.onclick = (e) => {
+    if(e.target === overlay) onClose();
+  };
+
+  // ESC closes too
+  document.addEventListener('keydown', function escOnce(ev){
+    if(ev.key === 'Escape'){
+      document.removeEventListener('keydown', escOnce);
+      onClose();
+    }
+  });
+}
 
 function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDuration){
   const base = parseInt(baseSelectedCount, 10) || 0;
@@ -2487,6 +2617,9 @@ async function submitBooking(payload, setMsg){
 
   const bookedInstructor = currentInstructor;
   closeBookingModal();
+
+  mrmShowCalendarSuccessPopup('Please check your email for our confirmation.');
+
   updateBooking(currentInstructor);
   if(bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function'){
     bookedInstructor._mrmMarkStale();
