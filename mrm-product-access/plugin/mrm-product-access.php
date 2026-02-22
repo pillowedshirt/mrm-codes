@@ -1484,13 +1484,29 @@ class MRM_Product_Access {
             return $this->hash_email( strtolower( trim( (string) $email ) ) );
         };
 
-        // Rule 1: master list
-        if ( isset( $lists['all-sheet-music'] ) && is_array( $lists['all-sheet-music'] ) ) {
-            foreach ( $lists['all-sheet-music'] as $em ) {
-                $em = sanitize_email( $em );
-                if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
-            }
-        }
+        // Rule 1: master all-sheet-music ledger (DB), auto-expiring
+        $settings = get_option( 'mrm_pay_hub_settings', array() );
+        $master_sku = isset( $settings['all_sheet_music_sku'] ) ? (string) $settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
+        $master_sku = strtolower( trim( $master_sku ) );
+        $master_sku = preg_replace( '/[^a-z0-9\-_]+/', '', $master_sku );
+        if ( ! $master_sku ) $master_sku = 'piece-all-sheet-music-access-complete-package';
+
+        $now = current_time( 'mysql' );
+        $master_id = $wpdb->get_var( $wpdb->prepare(
+            "SELECT id FROM {$table}
+             WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL
+               AND (
+                 (expires_at IS NOT NULL AND expires_at > %s)
+                 OR
+                 (expires_at IS NULL AND DATE_ADD(granted_at, INTERVAL 31 DAY) > %s)
+               )
+             ORDER BY id DESC LIMIT 1",
+            (string) $email_hash,
+            (string) $master_sku,
+            (string) $now,
+            (string) $now
+        ) );
+        if ( ! empty( $master_id ) ) return true;
 
         // Rule 2: per-product list
         if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {

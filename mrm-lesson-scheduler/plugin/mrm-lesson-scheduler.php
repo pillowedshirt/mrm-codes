@@ -483,51 +483,6 @@ class MRM_Lesson_Scheduler {
         ) );
     }
 
-    private function grant_all_sheet_music_access_for_email( $email, $source = 'lesson_booking', $source_id = '' ) {
-        $email = sanitize_email( (string) $email );
-        if ( ! $email || ! is_email( $email ) ) {
-            return;
-        }
-
-        $hub_settings = get_option( 'mrm_pay_hub_settings', array() );
-        $all_sku      = isset( $hub_settings['all_sheet_music_sku'] ) ? (string) $hub_settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
-        $all_sku      = strtolower( trim( $all_sku ) );
-        $all_sku      = preg_replace( '/[^a-z0-9\-_]/', '', $all_sku );
-        if ( $all_sku === '' ) {
-            return;
-        }
-
-        $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
-
-        global $wpdb;
-        $table  = $wpdb->prefix . 'mrm_sheet_music_access';
-        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
-        if ( $exists !== $table ) {
-            return;
-        }
-
-        $now = current_time( 'mysql' );
-
-        // If already active, do nothing.
-        $id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
-            $email_hash,
-            $all_sku
-        ) );
-        if ( $id ) {
-            return;
-        }
-
-        $wpdb->insert( $table, array(
-            'email_hash' => $email_hash,
-            'sku'        => $all_sku,
-            'granted_at' => $now,
-            'revoked_at' => null,
-            'source'     => $source,
-            'source_id'  => $source_id !== '' ? (string) $source_id : null,
-        ), array( '%s','%s','%s','%s','%s','%s' ) );
-    }
-
     public function rest_book_lesson( WP_REST_Request $request ) {
         global $wpdb;
 
@@ -541,6 +496,20 @@ class MRM_Lesson_Scheduler {
         $instrument    = sanitize_text_field( (string) ( $data['instrument'] ?? '' ) );
         $is_online     = ! empty( $data['online'] ) ? 1 : 0;
         $lesson_length = intval( $data['lesson_length'] ?? ( $data['slot_minutes'] ?? 60 ) );
+
+        $parent_first  = sanitize_text_field( (string) ( $data['first_name'] ?? '' ) );
+        $parent_last   = sanitize_text_field( (string) ( $data['last_name'] ?? '' ) );
+
+        $phone         = sanitize_text_field( (string) ( $data['phone'] ?? '' ) );
+
+        $address       = sanitize_text_field( (string) ( $data['address'] ?? '' ) );
+        $address_state = sanitize_text_field( (string) ( $data['address_state'] ?? '' ) );
+        $address_postal= sanitize_text_field( (string) ( $data['address_postal'] ?? '' ) );
+
+        $lesson_type       = sanitize_text_field( (string) ( $data['lesson_type'] ?? '' ) );          // online | inperson | consultation (per your UI)
+        $repeat_frequency  = sanitize_text_field( (string) ( $data['repeat_frequency'] ?? 'none' ) ); // weekly | biweekly | none
+        $repeat_duration   = sanitize_text_field( (string) ( $data['repeat_duration'] ?? '' ) );      // 1_month | 3_months | indefinitely (per UI)
+        $appointment_type  = sanitize_text_field( (string) ( $data['appointment_type'] ?? 'lesson' ) ); // lesson | consultation
 
         if ( $instructor_id <= 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
@@ -560,6 +529,22 @@ class MRM_Lesson_Scheduler {
 
         $now = current_time( 'mysql' );
         $created_ids = array();
+
+        // Fetch instructor calendar + timezone (required for Google event insert)
+        $table_instructors = $wpdb->prefix . 'mrm_instructors';
+        $instr = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT id, name, email, calendar_id, timezone
+                 FROM {$table_instructors}
+                 WHERE id = %d
+                 LIMIT 1",
+                $instructor_id
+            ),
+            ARRAY_A
+        );
+
+        $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
+        $instr_tz    = ( is_array( $instr ) && ! empty( $instr['timezone'] ) ) ? (string) $instr['timezone'] : 'UTC';
 
         foreach ( $slots as $slot ) {
             $start_raw = (string) ( $slot['start'] ?? '' );
@@ -603,7 +588,225 @@ class MRM_Lesson_Scheduler {
             ) );
 
             if ( $ok ) {
-                $created_ids[] = (int) $wpdb->insert_id;
+                $booking_id = (int) $wpdb->insert_id;
+                $created_ids[] = $booking_id;
+
+                // Call existing Google Calendar insert function (already defined in this plugin)
+                // Only do this if Google is configured and the instructor has a calendar_id.
+                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+
+                    // ------------------------------------------------------------
+                    // Event title/location/description (minimal but complete)
+                    // Requirements:
+                    // - Title format: "<length>m <instrument> <lesson type> - <student>"
+                    // - Online: NO location field at all (handled by google_insert_event() omission below)
+                    // - Description includes ALL confirm popup fillable fields
+                    // - In-person: address goes in LOCATION only (street + state + postal)
+                    // ------------------------------------------------------------
+                    $display_student = ( $student_name !== '' ) ? $student_name : $student_email;
+
+                    // =========================
+                    // Title format (UPDATED):
+                    // <Student or Parent Name> <Lesson Type> <Instrument> <30min/60min> Lesson
+                    // - Lessons: use STUDENT name
+                    // - Consultations: use PARENT name
+                    // =========================
+                    $minutes = (int) ( $lesson_length > 0 ? $lesson_length : 60 );
+                    $minutes_label = ( $minutes === 30 ) ? '30min' : ( ( $minutes === 60 ) ? '60min' : ( $minutes . 'min' ) );
+
+                    // Parent full name
+                    $parent_full = trim( trim( (string) $parent_first ) . ' ' . trim( (string) $parent_last ) );
+
+                    // Student display
+                    $student_full = trim( (string) $student_name );
+                    $student_display = ( $student_full !== '' ) ? $student_full : ( (string) $student_email );
+
+                    // Determine consultation vs lesson
+                    $lt_raw = strtolower( trim( (string) $lesson_type ) );
+                    $is_consultation = ( strtolower( (string) $appointment_type ) === 'consultation' ) || ( $lt_raw === 'consultation' );
+
+                    // Name in title depends on consultation vs lesson:
+                    if ( $is_consultation ) {
+                        $name_for_title = ( $parent_full !== '' ) ? $parent_full : $student_display;
+                    } else {
+                        $name_for_title = $student_display;
+                    }
+
+                    // Lesson type label (keep readable)
+                    if ( $lt_raw === '' ) {
+                        $lesson_type_label = $is_online ? 'Online' : 'In person';
+                    } elseif ( $lt_raw === 'online' ) {
+                        $lesson_type_label = 'Online';
+                    } elseif ( $lt_raw === 'in_person' || $lt_raw === 'inperson' || $lt_raw === 'in person' ) {
+                        $lesson_type_label = 'In person';
+                    } elseif ( $lt_raw === 'consultation' ) {
+                        $lesson_type_label = 'Consultation';
+                    } else {
+                        $lesson_type_label = ucfirst( $lt_raw );
+                    }
+
+                    $inst = trim( (string) $instrument );
+
+                    // Consultations must title as: "<Parent Name> Online Consultation"
+                    if ( $is_consultation ) {
+                        $parent_for_title = ( $parent_full !== '' ) ? $parent_full : $student_display;
+                        $title = $parent_for_title . ' Online 30 min Consultation';
+                    } else {
+                        // Lessons: "<Student Name> <Lesson Type> <Instrument> <30min/60min> Lesson"
+                        $title_parts = array();
+                        $title_parts[] = $name_for_title;         // student
+                        $title_parts[] = $lesson_type_label;      // Online / In person
+                        if ( $inst !== '' ) $title_parts[] = $inst;
+                        $title_parts[] = $minutes_label;          // 30min/60min
+                        $title_parts[] = 'Lesson';
+                        $title = implode( ' ', $title_parts );
+                    }
+
+                    // Compute student last name (best-effort, from student_name)
+                    $student_last_name = '';
+                    $sn = trim( (string) $student_name );
+                    if ( $sn !== '' && preg_match( '/\s+/', $sn ) ) {
+                        $parts = preg_split( '/\s+/', $sn );
+                        if ( is_array( $parts ) && ! empty( $parts ) ) {
+                            $student_last_name = (string) end( $parts );
+                        }
+                    }
+
+                    // Location: in-person ONLY (street + state + postal). Online => blank (and omitted later).
+                    $location = '';
+                    if ( ! $is_online ) {
+                        $state_zip = trim( trim( (string) $address_state ) . ' ' . trim( (string) $address_postal ) );
+                        if ( $address !== '' && $state_zip !== '' ) {
+                            $location = trim( $address . ', ' . $state_zip );
+                        } elseif ( $address !== '' ) {
+                            $location = trim( $address );
+                        } elseif ( $state_zip !== '' ) {
+                            $location = $state_zip;
+                        }
+                    }
+
+                    // =========================
+                    // Description format (REQUIRED):
+                    // 1) Gate URL FIRST (online lessons + consultations)
+                    // 2) "Details:" line
+                    // 3) Every fillable box label WORD-FOR-WORD from scheduler.html + selected value
+                    // =========================
+                    $description_lines = array();
+
+                    // Gate URL: same token-gate system you already use (±10 minutes enforced by gate page)
+                    $gate_url = add_query_arg( array( 'token' => $token ), home_url( '/join-online/' ) );
+
+                    // Show gate for: (a) online lessons OR (b) consultations (even if flagged oddly)
+                    $is_consultation = ( strtolower( (string) $appointment_type ) === 'consultation' ) || ( strtolower( (string) $lt_raw ) === 'consultation' );
+                    if ( $is_online || $is_consultation ) {
+                        // First line must be the URL
+                        $description_lines[] = 'Join video call: ' . $gate_url;
+                        $description_lines[] = ''; // blank line
+                    }
+
+                    $description_lines[] = 'Details:';
+
+                    // WORD-FOR-WORD labels from scheduler.html modal:
+                    $description_lines[] = 'First Name: ' . (string) $parent_first;
+                    $description_lines[] = 'Last Name: ' . (string) $parent_last;
+                    $description_lines[] = 'Student Name: ' . (string) $student_name;
+                    $description_lines[] = 'Instrument: ' . (string) $instrument;
+                    $description_lines[] = 'Email: ' . (string) $student_email;
+                    $description_lines[] = 'Phone: ' . (string) $phone;
+
+                    // These labels match the exact casing in scheduler.html:
+                    $description_lines[] = 'Lesson length: ' . $minutes . ' minutes';
+                    $description_lines[] = 'Lesson type: ' . $lesson_type_label;
+
+                    // Frequency (label is "Frequency")
+                    if ( $repeat_frequency !== '' ) {
+                        $description_lines[] = 'Frequency: ' . (string) $repeat_frequency;
+                    }
+
+                    // Reserve duration label must match scheduler.html exactly:
+                    if ( $repeat_duration !== '' ) {
+                        $description_lines[] = 'How long would you like to reserve this lesson time?: ' . (string) $repeat_duration;
+                    }
+
+                    // Address fields (these are fillable boxes in the modal)
+                    // Keep them present in details for plugin access; location field can still remain in-person only elsewhere.
+                    $description_lines[] = 'Address: ' . (string) $address;
+                    $description_lines[] = 'State: ' . (string) $address_state;
+                    $description_lines[] = 'Postal Code: ' . (string) $address_postal;
+
+                    $description = implode( "\n", $description_lines );
+
+                    // Your sync logic expects this to exist:
+                    // extendedProperties.private.booking_id
+                    $extended_private = array(
+                        'booking_id'          => (string) $booking_id,
+                        'student_email'       => (string) $student_email,
+                        // Store parent name as primary display name for calendar-based workflows
+                        'student_name'        => (string) $name_for_calendar,
+                        'student_last_name'   => (string) $student_last_name,
+                        'instrument'          => (string) $instrument,
+
+                        'parent_first_name'   => (string) $parent_first,
+                        'parent_last_name'    => (string) $parent_last,
+                        'phone'               => (string) $phone,
+
+                        'address'             => (string) $address,
+                        'address_state'       => (string) $address_state,
+                        'address_postal'      => (string) $address_postal,
+
+                        'lesson_type'         => (string) $lesson_type,
+                        'repeat_frequency'    => (string) $repeat_frequency,
+                        'repeat_duration'     => (string) $repeat_duration,
+                        'appointment_type'    => (string) $appointment_type,
+
+                        'reminder_token'      => (string) $token,
+                    );
+
+                    // Use your existing RFC3339 UTC helper (already in this file)
+                    $start_rfc3339 = $this->to_rfc3339_utc( $start_raw );
+                    $end_rfc3339   = $this->to_rfc3339_utc( $end_raw );
+
+                    // If conversion fails, do not break booking — just log
+                    if ( ! is_wp_error( $start_rfc3339 ) && ! is_wp_error( $end_rfc3339 ) ) {
+
+                        // IMPORTANT: We pass create_meet = false to respect your existing design:
+                        // Meet is created later by the join gate / reminder flow, not on calendar insert.
+                        $ins = $this->google_insert_event(
+                            $calendar_id,
+                            $title,
+                            $description,
+                            $location,
+                            $start_rfc3339,
+                            $end_rfc3339,
+                            'UTC',              // dateTime values are UTC Z strings
+                            $extended_private,
+                            array(),            // recurrence not used here; your UI sends explicit slots
+                            false,              // create_meet disabled (deferred Meet is your current architecture)
+                            (array) ( is_email( $student_email ) ? array( $student_email ) : array() )
+                        );
+
+                        if ( ! is_wp_error( $ins ) && is_array( $ins ) && ! empty( $ins['id'] ) ) {
+                            // Store google_event_id so your sync code can find/update later
+                            $wpdb->update(
+                                $lessons_table,
+                                array(
+                                    'google_event_id' => (string) $ins['id'],
+                                    'updated_at'      => $now,
+                                ),
+                                array( 'id' => $booking_id ),
+                                array( '%s', '%s' ),
+                                array( '%d' )
+                            );
+                        } else {
+                            $msg = is_wp_error( $ins ) ? $ins->get_error_message() : 'Unknown insert response.';
+                            error_log( 'MRM google_insert_event failed for booking_id ' . $booking_id . ': ' . $msg );
+                        }
+
+                    } else {
+                        $msg = is_wp_error( $start_rfc3339 ) ? $start_rfc3339->get_error_message() : $end_rfc3339->get_error_message();
+                        error_log( 'MRM time->RFC3339 failed for booking_id ' . $booking_id . ': ' . $msg );
+                    }
+                }
             }
         }
 
@@ -611,21 +814,8 @@ class MRM_Lesson_Scheduler {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
         }
 
-        // FEATURE: lesson booking grants all-sheet-music access (email-based, no accounts)
-        $student_email = isset( $data['student_email'] ) ? sanitize_email( $data['student_email'] ) : '';
-        if ( $student_email && is_email( $student_email ) ) {
-            $hub = function_exists( 'mrm_pay_hub_singleton' ) ? mrm_pay_hub_singleton() : null;
-            if ( $hub ) {
-                // add to master list + access table row (sku == product_slug)
-                $hub->add_email_to_access_list( 'all-sheet-music', $student_email );
-
-                // also ensure DB table row exists
-                $hub->maybe_install_or_upgrade_db();
-                $hub->grant_all_sheet_music_db_row( $student_email, 'lesson_booking', (string) ( $created_ids[0] ?? '' ) );
-            } else {
-                error_log( '[MRM Lesson Scheduler] Payments Hub not available; could not grant all-sheet-music.' );
-            }
-        }
+        // Removed: lesson purchases should NOT grant "all sheet music" access.
+        // Only the $5 sheet-music add-on payment grants ledger access.
 
         return new WP_REST_Response( array(
             'ok' => true,
@@ -1255,8 +1445,6 @@ class MRM_Lesson_Scheduler {
      * Returns meet URL (string) or WP_Error.
      */
     protected function google_add_meet_to_event( $calendar_id, $event_id ) {
-        // Safety: do not write Meet links into Calendar events (architecture rule).
-        return new WP_Error( 'meet_calendar_write_disabled', 'Meet links are not written into Google Calendar events in this system.' );
         if ( ! $this->google_is_configured() ) {
             return new WP_Error( 'google_not_configured', 'Google Calendar is not configured.' );
         }
@@ -1423,142 +1611,227 @@ class MRM_Lesson_Scheduler {
      *
      * Availability is derived from explicit "Free" events on the calendar.
      */
-    public function rest_get_availability( WP_REST_Request $request ) {
-        // =========================
-        // Inputs (canonical + legacy)
-        // =========================
+    function rest_get_availability( WP_REST_Request $request ) {
+
         $instructor_id = absint( $request->get_param( 'instructor_id' ) );
 
-        // Canonical params (preferred)
+        // Preferred params (new front-end)
         $start = sanitize_text_field( (string) $request->get_param( 'start_date' ) );
         $end   = sanitize_text_field( (string) $request->get_param( 'end_date' ) );
 
-        // Legacy fallback (keep for 30 days)
+        // Legacy fallback
         if ( $start === '' ) { $start = sanitize_text_field( (string) $request->get_param( 'start' ) ); }
         if ( $end   === '' ) { $end   = sanitize_text_field( (string) $request->get_param( 'end' ) ); }
 
         $slot_minutes = absint( $request->get_param( 'slot_minutes' ) );
+        if ( ! $slot_minutes ) $slot_minutes = 15;
 
-        // =========================
-        // Diagnostics helper
-        // =========================
-        $log_prefix = 'MRM_SCHED availability: ';
-
-        // =========================
-        // Validate instructor_id
-        // =========================
-        if ( ! $instructor_id ) {
-            error_log( $log_prefix . 'missing/invalid instructor_id' );
+        // Minimal validation
+        if ( ! $instructor_id || ! $start || ! $end ) {
             return new WP_REST_Response( array(
                 'ok'      => false,
-                'message' => 'Invalid instructor_id.',
+                'message' => 'Missing required parameters.',
             ), 400 );
         }
 
-        // Confirm instructor exists (so we can log “invalid instructor_id” explicitly)
+        // We expect YYYY-MM-DD (scheduler.html sends this)
+        if ( ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $start ) || ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $end ) ) {
+            return new WP_REST_Response( array(
+                'ok'      => false,
+                'message' => 'Invalid date format. Use YYYY-MM-DD.',
+            ), 400 );
+        }
+
+        // 1) Availability windows from Google (your “free/transparent” availability blocks)
+        $availability = $this->get_calendar_availability_events( $instructor_id, $start, $end );
+
+        // 2) Busy windows (ALWAYS compute: DB lessons + Google opaque events)
+        // IMPORTANT: Keep DB busy separate from Google busy so we don't lose lesson_type metadata.
+        $busy_db = array();
+        $busy_google = array();
+
+        // Build time_min/time_max UTC using instructor timezone (same approach your file already uses elsewhere)
         global $wpdb;
-        $table = $wpdb->prefix . 'mrm_instructors';
-        $exists = (int) $wpdb->get_var(
-            $wpdb->prepare( "SELECT COUNT(1) FROM {$table} WHERE id = %d", $instructor_id )
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT calendar_id, timezone FROM {$wpdb->prefix}mrm_instructors WHERE id = %d",
+                (int) $instructor_id
+            ),
+            ARRAY_A
         );
-        if ( $exists <= 0 ) {
-            error_log( $log_prefix . 'invalid instructor_id=' . $instructor_id . ' (not found in DB)' );
-            return new WP_REST_Response( array(
-                'ok'      => false,
-                'message' => 'Instructor not found.',
-            ), 404 );
-        }
 
-        // =========================
-        // Validate date params (strict YYYY-MM-DD)
-        // =========================
-        if ( $start === '' || $end === '' ) {
-            error_log( $log_prefix . 'missing start/end date params. Got start=' . $start . ' end=' . $end );
-            return new WP_REST_Response( array(
-                'ok'      => false,
-                'message' => 'Missing required parameters: start_date/end_date.',
-            ), 400 );
-        }
+        $calendar_id = is_array( $row ) ? (string) ( $row['calendar_id'] ?? '' ) : '';
+        $tz          = is_array( $row ) ? (string) ( $row['timezone'] ?? '' ) : '';
+        if ( ! $tz ) $tz = 'America/Phoenix';
 
-        if ( ! $this->mrm_is_valid_ymd( $start ) || ! $this->mrm_is_valid_ymd( $end ) ) {
-            error_log( $log_prefix . 'invalid date format. start=' . $start . ' end=' . $end . ' (expected YYYY-MM-DD)' );
-            return new WP_REST_Response( array(
-                'ok'      => false,
-                'message' => 'Invalid date format. Expected YYYY-MM-DD.',
-            ), 400 );
-        }
+        try {
+            $start_local = DateTime::createFromFormat( 'Y-m-d', $start, new DateTimeZone( $tz ) );
+            $end_local   = DateTime::createFromFormat( 'Y-m-d', $end,   new DateTimeZone( $tz ) );
 
-        // Optional: basic range sanity (end >= start)
-        if ( strtotime( $end . ' 00:00:00' ) < strtotime( $start . ' 00:00:00' ) ) {
-            error_log( $log_prefix . 'invalid date range. start=' . $start . ' end=' . $end );
-            return new WP_REST_Response( array(
-                'ok'      => false,
-                'message' => 'Invalid date range: end_date must be >= start_date.',
-            ), 400 );
-        }
+            if ( $start_local && $end_local ) {
+                $start_local->setTime( 0, 0, 0 );
+                $end_local->setTime( 0, 0, 0 );
+                $end_local->modify( '+1 day' ); // inclusive end_date
 
-        // =========================
-        // Validate slot_minutes bounds
-        // =========================
-        // Scheduler uses 15. If caller sends something weird, fall back to default-slot behavior (0).
-        if ( $slot_minutes !== 0 ) {
-            // sensible bounds: 10..180
-            if ( $slot_minutes < 10 || $slot_minutes > 180 ) {
-                error_log( $log_prefix . 'slot_minutes out of bounds: ' . $slot_minutes . ' (forcing default)' );
-                $slot_minutes = 0;
+                $start_utc = clone $start_local;
+                $end_utc   = clone $end_local;
+                $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+                $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+
+                $time_min = $start_utc->format( 'Y-m-d\TH:i:s\Z' );
+                $time_max = $end_utc->format( 'Y-m-d\TH:i:s\Z' );
+
+                // Map Google event IDs -> actual start/end timestamps for reconciliation (deletes/moves)
+                $google_event_map = array();
+
+                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+                    $events = $this->google_list_events( $calendar_id, $time_min, $time_max );
+                    if ( ! is_wp_error( $events ) && is_array( $events ) ) {
+                        $items = isset( $events['items'] ) && is_array( $events['items'] ) ? $events['items'] : $events;
+                        foreach ( $items as $ev ) {
+                            $id = (string) ( $ev['id'] ?? '' );
+                            if ( $id === '' ) continue;
+
+                            $start_dt = $ev['start']['dateTime'] ?? '';
+                            $end_dt   = $ev['end']['dateTime'] ?? '';
+
+                            // Skip all-day events
+                            if ( ! $start_dt || ! $end_dt ) continue;
+
+                            $s = strtotime( (string) $start_dt );
+                            $e = strtotime( (string) $end_dt );
+                            if ( ! $s || ! $e || $e <= $s ) continue;
+
+                            $google_event_map[ $id ] = array( 'start_ts' => $s, 'end_ts' => $e );
+                        }
+                    }
+                }
+
+                // DB busy (scheduled lessons table) — includes lesson_type/lesson_minutes
+                $db_busy = $this->db_busy_intervals_for_instructor( $instructor_id, $time_min, $time_max );
+                foreach ( (array) $db_busy as $b ) {
+                    $geid = (string) ( $b['google_event_id'] ?? '' );
+                    if ( $geid !== '' ) {
+                        if ( empty( $google_event_map[ $geid ] ) ) {
+                            // Event was deleted from Google -> do NOT treat as booked
+                            continue;
+                        }
+                        // Event exists but may have moved -> override DB timestamps with Google timestamps
+                        $b['start_ts'] = (int) $google_event_map[ $geid ]['start_ts'];
+                        $b['end_ts']   = (int) $google_event_map[ $geid ]['end_ts'];
+                        $b['start']    = gmdate( 'c', (int) $b['start_ts'] );
+                        $b['end']      = gmdate( 'c', (int) $b['end_ts'] );
+                    }
+                    if ( empty( $b['start_ts'] ) || empty( $b['end_ts'] ) ) continue;
+                    $busy_db[] = array(
+                        'start'          => (string) ( $b['start'] ?? gmdate( 'c', (int) $b['start_ts'] ) ),
+                        'end'            => (string) ( $b['end']   ?? gmdate( 'c', (int) $b['end_ts'] ) ),
+                        'start_ts'       => (int) $b['start_ts'],
+                        'end_ts'         => (int) $b['end_ts'],
+
+                        'lesson_type'    => (string) ( $b['lesson_type'] ?? '' ),    // 'online' | 'in_person'
+                        'lesson_minutes' => (int)    ( $b['lesson_minutes'] ?? 0 ),  // 30 | 60
+                        'source'         => 'db',
+                    );
+                }
+
+                // Google FreeBusy busy (opaque events)
+                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+                    $fb = $this->google_freebusy( array( $calendar_id ), $time_min, $time_max );
+                    if ( ! is_wp_error( $fb ) ) {
+                        foreach ( (array) $fb as $b ) {
+                            if ( empty( $b['start'] ) || empty( $b['end'] ) ) continue;
+                            $bs = strtotime( (string) $b['start'] );
+                            $be = strtotime( (string) $b['end'] );
+                            if ( ! $bs || ! $be || $be <= $bs ) continue;
+                            $busy_google[] = array(
+                                'start'       => gmdate( 'c', (int) $bs ),
+                                'end'         => gmdate( 'c', (int) $be ),
+                                'start_ts' => (int) $bs,
+                                'end_ts'   => (int) $be,
+                                // leave lesson_type unset for google
+                                'source'   => 'google',
+                            );
+                        }
+                    }
+                }
+
+                // Merge within each source ONLY (keeps DB lesson_type intact)
+                $busy_db = $this->merge_intervals( $busy_db );
+                $busy_google = $this->merge_intervals( $busy_google );
+
+                // Drop google intervals that overlap DB intervals (prevents dupes and metadata loss)
+                if ( ! empty( $busy_db ) && ! empty( $busy_google ) ) {
+                    $filtered_google = array();
+                    foreach ( $busy_google as $g ) {
+                        $overlap = false;
+                        foreach ( $busy_db as $d ) {
+                            if ( max( (int)$g['start_ts'], (int)$d['start_ts'] ) < min( (int)$g['end_ts'], (int)$d['end_ts'] ) ) {
+                                $overlap = true;
+                                break;
+                            }
+                        }
+                        if ( ! $overlap ) $filtered_google[] = $g;
+                    }
+                    $busy_google = $filtered_google;
+                }
+
+                // Final busy list: DB first (metadata-rich), then google
+                $busy = array_merge( $busy_db, $busy_google );
+            } else {
+                $busy = array();
             }
+        } catch ( Exception $e ) {
+            $busy = array();
         }
 
-        // =========================
-        // Fetch availability events from Google Calendar
-        // =========================
-        $availability_events = $this->get_calendar_availability_events(
-            $instructor_id,
-            $start,
-            $end
-        );
-
-        if ( empty( $availability_events ) ) {
-            return new WP_REST_Response( array(
-                'ok'          => true,
-                'slots'       => array(),
-                'busy'        => array(),
-                // Legacy alias (keep ~30 days)
-                'availability'=> array(),
-            ), 200 );
-        }
-
-        // =========================
-        // Split into bookable slots
-        // =========================
+        // 3) Split availability into slots
         $slots = array();
+        foreach ( (array) $availability as $win ) {
+            $s = strtotime( (string) ( $win['start'] ?? '' ) );
+            $e = strtotime( (string) ( $win['end'] ?? '' ) );
+            if ( ! $s || ! $e || $e <= $s ) continue;
 
-        foreach ( $availability_events as $event ) {
-            $event_start = strtotime( $event['start'] );
-            $event_end   = strtotime( $event['end'] );
-
-            if ( ! $event_start || ! $event_end || $event_end <= $event_start ) {
-                continue;
-            }
-
-            $event_slots = $this->split_into_lesson_slots(
-                $event_start,
-                $event_end,
-                $instructor_id,
-                $slot_minutes
+            $slots = array_merge(
+                $slots,
+                (array) $this->split_into_lesson_slots( $s, $e, $instructor_id, $slot_minutes )
             );
-
-            $slots = array_merge( $slots, $event_slots );
         }
 
+        // 4) Filter slots by busy overlaps
+        if ( ! empty( $busy ) && ! empty( $slots ) ) {
+            $filtered = array();
+            foreach ( $slots as $slot ) {
+                $ss = strtotime( (string) ( $slot['start'] ?? '' ) );
+                $se = strtotime( (string) ( $slot['end'] ?? '' ) );
+                if ( ! $ss || ! $se || $se <= $ss ) continue;
+
+                $conflict = false;
+                foreach ( $busy as $b ) {
+                    $bs = (int) ( $b['start_ts'] ?? 0 );
+                    $be = (int) ( $b['end_ts'] ?? 0 );
+                    if ( $bs && $be && max( $ss, $bs ) < min( $se, $be ) ) {
+                        $conflict = true;
+                        break;
+                    }
+                }
+                if ( ! $conflict ) $filtered[] = $slot;
+            }
+            $slots = $filtered;
+        }
+
+        // Return in the format scheduler.html expects
+        // - slots: for booking
+        // - busy: for calendar shading / busy markers
+        // - availability: legacy alias used in older code paths
         return new WP_REST_Response( array(
-            'ok'          => true,
-            'slots'       => array_values( $slots ),
-            'busy'        => array(), // reserved for future busy-window support
-            // Legacy alias (keep ~30 days)
-            'availability'=> array_values( $slots ),
+            'ok'           => true,
+            'slots'        => array_values( $slots ),
+            'busy'         => array_values( $busy ),
+            'availability' => array_values( $slots ),
         ), 200 );
     }
+
 
     private function mrm_is_valid_ymd( $s ) {
         $s = (string) $s;
@@ -2463,7 +2736,7 @@ class MRM_Lesson_Scheduler {
         $min_dt = gmdate( 'Y-m-d H:i:s', $min_ts - $pad );
         $max_dt = gmdate( 'Y-m-d H:i:s', $max_ts + $pad );
         $rows = $wpdb->get_results( $wpdb->prepare(
-            "SELECT start_time, end_time, is_online FROM {$table} WHERE instructor_id = %d AND status = %s AND end_time >= %s AND start_time <= %s",
+            "SELECT start_time, end_time, is_online, google_event_id FROM {$table} WHERE instructor_id = %d AND status = %s AND end_time >= %s AND start_time <= %s",
             (int) $instructor_id, 'scheduled', $min_dt, $max_dt
         ), ARRAY_A );
         if ( ! is_array( $rows ) ) return array();
@@ -2487,6 +2760,7 @@ class MRM_Lesson_Scheduler {
                 // Metadata so the frontend can render/split online blocks correctly
                 'lesson_type'    => $lesson_type,
                 'lesson_minutes' => $raw_duration_minutes,
+                'google_event_id' => (string) ( $r['google_event_id'] ?? '' ),
 
                 'source'         => 'db',
             );
@@ -3019,7 +3293,6 @@ protected function base64url_encode( $data ) {
         $payload = array(
             'summary' => (string) $title,
             'description' => (string) $description,
-            'location' => (string) $location,
             // Force yellow regardless of calendar color
             'colorId' => '5',
             'start' => array(
@@ -3033,6 +3306,13 @@ protected function base64url_encode( $data ) {
             // Show as Busy
             'transparency' => 'opaque',
         );
+
+        // Only set location when we have a real in-person location.
+        // (Online lessons: omit location entirely so it doesn't show up at all.)
+        $loc = trim( (string) $location );
+        if ( $loc !== '' ) {
+            $payload['location'] = $loc;
+        }
 
         // Disable Calendar reminders for events created by this plugin.
         // (You requested to remove the 1-hour-before reminder entirely.)
@@ -3073,27 +3353,20 @@ protected function base64url_encode( $data ) {
             }
         }
 
-        // If requested, generate a unique Google Meet link for this event.
-        // IMPORTANT: do NOT force Meet creation based on lesson_type / appointment_type.
-        // Meet creation must be explicitly requested by the caller.
+        // If requested explicitly, generate a Google Meet link for this event.
+        // IMPORTANT: We no longer auto-create Meet for online lessons.
         $want_meet = (bool) $create_meet;
+
         if ( $want_meet ) {
-            // requestId must be unique per createRequest
             $request_id = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : bin2hex( random_bytes( 8 ) );
             $payload['conferenceData'] = array(
                 'createRequest' => array(
                     'requestId' => $request_id,
                     'conferenceSolutionKey' => array(
-                        // Google Meet
                         'type' => 'hangoutsMeet',
                     ),
                 ),
             );
-
-            // Optional: make location clearly “online”
-            if ( empty( $payload['location'] ) || stripos( (string) $payload['location'], 'meet' ) === false ) {
-                $payload['location'] = 'Google Meet';
-            }
         }
 
         $url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( $calendar_id ) . '/events';

@@ -922,8 +922,51 @@ h1 {
   color: var(--color-text-muted);
 }
 
-.payment-options input[type="checkbox"]{
-  margin-right: 6px;
+.mrm-check-row{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-top:10px;
+}
+
+.mrm-check-row input[type="checkbox"]{
+  appearance:none;
+  -webkit-appearance:none;
+  width:18px;height:18px;
+  border:2px solid var(--color-accent);
+  border-radius:5px;
+  background:#fff;
+  display:inline-grid;
+  place-content:center;
+  cursor:pointer;
+}
+
+.mrm-check-row input[type="checkbox"]::after{
+  content:"";
+  width:9px;height:5px;
+  border-left:2px solid #fff;
+  border-bottom:2px solid #fff;
+  transform:rotate(-45deg);
+  opacity:0;
+}
+
+.mrm-check-row input[type="checkbox"]:checked{
+  background:var(--color-accent);
+  border-color:var(--color-accent);
+}
+
+.mrm-check-row input[type="checkbox"]:checked::after{opacity:1;}
+
+.mrm-check-row input[type="checkbox"]:focus-visible{
+  outline:3px solid rgba(0,0,0,0.18);
+  outline-offset:2px;
+}
+
+.mrm-check-row.is-disabled {
+  opacity: 0.45;
+}
+.mrm-check-row.is-disabled label {
+  cursor: not-allowed;
 }
 
 .modal-actions {
@@ -947,6 +990,66 @@ h1 {
   margin-top: 10px;
   font-size: 14px;
   color: rgba(0,0,0,0.75);
+}
+
+/* =========================================================
+   Calendar Success Popup (Event Created)
+   ========================================================= */
+.mrm-success-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: none;              /* shown via JS */
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 100002;            /* above booking modal overlay */
+}
+
+.mrm-success-modal{
+  width: min(460px, 100%);
+  background: var(--color-surface);
+  border: 1px solid rgba(0,0,0,0.14);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 22px 60px rgba(0,0,0,0.22);
+  padding: 22px 18px 18px;
+  text-align: center;
+}
+
+.mrm-success-icon{
+  width: 74px;
+  height: 74px;
+  border-radius: 999px;
+  margin: 4px auto 14px;
+  background: rgba(0,0,0,0.06);
+  display: grid;
+  place-items: center;
+}
+
+.mrm-success-icon svg{
+  width: 40px;
+  height: 40px;
+  display: block;
+}
+
+.mrm-success-title{
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.mrm-success-text{
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.mrm-success-actions{
+  display: flex;
+  justify-content: center;
+  margin-top: 6px;
 }
 
 .mrm-toast {
@@ -1389,12 +1492,143 @@ h1 {
     --slot-row-h: 36px;
   }
 }
+
+/* Initial preferences popup */
+.mrm-pref-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 999999;
+}
+.mrm-pref-modal{
+  width: 100%;
+  max-width: 560px;
+  background: #fff;
+  border-radius: 16px;
+  padding: 14px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+}
+.mrm-pref-head{
+  display:flex;
+  align-items:center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.mrm-pref-title{
+  font-size: 16px;
+  font-weight: 700;
+}
+.mrm-pref-close{
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid #d7d7d7;
+  background: #ffffff;
+  color: #111111;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.mrm-pref-close:hover{
+  border-color:#bdbdbd;
+}
+.mrm-pref-close:focus{
+  outline: 2px solid rgba(0,0,0,0.25);
+  outline-offset: 2px;
+}
+.mrm-pref-grid{
+  display:grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+.mrm-pref-grid label{
+  display:block;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: #222;
+}
+.mrm-pref-grid select{
+  width: 100%;
+  padding: 10px 10px;
+  border: 1px solid #e1e1e1;
+  border-radius: 12px;
+  background: #fff;
+}
+.mrm-pref-grid select:disabled{
+  opacity: 0.65;
+  background: #f3f3f3;
+  cursor: not-allowed;
+}
+.mrm-pref-see{
+  width: 100%;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: none;
+  background: #111;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mrm-pref-note{
+  margin-top: 10px;
+  font-size: 12px;
+  color: #666;
+}
+
 </style>
 </head>
 
 <body>
 <div class="wrapper" id="mainContainer">
   <h1>Schedule Your Lesson</h1>
+
+
+  <!-- Initial preferences popup -->
+  <div id="mrm-pref-overlay" class="mrm-pref-overlay" aria-hidden="false" style="display:none;">
+    <div class="mrm-pref-modal" role="dialog" aria-modal="true" aria-label="Choose lesson preferences">
+      <div class="mrm-pref-head">
+        <div class="mrm-pref-title">Choose your lesson details</div>
+        <button type="button" id="mrm-pref-close" class="mrm-pref-close" aria-label="Close">×</button>
+      </div>
+
+      <div class="mrm-pref-grid">
+        <div>
+          <label>Instrument</label>
+          <select id="mrm-pref-instrument"></select>
+        </div>
+        <div>
+          <label>Lesson type</label>
+          <select id="mrm-pref-lesson-option"></select>
+        </div>
+        <div>
+          <label>Lesson length</label>
+          <select id="mrm-pref-length"></select>
+        </div>
+        <div>
+          <label>Frequency</label>
+          <select id="mrm-pref-frequency"></select>
+        </div>
+        <div>
+          <label>Reserve time for</label>
+          <select id="mrm-pref-duration"></select>
+        </div>
+      </div>
+
+      <button type="button" id="mrm-pref-see" class="mrm-pref-see">See availability</button>
+      <div class="mrm-pref-note">You can still adjust these options after availability loads.</div>
+    </div>
+  </div>
 
   <div class="filters">
     <div>
@@ -1471,6 +1705,9 @@ h1 {
     <input id="first-name" type="hidden">
     <input id="last-name" type="hidden">
     <input id="address" type="hidden">
+    <input id="address-state" type="hidden">
+    <input id="address-postal" type="hidden">
+    <input id="address-country" type="hidden">
     <input id="phone" type="hidden">
     <input id="frequency" type="hidden">
     <input id="reserve-duration" type="hidden">
@@ -1514,20 +1751,41 @@ h1 {
           <label for="modal-address">Address</label>
           <input id="modal-address" autocomplete="street-address">
 
+          <label for="modal-state">State</label>
+          <input id="modal-state" autocomplete="address-level1">
+
+          <label for="modal-postal-code">Postal Code</label>
+          <input id="modal-postal-code" autocomplete="postal-code">
+
           <label for="modal-phone">Phone</label>
           <input id="modal-phone" autocomplete="tel">
 
-          <label for="modal-lesson-length">Lesson Length</label>
-          <input id="modal-lesson-length" readonly>
+          <label for="modal-length">Lesson length</label>
+          <select id="modal-length" disabled>
+            <option value="30">30 minutes</option>
+            <option value="60">60 minutes</option>
+          </select>
 
-          <label for="modal-lesson-type">Lesson Type</label>
-          <input id="modal-lesson-type" readonly>
+          <label for="modal-type">Lesson type</label>
+          <select id="modal-type" disabled>
+            <option value="1">Online</option>
+            <option value="0">In person</option>
+          </select>
 
           <label for="modal-frequency">Frequency</label>
-          <input id="modal-frequency" readonly>
+          <select id="modal-frequency">
+            <option value="weekly">Weekly</option>
+            <option value="biweekly">Biweekly</option>
+            <option value="none">Do not repeat</option>
+          </select>
 
           <label for="modal-repeat-duration">How long would you like to reserve this lesson time?</label>
-          <input id="modal-repeat-duration" readonly>
+          <select id="modal-repeat-duration">
+            <option value="--">--</option>
+            <option value="1_month">One month</option>
+            <option value="3_months">Three months</option>
+            <option value="indefinitely">Indefinitely</option>
+          </select>
 
           <div class="terms-row" style="margin-top:12px;">
             <input type="checkbox" id="modal-agree-terms">
@@ -1538,8 +1796,18 @@ h1 {
           </div>
 
           <div class="payment-options">
-            <label><input type="checkbox" id="mrm-autopay-opt"> I am aware that I am signing up for auto-pay for future lessons.</label><br>
-            <label><input type="checkbox" id="mrm-prepay-opt"> I would like to prepay for all selected lessons.</label>
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-autopay-opt">
+              <label for="mrm-autopay-opt">I am aware that I am signing up for auto-pay for future lessons.</label>
+            </div>
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-prepay-opt">
+              <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
+            </div>
+            <div class="mrm-check-row">
+              <input type="checkbox" id="mrm-sheet-music-addon-opt">
+              <label for="mrm-sheet-music-addon-opt">subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)</label>
+            </div>
             <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
           </div>
 
@@ -1547,6 +1815,7 @@ h1 {
             <button class="modal-submit" id="modal-submit-booking">Book now</button>
           </div>
 
+          <div id="modal-availability-message" class="modal-message" style="color:#a70000;"></div>
           <div id="modal-booking-message" class="modal-message"></div>
         </div>
       </div>
@@ -1572,7 +1841,49 @@ h1 {
 
 </div>
 
+<!-- Confirm Total Overlay -->
+<div id="mrm-confirm-total-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+  <div class="modal" role="dialog" aria-modal="true" style="max-width:520px;">
+    <div class="modal-header">
+      <h2 class="modal-title">Confirm total</h2>
+      <button class="modal-close" id="mrm-confirm-total-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <p style="margin-top:0;color:var(--color-text-muted);">Please confirm the total amount before placing your order.</p>
+      <div id="mrm-confirm-total-breakdown"></div>
+      <div class="modal-actions" style="display:flex;gap:10px;">
+        <button class="modal-submit" id="mrm-confirm-total-cancel" type="button" style="background:transparent;border:1px solid rgba(0,0,0,0.18);color:var(--color-text-main);">Cancel</button>
+        <button class="modal-submit" id="mrm-confirm-total-confirm" type="button">Confirm &amp; pay</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="instructorProfileView" style="display:none;"></div>
+
+<!-- =========================================================
+     Calendar Success Popup (Event Created)
+     ========================================================= -->
+<div id="mrm-success-overlay" class="mrm-success-overlay" aria-hidden="true">
+  <div class="mrm-success-modal" role="dialog" aria-modal="true" aria-labelledby="mrm-success-title">
+    <div class="mrm-success-icon" aria-hidden="true">
+      <!-- Checkmark icon -->
+      <svg viewBox="0 0 24 24" fill="none">
+        <path d="M20 6L9 17l-5-5" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+    </div>
+
+    <h2 id="mrm-success-title" class="mrm-success-title">Your event has been created</h2>
+    <p id="mrm-success-text" class="mrm-success-text">
+      Please check your email for our confirmation.
+    </p>
+
+    <div class="mrm-success-actions">
+      <!-- Reuse your existing button styling -->
+      <button id="mrm-success-close" class="modal-submit" type="button">Close</button>
+    </div>
+  </div>
+</div>
 
 <script src="https://js.stripe.com/v3/"></script>
 <script>
@@ -1581,6 +1892,76 @@ const payApiBase = '/wp-json/mrm-pay/v1';
 let stripe = null;
 let activeStripeElements = null;
 let activePaymentElement = null;
+
+/* =========================================================
+   Calendar Success Popup (Event Created)
+   Reload happens ONLY when Close is clicked.
+   ========================================================= */
+function mrmShowCalendarSuccessPopup(customText){
+  const overlay  = document.getElementById('mrm-success-overlay');
+  const textEl   = document.getElementById('mrm-success-text');
+  const closeBtn = document.getElementById('mrm-success-close');
+
+  if(!overlay || !textEl || !closeBtn) return;
+
+  // Set message text
+  if(typeof customText === 'string' && customText.trim()){
+    textEl.textContent = customText.trim();
+  }else{
+    textEl.textContent = 'Please check your email for our confirmation.';
+  }
+
+  // Show overlay
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden', 'false');
+
+  // Ensure ONLY the Close button can dismiss + reload
+  closeBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Hide popup first
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
+
+    // Reload at the very end of this click handler sequence
+    // (setTimeout 0 ensures the DOM hide applies before reload)
+    setTimeout(() => {
+      window.location.reload();
+    }, 0);
+  };
+}
+
+function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDuration){
+  const base = parseInt(baseSelectedCount, 10) || 0;
+  const freq = String(repeatFrequency || '').toLowerCase();
+  const dur  = String(repeatDuration || '').toLowerCase();
+
+  // No recurrence => pay only what is selected
+  if (!freq || freq === 'none') return base;
+
+  // You cannot meaningfully “prepay” indefinitely (no finite count)
+  if (dur === 'indefinitely') return null;
+
+  // Approximate recurrence counts in your UI terms
+  // 1_month ≈ 4 weeks, 3_months ≈ 12 weeks
+  const totalWeeks =
+    (dur === '1_month')  ? 4 :
+    (dur === '3_months') ? 12 :
+    null;
+
+  if (!totalWeeks) return base;
+
+  const intervalWeeks =
+    (freq === 'weekly')   ? 1 :
+    (freq === 'biweekly') ? 2 :
+    1;
+
+  const occurrences = Math.max(1, Math.floor(totalWeeks / intervalWeeks));
+
+  // If baseSelectedCount is >1 (user selected multiple starters), multiply accordingly
+  return Math.max(1, base * occurrences);
+}
 
 function ensureStripe(publishableKey){
   const key = (publishableKey || '').trim();
@@ -1592,14 +1973,25 @@ function ensureStripe(publishableKey){
   return stripe;
 }
 
-function openPaymentModal(clientSecret, description){
+function openPaymentModal(clientSecret, breakdown){
   const overlay = document.getElementById('mrm-payment-overlay');
   const closeBtn = document.getElementById('mrm-payment-close');
   const payBtn = document.getElementById('mrm-pay-btn');
   const errorEl = document.getElementById('mrm-payment-error');
   const instructions = document.getElementById('mrm-payment-instructions');
 
-  instructions.textContent = description || 'Please enter your card details.';
+  const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
+  const base = Number(breakdown?.base_amount_cents || 0);
+  const addon = Number(breakdown?.addon_amount_cents || 0);
+  const tax = Number(breakdown?.tax_cents || 0);
+  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
+
+  const rows = [];
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
+  if (addon > 0) rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated at checkout'}</strong></div>`);
+  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+  instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
   errorEl.textContent = '';
   payBtn.disabled = false;
 
@@ -1611,10 +2003,23 @@ function openPaymentModal(clientSecret, description){
   activePaymentElement = activeStripeElements.create('payment');
   activePaymentElement.mount('#mrm-payment-element');
 
-  const closeModal = () => {
+  const closeModal = (opts = {}) => {
+    const shouldClear = !!opts.clearSelection;
+
+    if (shouldClear) {
+      clearSelectedSlots();
+    }
+
     overlay.style.display = 'none';
     overlay.setAttribute('aria-hidden', 'true');
-    document.body.classList.remove('mrm-booking-modal-open');
+
+    // Only remove the body lock if the Confirm Booking modal is not still open
+    const bookingOverlay = document.getElementById('booking-modal');
+    const bookingStillOpen = bookingOverlay && bookingOverlay.getAttribute('aria-hidden') === 'false';
+    if (!bookingStillOpen) {
+      document.body.classList.remove('mrm-booking-modal-open');
+    }
+
     if (activePaymentElement) {
       activePaymentElement.unmount();
     }
@@ -1622,9 +2027,46 @@ function openPaymentModal(clientSecret, description){
     activeStripeElements = null;
   };
 
-  closeBtn.onclick = closeModal;
+  closeBtn.onclick = () => closeModal({ clearSelection: false });
 
   return { payBtn, errorEl, closeModal };
+}
+
+function showConfirmTotal(breakdown){
+  const overlay = document.getElementById('mrm-confirm-total-overlay');
+  const closeBtn = document.getElementById('mrm-confirm-total-close');
+  const cancelBtn = document.getElementById('mrm-confirm-total-cancel');
+  const confirmBtn = document.getElementById('mrm-confirm-total-confirm');
+  const box = document.getElementById('mrm-confirm-total-breakdown');
+
+  const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
+  const base = Number(breakdown?.base_amount_cents || 0);
+  const addon = Number(breakdown?.addon_amount_cents || 0);
+  const tax = Number(breakdown?.tax_cents || 0);
+  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
+
+  const rows = [];
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
+  if (addon > 0) rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
+  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
+  box.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden','false');
+
+  return new Promise((resolve)=>{
+    const cleanup = ()=>{
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden','true');
+      closeBtn.onclick = null;
+      cancelBtn.onclick = null;
+      confirmBtn.onclick = null;
+    };
+    closeBtn.onclick = ()=>{ cleanup(); resolve(false); };
+    cancelBtn.onclick = ()=>{ cleanup(); resolve(false); };
+    confirmBtn.onclick = ()=>{ cleanup(); resolve(true); };
+  });
 }
 
 async function verifyPaymentIntent(piId, email){
@@ -1643,6 +2085,27 @@ const visitorTZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 let selectedSlots = [];
 let currentInstructor = null;
+
+const MRM_SELECTED_SLOTS_KEY = 'mrmSchedulerSelectedSlotsV1';
+
+function persistSelectedSlots(){
+  try{ sessionStorage.setItem(MRM_SELECTED_SLOTS_KEY, JSON.stringify(selectedSlots || [])); }catch(_){}
+}
+
+function restoreSelectedSlots(){
+  try{
+    const raw = sessionStorage.getItem(MRM_SELECTED_SLOTS_KEY);
+    if(!raw) return;
+    const parsed = JSON.parse(raw);
+    if(Array.isArray(parsed)) selectedSlots = parsed;
+  }catch(_){}
+}
+
+function clearPersistedSelectedSlots(){
+  try{ sessionStorage.removeItem(MRM_SELECTED_SLOTS_KEY); }catch(_){}
+}
+
+restoreSelectedSlots();
 
 const STATE_FULL_NAMES = {
   AL:"Alabama", AK:"Alaska", AZ:"Arizona", AR:"Arkansas", CA:"California", CO:"Colorado", CT:"Connecticut", DE:"Delaware",
@@ -1668,6 +2131,8 @@ function applyLessonOptionDefaults(){
   const mode = document.getElementById('online-select');
   const freq = document.getElementById('repeat-frequency');
   const dur = document.getElementById('repeat-duration');
+  const modalFreq = document.getElementById('modal-frequency');
+  const modalDur  = document.getElementById('modal-repeat-duration');
   if(!opt || !len || !mode) return;
 
   if(opt.value === 'consultation'){
@@ -1687,6 +2152,16 @@ function applyLessonOptionDefaults(){
       dur.value = '--';
       dur.disabled = true;
     }
+
+    // Also disable the modal controls for consultations
+    if(modalFreq){
+      modalFreq.value = 'none';
+      modalFreq.disabled = true;
+    }
+    if(modalDur){
+      modalDur.value = '--';
+      modalDur.disabled = true;
+    }
   } else {
     // Standard lesson (online or in-person)
     len.disabled = false;
@@ -1699,6 +2174,8 @@ function applyLessonOptionDefaults(){
     // Recurrence controls enabled for normal lessons
     if(freq) freq.disabled = false;
     if(dur) dur.disabled = false;
+    if(modalFreq) modalFreq.disabled = false;
+    if(modalDur)  modalDur.disabled  = false;
   }
 }
 
@@ -1752,9 +2229,160 @@ function applyRepeatUIRules(){
   if(hiddenFreq) hiddenFreq.value = freq;
   if(hiddenDur)  hiddenDur.value  = durSel.value || '--';
 
-  // Sync modal readonly display fields
-  if(modalFreq) modalFreq.value = freqLabel(freq);
-  if(modalDur)  modalDur.value  = durLabel(durSel.value || '--');
+  // Sync modal controls
+  if(modalFreq) modalFreq.value = freq;
+  if(modalDur)  modalDur.value  = durSel.value || '--';
+}
+
+function updatePaymentCheckboxVisibility() {
+  const appointmentType = document.getElementById('lesson-option')?.value; // 'consultation' or lesson type
+  const frequency = document.getElementById('repeat-frequency')?.value || 'none'; // weekly | biweekly | none
+
+  const termsRow = document.querySelector('.terms-row');
+
+  const autopayCb = document.getElementById('mrm-autopay-opt');
+  const prepayCb  = document.getElementById('mrm-prepay-opt');
+  const sheetCb   = document.getElementById('mrm-sheet-music-addon-opt');
+
+  const autopayRow = autopayCb?.closest('.mrm-check-row');
+  const prepayRow  = prepayCb?.closest('.mrm-check-row');
+  const sheetRow   = sheetCb?.closest('.mrm-check-row');
+
+  if (!termsRow || !autopayRow || !prepayRow || !sheetRow) return;
+
+  // Default: hide everything
+  termsRow.style.display  = 'none';
+  autopayRow.style.display = 'none';
+  prepayRow.style.display  = 'none';
+  sheetRow.style.display   = 'none';
+
+  // Consultation: ONLY terms of service
+  if (appointmentType === 'consultation') {
+    termsRow.style.display = '';
+
+    // Ensure hidden options are not selected
+    if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
+    if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
+    if (sheetCb)   { sheetCb.checked   = false; }
+
+    // Remove any disabled styling
+    autopayRow.classList.remove('is-disabled');
+    prepayRow.classList.remove('is-disabled');
+    return;
+  }
+
+  // Non-consultation lesson: terms always visible
+  termsRow.style.display = '';
+
+  // Sheet music subscription: always visible for online/in-person lessons
+  sheetRow.style.display = '';
+
+  // Auto-pay + Prepay only visible for repeating lessons
+  const isRepeating = (frequency === 'weekly' || frequency === 'biweekly');
+
+  if (isRepeating) {
+    autopayRow.style.display = '';
+    prepayRow.style.display  = '';
+  } else {
+    autopayRow.style.display = 'none';
+    prepayRow.style.display  = 'none';
+
+    // If lesson does not repeat, force these off + fully enabled
+    if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
+    if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
+    autopayRow.classList.remove('is-disabled');
+    prepayRow.classList.remove('is-disabled');
+  }
+
+  // Apply mutual-exclusion state if they are visible
+  applyAutoPrepayMutualExclusion();
+}
+
+function applyAutoPrepayMutualExclusion() {
+  const autopayCb = document.getElementById('mrm-autopay-opt');
+  const prepayCb  = document.getElementById('mrm-prepay-opt');
+  if (!autopayCb || !prepayCb) return;
+
+  const autopayRow = autopayCb.closest('.mrm-check-row');
+  const prepayRow  = prepayCb.closest('.mrm-check-row');
+
+  const autopayOn = !!autopayCb.checked;
+  const prepayOn  = !!prepayCb.checked;
+
+  // Reset
+  autopayCb.disabled = false;
+  prepayCb.disabled  = false;
+  autopayRow?.classList.remove('is-disabled');
+  prepayRow?.classList.remove('is-disabled');
+
+  // If one is selected, disable the other
+  if (autopayOn) {
+    prepayCb.disabled = true;
+    prepayRow?.classList.add('is-disabled');
+  } else if (prepayOn) {
+    autopayCb.disabled = true;
+    autopayRow?.classList.add('is-disabled');
+  }
+}
+
+function clearSelectedSlots() {
+  selectedSlots = [];
+  clearPersistedSelectedSlots();
+  document.querySelectorAll('.slot.selected, .selected-slot').forEach(el => {
+    el.classList.remove('selected');
+    el.classList.remove('selected-slot');
+  });
+  if (currentInstructor) updateBooking(currentInstructor);
+}
+
+function syncModalToMain() {
+  const mainLength = document.getElementById('length-select');
+  const mainType = document.getElementById('online-select');
+  const mainFrequency = document.getElementById('repeat-frequency');
+  const mainDuration = document.getElementById('repeat-duration');
+  const modalLength = document.getElementById('modal-length');
+  const modalType = document.getElementById('modal-type');
+  const modalFrequency = document.getElementById('modal-frequency');
+  const modalDuration = document.getElementById('modal-repeat-duration');
+  if (!mainLength || !mainType || !mainFrequency || !mainDuration || !modalLength || !modalType || !modalFrequency || !modalDuration) return;
+
+  modalLength.value = mainLength.value;
+  modalType.value = mainType.value;
+  modalFrequency.value = mainFrequency.value;
+  modalDuration.value = mainDuration.value;
+}
+
+function checkAvailabilityConflict() {
+  // Availability conflict messaging/locking has been removed by request.
+  // Never block booking from the Confirm Your Booking modal.
+  const msg = document.getElementById('modal-availability-message');
+  const bookBtn = document.getElementById('modal-submit-booking');
+
+  if (msg) msg.textContent = '';
+  if (bookBtn) bookBtn.disabled = false;
+
+  return false;
+}
+
+function syncMainToModal() {
+  const modalLength = document.getElementById('modal-length');
+  const modalType = document.getElementById('modal-type');
+  const modalFrequency = document.getElementById('modal-frequency');
+  const modalDuration = document.getElementById('modal-repeat-duration');
+  const mainLength = document.getElementById('length-select');
+  const mainType = document.getElementById('online-select');
+  const mainFrequency = document.getElementById('repeat-frequency');
+  const mainDuration = document.getElementById('repeat-duration');
+  if (!modalLength || !modalType || !modalFrequency || !modalDuration || !mainLength || !mainType || !mainFrequency || !mainDuration) return;
+
+  mainLength.value = modalLength.value;
+  mainType.value = modalType.value;
+  mainFrequency.value = modalFrequency.value;
+  mainDuration.value = modalDuration.value;
+
+  applyRepeatUIRules();
+  updatePaymentCheckboxVisibility();
+  checkAvailabilityConflict();
 }
 
 // Optional: if user flips lesson option, enforce the defaults immediately.
@@ -1778,11 +2406,12 @@ document.addEventListener('change', (e)=>{
 const repeatFrequencyEl = document.getElementById('repeat-frequency');
 const repeatDurationEl  = document.getElementById('repeat-duration');
 
-if (repeatFrequencyEl) repeatFrequencyEl.addEventListener('change', applyRepeatUIRules);
+if (repeatFrequencyEl) repeatFrequencyEl.addEventListener('change', ()=>{ applyRepeatUIRules(); updatePaymentCheckboxVisibility(); });
 if (repeatDurationEl)  repeatDurationEl.addEventListener('change', applyRepeatUIRules);
 
 // run once on page load to enforce defaults
 applyRepeatUIRules();
+updatePaymentCheckboxVisibility();
 
 function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s => ({
@@ -1910,6 +2539,8 @@ function openBookingModal(instr){
   const msg = document.getElementById('modal-booking-message');
 
   msg.textContent = '';
+  const availabilityMsg = document.getElementById('modal-availability-message');
+  if (availabilityMsg) availabilityMsg.textContent = '';
   list.innerHTML = '';
 
   const instrName = instr && instr.name ? instr.name : '';
@@ -1933,30 +2564,43 @@ function openBookingModal(instr){
   document.getElementById('modal-first-name').value = document.getElementById('first-name')?.value || '';
   document.getElementById('modal-last-name').value  = document.getElementById('last-name')?.value || '';
   document.getElementById('modal-address').value    = document.getElementById('address')?.value || '';
+  document.getElementById('modal-state').value      = document.getElementById('address-state')?.value || '';
+  document.getElementById('modal-postal-code').value= document.getElementById('address-postal')?.value || '';
   document.getElementById('modal-phone').value      = document.getElementById('phone')?.value || '';
 
-  // Auto-populated read-only fields from dropdowns
-  const len = document.getElementById('length-select')?.value || '';
-  const type = (String(document.getElementById('online-select')?.value) === '1') ? 'Online' : 'In person';
-  const freq = document.getElementById('repeat-frequency')?.value || 'weekly';
-  const dur  = document.getElementById('repeat-duration')?.value || '1_month';
+  syncModalToMain();
+  checkAvailabilityConflict();
 
-  document.getElementById('modal-lesson-length').value = len ? (len + ' minutes') : '';
-  document.getElementById('modal-lesson-type').value   = type;
+  // Allow changing frequency + reserve duration inside the modal (lesson type/length stay locked)
+  const modalFrequency = document.getElementById('modal-frequency');
+  const modalDuration = document.getElementById('modal-repeat-duration');
 
-  document.getElementById('modal-frequency').value = (freq === 'biweekly') ? 'Biweekly'
-    : (freq === 'none') ? 'Do not repeat'
-    : 'Weekly';
+  // Attach once
+  if (modalFrequency && !modalFrequency.dataset.mrmBound) {
+    modalFrequency.dataset.mrmBound = '1';
+    modalFrequency.addEventListener('change', ()=>{
+      syncMainToModal();
+      syncModalToLegacyFields();
+      persistSelectedSlots();
+    });
+  }
 
-  document.getElementById('modal-repeat-duration').value = (freq === 'none' || dur === '--') ? '--'
-    : (dur === '3_months') ? 'Three months'
-    : (dur === 'indefinitely') ? 'Indefinitely'
-    : 'One month';
+  if (modalDuration && !modalDuration.dataset.mrmBound) {
+    modalDuration.dataset.mrmBound = '1';
+    modalDuration.addEventListener('change', ()=>{
+      syncMainToModal();
+      syncModalToLegacyFields();
+      persistSelectedSlots();
+    });
+  }
 
   // Show + lock scroll
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden','false');
   document.body.classList.add('mrm-booking-modal-open');
+
+  const hiddenCountry = document.getElementById('address-country');
+  if (hiddenCountry) hiddenCountry.value = 'US';
 
   // Focus the close button for clean UX/accessibility
   requestAnimationFrame(()=>{
@@ -1967,6 +2611,7 @@ function openBookingModal(instr){
 
 function closeBookingModal(){
   const overlay = document.getElementById('booking-modal');
+  clearSelectedSlots();
   overlay.style.display = 'none';
   overlay.setAttribute('aria-hidden','true');
   document.body.classList.remove('mrm-booking-modal-open');
@@ -1983,6 +2628,8 @@ function syncModalToLegacyFields(){
   const fn = document.getElementById('modal-first-name')?.value || '';
   const ln = document.getElementById('modal-last-name')?.value || '';
   const addr = document.getElementById('modal-address')?.value || '';
+  const addrState = document.getElementById('modal-state')?.value || '';
+  const addrPostal = document.getElementById('modal-postal-code')?.value || '';
   const phone = document.getElementById('modal-phone')?.value || '';
 
   const freq = document.getElementById('repeat-frequency')?.value || 'weekly';
@@ -1991,6 +2638,9 @@ function syncModalToLegacyFields(){
   const fnEl = document.getElementById('first-name'); if(fnEl) fnEl.value = fn;
   const lnEl = document.getElementById('last-name');  if(lnEl) lnEl.value = ln;
   const adEl = document.getElementById('address');    if(adEl) adEl.value = addr;
+  const asEl = document.getElementById('address-state'); if(asEl) asEl.value = addrState;
+  const apEl = document.getElementById('address-postal'); if(apEl) apEl.value = addrPostal;
+  const acEl = document.getElementById('address-country'); if(acEl) acEl.value = 'US';
   const phEl = document.getElementById('phone');      if(phEl) phEl.value = phone;
   const frEl = document.getElementById('frequency');  if(frEl) frEl.value = freq;
   const rdEl = document.getElementById('reserve-duration'); if(rdEl) rdEl.value = dur;
@@ -2026,6 +2676,9 @@ async function submitBooking(payload, setMsg){
 
   const bookedInstructor = currentInstructor;
   closeBookingModal();
+
+  mrmShowCalendarSuccessPopup('Please check your email for our confirmation.');
+
   updateBooking(currentInstructor);
   if(bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function'){
     bookedInstructor._mrmMarkStale();
@@ -2070,6 +2723,9 @@ function ensureLegacyBookingHandler(){
     const firstName = (document.getElementById('first-name')?.value||'').trim();
     const lastName  = (document.getElementById('last-name')?.value||'').trim();
     const address   = (document.getElementById('address')?.value||'').trim();
+    const addressState = (document.getElementById('address-state')?.value||'').trim();
+    const addressPostal = (document.getElementById('address-postal')?.value||'').trim();
+    const addressCountry = (document.getElementById('address-country')?.value||'US').trim() || 'US';
     const phone     = (document.getElementById('phone')?.value||'').trim();
 
     const frequency = (document.getElementById('frequency')?.value||'weekly').trim();         // weekly|biweekly|none
@@ -2129,8 +2785,11 @@ function ensureLegacyBookingHandler(){
       instructor_id: s.instructor_id
     }));
 
-    const onlineValue = parseInt(document.getElementById('online-select').value,10)||0;
-    const lessonType = onlineValue === 1 ? 'online' : 'in_person';
+    const appointmentType = document.getElementById('lesson-option')?.value; // 'consultation' | 'online' | 'in_person'
+
+    // Derive mode directly from appointmentType (avoids hidden-select desync bugs)
+    const onlineValue = (appointmentType === 'consultation' || appointmentType === 'online') ? 1 : 0;
+    const lessonType  = onlineValue === 1 ? 'online' : 'in_person';
     const first = relevantSelected[0] || null;
     const selectedMinutes = first
       ? Math.round((new Date(first.end).getTime() - new Date(first.start).getTime()) / 60000)
@@ -2140,9 +2799,6 @@ function ensureLegacyBookingHandler(){
       ? selectedMinutes
       : getSlotMinutes();
 
-    const lessonOptionEl = document.getElementById('lesson-option');
-    const lessonOptionVal = lessonOptionEl ? (lessonOptionEl.value || '') : '';
-    const appointmentType = (lessonOptionVal === 'consultation') ? 'consultation' : 'lesson';
 
     const payload = {
       instructor_id: instrId,
@@ -2152,6 +2808,8 @@ function ensureLegacyBookingHandler(){
       student_name: studentName,
       student_email: email,
       address,
+      address_state: addressState,
+      address_postal: addressPostal,
       phone,
 
       // Auto populated
@@ -2175,16 +2833,28 @@ function ensureLegacyBookingHandler(){
       const len = effectiveMinutes === 60 ? '60' : '30';
       const mode = lessonType === 'online' ? 'online' : 'inperson';
       const sku = `lesson_${len}_${mode}`;
-      // IMPORTANT: count must match the slots we’re actually booking for THIS instructor
-      // (selectedSlots is global and may include other instructors / other context)
-      const count = relevantSelected.length;
 
       const prepay = document.getElementById('mrm-prepay-opt')?.checked;
       const autopay = document.getElementById('mrm-autopay-opt')?.checked;
+      const sheetMusicAddon = document.getElementById('mrm-sheet-music-addon-opt')?.checked;
 
-      if(!prepay && !autopay){
+      if(appointmentType !== 'consultation' && frequency !== 'none' && !prepay && !autopay){
         setMsg('Please choose either prepay or auto-pay.');
         return;
+      }
+
+      // Count logic:
+      // - Base is the instructor-filtered selection count
+      // - If “prepay” is checked and recurrence is enabled, derive a finite lesson count
+      let count = relevantSelected.length;
+
+      if (prepay) {
+        const derived = estimatePrepayLessonCount(count, frequency, reserveDuration);
+        if (derived === null) {
+          setMsg('Prepay is not available when "Reserve time for" is set to "Indefinitely". Please choose One month or Three months.');
+          return;
+        }
+        count = derived;
       }
 
       setMsg('Preparing payment…');
@@ -2199,7 +2869,11 @@ function ensureLegacyBookingHandler(){
         }
 
         const baseAmount = quote.amount_cents || 0;
-        const chargeAmountCents = prepay ? (baseAmount * count) : baseAmount;
+        const chargeAmountCents = baseAmount * count;
+        const sheetAddonCents = sheetMusicAddon ? 500 : 0;
+        const sheetAddonTax = sheetMusicAddon ? (quote.addon_tax_cents || 0) : 0;
+        const finalAmountCents = chargeAmountCents + sheetAddonCents + sheetAddonTax;
+        const finalAmountDollars = (finalAmountCents / 100).toFixed(2);
 
         const createRes = await fetch(payApiBase + '/create-payment-intent', {
           method:'POST',
@@ -2207,9 +2881,22 @@ function ensureLegacyBookingHandler(){
           body: JSON.stringify({
             sku: sku,
             email: email,
-            context:{ lesson_length: len, lesson_mode: lessonType, lesson_count: count, prepay: prepay ? 'yes' : 'no' },
+            context:{
+              instructor_id: instrId,
+              lesson_length: len,
+              lesson_mode: lessonType,
+              lesson_count: count,
+              prepay: prepay ? 'yes' : 'no'
+            },
             save_card: autopay,
-            amount_override_cents: chargeAmountCents
+            amount_override_cents: chargeAmountCents,
+            sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
+            address: {
+              line1: address,
+              state: addressState,
+              postal_code: addressPostal,
+              country: addressCountry
+            }
           })
         });
         const createData = await createRes.json();
@@ -2225,9 +2912,7 @@ function ensureLegacyBookingHandler(){
         }
         stripe = stripeInstance;
 
-        const priceDisplay = prepay
-          ? `Total ${count} lesson(s): $${(chargeAmountCents / 100).toFixed(2)}`
-          : `Lesson total: $${(chargeAmountCents / 100).toFixed(2)}`;
+        persistSelectedSlots();
 
         sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
           payload,
@@ -2235,13 +2920,23 @@ function ensureLegacyBookingHandler(){
           payment_intent_id: createData.payment_intent_id
         }));
 
-        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, priceDisplay);
+        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, createData);
 
         payBtn.onclick = async () => {
           payBtn.disabled = true;
+          const okToPay = await showConfirmTotal(createData);
+          if (!okToPay) {
+            payBtn.disabled = false;
+            return;
+          }
           const { error, paymentIntent } = await stripe.confirmPayment({
             elements: activeStripeElements,
-            confirmParams: { return_url: window.location.href }
+            
+            // Keep return_url for cases where Stripe MUST redirect (3DS/SCA).
+            confirmParams: { return_url: window.location.href },
+
+            // CRITICAL: prevents a full page reload for normal successful payments.
+            redirect: 'if_required'
           });
           if (error) {
             errorEl.textContent = error.message || 'Payment failed.';
@@ -2251,7 +2946,7 @@ function ensureLegacyBookingHandler(){
           if (paymentIntent && paymentIntent.status === 'succeeded') {
             await verifyPaymentIntent(paymentIntent.id, email);
             await submitBooking(payload, setMsg);
-            closeModal();
+            closeModal({ clearSelection: true });
           }
         };
       }catch(err){
@@ -2402,9 +3097,9 @@ function _mrmGetBusyType(b){
   const t = _mrmNormalizeLessonType(b.lesson_type); // 'online' | 'in_person' | null
   if(t) return t;
 
-  // Travel-safe default: if the API didn't label the busy block,
-  // treat it as in_person so 30-min buffers protect scheduling.
-  return 'in_person';
+  // Legacy behavior for unlabeled busy blocks (e.g., Google FreeBusy):
+  // do NOT apply travel buffers and do NOT force an online label.
+  return null;
 }
 
 function _mrmBusyBlocks(b){
@@ -2910,6 +3605,11 @@ function renderCalendar(instr, state, container){
               const tile = document.createElement('div');
               tile.className = (labelLines && labelLines.length) ? 'slot has-subline' : 'slot';
               tile.dataset.startMs = String(tMs);
+              const slotKey = `${instr.id}|${new Date(tMs).toISOString()}|${minutes}`;
+              tile.dataset.slotKey = slotKey;
+              if (selectedSlots.some(s => s.key === slotKey)) {
+                tile.classList.add('selected');
+              }
 
               // Line 1: Time (always)
               const timeLine = document.createElement('div');
@@ -2939,11 +3639,6 @@ function renderCalendar(instr, state, container){
                 modeLine.textContent = (has3 ? (labelLines[2] || '') : (labelLines[1] || ''));
                 tile.append(modeLine);
               }
-
-              const startISO = new Date(tMs).toISOString();
-              const endISO   = new Date(tMs + minutes*60*1000).toISOString();
-              const slotKey = instr.id+'|'+startISO+'|'+minutes;
-              if(selectedSlots.some(s=>s.key===slotKey)) tile.classList.add('selected');
 
               const withinLeadTime = (isFinite(leadTimeMs) && tMs < leadTimeMs);
               if(withinLeadTime){
@@ -3205,6 +3900,8 @@ function toggleSlot(el,slot,instr){
     selectedSlots.push({key,start:slot.start,end:slot.end,instructor_id:instr.id});
     el.classList.add('selected');
   }
+
+  persistSelectedSlots();
 
   const msgEl = document.getElementById('booking-message');
   const modalMsg = document.getElementById('modal-booking-message');
@@ -4294,6 +4991,7 @@ titleWrap.appendChild(learn);
               });
           }
 
+          instr._mrmState = state;
           state._refreshDayAvailability = refreshDayAvailability;
           instr._mrmRefreshOpenDay = ()=>{
             if(state.expandedDay) refreshDayAvailability(state.expandedDay, { force: true });
@@ -4437,8 +5135,145 @@ document.getElementById('modal-instrument').addEventListener('change', ()=>{
   document.getElementById('confirm-instrument').value = v;
 });
 
+document.getElementById('lesson-option').addEventListener('change', updatePaymentCheckboxVisibility);
+document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
+
+document.getElementById('mrm-pref-see')?.addEventListener('click', mrmApplyPrefAndLoad);
+document.getElementById('mrm-pref-close')?.addEventListener('click', mrmApplyPrefAndLoad);
+
+const autopayEl = document.getElementById('mrm-autopay-opt');
+const prepayEl  = document.getElementById('mrm-prepay-opt');
+
+if (autopayEl) {
+  autopayEl.addEventListener('change', () => {
+    // If turning on autopay, force prepay off
+    if (autopayEl.checked && prepayEl) prepayEl.checked = false;
+    applyAutoPrepayMutualExclusion();
+  });
+}
+
+if (prepayEl) {
+  prepayEl.addEventListener('change', () => {
+    // If turning on prepay, force autopay off
+    if (prepayEl.checked && autopayEl) autopayEl.checked = false;
+    applyAutoPrepayMutualExclusion();
+  });
+}
+
+
+// ------------------------------
+// Initial preferences popup flow
+// ------------------------------
+function mrmOpenPrefPopup(){
+  const overlay = document.getElementById('mrm-pref-overlay');
+  if(!overlay) return;
+
+  // Copy options from main selects so there is only one “source of truth”
+  const mainInstrument = document.getElementById('instrument-input');
+  const mainOpt        = document.getElementById('lesson-option');
+  const mainLen        = document.getElementById('length-select');
+  const mainFreq       = document.getElementById('repeat-frequency');
+  const mainDur        = document.getElementById('repeat-duration');
+
+  const pInstrument = document.getElementById('mrm-pref-instrument');
+  const pOpt        = document.getElementById('mrm-pref-lesson-option');
+  const pLen        = document.getElementById('mrm-pref-length');
+  const pFreq       = document.getElementById('mrm-pref-frequency');
+  const pDur        = document.getElementById('mrm-pref-duration');
+
+  if(mainInstrument && pInstrument) pInstrument.innerHTML = mainInstrument.innerHTML;
+  if(mainOpt && pOpt)              pOpt.innerHTML        = mainOpt.innerHTML;
+  if(mainLen && pLen)              pLen.innerHTML        = mainLen.innerHTML;
+  if(mainFreq && pFreq)            pFreq.innerHTML       = mainFreq.innerHTML;
+  if(mainDur && pDur)              pDur.innerHTML        = mainDur.innerHTML;
+
+  // Default values from the current page state
+  if(mainInstrument && pInstrument) pInstrument.value = mainInstrument.value || '';
+  if(mainOpt && pOpt)              pOpt.value        = mainOpt.value || 'consultation';
+  if(mainLen && pLen)              pLen.value        = mainLen.value || '60';
+  if(mainFreq && pFreq)            pFreq.value       = mainFreq.value || 'weekly';
+  if(mainDur && pDur)              pDur.value        = mainDur.value || '1_month';
+
+  // Keep popup fields consistent with consultation rules
+  pOpt?.addEventListener('change', mrmPrefApplyDefaults);
+  mrmPrefApplyDefaults();
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden','false');
+  document.body.classList.add('mrm-booking-modal-open');
+}
+
+function mrmClosePrefPopup(){
+  const overlay = document.getElementById('mrm-pref-overlay');
+  if(!overlay) return;
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden','true');
+
+  // Only unlock body if booking modal is not open
+  const bookingOverlay = document.getElementById('booking-modal');
+  const bookingStillOpen = bookingOverlay && bookingOverlay.getAttribute('aria-hidden') === 'false';
+  if (!bookingStillOpen) {
+    document.body.classList.remove('mrm-booking-modal-open');
+  }
+}
+
+function mrmPrefApplyDefaults(){
+  const pOpt  = document.getElementById('mrm-pref-lesson-option');
+  const pLen  = document.getElementById('mrm-pref-length');
+  const pFreq = document.getElementById('mrm-pref-frequency');
+  const pDur  = document.getElementById('mrm-pref-duration');
+  if(!pOpt || !pLen || !pFreq || !pDur) return;
+
+  if(pOpt.value === 'consultation'){
+    // consultation defaults (match main form behavior)
+    pLen.value = '30';
+    pLen.disabled = true;
+
+    pFreq.value = 'none';
+    pFreq.disabled = true;
+
+    pDur.value = '--';
+    pDur.disabled = true;
+  } else {
+    // lessons can choose these
+    pLen.disabled = false;
+    pFreq.disabled = false;
+    pDur.disabled = false;
+  }
+}
+
+function mrmApplyPrefAndLoad(){
+  const mainInstrument = document.getElementById('instrument-input');
+  const mainOpt        = document.getElementById('lesson-option');
+  const mainLen        = document.getElementById('length-select');
+  const mainFreq       = document.getElementById('repeat-frequency');
+  const mainDur        = document.getElementById('repeat-duration');
+
+  const pInstrument = document.getElementById('mrm-pref-instrument');
+  const pOpt        = document.getElementById('mrm-pref-lesson-option');
+  const pLen        = document.getElementById('mrm-pref-length');
+  const pFreq       = document.getElementById('mrm-pref-frequency');
+  const pDur        = document.getElementById('mrm-pref-duration');
+
+  if(mainInstrument && pInstrument) mainInstrument.value = pInstrument.value || '';
+  if(mainOpt && pOpt)              mainOpt.value        = pOpt.value || 'consultation';
+  if(mainLen && pLen)              mainLen.value        = pLen.value || '60';
+  if(mainFreq && pFreq)            mainFreq.value       = pFreq.value || 'weekly';
+  if(mainDur && pDur)              mainDur.value        = pDur.value || '1_month';
+
+  // Apply consultation rules and checkbox visibility rules immediately
+  applyLessonOptionDefaults();
+  updatePaymentCheckboxVisibility();
+
+  mrmClosePrefPopup();
+
+  // Now load availability
+  loadInstructors();
+}
+
 applyLessonOptionDefaults();
-loadInstructors();
+updatePaymentCheckboxVisibility();
+mrmOpenPrefPopup();
 </script>
 </body>
 </html>
