@@ -907,7 +907,8 @@ class MRM_Payments_Hub_Single {
 
     $details = '';
     $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
-    if ($sku) $details .= '<div><strong>SKU:</strong> ' . esc_html($sku) . '</div>';
+    // Show SKU for piece products etc, but hide it for lessons
+    if ($sku && $product_type !== 'lesson') $details .= '<div><strong>SKU:</strong> ' . esc_html($sku) . '</div>';
     if (!empty($order_row['id'])) $details .= '<div><strong>Order #:</strong> ' . esc_html((string)$order_row['id']) . '</div>';
     if ($pi_id) $details .= '<div><strong>Payment ID:</strong> ' . esc_html($pi_id) . '</div>';
 
@@ -935,24 +936,40 @@ class MRM_Payments_Hub_Single {
       if ($len)  $details .= '<div>Length: ' . esc_html($len) . ' minutes</div>';
       if ($mode) $details .= '<div>Mode: ' . esc_html($mode) . '</div>';
       if ($count) $details .= '<div>Count: ' . esc_html($count) . '</div>';
-      if ($prepay) $details .= '<div>Plan: ' . esc_html($prepay === 'yes' ? 'Prepay' : 'Auto-pay') . '</div>';
+
+      // Plan display rules:
+      // - Non-recurring lessons should always show Prepay
+      // - Recurring lessons show Prepay vs Auto-pay based on mrm_prepay
+      $is_recurring = ((int)$count > 1);
+      if ($is_recurring) {
+        $details .= '<div>Plan: ' . esc_html($prepay === 'yes' ? 'Prepay' : 'Auto-pay') . '</div>';
+      } else {
+        $details .= '<div>Plan: Prepay</div>';
+      }
+
+      // Swap the order: cancellation guidance first, then instructor contact info
+      $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel? Contact your instructor.</strong></div>';
 
       if (!empty($instructor['email'])) {
         $name = $instructor['name'] ? $instructor['name'] : 'Your instructor';
-        $details .= '<div style="margin-top:10px;"><strong>Instructor contact:</strong> '
-          . esc_html($name) . ' — <a href="mailto:' . esc_attr($instructor['email']) . '">'
-          . esc_html($instructor['email']) . '</a></div>';
+        $details .= '<div style="margin-top:6px;">' . esc_html($name) . '</div>';
+        $details .= '<div><a href="mailto:' . esc_attr($instructor['email']) . '">' . esc_html($instructor['email']) . '</a></div>';
       }
     }
 
     // Sheet music specific hint
     if ($product_type === 'sheet_music') {
-      $details .= '<div style="margin-top:12px;">If you purchased sheet music, you can access it from the product page using your email + OTP.</div>';
+      $details .= '<div style="margin-top:12px;">If you purchased sheet music, you can access it from the product page using your email and one-time password.</div>';
     }
 
     $contact_url = $this->mrm_get_contact_url();
 
-    $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel?</strong></div>';
+    // Support / refund guidance differs by product type
+    if ($product_type === 'sheet_music') {
+      $details .= '<div style="margin-top:12px;"><strong>Need assistance or would like to request a refund?</strong></div>';
+    } elseif ($product_type !== 'lesson') {
+      $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel?</strong></div>';
+    }
 
     $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
 
