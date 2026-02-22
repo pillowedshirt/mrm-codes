@@ -1132,48 +1132,50 @@ a{ -webkit-tap-highlight-color:transparent; }
 
           payBtn.disabled = false;
 
-          let lastTaxZip = '';
+          if (zipInput) {
+            let lastTaxZip = '';
 
-          zipInput.oninput = async () => {
-            const zip = String(zipInput.value || '').trim();
-            if (zip.length < 5) return;
+            zipInput.oninput = async () => {
+              const zip = String(zipInput.value || '').trim();
+              if (zip.length < 5) return;
 
-            if (pendingOrderId && pendingClientSecret && activeStripeElements && zip !== lastTaxZip) {
-              try {
-                errorEl.textContent = '';
-                const uRes = await fetch('/wp-json/mrm-pay/v1/update-tax', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    order_id: pendingOrderId,
-                    address: { country: 'US', postal_code: zip }
-                  })
-                });
-                const uData = await uRes.json();
-                if (!uRes.ok || !uData.ok) {
-                  errorEl.textContent = (uData && uData.message) ? uData.message : 'Unable to calculate tax.';
-                  return;
+              if (pendingOrderId && pendingClientSecret && activeStripeElements && zip !== lastTaxZip) {
+                try {
+                  errorEl.textContent = '';
+                  const uRes = await fetch('/wp-json/mrm-pay/v1/update-tax', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      order_id: pendingOrderId,
+                      address: { country: 'US', postal_code: zip }
+                    })
+                  });
+                  const uData = await uRes.json();
+                  if (!uRes.ok || !uData.ok) {
+                    errorEl.textContent = (uData && uData.message) ? uData.message : 'Unable to calculate tax.';
+                    return;
+                  }
+
+                  pendingBreakdown = {
+                    base_amount_cents: uData.base_amount_cents,
+                    addon_amount_cents: uData.addon_amount_cents || 0,
+                    tax_cents: uData.tax_cents,
+                    amount_cents: uData.total_cents
+                  };
+
+                  renderPiecePaymentBreakdown(pendingBreakdown);
+
+                  if (activeStripeElements && typeof activeStripeElements.fetchUpdates === 'function') {
+                    await activeStripeElements.fetchUpdates();
+                  }
+
+                  lastTaxZip = zip;
+                } catch (e) {
+                  errorEl.textContent = 'Tax update failed. Please try again.';
                 }
-
-                // Update local breakdown + refresh Stripe Payment Element from the updated PI
-                pendingBreakdown = {
-                  base_amount_cents: uData.base_amount_cents,
-                  addon_amount_cents: uData.addon_amount_cents || 0,
-                  tax_cents: uData.tax_cents,
-                  amount_cents: uData.total_cents
-                };
-                renderPiecePaymentBreakdown(pendingBreakdown); // refresh breakdown UI (does NOT reset Stripe element)
-
-                if (activeStripeElements && typeof activeStripeElements.fetchUpdates === 'function') {
-                  await activeStripeElements.fetchUpdates();
-                }
-
-                lastTaxZip = zip;
-              } catch (e) {
-                errorEl.textContent = 'Tax update failed. Please try again.';
               }
-            }
-          };
+            };
+          }
         } catch (err) {
           errorEl.textContent = 'Payment setup failed. Please try again.';
           payBtn.disabled = true;
