@@ -604,6 +604,93 @@ class MRM_Payments_Hub_Single {
     return max(0, $tax);
   }
 
+  /**
+   * Calculate tax for a set of line items using Stripe Tax (custom flow).
+   * Each line item: ['amount_cents'=>int, 'reference'=>string, 'tax_code'=>string]
+   * Returns array: ['ok'=>bool,'tax_cents'=>int,'amount_total_cents'=>int,'calculation_id'=>string,'line_items'=>array]
+   */
+  private function mrm_tax_calculate_for_items($address, $line_items, $currency = 'usd') {
+    $country = strtoupper((string)($address['country'] ?? ''));
+    $postal  = trim((string)($address['postal_code'] ?? ''));
+    $state   = trim((string)($address['state'] ?? ''));
+    $line1   = trim((string)($address['line1'] ?? ''));
+
+    // Stripe Tax needs at minimum country + postal code for most US calculations.
+    if (!$country || !$postal) {
+      return array('ok'=>false,'tax_cents'=>0,'amount_total_cents'=>0,'calculation_id'=>'','line_items'=>array());
+    }
+
+    $items = array();
+    $subtotal = 0;
+
+    foreach ((array)$line_items as $li) {
+      $amt = isset($li['amount_cents']) ? (int)$li['amount_cents'] : 0;
+      if ($amt <= 0) continue;
+      $subtotal += $amt;
+
+      $ref = isset($li['reference']) ? (string)$li['reference'] : '';
+      if (!$ref) $ref = 'item_' . count($items) . '_' . $amt;
+
+      $tax_code = isset($li['tax_code']) ? (string)$li['tax_code'] : '';
+      if (!$tax_code) $tax_code = 'txcd_10000000'; // Generic electronically supplied services
+
+      $items[] = array(
+        'amount' => $amt,
+        'reference' => $ref,
+        'tax_code' => $tax_code,
+      );
+    }
+
+    if (empty($items)) {
+      return array('ok'=>true,'tax_cents'=>0,'amount_total_cents'=>$subtotal,'calculation_id'=>'','line_items'=>array());
+    }
+
+    $payload = array(
+      'currency' => strtolower((string)$currency),
+      'customer_details' => array(
+        'address' => array(
+          'country' => $country,
+          'postal_code' => $postal,
+        ),
+      ),
+      'line_items' => $items,
+    );
+
+    // Optional fields if present
+    if ($state) $payload['customer_details']['address']['state'] = $state;
+    if ($line1) $payload['customer_details']['address']['line1'] = $line1;
+
+    $calc = $this->stripe_api_request('POST', '/v1/tax/calculations', $payload);
+    if (is_wp_error($calc)) {
+      error_log('[MRM Payments Hub] Stripe Tax calc error: ' . $calc->get_error_message());
+      return array('ok'=>false,'tax_cents'=>0,'amount_total_cents'=>$subtotal,'calculation_id'=>'','line_items'=>array());
+    }
+
+    $tax_cents = isset($calc['tax_amount_exclusive']) ? (int)$calc['tax_amount_exclusive'] : 0;
+    $amount_total = isset($calc['amount_total']) ? (int)$calc['amount_total'] : ($subtotal + $tax_cents);
+    $calc_id = isset($calc['id']) ? (string)$calc['id'] : '';
+
+    // Extract per-line-item tax amounts if expanded (Stripe may not return by default)
+    $out_items = array();
+    if (!empty($calc['line_items']['data']) && is_array($calc['line_items']['data'])) {
+      foreach ($calc['line_items']['data'] as $x) {
+        $out_items[] = array(
+          'reference' => (string)($x['reference'] ?? ''),
+          'amount_cents' => (int)($x['amount'] ?? 0),
+          'tax_cents' => (int)($x['amount_tax'] ?? 0),
+        );
+      }
+    }
+
+    return array(
+      'ok' => true,
+      'tax_cents' => $tax_cents,
+      'amount_total_cents' => $amount_total,
+      'calculation_id' => $calc_id,
+      'line_items' => $out_items,
+    );
+  }
+
   private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array()) {
     $params = array(
       'amount' => (int)$amount_cents,
@@ -702,6 +789,29 @@ class MRM_Payments_Hub_Single {
       'stripe_status' => $stripe_status,
       'updated_at' => current_time('mysql'),
     ), array('id' => (int)$order_id), array('%s','%s','%s'), array('%d'));
+  }
+
+  private function update_order_amount_and_metadata($order_id, $amount_cents, $metadata_array) {
+    global $wpdb;
+    $wpdb->update(
+      $this->table_orders(),
+      array(
+        'amount_cents' => (int)$amount_cents,
+        'metadata_json' => wp_json_encode(is_array($metadata_array) ? $metadata_array : array()),
+        'updated_at' => current_time('mysql'),
+      ),
+      array('id' => (int)$order_id),
+      array('%d','%s','%s'),
+      array('%d')
+    );
+  }
+
+  private function get_order($order_id) {
+    global $wpdb;
+    return $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM {$this->table_orders()} WHERE id=%d LIMIT 1",
+      (int)$order_id
+    ), ARRAY_A);
   }
 
   private function get_order_by_pi($payment_intent_id) {
@@ -1080,6 +1190,12 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/update-tax', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_update_tax'),
+      'permission_callback' => '__return_true',
+    ));
+
     register_rest_route('mrm-pay/v1', '/verify-payment-intent', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_verify_payment_intent'),
@@ -1294,8 +1410,34 @@ class MRM_Payments_Hub_Single {
 
     $base_amount_cents = (int)$amount;
     $addon_amount_cents = $addon_selected ? 500 : 0;
-    $addon_tax_cents = $addon_selected ? $this->mrm_tax_cents_for_addon($address) : 0;
-    $final_amount_cents = $base_amount_cents + $addon_amount_cents + $addon_tax_cents;
+
+    // Stripe Tax (US-wide): calculate tax for taxable items only.
+    // Lessons are treated as non-taxable by design; sheet music and sheet music access add-ons are taxable.
+    $taxable_items = array();
+
+    if ($product_type === 'sheet_music') {
+      // Digital sheet music (closest match: Digital Books - downloaded - non subscription - with permanent rights)
+      $taxable_items[] = array(
+        'amount_cents' => $base_amount_cents,
+        'reference' => 'sheet_music_base',
+        'tax_code' => 'txcd_10302000',
+      );
+    }
+
+    if ($addon_amount_cents > 0) {
+      // Monthly sheet music access (closest match: Digital Books - downloaded - subscription - with conditional rights)
+      $taxable_items[] = array(
+        'amount_cents' => $addon_amount_cents,
+        'reference' => 'sheet_music_access',
+        'tax_code' => 'txcd_10302002',
+      );
+    }
+
+    $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
+    $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
+
+    $final_amount_cents = $base_amount_cents + $addon_amount_cents + $tax_cents;
 
     // Final safety: NEVER create PI with amount=0
     if ($final_amount_cents <= 0) {
@@ -1311,7 +1453,11 @@ class MRM_Payments_Hub_Single {
     $metadata['mrm_sheet_music_addon'] = $addon_selected ? 'yes' : 'no';
     $metadata['mrm_base_amount_cents'] = (string)$base_amount_cents;
     $metadata['mrm_addon_amount_cents'] = (string)$addon_amount_cents;
-    $metadata['mrm_addon_tax_cents'] = (string)$addon_tax_cents;
+    // Total tax for this order (covers sheet music base + subscription add-on, depending on product).
+    $metadata['mrm_tax_cents'] = (string)$tax_cents;
+    $metadata['mrm_tax_calculation_id'] = (string)$tax_calc_id;
+    // Back-compat key (historically used for the $5 add-on tax only).
+    $metadata['mrm_addon_tax_cents'] = (string)$tax_cents;
 
     // Create internal order first so order_id can be labeled in Stripe metadata
     $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
@@ -1359,12 +1505,92 @@ class MRM_Payments_Hub_Single {
       'sku' => $sku,
       'label' => (string)($p['label'] ?? $sku),
       'amount_cents' => $final_amount_cents,
+      'base_amount_cents' => $base_amount_cents,
+      'addon_amount_cents' => $addon_amount_cents,
+      'tax_cents' => $tax_cents,
+      'tax_calculation_id' => $tax_calc_id,
       'currency' => $currency,
       'product_type' => $product_type,
       'category' => (string)($p['category'] ?? ''),
       'composer_pct' => isset($p['composer_pct']) ? (int)$p['composer_pct'] : null,
       // For debugging. Remove later if you want.
       'metadata' => $metadata,
+    ), 200);
+  }
+
+  public function rest_update_tax(WP_REST_Request $req) {
+    $data = (array) $req->get_json_params();
+    $order_id = isset($data['order_id']) ? absint($data['order_id']) : 0;
+    $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
+
+    if ($order_id <= 0) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing order_id.'), 400);
+
+    $order = $this->get_order($order_id);
+    if (!$order) return new WP_REST_Response(array('ok'=>false,'message'=>'Order not found.'), 404);
+
+    $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+    if (!$pi_id) return new WP_REST_Response(array('ok'=>false,'message'=>'PaymentIntent not attached yet.'), 409);
+
+    // Only allow updating tax for unpaid orders
+    $status = (string)($order['status'] ?? '');
+    // NOTE: your orders start as 'created' in create_order(). Allow both 'created' and 'pending' here.
+    if ($status && !in_array($status, array('created','pending'), true)) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Order is not pending.'), 409);
+    }
+
+    $meta = array();
+    if (!empty($order['metadata_json'])) {
+      $decoded = json_decode((string)$order['metadata_json'], true);
+      if (is_array($decoded)) $meta = $decoded;
+    }
+
+    $product_type = (string)($order['product_type'] ?? ($meta['mrm_product_type'] ?? ''));
+    $base_amount_cents = isset($meta['mrm_base_amount_cents']) ? (int)$meta['mrm_base_amount_cents'] : (int)($order['amount_cents'] ?? 0);
+    $addon_amount_cents = isset($meta['mrm_addon_amount_cents']) ? (int)$meta['mrm_addon_amount_cents'] : 0;
+
+    // Recompute tax on taxable items only.
+    $taxable_items = array();
+
+    if ($product_type === 'sheet_music') {
+      $taxable_items[] = array('amount_cents'=>$base_amount_cents,'reference'=>'sheet_music_base','tax_code'=>'txcd_10302000');
+    }
+
+    if ($addon_amount_cents > 0) {
+      $taxable_items[] = array('amount_cents'=>$addon_amount_cents,'reference'=>'sheet_music_access','tax_code'=>'txcd_10302002');
+    }
+
+    $currency = strtolower((string)($order['currency'] ?? 'usd'));
+
+    $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
+    $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
+
+    $new_total_cents = $base_amount_cents + $addon_amount_cents + $tax_cents;
+
+    // Update Stripe PaymentIntent amount (before confirmation)
+    $pi = $this->stripe_api_request('POST', '/v1/payment_intents/' . $pi_id, array(
+      'amount' => $new_total_cents,
+    ));
+    if (is_wp_error($pi)) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
+    }
+
+    // Persist into order metadata so receipts and ledger remain consistent
+    $meta['mrm_tax_cents'] = (string)$tax_cents;
+    $meta['mrm_tax_calculation_id'] = (string)$tax_calc_id;
+    $meta['mrm_addon_tax_cents'] = (string)$tax_cents; // back-compat
+
+    $this->update_order_amount_and_metadata($order_id, $new_total_cents, $meta);
+
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'order_id' => (int)$order_id,
+      'payment_intent_id' => $pi_id,
+      'base_amount_cents' => (int)$base_amount_cents,
+      'addon_amount_cents' => (int)$addon_amount_cents,
+      'tax_cents' => (int)$tax_cents,
+      'total_cents' => (int)$new_total_cents,
+      'currency' => $currency,
     ), 200);
   }
 

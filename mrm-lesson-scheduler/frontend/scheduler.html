@@ -1841,6 +1841,24 @@ h1 {
 
 </div>
 
+<!-- Confirm Total Overlay -->
+<div id="mrm-confirm-total-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+  <div class="modal" role="dialog" aria-modal="true" style="max-width:520px;">
+    <div class="modal-header">
+      <h2 class="modal-title">Confirm total</h2>
+      <button class="modal-close" id="mrm-confirm-total-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <p style="margin-top:0;color:var(--color-text-muted);">Please confirm the total amount before placing your order.</p>
+      <div id="mrm-confirm-total-breakdown"></div>
+      <div class="modal-actions" style="display:flex;gap:10px;">
+        <button class="modal-submit" id="mrm-confirm-total-cancel" type="button" style="background:transparent;border:1px solid rgba(0,0,0,0.18);color:var(--color-text-main);">Cancel</button>
+        <button class="modal-submit" id="mrm-confirm-total-confirm" type="button">Confirm &amp; pay</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="instructorProfileView" style="display:none;"></div>
 
 <!-- =========================================================
@@ -1955,14 +1973,25 @@ function ensureStripe(publishableKey){
   return stripe;
 }
 
-function openPaymentModal(clientSecret, finalAmountDollars){
+function openPaymentModal(clientSecret, breakdown){
   const overlay = document.getElementById('mrm-payment-overlay');
   const closeBtn = document.getElementById('mrm-payment-close');
   const payBtn = document.getElementById('mrm-pay-btn');
   const errorEl = document.getElementById('mrm-payment-error');
   const instructions = document.getElementById('mrm-payment-instructions');
 
-  instructions.textContent = `Total due: $${finalAmountDollars || '0.00'} – enter your card details below.`;
+  const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
+  const base = Number(breakdown?.base_amount_cents || 0);
+  const addon = Number(breakdown?.addon_amount_cents || 0);
+  const tax = Number(breakdown?.tax_cents || 0);
+  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
+
+  const rows = [];
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
+  if (addon > 0) rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated at checkout'}</strong></div>`);
+  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+  instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
   errorEl.textContent = '';
   payBtn.disabled = false;
 
@@ -2001,6 +2030,43 @@ function openPaymentModal(clientSecret, finalAmountDollars){
   closeBtn.onclick = () => closeModal({ clearSelection: false });
 
   return { payBtn, errorEl, closeModal };
+}
+
+function showConfirmTotal(breakdown){
+  const overlay = document.getElementById('mrm-confirm-total-overlay');
+  const closeBtn = document.getElementById('mrm-confirm-total-close');
+  const cancelBtn = document.getElementById('mrm-confirm-total-cancel');
+  const confirmBtn = document.getElementById('mrm-confirm-total-confirm');
+  const box = document.getElementById('mrm-confirm-total-breakdown');
+
+  const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
+  const base = Number(breakdown?.base_amount_cents || 0);
+  const addon = Number(breakdown?.addon_amount_cents || 0);
+  const tax = Number(breakdown?.tax_cents || 0);
+  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
+
+  const rows = [];
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
+  if (addon > 0) rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
+  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
+  box.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden','false');
+
+  return new Promise((resolve)=>{
+    const cleanup = ()=>{
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden','true');
+      closeBtn.onclick = null;
+      cancelBtn.onclick = null;
+      confirmBtn.onclick = null;
+    };
+    closeBtn.onclick = ()=>{ cleanup(); resolve(false); };
+    cancelBtn.onclick = ()=>{ cleanup(); resolve(false); };
+    confirmBtn.onclick = ()=>{ cleanup(); resolve(true); };
+  });
 }
 
 async function verifyPaymentIntent(piId, email){
@@ -2854,10 +2920,15 @@ function ensureLegacyBookingHandler(){
           payment_intent_id: createData.payment_intent_id
         }));
 
-        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, finalAmountDollars);
+        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, createData);
 
         payBtn.onclick = async () => {
           payBtn.disabled = true;
+          const okToPay = await showConfirmTotal(createData);
+          if (!okToPay) {
+            payBtn.disabled = false;
+            return;
+          }
           const { error, paymentIntent } = await stripe.confirmPayment({
             elements: activeStripeElements,
             
