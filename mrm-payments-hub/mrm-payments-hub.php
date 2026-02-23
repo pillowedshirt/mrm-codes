@@ -80,6 +80,17 @@ class MRM_Payments_Hub_Single {
       error_log('[MRM Payments Hub] DB tables missing; running install_or_upgrade_db().');
       $this->install_or_upgrade_db();
     }
+
+    // ✅ One-time migration: move old master SKU rows to all-sheet-music
+    $table = $this->table_sheet_music_access();
+    $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($found === $table) {
+      $wpdb->query(
+        "UPDATE {$table}
+         SET sku = 'all-sheet-music'
+         WHERE sku = 'piece-all-sheet-music-access-complete-package'"
+      );
+    }
   }
 
   private function install_or_upgrade_db() {
@@ -184,12 +195,8 @@ class MRM_Payments_Hub_Single {
   }
 
   public function mrm_master_all_sheet_music_sku() {
-    $s = $this->get_settings();
-    $sku = isset($s['all_sheet_music_sku']) ? (string)$s['all_sheet_music_sku'] : '';
-    $sku = strtolower(trim($sku));
-    $sku = preg_replace('/[^a-z0-9\-_]+/', '', $sku);
-    if (!$sku) $sku = 'piece-all-sheet-music-access-complete-package';
-    return $sku;
+    // ✅ No override. Master SKU is fixed.
+    return 'all-sheet-music';
   }
 
   public function mrm_is_all_sheet_music_active_for_month($email, $month_key) {
@@ -1925,8 +1932,6 @@ class MRM_Payments_Hub_Single {
       $settings['stripe_test_publishable_key'] = sanitize_text_field((string)($_POST['stripe_test_publishable_key'] ?? ''));
       $settings['stripe_test_secret_key'] = sanitize_text_field((string)($_POST['stripe_test_secret_key'] ?? ''));
       $settings['stripe_test_webhook_secret'] = sanitize_text_field((string)($_POST['stripe_test_webhook_secret'] ?? ''));
-      $settings['all_sheet_music_sku'] = $this->sanitize_sku((string)($_POST['all_sheet_music_sku'] ?? 'piece-all-sheet-music-access-complete-package'));
-
       $this->save_settings($settings);
 
       // ✅ Manual access row inserts (row-based UI)
@@ -2384,7 +2389,6 @@ class MRM_Payments_Hub_Single {
     $sk_test   = esc_attr((string)($settings['stripe_test_secret_key'] ?? ''));
     $wh_test   = esc_attr((string)($settings['stripe_test_webhook_secret'] ?? ''));
     $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
-    $allSku    = esc_attr((string)($settings['all_sheet_music_sku'] ?? 'piece-all-sheet-music-access-complete-package'));
 
     ?>
     <div class="wrap">
@@ -2406,16 +2410,6 @@ class MRM_Payments_Hub_Single {
             </td>
           </tr>
         </table>
-        <table class="form-table">
-          <tr>
-            <th scope="row"><label for="all_sheet_music_sku">All Sheet Music SKU (override)</label></th>
-            <td>
-              <input type="text" id="all_sheet_music_sku" name="all_sheet_music_sku" value="<?php echo $allSku; ?>" class="regular-text" />
-              <p class="description">If an email has access to this SKU, OTP will be issued for any piece without checking the piece SKU list.</p>
-            </td>
-          </tr>
-        </table>
-
         <h3>Live Keys</h3>
         <table class="form-table">
           <tr>

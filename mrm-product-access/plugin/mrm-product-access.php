@@ -1485,11 +1485,8 @@ class MRM_Product_Access {
         };
 
         // Rule 1: master all-sheet-music ledger (DB), auto-expiring
-        $settings = get_option( 'mrm_pay_hub_settings', array() );
-        $master_sku = isset( $settings['all_sheet_music_sku'] ) ? (string) $settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
-        $master_sku = strtolower( trim( $master_sku ) );
-        $master_sku = preg_replace( '/[^a-z0-9\-_]+/', '', $master_sku );
-        if ( ! $master_sku ) $master_sku = 'piece-all-sheet-music-access-complete-package';
+        // ✅ No override. Master SKU is fixed.
+        $master_sku = 'all-sheet-music';
 
         $now = current_time( 'mysql' );
         $master_id = $wpdb->get_var( $wpdb->prepare(
