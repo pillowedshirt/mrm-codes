@@ -1795,8 +1795,22 @@ a{ -webkit-tap-highlight-color:transparent; }
           this.disabled = false;
           return;
         }
+        // ✅ Save context so the redirect-return handler can finish access + show success popup
+        try {
+          sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
+            email: email,
+            sku: pendingSku
+          }));
+        } catch (e) {
+          // ignore storage errors; we'll still try the non-redirect path
+        }
+
         const { error, paymentIntent } = await stripe.confirmPayment({
           elements: activeStripeElements,
+
+          // ✅ IMPORTANT: avoid redirect unless required (3DS, etc.)
+          redirect: 'if_required',
+
           confirmParams: { return_url: window.location.href }
         });
         if (error) {
