@@ -834,20 +834,7 @@ a{ -webkit-tap-highlight-color:transparent; }
               <button id="payment-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
             </div>
             <div class="modal-body">
-              <p id="payment-instructions"></p>
-
-              <div id="mrm-payment-element"></div>
-
-              <div style="height:50px;"></div>
-
-              <input
-                type="text"
-                id="mrm-payment-zip"
-                placeholder="Billing ZIP code"
-                inputmode="numeric"
-                autocomplete="postal-code"
-                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
-              />
+              <div id="payment-instructions"></div>
 
               <input
                 type="email"
@@ -856,6 +843,40 @@ a{ -webkit-tap-highlight-color:transparent; }
                 required
                 style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
               />
+
+              <div style="display:flex;gap:10px;margin-bottom:12px;">
+                <input
+                  type="text"
+                  id="mrm-billing-state"
+                  placeholder="State (e.g., AZ)"
+                  style="flex:1;padding:10px 12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+                />
+                <input
+                  type="text"
+                  id="mrm-billing-postal"
+                  placeholder="ZIP"
+                  required
+                  style="flex:1;padding:10px 12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+                />
+              </div>
+
+              <input
+                type="text"
+                id="mrm-billing-line1"
+                placeholder="Street address (optional)"
+                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+              />
+
+              <select
+                id="mrm-billing-country"
+                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);background:#fff;"
+              >
+                <option value="US" selected>United States</option>
+              </select>
+
+              <div id="mrm-payment-element"></div>
+
+              <div style="height:18px;"></div>
 
               <button id="mrm-pay-btn" class="button-primary" style="width:100%;">Pay</button>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
@@ -1013,15 +1034,47 @@ a{ -webkit-tap-highlight-color:transparent; }
     instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
   }
 
-  function openPaymentModal(initialBreakdown) {
+  function openPaymentModal(quoteData, priceDisplay) {
     const overlay = document.getElementById('mrm-payment-overlay');
     const payBtn = document.getElementById('mrm-pay-btn');
     const errorEl = document.getElementById('mrm-payment-error');
-    const zipInput = document.getElementById('mrm-payment-zip');
+    const instructions = document.getElementById('payment-instructions');
     const emailInput = document.getElementById('mrm-payment-email');
+
+    const stateInput = document.getElementById('mrm-billing-state');
+    const postalInput = document.getElementById('mrm-billing-postal');
+    const line1Input = document.getElementById('mrm-billing-line1');
+    const countrySelect = document.getElementById('mrm-billing-country');
+
     const paymentMount = document.getElementById('mrm-payment-element');
 
-    // OLD working behavior: open modal + reset state cleanly
+    const money = (cents) => '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
+    const esc = (s) => String(s || '')
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+
+    const baseFromQuote = Number(quoteData && quoteData.amount_cents ? quoteData.amount_cents : 0);
+    const labelFromQuote = String((quoteData && quoteData.label) ? quoteData.label : '').trim();
+
+    const renderBreakdown = (opts = {}) => {
+      const label = String(opts.label || labelFromQuote || 'Item').trim();
+      const base = Number(opts.base_amount_cents ?? baseFromQuote ?? 0);
+      const tax  = Number(opts.tax_cents ?? 0);
+      const total = Number(opts.amount_cents ?? (base + tax));
+
+      const rows = [];
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${esc(label)}</span><strong>${money(base)}</strong></div>`);
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated at checkout'}</strong></div>`);
+      rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+      instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">${rows.join('')}</div>`;
+    };
+
+    // Initial breakdown (tax pending)
+    renderBreakdown({ base_amount_cents: baseFromQuote, tax_cents: 0, amount_cents: baseFromQuote });
+
     overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden', 'false');
 
@@ -1029,188 +1082,135 @@ a{ -webkit-tap-highlight-color:transparent; }
     payBtn.disabled = true;
     payBtn.textContent = 'Pay';
 
-    if (emailInput) emailInput.value = '';
-    if (zipInput) zipInput.value = '';
+    emailInput.value = '';
+    if (stateInput) stateInput.value = '';
+    if (postalInput) postalInput.value = '';
+    if (line1Input) line1Input.value = '';
+    if (countrySelect) countrySelect.value = 'US';
 
     pendingClientSecret = '';
-    pendingOrderId = 0;
-    pendingBreakdown = initialBreakdown || null;
-
-    // Unmount old Stripe element if any
     if (activePaymentElement) {
       try { activePaymentElement.unmount(); } catch (e) {}
     }
     activePaymentElement = null;
     activeStripeElements = null;
 
-    // Render breakdown (shows base immediately, tax waits for ZIP)
-    renderPiecePaymentBreakdown(pendingBreakdown);
+    paymentMount.innerHTML = `
+      <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+        Enter your email and ZIP to load the secure payment form.
+      </div>
+    `;
 
-    // Placeholder message
-    if (paymentMount) {
-      paymentMount.innerHTML = `
-        <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
-          Enter your email to load the secure payment form.
-        </div>
-      `;
-    }
+    document.getElementById('payment-close').onclick = function () {
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden', 'true');
 
-    // Close button behavior (stable from old)
-    const closeBtn = document.getElementById('payment-close');
-    if (closeBtn) {
-      closeBtn.onclick = function () {
-        overlay.style.display = 'none';
-        overlay.setAttribute('aria-hidden', 'true');
+      if (activePaymentElement) {
+        try { activePaymentElement.unmount(); } catch (e) {}
+      }
+      activePaymentElement = null;
+      activeStripeElements = null;
 
-        if (activePaymentElement) {
-          try { activePaymentElement.unmount(); } catch (e) {}
-        }
-        activePaymentElement = null;
-        activeStripeElements = null;
-
-        pendingSku = '';
-        pendingClientSecret = '';
-        pendingOrderId = 0;
-        pendingBreakdown = null;
-
-        errorEl.textContent = '';
-      };
-    }
+      pendingSku = '';
+      pendingClientSecret = '';
+      errorEl.textContent = '';
+    };
 
     const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
+    const isPostalLike = (v) => String(v || '').trim().length >= 4;
+
+    const getAddressPayload = () => {
+      const country = (countrySelect && countrySelect.value) ? String(countrySelect.value).trim() : 'US';
+      return {
+        line1: (line1Input && line1Input.value) ? String(line1Input.value).trim() : '',
+        state: (stateInput && stateInput.value) ? String(stateInput.value).trim() : '',
+        postal_code: (postalInput && postalInput.value) ? String(postalInput.value).trim() : '',
+        country: country || 'US'
+      };
+    };
 
     let loadTimer = null;
-    if (emailInput) {
-      emailInput.oninput = function () {
-        clearTimeout(loadTimer);
-        loadTimer = setTimeout(async () => {
-          const email = (emailInput.value || '').trim();
 
-          if (!isEmailLike(email)) {
-            payBtn.disabled = true;
-            return;
-          }
-          if (pendingClientSecret || activePaymentElement) return;
+    const scheduleLoad = () => {
+      clearTimeout(loadTimer);
+      loadTimer = setTimeout(async () => {
+        const email = (emailInput.value || '').trim();
+        const postal = (postalInput && postalInput.value) ? String(postalInput.value).trim() : '';
 
-          if (!pendingSku) {
-            errorEl.textContent = 'Missing SKU.';
-            payBtn.disabled = true;
-            return;
-          }
+        if (!isEmailLike(email) || !isPostalLike(postal)) {
+          payBtn.disabled = true;
+          return;
+        }
 
-          try {
-            errorEl.textContent = '';
+        if (pendingClientSecret || activePaymentElement) return;
 
-            const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                sku: pendingSku,
-                email: email,
-                context: { piece_slug: getPieceSlugFromUrl() }
-              })
-            });
+        if (!pendingSku) {
+          errorEl.textContent = 'Missing SKU.';
+          payBtn.disabled = true;
+          return;
+        }
 
-            const data = await res.json();
-            if (!res.ok || !data.ok) {
-              errorEl.textContent = data.message || 'Error creating payment.';
-              payBtn.disabled = true;
-              return;
-            }
+        try {
+          errorEl.textContent = '';
 
-            const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
-            if (!stripeInstance) {
-              errorEl.textContent = 'Stripe is not configured.';
-              payBtn.disabled = true;
-              return;
-            }
-
-            stripe = stripeInstance;
-            window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
-
-            pendingClientSecret = data.client_secret;
-            pendingOrderId = Number(data.order_id || 0);
-
-            // backend now returns authoritative breakdown
-            pendingBreakdown = {
-              base_amount_cents: Number(data.base_amount_cents || 0),
-              addon_amount_cents: Number(data.addon_amount_cents || 0),
-              tax_cents: Number(data.tax_cents || 0),
-              amount_cents: Number(data.amount_cents || 0)
-            };
-
-            renderPiecePaymentBreakdown(pendingBreakdown);
-
-            activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
-            activePaymentElement = activeStripeElements.create('payment');
-
-            if (paymentMount) paymentMount.innerHTML = '';
-            activePaymentElement.mount('#mrm-payment-element');
-
-            sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
-              email: email,
+          const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
               sku: pendingSku,
-              pi: data.payment_intent_id
-            }));
+              email: email,
+              context: { piece_slug: getPieceSlugFromUrl() },
+              address: getAddressPayload()
+            })
+          });
 
-            payBtn.disabled = false;
-
-            // ZIP → live tax update (only after we have pendingOrderId & elements)
-            if (zipInput) {
-              let lastTaxZip = '';
-              zipInput.oninput = async () => {
-                const zip = String(zipInput.value || '').trim();
-                if (zip.length < 5) return;
-                if (!pendingOrderId || !activeStripeElements || zip === lastTaxZip) return;
-
-                try {
-                  const uRes = await fetch('/wp-json/mrm-pay/v1/update-tax', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      order_id: pendingOrderId,
-                      address: { country: 'US', postal_code: zip }
-                    })
-                  });
-
-                  const uData = await uRes.json();
-                  if (!uRes.ok || !uData.ok) {
-                    // Don’t crash the flow—just show message
-                    errorEl.textContent = (uData && uData.message) ? uData.message : 'Unable to calculate tax.';
-                    return;
-                  }
-
-                  pendingBreakdown = {
-                    base_amount_cents: Number(uData.base_amount_cents || 0),
-                    addon_amount_cents: Number(uData.addon_amount_cents || 0),
-                    tax_cents: Number(uData.tax_cents || 0),
-                    amount_cents: Number(uData.total_cents || 0)
-                  };
-
-                  renderPiecePaymentBreakdown(pendingBreakdown);
-
-                  if (activeStripeElements && typeof activeStripeElements.fetchUpdates === 'function') {
-                    await activeStripeElements.fetchUpdates();
-                  }
-
-                  lastTaxZip = zip;
-                } catch (e) {
-                  errorEl.textContent = 'Tax update failed. Please try again.';
-                }
-              };
-            }
-
-          } catch (err) {
-            errorEl.textContent = 'Payment setup failed. Please try again.';
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            errorEl.textContent = data.message || 'Error creating payment.';
             payBtn.disabled = true;
+            return;
           }
-        }, 350);
-      };
-    }
 
-    return { payBtn, errorEl, emailInput, zipInput };
+          const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
+          if (!stripeInstance) {
+            errorEl.textContent = 'Stripe is not configured.';
+            payBtn.disabled = true;
+            return;
+          }
+
+          stripe = stripeInstance;
+          window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
+
+          pendingClientSecret = data.client_secret || '';
+
+          // Update breakdown with tax + totals from server
+          renderBreakdown({
+            label: data.label || labelFromQuote,
+            base_amount_cents: Number(data.base_amount_cents || baseFromQuote || 0),
+            tax_cents: Number(data.tax_cents || 0),
+            amount_cents: Number(data.amount_cents || 0)
+          });
+
+          activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
+          activePaymentElement = activeStripeElements.create('payment');
+          paymentMount.innerHTML = '';
+          activePaymentElement.mount('#mrm-payment-element');
+
+          payBtn.disabled = false;
+        } catch (err) {
+          console.error('[MRM] create-payment-intent error:', err);
+          errorEl.textContent = 'Unable to load payment form.';
+          payBtn.disabled = true;
+        }
+      }, 450);
+    };
+
+    emailInput.oninput = scheduleLoad;
+    if (postalInput) postalInput.oninput = scheduleLoad;
+    if (stateInput) stateInput.oninput = scheduleLoad;
+    if (line1Input) line1Input.oninput = scheduleLoad;
+    if (countrySelect) countrySelect.onchange = scheduleLoad;
   }
-
 
 
   function showConfirmTotal(breakdown){
@@ -1780,12 +1780,16 @@ a{ -webkit-tap-highlight-color:transparent; }
 
         if (!sku) { alert('Missing product_slug for this offer.'); return; }
 
+        const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
+        let quoteData = null;
+
         // 1) Quote (validates sku exists + active in hub)
         let qData = null;
         try {
           const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?sku=${encodeURIComponent(sku)}`, { method: 'GET' });
           qData = await qRes.json().catch(() => ({}));
           if (!qRes.ok || !qData.ok) throw new Error(qData.message || 'Quote failed.');
+          quoteData = qData;
         } catch (err) {
           console.error('[MRM] Quote failed:', err);
           alert(err.message || 'This offer is not available for purchase.');
@@ -1799,11 +1803,7 @@ a{ -webkit-tap-highlight-color:transparent; }
           try { activePaymentElement.unmount(); } catch (e) {}
           activePaymentElement = null;
         }
-        openPaymentModal({
-          base_amount_cents: Number((qData && qData.amount_cents) || 0),
-          tax_cents: 0,
-          amount_cents: Number((qData && qData.amount_cents) || 0)
-        });
+        openPaymentModal(quoteData, priceDisplay);
       });
     });
 
