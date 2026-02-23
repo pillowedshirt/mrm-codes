@@ -147,6 +147,20 @@ a{ -webkit-tap-highlight-color:transparent; }
   outline-offset: 2px;
 }
 
+/* =========================
+   Confirm Total Modal: button colors
+   ========================= */
+#mrm-confirm-total-overlay .button-primary{
+  background: #000 !important;
+  border-color: #000 !important;
+  color: #fff !important;
+}
+#mrm-confirm-total-overlay .button-secondary{
+  background: #fff !important;
+  border-color: #000 !important;
+  color: #000 !important;
+}
+
 /* PDF */
 .pdf-preview{
   width: min(860px, 100%);
@@ -889,14 +903,27 @@ a{ -webkit-tap-highlight-color:transparent; }
           <div class="modal" role="dialog" aria-modal="true" style="max-width:520px;">
             <div class="modal-header">
               <h2 class="modal-title">Confirm total</h2>
-              <button class="modal-close" id="mrm-confirm-total-close" aria-label="Close">×</button>
+              <!-- Match the X button style used in the main Purchase modal -->
+              <button id="mrm-confirm-total-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
             </div>
+
             <div class="modal-body">
-              <p style="margin-top:0;color:var(--color-text-muted);">Please confirm the total amount before placing your order.</p>
+              <p style="margin-top:0;color:var(--color-text-muted);">
+                Please confirm the total amount before placing your order.
+              </p>
+
               <div id="mrm-confirm-total-breakdown"></div>
-              <div class="modal-actions" style="display:flex;gap:10px;">
-                <button class="modal-submit" id="mrm-confirm-total-cancel" type="button" style="background:transparent;border:1px solid rgba(0,0,0,0.18);">Cancel</button>
-                <button class="modal-submit" id="mrm-confirm-total-confirm" type="button">Confirm &amp; pay</button>
+
+              <div style="display:flex;gap:10px;margin-top:12px;">
+                <!-- Back button: white with black border/text -->
+                <button id="mrm-confirm-total-cancel" type="button" class="button-secondary" style="flex:1;">
+                  Back
+                </button>
+
+                <!-- Confirm button: black -->
+                <button id="mrm-confirm-total-confirm" type="button" class="button-primary" style="flex:1;">
+                  Confirm &amp; pay
+                </button>
               </div>
             </div>
           </div>
@@ -1027,7 +1054,8 @@ a{ -webkit-tap-highlight-color:transparent; }
     const total = Number((breakdown && (breakdown.amount_cents || breakdown.total_cents)) || (base + tax));
 
     const rows = [];
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music</span><strong>${money(base)}</strong></div>`);
+    const itemLabel = String(breakdown?.label || 'Sheet music');
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Enter ZIP to calculate'}</strong></div>`);
     rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
 
@@ -1064,6 +1092,9 @@ a{ -webkit-tap-highlight-color:transparent; }
       const base = Number(opts.base_amount_cents ?? baseFromQuote ?? 0);
       const tax  = Number(opts.tax_cents ?? 0);
       const total = Number(opts.amount_cents ?? (base + tax));
+
+      // ✅ CRITICAL: This feeds the Confirm Total popup
+      pendingBreakdown = { label, base_amount_cents: base, tax_cents: tax, amount_cents: total };
 
       const rows = [];
       rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${esc(label)}</span><strong>${money(base)}</strong></div>`);
@@ -1226,7 +1257,8 @@ a{ -webkit-tap-highlight-color:transparent; }
     const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + tax);
 
     const rows = [];
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music</span><strong>${money(base)}</strong></div>`);
+    const itemLabel = String(breakdown?.label || 'Sheet music');
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
     rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
     box.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
