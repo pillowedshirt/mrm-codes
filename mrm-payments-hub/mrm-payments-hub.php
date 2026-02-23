@@ -1740,7 +1740,7 @@ class MRM_Payments_Hub_Single {
 
     $email_hash = $this->email_hash($email);
 
-    $ok = $this->grant_sheet_music_access($email_hash, $sku, $pi_id ? 'stripe_pi' : 'manual', $pi_id);
+    $ok = $this->grant_sheet_music_access($email_hash, $email, $sku, $pi_id ? 'stripe_pi' : 'manual', $pi_id);
     if (!$ok) {
       global $wpdb;
       $last = $wpdb->last_error ? $wpdb->last_error : 'unknown_db_error';
@@ -1753,18 +1753,8 @@ class MRM_Payments_Hub_Single {
       ), 500);
     }
 
-    // Granting rule: add to per-product list as well
-    $this->add_email_to_access_list($sku, $email);
-
-    // Also append plaintext email to the approved list for admin visibility.
-    $lists = $this->get_email_lists();
-    if (!isset($lists[$sku]) || !is_array($lists[$sku])) $lists[$sku] = array();
-    $lower = strtolower($email);
-    if (!in_array($lower, $lists[$sku], true)) {
-      $lists[$sku][] = $lower;
-      sort($lists[$sku]);
-      $this->save_email_lists($lists);
-    }
+    // ✅ Access source of truth: DB ledger row only.
+    // Do NOT also mirror into the per-product "Approved Emails (OTP Access)" product UI.
 
     return new WP_REST_Response(array(
       'ok' => true,
@@ -1811,7 +1801,7 @@ class MRM_Payments_Hub_Single {
     ), 200);
   }
 
-  private function grant_sheet_music_access($email_hash, $sku, $source = null, $source_id = null) {
+  private function grant_sheet_music_access($email_hash, $email_plain, $sku, $source = null, $source_id = null) {
     global $wpdb;
     $table = $this->table_sheet_music_access();
     $now = current_time('mysql');
@@ -1824,13 +1814,17 @@ class MRM_Payments_Hub_Single {
     if ($existing) return true;
 
     $ins = $wpdb->insert($table, array(
-      'email_hash' => $email_hash,
-      'sku' => $sku,
-      'granted_at' => $now,
-      'revoked_at' => null,
-      'source' => $source,
-      'source_id' => $source_id,
-    ), array('%s','%s','%s','%s','%s','%s'));
+      'email_hash'  => $email_hash,
+      'email_plain' => $email_plain,
+      'sku'         => $sku,
+      'start_at'    => $now,
+      'expires_at'  => null,
+      'month_key'   => null,
+      'granted_at'  => $now,
+      'revoked_at'  => null,
+      'source'      => $source,
+      'source_id'   => $source_id,
+    ), array('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'));
 
     return (bool)$ins;
   }
@@ -1935,6 +1929,55 @@ class MRM_Payments_Hub_Single {
 
       $this->save_settings($settings);
 
+      // ✅ Manual access row inserts (row-based UI)
+      if (
+        isset($_POST['mrm_access_add_slug'], $_POST['mrm_access_add_email']) &&
+        is_array($_POST['mrm_access_add_slug']) &&
+        is_array($_POST['mrm_access_add_email'])
+      ) {
+        global $wpdb;
+        $access_table = $this->table_sheet_music_access();
+
+        // Ensure DB exists
+        $this->maybe_install_or_upgrade_db();
+
+        foreach ($_POST['mrm_access_add_slug'] as $i => $slug_raw) {
+          $slug = $this->sanitize_product_slug($slug_raw);
+          $email = sanitize_email((string)($_POST['mrm_access_add_email'][$i] ?? ''));
+
+          if (!$slug) continue;
+          if (!$email || !is_email($email)) continue;
+
+          $purchase_raw = (string)($_POST['mrm_access_add_purchase'][$i] ?? '');
+          $expires_raw  = (string)($_POST['mrm_access_add_expires'][$i] ?? '');
+
+          $purchase_dt = $purchase_raw ? date('Y-m-d 00:00:00', strtotime($purchase_raw)) : current_time('mysql');
+          $expires_dt  = $expires_raw ? date('Y-m-d 00:00:00', strtotime($expires_raw)) : null;
+
+          $email_hash = $this->email_hash($email);
+
+          // Idempotent: skip if already active
+          $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$access_table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+            $email_hash, $slug
+          ));
+          if ($existing) continue;
+
+          $wpdb->insert($access_table, array(
+            'email_hash'  => $email_hash,
+            'email_plain' => $email,
+            'sku'         => $slug,
+            'start_at'    => $purchase_dt,
+            'expires_at'  => $expires_dt,
+            'month_key'   => null,
+            'granted_at'  => current_time('mysql'),
+            'revoked_at'  => null,
+            'source'      => 'manual_admin',
+            'source_id'   => null,
+          ), array('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'));
+        }
+      }
+
       // Save Access Lists
       if (isset($_POST['mrm_access_slug']) && is_array($_POST['mrm_access_slug'])
           && isset($_POST['mrm_access_emails']) && is_array($_POST['mrm_access_emails'])) {
@@ -1971,8 +2014,6 @@ class MRM_Payments_Hub_Single {
       $categories = isset($_POST['category']) ? (array)$_POST['category'] : array();
       $composer_pcts = isset($_POST['composer_pct']) ? (array)$_POST['composer_pct'] : array();
       $deletes = isset($_POST['delete']) ? (array)$_POST['delete'] : array();
-      $approved_emails = isset($_POST['approved_emails']) ? (array)$_POST['approved_emails'] : array();
-      $email_lists = $this->get_email_lists();
 
       $allowed_currencies = array('usd', 'eur');
       $allowed_types = array('lesson', 'sheet_music');
@@ -2047,88 +2088,12 @@ class MRM_Payments_Hub_Single {
       }
 
       $this->save_products($products);
-      // Save approved email lists per SKU (sheet_music only) and mirror into access table.
-      $access_table = $this->table_sheet_music_access();
-      global $wpdb;
-
-      foreach ($skus as $index => $sku_raw) {
-        $original_sku = $this->sanitize_sku((string)($original_skus[$index] ?? ''));
-        $current_sku = $original_sku ? $original_sku : $this->sanitize_sku($sku_raw);
-        if (!empty($deletes[$index])) {
-          if ($current_sku) {
-            unset($email_lists[$current_sku]);
-          }
-          continue;
-        }
-
-        // Resolve final SKU the same way the product save loop does.
-        $type = sanitize_text_field((string)($types[$index] ?? 'sheet_music'));
-        if ($type !== 'sheet_music') continue;
-
-        $label_raw = sanitize_text_field((string)($labels[$index] ?? ''));
-        $category = sanitize_text_field((string)($categories[$index] ?? 'fundamentals'));
-        $final_sku = $this->generate_sheet_music_sku($label_raw, $category, $current_sku);
-        $final_sku = $this->sanitize_sku($final_sku);
-        if (!$final_sku) continue;
-
-        if ($final_sku === $this->mrm_master_all_sheet_music_sku()) {
-          continue;
-        }
-
-        $raw_lines = (string)($approved_emails[$index] ?? '');
-        $emails = $this->normalize_email_lines($raw_lines);
-
-        // Persist plaintext list
-        $email_lists[$final_sku] = $emails;
-
-        // Mirror to access table:
-        // - grant for all in list
-        // - revoke any previously granted by 'manual_list' not in the list
-        $now = current_time('mysql');
-        $wanted_hashes = array();
-        foreach ($emails as $e) {
-          $eh = $this->email_hash($e);
-          $wanted_hashes[$eh] = true;
-
-          // Insert if not exists active
-          $existing_id = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$access_table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
-            $eh, $final_sku
-          ));
-          if (!$existing_id) {
-            $wpdb->insert($access_table, array(
-              'email_hash' => $eh,
-              'sku' => $final_sku,
-              'granted_at' => $now,
-              'revoked_at' => null,
-              'source' => 'manual_list',
-              'source_id' => null,
-            ), array('%s','%s','%s','%s','%s','%s'));
-          }
-        }
-
-        // Revoke entries sourced from manual_list that are no longer wanted
-        $rows = $wpdb->get_results($wpdb->prepare(
-          "SELECT id,email_hash FROM {$access_table} WHERE sku=%s AND revoked_at IS NULL AND source='manual_list'",
-          $final_sku
-        ), ARRAY_A);
-
-        foreach ($rows as $r) {
-          $eh = (string)$r['email_hash'];
-          if (!isset($wanted_hashes[$eh])) {
-            $wpdb->update($access_table, array('revoked_at' => $now), array('id' => intval($r['id'])), array('%s'), array('%d'));
-          }
-        }
-      }
-
-      $this->save_email_lists($email_lists);
       add_settings_error('mrm_pay_hub', 'products_saved', 'Products saved.', 'updated');
     }
   }
 
   private function render_products_ui() {
     $products = $this->all_products();
-    $email_lists = $this->get_email_lists();
     $all_sku = $this->get_all_sheet_music_sku();
     $lesson_categories = array(
       '60_online' => '60 Online',
@@ -2228,10 +2193,7 @@ class MRM_Payments_Hub_Single {
                 <input type="number" name="composer_pct[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['composer_pct'] ?? '')); ?>" class="small-text" min="0" max="100" />
               </label>
             </p>
-            <?php if ($type === 'sheet_music') :
-              $emails = isset($email_lists[$sku]) && is_array($email_lists[$sku]) ? $email_lists[$sku] : array();
-              $text = esc_textarea(implode("\n", $emails));
-            ?>
+            <?php if ($type === 'sheet_music') : ?>
               <hr />
               <?php if ($sku === $all_sku) :
                 global $wpdb;
@@ -2265,12 +2227,6 @@ class MRM_Payments_Hub_Single {
                   <?php endif; ?>
                   </tbody>
                 </table>
-              <?php else : ?>
-                <p><strong>Approved Emails (OTP Access)</strong></p>
-                <p>
-                  <textarea name="approved_emails[<?php echo esc_attr($current_index); ?>]" rows="6" style="width:100%;font-family:monospace;"><?php echo $text; ?></textarea>
-                  <small>One email per line.</small>
-                </p>
               <?php endif; ?>
             <?php endif; ?>
             <p>
@@ -2511,19 +2467,26 @@ class MRM_Payments_Hub_Single {
                 $lists['all-sheet-music'] = array();
               }
 
-              // Build a stable list of rows: master + any existing keys
+              // Keys from option lists
               $keys = array_keys($lists);
+
+              // Also include any SKU present in access table
+              global $wpdb;
+              $access_table = $wpdb->prefix . 'mrm_sheet_music_access';
+              $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $access_table));
+              if ($exists === $access_table) {
+                $db_keys = $wpdb->get_col("SELECT DISTINCT sku FROM {$access_table} ORDER BY sku ASC");
+                if (is_array($db_keys)) $keys = array_merge($keys, $db_keys);
+              }
+
+              $keys = array_filter(array_map(array($this, 'sanitize_product_slug'), $keys));
               sort($keys);
 
               // Ensure master is first
               $keys = array_values(array_unique(array_merge(array('all-sheet-music'), $keys)));
 
-              global $wpdb;
-              $access_table = $wpdb->prefix . 'mrm_sheet_music_access';
-
               foreach ($keys as $k) {
                 $safe_k = esc_attr($k);
-                $val = isset($lists[$k]) && is_array($lists[$k]) ? implode("\n", $lists[$k]) : '';
                 $results = $wpdb->get_results($wpdb->prepare(
                   "SELECT email_plain, start_at, expires_at FROM {$access_table} WHERE sku = %s AND revoked_at IS NULL ORDER BY start_at DESC",
                   $k
@@ -2532,10 +2495,19 @@ class MRM_Payments_Hub_Single {
                 <tr>
                   <td><input type="text" name="mrm_access_slug[]" value="<?php echo $safe_k; ?>" style="width:100%;" /></td>
                   <td>
-                    <textarea name="mrm_access_emails[]" rows="4" style="width:100%; font-family: monospace;"><?php echo esc_textarea($val); ?></textarea>
+                    <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+                      <input type="email" name="mrm_access_add_email[]" value="" placeholder="email@example.com" style="flex:1; max-width: 360px;" />
+                      <input type="date" name="mrm_access_add_purchase[]" value="" style="width:160px;" />
+                      <input type="date" name="mrm_access_add_expires[]" value="" style="width:160px;" />
+                      <input type="hidden" name="mrm_access_add_slug[]" value="<?php echo esc_attr($k); ?>" />
+                      <span style="opacity:.75;">(purchase / expires optional)</span>
+                    </div>
+                    <p style="margin:0;">
+                      <small>Add one email at a time. Leave “expires” blank for never.</small>
+                    </p>
                     <table class="widefat" style="margin-top:8px;">
                       <thead>
-                        <tr><th>Email</th><th>Start date</th><th>Expires</th></tr>
+                        <tr><th>Email</th><th>Purchase date</th><th>Expires</th></tr>
                       </thead>
                       <tbody>
                         <?php if (!empty($results)) : ?>
@@ -2562,7 +2534,18 @@ class MRM_Payments_Hub_Single {
             <!-- blank row to add a new slug -->
             <tr>
               <td><input type="text" name="mrm_access_slug[]" value="" placeholder="new-product-slug" style="width:100%;" /></td>
-              <td><textarea name="mrm_access_emails[]" rows="4" style="width:100%; font-family: monospace;" placeholder="email1@example.com&#10;email2@example.com"></textarea></td>
+              <td>
+                <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+                  <input type="email" name="mrm_access_add_email[]" value="" placeholder="email@example.com" style="flex:1; max-width: 360px;" />
+                  <input type="date" name="mrm_access_add_purchase[]" value="" style="width:160px;" />
+                  <input type="date" name="mrm_access_add_expires[]" value="" style="width:160px;" />
+                  <input type="hidden" name="mrm_access_add_slug[]" value="" />
+                  <span style="opacity:.75;">(purchase / expires optional)</span>
+                </div>
+                <p style="margin:0;">
+                  <small>Add one email at a time. Leave “expires” blank for never.</small>
+                </p>
+              </td>
             </tr>
           </tbody>
         </table>
