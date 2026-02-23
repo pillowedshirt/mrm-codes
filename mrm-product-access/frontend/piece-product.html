@@ -161,6 +161,13 @@ a{ -webkit-tap-highlight-color:transparent; }
   color: #000 !important;
 }
 
+/* =========================
+   Confirm Total Modal: center pane
+   ========================= */
+#mrm-confirm-total-overlay{
+  align-items: center !important;
+}
+
 /* PDF */
 .pdf-preview{
   width: min(860px, 100%);
@@ -1094,7 +1101,7 @@ a{ -webkit-tap-highlight-color:transparent; }
       const total = Number(opts.amount_cents ?? (base + tax));
 
       // ✅ CRITICAL: This feeds the Confirm Total popup
-      pendingBreakdown = { label, base_amount_cents: base, tax_cents: tax, amount_cents: total };
+      pendingBreakdown = { sku: pendingSku, label, base_amount_cents: base, tax_cents: tax, amount_cents: total };
 
       const rows = [];
       rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${esc(label)}</span><strong>${money(base)}</strong></div>`);
@@ -1257,7 +1264,7 @@ a{ -webkit-tap-highlight-color:transparent; }
     const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + tax);
 
     const rows = [];
-    const itemLabel = String(breakdown?.label || 'Sheet music');
+    const itemLabel = String(breakdown?.sku || 'Sheet music');
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
     rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
