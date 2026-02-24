@@ -1050,6 +1050,65 @@ a{ -webkit-tap-highlight-color:transparent; }
     return String(raw || '').trim().toLowerCase();
   }
 
+  function inferSheetMusicTypeFromOfferEl(offerEl){
+    if (!offerEl) return '';
+
+    const rawSlug = String(offerEl.dataset.productSlug || '').toLowerCase();
+    const title = String((offerEl.querySelector('.offer-title') || {}).textContent || '').toLowerCase();
+    const subtitle = String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').toLowerCase();
+    const text = `${rawSlug} ${title} ${subtitle}`;
+
+    // Exact / obvious matches first
+    if (/complete-package/.test(text)) return 'complete-package';
+    if (/trombone[-\s]*euphonium/.test(text) || (/trombone/.test(text) && /euphonium/.test(text))) return 'trombone-euphonium';
+    if (/\btuba\b/.test(text)) return 'tuba';
+    if (/fundamental/.test(text)) return 'fundamentals';
+
+    // Legacy wording fallbacks (adjust if your titles use different wording)
+    if (/full[\s-]*piece|complete|bundle|all parts|all versions/.test(text)) return 'complete-package';
+
+    return '';
+  }
+
+  async function resolveCanonicalHubSkuForOffer(offerEl){
+    const rawSku = String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase();
+    if (!rawSku) return '';
+
+    // If already looks like canonical Payments Hub piece SKU (including possible numeric suffix), keep it.
+    if (/^piece-[a-z0-9-]+-(fundamentals|trombone-euphonium|tuba|complete-package)(-\d+)?$/.test(rawSku)) {
+      return rawSku;
+    }
+
+    const pieceSlug = getPieceSlugFromUrl();
+    const type = inferSheetMusicTypeFromOfferEl(offerEl);
+
+    if (!pieceSlug || !type) {
+      console.warn('[MRM] Could not infer canonical piece SKU type; using configured offer slug:', { rawSku, pieceSlug, type });
+      return rawSku;
+    }
+
+    try {
+      const r = await fetch(`/wp-json/mrm-pay/v1/resolve?piece_slug=${encodeURIComponent(pieceSlug)}&type=${encodeURIComponent(type)}`, {
+        method: 'GET'
+      });
+      const data = await r.json().catch(() => ({}));
+
+      if (r.ok && data && data.ok && data.sku) {
+        const resolved = String(data.sku).trim().toLowerCase();
+        if (resolved && resolved !== rawSku) {
+          console.info('[MRM] Resolved canonical hub SKU for offer', { rawSku, resolved, pieceSlug, type });
+        }
+        return resolved || rawSku;
+      }
+
+      console.warn('[MRM] Hub SKU resolve failed; falling back to configured offer slug', { rawSku, pieceSlug, type, data });
+      return rawSku;
+    } catch (e) {
+      console.warn('[MRM] Hub SKU resolve request error; falling back to configured offer slug', e);
+      return rawSku;
+    }
+  }
+
   function renderPiecePaymentBreakdown(breakdown){
     const instructions = document.getElementById('payment-instructions');
     if (!instructions) return;
@@ -1905,9 +1964,12 @@ a{ -webkit-tap-highlight-color:transparent; }
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
-        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
+        const rawSku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
 
-        if (!sku) { alert('Missing product_slug for this offer.'); return; }
+        if (!rawSku) { alert('Missing product_slug for this offer.'); return; }
+
+        const sku = await resolveCanonicalHubSkuForOffer(offerEl);
+        if (!sku) { alert('Unable to determine product SKU for this offer.'); return; }
 
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
         let quoteData = null;
@@ -1941,8 +2003,11 @@ a{ -webkit-tap-highlight-color:transparent; }
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
-        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
-        if (!sku) { alert('Missing product_slug for this offer.'); return; }
+        const rawSku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
+        if (!rawSku) { alert('Missing product_slug for this offer.'); return; }
+
+        const sku = await resolveCanonicalHubSkuForOffer(offerEl);
+        if (!sku) { alert('Unable to determine product SKU for this offer.'); return; }
 
         openOtpModal(sku);
       });
