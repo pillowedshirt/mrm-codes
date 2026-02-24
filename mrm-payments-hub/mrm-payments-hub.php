@@ -1739,9 +1739,43 @@ class MRM_Payments_Hub_Single {
 
     // Accept sku or product_slug (canonical is product_slug)
     $incoming_slug = isset($data['product_slug']) ? $data['product_slug'] : ($data['sku'] ?? '');
-    $sku   = $this->sanitize_sku($incoming_slug); // keep sanitize_sku for now, but we treat sku == product_slug
+    $sku   = $this->sanitize_sku($incoming_slug);
     $email = sanitize_email((string)($data['email'] ?? ''));
     $pi_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
+
+    // If payment_intent_id is provided, verify it succeeded and bind grant inputs to PI metadata.
+    // This prevents stale/mismatched frontend state from granting the wrong product/email.
+    if ($pi_id) {
+      $pi = $this->stripe_retrieve_payment_intent($pi_id);
+      if (is_wp_error($pi)) {
+        return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
+      }
+
+      $status = (string)($pi['status'] ?? '');
+      if ($status !== 'succeeded') {
+        return new WP_REST_Response(array('ok'=>false,'message'=>'PaymentIntent not succeeded.'), 400);
+      }
+
+      $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+
+      $pi_sku = $this->sanitize_sku((string)($meta['mrm_sku'] ?? ''));
+      $pi_email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
+
+      // Prefer PI metadata as the source of truth when available.
+      if ($pi_sku) {
+        if ($sku && $sku !== $pi_sku) {
+          error_log('[MRM Payments Hub] grant-sheet-music-access sku mismatch; request=' . $sku . ' pi_meta=' . $pi_sku . ' pi=' . $pi_id);
+        }
+        $sku = $pi_sku;
+      }
+
+      if ($pi_email && is_email($pi_email)) {
+        if ($email && strtolower($email) !== strtolower($pi_email)) {
+          error_log('[MRM Payments Hub] grant-sheet-music-access email mismatch; request=' . $email . ' pi_meta=' . $pi_email . ' pi=' . $pi_id);
+        }
+        $email = $pi_email;
+      }
+    }
 
     if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
     if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
@@ -1754,17 +1788,6 @@ class MRM_Payments_Hub_Single {
     $product_type = (string)($p['product_type'] ?? 'unknown');
     if ($product_type !== 'sheet_music') {
       return new WP_REST_Response(array('ok'=>false,'message'=>'SKU is not sheet_music.'), 400);
-    }
-
-    // If payment_intent_id is provided, require it to be succeeded.
-    if ($pi_id) {
-      $pi = $this->stripe_retrieve_payment_intent($pi_id);
-      if (is_wp_error($pi)) return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
-
-      $status = (string)($pi['status'] ?? '');
-      if ($status !== 'succeeded') {
-        return new WP_REST_Response(array('ok'=>false,'message'=>'PaymentIntent not succeeded.'), 400);
-      }
     }
 
     // DB guard (updates can skip activation hook)
@@ -1787,7 +1810,6 @@ class MRM_Payments_Hub_Single {
 
     $ok = $this->grant_sheet_music_access($email_hash, $email, $sku, $pi_id ? 'stripe_pi' : 'manual', $pi_id);
     if (!$ok) {
-      global $wpdb;
       $last = $wpdb->last_error ? $wpdb->last_error : 'unknown_db_error';
       error_log('[MRM Payments Hub] grant_sheet_music_access insert failed sku=' . $sku . ' email_hash=' . $email_hash . ' err=' . $last);
 
@@ -1807,6 +1829,7 @@ class MRM_Payments_Hub_Single {
       'sku' => $sku,
     ), 200);
   }
+
 
   public function rest_has_access(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
