@@ -1410,6 +1410,47 @@ a{ -webkit-tap-highlight-color:transparent; }
     let gData = {};
     try { gData = await gRes.json(); } catch(e) {}
 
+    console.log('[MRM] grant-sheet-music-access response', { status: gRes.status, data: gData });
+
+    if(!gRes.ok || !gData.ok){
+      const msg = (gData && (gData.message || gData.debug)) ? (gData.message || gData.debug) : 'Access grant failed.';
+      throw new Error(msg);
+    }
+
+    mrmShowPieceSuccessPopup(
+      'Thank you!',
+      'Access has been granted. Check your email for download instructions.'
+    );
+
+    return gData;
+  }
+
+
+  async function verifyAndGrantByPiOnly(piId){
+    const vRes = await fetch('/wp-json/mrm-pay/v1/verify-payment-intent', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ payment_intent_id: piId })
+    });
+
+    let vData = {};
+    try { vData = await vRes.json(); } catch(e) {}
+
+    if(!vRes.ok || !vData.ok){
+      const msg = (vData && (vData.message || vData.debug)) ? (vData.message || vData.debug) : 'Payment not completed.';
+      throw new Error(msg);
+    }
+
+    // Grant by PI only; backend will bind sku/email from PaymentIntent metadata.
+    const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ payment_intent_id: piId })
+    });
+
+    let gData = {};
+    try { gData = await gRes.json(); } catch(e) {}
+
     if(!gRes.ok || !gData.ok){
       const msg = (gData && (gData.message || gData.debug)) ? (gData.message || gData.debug) : 'Access grant failed.';
       throw new Error(msg);
@@ -1428,20 +1469,26 @@ a{ -webkit-tap-highlight-color:transparent; }
     const piId = params.get('payment_intent');
     if (!piId) return;
 
-    const redirectStatus = params.get('redirect_status') || '';
     const stored = sessionStorage.getItem('mrmPiecePayment');
 
-    // If Stripe returned but sessionStorage context is missing, surface a clear message instead of silent no-op.
+    // If Stripe returned but sessionStorage context is missing, try a PI-only finalize using backend metadata.
     if (!stored) {
-      const errorEl = document.getElementById('mrm-payment-error');
-      if (errorEl && redirectStatus) {
-        errorEl.textContent = 'Payment returned from Stripe, but purchase context was missing. Please try the Access button with your purchase email.';
-      }
-      // Clean Stripe params from URL to avoid repeated handling loops
-      try {
-        const cleanUrl = window.location.pathname + (window.location.hash || '');
-        window.history.replaceState({}, document.title, cleanUrl);
-      } catch (e) {}
+      verifyAndGrantByPiOnly(piId)
+        .catch((err) => {
+          console.error('[MRM] Stripe return PI-only finalize failed:', err);
+          const errorEl = document.getElementById('mrm-payment-error');
+          if (errorEl) {
+            errorEl.textContent = (err && err.message)
+              ? err.message
+              : 'Payment returned from Stripe, but purchase finalization could not be completed.';
+          }
+        })
+        .finally(() => {
+          try {
+            const cleanUrl = window.location.pathname + (window.location.hash || '');
+            window.history.replaceState({}, document.title, cleanUrl);
+          } catch (e) {}
+        });
       return;
     }
 
@@ -1969,6 +2016,11 @@ a{ -webkit-tap-highlight-color:transparent; }
         if (!rawSku) { alert('Missing product_slug for this offer.'); return; }
 
         const sku = await resolveCanonicalHubSkuForOffer(offerEl);
+        console.log('[MRM] Purchase SKU resolved', {
+          raw_offer_slug: rawSku,
+          resolved_sku: sku,
+          piece_slug: getPieceSlugFromUrl()
+        });
         if (!sku) { alert('Unable to determine product SKU for this offer.'); return; }
 
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';

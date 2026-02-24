@@ -1923,7 +1923,15 @@ class MRM_Payments_Hub_Single {
       "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
       $email_hash, $sku
     ));
-    if ($existing) return true;
+
+    if ($existing) {
+      // Back-compat mirror: ensure legacy email-based access list is also populated.
+      // DB ledger remains source of truth.
+      if ($email_plain && is_email($email_plain)) {
+        $this->add_email_to_access_list($sku, $email_plain);
+      }
+      return true;
+    }
 
     $ins = $wpdb->insert($table, array(
       'email_hash'  => $email_hash,
@@ -1938,7 +1946,16 @@ class MRM_Payments_Hub_Single {
       'source_id'   => $source_id,
     ), array('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'));
 
-    return (bool)$ins;
+    if ($ins) {
+      // Back-compat mirror: also write to email-based access list UI data.
+      // This keeps older UI paths and expectations in sync with DB ledger rows.
+      if ($email_plain && is_email($email_plain)) {
+        $this->add_email_to_access_list($sku, $email_plain);
+      }
+      return true;
+    }
+
+    return false;
   }
 
   public function grant_all_sheet_music_db_row($email, $source = null, $source_id = null) {
