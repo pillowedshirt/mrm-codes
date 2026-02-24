@@ -1396,33 +1396,23 @@ a{ -webkit-tap-highlight-color:transparent; }
     let vData = {};
     try { vData = await vRes.json(); } catch(e) {}
 
+    console.log('[MRM] verify-payment-intent response', { status: vRes.status, data: vData, requestedSku: sku, requestedEmail: email });
+
     if(!vRes.ok || !vData.ok){
       const msg = (vData && (vData.message || vData.debug)) ? (vData.message || vData.debug) : 'Payment not completed.';
       throw new Error(msg);
     }
 
-    const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ product_slug: sku, email: email, payment_intent_id: piId })
-    });
-
-    let gData = {};
-    try { gData = await gRes.json(); } catch(e) {}
-
-    console.log('[MRM] grant-sheet-music-access response', { status: gRes.status, data: gData });
-
-    if(!gRes.ok || !gData.ok){
-      const msg = (gData && (gData.message || gData.debug)) ? (gData.message || gData.debug) : 'Access grant failed.';
-      throw new Error(msg);
-    }
+    // IMPORTANT:
+    // Payments Hub verify endpoint is the source of truth and already auto-grants
+    // piece sheet-music access from PaymentIntent metadata (and mirrors to email-based list).
 
     mrmShowPieceSuccessPopup(
       'Thank you!',
       'Access has been granted. Check your email for download instructions.'
     );
 
-    return gData;
+    return vData;
   }
 
 
@@ -1436,23 +1426,10 @@ a{ -webkit-tap-highlight-color:transparent; }
     let vData = {};
     try { vData = await vRes.json(); } catch(e) {}
 
+    console.log('[MRM] verify-payment-intent (PI-only) response', { status: vRes.status, data: vData, piId });
+
     if(!vRes.ok || !vData.ok){
       const msg = (vData && (vData.message || vData.debug)) ? (vData.message || vData.debug) : 'Payment not completed.';
-      throw new Error(msg);
-    }
-
-    // Grant by PI only; backend will bind sku/email from PaymentIntent metadata.
-    const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ payment_intent_id: piId })
-    });
-
-    let gData = {};
-    try { gData = await gRes.json(); } catch(e) {}
-
-    if(!gRes.ok || !gData.ok){
-      const msg = (gData && (gData.message || gData.debug)) ? (gData.message || gData.debug) : 'Access grant failed.';
       throw new Error(msg);
     }
 
@@ -1461,7 +1438,7 @@ a{ -webkit-tap-highlight-color:transparent; }
       'Access has been granted. Check your email for download instructions.'
     );
 
-    return gData;
+    return vData;
   }
 
   function checkReturnFromStripe(){
