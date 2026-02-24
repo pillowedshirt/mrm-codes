@@ -62,22 +62,60 @@ class MRM_Payments_Hub_Single {
   }
 
   public function maybe_install_or_upgrade_db() {
-    // Run a lightweight existence check; only dbDelta if needed.
+    // Run a lightweight existence + schema check; only dbDelta if needed.
     global $wpdb;
 
     $orders = $this->table_orders();
     $links  = $this->table_links();
     $access = $this->table_sheet_music_access();
 
-    $missing = false;
+    $needs_upgrade = false;
 
+    // 1) Table existence check
     foreach (array($orders, $links, $access) as $t) {
       $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
-      if ($found !== $t) { $missing = true; break; }
+      if ($found !== $t) {
+        $needs_upgrade = true;
+        break;
+      }
     }
 
-    if ($missing) {
-      error_log('[MRM Payments Hub] DB tables missing; running install_or_upgrade_db().');
+    // 2) Access-table schema check (important after plugin updates)
+    if (!$needs_upgrade) {
+      $required_access_columns = array(
+        'email_hash',
+        'email_plain',
+        'sku',
+        'start_at',
+        'expires_at',
+        'month_key',
+        'granted_at',
+        'revoked_at',
+        'source',
+        'source_id',
+      );
+
+      $existing_cols = array();
+      $cols = $wpdb->get_results("SHOW COLUMNS FROM {$access}");
+      if (is_array($cols)) {
+        foreach ($cols as $c) {
+          if (!empty($c->Field)) {
+            $existing_cols[] = (string)$c->Field;
+          }
+        }
+      }
+
+      foreach ($required_access_columns as $col) {
+        if (!in_array($col, $existing_cols, true)) {
+          $needs_upgrade = true;
+          error_log('[MRM Payments Hub] Access table missing column: ' . $col . ' — running install_or_upgrade_db().');
+          break;
+        }
+      }
+    }
+
+    if ($needs_upgrade) {
+      error_log('[MRM Payments Hub] DB schema upgrade required; running install_or_upgrade_db().');
       $this->install_or_upgrade_db();
     }
 
