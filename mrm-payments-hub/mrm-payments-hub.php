@@ -237,6 +237,10 @@ class MRM_Payments_Hub_Single {
     return 'all-sheet-music';
   }
 
+  private function master_sheet_music_sku() {
+    return $this->mrm_master_all_sheet_music_sku();
+  }
+
   public function mrm_is_all_sheet_music_active_for_month($email, $month_key) {
     $email = sanitize_email((string)$email);
     if (!$email || !is_email($email)) return false;
@@ -1696,18 +1700,51 @@ class MRM_Payments_Hub_Single {
     $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
     $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
 
+    $start_ts = 0;
+    if (isset($pi['charges']['data'][0]['created'])) {
+      $start_ts = (int)$pi['charges']['data'][0]['created'];
+    } elseif (isset($pi['created'])) {
+      $start_ts = (int)$pi['created'];
+    } else {
+      $start_ts = time();
+    }
+
+    // Scheduler lesson addon path (existing behavior)
     if ($ok && $addon_yes) {
       $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
       if ($email && is_email($email)) {
-        $start_ts = 0;
-        if (isset($pi['charges']['data'][0]['created'])) {
-          $start_ts = (int)$pi['charges']['data'][0]['created'];
-        } elseif (isset($pi['created'])) {
-          $start_ts = (int)$pi['created'];
-        } else {
-          $start_ts = time();
-        }
         $this->mrm_grant_all_sheet_music_ledger($email, $start_ts, 'stripe_pi_addon', $pi_id);
+      }
+    }
+
+    // ✅ Piece-product path (new): auto-grant specific sheet-music SKU from PI metadata,
+    // same backend-driven pattern as scheduler verify flow.
+    if ($ok) {
+      $pi_product_type = sanitize_text_field((string)($meta['mrm_product_type'] ?? ''));
+      $pi_sku = $this->sanitize_sku((string)($meta['mrm_sku'] ?? ''));
+      $pi_email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
+
+      if ($pi_product_type === 'sheet_music' && $pi_sku && $pi_email && is_email($pi_email)) {
+        // Do not double-handle the scheduler addon master SKU here.
+        if ($pi_sku !== $this->master_sheet_music_sku()) {
+          $pi_product = $this->get_product($pi_sku);
+
+          if ($pi_product && !empty($pi_product['active']) && (string)($pi_product['product_type'] ?? '') === 'sheet_music') {
+            $email_hash = $this->email_hash($pi_email);
+            $granted = $this->grant_sheet_music_access(
+              $email_hash,
+              $pi_email,
+              $pi_sku,
+              'stripe_pi_verify',
+              $pi_id,
+              $start_ts
+            );
+
+            if (!$granted) {
+              error_log('[MRM Payments Hub] verify PI auto-grant failed for piece sku=' . $pi_sku . ' pi=' . $pi_id);
+            }
+          }
+        }
       }
     }
 
@@ -1869,10 +1906,17 @@ class MRM_Payments_Hub_Single {
     ), 200);
   }
 
-  private function grant_sheet_music_access($email_hash, $email_plain, $sku, $source = null, $source_id = null) {
+  private function grant_sheet_music_access($email_hash, $email_plain, $sku, $source = null, $source_id = null, $start_ts = null) {
     global $wpdb;
     $table = $this->table_sheet_music_access();
-    $now = current_time('mysql');
+
+    // Default to "now", but allow caller to pass Stripe charge/create timestamp.
+    $now_mysql = current_time('mysql');
+    $start_at_mysql = $now_mysql;
+
+    if ($start_ts !== null && is_numeric($start_ts) && (int)$start_ts > 0) {
+      $start_at_mysql = gmdate('Y-m-d H:i:s', (int)$start_ts);
+    }
 
     // If already granted (active row exists), treat as idempotent success.
     $existing = $wpdb->get_var($wpdb->prepare(
@@ -1885,10 +1929,10 @@ class MRM_Payments_Hub_Single {
       'email_hash'  => $email_hash,
       'email_plain' => $email_plain,
       'sku'         => $sku,
-      'start_at'    => $now,
-      'expires_at'  => null,
+      'start_at'    => $start_at_mysql,
+      'expires_at'  => null,              // piece purchases never expire
       'month_key'   => null,
-      'granted_at'  => $now,
+      'granted_at'  => $now_mysql,
       'revoked_at'  => null,
       'source'      => $source,
       'source_id'   => $source_id,
