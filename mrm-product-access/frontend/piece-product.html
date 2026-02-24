@@ -1368,14 +1368,47 @@ a{ -webkit-tap-highlight-color:transparent; }
     const params = new URLSearchParams(window.location.search);
     const piId = params.get('payment_intent');
     if (!piId) return;
+
+    const redirectStatus = params.get('redirect_status') || '';
     const stored = sessionStorage.getItem('mrmPiecePayment');
-    if (!stored) return;
+
+    // If Stripe returned but sessionStorage context is missing, surface a clear message instead of silent no-op.
+    if (!stored) {
+      const errorEl = document.getElementById('mrm-payment-error');
+      if (errorEl && redirectStatus) {
+        errorEl.textContent = 'Payment returned from Stripe, but purchase context was missing. Please try the Access button with your purchase email.';
+      }
+      // Clean Stripe params from URL to avoid repeated handling loops
+      try {
+        const cleanUrl = window.location.pathname + (window.location.hash || '');
+        window.history.replaceState({}, document.title, cleanUrl);
+      } catch (e) {}
+      return;
+    }
+
     try {
       const ctx = JSON.parse(stored);
       if (ctx && ctx.email && ctx.sku) {
-        verifyAndGrant(piId, ctx.email, ctx.sku).finally(() => {
-          sessionStorage.removeItem('mrmPiecePayment');
-        });
+        verifyAndGrant(piId, ctx.email, ctx.sku)
+          .catch((err) => {
+            console.error('[MRM] Stripe return verifyAndGrant failed:', err);
+            const errorEl = document.getElementById('mrm-payment-error');
+            if (errorEl) {
+              errorEl.textContent = (err && err.message)
+                ? err.message
+                : 'Payment verification or access grant failed after returning from Stripe.';
+            }
+          })
+          .finally(() => {
+            sessionStorage.removeItem('mrmPiecePayment');
+            // Clean Stripe params from URL after handling
+            try {
+              const cleanUrl = window.location.pathname + (window.location.hash || '');
+              window.history.replaceState({}, document.title, cleanUrl);
+            } catch (e) {}
+          });
+      } else {
+        sessionStorage.removeItem('mrmPiecePayment');
       }
     } catch (e) {
       sessionStorage.removeItem('mrmPiecePayment');
@@ -1790,9 +1823,13 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     const payBtn = document.getElementById('mrm-pay-btn');
     if (payBtn) {
-      payBtn.onclick = async function () {
+      payBtn.onclick = async function (evt) {
+        if (evt && typeof evt.preventDefault === 'function') evt.preventDefault();
+
         const errorEl = document.getElementById('mrm-payment-error');
         const email = (document.getElementById('mrm-payment-email').value || '').trim();
+
+        errorEl.textContent = '';
 
         if (!pendingSku) {
           errorEl.textContent = 'Missing SKU.';
@@ -1832,26 +1869,32 @@ a{ -webkit-tap-highlight-color:transparent; }
             return;
           }
 
-          // If Stripe returns immediately and succeeded, finalize access now
-          if (paymentIntent && paymentIntent.status === 'succeeded') {
+          // Immediate success path (most cards)
+          if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'requires_capture')) {
             try {
               await verifyAndGrant(paymentIntent.id, email, pendingSku);
               // success popup handles reload
               return;
             } catch (e) {
               console.error('[MRM] verifyAndGrant failed after successful payment:', e);
-              errorEl.textContent = 'Payment succeeded, but access setup did not finish. Please refresh and try Access, or contact support.';
+              errorEl.textContent = (e && e.message)
+                ? e.message
+                : 'Payment succeeded, but access setup did not finish. Please refresh and try Access, or contact support.';
               this.disabled = false;
               return;
             }
           }
 
-          // If no immediate paymentIntent (redirect path), re-enable button just in case user returns without redirect
+          // If Stripe did not return a terminal status immediately, rely on redirect-return handler.
+          // Keep the button enabled so user is not stuck if no redirect occurs.
+          if (paymentIntent && paymentIntent.status) {
+            console.warn('[MRM] Non-terminal immediate paymentIntent status:', paymentIntent.status);
+          }
           this.disabled = false;
 
         } catch (e) {
           console.error('[MRM] Pay flow error:', e);
-          errorEl.textContent = 'Unexpected error while processing payment.';
+          errorEl.textContent = (e && e.message) ? e.message : 'Unexpected error while processing payment.';
           this.disabled = false;
         }
       };
