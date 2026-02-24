@@ -1795,24 +1795,25 @@ a{ -webkit-tap-highlight-color:transparent; }
         const email = (document.getElementById('mrm-payment-email').value || '').trim();
 
         if (!pendingSku) {
-          errorEl.textContent = 'Missing SKU.';
-          return;
-        }
-        if (!pendingClientSecret || !activeStripeElements) {
-          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email.';
+          errorEl.textContent = 'Missing product selection.';
           return;
         }
 
+        if (!pendingClientSecret || !activeStripeElements) {
+          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email and ZIP.';
+          return;
+        }
+
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          errorEl.textContent = 'Please enter a valid email address.';
+          return;
+        }
+
+        errorEl.textContent = '';
         this.disabled = true;
 
         try {
-          const okToPay = await showConfirmTotal(pendingBreakdown);
-          if (!okToPay) {
-            this.disabled = false;
-            return;
-          }
-
-          // Save context so redirect-return handler can finalize access + popup
+          // Save context so Stripe redirect-return can finalize access if redirect is required
           try {
             sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
               email: email,
@@ -1832,26 +1833,20 @@ a{ -webkit-tap-highlight-color:transparent; }
             return;
           }
 
-          // If Stripe returns immediately and succeeded, finalize access now
+          // Immediate success path (no redirect required)
           if (paymentIntent && paymentIntent.status === 'succeeded') {
-            try {
-              await verifyAndGrant(paymentIntent.id, email, pendingSku);
-              // success popup handles reload
-              return;
-            } catch (e) {
-              console.error('[MRM] verifyAndGrant failed after successful payment:', e);
-              errorEl.textContent = 'Payment succeeded, but access setup did not finish. Please refresh and try Access, or contact support.';
-              this.disabled = false;
-              return;
-            }
+            await verifyAndGrant(paymentIntent.id, email, pendingSku);
+            // Success popup will show and handle page reload on close
+            return;
           }
 
-          // If no immediate paymentIntent (redirect path), re-enable button just in case user returns without redirect
+          // Redirect-required path: Stripe may redirect away and return.
+          // If no immediate status is returned, keep UI usable.
           this.disabled = false;
 
         } catch (e) {
-          console.error('[MRM] Pay flow error:', e);
-          errorEl.textContent = 'Unexpected error while processing payment.';
+          console.error('[MRM] Piece pay button flow error:', e);
+          errorEl.textContent = 'Unable to process payment right now. Please try again.';
           this.disabled = false;
         }
       };
