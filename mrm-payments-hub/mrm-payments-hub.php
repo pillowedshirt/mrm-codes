@@ -2021,6 +2021,62 @@ class MRM_Payments_Hub_Single {
         }
       }
 
+      // ✅ Edit / delete existing active access rows (row-based UI)
+      if (isset($_POST['mrm_access_row_id']) && is_array($_POST['mrm_access_row_id'])) {
+        global $wpdb;
+        $access_table = $this->table_sheet_music_access();
+        $this->maybe_install_or_upgrade_db();
+
+        $delete_ids = array();
+        if (isset($_POST['mrm_access_row_delete']) && is_array($_POST['mrm_access_row_delete'])) {
+          foreach ($_POST['mrm_access_row_delete'] as $did) {
+            $delete_ids[(int)$did] = true;
+          }
+        }
+
+        foreach ($_POST['mrm_access_row_id'] as $i => $id_raw) {
+          $row_id = (int)$id_raw;
+          if ($row_id <= 0) continue;
+
+          // Delete (revoke) row
+          if (isset($delete_ids[$row_id])) {
+            $wpdb->update(
+              $access_table,
+              array('revoked_at' => current_time('mysql')),
+              array('id' => $row_id),
+              array('%s'),
+              array('%d')
+            );
+            continue;
+          }
+
+          $email = sanitize_email((string)($_POST['mrm_access_row_email'][$i] ?? ''));
+          if (!$email || !is_email($email)) {
+            // skip invalid edits; preserve existing row
+            continue;
+          }
+
+          $start_raw  = (string)($_POST['mrm_access_row_start'][$i] ?? '');
+          $expire_raw = (string)($_POST['mrm_access_row_expires'][$i] ?? '');
+
+          $start_dt  = $start_raw ? date('Y-m-d 00:00:00', strtotime($start_raw)) : null;
+          $expire_dt = $expire_raw ? date('Y-m-d 00:00:00', strtotime($expire_raw)) : null;
+
+          $wpdb->update(
+            $access_table,
+            array(
+              'email_plain' => $email,
+              'email_hash'  => $this->email_hash($email),
+              'start_at'    => $start_dt,
+              'expires_at'  => $expire_dt,
+            ),
+            array('id' => $row_id),
+            array('%s','%s','%s','%s'),
+            array('%d')
+          );
+        }
+      }
+
       // Save Access Lists
       if (isset($_POST['mrm_access_slug']) && is_array($_POST['mrm_access_slug'])
           && isset($_POST['mrm_access_emails']) && is_array($_POST['mrm_access_emails'])) {
@@ -2520,7 +2576,7 @@ class MRM_Payments_Hub_Single {
               foreach ($keys as $k) {
                 $safe_k = esc_attr($k);
                 $results = $wpdb->get_results($wpdb->prepare(
-                  "SELECT email_plain, start_at, expires_at FROM {$access_table} WHERE sku = %s AND revoked_at IS NULL ORDER BY start_at DESC",
+                  "SELECT id, email_plain, start_at, expires_at FROM {$access_table} WHERE sku = %s AND revoked_at IS NULL ORDER BY start_at DESC",
                   $k
                 ));
                 ?>
@@ -2548,9 +2604,22 @@ class MRM_Payments_Hub_Single {
                             $expire = $row->expires_at ? date_i18n('Y-m-d', strtotime($row->expires_at)) : '';
                           ?>
                             <tr>
-                              <td><?php echo esc_html((string)$row->email_plain); ?></td>
-                              <td><?php echo esc_html($start); ?></td>
-                              <td><?php echo esc_html($expire); ?></td>
+                              <td>
+                                <input type="hidden" name="mrm_access_row_id[]" value="<?php echo (int)$row->id; ?>" />
+                                <input type="email" name="mrm_access_row_email[]" value="<?php echo esc_attr((string)$row->email_plain); ?>" style="width:100%;" />
+                              </td>
+                              <td>
+                                <input type="date" name="mrm_access_row_start[]" value="<?php echo esc_attr($start); ?>" style="width:150px;" />
+                              </td>
+                              <td>
+                                <div style="display:flex; align-items:center; gap:8px;">
+                                  <input type="date" name="mrm_access_row_expires[]" value="<?php echo esc_attr($expire); ?>" style="width:150px;" />
+                                  <label style="white-space:nowrap;">
+                                    <input type="checkbox" name="mrm_access_row_delete[]" value="<?php echo (int)$row->id; ?>" />
+                                    Delete
+                                  </label>
+                                </div>
+                              </td>
                             </tr>
                           <?php endforeach; ?>
                         <?php else : ?>

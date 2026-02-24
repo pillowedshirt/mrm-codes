@@ -1790,36 +1790,55 @@ a{ -webkit-tap-highlight-color:transparent; }
         }
 
         this.disabled = true;
-        const okToPay = await showConfirmTotal(pendingBreakdown);
-        if (!okToPay) {
-          this.disabled = false;
-          return;
-        }
-        // ✅ Save context so the redirect-return handler can finish access + show success popup
+
         try {
-          sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
-            email: email,
-            sku: pendingSku
-          }));
-        } catch (e) {
-          // ignore storage errors; we'll still try the non-redirect path
-        }
+          const okToPay = await showConfirmTotal(pendingBreakdown);
+          if (!okToPay) {
+            this.disabled = false;
+            return;
+          }
 
-        const { error, paymentIntent } = await stripe.confirmPayment({
-          elements: activeStripeElements,
+          // Save context so redirect-return handler can finalize access + popup
+          try {
+            sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
+              email: email,
+              sku: pendingSku
+            }));
+          } catch (e) {}
 
-          // ✅ IMPORTANT: avoid redirect unless required (3DS, etc.)
-          redirect: 'if_required',
+          const { error, paymentIntent } = await stripe.confirmPayment({
+            elements: activeStripeElements,
+            redirect: 'if_required',
+            confirmParams: { return_url: window.location.href }
+          });
 
-          confirmParams: { return_url: window.location.href }
-        });
-        if (error) {
-          errorEl.textContent = error.message || 'Payment failed.';
+          if (error) {
+            errorEl.textContent = error.message || 'Payment failed.';
+            this.disabled = false;
+            return;
+          }
+
+          // If Stripe returns immediately and succeeded, finalize access now
+          if (paymentIntent && paymentIntent.status === 'succeeded') {
+            try {
+              await verifyAndGrant(paymentIntent.id, email, pendingSku);
+              // success popup handles reload
+              return;
+            } catch (e) {
+              console.error('[MRM] verifyAndGrant failed after successful payment:', e);
+              errorEl.textContent = 'Payment succeeded, but access setup did not finish. Please refresh and try Access, or contact support.';
+              this.disabled = false;
+              return;
+            }
+          }
+
+          // If no immediate paymentIntent (redirect path), re-enable button just in case user returns without redirect
           this.disabled = false;
-          return;
-        }
-        if (paymentIntent && paymentIntent.status === 'succeeded') {
-          await verifyAndGrant(paymentIntent.id, email, pendingSku);
+
+        } catch (e) {
+          console.error('[MRM] Pay flow error:', e);
+          errorEl.textContent = 'Unexpected error while processing payment.';
+          this.disabled = false;
         }
       };
     }

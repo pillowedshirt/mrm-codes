@@ -1474,38 +1474,81 @@ class MRM_Product_Access {
         $sku = preg_replace( '/[^a-z0-9\-_]+/', '', $sku );
         if ( ! $sku ) return false;
 
-        // Pull lists from Payments Hub (source of truth for email lists)
+        // Pull lists from Payments Hub (legacy/option-based fallback)
         $lists = get_option( 'mrm_pay_hub_access_lists', array() );
         if ( ! is_array( $lists ) ) $lists = array();
 
-        // Convert hash -> compare against list (we only have hash here).
-        // We can safely compare by hashing list emails with the same hash_email.
         $hash_of = function( $email ) {
             return $this->hash_email( strtolower( trim( (string) $email ) ) );
         };
 
-        // Rule 1: master all-sheet-music ledger (DB), auto-expiring
-        // ✅ No override. Master SKU is fixed.
-        $master_sku = 'all-sheet-music';
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        if ( $exists !== $table ) {
+            // fallback to option lists only
+            if ( isset( $lists['all-sheet-music'] ) && is_array( $lists['all-sheet-music'] ) ) {
+                foreach ( $lists['all-sheet-music'] as $em ) {
+                    $em = sanitize_email( $em );
+                    if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
+                }
+            }
+            if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
+                foreach ( $lists[ $sku ] as $em ) {
+                    $em = sanitize_email( $em );
+                    if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
+                }
+            }
+            return false;
+        }
 
         $now = current_time( 'mysql' );
-        $master_id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table}
-             WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL
-               AND (
-                 (expires_at IS NOT NULL AND expires_at > %s)
-                 OR
-                 (expires_at IS NULL AND DATE_ADD(granted_at, INTERVAL 31 DAY) > %s)
-               )
-             ORDER BY id DESC LIMIT 1",
-            (string) $email_hash,
-            (string) $master_sku,
-            (string) $now,
-            (string) $now
-        ) );
-        if ( ! empty( $master_id ) ) return true;
 
-        // Rule 2: per-product list
+        // Helper: match a DB row against Product Access hash (salted) OR exact db hash (legacy/current)
+        $row_matches_email_hash = function( $row ) use ( $email_hash ) {
+            $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+            if ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) {
+                return true;
+            }
+
+            $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
+            if ( $email_plain !== '' ) {
+                $salted = $this->hash_email( strtolower( trim( $email_plain ) ) );
+                if ( hash_equals( $email_hash, $salted ) ) {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        // Rule 1: master all-sheet-music ledger (DB), auto-expiring
+        $master_sku = 'all-sheet-music';
+        $master_rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, email_hash, email_plain, expires_at, granted_at
+             FROM {$table}
+             WHERE sku=%s AND revoked_at IS NULL
+             ORDER BY id DESC",
+            (string) $master_sku
+        ) );
+
+        if ( is_array( $master_rows ) ) {
+            foreach ( $master_rows as $row ) {
+                if ( ! $row_matches_email_hash( $row ) ) continue;
+
+                $expires_at = isset( $row->expires_at ) ? (string) $row->expires_at : '';
+                $granted_at = isset( $row->granted_at ) ? (string) $row->granted_at : '';
+
+                $active = false;
+                if ( $expires_at !== '' ) {
+                    $active = ( strtotime( $expires_at ) > strtotime( $now ) );
+                } elseif ( $granted_at !== '' ) {
+                    $active = ( strtotime( $granted_at . ' +31 days' ) > strtotime( $now ) );
+                }
+
+                if ( $active ) return true;
+            }
+        }
+
+        // Rule 2: per-product option list (fallback)
         if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
             foreach ( $lists[ $sku ] as $em ) {
                 $em = sanitize_email( $em );
@@ -1513,17 +1556,24 @@ class MRM_Product_Access {
             }
         }
 
-        // Rule 3: DB row exists (also controlled by Payments Hub)
-        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
-        if ( $exists !== $table ) return false;
-
-        $id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
-            (string) $email_hash,
+        // Rule 3: per-product DB row
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, email_hash, email_plain
+             FROM {$table}
+             WHERE sku=%s AND revoked_at IS NULL
+             ORDER BY id DESC",
             (string) $sku
         ) );
 
-        return ! empty( $id );
+        if ( is_array( $rows ) ) {
+            foreach ( $rows as $row ) {
+                if ( $row_matches_email_hash( $row ) ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
 
