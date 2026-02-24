@@ -1667,6 +1667,9 @@ class MRM_Payments_Hub_Single {
 
     $ok = in_array($status, $terminal_statuses, true);
 
+    $piece_auto_grant_attempted = false;
+    $piece_auto_grant_success = false;
+
     // If this PaymentIntent was created with a customer + setup_future_usage,
     // Stripe should attach the payment method to the customer.
     // We log proof and force-set default PM for off-session charges.
@@ -1731,6 +1734,7 @@ class MRM_Payments_Hub_Single {
 
           if ($pi_product && !empty($pi_product['active']) && (string)($pi_product['product_type'] ?? '') === 'sheet_music') {
             $email_hash = $this->email_hash($pi_email);
+            $piece_auto_grant_attempted = true;
             $granted = $this->grant_sheet_music_access(
               $email_hash,
               $pi_email,
@@ -1739,6 +1743,8 @@ class MRM_Payments_Hub_Single {
               $pi_id,
               $start_ts
             );
+
+            $piece_auto_grant_success = (bool) $granted;
 
             if (!$granted) {
               error_log('[MRM Payments Hub] verify PI auto-grant failed for piece sku=' . $pi_sku . ' pi=' . $pi_id);
@@ -1768,6 +1774,8 @@ class MRM_Payments_Hub_Single {
       'amount_cents' => (int)($pi['amount'] ?? 0),
       'currency' => (string)($pi['currency'] ?? 'usd'),
       'metadata' => (array)($pi['metadata'] ?? array()),
+      'piece_auto_grant_attempted' => (bool)$piece_auto_grant_attempted,
+      'piece_auto_grant_success' => (bool)$piece_auto_grant_success,
     ), 200);
   }
 
