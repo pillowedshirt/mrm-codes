@@ -1387,49 +1387,67 @@ a{ -webkit-tap-highlight-color:transparent; }
   }
 
   async function verifyAndGrant(piId, email, sku){
-    const vRes = await fetch('/wp-json/mrm-pay/v1/verify-payment-intent', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ payment_intent_id: piId, email: email })
+    // We keep the function name to minimize changes elsewhere,
+    // but this is now a GRANT finalizer (not verify-only).
+    const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        payment_intent_id: piId
+        // IMPORTANT: Do NOT send sku/email here.
+        // Backend binds canonical sku + email from Stripe PI metadata.
+      })
     });
 
-    let vData = {};
-    try { vData = await vRes.json(); } catch(e) {}
+    let gData = {};
+    try { gData = await gRes.json(); } catch (e) {}
 
-    console.log('[MRM] verify-payment-intent response', { status: vRes.status, data: vData, requestedSku: sku, requestedEmail: email });
+    console.log('[MRM] grant-sheet-music-access response (post-payment)', {
+      status: gRes.status,
+      data: gData,
+      piId,
+      requestedSku: sku,
+      requestedEmail: email
+    });
 
-    if(!vRes.ok || !vData.ok){
-      const msg = (vData && (vData.message || vData.debug)) ? (vData.message || vData.debug) : 'Payment not completed.';
+    if (!gRes.ok || !gData.ok) {
+      const msg = (gData && (gData.message || gData.debug))
+        ? (gData.message || gData.debug)
+        : 'Payment succeeded, but access grant failed.';
       throw new Error(msg);
     }
-
-    // IMPORTANT:
-    // Payments Hub verify endpoint is the source of truth and already auto-grants
-    // piece sheet-music access from PaymentIntent metadata (and mirrors to email-based list).
 
     mrmShowPieceSuccessPopup(
       'Thank you!',
       'Access has been granted. Check your email for download instructions.'
     );
 
-    return vData;
+    return gData;
   }
 
 
   async function verifyAndGrantByPiOnly(piId){
-    const vRes = await fetch('/wp-json/mrm-pay/v1/verify-payment-intent', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ payment_intent_id: piId })
+    const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        payment_intent_id: piId
+      })
     });
 
-    let vData = {};
-    try { vData = await vRes.json(); } catch(e) {}
+    let gData = {};
+    try { gData = await gRes.json(); } catch (e) {}
 
-    console.log('[MRM] verify-payment-intent (PI-only) response', { status: vRes.status, data: vData, piId });
+    console.log('[MRM] grant-sheet-music-access response (PI-only)', {
+      status: gRes.status,
+      data: gData,
+      piId
+    });
 
-    if(!vRes.ok || !vData.ok){
-      const msg = (vData && (vData.message || vData.debug)) ? (vData.message || vData.debug) : 'Payment not completed.';
+    if (!gRes.ok || !gData.ok) {
+      const msg = (gData && (gData.message || gData.debug))
+        ? (gData.message || gData.debug)
+        : 'Payment returned from Stripe, but access grant failed.';
       throw new Error(msg);
     }
 
@@ -1438,7 +1456,7 @@ a{ -webkit-tap-highlight-color:transparent; }
       'Access has been granted. Check your email for download instructions.'
     );
 
-    return vData;
+    return gData;
   }
 
   function checkReturnFromStripe(){
