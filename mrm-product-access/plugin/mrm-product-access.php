@@ -458,10 +458,12 @@ class MRM_Product_Access {
                         continue;
                     }
 
-                    // Back-compat only: if older configs relied on derived slugs, keep behavior ONLY if an admin saved an empty slug.
-                    // Prefer explicit product_slug always.
+                    // IMPORTANT: Do NOT auto-derive offer product_slug from display title.
+                    // Payments Hub sheet-music SKUs follow a strict canonical format (piece-<title>-<type>[optional-suffix]).
+                    // Deriving from display title can create mismatches that break quoting/access grants.
+                    // Leave blank so the frontend/admin clearly indicates a configuration error and the slug can be corrected intentionally.
                     if ( $pslug === '' && $dt !== '' ) {
-                        $pslug = $this->sanitize_product_slug( $dt );
+                        $pslug = '';
                     }
 
                     if ( ! isset( $offers_by_piece[ $pi ] ) ) {
