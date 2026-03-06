@@ -2875,6 +2875,87 @@ function ensureLegacyBookingHandler(){
         const finalAmountCents = chargeAmountCents + sheetAddonCents + sheetAddonTax;
         const finalAmountDollars = (finalAmountCents / 100).toFixed(2);
 
+        if (autopay && !prepay) {
+          setMsg('Saving payment method for auto-pay…');
+          btn.disabled = true;
+
+          const setupRes = await fetch(payApiBase + '/create-setup-intent', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+              email,
+              context: {
+                instructor_id: instrId,
+                lesson_length: len,
+                lesson_mode: lessonType
+              },
+              address: {
+                line1: address,
+                state: addressState,
+                postal_code: addressPostal,
+                country: addressCountry
+              }
+            })
+          });
+
+          const setupData = await setupRes.json();
+          if (!setupRes.ok || !setupData.ok) {
+            setMsg(setupData.message || 'Unable to start auto-pay setup.');
+            btn.disabled = false;
+            return;
+          }
+
+          const stripeInstance = ensureStripe(setupData.publishableKey || '');
+          if (!stripeInstance) { setMsg('Stripe is not configured.'); btn.disabled=false; return; }
+          stripe = stripeInstance;
+
+          persistSelectedSlots();
+
+          const { payBtn, errorEl, closeModal } = openPaymentModal(setupData.client_secret, setupData);
+
+          payBtn.onclick = async () => {
+            payBtn.disabled = true;
+
+            const { error, setupIntent } = await stripe.confirmSetup({
+              elements: activeStripeElements,
+              confirmParams: { return_url: window.location.href },
+              redirect: 'if_required'
+            });
+
+            if (error) {
+              errorEl.textContent = error.message || 'Setup failed.';
+              payBtn.disabled = false;
+              return;
+            }
+
+            if (setupIntent && setupIntent.status === 'succeeded') {
+              const finalizeRes = await fetch(payApiBase + '/finalize-autopay', {
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({
+                  autopay_profile_id: setupData.autopay_profile_id,
+                  setup_intent_id: setupIntent.id
+                })
+              });
+              const finalizeData = await finalizeRes.json();
+              if (!finalizeRes.ok || !finalizeData.ok) {
+                errorEl.textContent = finalizeData.message || 'Unable to finalize auto-pay setup.';
+                payBtn.disabled = false;
+                return;
+              }
+              payload.payment_mode = 'autopay';
+              payload.autopay_profile_id = setupData.autopay_profile_id;
+              payload.order_id = 0;
+
+              await submitBooking(payload, setMsg);
+              closeModal({ clearSelection: true });
+            }
+          };
+
+          btn.disabled = false;
+          return;
+        }
+
         const createRes = await fetch(payApiBase + '/create-payment-intent', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
@@ -2888,7 +2969,7 @@ function ensureLegacyBookingHandler(){
               lesson_count: count,
               prepay: prepay ? 'yes' : 'no'
             },
-            save_card: autopay,
+            save_card: false,
             amount_override_cents: chargeAmountCents,
             sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
             address: {
@@ -2917,7 +2998,9 @@ function ensureLegacyBookingHandler(){
         sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
           payload,
           email,
-          payment_intent_id: createData.payment_intent_id
+          payment_intent_id: createData.payment_intent_id,
+          order_id: createData.order_id,
+          payment_mode: prepay ? 'prepay' : 'one_time'
         }));
 
         const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, createData);
@@ -2945,6 +3028,9 @@ function ensureLegacyBookingHandler(){
           }
           if (paymentIntent && paymentIntent.status === 'succeeded') {
             await verifyPaymentIntent(paymentIntent.id, email);
+            payload.order_id = createData.order_id;
+            payload.payment_mode = prepay ? 'prepay' : 'one_time';
+            payload.autopay_profile_id = null;
             await submitBooking(payload, setMsg);
             closeModal({ clearSelection: true });
           }
@@ -2995,6 +3081,9 @@ async function checkReturnFromStripe(){
   };
   try{
     await verifyPaymentIntent(piId, ctx.email);
+    if (ctx.order_id) ctx.payload.order_id = ctx.order_id;
+    if (!ctx.payload.payment_mode) ctx.payload.payment_mode = (ctx.payment_mode || 'one_time');
+    if (typeof ctx.payload.autopay_profile_id === 'undefined') ctx.payload.autopay_profile_id = null;
     await submitBooking(ctx.payload, setMsg);
   }catch(err){
     setMsg(err.message || 'Payment verification failed.');

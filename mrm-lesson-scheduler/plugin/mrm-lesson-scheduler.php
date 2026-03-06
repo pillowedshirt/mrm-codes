@@ -26,7 +26,7 @@ class MRM_Lesson_Scheduler {
     protected static $instance;
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
-    const DB_VERSION = '1.5.2';
+    const DB_VERSION = '1.5.3';
     const CAPABILITY = 'manage_options';
     // Google endpoints
     const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -232,6 +232,12 @@ class MRM_Lesson_Scheduler {
         return array( $start_ts, $end_ts );
     }
 
+    protected function google_event_end_utc( $event ) {
+        list( , $end_ts ) = $this->google_event_to_utc_ts( $event );
+        if ( ! $end_ts ) return '';
+        return gmdate( 'Y-m-d H:i:s', $end_ts );
+    }
+
     public static function get_instance() {
         if ( empty( self::$instance ) ) self::$instance = new self();
         return self::$instance;
@@ -248,6 +254,10 @@ class MRM_Lesson_Scheduler {
         // Pattern B: periodic sync of upcoming events so gate/reminders stay accurate if instructors drag events
         add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
         add_action( 'mrm_scheduler_sync_upcoming_events', array( $this, 'cron_sync_upcoming_events' ) );
+        add_action( 'mrm_scheduler_reconcile_completed_lessons', array( $this, 'cron_reconcile_completed_lessons' ) );
+        if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
+            wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
+        }
         // Gate page (virtual) for joining online lessons
         add_action( 'init', array( $this, 'register_join_gate_rewrite' ) );
         add_filter( 'query_vars', array( $this, 'register_join_gate_query_vars' ) );
@@ -270,6 +280,9 @@ class MRM_Lesson_Scheduler {
 
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
             wp_schedule_event( time() + 60, 'mrm_10min', 'mrm_scheduler_sync_upcoming_events' );
+        }
+        if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
+            wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
         }
     }
 
@@ -313,6 +326,10 @@ class MRM_Lesson_Scheduler {
     status VARCHAR(30) NOT NULL DEFAULT 'scheduled',
     google_event_id VARCHAR(255) NULL,
     google_meet_url TEXT NULL,
+    order_id BIGINT UNSIGNED NULL,
+    payment_mode VARCHAR(20) NOT NULL DEFAULT 'none',
+    payout_unlocked_at DATETIME NULL,
+    autopay_profile_id BIGINT UNSIGNED NULL,
     agreement_id BIGINT UNSIGNED NULL,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
@@ -323,6 +340,9 @@ class MRM_Lesson_Scheduler {
     PRIMARY KEY (id),
     KEY instructor_idx (instructor_id),
     KEY student_email_idx (student_email),
+    KEY order_id_idx (order_id),
+    KEY payment_mode_idx (payment_mode),
+    KEY payout_unlocked_at_idx (payout_unlocked_at),
     KEY reminder_token_hash_idx (reminder_token_hash),
     KEY reminder_sent_at_idx (reminder_sent_at)
 ) {$charset_collate};";
@@ -391,6 +411,10 @@ class MRM_Lesson_Scheduler {
         $need_lessons = array(
             'google_event_id',
             'google_meet_url',
+            'order_id',
+            'payment_mode',
+            'payout_unlocked_at',
+            'autopay_profile_id',
             'agreement_id',
             'reminder_token',
             'reminder_token_hash',
@@ -512,6 +536,9 @@ class MRM_Lesson_Scheduler {
         $repeat_frequency  = sanitize_text_field( (string) ( $data['repeat_frequency'] ?? 'none' ) ); // weekly | biweekly | none
         $repeat_duration   = sanitize_text_field( (string) ( $data['repeat_duration'] ?? '' ) );      // 1_month | 3_months | indefinitely (per UI)
         $appointment_type  = sanitize_text_field( (string) ( $data['appointment_type'] ?? 'lesson' ) ); // lesson | consultation
+        $order_id = isset( $data['order_id'] ) ? intval( $data['order_id'] ) : 0;
+        $payment_mode = sanitize_text_field( (string ) ( $data['payment_mode'] ?? 'none' ) ); // prepay|autopay|none
+        $autopay_profile_id = isset( $data['autopay_profile_id'] ) ? intval( $data['autopay_profile_id'] ) : 0;
 
         if ( $instructor_id <= 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
@@ -578,6 +605,10 @@ class MRM_Lesson_Scheduler {
                 'status'        => 'scheduled',
                 'google_event_id' => null,
                 'google_meet_url' => null,
+                'order_id'        => ( $order_id > 0 ? $order_id : null ),
+                'payment_mode'    => ( $payment_mode !== '' ? $payment_mode : 'none' ),
+                'payout_unlocked_at' => null,
+                'autopay_profile_id' => ( $autopay_profile_id > 0 ? $autopay_profile_id : null ),
                 'agreement_id'    => null,
                 'created_at'      => $now,
                 'updated_at'      => $now,
@@ -586,7 +617,7 @@ class MRM_Lesson_Scheduler {
                 'reminder_scheduled_at' => null,
                 'reminder_sent_at' => null,
             ), array(
-                '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'
+                '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%d','%s','%s','%d','%s','%s','%s','%s','%s','%s','%s','%s'
             ) );
 
             if ( $ok ) {
@@ -2224,6 +2255,104 @@ class MRM_Lesson_Scheduler {
                     );
                 }
             }
+        }
+    }
+
+
+    public function cron_reconcile_completed_lessons() {
+        global $wpdb;
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+        $rows = $wpdb->get_results("
+            SELECT l.*, i.calendar_id, i.timezone
+            FROM {$lessons_table} l
+            JOIN {$instructors_table} i ON i.id = l.instructor_id
+            WHERE l.status='scheduled'
+              AND l.payout_unlocked_at IS NULL
+              AND l.end_time < UTC_TIMESTAMP()
+            ORDER BY l.end_time ASC
+            LIMIT 50
+        ", ARRAY_A);
+
+        if ( ! $rows ) return;
+
+        foreach ( $rows as $l ) {
+            $calendar_id = (string) ( $l['calendar_id'] ?? '' );
+            $event_id    = (string) ( $l['google_event_id'] ?? '' );
+            $booking_id  = (int) ( $l['id'] ?? 0 );
+
+            if ( $calendar_id === '' || ! $this->google_is_configured() ) {
+                continue;
+            }
+
+            $ev = null;
+
+            $time_min = gmdate( 'c', strtotime( $l['start_time'] ) - 6 * HOUR_IN_SECONDS );
+            $time_max = gmdate( 'c', strtotime( $l['end_time'] ) + 6 * HOUR_IN_SECONDS );
+
+            if ( $event_id !== '' ) {
+                $got = $this->google_get_event( $calendar_id, $event_id );
+                if ( ! is_wp_error( $got ) && is_array( $got ) ) $ev = $got;
+            }
+
+            if ( ! is_array( $ev ) ) {
+                $found = $this->google_find_event_by_booking_id( $calendar_id, $booking_id, $time_min, $time_max );
+                if ( ! is_wp_error( $found ) && is_array( $found ) ) $ev = $found;
+            }
+
+            if ( ! is_array( $ev ) ) {
+                $wpdb->update(
+                    $lessons_table,
+                    array( 'status' => 'cancelled', 'updated_at' => current_time( 'mysql' ) ),
+                    array( 'id' => $booking_id ),
+                    array( '%s', '%s' ),
+                    array( '%d' )
+                );
+                continue;
+            }
+
+            $status = strtolower( (string) ( $ev['status'] ?? 'confirmed' ) );
+            if ( $status === 'cancelled' ) {
+                $wpdb->update(
+                    $lessons_table,
+                    array( 'status' => 'cancelled', 'updated_at' => current_time( 'mysql' ) ),
+                    array( 'id' => $booking_id ),
+                    array( '%s', '%s' ),
+                    array( '%d' )
+                );
+                continue;
+            }
+
+            $end = $this->google_event_end_utc( $ev );
+            if ( ! $end ) continue;
+            if ( strtotime( $end ) > time() ) continue;
+
+            $wpdb->update(
+                $lessons_table,
+                array(
+                    'status' => 'delivered',
+                    'payout_unlocked_at' => current_time( 'mysql' ),
+                    'updated_at' => current_time( 'mysql' )
+                ),
+                array( 'id' => $booking_id ),
+                array( '%s', '%s', '%s' ),
+                array( '%d' )
+            );
+
+            do_action( 'mrm_lesson_delivered', array(
+                'lesson_id' => $booking_id,
+                'instructor_id' => (int) $l['instructor_id'],
+                'student_email' => (string) $l['student_email'],
+                'lesson_length' => (int) $l['lesson_length'],
+                'is_online' => (int) $l['is_online'],
+                'order_id' => (int) ( $l['order_id'] ?? 0 ),
+                'payment_mode' => (string) ( $l['payment_mode'] ?? 'none' ),
+                'autopay_profile_id' => (int) ( $l['autopay_profile_id'] ?? 0 ),
+                'google_event_id' => (string) ( $l['google_event_id'] ?? '' ),
+                'ended_at_utc' => (string) $end,
+            ) );
         }
     }
     /**
