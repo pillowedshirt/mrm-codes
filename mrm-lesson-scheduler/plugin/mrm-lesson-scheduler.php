@@ -26,7 +26,7 @@ class MRM_Lesson_Scheduler {
     protected static $instance;
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
-    const DB_VERSION = '1.5.1';
+    const DB_VERSION = '1.5.2';
     const CAPABILITY = 'manage_options';
     // Google endpoints
     const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -292,6 +292,7 @@ class MRM_Lesson_Scheduler {
     longitude DECIMAL(10,6) DEFAULT NULL,
     calendar_id VARCHAR(255) NOT NULL,
     timezone VARCHAR(50) NOT NULL,
+    stripe_connected_account_id VARCHAR(255) DEFAULT NULL,
     hire_date DATE DEFAULT NULL,
     PRIMARY KEY (id),
     KEY city_idx (city),
@@ -358,6 +359,7 @@ class MRM_Lesson_Scheduler {
         $instructor_cols = $wpdb->get_col( "DESC {$instructors}", 0 );
         $need_instructors = array(
             'timezone',
+            'stripe_connected_account_id',
             'hire_date',
             'calendar_id',
             'profile_image_url',
@@ -1542,6 +1544,7 @@ class MRM_Lesson_Scheduler {
             'longitude' => null,
             'calendar_id' => '',
             'timezone' => '',
+            'stripe_connected_account_id' => null,
             'hire_date' => null,
         );
         foreach ( $instructors as &$row ) {
@@ -2313,6 +2316,7 @@ class MRM_Lesson_Scheduler {
             $longitude_in = ( isset( $_POST['longitude'] ) && $_POST['longitude'] !== '' ) ? (string) wp_unslash( $_POST['longitude'] ) : '';
             $calendar_id = isset( $_POST['calendar_id'] ) ? sanitize_text_field( wp_unslash( $_POST['calendar_id'] ) ) : '';
             $timezone    = isset( $_POST['timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['timezone'] ) ) : '';
+            $stripe_connected_account_id = isset( $_POST['stripe_connected_account_id'] ) ? sanitize_text_field( wp_unslash( $_POST['stripe_connected_account_id'] ) ) : '';
             $hire_date   = isset( $_POST['hire_date'] ) ? sanitize_text_field( wp_unslash( $_POST['hire_date'] ) ) : '';
             $profile_image_url = isset( $_POST['profile_image_url'] ) ? esc_url_raw( wp_unslash( $_POST['profile_image_url'] ) ) : '';
             $short_description = isset( $_POST['short_description'] ) ? sanitize_text_field( wp_unslash( $_POST['short_description'] ) ) : '';
@@ -2332,6 +2336,7 @@ class MRM_Lesson_Scheduler {
                 if ( ! $state || strlen($state) !== 2 ) $errors[] = 'State is required (2-letter code like AZ).';
                 if ( ! $calendar_id ) $errors[] = 'Calendar ID is required.';
                 if ( ! $timezone ) $errors[] = 'Timezone is required.';
+                if ( $stripe_connected_account_id && ! preg_match( '/^acct_[A-Za-z0-9]+$/', $stripe_connected_account_id ) ) $errors[] = 'Stripe Connected Account ID must start with acct_.';
                 if ( $hire_date && ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $hire_date ) ) $errors[] = 'Start Date must be in YYYY-MM-DD format.';
                 if ( $latitude_in !== '' && ! is_numeric( $latitude_in ) ) $errors[] = 'Latitude must be a number (or blank).';
                 if ( $longitude_in !== '' && ! is_numeric( $longitude_in ) ) $errors[] = 'Longitude must be a number (or blank).';
@@ -2348,6 +2353,7 @@ class MRM_Lesson_Scheduler {
                     'longitude' => ( $longitude_in === '' ? null : (string) $longitude_in ),
                     'calendar_id' => $calendar_id,
                     'timezone' => $timezone,
+                    'stripe_connected_account_id' => ( $stripe_connected_account_id === '' ? null : $stripe_connected_account_id ),
                     'hire_date' => ( $hire_date === '' ? null : $hire_date ),
                     'profile_image_url' => ( $profile_image_url === '' ? null : $profile_image_url ),
                     'short_description' => ( $short_description === '' ? null : $short_description ),
@@ -2501,6 +2507,13 @@ class MRM_Lesson_Scheduler {
                         </td>
                     </tr>
                     <tr>
+                        <th scope="row"><label for="stripe_connected_account_id">Stripe Connected Account ID</label></th>
+                        <td>
+                            <input name="stripe_connected_account_id" id="stripe_connected_account_id" type="text" class="regular-text" placeholder="acct_..." value="<?php echo esc_attr( $editing['stripe_connected_account_id'] ?? '' ); ?>">
+                            <p class="description">Paste the instructor’s Stripe Connect account ID here after onboarding.</p>
+                        </td>
+                    </tr>
+                    <tr>
                         <th scope="row"><label for="hire_date">Start Date</label></th>
                         <td><input name="hire_date" id="hire_date" type="date" value="<?php echo esc_attr( $editing['hire_date'] ?? '' ); ?>"></td>
                     </tr>
@@ -2518,7 +2531,7 @@ class MRM_Lesson_Scheduler {
                 <table class="widefat striped">
                     <thead>
                         <tr>
-                            <th>ID</th><th>Name</th><th>Email</th><th>City</th><th>Start Date</th><th>Calendar ID</th><th>Timezone</th><th>Actions</th>
+                            <th>ID</th><th>Name</th><th>Email</th><th>City</th><th>Start Date</th><th>Stripe Acct</th><th>Calendar ID</th><th>Timezone</th><th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -2529,6 +2542,7 @@ class MRM_Lesson_Scheduler {
                                 <td><?php echo esc_html( $r['email'] ); ?></td>
                                 <td><?php echo esc_html( $r['city'] ); ?></td>
                                 <td><?php echo esc_html( $r['hire_date'] ); ?></td>
+                                <td><code><?php echo esc_html( $r['stripe_connected_account_id'] ?? '' ); ?></code></td>
                                 <td><code><?php echo esc_html( $r['calendar_id'] ); ?></code></td>
                                 <td><code><?php echo esc_html( $r['timezone'] ); ?></code></td>
                                 <td>
