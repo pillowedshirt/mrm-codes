@@ -24,12 +24,11 @@ class MRM_Payments_Hub_Single {
     add_action('admin_menu', array($this, 'admin_menu'));
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('rest_api_init', array($this, 'register_routes'));
-    // Ensure DB tables exist even after plugin updates (activation hook is not enough).
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
     add_action('mrm_pay_hub_cleanup_access', array($this, 'cleanup_access'));
+    add_action('mrm_pay_hub_daily_payout_check', array($this, 'cron_daily_payout_check'));
 
     register_activation_hook(__FILE__, array($this, 'on_activate'));
-
   }
 
   /* =========================================================
@@ -37,12 +36,15 @@ class MRM_Payments_Hub_Single {
    * ======================================================= */
 
   public function on_activate() {
-    // Create or upgrade database tables
     $this->install_or_upgrade_db();
-    // Ensure the default lesson products are present
     $this->ensure_default_products();
+
     if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
       wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_daily_payout_check')) {
+      wp_schedule_event(time() + 600, 'daily', 'mrm_pay_hub_daily_payout_check');
     }
   }
 
@@ -61,18 +63,24 @@ class MRM_Payments_Hub_Single {
     return $wpdb->prefix . 'mrm_sheet_music_access';
   }
 
+  private function table_payout_ledger() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_payout_ledger';
+  }
+
   public function maybe_install_or_upgrade_db() {
     // Run a lightweight existence + schema check; only dbDelta if needed.
     global $wpdb;
 
-    $orders = $this->table_orders();
-    $links  = $this->table_links();
-    $access = $this->table_sheet_music_access();
+    $orders  = $this->table_orders();
+    $links   = $this->table_links();
+    $access  = $this->table_sheet_music_access();
+    $payouts = $this->table_payout_ledger();
 
     $needs_upgrade = false;
 
     // 1) Table existence check
-    foreach (array($orders, $links, $access) as $t) {
+    foreach (array($orders, $links, $access, $payouts) as $t) {
       $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
       if ($found !== $t) {
         $needs_upgrade = true;
@@ -136,9 +144,10 @@ class MRM_Payments_Hub_Single {
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     $charset = $wpdb->get_charset_collate();
 
-    $orders = $this->table_orders();
-    $links  = $this->table_links();
-    $access = $this->table_sheet_music_access();
+    $orders  = $this->table_orders();
+    $links   = $this->table_links();
+    $access  = $this->table_sheet_music_access();
+    $payouts = $this->table_payout_ledger();
 
     $sql_orders = "CREATE TABLE {$orders} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -193,9 +202,34 @@ class MRM_Payments_Hub_Single {
       KEY email_month_idx (email_hash, month_key)
     ) {$charset};";
 
+    $sql_payouts = "CREATE TABLE {$payouts} (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      order_id BIGINT UNSIGNED NOT NULL,
+      stripe_payment_intent_id VARCHAR(255) DEFAULT NULL,
+      payee_type VARCHAR(30) NOT NULL,
+      payee_ref VARCHAR(120) DEFAULT NULL,
+      connected_account_id VARCHAR(255) DEFAULT NULL,
+      currency VARCHAR(10) NOT NULL DEFAULT 'usd',
+      gross_cents INT NOT NULL DEFAULT 0,
+      net_cents INT NOT NULL DEFAULT 0,
+      status VARCHAR(30) NOT NULL DEFAULT 'pending',
+      transfer_id VARCHAR(255) DEFAULT NULL,
+      payout_id VARCHAR(255) DEFAULT NULL,
+      batch_key VARCHAR(80) DEFAULT NULL,
+      notes TEXT DEFAULT NULL,
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uniq_order_payee (order_id, payee_type, payee_ref),
+      KEY status_idx (status),
+      KEY acct_idx (connected_account_id),
+      KEY pi_idx (stripe_payment_intent_id)
+    ) {$charset};";
+
     dbDelta($sql_orders);
     dbDelta($sql_links);
     dbDelta($sql_access);
+    dbDelta($sql_payouts);
   }
 
 
@@ -591,19 +625,25 @@ class MRM_Payments_Hub_Single {
    * Stripe HTTP (no composer dependency)
    * ======================================================= */
 
-  private function stripe_api_request($method, $path, $params = array()) {
+  private function stripe_api_request($method, $path, $params = array(), $extra_headers = array()) {
     $key = $this->secret_key();
     if (!$key) return new WP_Error('stripe_not_configured', 'Stripe secret key is not configured.');
 
     $url = 'https://api.stripe.com' . $path;
 
+    $headers = array(
+      'Authorization' => 'Bearer ' . $key,
+      'Content-Type'  => 'application/x-www-form-urlencoded',
+    );
+
+    if (!empty($extra_headers) && is_array($extra_headers)) {
+      $headers = array_merge($headers, $extra_headers);
+    }
+
     $args = array(
       'method'  => strtoupper($method),
       'timeout' => 30,
-      'headers' => array(
-        'Authorization' => 'Bearer ' . $key,
-        'Content-Type'  => 'application/x-www-form-urlencoded',
-      ),
+      'headers' => $headers,
     );
 
     if ($args['method'] === 'GET') {
@@ -1216,6 +1256,376 @@ class MRM_Payments_Hub_Single {
     return $metadata;
   }
 
+
+  private function mrm_get_instructor_row($instructor_id) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'mrm_instructors';
+    return $wpdb->get_row(
+      $wpdb->prepare("SELECT * FROM {$table} WHERE id=%d LIMIT 1", (int)$instructor_id),
+      ARRAY_A
+    );
+  }
+
+  private function mrm_parse_tier_rules($text) {
+    $rules = array();
+    $lines = preg_split('/\\r\\n|\\r|\\n/', (string)$text);
+    foreach ((array)$lines as $line) {
+      $line = trim((string)$line);
+      if ($line === '' || strpos($line, '=') === false) continue;
+      list($months, $pct) = array_map('trim', explode('=', $line, 2));
+      $months = max(0, intval($months));
+      $pct = max(0, min(100, intval($pct)));
+      $rules[$months] = $pct;
+    }
+    if (empty($rules)) {
+      $rules = array(0 => 50, 12 => 55, 24 => 60);
+    }
+    ksort($rules, SORT_NUMERIC);
+    return $rules;
+  }
+
+  private function mrm_months_since_date($date_string) {
+    $date_string = trim((string)$date_string);
+    if ($date_string === '') return 0;
+    try {
+      $tz = $this->mrm_wp_tz();
+      $start = new DateTime($date_string, $tz);
+      $now = new DateTime('now', $tz);
+      if ($start > $now) return 0;
+      $diff = $start->diff($now);
+      return max(0, ((int)$diff->y * 12) + (int)$diff->m);
+    } catch (Exception $e) {
+      return 0;
+    }
+  }
+
+  private function mrm_resolve_instructor_pct($hire_date) {
+    $settings = $this->get_settings();
+    $rules = $this->mrm_parse_tier_rules($settings['instructor_tier_rules'] ?? "0=50\n12=55\n24=60");
+    $months = $this->mrm_months_since_date($hire_date);
+    $pct = 0;
+    foreach ($rules as $rule_months => $rule_pct) {
+      if ($months >= (int)$rule_months) {
+        $pct = (int)$rule_pct;
+      }
+    }
+    return max(0, min(100, $pct));
+  }
+
+  private function mrm_lesson_composer_cut_cents($lesson_length) {
+    $settings = $this->get_settings();
+    $lesson_length = (int)$lesson_length;
+    if ($lesson_length === 30) {
+      return max(0, (int)($settings['lesson_composer_cut_30_cents'] ?? 250));
+    }
+    return max(0, (int)($settings['lesson_composer_cut_60_cents'] ?? 500));
+  }
+
+  private function stripe_create_transfer($amount_cents, $currency, $destination_account_id, $transfer_group = '', $metadata = array()) {
+    $params = array(
+      'amount' => (int)$amount_cents,
+      'currency' => strtolower((string)$currency),
+      'destination' => (string)$destination_account_id,
+    );
+    if ($transfer_group !== '') $params['transfer_group'] = $transfer_group;
+    if (!empty($metadata)) $params['metadata'] = $metadata;
+    return $this->stripe_api_request('POST', '/v1/transfers', $params);
+  }
+
+  private function stripe_create_connected_account_payout($connected_account_id, $amount_cents, $currency, $metadata = array()) {
+    $params = array(
+      'amount' => (int)$amount_cents,
+      'currency' => strtolower((string)$currency),
+    );
+    if (!empty($metadata)) $params['metadata'] = $metadata;
+    return $this->stripe_api_request('POST', '/v1/payouts', $params, array(
+      'Stripe-Account' => (string)$connected_account_id,
+    ));
+  }
+
+  private function mrm_insert_payout_ledger_row($order_id, $pi_id, $payee_type, $payee_ref, $connected_account_id, $currency, $gross_cents, $net_cents, $status = 'pending', $notes = '') {
+    global $wpdb;
+    $table = $this->table_payout_ledger();
+    $now = current_time('mysql');
+
+    $existing = $wpdb->get_var($wpdb->prepare(
+      "SELECT id FROM {$table} WHERE order_id=%d AND payee_type=%s AND payee_ref=%s LIMIT 1",
+      (int)$order_id,
+      (string)$payee_type,
+      (string)$payee_ref
+    ));
+    if ($existing) return (int)$existing;
+
+    $wpdb->insert($table, array(
+      'order_id' => (int)$order_id,
+      'stripe_payment_intent_id' => (string)$pi_id,
+      'payee_type' => (string)$payee_type,
+      'payee_ref' => (string)$payee_ref,
+      'connected_account_id' => $connected_account_id ? (string)$connected_account_id : null,
+      'currency' => strtolower((string)$currency),
+      'gross_cents' => (int)$gross_cents,
+      'net_cents' => (int)$net_cents,
+      'status' => (string)$status,
+      'transfer_id' => null,
+      'payout_id' => null,
+      'batch_key' => null,
+      'notes' => $notes !== '' ? (string)$notes : null,
+      'created_at' => $now,
+      'updated_at' => $now,
+    ), array('%d','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'));
+
+    return (int)$wpdb->insert_id;
+  }
+
+  private function mrm_maybe_create_payout_ledger_for_order($order) {
+    if (!$order || empty($order['id'])) return false;
+    if ((string)($order['status'] ?? '') !== 'paid') return false;
+
+    global $wpdb;
+    $table = $this->table_payout_ledger();
+
+    $already = (int)$wpdb->get_var($wpdb->prepare(
+      "SELECT COUNT(*) FROM {$table} WHERE order_id=%d",
+      (int)$order['id']
+    ));
+    if ($already > 0) return true;
+
+    $meta = array();
+    if (!empty($order['metadata_json'])) {
+      $decoded = json_decode((string)$order['metadata_json'], true);
+      if (is_array($decoded)) $meta = $decoded;
+    }
+
+    $order_id = (int)$order['id'];
+    $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+    $currency = strtolower((string)($order['currency'] ?? 'usd'));
+    $product_type = (string)($order['product_type'] ?? ($meta['mrm_product_type'] ?? ''));
+    $base_cents = isset($meta['mrm_base_amount_cents']) ? (int)$meta['mrm_base_amount_cents'] : (int)($order['amount_cents'] ?? 0);
+    $addon_cents = isset($meta['mrm_addon_amount_cents']) ? (int)$meta['mrm_addon_amount_cents'] : 0;
+
+    if ($product_type === 'sheet_music') {
+      $composer_pct = max(0, min(100, (int)($meta['mrm_composer_pct'] ?? 0)));
+      $composer_share = (int) round($base_cents * ($composer_pct / 100));
+      $platform_share = max(0, $base_cents - $composer_share) + max(0, $addon_cents);
+      $composer_acct = (string)($this->get_settings()['composer_connected_account_id'] ?? '');
+
+      if ($composer_share > 0) {
+        $this->mrm_insert_payout_ledger_row($order_id, $pi_id, 'composer', 'composer', $composer_acct, $currency, $composer_share, $composer_share, $composer_acct ? 'pending' : 'blocked', $composer_acct ? '' : 'Missing composer connected account ID');
+      }
+
+      $this->mrm_insert_payout_ledger_row($order_id, $pi_id, 'platform', 'platform', '', $currency, $platform_share, $platform_share, 'retained', 'Retained by platform');
+      return true;
+    }
+
+    if ($product_type === 'lesson') {
+      $instructor_id = (int)($meta['mrm_instructor_id'] ?? 0);
+      $lesson_length = (int)($meta['mrm_lesson_length'] ?? 60);
+      $lesson_count = max(1, (int)($meta['mrm_lesson_count'] ?? 1));
+
+      $instr = $this->mrm_get_instructor_row($instructor_id);
+      $instr_pct = $this->mrm_resolve_instructor_pct((string)($instr['hire_date'] ?? ''));
+      $instructor_share = (int) floor($base_cents * ($instr_pct / 100));
+      $instructor_acct = (string)($instr['stripe_connected_account_id'] ?? '');
+
+      $composer_cut_total = $this->mrm_lesson_composer_cut_cents($lesson_length) * $lesson_count;
+      if ($composer_cut_total > ($base_cents - $instructor_share)) {
+        $composer_cut_total = max(0, $base_cents - $instructor_share);
+      }
+
+      $platform_share = max(0, $base_cents - $instructor_share - $composer_cut_total) + max(0, $addon_cents);
+      $composer_acct = (string)($this->get_settings()['composer_connected_account_id'] ?? '');
+
+      if ($instructor_share > 0) {
+        $this->mrm_insert_payout_ledger_row(
+          $order_id,
+          $pi_id,
+          'instructor',
+          (string)$instructor_id,
+          $instructor_acct,
+          $currency,
+          $instructor_share,
+          $instructor_share,
+          $instructor_acct ? 'pending' : 'blocked',
+          $instructor_acct ? ('Tenure rule payout at ' . $instr_pct . '%') : 'Missing instructor connected account ID'
+        );
+      }
+
+      if ($composer_cut_total > 0) {
+        $this->mrm_insert_payout_ledger_row(
+          $order_id,
+          $pi_id,
+          'composer',
+          'composer',
+          $composer_acct,
+          $currency,
+          $composer_cut_total,
+          $composer_cut_total,
+          $composer_acct ? 'pending' : 'blocked',
+          $composer_acct ? '' : 'Missing composer connected account ID'
+        );
+      }
+
+      $this->mrm_insert_payout_ledger_row($order_id, $pi_id, 'platform', 'platform', '', $currency, $platform_share, $platform_share, 'retained', 'Retained by platform');
+      return true;
+    }
+
+    return false;
+  }
+
+  private function mrm_is_biweekly_payout_day() {
+    $settings = $this->get_settings();
+    $anchor = trim((string)($settings['payout_anchor_date'] ?? ''));
+    if ($anchor === '') return false;
+
+    try {
+      $tz = $this->mrm_wp_tz();
+      $today = new DateTime('today', $tz);
+      $start = new DateTime($anchor, $tz);
+
+      if ($today < $start) return false;
+      if ((int)$today->format('N') !== 5) return false; // Friday
+
+      $days = (int)$start->diff($today)->format('%a');
+      return ($days % 14) === 0;
+    } catch (Exception $e) {
+      return false;
+    }
+  }
+
+  public function cron_daily_payout_check() {
+    if ($this->mrm_is_biweekly_payout_day()) {
+      $this->mrm_run_payout_batch(false);
+    }
+  }
+
+  public function mrm_run_payout_batch($force = false) {
+    $summary = array(
+      'transfers_created' => 0,
+      'payouts_created' => 0,
+      'errors' => 0,
+    );
+
+    if (!$force && !$this->mrm_is_biweekly_payout_day()) {
+      return $summary;
+    }
+
+    global $wpdb;
+    $table = $this->table_payout_ledger();
+    $rows = $wpdb->get_results(
+      "SELECT * FROM {$table}
+       WHERE status='pending'
+         AND connected_account_id IS NOT NULL
+         AND connected_account_id <> ''
+       ORDER BY connected_account_id ASC, id ASC",
+      ARRAY_A
+    );
+
+    if (!$rows) return $summary;
+
+    $batch_key = 'batch_' . gmdate('Ymd_His');
+
+    $groups = array();
+    foreach ($rows as $row) {
+      $gk = $row['connected_account_id'] . '|' . strtolower((string)$row['currency']);
+      if (!isset($groups[$gk])) $groups[$gk] = array();
+      $groups[$gk][] = $row;
+    }
+
+    foreach ($groups as $group_key => $group_rows) {
+      $first = $group_rows[0];
+      $acct = (string)$first['connected_account_id'];
+      $currency = strtolower((string)$first['currency']);
+      $transferred_total = 0;
+      $transferred_ids = array();
+
+      foreach ($group_rows as $row) {
+        $amount = (int)$row['net_cents'];
+        if ($amount <= 0) continue;
+
+        $transfer = $this->stripe_create_transfer(
+          $amount,
+          $currency,
+          $acct,
+          'MRM_ORDER_' . (int)$row['order_id'],
+          array(
+            'mrm_order_id' => (string)$row['order_id'],
+            'mrm_payee_type' => (string)$row['payee_type'],
+            'mrm_batch_key' => $batch_key,
+          )
+        );
+
+        if (is_wp_error($transfer)) {
+          $summary['errors']++;
+          $wpdb->update(
+            $table,
+            array(
+              'status' => 'error',
+              'notes' => $transfer->get_error_message(),
+              'updated_at' => current_time('mysql'),
+            ),
+            array('id' => (int)$row['id']),
+            array('%s','%s','%s'),
+            array('%d')
+          );
+          continue;
+        }
+
+        $wpdb->update(
+          $table,
+          array(
+            'status' => 'transferred',
+            'transfer_id' => (string)($transfer['id'] ?? ''),
+            'batch_key' => $batch_key,
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => (int)$row['id']),
+          array('%s','%s','%s','%s'),
+          array('%d')
+        );
+
+        $summary['transfers_created']++;
+        $transferred_total += $amount;
+        $transferred_ids[] = (int)$row['id'];
+      }
+
+      if ($transferred_total <= 0 || empty($transferred_ids)) {
+        continue;
+      }
+
+      $payout = $this->stripe_create_connected_account_payout(
+        $acct,
+        $transferred_total,
+        $currency,
+        array(
+          'mrm_batch_key' => $batch_key,
+        )
+      );
+
+      if (is_wp_error($payout)) {
+        $summary['errors']++;
+        continue;
+      }
+
+      foreach ($transferred_ids as $ledger_id) {
+        $wpdb->update(
+          $table,
+          array(
+            'status' => 'paid_out',
+            'payout_id' => (string)($payout['id'] ?? ''),
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => (int)$ledger_id),
+          array('%s','%s','%s'),
+          array('%d')
+        );
+      }
+
+      $summary['payouts_created']++;
+    }
+
+    return $summary;
+  }
+
   /* =========================================================
    * REST API
    * ======================================================= */
@@ -1763,9 +2173,9 @@ class MRM_Payments_Hub_Single {
 
     // Send custom receipt email once (idempotent)
     if ($ok && $order) {
-      // refresh order row because metadata_json may have been merged/updated
       $order = $this->get_order_by_pi($pi_id);
       $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
+      $this->mrm_maybe_create_payout_ledger_for_order($order);
     }
 
     return new WP_REST_Response(array(
@@ -2062,6 +2472,11 @@ class MRM_Payments_Hub_Single {
       $settings['stripe_test_publishable_key'] = sanitize_text_field((string)($_POST['stripe_test_publishable_key'] ?? ''));
       $settings['stripe_test_secret_key'] = sanitize_text_field((string)($_POST['stripe_test_secret_key'] ?? ''));
       $settings['stripe_test_webhook_secret'] = sanitize_text_field((string)($_POST['stripe_test_webhook_secret'] ?? ''));
+      $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
+      $settings['lesson_composer_cut_30_cents'] = max(0, intval($_POST['lesson_composer_cut_30_cents'] ?? 250));
+      $settings['lesson_composer_cut_60_cents'] = max(0, intval($_POST['lesson_composer_cut_60_cents'] ?? 500));
+      $settings['instructor_tier_rules'] = trim((string) wp_unslash($_POST['instructor_tier_rules'] ?? "0=50\n12=55\n24=60"));
+      $settings['payout_anchor_date'] = sanitize_text_field((string)($_POST['payout_anchor_date'] ?? ''));
       $this->save_settings($settings);
 
       // ✅ Manual access row inserts (row-based UI)
@@ -2187,6 +2602,12 @@ class MRM_Payments_Hub_Single {
         if (!isset($new_lists['all-sheet-music'])) $new_lists['all-sheet-music'] = array();
 
         $this->save_access_lists($new_lists);
+      }
+
+      if (!empty($_POST['mrm_run_payout_batch'])) {
+        $result = $this->mrm_run_payout_batch(true);
+        $msg = 'Payout batch run. Transfers: ' . (int)($result['transfers_created'] ?? 0) . ', payouts: ' . (int)($result['payouts_created'] ?? 0) . ', errors: ' . (int)($result['errors'] ?? 0);
+        add_settings_error('mrm_pay_hub', 'payout_batch_run', $msg, empty($result['errors']) ? 'updated' : 'error');
       }
 
       add_settings_error('mrm_pay_hub', 'saved', 'Settings saved.', 'updated');
@@ -2574,6 +2995,11 @@ class MRM_Payments_Hub_Single {
     $pk_test   = esc_attr((string)($settings['stripe_test_publishable_key'] ?? ''));
     $sk_test   = esc_attr((string)($settings['stripe_test_secret_key'] ?? ''));
     $wh_test   = esc_attr((string)($settings['stripe_test_webhook_secret'] ?? ''));
+    $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
+    $cut_30 = (int)($settings['lesson_composer_cut_30_cents'] ?? 250);
+    $cut_60 = (int)($settings['lesson_composer_cut_60_cents'] ?? 500);
+    $tier_rules = esc_textarea((string)($settings['instructor_tier_rules'] ?? "0=50\n12=55\n24=60"));
+    $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
     $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
 
     ?>
@@ -2625,6 +3051,47 @@ class MRM_Payments_Hub_Single {
           <tr>
             <th scope="row"><label for="stripe_test_webhook_secret">Webhook Signing Secret (Test, optional)</label></th>
             <td><input type="password" id="stripe_test_webhook_secret" name="stripe_test_webhook_secret" value="<?php echo $wh_test; ?>" class="regular-text" autocomplete="off" /></td>
+          </tr>
+        </table>
+
+        <h2>Connect / Payout Settings</h2>
+        <p>These settings drive instructor/composer payout math and the biweekly payout batch.</p>
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="composer_connected_account_id">Composer Connected Account ID</label></th>
+            <td>
+              <input type="text" id="composer_connected_account_id" name="composer_connected_account_id" value="<?php echo $composer_acct; ?>" class="regular-text" placeholder="acct_..." />
+              <p class="description">Paste the composer’s Stripe Connect account ID here.</p>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="lesson_composer_cut_30_cents">30-Min Lesson Composer Cut (cents)</label></th>
+            <td><input type="number" id="lesson_composer_cut_30_cents" name="lesson_composer_cut_30_cents" value="<?php echo esc_attr($cut_30); ?>" class="small-text" min="0" step="1" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="lesson_composer_cut_60_cents">60-Min Lesson Composer Cut (cents)</label></th>
+            <td><input type="number" id="lesson_composer_cut_60_cents" name="lesson_composer_cut_60_cents" value="<?php echo esc_attr($cut_60); ?>" class="small-text" min="0" step="1" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="instructor_tier_rules">Instructor Tier Rules</label></th>
+            <td>
+              <textarea id="instructor_tier_rules" name="instructor_tier_rules" rows="6" class="large-text code"><?php echo $tier_rules; ?></textarea>
+              <p class="description">One rule per line in the format <code>months=pct</code>. Example:<br><code>0=50<br>12=55<br>24=60</code></p>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="payout_anchor_date">Biweekly Payout Anchor Date</label></th>
+            <td>
+              <input type="date" id="payout_anchor_date" name="payout_anchor_date" value="<?php echo $payout_anchor_date; ?>" />
+              <p class="description">Use the first Friday that should count as a payout Friday. Every 14 days after that is a payout day.</p>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Manual Test Button</th>
+            <td>
+              <button type="submit" name="mrm_run_payout_batch" value="1" class="button">Run Payout Batch Now</button>
+              <p class="description">Use this in sandbox to test transfers and payouts immediately.</p>
+            </td>
           </tr>
         </table>
 
