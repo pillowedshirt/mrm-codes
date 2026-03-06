@@ -79,6 +79,11 @@ class MRM_Payments_Hub_Single {
     return $wpdb->prefix . 'mrm_autopay_profiles';
   }
 
+  private function table_webhook_events() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_stripe_webhook_events';
+  }
+
   public function maybe_install_or_upgrade_db() {
     // Run a lightweight existence + schema check; only dbDelta if needed.
     global $wpdb;
@@ -89,11 +94,12 @@ class MRM_Payments_Hub_Single {
     $payouts = $this->table_payout_ledger();
     $credits = $this->table_lesson_credits();
     $autopay = $this->table_autopay_profiles();
+    $webhooks = $this->table_webhook_events();
 
     $needs_upgrade = false;
 
     // 1) Table existence check
-    foreach (array($orders, $links, $access, $payouts, $credits, $autopay) as $t) {
+    foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks) as $t) {
       $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
       if ($found !== $t) {
         $needs_upgrade = true;
@@ -163,6 +169,7 @@ class MRM_Payments_Hub_Single {
     $payouts = $this->table_payout_ledger();
     $credits = $this->table_lesson_credits();
     $autopay = $this->table_autopay_profiles();
+    $webhooks = $this->table_webhook_events();
 
     $sql_orders = "CREATE TABLE {$orders} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -276,12 +283,26 @@ class MRM_Payments_Hub_Single {
       KEY active_idx (active)
     ) {$charset};";
 
+    $sql_webhooks = "CREATE TABLE {$webhooks} (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      stripe_event_id VARCHAR(255) NOT NULL,
+      event_type VARCHAR(120) NOT NULL,
+      object_id VARCHAR(255) DEFAULT NULL,
+      processed_at DATETIME NOT NULL,
+      created_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY stripe_event_id_uniq (stripe_event_id),
+      KEY event_type_idx (event_type),
+      KEY object_id_idx (object_id)
+    ) {$charset};";
+
     dbDelta($sql_orders);
     dbDelta($sql_links);
     dbDelta($sql_access);
     dbDelta($sql_payouts);
     dbDelta($sql_credits);
     dbDelta($sql_autopay);
+    dbDelta($sql_webhooks);
   }
 
 
@@ -938,6 +959,144 @@ class MRM_Payments_Hub_Single {
     return isset($created['id']) ? (string)$created['id'] : new WP_Error('stripe_error', 'Unable to create customer.');
   }
 
+  private function stripe_construct_webhook_event($payload, $signature_header, $secret) {
+    if (!$payload || !$signature_header || !$secret) {
+      return new WP_Error('stripe_webhook_invalid', 'Missing webhook payload, signature, or secret.');
+    }
+
+    $parts = explode(',', (string)$signature_header);
+    $timestamp = '';
+    $signatures = array();
+
+    foreach ($parts as $part) {
+      $kv = explode('=', trim($part), 2);
+      if (count($kv) !== 2) continue;
+      if ($kv[0] === 't') $timestamp = $kv[1];
+      if ($kv[0] === 'v1') $signatures[] = $kv[1];
+    }
+
+    if ($timestamp === '' || empty($signatures)) {
+      return new WP_Error('stripe_webhook_invalid', 'Invalid Stripe-Signature header.');
+    }
+
+    $signed_payload = $timestamp . '.' . $payload;
+    $expected = hash_hmac('sha256', $signed_payload, $secret);
+
+    $valid = false;
+    foreach ($signatures as $sig) {
+      if (hash_equals($expected, $sig)) {
+        $valid = true;
+        break;
+      }
+    }
+
+    if (!$valid) {
+      return new WP_Error('stripe_webhook_invalid', 'Webhook signature verification failed.');
+    }
+
+    $json = json_decode($payload, true);
+    if (!is_array($json)) {
+      return new WP_Error('stripe_webhook_invalid', 'Invalid webhook JSON.');
+    }
+
+    return $json;
+  }
+
+  private function mrm_webhook_event_already_processed($event_id) {
+    global $wpdb;
+    return (bool)$wpdb->get_var($wpdb->prepare(
+      "SELECT id FROM {$this->table_webhook_events()} WHERE stripe_event_id=%s LIMIT 1",
+      (string)$event_id
+    ));
+  }
+
+  private function mrm_mark_webhook_event_processed($event_id, $event_type, $object_id = '') {
+    global $wpdb;
+    $now = current_time('mysql');
+
+    $wpdb->insert($this->table_webhook_events(), array(
+      'stripe_event_id' => (string)$event_id,
+      'event_type' => (string)$event_type,
+      'object_id' => (string)$object_id,
+      'processed_at' => $now,
+      'created_at' => $now,
+    ), array('%s','%s','%s','%s','%s'));
+  }
+
+  private function mrm_handle_payment_intent_succeeded_webhook($pi) {
+    if (!is_array($pi)) return;
+
+    $pi_id = (string)($pi['id'] ?? '');
+    if ($pi_id === '') return;
+
+    $latest_charge = '';
+    if (!empty($pi['latest_charge'])) {
+      $latest_charge = (string)$pi['latest_charge'];
+    }
+
+    $order = $this->get_order_by_pi($pi_id);
+    if (!$order) return;
+
+    $metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+    $metadata['mrm_latest_charge_id'] = $latest_charge;
+
+    $this->update_order_status_from_pi($pi_id, 'paid', (string)($pi['status'] ?? 'succeeded'), $metadata);
+
+    $order = $this->get_order_by_pi($pi_id);
+    if ($order) {
+      $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
+      $this->mrm_maybe_create_payout_ledger_for_order($order);
+    }
+  }
+
+  private function mrm_handle_payment_intent_failed_webhook($pi, $local_status = 'failed') {
+    if (!is_array($pi)) return;
+
+    $pi_id = (string)($pi['id'] ?? '');
+    if ($pi_id === '') return;
+
+    $order = $this->get_order_by_pi($pi_id);
+    if (!$order) return;
+
+    $metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+    if (!empty($pi['latest_charge'])) {
+      $metadata['mrm_latest_charge_id'] = (string)$pi['latest_charge'];
+    }
+
+    $this->update_order_status_from_pi($pi_id, $local_status, (string)($pi['status'] ?? ''), $metadata);
+  }
+
+  private function mrm_handle_charge_refunded_webhook($charge) {
+    if (!is_array($charge)) return;
+
+    $pi_id = (string)($charge['payment_intent'] ?? '');
+    if ($pi_id === '') return;
+
+    $order = $this->get_order_by_pi($pi_id);
+    if (!$order) return;
+
+    $this->update_order_status_from_pi($pi_id, 'refunded', 'refunded', array(
+      'mrm_latest_charge_id' => (string)($charge['id'] ?? ''),
+      'mrm_refunded_at' => current_time('mysql'),
+    ));
+
+    global $wpdb;
+    $wpdb->update(
+      $this->table_payout_ledger(),
+      array(
+        'status' => 'cancelled',
+        'updated_at' => current_time('mysql'),
+        'notes' => 'Cancelled by refund webhook before payout transfer.',
+      ),
+      array(
+        'order_id' => (int)$order['id'],
+        'status' => 'pending',
+      ),
+      array('%s','%s','%s'),
+      array('%d','%s')
+    );
+  }
+
   /* =========================================================
    * Orders ledger helpers
    * ======================================================= */
@@ -1578,11 +1737,15 @@ class MRM_Payments_Hub_Single {
 
     if ($lesson_id <= 0 || $instructor_id <= 0) return;
 
-    if ($mode === 'prepay') {
+    // Any lesson already paid on the platform should unlock from credits only after delivery.
+    // This includes both bundled prepay and single paid lessons.
+    if ($mode === 'prepay' || $mode === 'one_time') {
       $this->unlock_prepay_instructor_payout($data);
       return;
     }
 
+    // Auto-pay means the lesson was booked with a saved payment method
+    // and should only be charged after completion.
     if ($mode === 'autopay') {
       $this->charge_and_unlock_autopay($data);
       return;
@@ -1692,13 +1855,37 @@ class MRM_Payments_Hub_Single {
     $status = (string)($pi['status'] ?? '');
     $this->attach_payment_intent_to_order($order_id, $pi_id, $status);
 
+    $latest_charge = '';
+    if (!empty($pi['latest_charge'])) {
+      $latest_charge = (string)$pi['latest_charge'];
+    }
+
     if ($status !== 'succeeded' && $status !== 'requires_capture') {
-      $this->update_order_status_from_pi($pi_id, 'failed', $status);
-      $this->mrm_insert_payout_ledger_row($order_id, $pi_id, 'instructor', 'lesson:' . $lesson_id, '', (string)($profile['currency'] ?? 'usd'), 0, 0, 'blocked', 'Autopay charge not successful: ' . $status);
+      $this->update_order_status_from_pi($pi_id, 'failed', $status, array(
+        'mrm_lesson_id' => (string)$lesson_id,
+        'mrm_autopay_profile_id' => (string)$autopay_profile_id,
+        'mrm_latest_charge_id' => $latest_charge,
+      ));
+      $this->mrm_insert_payout_ledger_row(
+        $order_id,
+        $pi_id,
+        'instructor',
+        'lesson:' . $lesson_id,
+        '',
+        (string)($profile['currency'] ?? 'usd'),
+        0,
+        0,
+        'blocked',
+        'Autopay charge not successful: ' . $status
+      );
       return;
     }
 
-    $this->update_order_status_from_pi($pi_id, 'paid', $status, array('mrm_lesson_id' => (string)$lesson_id));
+    $this->update_order_status_from_pi($pi_id, 'paid', $status, array(
+      'mrm_lesson_id' => (string)$lesson_id,
+      'mrm_autopay_profile_id' => (string)$autopay_profile_id,
+      'mrm_latest_charge_id' => $latest_charge,
+    ));
 
     $instr = $this->mrm_get_instructor_row($instructor_id);
     $instr_pct = $this->mrm_resolve_instructor_pct((string)($instr['hire_date'] ?? ''));
@@ -1964,6 +2151,12 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/stripe-webhook', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_stripe_webhook'),
+      'permission_callback' => '__return_true',
+    ));
+
 
     register_rest_route('mrm-pay/v1', '/grant-sheet-music-access', array(
       'methods' => WP_REST_Server::CREATABLE,
@@ -1977,6 +2170,60 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+  }
+
+  public function rest_stripe_webhook(WP_REST_Request $req) {
+    $payload = $req->get_body();
+    $signature = isset($_SERVER['HTTP_STRIPE_SIGNATURE']) ? (string)$_SERVER['HTTP_STRIPE_SIGNATURE'] : '';
+    $secret = $this->webhook_secret();
+
+    if (!$secret) {
+      return new WP_REST_Response(array('ok' => false, 'message' => 'Webhook secret is not configured.'), 500);
+    }
+
+    $event = $this->stripe_construct_webhook_event($payload, $signature, $secret);
+    if (is_wp_error($event)) {
+      return new WP_REST_Response(array('ok' => false, 'message' => $event->get_error_message()), 400);
+    }
+
+    $event_id = (string)($event['id'] ?? '');
+    $event_type = (string)($event['type'] ?? '');
+    $object = isset($event['data']['object']) && is_array($event['data']['object']) ? $event['data']['object'] : array();
+    $object_id = (string)($object['id'] ?? '');
+
+    if ($event_id === '' || $event_type === '') {
+      return new WP_REST_Response(array('ok' => false, 'message' => 'Invalid webhook event.'), 400);
+    }
+
+    if ($this->mrm_webhook_event_already_processed($event_id)) {
+      return new WP_REST_Response(array('ok' => true, 'duplicate' => true), 200);
+    }
+
+    switch ($event_type) {
+      case 'payment_intent.succeeded':
+        $this->mrm_handle_payment_intent_succeeded_webhook($object);
+        break;
+
+      case 'payment_intent.payment_failed':
+        $this->mrm_handle_payment_intent_failed_webhook($object, 'failed');
+        break;
+
+      case 'payment_intent.canceled':
+        $this->mrm_handle_payment_intent_failed_webhook($object, 'failed');
+        break;
+
+      case 'charge.refunded':
+        $this->mrm_handle_charge_refunded_webhook($object);
+        break;
+
+      default:
+        // Acknowledge unhandled events so Stripe does not keep retrying forever.
+        break;
+    }
+
+    $this->mrm_mark_webhook_event_processed($event_id, $event_type, $object_id);
+
+    return new WP_REST_Response(array('ok' => true), 200);
   }
 
   public function rest_quote(WP_REST_Request $req) {
