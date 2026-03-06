@@ -2258,6 +2258,18 @@ class MRM_Lesson_Scheduler {
         }
     }
 
+    public function register_custom_cron_schedules( $schedules ) {
+        // Add a 10-minute interval used by the lesson completion reconciler.
+        if ( ! isset( $schedules['mrm_10min'] ) ) {
+            $schedules['mrm_10min'] = array(
+                'interval' => 10 * 60,
+                'display'  => __( 'Every 10 minutes (MRM)', 'mrm-lesson-scheduler' ),
+            );
+        }
+
+        return $schedules;
+    }
+
 
     public function cron_reconcile_completed_lessons() {
         global $wpdb;
