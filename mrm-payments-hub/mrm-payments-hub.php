@@ -1312,16 +1312,7 @@ class MRM_Payments_Hub_Single {
     return max(0, min(100, $pct));
   }
 
-  private function mrm_lesson_composer_cut_cents($lesson_length) {
-    $settings = $this->get_settings();
-    $lesson_length = (int)$lesson_length;
-    if ($lesson_length === 30) {
-      return max(0, (int)($settings['lesson_composer_cut_30_cents'] ?? 250));
-    }
-    return max(0, (int)($settings['lesson_composer_cut_60_cents'] ?? 500));
-  }
-
-  private function stripe_create_transfer($amount_cents, $currency, $destination_account_id, $transfer_group = '', $metadata = array()) {
+  private function stripe_create_transfer($amount_cents, $currency, $destination_account_id, $transfer_group = '', $metadata = array(), $source_transaction = '') {
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => strtolower((string)$currency),
@@ -1329,6 +1320,7 @@ class MRM_Payments_Hub_Single {
     );
     if ($transfer_group !== '') $params['transfer_group'] = $transfer_group;
     if (!empty($metadata)) $params['metadata'] = $metadata;
+    if ($source_transaction !== '') $params['source_transaction'] = (string)$source_transaction;
     return $this->stripe_api_request('POST', '/v1/transfers', $params);
   }
 
@@ -1419,21 +1411,19 @@ class MRM_Payments_Hub_Single {
 
     if ($product_type === 'lesson') {
       $instructor_id = (int)($meta['mrm_instructor_id'] ?? 0);
-      $lesson_length = (int)($meta['mrm_lesson_length'] ?? 60);
-      $lesson_count = max(1, (int)($meta['mrm_lesson_count'] ?? 1));
 
       $instr = $this->mrm_get_instructor_row($instructor_id);
       $instr_pct = $this->mrm_resolve_instructor_pct((string)($instr['hire_date'] ?? ''));
       $instructor_share = (int) floor($base_cents * ($instr_pct / 100));
       $instructor_acct = (string)($instr['stripe_connected_account_id'] ?? '');
 
-      $composer_cut_total = $this->mrm_lesson_composer_cut_cents($lesson_length) * $lesson_count;
-      if ($composer_cut_total > ($base_cents - $instructor_share)) {
-        $composer_cut_total = max(0, $base_cents - $instructor_share);
-      }
-
-      $platform_share = max(0, $base_cents - $instructor_share - $composer_cut_total) + max(0, $addon_cents);
+      // NEW RULE: composer gets 100% of the add-on (sheet music subscription upcharge)
+      $composer_addon_share = max(0, (int)$addon_cents);
       $composer_acct = (string)($this->get_settings()['composer_connected_account_id'] ?? '');
+
+      // Platform keeps what's left of the base lesson after instructor share.
+      // (Add-on is NOT included in platform share anymore.)
+      $platform_share = max(0, $base_cents - $instructor_share);
 
       if ($instructor_share > 0) {
         $this->mrm_insert_payout_ledger_row(
@@ -1450,7 +1440,7 @@ class MRM_Payments_Hub_Single {
         );
       }
 
-      if ($composer_cut_total > 0) {
+      if ($composer_addon_share > 0) {
         $this->mrm_insert_payout_ledger_row(
           $order_id,
           $pi_id,
@@ -1458,14 +1448,25 @@ class MRM_Payments_Hub_Single {
           'composer',
           $composer_acct,
           $currency,
-          $composer_cut_total,
-          $composer_cut_total,
+          $composer_addon_share,
+          $composer_addon_share,
           $composer_acct ? 'pending' : 'blocked',
-          $composer_acct ? '' : 'Missing composer connected account ID'
+          $composer_acct ? 'Add-on payout (subscription upcharge)' : 'Missing composer connected account ID'
         );
       }
 
-      $this->mrm_insert_payout_ledger_row($order_id, $pi_id, 'platform', 'platform', '', $currency, $platform_share, $platform_share, 'retained', 'Retained by platform');
+      $this->mrm_insert_payout_ledger_row(
+        $order_id,
+        $pi_id,
+        'platform',
+        'platform',
+        '',
+        $currency,
+        $platform_share,
+        $platform_share,
+        'retained',
+        'Retained by platform'
+      );
       return true;
     }
 
@@ -1503,6 +1504,7 @@ class MRM_Payments_Hub_Single {
       'transfers_created' => 0,
       'payouts_created' => 0,
       'errors' => 0,
+      'last_error' => '',
     );
 
     if (!$force && !$this->mrm_is_biweekly_payout_day()) {
@@ -1521,6 +1523,27 @@ class MRM_Payments_Hub_Single {
     );
 
     if (!$rows) return $summary;
+
+    // Build order_id -> latest_charge_id map
+    $order_ids = array();
+    foreach ($rows as $r) $order_ids[] = (int)$r['order_id'];
+    $order_ids = array_values(array_unique($order_ids));
+
+    $charge_map = array();
+    if (!empty($order_ids)) {
+      $orders_table = $this->table_orders();
+      $in = implode(',', array_map('intval', $order_ids));
+      $order_rows = $wpdb->get_results("SELECT id, metadata_json FROM {$orders_table} WHERE id IN ({$in})", ARRAY_A);
+      foreach ((array)$order_rows as $or) {
+        $m = array();
+        if (!empty($or['metadata_json'])) {
+          $d = json_decode((string)$or['metadata_json'], true);
+          if (is_array($d)) $m = $d;
+        }
+        $ch = (string)($m['mrm_latest_charge_id'] ?? '');
+        if ($ch !== '') $charge_map[(int)$or['id']] = $ch;
+      }
+    }
 
     $batch_key = 'batch_' . gmdate('Ymd_His');
 
@@ -1541,6 +1564,7 @@ class MRM_Payments_Hub_Single {
       foreach ($group_rows as $row) {
         $amount = (int)$row['net_cents'];
         if ($amount <= 0) continue;
+        $source_txn = (string)($charge_map[(int)$row['order_id']] ?? '');
 
         $transfer = $this->stripe_create_transfer(
           $amount,
@@ -1551,11 +1575,13 @@ class MRM_Payments_Hub_Single {
             'mrm_order_id' => (string)$row['order_id'],
             'mrm_payee_type' => (string)$row['payee_type'],
             'mrm_batch_key' => $batch_key,
-          )
+          ),
+          $source_txn
         );
 
         if (is_wp_error($transfer)) {
           $summary['errors']++;
+          $summary['last_error'] = $transfer->get_error_message();
           $wpdb->update(
             $table,
             array(
@@ -1603,6 +1629,7 @@ class MRM_Payments_Hub_Single {
 
       if (is_wp_error($payout)) {
         $summary['errors']++;
+        $summary['last_error'] = $payout->get_error_message();
         continue;
       }
 
@@ -2165,10 +2192,21 @@ class MRM_Payments_Hub_Single {
     }
 
     // Update local order status if it exists
+    $latest_charge = '';
+    if (!empty($pi['latest_charge'])) {
+      $latest_charge = (string)$pi['latest_charge'];
+    }
+
     $order = $this->get_order_by_pi($pi_id);
     if ($order) {
       $new_status = $ok ? 'paid' : (in_array($status, $fail_statuses, true) ? 'failed' : 'created');
-      $this->update_order_status_from_pi($pi_id, $new_status, $status, $pi['metadata'] ?? null);
+      $metadata = $pi['metadata'] ?? null;
+      if (is_array($metadata)) {
+        $metadata['mrm_latest_charge_id'] = $latest_charge;
+      } else {
+        $metadata = array('mrm_latest_charge_id' => $latest_charge);
+      }
+      $this->update_order_status_from_pi($pi_id, $new_status, $status, $metadata);
     }
 
     // Send custom receipt email once (idempotent)
@@ -2473,8 +2511,6 @@ class MRM_Payments_Hub_Single {
       $settings['stripe_test_secret_key'] = sanitize_text_field((string)($_POST['stripe_test_secret_key'] ?? ''));
       $settings['stripe_test_webhook_secret'] = sanitize_text_field((string)($_POST['stripe_test_webhook_secret'] ?? ''));
       $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
-      $settings['lesson_composer_cut_30_cents'] = max(0, intval($_POST['lesson_composer_cut_30_cents'] ?? 250));
-      $settings['lesson_composer_cut_60_cents'] = max(0, intval($_POST['lesson_composer_cut_60_cents'] ?? 500));
       $settings['instructor_tier_rules'] = trim((string) wp_unslash($_POST['instructor_tier_rules'] ?? "0=50\n12=55\n24=60"));
       $settings['payout_anchor_date'] = sanitize_text_field((string)($_POST['payout_anchor_date'] ?? ''));
       $this->save_settings($settings);
@@ -2606,7 +2642,8 @@ class MRM_Payments_Hub_Single {
 
       if (!empty($_POST['mrm_run_payout_batch'])) {
         $result = $this->mrm_run_payout_batch(true);
-        $msg = 'Payout batch run. Transfers: ' . (int)($result['transfers_created'] ?? 0) . ', payouts: ' . (int)($result['payouts_created'] ?? 0) . ', errors: ' . (int)($result['errors'] ?? 0);
+        $last = !empty($result['last_error']) ? (' Last error: ' . $result['last_error']) : '';
+        $msg = 'Payout batch run. Transfers: ' . (int)($result['transfers_created'] ?? 0) . ', payouts: ' . (int)($result['payouts_created'] ?? 0) . ', errors: ' . (int)($result['errors'] ?? 0) . $last;
         add_settings_error('mrm_pay_hub', 'payout_batch_run', $msg, empty($result['errors']) ? 'updated' : 'error');
       }
 
@@ -2996,8 +3033,6 @@ class MRM_Payments_Hub_Single {
     $sk_test   = esc_attr((string)($settings['stripe_test_secret_key'] ?? ''));
     $wh_test   = esc_attr((string)($settings['stripe_test_webhook_secret'] ?? ''));
     $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
-    $cut_30 = (int)($settings['lesson_composer_cut_30_cents'] ?? 250);
-    $cut_60 = (int)($settings['lesson_composer_cut_60_cents'] ?? 500);
     $tier_rules = esc_textarea((string)($settings['instructor_tier_rules'] ?? "0=50\n12=55\n24=60"));
     $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
     $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
@@ -3063,14 +3098,6 @@ class MRM_Payments_Hub_Single {
               <input type="text" id="composer_connected_account_id" name="composer_connected_account_id" value="<?php echo $composer_acct; ?>" class="regular-text" placeholder="acct_..." />
               <p class="description">Paste the composer’s Stripe Connect account ID here.</p>
             </td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="lesson_composer_cut_30_cents">30-Min Lesson Composer Cut (cents)</label></th>
-            <td><input type="number" id="lesson_composer_cut_30_cents" name="lesson_composer_cut_30_cents" value="<?php echo esc_attr($cut_30); ?>" class="small-text" min="0" step="1" /></td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="lesson_composer_cut_60_cents">60-Min Lesson Composer Cut (cents)</label></th>
-            <td><input type="number" id="lesson_composer_cut_60_cents" name="lesson_composer_cut_60_cents" value="<?php echo esc_attr($cut_60); ?>" class="small-text" min="0" step="1" /></td>
           </tr>
           <tr>
             <th scope="row"><label for="instructor_tier_rules">Instructor Tier Rules</label></th>
