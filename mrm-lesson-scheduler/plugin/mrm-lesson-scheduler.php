@@ -2204,7 +2204,7 @@ class MRM_Lesson_Scheduler {
         }
     }
 
-    public function cron_sync_upcoming_events() {
+    public function cron_sync_upcoming_events( $lookback_hours = 6, $lookahead_days = 7 ) {
         // Guard: only run if Google is configured
         if ( ! $this->google_is_configured() ) return;
 
@@ -2212,12 +2212,14 @@ class MRM_Lesson_Scheduler {
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
         $table_instructors = $wpdb->prefix . 'mrm_instructors';
 
-        // Window: now-6h to now+7d (UTC)
-        // -6h: catches just-missed boundary / timezone edge cases
-        // +7d: ensures moves from farther future into the near future get discovered quickly
+        $lookback_hours = max( 1, (int) $lookback_hours );
+        $lookahead_days = max( 1, (int) $lookahead_days );
+
+        // Window: now-lookback to now+lookahead (UTC)
+        // Default cron remains narrow, but payout-triggered reconciliation can widen this.
         $now_ts = time();
-        $min_ts = $now_ts - ( 6 * HOUR_IN_SECONDS );
-        $max_ts = $now_ts + ( 7 * DAY_IN_SECONDS );
+        $min_ts = $now_ts - ( $lookback_hours * HOUR_IN_SECONDS );
+        $max_ts = $now_ts + ( $lookahead_days * DAY_IN_SECONDS );
 
         $min_utc = gmdate( 'Y-m-d H:i:s', $min_ts );
         $max_utc = gmdate( 'Y-m-d H:i:s', $max_ts );
@@ -2327,6 +2329,11 @@ class MRM_Lesson_Scheduler {
 
     public function cron_reconcile_completed_lessons() {
         global $wpdb;
+
+        // Before deciding whether lessons have ended, first sync Google-moved
+        // booking times back into the local lesson rows. Use a wider lookback
+        // than normal cron so manual payout runs can catch recently moved lessons.
+        $this->cron_sync_upcoming_events( 72, 7 );
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $instructors_table = $wpdb->prefix . 'mrm_instructors';
