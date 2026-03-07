@@ -28,6 +28,7 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_cleanup_access', array($this, 'cleanup_access'));
     add_action('mrm_pay_hub_daily_payout_check', array($this, 'cron_daily_payout_check'));
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
+    add_action('mrm_lesson_cancelled', array($this, 'on_lesson_cancelled'), 10, 1);
 
     register_activation_hook(__FILE__, array($this, 'on_activate'));
   }
@@ -136,6 +137,33 @@ class MRM_Payments_Hub_Single {
         if (!in_array($col, $existing_cols, true)) {
           $needs_upgrade = true;
           error_log('[MRM Payments Hub] Access table missing column: ' . $col . ' — running install_or_upgrade_db().');
+          break;
+        }
+      }
+    }
+
+    if (!$needs_upgrade) {
+      $required_autopay_columns = array(
+        'plan_kind',
+        'authorized_lesson_count',
+        'charged_lesson_count',
+        'detached_at',
+      );
+
+      $existing_autopay_cols = array();
+      $cols = $wpdb->get_results("SHOW COLUMNS FROM {$autopay}");
+      if (is_array($cols)) {
+        foreach ($cols as $c) {
+          if (!empty($c->Field)) {
+            $existing_autopay_cols[] = (string)$c->Field;
+          }
+        }
+      }
+
+      foreach ($required_autopay_columns as $col) {
+        if (!in_array($col, $existing_autopay_cols, true)) {
+          $needs_upgrade = true;
+          error_log('[MRM Payments Hub] Autopay table missing column: ' . $col . ' — running install_or_upgrade_db().');
           break;
         }
       }
@@ -267,21 +295,25 @@ class MRM_Payments_Hub_Single {
     ) {$charset};";
 
     $sql_autopay = "CREATE TABLE {$autopay} (
-      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-      instructor_id BIGINT UNSIGNED NOT NULL,
-      email_hash CHAR(64) NOT NULL,
-      customer_id VARCHAR(255) NOT NULL,
-      payment_method_id VARCHAR(255) NOT NULL,
-      currency VARCHAR(10) NOT NULL DEFAULT 'usd',
-      unit_base_cents INT NOT NULL DEFAULT 0,
-      active TINYINT(1) NOT NULL DEFAULT 1,
-      created_at DATETIME NOT NULL,
-      updated_at DATETIME NOT NULL,
-      PRIMARY KEY (id),
-      KEY email_hash_idx (email_hash),
-      KEY instructor_idx (instructor_id),
-      KEY active_idx (active)
-    ) {$charset};";
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  instructor_id BIGINT UNSIGNED NOT NULL,
+  email_hash CHAR(64) NOT NULL,
+  customer_id VARCHAR(255) NOT NULL,
+  payment_method_id VARCHAR(255) NOT NULL,
+  currency VARCHAR(10) NOT NULL DEFAULT 'usd',
+  unit_base_cents INT NOT NULL DEFAULT 0,
+  plan_kind VARCHAR(20) NOT NULL DEFAULT 'indefinite',
+  authorized_lesson_count INT NOT NULL DEFAULT 0,
+  charged_lesson_count INT NOT NULL DEFAULT 0,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  detached_at DATETIME DEFAULT NULL,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY email_hash_idx (email_hash),
+  KEY instructor_idx (instructor_id),
+  KEY active_idx (active)
+) {$charset};";
 
     $sql_webhooks = "CREATE TABLE {$webhooks} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -935,6 +967,28 @@ class MRM_Payments_Hub_Single {
     ));
   }
 
+  private function stripe_detach_payment_method($payment_method_id) {
+    $payment_method_id = sanitize_text_field((string)$payment_method_id);
+    if (!$payment_method_id) return new WP_Error('stripe_invalid_args', 'Missing payment method id.');
+    return $this->stripe_api_request('POST', '/v1/payment_methods/' . rawurlencode($payment_method_id) . '/detach', array());
+  }
+
+  private function stripe_create_refund($payment_intent_id, $amount_cents = null, $reason = 'requested_by_customer') {
+    $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
+    if (!$payment_intent_id) return new WP_Error('stripe_invalid_args', 'Missing payment_intent id.');
+
+    $params = array(
+      'payment_intent' => $payment_intent_id,
+      'reason' => $reason,
+    );
+
+    if ($amount_cents !== null && (int)$amount_cents > 0) {
+      $params['amount'] = (int)$amount_cents;
+    }
+
+    return $this->stripe_api_request('POST', '/v1/refunds', $params);
+  }
+
   private function stripe_find_or_create_customer($email) {
     $email = sanitize_email((string)$email);
     if (!$email || !is_email($email)) return new WP_Error('bad_email', 'Valid email required for customer.');
@@ -1237,6 +1291,144 @@ class MRM_Payments_Hub_Single {
       "SELECT * FROM {$this->table_autopay_profiles()} WHERE id=%d LIMIT 1",
       (int)$autopay_profile_id
     ), ARRAY_A);
+  }
+
+  private function mrm_get_order_by_id($order_id) {
+    global $wpdb;
+    return $wpdb->get_row(
+      $wpdb->prepare("SELECT * FROM {$this->table_orders()} WHERE id=%d LIMIT 1", (int)$order_id),
+      ARRAY_A
+    );
+  }
+
+  private function mrm_count_future_scheduled_lessons_for_autopay($autopay_profile_id) {
+    global $wpdb;
+    if ((int)$autopay_profile_id <= 0) return 0;
+
+    $table = $wpdb->prefix . 'mrm_lessons';
+    $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($exists !== $table) return 0;
+
+    return (int)$wpdb->get_var($wpdb->prepare(
+      "SELECT COUNT(*)
+       FROM {$table}
+       WHERE autopay_profile_id = %d
+         AND status = 'scheduled'
+         AND end_time > UTC_TIMESTAMP()",
+      (int)$autopay_profile_id
+    ));
+  }
+
+  private function mrm_increment_autopay_charge_count($autopay_profile_id) {
+    global $wpdb;
+    if ((int)$autopay_profile_id <= 0) return;
+
+    $profile = $this->mrm_get_autopay_profile($autopay_profile_id);
+    if (!$profile) return;
+
+    $new_count = max(0, (int)($profile['charged_lesson_count'] ?? 0) + 1);
+
+    $wpdb->update(
+      $this->table_autopay_profiles(),
+      array(
+        'charged_lesson_count' => $new_count,
+        'updated_at' => current_time('mysql'),
+      ),
+      array('id' => (int)$autopay_profile_id),
+      array('%d','%s'),
+      array('%d')
+    );
+  }
+
+  private function mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, $force = false) {
+    global $wpdb;
+
+    $autopay_profile_id = (int)$autopay_profile_id;
+    if ($autopay_profile_id <= 0) return false;
+
+    $profile = $this->mrm_get_autopay_profile($autopay_profile_id);
+    if (!$profile) return false;
+
+    $plan_kind = (string)($profile['plan_kind'] ?? 'indefinite');
+    $authorized = (int)($profile['authorized_lesson_count'] ?? 0);
+    $charged = (int)($profile['charged_lesson_count'] ?? 0);
+    $future_count = $this->mrm_count_future_scheduled_lessons_for_autopay($autopay_profile_id);
+
+    $should_detach = false;
+
+    if ($force) {
+      $should_detach = true;
+    } elseif ($plan_kind === 'bounded') {
+      $should_detach = ($authorized > 0 && $charged >= $authorized && $future_count <= 0);
+    } else {
+      $should_detach = ($future_count <= 0);
+    }
+
+    if (!$should_detach) return false;
+
+    $pm_id = (string)($profile['payment_method_id'] ?? '');
+    if ($pm_id !== '') {
+      $det = $this->stripe_detach_payment_method($pm_id);
+      if (is_wp_error($det)) {
+        error_log('[MRM Payments Hub] Detach PM failed for autopay profile ' . $autopay_profile_id . ': ' . $det->get_error_message());
+        return false;
+      }
+    }
+
+    $wpdb->update(
+      $this->table_autopay_profiles(),
+      array(
+        'active' => 0,
+        'detached_at' => current_time('mysql'),
+        'updated_at' => current_time('mysql'),
+      ),
+      array('id' => $autopay_profile_id),
+      array('%d','%s','%s'),
+      array('%d')
+    );
+
+    return true;
+  }
+
+  private function mrm_find_lesson_charge_order($lesson_id) {
+    global $wpdb;
+    $lesson_id = (int)$lesson_id;
+    if ($lesson_id <= 0) return null;
+
+    return $wpdb->get_row($wpdb->prepare(
+      "SELECT o.*
+       FROM {$this->table_orders()} o
+       INNER JOIN {$this->table_links()} l ON l.order_id = o.id
+       WHERE l.source = %s
+         AND l.source_object_id = %s
+       ORDER BY o.id DESC
+       LIMIT 1",
+      'lesson',
+      (string)$lesson_id
+    ), ARRAY_A);
+  }
+
+  private function mrm_request_refund_for_order($order, $note = '') {
+    if (!is_array($order)) return false;
+
+    $status = (string)($order['status'] ?? '');
+    $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+
+    if ($pi_id === '' || $status === 'refunded') return false;
+    if (!in_array($status, array('paid','completed','succeeded'), true)) return false;
+
+    $refund = $this->stripe_create_refund($pi_id, null, 'requested_by_customer');
+    if (is_wp_error($refund)) {
+      error_log('[MRM Payments Hub] Refund failed for order ' . (int)$order['id'] . ': ' . $refund->get_error_message());
+      return false;
+    }
+
+    $this->update_order_status_from_pi($pi_id, 'refund_pending', 'refund_pending', array(
+      'mrm_refund_requested_at' => current_time('mysql'),
+      'mrm_refund_note' => (string)$note,
+    ));
+
+    return true;
   }
 
   private function decode_email_hash(string $hash): ?string {
@@ -1752,6 +1944,41 @@ class MRM_Payments_Hub_Single {
     }
   }
 
+  public function on_lesson_cancelled($data) {
+    $lesson_id = (int)($data['lesson_id'] ?? 0);
+    $payment_mode = (string)($data['payment_mode'] ?? 'none');
+    $order_id = (int)($data['order_id'] ?? 0);
+    $autopay_profile_id = (int)($data['autopay_profile_id'] ?? 0);
+
+    if ($lesson_id <= 0) return;
+
+    // AutoPay lessons: refund the specific lesson charge if one already exists,
+    // then deactivate/detach if no future lessons remain.
+    if ($payment_mode === 'autopay') {
+      $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
+      if ($lesson_order) {
+        $this->mrm_request_refund_for_order($lesson_order, 'Auto-refund for cancelled autopay lesson ' . $lesson_id);
+      }
+
+      if ($autopay_profile_id > 0) {
+        $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
+      }
+      return;
+    }
+
+    // One-time lessons: refund the original booking order if it was paid.
+    if ($payment_mode === 'one_time' && $order_id > 0) {
+      $order = $this->mrm_get_order_by_id($order_id);
+      if ($order) {
+        $this->mrm_request_refund_for_order($order, 'Auto-refund for cancelled one-time lesson ' . $lesson_id);
+      }
+      return;
+    }
+
+    // Prepay bundles are intentionally not auto-refunded here because one payment
+    // can cover multiple lessons. Leave bundle-credit handling separate.
+  }
+
   private function unlock_prepay_instructor_payout($data) {
     global $wpdb;
 
@@ -1886,6 +2113,10 @@ class MRM_Payments_Hub_Single {
       'mrm_autopay_profile_id' => (string)$autopay_profile_id,
       'mrm_latest_charge_id' => $latest_charge,
     ));
+
+    $this->link_order($order_id, 'lesson', (string)$lesson_id);
+    $this->mrm_increment_autopay_charge_count($autopay_profile_id);
+    $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
 
     $instr = $this->mrm_get_instructor_row($instructor_id);
     $instr_pct = $this->mrm_resolve_instructor_pct((string)($instr['hire_date'] ?? ''));
@@ -2551,6 +2782,15 @@ class MRM_Payments_Hub_Single {
     $lesson_length = isset($context['lesson_length']) ? absint($context['lesson_length']) : 60;
     $lesson_mode = sanitize_text_field((string)($context['lesson_mode'] ?? 'online'));
 
+    $repeat_frequency = sanitize_text_field((string)($context['repeat_frequency'] ?? 'none'));
+    $repeat_duration = sanitize_text_field((string)($context['repeat_duration'] ?? 'indefinitely'));
+    $authorized_lesson_count = isset($context['authorized_lesson_count']) ? absint($context['authorized_lesson_count']) : 0;
+
+    $plan_kind = ($repeat_duration === 'indefinitely') ? 'indefinite' : 'bounded';
+    if ($plan_kind === 'bounded' && $authorized_lesson_count <= 0) {
+      $authorized_lesson_count = 1;
+    }
+
     if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
     if ($instructor_id <= 0) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid instructor_id required.'), 400);
 
@@ -2575,10 +2815,14 @@ class MRM_Payments_Hub_Single {
       'payment_method_id' => '',
       'currency' => $currency,
       'unit_base_cents' => (int)$base_amount,
+      'plan_kind' => $plan_kind,
+      'authorized_lesson_count' => (int)$authorized_lesson_count,
+      'charged_lesson_count' => 0,
       'active' => 1,
+      'detached_at' => null,
       'created_at' => $now,
       'updated_at' => $now,
-    ), array('%d','%s','%s','%s','%s','%d','%d','%s','%s'));
+    ), array('%d','%s','%s','%s','%s','%d','%s','%d','%d','%d','%s','%s','%s'));
 
     $autopay_profile_id = (int)$wpdb->insert_id;
     if ($autopay_profile_id <= 0) {
@@ -2603,6 +2847,8 @@ class MRM_Payments_Hub_Single {
       'autopay_profile_id' => $autopay_profile_id,
       'currency' => $currency,
       'unit_base_cents' => $base_amount,
+      'plan_kind' => $plan_kind,
+      'authorized_lesson_count' => (int)$authorized_lesson_count,
     ), 200);
   }
 

@@ -1840,6 +1840,8 @@ h1 {
                 <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
               </div>
 
+              <div id="mrm-autopay-visual-note" style="display:none; margin-top:10px; font-size:12.5px; line-height:1.45;"></div>
+
               <div style="margin-top:8px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
             </div>
 
@@ -1998,6 +2000,38 @@ function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDur
 
   // If baseSelectedCount is >1 (user selected multiple starters), multiply accordingly
   return Math.max(1, base * occurrences);
+}
+
+function estimateAutopayAuthorizedLessonCount(baseSelectedCount, repeatFrequency, repeatDuration){
+  const derived = estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDuration);
+  if (derived === null) return 0; // indefinite
+  return Math.max(1, parseInt(derived, 10) || 0);
+}
+
+function updateAutopayVisualNote() {
+  const noteEl = document.getElementById('mrm-autopay-visual-note');
+  const autopayCb = document.getElementById('mrm-autopay-opt');
+  const frequency = (document.getElementById('frequency')?.value || 'none').trim();
+  const reserveDuration = (document.getElementById('reserve-duration')?.value || '--').trim();
+
+  if (!noteEl || !autopayCb) return;
+
+  const count = selectedSlots.length || 1;
+  const authorized = estimateAutopayAuthorizedLessonCount(count, frequency, reserveDuration);
+
+  if (!autopayCb.checked) {
+    noteEl.style.display = 'none';
+    noteEl.textContent = '';
+    return;
+  }
+
+  if (authorized > 0) {
+    noteEl.textContent = `Auto-pay enrollment: your card will be stored for up to ${authorized} delivered lesson charge${authorized === 1 ? '' : 's'} for this enrollment, then removed automatically when the enrollment ends.`;
+  } else {
+    noteEl.textContent = 'Auto-pay enrollment: your card will stay on file only while future recurring lessons remain scheduled, and it will be removed automatically when recurring lessons are canceled.';
+  }
+
+  noteEl.style.display = 'block';
 }
 
 function ensureStripe(publishableKey){
@@ -2676,6 +2710,7 @@ function syncModalToLegacyFields(){
   const phEl = document.getElementById('phone');      if(phEl) phEl.value = phone;
   const frEl = document.getElementById('frequency');  if(frEl) frEl.value = freq;
   const rdEl = document.getElementById('reserve-duration'); if(rdEl) rdEl.value = dur;
+  updateAutopayVisualNote();
 }
 
 async function submitBooking(payload, setMsg){
@@ -2715,7 +2750,23 @@ async function submitBooking(payload, setMsg){
   const bookedInstructor = currentInstructor;
   closeBookingModal();
 
-  const popupText = 'Please check your email for our confirmation.';
+  let popupText = 'Please check your email for our confirmation.';
+
+  if ((payload.payment_mode || '') === 'autopay') {
+    const slotCount = Array.isArray(payload.slots) ? payload.slots.length : 1;
+    const authorized = estimateAutopayAuthorizedLessonCount(
+      slotCount,
+      payload.repeat_frequency || 'none',
+      payload.repeat_duration || '--'
+    );
+
+    if (authorized > 0) {
+      popupText = `Auto-pay enabled. Your card has been saved for up to ${authorized} delivered lesson charge${authorized === 1 ? '' : 's'} in this enrollment. It will be removed automatically when the enrollment ends. Please check your email for our confirmation.`;
+    } else {
+      popupText = 'Auto-pay enabled. Your card has been saved only while future recurring lessons remain scheduled, and it will be removed automatically when recurring lessons are canceled. Please check your email for our confirmation.';
+    }
+  }
+
   mrmShowCalendarSuccessPopup(popupText);
 
   updateBooking(currentInstructor);
@@ -2926,7 +2977,10 @@ function ensureLegacyBookingHandler(){
               context: {
                 instructor_id: instrId,
                 lesson_length: len,
-                lesson_mode: lessonType
+                lesson_mode: lessonType,
+                repeat_frequency: frequency,
+                repeat_duration: reserveDuration,
+                authorized_lesson_count: estimateAutopayAuthorizedLessonCount(count, frequency, reserveDuration)
               },
               address: {
                 line1: address,
@@ -5283,6 +5337,7 @@ if (autopayEl) {
     // If turning on autopay, force prepay off
     if (autopayEl.checked && prepayEl) prepayEl.checked = false;
     applyAutoPrepayMutualExclusion();
+    updateAutopayVisualNote();
   });
 }
 
@@ -5291,9 +5346,13 @@ if (prepayEl) {
     // If turning on prepay, force autopay off
     if (prepayEl.checked && autopayEl) autopayEl.checked = false;
     applyAutoPrepayMutualExclusion();
+    updateAutopayVisualNote();
   });
 }
 
+document.getElementById('frequency')?.addEventListener('change', updateAutopayVisualNote);
+document.getElementById('reserve-duration')?.addEventListener('change', updateAutopayVisualNote);
+updateAutopayVisualNote();
 
 // ------------------------------
 // Initial preferences popup flow
