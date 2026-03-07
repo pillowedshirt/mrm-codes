@@ -922,11 +922,42 @@ h1 {
   color: var(--color-text-muted);
 }
 
+.mrm-payment-choice-group{
+  display:none;
+  margin-top:12px;
+  padding:14px 14px 12px;
+  border:1px solid rgba(0,0,0,0.18);
+  border-radius:14px;
+  background:rgba(0,0,0,0.02);
+}
+
+.mrm-payment-choice-title{
+  margin:0 0 8px 0;
+  font-size:13px;
+  font-weight:700;
+  color:var(--color-text-main);
+  text-transform:none;
+}
+
 .mrm-check-row{
   display:flex;
   align-items:center;
   gap:8px;
   margin-top:10px;
+}
+
+.mrm-payment-choice-group .mrm-check-row:first-of-type{
+  margin-top:0;
+}
+
+.mrm-pref-field.is-disabled label{
+  color:#777;
+}
+
+.mrm-pref-field.is-disabled select{
+  opacity:0.65;
+  background:#f3f3f3;
+  cursor:not-allowed;
 }
 
 .mrm-check-row input[type="checkbox"]{
@@ -1611,15 +1642,15 @@ h1 {
           <label>Lesson type</label>
           <select id="mrm-pref-lesson-option"></select>
         </div>
-        <div>
+        <div id="mrm-pref-length-wrap" class="mrm-pref-field">
           <label>Lesson length</label>
           <select id="mrm-pref-length"></select>
         </div>
-        <div>
+        <div id="mrm-pref-frequency-wrap" class="mrm-pref-field">
           <label>Frequency</label>
           <select id="mrm-pref-frequency"></select>
         </div>
-        <div>
+        <div id="mrm-pref-duration-wrap" class="mrm-pref-field">
           <label>Reserve time for</label>
           <select id="mrm-pref-duration"></select>
         </div>
@@ -1796,19 +1827,26 @@ h1 {
           </div>
 
           <div class="payment-options">
-            <div class="mrm-check-row">
-              <input type="checkbox" id="mrm-autopay-opt">
-              <label for="mrm-autopay-opt">I am aware that I am signing up for auto-pay for future lessons.</label>
+            <div id="mrm-payment-choice-group" class="mrm-payment-choice-group">
+              <div class="mrm-payment-choice-title">Select your payment option</div>
+
+              <div class="mrm-check-row">
+                <input type="checkbox" id="mrm-autopay-opt">
+                <label for="mrm-autopay-opt">I am aware that I am signing up for auto-pay for future lessons.</label>
+              </div>
+
+              <div class="mrm-check-row">
+                <input type="checkbox" id="mrm-prepay-opt">
+                <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
+              </div>
+
+              <div style="margin-top:8px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
             </div>
-            <div class="mrm-check-row">
-              <input type="checkbox" id="mrm-prepay-opt">
-              <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
-            </div>
+
             <div class="mrm-check-row">
               <input type="checkbox" id="mrm-sheet-music-addon-opt">
               <label for="mrm-sheet-music-addon-opt">subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)</label>
             </div>
-            <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
           </div>
 
           <div class="modal-actions">
@@ -2234,10 +2272,11 @@ function applyRepeatUIRules(){
 }
 
 function updatePaymentCheckboxVisibility() {
-  const appointmentType = document.getElementById('lesson-option')?.value; // 'consultation' or lesson type
-  const frequency = document.getElementById('repeat-frequency')?.value || 'none'; // weekly | biweekly | none
+  const appointmentType = document.getElementById('lesson-option')?.value || 'consultation';
+  const frequency = document.getElementById('repeat-frequency')?.value || 'none';
 
   const termsRow = document.querySelector('.terms-row');
+  const paymentChoiceGroup = document.getElementById('mrm-payment-choice-group');
 
   const autopayCb = document.getElementById('mrm-autopay-opt');
   const prepayCb  = document.getElementById('mrm-prepay-opt');
@@ -2247,53 +2286,47 @@ function updatePaymentCheckboxVisibility() {
   const prepayRow  = prepayCb?.closest('.mrm-check-row');
   const sheetRow   = sheetCb?.closest('.mrm-check-row');
 
-  if (!termsRow || !autopayRow || !prepayRow || !sheetRow) return;
+  if (!termsRow || !paymentChoiceGroup || !autopayRow || !prepayRow || !sheetRow) return;
 
-  // Default: hide everything
-  termsRow.style.display  = 'none';
+  termsRow.style.display = 'none';
+  paymentChoiceGroup.style.display = 'none';
   autopayRow.style.display = 'none';
-  prepayRow.style.display  = 'none';
-  sheetRow.style.display   = 'none';
+  prepayRow.style.display = 'none';
+  sheetRow.style.display = 'none';
 
-  // Consultation: ONLY terms of service
   if (appointmentType === 'consultation') {
     termsRow.style.display = '';
 
-    // Ensure hidden options are not selected
     if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
     if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
     if (sheetCb)   { sheetCb.checked   = false; }
 
-    // Remove any disabled styling
     autopayRow.classList.remove('is-disabled');
     prepayRow.classList.remove('is-disabled');
     return;
   }
 
-  // Non-consultation lesson: terms always visible
   termsRow.style.display = '';
-
-  // Sheet music subscription: always visible for online/in-person lessons
   sheetRow.style.display = '';
 
-  // Auto-pay + Prepay only visible for repeating lessons
   const isRepeating = (frequency === 'weekly' || frequency === 'biweekly');
 
   if (isRepeating) {
+    paymentChoiceGroup.style.display = 'block';
     autopayRow.style.display = '';
     prepayRow.style.display  = '';
   } else {
+    paymentChoiceGroup.style.display = 'none';
     autopayRow.style.display = 'none';
     prepayRow.style.display  = 'none';
 
-    // If lesson does not repeat, force these off + fully enabled
     if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
     if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
+
     autopayRow.classList.remove('is-disabled');
     prepayRow.classList.remove('is-disabled');
   }
 
-  // Apply mutual-exclusion state if they are visible
   applyAutoPrepayMutualExclusion();
 }
 
@@ -2682,11 +2715,7 @@ async function submitBooking(payload, setMsg){
   const bookedInstructor = currentInstructor;
   closeBookingModal();
 
-  let popupText = 'Please check your email for our confirmation.';
-  if (data && Array.isArray(data.google_messages) && data.google_messages.length) {
-    popupText = backendMsg + ' Google Calendar note: ' + data.google_messages.join(' | ');
-  }
-
+  const popupText = 'Please check your email for our confirmation.';
   mrmShowCalendarSuccessPopup(popupText);
 
   updateBooking(currentInstructor);
@@ -5299,8 +5328,15 @@ function mrmOpenPrefPopup(){
   if(mainFreq && pFreq)            pFreq.value       = mainFreq.value || 'weekly';
   if(mainDur && pDur)              pDur.value        = mainDur.value || '1_month';
 
-  // Keep popup fields consistent with consultation rules
-  pOpt?.addEventListener('change', mrmPrefApplyDefaults);
+  // Keep popup fields consistent with consultation + repeat rules
+  if (pOpt && !pOpt.dataset.mrmBound) {
+    pOpt.dataset.mrmBound = '1';
+    pOpt.addEventListener('change', mrmPrefApplyDefaults);
+  }
+  if (pFreq && !pFreq.dataset.mrmBound) {
+    pFreq.dataset.mrmBound = '1';
+    pFreq.addEventListener('change', mrmPrefApplyRepeatRules);
+  }
   mrmPrefApplyDefaults();
 
   overlay.style.display = 'flex';
@@ -5322,28 +5358,65 @@ function mrmClosePrefPopup(){
   }
 }
 
+function mrmPrefApplyRepeatRules(){
+  const pFreq = document.getElementById('mrm-pref-frequency');
+  const pDur  = document.getElementById('mrm-pref-duration');
+  const pDurWrap = document.getElementById('mrm-pref-duration-wrap');
+
+  if(!pFreq || !pDur) return;
+
+  const isRepeating = (pFreq.value === 'weekly' || pFreq.value === 'biweekly');
+  const dashOpt = pDur.querySelector('option[value="--"]');
+
+  if (!isRepeating) {
+    if (dashOpt) dashOpt.disabled = false;
+    pDur.value = '--';
+    pDur.disabled = true;
+    pDurWrap?.classList.add('is-disabled');
+  } else {
+    pDur.disabled = false;
+    if (dashOpt) dashOpt.disabled = true;
+
+    if (!pDur.value || pDur.value === '--') {
+      pDur.value = '1_month';
+    }
+
+    pDurWrap?.classList.remove('is-disabled');
+  }
+}
+
 function mrmPrefApplyDefaults(){
   const pOpt  = document.getElementById('mrm-pref-lesson-option');
   const pLen  = document.getElementById('mrm-pref-length');
   const pFreq = document.getElementById('mrm-pref-frequency');
   const pDur  = document.getElementById('mrm-pref-duration');
+
+  const pLenWrap  = document.getElementById('mrm-pref-length-wrap');
+  const pFreqWrap = document.getElementById('mrm-pref-frequency-wrap');
+  const pDurWrap  = document.getElementById('mrm-pref-duration-wrap');
+
   if(!pOpt || !pLen || !pFreq || !pDur) return;
 
   if(pOpt.value === 'consultation'){
-    // consultation defaults (match main form behavior)
     pLen.value = '30';
     pLen.disabled = true;
+    pLenWrap?.classList.add('is-disabled');
 
     pFreq.value = 'none';
     pFreq.disabled = true;
+    pFreqWrap?.classList.add('is-disabled');
 
     pDur.value = '--';
     pDur.disabled = true;
+    pDurWrap?.classList.add('is-disabled');
   } else {
-    // lessons can choose these
     pLen.disabled = false;
     pFreq.disabled = false;
-    pDur.disabled = false;
+
+    pLenWrap?.classList.remove('is-disabled');
+    pFreqWrap?.classList.remove('is-disabled');
+
+    mrmPrefApplyRepeatRules();
   }
 }
 
@@ -5366,8 +5439,9 @@ function mrmApplyPrefAndLoad(){
   if(mainFreq && pFreq)            mainFreq.value       = pFreq.value || 'weekly';
   if(mainDur && pDur)              mainDur.value        = pDur.value || '1_month';
 
-  // Apply consultation rules and checkbox visibility rules immediately
+  // Apply consultation + repeat rules immediately to the main form
   applyLessonOptionDefaults();
+  applyRepeatUIRules();
   updatePaymentCheckboxVisibility();
 
   mrmClosePrefPopup();
