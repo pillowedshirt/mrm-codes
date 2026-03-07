@@ -1904,31 +1904,30 @@ function mrmShowCalendarSuccessPopup(customText){
 
   if(!overlay || !textEl || !closeBtn) return;
 
-  // Set message text
   if(typeof customText === 'string' && customText.trim()){
     textEl.textContent = customText.trim();
   }else{
     textEl.textContent = 'Please check your email for our confirmation.';
   }
 
-  // Show overlay
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden', 'false');
 
-  // Ensure ONLY the Close button can dismiss + reload
-  closeBtn.onclick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Hide popup first
+  const closePopup = (e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     overlay.style.display = 'none';
     overlay.setAttribute('aria-hidden', 'true');
+  };
 
-    // Reload at the very end of this click handler sequence
-    // (setTimeout 0 ensures the DOM hide applies before reload)
-    setTimeout(() => {
-      window.location.reload();
-    }, 0);
+  closeBtn.onclick = closePopup;
+
+  overlay.onclick = (e) => {
+    if (e.target === overlay) {
+      closePopup(e);
+    }
   };
 }
 
@@ -2654,40 +2653,54 @@ async function submitBooking(payload, setMsg){
   });
 
   let data = null;
-  try{ data = await r.json(); }catch(_){ data = null; }
-
-  if(!r.ok){
-    const err = (data && (data.message || data.error)) ? (data.message || data.error) : ('Booking failed (HTTP ' + r.status + ').');
-    setMsg(err);
-    return { ok: false };
+  try {
+    data = await r.json();
+  } catch (_) {
+    data = null;
   }
 
-  const ok = (data && (data.success===true || data.ok===true)) || (!data);
-  if(!ok){
-    const err = (data && (data.message || data.error)) ? (data.message || data.error) : 'Booking failed.';
+  if (!r.ok) {
+    const err = (data && (data.message || data.error))
+      ? (data.message || data.error)
+      : ('Booking failed (HTTP ' + r.status + ').');
     setMsg(err);
-    return { ok: false };
+    return { ok: false, data };
   }
 
-  setMsg((data && data.message) ? data.message : 'Booking confirmed!');
+  const ok = !!(data && (data.success === true || data.ok === true));
+  if (!ok) {
+    const err = (data && (data.message || data.error))
+      ? (data.message || data.error)
+      : 'Booking failed.';
+    setMsg(err);
+    return { ok: false, data };
+  }
+
+  const backendMsg = (data && data.message) ? data.message : 'Booking confirmed!';
+  setMsg(backendMsg);
 
   const bookedInstructor = currentInstructor;
   closeBookingModal();
 
-  mrmShowCalendarSuccessPopup('Please check your email for our confirmation.');
+  let popupText = 'Please check your email for our confirmation.';
+  if (data && Array.isArray(data.google_messages) && data.google_messages.length) {
+    popupText = backendMsg + ' Google Calendar note: ' + data.google_messages.join(' | ');
+  }
+
+  mrmShowCalendarSuccessPopup(popupText);
 
   updateBooking(currentInstructor);
-  if(bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function'){
+  if (bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function') {
     bookedInstructor._mrmMarkStale();
   }
-  if(bookedInstructor && typeof bookedInstructor._mrmRefreshOpenDay === 'function'){
+  if (bookedInstructor && typeof bookedInstructor._mrmRefreshOpenDay === 'function') {
     bookedInstructor._mrmRefreshOpenDay();
   }
-  if(bookedInstructor && typeof bookedInstructor._mrmRefreshVisibleMonth === 'function'){
+  if (bookedInstructor && typeof bookedInstructor._mrmRefreshVisibleMonth === 'function') {
     bookedInstructor._mrmRefreshVisibleMonth();
   }
 
-  return { ok: true };
+  return { ok: true, data };
 }
 
 function ensureLegacyBookingHandler(){

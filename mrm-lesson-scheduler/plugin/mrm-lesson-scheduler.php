@@ -558,6 +558,7 @@ class MRM_Lesson_Scheduler {
 
         $now = current_time( 'mysql' );
         $created_ids = array();
+        $google_messages = array();
 
         // Fetch instructor calendar + timezone (required for Google event insert)
         $table_instructors = $wpdb->prefix . 'mrm_instructors';
@@ -626,6 +627,12 @@ class MRM_Lesson_Scheduler {
 
                 // Call existing Google Calendar insert function (already defined in this plugin)
                 // Only do this if Google is configured and the instructor has a calendar_id.
+                if ( $calendar_id === '' ) {
+                    $google_messages[] = 'Instructor calendar_id is blank, so no Google Calendar event could be created.';
+                } elseif ( ! $this->google_is_configured() ) {
+                    $google_messages[] = 'Google Calendar is not configured in the plugin settings, so no calendar event could be created.';
+                }
+
                 if ( $calendar_id !== '' && $this->google_is_configured() ) {
 
                     // ------------------------------------------------------------
@@ -664,6 +671,8 @@ class MRM_Lesson_Scheduler {
                     } else {
                         $name_for_title = $student_display;
                     }
+
+                    $name_for_calendar = $name_for_title;
 
                     // Lesson type label (keep readable)
                     if ( $lt_raw === '' ) {
@@ -830,18 +839,24 @@ class MRM_Lesson_Scheduler {
                                 array( '%s', '%s' ),
                                 array( '%d' )
                             );
+
+                            $google_messages[] = 'Calendar event created successfully.';
                         } else {
                             $msg = is_wp_error( $ins ) ? $ins->get_error_message() : 'Unknown insert response.';
+                            $google_messages[] = 'Calendar event was not created: ' . $msg;
                             error_log( 'MRM google_insert_event failed for booking_id ' . $booking_id . ': ' . $msg );
                         }
 
                     } else {
                         $msg = is_wp_error( $start_rfc3339 ) ? $start_rfc3339->get_error_message() : $end_rfc3339->get_error_message();
+                        $google_messages[] = 'Calendar event was not created because time conversion failed: ' . $msg;
                         error_log( 'MRM time->RFC3339 failed for booking_id ' . $booking_id . ': ' . $msg );
                     }
                 }
             }
         }
+
+        $this->bump_cache_bust_token();
 
         if ( empty( $created_ids ) ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
@@ -850,11 +865,17 @@ class MRM_Lesson_Scheduler {
         // Removed: lesson purchases should NOT grant "all sheet music" access.
         // Only the $5 sheet-music add-on payment grants ledger access.
 
+        $response_message = 'Booking confirmed!';
+        if ( ! empty( $google_messages ) ) {
+            $response_message .= ' ' . implode( ' ', array_unique( $google_messages ) );
+        }
+
         return new WP_REST_Response( array(
             'ok' => true,
             'success' => true,
-            'message' => 'Booking confirmed!',
+            'message' => $response_message,
             'lesson_ids' => $created_ids,
+            'google_messages' => array_values( array_unique( $google_messages ) ),
         ), 200 );
     }
 
