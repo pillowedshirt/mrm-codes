@@ -255,8 +255,12 @@ class MRM_Lesson_Scheduler {
         add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
         add_action( 'mrm_scheduler_sync_upcoming_events', array( $this, 'cron_sync_upcoming_events' ) );
         add_action( 'mrm_scheduler_reconcile_completed_lessons', array( $this, 'cron_reconcile_completed_lessons' ) );
+        add_action( 'mrm_scheduler_reconcile_cancelled_lessons', array( $this, 'cron_reconcile_cancelled_lessons' ) );
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
             wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
+        }
+        if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
+            wp_schedule_event( time() + 180, 'mrm_10min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
         // Gate page (virtual) for joining online lessons
         add_action( 'init', array( $this, 'register_join_gate_rewrite' ) );
@@ -283,6 +287,9 @@ class MRM_Lesson_Scheduler {
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
             wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
+        }
+        if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
+            wp_schedule_event( time() + 180, 'mrm_10min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
     }
 
@@ -2327,6 +2334,40 @@ class MRM_Lesson_Scheduler {
     }
 
 
+    protected function cancel_lesson_and_notify( $lesson_row, $reason = '' ) {
+        global $wpdb;
+
+        if ( ! is_array( $lesson_row ) ) return;
+        $lesson_id = (int) ( $lesson_row['id'] ?? 0 );
+        if ( $lesson_id <= 0 ) return;
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+
+        $wpdb->update(
+            $lessons_table,
+            array(
+                'status' => 'cancelled',
+                'updated_at' => current_time( 'mysql' ),
+            ),
+            array( 'id' => $lesson_id ),
+            array( '%s', '%s' ),
+            array( '%d' )
+        );
+
+        do_action( 'mrm_lesson_cancelled', array(
+            'lesson_id' => $lesson_id,
+            'instructor_id' => (int) ( $lesson_row['instructor_id'] ?? 0 ),
+            'student_email' => (string) ( $lesson_row['student_email'] ?? '' ),
+            'lesson_length' => (int) ( $lesson_row['lesson_length'] ?? 0 ),
+            'is_online' => (int) ( $lesson_row['is_online'] ?? 0 ),
+            'order_id' => (int) ( $lesson_row['order_id'] ?? 0 ),
+            'payment_mode' => (string) ( $lesson_row['payment_mode'] ?? 'none' ),
+            'autopay_profile_id' => (int) ( $lesson_row['autopay_profile_id'] ?? 0 ),
+            'google_event_id' => (string) ( $lesson_row['google_event_id'] ?? '' ),
+            'cancel_reason' => (string) $reason,
+        ) );
+    }
+
     public function cron_reconcile_completed_lessons() {
         global $wpdb;
 
@@ -2376,25 +2417,13 @@ class MRM_Lesson_Scheduler {
             }
 
             if ( ! is_array( $ev ) ) {
-                $wpdb->update(
-                    $lessons_table,
-                    array( 'status' => 'cancelled', 'updated_at' => current_time( 'mysql' ) ),
-                    array( 'id' => $booking_id ),
-                    array( '%s', '%s' ),
-                    array( '%d' )
-                );
+                $this->cancel_lesson_and_notify( $l, 'google_event_missing' );
                 continue;
             }
 
             $status = strtolower( (string) ( $ev['status'] ?? 'confirmed' ) );
             if ( $status === 'cancelled' ) {
-                $wpdb->update(
-                    $lessons_table,
-                    array( 'status' => 'cancelled', 'updated_at' => current_time( 'mysql' ) ),
-                    array( 'id' => $booking_id ),
-                    array( '%s', '%s' ),
-                    array( '%d' )
-                );
+                $this->cancel_lesson_and_notify( $l, 'google_event_cancelled' );
                 continue;
             }
 
@@ -2426,6 +2455,59 @@ class MRM_Lesson_Scheduler {
                 'google_event_id' => (string) ( $l['google_event_id'] ?? '' ),
                 'ended_at_utc' => (string) $end,
             ) );
+        }
+    }
+
+    public function cron_reconcile_cancelled_lessons() {
+        global $wpdb;
+
+        if ( ! $this->google_is_configured() ) return;
+
+        // Sync first so moved events update local lesson times.
+        $this->cron_sync_upcoming_events( 72, 30 );
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+        $rows = $wpdb->get_results("
+            SELECT l.*, i.calendar_id, i.timezone
+            FROM {$lessons_table} l
+            JOIN {$instructors_table} i ON i.id = l.instructor_id
+            WHERE l.status='scheduled'
+              AND l.google_event_id IS NOT NULL
+              AND l.google_event_id <> ''
+              AND l.start_time > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)
+            ORDER BY l.start_time ASC
+            LIMIT 100
+        ", ARRAY_A);
+
+        if ( ! $rows ) return;
+
+        foreach ( $rows as $l ) {
+            $calendar_id = (string) ( $l['calendar_id'] ?? '' );
+            $event_id    = (string) ( $l['google_event_id'] ?? '' );
+            $booking_id  = (int) ( $l['id'] ?? 0 );
+
+            if ( $calendar_id === '' || $event_id === '' ) continue;
+
+            $ev = $this->google_get_event( $calendar_id, $event_id );
+            if ( is_wp_error( $ev ) || ! is_array( $ev ) ) {
+                $time_min = gmdate( 'c', strtotime( $l['start_time'] ) - 30 * DAY_IN_SECONDS );
+                $time_max = gmdate( 'c', strtotime( $l['end_time'] ) + 30 * DAY_IN_SECONDS );
+                $found = $this->google_find_event_by_booking_id( $calendar_id, $booking_id, $time_min, $time_max );
+                if ( ! is_wp_error( $found ) && is_array( $found ) ) {
+                    $ev = $found;
+                } else {
+                    $this->cancel_lesson_and_notify( $l, 'google_event_deleted_or_series_removed' );
+                    continue;
+                }
+            }
+
+            $status = strtolower( (string) ( $ev['status'] ?? 'confirmed' ) );
+            if ( $status === 'cancelled' ) {
+                $this->cancel_lesson_and_notify( $l, 'google_event_cancelled' );
+                continue;
+            }
         }
     }
     /**
