@@ -2671,9 +2671,6 @@ async function submitBooking(payload, setMsg){
 
   setMsg((data && data.message) ? data.message : 'Booking confirmed!');
 
-  selectedSlots.length = 0;
-  document.querySelectorAll('.slot.selected').forEach(el=>el.classList.remove('selected'));
-
   const bookedInstructor = currentInstructor;
   closeBookingModal();
 
@@ -2947,8 +2944,10 @@ function ensureLegacyBookingHandler(){
               payload.autopay_profile_id = setupData.autopay_profile_id;
               payload.order_id = 0;
 
+              // Close Stripe payment modal first so the normal booking success popup displays cleanly
+              closeModal({ clearSelection: false });
+
               await submitBooking(payload, setMsg);
-              closeModal({ clearSelection: true });
             }
           };
 
@@ -3028,11 +3027,15 @@ function ensureLegacyBookingHandler(){
           }
           if (paymentIntent && paymentIntent.status === 'succeeded') {
             await verifyPaymentIntent(paymentIntent.id, email);
+
             payload.order_id = createData.order_id;
             payload.payment_mode = prepay ? 'prepay' : 'one_time';
             payload.autopay_profile_id = null;
+
+            // Close Stripe payment modal first so the normal booking success popup displays cleanly
+            closeModal({ clearSelection: false });
+
             await submitBooking(payload, setMsg);
-            closeModal({ clearSelection: true });
           }
         };
       }catch(err){
