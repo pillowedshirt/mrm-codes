@@ -618,7 +618,29 @@ class MRM_Lesson_Scheduler {
                 'reminder_scheduled_at' => null,
                 'reminder_sent_at' => null,
             ), array(
-                '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%d','%s','%s','%d','%s','%s','%s','%s','%s','%s','%s','%s'
+                '%d', // instructor_id
+                '%d', // series_id
+                '%s', // student_name
+                '%s', // student_email
+                '%s', // instrument
+                '%d', // is_online
+                '%d', // lesson_length
+                '%s', // start_time
+                '%s', // end_time
+                '%s', // status
+                '%s', // google_event_id
+                '%s', // google_meet_url
+                '%d', // order_id
+                '%s', // payment_mode
+                '%s', // payout_unlocked_at
+                '%d', // autopay_profile_id
+                '%d', // agreement_id
+                '%s', // created_at
+                '%s', // updated_at
+                '%s', // reminder_token
+                '%s', // reminder_token_hash
+                '%s', // reminder_scheduled_at
+                '%s', // reminder_sent_at
             ) );
 
             if ( $ok ) {
@@ -853,13 +875,24 @@ class MRM_Lesson_Scheduler {
                         error_log( 'MRM time->RFC3339 failed for booking_id ' . $booking_id . ': ' . $msg );
                     }
                 }
+            } else {
+                error_log(
+                    'MRM booking insert failed. DB error: ' . $wpdb->last_error .
+                    ' | start=' . $start_mysql .
+                    ' | end=' . $end_mysql .
+                    ' | instructor_id=' . (int) $instructor_id .
+                    ' | student_email=' . $student_email
+                );
             }
         }
 
         $this->bump_cache_bust_token();
 
         if ( empty( $created_ids ) ) {
-            return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
+            return new WP_REST_Response( array(
+                'ok' => false,
+                'message' => 'Booking could not be saved. The selected time may still appear open, but the lesson record was not inserted. Please check the plugin error log.'
+            ), 400 );
         }
 
         // Removed: lesson purchases should NOT grant "all sheet music" access.
