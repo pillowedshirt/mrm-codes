@@ -2026,9 +2026,9 @@ function updateAutopayVisualNote() {
   }
 
   if (authorized > 0) {
-    noteEl.textContent = `Auto-pay enrollment: your card will be stored for up to ${authorized} delivered lesson charge${authorized === 1 ? '' : 's'} for this enrollment, then removed automatically when the enrollment ends.`;
+    noteEl.textContent = `Auto-pay enrollment: the first lesson is prepaid now, and your card will remain on file for up to ${authorized} total lesson charge${authorized === 1 ? '' : 's'} under this enrollment. Remaining lessons are charged automatically after delivery.`;
   } else {
-    noteEl.textContent = 'Auto-pay enrollment: your card will stay on file only while future recurring lessons remain scheduled, and it will be removed automatically when recurring lessons are canceled.';
+    noteEl.textContent = 'Auto-pay enrollment: the first lesson is prepaid now, and future recurring lessons are charged automatically after delivery while lessons remain scheduled. Your saved card will be removed automatically when recurring lessons are canceled.';
   }
 
   noteEl.style.display = 'block';
@@ -2761,9 +2761,9 @@ async function submitBooking(payload, setMsg){
     );
 
     if (authorized > 0) {
-      popupText = `Auto-pay enabled. Your card has been saved for up to ${authorized} delivered lesson charge${authorized === 1 ? '' : 's'} in this enrollment. It will be removed automatically when the enrollment ends. Please check your email for our confirmation.`;
+      popupText = `Auto-pay enabled. First lesson is prepaid as provided in the terms of service. Your saved card will remain active for up to ${authorized} total lesson charge${authorized === 1 ? '' : 's'} in this enrollment, and remaining lessons will be charged automatically after delivery. Please check your email for our confirmation.`;
     } else {
-      popupText = 'Auto-pay enabled. Your card has been saved only while future recurring lessons remain scheduled, and it will be removed automatically when recurring lessons are canceled. Please check your email for our confirmation.';
+      popupText = 'Auto-pay enabled. First lesson is prepaid as provided in the terms of service. Future recurring lessons will be charged automatically after delivery while lessons remain scheduled. Please check your email for our confirmation.';
     }
   }
 
@@ -2966,22 +2966,31 @@ function ensureLegacyBookingHandler(){
         const finalAmountDollars = (finalAmountCents / 100).toFixed(2);
 
         if (autopay && !prepay) {
-          setMsg('Saving payment method for auto-pay…');
+          setMsg('Charging first lesson and saving card for auto-pay…');
           btn.disabled = true;
 
-          const setupRes = await fetch(payApiBase + '/create-setup-intent', {
+          const authorizedLessonCount = estimateAutopayAuthorizedLessonCount(count, frequency, reserveDuration);
+
+          const createRes = await fetch(payApiBase + '/create-payment-intent', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body: JSON.stringify({
-              email,
-              context: {
+              sku: sku,
+              email: email,
+              context:{
                 instructor_id: instrId,
                 lesson_length: len,
                 lesson_mode: lessonType,
+                lesson_count: 1,
+                prepay: 'no',
+                autopay: 'yes',
                 repeat_frequency: frequency,
                 repeat_duration: reserveDuration,
-                authorized_lesson_count: estimateAutopayAuthorizedLessonCount(count, frequency, reserveDuration)
+                authorized_lesson_count: authorizedLessonCount
               },
+              save_card: true,
+              amount_override_cents: baseAmount,
+              sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
               address: {
                 line1: address,
                 state: addressState,
@@ -2991,58 +3000,78 @@ function ensureLegacyBookingHandler(){
             })
           });
 
-          const setupData = await setupRes.json();
-          if (!setupRes.ok || !setupData.ok) {
-            setMsg(setupData.message || 'Unable to start auto-pay setup.');
+          const createData = await createRes.json();
+          if (!createRes.ok || !createData.ok) {
+            setMsg(createData.message || 'Unable to start first auto-pay charge.');
             btn.disabled = false;
             return;
           }
 
-          const stripeInstance = ensureStripe(setupData.publishableKey || '');
-          if (!stripeInstance) { setMsg('Stripe is not configured.'); btn.disabled=false; return; }
+          const stripeInstance = ensureStripe(createData.publishableKey || '');
+          if (!stripeInstance) {
+            setMsg('Stripe is not configured.');
+            btn.disabled = false;
+            return;
+          }
           stripe = stripeInstance;
 
           persistSelectedSlots();
 
-          const { payBtn, errorEl, closeModal } = openPaymentModal(setupData.client_secret, setupData);
+          const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, createData);
 
           payBtn.onclick = async () => {
             payBtn.disabled = true;
 
-            const { error, setupIntent } = await stripe.confirmSetup({
+            const okToPay = await showConfirmTotal(createData);
+            if (!okToPay) {
+              payBtn.disabled = false;
+              return;
+            }
+
+            const { error, paymentIntent } = await stripe.confirmPayment({
               elements: activeStripeElements,
               confirmParams: { return_url: window.location.href },
               redirect: 'if_required'
             });
 
             if (error) {
-              errorEl.textContent = error.message || 'Setup failed.';
+              errorEl.textContent = error.message || 'Payment failed.';
               payBtn.disabled = false;
               return;
             }
 
-            if (setupIntent && setupIntent.status === 'succeeded') {
-              const finalizeRes = await fetch(payApiBase + '/finalize-autopay', {
+            if (paymentIntent && paymentIntent.status === 'succeeded') {
+              await verifyPaymentIntent(paymentIntent.id, email);
+
+              const enrollRes = await fetch(payApiBase + '/create-autopay-enrollment', {
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({
-                  autopay_profile_id: setupData.autopay_profile_id,
-                  setup_intent_id: setupIntent.id
+                  payment_intent_id: paymentIntent.id,
+                  email: email,
+                  context: {
+                    instructor_id: instrId,
+                    lesson_length: len,
+                    lesson_mode: lessonType,
+                    repeat_frequency: frequency,
+                    repeat_duration: reserveDuration,
+                    authorized_lesson_count: authorizedLessonCount
+                  }
                 })
               });
-              const finalizeData = await finalizeRes.json();
-              if (!finalizeRes.ok || !finalizeData.ok) {
-                errorEl.textContent = finalizeData.message || 'Unable to finalize auto-pay setup.';
+
+              const enrollData = await enrollRes.json();
+              if (!enrollRes.ok || !enrollData.ok) {
+                errorEl.textContent = enrollData.message || 'Unable to finalize auto-pay enrollment.';
                 payBtn.disabled = false;
                 return;
               }
+
               payload.payment_mode = 'autopay';
-              payload.autopay_profile_id = setupData.autopay_profile_id;
-              payload.order_id = 0;
+              payload.autopay_profile_id = enrollData.autopay_profile_id;
+              payload.order_id = createData.order_id;
 
-              // Close Stripe payment modal first so the normal booking success popup displays cleanly
               closeModal({ clearSelection: false });
-
               await submitBooking(payload, setMsg);
             }
           };

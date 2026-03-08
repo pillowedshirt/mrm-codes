@@ -583,7 +583,7 @@ class MRM_Lesson_Scheduler {
         $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
         $instr_tz    = ( is_array( $instr ) && ! empty( $instr['timezone'] ) ) ? (string) $instr['timezone'] : 'UTC';
 
-        foreach ( $slots as $slot ) {
+        foreach ( $slots as $slot_index => $slot ) {
             $start_raw = (string) ( $slot['start'] ?? '' );
             $end_raw   = (string) ( $slot['end'] ?? '' );
 
@@ -600,6 +600,11 @@ class MRM_Lesson_Scheduler {
             $token = bin2hex( random_bytes( 16 ) );
             $token_hash = hash( 'sha256', $token );
 
+            $slot_order_id = $order_id;
+            if ( $payment_mode === 'autopay' && $slot_index > 0 ) {
+                $slot_order_id = 0;
+            }
+
             $ok = $wpdb->insert( $lessons_table, array(
                 'instructor_id' => $instructor_id,
                 'series_id'     => null,
@@ -613,7 +618,7 @@ class MRM_Lesson_Scheduler {
                 'status'        => 'scheduled',
                 'google_event_id' => null,
                 'google_meet_url' => null,
-                'order_id'        => ( $order_id > 0 ? $order_id : null ),
+                'order_id'        => ( $slot_order_id > 0 ? $slot_order_id : null ),
                 'payment_mode'    => ( $payment_mode !== '' ? $payment_mode : 'none' ),
                 'payout_unlocked_at' => null,
                 'autopay_profile_id' => ( $autopay_profile_id > 0 ? $autopay_profile_id : null ),
