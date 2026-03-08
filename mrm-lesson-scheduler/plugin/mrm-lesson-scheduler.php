@@ -213,6 +213,25 @@ class MRM_Lesson_Scheduler {
         return null;
     }
 
+
+    protected function google_find_instance_by_local_start( $instances_payload, $start_mysql ) {
+        if ( ! is_array( $instances_payload ) ) return null;
+        $items = isset( $instances_payload['items'] ) && is_array( $instances_payload['items'] ) ? $instances_payload['items'] : array();
+        if ( empty( $items ) ) return null;
+
+        $target_ts = strtotime( (string) $start_mysql );
+        if ( ! $target_ts ) return null;
+
+        foreach ( $items as $ev ) {
+            list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $ev );
+            if ( $g_start_ts && abs( $g_start_ts - $target_ts ) <= 120 ) {
+                return $ev;
+            }
+        }
+
+        return null;
+    }
+
     // Extract UTC timestamps from a Google event payload
     protected function google_event_to_utc_ts( $event ) {
         $start = '';
@@ -516,6 +535,76 @@ class MRM_Lesson_Scheduler {
         ) );
     }
 
+
+    protected function expand_booking_slots_from_repeat_rule( $slots, $repeat_frequency, $repeat_duration ) {
+        $slots = is_array( $slots ) ? array_values( $slots ) : array();
+        $repeat_frequency = strtolower( trim( (string) $repeat_frequency ) );
+        $repeat_duration  = strtolower( trim( (string) $repeat_duration ) );
+
+        if ( empty( $slots ) ) return array();
+        if ( $repeat_frequency !== 'weekly' && $repeat_frequency !== 'biweekly' ) return $slots;
+
+        $interval_days = ( $repeat_frequency === 'biweekly' ) ? 14 : 7;
+
+        $count_map = array(
+            '1_month'   => 4,
+            '2_months'  => 8,
+            '3_months'  => 12,
+            '6_months'  => 24,
+            '12_months' => 48,
+        );
+
+        if ( $repeat_frequency === 'biweekly' ) {
+            $count_map = array(
+                '1_month'   => 2,
+                '2_months'  => 4,
+                '3_months'  => 6,
+                '6_months'  => 12,
+                '12_months' => 24,
+            );
+        }
+
+        $repeat_count = isset( $count_map[ $repeat_duration ] ) ? (int) $count_map[ $repeat_duration ] : 0;
+        if ( $repeat_count <= 1 ) return $slots;
+
+        $expanded = array();
+
+        foreach ( $slots as $slot ) {
+            $start_raw = (string) ( $slot['start'] ?? '' );
+            $end_raw   = (string) ( $slot['end'] ?? '' );
+
+            $start_ts = strtotime( $start_raw );
+            $end_ts   = strtotime( $end_raw );
+
+            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                continue;
+            }
+
+            for ( $i = 0; $i < $repeat_count; $i++ ) {
+                $expanded[] = array(
+                    'start' => gmdate( 'c', $start_ts + ( $i * $interval_days * DAY_IN_SECONDS ) ),
+                    'end'   => gmdate( 'c', $end_ts   + ( $i * $interval_days * DAY_IN_SECONDS ) ),
+                    'instructor_id' => (int) ( $slot['instructor_id'] ?? 0 ),
+                );
+            }
+        }
+
+        usort( $expanded, function( $a, $b ) {
+            return strcmp( (string) $a['start'], (string) $b['start'] );
+        } );
+
+        $deduped = array();
+        $seen = array();
+        foreach ( $expanded as $slot ) {
+            $k = (string) $slot['instructor_id'] . '|' . (string) $slot['start'] . '|' . (string) $slot['end'];
+            if ( isset( $seen[ $k ] ) ) continue;
+            $seen[ $k ] = true;
+            $deduped[] = $slot;
+        }
+
+        return $deduped;
+    }
+
     public function rest_book_lesson( WP_REST_Request $request ) {
         global $wpdb;
 
@@ -523,6 +612,11 @@ class MRM_Lesson_Scheduler {
 
         $instructor_id = intval( $data['instructor_id'] ?? 0 );
         $slots         = isset( $data['slots'] ) && is_array( $data['slots'] ) ? $data['slots'] : array();
+        $slots         = $this->expand_booking_slots_from_repeat_rule(
+            $slots,
+            (string) ( $data['repeat_frequency'] ?? 'none' ),
+            (string) ( $data['repeat_duration'] ?? '' )
+        );
 
         $student_name  = sanitize_text_field( (string) ( $data['student_name'] ?? '' ) );
         $student_email = sanitize_email( (string) ( $data['student_email'] ?? '' ) );
@@ -584,8 +678,8 @@ class MRM_Lesson_Scheduler {
         $instr_tz    = ( is_array( $instr ) && ! empty( $instr['timezone'] ) ) ? (string) $instr['timezone'] : 'UTC';
 
         $is_recurring_booking = (
-            count( $slots ) > 1 &&
-            in_array( strtolower( (string) $repeat_frequency ), array( 'weekly', 'biweekly' ), true )
+            in_array( strtolower( (string) $repeat_frequency ), array( 'weekly', 'biweekly' ), true ) &&
+            count( $slots ) >= 1
         );
 
         $series_id = null;
@@ -868,28 +962,29 @@ class MRM_Lesson_Scheduler {
                     // Your sync logic expects this to exist:
                     // extendedProperties.private.booking_id
                     $extended_private = array(
-                        'booking_id'          => (string) $booking_id,
                         'student_email'       => (string) $student_email,
-                        // Store parent name as primary display name for calendar-based workflows
                         'student_name'        => (string) $name_for_calendar,
                         'student_last_name'   => (string) $student_last_name,
                         'instrument'          => (string) $instrument,
-
                         'parent_first_name'   => (string) $parent_first,
                         'parent_last_name'    => (string) $parent_last,
                         'phone'               => (string) $phone,
-
                         'address'             => (string) $address,
                         'address_state'       => (string) $address_state,
                         'address_postal'      => (string) $address_postal,
-
                         'lesson_type'         => (string) $lesson_type,
                         'repeat_frequency'    => (string) $repeat_frequency,
                         'repeat_duration'     => (string) $repeat_duration,
                         'appointment_type'    => (string) $appointment_type,
-
                         'reminder_token'      => (string) $token,
                     );
+
+                    if ( $is_recurring_booking ) {
+                        $extended_private['series_id'] = (string) ( $series_id ?: '' );
+                        $extended_private['series_anchor_start_utc'] = (string) $start_mysql;
+                    } else {
+                        $extended_private['booking_id'] = (string) $booking_id;
+                    }
 
                     // Use your existing RFC3339 UTC helper (already in this file)
                     $start_rfc3339 = $this->to_rfc3339_utc( $start_raw );
@@ -960,6 +1055,14 @@ class MRM_Lesson_Scheduler {
                                     $recurring_instance_map = $instance_map;
 
                                     $occurrence_event_id = isset( $instance_map[ $start_mysql ] ) ? $instance_map[ $start_mysql ] : '';
+
+                                    if ( $occurrence_event_id === '' ) {
+                                        $match_instance = $this->google_find_instance_by_local_start( $instances, $start_mysql );
+                                        if ( is_array( $match_instance ) && ! empty( $match_instance['id'] ) ) {
+                                            $occurrence_event_id = (string) $match_instance['id'];
+                                        }
+                                    }
+
                                     if ( $occurrence_event_id !== '' ) {
                                         $wpdb->update(
                                             $lessons_table,
@@ -1203,7 +1306,10 @@ class MRM_Lesson_Scheduler {
                     if ( $is_master ) {
                         $inst = $this->google_list_event_instances( $calendar_id, $event_id, $time_min, $time_max );
                         if ( is_array( $inst ) ) {
-                            $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
+                            $match = $this->google_find_instance_by_local_start( $inst, (string) $lesson['start_time'] );
+                            if ( ! is_array( $match ) ) {
+                                $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
+                            }
                             if ( is_array( $match ) ) {
                                 $resolved_event = $match;
                             }
@@ -2559,7 +2665,25 @@ class MRM_Lesson_Scheduler {
 
             if ( $event_id !== '' ) {
                 $got = $this->google_get_event( $calendar_id, $event_id );
-                if ( ! is_wp_error( $got ) && is_array( $got ) ) $ev = $got;
+
+                if ( ! is_wp_error( $got ) && is_array( $got ) ) {
+                    $is_master = isset( $got['recurrence'] ) && is_array( $got['recurrence'] ) && ! empty( $got['recurrence'] );
+
+                    if ( $is_master ) {
+                        $inst = $this->google_list_event_instances( $calendar_id, $event_id, $time_min, $time_max );
+                        if ( ! is_wp_error( $inst ) && is_array( $inst ) ) {
+                            $match = $this->google_find_instance_by_local_start( $inst, (string) $l['start_time'] );
+                            if ( ! is_array( $match ) ) {
+                                $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
+                            }
+                            if ( is_array( $match ) ) {
+                                $ev = $match;
+                            }
+                        }
+                    } else {
+                        $ev = $got;
+                    }
+                }
             }
 
             if ( ! is_array( $ev ) ) {
@@ -2641,10 +2765,34 @@ class MRM_Lesson_Scheduler {
 
             if ( $calendar_id === '' || $event_id === '' || $booking_id <= 0 ) continue;
 
+            $time_min = gmdate( 'c', strtotime( $l['start_time'] ) - 30 * DAY_IN_SECONDS );
+            $time_max = gmdate( 'c', strtotime( $l['end_time'] ) + 30 * DAY_IN_SECONDS );
+
             $ev = $this->google_get_event( $calendar_id, $event_id );
-            if ( is_wp_error( $ev ) || ! is_array( $ev ) ) {
-                $time_min = gmdate( 'c', strtotime( $l['start_time'] ) - 30 * DAY_IN_SECONDS );
-                $time_max = gmdate( 'c', strtotime( $l['end_time'] ) + 30 * DAY_IN_SECONDS );
+
+            if ( ! is_wp_error( $ev ) && is_array( $ev ) ) {
+                $is_master = isset( $ev['recurrence'] ) && is_array( $ev['recurrence'] ) && ! empty( $ev['recurrence'] );
+
+                if ( $is_master ) {
+                    $inst = $this->google_list_event_instances( $calendar_id, $event_id, $time_min, $time_max );
+                    if ( ! is_wp_error( $inst ) && is_array( $inst ) ) {
+                        $match = $this->google_find_instance_by_local_start( $inst, (string) $l['start_time'] );
+                        if ( ! is_array( $match ) ) {
+                            $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
+                        }
+
+                        if ( is_array( $match ) ) {
+                            $ev = $match;
+                        } else {
+                            $this->cancel_lesson_and_notify( $l, 'google_occurrence_deleted' );
+                            continue;
+                        }
+                    } else {
+                        $this->cancel_lesson_and_notify( $l, 'google_occurrence_lookup_failed_or_deleted' );
+                        continue;
+                    }
+                }
+            } else {
                 $found = $this->google_find_event_by_booking_id( $calendar_id, $booking_id, $time_min, $time_max );
                 if ( ! is_wp_error( $found ) && is_array( $found ) ) {
                     $ev = $found;

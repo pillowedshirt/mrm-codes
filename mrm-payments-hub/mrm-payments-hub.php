@@ -1960,20 +1960,21 @@ class MRM_Payments_Hub_Single {
 
     if ($lesson_id <= 0) return;
 
-    // AutoPay lessons: refund the specific lesson charge if one already exists,
-    // then deactivate/detach if no future lessons remain.
     if ($payment_mode === 'autopay') {
       $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
 
+      // Refund only if this specific lesson already has a completed charge.
       if ($lesson_order) {
         $this->mrm_request_refund_for_order($lesson_order, 'Auto-refund for cancelled autopay lesson ' . $lesson_id);
       } elseif ($order_id > 0) {
+        // Fallback: the first autopay lesson was prepaid at booking time.
         $first_order = $this->mrm_get_order_by_id($order_id);
         if ($first_order) {
           $this->mrm_request_refund_for_order($first_order, 'Auto-refund for cancelled prepaid first autopay lesson ' . $lesson_id);
         }
       }
 
+      // If no order exists, this was a future uncharged lesson. Cancel only, no refund.
       if ($autopay_profile_id > 0) {
         $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
       }
