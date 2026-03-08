@@ -1706,10 +1706,14 @@ class MRM_Payments_Hub_Single {
     if ($product_type === 'lesson') {
       $lesson_id = sanitize_text_field((string)($context['lesson_id'] ?? ''));
       $instructor_id = sanitize_text_field((string)($context['instructor_id'] ?? ''));
-      $lesson_length = sanitize_text_field((string)($context['lesson_length'] ?? '')); // "30" or "60"
-      $lesson_mode = sanitize_text_field((string)($context['lesson_mode'] ?? ''));     // "online" or "in_person"
+      $lesson_length = sanitize_text_field((string)($context['lesson_length'] ?? ''));
+      $lesson_mode = sanitize_text_field((string)($context['lesson_mode'] ?? ''));
       $lesson_count = sanitize_text_field((string)($context['lesson_count'] ?? ''));
       $prepay = sanitize_text_field((string)($context['prepay'] ?? ''));
+      $autopay = sanitize_text_field((string)($context['autopay'] ?? ''));
+      $repeat_frequency = sanitize_text_field((string)($context['repeat_frequency'] ?? ''));
+      $repeat_duration = sanitize_text_field((string)($context['repeat_duration'] ?? ''));
+      $authorized_lesson_count = sanitize_text_field((string)($context['authorized_lesson_count'] ?? ''));
 
       if ($lesson_id) $metadata['mrm_lesson_id'] = $lesson_id;
       if ($instructor_id) $metadata['mrm_instructor_id'] = $instructor_id;
@@ -1717,6 +1721,10 @@ class MRM_Payments_Hub_Single {
       if ($lesson_mode) $metadata['mrm_lesson_mode'] = $lesson_mode;
       if ($lesson_count) $metadata['mrm_lesson_count'] = $lesson_count;
       if ($prepay) $metadata['mrm_prepay'] = $prepay;
+      if ($autopay) $metadata['mrm_autopay'] = $autopay;
+      if ($repeat_frequency) $metadata['mrm_repeat_frequency'] = $repeat_frequency;
+      if ($repeat_duration) $metadata['mrm_repeat_duration'] = $repeat_duration;
+      if ($authorized_lesson_count) $metadata['mrm_authorized_lesson_count'] = $authorized_lesson_count;
 
       // Fixed composer cut cents for your automation
       $composer_cut_cents = 0;
@@ -1956,8 +1964,14 @@ class MRM_Payments_Hub_Single {
     // then deactivate/detach if no future lessons remain.
     if ($payment_mode === 'autopay') {
       $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
+
       if ($lesson_order) {
         $this->mrm_request_refund_for_order($lesson_order, 'Auto-refund for cancelled autopay lesson ' . $lesson_id);
+      } elseif ($order_id > 0) {
+        $first_order = $this->mrm_get_order_by_id($order_id);
+        if ($first_order) {
+          $this->mrm_request_refund_for_order($first_order, 'Auto-refund for cancelled prepaid first autopay lesson ' . $lesson_id);
+        }
       }
 
       if ($autopay_profile_id > 0) {
@@ -2385,6 +2399,12 @@ class MRM_Payments_Hub_Single {
     register_rest_route('mrm-pay/v1', '/finalize-autopay', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_finalize_autopay'),
+      'permission_callback' => '__return_true',
+    ));
+
+    register_rest_route('mrm-pay/v1', '/create-autopay-enrollment', array(
+      'methods' => 'POST',
+      'callback' => array($this, 'rest_create_autopay_enrollment'),
       'permission_callback' => '__return_true',
     ));
 
@@ -2896,6 +2916,120 @@ class MRM_Payments_Hub_Single {
       'ok' => true,
       'autopay_profile_id' => $autopay_profile_id,
       'payment_method_id' => $payment_method_id,
+    ), 200);
+  }
+
+  public function rest_create_autopay_enrollment(WP_REST_Request $req) {
+    global $wpdb;
+
+    $data = (array)$req->get_json_params();
+    $payment_intent_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+
+    $instructor_id = isset($context['instructor_id']) ? absint($context['instructor_id']) : 0;
+    $lesson_length = isset($context['lesson_length']) ? absint($context['lesson_length']) : 60;
+    $lesson_mode = sanitize_text_field((string)($context['lesson_mode'] ?? 'online'));
+    $repeat_frequency = sanitize_text_field((string)($context['repeat_frequency'] ?? 'none'));
+    $repeat_duration = sanitize_text_field((string)($context['repeat_duration'] ?? 'indefinitely'));
+    $authorized_lesson_count = isset($context['authorized_lesson_count']) ? absint($context['authorized_lesson_count']) : 0;
+
+    if ($payment_intent_id === '') {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Missing payment_intent_id.'), 400);
+    }
+    if (!$email || !is_email($email)) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+    }
+    if ($instructor_id <= 0) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Valid instructor_id required.'), 400);
+    }
+
+    $pi = $this->stripe_retrieve_payment_intent($payment_intent_id);
+    if (is_wp_error($pi)) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
+    }
+
+    $status = (string)($pi['status'] ?? '');
+    $customer_id = (string)($pi['customer'] ?? '');
+    $payment_method_id = (string)($pi['payment_method'] ?? '');
+
+    if ($status !== 'succeeded') {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'PaymentIntent not succeeded.'), 400);
+    }
+    if ($customer_id === '' || $payment_method_id === '') {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Saved card details were not attached to the successful payment.'), 400);
+    }
+
+    $sku = 'lesson_' . ($lesson_length === 60 ? '60' : '30') . '_' . ($lesson_mode === 'online' ? 'online' : 'inperson');
+    $p = $this->get_product($sku);
+    if (!$p || empty($p['active'])) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive lesson SKU.'), 404);
+    }
+
+    $base_amount = (int)($p['amount_cents'] ?? 0);
+    $currency = strtolower((string)($p['currency'] ?? 'usd'));
+    if ($base_amount <= 0) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid lesson price.'), 400);
+    }
+
+    $plan_kind = ($repeat_duration === 'indefinitely') ? 'indefinite' : 'bounded';
+    if ($plan_kind === 'bounded' && $authorized_lesson_count <= 0) {
+      $authorized_lesson_count = 1;
+    }
+
+    $email_hash = $this->email_hash($email);
+    $now = current_time('mysql');
+
+    $wpdb->insert($this->table_autopay_profiles(), array(
+      'instructor_id' => (int)$instructor_id,
+      'email_hash' => (string)$email_hash,
+      'customer_id' => (string)$customer_id,
+      'payment_method_id' => (string)$payment_method_id,
+      'currency' => $currency,
+      'unit_base_cents' => (int)$base_amount,
+      'plan_kind' => $plan_kind,
+      'authorized_lesson_count' => (int)$authorized_lesson_count,
+      'charged_lesson_count' => 0,
+      'active' => 1,
+      'detached_at' => null,
+      'created_at' => $now,
+      'updated_at' => $now,
+    ), array('%d','%s','%s','%s','%s','%d','%s','%d','%d','%d','%s','%s','%s'));
+
+    $autopay_profile_id = (int)$wpdb->insert_id;
+    if ($autopay_profile_id <= 0) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Unable to create autopay profile.'), 500);
+    }
+
+    $set = $this->stripe_set_default_payment_method($customer_id, $payment_method_id);
+    if (is_wp_error($set)) {
+      error_log('[MRM Payments Hub] create-autopay-enrollment set default PM failed: ' . $set->get_error_message());
+    }
+
+    $order = $this->get_order_by_pi($payment_intent_id);
+    if ($order) {
+      $meta = array();
+      if (!empty($order['metadata_json'])) {
+        $decoded = json_decode((string)$order['metadata_json'], true);
+        if (is_array($decoded)) $meta = $decoded;
+      }
+
+      $meta['mrm_autopay_enrollment'] = 'yes';
+      $meta['mrm_autopay_profile_id'] = (string)$autopay_profile_id;
+      $meta['mrm_plan_kind'] = $plan_kind;
+      $meta['mrm_authorized_lesson_count'] = (string)$authorized_lesson_count;
+      $meta['mrm_first_lesson_prepaid'] = 'yes';
+
+      $this->update_order_status_from_pi($payment_intent_id, (string)($order['status'] ?? 'paid'), 'succeeded', $meta);
+    }
+
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'autopay_profile_id' => $autopay_profile_id,
+      'customer_id' => $customer_id,
+      'payment_method_id' => $payment_method_id,
+      'plan_kind' => $plan_kind,
+      'authorized_lesson_count' => (int)$authorized_lesson_count,
     ), 200);
   }
 
