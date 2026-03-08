@@ -583,6 +583,54 @@ class MRM_Lesson_Scheduler {
         $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
         $instr_tz    = ( is_array( $instr ) && ! empty( $instr['timezone'] ) ) ? (string) $instr['timezone'] : 'UTC';
 
+        $is_recurring_booking = (
+            count( $slots ) > 1 &&
+            in_array( strtolower( (string) $repeat_frequency ), array( 'weekly', 'biweekly' ), true )
+        );
+
+        $series_id = null;
+        $recurring_master_event_id = '';
+        $recurring_instance_map = array();
+        if ( $is_recurring_booking ) {
+            $wpdb->insert(
+                $lessons_table,
+                array(
+                    'instructor_id' => $instructor_id,
+                    'series_id'     => null,
+                    'student_name'  => $student_name !== '' ? $student_name : $student_email,
+                    'student_email' => $student_email,
+                    'instrument'    => $instrument !== '' ? $instrument : 'unknown',
+                    'is_online'     => $is_online,
+                    'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
+                    'start_time'    => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
+                    'end_time'      => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['end'] ?? '' ) ) ),
+                    'status'        => 'series',
+                    'google_event_id' => null,
+                    'google_meet_url' => null,
+                    'order_id'        => null,
+                    'payment_mode'    => 'none',
+                    'payout_unlocked_at' => null,
+                    'autopay_profile_id' => null,
+                    'agreement_id'    => null,
+                    'created_at'      => $now,
+                    'updated_at'      => $now,
+                    'reminder_token'  => null,
+                    'reminder_token_hash' => null,
+                    'reminder_scheduled_at' => null,
+                    'reminder_sent_at' => null,
+                ),
+                array(
+                    '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s',
+                    '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'
+                )
+            );
+
+            $series_id = (int) $wpdb->insert_id;
+            if ( $series_id <= 0 ) {
+                $series_id = null;
+            }
+        }
+
         foreach ( $slots as $slot_index => $slot ) {
             $start_raw = (string) ( $slot['start'] ?? '' );
             $end_raw   = (string) ( $slot['end'] ?? '' );
@@ -607,7 +655,7 @@ class MRM_Lesson_Scheduler {
 
             $ok = $wpdb->insert( $lessons_table, array(
                 'instructor_id' => $instructor_id,
-                'series_id'     => null,
+                'series_id'     => ( $series_id ? $series_id : null ),
                 'student_name'  => $student_name !== '' ? $student_name : $student_email,
                 'student_email' => $student_email,
                 'instrument'    => $instrument !== '' ? $instrument : 'unknown',
@@ -667,7 +715,12 @@ class MRM_Lesson_Scheduler {
                     $google_messages[] = 'Google Calendar is not configured in the plugin settings, so no calendar event could be created.';
                 }
 
-                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+                $should_create_google_event = true;
+                if ( $is_recurring_booking && count( $created_ids ) > 1 ) {
+                    $should_create_google_event = false;
+                }
+
+                if ( $should_create_google_event && $calendar_id !== '' && $this->google_is_configured() ) {
 
                     // ------------------------------------------------------------
                     // Event title/location/description (minimal but complete)
@@ -847,6 +900,15 @@ class MRM_Lesson_Scheduler {
 
                         // IMPORTANT: We pass create_meet = false to respect your existing design:
                         // Meet is created later by the join gate / reminder flow, not on calendar insert.
+                        $recurrence_rules = array();
+                        if ( $is_recurring_booking && ! empty( $slots[0]['start'] ) ) {
+                            $recurrence_rules = $this->build_google_recurrence_rules(
+                                $repeat_frequency,
+                                $repeat_duration,
+                                strtotime( (string) $slots[0]['start'] )
+                            );
+                        }
+
                         $ins = $this->google_insert_event(
                             $calendar_id,
                             $title,
@@ -856,23 +918,95 @@ class MRM_Lesson_Scheduler {
                             $end_rfc3339,
                             'UTC',              // dateTime values are UTC Z strings
                             $extended_private,
-                            array(),            // recurrence not used here; your UI sends explicit slots
+                            $recurrence_rules,
                             false,              // create_meet disabled (deferred Meet is your current architecture)
                             (array) ( is_email( $student_email ) ? array( $student_email ) : array() )
                         );
 
                         if ( ! is_wp_error( $ins ) && is_array( $ins ) && ! empty( $ins['id'] ) ) {
-                            // Store google_event_id so your sync code can find/update later
-                            $wpdb->update(
-                                $lessons_table,
-                                array(
-                                    'google_event_id' => (string) $ins['id'],
-                                    'updated_at'      => $now,
-                                ),
-                                array( 'id' => $booking_id ),
-                                array( '%s', '%s' ),
-                                array( '%d' )
-                            );
+                            if ( $is_recurring_booking && ! empty( $recurrence_rules ) ) {
+                                $master_event_id = (string) $ins['id'];
+                                $recurring_master_event_id = $master_event_id;
+
+                                if ( $series_id ) {
+                                    $wpdb->update(
+                                        $lessons_table,
+                                        array(
+                                            'google_event_id' => $master_event_id,
+                                            'updated_at'      => $now,
+                                        ),
+                                        array( 'id' => $series_id ),
+                                        array( '%s', '%s' ),
+                                        array( '%d' )
+                                    );
+                                }
+
+                                $window_start = gmdate( 'c', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) - DAY_IN_SECONDS );
+                                $window_end   = gmdate( 'c', strtotime( end( $slots )['end'] ?? (string) ( $slots[0]['end'] ?? '' ) ) + ( 30 * DAY_IN_SECONDS ) );
+
+                                $instances = $this->google_list_event_instances( $calendar_id, $master_event_id, $window_start, $window_end );
+
+                                if ( ! is_wp_error( $instances ) && is_array( $instances ) ) {
+                                    $items = isset( $instances['items'] ) && is_array( $instances['items'] ) ? $instances['items'] : array();
+
+                                    $instance_map = array();
+                                    foreach ( $items as $instance ) {
+                                        list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $instance );
+                                        if ( $g_start_ts ) {
+                                            $instance_map[ gmdate( 'Y-m-d H:i:s', $g_start_ts ) ] = (string) ( $instance['id'] ?? '' );
+                                        }
+                                    }
+
+                                    $recurring_instance_map = $instance_map;
+
+                                    $occurrence_event_id = isset( $instance_map[ $start_mysql ] ) ? $instance_map[ $start_mysql ] : '';
+                                    if ( $occurrence_event_id !== '' ) {
+                                        $wpdb->update(
+                                            $lessons_table,
+                                            array(
+                                                'google_event_id' => $occurrence_event_id,
+                                                'updated_at'      => $now,
+                                            ),
+                                            array( 'id' => $booking_id ),
+                                            array( '%s', '%s' ),
+                                            array( '%d' )
+                                        );
+                                    } else {
+                                        $wpdb->update(
+                                            $lessons_table,
+                                            array(
+                                                'google_event_id' => $master_event_id,
+                                                'updated_at'      => $now,
+                                            ),
+                                            array( 'id' => $booking_id ),
+                                            array( '%s', '%s' ),
+                                            array( '%d' )
+                                        );
+                                    }
+                                } else {
+                                    $wpdb->update(
+                                        $lessons_table,
+                                        array(
+                                            'google_event_id' => $master_event_id,
+                                            'updated_at'      => $now,
+                                        ),
+                                        array( 'id' => $booking_id ),
+                                        array( '%s', '%s' ),
+                                        array( '%d' )
+                                    );
+                                }
+                            } else {
+                                $wpdb->update(
+                                    $lessons_table,
+                                    array(
+                                        'google_event_id' => (string) $ins['id'],
+                                        'updated_at'      => $now,
+                                    ),
+                                    array( 'id' => $booking_id ),
+                                    array( '%s', '%s' ),
+                                    array( '%d' )
+                                );
+                            }
 
                             $google_messages[] = 'Calendar event created successfully.';
                         } else {
@@ -886,6 +1020,18 @@ class MRM_Lesson_Scheduler {
                         $google_messages[] = 'Calendar event was not created because time conversion failed: ' . $msg;
                         error_log( 'MRM time->RFC3339 failed for booking_id ' . $booking_id . ': ' . $msg );
                     }
+                } elseif ( $is_recurring_booking && $recurring_master_event_id !== '' ) {
+                    $occurrence_event_id = isset( $recurring_instance_map[ $start_mysql ] ) ? $recurring_instance_map[ $start_mysql ] : '';
+                    $wpdb->update(
+                        $lessons_table,
+                        array(
+                            'google_event_id' => ( $occurrence_event_id !== '' ? $occurrence_event_id : $recurring_master_event_id ),
+                            'updated_at'      => $now,
+                        ),
+                        array( 'id' => $booking_id ),
+                        array( '%s', '%s' ),
+                        array( '%d' )
+                    );
                 }
             } else {
                 error_log(
@@ -2468,7 +2614,7 @@ class MRM_Lesson_Scheduler {
 
         if ( ! $this->google_is_configured() ) return;
 
-        // Sync first so moved events update local lesson times.
+        // Sync first so moved recurring instances update local start/end times.
         $this->cron_sync_upcoming_events( 72, 30 );
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
@@ -2481,9 +2627,9 @@ class MRM_Lesson_Scheduler {
             WHERE l.status='scheduled'
               AND l.google_event_id IS NOT NULL
               AND l.google_event_id <> ''
-              AND l.start_time > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)
+              AND l.start_time > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 14 DAY)
             ORDER BY l.start_time ASC
-            LIMIT 100
+            LIMIT 200
         ", ARRAY_A);
 
         if ( ! $rows ) return;
@@ -2493,7 +2639,7 @@ class MRM_Lesson_Scheduler {
             $event_id    = (string) ( $l['google_event_id'] ?? '' );
             $booking_id  = (int) ( $l['id'] ?? 0 );
 
-            if ( $calendar_id === '' || $event_id === '' ) continue;
+            if ( $calendar_id === '' || $event_id === '' || $booking_id <= 0 ) continue;
 
             $ev = $this->google_get_event( $calendar_id, $event_id );
             if ( is_wp_error( $ev ) || ! is_array( $ev ) ) {
@@ -3580,6 +3726,54 @@ protected function base64url_encode( $data ) {
      * @param array  $attendee_emails Emails to add as attendees for calendar reminders
      * @return true|WP_Error
      */
+    protected function build_google_recurrence_rules( $repeat_frequency, $repeat_duration, $start_ts ) {
+        $repeat_frequency = strtolower( trim( (string) $repeat_frequency ) );
+        $repeat_duration  = strtolower( trim( (string) $repeat_duration ) );
+        $start_ts         = (int) $start_ts;
+
+        if ( $start_ts <= 0 ) return array();
+        if ( $repeat_frequency !== 'weekly' && $repeat_frequency !== 'biweekly' ) return array();
+
+        $interval = ( $repeat_frequency === 'biweekly' ) ? 2 : 1;
+
+        // If duration is indefinite, do not include COUNT/UNTIL.
+        if ( $repeat_duration === 'indefinitely' ) {
+            return array(
+                'RRULE:FREQ=WEEKLY;INTERVAL=' . $interval
+            );
+        }
+
+        // Map your UI values to a lesson count.
+        $count_map = array(
+            '1_month'  => 4,
+            '2_months' => 8,
+            '3_months' => 12,
+            '6_months' => 24,
+            '12_months' => 48,
+        );
+
+        if ( $interval === 2 ) {
+            $count_map = array(
+                '1_month'  => 2,
+                '2_months' => 4,
+                '3_months' => 6,
+                '6_months' => 12,
+                '12_months' => 24,
+            );
+        }
+
+        $count = isset( $count_map[ $repeat_duration ] ) ? (int) $count_map[ $repeat_duration ] : 0;
+        if ( $count <= 0 ) {
+            return array(
+                'RRULE:FREQ=WEEKLY;INTERVAL=' . $interval
+            );
+        }
+
+        return array(
+            'RRULE:FREQ=WEEKLY;INTERVAL=' . $interval . ';COUNT=' . $count
+        );
+    }
+
     protected function google_insert_event( $calendar_id, $title, $description, $location, $start_rfc3339, $end_rfc3339, $timezone, $extended_private, $recurrence = array(), $create_meet = false, $attendee_emails = array() ) {
         $token = $this->google_get_access_token();
         if ( is_wp_error( $token ) ) return $token;

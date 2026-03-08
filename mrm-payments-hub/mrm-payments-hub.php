@@ -2210,6 +2210,7 @@ class MRM_Payments_Hub_Single {
     // This lets manual payout runs pick up lessons that were moved/rescheduled
     // in Google Calendar and have now ended.
     do_action('mrm_scheduler_reconcile_completed_lessons');
+    do_action('mrm_scheduler_reconcile_cancelled_lessons');
     error_log('MRM payout batch: forced lesson reconciliation before payout selection.');
 
     global $wpdb;
