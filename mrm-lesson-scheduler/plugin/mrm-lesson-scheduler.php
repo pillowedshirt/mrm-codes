@@ -280,10 +280,10 @@ class MRM_Lesson_Scheduler {
         add_action( 'mrm_scheduler_reconcile_completed_lessons', array( $this, 'cron_reconcile_completed_lessons' ) );
         add_action( 'mrm_scheduler_reconcile_cancelled_lessons', array( $this, 'cron_reconcile_cancelled_lessons' ) );
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
-            wp_schedule_event( time() + 120, 'mrm_5min', 'mrm_scheduler_reconcile_completed_lessons' );
+            wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
-            wp_schedule_event( time() + 180, 'mrm_5min', 'mrm_scheduler_reconcile_cancelled_lessons' );
+            wp_schedule_event( time() + 180, 'mrm_10min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
         // Gate page (virtual) for joining online lessons
         add_action( 'init', array( $this, 'register_join_gate_rewrite' ) );
@@ -306,13 +306,13 @@ class MRM_Lesson_Scheduler {
         flush_rewrite_rules();
 
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
-            wp_schedule_event( time() + 60, 'mrm_5min', 'mrm_scheduler_sync_upcoming_events' );
+            wp_schedule_event( time() + 60, 'mrm_10min', 'mrm_scheduler_sync_upcoming_events' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
-            wp_schedule_event( time() + 120, 'mrm_5min', 'mrm_scheduler_reconcile_completed_lessons' );
+            wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
-            wp_schedule_event( time() + 180, 'mrm_5min', 'mrm_scheduler_reconcile_cancelled_lessons' );
+            wp_schedule_event( time() + 180, 'mrm_10min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
     }
 
@@ -2583,14 +2583,6 @@ class MRM_Lesson_Scheduler {
     }
 
     public function register_custom_cron_schedules( $schedules ) {
-        if ( ! isset( $schedules['mrm_5min'] ) ) {
-            $schedules['mrm_5min'] = array(
-                'interval' => 5 * 60,
-                'display'  => __( 'Every 5 minutes (MRM)', 'mrm-lesson-scheduler' ),
-            );
-        }
-
-        // Add a 10-minute interval used by the lesson completion reconciler.
         if ( ! isset( $schedules['mrm_10min'] ) ) {
             $schedules['mrm_10min'] = array(
                 'interval' => 10 * 60,
