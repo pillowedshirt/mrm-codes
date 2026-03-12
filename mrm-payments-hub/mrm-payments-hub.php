@@ -1971,16 +1971,14 @@ class MRM_Payments_Hub_Single {
       $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
       $cancel_reason = (string)($data['cancel_reason'] ?? '');
 
-      // Refund only if this specific lesson already has a completed charge.
+      // Refund only if this specific lesson already has a completed lesson-level charge.
       if ($lesson_order) {
         $this->mrm_request_refund_for_order($lesson_order, 'Auto-refund for cancelled autopay lesson ' . $lesson_id);
       } elseif ($order_id > 0) {
-        // Fallback for the prepaid first autopay lesson:
-        // only refund when the cancellation reason is an explicit Google-side cancellation/deletion,
-        // not merely a temporary lookup miss during a move/reschedule.
+        // Fallback for the prepaid first autopay lesson.
+        // Only refund on explicit cancellation/deletion reasons.
         $explicit_cancel_reasons = array(
           'google_event_cancelled',
-          'google_occurrence_deleted',
           'google_event_deleted_or_series_removed',
         );
 
@@ -1992,7 +1990,6 @@ class MRM_Payments_Hub_Single {
         }
       }
 
-      // If no order exists, this was a future uncharged lesson. Cancel only, no refund.
       if ($autopay_profile_id > 0) {
         $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
       }
