@@ -1944,7 +1944,7 @@ class MRM_Payments_Hub_Single {
     );
 
     if ($lesson_id <= 0 || $instructor_id <= 0) {
-      error_log('[MRM AutoPay] on_lesson_delivered aborted بسبب missing lesson_id or instructor_id.');
+      error_log('[MRM AutoPay] on_lesson_delivered aborted: missing lesson_id or instructor_id.');
       return;
     }
 
