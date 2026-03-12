@@ -1971,18 +1971,26 @@ class MRM_Payments_Hub_Single {
       $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
       $cancel_reason = (string)($data['cancel_reason'] ?? '');
 
-      // Refund only if this specific lesson already has a completed lesson-level charge.
+      // Refund only if this specific lesson already has its own completed lesson-level charge.
       if ($lesson_order) {
         $this->mrm_request_refund_for_order($lesson_order, 'Auto-refund for cancelled autopay lesson ' . $lesson_id);
       } elseif ($order_id > 0) {
         // Fallback for the prepaid first autopay lesson.
-        // Only refund on explicit cancellation/deletion reasons.
+        // Make this stricter for recurring lessons: only refund on explicit, validated deletion/cancellation.
         $explicit_cancel_reasons = array(
           'google_event_cancelled',
           'google_event_deleted_or_series_removed',
         );
 
-        if (in_array($cancel_reason, $explicit_cancel_reasons, true)) {
+        $is_recurring = !empty($data['series_id']) && (int)$data['series_id'] > 0;
+
+        if (
+          in_array($cancel_reason, $explicit_cancel_reasons, true) &&
+          (
+            !$is_recurring ||
+            $cancel_reason === 'google_event_cancelled'
+          )
+        ) {
           $first_order = $this->mrm_get_order_by_id($order_id);
           if ($first_order) {
             $this->mrm_request_refund_for_order($first_order, 'Auto-refund for cancelled prepaid first autopay lesson ' . $lesson_id);
