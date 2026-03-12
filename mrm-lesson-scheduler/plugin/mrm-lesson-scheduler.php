@@ -216,7 +216,11 @@ class MRM_Lesson_Scheduler {
 
     protected function google_find_instance_by_local_start( $instances_payload, $start_mysql ) {
         if ( ! is_array( $instances_payload ) ) return null;
-        $items = isset( $instances_payload['items'] ) && is_array( $instances_payload['items'] ) ? $instances_payload['items'] : array();
+
+        $items = isset( $instances_payload['items'] ) && is_array( $instances_payload['items'] )
+            ? $instances_payload['items']
+            : array();
+
         if ( empty( $items ) ) return null;
 
         $target_ts = strtotime( (string) $start_mysql );
@@ -224,7 +228,7 @@ class MRM_Lesson_Scheduler {
 
         foreach ( $items as $ev ) {
             list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $ev );
-            if ( $g_start_ts && abs( $g_start_ts - $target_ts ) <= 120 ) {
+            if ( $g_start_ts && abs( $g_start_ts - $target_ts ) <= 180 ) {
                 return $ev;
             }
         }
@@ -276,10 +280,10 @@ class MRM_Lesson_Scheduler {
         add_action( 'mrm_scheduler_reconcile_completed_lessons', array( $this, 'cron_reconcile_completed_lessons' ) );
         add_action( 'mrm_scheduler_reconcile_cancelled_lessons', array( $this, 'cron_reconcile_cancelled_lessons' ) );
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
-            wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
+            wp_schedule_event( time() + 120, 'mrm_5min', 'mrm_scheduler_reconcile_completed_lessons' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
-            wp_schedule_event( time() + 180, 'mrm_10min', 'mrm_scheduler_reconcile_cancelled_lessons' );
+            wp_schedule_event( time() + 180, 'mrm_5min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
         // Gate page (virtual) for joining online lessons
         add_action( 'init', array( $this, 'register_join_gate_rewrite' ) );
@@ -302,13 +306,13 @@ class MRM_Lesson_Scheduler {
         flush_rewrite_rules();
 
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
-            wp_schedule_event( time() + 60, 'mrm_10min', 'mrm_scheduler_sync_upcoming_events' );
+            wp_schedule_event( time() + 60, 'mrm_5min', 'mrm_scheduler_sync_upcoming_events' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
-            wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
+            wp_schedule_event( time() + 120, 'mrm_5min', 'mrm_scheduler_reconcile_completed_lessons' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
-            wp_schedule_event( time() + 180, 'mrm_10min', 'mrm_scheduler_reconcile_cancelled_lessons' );
+            wp_schedule_event( time() + 180, 'mrm_5min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
     }
 
@@ -2579,6 +2583,13 @@ class MRM_Lesson_Scheduler {
     }
 
     public function register_custom_cron_schedules( $schedules ) {
+        if ( ! isset( $schedules['mrm_5min'] ) ) {
+            $schedules['mrm_5min'] = array(
+                'interval' => 5 * 60,
+                'display'  => __( 'Every 5 minutes (MRM)', 'mrm-lesson-scheduler' ),
+            );
+        }
+
         // Add a 10-minute interval used by the lesson completion reconciler.
         if ( ! isset( $schedules['mrm_10min'] ) ) {
             $schedules['mrm_10min'] = array(
@@ -2628,10 +2639,9 @@ class MRM_Lesson_Scheduler {
     public function cron_reconcile_completed_lessons() {
         global $wpdb;
 
-        // Before deciding whether lessons have ended, first sync Google-moved
-        // booking times back into the local lesson rows. Use a wider lookback
-        // than normal cron so manual payout runs can catch recently moved lessons.
-        $this->cron_sync_upcoming_events( 72, 7 );
+        // Sync first so moved Google events update local lesson times before
+        // we decide whether a lesson has actually ended.
+        $this->cron_sync_upcoming_events( 72, 30 );
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $instructors_table = $wpdb->prefix . 'mrm_instructors';
@@ -2670,6 +2680,9 @@ class MRM_Lesson_Scheduler {
                     $is_master = isset( $got['recurrence'] ) && is_array( $got['recurrence'] ) && ! empty( $got['recurrence'] );
 
                     if ( $is_master ) {
+                        $time_min = gmdate( 'c', strtotime( (string) $l['start_time'] ) - 14 * DAY_IN_SECONDS );
+                        $time_max = gmdate( 'c', strtotime( (string) $l['end_time'] ) + 14 * DAY_IN_SECONDS );
+
                         $inst = $this->google_list_event_instances( $calendar_id, $event_id, $time_min, $time_max );
                         if ( ! is_wp_error( $inst ) && is_array( $inst ) ) {
                             $match = $this->google_find_instance_by_local_start( $inst, (string) $l['start_time'] );
@@ -2716,6 +2729,16 @@ class MRM_Lesson_Scheduler {
                 array( 'id' => $booking_id ),
                 array( '%s', '%s', '%s' ),
                 array( '%d' )
+            );
+
+            error_log(
+                'MRM scheduler: lesson delivered'
+                . ' lesson_id=' . $booking_id
+                . ' instructor_id=' . (int) ( $l['instructor_id'] ?? 0 )
+                . ' payment_mode=' . (string) ( $l['payment_mode'] ?? 'none' )
+                . ' autopay_profile_id=' . (int) ( $l['autopay_profile_id'] ?? 0 )
+                . ' local_start=' . (string) ( $l['start_time'] ?? '' )
+                . ' local_end=' . (string) ( $l['end_time'] ?? '' )
             );
 
             do_action( 'mrm_lesson_delivered', array(
