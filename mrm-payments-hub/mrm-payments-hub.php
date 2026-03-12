@@ -1934,18 +1934,25 @@ class MRM_Payments_Hub_Single {
     $lesson_id = (int)($data['lesson_id'] ?? 0);
     $mode = (string)($data['payment_mode'] ?? 'none');
     $instructor_id = (int)($data['instructor_id'] ?? 0);
+    $autopay_profile_id = (int)($data['autopay_profile_id'] ?? 0);
 
-    if ($lesson_id <= 0 || $instructor_id <= 0) return;
+    error_log('[MRM AutoPay] on_lesson_delivered fired'
+      . ' lesson_id=' . $lesson_id
+      . ' instructor_id=' . $instructor_id
+      . ' payment_mode=' . $mode
+      . ' autopay_profile_id=' . $autopay_profile_id
+    );
 
-    // Any lesson already paid on the platform should unlock from credits only after delivery.
-    // This includes both bundled prepay and single paid lessons.
+    if ($lesson_id <= 0 || $instructor_id <= 0) {
+      error_log('[MRM AutoPay] on_lesson_delivered aborted بسبب missing lesson_id or instructor_id.');
+      return;
+    }
+
     if ($mode === 'prepay' || $mode === 'one_time') {
       $this->unlock_prepay_instructor_payout($data);
       return;
     }
 
-    // Auto-pay means the lesson was booked with a saved payment method
-    // and should only be charged after completion.
     if ($mode === 'autopay') {
       $this->charge_and_unlock_autopay($data);
       return;
@@ -2048,13 +2055,28 @@ class MRM_Payments_Hub_Single {
     $instructor_id = (int)($data['instructor_id'] ?? 0);
     $lesson_id = (int)($data['lesson_id'] ?? 0);
 
-    if ($autopay_profile_id <= 0 || $instructor_id <= 0 || $lesson_id <= 0) return;
+    error_log('[MRM AutoPay] charge_and_unlock_autopay start'
+      . ' lesson_id=' . $lesson_id
+      . ' instructor_id=' . $instructor_id
+      . ' autopay_profile_id=' . $autopay_profile_id
+    );
+
+    if ($autopay_profile_id <= 0 || $instructor_id <= 0 || $lesson_id <= 0) {
+      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: invalid ids.');
+      return;
+    }
 
     $profile = $this->mrm_get_autopay_profile($autopay_profile_id);
-    if (!$profile || (int)($profile['active'] ?? 0) !== 1) return;
+    if (!$profile || (int)($profile['active'] ?? 0) !== 1) {
+      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: profile missing or inactive for autopay_profile_id=' . $autopay_profile_id);
+      return;
+    }
 
     $amount_cents = (int)($profile['unit_base_cents'] ?? 0);
-    if ($amount_cents <= 0) return;
+    if ($amount_cents <= 0) {
+      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: unit_base_cents <= 0 for autopay_profile_id=' . $autopay_profile_id);
+      return;
+    }
 
     $order_id = $this->create_order(
       (string)($profile['email_hash'] ?? ''),
@@ -2089,6 +2111,7 @@ class MRM_Payments_Hub_Single {
         'stripe_status' => 'offsession_failed',
         'updated_at' => current_time('mysql'),
       ), array('id' => (int)$order_id), array('%s','%s','%s'), array('%d'));
+      error_log('[MRM AutoPay] off-session payment failed for lesson_id=' . $lesson_id . ' reason=' . $pi->get_error_message());
       $this->mrm_insert_payout_ledger_row($order_id, '', 'instructor', 'lesson:' . $lesson_id, '', (string)($profile['currency'] ?? 'usd'), 0, 0, 'blocked', 'Autopay charge failed: ' . $pi->get_error_message());
       return;
     }
@@ -2096,6 +2119,13 @@ class MRM_Payments_Hub_Single {
     $pi_id = (string)($pi['id'] ?? '');
     $status = (string)($pi['status'] ?? '');
     $this->attach_payment_intent_to_order($order_id, $pi_id, $status);
+
+    error_log('[MRM AutoPay] off-session payment intent created'
+      . ' lesson_id=' . $lesson_id
+      . ' order_id=' . $order_id
+      . ' pi_id=' . $pi_id
+      . ' status=' . $status
+    );
 
     $latest_charge = '';
     if (!empty($pi['latest_charge'])) {
@@ -2128,6 +2158,8 @@ class MRM_Payments_Hub_Single {
       'mrm_autopay_profile_id' => (string)$autopay_profile_id,
       'mrm_latest_charge_id' => $latest_charge,
     ));
+
+    error_log('[MRM AutoPay] charge succeeded for lesson_id=' . $lesson_id . ' pi_id=' . $pi_id);
 
     $this->link_order($order_id, 'lesson', (string)$lesson_id);
     $this->mrm_increment_autopay_charge_count($autopay_profile_id);
