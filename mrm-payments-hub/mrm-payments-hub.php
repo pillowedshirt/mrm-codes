@@ -33,6 +33,7 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_daily_payout_check', array($this, 'cron_daily_payout_check'));
     add_action('mrm_pay_hub_retry_autopay_charges', array($this, 'cron_retry_autopay_charges'));
 
+    add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
     add_action('mrm_lesson_cancelled', array($this, 'on_lesson_cancelled'), 10, 1);
 
@@ -1139,6 +1140,23 @@ class MRM_Payments_Hub_Single {
     if ($order) {
       $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
       $this->mrm_maybe_create_payout_ledger_for_order($order);
+
+      $lesson_id = 0;
+
+      if (!empty($metadata['mrm_lesson_id'])) {
+        $lesson_id = (int)$metadata['mrm_lesson_id'];
+      }
+
+      if ($lesson_id <= 0 && !empty($order['metadata_json'])) {
+        $decoded = json_decode((string)$order['metadata_json'], true);
+        if (is_array($decoded) && !empty($decoded['mrm_lesson_id'])) {
+          $lesson_id = (int)$decoded['mrm_lesson_id'];
+        }
+      }
+
+      if ($lesson_id > 0 && (string)($order['sku'] ?? '') === 'autopay_lesson_charge') {
+        $this->mrm_finalize_autopay_lesson_success($lesson_id, $order, $pi_id);
+      }
     }
   }
 
@@ -1157,6 +1175,23 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->update_order_status_from_pi($pi_id, $local_status, (string)($pi['status'] ?? ''), $metadata);
+
+    $lesson_id = 0;
+    if (!empty($metadata['mrm_lesson_id'])) {
+      $lesson_id = (int)$metadata['mrm_lesson_id'];
+    }
+
+    if ($lesson_id <= 0 && !empty($order['metadata_json'])) {
+      $decoded = json_decode((string)$order['metadata_json'], true);
+      if (is_array($decoded) && !empty($decoded['mrm_lesson_id'])) {
+        $lesson_id = (int)$decoded['mrm_lesson_id'];
+      }
+    }
+
+    if ($lesson_id > 0 && (string)($order['sku'] ?? '') === 'autopay_lesson_charge') {
+      $message = 'Autopay webhook failure: ' . (string)($pi['status'] ?? $local_status);
+      $this->mrm_finalize_autopay_lesson_failure($lesson_id, $message);
+    }
   }
 
   private function mrm_handle_charge_refunded_webhook($charge) {
@@ -1969,6 +2004,131 @@ class MRM_Payments_Hub_Single {
   }
 
 
+  public function on_lesson_charge_due($data) {
+    $mode = (string)($data['payment_mode'] ?? 'none');
+    if ($mode !== 'autopay') return;
+    $this->charge_and_unlock_autopay($data);
+  }
+
+  private function mrm_finalize_autopay_lesson_success($lesson_id, $order = array(), $pi_id = '') {
+    global $wpdb;
+
+    $lesson_id = (int)$lesson_id;
+    if ($lesson_id <= 0) return;
+
+    $lessons_table = $this->table_lessons();
+    $lesson = $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM {$lessons_table} WHERE id=%d LIMIT 1",
+      $lesson_id
+    ), ARRAY_A);
+
+    if (!$lesson) return;
+
+    if ((string)($lesson['charge_status'] ?? '') === 'paid' && (string)($lesson['status'] ?? '') === 'delivered') {
+      return;
+    }
+
+    $now = current_time('mysql');
+    $wpdb->update(
+      $lessons_table,
+      array(
+        'status' => 'delivered',
+        'charge_status' => 'paid',
+        'payout_unlocked_at' => $now,
+        'delivered_at' => !empty($lesson['delivered_at']) ? (string)$lesson['delivered_at'] : $now,
+        'charge_last_error' => null,
+        'updated_at' => $now,
+      ),
+      array('id' => $lesson_id),
+      array('%s','%s','%s','%s','%s','%s'),
+      array('%d')
+    );
+
+    $autopay_profile_id = (int)($lesson['autopay_profile_id'] ?? 0);
+    if ($autopay_profile_id > 0) {
+      $this->mrm_increment_autopay_charge_count($autopay_profile_id);
+      $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
+    }
+
+    if (!is_array($order) || empty($order['id'])) {
+      return;
+    }
+
+    $order_id = (int)$order['id'];
+    $amount_cents = (int)($order['amount_cents'] ?? 0);
+    $currency = (string)($order['currency'] ?? 'usd');
+    $instructor_id = (int)($lesson['instructor_id'] ?? 0);
+
+    $this->link_order($order_id, 'lesson', (string)$lesson_id);
+
+    $instr = $this->mrm_get_instructor_row($instructor_id);
+    $instr_pct = $this->mrm_resolve_instructor_pct((string)($instr['hire_date'] ?? ''));
+    $instructor_share = (int) floor($amount_cents * ($instr_pct / 100));
+    $instructor_acct = (string)($instr['stripe_connected_account_id'] ?? '');
+
+    if ($instructor_share > 0) {
+      $this->mrm_insert_payout_ledger_row(
+        $order_id,
+        $pi_id,
+        'instructor',
+        'lesson:' . $lesson_id,
+        $instructor_acct,
+        $currency,
+        $instructor_share,
+        $instructor_share,
+        $instructor_acct ? 'pending' : 'blocked',
+        $instructor_acct ? ('Autopay lesson unlocked at ' . $instr_pct . '%') : 'Missing instructor connected account ID'
+      );
+    }
+
+    $platform_share = max(0, $amount_cents - $instructor_share);
+    $this->mrm_insert_payout_ledger_row(
+      $order_id,
+      $pi_id,
+      'platform',
+      'platform',
+      '',
+      $currency,
+      $platform_share,
+      $platform_share,
+      'retained',
+      'Retained by platform'
+    );
+
+    error_log('[MRM AutoPay] webhook finalized successful lesson charge'
+      . ' lesson_id=' . $lesson_id
+      . ' order_id=' . $order_id
+      . ' pi_id=' . $pi_id
+    );
+  }
+
+  private function mrm_finalize_autopay_lesson_failure($lesson_id, $message = '') {
+    global $wpdb;
+
+    $lesson_id = (int)$lesson_id;
+    if ($lesson_id <= 0) return;
+
+    $lessons_table = $this->table_lessons();
+    $wpdb->update(
+      $lessons_table,
+      array(
+        'status' => 'payment_due',
+        'charge_status' => 'failed',
+        'charge_last_error' => (string)$message,
+        'updated_at' => current_time('mysql'),
+      ),
+      array('id' => $lesson_id),
+      array('%s','%s','%s','%s'),
+      array('%d')
+    );
+
+    error_log('[MRM AutoPay] webhook finalized failed lesson charge'
+      . ' lesson_id=' . $lesson_id
+      . ' message=' . (string)$message
+    );
+  }
+
+
   public function on_lesson_delivered($data) {
     $lesson_id = (int)($data['lesson_id'] ?? 0);
     $mode = (string)($data['payment_mode'] ?? 'none');
@@ -1993,7 +2153,7 @@ class MRM_Payments_Hub_Single {
     }
 
     if ($mode === 'autopay') {
-      $this->charge_and_unlock_autopay($data);
+      error_log('[MRM AutoPay] autopay lesson delivery acknowledged; waiting for charge-due / webhook flow.');
       return;
     }
   }
@@ -2004,16 +2164,28 @@ class MRM_Payments_Hub_Single {
     $lessons_table = $this->table_lessons();
 
     $rows = $wpdb->get_results("
-      SELECT id, instructor_id, student_email, lesson_length, is_online, order_id, payment_mode, autopay_profile_id, end_time, status
-      FROM {$lessons_table}
-      WHERE payment_mode = 'autopay'
-        AND autopay_profile_id IS NOT NULL
-        AND autopay_profile_id > 0
-        AND status = 'delivered'
-        AND end_time < UTC_TIMESTAMP()
-      ORDER BY end_time ASC
-      LIMIT 25
-    ", ARRAY_A);
+    SELECT id, instructor_id, student_email, lesson_length, is_online, order_id, payment_mode, autopay_profile_id, end_time, status, charge_status, charge_attempts, charge_last_attempt_at
+    FROM {$lessons_table}
+    WHERE payment_mode = 'autopay'
+      AND autopay_profile_id IS NOT NULL
+      AND autopay_profile_id > 0
+      AND status = 'payment_due'
+      AND end_time < UTC_TIMESTAMP()
+      AND (
+        charge_status = 'due'
+        OR charge_status = 'failed'
+        OR (
+          charge_status = 'processing'
+          AND (
+            charge_last_attempt_at IS NULL
+            OR charge_last_attempt_at <= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 20 MINUTE)
+          )
+        )
+      )
+      AND charge_attempts < 12
+    ORDER BY charge_due_at ASC, end_time ASC
+    LIMIT 25
+  ", ARRAY_A);
 
     if (!$rows) {
       return;
@@ -2030,6 +2202,11 @@ class MRM_Payments_Hub_Single {
         $existing_status = (string)($existing_order['status'] ?? '');
 
         if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
+          $this->mrm_finalize_autopay_lesson_success(
+            $lesson_id,
+            $existing_order,
+            (string)($existing_order['stripe_payment_intent_id'] ?? '')
+          );
           continue;
         }
 
@@ -2038,11 +2215,12 @@ class MRM_Payments_Hub_Single {
         }
       }
 
-      error_log('[MRM AutoPay Retry] retrying follow-up recurring lesson charge'
+      error_log('[MRM AutoPay Retry] retrying payment_due lesson charge'
         . ' lesson_id=' . $lesson_id
         . ' instructor_id=' . (int)($row['instructor_id'] ?? 0)
         . ' autopay_profile_id=' . (int)($row['autopay_profile_id'] ?? 0)
-        . ' end_time=' . (string)($row['end_time'] ?? '')
+        . ' charge_status=' . (string)($row['charge_status'] ?? '')
+        . ' attempts=' . (int)($row['charge_attempts'] ?? 0)
       );
 
       $this->charge_and_unlock_autopay(array(
@@ -2166,9 +2344,12 @@ class MRM_Payments_Hub_Single {
   }
 
   private function charge_and_unlock_autopay($data) {
+    global $wpdb;
+
     $autopay_profile_id = (int)($data['autopay_profile_id'] ?? 0);
     $instructor_id = (int)($data['instructor_id'] ?? 0);
     $lesson_id = (int)($data['lesson_id'] ?? 0);
+    $lessons_table = $this->table_lessons();
 
     error_log('[MRM AutoPay] charge_and_unlock_autopay start'
       . ' lesson_id=' . $lesson_id
@@ -2181,30 +2362,74 @@ class MRM_Payments_Hub_Single {
       return;
     }
 
+    $lesson = $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM {$lessons_table} WHERE id=%d LIMIT 1",
+      $lesson_id
+    ), ARRAY_A);
+
+    if (!$lesson) {
+      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: lesson not found.');
+      return;
+    }
+
+    if ((string)($lesson['payment_mode'] ?? '') !== 'autopay') {
+      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: lesson is not autopay.');
+      return;
+    }
+
+    if ((string)($lesson['status'] ?? '') !== 'payment_due') {
+      error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson status is not payment_due. status=' . (string)($lesson['status'] ?? ''));
+      return;
+    }
+
+    if ((string)($lesson['charge_status'] ?? '') === 'paid') {
+      error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson already paid.');
+      return;
+    }
+
     $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
     if ($existing_order) {
       $existing_status = (string)($existing_order['status'] ?? '');
 
       if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
-        error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson already has successful charge lesson_id=' . $lesson_id);
+        $this->mrm_finalize_autopay_lesson_success(
+          $lesson_id,
+          $existing_order,
+          (string)($existing_order['stripe_payment_intent_id'] ?? '')
+        );
         return;
       }
 
       if (in_array($existing_status, array('pending', 'processing', 'requires_capture'), true)) {
-        error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson already has in-flight charge lesson_id=' . $lesson_id . ' status=' . $existing_status);
+        error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: existing in-flight order for lesson_id=' . $lesson_id);
         return;
       }
     }
 
+    $attempts = (int)($lesson['charge_attempts'] ?? 0) + 1;
+    $wpdb->update(
+      $lessons_table,
+      array(
+        'charge_status' => 'processing',
+        'charge_attempts' => $attempts,
+        'charge_last_attempt_at' => current_time('mysql'),
+        'charge_last_error' => null,
+        'updated_at' => current_time('mysql'),
+      ),
+      array('id' => $lesson_id),
+      array('%s','%d','%s','%s','%s'),
+      array('%d')
+    );
+
     $profile = $this->mrm_get_autopay_profile($autopay_profile_id);
     if (!$profile || (int)($profile['active'] ?? 0) !== 1) {
-      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: profile missing or inactive for autopay_profile_id=' . $autopay_profile_id);
+      $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'Autopay profile missing or inactive.');
       return;
     }
 
     $amount_cents = (int)($profile['unit_base_cents'] ?? 0);
     if ($amount_cents <= 0) {
-      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: unit_base_cents <= 0 for autopay_profile_id=' . $autopay_profile_id);
+      $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'unit_base_cents <= 0');
       return;
     }
 
@@ -2218,8 +2443,11 @@ class MRM_Payments_Hub_Single {
         'mrm_autopay_profile_id' => (string)$autopay_profile_id,
         'mrm_instructor_id' => (string)$instructor_id,
         'mrm_lesson_id' => (string)$lesson_id,
+        'mrm_charge_attempt' => (string)$attempts,
       )
     );
+
+    $this->link_order($order_id, 'lesson', (string)$lesson_id);
 
     $pi = $this->stripe_create_offsession_payment_intent(
       $amount_cents,
@@ -2235,14 +2463,14 @@ class MRM_Payments_Hub_Single {
     );
 
     if (is_wp_error($pi)) {
-      global $wpdb;
       $wpdb->update($this->table_orders(), array(
         'status' => 'failed',
         'stripe_status' => 'offsession_failed',
         'updated_at' => current_time('mysql'),
       ), array('id' => (int)$order_id), array('%s','%s','%s'), array('%d'));
+
+      $this->mrm_finalize_autopay_lesson_failure($lesson_id, $pi->get_error_message());
       error_log('[MRM AutoPay] off-session payment failed for lesson_id=' . $lesson_id . ' reason=' . $pi->get_error_message());
-      $this->mrm_insert_payout_ledger_row($order_id, '', 'instructor', 'lesson:' . $lesson_id, '', (string)($profile['currency'] ?? 'usd'), 0, 0, 'blocked', 'Autopay charge failed: ' . $pi->get_error_message());
       return;
     }
 
@@ -2257,79 +2485,19 @@ class MRM_Payments_Hub_Single {
       . ' status=' . $status
     );
 
-    $latest_charge = '';
-    if (!empty($pi['latest_charge'])) {
-      $latest_charge = (string)$pi['latest_charge'];
-    }
-
-    if ($status !== 'succeeded' && $status !== 'requires_capture') {
-      $this->update_order_status_from_pi($pi_id, 'failed', $status, array(
-        'mrm_lesson_id' => (string)$lesson_id,
-        'mrm_autopay_profile_id' => (string)$autopay_profile_id,
-        'mrm_latest_charge_id' => $latest_charge,
-      ));
-      $this->mrm_insert_payout_ledger_row(
-        $order_id,
-        $pi_id,
-        'instructor',
-        'lesson:' . $lesson_id,
-        '',
-        (string)($profile['currency'] ?? 'usd'),
-        0,
-        0,
-        'blocked',
-        'Autopay charge not successful: ' . $status
-      );
+    if (in_array($status, array('succeeded', 'processing', 'requires_capture'), true)) {
+      // Do not finalize the lesson here.
+      // Stripe webhook is now the source of truth for payment success.
       return;
     }
 
-    $this->update_order_status_from_pi($pi_id, 'paid', $status, array(
+    $this->update_order_status_from_pi($pi_id, 'failed', $status, array(
       'mrm_lesson_id' => (string)$lesson_id,
       'mrm_autopay_profile_id' => (string)$autopay_profile_id,
-      'mrm_latest_charge_id' => $latest_charge,
     ));
 
-    error_log('[MRM AutoPay] charge succeeded for lesson_id=' . $lesson_id . ' pi_id=' . $pi_id);
-
-    $this->link_order($order_id, 'lesson', (string)$lesson_id);
-    $this->mrm_increment_autopay_charge_count($autopay_profile_id);
-    $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
-
-    $instr = $this->mrm_get_instructor_row($instructor_id);
-    $instr_pct = $this->mrm_resolve_instructor_pct((string)($instr['hire_date'] ?? ''));
-    $instructor_share = (int) floor($amount_cents * ($instr_pct / 100));
-    $instructor_acct = (string)($instr['stripe_connected_account_id'] ?? '');
-
-    if ($instructor_share > 0) {
-      $this->mrm_insert_payout_ledger_row(
-        $order_id,
-        $pi_id,
-        'instructor',
-        'lesson:' . $lesson_id,
-        $instructor_acct,
-        (string)($profile['currency'] ?? 'usd'),
-        $instructor_share,
-        $instructor_share,
-        $instructor_acct ? 'pending' : 'blocked',
-        $instructor_acct ? ('Autopay lesson unlocked at ' . $instr_pct . '%') : 'Missing instructor connected account ID'
-      );
-    }
-
-    $platform_share = max(0, $amount_cents - $instructor_share);
-    $this->mrm_insert_payout_ledger_row(
-      $order_id,
-      $pi_id,
-      'platform',
-      'platform',
-      '',
-      (string)($profile['currency'] ?? 'usd'),
-      $platform_share,
-      $platform_share,
-      'retained',
-      'Retained by platform'
-    );
+    $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'Autopay charge not successful: ' . $status);
   }
-
 
   private function mrm_is_biweekly_payout_day() {
     $settings = $this->get_settings();
