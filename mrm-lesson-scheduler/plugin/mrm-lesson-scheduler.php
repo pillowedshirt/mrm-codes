@@ -26,7 +26,7 @@ class MRM_Lesson_Scheduler {
     protected static $instance;
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
-    const DB_VERSION = '1.5.4';
+    const DB_VERSION = '1.5.5';
     const CAPABILITY = 'manage_options';
     // Google endpoints
     const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -575,6 +575,12 @@ class MRM_Lesson_Scheduler {
     start_time DATETIME NOT NULL,
     end_time DATETIME NOT NULL,
     google_original_start_time DATETIME NULL,
+    delivered_at DATETIME NULL,
+    charge_due_at DATETIME NULL,
+    charge_status VARCHAR(30) NOT NULL DEFAULT 'none',
+    charge_attempts INT NOT NULL DEFAULT 0,
+    charge_last_attempt_at DATETIME NULL,
+    charge_last_error LONGTEXT NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'scheduled',
     google_event_id VARCHAR(255) NULL,
     google_meet_url TEXT NULL,
@@ -595,6 +601,8 @@ class MRM_Lesson_Scheduler {
     KEY order_id_idx (order_id),
     KEY payment_mode_idx (payment_mode),
     KEY payout_unlocked_at_idx (payout_unlocked_at),
+    KEY charge_status_idx (charge_status),
+    KEY charge_due_at_idx (charge_due_at),
     KEY reminder_token_hash_idx (reminder_token_hash),
     KEY reminder_sent_at_idx (reminder_sent_at)
 ) {$charset_collate};";
@@ -662,6 +670,12 @@ class MRM_Lesson_Scheduler {
         $lesson_cols = $wpdb->get_col( "DESC {$lessons}", 0 );
         $need_lessons = array(
             'google_original_start_time',
+            'delivered_at',
+            'charge_due_at',
+            'charge_status',
+            'charge_attempts',
+            'charge_last_attempt_at',
+            'charge_last_error',
             'google_event_id',
             'google_meet_url',
             'order_id',
@@ -2909,21 +2923,20 @@ class MRM_Lesson_Scheduler {
         $instructors_table = $wpdb->prefix . 'mrm_instructors';
 
         $rows = $wpdb->get_results("
-            SELECT l.*, i.calendar_id, i.timezone
-            FROM {$lessons_table} l
-            JOIN {$instructors_table} i ON i.id = l.instructor_id
-            WHERE l.status='scheduled'
-              AND l.payout_unlocked_at IS NULL
-              AND l.end_time < UTC_TIMESTAMP()
-            ORDER BY l.end_time ASC
-            LIMIT 50
-        ", ARRAY_A);
+        SELECT l.*, i.calendar_id, i.timezone
+        FROM {$lessons_table} l
+        JOIN {$instructors_table} i ON i.id = l.instructor_id
+        WHERE l.status='scheduled'
+          AND l.payout_unlocked_at IS NULL
+          AND l.end_time < UTC_TIMESTAMP()
+        ORDER BY l.end_time ASC
+        LIMIT 50
+    ", ARRAY_A);
 
         if ( ! $rows ) return;
 
         foreach ( $rows as $l ) {
             $calendar_id = (string) ( $l['calendar_id'] ?? '' );
-            $event_id    = (string) ( $l['google_event_id'] ?? '' );
             $booking_id  = (int) ( $l['id'] ?? 0 );
 
             if ( $calendar_id === '' || ! $this->google_is_configured() ) {
@@ -2944,19 +2957,72 @@ class MRM_Lesson_Scheduler {
                 continue;
             }
 
-            $end = $this->google_event_end_utc( $ev );
-            if ( ! $end ) continue;
-            if ( strtotime( $end ) > time() ) continue;
+            $new_start = $this->google_event_start_utc( $ev );
+            $new_end   = $this->google_event_end_utc( $ev );
+            if ( ! $new_end ) continue;
+            if ( strtotime( $new_end ) > time() ) continue;
+
+            $new_event_id = (string) ( $ev['id'] ?? '' );
+            $payment_mode = (string) ( $l['payment_mode'] ?? 'none' );
+            $now_mysql = current_time( 'mysql' );
+
+            if ( $payment_mode === 'autopay' ) {
+                $wpdb->update(
+                    $lessons_table,
+                    array(
+                        'start_time'      => ( $new_start ?: (string) ( $l['start_time'] ?? '' ) ),
+                        'end_time'        => $new_end,
+                        'google_event_id' => ( $new_event_id !== '' ? $new_event_id : null ),
+                        'delivered_at'    => $now_mysql,
+                        'charge_due_at'   => $now_mysql,
+                        'charge_status'   => 'due',
+                        'status'          => 'payment_due',
+                        'updated_at'      => $now_mysql,
+                    ),
+                    array( 'id' => $booking_id ),
+                    array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s' ),
+                    array( '%d' )
+                );
+
+                error_log(
+                    'MRM scheduler: lesson moved to payment_due'
+                    . ' lesson_id=' . $booking_id
+                    . ' instructor_id=' . (int) ( $l['instructor_id'] ?? 0 )
+                    . ' payment_mode=' . $payment_mode
+                    . ' autopay_profile_id=' . (int) ( $l['autopay_profile_id'] ?? 0 )
+                    . ' synced_start=' . (string) ( $new_start ?: '' )
+                    . ' synced_end=' . (string) ( $new_end ?: '' )
+                );
+
+                do_action( 'mrm_lesson_charge_due', array(
+                    'lesson_id' => $booking_id,
+                    'instructor_id' => (int) $l['instructor_id'],
+                    'student_email' => (string) $l['student_email'],
+                    'lesson_length' => (int) $l['lesson_length'],
+                    'is_online' => (int) $l['is_online'],
+                    'order_id' => (int) ( $l['order_id'] ?? 0 ),
+                    'payment_mode' => $payment_mode,
+                    'autopay_profile_id' => (int) ( $l['autopay_profile_id'] ?? 0 ),
+                    'google_event_id' => $new_event_id,
+                    'ended_at_utc' => (string) $new_end,
+                ) );
+
+                continue;
+            }
 
             $wpdb->update(
                 $lessons_table,
                 array(
-                    'status' => 'delivered',
-                    'payout_unlocked_at' => current_time( 'mysql' ),
-                    'updated_at' => current_time( 'mysql' )
+                    'start_time'        => ( $new_start ?: (string) ( $l['start_time'] ?? '' ) ),
+                    'end_time'          => $new_end,
+                    'google_event_id'   => ( $new_event_id !== '' ? $new_event_id : null ),
+                    'status'            => 'delivered',
+                    'delivered_at'      => $now_mysql,
+                    'payout_unlocked_at'=> $now_mysql,
+                    'updated_at'        => $now_mysql
                 ),
                 array( 'id' => $booking_id ),
-                array( '%s', '%s', '%s' ),
+                array( '%s', '%s', '%s', '%s', '%s', '%s' ),
                 array( '%d' )
             );
 
@@ -2964,10 +3030,10 @@ class MRM_Lesson_Scheduler {
                 'MRM scheduler: lesson delivered'
                 . ' lesson_id=' . $booking_id
                 . ' instructor_id=' . (int) ( $l['instructor_id'] ?? 0 )
-                . ' payment_mode=' . (string) ( $l['payment_mode'] ?? 'none' )
+                . ' payment_mode=' . $payment_mode
                 . ' autopay_profile_id=' . (int) ( $l['autopay_profile_id'] ?? 0 )
-                . ' local_start=' . (string) ( $l['start_time'] ?? '' )
-                . ' local_end=' . (string) ( $l['end_time'] ?? '' )
+                . ' synced_start=' . (string) ( $new_start ?: '' )
+                . ' synced_end=' . (string) ( $new_end ?: '' )
             );
 
             do_action( 'mrm_lesson_delivered', array(
@@ -2977,10 +3043,10 @@ class MRM_Lesson_Scheduler {
                 'lesson_length' => (int) $l['lesson_length'],
                 'is_online' => (int) $l['is_online'],
                 'order_id' => (int) ( $l['order_id'] ?? 0 ),
-                'payment_mode' => (string) ( $l['payment_mode'] ?? 'none' ),
+                'payment_mode' => $payment_mode,
                 'autopay_profile_id' => (int) ( $l['autopay_profile_id'] ?? 0 ),
-                'google_event_id' => (string) ( $l['google_event_id'] ?? '' ),
-                'ended_at_utc' => (string) $end,
+                'google_event_id' => $new_event_id,
+                'ended_at_utc' => (string) $new_end,
             ) );
         }
     }
