@@ -26,7 +26,7 @@ class MRM_Lesson_Scheduler {
     protected static $instance;
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
-    const DB_VERSION = '1.5.3';
+    const DB_VERSION = '1.5.4';
     const CAPABILITY = 'manage_options';
     // Google endpoints
     const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -249,6 +249,11 @@ class MRM_Lesson_Scheduler {
         $target_ts = strtotime( (string) $original_start_mysql );
         if ( ! $target_ts ) return null;
 
+        // Use a much wider tolerance here because this field is intended to be
+        // the immutable anchor for the recurring occurrence identity.
+        $best = null;
+        $best_diff = null;
+
         foreach ( $items as $ev ) {
             $orig = $ev['originalStartTime'] ?? null;
             if ( ! is_array( $orig ) ) {
@@ -260,13 +265,28 @@ class MRM_Lesson_Scheduler {
             if ( ! empty( $orig['dateTime'] ) ) {
                 $orig_ts = strtotime( (string) $orig['dateTime'] );
             } elseif ( ! empty( $orig['date'] ) ) {
-                // All-day fallback
                 $orig_ts = strtotime( (string) $orig['date'] . ' 00:00:00 UTC' );
             }
 
-            if ( $orig_ts && abs( $orig_ts - $target_ts ) <= 180 ) {
+            if ( ! $orig_ts ) {
+                continue;
+            }
+
+            $diff = abs( $orig_ts - $target_ts );
+
+            if ( $best === null || $diff < $best_diff ) {
+                $best = $ev;
+                $best_diff = $diff;
+            }
+
+            if ( $diff <= 180 ) {
                 return $ev;
             }
+        }
+
+        // Wider fallback tolerance for recurring-reschedule recovery.
+        if ( $best !== null && $best_diff !== null && $best_diff <= DAY_IN_SECONDS ) {
+            return $best;
         }
 
         return null;
@@ -287,6 +307,11 @@ class MRM_Lesson_Scheduler {
         $booking_id = (int) ( $lesson_row['id'] ?? 0 );
         $start_time = (string) ( $lesson_row['start_time'] ?? '' );
         $end_time   = (string) ( $lesson_row['end_time'] ?? '' );
+        $google_original_start_time = (string) ( $lesson_row['google_original_start_time'] ?? '' );
+
+        if ( $google_original_start_time === '' ) {
+            $google_original_start_time = $start_time;
+        }
 
         $window_days = max( 1, (int) $instance_window_days );
         $time_min = gmdate( 'c', strtotime( $start_time ) - ( $window_days * DAY_IN_SECONDS ) );
@@ -296,7 +321,7 @@ class MRM_Lesson_Scheduler {
             return is_array( $ev ) && strtolower( (string) ( $ev['status'] ?? 'confirmed' ) ) === 'cancelled';
         };
 
-        $resolve_from_master = function( $master_event_id ) use ( $calendar_id, $time_min, $time_max, $start_time, $booking_id, $explicit_cancel ) {
+        $resolve_from_master = function( $master_event_id ) use ( $calendar_id, $time_min, $time_max, $start_time, $google_original_start_time, $booking_id, $explicit_cancel ) {
             $got = $this->google_get_event( $calendar_id, $master_event_id );
             if ( is_wp_error( $got ) || ! is_array( $got ) ) {
                 return array(
@@ -333,15 +358,15 @@ class MRM_Lesson_Scheduler {
             }
 
             // Preferred order for recurring slots:
-            // 1) originalStartTime
-            // 2) current local start_time
-            // 3) booking_id fallback
-            $match = $this->google_find_instance_by_original_start( $inst, $start_time );
-            if ( ! is_array( $match ) ) {
-                $match = $this->google_find_instance_by_local_start( $inst, $start_time );
-            }
+            // 1) immutable google_original_start_time
+            // 2) booking_id fallback
+            // 3) current local start_time fallback
+            $match = $this->google_find_instance_by_original_start( $inst, $google_original_start_time );
             if ( ! is_array( $match ) ) {
                 $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
+            }
+            if ( ! is_array( $match ) ) {
+                $match = $this->google_find_instance_by_local_start( $inst, $start_time );
             }
 
             if ( is_array( $match ) ) {
@@ -549,6 +574,7 @@ class MRM_Lesson_Scheduler {
     lesson_length INT NOT NULL DEFAULT 60,
     start_time DATETIME NOT NULL,
     end_time DATETIME NOT NULL,
+    google_original_start_time DATETIME NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'scheduled',
     google_event_id VARCHAR(255) NULL,
     google_meet_url TEXT NULL,
@@ -635,6 +661,7 @@ class MRM_Lesson_Scheduler {
 
         $lesson_cols = $wpdb->get_col( "DESC {$lessons}", 0 );
         $need_lessons = array(
+            'google_original_start_time',
             'google_event_id',
             'google_meet_url',
             'order_id',
@@ -898,6 +925,7 @@ class MRM_Lesson_Scheduler {
                     'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
                     'start_time'    => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
                     'end_time'      => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['end'] ?? '' ) ) ),
+                    'google_original_start_time' => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
                     'status'        => 'series',
                     'google_event_id' => null,
                     'google_meet_url' => null,
@@ -914,7 +942,7 @@ class MRM_Lesson_Scheduler {
                     'reminder_sent_at' => null,
                 ),
                 array(
-                    '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s',
+                    '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s',
                     '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'
                 )
             );
@@ -957,6 +985,7 @@ class MRM_Lesson_Scheduler {
                 'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
                 'start_time'    => $start_mysql,
                 'end_time'      => $end_mysql,
+                'google_original_start_time' => $start_mysql,
                 'status'        => 'scheduled',
                 'google_event_id' => null,
                 'google_meet_url' => null,
@@ -981,6 +1010,7 @@ class MRM_Lesson_Scheduler {
                 '%d', // lesson_length
                 '%s', // start_time
                 '%s', // end_time
+                '%s', // google_original_start_time
                 '%s', // status
                 '%s', // google_event_id
                 '%s', // google_meet_url
@@ -1419,7 +1449,7 @@ class MRM_Lesson_Scheduler {
 
         $lesson = $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT id,instructor_id,student_name,student_email,is_online,lesson_length,start_time,end_time,status,google_event_id,google_meet_url,reminder_token_hash
+                "SELECT id,instructor_id,student_name,student_email,is_online,lesson_length,start_time,end_time,google_original_start_time,status,google_event_id,google_meet_url,reminder_token_hash
                  FROM {$table_lessons}
                  WHERE reminder_token_hash = %s
                  LIMIT 1",
@@ -1490,11 +1520,12 @@ class MRM_Lesson_Scheduler {
                         array(
                             'start_time'      => $new_start,
                             'end_time'        => $new_end,
+                            'google_original_start_time' => ( ! empty( $lesson['google_original_start_time'] ) ? $lesson['google_original_start_time'] : $lesson['start_time'] ),
                             'google_event_id' => ( $new_event_id !== '' ? $new_event_id : null ),
                             'updated_at'      => current_time( 'mysql' ),
                         ),
                         array( 'id' => (int) $lesson['id'] ),
-                        array( '%s','%s','%s','%s' ),
+                        array( '%s','%s','%s','%s','%s' ),
                         array( '%d' )
                     );
 
@@ -2735,7 +2766,7 @@ class MRM_Lesson_Scheduler {
             // and update the row directly. This makes recurring reschedules behave more like one-off lessons.
             $recurring_rows = $wpdb->get_results(
                 $wpdb->prepare(
-                    "SELECT id, series_id, start_time, end_time, google_event_id
+                    "SELECT id, series_id, start_time, end_time, google_original_start_time, google_event_id
                      FROM {$table_lessons}
                      WHERE instructor_id = %d
                        AND status = 'scheduled'
@@ -2793,11 +2824,16 @@ class MRM_Lesson_Scheduler {
                             array(
                                 'start_time'      => $new_start,
                                 'end_time'        => $new_end,
+                                'google_original_start_time' => (
+                                    ! empty( $lesson_row['google_original_start_time'] )
+                                        ? $lesson_row['google_original_start_time']
+                                        : (string) ( $lesson_row['start_time'] ?? $new_start )
+                                ),
                                 'google_event_id' => ( $new_event_id !== '' ? $new_event_id : null ),
                                 'updated_at'      => current_time( 'mysql' ),
                             ),
                             array( 'id' => (int) $lesson_row['id'] ),
-                            array( '%s','%s','%s','%s' ),
+                            array( '%s','%s','%s','%s','%s' ),
                             array( '%d' )
                         );
 
