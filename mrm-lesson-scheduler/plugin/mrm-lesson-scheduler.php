@@ -287,6 +287,10 @@ class MRM_Lesson_Scheduler {
         $booking_id = (int) ( $lesson_row['id'] ?? 0 );
         $start_time = (string) ( $lesson_row['start_time'] ?? '' );
         $end_time   = (string) ( $lesson_row['end_time'] ?? '' );
+        $original_start_time = (string) ( $lesson_row['original_start_time'] ?? '' );
+        if ( $original_start_time === '' ) {
+            $original_start_time = $start_time;
+        }
 
         $window_days = max( 1, (int) $instance_window_days );
         $time_min = gmdate( 'c', strtotime( $start_time ) - ( $window_days * DAY_IN_SECONDS ) );
@@ -296,7 +300,7 @@ class MRM_Lesson_Scheduler {
             return is_array( $ev ) && strtolower( (string) ( $ev['status'] ?? 'confirmed' ) ) === 'cancelled';
         };
 
-        $resolve_from_master = function( $master_event_id ) use ( $calendar_id, $time_min, $time_max, $start_time, $booking_id, $explicit_cancel ) {
+        $resolve_from_master = function( $master_event_id ) use ( $calendar_id, $time_min, $time_max, $start_time, $original_start_time, $booking_id, $explicit_cancel ) {
             $got = $this->google_get_event( $calendar_id, $master_event_id );
             if ( is_wp_error( $got ) || ! is_array( $got ) ) {
                 return array(
@@ -336,7 +340,7 @@ class MRM_Lesson_Scheduler {
             // 1) originalStartTime
             // 2) current local start_time
             // 3) booking_id fallback
-            $match = $this->google_find_instance_by_original_start( $inst, $start_time );
+            $match = $this->google_find_instance_by_original_start( $inst, $original_start_time );
             if ( ! is_array( $match ) ) {
                 $match = $this->google_find_instance_by_local_start( $inst, $start_time );
             }
@@ -549,6 +553,11 @@ class MRM_Lesson_Scheduler {
     status VARCHAR(30) NOT NULL DEFAULT 'scheduled',
     google_event_id VARCHAR(255) NULL,
     google_meet_url TEXT NULL,
+    original_start_time DATETIME NULL,
+    charge_status VARCHAR(20) NOT NULL DEFAULT 'none',
+    charge_order_id BIGINT UNSIGNED NULL,
+    charge_attempted_at DATETIME NULL,
+    charge_failure_note TEXT NULL,
     order_id BIGINT UNSIGNED NULL,
     payment_mode VARCHAR(20) NOT NULL DEFAULT 'none',
     payout_unlocked_at DATETIME NULL,
@@ -564,7 +573,9 @@ class MRM_Lesson_Scheduler {
     KEY instructor_idx (instructor_id),
     KEY student_email_idx (student_email),
     KEY order_id_idx (order_id),
+    KEY charge_order_id_idx (charge_order_id),
     KEY payment_mode_idx (payment_mode),
+    KEY charge_status_idx (charge_status),
     KEY payout_unlocked_at_idx (payout_unlocked_at),
     KEY reminder_token_hash_idx (reminder_token_hash),
     KEY reminder_sent_at_idx (reminder_sent_at)
@@ -634,6 +645,11 @@ class MRM_Lesson_Scheduler {
         $need_lessons = array(
             'google_event_id',
             'google_meet_url',
+            'original_start_time',
+            'charge_status',
+            'charge_order_id',
+            'charge_attempted_at',
+            'charge_failure_note',
             'order_id',
             'payment_mode',
             'payout_unlocked_at',
@@ -957,6 +973,15 @@ class MRM_Lesson_Scheduler {
                 'status'        => 'scheduled',
                 'google_event_id' => null,
                 'google_meet_url' => null,
+                'original_start_time' => $start_mysql,
+                'charge_status' => (
+                    $payment_mode === 'autopay'
+                        ? ( $slot_order_id > 0 ? 'charged' : 'pending' )
+                        : ( $slot_order_id > 0 ? 'charged' : 'none' )
+                ),
+                'charge_order_id' => ( $payment_mode === 'autopay' && $slot_order_id > 0 ? $slot_order_id : null ),
+                'charge_attempted_at' => ( $payment_mode === 'autopay' && $slot_order_id > 0 ? $now : null ),
+                'charge_failure_note' => null,
                 'order_id'        => ( $slot_order_id > 0 ? $slot_order_id : null ),
                 'payment_mode'    => ( $payment_mode !== '' ? $payment_mode : 'none' ),
                 'payout_unlocked_at' => null,
@@ -981,6 +1006,11 @@ class MRM_Lesson_Scheduler {
                 '%s', // status
                 '%s', // google_event_id
                 '%s', // google_meet_url
+                '%s', // original_start_time
+                '%s', // charge_status
+                '%d', // charge_order_id
+                '%s', // charge_attempted_at
+                '%s', // charge_failure_note
                 '%d', // order_id
                 '%s', // payment_mode
                 '%s', // payout_unlocked_at
