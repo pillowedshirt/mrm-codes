@@ -472,6 +472,9 @@ class MRM_Lesson_Scheduler {
         add_action( 'mrm_scheduler_sync_upcoming_events', array( $this, 'cron_sync_upcoming_events' ) );
         add_action( 'mrm_scheduler_reconcile_completed_lessons', array( $this, 'cron_reconcile_completed_lessons' ) );
         add_action( 'mrm_scheduler_reconcile_cancelled_lessons', array( $this, 'cron_reconcile_cancelled_lessons' ) );
+        if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
+            wp_schedule_event( time() + 60, 'mrm_10min', 'mrm_scheduler_sync_upcoming_events' );
+        }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
             wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
         }

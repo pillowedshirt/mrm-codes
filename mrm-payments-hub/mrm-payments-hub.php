@@ -25,8 +25,14 @@ class MRM_Payments_Hub_Single {
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('rest_api_init', array($this, 'register_routes'));
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
+
+    add_filter('cron_schedules', array($this, 'register_custom_cron_schedules'));
+    add_action('init', array($this, 'ensure_runtime_cron_schedules'), 20);
+
     add_action('mrm_pay_hub_cleanup_access', array($this, 'cleanup_access'));
     add_action('mrm_pay_hub_daily_payout_check', array($this, 'cron_daily_payout_check'));
+    add_action('mrm_pay_hub_retry_autopay_charges', array($this, 'cron_retry_autopay_charges'));
+
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
     add_action('mrm_lesson_cancelled', array($this, 'on_lesson_cancelled'), 10, 1);
 
@@ -36,6 +42,30 @@ class MRM_Payments_Hub_Single {
   /* =========================================================
    * Activation / DB
    * ======================================================= */
+
+  public function register_custom_cron_schedules($schedules) {
+    if (!isset($schedules['mrm_10min'])) {
+      $schedules['mrm_10min'] = array(
+        'interval' => 10 * MINUTE_IN_SECONDS,
+        'display'  => __('Every 10 Minutes', 'mrm-payments-hub'),
+      );
+    }
+    return $schedules;
+  }
+
+  public function ensure_runtime_cron_schedules() {
+    if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
+      wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_daily_payout_check')) {
+      wp_schedule_event(time() + 600, 'daily', 'mrm_pay_hub_daily_payout_check');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
+      wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
+    }
+  }
 
   public function on_activate() {
     $this->install_or_upgrade_db();
@@ -48,6 +78,10 @@ class MRM_Payments_Hub_Single {
     if (!wp_next_scheduled('mrm_pay_hub_daily_payout_check')) {
       wp_schedule_event(time() + 600, 'daily', 'mrm_pay_hub_daily_payout_check');
     }
+
+    if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
+      wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
+    }
   }
 
   private function table_orders() {
@@ -58,6 +92,11 @@ class MRM_Payments_Hub_Single {
   private function table_links() {
     global $wpdb;
     return $wpdb->prefix . 'mrm_order_links';
+  }
+
+  private function table_lessons() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_lessons';
   }
 
   private function table_sheet_music_access() {
@@ -1959,6 +1998,66 @@ class MRM_Payments_Hub_Single {
     }
   }
 
+  public function cron_retry_autopay_charges() {
+    global $wpdb;
+
+    $lessons_table = $this->table_lessons();
+
+    $rows = $wpdb->get_results("
+      SELECT id, instructor_id, student_email, lesson_length, is_online, order_id, payment_mode, autopay_profile_id, end_time, status
+      FROM {$lessons_table}
+      WHERE payment_mode = 'autopay'
+        AND autopay_profile_id IS NOT NULL
+        AND autopay_profile_id > 0
+        AND status = 'delivered'
+        AND end_time < UTC_TIMESTAMP()
+      ORDER BY end_time ASC
+      LIMIT 25
+    ", ARRAY_A);
+
+    if (!$rows) {
+      return;
+    }
+
+    foreach ($rows as $row) {
+      $lesson_id = (int)($row['id'] ?? 0);
+      if ($lesson_id <= 0) {
+        continue;
+      }
+
+      $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
+      if ($existing_order) {
+        $existing_status = (string)($existing_order['status'] ?? '');
+
+        if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
+          continue;
+        }
+
+        if (in_array($existing_status, array('pending', 'processing', 'requires_capture'), true)) {
+          continue;
+        }
+      }
+
+      error_log('[MRM AutoPay Retry] retrying follow-up recurring lesson charge'
+        . ' lesson_id=' . $lesson_id
+        . ' instructor_id=' . (int)($row['instructor_id'] ?? 0)
+        . ' autopay_profile_id=' . (int)($row['autopay_profile_id'] ?? 0)
+        . ' end_time=' . (string)($row['end_time'] ?? '')
+      );
+
+      $this->charge_and_unlock_autopay(array(
+        'lesson_id' => $lesson_id,
+        'instructor_id' => (int)($row['instructor_id'] ?? 0),
+        'student_email' => (string)($row['student_email'] ?? ''),
+        'lesson_length' => (int)($row['lesson_length'] ?? 0),
+        'is_online' => (int)($row['is_online'] ?? 0),
+        'order_id' => (int)($row['order_id'] ?? 0),
+        'payment_mode' => (string)($row['payment_mode'] ?? 'autopay'),
+        'autopay_profile_id' => (int)($row['autopay_profile_id'] ?? 0),
+      ));
+    }
+  }
+
   public function on_lesson_cancelled($data) {
     $lesson_id = (int)($data['lesson_id'] ?? 0);
     $payment_mode = (string)($data['payment_mode'] ?? 'none');
@@ -2080,6 +2179,21 @@ class MRM_Payments_Hub_Single {
     if ($autopay_profile_id <= 0 || $instructor_id <= 0 || $lesson_id <= 0) {
       error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: invalid ids.');
       return;
+    }
+
+    $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
+    if ($existing_order) {
+      $existing_status = (string)($existing_order['status'] ?? '');
+
+      if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
+        error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson already has successful charge lesson_id=' . $lesson_id);
+        return;
+      }
+
+      if (in_array($existing_status, array('pending', 'processing', 'requires_capture'), true)) {
+        error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson already has in-flight charge lesson_id=' . $lesson_id . ' status=' . $existing_status);
+        return;
+      }
     }
 
     $profile = $this->mrm_get_autopay_profile($autopay_profile_id);
@@ -4345,10 +4459,20 @@ register_activation_hook(__FILE__, function() {
   if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
     wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
   }
+
+  if (!wp_next_scheduled('mrm_pay_hub_daily_payout_check')) {
+    wp_schedule_event(time() + 600, 'daily', 'mrm_pay_hub_daily_payout_check');
+  }
+
+  if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
+    wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
+  }
 });
 
 register_deactivation_hook(__FILE__, function() {
   wp_clear_scheduled_hook('mrm_pay_hub_cleanup_access');
+  wp_clear_scheduled_hook('mrm_pay_hub_daily_payout_check');
+  wp_clear_scheduled_hook('mrm_pay_hub_retry_autopay_charges');
 });
 
 /**
