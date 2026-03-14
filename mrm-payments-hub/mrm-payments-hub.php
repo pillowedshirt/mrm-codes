@@ -1246,13 +1246,28 @@ class MRM_Payments_Hub_Single {
     return (int)$wpdb->insert_id;
   }
 
-  private function attach_payment_intent_to_order($order_id, $payment_intent_id, $stripe_status = null) {
+  private function attach_payment_intent_to_order($order_id, $payment_intent_id, $stripe_status = null, $local_status = 'processing') {
     global $wpdb;
-    $wpdb->update($this->table_orders(), array(
+
+    $data = array(
       'stripe_payment_intent_id' => $payment_intent_id,
       'stripe_status' => $stripe_status,
       'updated_at' => current_time('mysql'),
-    ), array('id' => (int)$order_id), array('%s','%s','%s'), array('%d'));
+    );
+    $fmt = array('%s','%s','%s');
+
+    if ($local_status !== null && $local_status !== '') {
+      $data['status'] = (string)$local_status;
+      $fmt[] = '%s';
+    }
+
+    $wpdb->update(
+      $this->table_orders(),
+      $data,
+      array('id' => (int)$order_id),
+      $fmt,
+      array('%d')
+    );
   }
 
   private function update_order_amount_and_metadata($order_id, $amount_cents, $metadata_array) {
@@ -2128,6 +2143,71 @@ class MRM_Payments_Hub_Single {
     );
   }
 
+  private function mrm_reconcile_autopay_existing_order($lesson_id, $order) {
+    $lesson_id = (int)$lesson_id;
+    if ($lesson_id <= 0 || !is_array($order)) {
+      return false;
+    }
+
+    $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+    if ($pi_id === '') {
+      return false;
+    }
+
+    $pi = $this->stripe_retrieve_payment_intent($pi_id);
+    if (is_wp_error($pi)) {
+      error_log('[MRM AutoPay] reconcile failed to retrieve PI'
+        . ' lesson_id=' . $lesson_id
+        . ' pi_id=' . $pi_id
+        . ' error=' . $pi->get_error_message()
+      );
+      return false;
+    }
+
+    $pi_status = (string)($pi['status'] ?? '');
+    $metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+
+    if ($lesson_id > 0 && empty($metadata['mrm_lesson_id'])) {
+      $metadata['mrm_lesson_id'] = (string)$lesson_id;
+    }
+    if (!empty($pi['latest_charge'])) {
+      $metadata['mrm_latest_charge_id'] = (string)$pi['latest_charge'];
+    }
+
+    if (in_array($pi_status, array('succeeded', 'requires_capture'), true)) {
+      $this->update_order_status_from_pi($pi_id, 'paid', $pi_status, $metadata);
+      $fresh_order = $this->get_order_by_pi($pi_id);
+      $this->mrm_finalize_autopay_lesson_success(
+        $lesson_id,
+        (is_array($fresh_order) ? $fresh_order : $order),
+        $pi_id
+      );
+      return true;
+    }
+
+    if (in_array($pi_status, array('processing', 'requires_confirmation'), true)) {
+      $this->update_order_status_from_pi($pi_id, 'processing', $pi_status, $metadata);
+      return true;
+    }
+
+    if (in_array($pi_status, array('requires_payment_method', 'requires_action', 'canceled'), true)) {
+      $this->update_order_status_from_pi($pi_id, 'failed', $pi_status, $metadata);
+      $this->mrm_finalize_autopay_lesson_failure(
+        $lesson_id,
+        'Autopay reconcile status: ' . $pi_status
+      );
+      return true;
+    }
+
+    error_log('[MRM AutoPay] reconcile encountered unhandled PI status'
+      . ' lesson_id=' . $lesson_id
+      . ' pi_id=' . $pi_id
+      . ' status=' . $pi_status
+    );
+
+    return false;
+  }
+
 
   public function on_lesson_delivered($data) {
     $lesson_id = (int)($data['lesson_id'] ?? 0);
@@ -2200,6 +2280,14 @@ class MRM_Payments_Hub_Single {
       $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
       if ($existing_order) {
         $existing_status = (string)($existing_order['status'] ?? '');
+        $existing_pi_id = (string)($existing_order['stripe_payment_intent_id'] ?? '');
+
+        if ($existing_pi_id !== '') {
+          $this->mrm_reconcile_autopay_existing_order($lesson_id, $existing_order);
+
+          $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
+          $existing_status = (string)($existing_order['status'] ?? '');
+        }
 
         if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
           $this->mrm_finalize_autopay_lesson_success(
@@ -2390,6 +2478,13 @@ class MRM_Payments_Hub_Single {
     $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
     if ($existing_order) {
       $existing_status = (string)($existing_order['status'] ?? '');
+      $existing_pi_id = (string)($existing_order['stripe_payment_intent_id'] ?? '');
+
+      if ($existing_pi_id !== '') {
+        $this->mrm_reconcile_autopay_existing_order($lesson_id, $existing_order);
+        $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
+        $existing_status = (string)($existing_order['status'] ?? '');
+      }
 
       if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
         $this->mrm_finalize_autopay_lesson_success(
@@ -2476,7 +2571,15 @@ class MRM_Payments_Hub_Single {
 
     $pi_id = (string)($pi['id'] ?? '');
     $status = (string)($pi['status'] ?? '');
-    $this->attach_payment_intent_to_order($order_id, $pi_id, $status);
+
+    $local_order_status = 'processing';
+    if (in_array($status, array('succeeded', 'requires_capture'), true)) {
+      $local_order_status = 'paid';
+    } elseif (in_array($status, array('requires_payment_method', 'requires_action', 'canceled'), true)) {
+      $local_order_status = 'failed';
+    }
+
+    $this->attach_payment_intent_to_order($order_id, $pi_id, $status, $local_order_status);
 
     error_log('[MRM AutoPay] off-session payment intent created'
       . ' lesson_id=' . $lesson_id
@@ -2485,9 +2588,16 @@ class MRM_Payments_Hub_Single {
       . ' status=' . $status
     );
 
-    if (in_array($status, array('succeeded', 'processing', 'requires_capture'), true)) {
-      // Do not finalize the lesson here.
-      // Stripe webhook is now the source of truth for payment success.
+    if (in_array($status, array('succeeded', 'requires_capture'), true)) {
+      // Fast-path finalize from direct Stripe truth.
+      // Webhook remains idempotent and will not hurt anything if it arrives later.
+      $fresh_order = $this->get_order($order_id);
+      $this->mrm_finalize_autopay_lesson_success($lesson_id, $fresh_order, $pi_id);
+      return;
+    }
+
+    if ($status === 'processing') {
+      // Leave lesson in payment_due / processing and let webhook or retry reconcile it.
       return;
     }
 
