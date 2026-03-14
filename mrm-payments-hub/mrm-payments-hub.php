@@ -1390,6 +1390,39 @@ class MRM_Payments_Hub_Single {
     );
   }
 
+  private function mrm_validate_autopay_profile_for_charge( $profile ) {
+    if ( ! is_array( $profile ) ) {
+      return new WP_Error( 'mrm_autopay_invalid_profile', 'Autopay profile is invalid.' );
+    }
+
+    if ( (int)($profile['active'] ?? 0) !== 1 ) {
+      return new WP_Error( 'mrm_autopay_inactive', 'Autopay profile is inactive.' );
+    }
+
+    $customer_id = (string)($profile['customer_id'] ?? '');
+    $payment_method_id = (string)($profile['payment_method_id'] ?? '');
+
+    if ( $customer_id === '' ) {
+      return new WP_Error( 'mrm_autopay_missing_customer', 'Autopay profile is missing Stripe customer ID.' );
+    }
+
+    if ( $payment_method_id === '' ) {
+      return new WP_Error( 'mrm_autopay_missing_pm', 'Autopay profile is missing Stripe payment method ID.' );
+    }
+
+    $amount_cents = (int)($profile['unit_base_cents'] ?? 0);
+    if ( $amount_cents <= 0 ) {
+      return new WP_Error( 'mrm_autopay_bad_amount', 'Autopay profile amount is invalid.' );
+    }
+
+    return array(
+      'customer_id' => $customer_id,
+      'payment_method_id' => $payment_method_id,
+      'amount_cents' => $amount_cents,
+      'currency' => (string)($profile['currency'] ?? 'usd'),
+    );
+  }
+
   private function mrm_count_open_lessons_for_autopay($autopay_profile_id) {
     global $wpdb;
     if ((int)$autopay_profile_id <= 0) return 0;
@@ -2268,18 +2301,17 @@ class MRM_Payments_Hub_Single {
   }
 
   public function cron_retry_autopay_charges() {
-    global $wpdb;
+  global $wpdb;
 
-    $lessons_table = $this->table_lessons();
+  $lessons_table = $this->table_lessons();
 
-    $rows = $wpdb->get_results("
+  $rows = $wpdb->get_results("
     SELECT id, instructor_id, student_email, lesson_length, is_online, order_id, payment_mode, autopay_profile_id, end_time, status, charge_status, charge_attempts, charge_last_attempt_at
     FROM {$lessons_table}
     WHERE payment_mode = 'autopay'
       AND autopay_profile_id IS NOT NULL
       AND autopay_profile_id > 0
       AND status = 'payment_due'
-      AND end_time < UTC_TIMESTAMP()
       AND (
         charge_status = 'due'
         OR charge_status = 'failed'
@@ -2296,65 +2328,53 @@ class MRM_Payments_Hub_Single {
     LIMIT 25
   ", ARRAY_A);
 
-    if (!$rows) {
-      return;
+  if (!$rows) {
+    return;
+  }
+
+  foreach ($rows as $row) {
+    $lesson_id = (int)($row['id'] ?? 0);
+    if ($lesson_id <= 0) {
+      continue;
     }
 
-    foreach ($rows as $row) {
-      $lesson_id = (int)($row['id'] ?? 0);
-      if ($lesson_id <= 0) {
+    $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
+    if ($existing_order) {
+      $existing_status = (string)($existing_order['status'] ?? '');
+      $existing_pi_id = (string)($existing_order['stripe_payment_intent_id'] ?? '');
+
+      if ($existing_pi_id !== '') {
+        $this->mrm_reconcile_autopay_existing_order($lesson_id, $existing_order);
+        $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
+        $existing_status = (string)($existing_order['status'] ?? '');
+      }
+
+      if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
+        $this->mrm_finalize_autopay_lesson_success(
+          $lesson_id,
+          $existing_order,
+          (string)($existing_order['stripe_payment_intent_id'] ?? '')
+        );
         continue;
       }
 
-      $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
-      if ($existing_order) {
-        $existing_status = (string)($existing_order['status'] ?? '');
-        $existing_pi_id = (string)($existing_order['stripe_payment_intent_id'] ?? '');
-
-        if ($existing_pi_id !== '') {
-          $this->mrm_reconcile_autopay_existing_order($lesson_id, $existing_order);
-
-          $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
-          $existing_status = (string)($existing_order['status'] ?? '');
-        }
-
-        if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
-          $this->mrm_finalize_autopay_lesson_success(
-            $lesson_id,
-            $existing_order,
-            (string)($existing_order['stripe_payment_intent_id'] ?? '')
-          );
-          continue;
-        }
-
-        if (in_array($existing_status, array('pending', 'processing', 'requires_capture'), true)) {
-          continue;
-        }
+      if (in_array($existing_status, array('pending', 'processing', 'requires_capture'), true)) {
+        continue;
       }
-
-      error_log('[MRM AutoPay Retry] retrying payment_due lesson charge'
-        . ' lesson_id=' . $lesson_id
-        . ' instructor_id=' . (int)($row['instructor_id'] ?? 0)
-        . ' autopay_profile_id=' . (int)($row['autopay_profile_id'] ?? 0)
-        . ' status=' . (string)($row['status'] ?? '')
-        . ' charge_status=' . (string)($row['charge_status'] ?? '')
-        . ' attempts=' . (int)($row['charge_attempts'] ?? 0)
-        . ' last_attempt_at=' . (string)($row['charge_last_attempt_at'] ?? '')
-        . ' end_time=' . (string)($row['end_time'] ?? '')
-      );
-
-      $this->charge_and_unlock_autopay(array(
-        'lesson_id' => $lesson_id,
-        'instructor_id' => (int)($row['instructor_id'] ?? 0),
-        'student_email' => (string)($row['student_email'] ?? ''),
-        'lesson_length' => (int)($row['lesson_length'] ?? 0),
-        'is_online' => (int)($row['is_online'] ?? 0),
-        'order_id' => (int)($row['order_id'] ?? 0),
-        'payment_mode' => (string)($row['payment_mode'] ?? 'autopay'),
-        'autopay_profile_id' => (int)($row['autopay_profile_id'] ?? 0),
-      ));
     }
+
+    $this->charge_and_unlock_autopay(array(
+      'lesson_id' => $lesson_id,
+      'instructor_id' => (int)($row['instructor_id'] ?? 0),
+      'student_email' => (string)($row['student_email'] ?? ''),
+      'lesson_length' => (int)($row['lesson_length'] ?? 0),
+      'is_online' => (int)($row['is_online'] ?? 0),
+      'order_id' => (int)($row['order_id'] ?? 0),
+      'payment_mode' => (string)($row['payment_mode'] ?? 'autopay'),
+      'autopay_profile_id' => (int)($row['autopay_profile_id'] ?? 0),
+    ));
   }
+}
 
   public function on_lesson_cancelled($data) {
     $lesson_id = (int)($data['lesson_id'] ?? 0);
@@ -2549,34 +2569,16 @@ class MRM_Payments_Hub_Single {
     );
 
     $profile = $this->mrm_get_autopay_profile($autopay_profile_id);
-    if (!$profile || (int)($profile['active'] ?? 0) !== 1) {
-      $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'Autopay profile missing or inactive.');
+    $validated_profile = $this->mrm_validate_autopay_profile_for_charge($profile);
+    if ( is_wp_error($validated_profile) ) {
+      $this->mrm_finalize_autopay_lesson_failure($lesson_id, $validated_profile->get_error_message());
       return;
     }
 
-    $customer_id = (string)($profile['customer_id'] ?? '');
-    $payment_method_id = (string)($profile['payment_method_id'] ?? '');
-
-    if ($customer_id === '' || $payment_method_id === '') {
-      $this->mrm_finalize_autopay_lesson_failure(
-        $lesson_id,
-        'Autopay profile missing saved Stripe customer/payment method.'
-      );
-
-      error_log('[MRM AutoPay] missing saved payment details'
-        . ' lesson_id=' . $lesson_id
-        . ' autopay_profile_id=' . $autopay_profile_id
-        . ' customer_id=' . $customer_id
-        . ' payment_method_id=' . $payment_method_id
-      );
-      return;
-    }
-
-    $amount_cents = (int)($profile['unit_base_cents'] ?? 0);
-    if ($amount_cents <= 0) {
-      $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'unit_base_cents <= 0');
-      return;
-    }
+    $customer_id = (string)$validated_profile['customer_id'];
+    $payment_method_id = (string)$validated_profile['payment_method_id'];
+    $amount_cents = (int)$validated_profile['amount_cents'];
+    $currency = (string)$validated_profile['currency'];
 
     $order_id = $this->create_order(
       (string)($profile['email_hash'] ?? ''),
@@ -2596,7 +2598,7 @@ class MRM_Payments_Hub_Single {
 
     $pi = $this->stripe_create_offsession_payment_intent(
       $amount_cents,
-      (string)($profile['currency'] ?? 'usd'),
+      $currency,
       $customer_id,
       $payment_method_id,
       array(
