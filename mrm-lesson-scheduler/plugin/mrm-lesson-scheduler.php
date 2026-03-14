@@ -620,6 +620,16 @@ class MRM_Lesson_Scheduler {
         dbDelta( $sql1 );
         dbDelta( $sql2 );
         dbDelta( $sql3 );
+
+        // Backfill recurring anchor for older lesson rows so moved recurring events
+        // can still be resolved against Google after reschedules.
+        $wpdb->query(
+            "UPDATE {$table_lessons}
+             SET google_original_start_time = start_time
+             WHERE google_original_start_time IS NULL
+                OR google_original_start_time = '0000-00-00 00:00:00'"
+        );
+
         update_option( 'mrm_scheduler_db_version', self::DB_VERSION );
         if ( ! get_option( 'mrm_scheduler_settings', false ) ) {
             add_option( 'mrm_scheduler_settings', array(), '', 'no' ); // autoload disabled
@@ -2940,6 +2950,13 @@ class MRM_Lesson_Scheduler {
             $booking_id  = (int) ( $l['id'] ?? 0 );
 
             if ( $calendar_id === '' || ! $this->google_is_configured() ) {
+                error_log(
+                    'MRM scheduler: reconcile skipped lesson'
+                    . ' lesson_id=' . $booking_id
+                    . ' reason=missing_calendar_or_google_not_configured'
+                    . ' calendar_id=' . $calendar_id
+                    . ' google_configured=' . ( $this->google_is_configured() ? 'yes' : 'no' )
+                );
                 continue;
             }
 
@@ -2948,6 +2965,16 @@ class MRM_Lesson_Scheduler {
             $ev = $resolved['event'] ?? null;
 
             if ( $resolved_status !== 'resolved' || ! is_array( $ev ) ) {
+                error_log(
+                    'MRM scheduler: reconcile unresolved lesson'
+                    . ' lesson_id=' . $booking_id
+                    . ' series_id=' . (int) ( $l['series_id'] ?? 0 )
+                    . ' start_time=' . (string) ( $l['start_time'] ?? '' )
+                    . ' end_time=' . (string) ( $l['end_time'] ?? '' )
+                    . ' google_original_start_time=' . (string) ( $l['google_original_start_time'] ?? '' )
+                    . ' google_event_id=' . (string) ( $l['google_event_id'] ?? '' )
+                    . ' resolved_status=' . $resolved_status
+                );
                 continue;
             }
 
@@ -2967,20 +2994,52 @@ class MRM_Lesson_Scheduler {
             $now_mysql = current_time( 'mysql' );
 
             if ( $payment_mode === 'autopay' ) {
+                $autopay_profile_id = (int) ( $l['autopay_profile_id'] ?? 0 );
+
+                if ( $autopay_profile_id <= 0 ) {
+                    $wpdb->update(
+                        $lessons_table,
+                        array(
+                            'start_time'        => ( $new_start ?: (string) ( $l['start_time'] ?? '' ) ),
+                            'end_time'          => $new_end,
+                            'google_event_id'   => ( $new_event_id !== '' ? $new_event_id : null ),
+                            'delivered_at'      => $now_mysql,
+                            'charge_due_at'     => $now_mysql,
+                            'charge_status'     => 'failed',
+                            'charge_last_error' => 'Missing autopay_profile_id on ended autopay lesson row.',
+                            'status'            => 'payment_due',
+                            'updated_at'        => $now_mysql,
+                        ),
+                        array( 'id' => $booking_id ),
+                        array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s' ),
+                        array( '%d' )
+                    );
+
+                    error_log(
+                        'MRM scheduler: autopay lesson missing autopay_profile_id'
+                        . ' lesson_id=' . $booking_id
+                        . ' instructor_id=' . (int) ( $l['instructor_id'] ?? 0 )
+                        . ' synced_start=' . (string) ( $new_start ?: '' )
+                        . ' synced_end=' . (string) ( $new_end ?: '' )
+                    );
+                    continue;
+                }
+
                 $wpdb->update(
                     $lessons_table,
                     array(
-                        'start_time'      => ( $new_start ?: (string) ( $l['start_time'] ?? '' ) ),
-                        'end_time'        => $new_end,
-                        'google_event_id' => ( $new_event_id !== '' ? $new_event_id : null ),
-                        'delivered_at'    => $now_mysql,
-                        'charge_due_at'   => $now_mysql,
-                        'charge_status'   => 'due',
-                        'status'          => 'payment_due',
-                        'updated_at'      => $now_mysql,
+                        'start_time'        => ( $new_start ?: (string) ( $l['start_time'] ?? '' ) ),
+                        'end_time'          => $new_end,
+                        'google_event_id'   => ( $new_event_id !== '' ? $new_event_id : null ),
+                        'delivered_at'      => $now_mysql,
+                        'charge_due_at'     => $now_mysql,
+                        'charge_status'     => 'due',
+                        'charge_last_error' => null,
+                        'status'            => 'payment_due',
+                        'updated_at'        => $now_mysql,
                     ),
                     array( 'id' => $booking_id ),
-                    array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s' ),
+                    array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s' ),
                     array( '%d' )
                 );
 
@@ -2989,7 +3048,7 @@ class MRM_Lesson_Scheduler {
                     . ' lesson_id=' . $booking_id
                     . ' instructor_id=' . (int) ( $l['instructor_id'] ?? 0 )
                     . ' payment_mode=' . $payment_mode
-                    . ' autopay_profile_id=' . (int) ( $l['autopay_profile_id'] ?? 0 )
+                    . ' autopay_profile_id=' . $autopay_profile_id
                     . ' synced_start=' . (string) ( $new_start ?: '' )
                     . ' synced_end=' . (string) ( $new_end ?: '' )
                 );
@@ -3002,7 +3061,7 @@ class MRM_Lesson_Scheduler {
                     'is_online' => (int) $l['is_online'],
                     'order_id' => (int) ( $l['order_id'] ?? 0 ),
                     'payment_mode' => $payment_mode,
-                    'autopay_profile_id' => (int) ( $l['autopay_profile_id'] ?? 0 ),
+                    'autopay_profile_id' => $autopay_profile_id,
                     'google_event_id' => $new_event_id,
                     'ended_at_utc' => (string) $new_end,
                 ) );
