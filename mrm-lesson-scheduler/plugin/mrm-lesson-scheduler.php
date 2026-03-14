@@ -523,7 +523,7 @@ class MRM_Lesson_Scheduler {
     }
 
 
-    protected function sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, $instance_window_days = 30 ) {
+    protected function sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, $instance_window_days = 120 ) {
         global $wpdb;
 
         if ( ! is_array( $lesson_row ) ) {
@@ -568,7 +568,7 @@ class MRM_Lesson_Scheduler {
             return array(
                 'status' => 'unresolved',
                 'event'  => null,
-                'reason' => $resolved_reason ?: 'unresolved',
+                'reason' => ( $resolved_reason !== '' ? $resolved_reason : 'unresolved' ),
             );
         }
 
@@ -594,11 +594,11 @@ class MRM_Lesson_Scheduler {
         $wpdb->update(
             $table_lessons,
             array(
-                'start_time'      => $new_start,
-                'end_time'        => $new_end,
+                'start_time'                 => $new_start,
+                'end_time'                   => $new_end,
                 'google_original_start_time' => $original_anchor,
-                'google_event_id' => ( $new_event_id !== '' ? $new_event_id : null ),
-                'updated_at'      => current_time( 'mysql' ),
+                'google_event_id'            => ( $new_event_id !== '' ? $new_event_id : null ),
+                'updated_at'                 => current_time( 'mysql' ),
             ),
             array( 'id' => $lesson_id ),
             array( '%s', '%s', '%s', '%s', '%s' ),
@@ -611,12 +611,12 @@ class MRM_Lesson_Scheduler {
         $lesson_row['google_original_start_time'] = $original_anchor;
 
         return array(
-            'status' => 'resolved',
-            'event'  => $resolved_event,
-            'reason' => $resolved_reason ?: 'resolved',
+            'status'     => 'resolved',
+            'event'      => $resolved_event,
+            'reason'     => ( $resolved_reason !== '' ? $resolved_reason : 'resolved' ),
             'lesson_row' => $lesson_row,
-            'start_utc' => $new_start,
-            'end_utc' => $new_end,
+            'start_utc'  => $new_start,
+            'end_utc'    => $new_end,
         );
     }
 
@@ -2776,18 +2776,16 @@ class MRM_Lesson_Scheduler {
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
         $table_instructors = $wpdb->prefix . 'mrm_instructors';
 
-        // Google should be the source of truth, so do not prefilter lessons by local
-        // start_time/end_time before asking Google where the event actually is.
         $rows = $wpdb->get_results(
             "SELECT l.*, i.calendar_id, i.timezone
          FROM {$table_lessons} l
          JOIN {$table_instructors} i ON i.id = l.instructor_id
-         WHERE l.status = 'scheduled'
+         WHERE l.status IN ('scheduled', 'payment_due')
            AND l.payout_unlocked_at IS NULL
            AND i.calendar_id IS NOT NULL
            AND i.calendar_id <> ''
          ORDER BY l.start_time ASC
-         LIMIT 300",
+         LIMIT 400",
             ARRAY_A
         );
 
@@ -2799,15 +2797,12 @@ class MRM_Lesson_Scheduler {
                 continue;
             }
 
-            // Use a wide instance window so moved recurring lessons still resolve.
             $sync = $this->sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, 120 );
 
             if ( (string) ( $sync['status'] ?? '' ) === 'cancelled' ) {
                 $this->cancel_lesson_and_notify( $lesson_row, 'google_event_cancelled' );
                 continue;
             }
-
-            // For sync cron, unresolved rows are simply skipped and retried on the next run.
         }
     }
 
@@ -2861,25 +2856,21 @@ class MRM_Lesson_Scheduler {
     public function cron_reconcile_completed_lessons() {
         global $wpdb;
 
-        // Sync first so lessons refresh from Google before payment state decisions.
         $this->cron_sync_upcoming_events( 72, 30 );
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $instructors_table = $wpdb->prefix . 'mrm_instructors';
 
-        // IMPORTANT:
-        // Do NOT prefilter by local end_time here.
-        // Google must be the first source of truth for whether the lesson ended.
         $rows = $wpdb->get_results(
             "SELECT l.*, i.calendar_id, i.timezone
          FROM {$lessons_table} l
          JOIN {$instructors_table} i ON i.id = l.instructor_id
-         WHERE l.status = 'scheduled'
+         WHERE l.status IN ('scheduled', 'payment_due')
            AND l.payout_unlocked_at IS NULL
            AND i.calendar_id IS NOT NULL
            AND i.calendar_id <> ''
          ORDER BY l.start_time ASC
-         LIMIT 200",
+         LIMIT 250",
             ARRAY_A
         );
 
@@ -2893,7 +2884,6 @@ class MRM_Lesson_Scheduler {
                 continue;
             }
 
-            // First ask Google where the lesson is now and update the row from Google.
             $sync = $this->sync_lesson_row_from_google_truth( $l, $calendar_id, 120 );
             $sync_status = (string) ( $sync['status'] ?? 'unresolved' );
             $ev = $sync['event'] ?? null;
@@ -2921,7 +2911,6 @@ class MRM_Lesson_Scheduler {
             $new_end   = (string) ( $sync['end_utc'] ?? '' );
             if ( $new_end === '' ) continue;
 
-            // Google event end time is the source of truth.
             if ( strtotime( $new_end ) > time() ) {
                 continue;
             }
