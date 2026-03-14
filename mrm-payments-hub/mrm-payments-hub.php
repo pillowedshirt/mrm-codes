@@ -1390,7 +1390,7 @@ class MRM_Payments_Hub_Single {
     );
   }
 
-  private function mrm_count_future_scheduled_lessons_for_autopay($autopay_profile_id) {
+  private function mrm_count_open_lessons_for_autopay($autopay_profile_id) {
     global $wpdb;
     if ((int)$autopay_profile_id <= 0) return 0;
 
@@ -1402,10 +1402,22 @@ class MRM_Payments_Hub_Single {
       "SELECT COUNT(*)
        FROM {$table}
        WHERE autopay_profile_id = %d
-         AND status = 'scheduled'
-         AND end_time > UTC_TIMESTAMP()",
+         AND payout_unlocked_at IS NULL
+         AND status IN ('scheduled', 'payment_due')",
       (int)$autopay_profile_id
     ));
+  }
+
+  private function mrm_required_followup_charge_count($profile) {
+    $plan_kind = (string)($profile['plan_kind'] ?? 'indefinite');
+    $authorized = (int)($profile['authorized_lesson_count'] ?? 0);
+
+    // First lesson is prepaid up front in your recurring autopay model.
+    if ($plan_kind === 'bounded') {
+      return max(0, $authorized - 1);
+    }
+
+    return PHP_INT_MAX;
   }
 
   private function mrm_increment_autopay_charge_count($autopay_profile_id) {
@@ -1441,17 +1453,28 @@ class MRM_Payments_Hub_Single {
     $plan_kind = (string)($profile['plan_kind'] ?? 'indefinite');
     $authorized = (int)($profile['authorized_lesson_count'] ?? 0);
     $charged = (int)($profile['charged_lesson_count'] ?? 0);
-    $future_count = $this->mrm_count_future_scheduled_lessons_for_autopay($autopay_profile_id);
+    $open_count = $this->mrm_count_open_lessons_for_autopay($autopay_profile_id);
+    $required_followup_count = $this->mrm_required_followup_charge_count($profile);
 
     $should_detach = false;
 
     if ($force) {
       $should_detach = true;
     } elseif ($plan_kind === 'bounded') {
-      $should_detach = ($authorized > 0 && $charged >= $authorized && $future_count <= 0);
+      $should_detach = ($authorized > 0 && $charged >= $required_followup_count && $open_count <= 0);
     } else {
-      $should_detach = ($future_count <= 0);
+      $should_detach = ($open_count <= 0);
     }
+
+    error_log('[MRM Payments Hub] autopay detach evaluation'
+      . ' profile_id=' . $autopay_profile_id
+      . ' plan_kind=' . $plan_kind
+      . ' authorized=' . $authorized
+      . ' charged=' . $charged
+      . ' required_followup_count=' . $required_followup_count
+      . ' open_count=' . $open_count
+      . ' should_detach=' . ($should_detach ? 'yes' : 'no')
+    );
 
     if (!$should_detach) return false;
 
@@ -1474,6 +1497,12 @@ class MRM_Payments_Hub_Single {
       array('id' => $autopay_profile_id),
       array('%d','%s','%s'),
       array('%d')
+    );
+
+    error_log('[MRM Payments Hub] autopay profile detached'
+      . ' profile_id=' . $autopay_profile_id
+      . ' charged=' . $charged
+      . ' open_count=' . $open_count
     );
 
     return true;
@@ -2307,8 +2336,11 @@ class MRM_Payments_Hub_Single {
         . ' lesson_id=' . $lesson_id
         . ' instructor_id=' . (int)($row['instructor_id'] ?? 0)
         . ' autopay_profile_id=' . (int)($row['autopay_profile_id'] ?? 0)
+        . ' status=' . (string)($row['status'] ?? '')
         . ' charge_status=' . (string)($row['charge_status'] ?? '')
         . ' attempts=' . (int)($row['charge_attempts'] ?? 0)
+        . ' last_attempt_at=' . (string)($row['charge_last_attempt_at'] ?? '')
+        . ' end_time=' . (string)($row['end_time'] ?? '')
       );
 
       $this->charge_and_unlock_autopay(array(
@@ -2522,6 +2554,24 @@ class MRM_Payments_Hub_Single {
       return;
     }
 
+    $customer_id = (string)($profile['customer_id'] ?? '');
+    $payment_method_id = (string)($profile['payment_method_id'] ?? '');
+
+    if ($customer_id === '' || $payment_method_id === '') {
+      $this->mrm_finalize_autopay_lesson_failure(
+        $lesson_id,
+        'Autopay profile missing saved Stripe customer/payment method.'
+      );
+
+      error_log('[MRM AutoPay] missing saved payment details'
+        . ' lesson_id=' . $lesson_id
+        . ' autopay_profile_id=' . $autopay_profile_id
+        . ' customer_id=' . $customer_id
+        . ' payment_method_id=' . $payment_method_id
+      );
+      return;
+    }
+
     $amount_cents = (int)($profile['unit_base_cents'] ?? 0);
     if ($amount_cents <= 0) {
       $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'unit_base_cents <= 0');
@@ -2547,8 +2597,8 @@ class MRM_Payments_Hub_Single {
     $pi = $this->stripe_create_offsession_payment_intent(
       $amount_cents,
       (string)($profile['currency'] ?? 'usd'),
-      (string)($profile['customer_id'] ?? ''),
-      (string)($profile['payment_method_id'] ?? ''),
+      $customer_id,
+      $payment_method_id,
       array(
         'mrm_order_id' => (string)$order_id,
         'mrm_lesson_id' => (string)$lesson_id,
@@ -3464,6 +3514,16 @@ class MRM_Payments_Hub_Single {
 
       $this->update_order_status_from_pi($payment_intent_id, (string)($order['status'] ?? 'paid'), 'succeeded', $meta);
     }
+
+    error_log('[MRM Payments Hub] autopay enrollment created'
+      . ' profile_id=' . $autopay_profile_id
+      . ' instructor_id=' . (int)$instructor_id
+      . ' customer_id=' . $customer_id
+      . ' payment_method_id=' . $payment_method_id
+      . ' plan_kind=' . $plan_kind
+      . ' authorized_lesson_count=' . (int)$authorized_lesson_count
+      . ' unit_base_cents=' . (int)$base_amount
+    );
 
     return new WP_REST_Response(array(
       'ok' => true,
