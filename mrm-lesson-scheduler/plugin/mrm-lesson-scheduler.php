@@ -237,6 +237,46 @@ class MRM_Lesson_Scheduler {
     }
 
 
+    protected function google_find_instance_near_now( $instances_payload, $max_diff_seconds = 43200 ) {
+        if ( ! is_array( $instances_payload ) ) return null;
+
+        $items = isset( $instances_payload['items'] ) && is_array( $instances_payload['items'] )
+            ? $instances_payload['items']
+            : array();
+
+        if ( empty( $items ) ) return null;
+
+        $now = time();
+        $best = null;
+        $best_diff = null;
+
+        foreach ( $items as $ev ) {
+            $start_utc = $this->google_event_start_utc( $ev );
+            if ( ! $start_utc ) {
+                continue;
+            }
+
+            $ts = strtotime( (string) $start_utc );
+            if ( ! $ts ) {
+                continue;
+            }
+
+            $diff = abs( $ts - $now );
+
+            if ( $best === null || $diff < $best_diff ) {
+                $best = $ev;
+                $best_diff = $diff;
+            }
+        }
+
+        if ( $best !== null && $best_diff !== null && $best_diff <= (int) $max_diff_seconds ) {
+            return $best;
+        }
+
+        return null;
+    }
+
+
     protected function google_find_instance_by_original_start( $instances_payload, $original_start_mysql ) {
         if ( ! is_array( $instances_payload ) ) return null;
 
@@ -313,15 +353,11 @@ class MRM_Lesson_Scheduler {
             $google_original_start_time = $start_time;
         }
 
-        $window_days = max( 1, (int) $instance_window_days );
-        $time_min = gmdate( 'c', strtotime( $start_time ) - ( $window_days * DAY_IN_SECONDS ) );
-        $time_max = gmdate( 'c', strtotime( $end_time )   + ( $window_days * DAY_IN_SECONDS ) );
-
         $explicit_cancel = function( $ev ) {
             return is_array( $ev ) && strtolower( (string) ( $ev['status'] ?? 'confirmed' ) ) === 'cancelled';
         };
 
-        $resolve_from_master = function( $master_event_id ) use ( $calendar_id, $time_min, $time_max, $start_time, $google_original_start_time, $booking_id, $explicit_cancel ) {
+        $resolve_from_master = function( $master_event_id ) use ( $calendar_id, $start_time, $end_time, $google_original_start_time, $booking_id, $explicit_cancel ) {
             $got = $this->google_get_event( $calendar_id, $master_event_id );
             if ( is_wp_error( $got ) || ! is_array( $got ) ) {
                 return array(
@@ -348,6 +384,21 @@ class MRM_Lesson_Scheduler {
                 );
             }
 
+            $anchor_ts = strtotime( (string) $google_original_start_time );
+            $start_ts  = strtotime( (string) $start_time );
+            $end_ts    = strtotime( (string) $end_time );
+
+            if ( ! $anchor_ts ) $anchor_ts = $start_ts;
+            if ( ! $start_ts )  $start_ts  = $anchor_ts;
+            if ( ! $end_ts )    $end_ts    = $start_ts;
+
+            $window_base_start = $anchor_ts ?: $start_ts ?: time();
+            $window_base_end   = $end_ts ?: $window_base_start;
+
+            // Use a much wider window so recurring lessons moved in Google can still be found.
+            $time_min = gmdate( 'c', min( $window_base_start, time() ) - ( 45 * DAY_IN_SECONDS ) );
+            $time_max = gmdate( 'c', max( $window_base_end, time() ) + ( 45 * DAY_IN_SECONDS ) );
+
             $inst = $this->google_list_event_instances( $calendar_id, $master_event_id, $time_min, $time_max );
             if ( is_wp_error( $inst ) || ! is_array( $inst ) ) {
                 return array(
@@ -361,12 +412,16 @@ class MRM_Lesson_Scheduler {
             // 1) immutable google_original_start_time
             // 2) booking_id fallback
             // 3) current local start_time fallback
+            // 4) nearest instance to "now" fallback for moved recurring lessons
             $match = $this->google_find_instance_by_original_start( $inst, $google_original_start_time );
             if ( ! is_array( $match ) ) {
                 $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
             }
             if ( ! is_array( $match ) ) {
                 $match = $this->google_find_instance_by_local_start( $inst, $start_time );
+            }
+            if ( ! is_array( $match ) ) {
+                $match = $this->google_find_instance_near_now( $inst, 12 * HOUR_IN_SECONDS );
             }
 
             if ( is_array( $match ) ) {
@@ -1473,7 +1528,7 @@ class MRM_Lesson_Scheduler {
 
         $lesson = $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT id,instructor_id,student_name,student_email,is_online,lesson_length,start_time,end_time,google_original_start_time,status,google_event_id,google_meet_url,reminder_token_hash
+                "SELECT id,series_id,instructor_id,student_name,student_email,is_online,lesson_length,start_time,end_time,google_original_start_time,status,google_event_id,google_meet_url,reminder_token_hash
                  FROM {$table_lessons}
                  WHERE reminder_token_hash = %s
                  LIMIT 1",
@@ -1489,6 +1544,21 @@ class MRM_Lesson_Scheduler {
                 'This lesson link is not valid. Please use the link provided in your email or calendar event.'
             );
             exit;
+        }
+
+        if ( empty( $lesson['google_original_start_time'] ) && ! empty( $lesson['start_time'] ) ) {
+            $lesson['google_original_start_time'] = (string) $lesson['start_time'];
+
+            $wpdb->update(
+                $table_lessons,
+                array(
+                    'google_original_start_time' => (string) $lesson['google_original_start_time'],
+                    'updated_at' => current_time( 'mysql' ),
+                ),
+                array( 'id' => (int) $lesson['id'] ),
+                array( '%s', '%s' ),
+                array( '%d' )
+            );
         }
 
         if ( (string) $lesson['status'] !== 'scheduled' ) {
@@ -1526,6 +1596,12 @@ class MRM_Lesson_Scheduler {
             $resolved_status = (string) ( $resolved['status'] ?? 'unresolved' );
             $resolved_event  = $resolved['event'] ?? null;
 
+            if ( $resolved_status !== 'resolved' ) {
+                $resolved = $this->resolve_google_event_for_lesson_row( $lesson, $calendar_id, 120 );
+                $resolved_status = (string) ( $resolved['status'] ?? 'unresolved' );
+                $resolved_event  = $resolved['event'] ?? null;
+            }
+
             // If the lesson resolves cleanly, trust Google and refresh the row immediately.
             if ( $resolved_status === 'resolved' && is_array( $resolved_event ) ) {
                 list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $resolved_event );
@@ -1554,9 +1630,10 @@ class MRM_Lesson_Scheduler {
                     );
 
                     $lesson['start_time'] = $new_start;
-                    $lesson['end_time']   = $new_end;
-                    if ( $new_event_id !== '' ) {
-                        $lesson['google_event_id'] = $new_event_id;
+                    $lesson['end_time'] = $new_end;
+                    $lesson['google_event_id'] = $new_event_id;
+                    if ( empty( $lesson['google_original_start_time'] ) ) {
+                        $lesson['google_original_start_time'] = (string) $lesson['start_time'];
                     }
                 }
             }
@@ -1566,12 +1643,21 @@ class MRM_Lesson_Scheduler {
         }
 
         // Enforce 10-min before / 10-min after window
-        $start_ts = strtotime( (string) $lesson['start_time'] . ' UTC' );
-        $end_ts   = strtotime( (string) $lesson['end_time'] . ' UTC' );
-        if ( ! $start_ts || ! $end_ts ) {
+        $start_ts = strtotime( (string) ( $lesson['start_time'] ?? '' ) );
+        $end_ts   = strtotime( (string) ( $lesson['end_time'] ?? '' ) );
+
+        if ( ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) && ! empty( $lesson['google_original_start_time'] ) ) {
+            $fallback_start_ts = strtotime( (string) $lesson['google_original_start_time'] );
+            if ( $fallback_start_ts ) {
+                $start_ts = $fallback_start_ts;
+                $end_ts = $fallback_start_ts + ( max( 1, (int) ( $lesson['lesson_length'] ?? 60 ) ) * MINUTE_IN_SECONDS );
+            }
+        }
+
+        if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
             $this->render_gate_message_page(
-                'Time Error',
-                'This lesson has an invalid time window. Please contact support.'
+                'Schedule Unavailable',
+                'We could not determine the lesson time for this link. Please contact your instructor.'
             );
             exit;
         }
