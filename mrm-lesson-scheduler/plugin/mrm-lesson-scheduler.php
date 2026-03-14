@@ -2769,26 +2769,48 @@ class MRM_Lesson_Scheduler {
         }
     }
 
+    protected function get_lessons_needing_google_truth_pass( $limit = 300 ) {
+        global $wpdb;
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+        $limit = max( 1, (int) $limit );
+
+        $sql = "
+        SELECT l.*, i.calendar_id, i.timezone
+        FROM {$lessons_table} l
+        JOIN {$instructors_table} i ON i.id = l.instructor_id
+        WHERE i.calendar_id IS NOT NULL
+          AND i.calendar_id <> ''
+          AND (
+                (
+                    l.payment_mode = 'autopay'
+                    AND (
+                        l.status IN ('scheduled', 'payment_due', 'delivered')
+                        OR (
+                            l.payout_unlocked_at IS NULL
+                            AND l.status NOT IN ('cancelled', 'series')
+                        )
+                    )
+                )
+                OR
+                (
+                    l.payment_mode <> 'autopay'
+                    AND l.status = 'scheduled'
+                    AND l.payout_unlocked_at IS NULL
+                )
+          )
+        ORDER BY l.start_time ASC
+        LIMIT {$limit}
+    ";
+
+        return $wpdb->get_results( $sql, ARRAY_A );
+    }
+
     public function cron_sync_upcoming_events( $lookback_hours = 6, $lookahead_days = 7 ) {
         if ( ! $this->google_is_configured() ) return;
 
-        global $wpdb;
-        $table_lessons = $wpdb->prefix . 'mrm_lessons';
-        $table_instructors = $wpdb->prefix . 'mrm_instructors';
-
-        $rows = $wpdb->get_results(
-            "SELECT l.*, i.calendar_id, i.timezone
-         FROM {$table_lessons} l
-         JOIN {$table_instructors} i ON i.id = l.instructor_id
-         WHERE l.status IN ('scheduled', 'payment_due')
-           AND l.payout_unlocked_at IS NULL
-           AND i.calendar_id IS NOT NULL
-           AND i.calendar_id <> ''
-         ORDER BY l.start_time ASC
-         LIMIT 400",
-            ARRAY_A
-        );
-
+        $rows = $this->get_lessons_needing_google_truth_pass( 400 );
         if ( ! is_array( $rows ) || empty( $rows ) ) return;
 
         foreach ( $rows as $lesson_row ) {
@@ -2803,6 +2825,8 @@ class MRM_Lesson_Scheduler {
                 $this->cancel_lesson_and_notify( $lesson_row, 'google_event_cancelled' );
                 continue;
             }
+
+            // unresolved rows are left for later runs / payment recovery pass
         }
     }
 
@@ -2859,20 +2883,7 @@ class MRM_Lesson_Scheduler {
         $this->cron_sync_upcoming_events( 72, 30 );
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
-        $instructors_table = $wpdb->prefix . 'mrm_instructors';
-
-        $rows = $wpdb->get_results(
-            "SELECT l.*, i.calendar_id, i.timezone
-         FROM {$lessons_table} l
-         JOIN {$instructors_table} i ON i.id = l.instructor_id
-         WHERE l.status IN ('scheduled', 'payment_due')
-           AND l.payout_unlocked_at IS NULL
-           AND i.calendar_id IS NOT NULL
-           AND i.calendar_id <> ''
-         ORDER BY l.start_time ASC
-         LIMIT 250",
-            ARRAY_A
-        );
+        $rows = $this->get_lessons_needing_google_truth_pass( 300 );
 
         if ( ! $rows ) return;
 
@@ -2901,16 +2912,19 @@ class MRM_Lesson_Scheduler {
                 ? $sync['lesson_row']
                 : $l;
 
-            $status = strtolower( (string) ( $ev['status'] ?? 'confirmed' ) );
-            if ( $status === 'cancelled' ) {
+            $google_status = strtolower( (string) ( $ev['status'] ?? 'confirmed' ) );
+            if ( $google_status === 'cancelled' ) {
                 $this->cancel_lesson_and_notify( $synced_lesson, 'google_event_cancelled' );
                 continue;
             }
 
             $new_start = (string) ( $sync['start_utc'] ?? '' );
             $new_end   = (string) ( $sync['end_utc'] ?? '' );
-            if ( $new_end === '' ) continue;
+            if ( $new_end === '' ) {
+                continue;
+            }
 
+            // Google end time is the source of truth.
             if ( strtotime( $new_end ) > time() ) {
                 continue;
             }
@@ -2937,7 +2951,7 @@ class MRM_Lesson_Scheduler {
                             'updated_at'        => $now_mysql,
                         ),
                         array( 'id' => $booking_id ),
-                        array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s' ),
+                        array( '%s','%s','%s','%s','%s','%s','%s','%s','%s' ),
                         array( '%d' )
                     );
                     continue;
@@ -2951,28 +2965,30 @@ class MRM_Lesson_Scheduler {
                         'google_event_id'   => ( $new_event_id !== '' ? $new_event_id : null ),
                         'delivered_at'      => $now_mysql,
                         'charge_due_at'     => $now_mysql,
-                        'charge_status'     => 'due',
-                        'charge_last_error' => null,
-                        'status'            => 'payment_due',
+                        'charge_status'     => ( (string) ( $synced_lesson['charge_status'] ?? '' ) === 'paid' ? 'paid' : 'due' ),
+                        'charge_last_error' => ( (string) ( $synced_lesson['charge_status'] ?? '' ) === 'paid' ? null : null ),
+                        'status'            => ( (string) ( $synced_lesson['charge_status'] ?? '' ) === 'paid' ? 'delivered' : 'payment_due' ),
                         'updated_at'        => $now_mysql,
                     ),
                     array( 'id' => $booking_id ),
-                    array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s' ),
+                    array( '%s','%s','%s','%s','%s','%s','%s','%s','%s' ),
                     array( '%d' )
                 );
 
-                do_action( 'mrm_lesson_charge_due', array(
-                    'lesson_id' => $booking_id,
-                    'instructor_id' => (int) $synced_lesson['instructor_id'],
-                    'student_email' => (string) $synced_lesson['student_email'],
-                    'lesson_length' => (int) $synced_lesson['lesson_length'],
-                    'is_online' => (int) $synced_lesson['is_online'],
-                    'order_id' => (int) ( $synced_lesson['order_id'] ?? 0 ),
-                    'payment_mode' => $payment_mode,
-                    'autopay_profile_id' => $autopay_profile_id,
-                    'google_event_id' => $new_event_id,
-                    'ended_at_utc' => (string) $new_end,
-                ) );
+                if ( (string) ( $synced_lesson['charge_status'] ?? '' ) !== 'paid' ) {
+                    do_action( 'mrm_lesson_charge_due', array(
+                        'lesson_id' => $booking_id,
+                        'instructor_id' => (int) $synced_lesson['instructor_id'],
+                        'student_email' => (string) $synced_lesson['student_email'],
+                        'lesson_length' => (int) $synced_lesson['lesson_length'],
+                        'is_online' => (int) $synced_lesson['is_online'],
+                        'order_id' => (int) ( $synced_lesson['order_id'] ?? 0 ),
+                        'payment_mode' => $payment_mode,
+                        'autopay_profile_id' => $autopay_profile_id,
+                        'google_event_id' => $new_event_id,
+                        'ended_at_utc' => (string) $new_end,
+                    ) );
+                }
 
                 continue;
             }
@@ -2986,10 +3002,10 @@ class MRM_Lesson_Scheduler {
                     'status'             => 'delivered',
                     'delivered_at'       => $now_mysql,
                     'payout_unlocked_at' => $now_mysql,
-                    'updated_at'         => $now_mysql,
+                    'updated_at'         => $now_mysql
                 ),
                 array( 'id' => $booking_id ),
-                array( '%s', '%s', '%s', '%s', '%s', '%s' ),
+                array( '%s','%s','%s','%s','%s','%s' ),
                 array( '%d' )
             );
 

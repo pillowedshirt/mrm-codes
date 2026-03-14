@@ -32,6 +32,8 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_cleanup_access', array($this, 'cleanup_access'));
     add_action('mrm_pay_hub_daily_payout_check', array($this, 'cron_daily_payout_check'));
     add_action('mrm_pay_hub_retry_autopay_charges', array($this, 'cron_retry_autopay_charges'));
+    add_action('mrm_pay_hub_discover_missed_autopay_lessons', array($this, 'cron_discover_missed_autopay_lessons'));
+    add_action('mrm_pay_hub_reset_stuck_autopay_lessons', array($this, 'cron_reset_stuck_autopay_lessons'));
 
     add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
@@ -66,6 +68,14 @@ class MRM_Payments_Hub_Single {
     if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
       wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
     }
+
+    if (!wp_next_scheduled('mrm_pay_hub_discover_missed_autopay_lessons')) {
+      wp_schedule_event(time() + 180, 'mrm_10min', 'mrm_pay_hub_discover_missed_autopay_lessons');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_reset_stuck_autopay_lessons')) {
+      wp_schedule_event(time() + 420, 'daily', 'mrm_pay_hub_reset_stuck_autopay_lessons');
+    }
   }
 
   public function on_activate() {
@@ -82,6 +92,14 @@ class MRM_Payments_Hub_Single {
 
     if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
       wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_discover_missed_autopay_lessons')) {
+      wp_schedule_event(time() + 180, 'mrm_10min', 'mrm_pay_hub_discover_missed_autopay_lessons');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_reset_stuck_autopay_lessons')) {
+      wp_schedule_event(time() + 420, 'daily', 'mrm_pay_hub_reset_stuck_autopay_lessons');
     }
   }
 
@@ -1390,6 +1408,73 @@ class MRM_Payments_Hub_Single {
     );
   }
 
+  private function mrm_google_truth_confirms_lesson_ended( $lesson_id ) {
+    global $wpdb;
+
+    $lesson_id = (int)$lesson_id;
+    if ($lesson_id <= 0) {
+      return new WP_Error('mrm_invalid_lesson_id', 'Invalid lesson ID.');
+    }
+
+    $lessons_table = $wpdb->prefix . 'mrm_lessons';
+    $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+    $row = $wpdb->get_row($wpdb->prepare(
+      "SELECT l.*, i.calendar_id
+     FROM {$lessons_table} l
+     LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id
+     WHERE l.id = %d
+     LIMIT 1",
+      $lesson_id
+    ), ARRAY_A);
+
+    if (!$row) {
+      return new WP_Error('mrm_lesson_missing', 'Lesson row not found.');
+    }
+
+    $calendar_id = (string)($row['calendar_id'] ?? '');
+    $event_id = (string)($row['google_event_id'] ?? '');
+    if ($calendar_id === '' || $event_id === '') {
+      return new WP_Error('mrm_google_link_missing', 'Lesson is missing Google calendar linkage.');
+    }
+
+    if (!class_exists('MRM_Lesson_Scheduler')) {
+      return new WP_Error('mrm_scheduler_missing', 'Lesson scheduler class unavailable.');
+    }
+
+    $scheduler = MRM_Lesson_Scheduler::instance();
+    if (!$scheduler || !method_exists($scheduler, 'sync_lesson_row_from_google_truth')) {
+      return new WP_Error('mrm_scheduler_sync_missing', 'Google sync helper unavailable.');
+    }
+
+    $sync = $scheduler->sync_lesson_row_from_google_truth($row, $calendar_id, 120);
+    $status = (string)($sync['status'] ?? 'unresolved');
+    if ($status === 'cancelled') {
+      return new WP_Error('mrm_google_cancelled', 'Google event is cancelled.');
+    }
+
+    if ($status !== 'resolved') {
+      return new WP_Error('mrm_google_unresolved', 'Could not resolve lesson from Google.');
+    }
+
+    $synced = isset($sync['lesson_row']) && is_array($sync['lesson_row']) ? $sync['lesson_row'] : $row;
+    $end_utc = (string)($sync['end_utc'] ?? ($synced['end_time'] ?? ''));
+
+    if ($end_utc === '') {
+      return new WP_Error('mrm_google_end_missing', 'Google event end time is missing.');
+    }
+
+    if (strtotime($end_utc) > time()) {
+      return new WP_Error('mrm_google_not_ended', 'Google event has not ended yet.');
+    }
+
+    return array(
+      'lesson_row' => $synced,
+      'end_utc' => $end_utc,
+      'sync' => $sync,
+    );
+  }
+
   private function mrm_validate_autopay_profile_for_charge( $profile ) {
     if ( ! is_array( $profile ) ) {
       return new WP_Error( 'mrm_autopay_invalid_profile', 'Autopay profile is invalid.' );
@@ -1435,8 +1520,11 @@ class MRM_Payments_Hub_Single {
       "SELECT COUNT(*)
        FROM {$table}
        WHERE autopay_profile_id = %d
-         AND payout_unlocked_at IS NULL
-         AND status IN ('scheduled', 'payment_due')",
+         AND (
+              payout_unlocked_at IS NULL
+              OR charge_status IN ('due','processing','failed')
+         )
+         AND status NOT IN ('cancelled','series')",
       (int)$autopay_profile_id
     ));
   }
@@ -2363,6 +2451,11 @@ class MRM_Payments_Hub_Single {
       }
     }
 
+    $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
+    if (is_wp_error($google_truth)) {
+      continue;
+    }
+
     $this->charge_and_unlock_autopay(array(
       'lesson_id' => $lesson_id,
       'instructor_id' => (int)($row['instructor_id'] ?? 0),
@@ -2375,6 +2468,85 @@ class MRM_Payments_Hub_Single {
     ));
   }
 }
+
+
+  public function cron_discover_missed_autopay_lessons() {
+    global $wpdb;
+
+    $lessons_table = $this->table_lessons();
+    $rows = $wpdb->get_results("
+    SELECT id, instructor_id, student_email, lesson_length, is_online, order_id, payment_mode, autopay_profile_id, status
+    FROM {$lessons_table}
+    WHERE payment_mode = 'autopay'
+      AND autopay_profile_id IS NOT NULL
+      AND autopay_profile_id > 0
+      AND payout_unlocked_at IS NULL
+      AND status IN ('scheduled', 'payment_due', 'delivered')
+    ORDER BY start_time ASC
+    LIMIT 100
+  ", ARRAY_A);
+
+    if (!$rows) {
+      return;
+    }
+
+    foreach ($rows as $row) {
+      $lesson_id = (int)($row['id'] ?? 0);
+      if ($lesson_id <= 0) {
+        continue;
+      }
+
+      $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
+      if (is_wp_error($google_truth)) {
+        continue;
+      }
+
+      $status = (string)($row['status'] ?? '');
+      if ($status !== 'payment_due') {
+        $wpdb->update(
+          $lessons_table,
+          array(
+            'status' => 'payment_due',
+            'charge_due_at' => current_time('mysql'),
+            'charge_status' => 'due',
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => $lesson_id),
+          array('%s','%s','%s','%s'),
+          array('%d')
+        );
+      }
+
+      $this->charge_and_unlock_autopay(array(
+        'lesson_id' => $lesson_id,
+        'instructor_id' => (int)($row['instructor_id'] ?? 0),
+        'student_email' => (string)($row['student_email'] ?? ''),
+        'lesson_length' => (int)($row['lesson_length'] ?? 0),
+        'is_online' => (int)($row['is_online'] ?? 0),
+        'order_id' => (int)($row['order_id'] ?? 0),
+        'payment_mode' => (string)($row['payment_mode'] ?? 'autopay'),
+        'autopay_profile_id' => (int)($row['autopay_profile_id'] ?? 0),
+      ));
+    }
+  }
+
+  public function cron_reset_stuck_autopay_lessons() {
+    global $wpdb;
+
+    $lessons_table = $this->table_lessons();
+
+    $wpdb->query(
+      "UPDATE {$lessons_table}
+       SET charge_status = 'due',
+           charge_last_error = CONCAT(COALESCE(charge_last_error, ''), ' | auto-reset from repeated failure'),
+           updated_at = UTC_TIMESTAMP()
+       WHERE payment_mode = 'autopay'
+         AND status = 'payment_due'
+         AND charge_status = 'failed'
+         AND charge_attempts >= 12
+         AND payout_unlocked_at IS NULL"
+    );
+  }
 
   public function on_lesson_cancelled($data) {
     $lesson_id = (int)($data['lesson_id'] ?? 0);
@@ -2524,6 +2696,28 @@ class MRM_Payments_Hub_Single {
 
     if ((string)($lesson['charge_status'] ?? '') === 'paid') {
       error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson already paid.');
+      return;
+    }
+
+    $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
+    if (is_wp_error($google_truth)) {
+      $message = $google_truth->get_error_message();
+
+      global $wpdb;
+      $lessons_table = $this->table_lessons();
+      $wpdb->update(
+        $lessons_table,
+        array(
+          'status' => 'payment_due',
+          'charge_status' => 'failed',
+          'charge_last_error' => $message,
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => $lesson_id),
+        array('%s','%s','%s','%s'),
+        array('%d')
+      );
+
       return;
     }
 
@@ -3343,6 +3537,18 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Unable to create autopay profile.'), 500);
     }
 
+    $validated_profile = $this->mrm_validate_autopay_profile_for_charge(
+      $this->mrm_get_autopay_profile($autopay_profile_id)
+    );
+
+    if ( is_wp_error($validated_profile) ) {
+      return new WP_Error(
+        'mrm_autopay_profile_incomplete',
+        $validated_profile->get_error_message(),
+        array('status' => 500)
+      );
+    }
+
     $si = $this->stripe_create_setup_intent($customer_id, array(
       'mrm_autopay_profile_id' => (string)$autopay_profile_id,
       'mrm_instructor_id' => (string)$instructor_id,
@@ -3493,6 +3699,18 @@ class MRM_Payments_Hub_Single {
     $autopay_profile_id = (int)$wpdb->insert_id;
     if ($autopay_profile_id <= 0) {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Unable to create autopay profile.'), 500);
+    }
+
+    $validated_profile = $this->mrm_validate_autopay_profile_for_charge(
+      $this->mrm_get_autopay_profile($autopay_profile_id)
+    );
+
+    if ( is_wp_error($validated_profile) ) {
+      return new WP_Error(
+        'mrm_autopay_profile_incomplete',
+        $validated_profile->get_error_message(),
+        array('status' => 500)
+      );
     }
 
     $set = $this->stripe_set_default_payment_method($customer_id, $payment_method_id);
