@@ -424,6 +424,61 @@ class MRM_Lesson_Scheduler {
             array( '%d' )
         );
     }
+
+    protected function sync_shared_token_rows_from_google_truth( $token_hash ) {
+        global $wpdb;
+
+        $token_hash = trim( (string) $token_hash );
+        if ( $token_hash === '' ) {
+            return;
+        }
+
+        $table_lessons = $wpdb->prefix . 'mrm_lessons';
+        $table_instructors = $wpdb->prefix . 'mrm_instructors';
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT l.*, i.calendar_id
+                 FROM {$table_lessons} l
+                 LEFT JOIN {$table_instructors} i ON i.id = l.instructor_id
+                 WHERE l.reminder_token_hash = %s
+                   AND l.status IN ('scheduled','payment_due','delivered')
+                 ORDER BY l.start_time ASC
+                 LIMIT 100",
+                $token_hash
+            ),
+            ARRAY_A
+        );
+
+        if ( ! $rows ) {
+            return;
+        }
+
+        foreach ( $rows as $row ) {
+            $calendar_id = (string) ( $row['calendar_id'] ?? '' );
+            if ( $calendar_id === '' || ! $this->google_is_configured() ) {
+                continue;
+            }
+
+            if ( empty( $row['google_original_start_time'] ) && ! empty( $row['start_time'] ) ) {
+                $row['google_original_start_time'] = (string) $row['start_time'];
+
+                $wpdb->update(
+                    $table_lessons,
+                    array(
+                        'google_original_start_time' => (string) $row['google_original_start_time'],
+                        'updated_at' => current_time( 'mysql' ),
+                    ),
+                    array( 'id' => (int) $row['id'] ),
+                    array( '%s', '%s' ),
+                    array( '%d' )
+                );
+            }
+
+            $this->sync_lesson_row_from_google_truth( $row, $calendar_id, 120 );
+        }
+    }
+
     protected function resolve_google_event_for_lesson_row( $lesson_row, $calendar_id, $instance_window_days = 30 ) {
         if ( ! is_array( $lesson_row ) ) {
             return array(
@@ -498,15 +553,16 @@ class MRM_Lesson_Scheduler {
                 );
             }
 
+            // Recurring match order:
+            // 1) original start anchor
+            // 2) current local row start
+            // 3) booking_id only if Google still carries it
             $match = $this->google_find_instance_by_original_start( $inst, $google_original_start_time );
-            if ( ! is_array( $match ) ) {
-                $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
-            }
             if ( ! is_array( $match ) ) {
                 $match = $this->google_find_instance_by_local_start( $inst, $start_time );
             }
             if ( ! is_array( $match ) ) {
-                $match = $this->google_find_instance_near_now( $inst, 12 * HOUR_IN_SECONDS );
+                $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
             }
 
             if ( is_array( $match ) ) {
@@ -532,7 +588,6 @@ class MRM_Lesson_Scheduler {
             );
         };
 
-        // 1) For recurring rows, prefer the recurring master event first.
         if ( $series_id > 0 ) {
             $series_master_event_id = $this->get_series_master_google_event_id( $series_id );
             if ( $series_master_event_id !== '' ) {
@@ -543,7 +598,6 @@ class MRM_Lesson_Scheduler {
             }
         }
 
-        // 2) Fallback to the row's direct google_event_id.
         if ( $event_id !== '' ) {
             $direct = $resolve_from_master( $event_id );
             if ( $direct['status'] !== 'unresolved' ) {
@@ -551,36 +605,38 @@ class MRM_Lesson_Scheduler {
             }
         }
 
-        // 3) Legacy fallback by booking_id in a broad window.
-        $fallback_anchor_ts = strtotime( (string) $google_original_start_time );
-        $fallback_start_ts  = strtotime( (string) $start_time );
-        $fallback_end_ts    = strtotime( (string) $end_time );
+        // Legacy fallback for non-recurring / older rows only.
+        if ( $series_id <= 0 ) {
+            $fallback_anchor_ts = strtotime( (string) $google_original_start_time );
+            $fallback_start_ts  = strtotime( (string) $start_time );
+            $fallback_end_ts    = strtotime( (string) $end_time );
 
-        if ( ! $fallback_anchor_ts ) $fallback_anchor_ts = $fallback_start_ts;
-        if ( ! $fallback_start_ts )  $fallback_start_ts  = $fallback_anchor_ts;
-        if ( ! $fallback_end_ts )    $fallback_end_ts    = $fallback_start_ts;
+            if ( ! $fallback_anchor_ts ) $fallback_anchor_ts = $fallback_start_ts;
+            if ( ! $fallback_start_ts )  $fallback_start_ts  = $fallback_anchor_ts;
+            if ( ! $fallback_end_ts )    $fallback_end_ts    = $fallback_start_ts;
 
-        $fallback_window_base_start = $fallback_anchor_ts ?: $fallback_start_ts ?: time();
-        $fallback_window_base_end   = $fallback_end_ts ?: $fallback_window_base_start;
+            $fallback_window_base_start = $fallback_anchor_ts ?: $fallback_start_ts ?: time();
+            $fallback_window_base_end   = $fallback_end_ts ?: $fallback_window_base_start;
 
-        $fallback_time_min = gmdate( 'c', min( $fallback_window_base_start, time() ) - ( 45 * DAY_IN_SECONDS ) );
-        $fallback_time_max = gmdate( 'c', max( $fallback_window_base_end, time() ) + ( 45 * DAY_IN_SECONDS ) );
+            $fallback_time_min = gmdate( 'c', min( $fallback_window_base_start, time() ) - ( 45 * DAY_IN_SECONDS ) );
+            $fallback_time_max = gmdate( 'c', max( $fallback_window_base_end, time() ) + ( 45 * DAY_IN_SECONDS ) );
 
-        $found = $this->google_find_event_by_booking_id( $calendar_id, $booking_id, $fallback_time_min, $fallback_time_max );
-        if ( ! is_wp_error( $found ) && is_array( $found ) ) {
-            if ( $explicit_cancel( $found ) ) {
+            $found = $this->google_find_event_by_booking_id( $calendar_id, $booking_id, $fallback_time_min, $fallback_time_max );
+            if ( ! is_wp_error( $found ) && is_array( $found ) ) {
+                if ( $explicit_cancel( $found ) ) {
+                    return array(
+                        'status' => 'cancelled',
+                        'event'  => $found,
+                        'reason' => 'booking_id_cancelled',
+                    );
+                }
+
                 return array(
-                    'status' => 'cancelled',
+                    'status' => 'resolved',
                     'event'  => $found,
-                    'reason' => 'booking_id_cancelled',
+                    'reason' => 'booking_id_match',
                 );
             }
-
-            return array(
-                'status' => 'resolved',
-                'event'  => $found,
-                'reason' => 'booking_id_match',
-            );
         }
 
         return array(
@@ -589,6 +645,7 @@ class MRM_Lesson_Scheduler {
             'reason' => 'no_google_match',
         );
     }
+
 
 
 
@@ -1651,7 +1708,6 @@ class MRM_Lesson_Scheduler {
         global $wpdb;
 
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
-        $table_instructors = $wpdb->prefix . 'mrm_instructors';
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
@@ -1674,68 +1730,16 @@ class MRM_Lesson_Scheduler {
         }
 
         $now = time();
-        $current_match = null;
-        $current_appointment_type = '';
 
         $nearest_upcoming = null;
-        $nearest_upcoming_type = '';
         $nearest_upcoming_diff = null;
 
         $nearest_recent = null;
-        $nearest_recent_type = '';
         $nearest_recent_diff = null;
 
         foreach ( $rows as $candidate ) {
-            if ( empty( $candidate['google_original_start_time'] ) && ! empty( $candidate['start_time'] ) ) {
-                $candidate['google_original_start_time'] = (string) $candidate['start_time'];
-
-                $wpdb->update(
-                    $table_lessons,
-                    array(
-                        'google_original_start_time' => (string) $candidate['google_original_start_time'],
-                        'updated_at' => current_time( 'mysql' ),
-                    ),
-                    array( 'id' => (int) $candidate['id'] ),
-                    array( '%s', '%s' ),
-                    array( '%d' )
-                );
-            }
-
             if ( empty( $candidate['is_online'] ) ) {
                 continue;
-            }
-
-            $appointment_type = '';
-
-            $instr = $wpdb->get_row(
-                $wpdb->prepare(
-                    "SELECT calendar_id,timezone,email
-                     FROM {$table_instructors}
-                     WHERE id = %d
-                     LIMIT 1",
-                    (int) $candidate['instructor_id']
-                ),
-                ARRAY_A
-            );
-
-            $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
-
-            if ( $calendar_id !== '' && $this->google_is_configured() ) {
-                $sync = $this->sync_lesson_row_from_google_truth( $candidate, $calendar_id, 120 );
-                $sync_status = (string) ( $sync['status'] ?? 'unresolved' );
-                $resolved_event = $sync['event'] ?? null;
-
-                if ( $sync_status === 'cancelled' ) {
-                    continue;
-                }
-
-                if ( $sync_status === 'resolved' && isset( $sync['lesson_row'] ) && is_array( $sync['lesson_row'] ) ) {
-                    $candidate = $sync['lesson_row'];
-
-                    if ( is_array( $resolved_event ) && isset( $resolved_event['extendedProperties']['private']['appointment_type'] ) ) {
-                        $appointment_type = (string) $resolved_event['extendedProperties']['private']['appointment_type'];
-                    }
-                }
             }
 
             $start_ts = strtotime( (string) ( $candidate['start_time'] ?? '' ) );
@@ -1759,7 +1763,7 @@ class MRM_Lesson_Scheduler {
             if ( $now >= $open_ts && $now <= $close_ts ) {
                 return array(
                     'lesson' => $candidate,
-                    'appointment_type' => $appointment_type,
+                    'appointment_type' => '',
                 );
             }
 
@@ -1767,14 +1771,12 @@ class MRM_Lesson_Scheduler {
                 $diff = $open_ts - $now;
                 if ( $nearest_upcoming === null || $nearest_upcoming_diff === null || $diff < $nearest_upcoming_diff ) {
                     $nearest_upcoming = $candidate;
-                    $nearest_upcoming_type = $appointment_type;
                     $nearest_upcoming_diff = $diff;
                 }
             } else {
                 $diff = $now - $close_ts;
                 if ( $nearest_recent === null || $nearest_recent_diff === null || $diff < $nearest_recent_diff ) {
                     $nearest_recent = $candidate;
-                    $nearest_recent_type = $appointment_type;
                     $nearest_recent_diff = $diff;
                 }
             }
@@ -1783,14 +1785,14 @@ class MRM_Lesson_Scheduler {
         if ( $nearest_upcoming !== null ) {
             return array(
                 'lesson' => $nearest_upcoming,
-                'appointment_type' => $nearest_upcoming_type,
+                'appointment_type' => '',
             );
         }
 
         if ( $nearest_recent !== null ) {
             return array(
                 'lesson' => $nearest_recent,
-                'appointment_type' => $nearest_recent_type,
+                'appointment_type' => '',
             );
         }
 
@@ -1799,6 +1801,7 @@ class MRM_Lesson_Scheduler {
             'appointment_type' => '',
         );
     }
+
 
     public function maybe_render_join_gate_page() {
         // Absolute: this route must never be cached.
@@ -1821,6 +1824,10 @@ class MRM_Lesson_Scheduler {
         }
 
         $token_hash = hash( 'sha256', $token );
+
+        // First sync every lesson row that shares this recurring room token.
+        // This makes moved recurring occurrences update before room-availability is evaluated.
+        $this->sync_shared_token_rows_from_google_truth( $token_hash );
 
         global $wpdb;
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
@@ -1890,24 +1897,8 @@ class MRM_Lesson_Scheduler {
         );
 
         $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
-
-        if ( $calendar_id !== '' && $this->google_is_configured() ) {
-            $sync = $this->sync_lesson_row_from_google_truth( $lesson, $calendar_id, 120 );
-            $sync_status = (string) ( $sync['status'] ?? 'unresolved' );
-            $resolved_event = $sync['event'] ?? null;
-
-            if ( $sync_status === 'resolved' && is_array( $resolved_event ) ) {
-                if ( isset( $resolved_event['extendedProperties']['private']['appointment_type'] ) ) {
-                    $appointment_type = (string) $resolved_event['extendedProperties']['private']['appointment_type'];
-                }
-
-                if ( isset( $sync['lesson_row'] ) && is_array( $sync['lesson_row'] ) ) {
-                    $lesson = $sync['lesson_row'];
-                }
-            }
-
-            // If unresolved, fall back to the current row values.
-        }
+        // Row timing was already bulk-synced before resolve_gate_lesson_by_shared_token().
+        // Keep the selected lesson row as-is here.
 
         // Enforce 10-min before / 10-min after window
         $start_ts = strtotime( (string) ( $lesson['start_time'] ?? '' ) );
