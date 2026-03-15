@@ -356,6 +356,74 @@ class MRM_Lesson_Scheduler {
             )
         );
     }
+
+
+    protected function get_shared_google_meet_url_for_lesson( $lesson_row ) {
+        global $wpdb;
+
+        $table_lessons = $wpdb->prefix . 'mrm_lessons';
+        $series_id = (int) ( $lesson_row['series_id'] ?? 0 );
+
+        if ( $series_id > 0 ) {
+            $sql = $wpdb->prepare(
+                "SELECT google_meet_url
+                 FROM {$table_lessons}
+                 WHERE ( id = %d OR series_id = %d )
+                   AND google_meet_url IS NOT NULL
+                   AND google_meet_url <> ''
+                 ORDER BY CASE WHEN id = %d THEN 0 ELSE 1 END, id ASC
+                 LIMIT 1",
+                $series_id,
+                $series_id,
+                $series_id
+            );
+
+            return (string) $wpdb->get_var( $sql );
+        }
+
+        return (string) ( $lesson_row['google_meet_url'] ?? '' );
+    }
+
+    protected function persist_shared_google_meet_url_for_lesson( $lesson_row, $meet_url ) {
+        global $wpdb;
+
+        $table_lessons = $wpdb->prefix . 'mrm_lessons';
+        $lesson_id = (int) ( $lesson_row['id'] ?? 0 );
+        $series_id = (int) ( $lesson_row['series_id'] ?? 0 );
+        $meet_url = trim( (string) $meet_url );
+
+        if ( $lesson_id <= 0 || $meet_url === '' ) {
+            return;
+        }
+
+        if ( $series_id > 0 ) {
+            $wpdb->query(
+                $wpdb->prepare(
+                    "UPDATE {$table_lessons}
+                     SET google_meet_url = %s,
+                         updated_at = %s
+                     WHERE id = %d
+                        OR series_id = %d",
+                    $meet_url,
+                    current_time( 'mysql' ),
+                    $series_id,
+                    $series_id
+                )
+            );
+            return;
+        }
+
+        $wpdb->update(
+            $table_lessons,
+            array(
+                'google_meet_url' => $meet_url,
+                'updated_at'      => current_time( 'mysql' ),
+            ),
+            array( 'id' => $lesson_id ),
+            array( '%s', '%s' ),
+            array( '%d' )
+        );
+    }
     protected function resolve_google_event_for_lesson_row( $lesson_row, $calendar_id, $instance_window_days = 30 ) {
         if ( ! is_array( $lesson_row ) ) {
             return array(
@@ -1038,11 +1106,15 @@ class MRM_Lesson_Scheduler {
 
         $instructor_id = intval( $data['instructor_id'] ?? 0 );
         $slots         = isset( $data['slots'] ) && is_array( $data['slots'] ) ? $data['slots'] : array();
-        $slots         = $this->expand_booking_slots_from_repeat_rule(
-            $slots,
-            (string) ( $data['repeat_frequency'] ?? 'none' ),
-            (string) ( $data['repeat_duration'] ?? '' )
-        );
+        $slots_are_expanded = ! empty( $data['slots_are_expanded'] );
+
+        if ( ! $slots_are_expanded ) {
+            $slots = $this->expand_booking_slots_from_repeat_rule(
+                $slots,
+                (string) ( $data['repeat_frequency'] ?? 'none' ),
+                (string) ( $data['repeat_duration'] ?? '' )
+            );
+        }
 
         $student_name  = sanitize_text_field( (string) ( $data['student_name'] ?? '' ) );
         $student_email = sanitize_email( (string) ( $data['student_email'] ?? '' ) );
@@ -1200,7 +1272,7 @@ class MRM_Lesson_Scheduler {
                 'google_original_start_time' => $start_mysql,
                 'status'        => 'scheduled',
                 'google_event_id' => ( $series_master_google_event_id !== '' ? $series_master_google_event_id : null ),
-                'google_meet_url' => ( $series_master_google_meet_url !== '' ? $series_master_google_meet_url : null ),
+                'google_meet_url' => null,
                 'order_id'        => ( $slot_order_id > 0 ? $slot_order_id : null ),
                 'payment_mode'    => ( $payment_mode !== '' ? $payment_mode : 'none' ),
                 'payout_unlocked_at' => null,
@@ -1442,7 +1514,6 @@ class MRM_Lesson_Scheduler {
 
                         if ( $is_recurring_booking ) {
                             $recurrence_rules = $this->build_google_recurrence_rules( $repeat_frequency, $repeat_duration, $start_ts );
-                            $create_meet = (bool) $is_online;
                         }
 
                         $ins = $this->google_insert_event(
@@ -1471,7 +1542,7 @@ class MRM_Lesson_Scheduler {
                                     $lessons_table,
                                     array(
                                         'google_event_id' => $series_master_google_event_id,
-                                        'google_meet_url' => ( $series_master_google_meet_url !== '' ? $series_master_google_meet_url : null ),
+                                        'google_meet_url' => null,
                                         'updated_at'      => $now,
                                     ),
                                     array( 'id' => $booking_id ),
@@ -1484,7 +1555,7 @@ class MRM_Lesson_Scheduler {
                                         $lessons_table,
                                         array(
                                             'google_event_id' => $series_master_google_event_id,
-                                            'google_meet_url' => ( $series_master_google_meet_url !== '' ? $series_master_google_meet_url : null ),
+                                            'google_meet_url' => null,
                                             'updated_at'      => $now,
                                         ),
                                         array( 'id' => $series_id ),
@@ -1499,7 +1570,7 @@ class MRM_Lesson_Scheduler {
                                     $lessons_table,
                                     array(
                                         'google_event_id' => $created_event_id,
-                                        'google_meet_url' => ( $created_meet_url !== '' ? $created_meet_url : null ),
+                                        'google_meet_url' => null,
                                         'updated_at'      => $now,
                                     ),
                                     array( 'id' => $booking_id ),
@@ -1943,9 +2014,10 @@ class MRM_Lesson_Scheduler {
             wp_mail( $to, $subject, $email_html, $headers );
         }
 
-        // If Meet already exists, go there
-        if ( ! empty( $lesson['google_meet_url'] ) ) {
-            wp_redirect( (string) $lesson['google_meet_url'], 302 );
+        // For recurring series, reuse one shared deferred room URL across the whole series.
+        $shared_meet_url = $this->get_shared_google_meet_url_for_lesson( $lesson );
+        if ( $shared_meet_url !== '' ) {
+            wp_redirect( $shared_meet_url, 302 );
             exit;
         }
 
@@ -1961,17 +2033,7 @@ class MRM_Lesson_Scheduler {
             exit;
         }
 
-        // Persist meet url to DB
-        $wpdb->update(
-            $table_lessons,
-            array(
-                'google_meet_url' => (string) $meet_url,
-                'updated_at'      => current_time( 'mysql' ),
-            ),
-            array( 'id' => (int) $lesson['id'] ),
-            array( '%s','%s' ),
-            array( '%d' )
-        );
+        $this->persist_shared_google_meet_url_for_lesson( $lesson, (string) $meet_url );
 
         wp_redirect( (string) $meet_url, 302 );
         exit;
