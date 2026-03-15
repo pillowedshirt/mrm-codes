@@ -581,7 +581,7 @@ class MRM_Lesson_Scheduler {
             return is_array( $ev ) && strtolower( (string) ( $ev['status'] ?? 'confirmed' ) ) === 'cancelled';
         };
 
-        $resolve_from_master = function( $master_event_id ) use ( $calendar_id, $start_time, $end_time, $google_original_start_time, $booking_id, $explicit_cancel ) {
+        $resolve_from_master = function( $master_event_id ) use ( $calendar_id, $start_time, $end_time, $google_original_start_time, $booking_id, $explicit_cancel, $instance_window_days ) {
             $got = $this->google_get_event( $calendar_id, $master_event_id );
             if ( is_wp_error( $got ) || ! is_array( $got ) ) {
                 return array(
@@ -1917,14 +1917,16 @@ class MRM_Lesson_Scheduler {
         global $wpdb;
 
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
+        $table_instructors = $wpdb->prefix . 'mrm_instructors';
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT id,series_id,instructor_id,student_name,student_email,is_online,lesson_length,start_time,end_time,google_original_start_time,status,google_event_id,google_meet_url,reminder_token_hash
-                 FROM {$table_lessons}
-                 WHERE reminder_token_hash = %s
-                   AND status IN ('scheduled','payment_due','delivered')
-                 ORDER BY start_time ASC
+                "SELECT l.*, i.calendar_id, i.timezone
+                 FROM {$table_lessons} l
+                 LEFT JOIN {$table_instructors} i ON i.id = l.instructor_id
+                 WHERE l.reminder_token_hash = %s
+                   AND l.status IN ('scheduled','payment_due','delivered')
+                 ORDER BY l.start_time ASC
                  LIMIT 100",
                 $token_hash
             ),
@@ -1935,10 +1937,17 @@ class MRM_Lesson_Scheduler {
             return array(
                 'lesson' => null,
                 'appointment_type' => '',
+                'start_ts' => 0,
+                'end_ts' => 0,
+                'timing_source' => '',
+                'timing_status' => 'unresolved',
+                'timing_reason' => 'no_rows',
             );
         }
 
         $now = time();
+
+        $current_match = null;
 
         $nearest_upcoming = null;
         $nearest_upcoming_diff = null;
@@ -1951,63 +1960,127 @@ class MRM_Lesson_Scheduler {
                 continue;
             }
 
-            $start_ts = strtotime( (string) ( $candidate['start_time'] ?? '' ) );
-            $end_ts   = strtotime( (string) ( $candidate['end_time'] ?? '' ) );
+            $effective_lesson = $candidate;
+            $calendar_id = (string) ( $candidate['calendar_id'] ?? '' );
 
-            if ( ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) && ! empty( $candidate['google_original_start_time'] ) ) {
-                $fallback_start_ts = strtotime( (string) $candidate['google_original_start_time'] );
-                if ( $fallback_start_ts ) {
-                    $start_ts = $fallback_start_ts;
-                    $end_ts = $fallback_start_ts + ( max( 1, (int) ( $candidate['lesson_length'] ?? 60 ) ) * MINUTE_IN_SECONDS );
+            $timing_source = 'db';
+            $timing_status = 'unresolved';
+            $timing_reason = '';
+            $start_ts = 0;
+            $end_ts = 0;
+
+            if ( $calendar_id !== '' && $this->google_is_configured() ) {
+                $gate_timing = $this->get_live_google_timing_for_lesson( $candidate, $calendar_id );
+                $timing_status = (string) ( $gate_timing['status'] ?? 'unresolved' );
+                $timing_reason = (string) ( $gate_timing['reason'] ?? '' );
+
+                if ( $timing_status === 'resolved' ) {
+                    $effective_lesson = isset( $gate_timing['lesson'] ) && is_array( $gate_timing['lesson'] )
+                        ? $gate_timing['lesson']
+                        : $candidate;
+
+                    $start_ts = (int) ( $gate_timing['start_ts'] ?? 0 );
+                    $end_ts   = (int) ( $gate_timing['end_ts'] ?? 0 );
+                    $timing_source = 'google';
                 }
             }
 
             if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                $start_ts = strtotime( (string) ( $effective_lesson['start_time'] ?? '' ) );
+                $end_ts   = strtotime( (string) ( $effective_lesson['end_time'] ?? '' ) );
+
+                if ( ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) && ! empty( $effective_lesson['google_original_start_time'] ) ) {
+                    $fallback_start_ts = strtotime( (string) $effective_lesson['google_original_start_time'] );
+                    if ( $fallback_start_ts ) {
+                        $start_ts = $fallback_start_ts;
+                        $end_ts = $fallback_start_ts + ( max( 1, (int) ( $effective_lesson['lesson_length'] ?? 60 ) ) * MINUTE_IN_SECONDS );
+                    }
+                }
+
+                if ( $start_ts && $end_ts && $end_ts > $start_ts && $timing_source !== 'google' ) {
+                    $timing_source = 'db';
+                    if ( $timing_status === '' ) {
+                        $timing_status = 'fallback';
+                    }
+                }
+            }
+
+            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                    error_log(
+                        '[MRM] gate_candidate_skip lesson_id=' . (int) ( $candidate['id'] ?? 0 ) .
+                        ' reason=no_valid_time' .
+                        ' timing_status=' . $timing_status .
+                        ' timing_reason=' . $timing_reason
+                    );
+                }
                 continue;
             }
 
             $open_ts  = $start_ts - ( 10 * MINUTE_IN_SECONDS );
             $close_ts = $end_ts + ( 10 * MINUTE_IN_SECONDS );
 
-            if ( $now >= $open_ts && $now <= $close_ts ) {
-                return array(
-                    'lesson' => $candidate,
-                    'appointment_type' => '',
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                error_log(
+                    '[MRM] gate_candidate lesson_id=' . (int) ( $effective_lesson['id'] ?? 0 ) .
+                    ' timing_source=' . $timing_source .
+                    ' timing_status=' . $timing_status .
+                    ' timing_reason=' . $timing_reason .
+                    ' start=' . gmdate( 'Y-m-d H:i:s', $start_ts ) .
+                    ' end=' . gmdate( 'Y-m-d H:i:s', $end_ts )
                 );
+            }
+
+            $bundle = array(
+                'lesson' => $effective_lesson,
+                'appointment_type' => '',
+                'start_ts' => $start_ts,
+                'end_ts' => $end_ts,
+                'timing_source' => $timing_source,
+                'timing_status' => $timing_status,
+                'timing_reason' => $timing_reason,
+            );
+
+            if ( $now >= $open_ts && $now <= $close_ts ) {
+                $current_match = $bundle;
+                break;
             }
 
             if ( $now < $open_ts ) {
                 $diff = $open_ts - $now;
                 if ( $nearest_upcoming === null || $nearest_upcoming_diff === null || $diff < $nearest_upcoming_diff ) {
-                    $nearest_upcoming = $candidate;
+                    $nearest_upcoming = $bundle;
                     $nearest_upcoming_diff = $diff;
                 }
             } else {
                 $diff = $now - $close_ts;
                 if ( $nearest_recent === null || $nearest_recent_diff === null || $diff < $nearest_recent_diff ) {
-                    $nearest_recent = $candidate;
+                    $nearest_recent = $bundle;
                     $nearest_recent_diff = $diff;
                 }
             }
         }
 
+        if ( $current_match !== null ) {
+            return $current_match;
+        }
+
         if ( $nearest_upcoming !== null ) {
-            return array(
-                'lesson' => $nearest_upcoming,
-                'appointment_type' => '',
-            );
+            return $nearest_upcoming;
         }
 
         if ( $nearest_recent !== null ) {
-            return array(
-                'lesson' => $nearest_recent,
-                'appointment_type' => '',
-            );
+            return $nearest_recent;
         }
 
         return array(
             'lesson' => null,
             'appointment_type' => '',
+            'start_ts' => 0,
+            'end_ts' => 0,
+            'timing_source' => '',
+            'timing_status' => 'unresolved',
+            'timing_reason' => 'no_scored_candidates',
         );
     }
 
@@ -2034,10 +2107,6 @@ class MRM_Lesson_Scheduler {
 
         $token_hash = hash( 'sha256', $token );
 
-        // First sync every lesson row that shares this recurring room token.
-        // This makes moved recurring occurrences update before room-availability is evaluated.
-        $this->sync_shared_token_rows_from_google_truth( $token_hash );
-
         global $wpdb;
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
         $table_instructors = $wpdb->prefix . 'mrm_instructors';
@@ -2051,6 +2120,12 @@ class MRM_Lesson_Scheduler {
         $appointment_type = isset( $resolved_gate['appointment_type'] )
             ? (string) $resolved_gate['appointment_type']
             : '';
+
+        $resolved_gate_start_ts = (int) ( $resolved_gate['start_ts'] ?? 0 );
+        $resolved_gate_end_ts   = (int) ( $resolved_gate['end_ts'] ?? 0 );
+        $resolved_gate_timing_source = (string) ( $resolved_gate['timing_source'] ?? '' );
+        $resolved_gate_timing_status = (string) ( $resolved_gate['timing_status'] ?? '' );
+        $resolved_gate_timing_reason = (string) ( $resolved_gate['timing_reason'] ?? '' );
 
         // Re-read the selected lesson row after token-based sync and gate resolution so this
         // request uses the latest DB values written from Google truth.
@@ -2076,7 +2151,12 @@ class MRM_Lesson_Scheduler {
                 ' start_time=' . ( is_array( $lesson ) ? (string) ( $lesson['start_time'] ?? '' ) : '' ) .
                 ' end_time=' . ( is_array( $lesson ) ? (string) ( $lesson['end_time'] ?? '' ) : '' ) .
                 ' google_event_id=' . ( is_array( $lesson ) ? (string) ( $lesson['google_event_id'] ?? '' ) : '' ) .
-                ' google_original_start_time=' . ( is_array( $lesson ) ? (string) ( $lesson['google_original_start_time'] ?? '' ) : '' )
+                ' google_original_start_time=' . ( is_array( $lesson ) ? (string) ( $lesson['google_original_start_time'] ?? '' ) : '' ) .
+                ' timing_source=' . $resolved_gate_timing_source .
+                ' timing_status=' . $resolved_gate_timing_status .
+                ' timing_reason=' . $resolved_gate_timing_reason .
+                ' resolved_start=' . ( $resolved_gate_start_ts ? gmdate( 'Y-m-d H:i:s', $resolved_gate_start_ts ) : '' ) .
+                ' resolved_end=' . ( $resolved_gate_end_ts ? gmdate( 'Y-m-d H:i:s', $resolved_gate_end_ts ) : '' )
             );
         }
 
@@ -2135,26 +2215,36 @@ class MRM_Lesson_Scheduler {
 
         $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
 
-        // Prefer live Google timing first.  Fall back to the local lesson row only if the
-        // Google resolver cannot currently resolve the event.
-        $gate_timing = $this->get_live_google_timing_for_lesson( $lesson, $calendar_id );
+        $gate_timing = array(
+            'status' => $resolved_gate_timing_status,
+            'reason' => $resolved_gate_timing_reason,
+            'source' => $resolved_gate_timing_source,
+        );
 
-        if ( (string) ( $gate_timing['status'] ?? '' ) === 'resolved' ) {
-            $lesson = isset( $gate_timing['lesson'] ) && is_array( $gate_timing['lesson'] )
-                ? $gate_timing['lesson']
-                : $lesson;
-
-            $start_ts = (int) ( $gate_timing['start_ts'] ?? 0 );
-            $end_ts   = (int) ( $gate_timing['end_ts'] ?? 0 );
+        if ( $resolved_gate_start_ts && $resolved_gate_end_ts && $resolved_gate_end_ts > $resolved_gate_start_ts ) {
+            $start_ts = $resolved_gate_start_ts;
+            $end_ts   = $resolved_gate_end_ts;
         } else {
-            $start_ts = strtotime( (string) ( $lesson['start_time'] ?? '' ) );
-            $end_ts   = strtotime( (string) ( $lesson['end_time'] ?? '' ) );
+            // Final safety fallback for unexpected cases.
+            $gate_timing = $this->get_live_google_timing_for_lesson( $lesson, $calendar_id );
 
-            if ( ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) && ! empty( $lesson['google_original_start_time'] ) ) {
-                $fallback_start_ts = strtotime( (string) $lesson['google_original_start_time'] );
-                if ( $fallback_start_ts ) {
-                    $start_ts = $fallback_start_ts;
-                    $end_ts = $fallback_start_ts + ( max( 1, (int) ( $lesson['lesson_length'] ?? 60 ) ) * MINUTE_IN_SECONDS );
+            if ( (string) ( $gate_timing['status'] ?? '' ) === 'resolved' ) {
+                $lesson = isset( $gate_timing['lesson'] ) && is_array( $gate_timing['lesson'] )
+                    ? $gate_timing['lesson']
+                    : $lesson;
+
+                $start_ts = (int) ( $gate_timing['start_ts'] ?? 0 );
+                $end_ts   = (int) ( $gate_timing['end_ts'] ?? 0 );
+            } else {
+                $start_ts = strtotime( (string) ( $lesson['start_time'] ?? '' ) );
+                $end_ts   = strtotime( (string) ( $lesson['end_time'] ?? '' ) );
+
+                if ( ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) && ! empty( $lesson['google_original_start_time'] ) ) {
+                    $fallback_start_ts = strtotime( (string) $lesson['google_original_start_time'] );
+                    if ( $fallback_start_ts ) {
+                        $start_ts = $fallback_start_ts;
+                        $end_ts = $fallback_start_ts + ( max( 1, (int) ( $lesson['lesson_length'] ?? 60 ) ) * MINUTE_IN_SECONDS );
+                    }
                 }
             }
         }
@@ -2164,6 +2254,7 @@ class MRM_Lesson_Scheduler {
                 '[MRM] gate_timing lesson_id=' . (int) ( $lesson['id'] ?? 0 ) .
                 ' timing_status=' . (string) ( $gate_timing['status'] ?? '' ) .
                 ' timing_reason=' . (string) ( $gate_timing['reason'] ?? '' ) .
+                ' timing_source=' . (string) ( $gate_timing['source'] ?? $resolved_gate_timing_source ) .
                 ' gate_start=' . ( $start_ts ? gmdate( 'Y-m-d H:i:s', $start_ts ) : '' ) .
                 ' gate_end=' . ( $end_ts ? gmdate( 'Y-m-d H:i:s', $end_ts ) : '' )
             );
