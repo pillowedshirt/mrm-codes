@@ -1765,23 +1765,145 @@ class MRM_Payments_Hub_Single {
     );
   }
 
+  private function mrm_backfill_autopay_series_rows_from_children() {
+    global $wpdb;
+
+    $lessons_table = $this->table_lessons();
+
+    $rows = $wpdb->get_results(
+      "
+      SELECT
+        s.id AS series_id,
+        MAX(NULLIF(c.autopay_profile_id, 0)) AS autopay_profile_id,
+        MAX(NULLIF(c.order_id, 0)) AS order_id,
+        MAX(NULLIF(c.google_event_id, '')) AS google_event_id,
+        MAX(NULLIF(c.payment_mode, '')) AS payment_mode
+      FROM {$lessons_table} s
+      INNER JOIN {$lessons_table} c
+        ON c.series_id = s.id
+      WHERE s.status = 'series'
+        AND c.status NOT IN ('cancelled', 'series')
+        AND c.payment_mode = 'autopay'
+        AND c.autopay_profile_id IS NOT NULL
+        AND c.autopay_profile_id > 0
+        AND (
+          s.autopay_profile_id IS NULL OR s.autopay_profile_id = 0
+          OR s.payment_mode IS NULL OR s.payment_mode = '' OR s.payment_mode = 'none'
+          OR s.google_event_id IS NULL OR s.google_event_id = ''
+          OR s.order_id IS NULL OR s.order_id = 0
+        )
+      GROUP BY s.id
+      ",
+      ARRAY_A
+    );
+
+    if ( ! $rows ) {
+      return;
+    }
+
+    foreach ( $rows as $row ) {
+      $series_id = (int) ( $row['series_id'] ?? 0 );
+      if ( $series_id <= 0 ) {
+        continue;
+      }
+
+      $current = $wpdb->get_row(
+        $wpdb->prepare(
+          "SELECT * FROM {$lessons_table} WHERE id = %d LIMIT 1",
+          $series_id
+        ),
+        ARRAY_A
+      );
+
+      if ( ! $current ) {
+        continue;
+      }
+
+      $update = array();
+      $format = array();
+
+      if ( (int) ( $current['autopay_profile_id'] ?? 0 ) <= 0 && (int) ( $row['autopay_profile_id'] ?? 0 ) > 0 ) {
+        $update['autopay_profile_id'] = (int) $row['autopay_profile_id'];
+        $format[] = '%d';
+      }
+
+      if ( (string) ( $current['payment_mode'] ?? '' ) === '' || (string) ( $current['payment_mode'] ?? '' ) === 'none' ) {
+        $payment_mode = (string) ( $row['payment_mode'] ?? '' );
+        if ( $payment_mode !== '' ) {
+          $update['payment_mode'] = $payment_mode;
+          $format[] = '%s';
+        }
+      }
+
+      if ( (int) ( $current['order_id'] ?? 0 ) <= 0 && (int) ( $row['order_id'] ?? 0 ) > 0 ) {
+        $update['order_id'] = (int) $row['order_id'];
+        $format[] = '%d';
+      }
+
+      if ( (string) ( $current['google_event_id'] ?? '' ) === '' ) {
+        $google_event_id = (string) ( $row['google_event_id'] ?? '' );
+        if ( $google_event_id !== '' ) {
+          $update['google_event_id'] = $google_event_id;
+          $format[] = '%s';
+        }
+      }
+
+      if ( ! empty( $update ) ) {
+        $update['updated_at'] = current_time( 'mysql' );
+        $format[] = '%s';
+
+        $wpdb->update(
+          $lessons_table,
+          $update,
+          array( 'id' => $series_id ),
+          $format,
+          array( '%d' )
+        );
+      }
+    }
+  }
+
   private function mrm_get_active_autopay_series_rows() {
     global $wpdb;
 
     $lessons_table = $this->table_lessons();
     $instructors_table = $wpdb->prefix . 'mrm_instructors';
 
+    $rows = $wpdb->get_results(
+      "
+      SELECT s.*, i.calendar_id
+      FROM {$lessons_table} s
+      LEFT JOIN {$instructors_table} i ON i.id = s.instructor_id
+      WHERE s.status = 'series'
+        AND s.payment_mode = 'autopay'
+        AND s.autopay_profile_id IS NOT NULL
+        AND s.autopay_profile_id > 0
+        AND s.google_event_id IS NOT NULL
+        AND s.google_event_id <> ''
+      ORDER BY s.id ASC
+      ",
+      ARRAY_A
+    );
+
+    if ( $rows ) {
+      return $rows;
+    }
+
+    // Legacy fallback: use autopay child rows that have no usable parent series row yet.
     return $wpdb->get_results(
-      "SELECT l.*, i.calendar_id
-       FROM {$lessons_table} l
-       LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id
-       WHERE l.status = 'series'
-         AND l.payment_mode = 'autopay'
-         AND l.autopay_profile_id IS NOT NULL
-         AND l.autopay_profile_id > 0
-         AND l.google_event_id IS NOT NULL
-         AND l.google_event_id <> ''
-       ORDER BY l.id ASC",
+      "
+      SELECT c.*, i.calendar_id
+      FROM {$lessons_table} c
+      LEFT JOIN {$instructors_table} i ON i.id = c.instructor_id
+      WHERE c.payment_mode = 'autopay'
+        AND c.autopay_profile_id IS NOT NULL
+        AND c.autopay_profile_id > 0
+        AND c.google_event_id IS NOT NULL
+        AND c.google_event_id <> ''
+        AND c.status NOT IN ('cancelled', 'series')
+        AND (c.series_id IS NULL OR c.series_id = 0)
+      ORDER BY c.id ASC
+      ",
       ARRAY_A
     );
   }
@@ -2748,6 +2870,9 @@ class MRM_Payments_Hub_Single {
 
 
   public function cron_discover_missed_autopay_lessons() {
+    error_log('[MRM AutoPay] occurrence reconciler started at ' . gmdate('Y-m-d H:i:s'));
+
+    $this->mrm_backfill_autopay_series_rows_from_children();
     if (!class_exists('MRM_Lesson_Scheduler')) {
       return;
     }
@@ -2759,6 +2884,7 @@ class MRM_Payments_Hub_Single {
 
     $series_rows = $this->mrm_get_active_autopay_series_rows();
     if (!$series_rows) {
+      error_log('[MRM AutoPay] occurrence reconciler found no active autopay series rows.');
       return;
     }
 
@@ -2771,8 +2897,23 @@ class MRM_Payments_Hub_Single {
       $autopay_profile_id = (int)($series_row['autopay_profile_id'] ?? 0);
 
       if ($calendar_id === '' || $master_event_id === '' || $autopay_profile_id <= 0) {
+        error_log(
+          '[MRM AutoPay] occurrence reconciler skipping invalid series'
+          . ' series_row_id=' . (int)($series_row['id'] ?? 0)
+          . ' calendar_id=' . $calendar_id
+          . ' master_event_id=' . $master_event_id
+          . ' autopay_profile_id=' . $autopay_profile_id
+        );
         continue;
       }
+
+      error_log(
+        '[MRM AutoPay] checking series'
+        . ' series_row_id=' . (int)($series_row['id'] ?? 0)
+        . ' calendar_id=' . $calendar_id
+        . ' master_event_id=' . $master_event_id
+        . ' autopay_profile_id=' . $autopay_profile_id
+      );
 
       $instances = $scheduler->get_google_series_occurrences_in_window($calendar_id, $master_event_id, $time_min, $time_max);
       if (is_wp_error($instances) || !is_array($instances)) {
@@ -2866,12 +3007,23 @@ class MRM_Payments_Hub_Single {
           array('%d')
         );
 
+        error_log(
+          '[MRM AutoPay] occurrence due'
+          . ' series_row_id=' . (int)($series_row['id'] ?? 0)
+          . ' lesson_id=' . (int)$lesson_id
+          . ' autopay_profile_id=' . (int)$autopay_profile_id
+          . ' occurrence_key=' . $occurrence_key
+          . ' start_utc=' . $start_utc
+          . ' end_utc=' . $end_utc
+        );
+
         $this->charge_and_unlock_autopay(
           array(
             'lesson_id' => $lesson_id,
             'instructor_id' => (int)$series_row['instructor_id'],
             'autopay_profile_id' => $autopay_profile_id,
-          )
+          ),
+          true
         );
 
         $lesson_row = $wpdb->get_row(
@@ -3053,7 +3205,7 @@ class MRM_Payments_Hub_Single {
     }
   }
 
-  private function charge_and_unlock_autopay($data) {
+  private function charge_and_unlock_autopay($data, $skip_google_truth_check = false) {
     global $wpdb;
 
     $autopay_profile_id = (int)($data['autopay_profile_id'] ?? 0);
@@ -3097,25 +3249,27 @@ class MRM_Payments_Hub_Single {
       return;
     }
 
-    $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
-    if (is_wp_error($google_truth)) {
-      $message = $google_truth->get_error_message();
+    if (!$skip_google_truth_check) {
+      $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
+      if (is_wp_error($google_truth)) {
+        $message = $google_truth->get_error_message();
 
-      $wpdb->update(
-        $lessons_table,
-        array(
-          'status' => 'payment_due',
-          'charge_status' => 'due',
-          'charge_last_error' => $message,
-          'updated_at' => current_time('mysql'),
-        ),
-        array('id' => $lesson_id),
-        array('%s','%s','%s','%s'),
-        array('%d')
-      );
+        $wpdb->update(
+          $lessons_table,
+          array(
+            'status' => 'payment_due',
+            'charge_status' => 'due',
+            'charge_last_error' => $message,
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => $lesson_id),
+          array('%s','%s','%s','%s'),
+          array('%d')
+        );
 
-      error_log('[MRM AutoPay] charge delayed pending Google truth for lesson_id=' . $lesson_id . ' reason=' . $message);
-      return;
+        error_log('[MRM AutoPay] charge delayed pending Google truth for lesson_id=' . $lesson_id . ' reason=' . $message);
+        return;
+      }
     }
 
     $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);

@@ -3227,40 +3227,89 @@ class MRM_Lesson_Scheduler {
         }
     }
 
-    protected function get_lessons_needing_google_truth_pass( $limit = 300 ) {
+    protected function get_lessons_needing_google_truth_pass( $limit = 300, $lookback_hours = 24, $lookahead_days = 30 ) {
         global $wpdb;
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $instructors_table = $wpdb->prefix . 'mrm_instructors';
-        $limit = max( 1, (int) $limit );
 
-        $sql = "
-        SELECT l.*, i.calendar_id, i.timezone
-        FROM {$lessons_table} l
-        JOIN {$instructors_table} i ON i.id = l.instructor_id
-        WHERE i.calendar_id IS NOT NULL
-          AND i.calendar_id <> ''
-          AND (
-                (
-                    l.payment_mode = 'autopay'
-                    AND (
-                        l.status IN ('scheduled', 'payment_due', 'delivered')
-                        OR (
-                            l.payout_unlocked_at IS NULL
-                            AND l.status NOT IN ('cancelled', 'series')
-                        )
+        $limit = max( 1, (int) $limit );
+        $lookback_hours = max( 1, (int) $lookback_hours );
+        $lookahead_days = max( 1, (int) $lookahead_days );
+
+        $now_utc       = gmdate( 'Y-m-d H:i:s' );
+        $lookback_utc  = gmdate( 'Y-m-d H:i:s', time() - ( $lookback_hours * HOUR_IN_SECONDS ) );
+        $lookahead_utc = gmdate( 'Y-m-d H:i:s', time() + ( $lookahead_days * DAY_IN_SECONDS ) );
+
+        $sql = $wpdb->prepare(
+            "
+            SELECT l.*, i.calendar_id, i.timezone
+            FROM {$lessons_table} l
+            JOIN {$instructors_table} i ON i.id = l.instructor_id
+            WHERE i.calendar_id IS NOT NULL
+              AND i.calendar_id <> ''
+              AND l.status NOT IN ('cancelled', 'series')
+              AND (
+                    (
+                        l.start_time IS NOT NULL
+                        AND l.start_time <> ''
+                        AND l.start_time BETWEEN %s AND %s
                     )
+                    OR
+                    (
+                        l.end_time IS NOT NULL
+                        AND l.end_time <> ''
+                        AND l.end_time BETWEEN %s AND %s
+                    )
+                    OR
+                    (
+                        l.google_original_start_time IS NOT NULL
+                        AND l.google_original_start_time <> ''
+                        AND l.google_original_start_time BETWEEN %s AND %s
+                    )
+                    OR
+                    (
+                        l.payment_mode = 'autopay'
+                        AND l.autopay_profile_id IS NOT NULL
+                        AND l.autopay_profile_id > 0
+                        AND l.charge_status IN ('due', 'processing', 'failed')
+                    )
+              )
+            ORDER BY
+              CASE
+                WHEN l.end_time IS NOT NULL
+                     AND l.end_time <> ''
+                     AND l.end_time BETWEEN %s AND %s THEN 0
+                WHEN l.start_time IS NOT NULL
+                     AND l.start_time <> ''
+                     AND l.start_time BETWEEN %s AND %s THEN 1
+                WHEN l.google_original_start_time IS NOT NULL
+                     AND l.google_original_start_time <> ''
+                     AND l.google_original_start_time BETWEEN %s AND %s THEN 2
+                ELSE 3
+              END,
+              ABS(
+                TIMESTAMPDIFF(
+                  MINUTE,
+                  %s,
+                  COALESCE(
+                    NULLIF(l.start_time, ''),
+                    NULLIF(l.google_original_start_time, ''),
+                    NULLIF(l.end_time, '')
+                  )
                 )
-                OR
-                (
-                    l.payment_mode <> 'autopay'
-                    AND l.status = 'scheduled'
-                    AND l.payout_unlocked_at IS NULL
-                )
-          )
-        ORDER BY l.start_time ASC
-        LIMIT {$limit}
-    ";
+              )
+            LIMIT %d
+            ",
+            $lookback_utc,  $lookahead_utc,
+            $lookback_utc,  $lookahead_utc,
+            $lookback_utc,  $lookahead_utc,
+            $lookback_utc,  $now_utc,
+            $now_utc,       $lookahead_utc,
+            $lookback_utc,  $lookahead_utc,
+            $now_utc,
+            $limit
+        );
 
         return $wpdb->get_results( $sql, ARRAY_A );
     }
@@ -3268,7 +3317,7 @@ class MRM_Lesson_Scheduler {
     public function cron_sync_upcoming_events( $lookback_hours = 6, $lookahead_days = 7 ) {
         if ( ! $this->google_is_configured() ) return;
 
-        $rows = $this->get_lessons_needing_google_truth_pass( 400 );
+        $rows = $this->get_lessons_needing_google_truth_pass( 400, $lookback_hours, $lookahead_days );
 
         // Debug: record when the sync job fires and how many rows were fetched.  This aids in
         // diagnosing whether WP‑Cron is running versus whether the resolver is failing.
@@ -3368,7 +3417,7 @@ class MRM_Lesson_Scheduler {
         }
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
-        $rows = $this->get_lessons_needing_google_truth_pass( 300 );
+        $rows = $this->get_lessons_needing_google_truth_pass( 300, 72, 30 );
 
         if ( ! $rows ) return;
 
@@ -4105,7 +4154,7 @@ class MRM_Lesson_Scheduler {
 
         $summary['google_ready'] = true;
 
-        $rows = $this->get_lessons_needing_google_truth_pass( 400 );
+        $rows = $this->get_lessons_needing_google_truth_pass( 400, 72, 30 );
         $summary['rows_fetched'] = is_array( $rows ) ? count( $rows ) : 0;
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
