@@ -35,7 +35,9 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_discover_missed_autopay_lessons', array($this, 'cron_discover_missed_autopay_lessons'));
     add_action('mrm_pay_hub_reset_stuck_autopay_lessons', array($this, 'cron_reset_stuck_autopay_lessons'));
 
-    add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
+    // Old row-driven autopay trigger disabled.
+    // Charges are now reconciled from Google occurrences in cron.
+    // add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
     add_action('mrm_lesson_cancelled', array($this, 'on_lesson_cancelled'), 10, 1);
 
@@ -136,6 +138,11 @@ class MRM_Payments_Hub_Single {
   private function table_autopay_profiles() {
     global $wpdb;
     return $wpdb->prefix . 'mrm_autopay_profiles';
+  }
+
+  private function table_autopay_occurrence_charges() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_autopay_occurrence_charges';
   }
 
   private function table_webhook_events() {
@@ -373,6 +380,35 @@ class MRM_Payments_Hub_Single {
   KEY active_idx (active)
 ) {$charset};";
 
+    $occurrence_charges = $this->table_autopay_occurrence_charges();
+
+    $sql_occurrence_charges = "CREATE TABLE {$occurrence_charges} (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  autopay_profile_id BIGINT UNSIGNED NOT NULL,
+  series_lesson_id BIGINT UNSIGNED NOT NULL,
+  occurrence_key VARCHAR(255) NOT NULL,
+  google_series_event_id VARCHAR(255) NOT NULL,
+  google_event_id VARCHAR(255) DEFAULT NULL,
+  original_start_utc DATETIME NOT NULL,
+  occurrence_start_utc DATETIME NOT NULL,
+  occurrence_end_utc DATETIME NOT NULL,
+  lesson_id BIGINT UNSIGNED DEFAULT NULL,
+  order_id BIGINT UNSIGNED DEFAULT NULL,
+  stripe_payment_intent_id VARCHAR(255) DEFAULT NULL,
+  charge_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+  attempt_count INT NOT NULL DEFAULT 0,
+  last_attempt_at DATETIME DEFAULT NULL,
+  last_error LONGTEXT NULL,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uniq_occurrence_profile (autopay_profile_id, occurrence_key),
+  KEY series_lesson_idx (series_lesson_id),
+  KEY lesson_id_idx (lesson_id),
+  KEY charge_status_idx (charge_status),
+  KEY occurrence_end_idx (occurrence_end_utc)
+) {$charset};";
+
     $sql_webhooks = "CREATE TABLE {$webhooks} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       stripe_event_id VARCHAR(255) NOT NULL,
@@ -392,6 +428,7 @@ class MRM_Payments_Hub_Single {
     dbDelta($sql_payouts);
     dbDelta($sql_credits);
     dbDelta($sql_autopay);
+    dbDelta($sql_occurrence_charges);
     dbDelta($sql_webhooks);
   }
 
@@ -1438,6 +1475,88 @@ class MRM_Payments_Hub_Single {
     return (int)$wpdb->insert_id;
   }
 
+  private function mrm_get_occurrence_charge_row($autopay_profile_id, $occurrence_key) {
+    global $wpdb;
+    return $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$this->table_autopay_occurrence_charges()} WHERE autopay_profile_id=%d AND occurrence_key=%s LIMIT 1",
+        (int)$autopay_profile_id,
+        (string)$occurrence_key
+      ),
+      ARRAY_A
+    );
+  }
+
+  private function mrm_insert_pending_occurrence_charge($data) {
+    global $wpdb;
+
+    $now = current_time('mysql');
+
+    $wpdb->insert(
+      $this->table_autopay_occurrence_charges(),
+      array(
+        'autopay_profile_id'   => (int)($data['autopay_profile_id'] ?? 0),
+        'series_lesson_id'     => (int)($data['series_lesson_id'] ?? 0),
+        'occurrence_key'       => (string)($data['occurrence_key'] ?? ''),
+        'google_series_event_id' => (string)($data['google_series_event_id'] ?? ''),
+        'google_event_id'      => (string)($data['google_event_id'] ?? ''),
+        'original_start_utc'   => (string)($data['original_start_utc'] ?? ''),
+        'occurrence_start_utc' => (string)($data['occurrence_start_utc'] ?? ''),
+        'occurrence_end_utc'   => (string)($data['occurrence_end_utc'] ?? ''),
+        'lesson_id'            => !empty($data['lesson_id']) ? (int)$data['lesson_id'] : null,
+        'order_id'             => null,
+        'stripe_payment_intent_id' => null,
+        'charge_status'        => 'pending',
+        'attempt_count'        => 0,
+        'last_attempt_at'      => null,
+        'last_error'           => null,
+        'created_at'           => $now,
+        'updated_at'           => $now,
+      ),
+      array('%d','%d','%s','%s','%s','%s','%s','%s','%d','%d','%s','%d','%s','%s','%s','%s')
+    );
+
+    return (int)$wpdb->insert_id;
+  }
+
+  private function mrm_mark_occurrence_charge_paid($occurrence_charge_id, $lesson_id = 0, $order_id = 0, $pi_id = '') {
+    global $wpdb;
+
+    $wpdb->update(
+      $this->table_autopay_occurrence_charges(),
+      array(
+        'lesson_id' => ($lesson_id > 0 ? (int)$lesson_id : null),
+        'order_id' => ($order_id > 0 ? (int)$order_id : null),
+        'stripe_payment_intent_id' => ($pi_id !== '' ? (string)$pi_id : null),
+        'charge_status' => 'paid',
+        'updated_at' => current_time('mysql'),
+      ),
+      array('id' => (int)$occurrence_charge_id),
+      array('%d','%d','%s','%s','%s'),
+      array('%d')
+    );
+  }
+
+  private function mrm_mark_occurrence_charge_failed($occurrence_charge_id, $message = '') {
+    global $wpdb;
+
+    $wpdb->query(
+      $wpdb->prepare(
+        "UPDATE {$this->table_autopay_occurrence_charges()}
+         SET charge_status='failed',
+             attempt_count=attempt_count+1,
+             last_attempt_at=%s,
+             last_error=%s,
+             updated_at=%s
+         WHERE id=%d",
+        current_time('mysql'),
+        (string)$message,
+        current_time('mysql'),
+        (int)$occurrence_charge_id
+      )
+    );
+  }
+
   private function mrm_get_autopay_profile($autopay_profile_id) {
     global $wpdb;
     return $wpdb->get_row($wpdb->prepare(
@@ -1452,6 +1571,92 @@ class MRM_Payments_Hub_Single {
       $wpdb->prepare("SELECT * FROM {$this->table_orders()} WHERE id=%d LIMIT 1", (int)$order_id),
       ARRAY_A
     );
+  }
+
+  private function mrm_materialize_lesson_row_from_series_occurrence($series_row, $occurrence) {
+    global $wpdb;
+
+    if (!is_array($series_row) || !is_array($occurrence)) {
+      return 0;
+    }
+
+    $lessons_table = $this->table_lessons();
+
+    $series_id = (int)($series_row['id'] ?? 0);
+    $original_start_utc = (string)($occurrence['original_start_utc'] ?? '');
+    $start_utc = (string)($occurrence['start_utc'] ?? '');
+    $end_utc = (string)($occurrence['end_utc'] ?? '');
+
+    if ($series_id <= 0 || $original_start_utc === '' || $start_utc === '' || $end_utc === '') {
+      return 0;
+    }
+
+    $existing = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT id FROM {$lessons_table} WHERE series_id=%d AND google_original_start_time=%s LIMIT 1",
+        $series_id,
+        $original_start_utc
+      ),
+      ARRAY_A
+    );
+
+    if ($existing && !empty($existing['id'])) {
+      $lesson_id = (int)$existing['id'];
+
+      $wpdb->update(
+        $lessons_table,
+        array(
+          'start_time' => $start_utc,
+          'end_time' => $end_utc,
+          'google_event_id' => (string)($occurrence['google_event_id'] ?? ''),
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => $lesson_id),
+        array('%s','%s','%s','%s'),
+        array('%d')
+      );
+
+      return $lesson_id;
+    }
+
+    $wpdb->insert(
+      $lessons_table,
+      array(
+        'instructor_id' => (int)$series_row['instructor_id'],
+        'series_id' => $series_id,
+        'student_name' => (string)$series_row['student_name'],
+        'student_email' => (string)$series_row['student_email'],
+        'instrument' => (string)$series_row['instrument'],
+        'is_online' => (int)$series_row['is_online'],
+        'lesson_length' => (int)$series_row['lesson_length'],
+        'start_time' => $start_utc,
+        'end_time' => $end_utc,
+        'google_original_start_time' => $original_start_utc,
+        'delivered_at' => null,
+        'charge_due_at' => null,
+        'charge_status' => 'none',
+        'charge_attempts' => 0,
+        'charge_last_attempt_at' => null,
+        'charge_last_error' => null,
+        'status' => 'scheduled',
+        'google_event_id' => (string)($occurrence['google_event_id'] ?? ''),
+        'google_meet_url' => null,
+        'order_id' => null,
+        'payment_mode' => 'autopay',
+        'payout_unlocked_at' => null,
+        'autopay_profile_id' => (int)$series_row['autopay_profile_id'],
+        'agreement_id' => null,
+        'created_at' => current_time('mysql'),
+        'updated_at' => current_time('mysql'),
+        'reminder_token' => null,
+        'reminder_token_hash' => (string)($series_row['reminder_token_hash'] ?? ''),
+        'reminder_scheduled_at' => null,
+        'reminder_sent_at' => null,
+      ),
+      array('%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%d','%s','%s','%s','%s','%s','%s','%d','%s','%s','%d','%s','%s','%s','%s','%s')
+    );
+
+    return (int)$wpdb->insert_id;
   }
 
   private function mrm_google_truth_confirms_lesson_ended( $lesson_id ) {
@@ -1557,6 +1762,27 @@ class MRM_Payments_Hub_Single {
       'payment_method_id' => $payment_method_id,
       'amount_cents' => $amount_cents,
       'currency' => (string)($profile['currency'] ?? 'usd'),
+    );
+  }
+
+  private function mrm_get_active_autopay_series_rows() {
+    global $wpdb;
+
+    $lessons_table = $this->table_lessons();
+    $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+    return $wpdb->get_results(
+      "SELECT l.*, i.calendar_id
+       FROM {$lessons_table} l
+       LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id
+       WHERE l.status = 'series'
+         AND l.payment_mode = 'autopay'
+         AND l.autopay_profile_id IS NOT NULL
+         AND l.autopay_profile_id > 0
+         AND l.google_event_id IS NOT NULL
+         AND l.google_event_id <> ''
+       ORDER BY l.id ASC",
+      ARRAY_A
     );
   }
 
@@ -2222,9 +2448,8 @@ class MRM_Payments_Hub_Single {
 
 
   public function on_lesson_charge_due($data) {
-    $mode = (string)($data['payment_mode'] ?? 'none');
-    if ($mode !== 'autopay') return;
-    $this->charge_and_unlock_autopay($data);
+    // Disabled in favor of occurrence-based Google reconciliation.
+    return;
   }
 
   private function mrm_finalize_autopay_lesson_success($lesson_id, $order = array(), $pi_id = '') {
@@ -2523,38 +2748,111 @@ class MRM_Payments_Hub_Single {
 
 
   public function cron_discover_missed_autopay_lessons() {
-    global $wpdb;
-
-    $lessons_table = $this->table_lessons();
-    $rows = $wpdb->get_results("
-    SELECT id, instructor_id, student_email, lesson_length, is_online, order_id, payment_mode, autopay_profile_id, status
-    FROM {$lessons_table}
-    WHERE payment_mode = 'autopay'
-      AND autopay_profile_id IS NOT NULL
-      AND autopay_profile_id > 0
-      AND payout_unlocked_at IS NULL
-      AND status IN ('scheduled', 'payment_due', 'delivered')
-    ORDER BY start_time ASC
-    LIMIT 100
-  ", ARRAY_A);
-
-    if (!$rows) {
+    if (!class_exists('MRM_Lesson_Scheduler')) {
       return;
     }
 
-    foreach ($rows as $row) {
-      $lesson_id = (int)($row['id'] ?? 0);
-      if ($lesson_id <= 0) {
+    $scheduler = MRM_Lesson_Scheduler::get_instance();
+    if (!$scheduler || !method_exists($scheduler, 'get_google_series_occurrences_in_window')) {
+      return;
+    }
+
+    $series_rows = $this->mrm_get_active_autopay_series_rows();
+    if (!$series_rows) {
+      return;
+    }
+
+    $time_min = gmdate('c', time() - (90 * MINUTE_IN_SECONDS));
+    $time_max = gmdate('c', time() - (5 * MINUTE_IN_SECONDS));
+
+    foreach ($series_rows as $series_row) {
+      $calendar_id = (string)($series_row['calendar_id'] ?? '');
+      $master_event_id = (string)($series_row['google_event_id'] ?? '');
+      $autopay_profile_id = (int)($series_row['autopay_profile_id'] ?? 0);
+
+      if ($calendar_id === '' || $master_event_id === '' || $autopay_profile_id <= 0) {
         continue;
       }
 
-      $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
-      if (is_wp_error($google_truth)) {
+      $instances = $scheduler->get_google_series_occurrences_in_window($calendar_id, $master_event_id, $time_min, $time_max);
+      if (is_wp_error($instances) || !is_array($instances)) {
         continue;
       }
 
-      $status = (string)($row['status'] ?? '');
-      if ($status !== 'payment_due') {
+      $items = isset($instances['items']) && is_array($instances['items']) ? $instances['items'] : array();
+      foreach ($items as $ev) {
+        $google_status = strtolower((string)($ev['status'] ?? 'confirmed'));
+        if ($google_status === 'cancelled') {
+          continue;
+        }
+
+        $start_utc = '';
+        $end_utc = '';
+        $original_start_utc = '';
+        $google_event_id = (string)($ev['id'] ?? '');
+
+        if (!empty($ev['start']['dateTime'])) {
+          $start_utc = gmdate('Y-m-d H:i:s', strtotime((string)$ev['start']['dateTime']));
+        }
+        if (!empty($ev['end']['dateTime'])) {
+          $end_utc = gmdate('Y-m-d H:i:s', strtotime((string)$ev['end']['dateTime']));
+        }
+        if (!empty($ev['originalStartTime']['dateTime'])) {
+          $original_start_utc = gmdate('Y-m-d H:i:s', strtotime((string)$ev['originalStartTime']['dateTime']));
+        } elseif (!empty($ev['originalStartTime']['date'])) {
+          $original_start_utc = gmdate('Y-m-d H:i:s', strtotime((string)$ev['originalStartTime']['date'] . ' 00:00:00 UTC'));
+        } else {
+          $original_start_utc = $start_utc;
+        }
+
+        if ($start_utc === '' || $end_utc === '' || strtotime($end_utc) > time()) {
+          continue;
+        }
+
+        $occurrence_key = $master_event_id . '|' . $original_start_utc;
+        $existing_charge = $this->mrm_get_occurrence_charge_row($autopay_profile_id, $occurrence_key);
+
+        if (is_array($existing_charge) && in_array((string)($existing_charge['charge_status'] ?? ''), array('pending','paid'), true)) {
+          continue;
+        }
+
+        $lesson_id = $this->mrm_materialize_lesson_row_from_series_occurrence(
+          $series_row,
+          array(
+            'google_event_id' => $google_event_id,
+            'original_start_utc' => $original_start_utc,
+            'start_utc' => $start_utc,
+            'end_utc' => $end_utc,
+          )
+        );
+
+        if ($lesson_id <= 0) {
+          continue;
+        }
+
+        $occurrence_charge_id = 0;
+
+        if (!$existing_charge) {
+          $occurrence_charge_id = $this->mrm_insert_pending_occurrence_charge(
+            array(
+              'autopay_profile_id' => $autopay_profile_id,
+              'series_lesson_id' => (int)$series_row['id'],
+              'occurrence_key' => $occurrence_key,
+              'google_series_event_id' => $master_event_id,
+              'google_event_id' => $google_event_id,
+              'original_start_utc' => $original_start_utc,
+              'occurrence_start_utc' => $start_utc,
+              'occurrence_end_utc' => $end_utc,
+              'lesson_id' => $lesson_id,
+            )
+          );
+        } else {
+          $occurrence_charge_id = (int)$existing_charge['id'];
+        }
+
+        global $wpdb;
+        $lessons_table = $this->table_lessons();
+
         $wpdb->update(
           $lessons_table,
           array(
@@ -2567,20 +2865,33 @@ class MRM_Payments_Hub_Single {
           array('%s','%s','%s','%s'),
           array('%d')
         );
-      }
 
-      $this->charge_and_unlock_autopay(array(
-        'lesson_id' => $lesson_id,
-        'instructor_id' => (int)($row['instructor_id'] ?? 0),
-        'student_email' => (string)($row['student_email'] ?? ''),
-        'lesson_length' => (int)($row['lesson_length'] ?? 0),
-        'is_online' => (int)($row['is_online'] ?? 0),
-        'order_id' => (int)($row['order_id'] ?? 0),
-        'payment_mode' => (string)($row['payment_mode'] ?? 'autopay'),
-        'autopay_profile_id' => (int)($row['autopay_profile_id'] ?? 0),
-      ));
+        $this->charge_and_unlock_autopay(
+          array(
+            'lesson_id' => $lesson_id,
+            'instructor_id' => (int)$series_row['instructor_id'],
+            'autopay_profile_id' => $autopay_profile_id,
+          )
+        );
+
+        $lesson_row = $wpdb->get_row(
+          $wpdb->prepare("SELECT * FROM {$lessons_table} WHERE id=%d LIMIT 1", $lesson_id),
+          ARRAY_A
+        );
+
+        if (is_array($lesson_row) && (string)($lesson_row['charge_status'] ?? '') === 'paid') {
+          $order = $this->mrm_find_lesson_charge_order($lesson_id);
+          $order_id = (int)($order['id'] ?? 0);
+          $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+          $this->mrm_mark_occurrence_charge_paid($occurrence_charge_id, $lesson_id, $order_id, $pi_id);
+        } else {
+          $last_error = is_array($lesson_row) ? (string)($lesson_row['charge_last_error'] ?? 'Occurrence charge not completed.') : 'Occurrence charge not completed.';
+          $this->mrm_mark_occurrence_charge_failed($occurrence_charge_id, $last_error);
+        }
+      }
     }
   }
+
 
   public function cron_reset_stuck_autopay_lessons() {
     global $wpdb;

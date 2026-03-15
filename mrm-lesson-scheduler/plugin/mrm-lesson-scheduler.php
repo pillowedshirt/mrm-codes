@@ -1426,10 +1426,10 @@ class MRM_Lesson_Scheduler {
                     'status'        => 'series',
                     'google_event_id' => null,
                     'google_meet_url' => null,
-                    'order_id'        => null,
-                    'payment_mode'    => 'none',
+                    'order_id'        => ( $order_id > 0 ? $order_id : null ),
+                    'payment_mode'    => ( $payment_mode !== '' ? $payment_mode : 'none' ),
                     'payout_unlocked_at' => null,
-                    'autopay_profile_id' => null,
+                    'autopay_profile_id' => ( $autopay_profile_id > 0 ? $autopay_profile_id : null ),
                     'agreement_id'    => null,
                     'created_at'      => $now,
                     'updated_at'      => $now,
@@ -2097,29 +2097,23 @@ class MRM_Lesson_Scheduler {
 
         $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
 
-        // Prefer live Google timing first.  Fall back to the local lesson row only if the
-        // Google resolver cannot currently resolve the event.
+        // Google is the only timing truth for room access.
         $gate_timing = $this->get_live_google_timing_for_lesson( $lesson, $calendar_id );
 
-        if ( (string) ( $gate_timing['status'] ?? '' ) === 'resolved' ) {
-            $lesson = isset( $gate_timing['lesson'] ) && is_array( $gate_timing['lesson'] )
-                ? $gate_timing['lesson']
-                : $lesson;
-
-            $start_ts = (int) ( $gate_timing['start_ts'] ?? 0 );
-            $end_ts   = (int) ( $gate_timing['end_ts'] ?? 0 );
-        } else {
-            $start_ts = strtotime( (string) ( $lesson['start_time'] ?? '' ) );
-            $end_ts   = strtotime( (string) ( $lesson['end_time'] ?? '' ) );
-
-            if ( ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) && ! empty( $lesson['google_original_start_time'] ) ) {
-                $fallback_start_ts = strtotime( (string) $lesson['google_original_start_time'] );
-                if ( $fallback_start_ts ) {
-                    $start_ts = $fallback_start_ts;
-                    $end_ts = $fallback_start_ts + ( max( 1, (int) ( $lesson['lesson_length'] ?? 60 ) ) * MINUTE_IN_SECONDS );
-                }
-            }
+        if ( (string) ( $gate_timing['status'] ?? '' ) !== 'resolved' ) {
+            $this->render_gate_message_page(
+                'Schedule Unavailable',
+                'We could not confirm the live Google Calendar time for this lesson yet. Please refresh in a moment or contact your instructor.'
+            );
+            exit;
         }
+
+        $lesson = isset( $gate_timing['lesson'] ) && is_array( $gate_timing['lesson'] )
+            ? $gate_timing['lesson']
+            : $lesson;
+
+        $start_ts = (int) ( $gate_timing['start_ts'] ?? 0 );
+        $end_ts   = (int) ( $gate_timing['end_ts'] ?? 0 );
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             error_log(
@@ -3466,20 +3460,8 @@ class MRM_Lesson_Scheduler {
                     array( '%d' )
                 );
 
-                if ( (string) ( $synced_lesson['charge_status'] ?? '' ) !== 'paid' ) {
-                    do_action( 'mrm_lesson_charge_due', array(
-                        'lesson_id' => $booking_id,
-                        'instructor_id' => (int) $synced_lesson['instructor_id'],
-                        'student_email' => (string) $synced_lesson['student_email'],
-                        'lesson_length' => (int) $synced_lesson['lesson_length'],
-                        'is_online' => (int) $synced_lesson['is_online'],
-                        'order_id' => (int) ( $synced_lesson['order_id'] ?? 0 ),
-                        'payment_mode' => $payment_mode,
-                        'autopay_profile_id' => $autopay_profile_id,
-                        'google_event_id' => $new_event_id,
-                        'ended_at_utc' => (string) $new_end,
-                    ) );
-                }
+                // Immediate row-driven charge trigger removed.
+                // Occurrence-based autopay reconciliation now handles charges from Google truth.
 
                 continue;
             }
@@ -4783,6 +4765,19 @@ protected function base64url_encode( $data ) {
      * @param array  $attendee_emails Emails to add as attendees for calendar reminders
      * @return true|WP_Error
      */
+    public function get_google_series_occurrences_in_window( $calendar_id, $master_event_id, $time_min, $time_max ) {
+        $calendar_id = trim( (string) $calendar_id );
+        $master_event_id = trim( (string) $master_event_id );
+        $time_min = trim( (string) $time_min );
+        $time_max = trim( (string) $time_max );
+
+        if ( $calendar_id === '' || $master_event_id === '' || $time_min === '' || $time_max === '' ) {
+            return new WP_Error( 'mrm_bad_series_window_args', 'Missing calendar, master event, or time window.' );
+        }
+
+        return $this->google_list_event_instances( $calendar_id, $master_event_id, $time_min, $time_max );
+    }
+
     protected function build_google_recurrence_rules( $repeat_frequency, $repeat_duration, $start_ts ) {
         $repeat_frequency = strtolower( trim( (string) $repeat_frequency ) );
         $repeat_duration  = strtolower( trim( (string) $repeat_duration ) );
