@@ -741,7 +741,7 @@ class MRM_Lesson_Scheduler {
 
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
 
-        $wpdb->update(
+        $update_result = $wpdb->update(
             $table_lessons,
             array(
                 'start_time'                 => $new_start,
@@ -754,6 +754,16 @@ class MRM_Lesson_Scheduler {
             array( '%s', '%s', '%s', '%s', '%s' ),
             array( '%d' )
         );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log(
+                '[MRM] sync_lesson_row_from_google_truth updated lesson_id=' . $lesson_id .
+                ' start=' . $new_start .
+                ' end=' . $new_end .
+                ' stored_event_id=' . $stored_event_id .
+                ' update_result=' . var_export( $update_result, true )
+            );
+        }
 
         $lesson_row['start_time'] = $new_start;
         $lesson_row['end_time'] = $new_end;
@@ -816,13 +826,13 @@ class MRM_Lesson_Scheduler {
         add_action( 'mrm_scheduler_reconcile_completed_lessons', array( $this, 'cron_reconcile_completed_lessons' ) );
         add_action( 'mrm_scheduler_reconcile_cancelled_lessons', array( $this, 'cron_reconcile_cancelled_lessons' ) );
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
-            wp_schedule_event( time() + 60, 'mrm_10min', 'mrm_scheduler_sync_upcoming_events' );
+            wp_schedule_event( time() + 60, 'mrm_1min', 'mrm_scheduler_sync_upcoming_events' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
-            wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
+            wp_schedule_event( time() + 70, 'mrm_1min', 'mrm_scheduler_reconcile_completed_lessons' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
-            wp_schedule_event( time() + 180, 'mrm_10min', 'mrm_scheduler_reconcile_cancelled_lessons' );
+            wp_schedule_event( time() + 80, 'mrm_1min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
         // Gate page (virtual) for joining online lessons
         add_action( 'init', array( $this, 'register_join_gate_rewrite' ) );
@@ -831,8 +841,6 @@ class MRM_Lesson_Scheduler {
         add_action( 'send_headers', array( $this, 'maybe_send_gate_nocache_headers' ), 0 );
         add_filter( 'redirect_canonical', array( $this, 'maybe_disable_canonical_for_gate' ), 10, 2 );
         $this->options = get_option( $this->option_key, array() );
-        // Ensure our cron schedules are registered and any outdated jobs are rescheduled.
-        $this->maybe_reschedule_cron_jobs();
     }
 
     /* =========================================================
@@ -850,16 +858,7 @@ class MRM_Lesson_Scheduler {
         $inst->maybe_reschedule_cron_jobs();
     }
 
-    /**
-     * Unschedule any existing MRM cron jobs and reschedule them with the current interval.
-     *
-     * WordPress stores scheduled events in the options table and does not automatically update
-     * their interval when a plugin changes its schedule definition.  Without clearing and
-     * re‑scheduling, stale jobs may continue to run on old cadences.  This method should be
-     * called from the constructor and from the activation handler.
-     */
     protected function maybe_reschedule_cron_jobs() {
-        // Clear existing schedules for our hooks.
         $hooks = array(
             'mrm_scheduler_sync_upcoming_events',
             'mrm_scheduler_reconcile_completed_lessons',
@@ -867,29 +866,25 @@ class MRM_Lesson_Scheduler {
         );
 
         foreach ( $hooks as $hook ) {
-            // Remove all scheduled instances of the hook.
             if ( function_exists( 'wp_clear_scheduled_hook' ) ) {
                 wp_clear_scheduled_hook( $hook );
             } else {
-                // Fallback for older WP versions: unschedule individually.
                 while ( $timestamp = wp_next_scheduled( $hook ) ) {
                     wp_unschedule_event( $timestamp, $hook );
                 }
             }
         }
 
-        // Register our custom schedule if not already present.
         add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
 
-        // Schedule new events if none exist.  Stagger start times to avoid simultaneous runs.
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
-            wp_schedule_event( time() + 60, 'mrm_10min', 'mrm_scheduler_sync_upcoming_events' );
+            wp_schedule_event( time() + 60, 'mrm_1min', 'mrm_scheduler_sync_upcoming_events' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_completed_lessons' ) ) {
-            wp_schedule_event( time() + 120, 'mrm_10min', 'mrm_scheduler_reconcile_completed_lessons' );
+            wp_schedule_event( time() + 70, 'mrm_1min', 'mrm_scheduler_reconcile_completed_lessons' );
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
-            wp_schedule_event( time() + 180, 'mrm_10min', 'mrm_scheduler_reconcile_cancelled_lessons' );
+            wp_schedule_event( time() + 80, 'mrm_1min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
     }
 
@@ -1884,6 +1879,24 @@ class MRM_Lesson_Scheduler {
         // First sync every lesson row that shares this recurring room token.
         // This makes moved recurring occurrences update before room-availability is evaluated.
         $this->sync_shared_token_rows_from_google_truth( $token_hash );
+        // Re-read the lesson row after sync so this request uses the latest Google-derived
+        // start/end times instead of any stale values loaded earlier in the request.
+        if ( ! empty( $lesson['id'] ) ) {
+            global $wpdb;
+            $table_lessons = $wpdb->prefix . 'mrm_lessons';
+
+            $fresh_lesson = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT * FROM {$table_lessons} WHERE id = %d LIMIT 1",
+                    (int) $lesson['id']
+                ),
+                ARRAY_A
+            );
+
+            if ( is_array( $fresh_lesson ) && ! empty( $fresh_lesson ) ) {
+                $lesson = array_merge( $lesson, $fresh_lesson );
+            }
+        }
 
         global $wpdb;
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
@@ -3117,6 +3130,16 @@ class MRM_Lesson_Scheduler {
                 continue;
             }
 
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                error_log(
+                    '[MRM] cron_sync_upcoming_events attempting lesson_id=' . (int) ( $lesson_row['id'] ?? 0 ) .
+                    ' start_time=' . (string) ( $lesson_row['start_time'] ?? '' ) .
+                    ' end_time=' . (string) ( $lesson_row['end_time'] ?? '' ) .
+                    ' google_event_id=' . (string) ( $lesson_row['google_event_id'] ?? '' ) .
+                    ' google_original_start_time=' . (string) ( $lesson_row['google_original_start_time'] ?? '' )
+                );
+            }
+
             $sync = $this->sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, 120 );
 
             if ( (string) ( $sync['status'] ?? '' ) === 'cancelled' ) {
@@ -3129,6 +3152,13 @@ class MRM_Lesson_Scheduler {
     }
 
     public function register_custom_cron_schedules( $schedules ) {
+        if ( ! isset( $schedules['mrm_1min'] ) ) {
+            $schedules['mrm_1min'] = array(
+                'interval' => 60,
+                'display'  => __( 'Every 1 minute (MRM)', 'mrm-lesson-scheduler' ),
+            );
+        }
+
         if ( ! isset( $schedules['mrm_10min'] ) ) {
             $schedules['mrm_10min'] = array(
                 'interval' => 10 * 60,
