@@ -937,6 +937,8 @@ class MRM_Lesson_Scheduler {
         add_action( 'admin_post_mrm_scheduler_run_upgrade', array( $this, 'handle_run_upgrade' ) );
         add_action( 'admin_post_mrm_scheduler_save_google', array( $this, 'handle_save_google_settings' ) );
         add_action( 'admin_post_mrm_scheduler_test_google', array( $this, 'handle_test_google_settings' ) );
+        add_action( 'admin_post_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
+        add_action( 'admin_post_nopriv_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
         add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
         // Pattern B: periodic sync of upcoming events so gate/reminders stay accurate if instructors drag events
         add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
@@ -3364,10 +3366,12 @@ class MRM_Lesson_Scheduler {
         ) );
     }
 
-    public function cron_reconcile_completed_lessons() {
+    public function cron_reconcile_completed_lessons( $skip_initial_sync = false ) {
         global $wpdb;
 
-        $this->cron_sync_upcoming_events( 72, 30 );
+        if ( ! $skip_initial_sync ) {
+            $this->cron_sync_upcoming_events( 72, 30 );
+        }
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $rows = $this->get_lessons_needing_google_truth_pass( 300 );
@@ -3511,13 +3515,15 @@ class MRM_Lesson_Scheduler {
         }
     }
 
-    public function cron_reconcile_cancelled_lessons() {
+    public function cron_reconcile_cancelled_lessons( $skip_initial_sync = false ) {
         global $wpdb;
 
         if ( ! $this->google_is_configured() ) return;
 
         // Sync first so moved recurring instances update local start/end times.
-        $this->cron_sync_upcoming_events( 72, 30 );
+        if ( ! $skip_initial_sync ) {
+            $this->cron_sync_upcoming_events( 72, 30 );
+        }
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $instructors_table = $wpdb->prefix . 'mrm_instructors';
@@ -3934,6 +3940,17 @@ class MRM_Lesson_Scheduler {
         ?>
         <div class="wrap">
             <h1>MRM Scheduler — Google Calendar</h1>
+            <?php if ( isset( $_GET['sync_now'] ) ) : ?>
+                <div class="<?php echo ( (string) $_GET['sync_now'] === '1' ? 'notice notice-success' : 'notice notice-error' ); ?>"><p>
+                    <?php
+                    echo esc_html(
+                        ( (string) $_GET['sync_now'] === '1' )
+                            ? 'Direct Google sync finished. Rows fetched: ' . (int) ( $_GET['rows'] ?? 0 ) . '.'
+                            : 'Direct Google sync failed.'
+                    );
+                    ?>
+                </p></div>
+            <?php endif; ?>
             <p style="max-width:900px;"> This plugin uses a <strong>Google Cloud Service Account</strong> (JWT) to call the Google Calendar API. For each instructor calendar, share the calendar with the Service Account email below. </p>
             <hr>
             <h2>1) Service Account Credentials</h2>
@@ -3966,6 +3983,13 @@ class MRM_Lesson_Scheduler {
                             <p class="description"> Leave blank unless you set up <strong>Domain-wide Delegation</strong> in Google Workspace. If blank, sharing calendars with the Service Account email is enough. </p>
                         </td>
                     </tr>
+                    <tr>
+                        <th scope="row">Direct Sync Secret</th>
+                        <td>
+                            <input type="text" class="regular-text" name="google_sync_secret" value="<?php echo esc_attr( (string) ( $opts['google_sync_secret'] ?? '' ) ); ?>" placeholder="Paste a long random secret">
+                            <p class="description">Used by the direct Google sync endpoint for Hostinger cron. Use a long random value and keep it private.</p>
+                        </td>
+                    </tr>
                 </table>
                 <?php submit_button( 'Save Google Settings' ); ?>
             </form>
@@ -3995,6 +4019,32 @@ class MRM_Lesson_Scheduler {
                 <?php submit_button( 'Test Google Calendar API', 'secondary' ); ?>
             </form>
             <hr>
+            <h2>4) Direct Google Sync</h2>
+            <p>Use this when you want to force the plugin to pull Google event timing into <code>wp_mrm_lessons</code> immediately instead of waiting for WP-Cron.</p>
+            <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
+                <?php wp_nonce_field( 'mrm_scheduler_google_sync_now', 'mrm_scheduler_google_sync_now_nonce' ); ?>
+                <input type="hidden" name="action" value="mrm_scheduler_google_sync_now">
+                <?php submit_button( 'Run Google Sync Now', 'secondary' ); ?>
+            </form>
+            <p><strong>Direct endpoint for Hostinger cron:</strong></p>
+            <p>
+                <code style="display:block; max-width:100%; overflow:auto;">
+                    <?php
+                    echo esc_html(
+                        add_query_arg(
+                            array(
+                                'action'     => 'mrm_scheduler_google_sync_now',
+                                'sync_token' => (string) ( $opts['google_sync_secret'] ?? '' ),
+                                'format'     => 'json',
+                            ),
+                            admin_url( 'admin-post.php' )
+                        )
+                    );
+                    ?>
+                </code>
+            </p>
+
+            <hr>
             <h2>Sharing Calendars (required)</h2>
             <ol>
                 <li>Open the instructor availability calendar → <strong>Settings and sharing</strong>.</li>
@@ -4020,6 +4070,9 @@ class MRM_Lesson_Scheduler {
         }
         if ( isset( $_POST['google_delegated_user'] ) ) {
             $opts['google_delegated_user'] = sanitize_email( wp_unslash( $_POST['google_delegated_user'] ) );
+        }
+        if ( isset( $_POST['google_sync_secret'] ) ) {
+            $opts['google_sync_secret'] = sanitize_text_field( wp_unslash( $_POST['google_sync_secret'] ) );
         }
         if ( isset( $_POST['save_slot_rules'] ) ) {
             $slot = isset($_POST['default_slot_minutes']) ? absint($_POST['default_slot_minutes']) : 30;
@@ -4048,6 +4101,86 @@ class MRM_Lesson_Scheduler {
         }
         $msg = 'Success: Access token obtained. Next: share an instructor calendar with the Service Account email and test /availability.';
         wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=ok&msg=' . rawurlencode($msg) ) );
+        exit;
+    }
+
+    protected function run_google_sync_now( $source = 'manual' ) {
+        $summary = array(
+            'ok'            => false,
+            'source'        => (string) $source,
+            'started_at'    => current_time( 'mysql' ),
+            'finished_at'   => '',
+            'rows_fetched'  => 0,
+            'google_ready'  => false,
+            'message'       => '',
+        );
+
+        if ( ! $this->google_is_configured() ) {
+            $summary['message'] = 'Google is not configured.';
+            $summary['finished_at'] = current_time( 'mysql' );
+            return $summary;
+        }
+
+        $summary['google_ready'] = true;
+
+        $rows = $this->get_lessons_needing_google_truth_pass( 400 );
+        $summary['rows_fetched'] = is_array( $rows ) ? count( $rows ) : 0;
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log(
+                '[MRM] run_google_sync_now source=' . $summary['source'] .
+                ' rows_fetched=' . (int) $summary['rows_fetched'] .
+                ' started_at=' . $summary['started_at']
+            );
+        }
+
+        $this->cron_sync_upcoming_events( 72, 30 );
+        $this->cron_reconcile_completed_lessons( true );
+        $this->cron_reconcile_cancelled_lessons( true );
+
+        $summary['ok'] = true;
+        $summary['message'] = 'Direct Google sync completed.';
+        $summary['finished_at'] = current_time( 'mysql' );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log(
+                '[MRM] run_google_sync_now finished source=' . $summary['source'] .
+                ' finished_at=' . $summary['finished_at']
+            );
+        }
+
+        return $summary;
+    }
+
+    public function handle_google_sync_now_request() {
+        $is_admin_request = current_user_can( self::CAPABILITY ) && isset( $_POST['mrm_scheduler_google_sync_now_nonce'] );
+
+        if ( $is_admin_request ) {
+            check_admin_referer( 'mrm_scheduler_google_sync_now', 'mrm_scheduler_google_sync_now_nonce' );
+        } else {
+            $opts = $this->get_settings();
+            $saved_token = (string) ( $opts['google_sync_secret'] ?? '' );
+            $request_token = isset( $_REQUEST['sync_token'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['sync_token'] ) ) : '';
+
+            if ( $saved_token === '' || $request_token === '' || ! hash_equals( $saved_token, $request_token ) ) {
+                wp_die( 'Not allowed.', 'Not allowed', array( 'response' => 403 ) );
+            }
+        }
+
+        $summary = $this->run_google_sync_now( $is_admin_request ? 'admin_button' : 'direct_endpoint' );
+
+        $wants_json = ! $is_admin_request || ( isset( $_REQUEST['format'] ) && strtolower( (string) $_REQUEST['format'] ) === 'json' );
+
+        if ( $wants_json ) {
+            wp_send_json( $summary, ( ! empty( $summary['ok'] ) ? 200 : 500 ) );
+        }
+
+        wp_safe_redirect(
+            admin_url(
+                'admin.php?page=mrm-scheduler-google&sync_now=' . ( ! empty( $summary['ok'] ) ? '1' : '0' ) .
+                '&rows=' . (int) ( $summary['rows_fetched'] ?? 0 )
+            )
+        );
         exit;
     }
 
