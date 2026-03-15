@@ -1025,6 +1025,52 @@ class MRM_Payments_Hub_Single {
     ));
   }
 
+
+  private function stripe_retrieve_payment_method($payment_method_id) {
+    $payment_method_id = sanitize_text_field((string)$payment_method_id);
+    if (!$payment_method_id) return new WP_Error('stripe_invalid_args', 'Missing payment method id.');
+    return $this->stripe_api_request('GET', '/v1/payment_methods/' . rawurlencode($payment_method_id));
+  }
+
+  private function mrm_ensure_customer_payment_method_ready($customer_id, $payment_method_id) {
+    $customer_id = sanitize_text_field((string)$customer_id);
+    $payment_method_id = sanitize_text_field((string)$payment_method_id);
+
+    if (!$customer_id || !$payment_method_id) {
+      return new WP_Error('mrm_autopay_missing_customer_or_pm', 'Missing Stripe customer or payment method for autopay.');
+    }
+
+    $pm = $this->stripe_retrieve_payment_method($payment_method_id);
+    if (is_wp_error($pm)) {
+      return $pm;
+    }
+
+    $attached_customer = isset($pm['customer']) ? (string)$pm['customer'] : '';
+    if ($attached_customer !== '' && $attached_customer !== $customer_id) {
+      return new WP_Error(
+        'mrm_autopay_pm_customer_mismatch',
+        'Saved payment method is attached to a different Stripe customer.'
+      );
+    }
+
+    if ($attached_customer === '') {
+      $attach = $this->stripe_attach_payment_method_to_customer($payment_method_id, $customer_id);
+      if (is_wp_error($attach)) {
+        return $attach;
+      }
+    }
+
+    $set = $this->stripe_set_default_payment_method($customer_id, $payment_method_id);
+    if (is_wp_error($set)) {
+      return $set;
+    }
+
+    return array(
+      'customer_id' => $customer_id,
+      'payment_method_id' => $payment_method_id,
+    );
+  }
+
   private function stripe_detach_payment_method($payment_method_id) {
     $payment_method_id = sanitize_text_field((string)$payment_method_id);
     if (!$payment_method_id) return new WP_Error('stripe_invalid_args', 'Missing payment method id.');
@@ -1421,10 +1467,10 @@ class MRM_Payments_Hub_Single {
 
     $row = $wpdb->get_row($wpdb->prepare(
       "SELECT l.*, i.calendar_id
-     FROM {$lessons_table} l
-     LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id
-     WHERE l.id = %d
-     LIMIT 1",
+       FROM {$lessons_table} l
+       LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id
+       WHERE l.id = %d
+       LIMIT 1",
       $lesson_id
     ), ARRAY_A);
 
@@ -1433,22 +1479,28 @@ class MRM_Payments_Hub_Single {
     }
 
     $calendar_id = (string)($row['calendar_id'] ?? '');
-    $event_id = (string)($row['google_event_id'] ?? '');
-    if ($calendar_id === '' || $event_id === '') {
-      return new WP_Error('mrm_google_link_missing', 'Lesson is missing Google calendar linkage.');
+    if ($calendar_id === '') {
+      return new WP_Error('mrm_google_calendar_missing', 'Lesson is missing an instructor Google calendar ID.');
     }
 
     if (!class_exists('MRM_Lesson_Scheduler')) {
       return new WP_Error('mrm_scheduler_missing', 'Lesson scheduler class unavailable.');
     }
 
-    $scheduler = MRM_Lesson_Scheduler::instance();
+    // IMPORTANT:
+    // The scheduler plugin exposes get_instance(), not instance().
+    $scheduler = MRM_Lesson_Scheduler::get_instance();
     if (!$scheduler || !method_exists($scheduler, 'sync_lesson_row_from_google_truth')) {
       return new WP_Error('mrm_scheduler_sync_missing', 'Google sync helper unavailable.');
     }
 
+    // IMPORTANT:
+    // Do not require google_event_id here.
+    // The scheduler resolver can recover by direct event ID, series anchor,
+    // booking_id, google_original_start_time, and local start fallback.
     $sync = $scheduler->sync_lesson_row_from_google_truth($row, $calendar_id, 120);
     $status = (string)($sync['status'] ?? 'unresolved');
+
     if ($status === 'cancelled') {
       return new WP_Error('mrm_google_cancelled', 'Google event is cancelled.');
     }
@@ -2535,17 +2587,52 @@ class MRM_Payments_Hub_Single {
 
     $lessons_table = $this->table_lessons();
 
-    $wpdb->query(
-      "UPDATE {$lessons_table}
-       SET charge_status = 'due',
-           charge_last_error = CONCAT(COALESCE(charge_last_error, ''), ' | auto-reset from repeated failure'),
-           updated_at = UTC_TIMESTAMP()
-       WHERE payment_mode = 'autopay'
-         AND status = 'payment_due'
-         AND charge_status = 'failed'
-         AND charge_attempts >= 12
-         AND payout_unlocked_at IS NULL"
-    );
+    $rows = $wpdb->get_results("
+      SELECT id, charge_attempts, charge_last_error
+      FROM {$lessons_table}
+      WHERE payment_mode = 'autopay'
+        AND status = 'payment_due'
+        AND charge_status = 'failed'
+        AND charge_attempts >= 12
+        AND payout_unlocked_at IS NULL
+      ORDER BY updated_at ASC
+      LIMIT 100
+    ", ARRAY_A);
+
+    if (!$rows) {
+      return;
+    }
+
+    foreach ($rows as $row) {
+      $lesson_id = (int)($row['id'] ?? 0);
+      if ($lesson_id <= 0) {
+        continue;
+      }
+
+      // Only reset lessons that Google still confirms have actually ended.
+      $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
+      if (is_wp_error($google_truth)) {
+        continue;
+      }
+
+      $prev_error = trim((string)($row['charge_last_error'] ?? ''));
+      $new_error = trim($prev_error . ' | Auto-reset after retry cap; retry counter cleared for a fresh pass.');
+
+      $wpdb->update(
+        $lessons_table,
+        array(
+          'charge_status' => 'due',
+          'charge_attempts' => 0,
+          'charge_last_attempt_at' => null,
+          'charge_due_at' => current_time('mysql'),
+          'charge_last_error' => $new_error,
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => $lesson_id),
+        array('%s','%d','%s','%s','%s','%s'),
+        array('%d')
+      );
+    }
   }
 
   public function on_lesson_cancelled($data) {
@@ -2703,13 +2790,11 @@ class MRM_Payments_Hub_Single {
     if (is_wp_error($google_truth)) {
       $message = $google_truth->get_error_message();
 
-      global $wpdb;
-      $lessons_table = $this->table_lessons();
       $wpdb->update(
         $lessons_table,
         array(
           'status' => 'payment_due',
-          'charge_status' => 'failed',
+          'charge_status' => 'due',
           'charge_last_error' => $message,
           'updated_at' => current_time('mysql'),
         ),
@@ -2718,6 +2803,7 @@ class MRM_Payments_Hub_Single {
         array('%d')
       );
 
+      error_log('[MRM AutoPay] charge delayed pending Google truth for lesson_id=' . $lesson_id . ' reason=' . $message);
       return;
     }
 
@@ -2773,6 +2859,12 @@ class MRM_Payments_Hub_Single {
     $payment_method_id = (string)$validated_profile['payment_method_id'];
     $amount_cents = (int)$validated_profile['amount_cents'];
     $currency = (string)$validated_profile['currency'];
+
+    $pm_ready = $this->mrm_ensure_customer_payment_method_ready($customer_id, $payment_method_id);
+    if (is_wp_error($pm_ready)) {
+      $this->mrm_finalize_autopay_lesson_failure($lesson_id, $pm_ready->get_error_message());
+      return;
+    }
 
     $order_id = $this->create_order(
       (string)($profile['email_hash'] ?? ''),
@@ -3537,17 +3629,8 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Unable to create autopay profile.'), 500);
     }
 
-    $validated_profile = $this->mrm_validate_autopay_profile_for_charge(
-      $this->mrm_get_autopay_profile($autopay_profile_id)
-    );
-
-    if ( is_wp_error($validated_profile) ) {
-      return new WP_Error(
-        'mrm_autopay_profile_incomplete',
-        $validated_profile->get_error_message(),
-        array('status' => 500)
-      );
-    }
+    // This route is not your active frontend path, but this cleanup removes stale overlapping
+    // logic that was guaranteed to fail if it ever got used again.
 
     $si = $this->stripe_create_setup_intent($customer_id, array(
       'mrm_autopay_profile_id' => (string)$autopay_profile_id,
@@ -3601,9 +3684,10 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok'=>false,'message'=>'SetupIntent customer mismatch.'), 400);
     }
 
-    $set = $this->stripe_set_default_payment_method((string)$profile['customer_id'], $payment_method_id);
-    if (is_wp_error($set)) {
-      error_log('[MRM Payments Hub] finalize-autopay set default PM failed: ' . $set->get_error_message());
+    $pm_ready = $this->mrm_ensure_customer_payment_method_ready((string)$profile['customer_id'], $payment_method_id);
+    if (is_wp_error($pm_ready)) {
+      error_log('[MRM Payments Hub] finalize-autopay payment-method readiness failed: ' . $pm_ready->get_error_message());
+      return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()), 400);
     }
 
     $wpdb->update($this->table_autopay_profiles(), array(
@@ -3660,6 +3744,11 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Saved card details were not attached to the successful payment.'), 400);
     }
 
+    $pm_ready = $this->mrm_ensure_customer_payment_method_ready($customer_id, $payment_method_id);
+    if (is_wp_error($pm_ready)) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()), 400);
+    }
+
     $sku = 'lesson_' . ($lesson_length === 60 ? '60' : '30') . '_' . ($lesson_mode === 'online' ? 'online' : 'inperson');
     $p = $this->get_product($sku);
     if (!$p || empty($p['active'])) {
@@ -3711,11 +3800,6 @@ class MRM_Payments_Hub_Single {
         $validated_profile->get_error_message(),
         array('status' => 500)
       );
-    }
-
-    $set = $this->stripe_set_default_payment_method($customer_id, $payment_method_id);
-    if (is_wp_error($set)) {
-      error_log('[MRM Payments Hub] create-autopay-enrollment set default PM failed: ' . $set->get_error_message());
     }
 
     $order = $this->get_order_by_pi($payment_intent_id);
@@ -3865,18 +3949,11 @@ class MRM_Payments_Hub_Single {
       if ($customer_id && $pm_id) {
         error_log('[MRM Payments Hub] verify PI succeeded. customer=' . $customer_id . ' pm=' . $pm_id . ' setup_future_usage=' . $sfu);
 
-        // Best-effort attach (harmless if already attached; Stripe may error if already attached to another customer)
-        $attach = $this->stripe_attach_payment_method_to_customer($pm_id, $customer_id);
-        if (is_wp_error($attach)) {
-          error_log('[MRM Payments Hub] attach PM failed: ' . $attach->get_error_message() . ' data=' . wp_json_encode($attach->get_error_data()));
-        }
-
-        // Set as default for off-session usage
-        $set = $this->stripe_set_default_payment_method($customer_id, $pm_id);
-        if (is_wp_error($set)) {
-          error_log('[MRM Payments Hub] set default PM failed: ' . $set->get_error_message() . ' data=' . wp_json_encode($set->get_error_data()));
+        $pm_ready = $this->mrm_ensure_customer_payment_method_ready($customer_id, $pm_id);
+        if (is_wp_error($pm_ready)) {
+          error_log('[MRM Payments Hub] verify PI payment-method readiness failed: ' . $pm_ready->get_error_message() . ' data=' . wp_json_encode($pm_ready->get_error_data()));
         } else {
-          error_log('[MRM Payments Hub] default PM set for customer=' . $customer_id);
+          error_log('[MRM Payments Hub] payment method ready for customer=' . $customer_id);
         }
       } else {
         // If user expected autopay but no customer/pm is present, log it loudly
