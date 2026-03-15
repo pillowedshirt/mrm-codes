@@ -997,7 +997,7 @@ class MRM_Payments_Hub_Single {
       'payment_method' => (string)$payment_method_id,
       'off_session' => 'true',
       'confirm' => 'true',
-      'automatic_payment_methods[enabled]' => 'false',
+      'payment_method_types[0]' => 'card',
     );
     if ($description !== '') $params['description'] = (string)$description;
     foreach ((array)$metadata as $k => $v) {
