@@ -588,7 +588,9 @@ class MRM_Lesson_Scheduler {
             );
         };
 
+        // Attempt to resolve recurring instances first.
         if ( $series_id > 0 ) {
+            // If this row belongs to a series, try resolving against the master event id.
             $series_master_event_id = $this->get_series_master_google_event_id( $series_id );
             if ( $series_master_event_id !== '' ) {
                 $series_result = $resolve_from_master( $series_master_event_id );
@@ -598,6 +600,7 @@ class MRM_Lesson_Scheduler {
             }
         }
 
+        // If we have a stored event_id (could be a master or instance id), attempt to resolve directly.
         if ( $event_id !== '' ) {
             $direct = $resolve_from_master( $event_id );
             if ( $direct['status'] !== 'unresolved' ) {
@@ -605,8 +608,16 @@ class MRM_Lesson_Scheduler {
             }
         }
 
-        // Legacy fallback for non-recurring / older rows only.
-        if ( $series_id <= 0 ) {
+        /*
+         * Fallback resolution: query Google for events carrying our booking_id.  Previously this
+         * was only executed for non‑recurring events, but moved recurring instances still carry
+         * the lesson booking ID in their extendedProperties.  Without this additional pass the
+         * resolver can fail to match a rescheduled instance, leaving local start_time/end_time
+         * stale and causing gate issues.  This fallback runs a wide search window around the
+         * original and current start times and returns any event matching our booking ID.  The
+         * booking_id property is only ever set on events created by this plugin.
+         */
+        {
             $fallback_anchor_ts = strtotime( (string) $google_original_start_time );
             $fallback_start_ts  = strtotime( (string) $start_time );
             $fallback_end_ts    = strtotime( (string) $end_time );
@@ -639,6 +650,7 @@ class MRM_Lesson_Scheduler {
             }
         }
 
+        // Still unresolved.  Include the last attempted reason for easier debugging.
         return array(
             'status' => 'unresolved',
             'event'  => null,
@@ -681,6 +693,12 @@ class MRM_Lesson_Scheduler {
         $resolved_status = (string) ( $resolved['status'] ?? 'unresolved' );
         $resolved_event  = $resolved['event'] ?? null;
         $resolved_reason = (string) ( $resolved['reason'] ?? '' );
+
+        // Debug: log resolution outcomes to aid troubleshooting.  Include booking ID and reason.
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            $bid = (int) ( $lesson_row['id'] ?? 0 );
+            error_log( '[MRM] sync_lesson_row_from_google_truth lesson_id=' . $bid . ' status=' . $resolved_status . ' reason=' . $resolved_reason );
+        }
 
         if ( $resolved_status === 'cancelled' && is_array( $resolved_event ) ) {
             return array(
@@ -813,6 +831,8 @@ class MRM_Lesson_Scheduler {
         add_action( 'send_headers', array( $this, 'maybe_send_gate_nocache_headers' ), 0 );
         add_filter( 'redirect_canonical', array( $this, 'maybe_disable_canonical_for_gate' ), 10, 2 );
         $this->options = get_option( $this->option_key, array() );
+        // Ensure our cron schedules are registered and any outdated jobs are rescheduled.
+        $this->maybe_reschedule_cron_jobs();
     }
 
     /* =========================================================
@@ -826,6 +846,42 @@ class MRM_Lesson_Scheduler {
         $inst->register_join_gate_rewrite();
         flush_rewrite_rules();
 
+        // Reschedule cron jobs on activation to remove outdated intervals.
+        $inst->maybe_reschedule_cron_jobs();
+    }
+
+    /**
+     * Unschedule any existing MRM cron jobs and reschedule them with the current interval.
+     *
+     * WordPress stores scheduled events in the options table and does not automatically update
+     * their interval when a plugin changes its schedule definition.  Without clearing and
+     * re‑scheduling, stale jobs may continue to run on old cadences.  This method should be
+     * called from the constructor and from the activation handler.
+     */
+    protected function maybe_reschedule_cron_jobs() {
+        // Clear existing schedules for our hooks.
+        $hooks = array(
+            'mrm_scheduler_sync_upcoming_events',
+            'mrm_scheduler_reconcile_completed_lessons',
+            'mrm_scheduler_reconcile_cancelled_lessons',
+        );
+
+        foreach ( $hooks as $hook ) {
+            // Remove all scheduled instances of the hook.
+            if ( function_exists( 'wp_clear_scheduled_hook' ) ) {
+                wp_clear_scheduled_hook( $hook );
+            } else {
+                // Fallback for older WP versions: unschedule individually.
+                while ( $timestamp = wp_next_scheduled( $hook ) ) {
+                    wp_unschedule_event( $timestamp, $hook );
+                }
+            }
+        }
+
+        // Register our custom schedule if not already present.
+        add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
+
+        // Schedule new events if none exist.  Stagger start times to avoid simultaneous runs.
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
             wp_schedule_event( time() + 60, 'mrm_10min', 'mrm_scheduler_sync_upcoming_events' );
         }
@@ -3045,6 +3101,14 @@ class MRM_Lesson_Scheduler {
         if ( ! $this->google_is_configured() ) return;
 
         $rows = $this->get_lessons_needing_google_truth_pass( 400 );
+
+        // Debug: record when the sync job fires and how many rows were fetched.  This aids in
+        // diagnosing whether WP‑Cron is running versus whether the resolver is failing.
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            $count = ( is_array( $rows ) ? count( $rows ) : 0 );
+            error_log( '[MRM] cron_sync_upcoming_events running at ' . current_time( 'mysql' ) . ' with ' . $count . ' rows' );
+        }
+
         if ( ! is_array( $rows ) || empty( $rows ) ) return;
 
         foreach ( $rows as $lesson_row ) {
