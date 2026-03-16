@@ -1828,6 +1828,27 @@ class MRM_Payments_Hub_Single {
     );
   }
 
+  private function mrm_get_lesson_row_for_receipt($lesson_id) {
+    global $wpdb;
+
+    $lesson_id = (int)$lesson_id;
+    if ($lesson_id <= 0) return array();
+
+    $table = $wpdb->prefix . 'mrm_lessons';
+    $row = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT id, instructor_id, lesson_length, is_online, autopay_profile_id, payment_mode
+         FROM {$table}
+         WHERE id = %d
+         LIMIT 1",
+        $lesson_id
+      ),
+      ARRAY_A
+    );
+
+    return is_array($row) ? $row : array();
+  }
+
   private function mrm_set_order_meta_flag($order_id, $key, $value) {
     global $wpdb;
     $order_id = (int)$order_id;
@@ -1857,10 +1878,18 @@ class MRM_Payments_Hub_Single {
     $pi_id = (string)($pi['id'] ?? '');
     $pi_meta = (isset($pi['metadata']) && is_array($pi['metadata'])) ? $pi['metadata'] : array();
 
+    $order_meta = array();
+    if (!empty($order_row['metadata_json'])) {
+      $decoded = json_decode((string)$order_row['metadata_json'], true);
+      if (is_array($decoded)) $order_meta = $decoded;
+    }
+
+    // Merge metadata so local order metadata can backfill fields missing from PI metadata.
+    $meta = array_merge($order_meta, $pi_meta);
+
     // Determine customer email
-    $email = sanitize_email((string)($pi_meta['mrm_customer_email'] ?? ''));
+    $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
     if (!$email || !is_email($email)) {
-      // fallback: try decode from order email_hash if available
       $email_hash = (string)($order_row['email_hash'] ?? '');
       if ($email_hash) {
         $decoded = $this->decode_email_hash($email_hash);
@@ -1869,18 +1898,19 @@ class MRM_Payments_Hub_Single {
     }
     if (!$email || !is_email($email)) return;
 
-    // Check idempotency flag
+    // Idempotency
     $existing_meta = array();
     if (!empty($order_row['metadata_json'])) {
       $decoded = json_decode((string)$order_row['metadata_json'], true);
       if (is_array($decoded)) $existing_meta = $decoded;
     }
     if (!empty($existing_meta['mrm_receipt_sent_at'])) {
-      return; // already sent
+      return;
     }
 
-    $sku = (string)($pi_meta['mrm_sku'] ?? ($order_row['sku'] ?? ''));
-    $product_type = (string)($pi_meta['mrm_product_type'] ?? ($order_row['product_type'] ?? 'unknown'));
+    $sku = (string)($meta['mrm_sku'] ?? ($order_row['sku'] ?? ''));
+    $product_type = (string)($meta['mrm_product_type'] ?? ($order_row['product_type'] ?? 'unknown'));
+
     $p = $sku ? $this->get_product($sku) : null;
     $label = (is_array($p) && !empty($p['label'])) ? (string)$p['label'] : ($sku ?: 'Purchase');
 
@@ -1889,9 +1919,9 @@ class MRM_Payments_Hub_Single {
     elseif (isset($pi['amount'])) $amount_cents = (int)$pi['amount'];
     else $amount_cents = (int)($order_row['amount_cents'] ?? 0);
 
-    $base_cents  = (int)($pi_meta['mrm_base_amount_cents'] ?? 0);
-    $addon_cents = (int)($pi_meta['mrm_addon_amount_cents'] ?? 0);
-    $tax_cents   = (int)($pi_meta['mrm_addon_tax_cents'] ?? 0);
+    $base_cents  = (int)($meta['mrm_base_amount_cents'] ?? 0);
+    $addon_cents = (int)($meta['mrm_addon_amount_cents'] ?? 0);
+    $tax_cents   = (int)($meta['mrm_addon_tax_cents'] ?? 0);
 
     $fmt_money = function($c){ return '$' . number_format(((int)$c)/100, 2); };
 
@@ -1900,64 +1930,149 @@ class MRM_Payments_Hub_Single {
 
     $details = '';
     $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
-    // Show SKU for piece products etc, but hide it for lessons
-    if ($sku && $product_type !== 'lesson') $details .= '<div><strong>SKU:</strong> ' . esc_html($sku) . '</div>';
-    if (!empty($order_row['id'])) $details .= '<div><strong>Order #:</strong> ' . esc_html((string)$order_row['id']) . '</div>';
-    if ($pi_id) $details .= '<div><strong>Payment ID:</strong> ' . esc_html($pi_id) . '</div>';
-
-    // Pricing breakdown when present
-    if ($base_cents > 0) {
-      $details .= '<div style="margin-top:10px;"><strong>Base:</strong> '.$fmt_money($base_cents).'</div>';
-      if ($addon_cents > 0) $details .= '<div><strong>Sheet music add-on:</strong> '.$fmt_money($addon_cents).'</div>';
-      if ($tax_cents > 0) $details .= '<div><strong>Add-on tax:</strong> '.$fmt_money($tax_cents).'</div>';
-      $details .= '<div><strong>Total:</strong> '.$fmt_money($amount_cents).'</div>';
-    } else {
-      $details .= '<div style="margin-top:10px;"><strong>Total:</strong> '.$fmt_money($amount_cents).'</div>';
+    if ($sku && $product_type !== 'lesson') {
+      $details .= '<div><strong>SKU:</strong> ' . esc_html($sku) . '</div>';
+    }
+    if (!empty($order_row['id'])) {
+      $details .= '<div><strong>Order #:</strong> ' . esc_html((string)$order_row['id']) . '</div>';
+    }
+    if ($pi_id) {
+      $details .= '<div><strong>Payment ID:</strong> ' . esc_html($pi_id) . '</div>';
     }
 
-    // Lesson-specific helpful info (when available)
+    if ($base_cents > 0) {
+      $details .= '<div style="margin-top:10px;"><strong>Base:</strong> ' . $fmt_money($base_cents) . '</div>';
+      if ($addon_cents > 0) $details .= '<div><strong>Sheet music add-on:</strong> ' . $fmt_money($addon_cents) . '</div>';
+      if ($tax_cents > 0) $details .= '<div><strong>Add-on tax:</strong> ' . $fmt_money($tax_cents) . '</div>';
+      $details .= '<div><strong>Total:</strong> ' . $fmt_money($amount_cents) . '</div>';
+    } else {
+      $details .= '<div style="margin-top:10px;"><strong>Total:</strong> ' . $fmt_money($amount_cents) . '</div>';
+    }
+
     if ($product_type === 'lesson') {
-      $iid = (string)($pi_meta['mrm_instructor_id'] ?? '');
+      $lesson_id = (int)($meta['mrm_lesson_id'] ?? 0);
+      $lesson_row = $this->mrm_get_lesson_row_for_receipt($lesson_id);
+
+      $autopay_profile_id = (int)($meta['mrm_autopay_profile_id'] ?? 0);
+      if ($autopay_profile_id <= 0) {
+        $autopay_profile_id = (int)($lesson_row['autopay_profile_id'] ?? 0);
+      }
+      $autopay_profile = $autopay_profile_id > 0 ? $this->mrm_get_autopay_profile($autopay_profile_id) : array();
+
+      $iid = (int)($meta['mrm_instructor_id'] ?? 0);
+      if ($iid <= 0) {
+        $iid = (int)($lesson_row['instructor_id'] ?? 0);
+      }
       $instructor = $iid ? $this->mrm_get_instructor_contact_from_id($iid) : array('name'=>'','email'=>'');
 
-      $len  = (string)($pi_meta['mrm_lesson_length'] ?? '');
-      $mode = (string)($pi_meta['mrm_lesson_mode'] ?? '');
-      $count = (string)($pi_meta['mrm_lesson_count'] ?? '');
-      $prepay = (string)($pi_meta['mrm_prepay'] ?? '');
-
-      $details .= '<div style="margin-top:12px;"><strong>Lesson details</strong></div>';
-      if ($len)  $details .= '<div>Length: ' . esc_html($len) . ' minutes</div>';
-      if ($mode) $details .= '<div>Mode: ' . esc_html($mode) . '</div>';
-      if ($count) $details .= '<div>Count: ' . esc_html($count) . '</div>';
-
-      // Plan display rules:
-      // - Non-recurring lessons should always show Prepay
-      // - Recurring lessons show Prepay vs Auto-pay based on mrm_prepay
-      $is_recurring = ((int)$count > 1);
-      if ($is_recurring) {
-        $details .= '<div>Plan: ' . esc_html($prepay === 'yes' ? 'Prepay' : 'Auto-pay') . '</div>';
-      } else {
-        $details .= '<div>Plan: Prepay</div>';
+      $len = trim((string)($meta['mrm_lesson_length'] ?? ''));
+      if ($len === '') {
+        $len = (string)($lesson_row['lesson_length'] ?? '');
       }
 
-      // Swap the order: cancellation guidance first, then instructor contact info
+      $raw_mode = trim((string)($meta['mrm_lesson_mode'] ?? ''));
+      if ($raw_mode === '') {
+        $is_online = (int)($lesson_row['is_online'] ?? 0);
+        $raw_mode = $is_online ? 'Online' : 'In Person';
+      }
+
+      $mode_lower = strtolower($raw_mode);
+      if (in_array($mode_lower, array('online', 'virtual'), true)) {
+        $mode_label = 'Online';
+      } elseif (in_array($mode_lower, array('in person', 'in-person', 'inperson'), true)) {
+        $mode_label = 'In Person';
+      } else {
+        $mode_label = ucwords(trim($raw_mode));
+      }
+
+      $lesson_count_raw = trim((string)($meta['mrm_lesson_count'] ?? ''));
+      $prepay = trim((string)($meta['mrm_prepay'] ?? ''));
+      $autopay = trim((string)($meta['mrm_autopay'] ?? ''));
+      $repeat_duration = trim((string)($meta['mrm_repeat_duration'] ?? ''));
+      $plan_kind = trim((string)($meta['mrm_plan_kind'] ?? ''));
+      if ($plan_kind === '' && is_array($autopay_profile)) {
+        $plan_kind = (string)($autopay_profile['plan_kind'] ?? '');
+      }
+
+      $authorized_lesson_count = (int)($meta['mrm_authorized_lesson_count'] ?? 0);
+      if ($authorized_lesson_count <= 0 && is_array($autopay_profile)) {
+        $authorized_lesson_count = (int)($autopay_profile['authorized_lesson_count'] ?? 0);
+      }
+
+      $is_autopay_followup_receipt = ($sku === 'autopay_lesson_charge');
+      $is_autopay_initial_receipt = ($autopay === 'yes' && $sku !== 'autopay_lesson_charge');
+      $is_autopay_receipt = ($is_autopay_initial_receipt || $is_autopay_followup_receipt);
+
+      $count_display = '';
+      if ($is_autopay_receipt) {
+        if ($repeat_duration === 'indefinitely' || $plan_kind === 'indefinite') {
+          $count_display = 'Indefinite';
+        } elseif ($authorized_lesson_count > 0) {
+          $count_display = (string)$authorized_lesson_count;
+        } elseif ($lesson_count_raw !== '') {
+          $count_display = $lesson_count_raw;
+        }
+      } else {
+        if ($lesson_count_raw !== '') {
+          $count_display = $lesson_count_raw;
+        }
+      }
+
+      $plan_display = 'Prepay';
+      if ($is_autopay_receipt) {
+        $plan_display = 'Auto';
+      } elseif ($prepay === 'yes') {
+        $plan_display = 'Prepay';
+      }
+
+      $lesson_subject_bits = array();
+      if ($len !== '') $lesson_subject_bits[] = $len . '-minute';
+      if ($mode_label !== '') $lesson_subject_bits[] = $mode_label;
+      $lesson_subject_bits[] = 'Lesson';
+      $lesson_subject_label = implode(' ', $lesson_subject_bits);
+
+      $details .= '<div style="margin-top:12px;"><strong>Lesson details</strong></div>';
+      if ($len !== '') {
+        $details .= '<div>Length: ' . esc_html($len) . ' minutes</div>';
+      }
+      if ($mode_label !== '') {
+        $details .= '<div>Mode: ' . esc_html($mode_label) . '</div>';
+      }
+      if ($count_display !== '') {
+        $details .= '<div>Count: ' . esc_html($count_display) . '</div>';
+      }
+      $details .= '<div>Plan: ' . esc_html($plan_display) . '</div>';
+
+      if ($is_autopay_initial_receipt) {
+        $details .= '<div style="margin-top:12px;">This message confirms that we have received payment for your first lesson. You will not be charged again until after your second lesson is delivered.</div>';
+      }
+
+      if ($is_autopay_followup_receipt) {
+        $details .= '<div style="margin-top:12px;">This message confirms your automatic payment for this lesson.</div>';
+      }
+
       $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel? Contact your instructor.</strong></div>';
 
+      if (!empty($instructor['name'])) {
+        $details .= '<div style="margin-top:6px;">' . esc_html($instructor['name']) . '</div>';
+      }
       if (!empty($instructor['email'])) {
-        $name = $instructor['name'] ? $instructor['name'] : 'Your instructor';
-        $details .= '<div style="margin-top:6px;">' . esc_html($name) . '</div>';
         $details .= '<div><a href="mailto:' . esc_attr($instructor['email']) . '">' . esc_html($instructor['email']) . '</a></div>';
+      }
+
+      if ($is_autopay_receipt) {
+        $label = 'AutoPay for ' . $lesson_subject_label;
+      } else {
+        $label = $lesson_subject_label;
       }
     }
 
-    // Sheet music specific hint
     if ($product_type === 'sheet_music') {
       $details .= '<div style="margin-top:12px;">If you purchased sheet music, you can access it from the product page using your email and one-time password.</div>';
     }
 
     $contact_url = $this->mrm_get_contact_url();
 
-    // Support / refund guidance differs by product type
     if ($product_type === 'sheet_music') {
       $details .= '<div style="margin-top:12px;"><strong>Need assistance or would like to request a refund?</strong></div>';
     } elseif ($product_type !== 'lesson') {
@@ -1966,7 +2081,7 @@ class MRM_Payments_Hub_Single {
 
     $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
 
-    $subject = 'Purchase confirmation – ' . $label;
+    $subject = 'Purchase confirmation — ' . $label;
 
     $headers = array(
       'Content-Type: text/html; charset=UTF-8',
@@ -2987,6 +3102,11 @@ class MRM_Payments_Hub_Single {
         'mrm_instructor_id' => (string)$instructor_id,
         'mrm_lesson_id' => (string)$lesson_id,
         'mrm_charge_attempt' => (string)$attempts,
+        'mrm_lesson_length' => (string)($lesson['lesson_length'] ?? ''),
+        'mrm_lesson_mode' => ((int)($lesson['is_online'] ?? 0) === 1 ? 'Online' : 'In Person'),
+        'mrm_autopay' => 'yes',
+        'mrm_plan_kind' => (string)($profile['plan_kind'] ?? ''),
+        'mrm_authorized_lesson_count' => (string)((int)($profile['authorized_lesson_count'] ?? 0)),
       )
     );
 
@@ -3001,6 +3121,12 @@ class MRM_Payments_Hub_Single {
         'mrm_order_id' => (string)$order_id,
         'mrm_lesson_id' => (string)$lesson_id,
         'mrm_autopay_profile_id' => (string)$autopay_profile_id,
+        'mrm_instructor_id' => (string)$instructor_id,
+        'mrm_lesson_length' => (string)($lesson['lesson_length'] ?? ''),
+        'mrm_lesson_mode' => ((int)($lesson['is_online'] ?? 0) === 1 ? 'Online' : 'In Person'),
+        'mrm_autopay' => 'yes',
+        'mrm_plan_kind' => (string)($profile['plan_kind'] ?? ''),
+        'mrm_authorized_lesson_count' => (string)((int)($profile['authorized_lesson_count'] ?? 0)),
       ),
       'MRM AutoPay Lesson Charge'
     );
