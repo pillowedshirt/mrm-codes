@@ -125,9 +125,23 @@ class MRM_Lesson_Scheduler {
     // List instances for a recurring Google Calendar event (master -> instances)
     protected function google_list_event_instances( $calendar_id, $event_id, $time_min_rfc3339, $time_max_rfc3339 ) {
         $calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+        $event_id    = trim( (string) $event_id );
 
         if ( ! $this->google_is_configured() ) {
             return new WP_Error( 'google_not_configured', 'Google Calendar is not configured.' );
+        }
+
+        if ( $calendar_id === '' ) {
+            return new WP_Error( 'google_calendar_missing', 'Google Calendar ID is missing.' );
+        }
+
+        if ( $event_id === '' ) {
+            return new WP_Error( 'google_event_missing', 'Google event ID is missing.' );
+        }
+
+        $range = $this->normalize_google_time_range( $time_min_rfc3339, $time_max_rfc3339 );
+        if ( is_wp_error( $range ) ) {
+            return $range;
         }
 
         $access_token = $this->google_get_access_token();
@@ -139,8 +153,8 @@ class MRM_Lesson_Scheduler {
                 '/events/' . rawurlencode( (string) $event_id ) . '/instances';
 
         $url = add_query_arg( array(
-            'timeMin'     => $time_min_rfc3339,
-            'timeMax'     => $time_max_rfc3339,
+            'timeMin'     => $range['timeMin'],
+            'timeMax'     => $range['timeMax'],
             'showDeleted' => 'false',
             'maxResults'  => 2500,
         ), $base );
@@ -165,8 +179,19 @@ class MRM_Lesson_Scheduler {
             return new WP_Error( 'google_list_instances_failed', 'Google Calendar events.instances failed.' );
         }
 
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log(
+                '[MRM] google_list_instances_success calendar_id=' . $calendar_id .
+                ' event_id=' . $event_id .
+                ' timeMin=' . $range['timeMin'] .
+                ' timeMax=' . $range['timeMax'] .
+                ' count=' . count( (array) ( $json['items'] ?? array() ) )
+            );
+        }
+
         return $json;
     }
+
 
     // List Google Calendar events for a window (Pattern B)
     protected function google_list_events( $calendar_id, $time_min_rfc3339, $time_max_rfc3339 ) {
@@ -174,6 +199,15 @@ class MRM_Lesson_Scheduler {
 
         if ( ! $this->google_is_configured() ) {
             return new WP_Error( 'google_not_configured', 'Google Calendar is not configured.' );
+        }
+
+        if ( $calendar_id === '' ) {
+            return new WP_Error( 'google_calendar_missing', 'Google Calendar ID is missing.' );
+        }
+
+        $range = $this->normalize_google_time_range( $time_min_rfc3339, $time_max_rfc3339 );
+        if ( is_wp_error( $range ) ) {
+            return $range;
         }
 
         $access_token = $this->google_get_access_token();
@@ -184,8 +218,8 @@ class MRM_Lesson_Scheduler {
         $base = sprintf( self::GOOGLE_EVENTS_LIST_URL, rawurlencode( (string) $calendar_id ) );
 
         $url = add_query_arg( array(
-            'timeMin'      => $time_min_rfc3339,
-            'timeMax'      => $time_max_rfc3339,
+            'timeMin'      => $range['timeMin'],
+            'timeMax'      => $range['timeMax'],
             'singleEvents' => 'true',
             'showDeleted'  => 'false',
             'maxResults'   => 2500,
@@ -212,8 +246,18 @@ class MRM_Lesson_Scheduler {
             return new WP_Error( 'google_list_events_failed', 'Google Calendar events.list failed.' );
         }
 
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log(
+                '[MRM] google_list_events_success calendar_id=' . $calendar_id .
+                ' timeMin=' . $range['timeMin'] .
+                ' timeMax=' . $range['timeMax'] .
+                ' count=' . count( (array) ( $json['items'] ?? array() ) )
+            );
+        }
+
         return $json;
     }
+
 
     /**
      * Find the correct Google Calendar event instance for a given booking_id
@@ -235,6 +279,15 @@ class MRM_Lesson_Scheduler {
             return null;
         }
 
+        if ( $calendar_id === '' ) {
+            return new WP_Error( 'google_calendar_missing', 'Google Calendar ID is missing.' );
+        }
+
+        $range = $this->normalize_google_time_range( $timeMin, $timeMax );
+        if ( is_wp_error( $range ) ) {
+            return $range;
+        }
+
         $access_token = $this->google_get_access_token();
         if ( is_wp_error( $access_token ) ) {
             return $access_token;
@@ -243,8 +296,8 @@ class MRM_Lesson_Scheduler {
         $base = sprintf( self::GOOGLE_EVENTS_LIST_URL, rawurlencode( (string) $calendar_id ) );
 
         $url = add_query_arg( array(
-            'timeMin'                 => $timeMin,
-            'timeMax'                 => $timeMax,
+            'timeMin'                 => $range['timeMin'],
+            'timeMax'                 => $range['timeMax'],
             'singleEvents'            => 'true',
             'showDeleted'             => 'false',
             'maxResults'              => 2500,
@@ -260,6 +313,7 @@ class MRM_Lesson_Scheduler {
         ) );
 
         if ( is_wp_error( $res ) ) {
+            $this->log_google_api_failure( 'google_find_event_by_booking_id_wp_error', $url, $res );
             return $res;
         }
 
@@ -267,11 +321,20 @@ class MRM_Lesson_Scheduler {
         $json = json_decode( wp_remote_retrieve_body( $res ), true );
 
         if ( $code < 200 || $code >= 300 || ! is_array( $json ) ) {
+            $this->log_google_api_failure( 'google_find_event_by_booking_id_failed', $url, $res );
             return new WP_Error( 'google_find_event_by_booking_id_failed', 'Google Calendar booking_id lookup failed.' );
         }
 
         $items = isset( $json['items'] ) && is_array( $json['items'] ) ? $json['items'] : array();
         if ( empty( $items ) ) {
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                error_log(
+                    '[MRM] google_find_event_by_booking_id_empty calendar_id=' . $calendar_id .
+                    ' booking_id=' . $booking_id .
+                    ' timeMin=' . $range['timeMin'] .
+                    ' timeMax=' . $range['timeMax']
+                );
+            }
             return null;
         }
 
@@ -281,12 +344,20 @@ class MRM_Lesson_Scheduler {
                 $bid = (int) $ev['extendedProperties']['private']['booking_id'];
             }
             if ( $bid === $booking_id ) {
+                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                    error_log(
+                        '[MRM] google_find_event_by_booking_id_match calendar_id=' . $calendar_id .
+                        ' booking_id=' . $booking_id .
+                        ' matched_event_id=' . (string) ( $ev['id'] ?? '' )
+                    );
+                }
                 return $ev;
             }
         }
 
         return null;
     }
+
 
     // From an instances.list payload, find the instance matching booking_id
     protected function google_find_instance_by_booking_id( $instances_payload, $booking_id ) {
@@ -387,6 +458,15 @@ class MRM_Lesson_Scheduler {
             return new WP_Error( 'missing_property_clause', 'Missing private property clause.' );
         }
 
+        if ( $calendar_id === '' ) {
+            return new WP_Error( 'google_calendar_missing', 'Google Calendar ID is missing.' );
+        }
+
+        $range = $this->normalize_google_time_range( $timeMin, $timeMax );
+        if ( is_wp_error( $range ) ) {
+            return $range;
+        }
+
         $access_token = $this->google_get_access_token();
         if ( is_wp_error( $access_token ) ) {
             return $access_token;
@@ -395,8 +475,8 @@ class MRM_Lesson_Scheduler {
         $base = sprintf( self::GOOGLE_EVENTS_LIST_URL, rawurlencode( (string) $calendar_id ) );
 
         $url = add_query_arg( array(
-            'timeMin'                 => $timeMin,
-            'timeMax'                 => $timeMax,
+            'timeMin'                 => $range['timeMin'],
+            'timeMax'                 => $range['timeMax'],
             'singleEvents'            => 'true',
             'showDeleted'             => 'false',
             'maxResults'              => 2500,
@@ -424,8 +504,19 @@ class MRM_Lesson_Scheduler {
             return new WP_Error( 'google_list_events_private_filter_failed', 'Google Calendar filtered events.list failed.' );
         }
 
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log(
+                '[MRM] google_list_events_private_success calendar_id=' . $calendar_id .
+                ' property=' . $property_clause .
+                ' timeMin=' . $range['timeMin'] .
+                ' timeMax=' . $range['timeMax'] .
+                ' count=' . count( (array) ( $json['items'] ?? array() ) )
+            );
+        }
+
         return $json;
     }
+
 
     protected function google_find_event_by_series_id_and_anchor( $calendar_id, $series_id, $google_original_start_time, $local_start_time, $timeMin, $timeMax ) {
         $series_id = (int) $series_id;
@@ -853,7 +944,7 @@ class MRM_Lesson_Scheduler {
 
         $window_days = max( 30, (int) $instance_window_days );
 
-        $make_window = function() use ( $google_original_start_time, $start_time, $end_time, $window_days ) {
+                $make_window = function() use ( $google_original_start_time, $start_time, $end_time, $window_days ) {
             $anchor_ts = strtotime( (string) $google_original_start_time );
             $start_ts  = strtotime( (string) $start_time );
             $end_ts    = strtotime( (string) $end_time );
@@ -865,9 +956,37 @@ class MRM_Lesson_Scheduler {
             $window_base_start = $anchor_ts ?: $start_ts ?: time();
             $window_base_end   = $end_ts ?: $window_base_start;
 
+            $raw_min = gmdate(
+                'Y-m-d H:i:s',
+                min( $window_base_start, time() ) - ( $window_days * DAY_IN_SECONDS )
+            );
+
+            $raw_max = gmdate(
+                'Y-m-d H:i:s',
+                max( $window_base_end, time() ) + ( $window_days * DAY_IN_SECONDS )
+            );
+
+            $normalized = $this->normalize_google_time_range( $raw_min, $raw_max );
+
+            if ( is_wp_error( $normalized ) ) {
+                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                    error_log(
+                        '[MRM] google_resolve_stage_window_normalize_failed' .
+                        ' raw_min=' . $raw_min .
+                        ' raw_max=' . $raw_max .
+                        ' error=' . $normalized->get_error_message()
+                    );
+                }
+
+                return array(
+                    'time_min' => gmdate( 'Y-m-d\TH:i:s\Z', strtotime( $raw_min ) ),
+                    'time_max' => gmdate( 'Y-m-d\TH:i:s\Z', strtotime( $raw_max ) ),
+                );
+            }
+
             return array(
-                'time_min' => gmdate( 'c', min( $window_base_start, time() ) - ( $window_days * DAY_IN_SECONDS ) ),
-                'time_max' => gmdate( 'c', max( $window_base_end, time() ) + ( $window_days * DAY_IN_SECONDS ) ),
+                'time_min' => $normalized['timeMin'],
+                'time_max' => $normalized['timeMax'],
             );
         };
 
@@ -1224,6 +1343,7 @@ class MRM_Lesson_Scheduler {
             );
         }
 
+        $calendar_id = trim( (string) $calendar_id );
         if ( $calendar_id === '' || ! $this->google_is_configured() ) {
             return array(
                 'status' => 'unresolved',
@@ -1237,17 +1357,16 @@ class MRM_Lesson_Scheduler {
         $resolved_event  = $resolved['event'] ?? null;
         $resolved_reason = (string) ( $resolved['reason'] ?? '' );
 
-        // Debug: log resolution outcomes to aid troubleshooting.  Include booking ID and reason.
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            $bid = (int) ( $lesson_row['id'] ?? 0 );
             error_log(
-                '[MRM] sync_lesson_row_from_google_truth lesson_id=' . $bid .
+                '[MRM] sync_lesson_row_from_google_truth lesson_id=' . $lesson_id .
                 ' status=' . $resolved_status .
                 ' reason=' . $resolved_reason .
                 ' local_start=' . (string) ( $lesson_row['start_time'] ?? '' ) .
                 ' local_end=' . (string) ( $lesson_row['end_time'] ?? '' ) .
                 ' google_original_start_time=' . (string) ( $lesson_row['google_original_start_time'] ?? '' ) .
-                ' google_event_id=' . (string) ( $lesson_row['google_event_id'] ?? '' )
+                ' google_event_id=' . (string) ( $lesson_row['google_event_id'] ?? '' ) .
+                ' google_instance_event_id=' . (string) ( $lesson_row['google_instance_event_id'] ?? '' )
             );
         }
 
@@ -1268,7 +1387,7 @@ class MRM_Lesson_Scheduler {
         }
 
         list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $resolved_event );
-        if ( ! $g_start_ts || ! $g_end_ts ) {
+        if ( ! $g_start_ts || ! $g_end_ts || $g_end_ts <= $g_start_ts ) {
             return array(
                 'status' => 'unresolved',
                 'event'  => null,
@@ -1278,6 +1397,7 @@ class MRM_Lesson_Scheduler {
 
         $new_start = gmdate( 'Y-m-d H:i:s', $g_start_ts );
         $new_end   = gmdate( 'Y-m-d H:i:s', $g_end_ts );
+
         $resolved_event_id = ! empty( $resolved_event['id'] ) ? (string) $resolved_event['id'] : '';
         $resolved_recurring_parent_id = ! empty( $resolved_event['recurringEventId'] )
             ? (string) $resolved_event['recurringEventId']
@@ -1290,45 +1410,98 @@ class MRM_Lesson_Scheduler {
         $series_id = (int) ( $lesson_row['series_id'] ?? 0 );
         $series_master_event_id = $this->get_series_master_google_event_id( $series_id );
 
-        // For recurring rows, keep the row pointed at the recurring master event.
-        $stored_event_id = ( $series_master_event_id !== '' ) ? $series_master_event_id : $resolved_event_id;
+        $stored_event_id = ( $series_master_event_id !== '' )
+            ? $series_master_event_id
+            : ( $resolved_recurring_parent_id !== '' ? $resolved_recurring_parent_id : $resolved_event_id );
+
+        $stored_instance_event_id = $resolved_event_id;
+
+        $current_start = (string) ( $lesson_row['start_time'] ?? '' );
+        $current_end   = (string) ( $lesson_row['end_time'] ?? '' );
+        $current_google_event_id = (string) ( $lesson_row['google_event_id'] ?? '' );
+        $current_google_instance_event_id = (string) ( $lesson_row['google_instance_event_id'] ?? '' );
+        $current_anchor = (string) ( $lesson_row['google_original_start_time'] ?? '' );
+
+        $needs_update =
+            $current_start !== $new_start ||
+            $current_end !== $new_end ||
+            $current_google_event_id !== $stored_event_id ||
+            $current_google_instance_event_id !== $stored_instance_event_id ||
+            $current_anchor !== $original_anchor;
 
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
 
-        $update_result = $wpdb->update(
-            $table_lessons,
-            array(
-                'start_time'                 => $new_start,
-                'end_time'                   => $new_end,
-                'google_original_start_time' => $original_anchor,
-                'google_event_id'            => ( $stored_event_id !== '' ? $stored_event_id : ( $resolved_recurring_parent_id !== '' ? $resolved_recurring_parent_id : null ) ),
-                'google_instance_event_id'   => ( $resolved_event_id !== '' ? $resolved_event_id : null ),
-                'updated_at'                 => current_time( 'mysql' ),
-            ),
-            array( 'id' => $lesson_id ),
-            array( '%s', '%s', '%s', '%s', '%s', '%s' ),
-            array( '%d' )
-        );
-
-        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] sync_lesson_row_from_google_truth updated lesson_id=' . $lesson_id .
-                ' old_start=' . (string) ( $lesson_row['start_time'] ?? '' ) .
-                ' old_end=' . (string) ( $lesson_row['end_time'] ?? '' ) .
-                ' new_start=' . $new_start .
-                ' new_end=' . $new_end .
-                ' stored_event_id=' . $stored_event_id .
-                ' stored_instance_event_id=' . $resolved_event_id .
-                ' update_result=' . var_export( $update_result, true ) .
-                ' last_error=' . ( isset( $wpdb->last_error ) ? (string) $wpdb->last_error : '' )
+        if ( $needs_update ) {
+            $update_result = $wpdb->update(
+                $table_lessons,
+                array(
+                    'start_time'                 => $new_start,
+                    'end_time'                   => $new_end,
+                    'google_original_start_time' => $original_anchor,
+                    'google_event_id'            => $stored_event_id,
+                    'google_instance_event_id'   => $stored_instance_event_id,
+                    'updated_at'                 => current_time( 'mysql' ),
+                ),
+                array( 'id' => $lesson_id ),
+                array( '%s', '%s', '%s', '%s', '%s', '%s' ),
+                array( '%d' )
             );
+
+            if ( $update_result === false ) {
+                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                    error_log(
+                        '[MRM] sync_lesson_row_from_google_truth db_update_failed lesson_id=' . $lesson_id .
+                        ' last_error=' . (string) $wpdb->last_error
+                    );
+                }
+
+                return array(
+                    'status' => 'unresolved',
+                    'event'  => null,
+                    'reason' => 'db_update_failed',
+                );
+            }
+
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                error_log(
+                    '[MRM] row_updated_from_google lesson_id=' . $lesson_id .
+                    ' old_start=' . $current_start .
+                    ' old_end=' . $current_end .
+                    ' new_start=' . $new_start .
+                    ' new_end=' . $new_end .
+                    ' stored_event_id=' . $stored_event_id .
+                    ' stored_instance_event_id=' . $stored_instance_event_id
+                );
+            }
+        } else {
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                error_log(
+                    '[MRM] resolved_but_unchanged lesson_id=' . $lesson_id .
+                    ' start=' . $new_start .
+                    ' end=' . $new_end .
+                    ' stored_event_id=' . $stored_event_id .
+                    ' stored_instance_event_id=' . $stored_instance_event_id
+                );
+            }
         }
 
-        $lesson_row['start_time'] = $new_start;
-        $lesson_row['end_time'] = $new_end;
-        $lesson_row['google_event_id'] = $stored_event_id;
-        $lesson_row['google_instance_event_id'] = $resolved_event_id;
-        $lesson_row['google_original_start_time'] = $original_anchor;
+        $fresh_row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM {$table_lessons} WHERE id = %d LIMIT 1",
+                $lesson_id
+            ),
+            ARRAY_A
+        );
+
+        if ( is_array( $fresh_row ) && ! empty( $fresh_row ) ) {
+            $lesson_row = $fresh_row;
+        } else {
+            $lesson_row['start_time'] = $new_start;
+            $lesson_row['end_time'] = $new_end;
+            $lesson_row['google_event_id'] = $stored_event_id;
+            $lesson_row['google_instance_event_id'] = $stored_instance_event_id;
+            $lesson_row['google_original_start_time'] = $original_anchor;
+        }
 
         return array(
             'status'     => 'resolved',
@@ -1339,6 +1512,7 @@ class MRM_Lesson_Scheduler {
             'end_utc'    => $new_end,
         );
     }
+
 
 
 
@@ -1368,10 +1542,11 @@ class MRM_Lesson_Scheduler {
     }
 
     protected function get_live_google_timing_for_lesson( $lesson_row, $calendar_id ) {
-        if ( ! is_array( $lesson_row ) || empty( $lesson_row['id'] ) ) {
+        if ( ! is_array( $lesson_row ) ) {
             return array(
-                'status'   => 'invalid',
+                'status'   => 'unresolved',
                 'reason'   => 'lesson_row_invalid',
+                'source'   => 'db_fallback',
                 'start_ts' => 0,
                 'end_ts'   => 0,
                 'lesson'   => $lesson_row,
@@ -1384,6 +1559,7 @@ class MRM_Lesson_Scheduler {
             return array(
                 'status'   => 'unresolved',
                 'reason'   => 'missing_calendar_or_google_not_configured',
+                'source'   => 'db_fallback',
                 'start_ts' => 0,
                 'end_ts'   => 0,
                 'lesson'   => $lesson_row,
@@ -1406,6 +1582,7 @@ class MRM_Lesson_Scheduler {
                 return array(
                     'status'   => 'resolved',
                     'reason'   => (string) ( $sync['reason'] ?? 'resolved' ),
+                    'source'   => 'google',
                     'start_ts' => $start_ts,
                     'end_ts'   => $end_ts,
                     'lesson'   => $synced_lesson,
@@ -1417,12 +1594,14 @@ class MRM_Lesson_Scheduler {
         return array(
             'status'   => 'unresolved',
             'reason'   => (string) ( $sync['reason'] ?? 'unresolved' ),
+            'source'   => 'db_fallback',
             'start_ts' => 0,
             'end_ts'   => 0,
             'lesson'   => $lesson_row,
             'sync'     => $sync,
         );
     }
+
 
     public static function get_instance() {
         if ( empty( self::$instance ) ) self::$instance = new self();
@@ -5007,7 +5186,50 @@ class MRM_Lesson_Scheduler {
         return gmdate( 'Y-m-d\TH:i:s\Z', $ts );
     }
 
-protected function base64url_encode( $data ) {
+    protected function normalize_google_time_range( $time_min, $time_max ) {
+        $time_min_n = $this->to_rfc3339_utc( $time_min );
+        if ( is_wp_error( $time_min_n ) ) {
+            return new WP_Error(
+                'invalid_google_time_min',
+                'Invalid Google timeMin: ' . $time_min_n->get_error_message()
+            );
+        }
+
+        $time_max_n = $this->to_rfc3339_utc( $time_max );
+        if ( is_wp_error( $time_max_n ) ) {
+            return new WP_Error(
+                'invalid_google_time_max',
+                'Invalid Google timeMax: ' . $time_max_n->get_error_message()
+            );
+        }
+
+        $min_ts = strtotime( $time_min_n );
+        $max_ts = strtotime( $time_max_n );
+
+        if ( ! $min_ts || ! $max_ts ) {
+            return new WP_Error(
+                'invalid_google_time_range',
+                'Google time window could not be parsed after normalization.'
+            );
+        }
+
+        if ( $max_ts <= $min_ts ) {
+            return new WP_Error(
+                'invalid_google_time_range',
+                'Google timeMax must be greater than timeMin.'
+            );
+        }
+
+        return array(
+            'timeMin' => $time_min_n,
+            'timeMax' => $time_max_n,
+            'min_ts'  => $min_ts,
+            'max_ts'  => $max_ts,
+        );
+    }
+
+
+    protected function base64url_encode( $data ) {
         return rtrim( strtr( base64_encode( $data ), '+/', '-_' ), '=' );
     }
 
