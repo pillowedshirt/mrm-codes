@@ -2272,7 +2272,22 @@ class MRM_Payments_Hub_Single {
     return is_array($row) ? $row : array();
   }
 
-  private function mrm_get_all_sheet_music_subscription_rows_for_admin() {
+  private function mrm_get_sheet_music_subscription_by_portal_token($token) {
+    global $wpdb;
+    $table = $this->table_sheet_music_subscriptions();
+
+    $row = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$table} WHERE portal_token = %s LIMIT 1",
+        (string)$token
+      ),
+      ARRAY_A
+    );
+
+    return is_array($row) ? $row : array();
+  }
+
+  private function mrm_get_sheet_music_subscription_rows_for_admin() {
     global $wpdb;
 
     $subs = $this->table_sheet_music_subscriptions();
@@ -2281,11 +2296,15 @@ class MRM_Payments_Hub_Single {
     return $wpdb->get_results(
       $wpdb->prepare(
         "SELECT
+            id,
+            email_hash,
             email_plain,
             stripe_status,
             cancel_at_period_end,
+            current_period_start,
             current_period_end,
             canceled_at,
+            created_at,
             updated_at
          FROM {$subs}
          WHERE email_plain IS NOT NULL
@@ -2308,30 +2327,30 @@ class MRM_Payments_Hub_Single {
     $period_end = (string)($row['current_period_end'] ?? '');
     $period_end_ts = $period_end ? strtotime($period_end) : 0;
 
-    $active_statuses = array('trialing', 'active');
-    if (in_array($status, $active_statuses, true)) {
+    if (in_array($status, array('trialing', 'active'), true)) {
       if ($period_end_ts > 0) {
         return ($period_end_ts >= time());
       }
       return true;
     }
 
+    if ($period_end_ts > 0 && $period_end_ts >= time()) {
+      return true;
+    }
+
     return false;
   }
 
-  private function mrm_get_sheet_music_subscription_by_portal_token($token) {
-    global $wpdb;
-    $table = $this->table_sheet_music_subscriptions();
+  private function mrm_sheet_music_subscription_end_date_for_admin($row) {
+    if (!is_array($row)) return '';
 
-    $row = $wpdb->get_row(
-      $wpdb->prepare(
-        "SELECT * FROM {$table} WHERE portal_token = %s LIMIT 1",
-        (string)$token
-      ),
-      ARRAY_A
-    );
+    $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
+    if ($is_active) return '';
 
-    return is_array($row) ? $row : array();
+    $period_end = (string)($row['current_period_end'] ?? '');
+    if ($period_end === '') return '';
+
+    return date_i18n('Y-m-d', strtotime($period_end));
   }
 
   private function mrm_upsert_sheet_music_subscription_row($data) {
@@ -4044,7 +4063,7 @@ class MRM_Payments_Hub_Single {
         'mrm_plan_kind' => (string)($profile['plan_kind'] ?? ''),
         'mrm_authorized_lesson_count' => (string)((int)($profile['authorized_lesson_count'] ?? 0)),
       ),
-      'MRM AutoPay Lesson Charge'
+      'Low Brass Lessons - Lesson Charge'
     );
 
     if (is_wp_error($pi)) {
@@ -4972,7 +4991,9 @@ class MRM_Payments_Hub_Single {
     $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
     $metadata['mrm_order_id'] = (string)$order_id;
 
-    $description = ($product_type === 'lesson') ? 'MRM Lesson' : 'MRM Sheet Music';
+    $description = ($product_type === 'lesson')
+      ? 'Low Brass Lessons - Lesson Charge'
+      : 'Low Brass Lessons - Sheet Music Charge';
 
     $save_card = !empty($data['save_card']);
 
@@ -5975,6 +5996,7 @@ class MRM_Payments_Hub_Single {
 
           if (!$slug) continue;
           if (!$email || !is_email($email)) continue;
+          if ($slug === 'all-sheet-music') continue;
 
           $purchase_raw = (string)($_POST['mrm_access_add_purchase'][$i] ?? '');
           $expires_raw  = (string)($_POST['mrm_access_add_expires'][$i] ?? '');
@@ -6022,6 +6044,14 @@ class MRM_Payments_Hub_Single {
         foreach ($_POST['mrm_access_row_id'] as $i => $id_raw) {
           $row_id = (int)$id_raw;
           if ($row_id <= 0) continue;
+
+          $row_sku = (string)$wpdb->get_var($wpdb->prepare(
+            "SELECT sku FROM {$access_table} WHERE id = %d LIMIT 1",
+            $row_id
+          ));
+          if ($row_sku === 'all-sheet-music') {
+            continue;
+          }
 
           // Delete (revoke) row
           if (isset($delete_ids[$row_id])) {
@@ -6076,8 +6106,8 @@ class MRM_Payments_Hub_Single {
           $new_lists[$slug] = $this->normalize_email_list_textarea($emails_raw);
         }
 
-        // Ensure master exists
-        if (!isset($new_lists['all-sheet-music'])) $new_lists['all-sheet-music'] = array();
+        // Force master subscription list to be Stripe-managed only
+        $new_lists['all-sheet-music'] = array();
 
         $this->save_access_lists($new_lists);
       }
@@ -6287,7 +6317,7 @@ class MRM_Payments_Hub_Single {
             <?php if ($type === 'sheet_music') : ?>
               <hr />
               <?php if ($sku === $all_sku) :
-                $rows = $this->mrm_get_all_sheet_music_subscription_rows_for_admin();
+                $rows = $this->mrm_get_sheet_music_subscription_rows_for_admin();
               ?>
                 <p><strong>Stripe Subscription Status (All Sheet Music)</strong><br />
                   <small>Synced from Stripe subscription webhooks.</small>
@@ -6308,10 +6338,7 @@ class MRM_Payments_Hub_Single {
                   <?php else : ?>
                     <?php foreach ($rows as $row) :
                       $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
-                      $end_date = '';
-                      if (!$is_active && !empty($row['current_period_end'])) {
-                        $end_date = (string)$row['current_period_end'];
-                      }
+                      $end_date = $this->mrm_sheet_music_subscription_end_date_for_admin($row);
                     ?>
                       <tr>
                         <td><?php echo esc_html((string)$row['email_plain']); ?></td>
@@ -6629,6 +6656,54 @@ class MRM_Payments_Hub_Single {
                   "SELECT id, email_plain, start_at, expires_at FROM {$access_table} WHERE sku = %s AND revoked_at IS NULL ORDER BY start_at DESC",
                   $k
                 ));
+                if ($k === 'all-sheet-music') {
+                  $subscription_rows = $this->mrm_get_sheet_music_subscription_rows_for_admin();
+                  ?>
+                  <tr>
+                    <td>
+                      <code>all-sheet-music</code>
+                      <p style="margin:8px 0 0;">
+                        <small>This row is Stripe-managed and read-only.</small>
+                      </p>
+                    </td>
+                    <td>
+                      <p style="margin:0 0 8px;">
+                        <small>Customers listed below are derived from the Stripe-synced subscription table. The checkbox is visual only.</small>
+                      </p>
+
+                      <table class="widefat" style="margin-top:8px;">
+                        <thead>
+                          <tr>
+                            <th>Email</th>
+                            <th>Purchase date</th>
+                            <th>Stripe subscription active</th>
+                            <th>Expires</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <?php if (!empty($subscription_rows)) : ?>
+                            <?php foreach ($subscription_rows as $sub_row) :
+                              $purchase_date = !empty($sub_row['created_at']) ? date_i18n('Y-m-d', strtotime($sub_row['created_at'])) : '';
+                              $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($sub_row);
+                              $expire_label = $this->mrm_sheet_music_subscription_end_date_for_admin($sub_row);
+                            ?>
+                              <tr>
+                                <td><?php echo esc_html((string)($sub_row['email_plain'] ?? '')); ?></td>
+                                <td><?php echo esc_html($purchase_date); ?></td>
+                                <td style="text-align:center;"><?php echo $is_active ? '✔' : ''; ?></td>
+                                <td><?php echo esc_html($expire_label); ?></td>
+                              </tr>
+                            <?php endforeach; ?>
+                          <?php else : ?>
+                            <tr><td colspan="4"><em>No active or paid-through sheet music subscriptions found.</em></td></tr>
+                          <?php endif; ?>
+                        </tbody>
+                      </table>
+                    </td>
+                  </tr>
+                  <?php
+                  continue;
+                }
                 ?>
                 <tr>
                   <td><input type="text" name="mrm_access_slug[]" value="<?php echo $safe_k; ?>" style="width:100%;" /></td>
