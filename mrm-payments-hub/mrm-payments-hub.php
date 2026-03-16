@@ -2473,6 +2473,7 @@ class MRM_Payments_Hub_Single {
     SELECT id, instructor_id, student_email, lesson_length, is_online, order_id, payment_mode, autopay_profile_id, end_time, status, charge_status, charge_attempts, charge_last_attempt_at
     FROM {$lessons_table}
     WHERE payment_mode = 'autopay'
+      AND COALESCE(order_id, 0) = 0
       AND autopay_profile_id IS NOT NULL
       AND autopay_profile_id > 0
       AND status = 'payment_due'
@@ -2588,6 +2589,7 @@ class MRM_Payments_Hub_Single {
     SELECT id, instructor_id, student_email, lesson_length, is_online, order_id, payment_mode, autopay_profile_id, status
     FROM {$lessons_table}
     WHERE payment_mode = 'autopay'
+      AND COALESCE(order_id, 0) = 0
       AND autopay_profile_id IS NOT NULL
       AND autopay_profile_id > 0
       AND payout_unlocked_at IS NULL
@@ -2669,6 +2671,7 @@ class MRM_Payments_Hub_Single {
       SELECT id, charge_attempts, charge_last_error
       FROM {$lessons_table}
       WHERE payment_mode = 'autopay'
+        AND COALESCE(order_id, 0) = 0
         AND status = 'payment_due'
         AND charge_status = 'failed'
         AND charge_attempts >= 12
@@ -2731,6 +2734,7 @@ class MRM_Payments_Hub_Single {
     $payment_mode = (string)($data['payment_mode'] ?? 'none');
     $order_id = (int)($data['order_id'] ?? 0);
     $autopay_profile_id = (int)($data['autopay_profile_id'] ?? 0);
+    $series_id = (int)($data['series_id'] ?? 0);
 
     if ($lesson_id <= 0) return;
 
@@ -2777,6 +2781,13 @@ class MRM_Payments_Hub_Single {
       if ($order) {
         $this->mrm_request_refund_for_order($order, 'Auto-refund for cancelled one-time lesson ' . $lesson_id);
       }
+
+      // If this one-time lesson is actually the prepaid first lesson in a recurring autopay series,
+      // also deactivate the autopay profile so the rest of the series cannot keep charging.
+      if ($series_id > 0 && $autopay_profile_id > 0) {
+        $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
+      }
+
       return;
     }
 
@@ -2874,6 +2885,14 @@ class MRM_Payments_Hub_Single {
 
     if ((string)($lesson['charge_status'] ?? '') === 'paid') {
       error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson already paid.');
+      return;
+    }
+
+    if ((int)($lesson['order_id'] ?? 0) > 0) {
+      error_log(
+        '[MRM AutoPay] charge_and_unlock_autopay skipped: lesson has original booking order_id and is not a follow-up autopay charge candidate. order_id=' .
+        (int)($lesson['order_id'] ?? 0)
+      );
       return;
     }
 

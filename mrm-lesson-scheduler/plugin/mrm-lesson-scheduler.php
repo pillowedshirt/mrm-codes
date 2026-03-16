@@ -1323,7 +1323,7 @@ class MRM_Lesson_Scheduler {
         );
     }
 
-    protected function sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, $instance_window_days = 120 ) {
+    public function sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, $instance_window_days = 120 ) {
         global $wpdb;
 
         if ( ! is_array( $lesson_row ) ) {
@@ -2045,7 +2045,7 @@ class MRM_Lesson_Scheduler {
         $repeat_duration   = sanitize_text_field( (string) ( $data['repeat_duration'] ?? '' ) );      // 1_month | 3_months | indefinitely (per UI)
         $appointment_type  = sanitize_text_field( (string) ( $data['appointment_type'] ?? 'lesson' ) ); // lesson | consultation
         $order_id = isset( $data['order_id'] ) ? intval( $data['order_id'] ) : 0;
-        $payment_mode = sanitize_text_field( (string ) ( $data['payment_mode'] ?? 'none' ) ); // prepay|autopay|none
+        $payment_mode = sanitize_text_field( (string ) ( $data['payment_mode'] ?? 'none' ) ); // prepay|one_time|autopay|none
         $autopay_profile_id = isset( $data['autopay_profile_id'] ) ? intval( $data['autopay_profile_id'] ) : 0;
 
         if ( $instructor_id <= 0 ) {
@@ -2164,8 +2164,30 @@ class MRM_Lesson_Scheduler {
             }
 
             $slot_order_id = $order_id;
-            if ( $payment_mode === 'autopay' && $slot_index > 0 ) {
-                $slot_order_id = 0;
+            $slot_payment_mode = ( $payment_mode !== '' ? $payment_mode : 'none' );
+            $slot_charge_status = 'none';
+
+            if ( $payment_mode === 'autopay' ) {
+                if ( $slot_index > 0 ) {
+                    $slot_order_id = 0;
+                    $slot_payment_mode = 'autopay';
+                    $slot_charge_status = 'none';
+                } else {
+                    // First lesson in an autopay series is already paid by the initial checkout.
+                    $slot_payment_mode = 'one_time';
+                    $slot_charge_status = ( $slot_order_id > 0 ? 'paid' : 'none' );
+                }
+            }
+
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                error_log(
+                    '[MRM] lesson_insert_classification'
+                    . ' slot_index=' . (int) $slot_index
+                    . ' series_id=' . (int) ( $series_id ?: 0 )
+                    . ' slot_order_id=' . (int) $slot_order_id
+                    . ' slot_payment_mode=' . (string) $slot_payment_mode
+                    . ' slot_charge_status=' . (string) $slot_charge_status
+                );
             }
 
             $ok = $wpdb->insert( $lessons_table, array(
@@ -2180,10 +2202,11 @@ class MRM_Lesson_Scheduler {
                 'end_time'      => $end_mysql,
                 'google_original_start_time' => $start_mysql,
                 'status'        => 'scheduled',
+                'charge_status' => $slot_charge_status,
                 'google_event_id' => ( $series_master_google_event_id !== '' ? $series_master_google_event_id : null ),
                 'google_meet_url' => null,
                 'order_id'        => ( $slot_order_id > 0 ? $slot_order_id : null ),
-                'payment_mode'    => ( $payment_mode !== '' ? $payment_mode : 'none' ),
+                'payment_mode'    => $slot_payment_mode,
                 'payout_unlocked_at' => null,
                 'autopay_profile_id' => ( $autopay_profile_id > 0 ? $autopay_profile_id : null ),
                 'agreement_id'    => null,
@@ -2205,6 +2228,7 @@ class MRM_Lesson_Scheduler {
                 '%s', // end_time
                 '%s', // google_original_start_time
                 '%s', // status
+                '%s', // charge_status
                 '%s', // google_event_id
                 '%s', // google_meet_url
                 '%d', // order_id
@@ -4195,7 +4219,51 @@ class MRM_Lesson_Scheduler {
 
             $new_event_id = (string) ( $synced_lesson['google_event_id'] ?? ( $ev['id'] ?? '' ) );
             $payment_mode = (string) ( $synced_lesson['payment_mode'] ?? 'none' );
+            $charge_status = (string) ( $synced_lesson['charge_status'] ?? 'none' );
+            $lesson_order_id = (int) ( $synced_lesson['order_id'] ?? 0 );
             $now_mysql = current_time( 'mysql' );
+
+            $is_prepaid_initial_autopay = (
+                $payment_mode === 'autopay'
+                && $lesson_order_id > 0
+                && $charge_status === 'paid'
+            );
+
+            if ( $is_prepaid_initial_autopay ) {
+                $wpdb->update(
+                    $lessons_table,
+                    array(
+                        'start_time'         => ( $new_start ?: (string) ( $synced_lesson['start_time'] ?? '' ) ),
+                        'end_time'           => $new_end,
+                        'google_event_id'    => ( $new_event_id !== '' ? $new_event_id : null ),
+                        'payment_mode'       => 'one_time',
+                        'status'             => 'delivered',
+                        'delivered_at'       => $now_mysql,
+                        'payout_unlocked_at' => $now_mysql,
+                        'charge_due_at'      => null,
+                        'charge_last_error'  => null,
+                        'updated_at'         => $now_mysql,
+                    ),
+                    array( 'id' => $booking_id ),
+                    array( '%s','%s','%s','%s','%s','%s','%s','%s','%s','%s' ),
+                    array( '%d' )
+                );
+
+                do_action( 'mrm_lesson_delivered', array(
+                    'lesson_id' => $booking_id,
+                    'instructor_id' => (int) $synced_lesson['instructor_id'],
+                    'student_email' => (string) $synced_lesson['student_email'],
+                    'lesson_length' => (int) $synced_lesson['lesson_length'],
+                    'is_online' => (int) $synced_lesson['is_online'],
+                    'order_id' => $lesson_order_id,
+                    'payment_mode' => 'one_time',
+                    'autopay_profile_id' => (int) ( $synced_lesson['autopay_profile_id'] ?? 0 ),
+                    'google_event_id' => $new_event_id,
+                    'ended_at_utc' => (string) $new_end,
+                ) );
+
+                continue;
+            }
 
             if ( $payment_mode === 'autopay' ) {
                 $autopay_profile_id = (int) ( $synced_lesson['autopay_profile_id'] ?? 0 );
