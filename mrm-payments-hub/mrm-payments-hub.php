@@ -1531,6 +1531,7 @@ class MRM_Payments_Hub_Single {
     if ($order) {
       $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
       $this->mrm_maybe_create_payout_ledger_for_order($order);
+      $this->mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi, $order);
 
       $lesson_id = 0;
 
@@ -2464,6 +2465,22 @@ class MRM_Payments_Hub_Single {
       'metadata_json' => wp_json_encode($meta),
       'updated_at'    => current_time('mysql'),
     ), array('id'=>$order_id), array('%s','%s'), array('%d'));
+  }
+
+
+  private function mrm_get_order_meta_array($order_row) {
+    if (!is_array($order_row)) return array();
+
+    $raw = (string)($order_row['metadata_json'] ?? '');
+    if ($raw === '') return array();
+
+    $decoded = json_decode($raw, true);
+    return is_array($decoded) ? $decoded : array();
+  }
+
+  private function mrm_get_order_meta_value($order_row, $key, $default = '') {
+    $meta = $this->mrm_get_order_meta_array($order_row);
+    return array_key_exists((string)$key, $meta) ? $meta[(string)$key] : $default;
   }
 
   private function mrm_claim_purchase_receipt_send($order_id) {
@@ -5341,62 +5358,133 @@ class MRM_Payments_Hub_Single {
     ), 200);
   }
 
-  private function mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi) {
-    if (!is_array($pi)) return;
+  private function mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi, $order = array()) {
+    try {
+      if (!is_array($pi)) return;
 
-    $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
-    $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
-    if (!$addon_yes) return;
+      $pi_id = (string)($pi['id'] ?? '');
+      if ($pi_id === '') return;
 
-    $price_id = $this->subscription_price_id();
-    if ($price_id === '') {
-      error_log('[MRM Payments Hub] Subscription price id is not configured.');
+      if (!is_array($order) || empty($order)) {
+        $order = $this->get_order_by_pi($pi_id);
+      }
+      if (!is_array($order) || empty($order)) {
+        error_log('[MRM Payments Hub] Subscription path skipped: order not found for PI ' . $pi_id);
+        return;
+      }
+
+      $order_id = (int)($order['id'] ?? 0);
+      if ($order_id <= 0) return;
+
+      $pi_meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+      $order_meta = $this->mrm_get_order_meta_array($order);
+      $meta = array_merge($order_meta, $pi_meta);
+
+      $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
+      $product_type = (string)($order['product_type'] ?? '');
+      if (!$addon_yes || $product_type !== 'lesson') {
+        return;
+      }
+
+      $already_created_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_created_at', '');
+      $already_subscription_id = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_id', '');
+      if ($already_created_at !== '' || $already_subscription_id !== '') {
+        return;
+      }
+
+      $order_status = (string)($order['status'] ?? '');
+      if (!in_array($order_status, array('paid', 'completed', 'succeeded'), true)) {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'waiting_for_paid_order');
+        return;
+      }
+
+      $price_id = $this->subscription_price_id();
+      if ($price_id === '') {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'configuration_missing');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing Stripe subscription Price ID.');
+        error_log('[MRM Payments Hub] Subscription price id is not configured.');
+        return;
+      }
+
+      $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
+      if (!$email || !is_email($email)) {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_email');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing valid customer email.');
+        return;
+      }
+
+      $existing = $this->mrm_get_active_sheet_music_subscription_by_email($email);
+      if (!empty($existing['id'])) {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'already_active');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_id', (string)($existing['stripe_subscription_id'] ?? ''));
+        return;
+      }
+
+      $customer_id = (string)($pi['customer'] ?? '');
+      $payment_method_id = (string)($pi['payment_method'] ?? '');
+
+      if ($customer_id === '' || $payment_method_id === '') {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_customer_or_payment_method');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing Stripe customer or payment method on initial payment intent.');
+        error_log('[MRM Payments Hub] Cannot create sheet music subscription: missing customer or payment method.');
+        return;
+      }
+
+      $start_ts = !empty($pi['created']) ? (int)$pi['created'] : time();
+      $trial_end_ts = strtotime('+1 month', $start_ts);
+      if (!$trial_end_ts || $trial_end_ts <= time()) {
+        $trial_end_ts = time() + (31 * DAY_IN_SECONDS);
+      }
+
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'creating');
+
+      $subscription = $this->stripe_create_subscription(
+        $customer_id,
+        $price_id,
+        $payment_method_id,
+        $trial_end_ts,
+        array(
+          'mrm_customer_email' => $email,
+          'mrm_source' => 'sheet_music_addon_initial_checkout',
+          'mrm_source_payment_intent' => $pi_id,
+          'mrm_order_id' => (string)$order_id,
+        )
+      );
+
+      if (is_wp_error($subscription)) {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'create_failed');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $subscription->get_error_message());
+        error_log('[MRM Payments Hub] Failed to create sheet music subscription: ' . $subscription->get_error_message());
+        return;
+      }
+
+      $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+
+      $subscription_id = (string)($subscription['id'] ?? '');
+      if ($subscription_id !== '') {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_id', $subscription_id);
+      }
+
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', (string)($subscription['status'] ?? 'created'));
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_created_at', current_time('mysql'));
+
+      $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+      $email_sent_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_enrollment_email_sent_at', '');
+
+      if (is_array($local) && !empty($local) && $email_sent_at === '') {
+        $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $trial_end_ts);
+        if ($sent) {
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
+        }
+      }
+    } catch (Throwable $e) {
+      $order_id = is_array($order) ? (int)($order['id'] ?? 0) : 0;
+      if ($order_id > 0) {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'runtime_exception');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $e->getMessage());
+      }
+      error_log('[MRM Payments Hub] Subscription path runtime exception: ' . $e->getMessage());
       return;
-    }
-
-    $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
-    if (!$email || !is_email($email)) return;
-
-    $existing = $this->mrm_get_active_sheet_music_subscription_by_email($email);
-    if (!empty($existing['id'])) {
-      return;
-    }
-
-    $customer_id = (string)($pi['customer'] ?? '');
-    $payment_method_id = (string)($pi['payment_method'] ?? '');
-
-    if ($customer_id === '' || $payment_method_id === '') {
-      error_log('[MRM Payments Hub] Cannot create sheet music subscription: missing customer or payment method.');
-      return;
-    }
-
-    $start_ts = !empty($pi['created']) ? (int)$pi['created'] : time();
-    $trial_end_ts = strtotime('+1 month', $start_ts);
-    if (!$trial_end_ts || $trial_end_ts <= time()) {
-      $trial_end_ts = time() + (31 * DAY_IN_SECONDS);
-    }
-
-    $subscription = $this->stripe_create_subscription(
-      $customer_id,
-      $price_id,
-      $payment_method_id,
-      $trial_end_ts,
-      array(
-        'mrm_customer_email' => $email,
-        'mrm_source' => 'sheet_music_addon_initial_checkout',
-        'mrm_source_payment_intent' => (string)($pi['id'] ?? ''),
-      )
-    );
-
-    if (is_wp_error($subscription)) {
-      error_log('[MRM Payments Hub] Failed to create sheet music subscription: ' . $subscription->get_error_message());
-      return;
-    }
-
-    $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
-    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id((string)($subscription['id'] ?? ''));
-    if (is_array($local) && !empty($local)) {
-      $this->mrm_send_sheet_music_subscription_enrollment_email($local, $trial_end_ts);
     }
   }
 
@@ -5459,7 +5547,6 @@ class MRM_Payments_Hub_Single {
       $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
       if ($email && is_email($email)) {
         $this->mrm_grant_all_sheet_music_ledger($email, $start_ts, 'stripe_pi_addon', $pi_id);
-        $this->mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi);
       }
     }
 
