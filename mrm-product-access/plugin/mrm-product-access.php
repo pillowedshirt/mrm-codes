@@ -1522,7 +1522,51 @@ class MRM_Product_Access {
             return false;
         };
 
-        // Rule 1: master all-sheet-music ledger (DB), auto-expiring
+        // Rule 1: Stripe-synced all-sheet-music subscription (primary truth)
+        $subs_table = $wpdb->prefix . 'mrm_sheet_music_subscriptions';
+        $subs_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $subs_table ) );
+
+        if ( $subs_exists === $subs_table ) {
+            $sub_rows = $wpdb->get_results(
+                "SELECT id, email_hash, email_plain, stripe_status, current_period_end
+                 FROM {$subs_table}
+                 ORDER BY id DESC"
+            );
+
+            if ( is_array( $sub_rows ) ) {
+                foreach ( $sub_rows as $row ) {
+                    $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+                    $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
+
+                    $matches = false;
+                    if ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) {
+                        $matches = true;
+                    } elseif ( $email_plain !== '' ) {
+                        $salted = $this->hash_email( strtolower( trim( $email_plain ) ) );
+                        if ( hash_equals( $email_hash, $salted ) ) {
+                            $matches = true;
+                        }
+                    }
+
+                    if ( ! $matches ) {
+                        continue;
+                    }
+
+                    $status = isset( $row->stripe_status ) ? (string) $row->stripe_status : '';
+                    $period_end = isset( $row->current_period_end ) ? (string) $row->current_period_end : '';
+                    $period_end_ts = $period_end ? strtotime( $period_end ) : 0;
+
+                    $active = in_array( $status, array( 'trialing', 'active' ), true );
+                    $paid_through = ( $period_end_ts > strtotime( $now ) );
+
+                    if ( $active || $paid_through ) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Rule 2: master all-sheet-music ledger (legacy fallback), auto-expiring
         $master_sku = 'all-sheet-music';
         $master_rows = $wpdb->get_results( $wpdb->prepare(
             "SELECT id, email_hash, email_plain, expires_at, granted_at
@@ -1550,7 +1594,7 @@ class MRM_Product_Access {
             }
         }
 
-        // Rule 2: per-product option list (fallback)
+        // Rule 3: per-product option list (fallback)
         if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
             foreach ( $lists[ $sku ] as $em ) {
                 $em = sanitize_email( $em );
@@ -1558,7 +1602,7 @@ class MRM_Product_Access {
             }
         }
 
-        // Rule 3: per-product DB row
+        // Rule 4: per-product DB row
         $rows = $wpdb->get_results( $wpdb->prepare(
             "SELECT id, email_hash, email_plain
              FROM {$table}
