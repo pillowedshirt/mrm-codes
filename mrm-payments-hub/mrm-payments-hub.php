@@ -28,6 +28,7 @@ class MRM_Payments_Hub_Single {
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('rest_api_init', array($this, 'register_routes'));
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
+    add_action('init', array($this, 'mrm_stripe_debug_log_boot_marker'));
 
     add_filter('cron_schedules', array($this, 'register_custom_cron_schedules'));
     add_action('init', array($this, 'ensure_runtime_cron_schedules'), 20);
@@ -618,6 +619,36 @@ class MRM_Payments_Hub_Single {
       return trim((string)($s['stripe_test_webhook_secret'] ?? ''));
     }
     return trim((string)($s['stripe_webhook_secret'] ?? ''));
+  }
+
+  private function stripe_debug_log_path() {
+    return WP_CONTENT_DIR . '/stripe-debug.log';
+  }
+
+  private function stripe_debug_log($message, $context = array()) {
+    $timestamp = gmdate('d-M-Y H:i:s') . ' UTC';
+
+    if (!is_scalar($message)) {
+      $message = print_r($message, true);
+    } else {
+      $message = (string)$message;
+    }
+
+    $line = '[' . $timestamp . '] [MRM Stripe] ' . $message;
+
+    if (!empty($context)) {
+      $json = wp_json_encode($context);
+      if ($json !== false) {
+        $line .= ' ' . $json;
+      }
+    }
+
+    $line .= PHP_EOL;
+
+    $path = $this->stripe_debug_log_path();
+
+    // Suppress warnings here so failed writes do not break payment flow.
+    @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
   }
 
   private function subscription_price_id() {
@@ -1508,7 +1539,24 @@ class MRM_Payments_Hub_Single {
     ), array('%s','%s','%s','%s','%s'));
   }
 
+  public function mrm_stripe_debug_log_boot_marker() {
+    static $did_log = false;
+    if ($did_log) return;
+    $did_log = true;
+
+    $this->stripe_debug_log('stripe debug logger initialized', array(
+      'plugin' => 'mrm-payments-hub',
+      'mode' => $this->is_test_mode() ? 'test' : 'live',
+    ));
+  }
+
   private function mrm_handle_payment_intent_succeeded_webhook($pi) {
+    $this->stripe_debug_log('payment_intent.succeeded handler entered', array(
+      'pi_id' => (string)($pi['id'] ?? ''),
+      'customer_id' => (string)($pi['customer'] ?? ''),
+      'payment_method_id' => (string)($pi['payment_method'] ?? ''),
+    ));
+
     if (!is_array($pi)) return;
 
     $pi_id = (string)($pi['id'] ?? '');
@@ -1619,20 +1667,42 @@ class MRM_Payments_Hub_Single {
 
   private function mrm_handle_customer_subscription_created_webhook($subscription) {
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    $this->stripe_debug_log('customer.subscription.created handler entered', array(
+      'subscription_id' => (string)($subscription['id'] ?? ''),
+      'status' => (string)($subscription['status'] ?? ''),
+      'email' => $email,
+    ));
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
   }
 
   private function mrm_handle_customer_subscription_updated_webhook($subscription) {
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    $this->stripe_debug_log('customer.subscription.updated handler entered', array(
+      'subscription_id' => (string)($subscription['id'] ?? ''),
+      'status' => (string)($subscription['status'] ?? ''),
+      'cancel_at_period_end' => !empty($subscription['cancel_at_period_end']) ? 'yes' : 'no',
+      'email' => $email,
+    ));
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
   }
 
   private function mrm_handle_customer_subscription_deleted_webhook($subscription) {
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    $this->stripe_debug_log('customer.subscription.deleted handler entered', array(
+      'subscription_id' => (string)($subscription['id'] ?? ''),
+      'status' => (string)($subscription['status'] ?? ''),
+      'email' => $email,
+    ));
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
   }
 
   private function mrm_handle_invoice_paid_webhook($invoice) {
+    $this->stripe_debug_log('invoice.paid handler entered', array(
+      'invoice_id' => (string)($invoice['id'] ?? ''),
+      'subscription_id' => (string)($invoice['subscription'] ?? ''),
+      'amount_paid' => (int)($invoice['amount_paid'] ?? 0),
+    ));
+
     $subscription_id = (string)($invoice['subscription'] ?? '');
     if ($subscription_id === '') return;
 
@@ -1648,7 +1718,14 @@ class MRM_Payments_Hub_Single {
     if (!empty($local['email_plain'])) {
       $invoice_created_ts = !empty($invoice['created']) ? (int)$invoice['created'] : time();
       $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'], $invoice_created_ts, 'stripe_subscription_invoice', (string)($invoice['id'] ?? ''));
-      $this->mrm_send_sheet_music_subscription_charge_email($local, $invoice);
+      $sent = $this->mrm_send_sheet_music_subscription_charge_email($local, $invoice);
+
+      $this->stripe_debug_log('subscription recurring charge email result', array(
+        'invoice_id' => (string)($invoice['id'] ?? ''),
+        'subscription_id' => $subscription_id,
+        'email' => (string)($local['email_plain'] ?? ''),
+        'sent' => ($sent ? 'yes' : 'no'),
+      ));
     }
   }
 
@@ -4656,6 +4733,11 @@ class MRM_Payments_Hub_Single {
 
     $event_id = (string)($event['id'] ?? '');
     $event_type = (string)($event['type'] ?? '');
+
+    $this->stripe_debug_log('webhook received', array(
+      'event_id' => (string)($event['id'] ?? ''),
+      'event_type' => $event_type,
+    ));
     $object = isset($event['data']['object']) && is_array($event['data']['object']) ? $event['data']['object'] : array();
     $object_id = (string)($object['id'] ?? '');
 
@@ -4710,6 +4792,11 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->mrm_mark_webhook_event_processed($event_id, $event_type, $object_id);
+
+    $this->stripe_debug_log('webhook processed successfully', array(
+      'event_id' => (string)($event['id'] ?? ''),
+      'event_type' => $event_type,
+    ));
 
     return new WP_REST_Response(array('ok' => true), 200);
   }
@@ -5430,12 +5517,22 @@ class MRM_Payments_Hub_Single {
     try {
       if (!is_array($pi)) return;
 
+      $this->stripe_debug_log('subscription path entered from initial payment intent', array(
+        'pi_id' => (string)($pi['id'] ?? ''),
+      ));
+
       $pi_id = (string)($pi['id'] ?? '');
       if ($pi_id === '') return;
 
       if (!is_array($order) || empty($order)) {
         $order = $this->get_order_by_pi($pi_id);
       }
+
+      $this->stripe_debug_log('subscription path order lookup complete', array(
+        'pi_id' => $pi_id,
+        'order_found' => (!empty($order) ? 'yes' : 'no'),
+        'order_id' => (int)($order['id'] ?? 0),
+      ));
       if (!is_array($order) || empty($order)) {
         error_log('[MRM Payments Hub] Subscription path skipped: order not found for PI ' . $pi_id);
         return;
@@ -5467,6 +5564,12 @@ class MRM_Payments_Hub_Single {
       }
 
       $price_id = $this->subscription_price_id();
+
+      $this->stripe_debug_log('subscription path checking price id', array(
+        'order_id' => $order_id,
+        'price_id_present' => ($price_id !== '' ? 'yes' : 'no'),
+      ));
+
       if ($price_id === '') {
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'configuration_missing');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing Stripe subscription Price ID.');
@@ -5506,6 +5609,15 @@ class MRM_Payments_Hub_Single {
 
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'creating');
 
+      $this->stripe_debug_log('subscription create requested', array(
+        'order_id' => $order_id,
+        'customer_id' => $customer_id,
+        'payment_method_id' => $payment_method_id,
+        'price_id' => $price_id,
+        'trial_end_ts' => $trial_end_ts,
+        'email' => $email,
+      ));
+
       $subscription = $this->stripe_create_subscription(
         $customer_id,
         $price_id,
@@ -5519,6 +5631,13 @@ class MRM_Payments_Hub_Single {
         )
       );
 
+      $this->stripe_debug_log('subscription create response received', array(
+        'order_id' => $order_id,
+        'subscription_id' => (string)($subscription['id'] ?? ''),
+        'subscription_status' => (string)($subscription['status'] ?? ''),
+        'is_wp_error' => (is_wp_error($subscription) ? 'yes' : 'no'),
+      ));
+
       if (is_wp_error($subscription)) {
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'create_failed');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $subscription->get_error_message());
@@ -5527,6 +5646,12 @@ class MRM_Payments_Hub_Single {
       }
 
       $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+
+      $this->stripe_debug_log('local subscription sync complete', array(
+        'order_id' => $order_id,
+        'subscription_id' => (string)($subscription['id'] ?? ''),
+        'email' => $email,
+      ));
 
       $subscription_id = (string)($subscription['id'] ?? '');
       if ($subscription_id !== '') {
@@ -5543,6 +5668,17 @@ class MRM_Payments_Hub_Single {
         $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $trial_end_ts);
         if ($sent) {
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
+          $this->stripe_debug_log('subscription enrollment email sent', array(
+            'order_id' => $order_id,
+            'subscription_id' => $subscription_id,
+            'email' => $email,
+          ));
+        } else {
+          $this->stripe_debug_log('subscription enrollment email failed to send', array(
+            'order_id' => $order_id,
+            'subscription_id' => $subscription_id,
+            'email' => $email,
+          ));
         }
       }
     } catch (Throwable $e) {
@@ -5551,6 +5687,10 @@ class MRM_Payments_Hub_Single {
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'runtime_exception');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $e->getMessage());
       }
+      $this->stripe_debug_log('subscription path runtime exception', array(
+        'order_id' => $order_id,
+        'message' => $e->getMessage(),
+      ));
       error_log('[MRM Payments Hub] Subscription path runtime exception: ' . $e->getMessage());
       return;
     }
