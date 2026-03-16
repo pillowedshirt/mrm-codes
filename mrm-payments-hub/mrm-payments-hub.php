@@ -19,6 +19,7 @@ class MRM_Payments_Hub_Single {
 
   // Admin menu
   const MENU_SLUG = 'mrm-payments-hub';
+  private const MRM_AUTO_REFUND_MAX_AGE_DAYS = 7;
 
   public function __construct() {
     add_action('admin_menu', array($this, 'admin_menu'));
@@ -1454,6 +1455,34 @@ class MRM_Payments_Hub_Single {
     );
   }
 
+  private function mrm_order_is_auto_refund_eligible($order, $max_age_days = 7) {
+    if (!is_array($order)) {
+      return false;
+    }
+
+    $status = (string)($order['status'] ?? '');
+    if (!in_array($status, array('paid', 'completed', 'succeeded'), true)) {
+      return false;
+    }
+
+    $created_at = (string)($order['created_at'] ?? '');
+    if ($created_at === '') {
+      // Fail closed: if we cannot prove the charge age, do not auto-refund.
+      return false;
+    }
+
+    $created_ts = strtotime($created_at);
+    if (!$created_ts) {
+      // Fail closed: if timestamp parsing fails, do not auto-refund.
+      return false;
+    }
+
+    $max_age_seconds = max(1, (int)$max_age_days) * DAY_IN_SECONDS;
+    $age_seconds = time() - $created_ts;
+
+    return ($age_seconds <= $max_age_seconds);
+  }
+
   private function mrm_google_truth_confirms_lesson_ended( $lesson_id ) {
     global $wpdb;
 
@@ -1723,18 +1752,37 @@ class MRM_Payments_Hub_Single {
     ), ARRAY_A);
   }
 
-  private function mrm_request_refund_for_order($order, $note = '') {
+  private function mrm_request_refund_for_order($order, $note = '', $respect_refund_window = true) {
     if (!is_array($order)) return false;
 
     $status = (string)($order['status'] ?? '');
     $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+    $order_id = (int)($order['id'] ?? 0);
 
     if ($pi_id === '' || $status === 'refunded') return false;
     if (!in_array($status, array('paid','completed','succeeded'), true)) return false;
 
+    if ($respect_refund_window && !$this->mrm_order_is_auto_refund_eligible($order, self::MRM_AUTO_REFUND_MAX_AGE_DAYS)) {
+      if (defined('WP_DEBUG') && WP_DEBUG) {
+        error_log(
+          '[MRM Payments Hub] Auto-refund skipped: order is older than 7 days. order_id=' . $order_id .
+          ' created_at=' . (string)($order['created_at'] ?? '') .
+          ' note=' . (string)$note
+        );
+      }
+
+      $this->update_order_status_from_pi($pi_id, $status, $status, array(
+        'mrm_auto_refund_skipped_at' => current_time('mysql'),
+        'mrm_auto_refund_skip_reason' => 'older_than_7_days',
+        'mrm_auto_refund_note' => (string)$note,
+      ));
+
+      return false;
+    }
+
     $refund = $this->stripe_create_refund($pi_id, null, 'requested_by_customer');
     if (is_wp_error($refund)) {
-      error_log('[MRM Payments Hub] Refund failed for order ' . (int)$order['id'] . ': ' . $refund->get_error_message());
+      error_log('[MRM Payments Hub] Refund failed for order ' . $order_id . ': ' . $refund->get_error_message());
       return false;
     }
 
@@ -2945,7 +2993,17 @@ class MRM_Payments_Hub_Single {
 
       // Refund only if this specific lesson already has its own completed lesson-level charge.
       if ($lesson_order) {
-        $this->mrm_request_refund_for_order($lesson_order, 'Auto-refund for cancelled autopay lesson ' . $lesson_id);
+        $refunded = $this->mrm_request_refund_for_order(
+          $lesson_order,
+          'Auto-refund for cancelled autopay lesson ' . $lesson_id
+        );
+
+        if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
+          error_log(
+            '[MRM Payments Hub] Auto-refund not issued for cancelled autopay lesson. lesson_id=' . $lesson_id .
+            ' order_id=' . (int)($lesson_order['id'] ?? 0)
+          );
+        }
       } elseif ($order_id > 0) {
         // Fallback for the prepaid first autopay lesson.
         // Make this stricter for recurring lessons: only refund on explicit, validated deletion/cancellation.
@@ -2965,7 +3023,17 @@ class MRM_Payments_Hub_Single {
         ) {
           $first_order = $this->mrm_get_order_by_id($order_id);
           if ($first_order) {
-            $this->mrm_request_refund_for_order($first_order, 'Auto-refund for cancelled prepaid first autopay lesson ' . $lesson_id);
+            $refunded = $this->mrm_request_refund_for_order(
+              $first_order,
+              'Auto-refund for cancelled prepaid first autopay lesson ' . $lesson_id
+            );
+
+            if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
+              error_log(
+                '[MRM Payments Hub] Auto-refund not issued for cancelled prepaid first autopay lesson. lesson_id=' . $lesson_id .
+                ' order_id=' . (int)($first_order['id'] ?? 0)
+              );
+            }
           }
         }
       }
@@ -2980,7 +3048,17 @@ class MRM_Payments_Hub_Single {
     if ($payment_mode === 'one_time' && $order_id > 0) {
       $order = $this->mrm_get_order_by_id($order_id);
       if ($order) {
-        $this->mrm_request_refund_for_order($order, 'Auto-refund for cancelled one-time lesson ' . $lesson_id);
+        $refunded = $this->mrm_request_refund_for_order(
+          $order,
+          'Auto-refund for cancelled one-time lesson ' . $lesson_id
+        );
+
+        if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
+          error_log(
+            '[MRM Payments Hub] Auto-refund not issued for cancelled one-time lesson. lesson_id=' . $lesson_id .
+            ' order_id=' . (int)($order['id'] ?? 0)
+          );
+        }
       }
 
       // If this one-time lesson is actually the prepaid first lesson in a recurring autopay series,
