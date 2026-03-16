@@ -1024,6 +1024,59 @@ h1 {
 }
 
 /* =========================================================
+   Payment Loading Overlay
+   ========================================================= */
+.mrm-payment-loading-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 100003;
+}
+
+.mrm-payment-loading-modal{
+  width: min(420px, 100%);
+  background: var(--color-surface);
+  border: 1px solid rgba(0,0,0,0.14);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 22px 60px rgba(0,0,0,0.22);
+  padding: 26px 20px 20px;
+  text-align: center;
+}
+
+.mrm-payment-loading-spinner{
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 14px;
+  border-radius: 999px;
+  border: 4px solid rgba(0,0,0,0.12);
+  border-top-color: var(--color-accent);
+  animation: mrm-spin 0.9s linear infinite;
+}
+
+.mrm-payment-loading-title{
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.mrm-payment-loading-text{
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+@keyframes mrm-spin{
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* =========================================================
    Calendar Success Popup (Event Created)
    ========================================================= */
 .mrm-success-overlay{
@@ -1071,8 +1124,15 @@ h1 {
 }
 
 .mrm-success-text{
-  margin: 0 0 16px;
+  margin: 0 0 8px;
   font-size: 14px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.mrm-success-note{
+  margin: 0 0 16px;
+  font-size: 13px;
   line-height: 1.45;
   color: var(--color-text-muted);
 }
@@ -1899,6 +1959,16 @@ h1 {
   </div>
 </div>
 
+<div id="mrm-payment-loading-overlay" class="mrm-payment-loading-overlay" aria-hidden="true" style="display:none;">
+  <div class="mrm-payment-loading-modal" role="dialog" aria-modal="true" aria-labelledby="mrm-payment-loading-title">
+    <div class="mrm-payment-loading-spinner" aria-hidden="true"></div>
+    <h2 id="mrm-payment-loading-title" class="mrm-payment-loading-title">Finalizing your booking</h2>
+    <p id="mrm-payment-loading-text" class="mrm-payment-loading-text">
+      Please wait while we confirm your payment and create your lesson.
+    </p>
+  </div>
+</div>
+
 <div id="instructorProfileView" style="display:none;"></div>
 
 <!-- =========================================================
@@ -1917,6 +1987,7 @@ h1 {
     <p id="mrm-success-text" class="mrm-success-text">
       Please check your email for our confirmation.
     </p>
+    <p id="mrm-success-note" class="mrm-success-note" style="display:none;"></p>
 
     <div class="mrm-success-actions">
       <!-- Reuse your existing button styling -->
@@ -1937,17 +2008,38 @@ let activePaymentElement = null;
    Calendar Success Popup (Event Created)
    Reload happens ONLY when Close is clicked.
    ========================================================= */
-function mrmShowCalendarSuccessPopup(customText){
+function mrmShowCalendarSuccessPopup(options){
   const overlay  = document.getElementById('mrm-success-overlay');
   const textEl   = document.getElementById('mrm-success-text');
+  const noteEl   = document.getElementById('mrm-success-note');
   const closeBtn = document.getElementById('mrm-success-close');
 
   if(!overlay || !textEl || !closeBtn) return;
 
-  if(typeof customText === 'string' && customText.trim()){
-    textEl.textContent = customText.trim();
-  }else{
-    textEl.textContent = 'Please check your email for our confirmation.';
+  let mainText = 'Please check your email for our confirmation.';
+  let noteText = '';
+
+  if (typeof options === 'string' && options.trim()) {
+    mainText = options.trim();
+  } else if (options && typeof options === 'object') {
+    if (typeof options.text === 'string' && options.text.trim()) {
+      mainText = options.text.trim();
+    }
+    if (typeof options.note === 'string' && options.note.trim()) {
+      noteText = options.note.trim();
+    }
+  }
+
+  textEl.textContent = mainText;
+
+  if (noteEl) {
+    if (noteText) {
+      noteEl.textContent = noteText;
+      noteEl.style.display = 'block';
+    } else {
+      noteEl.textContent = '';
+      noteEl.style.display = 'none';
+    }
   }
 
   overlay.style.display = 'flex';
@@ -1969,6 +2061,30 @@ function mrmShowCalendarSuccessPopup(customText){
       closePopup(e);
     }
   };
+}
+
+function mrmShowPaymentLoading(message){
+  const overlay = document.getElementById('mrm-payment-loading-overlay');
+  const textEl = document.getElementById('mrm-payment-loading-text');
+
+  if (!overlay) return;
+
+  if (textEl) {
+    textEl.textContent = (typeof message === 'string' && message.trim())
+      ? message.trim()
+      : 'Please wait while we confirm your payment and create your lesson.';
+  }
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function mrmHidePaymentLoading(){
+  const overlay = document.getElementById('mrm-payment-loading-overlay');
+  if (!overlay) return;
+
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden', 'true');
 }
 
 function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDuration){
@@ -2813,23 +2929,16 @@ async function submitBooking(payload, setMsg){
   closeBookingModal();
 
   let popupText = 'Please check your email for our confirmation.';
+  let popupNote = '';
 
   if ((payload.payment_mode || '') === 'autopay') {
-    const slotCount = Array.isArray(payload.slots) ? payload.slots.length : 1;
-    const authorized = estimateAutopayAuthorizedLessonCount(
-      slotCount,
-      payload.repeat_frequency || 'none',
-      payload.repeat_duration || '--'
-    );
-
-    if (authorized > 0) {
-      popupText = `Auto-pay enabled. First lesson is prepaid as provided in the terms of service. Your saved card will remain active for up to ${authorized} total lesson charge${authorized === 1 ? '' : 's'} in this enrollment, and remaining lessons will be charged automatically after delivery. Please check your email for our confirmation.`;
-    } else {
-      popupText = 'Auto-pay enabled. First lesson is prepaid as provided in the terms of service. Future recurring lessons will be charged automatically after delivery while lessons remain scheduled. Please check your email for our confirmation.';
-    }
+    popupNote = '(Auto-pay enabled)';
   }
 
-  mrmShowCalendarSuccessPopup(popupText);
+  mrmShowCalendarSuccessPopup({
+    text: popupText,
+    note: popupNote
+  });
 
   updateBooking(currentInstructor);
   if (bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function') {
@@ -3090,6 +3199,7 @@ function ensureLegacyBookingHandler(){
 
           payBtn.onclick = async () => {
             payBtn.disabled = true;
+            errorEl.textContent = '';
 
             const okToPay = await showConfirmTotal(createData);
             if (!okToPay) {
@@ -3097,51 +3207,67 @@ function ensureLegacyBookingHandler(){
               return;
             }
 
-            const { error, paymentIntent } = await stripe.confirmPayment({
-              elements: activeStripeElements,
-              confirmParams: { return_url: window.location.href },
-              redirect: 'if_required'
-            });
+            mrmShowPaymentLoading('Please wait while we confirm your payment and enable Auto-pay.');
 
-            if (error) {
-              errorEl.textContent = error.message || 'Payment failed.';
-              payBtn.disabled = false;
-              return;
-            }
-
-            if (paymentIntent && paymentIntent.status === 'succeeded') {
-              await verifyPaymentIntent(paymentIntent.id, email);
-
-              const enrollRes = await fetch(payApiBase + '/create-autopay-enrollment', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({
-                  payment_intent_id: paymentIntent.id,
-                  email: email,
-                  context: {
-                    instructor_id: instrId,
-                    lesson_length: len,
-                    lesson_mode: lessonType,
-                    repeat_frequency: frequency,
-                    repeat_duration: reserveDuration,
-                    authorized_lesson_count: authorizedLessonCount
-                  }
-                })
+            try {
+              const { error, paymentIntent } = await stripe.confirmPayment({
+                elements: activeStripeElements,
+                confirmParams: { return_url: window.location.href },
+                redirect: 'if_required'
               });
 
-              const enrollData = await enrollRes.json();
-              if (!enrollRes.ok || !enrollData.ok) {
-                errorEl.textContent = enrollData.message || 'Unable to finalize auto-pay enrollment.';
+              if (error) {
+                mrmHidePaymentLoading();
+                errorEl.textContent = error.message || 'Payment failed.';
                 payBtn.disabled = false;
                 return;
               }
 
-              payload.payment_mode = 'autopay';
-              payload.autopay_profile_id = enrollData.autopay_profile_id;
-              payload.order_id = createData.order_id;
+              if (paymentIntent && paymentIntent.status === 'succeeded') {
+                await verifyPaymentIntent(paymentIntent.id, email);
 
-              closeModal({ clearSelection: false });
-              await submitBooking(payload, setMsg);
+                const enrollRes = await fetch(payApiBase + '/create-autopay-enrollment', {
+                  method:'POST',
+                  headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({
+                    payment_intent_id: paymentIntent.id,
+                    email: email,
+                    context: {
+                      instructor_id: instrId,
+                      lesson_length: len,
+                      lesson_mode: lessonType,
+                      repeat_frequency: frequency,
+                      repeat_duration: reserveDuration,
+                      authorized_lesson_count: authorizedLessonCount
+                    }
+                  })
+                });
+
+                const enrollData = await enrollRes.json();
+                if (!enrollRes.ok || !enrollData.ok) {
+                  mrmHidePaymentLoading();
+                  errorEl.textContent = enrollData.message || 'Unable to finalize auto-pay enrollment.';
+                  payBtn.disabled = false;
+                  return;
+                }
+
+                payload.payment_mode = 'autopay';
+                payload.autopay_profile_id = enrollData.autopay_profile_id;
+                payload.order_id = createData.order_id;
+
+                closeModal({ clearSelection: false });
+                await submitBooking(payload, setMsg);
+                mrmHidePaymentLoading();
+                return;
+              }
+
+              mrmHidePaymentLoading();
+              errorEl.textContent = 'Payment could not be confirmed.';
+              payBtn.disabled = false;
+            } catch (err) {
+              mrmHidePaymentLoading();
+              errorEl.textContent = (err && err.message) ? err.message : 'Payment failed.';
+              payBtn.disabled = false;
             }
           };
 
@@ -3200,36 +3326,56 @@ function ensureLegacyBookingHandler(){
 
         payBtn.onclick = async () => {
           payBtn.disabled = true;
+          errorEl.textContent = '';
+
           const okToPay = await showConfirmTotal(createData);
           if (!okToPay) {
             payBtn.disabled = false;
             return;
           }
-          const { error, paymentIntent } = await stripe.confirmPayment({
-            elements: activeStripeElements,
-            
-            // Keep return_url for cases where Stripe MUST redirect (3DS/SCA).
-            confirmParams: { return_url: window.location.href },
 
-            // CRITICAL: prevents a full page reload for normal successful payments.
-            redirect: 'if_required'
-          });
-          if (error) {
-            errorEl.textContent = error.message || 'Payment failed.';
+          mrmShowPaymentLoading('Please wait while we confirm your payment and create your lesson.');
+
+          try {
+            const { error, paymentIntent } = await stripe.confirmPayment({
+              elements: activeStripeElements,
+              
+              // Keep return_url for cases where Stripe MUST redirect (3DS/SCA).
+              confirmParams: { return_url: window.location.href },
+
+              // CRITICAL: prevents a full page reload for normal successful payments.
+              redirect: 'if_required'
+            });
+
+            if (error) {
+              mrmHidePaymentLoading();
+              errorEl.textContent = error.message || 'Payment failed.';
+              payBtn.disabled = false;
+              return;
+            }
+
+            if (paymentIntent && paymentIntent.status === 'succeeded') {
+              await verifyPaymentIntent(paymentIntent.id, email);
+
+              payload.order_id = createData.order_id;
+              payload.payment_mode = prepay ? 'prepay' : 'one_time';
+              payload.autopay_profile_id = null;
+
+              // Close Stripe payment modal first so the normal booking success popup displays cleanly
+              closeModal({ clearSelection: false });
+
+              await submitBooking(payload, setMsg);
+              mrmHidePaymentLoading();
+              return;
+            }
+
+            mrmHidePaymentLoading();
+            errorEl.textContent = 'Payment could not be confirmed.';
             payBtn.disabled = false;
-            return;
-          }
-          if (paymentIntent && paymentIntent.status === 'succeeded') {
-            await verifyPaymentIntent(paymentIntent.id, email);
-
-            payload.order_id = createData.order_id;
-            payload.payment_mode = prepay ? 'prepay' : 'one_time';
-            payload.autopay_profile_id = null;
-
-            // Close Stripe payment modal first so the normal booking success popup displays cleanly
-            closeModal({ clearSelection: false });
-
-            await submitBooking(payload, setMsg);
+          } catch (err) {
+            mrmHidePaymentLoading();
+            errorEl.textContent = (err && err.message) ? err.message : 'Payment failed.';
+            payBtn.disabled = false;
           }
         };
       }catch(err){
