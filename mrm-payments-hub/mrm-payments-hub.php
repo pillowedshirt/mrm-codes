@@ -1837,7 +1837,7 @@ class MRM_Payments_Hub_Single {
     $table = $wpdb->prefix . 'mrm_lessons';
     $row = $wpdb->get_row(
       $wpdb->prepare(
-        "SELECT id, instructor_id, lesson_length, is_online, autopay_profile_id, payment_mode
+        "SELECT id, series_id, instructor_id, lesson_length, is_online, autopay_profile_id, payment_mode, start_time
          FROM {$table}
          WHERE id = %d
          LIMIT 1",
@@ -1847,6 +1847,43 @@ class MRM_Payments_Hub_Single {
     );
 
     return is_array($row) ? $row : array();
+  }
+
+
+  private function mrm_get_lesson_sequence_for_receipt($lesson_row) {
+    global $wpdb;
+
+    if (!is_array($lesson_row)) {
+      return 0;
+    }
+
+    $lesson_id = (int)($lesson_row['id'] ?? 0);
+    $series_id = (int)($lesson_row['series_id'] ?? 0);
+    $start_time = (string)($lesson_row['start_time'] ?? '');
+
+    if ($lesson_id <= 0 || $series_id <= 0 || $start_time === '') {
+      return 0;
+    }
+
+    $table = $wpdb->prefix . 'mrm_lessons';
+
+    $position = (int)$wpdb->get_var(
+      $wpdb->prepare(
+        "SELECT COUNT(*)
+         FROM {$table}
+         WHERE series_id = %d
+           AND (
+             start_time < %s
+             OR (start_time = %s AND id <= %d)
+           )",
+        $series_id,
+        $start_time,
+        $start_time,
+        $lesson_id
+      )
+    );
+
+    return max(0, $position);
   }
 
   private function mrm_set_order_meta_flag($order_id, $key, $value) {
@@ -1870,6 +1907,28 @@ class MRM_Payments_Hub_Single {
       'metadata_json' => wp_json_encode($meta),
       'updated_at'    => current_time('mysql'),
     ), array('id'=>$order_id), array('%s','%s'), array('%d'));
+  }
+
+  private function mrm_claim_purchase_receipt_send($order_id) {
+    $order_id = (int)$order_id;
+    if ($order_id <= 0) return false;
+
+    $lock_key = 'mrm_receipt_claim_order_' . $order_id;
+
+    if (get_option($lock_key, null)) {
+      return false;
+    }
+
+    $added = add_option($lock_key, current_time('mysql'), '', 'no');
+    return (bool)$added;
+  }
+
+  private function mrm_release_purchase_receipt_claim($order_id) {
+    $order_id = (int)$order_id;
+    if ($order_id <= 0) return;
+
+    $lock_key = 'mrm_receipt_claim_order_' . $order_id;
+    delete_option($lock_key);
   }
 
   private function mrm_maybe_send_purchase_receipt_email($pi, $order_row) {
@@ -1898,13 +1957,22 @@ class MRM_Payments_Hub_Single {
     }
     if (!$email || !is_email($email)) return;
 
-    // Idempotency
+    // Idempotency + race-condition lock
     $existing_meta = array();
     if (!empty($order_row['metadata_json'])) {
       $decoded = json_decode((string)$order_row['metadata_json'], true);
       if (is_array($decoded)) $existing_meta = $decoded;
     }
     if (!empty($existing_meta['mrm_receipt_sent_at'])) {
+      return;
+    }
+
+    $order_id_for_claim = (int)($order_row['id'] ?? 0);
+    if ($order_id_for_claim <= 0) {
+      return;
+    }
+
+    if (!$this->mrm_claim_purchase_receipt_send($order_id_for_claim)) {
       return;
     }
 
@@ -2003,14 +2071,27 @@ class MRM_Payments_Hub_Single {
       $is_autopay_initial_receipt = ($autopay === 'yes' && $sku !== 'autopay_lesson_charge');
       $is_autopay_receipt = ($is_autopay_initial_receipt || $is_autopay_followup_receipt);
 
+      $lesson_sequence = 0;
+      if ($is_autopay_receipt && !empty($lesson_row)) {
+        $lesson_sequence = (int)$this->mrm_get_lesson_sequence_for_receipt($lesson_row);
+      }
+
+      if ($lesson_sequence <= 0 && $is_autopay_initial_receipt) {
+        $lesson_sequence = 1;
+      }
+
       $count_display = '';
       if ($is_autopay_receipt) {
         if ($repeat_duration === 'indefinitely' || $plan_kind === 'indefinite') {
-          $count_display = 'Indefinite';
+          $count_display = ($lesson_sequence > 0)
+            ? ($lesson_sequence . ' of Indefinite')
+            : 'Indefinite';
         } elseif ($authorized_lesson_count > 0) {
-          $count_display = (string)$authorized_lesson_count;
+          $current_display = ($lesson_sequence > 0) ? $lesson_sequence : 1;
+          $count_display = $current_display . ' of ' . $authorized_lesson_count;
         } elseif ($lesson_count_raw !== '') {
-          $count_display = $lesson_count_raw;
+          $current_display = ($lesson_sequence > 0) ? $lesson_sequence : 1;
+          $count_display = $current_display . ' of ' . $lesson_count_raw;
         }
       } else {
         if ($lesson_count_raw !== '') {
@@ -2044,7 +2125,7 @@ class MRM_Payments_Hub_Single {
       $details .= '<div>Plan: ' . esc_html($plan_display) . '</div>';
 
       if ($is_autopay_initial_receipt) {
-        $details .= '<div style="margin-top:12px;">This message confirms that we have received payment for your first lesson. You will not be charged again until after your second lesson is delivered.</div>';
+        $details .= '<div style="margin-top:12px;">This message confirms that we have received payment for lesson 1. You will not be charged again until after lesson 2 is delivered.</div>';
       }
 
       if ($is_autopay_followup_receipt) {
@@ -2092,6 +2173,11 @@ class MRM_Payments_Hub_Single {
 
     if ($sent && !empty($order_row['id'])) {
       $this->mrm_set_order_meta_flag((int)$order_row['id'], 'mrm_receipt_sent_at', current_time('mysql'));
+      return;
+    }
+
+    if (!empty($order_row['id'])) {
+      $this->mrm_release_purchase_receipt_claim((int)$order_row['id']);
     }
   }
 
