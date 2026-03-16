@@ -20,6 +20,8 @@ class MRM_Payments_Hub_Single {
   // Admin menu
   const MENU_SLUG = 'mrm-payments-hub';
   private const MRM_AUTO_REFUND_MAX_AGE_DAYS = 7;
+  private const MRM_PM_LOOKAHEAD_HOURS = 72;
+  private const MRM_PM_SAME_MONTH_REQUIRES_UPDATE = true;
 
   public function __construct() {
     add_action('admin_menu', array($this, 'admin_menu'));
@@ -35,6 +37,7 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_retry_autopay_charges', array($this, 'cron_retry_autopay_charges'));
     add_action('mrm_pay_hub_discover_missed_autopay_lessons', array($this, 'cron_discover_missed_autopay_lessons'));
     add_action('mrm_pay_hub_reset_stuck_autopay_lessons', array($this, 'cron_reset_stuck_autopay_lessons'));
+    add_action('mrm_pay_hub_check_upcoming_payment_methods', array($this, 'cron_check_upcoming_payment_methods'));
 
     add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
@@ -77,6 +80,10 @@ class MRM_Payments_Hub_Single {
     if (!wp_next_scheduled('mrm_pay_hub_reset_stuck_autopay_lessons')) {
       wp_schedule_event(time() + 420, 'daily', 'mrm_pay_hub_reset_stuck_autopay_lessons');
     }
+
+    if (!wp_next_scheduled('mrm_pay_hub_check_upcoming_payment_methods')) {
+      wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_check_upcoming_payment_methods');
+    }
   }
 
   public function on_activate() {
@@ -101,6 +108,10 @@ class MRM_Payments_Hub_Single {
 
     if (!wp_next_scheduled('mrm_pay_hub_reset_stuck_autopay_lessons')) {
       wp_schedule_event(time() + 420, 'daily', 'mrm_pay_hub_reset_stuck_autopay_lessons');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_check_upcoming_payment_methods')) {
+      wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_check_upcoming_payment_methods');
     }
   }
 
@@ -364,6 +375,14 @@ class MRM_Payments_Hub_Single {
   plan_kind VARCHAR(20) NOT NULL DEFAULT 'indefinite',
   authorized_lesson_count INT NOT NULL DEFAULT 0,
   charged_lesson_count INT NOT NULL DEFAULT 0,
+  pm_brand VARCHAR(40) DEFAULT NULL,
+  pm_last4 VARCHAR(10) DEFAULT NULL,
+  pm_exp_month INT NOT NULL DEFAULT 0,
+  pm_exp_year INT NOT NULL DEFAULT 0,
+  pm_last_checked_at DATETIME DEFAULT NULL,
+  pm_attention_status VARCHAR(40) DEFAULT NULL,
+  pm_attention_reason VARCHAR(255) DEFAULT NULL,
+  pm_attention_notified_at DATETIME DEFAULT NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
   detached_at DATETIME DEFAULT NULL,
   created_at DATETIME NOT NULL,
@@ -1031,6 +1050,244 @@ class MRM_Payments_Hub_Single {
     $payment_method_id = sanitize_text_field((string)$payment_method_id);
     if (!$payment_method_id) return new WP_Error('stripe_invalid_args', 'Missing payment method id.');
     return $this->stripe_api_request('GET', '/v1/payment_methods/' . rawurlencode($payment_method_id));
+  }
+
+  private function mrm_extract_card_snapshot_from_payment_method($pm) {
+    if (!is_array($pm)) {
+      return array(
+        'brand' => '',
+        'last4' => '',
+        'exp_month' => 0,
+        'exp_year' => 0,
+      );
+    }
+
+    $card = isset($pm['card']) && is_array($pm['card']) ? $pm['card'] : array();
+
+    return array(
+      'brand' => (string)($card['brand'] ?? ''),
+      'last4' => (string)($card['last4'] ?? ''),
+      'exp_month' => (int)($card['exp_month'] ?? 0),
+      'exp_year' => (int)($card['exp_year'] ?? 0),
+    );
+  }
+
+  private function mrm_store_autopay_payment_method_snapshot($autopay_profile_id, $payment_method_id, $pm = null, $attention_status = null, $attention_reason = null, $notified_now = false) {
+    global $wpdb;
+
+    $autopay_profile_id = (int)$autopay_profile_id;
+    if ($autopay_profile_id <= 0) return false;
+
+    if (!is_array($pm)) {
+      $pm = $this->stripe_retrieve_payment_method($payment_method_id);
+      if (is_wp_error($pm)) {
+        return false;
+      }
+    }
+
+    $snap = $this->mrm_extract_card_snapshot_from_payment_method($pm);
+
+    $data = array(
+      'payment_method_id' => (string)$payment_method_id,
+      'pm_brand' => $snap['brand'],
+      'pm_last4' => $snap['last4'],
+      'pm_exp_month' => (int)$snap['exp_month'],
+      'pm_exp_year' => (int)$snap['exp_year'],
+      'pm_last_checked_at' => current_time('mysql'),
+      'updated_at' => current_time('mysql'),
+    );
+
+    $formats = array('%s','%s','%s','%d','%d','%s','%s');
+
+    if ($attention_status !== null) {
+      $data['pm_attention_status'] = (string)$attention_status;
+      $formats[] = '%s';
+    }
+
+    if ($attention_reason !== null) {
+      $data['pm_attention_reason'] = (string)$attention_reason;
+      $formats[] = '%s';
+    }
+
+    if ($notified_now) {
+      $data['pm_attention_notified_at'] = current_time('mysql');
+      $formats[] = '%s';
+    }
+
+    return (false !== $wpdb->update(
+      $this->table_autopay_profiles(),
+      $data,
+      array('id' => $autopay_profile_id),
+      $formats,
+      array('%d')
+    ));
+  }
+
+  private function mrm_payment_method_needs_attention_for_lesson($exp_month, $exp_year, $lesson_start_mysql) {
+    $exp_month = (int)$exp_month;
+    $exp_year = (int)$exp_year;
+    $lesson_start_mysql = (string)$lesson_start_mysql;
+
+    if ($exp_month <= 0 || $exp_year <= 0 || $lesson_start_mysql === '') {
+      return array(
+        'needs_attention' => true,
+        'reason_code' => 'missing_expiration',
+        'reason_text' => 'We could not confirm the expiration date of the saved payment method.',
+      );
+    }
+
+    $lesson_ts = strtotime($lesson_start_mysql);
+    if (!$lesson_ts) {
+      return array(
+        'needs_attention' => true,
+        'reason_code' => 'lesson_time_invalid',
+        'reason_text' => 'We could not confirm the lesson start time for payment-readiness review.',
+      );
+    }
+
+    $lesson_year = (int)gmdate('Y', $lesson_ts);
+    $lesson_month = (int)gmdate('n', $lesson_ts);
+
+    $expires_before_lesson_month =
+      ($exp_year < $lesson_year) ||
+      ($exp_year === $lesson_year && $exp_month < $lesson_month);
+
+    if ($expires_before_lesson_month) {
+      return array(
+        'needs_attention' => true,
+        'reason_code' => 'expired_before_lesson',
+        'reason_text' => sprintf('The saved card expires %02d/%04d, which is before the lesson month.', $exp_month, $exp_year),
+      );
+    }
+
+    if (self::MRM_PM_SAME_MONTH_REQUIRES_UPDATE && $exp_year === $lesson_year && $exp_month === $lesson_month) {
+      return array(
+        'needs_attention' => true,
+        'reason_code' => 'expires_same_month',
+        'reason_text' => sprintf('The saved card expires %02d/%04d, which is the same month as the scheduled lesson.', $exp_month, $exp_year),
+      );
+    }
+
+    return array(
+      'needs_attention' => false,
+      'reason_code' => '',
+      'reason_text' => '',
+    );
+  }
+
+  private function mrm_pm_notice_option_key($lesson_id) {
+    return 'mrm_pm_attention_notice_lesson_' . (int)$lesson_id;
+  }
+
+  private function mrm_pm_notice_already_sent_for_signature($lesson_id, $signature) {
+    $existing = (string)get_option($this->mrm_pm_notice_option_key($lesson_id), '');
+    return ($existing !== '' && hash_equals($existing, (string)$signature));
+  }
+
+  private function mrm_mark_pm_notice_sent_for_signature($lesson_id, $signature) {
+    update_option($this->mrm_pm_notice_option_key($lesson_id), (string)$signature, false);
+  }
+
+  private function mrm_clear_pm_notice_signature($lesson_id) {
+    delete_option($this->mrm_pm_notice_option_key($lesson_id));
+  }
+
+  private function mrm_get_wp_admin_notification_email() {
+    return sanitize_email((string)get_option('admin_email', ''));
+  }
+
+  private function mrm_format_lesson_mode_label($is_online) {
+    return ((int)$is_online === 1) ? 'Online' : 'In Person';
+  }
+
+  private function mrm_send_upcoming_payment_method_attention_emails($lesson_row, $profile, $snapshot, $reason_text) {
+    $lesson_id = (int)($lesson_row['id'] ?? 0);
+    if ($lesson_id <= 0) return false;
+
+    $student_email = sanitize_email((string)($lesson_row['student_email'] ?? ''));
+    $lesson_start = (string)($lesson_row['start_time'] ?? '');
+    $lesson_length = (int)($lesson_row['lesson_length'] ?? 0);
+    $mode_label = $this->mrm_format_lesson_mode_label((int)($lesson_row['is_online'] ?? 0));
+
+    $instructor = $this->mrm_get_instructor_contact_from_id((int)($lesson_row['instructor_id'] ?? 0));
+    $admin_email = $this->mrm_get_wp_admin_notification_email();
+
+    $brand = trim((string)($snapshot['brand'] ?? ''));
+    $last4 = trim((string)($snapshot['last4'] ?? ''));
+    $exp_month = (int)($snapshot['exp_month'] ?? 0);
+    $exp_year = (int)($snapshot['exp_year'] ?? 0);
+
+    $card_line = 'Saved payment method on file';
+    if ($brand !== '' || $last4 !== '') {
+      $card_line = trim($brand . ' ending in ' . $last4);
+    }
+    if ($exp_month > 0 && $exp_year > 0) {
+      $card_line .= sprintf(' (expires %02d/%04d)', $exp_month, $exp_year);
+    }
+
+    $lesson_line = trim(($lesson_length > 0 ? $lesson_length . '-minute ' : '') . $mode_label . ' lesson');
+    $when_line = ($lesson_start !== '') ? $lesson_start : 'the scheduled lesson time';
+
+    $student_subject = 'Action required: update your payment method before your lesson';
+    $student_intro = '<p>We are writing regarding your upcoming lesson.</p>';
+    $student_details =
+      '<p>Before this lesson can proceed, we need a confirmed payment method on file.</p>' .
+      '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' .
+      '<div><strong>Scheduled time:</strong> ' . esc_html($when_line) . '</div>' .
+      '<div><strong>Saved payment method:</strong> ' . esc_html($card_line) . '</div>' .
+      '<div><strong>Reason:</strong> ' . esc_html($reason_text) . '</div>' .
+      '<p style="margin-top:12px;">Please update or reconfirm your payment method as soon as possible. Until that is completed, your instructor has been asked to withhold the lesson.</p>';
+
+    $instructor_subject = 'Payment method not confirmed — please withhold upcoming lesson';
+    $instructor_intro = '<p>A scheduled AutoPay lesson requires payment-method confirmation before instruction.</p>';
+    $instructor_details =
+      '<div><strong>Lesson ID:</strong> ' . esc_html((string)$lesson_id) . '</div>' .
+      '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' .
+      '<div><strong>Scheduled time:</strong> ' . esc_html($when_line) . '</div>' .
+      '<div><strong>Student email:</strong> ' . esc_html($student_email) . '</div>' .
+      '<div><strong>Issue:</strong> ' . esc_html($reason_text) . '</div>' .
+      '<p style="margin-top:12px;">Please withhold providing this lesson until the payment method has been updated and confirmed.</p>';
+
+    $admin_subject = 'AutoPay payment method attention needed for upcoming lesson';
+    $admin_intro = '<p>An upcoming AutoPay lesson needs payment-method attention.</p>';
+    $admin_details =
+      '<div><strong>Lesson ID:</strong> ' . esc_html((string)$lesson_id) . '</div>' .
+      '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' .
+      '<div><strong>Scheduled time:</strong> ' . esc_html($when_line) . '</div>' .
+      '<div><strong>Student email:</strong> ' . esc_html($student_email) . '</div>' .
+      '<div><strong>Instructor:</strong> ' . esc_html((string)($instructor['name'] ?? '')) . '</div>' .
+      '<div><strong>Instructor email:</strong> ' . esc_html((string)($instructor['email'] ?? '')) . '</div>' .
+      '<div><strong>Saved payment method:</strong> ' . esc_html($card_line) . '</div>' .
+      '<div><strong>Issue:</strong> ' . esc_html($reason_text) . '</div>' .
+      '<p style="margin-top:12px;">Instructor notification has been sent. Please manage any additional communication as needed.</p>';
+
+    $headers = array(
+      'Content-Type: text/html; charset=UTF-8',
+      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+    );
+
+    $contact_url = $this->mrm_get_contact_url();
+
+    $student_sent = false;
+    if ($student_email && is_email($student_email)) {
+      $student_html = $this->mrm_email_wrap_html('Payment method confirmation needed', $student_intro, $student_details, $contact_url, 'Contact Support');
+      $student_sent = wp_mail($student_email, $student_subject, $student_html, $headers);
+    }
+
+    $instructor_sent = false;
+    $instructor_email = sanitize_email((string)($instructor['email'] ?? ''));
+    if ($instructor_email && is_email($instructor_email)) {
+      $instructor_html = $this->mrm_email_wrap_html('Instructor action required', $instructor_intro, $instructor_details, $contact_url, 'Contact Support');
+      $instructor_sent = wp_mail($instructor_email, $instructor_subject, $instructor_html, $headers);
+    }
+
+    $admin_sent = false;
+    if ($admin_email && is_email($admin_email)) {
+      $admin_html = $this->mrm_email_wrap_html('Admin awareness', $admin_intro, $admin_details, $contact_url, 'Contact Support');
+      $admin_sent = wp_mail($admin_email, $admin_subject, $admin_html, $headers);
+    }
+
+    return ($student_sent || $instructor_sent || $admin_sent);
   }
 
   private function mrm_ensure_customer_payment_method_ready($customer_id, $payment_method_id) {
@@ -3244,6 +3501,23 @@ class MRM_Payments_Hub_Single {
       return;
     }
 
+    if ((string)($profile['pm_attention_status'] ?? '') === 'needs_update') {
+      global $wpdb;
+      $wpdb->update(
+        $this->table_lessons(),
+        array(
+          'charge_last_error' => 'AutoPay charge blocked because the saved payment method still requires confirmation.',
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => $lesson_id),
+        array('%s','%s'),
+        array('%d')
+      );
+
+      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: payment method still requires confirmation. lesson_id=' . $lesson_id . ' autopay_profile_id=' . $autopay_profile_id);
+      return;
+    }
+
     $customer_id = (string)$validated_profile['customer_id'];
     $payment_method_id = (string)$validated_profile['payment_method_id'];
     $amount_cents = (int)$validated_profile['amount_cents'];
@@ -3364,6 +3638,172 @@ class MRM_Payments_Hub_Single {
       return ($days % 14) === 0;
     } catch (Exception $e) {
       return false;
+    }
+  }
+
+  public function cron_check_upcoming_payment_methods() {
+    global $wpdb;
+
+    $lessons_table = $this->table_lessons();
+    $autopay_table = $this->table_autopay_profiles();
+
+    $window_start = current_time('mysql');
+    $window_end = gmdate('Y-m-d H:i:s', time() + (self::MRM_PM_LOOKAHEAD_HOURS * HOUR_IN_SECONDS));
+
+    $rows = $wpdb->get_results($wpdb->prepare(
+      "SELECT l.id, l.instructor_id, l.student_email, l.lesson_length, l.is_online, l.start_time, l.end_time, l.autopay_profile_id,
+              l.status, l.charge_status, l.charge_last_error,
+              ap.id AS profile_id, ap.payment_method_id, ap.pm_brand, ap.pm_last4, ap.pm_exp_month, ap.pm_exp_year,
+              ap.pm_attention_status, ap.pm_attention_reason, ap.active
+       FROM {$lessons_table} l
+       INNER JOIN {$autopay_table} ap ON ap.id = l.autopay_profile_id
+       WHERE l.payment_mode = 'autopay'
+         AND COALESCE(l.status, 'scheduled') = 'scheduled'
+         AND COALESCE(ap.active, 0) = 1
+         AND COALESCE(l.autopay_profile_id, 0) > 0
+         AND l.start_time >= %s
+         AND l.start_time <= %s
+       ORDER BY l.start_time ASC",
+      $window_start,
+      $window_end
+    ), ARRAY_A);
+
+    if (!is_array($rows) || empty($rows)) {
+      return;
+    }
+
+    foreach ($rows as $row) {
+      $lesson_id = (int)($row['id'] ?? 0);
+      $autopay_profile_id = (int)($row['autopay_profile_id'] ?? 0);
+      $payment_method_id = (string)($row['payment_method_id'] ?? '');
+
+      if ($lesson_id <= 0 || $autopay_profile_id <= 0 || $payment_method_id === '') {
+        continue;
+      }
+
+      $pm = $this->stripe_retrieve_payment_method($payment_method_id);
+
+      if (is_wp_error($pm)) {
+        $reason_text = 'We could not confirm the saved payment method with Stripe.';
+        $signature = md5('pm-unreachable|' . $payment_method_id . '|' . $lesson_id);
+
+        $this->mrm_store_autopay_payment_method_snapshot(
+          $autopay_profile_id,
+          $payment_method_id,
+          null,
+          'needs_update',
+          $reason_text,
+          false
+        );
+
+        $wpdb->update(
+          $lessons_table,
+          array(
+            'charge_last_error' => 'Payment method requires confirmation before lesson. ' . $reason_text,
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => $lesson_id),
+          array('%s','%s'),
+          array('%d')
+        );
+
+        if (!$this->mrm_pm_notice_already_sent_for_signature($lesson_id, $signature)) {
+          $snapshot = array(
+            'brand' => (string)($row['pm_brand'] ?? ''),
+            'last4' => (string)($row['pm_last4'] ?? ''),
+            'exp_month' => (int)($row['pm_exp_month'] ?? 0),
+            'exp_year' => (int)($row['pm_exp_year'] ?? 0),
+          );
+          $sent = $this->mrm_send_upcoming_payment_method_attention_emails($row, $row, $snapshot, $reason_text);
+          if ($sent) {
+            $this->mrm_mark_pm_notice_sent_for_signature($lesson_id, $signature);
+            $this->mrm_store_autopay_payment_method_snapshot(
+              $autopay_profile_id,
+              $payment_method_id,
+              array('card' => $snapshot),
+              'needs_update',
+              $reason_text,
+              true
+            );
+          }
+        }
+
+        continue;
+      }
+
+      $snap = $this->mrm_extract_card_snapshot_from_payment_method($pm);
+      $eval = $this->mrm_payment_method_needs_attention_for_lesson(
+        (int)$snap['exp_month'],
+        (int)$snap['exp_year'],
+        (string)($row['start_time'] ?? '')
+      );
+
+      if (!empty($eval['needs_attention'])) {
+        $reason_text = (string)$eval['reason_text'];
+        $signature = md5($payment_method_id . '|' . $snap['exp_month'] . '|' . $snap['exp_year'] . '|' . $lesson_id . '|' . $eval['reason_code']);
+
+        $this->mrm_store_autopay_payment_method_snapshot(
+          $autopay_profile_id,
+          $payment_method_id,
+          $pm,
+          'needs_update',
+          $reason_text,
+          false
+        );
+
+        $wpdb->update(
+          $lessons_table,
+          array(
+            'charge_last_error' => 'Payment method requires confirmation before lesson. ' . $reason_text,
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => $lesson_id),
+          array('%s','%s'),
+          array('%d')
+        );
+
+        if (!$this->mrm_pm_notice_already_sent_for_signature($lesson_id, $signature)) {
+          $sent = $this->mrm_send_upcoming_payment_method_attention_emails($row, $row, $snap, $reason_text);
+          if ($sent) {
+            $this->mrm_mark_pm_notice_sent_for_signature($lesson_id, $signature);
+            $this->mrm_store_autopay_payment_method_snapshot(
+              $autopay_profile_id,
+              $payment_method_id,
+              $pm,
+              'needs_update',
+              $reason_text,
+              true
+            );
+          }
+        }
+
+        continue;
+      }
+
+      $this->mrm_store_autopay_payment_method_snapshot(
+        $autopay_profile_id,
+        $payment_method_id,
+        $pm,
+        'ok',
+        '',
+        false
+      );
+
+      $existing_error = (string)($row['charge_last_error'] ?? '');
+      if (strpos($existing_error, 'Payment method requires confirmation before lesson.') === 0) {
+        $wpdb->update(
+          $lessons_table,
+          array(
+            'charge_last_error' => null,
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => $lesson_id),
+          array('%s','%s'),
+          array('%d')
+        );
+      }
+
+      $this->mrm_clear_pm_notice_signature($lesson_id);
     }
   }
 
@@ -4096,6 +4536,18 @@ class MRM_Payments_Hub_Single {
       'updated_at' => current_time('mysql'),
     ), array('id' => $autopay_profile_id), array('%s','%d','%s'), array('%d'));
 
+    $pm_live = $this->stripe_retrieve_payment_method($payment_method_id);
+    if (!is_wp_error($pm_live)) {
+      $this->mrm_store_autopay_payment_method_snapshot(
+        $autopay_profile_id,
+        $payment_method_id,
+        $pm_live,
+        'ok',
+        '',
+        false
+      );
+    }
+
     return new WP_REST_Response(array(
       'ok' => true,
       'autopay_profile_id' => $autopay_profile_id,
@@ -4169,6 +4621,14 @@ class MRM_Payments_Hub_Single {
     $email_hash = $this->email_hash($email);
     $now = current_time('mysql');
 
+    $pm_live = $this->stripe_retrieve_payment_method($payment_method_id);
+    $pm_snap = !is_wp_error($pm_live) ? $this->mrm_extract_card_snapshot_from_payment_method($pm_live) : array(
+      'brand' => '',
+      'last4' => '',
+      'exp_month' => 0,
+      'exp_year' => 0,
+    );
+
     $wpdb->insert($this->table_autopay_profiles(), array(
       'instructor_id' => (int)$instructor_id,
       'email_hash' => (string)$email_hash,
@@ -4179,11 +4639,19 @@ class MRM_Payments_Hub_Single {
       'plan_kind' => $plan_kind,
       'authorized_lesson_count' => (int)$authorized_lesson_count,
       'charged_lesson_count' => 0,
+      'pm_brand' => (string)$pm_snap['brand'],
+      'pm_last4' => (string)$pm_snap['last4'],
+      'pm_exp_month' => (int)$pm_snap['exp_month'],
+      'pm_exp_year' => (int)$pm_snap['exp_year'],
+      'pm_last_checked_at' => $now,
+      'pm_attention_status' => 'ok',
+      'pm_attention_reason' => '',
+      'pm_attention_notified_at' => null,
       'active' => 1,
       'detached_at' => null,
       'created_at' => $now,
       'updated_at' => $now,
-    ), array('%d','%s','%s','%s','%s','%d','%s','%d','%d','%d','%s','%s','%s'));
+    ), array('%d','%s','%s','%s','%s','%d','%s','%d','%d','%s','%s','%d','%d','%s','%s','%s','%d','%s','%s','%s'));
 
     $autopay_profile_id = (int)$wpdb->insert_id;
     if ($autopay_profile_id <= 0) {
