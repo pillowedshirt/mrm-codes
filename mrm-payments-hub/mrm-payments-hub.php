@@ -1487,26 +1487,32 @@ class MRM_Payments_Hub_Single {
       return new WP_Error('mrm_scheduler_missing', 'Lesson scheduler class unavailable.');
     }
 
-    // IMPORTANT:
-    // The scheduler plugin exposes get_instance(), not instance().
     $scheduler = MRM_Lesson_Scheduler::get_instance();
     if (!$scheduler || !method_exists($scheduler, 'sync_lesson_row_from_google_truth')) {
       return new WP_Error('mrm_scheduler_sync_missing', 'Google sync helper unavailable.');
     }
 
-    // IMPORTANT:
-    // Do not require google_event_id here.
-    // The scheduler resolver can recover by direct event ID, series anchor,
-    // booking_id, google_original_start_time, and local start fallback.
     $sync = $scheduler->sync_lesson_row_from_google_truth($row, $calendar_id, 120);
     $status = (string)($sync['status'] ?? 'unresolved');
+    $reason = (string)($sync['reason'] ?? 'unresolved');
+
+    if (defined('WP_DEBUG') && WP_DEBUG) {
+      error_log(
+        '[MRM AutoPay] google_truth_check lesson_id=' . $lesson_id .
+        ' status=' . $status .
+        ' reason=' . $reason .
+        ' calendar_id=' . $calendar_id .
+        ' local_start=' . (string)($row['start_time'] ?? '') .
+        ' local_end=' . (string)($row['end_time'] ?? '')
+      );
+    }
 
     if ($status === 'cancelled') {
       return new WP_Error('mrm_google_cancelled', 'Google event is cancelled.');
     }
 
     if ($status !== 'resolved') {
-      return new WP_Error('mrm_google_unresolved', 'Could not resolve lesson from Google.');
+      return new WP_Error('mrm_google_unresolved', 'Could not resolve lesson from Google: ' . $reason);
     }
 
     $synced = isset($sync['lesson_row']) && is_array($sync['lesson_row']) ? $sync['lesson_row'] : $row;
@@ -1516,8 +1522,25 @@ class MRM_Payments_Hub_Single {
       return new WP_Error('mrm_google_end_missing', 'Google event end time is missing.');
     }
 
-    if (strtotime($end_utc) > time()) {
-      return new WP_Error('mrm_google_not_ended', 'Google event has not ended yet.');
+    $end_ts = strtotime($end_utc);
+    if (!$end_ts) {
+      return new WP_Error('mrm_google_end_invalid', 'Google event end time could not be parsed.');
+    }
+
+    if ($end_ts > time()) {
+      return new WP_Error(
+        'mrm_google_not_ended',
+        'Google event has not ended yet. end_utc=' . $end_utc
+      );
+    }
+
+    if (defined('WP_DEBUG') && WP_DEBUG) {
+      error_log(
+        '[MRM AutoPay] google_truth_confirmed lesson_id=' . $lesson_id .
+        ' end_utc=' . $end_utc .
+        ' synced_start=' . (string)($synced['start_time'] ?? '') .
+        ' synced_end=' . (string)($synced['end_time'] ?? '')
+      );
     }
 
     return array(
@@ -1526,6 +1549,7 @@ class MRM_Payments_Hub_Single {
       'sync' => $sync,
     );
   }
+
 
   private function mrm_validate_autopay_profile_for_charge( $profile ) {
     if ( ! is_array( $profile ) ) {
@@ -2478,6 +2502,16 @@ class MRM_Payments_Hub_Single {
       continue;
     }
 
+    if (defined('WP_DEBUG') && WP_DEBUG) {
+      error_log(
+        '[MRM AutoPay] retry_candidate lesson_id=' . $lesson_id .
+        ' status=' . (string)($row['status'] ?? '') .
+        ' charge_status=' . (string)($row['charge_status'] ?? '') .
+        ' charge_attempts=' . (int)($row['charge_attempts'] ?? 0) .
+        ' autopay_profile_id=' . (int)($row['autopay_profile_id'] ?? 0)
+      );
+    }
+
     $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
     if ($existing_order) {
       $existing_status = (string)($existing_order['status'] ?? '');
@@ -2505,7 +2539,31 @@ class MRM_Payments_Hub_Single {
 
     $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
     if (is_wp_error($google_truth)) {
+      $google_error = $google_truth->get_error_code() . ': ' . $google_truth->get_error_message();
+
+      if (defined('WP_DEBUG') && WP_DEBUG) {
+        error_log('[MRM AutoPay] retry_skip_google_truth lesson_id=' . $lesson_id . ' error=' . $google_error);
+      }
+
+      $wpdb->update(
+        $lessons_table,
+        array(
+          'charge_last_error' => substr('Google truth blocked charge: ' . $google_error, 0, 65535),
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => $lesson_id),
+        array('%s','%s'),
+        array('%d')
+      );
+
       continue;
+    }
+
+    if (defined('WP_DEBUG') && WP_DEBUG) {
+      error_log(
+        '[MRM AutoPay] retry_charge_ready lesson_id=' . $lesson_id .
+        ' end_utc=' . (string)($google_truth['end_utc'] ?? '')
+      );
     }
 
     $this->charge_and_unlock_autopay(array(
@@ -2550,11 +2608,31 @@ class MRM_Payments_Hub_Single {
 
       $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
       if (is_wp_error($google_truth)) {
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+          error_log(
+            '[MRM AutoPay] discover_skip_google_truth lesson_id=' . $lesson_id .
+            ' error=' . $google_truth->get_error_code() . ': ' . $google_truth->get_error_message()
+          );
+        }
         continue;
+      }
+
+      if (defined('WP_DEBUG') && WP_DEBUG) {
+        error_log(
+          '[MRM AutoPay] discover_google_truth_ready lesson_id=' . $lesson_id .
+          ' end_utc=' . (string)($google_truth['end_utc'] ?? '')
+        );
       }
 
       $status = (string)($row['status'] ?? '');
       if ($status !== 'payment_due') {
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+          error_log(
+            '[MRM AutoPay] discover_promote_to_payment_due lesson_id=' . $lesson_id .
+            ' old_status=' . $status
+          );
+        }
+
         $wpdb->update(
           $lessons_table,
           array(
@@ -2612,7 +2690,20 @@ class MRM_Payments_Hub_Single {
       // Only reset lessons that Google still confirms have actually ended.
       $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
       if (is_wp_error($google_truth)) {
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+          error_log(
+            '[MRM AutoPay] reset_skip_google_truth lesson_id=' . $lesson_id .
+            ' error=' . $google_truth->get_error_code() . ': ' . $google_truth->get_error_message()
+          );
+        }
         continue;
+      }
+
+      if (defined('WP_DEBUG') && WP_DEBUG) {
+        error_log(
+          '[MRM AutoPay] reset_google_truth_ready lesson_id=' . $lesson_id .
+          ' end_utc=' . (string)($google_truth['end_utc'] ?? '')
+        );
       }
 
       $prev_error = trim((string)($row['charge_last_error'] ?? ''));
