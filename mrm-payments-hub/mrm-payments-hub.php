@@ -155,6 +155,11 @@ class MRM_Payments_Hub_Single {
     return $wpdb->prefix . 'mrm_stripe_webhook_events';
   }
 
+  private function table_sheet_music_subscriptions() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_sheet_music_subscriptions';
+  }
+
   public function maybe_install_or_upgrade_db() {
     // Run a lightweight existence + schema check; only dbDelta if needed.
     global $wpdb;
@@ -166,11 +171,12 @@ class MRM_Payments_Hub_Single {
     $credits = $this->table_lesson_credits();
     $autopay = $this->table_autopay_profiles();
     $webhooks = $this->table_webhook_events();
+    $subs = $this->table_sheet_music_subscriptions();
 
     $needs_upgrade = false;
 
     // 1) Table existence check
-    foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks) as $t) {
+    foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks, $subs) as $t) {
       $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
       if ($found !== $t) {
         $needs_upgrade = true;
@@ -268,6 +274,7 @@ class MRM_Payments_Hub_Single {
     $credits = $this->table_lesson_credits();
     $autopay = $this->table_autopay_profiles();
     $webhooks = $this->table_webhook_events();
+    $subs = $this->table_sheet_music_subscriptions();
 
     $sql_orders = "CREATE TABLE {$orders} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -406,6 +413,30 @@ class MRM_Payments_Hub_Single {
       KEY object_id_idx (object_id)
     ) {$charset};";
 
+    $sql_subs = "CREATE TABLE {$subs} (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      email_hash CHAR(64) NOT NULL,
+      email_plain VARCHAR(190) DEFAULT NULL,
+      stripe_customer_id VARCHAR(255) NOT NULL,
+      stripe_subscription_id VARCHAR(255) NOT NULL,
+      stripe_price_id VARCHAR(255) NOT NULL,
+      stripe_status VARCHAR(60) NOT NULL DEFAULT 'pending',
+      current_period_start DATETIME DEFAULT NULL,
+      current_period_end DATETIME DEFAULT NULL,
+      cancel_at_period_end TINYINT(1) NOT NULL DEFAULT 0,
+      canceled_at DATETIME DEFAULT NULL,
+      latest_invoice_id VARCHAR(255) DEFAULT NULL,
+      portal_token VARCHAR(64) NOT NULL,
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY stripe_subscription_id_uniq (stripe_subscription_id),
+      UNIQUE KEY portal_token_uniq (portal_token),
+      KEY email_hash_idx (email_hash),
+      KEY stripe_customer_idx (stripe_customer_id),
+      KEY stripe_status_idx (stripe_status)
+    ) {$charset};";
+
     dbDelta($sql_orders);
     dbDelta($sql_links);
     dbDelta($sql_access);
@@ -413,6 +444,7 @@ class MRM_Payments_Hub_Single {
     dbDelta($sql_credits);
     dbDelta($sql_autopay);
     dbDelta($sql_webhooks);
+    dbDelta($sql_subs);
   }
 
 
@@ -586,6 +618,14 @@ class MRM_Payments_Hub_Single {
       return trim((string)($s['stripe_test_webhook_secret'] ?? ''));
     }
     return trim((string)($s['stripe_webhook_secret'] ?? ''));
+  }
+
+  private function subscription_price_id() {
+    $s = $this->get_settings();
+    if ($this->is_test_mode()) {
+      return trim((string)($s['stripe_test_sheet_music_subscription_price_id'] ?? ''));
+    }
+    return trim((string)($s['stripe_sheet_music_subscription_price_id'] ?? ''));
   }
 
   private function all_products() {
@@ -1050,6 +1090,35 @@ class MRM_Payments_Hub_Single {
     $payment_method_id = sanitize_text_field((string)$payment_method_id);
     if (!$payment_method_id) return new WP_Error('stripe_invalid_args', 'Missing payment method id.');
     return $this->stripe_api_request('GET', '/v1/payment_methods/' . rawurlencode($payment_method_id));
+  }
+
+  private function stripe_create_subscription($customer_id, $price_id, $default_payment_method_id, $trial_end_ts, $metadata = array()) {
+    $params = array(
+      'customer' => (string)$customer_id,
+      'items[0][price]' => (string)$price_id,
+      'default_payment_method' => (string)$default_payment_method_id,
+      'collection_method' => 'charge_automatically',
+      'proration_behavior' => 'none',
+      'trial_end' => (int)$trial_end_ts,
+    );
+
+    foreach ((array)$metadata as $k => $v) {
+      if ($k === '' || $v === null) continue;
+      $params["metadata[{$k}]"] = (string)$v;
+    }
+
+    return $this->stripe_api_request('POST', '/v1/subscriptions', $params);
+  }
+
+  private function stripe_retrieve_subscription($subscription_id) {
+    return $this->stripe_api_request('GET', '/v1/subscriptions/' . rawurlencode((string)$subscription_id));
+  }
+
+  private function stripe_create_billing_portal_session($customer_id, $return_url) {
+    return $this->stripe_api_request('POST', '/v1/billing_portal/sessions', array(
+      'customer' => (string)$customer_id,
+      'return_url' => (string)$return_url,
+    ));
   }
 
   private function mrm_extract_card_snapshot_from_payment_method($pm) {
@@ -1545,6 +1614,52 @@ class MRM_Payments_Hub_Single {
       array('%s','%s','%s'),
       array('%d','%s')
     );
+  }
+
+  private function mrm_handle_customer_subscription_created_webhook($subscription) {
+    $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+  }
+
+  private function mrm_handle_customer_subscription_updated_webhook($subscription) {
+    $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+  }
+
+  private function mrm_handle_customer_subscription_deleted_webhook($subscription) {
+    $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+  }
+
+  private function mrm_handle_invoice_paid_webhook($invoice) {
+    $subscription_id = (string)($invoice['subscription'] ?? '');
+    if ($subscription_id === '') return;
+
+    $sub = $this->stripe_retrieve_subscription($subscription_id);
+    if (is_wp_error($sub)) {
+      error_log('[MRM Payments Hub] Could not retrieve subscription during invoice.paid: ' . $sub->get_error_message());
+      return;
+    }
+
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($sub, (string)($sub['metadata']['mrm_customer_email'] ?? ''));
+
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+    if (!empty($local['email_plain'])) {
+      $invoice_created_ts = !empty($invoice['created']) ? (int)$invoice['created'] : time();
+      $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'], $invoice_created_ts, 'stripe_subscription_invoice', (string)($invoice['id'] ?? ''));
+      $this->mrm_send_sheet_music_subscription_charge_email($local, $invoice);
+    }
+  }
+
+  private function mrm_handle_invoice_payment_failed_webhook($invoice) {
+    $subscription_id = (string)($invoice['subscription'] ?? '');
+    if ($subscription_id === '') return;
+
+    $sub = $this->stripe_retrieve_subscription($subscription_id);
+    if (is_wp_error($sub)) return;
+
+    $email = sanitize_email((string)($sub['metadata']['mrm_customer_email'] ?? ''));
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($sub, $email);
   }
 
   /* =========================================================
@@ -2115,6 +2230,143 @@ class MRM_Payments_Hub_Single {
   </div>';
   }
 
+  private function mrm_generate_subscription_portal_token() {
+    return wp_generate_password(48, false, false);
+  }
+
+  private function mrm_get_sheet_music_subscription_by_stripe_id($stripe_subscription_id) {
+    global $wpdb;
+    $table = $this->table_sheet_music_subscriptions();
+
+    return $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$table} WHERE stripe_subscription_id = %s LIMIT 1",
+        (string)$stripe_subscription_id
+      ),
+      ARRAY_A
+    );
+  }
+
+  private function mrm_get_active_sheet_music_subscription_by_email($email) {
+    global $wpdb;
+
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) return array();
+
+    $table = $this->table_sheet_music_subscriptions();
+    $email_hash = $this->email_hash($email);
+
+    $row = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$table}
+         WHERE email_hash = %s
+           AND stripe_status IN ('trialing','active','past_due','unpaid')
+         ORDER BY id DESC
+         LIMIT 1",
+        $email_hash
+      ),
+      ARRAY_A
+    );
+
+    return is_array($row) ? $row : array();
+  }
+
+  private function mrm_get_sheet_music_subscription_by_portal_token($token) {
+    global $wpdb;
+    $table = $this->table_sheet_music_subscriptions();
+
+    $row = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$table} WHERE portal_token = %s LIMIT 1",
+        (string)$token
+      ),
+      ARRAY_A
+    );
+
+    return is_array($row) ? $row : array();
+  }
+
+  private function mrm_upsert_sheet_music_subscription_row($data) {
+    global $wpdb;
+
+    $table = $this->table_sheet_music_subscriptions();
+    $stripe_subscription_id = (string)($data['stripe_subscription_id'] ?? '');
+    if ($stripe_subscription_id === '') return false;
+
+    $existing = $this->mrm_get_sheet_music_subscription_by_stripe_id($stripe_subscription_id);
+    $now = current_time('mysql');
+
+    $row = array(
+      'email_hash' => (string)($data['email_hash'] ?? ''),
+      'email_plain' => (string)($data['email_plain'] ?? ''),
+      'stripe_customer_id' => (string)($data['stripe_customer_id'] ?? ''),
+      'stripe_subscription_id' => $stripe_subscription_id,
+      'stripe_price_id' => (string)($data['stripe_price_id'] ?? ''),
+      'stripe_status' => (string)($data['stripe_status'] ?? 'pending'),
+      'current_period_start' => (string)($data['current_period_start'] ?? null),
+      'current_period_end' => (string)($data['current_period_end'] ?? null),
+      'cancel_at_period_end' => !empty($data['cancel_at_period_end']) ? 1 : 0,
+      'canceled_at' => (string)($data['canceled_at'] ?? null),
+      'latest_invoice_id' => (string)($data['latest_invoice_id'] ?? ''),
+      'updated_at' => $now,
+    );
+
+    if (!empty($existing['id'])) {
+      return false !== $wpdb->update(
+        $table,
+        $row,
+        array('id' => (int)$existing['id']),
+        array('%s','%s','%s','%s','%s','%s','%s','%s','%d','%s','%s','%s'),
+        array('%d')
+      );
+    }
+
+    $row['portal_token'] = $this->mrm_generate_subscription_portal_token();
+    $row['created_at'] = $now;
+
+    return false !== $wpdb->insert(
+      $table,
+      $row,
+      array('%s','%s','%s','%s','%s','%s','%s','%s','%d','%s','%s','%s','%s','%s')
+    );
+  }
+
+  private function mrm_subscription_manage_url($portal_token) {
+    return home_url('/wp-json/mrm-pay/v1/subscription-portal?token=' . rawurlencode((string)$portal_token));
+  }
+
+  private function mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $fallback_email = '') {
+    if (!is_array($subscription)) return false;
+
+    $customer_id = (string)($subscription['customer'] ?? '');
+    $subscription_id = (string)($subscription['id'] ?? '');
+    $status = (string)($subscription['status'] ?? 'pending');
+    $latest_invoice_id = is_array($subscription['latest_invoice'] ?? null)
+      ? (string)(($subscription['latest_invoice']['id'] ?? ''))
+      : (string)($subscription['latest_invoice'] ?? '');
+    $price_id = (string)($subscription['items']['data'][0]['price']['id'] ?? '');
+    $period_start = !empty($subscription['current_period_start']) ? $this->mrm_mysql_from_ts((int)$subscription['current_period_start']) : null;
+    $period_end = !empty($subscription['current_period_end']) ? $this->mrm_mysql_from_ts((int)$subscription['current_period_end']) : null;
+    $canceled_at = !empty($subscription['canceled_at']) ? $this->mrm_mysql_from_ts((int)$subscription['canceled_at']) : null;
+
+    $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? $fallback_email));
+    $email_hash = $email && is_email($email) ? $this->email_hash($email) : '';
+
+    return $this->mrm_upsert_sheet_music_subscription_row(array(
+      'email_hash' => $email_hash,
+      'email_plain' => $email,
+      'stripe_customer_id' => $customer_id,
+      'stripe_subscription_id' => $subscription_id,
+      'stripe_price_id' => $price_id,
+      'stripe_status' => $status,
+      'current_period_start' => $period_start,
+      'current_period_end' => $period_end,
+      'cancel_at_period_end' => !empty($subscription['cancel_at_period_end']),
+      'canceled_at' => $canceled_at,
+      'latest_invoice_id' => $latest_invoice_id,
+    ));
+  }
+
   private function mrm_get_instructor_contact_from_id($instructor_id) {
     global $wpdb;
     $iid = (int)$instructor_id;
@@ -2484,6 +2736,87 @@ class MRM_Payments_Hub_Single {
     if (!empty($order_row['id'])) {
       $this->mrm_release_purchase_receipt_claim((int)$order_row['id']);
     }
+  }
+
+
+  private function mrm_send_sheet_music_subscription_enrollment_email($sub_row, $billing_anchor_ts) {
+    if (!is_array($sub_row)) return false;
+
+    $email = sanitize_email((string)($sub_row['email_plain'] ?? ''));
+    if (!$email || !is_email($email)) return false;
+
+    $manage_url = $this->mrm_subscription_manage_url((string)($sub_row['portal_token'] ?? ''));
+    $contact_url = $this->mrm_get_contact_url();
+    $anchor_label = $billing_anchor_ts > 0 ? wp_date('F j, Y', (int)$billing_anchor_ts, wp_timezone()) : 'the same date next month';
+
+    $title = 'Sheet music subscription enrolled';
+    $intro = '<p>You have successfully enrolled in the sheet music subscription service.</p>';
+    $details =
+      '<div><strong>Subscription:</strong> Monthly sheet music access</div>' .
+      '<div><strong>Amount:</strong> $5.00 per month</div>' .
+      '<div><strong>Status:</strong> Active</div>' .
+      '<div style="margin-top:12px;"><strong>Purchase details</strong></div>' .
+      '<div>Your subscription has been created successfully in our billing system.</div>' .
+      '<div style="margin-top:12px;">You will be billed again on or about <strong>' . esc_html($anchor_label) . '</strong>, and then monthly thereafter while the subscription remains active.</div>' .
+      '<p style="margin-top:18px;">
+         <a href="' . esc_url($manage_url) . '" style="display:inline-block;padding:12px 16px;background:#111;color:#fff;text-decoration:none;border-radius:10px;">
+           Cancel Subscription
+         </a>
+       </p>';
+
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+
+    return wp_mail(
+      $email,
+      'Subscription confirmation — Sheet music access',
+      $html,
+      array(
+        'Content-Type: text/html; charset=UTF-8',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+      )
+    );
+  }
+
+  private function mrm_send_sheet_music_subscription_charge_email($sub_row, $invoice) {
+    if (!is_array($sub_row)) return false;
+
+    $email = sanitize_email((string)($sub_row['email_plain'] ?? ''));
+    if (!$email || !is_email($email)) return false;
+
+    $amount_paid = (int)($invoice['amount_paid'] ?? 0);
+    $invoice_id = (string)($invoice['id'] ?? '');
+    $period_end_ts = !empty($invoice['lines']['data'][0]['period']['end']) ? (int)$invoice['lines']['data'][0]['period']['end'] : 0;
+
+    $manage_url = $this->mrm_subscription_manage_url((string)($sub_row['portal_token'] ?? ''));
+    $contact_url = $this->mrm_get_contact_url();
+    $next_label = $period_end_ts > 0 ? wp_date('F j, Y', $period_end_ts, wp_timezone()) : 'next month';
+
+    $title = 'Subscription payment received';
+    $intro = '<p>Your saved card has been successfully charged for your sheet music subscription.</p>';
+    $details =
+      '<div><strong>Subscription:</strong> Monthly sheet music access</div>' .
+      '<div><strong>Amount charged:</strong> $' . number_format($amount_paid / 100, 2) . '</div>' .
+      '<div><strong>Invoice ID:</strong> ' . esc_html($invoice_id) . '</div>' .
+      '<div style="margin-top:12px;"><strong>Purchase details</strong></div>' .
+      '<div>Your sheet music subscription remains active.</div>' .
+      '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong>' . esc_html($next_label) . '</strong>.</div>' .
+      '<p style="margin-top:18px;">
+         <a href="' . esc_url($manage_url) . '" style="display:inline-block;padding:12px 16px;background:#111;color:#fff;text-decoration:none;border-radius:10px;">
+           Cancel Subscription
+         </a>
+       </p>';
+
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+
+    return wp_mail(
+      $email,
+      'Purchase confirmation — Sheet music subscription',
+      $html,
+      array(
+        'Content-Type: text/html; charset=UTF-8',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+      )
+    );
   }
 
   /* =========================================================
@@ -4216,6 +4549,12 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/subscription-portal', array(
+      'methods' => WP_REST_Server::READABLE,
+      'callback' => array($this, 'rest_subscription_portal'),
+      'permission_callback' => '__return_true',
+    ));
+
   }
 
   public function rest_stripe_webhook(WP_REST_Request $req) {
@@ -4262,6 +4601,26 @@ class MRM_Payments_Hub_Single {
         $this->mrm_handle_charge_refunded_webhook($object);
         break;
 
+      case 'customer.subscription.created':
+        $this->mrm_handle_customer_subscription_created_webhook($object);
+        break;
+
+      case 'customer.subscription.updated':
+        $this->mrm_handle_customer_subscription_updated_webhook($object);
+        break;
+
+      case 'customer.subscription.deleted':
+        $this->mrm_handle_customer_subscription_deleted_webhook($object);
+        break;
+
+      case 'invoice.paid':
+        $this->mrm_handle_invoice_paid_webhook($object);
+        break;
+
+      case 'invoice.payment_failed':
+        $this->mrm_handle_invoice_payment_failed_webhook($object);
+        break;
+
       default:
         // Acknowledge unhandled events so Stripe does not keep retrying forever.
         break;
@@ -4271,6 +4630,31 @@ class MRM_Payments_Hub_Single {
 
     return new WP_REST_Response(array('ok' => true), 200);
   }
+
+  public function rest_subscription_portal(WP_REST_Request $req) {
+    $token = sanitize_text_field((string)$req->get_param('token'));
+    if ($token === '') {
+      wp_die('Missing subscription token.', 'Subscription Portal', array('response' => 400));
+    }
+
+    $sub = $this->mrm_get_sheet_music_subscription_by_portal_token($token);
+    if (empty($sub['id']) || empty($sub['stripe_customer_id'])) {
+      wp_die('Invalid subscription token.', 'Subscription Portal', array('response' => 404));
+    }
+
+    $portal = $this->stripe_create_billing_portal_session(
+      (string)$sub['stripe_customer_id'],
+      home_url('/')
+    );
+
+    if (is_wp_error($portal) || empty($portal['url'])) {
+      wp_die('Unable to open subscription portal right now.', 'Subscription Portal', array('response' => 500));
+    }
+
+    wp_redirect((string)$portal['url']);
+    exit;
+  }
+
 
   public function rest_quote(WP_REST_Request $req) {
     $sku = $this->sanitize_sku($req->get_param('sku'));
@@ -4957,6 +5341,66 @@ class MRM_Payments_Hub_Single {
     ), 200);
   }
 
+  private function mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi) {
+    if (!is_array($pi)) return;
+
+    $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+    $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
+    if (!$addon_yes) return;
+
+    $price_id = $this->subscription_price_id();
+    if ($price_id === '') {
+      error_log('[MRM Payments Hub] Subscription price id is not configured.');
+      return;
+    }
+
+    $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
+    if (!$email || !is_email($email)) return;
+
+    $existing = $this->mrm_get_active_sheet_music_subscription_by_email($email);
+    if (!empty($existing['id'])) {
+      return;
+    }
+
+    $customer_id = (string)($pi['customer'] ?? '');
+    $payment_method_id = (string)($pi['payment_method'] ?? '');
+
+    if ($customer_id === '' || $payment_method_id === '') {
+      error_log('[MRM Payments Hub] Cannot create sheet music subscription: missing customer or payment method.');
+      return;
+    }
+
+    $start_ts = !empty($pi['created']) ? (int)$pi['created'] : time();
+    $trial_end_ts = strtotime('+1 month', $start_ts);
+    if (!$trial_end_ts || $trial_end_ts <= time()) {
+      $trial_end_ts = time() + (31 * DAY_IN_SECONDS);
+    }
+
+    $subscription = $this->stripe_create_subscription(
+      $customer_id,
+      $price_id,
+      $payment_method_id,
+      $trial_end_ts,
+      array(
+        'mrm_customer_email' => $email,
+        'mrm_source' => 'sheet_music_addon_initial_checkout',
+        'mrm_source_payment_intent' => (string)($pi['id'] ?? ''),
+      )
+    );
+
+    if (is_wp_error($subscription)) {
+      error_log('[MRM Payments Hub] Failed to create sheet music subscription: ' . $subscription->get_error_message());
+      return;
+    }
+
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id((string)($subscription['id'] ?? ''));
+    if (is_array($local) && !empty($local)) {
+      $this->mrm_send_sheet_music_subscription_enrollment_email($local, $trial_end_ts);
+    }
+  }
+
+
   public function rest_verify_payment_intent(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
     $pi_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
@@ -5015,6 +5459,7 @@ class MRM_Payments_Hub_Single {
       $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
       if ($email && is_email($email)) {
         $this->mrm_grant_all_sheet_music_ledger($email, $start_ts, 'stripe_pi_addon', $pi_id);
+        $this->mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi);
       }
     }
 
@@ -5367,10 +5812,12 @@ class MRM_Payments_Hub_Single {
       $settings['stripe_publishable_key'] = sanitize_text_field((string)($_POST['stripe_publishable_key'] ?? ''));
       $settings['stripe_secret_key'] = sanitize_text_field((string)($_POST['stripe_secret_key'] ?? ''));
       $settings['stripe_webhook_secret'] = sanitize_text_field((string)($_POST['stripe_webhook_secret'] ?? ''));
+      $settings['stripe_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_sheet_music_subscription_price_id'] ?? ''));
       // Test keys
       $settings['stripe_test_publishable_key'] = sanitize_text_field((string)($_POST['stripe_test_publishable_key'] ?? ''));
       $settings['stripe_test_secret_key'] = sanitize_text_field((string)($_POST['stripe_test_secret_key'] ?? ''));
       $settings['stripe_test_webhook_secret'] = sanitize_text_field((string)($_POST['stripe_test_webhook_secret'] ?? ''));
+      $settings['stripe_test_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_test_sheet_music_subscription_price_id'] ?? ''));
       $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
       $settings['instructor_tier_rules'] = trim((string) wp_unslash($_POST['instructor_tier_rules'] ?? "0=50\n12=55\n24=60"));
       $settings['payout_anchor_date'] = sanitize_text_field((string)($_POST['payout_anchor_date'] ?? ''));
@@ -5890,9 +6337,11 @@ class MRM_Payments_Hub_Single {
     $pk_live   = esc_attr((string)($settings['stripe_publishable_key'] ?? ''));
     $sk_live   = esc_attr((string)($settings['stripe_secret_key'] ?? ''));
     $wh_live   = esc_attr((string)($settings['stripe_webhook_secret'] ?? ''));
+    $price_live = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
     $pk_test   = esc_attr((string)($settings['stripe_test_publishable_key'] ?? ''));
     $sk_test   = esc_attr((string)($settings['stripe_test_secret_key'] ?? ''));
     $wh_test   = esc_attr((string)($settings['stripe_test_webhook_secret'] ?? ''));
+    $price_test = esc_attr((string)($settings['stripe_test_sheet_music_subscription_price_id'] ?? ''));
     $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
     $tier_rules = esc_textarea((string)($settings['instructor_tier_rules'] ?? "0=50\n12=55\n24=60"));
     $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
@@ -5932,6 +6381,13 @@ class MRM_Payments_Hub_Single {
             <th scope="row"><label for="stripe_webhook_secret">Webhook Signing Secret (optional)</label></th>
             <td><input type="password" id="stripe_webhook_secret" name="stripe_webhook_secret" value="<?php echo $wh_live; ?>" class="regular-text" autocomplete="off" /></td>
           </tr>
+          <tr>
+            <th scope="row"><label for="stripe_sheet_music_subscription_price_id">Sheet Music Subscription Price ID</label></th>
+            <td>
+              <input type="text" id="stripe_sheet_music_subscription_price_id" name="stripe_sheet_music_subscription_price_id" value="<?php echo $price_live; ?>" class="regular-text" placeholder="price_..." />
+              <p class="description">Paste the live Stripe recurring Price ID for the $5 monthly sheet music subscription.</p>
+            </td>
+          </tr>
         </table>
 
         <h3>Test Keys</h3>
@@ -5947,6 +6403,13 @@ class MRM_Payments_Hub_Single {
           <tr>
             <th scope="row"><label for="stripe_test_webhook_secret">Webhook Signing Secret (Test, optional)</label></th>
             <td><input type="password" id="stripe_test_webhook_secret" name="stripe_test_webhook_secret" value="<?php echo $wh_test; ?>" class="regular-text" autocomplete="off" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="stripe_test_sheet_music_subscription_price_id">Sheet Music Subscription Price ID (Test)</label></th>
+            <td>
+              <input type="text" id="stripe_test_sheet_music_subscription_price_id" name="stripe_test_sheet_music_subscription_price_id" value="<?php echo $price_test; ?>" class="regular-text" placeholder="price_..." />
+              <p class="description">Paste the test Stripe recurring Price ID for the $5 monthly sheet music subscription.</p>
+            </td>
           </tr>
         </table>
 
