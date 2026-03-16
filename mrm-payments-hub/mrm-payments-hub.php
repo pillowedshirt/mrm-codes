@@ -2620,6 +2620,87 @@ class MRM_Payments_Hub_Single {
     return max(0, min(100, $pct));
   }
 
+  private function stripe_retrieve_balance() {
+    return $this->stripe_api_request('GET', '/v1/balance');
+  }
+
+  /**
+   * Stripe separates available funds by currency and source type (for example card vs bank_account).
+   * Payout batch transfers should only use funds that are actually available right now.
+   */
+  private function mrm_balance_available_for_currency($balance, $currency) {
+    $currency = strtolower((string)$currency);
+    if (!is_array($balance) || empty($balance['available']) || !is_array($balance['available'])) {
+      return array(
+        'total' => 0,
+        'card' => 0,
+        'bank_account' => 0,
+      );
+    }
+
+    foreach ($balance['available'] as $entry) {
+      if (strtolower((string)($entry['currency'] ?? '')) !== $currency) {
+        continue;
+      }
+
+      $source_types = isset($entry['source_types']) && is_array($entry['source_types'])
+        ? $entry['source_types']
+        : array();
+
+      return array(
+        'total' => (int)($entry['amount'] ?? 0),
+        'card' => (int)($source_types['card'] ?? 0),
+        'bank_account' => (int)($source_types['bank_account'] ?? 0),
+      );
+    }
+
+    return array(
+      'total' => 0,
+      'card' => 0,
+      'bank_account' => 0,
+    );
+  }
+
+  private function mrm_group_requires_card_balance($group_rows, $charge_map) {
+    foreach ((array)$group_rows as $row) {
+      $order_id = (int)($row['order_id'] ?? 0);
+      $source_txn = (string)($charge_map[$order_id] ?? '');
+      if ($source_txn !== '') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private function mrm_sum_group_transfer_amount($group_rows) {
+    $sum = 0;
+    foreach ((array)$group_rows as $row) {
+      $amount = (int)($row['net_cents'] ?? 0);
+      if ($amount > 0) {
+        $sum += $amount;
+      }
+    }
+    return (int)$sum;
+  }
+
+  private function mrm_mark_group_pending_balance_wait($table, $group_rows, $message) {
+    global $wpdb;
+
+    foreach ((array)$group_rows as $row) {
+      $wpdb->update(
+        $table,
+        array(
+          'status' => 'pending',
+          'notes' => (string)$message,
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => (int)$row['id']),
+        array('%s','%s','%s'),
+        array('%d')
+      );
+    }
+  }
+
   private function stripe_create_transfer($amount_cents, $currency, $destination_account_id, $transfer_group = '', $metadata = array(), $source_transaction = '') {
     $params = array(
       'amount' => (int)$amount_cents,
@@ -3845,6 +3926,13 @@ class MRM_Payments_Hub_Single {
 
     if (!$rows) return $summary;
 
+    $platform_balance = $this->stripe_retrieve_balance();
+    if (is_wp_error($platform_balance)) {
+      $summary['errors']++;
+      $summary['last_error'] = 'Unable to retrieve Stripe balance before payout batch: ' . $platform_balance->get_error_message();
+      return $summary;
+    }
+
     // Build order_id -> latest_charge_id map
     $order_ids = array();
     foreach ($rows as $r) $order_ids[] = (int)$r['order_id'];
@@ -3882,6 +3970,56 @@ class MRM_Payments_Hub_Single {
       $transferred_total = 0;
       $transferred_ids = array();
 
+      $group_required_total = $this->mrm_sum_group_transfer_amount($group_rows);
+      $available = $this->mrm_balance_available_for_currency($platform_balance, $currency);
+      $requires_card_balance = $this->mrm_group_requires_card_balance($group_rows, $charge_map);
+
+      if ($group_required_total <= 0) {
+        continue;
+      }
+
+      if (defined('WP_DEBUG') && WP_DEBUG) {
+        error_log(
+          '[MRM Payout] balance_preflight'
+          . ' currency=' . $currency
+          . ' group_required_total=' . (int)$group_required_total
+          . ' available_total=' . (int)$available['total']
+          . ' available_card=' . (int)$available['card']
+          . ' requires_card_balance=' . ($requires_card_balance ? 'yes' : 'no')
+          . ' connected_account_id=' . $acct
+        );
+      }
+
+      if ((int)$available['total'] < $group_required_total) {
+        $msg = sprintf(
+          'Waiting for Stripe available balance. Needed %s %0.2f, but only %s %0.2f is currently available.',
+          strtoupper($currency),
+          $group_required_total / 100,
+          strtoupper($currency),
+          ((int)$available['total']) / 100
+        );
+
+        $this->mrm_mark_group_pending_balance_wait($table, $group_rows, $msg);
+        $summary['errors']++;
+        $summary['last_error'] = $msg;
+        continue;
+      }
+
+      if ($requires_card_balance && (int)$available['card'] < $group_required_total) {
+        $msg = sprintf(
+          'Waiting for Stripe card available balance. Needed %s %0.2f, but only %s %0.2f of card balance is currently available.',
+          strtoupper($currency),
+          $group_required_total / 100,
+          strtoupper($currency),
+          ((int)$available['card']) / 100
+        );
+
+        $this->mrm_mark_group_pending_balance_wait($table, $group_rows, $msg);
+        $summary['errors']++;
+        $summary['last_error'] = $msg;
+        continue;
+      }
+
       foreach ($group_rows as $row) {
         $amount = (int)$row['net_cents'];
         if ($amount <= 0) continue;
@@ -3903,11 +4041,17 @@ class MRM_Payments_Hub_Single {
         if (is_wp_error($transfer)) {
           $summary['errors']++;
           $summary['last_error'] = $transfer->get_error_message();
+
+          $transfer_error_message = (string)$transfer->get_error_message();
+          $is_balance_wait_condition =
+            (stripos($transfer_error_message, 'insufficient funds') !== false) ||
+            (stripos($transfer_error_message, 'balance is too low') !== false);
+
           $wpdb->update(
             $table,
             array(
-              'status' => 'error',
-              'notes' => $transfer->get_error_message(),
+              'status' => $is_balance_wait_condition ? 'pending' : 'error',
+              'notes' => $transfer_error_message,
               'updated_at' => current_time('mysql'),
             ),
             array('id' => (int)$row['id']),
@@ -3933,6 +4077,31 @@ class MRM_Payments_Hub_Single {
         $summary['transfers_created']++;
         $transferred_total += $amount;
         $transferred_ids[] = (int)$row['id'];
+
+        if (isset($platform_balance['available']) && is_array($platform_balance['available'])) {
+          foreach ($platform_balance['available'] as &$balance_entry) {
+            if (strtolower((string)($balance_entry['currency'] ?? '')) !== $currency) {
+              continue;
+            }
+
+            $balance_entry['amount'] = max(0, (int)($balance_entry['amount'] ?? 0) - $amount);
+
+            if (
+              isset($balance_entry['source_types']) &&
+              is_array($balance_entry['source_types']) &&
+              $source_txn !== '' &&
+              isset($balance_entry['source_types']['card'])
+            ) {
+              $balance_entry['source_types']['card'] = max(
+                0,
+                (int)$balance_entry['source_types']['card'] - $amount
+              );
+            }
+
+            break;
+          }
+          unset($balance_entry);
+        }
       }
 
       if ($transferred_total <= 0 || empty($transferred_ids)) {
