@@ -2272,6 +2272,53 @@ class MRM_Payments_Hub_Single {
     return is_array($row) ? $row : array();
   }
 
+  private function mrm_get_all_sheet_music_subscription_rows_for_admin() {
+    global $wpdb;
+
+    $subs = $this->table_sheet_music_subscriptions();
+    $now = current_time('mysql');
+
+    return $wpdb->get_results(
+      $wpdb->prepare(
+        "SELECT
+            email_plain,
+            stripe_status,
+            cancel_at_period_end,
+            current_period_end,
+            canceled_at,
+            updated_at
+         FROM {$subs}
+         WHERE email_plain IS NOT NULL
+           AND email_plain <> ''
+           AND (
+             stripe_status IN ('trialing','active')
+             OR (current_period_end IS NOT NULL AND current_period_end >= %s)
+           )
+         ORDER BY email_plain ASC",
+        $now
+      ),
+      ARRAY_A
+    );
+  }
+
+  private function mrm_is_sheet_music_subscription_active_for_admin($row) {
+    if (!is_array($row)) return false;
+
+    $status = (string)($row['stripe_status'] ?? '');
+    $period_end = (string)($row['current_period_end'] ?? '');
+    $period_end_ts = $period_end ? strtotime($period_end) : 0;
+
+    $active_statuses = array('trialing', 'active');
+    if (in_array($status, $active_statuses, true)) {
+      if ($period_end_ts > 0) {
+        return ($period_end_ts >= time());
+      }
+      return true;
+    }
+
+    return false;
+  }
+
   private function mrm_get_sheet_music_subscription_by_portal_token($token) {
     global $wpdb;
     $table = $this->table_sheet_music_subscriptions();
@@ -6240,34 +6287,40 @@ class MRM_Payments_Hub_Single {
             <?php if ($type === 'sheet_music') : ?>
               <hr />
               <?php if ($sku === $all_sku) :
-                global $wpdb;
-                $access_table = $this->table_sheet_music_access();
-                $now = current_time('mysql');
-                $rows = $wpdb->get_results($wpdb->prepare(
-                  "SELECT email_plain, month_key, start_at, expires_at
-                   FROM {$access_table}
-                   WHERE sku=%s AND revoked_at IS NULL
-                     AND ((expires_at IS NOT NULL AND expires_at > %s) OR (expires_at IS NULL AND DATE_ADD(granted_at, INTERVAL 31 DAY) > %s))
-                   ORDER BY expires_at ASC, id DESC
-                   LIMIT 200",
-                  $all_sku, $now, $now
-                ), ARRAY_A);
+                $rows = $this->mrm_get_all_sheet_music_subscription_rows_for_admin();
               ?>
-                <p><strong>Active Ledger Access (All Sheet Music)</strong><br />
-                  <small>Managed by successful $5 add-on payments.</small>
+                <p><strong>Stripe Subscription Status (All Sheet Music)</strong><br />
+                  <small>Synced from Stripe subscription webhooks.</small>
                 </p>
                 <table class="widefat striped">
-                  <thead><tr><th>Email</th><th>Month</th><th>Starts</th><th>Expires</th></tr></thead>
-                  <tbody>
-                  <?php if (!empty($rows)) : foreach ($rows as $r) : ?>
+                  <thead>
                     <tr>
-                      <td><?php echo esc_html((string)($r['email_plain'] ?? '')); ?></td>
-                      <td><?php echo esc_html((string)($r['month_key'] ?? '')); ?></td>
-                      <td><?php echo esc_html((string)($r['start_at'] ?? '')); ?></td>
-                      <td><?php echo esc_html((string)($r['expires_at'] ?? '')); ?></td>
+                      <th>Email</th>
+                      <th>Subscription Active</th>
+                      <th>End Date</th>
+                      <th>Stripe Status</th>
+                      <th>Updated</th>
                     </tr>
-                  <?php endforeach; else : ?>
-                    <tr><td colspan="4">No active ledger entries.</td></tr>
+                  </thead>
+                  <tbody>
+                  <?php if (empty($rows)) : ?>
+                    <tr><td colspan="5">No sheet music subscriptions found.</td></tr>
+                  <?php else : ?>
+                    <?php foreach ($rows as $row) :
+                      $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
+                      $end_date = '';
+                      if (!$is_active && !empty($row['current_period_end'])) {
+                        $end_date = (string)$row['current_period_end'];
+                      }
+                    ?>
+                      <tr>
+                        <td><?php echo esc_html((string)$row['email_plain']); ?></td>
+                        <td style="text-align:center;"><?php echo $is_active ? '✔' : ''; ?></td>
+                        <td><?php echo esc_html($end_date); ?></td>
+                        <td><?php echo esc_html((string)$row['stripe_status']); ?></td>
+                        <td><?php echo esc_html((string)$row['updated_at']); ?></td>
+                      </tr>
+                    <?php endforeach; ?>
                   <?php endif; ?>
                   </tbody>
                 </table>
