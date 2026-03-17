@@ -1003,6 +1003,26 @@ a{ -webkit-tap-highlight-color:transparent; }
     return stripe;
   }
 
+  function mrmBuildPaymentElementOptions(allowedMethods){
+    const methods = Array.isArray(allowedMethods) && allowedMethods.length
+      ? allowedMethods.filter(Boolean)
+      : ['card'];
+
+    return {
+      paymentMethodOrder: methods,
+      wallets: {
+        applePay: 'never',
+        googlePay: 'never',
+        link: 'never'
+      },
+      layout: {
+        type: 'accordion',
+        defaultCollapsed: false,
+        visibleAccordionItemsCount: 0
+      }
+    };
+  }
+
   // pdf.js worker
   if (window.pdfjsLib) {
     pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -1289,7 +1309,10 @@ a{ -webkit-tap-highlight-color:transparent; }
           });
 
           activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
-          activePaymentElement = activeStripeElements.create('payment');
+          activePaymentElement = activeStripeElements.create(
+            'payment',
+            mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card'])
+          );
           paymentMount.innerHTML = '';
           activePaymentElement.mount('#mrm-payment-element');
 
