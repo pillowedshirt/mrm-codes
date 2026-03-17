@@ -1676,28 +1676,43 @@ class MRM_Payments_Hub_Single {
     if ($pi_id === '') return;
 
     $order = $this->get_order_by_pi($pi_id);
-    if (!$order) return;
+    if (!$order || empty($order['id'])) return;
 
+    $order_id = (int)$order['id'];
     $this->update_order_status_from_pi($pi_id, 'refunded', 'refunded', array(
-      'mrm_latest_charge_id' => (string)($charge['id'] ?? ''),
       'mrm_refunded_at' => current_time('mysql'),
     ));
 
-    global $wpdb;
-    $wpdb->update(
-      $this->table_payout_ledger(),
-      array(
-        'status' => 'cancelled',
-        'updated_at' => current_time('mysql'),
-        'notes' => 'Cancelled by refund webhook before payout transfer.',
-      ),
-      array(
-        'order_id' => (int)$order['id'],
-        'status' => 'pending',
-      ),
-      array('%s','%s','%s'),
-      array('%d','%s')
-    );
+    $product_type = (string)($order['product_type'] ?? '');
+    $sku = (string)($order['sku'] ?? '');
+
+    // Revoke piece-product access rows when a refunded piece purchase is detected.
+    if ($product_type === 'sheet_music' && $sku !== '' && $sku !== 'all-sheet-music') {
+      global $wpdb;
+      $access_table = $this->table_sheet_music_access();
+      $now = current_time('mysql');
+
+      $wpdb->update(
+        $access_table,
+        array(
+          'revoked_at' => $now,
+        ),
+        array(
+          'sku' => $sku,
+          'source' => 'stripe_pi',
+          'source_id' => $pi_id,
+          'revoked_at' => null,
+        ),
+        array('%s'),
+        array('%s','%s','%s','%s')
+      );
+
+      $this->stripe_debug_log('piece product access revoked due to refund', array(
+        'order_id' => $order_id,
+        'pi_id' => $pi_id,
+        'sku' => $sku,
+      ));
+    }
   }
 
   private function mrm_handle_customer_subscription_created_webhook($subscription) {
@@ -2518,25 +2533,16 @@ class MRM_Payments_Hub_Single {
     $status = (string)($row['stripe_status'] ?? '');
     $cancel_at_period_end = !empty($row['cancel_at_period_end']);
 
-    $is_active = (!$cancel_at_period_end && in_array($status, array('trialing', 'active'), true));
+    // "Active" means still renewing, not merely paid-through.
+    if ($cancel_at_period_end) {
+      return false;
+    }
 
-    $this->stripe_debug_log('admin subscription active check', array(
-      'email' => (string)($row['email_plain'] ?? ''),
-      'stripe_status' => $status,
-      'cancel_at_period_end' => ($cancel_at_period_end ? 'yes' : 'no'),
-      'result' => ($is_active ? 'active' : 'not_active'),
-    ));
-
-    return $is_active;
+    return in_array($status, array('active', 'trialing'), true);
   }
 
   private function mrm_sheet_music_subscription_end_date_for_admin($row) {
     if (!is_array($row)) return '';
-
-    $is_renewing = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
-    if ($is_renewing) {
-      return '';
-    }
 
     $period_end = (string)($row['current_period_end'] ?? '');
     if ($period_end === '') {
@@ -2555,7 +2561,7 @@ class MRM_Payments_Hub_Single {
     global $wpdb;
 
     $sku = $this->sanitize_product_slug((string)$sku);
-    if ($sku === '' || $sku === 'all-sheet-music') {
+    if ($sku === '' || $sku === 'all-sheet-music' || $sku === 'all-piece-products-instructors') {
       return array();
     }
 
@@ -2563,7 +2569,7 @@ class MRM_Payments_Hub_Single {
 
     return $wpdb->get_results(
       $wpdb->prepare(
-        "SELECT id, email_plain, granted_at, source, source_id
+        "SELECT id, email_plain, granted_at, source, source_id, revoked_at
          FROM {$table}
          WHERE sku = %s
            AND revoked_at IS NULL
@@ -5350,6 +5356,7 @@ class MRM_Payments_Hub_Single {
 
     $save_card = !empty($data['save_card']);
     $requires_customer_for_subscription = ($addon_selected && $product_type === 'lesson');
+    $requires_customer_for_piece_purchase = ($product_type === 'sheet_music');
 
     $extra = array();
     $customer_id = '';
@@ -5357,11 +5364,12 @@ class MRM_Payments_Hub_Single {
     // Enable Stripe receipt emails
     $extra['receipt_email'] = $email;
 
-    if ($save_card || $requires_customer_for_subscription) {
+    if ($save_card || $requires_customer_for_subscription || $requires_customer_for_piece_purchase) {
       $this->stripe_debug_log('create_payment_intent resolving stripe customer', array(
         'email' => $email,
         'save_card' => ($save_card ? 'yes' : 'no'),
         'requires_customer_for_subscription' => ($requires_customer_for_subscription ? 'yes' : 'no'),
+        'requires_customer_for_piece_purchase' => ($requires_customer_for_piece_purchase ? 'yes' : 'no'),
         'addon_selected' => ($addon_selected ? 'yes' : 'no'),
         'product_type' => $product_type,
       ));
@@ -6532,6 +6540,39 @@ class MRM_Payments_Hub_Single {
         }
       }
 
+      // Delete selected piece-product access rows
+      if (!empty($_POST['mrm_piece_access_delete']) && is_array($_POST['mrm_piece_access_delete'])) {
+        global $wpdb;
+        $access_table = $this->table_sheet_music_access();
+
+        $delete_ids = array_map('intval', (array)$_POST['mrm_piece_access_delete']);
+        $delete_ids = array_filter($delete_ids);
+
+        foreach ($delete_ids as $row_id) {
+          if ($row_id <= 0) continue;
+
+          $row_sku = (string)$wpdb->get_var($wpdb->prepare(
+            "SELECT sku FROM {$access_table} WHERE id = %d LIMIT 1",
+            $row_id
+          ));
+
+          // Never allow manual delete of the Stripe-managed subscription master row.
+          if ($row_sku === 'all-sheet-music') {
+            continue;
+          }
+
+          $wpdb->update(
+            $access_table,
+            array(
+              'revoked_at' => current_time('mysql'),
+            ),
+            array('id' => $row_id),
+            array('%s'),
+            array('%d')
+          );
+        }
+      }
+
       // Save Access Lists
       if (isset($_POST['mrm_access_slug']) && is_array($_POST['mrm_access_slug'])
           && isset($_POST['mrm_access_emails']) && is_array($_POST['mrm_access_emails'])) {
@@ -7198,7 +7239,7 @@ class MRM_Payments_Hub_Single {
                     ?>
                     <table class="widefat" style="margin-top:8px;">
                       <thead>
-                        <tr><th>Email</th><th>Purchase date</th></tr>
+                        <tr><th>Email</th><th>Purchase date</th><th>Delete?</th></tr>
                       </thead>
                       <tbody>
                         <?php if (!empty($piece_rows)) : ?>
@@ -7206,12 +7247,20 @@ class MRM_Payments_Hub_Single {
                             $purchase_date = !empty($row['granted_at']) ? date_i18n('Y-m-d g:i A', strtotime($row['granted_at'])) : '';
                           ?>
                             <tr>
-                              <td><?php echo esc_html((string)($row['email_plain'] ?? '')); ?></td>
+                              <td>
+                                <?php echo esc_html((string)($row['email_plain'] ?? '')); ?>
+                                <input type="hidden" name="mrm_piece_access_row_id[]" value="<?php echo (int)($row['id'] ?? 0); ?>" />
+                              </td>
                               <td><?php echo esc_html($purchase_date); ?></td>
+                              <td style="text-align:center;">
+                                <label>
+                                  <input type="checkbox" name="mrm_piece_access_delete[]" value="<?php echo (int)($row['id'] ?? 0); ?>" />
+                                </label>
+                              </td>
                             </tr>
                           <?php endforeach; ?>
                         <?php else : ?>
-                          <tr><td colspan="2"><em>No access rows found.</em></td></tr>
+                          <tr><td colspan="3"><em>No access rows found.</em></td></tr>
                         <?php endif; ?>
                       </tbody>
                     </table>

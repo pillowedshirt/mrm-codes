@@ -231,6 +231,12 @@ class MRM_Product_Access {
             'callback'            => array( $this, 'api_authorize' ),
             'permission_callback' => '__return_true',
         ) );
+
+        register_rest_route( 'mrm-pa/v1', '/access-context', array(
+            'methods'  => WP_REST_Server::CREATABLE,
+            'callback' => array( $this, 'rest_access_context' ),
+            'permission_callback' => '__return_true',
+        ) );
     }
 
     /**
@@ -2024,6 +2030,7 @@ class MRM_Product_Access {
         };
 
         $has_tracks = ! empty( $tracks ) && is_array( $tracks );
+        $access_context = $this->payments_hub_access_context( (string) ( $payload['email_hash'] ?? '' ), $product_slug );
         // Use the same accent colour as the main site (golden‑olive tone).
         $accent = '#7b734a';
 
@@ -2405,12 +2412,16 @@ class MRM_Product_Access {
 
               $download_url = '';
               if ( $local !== '' ) {
-                  $download_url = $build( array(
+                  $download_args = array(
                       'product_slug' => $product_slug,
                       'asset_type'   => $type,
                       'track'        => (string) $idx,
                       'inline'       => $type === 'pdf' ? '1' : '0',
-                  ) );
+                  );
+                  if ( $type === 'audio' ) {
+                      $download_args['delivery_mode'] = 'stream';
+                  }
+                  $download_url = $build( $download_args );
               } else {
                   // Fallback: direct URL (not gated) if admin provided a remote URL.
                   $download_url = esc_url( $raw );
@@ -2419,7 +2430,7 @@ class MRM_Product_Access {
             <div class="item">
               <div class="top">
                 <div class="label"><?php echo esc_html( $label ); ?></div>
-                <?php if ( $download_url ) : ?>
+                <?php if ( $download_url && ! ( $type === 'audio' && (string) ( $access_context['source'] ?? '' ) === 'sheet_music_subscription' ) ) : ?>
                   <a class="btn primary" href="<?php echo esc_url( $download_url ); ?>" target="_blank" rel="noopener">
                     <?php echo 'Download'; ?>
                   </a>
@@ -2613,6 +2624,23 @@ class MRM_Product_Access {
         ) );
 
         return new WP_REST_Response( array( 'ok' => true ), 200 );
+    }
+
+    public function rest_access_context( WP_REST_Request $req ) {
+        $email = sanitize_email( (string) $req->get_param( 'email' ) );
+        $sku   = sanitize_text_field( (string) $req->get_param( 'sku' ) );
+
+        if ( ! $email || ! is_email( $email ) || $sku === '' ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing email or sku.' ), 400 );
+        }
+
+        $email_hash = $this->hash_email( strtolower( trim( $email ) ) );
+        $context = $this->payments_hub_access_context( $email_hash, $sku );
+
+        return new WP_REST_Response( array(
+            'ok' => true,
+            'context' => $context,
+        ), 200 );
     }
 
     /**
@@ -4033,6 +4061,7 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
     public function api_download( $request ) {
         $product_slug = isset( $_GET['product_slug'] ) ? $this->sanitize_product_slug( $_GET['product_slug'] ) : '';
         $asset_type   = isset( $_GET['asset_type'] ) ? sanitize_key( $_GET['asset_type'] ) : '';
+        $delivery_mode = strtolower( sanitize_text_field( (string) $request->get_param('delivery_mode') ) );
         $track        = isset( $_GET['track'] ) ? sanitize_key( $_GET['track'] ) : '';
         $inline       = ! empty( $_GET['inline'] );
         $force_dl     = ! empty( $_GET['download'] );
@@ -4081,13 +4110,15 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
         }
 
-        // Subscribers can access sheet music, but not downloadable audio files.
         if ( $asset_type === 'audio' && empty( $access_context['allow_audio_download'] ) ) {
-            error_log(
-                '[MRM Product Access] Audio download blocked by access type. product_slug=' . $product_slug .
-                ' source=' . (string)($access_context['source'] ?? '')
-            );
-            return new WP_REST_Response( array( 'error' => 'Audio downloads are not included with this access type.' ), 403 );
+            // Allow playback/streaming, but not explicit downloads, for subscription-based access.
+            if ( $delivery_mode !== 'stream' ) {
+                error_log(
+                  '[MRM Product Access] Audio download blocked by access type. product_slug=' . $product_slug .
+                  ' source=' . (string)($access_context['source'] ?? '')
+                );
+                return new WP_REST_Response( array( 'error' => 'Audio downloads are not included with this access type.' ), 403 );
+            }
         }
 
         $tracks = $this->get_tracks_for_slug( $product_slug );
