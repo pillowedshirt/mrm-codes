@@ -1160,14 +1160,14 @@ class MRM_Payments_Hub_Single {
     return $this->stripe_api_request('GET', '/v1/payment_methods/' . rawurlencode($payment_method_id));
   }
 
-  private function stripe_create_subscription($customer_id, $price_id, $default_payment_method_id, $trial_end_ts, $metadata = array()) {
+  private function stripe_create_subscription($customer_id, $price_id, $default_payment_method_id, $billing_cycle_anchor_ts, $metadata = array()) {
     $params = array(
       'customer' => (string)$customer_id,
       'items[0][price]' => (string)$price_id,
       'default_payment_method' => (string)$default_payment_method_id,
       'collection_method' => 'charge_automatically',
       'proration_behavior' => 'none',
-      'trial_end' => (int)$trial_end_ts,
+      'billing_cycle_anchor' => (int)$billing_cycle_anchor_ts,
     );
 
     foreach ((array)$metadata as $k => $v) {
@@ -1730,11 +1730,39 @@ class MRM_Payments_Hub_Single {
     ));
 
     $subscription_id = (string)($invoice['subscription'] ?? '');
-    if ($subscription_id === '') return;
+    $amount_paid = (int)($invoice['amount_paid'] ?? 0);
+
+    // Ignore non-subscription or zero-dollar invoice events.
+    if ($subscription_id === '' || $amount_paid <= 0) {
+      $this->stripe_debug_log('invoice.paid ignored', array(
+        'invoice_id' => (string)($invoice['id'] ?? ''),
+        'subscription_id' => $subscription_id,
+        'amount_paid' => $amount_paid,
+        'reason' => ($subscription_id === '' ? 'missing_subscription_id' : 'zero_amount_paid'),
+      ));
+      return;
+    }
 
     $sub = $this->stripe_retrieve_subscription($subscription_id);
     if (is_wp_error($sub)) {
-      error_log('[MRM Payments Hub] Could not retrieve subscription during invoice.paid: ' . $sub->get_error_message());
+      $this->stripe_debug_log('invoice.paid subscription retrieve failed', array(
+        'invoice_id' => (string)($invoice['id'] ?? ''),
+        'subscription_id' => $subscription_id,
+        'error' => $sub->get_error_message(),
+      ));
+      return;
+    }
+
+    $configured_price_id = $this->subscription_price_id();
+    $invoice_price_id = (string)($invoice['lines']['data'][0]['price']['id'] ?? '');
+
+    if ($configured_price_id !== '' && $invoice_price_id !== '' && $invoice_price_id !== $configured_price_id) {
+      $this->stripe_debug_log('invoice.paid ignored due to price mismatch', array(
+        'invoice_id' => (string)($invoice['id'] ?? ''),
+        'subscription_id' => $subscription_id,
+        'invoice_price_id' => $invoice_price_id,
+        'configured_price_id' => $configured_price_id,
+      ));
       return;
     }
 
@@ -1744,6 +1772,7 @@ class MRM_Payments_Hub_Single {
     if (!empty($local['email_plain'])) {
       $invoice_created_ts = !empty($invoice['created']) ? (int)$invoice['created'] : time();
       $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'], $invoice_created_ts, 'stripe_subscription_invoice', (string)($invoice['id'] ?? ''));
+
       $sent = $this->mrm_send_sheet_music_subscription_charge_email($local, $invoice);
 
       $this->stripe_debug_log('subscription recurring charge email result', array(
@@ -2427,33 +2456,39 @@ class MRM_Payments_Hub_Single {
     if (!is_array($row)) return false;
 
     $status = (string)($row['stripe_status'] ?? '');
-    $period_end = (string)($row['current_period_end'] ?? '');
-    $period_end_ts = $period_end ? strtotime($period_end) : 0;
+    $cancel_at_period_end = !empty($row['cancel_at_period_end']);
 
-    if (in_array($status, array('trialing', 'active'), true)) {
-      if ($period_end_ts > 0) {
-        return ($period_end_ts >= time());
-      }
-      return true;
-    }
+    $is_active = (!$cancel_at_period_end && in_array($status, array('trialing', 'active'), true));
 
-    if ($period_end_ts > 0 && $period_end_ts >= time()) {
-      return true;
-    }
+    $this->stripe_debug_log('admin subscription active check', array(
+      'email' => (string)($row['email_plain'] ?? ''),
+      'stripe_status' => $status,
+      'cancel_at_period_end' => ($cancel_at_period_end ? 'yes' : 'no'),
+      'result' => ($is_active ? 'active' : 'not_active'),
+    ));
 
-    return false;
+    return $is_active;
   }
 
   private function mrm_sheet_music_subscription_end_date_for_admin($row) {
     if (!is_array($row)) return '';
 
-    $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
-    if ($is_active) return '';
+    $is_renewing = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
+    if ($is_renewing) {
+      return '';
+    }
 
     $period_end = (string)($row['current_period_end'] ?? '');
-    if ($period_end === '') return '';
+    if ($period_end === '') {
+      return '';
+    }
 
-    return date_i18n('Y-m-d', strtotime($period_end));
+    $period_end_ts = strtotime($period_end);
+    if (!$period_end_ts) {
+      return '';
+    }
+
+    return date_i18n('Y-m-d', $period_end_ts);
   }
 
   private function mrm_upsert_sheet_music_subscription_row($data) {
@@ -2929,7 +2964,12 @@ class MRM_Payments_Hub_Single {
     if (!is_array($sub_row)) return false;
 
     $email = sanitize_email((string)($sub_row['email_plain'] ?? ''));
-    if (!$email || !is_email($email)) return false;
+    if (!$email || !is_email($email)) {
+      $this->stripe_debug_log('subscription enrollment email aborted: invalid email', array(
+        'email' => (string)($sub_row['email_plain'] ?? ''),
+      ));
+      return false;
+    }
 
     $manage_url = $this->mrm_subscription_manage_url((string)($sub_row['portal_token'] ?? ''));
     $contact_url = $this->mrm_get_contact_url();
@@ -2945,14 +2985,12 @@ class MRM_Payments_Hub_Single {
       '<div>Your subscription has been created successfully in our billing system.</div>' .
       '<div style="margin-top:12px;">You will be billed again on or about <strong>' . esc_html($anchor_label) . '</strong>, and then monthly thereafter while the subscription remains active.</div>' .
       '<p style="margin-top:18px;">
-         <a href="' . esc_url($manage_url) . '" style="display:inline-block;padding:12px 16px;background:#111;color:#fff;text-decoration:none;border-radius:10px;">
-           Cancel Subscription
-         </a>
-       </p>';
+       <a href="' . esc_url($manage_url) . '" style="color:#111;text-decoration:underline;">cancel subscription</a>
+     </p>';
 
     $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
 
-    return wp_mail(
+    $sent = wp_mail(
       $email,
       'Subscription confirmation — Sheet music access',
       $html,
@@ -2961,6 +2999,13 @@ class MRM_Payments_Hub_Single {
         'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
+
+    $this->stripe_debug_log('subscription enrollment email attempt', array(
+      'email' => $email,
+      'sent' => ($sent ? 'yes' : 'no'),
+    ));
+
+    return $sent;
   }
 
   private function mrm_send_sheet_music_subscription_charge_email($sub_row, $invoice) {
@@ -2987,10 +3032,8 @@ class MRM_Payments_Hub_Single {
       '<div>Your sheet music subscription remains active.</div>' .
       '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong>' . esc_html($next_label) . '</strong>.</div>' .
       '<p style="margin-top:18px;">
-         <a href="' . esc_url($manage_url) . '" style="display:inline-block;padding:12px 16px;background:#111;color:#fff;text-decoration:none;border-radius:10px;">
-           Cancel Subscription
-         </a>
-       </p>';
+       <a href="' . esc_url($manage_url) . '" style="color:#111;text-decoration:underline;">cancel subscription</a>
+     </p>';
 
     $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
 
@@ -5656,10 +5699,17 @@ class MRM_Payments_Hub_Single {
       }
 
       $start_ts = !empty($pi['created']) ? (int)$pi['created'] : time();
-      $trial_end_ts = strtotime('+1 month', $start_ts);
-      if (!$trial_end_ts || $trial_end_ts <= time()) {
-        $trial_end_ts = time() + (31 * DAY_IN_SECONDS);
+      $billing_cycle_anchor_ts = strtotime('+1 month', $start_ts);
+      if (!$billing_cycle_anchor_ts || $billing_cycle_anchor_ts <= time()) {
+        $billing_cycle_anchor_ts = time() + (31 * DAY_IN_SECONDS);
       }
+
+      $this->stripe_debug_log('subscription billing cycle anchor computed', array(
+        'order_id' => $order_id,
+        'pi_id' => $pi_id,
+        'start_ts' => $start_ts,
+        'billing_cycle_anchor_ts' => $billing_cycle_anchor_ts,
+      ));
 
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'creating');
 
@@ -5668,7 +5718,7 @@ class MRM_Payments_Hub_Single {
         'customer_id' => $customer_id,
         'payment_method_id' => $payment_method_id,
         'price_id' => $price_id,
-        'trial_end_ts' => $trial_end_ts,
+        'billing_cycle_anchor_ts' => $billing_cycle_anchor_ts,
         'email' => $email,
       ));
 
@@ -5676,7 +5726,7 @@ class MRM_Payments_Hub_Single {
         $customer_id,
         $price_id,
         $payment_method_id,
-        $trial_end_ts,
+        $billing_cycle_anchor_ts,
         array(
           'mrm_customer_email' => $email,
           'mrm_source' => 'sheet_music_addon_initial_checkout',
@@ -5719,7 +5769,7 @@ class MRM_Payments_Hub_Single {
       $email_sent_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_enrollment_email_sent_at', '');
 
       if (is_array($local) && !empty($local) && $email_sent_at === '') {
-        $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $trial_end_ts);
+        $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $billing_cycle_anchor_ts);
         if ($sent) {
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
           $this->stripe_debug_log('subscription enrollment email sent', array(
@@ -6884,7 +6934,7 @@ class MRM_Payments_Hub_Single {
                               <tr>
                                 <td><?php echo esc_html((string)($sub_row['email_plain'] ?? '')); ?></td>
                                 <td><?php echo esc_html($purchase_date); ?></td>
-                                <td style="text-align:center;"><?php echo $is_active ? '✔' : ''; ?></td>
+                                <td style="text-align:center;"><?php echo $is_active ? '✔' : 'X'; ?></td>
                                 <td><?php echo esc_html($expire_label); ?></td>
                               </tr>
                             <?php endforeach; ?>
