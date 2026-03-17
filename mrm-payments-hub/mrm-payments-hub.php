@@ -28,6 +28,7 @@ class MRM_Payments_Hub_Single {
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('rest_api_init', array($this, 'register_routes'));
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
+    add_action('init', array($this, 'mrm_run_instructor_piece_access_sync'));
 
     add_filter('cron_schedules', array($this, 'register_custom_cron_schedules'));
     add_action('init', array($this, 'ensure_runtime_cron_schedules'), 20);
@@ -84,6 +85,14 @@ class MRM_Payments_Hub_Single {
     if (!wp_next_scheduled('mrm_pay_hub_check_upcoming_payment_methods')) {
       wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_check_upcoming_payment_methods');
     }
+  }
+
+  public function mrm_run_instructor_piece_access_sync() {
+    static $did_run = false;
+    if ($did_run) return;
+    $did_run = true;
+
+    $this->mrm_sync_instructor_piece_access_master();
   }
 
   public function on_activate() {
@@ -2299,6 +2308,57 @@ class MRM_Payments_Hub_Single {
     return true;
   }
 
+
+  private function mrm_request_partial_refund_for_order($order, $amount_cents, $note = '', $respect_refund_window = true) {
+    if (!is_array($order)) return false;
+
+    $status = (string)($order['status'] ?? '');
+    $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+    $order_id = (int)($order['id'] ?? 0);
+    $amount_cents = (int)$amount_cents;
+
+    if ($amount_cents <= 0) return false;
+    if ($pi_id === '' || $status === 'refunded') return false;
+    if (!in_array($status, array('paid','completed','succeeded'), true)) return false;
+
+    if ($respect_refund_window && !$this->mrm_order_is_auto_refund_eligible($order, self::MRM_AUTO_REFUND_MAX_AGE_DAYS)) {
+      $this->update_order_status_from_pi($pi_id, $status, $status, array(
+        'mrm_auto_refund_skipped_at' => current_time('mysql'),
+        'mrm_auto_refund_skip_reason' => 'older_than_7_days',
+        'mrm_auto_refund_note' => (string)$note,
+      ));
+      return false;
+    }
+
+    $refund = $this->stripe_create_refund($pi_id, $amount_cents, 'requested_by_customer');
+    if (is_wp_error($refund)) {
+      error_log('[MRM Payments Hub] Partial refund failed for order ' . $order_id . ': ' . $refund->get_error_message());
+      return false;
+    }
+
+    $this->update_order_status_from_pi($pi_id, $status, $status, array(
+      'mrm_partial_refund_requested_at' => current_time('mysql'),
+      'mrm_partial_refund_amount_cents' => (string)$amount_cents,
+      'mrm_partial_refund_note' => (string)$note,
+    ));
+
+    return true;
+  }
+
+  private function mrm_calculate_prepay_per_lesson_refund_cents($order) {
+    if (!is_array($order)) return 0;
+
+    $meta = $this->mrm_get_order_meta_array($order);
+    $lesson_count = max(1, (int)($meta['mrm_lesson_count'] ?? 1));
+    $base_amount_cents = (int)($meta['mrm_base_amount_cents'] ?? 0);
+
+    if ($base_amount_cents <= 0 || $lesson_count <= 0) {
+      return 0;
+    }
+
+    return (int) floor($base_amount_cents / $lesson_count);
+  }
+
   private function decode_email_hash(string $hash): ?string {
     $map = get_option('mrm_pay_hub_email_map', array());
     if (!is_array($map)) return null;
@@ -2488,7 +2548,30 @@ class MRM_Payments_Hub_Single {
       return '';
     }
 
-    return date_i18n('Y-m-d', $period_end_ts);
+    return date_i18n('Y-m-d g:i A', $period_end_ts);
+  }
+
+  private function mrm_get_piece_product_access_rows_for_admin($sku) {
+    global $wpdb;
+
+    $sku = $this->sanitize_product_slug((string)$sku);
+    if ($sku === '' || $sku === 'all-sheet-music') {
+      return array();
+    }
+
+    $table = $this->table_sheet_music_access();
+
+    return $wpdb->get_results(
+      $wpdb->prepare(
+        "SELECT id, email_plain, granted_at, source, source_id
+         FROM {$table}
+         WHERE sku = %s
+           AND revoked_at IS NULL
+         ORDER BY granted_at DESC",
+        $sku
+      ),
+      ARRAY_A
+    );
   }
 
   private function mrm_upsert_sheet_music_subscription_row($data) {
@@ -2570,6 +2653,91 @@ class MRM_Payments_Hub_Single {
       'canceled_at' => $canceled_at,
       'latest_invoice_id' => $latest_invoice_id,
     ));
+  }
+
+  private function mrm_sync_instructor_piece_access_master() {
+    global $wpdb;
+
+    $instructors_table = $wpdb->prefix . 'mrm_instructors';
+    $access_table = $this->table_sheet_music_access();
+    $master_sku = 'all-piece-products-instructors';
+    $now = current_time('mysql');
+
+    $instructor_emails = $wpdb->get_col(
+      "SELECT email FROM {$instructors_table}
+       WHERE email IS NOT NULL AND email <> ''"
+    );
+
+    if (!is_array($instructor_emails)) {
+      $instructor_emails = array();
+    }
+
+    $instructor_emails = array_values(array_unique(array_filter(array_map('sanitize_email', $instructor_emails))));
+
+    error_log('[MRM Payments Hub] Instructor piece-access sync running. instructor_count=' . count($instructor_emails));
+
+    // Remove rows for emails that are no longer instructors.
+    $existing_rows = $wpdb->get_results(
+      $wpdb->prepare(
+        "SELECT id, email_plain
+         FROM {$access_table}
+         WHERE sku = %s
+           AND revoked_at IS NULL",
+        $master_sku
+      ),
+      ARRAY_A
+    );
+
+    foreach ((array)$existing_rows as $row) {
+      $email_plain = sanitize_email((string)($row['email_plain'] ?? ''));
+      if ($email_plain === '' || !in_array($email_plain, $instructor_emails, true)) {
+        $wpdb->update(
+          $access_table,
+          array(
+            'revoked_at' => $now,
+          ),
+          array('id' => (int)$row['id']),
+          array('%s'),
+          array('%d')
+        );
+      }
+    }
+
+    // Ensure every current instructor has a live row.
+    foreach ($instructor_emails as $email) {
+      $email_hash = $this->email_hash($email);
+      $exists = $wpdb->get_var(
+        $wpdb->prepare(
+          "SELECT id
+           FROM {$access_table}
+           WHERE sku = %s
+             AND email_hash = %s
+             AND revoked_at IS NULL
+           LIMIT 1",
+          $master_sku,
+          $email_hash
+        )
+      );
+
+      if (!$exists) {
+        $wpdb->insert(
+          $access_table,
+          array(
+            'email_hash' => $email_hash,
+            'email_plain' => $email,
+            'sku' => $master_sku,
+            'start_at' => $now,
+            'expires_at' => null,
+            'month_key' => null,
+            'granted_at' => $now,
+            'revoked_at' => null,
+            'source' => 'instructor_sync',
+            'source_id' => 'instructor_email',
+          ),
+          array('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s')
+        );
+      }
+    }
   }
 
   private function mrm_get_instructor_contact_from_id($instructor_id) {
@@ -3970,8 +4138,36 @@ class MRM_Payments_Hub_Single {
       return;
     }
 
-    // Prepay bundles are intentionally not auto-refunded here because one payment
-    // can cover multiple lessons. Leave bundle-credit handling separate.
+    // Prepay bundles: refund only the canceled prepaid lesson's share, not the full order.
+    if ($payment_mode === 'prepay' && $order_id > 0) {
+      $order = $this->mrm_get_order_by_id($order_id);
+      if ($order) {
+        $per_lesson_refund_cents = $this->mrm_calculate_prepay_per_lesson_refund_cents($order);
+
+        error_log(
+          '[MRM Payments Hub] Prepay lesson cancellation refund evaluation. lesson_id=' . $lesson_id .
+          ' order_id=' . (int)($order['id'] ?? 0) .
+          ' per_lesson_refund_cents=' . $per_lesson_refund_cents
+        );
+
+        if ($per_lesson_refund_cents > 0) {
+          $refunded = $this->mrm_request_partial_refund_for_order(
+            $order,
+            $per_lesson_refund_cents,
+            'Partial refund for cancelled prepaid lesson ' . $lesson_id
+          );
+
+          if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
+            error_log(
+              '[MRM Payments Hub] Partial refund not issued for cancelled prepaid lesson. lesson_id=' . $lesson_id .
+              ' order_id=' . (int)($order['id'] ?? 0) .
+              ' amount_cents=' . $per_lesson_refund_cents
+            );
+          }
+        }
+      }
+      return;
+    }
   }
 
   private function unlock_prepay_instructor_payout($data) {
@@ -6860,6 +7056,37 @@ class MRM_Payments_Hub_Single {
         <h2>Sheet Music Access Lists (Email-based)</h2>
         <p>Master list: <code>all-sheet-music</code> grants access to any piece.</p>
 
+        <?php
+        $instructor_rows = $this->mrm_get_piece_product_access_rows_for_admin('all-piece-products-instructors');
+        ?>
+        <h3 style="margin-top:18px;">Instructor piece access (auto-managed)</h3>
+        <p><small>This list is auto-generated from the instructors table and updates automatically.</small></p>
+
+        <table class="widefat striped" style="max-width: 980px; margin-bottom:18px;">
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Validated for all piece products</th>
+              <th>Granted</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php if (!empty($instructor_rows)) : ?>
+              <?php foreach ($instructor_rows as $row) :
+                $granted = !empty($row['granted_at']) ? date_i18n('Y-m-d g:i A', strtotime($row['granted_at'])) : '';
+              ?>
+                <tr>
+                  <td><?php echo esc_html((string)($row['email_plain'] ?? '')); ?></td>
+                  <td style="text-align:center;">✔</td>
+                  <td><?php echo esc_html($granted); ?></td>
+                </tr>
+              <?php endforeach; ?>
+            <?php else : ?>
+              <tr><td colspan="3"><em>No instructor piece-access rows found.</em></td></tr>
+            <?php endif; ?>
+          </tbody>
+        </table>
+
         <table class="widefat striped" style="max-width: 980px;">
           <thead>
             <tr>
@@ -6895,6 +7122,10 @@ class MRM_Payments_Hub_Single {
               $keys = array_values(array_unique(array_merge(array('all-sheet-music'), $keys)));
 
               foreach ($keys as $k) {
+                if ($k === 'all-piece-products-instructors') {
+                  continue;
+                }
+
                 $safe_k = esc_attr($k);
                 $results = $wpdb->get_results($wpdb->prepare(
                   "SELECT id, email_plain, start_at, expires_at FROM {$access_table} WHERE sku = %s AND revoked_at IS NULL ORDER BY start_at DESC",
@@ -6960,39 +7191,27 @@ class MRM_Payments_Hub_Single {
                       <span style="opacity:.75;">(purchase / expires optional)</span>
                     </div>
                     <p style="margin:0;">
-                      <small>Add one email at a time. Leave “expires” blank for never.</small>
+                      <small>Add one email at a time to manually validate or credit access for this piece product.</small>
                     </p>
+                    <?php
+                    $piece_rows = $this->mrm_get_piece_product_access_rows_for_admin($k);
+                    ?>
                     <table class="widefat" style="margin-top:8px;">
                       <thead>
-                        <tr><th>Email</th><th>Purchase date</th><th>Expires</th></tr>
+                        <tr><th>Email</th><th>Purchase date</th></tr>
                       </thead>
                       <tbody>
-                        <?php if (!empty($results)) : ?>
-                          <?php foreach ($results as $row) :
-                            $start = $row->start_at ? date_i18n('Y-m-d', strtotime($row->start_at)) : '';
-                            $expire = $row->expires_at ? date_i18n('Y-m-d', strtotime($row->expires_at)) : '';
+                        <?php if (!empty($piece_rows)) : ?>
+                          <?php foreach ($piece_rows as $row) :
+                            $purchase_date = !empty($row['granted_at']) ? date_i18n('Y-m-d g:i A', strtotime($row['granted_at'])) : '';
                           ?>
                             <tr>
-                              <td>
-                                <input type="hidden" name="mrm_access_row_id[]" value="<?php echo (int)$row->id; ?>" />
-                                <input type="email" name="mrm_access_row_email[]" value="<?php echo esc_attr((string)$row->email_plain); ?>" style="width:100%;" />
-                              </td>
-                              <td>
-                                <input type="date" name="mrm_access_row_start[]" value="<?php echo esc_attr($start); ?>" style="width:150px;" />
-                              </td>
-                              <td>
-                                <div style="display:flex; align-items:center; gap:8px;">
-                                  <input type="date" name="mrm_access_row_expires[]" value="<?php echo esc_attr($expire); ?>" style="width:150px;" />
-                                  <label style="white-space:nowrap;">
-                                    <input type="checkbox" name="mrm_access_row_delete[]" value="<?php echo (int)$row->id; ?>" />
-                                    Delete
-                                  </label>
-                                </div>
-                              </td>
+                              <td><?php echo esc_html((string)($row['email_plain'] ?? '')); ?></td>
+                              <td><?php echo esc_html($purchase_date); ?></td>
                             </tr>
                           <?php endforeach; ?>
                         <?php else : ?>
-                          <tr><td colspan="3"><em>No active access rows.</em></td></tr>
+                          <tr><td colspan="2"><em>No access rows found.</em></td></tr>
                         <?php endif; ?>
                       </tbody>
                     </table>

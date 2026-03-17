@@ -1566,6 +1566,24 @@ class MRM_Product_Access {
             }
         }
 
+        // Rule 1B: instructor-wide piece-product master access
+        $instructor_master_sku = 'all-piece-products-instructors';
+        $instructor_rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, email_hash, email_plain
+             FROM {$table}
+             WHERE sku=%s AND revoked_at IS NULL
+             ORDER BY id DESC",
+            (string) $instructor_master_sku
+        ) );
+
+        if ( is_array( $instructor_rows ) ) {
+            foreach ( $instructor_rows as $row ) {
+                if ( $row_matches_email_hash( $row ) ) {
+                    return true;
+                }
+            }
+        }
+
         // Rule 2: master all-sheet-music ledger (legacy fallback)
         $master_sku = 'all-sheet-music';
         $master_rows = $wpdb->get_results( $wpdb->prepare(
@@ -1620,6 +1638,106 @@ class MRM_Product_Access {
         }
 
         return false;
+    }
+
+
+    private function payments_hub_access_context( $email_hash, $sku ) {
+        global $wpdb;
+
+        $table = $wpdb->prefix . 'mrm_sheet_music_access';
+        $subs_table = $wpdb->prefix . 'mrm_sheet_music_subscriptions';
+        $now = current_time( 'mysql' );
+
+        $context = array(
+            'has_access' => false,
+            'source' => '',
+            'allow_audio_download' => false,
+        );
+
+        $sku = strtolower( trim( (string) $sku ) );
+        if ( $sku === '' ) return $context;
+
+        // Instructor-wide piece access
+        $instructor_master_sku = 'all-piece-products-instructors';
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, email_hash, email_plain
+             FROM {$table}
+             WHERE sku=%s AND revoked_at IS NULL
+             ORDER BY id DESC",
+            $instructor_master_sku
+        ) );
+
+        if ( is_array( $rows ) ) {
+            foreach ( $rows as $row ) {
+                $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+                $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
+
+                if (
+                    ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) ||
+                    ( $email_plain !== '' && hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email_plain ) ) ) ) )
+                ) {
+                    $context['has_access'] = true;
+                    $context['source'] = 'instructor_master';
+                    $context['allow_audio_download'] = true;
+                    return $context;
+                }
+            }
+        }
+
+        // Customer subscription master access: no audio downloads
+        $subs_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $subs_table ) );
+        if ( $subs_exists === $subs_table ) {
+            $sub_rows = $wpdb->get_results(
+                "SELECT id, email_hash, email_plain, stripe_status, current_period_end
+                 FROM {$subs_table}
+                 ORDER BY id DESC"
+            );
+
+            if ( is_array( $sub_rows ) ) {
+                foreach ( $sub_rows as $row ) {
+                    $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+                    $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
+
+                    $matches = false;
+                    if ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) {
+                        $matches = true;
+                    } elseif ( $email_plain !== '' ) {
+                        $salted = $this->hash_email( strtolower( trim( $email_plain ) ) );
+                        if ( hash_equals( $email_hash, $salted ) ) {
+                            $matches = true;
+                        }
+                    }
+
+                    if ( ! $matches ) {
+                        continue;
+                    }
+
+                    $status = isset( $row->stripe_status ) ? (string) $row->stripe_status : '';
+                    $period_end = isset( $row->current_period_end ) ? (string) $row->current_period_end : '';
+                    $period_end_ts = $period_end ? strtotime( $period_end ) : 0;
+
+                    $active = in_array( $status, array( 'trialing', 'active' ), true );
+                    $paid_through = ( $period_end_ts > strtotime( $now ) );
+
+                    if ( $active || $paid_through ) {
+                        $context['has_access'] = true;
+                        $context['source'] = 'sheet_music_subscription';
+                        $context['allow_audio_download'] = false;
+                        return $context;
+                    }
+                }
+            }
+        }
+
+        // Direct piece purchase / legacy access rows: audio downloads allowed
+        if ( $this->payments_hub_has_access( $email_hash, $sku ) ) {
+            $context['has_access'] = true;
+            $context['source'] = 'piece_purchase_or_legacy';
+            $context['allow_audio_download'] = true;
+            return $context;
+        }
+
+        return $context;
     }
 
 
@@ -3958,8 +4076,18 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         }
 
         // ✅ Hub is the ONLY source of truth for access (download time enforcement).
-        if ( ! $this->payments_hub_has_access( (string) $email_hash, $product_slug ) ) {
+        $access_context = $this->payments_hub_access_context( (string) $email_hash, $product_slug );
+        if ( empty( $access_context['has_access'] ) ) {
             return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
+        }
+
+        // Subscribers can access sheet music, but not downloadable audio files.
+        if ( $asset_type === 'audio' && empty( $access_context['allow_audio_download'] ) ) {
+            error_log(
+                '[MRM Product Access] Audio download blocked by access type. product_slug=' . $product_slug .
+                ' source=' . (string)($access_context['source'] ?? '')
+            );
+            return new WP_REST_Response( array( 'error' => 'Audio downloads are not included with this access type.' ), 403 );
         }
 
         $tracks = $this->get_tracks_for_slug( $product_slug );
