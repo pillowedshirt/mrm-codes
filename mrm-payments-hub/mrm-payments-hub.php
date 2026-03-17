@@ -28,7 +28,6 @@ class MRM_Payments_Hub_Single {
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('rest_api_init', array($this, 'register_routes'));
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
-    add_action('init', array($this, 'mrm_stripe_debug_log_boot_marker'));
 
     add_filter('cron_schedules', array($this, 'register_custom_cron_schedules'));
     add_action('init', array($this, 'ensure_runtime_cron_schedules'), 20);
@@ -622,33 +621,65 @@ class MRM_Payments_Hub_Single {
   }
 
   private function stripe_debug_log_path() {
-    return WP_CONTENT_DIR . '/stripe-debug.log';
+    if (!defined('WP_CONTENT_DIR') || !is_string(WP_CONTENT_DIR) || WP_CONTENT_DIR === '') {
+      return '';
+    }
+
+    return rtrim(WP_CONTENT_DIR, '/\\') . '/stripe-debug.log';
   }
 
   private function stripe_debug_log($message, $context = array()) {
-    $timestamp = gmdate('d-M-Y H:i:s') . ' UTC';
+    try {
+      $timestamp = gmdate('d-M-Y H:i:s') . ' UTC';
 
-    if (!is_scalar($message)) {
-      $message = print_r($message, true);
-    } else {
-      $message = (string)$message;
-    }
-
-    $line = '[' . $timestamp . '] [MRM Stripe] ' . $message;
-
-    if (!empty($context)) {
-      $json = wp_json_encode($context);
-      if ($json !== false) {
-        $line .= ' ' . $json;
+      if (!is_scalar($message)) {
+        $message = print_r($message, true);
+      } else {
+        $message = (string)$message;
       }
+
+      $line = '[' . $timestamp . '] [MRM Stripe] ' . $message;
+
+      if (!empty($context)) {
+        $json = function_exists('wp_json_encode') ? wp_json_encode($context) : json_encode($context);
+        if ($json !== false && $json !== null) {
+          $line .= ' ' . $json;
+        }
+      }
+
+      $line .= PHP_EOL;
+
+      $path = $this->stripe_debug_log_path();
+      if ($path === '') {
+        error_log(trim($line));
+        return;
+      }
+
+      $dir = dirname($path);
+      if (!is_dir($dir)) {
+        error_log(trim($line));
+        return;
+      }
+
+      // If file exists but is not writable, fall back to PHP error log.
+      if (file_exists($path) && !is_writable($path)) {
+        error_log(trim($line));
+        return;
+      }
+
+      // If directory is not writable and file does not already exist, fall back.
+      if (!file_exists($path) && !is_writable($dir)) {
+        error_log(trim($line));
+        return;
+      }
+
+      $result = @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
+      if ($result === false) {
+        error_log(trim($line));
+      }
+    } catch (Throwable $e) {
+      error_log('[MRM Stripe] logger failure: ' . $e->getMessage());
     }
-
-    $line .= PHP_EOL;
-
-    $path = $this->stripe_debug_log_path();
-
-    // Suppress warnings here so failed writes do not break payment flow.
-    @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
   }
 
   private function subscription_price_id() {
@@ -1537,17 +1568,6 @@ class MRM_Payments_Hub_Single {
       'processed_at' => $now,
       'created_at' => $now,
     ), array('%s','%s','%s','%s','%s'));
-  }
-
-  public function mrm_stripe_debug_log_boot_marker() {
-    static $did_log = false;
-    if ($did_log) return;
-    $did_log = true;
-
-    $this->stripe_debug_log('stripe debug logger initialized', array(
-      'plugin' => 'mrm-payments-hub',
-      'mode' => $this->is_test_mode() ? 'test' : 'live',
-    ));
   }
 
   private function mrm_handle_payment_intent_succeeded_webhook($pi) {
@@ -4719,6 +4739,7 @@ class MRM_Payments_Hub_Single {
 
   public function rest_stripe_webhook(WP_REST_Request $req) {
     $payload = $req->get_body();
+    $this->stripe_debug_log('stripe webhook entrypoint reached');
     $signature = isset($_SERVER['HTTP_STRIPE_SIGNATURE']) ? (string)$_SERVER['HTTP_STRIPE_SIGNATURE'] : '';
     $secret = $this->webhook_secret();
 
@@ -5516,6 +5537,7 @@ class MRM_Payments_Hub_Single {
   private function mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi, $order = array()) {
     try {
       if (!is_array($pi)) return;
+      $this->stripe_debug_log('entered subscription creation helper');
 
       $this->stripe_debug_log('subscription path entered from initial payment intent', array(
         'pi_id' => (string)($pi['id'] ?? ''),
