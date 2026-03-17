@@ -620,6 +620,12 @@ class MRM_Payments_Hub_Single {
     return trim((string)($s['stripe_webhook_secret'] ?? ''));
   }
 
+  private function is_test_mode() {
+    $s = $this->get_settings();
+    $mode = isset($s['stripe_mode']) ? (string)$s['stripe_mode'] : 'live';
+    return ($mode === 'test');
+  }
+
   private function stripe_debug_log_path() {
     if (!defined('WP_CONTENT_DIR') || !is_string(WP_CONTENT_DIR) || WP_CONTENT_DIR === '') {
       return '';
@@ -5104,6 +5110,7 @@ class MRM_Payments_Hub_Single {
       : 'Low Brass Lessons - Sheet Music Charge';
 
     $save_card = !empty($data['save_card']);
+    $requires_customer_for_subscription = ($addon_selected && $product_type === 'lesson');
 
     $extra = array();
     $customer_id = '';
@@ -5111,17 +5118,29 @@ class MRM_Payments_Hub_Single {
     // Enable Stripe receipt emails
     $extra['receipt_email'] = $email;
 
-    if ($save_card) {
+    if ($save_card || $requires_customer_for_subscription) {
+      $this->stripe_debug_log('create_payment_intent resolving stripe customer', array(
+        'email' => $email,
+        'save_card' => ($save_card ? 'yes' : 'no'),
+        'requires_customer_for_subscription' => ($requires_customer_for_subscription ? 'yes' : 'no'),
+        'addon_selected' => ($addon_selected ? 'yes' : 'no'),
+        'product_type' => $product_type,
+      ));
       $customer_id = $this->stripe_find_or_create_customer($email);
       if (is_wp_error($customer_id)) {
         return new WP_REST_Response(array('ok'=>false,'message'=>$customer_id->get_error_message()), 500);
       }
 
-      // This tells Stripe to attach the payment method to the customer for future off-session charges.
+      // Attach PI to a real Stripe customer so future off-session billing can work.
       $extra['customer'] = $customer_id;
       $extra['setup_future_usage'] = 'off_session';
 
       $metadata['mrm_save_card'] = 'yes';
+      $metadata['mrm_customer_id'] = (string)$customer_id;
+      $this->stripe_debug_log('create_payment_intent stripe customer resolved', array(
+        'email' => $email,
+        'customer_id' => (string)$customer_id,
+      ));
     }
 
     $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra);
@@ -5616,9 +5635,22 @@ class MRM_Payments_Hub_Single {
       $customer_id = (string)($pi['customer'] ?? '');
       $payment_method_id = (string)($pi['payment_method'] ?? '');
 
+      $this->stripe_debug_log('subscription path inspecting PI customer/payment method', array(
+        'order_id' => $order_id,
+        'pi_id' => $pi_id,
+        'customer_id' => $customer_id,
+        'payment_method_id' => $payment_method_id,
+      ));
+
       if ($customer_id === '' || $payment_method_id === '') {
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_customer_or_payment_method');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing Stripe customer or payment method on initial payment intent.');
+        $this->stripe_debug_log('subscription path blocked: missing customer or payment method', array(
+          'order_id' => $order_id,
+          'pi_id' => $pi_id,
+          'customer_id_present' => ($customer_id !== '' ? 'yes' : 'no'),
+          'payment_method_present' => ($payment_method_id !== '' ? 'yes' : 'no'),
+        ));
         error_log('[MRM Payments Hub] Cannot create sheet music subscription: missing customer or payment method.');
         return;
       }
