@@ -1177,7 +1177,10 @@ class MRM_Payments_Hub_Single {
       'collection_method' => 'charge_automatically',
       'proration_behavior' => 'none',
       'billing_cycle_anchor' => (int)$billing_cycle_anchor_ts,
+      'description' => 'Low Brass Lessons - Sheet Music Subscription Charge',
     );
+
+    $metadata['mrm_description'] = 'Low Brass Lessons - Sheet Music Subscription Charge';
 
     foreach ((array)$metadata as $k => $v) {
       if ($k === '' || $v === null) continue;
@@ -5803,7 +5806,7 @@ class MRM_Payments_Hub_Single {
   private function mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi, $order = array()) {
     try {
       if (!is_array($pi)) return;
-      $this->stripe_debug_log('entered subscription creation helper');
+      $this->stripe_debug_log('entered Low Brass Lessons - Sheet Music Subscription Charge helper');
 
       $this->stripe_debug_log('subscription path entered from initial payment intent', array(
         'pi_id' => (string)($pi['id'] ?? ''),
