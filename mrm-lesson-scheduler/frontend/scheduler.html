@@ -2233,7 +2233,27 @@ function ensureStripe(publishableKey){
   return stripe;
 }
 
-function openPaymentModal(clientSecret, breakdown){
+function mrmBuildPaymentElementOptions(allowedMethods){
+  const methods = Array.isArray(allowedMethods) && allowedMethods.length
+    ? allowedMethods.filter(Boolean)
+    : ['card'];
+
+  return {
+    paymentMethodOrder: methods,
+    wallets: {
+      applePay: 'never',
+      googlePay: 'never',
+      link: 'never'
+    },
+    layout: {
+      type: 'accordion',
+      defaultCollapsed: false,
+      visibleAccordionItemsCount: 0
+    }
+  };
+}
+
+function openPaymentModal(clientSecret, breakdown, allowedMethods){
   const overlay = document.getElementById('mrm-payment-overlay');
   const closeBtn = document.getElementById('mrm-payment-close');
   const payBtn = document.getElementById('mrm-pay-btn');
@@ -2260,7 +2280,10 @@ function openPaymentModal(clientSecret, breakdown){
   document.body.classList.add('mrm-booking-modal-open');
 
   activeStripeElements = stripe.elements({ clientSecret });
-  activePaymentElement = activeStripeElements.create('payment');
+  activePaymentElement = activeStripeElements.create(
+    'payment',
+    mrmBuildPaymentElementOptions(allowedMethods)
+  );
   activePaymentElement.mount('#mrm-payment-element');
 
   const closeModal = (opts = {}) => {
@@ -3206,7 +3229,11 @@ function ensureLegacyBookingHandler(){
 
           persistSelectedSlots();
 
-          const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, createData);
+          const { payBtn, errorEl, closeModal } = openPaymentModal(
+            createData.client_secret,
+            createData,
+            createData.allowed_payment_methods || ['card']
+          );
 
           payBtn.onclick = async () => {
             payBtn.disabled = true;
@@ -3333,7 +3360,11 @@ function ensureLegacyBookingHandler(){
           payment_mode: prepay ? 'prepay' : 'one_time'
         }));
 
-        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, createData);
+        const { payBtn, errorEl, closeModal } = openPaymentModal(
+          createData.client_secret,
+          createData,
+          createData.allowed_payment_methods || ['card']
+        );
 
         payBtn.onclick = async () => {
           payBtn.disabled = true;

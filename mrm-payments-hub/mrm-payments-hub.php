@@ -1093,13 +1093,27 @@ class MRM_Payments_Hub_Single {
     );
   }
 
-  private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array()) {
+  private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array(), $payment_method_types = array('card')) {
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => $currency ?: 'usd',
-      'automatic_payment_methods[enabled]' => 'true',
     );
-    if ($description) $params['description'] = $description;
+
+    if ($description) {
+      $params['description'] = $description;
+    }
+
+    $idx = 0;
+    foreach ((array)$payment_method_types as $pm_type) {
+      $pm_type = sanitize_text_field((string)$pm_type);
+      if ($pm_type === '') continue;
+      $params["payment_method_types[{$idx}]"] = $pm_type;
+      $idx++;
+    }
+
+    if ($idx <= 0) {
+      $params['payment_method_types[0]'] = 'card';
+    }
 
     // Allow additional Stripe params (customer, setup_future_usage, etc.)
     if (is_array($extra_params)) {
@@ -5485,10 +5499,18 @@ class MRM_Payments_Hub_Single {
 
     $save_card = !empty($data['save_card']);
     $requires_customer_for_subscription = ($addon_selected && $product_type === 'lesson');
-    $requires_customer_for_piece_purchase = ($product_type === 'sheet_music');
+    $requires_customer_for_piece_purchase = false;
 
     $extra = array();
     $customer_id = '';
+
+    // Default safe method set
+    $payment_method_types = array('card');
+
+    // Allow bank only on flows that do NOT need future off-session charging
+    if (!$save_card && !$requires_customer_for_subscription && !$requires_customer_for_piece_purchase) {
+      $payment_method_types = array('card', 'us_bank_account');
+    }
 
     // Enable Stripe receipt emails
     $extra['receipt_email'] = $email;
@@ -5519,7 +5541,7 @@ class MRM_Payments_Hub_Single {
       ));
     }
 
-    $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra);
+    $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra, $payment_method_types);
     if (is_wp_error($pi)) {
       $data = $pi->get_error_data();
       error_log('[MRM Payments Hub] Stripe PI error sku=' . $sku . ' msg=' . $pi->get_error_message() . ' data=' . wp_json_encode($data));
@@ -5533,6 +5555,7 @@ class MRM_Payments_Hub_Single {
       'publishableKey' => $this->publishable_key(),
       'client_secret' => (string)($pi['client_secret'] ?? ''),
       'payment_intent_id' => (string)$pi['id'],
+      'allowed_payment_methods' => array_values($payment_method_types),
       'order_id' => (int)$order_id,
       'customer_id' => $customer_id ? (string)$customer_id : '',
       'sku' => $sku,
