@@ -4397,6 +4397,41 @@ function getSlotMinutes(){
   return parseInt(document.getElementById('length-select').value,10)||60;
 }
 
+
+let selectedState = null;
+let renderInstructorListForState = null;
+
+function getSelectedInstrumentKey(){
+  const mainSel = document.getElementById('instrument-input');
+  const modalSel = document.getElementById('modal-instrument');
+
+  const raw = (
+    (mainSel && mainSel.value) ||
+    (modalSel && modalSel.value) ||
+    ''
+  ).toString().trim().toLowerCase();
+
+  if(!raw) return '';
+
+  // Normalize common labels to stored instructor instrument keys.
+  if(raw === 'trombone') return 'trombone';
+  if(raw === 'euphonium') return 'euphonium';
+  if(raw === 'tuba') return 'tuba';
+
+  return raw;
+}
+
+function instructorSupportsSelectedInstrument(instr, instrumentKey){
+  if(!instrumentKey) return true;
+  if(!instr || typeof instr !== 'object') return false;
+
+  const arr = Array.isArray(instr.instruments)
+    ? instr.instruments.map(v => String(v || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  return arr.includes(instrumentKey);
+}
+
 function loadInstructors(){
   fetch(apiBase+'/instructors')
     .then(r=>r.json())
@@ -4410,7 +4445,7 @@ function loadInstructors(){
 
       // Persist selection for convenience
       const STORAGE_KEY = 'mrm_selected_state';
-      let selectedState = null; // Always show map first; user must click a state
+      selectedState = null; // Always show map first; user must click a state
 
       // --- Inline SVG goes here ---
       // You MUST paste a "blank USA states" SVG (no labels) as a string.
@@ -4947,7 +4982,7 @@ function loadInstructors(){
         wrap.appendChild(box);
       }
 
-      function renderInstructorListForState(stateCode){
+      renderInstructorListForState = function(stateCode){
         wrap.innerHTML = '';
 
         // Header bar: selected state + change link (isolated)
@@ -5044,10 +5079,21 @@ function loadInstructors(){
           renderStateSelector();
         };
 
-        // Filter list to this state
+        // Filter list to this state + selected instrument
+        const selectedInstrumentKey = getSelectedInstrumentKey();
+
         const filtered = (list || []).filter(i=>{
           const st = (i.state || '').toString().trim().toUpperCase();
-          return st === stateCode;
+          if(st !== stateCode) return false;
+
+          return instructorSupportsSelectedInstrument(i, selectedInstrumentKey);
+        });
+
+        console.log('[MRM Scheduler] instructor filter', {
+          stateCode,
+          selectedInstrumentKey,
+          totalInstructors: Array.isArray(list) ? list.length : 0,
+          filteredCount: filtered.length
         });
 
         // Existing behavior: group by city (within state)
@@ -5059,6 +5105,17 @@ function loadInstructors(){
         });
 
         const cities = Object.keys(byCity).sort((a,b)=>a.localeCompare(b));
+
+        if(!filtered.length){
+          const empty = document.createElement('div');
+          empty.className = 'availability-message';
+          empty.style.margin = '14px 0 8px';
+          empty.textContent = selectedInstrumentKey
+            ? 'No instructors in this area currently teach the selected instrument.'
+            : 'No instructors found in this area.';
+          wrap.append(empty);
+          return;
+        }
 
         cities.forEach(city=>{
           const heading = document.createElement('h2');
@@ -5588,12 +5645,20 @@ document.getElementById('instrument-input').addEventListener('change', ()=>{
   document.getElementById('confirm-instrument').value = v;
   const modalSel = document.getElementById('modal-instrument');
   if(modalSel) modalSel.value = v;
+
+  if (selectedState) {
+    renderInstructorListForState(selectedState);
+  }
 });
 
 document.getElementById('modal-instrument').addEventListener('change', ()=>{
   const v = document.getElementById('modal-instrument').value || '';
   document.getElementById('instrument-input').value = v;
   document.getElementById('confirm-instrument').value = v;
+
+  if (selectedState) {
+    renderInstructorListForState(selectedState);
+  }
 });
 
 document.getElementById('lesson-option').addEventListener('change', updatePaymentCheckboxVisibility);
