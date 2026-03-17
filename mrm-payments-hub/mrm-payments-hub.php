@@ -705,6 +705,19 @@ class MRM_Payments_Hub_Single {
     return trim((string)($s['stripe_sheet_music_subscription_price_id'] ?? ''));
   }
 
+  private function composer_connected_account_id() {
+    $s = $this->get_settings();
+
+    $live = trim((string)($s['composer_connected_account_id'] ?? ''));
+    $test = trim((string)($s['test_composer_connected_account_id'] ?? ''));
+
+    if ($this->is_test_mode()) {
+      return ($test !== '') ? $test : $live;
+    }
+
+    return $live;
+  }
+
   private function all_products() {
     $p = get_option(self::OPT_PRODUCTS, array());
     return is_array($p) ? $p : array();
@@ -1798,12 +1811,16 @@ class MRM_Payments_Hub_Single {
     $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
     if (!empty($local['email_plain'])) {
       $invoice_created_ts = !empty($invoice['created']) ? (int)$invoice['created'] : time();
-      $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'], $invoice_created_ts, 'stripe_subscription_invoice', (string)($invoice['id'] ?? ''));
+      $invoice_id = (string)($invoice['id'] ?? '');
+
+      $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'], $invoice_created_ts, 'stripe_subscription_invoice', $invoice_id);
+
+      $this->mrm_create_composer_payout_for_subscription_invoice($invoice, $local);
 
       $sent = $this->mrm_send_sheet_music_subscription_charge_email($local, $invoice);
 
       $this->stripe_debug_log('subscription recurring charge email result', array(
-        'invoice_id' => (string)($invoice['id'] ?? ''),
+        'invoice_id' => $invoice_id,
         'subscription_id' => $subscription_id,
         'email' => (string)($local['email_plain'] ?? ''),
         'sent' => ($sent ? 'yes' : 'no'),
@@ -3501,6 +3518,109 @@ class MRM_Payments_Hub_Single {
     ), array('%d','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'));
 
     return (int)$wpdb->insert_id;
+  }
+
+
+  private function mrm_recurring_subscription_payout_exists($invoice_id) {
+    global $wpdb;
+
+    $invoice_id = trim((string)$invoice_id);
+    if ($invoice_id === '') return false;
+
+    $table = $this->table_payout_ledger();
+
+    $existing = $wpdb->get_var(
+      $wpdb->prepare(
+        "SELECT id
+         FROM {$table}
+         WHERE order_id = %d
+           AND payee_type = %s
+           AND payee_ref = %s
+         LIMIT 1",
+        0,
+        'composer',
+        'stripe_subscription_invoice:' . $invoice_id
+      )
+    );
+
+    return !empty($existing);
+  }
+
+  private function mrm_create_composer_payout_for_subscription_invoice($invoice, $local_subscription = array()) {
+    global $wpdb;
+
+    if (!is_array($invoice)) return false;
+
+    $invoice_id = trim((string)($invoice['id'] ?? ''));
+    $subscription_id = trim((string)($invoice['subscription'] ?? ''));
+    $amount_paid = (int)($invoice['amount_paid'] ?? 0);
+    $currency = strtolower(trim((string)($invoice['currency'] ?? 'usd')));
+
+    if ($invoice_id === '' || $subscription_id === '' || $amount_paid <= 0) {
+      return false;
+    }
+
+    if ($this->mrm_recurring_subscription_payout_exists($invoice_id)) {
+      return true;
+    }
+
+    $connected_account_id = $this->composer_connected_account_id();
+    if ($connected_account_id === '') {
+      error_log('[MRM Payments Hub] Recurring subscription composer payout skipped: missing composer connected account setting. invoice_id=' . $invoice_id);
+
+      if (method_exists($this, 'stripe_debug_log')) {
+        $this->stripe_debug_log('recurring subscription composer payout skipped', array(
+          'invoice_id' => $invoice_id,
+          'reason' => 'missing_composer_connected_account',
+        ));
+      }
+
+      return false;
+    }
+
+    $table = $this->table_payout_ledger();
+    $now = current_time('mysql');
+
+    $notes = 'Recurring sheet music subscription composer payout (100% composer share)';
+
+    $inserted = $wpdb->insert(
+      $table,
+      array(
+        'order_id' => 0,
+        'stripe_payment_intent_id' => '',
+        'payee_type' => 'composer',
+        'payee_ref' => 'stripe_subscription_invoice:' . $invoice_id,
+        'connected_account_id' => $connected_account_id,
+        'currency' => $currency,
+        'gross_cents' => $amount_paid,
+        'net_cents' => $amount_paid,
+        'status' => 'pending',
+        'transfer_id' => null,
+        'payout_id' => null,
+        'batch_key' => null,
+        'notes' => $notes,
+        'created_at' => $now,
+        'updated_at' => $now,
+      ),
+      array('%d','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s')
+    );
+
+    if ($inserted === false) {
+      error_log('[MRM Payments Hub] Failed to insert recurring subscription payout ledger row. invoice_id=' . $invoice_id);
+      return false;
+    }
+
+    if (method_exists($this, 'stripe_debug_log')) {
+      $this->stripe_debug_log('recurring subscription composer payout row created', array(
+        'invoice_id' => $invoice_id,
+        'subscription_id' => $subscription_id,
+        'connected_account_id' => $connected_account_id,
+        'amount_paid' => $amount_paid,
+        'currency' => $currency,
+      ));
+    }
+
+    return true;
   }
 
   private function mrm_maybe_create_payout_ledger_for_order($order) {
