@@ -2564,13 +2564,13 @@ class MRM_Payments_Hub_Single {
     global $wpdb;
 
     $sku = $this->sanitize_product_slug((string)$sku);
-    if ($sku === '' || $sku === 'all-sheet-music' || $sku === 'all-piece-products-instructors') {
+    if ($sku === '' || $sku === 'all-sheet-music') {
       return array();
     }
 
     $table = $this->table_sheet_music_access();
 
-    return $wpdb->get_results(
+    $rows = $wpdb->get_results(
       $wpdb->prepare(
         "SELECT id, email_plain, granted_at, source, source_id, revoked_at
          FROM {$table}
@@ -2581,6 +2581,12 @@ class MRM_Payments_Hub_Single {
       ),
       ARRAY_A
     );
+
+    if (defined('WP_DEBUG') && WP_DEBUG) {
+      error_log('[MRM Payments Hub] Admin piece access rows fetched. sku=' . $sku . ' row_count=' . count((array)$rows));
+    }
+
+    return $rows;
   }
 
   private function mrm_upsert_sheet_music_subscription_row($data) {
@@ -7102,6 +7108,7 @@ class MRM_Payments_Hub_Single {
 
         <?php
         $instructor_rows = $this->mrm_get_piece_product_access_rows_for_admin('all-piece-products-instructors');
+        if (defined('WP_DEBUG') && WP_DEBUG) error_log('[MRM Payments Hub] Instructor piece access table render. row_count=' . count((array)$instructor_rows));
         ?>
         <h3 style="margin-top:18px;">Instructor piece access (auto-managed)</h3>
         <p><small>This list is auto-generated from the instructors table and updates automatically.</small></p>
