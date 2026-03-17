@@ -1566,7 +1566,7 @@ class MRM_Product_Access {
             }
         }
 
-        // Rule 2: master all-sheet-music ledger (legacy fallback), auto-expiring
+        // Rule 2: master all-sheet-music ledger (legacy fallback)
         $master_sku = 'all-sheet-music';
         $master_rows = $wpdb->get_results( $wpdb->prepare(
             "SELECT id, email_hash, email_plain, expires_at, granted_at
