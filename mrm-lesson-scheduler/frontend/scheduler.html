@@ -3199,11 +3199,10 @@ function ensureLegacyBookingHandler(){
         }
 
         // Temporary pre-checkout preview only.
-        // Under the rollout model, tax is only applied after the backend knows:
-        // - the billing state
-        // - whether that state is registered
-        // - whether collection is enabled for that state
-        // - which taxable product profile applies
+        // Under the Stripe-only tax model, final tax is determined server-side after:
+        // - the billing state and ZIP are known
+        // - the taxable product profile is known
+        // - Stripe Tax evaluates the jurisdiction using your Stripe registrations
         const baseAmount = quote.amount_cents || 0;
         const chargeAmountCents = baseAmount * count;
         const sheetAddonCents = sheetMusicAddon ? 500 : 0;
