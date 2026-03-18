@@ -2988,6 +2988,28 @@ async function submitBooking(payload, setMsg){
   return { ok: true, data };
 }
 
+function handleExistingSheetMusicSubscriptionGuard(createData, setMsg){
+  const code = createData && createData.code ? String(createData.code) : '';
+  const alreadyEnrolled = !!(createData && createData.already_enrolled);
+
+  if (code !== 'already_enrolled_sheet_music_subscription' && !alreadyEnrolled) {
+    return false;
+  }
+
+  const addonCheckbox = document.getElementById('mrm-sheet-music-addon-opt');
+  if (addonCheckbox) {
+    addonCheckbox.checked = false;
+  }
+
+  setMsg(
+    (createData && createData.message)
+      ? createData.message
+      : 'This email is already enrolled in the sheet music subscription. You do not need to subscribe again. If you need help, please contact us through our contact form.'
+  );
+
+  return true;
+}
+
 function ensureLegacyBookingHandler(){
   const btn = document.getElementById('submit-booking');
   if(!btn) return;
@@ -3213,7 +3235,13 @@ function ensureLegacyBookingHandler(){
           });
 
           const createData = await createRes.json();
+
           if (!createRes.ok || !createData.ok) {
+            if (handleExistingSheetMusicSubscriptionGuard(createData, setMsg)) {
+              btn.disabled = false;
+              return;
+            }
+
             setMsg(createData.message || 'Unable to start first auto-pay charge.');
             btn.disabled = false;
             return;
@@ -3339,7 +3367,13 @@ function ensureLegacyBookingHandler(){
         });
         const createData = await createRes.json();
         if(!createRes.ok || !createData.ok){
+          if (handleExistingSheetMusicSubscriptionGuard(createData, setMsg)) {
+            btn.disabled = false;
+            return;
+          }
+
           setMsg(createData.message || 'Payment error.');
+          btn.disabled = false;
           return;
         }
 
