@@ -1142,7 +1142,7 @@ a{ -webkit-tap-highlight-color:transparent; }
     const rows = [];
     const itemLabel = String(breakdown?.label || 'Sheet music');
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Enter ZIP to calculate'}</strong></div>`);
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated after email + ZIP are entered'}</strong></div>`);
     rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
 
     instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
@@ -1184,7 +1184,7 @@ a{ -webkit-tap-highlight-color:transparent; }
 
       const rows = [];
       rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${esc(label)}</span><strong>${money(base)}</strong></div>`);
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated at checkout'}</strong></div>`);
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated after billing address is entered'}</strong></div>`);
       rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
       instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">${rows.join('')}</div>`;
     };
