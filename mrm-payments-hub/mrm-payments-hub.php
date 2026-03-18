@@ -5507,9 +5507,13 @@ class MRM_Payments_Hub_Single {
     // Default safe method set
     $payment_method_types = array('card');
 
-    // Allow bank only on flows that do NOT need future off-session charging
+    // Keep card-only so the Payment Element can show:
+    // - card entry
+    // - Apple Pay (when available)
+    // - Google Pay (when available)
+    // We intentionally do NOT include us_bank_account here.
     if (!$save_card && !$requires_customer_for_subscription && !$requires_customer_for_piece_purchase) {
-      $payment_method_types = array('card', 'us_bank_account');
+      $payment_method_types = array('card');
     }
 
     // Enable Stripe receipt emails
