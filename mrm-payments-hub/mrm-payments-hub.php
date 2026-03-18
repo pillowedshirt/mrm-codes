@@ -1017,9 +1017,22 @@ class MRM_Payments_Hub_Single {
     $state   = trim((string)($address['state'] ?? ''));
     $line1   = trim((string)($address['line1'] ?? ''));
 
-    // Stripe Tax needs at minimum country + postal code for most US calculations.
     if (!$country || !$postal) {
-      return array('ok'=>false,'tax_cents'=>0,'amount_total_cents'=>0,'calculation_id'=>'','line_items'=>array());
+      $this->stripe_debug_log('tax calculation skipped: missing minimum address fields', array(
+        'country' => $country,
+        'postal_code' => $postal,
+        'state' => $state,
+        'line1_present' => $line1 ? 'yes' : 'no',
+      ));
+
+      return array(
+        'ok'=>false,
+        'tax_cents'=>0,
+        'amount_total_cents'=>0,
+        'calculation_id'=>'',
+        'line_items'=>array(),
+        'taxability_reason'=>'missing_location_inputs',
+      );
     }
 
     $items = array();
@@ -1034,7 +1047,9 @@ class MRM_Payments_Hub_Single {
       if (!$ref) $ref = 'item_' . count($items) . '_' . $amt;
 
       $tax_code = isset($li['tax_code']) ? (string)$li['tax_code'] : '';
-      if (!$tax_code) $tax_code = 'txcd_10000000'; // Generic electronically supplied services
+      if (!$tax_code) {
+        $tax_code = 'txcd_10000000';
+      }
 
       $items[] = array(
         'amount' => $amt,
@@ -1044,7 +1059,18 @@ class MRM_Payments_Hub_Single {
     }
 
     if (empty($items)) {
-      return array('ok'=>true,'tax_cents'=>0,'amount_total_cents'=>$subtotal,'calculation_id'=>'','line_items'=>array());
+      $this->stripe_debug_log('tax calculation skipped: no taxable items', array(
+        'subtotal' => $subtotal,
+      ));
+
+      return array(
+        'ok'=>true,
+        'tax_cents'=>0,
+        'amount_total_cents'=>$subtotal,
+        'calculation_id'=>'',
+        'line_items'=>array(),
+        'taxability_reason'=>'no_taxable_items',
+      );
     }
 
     $payload = array(
@@ -1056,33 +1082,75 @@ class MRM_Payments_Hub_Single {
         ),
       ),
       'line_items' => $items,
+      'expand[]' => 'line_items',
     );
 
-    // Optional fields if present
-    if ($state) $payload['customer_details']['address']['state'] = $state;
-    if ($line1) $payload['customer_details']['address']['line1'] = $line1;
+    if ($state) {
+      $payload['customer_details']['address']['state'] = $state;
+    }
+    if ($line1) {
+      $payload['customer_details']['address']['line1'] = $line1;
+    }
+
+    $this->stripe_debug_log('tax calculation request', array(
+      'currency' => strtolower((string)$currency),
+      'address' => array(
+        'country' => $country,
+        'postal_code' => $postal,
+        'state' => $state,
+        'line1_present' => $line1 ? 'yes' : 'no',
+      ),
+      'line_items' => $items,
+    ));
 
     $calc = $this->stripe_api_request('POST', '/v1/tax/calculations', $payload);
+
     if (is_wp_error($calc)) {
-      error_log('[MRM Payments Hub] Stripe Tax calc error: ' . $calc->get_error_message());
-      return array('ok'=>false,'tax_cents'=>0,'amount_total_cents'=>$subtotal,'calculation_id'=>'','line_items'=>array());
+      $this->stripe_debug_log('tax calculation error', array(
+        'message' => $calc->get_error_message(),
+      ));
+
+      return array(
+        'ok'=>false,
+        'tax_cents'=>0,
+        'amount_total_cents'=>$subtotal,
+        'calculation_id'=>'',
+        'line_items'=>array(),
+        'taxability_reason'=>'stripe_error',
+      );
     }
 
     $tax_cents = isset($calc['tax_amount_exclusive']) ? (int)$calc['tax_amount_exclusive'] : 0;
     $amount_total = isset($calc['amount_total']) ? (int)$calc['amount_total'] : ($subtotal + $tax_cents);
     $calc_id = isset($calc['id']) ? (string)$calc['id'] : '';
 
-    // Extract per-line-item tax amounts if expanded (Stripe may not return by default)
     $out_items = array();
+    $taxability_reason = '';
+
     if (!empty($calc['line_items']['data']) && is_array($calc['line_items']['data'])) {
       foreach ($calc['line_items']['data'] as $x) {
+        $reason = (string)($x['taxability_reason'] ?? '');
+        if ($reason && $taxability_reason === '') {
+          $taxability_reason = $reason;
+        }
+
         $out_items[] = array(
           'reference' => (string)($x['reference'] ?? ''),
           'amount_cents' => (int)($x['amount'] ?? 0),
           'tax_cents' => (int)($x['amount_tax'] ?? 0),
+          'taxability_reason' => $reason,
+          'tax_code' => (string)($x['tax_code'] ?? ''),
         );
       }
     }
+
+    $this->stripe_debug_log('tax calculation response', array(
+      'calculation_id' => $calc_id,
+      'tax_cents' => $tax_cents,
+      'amount_total_cents' => $amount_total,
+      'taxability_reason' => $taxability_reason,
+      'line_items' => $out_items,
+    ));
 
     return array(
       'ok' => true,
@@ -1090,6 +1158,7 @@ class MRM_Payments_Hub_Single {
       'amount_total_cents' => $amount_total,
       'calculation_id' => $calc_id,
       'line_items' => $out_items,
+      'taxability_reason' => $taxability_reason,
     );
   }
 
@@ -1204,6 +1273,7 @@ class MRM_Payments_Hub_Single {
       'collection_method' => 'charge_automatically',
       'proration_behavior' => 'none',
       'billing_cycle_anchor' => (int)$billing_cycle_anchor_ts,
+      'automatic_tax[enabled]' => 'true',
       'description' => 'Low Brass Lessons - Sheet Music Subscription Charge',
     );
 
@@ -1213,6 +1283,13 @@ class MRM_Payments_Hub_Single {
       if ($k === '' || $v === null) continue;
       $params["metadata[{$k}]"] = (string)$v;
     }
+
+    $this->stripe_debug_log('creating stripe subscription with automatic tax', array(
+      'customer_id' => (string)$customer_id,
+      'price_id' => (string)$price_id,
+      'billing_cycle_anchor' => (int)$billing_cycle_anchor_ts,
+      'automatic_tax_enabled' => 'true',
+    ));
 
     return $this->stripe_api_request('POST', '/v1/subscriptions', $params);
   }
@@ -1549,6 +1626,66 @@ class MRM_Payments_Hub_Single {
     if (is_wp_error($created)) return $created;
 
     return isset($created['id']) ? (string)$created['id'] : new WP_Error('stripe_error', 'Unable to create customer.');
+  }
+
+  private function stripe_update_customer_address($customer_id, $email, $address = array(), $name = '') {
+    $customer_id = trim((string)$customer_id);
+    $email = sanitize_email((string)$email);
+
+    if ($customer_id === '') {
+      return new WP_Error('missing_customer_id', 'Missing Stripe customer id.');
+    }
+
+    $line1 = trim((string)($address['line1'] ?? ''));
+    $state = trim((string)($address['state'] ?? ''));
+    $postal = trim((string)($address['postal_code'] ?? ''));
+    $country = strtoupper(trim((string)($address['country'] ?? 'US')));
+
+    $params = array(
+      'email' => $email,
+    );
+
+    if ($name !== '') {
+      $params['name'] = (string)$name;
+    }
+
+    if ($line1 !== '') {
+      $params['address[line1]'] = $line1;
+    }
+    if ($state !== '') {
+      $params['address[state]'] = $state;
+    }
+    if ($postal !== '') {
+      $params['address[postal_code]'] = $postal;
+    }
+    if ($country !== '') {
+      $params['address[country]'] = $country;
+    }
+
+    $params['shipping[name]'] = $name !== '' ? (string)$name : $email;
+    if ($line1 !== '') {
+      $params['shipping[address][line1]'] = $line1;
+    }
+    if ($state !== '') {
+      $params['shipping[address][state]'] = $state;
+    }
+    if ($postal !== '') {
+      $params['shipping[address][postal_code]'] = $postal;
+    }
+    if ($country !== '') {
+      $params['shipping[address][country]'] = $country;
+    }
+
+    $this->stripe_debug_log('updating stripe customer tax location', array(
+      'customer_id' => $customer_id,
+      'email' => $email,
+      'state' => $state,
+      'postal_code' => $postal,
+      'country' => $country,
+      'line1_present' => $line1 ? 'yes' : 'no',
+    ));
+
+    return $this->stripe_api_request('POST', '/v1/customers/' . rawurlencode($customer_id), $params);
   }
 
   private function stripe_construct_webhook_event($payload, $signature_header, $secret) {
@@ -5300,6 +5437,8 @@ class MRM_Payments_Hub_Single {
       'label' => (string)($p['label'] ?? $sku),
       'amount_cents' => $amount_cents,
       'currency' => $currency,
+      'tax_pending' => true,
+      'tax_message' => 'Sales tax is calculated after billing ZIP/address is entered.',
       // Optional: only returned if you’ve stored it in products
       'price_id' => $price_id ? $price_id : null,
     ), 200);
@@ -5470,6 +5609,16 @@ class MRM_Payments_Hub_Single {
     $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
     $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
     $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
+    if ($tax_cents <= 0 && !empty($taxable_items)) {
+      $this->stripe_debug_log('create_payment_intent tax result was zero', array(
+        'sku' => $sku,
+        'product_type' => $product_type,
+        'tax_calculation_id' => $tax_calc_id,
+        'taxability_reason' => (string)($tax_result['taxability_reason'] ?? ''),
+        'address' => $address,
+        'taxable_items' => $taxable_items,
+      ));
+    }
 
     $final_amount_cents = $base_amount_cents + $addon_amount_cents + $tax_cents;
 
@@ -5562,6 +5711,21 @@ class MRM_Payments_Hub_Single {
         return new WP_REST_Response(array('ok'=>false,'message'=>$customer_id->get_error_message()), 500);
       }
 
+      $customer_update = $this->stripe_update_customer_address(
+        $customer_id,
+        $email,
+        $address,
+        (string)($context['student_name'] ?? '')
+      );
+
+      if (is_wp_error($customer_update)) {
+        $this->stripe_debug_log('create_payment_intent stripe customer address update failed', array(
+          'email' => $email,
+          'customer_id' => (string)$customer_id,
+          'message' => $customer_update->get_error_message(),
+        ));
+      }
+
       // Attach PI to a real Stripe customer so future off-session billing can work.
       $extra['customer'] = $customer_id;
       $extra['setup_future_usage'] = 'off_session';
@@ -5598,6 +5762,10 @@ class MRM_Payments_Hub_Single {
       'addon_amount_cents' => $addon_amount_cents,
       'tax_cents' => $tax_cents,
       'tax_calculation_id' => $tax_calc_id,
+      'tax_debug' => array(
+        'taxability_reason' => (string)($tax_result['taxability_reason'] ?? ''),
+        'line_items' => (array)($tax_result['line_items'] ?? array()),
+      ),
       'currency' => $currency,
       'product_type' => $product_type,
       'category' => (string)($p['category'] ?? ''),
@@ -5980,6 +6148,11 @@ class MRM_Payments_Hub_Single {
       'base_amount_cents' => (int)$base_amount_cents,
       'addon_amount_cents' => (int)$addon_amount_cents,
       'tax_cents' => (int)$tax_cents,
+      'tax_calculation_id' => $tax_calc_id,
+      'tax_debug' => array(
+        'taxability_reason' => (string)($tax_result['taxability_reason'] ?? ''),
+        'line_items' => (array)($tax_result['line_items'] ?? array()),
+      ),
       'total_cents' => (int)$new_total_cents,
       'currency' => $currency,
     ), 200);

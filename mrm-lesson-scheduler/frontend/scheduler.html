@@ -3192,10 +3192,12 @@ function ensureLegacyBookingHandler(){
           return;
         }
 
+        // Temporary pre-checkout preview only.
+        // Real sales tax is calculated server-side during create-payment-intent.
         const baseAmount = quote.amount_cents || 0;
         const chargeAmountCents = baseAmount * count;
         const sheetAddonCents = sheetMusicAddon ? 500 : 0;
-        const sheetAddonTax = sheetMusicAddon ? (quote.addon_tax_cents || 0) : 0;
+        const sheetAddonTax = 0;
         const finalAmountCents = chargeAmountCents + sheetAddonCents + sheetAddonTax;
         const finalAmountDollars = (finalAmountCents / 100).toFixed(2);
 
