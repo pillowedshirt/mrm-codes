@@ -3700,6 +3700,12 @@ class MRM_Payments_Hub_Single {
     return $this->stripe_api_request('GET', '/v1/balance');
   }
 
+  private function stripe_retrieve_connected_account_balance($connected_account_id) {
+    return $this->stripe_api_request('GET', '/v1/balance', array(), array(
+      'Stripe-Account' => (string)$connected_account_id,
+    ));
+  }
+
   /**
    * Stripe separates available funds by currency and source type (for example card vs bank_account).
    * Payout batch transfers should only use funds that are actually available right now.
@@ -3767,6 +3773,24 @@ class MRM_Payments_Hub_Single {
         $table,
         array(
           'status' => 'pending',
+          'notes' => (string)$message,
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => (int)$row['id']),
+        array('%s','%s','%s'),
+        array('%d')
+      );
+    }
+  }
+
+  private function mrm_mark_group_transferred_balance_wait($table, $group_rows, $message) {
+    global $wpdb;
+
+    foreach ((array)$group_rows as $row) {
+      $wpdb->update(
+        $table,
+        array(
+          'status' => 'transferred',
           'notes' => (string)$message,
           'updated_at' => current_time('mysql'),
         ),
@@ -5124,7 +5148,7 @@ class MRM_Payments_Hub_Single {
     $table = $this->table_payout_ledger();
     $rows = $wpdb->get_results(
       "SELECT * FROM {$table}
-       WHERE status='pending'
+       WHERE status IN ('pending','transferred')
          AND connected_account_id IS NOT NULL
          AND connected_account_id <> ''
        ORDER BY connected_account_id ASC, id ASC",
@@ -5174,60 +5198,71 @@ class MRM_Payments_Hub_Single {
       $first = $group_rows[0];
       $acct = (string)$first['connected_account_id'];
       $currency = strtolower((string)$first['currency']);
-      $transferred_total = 0;
-      $transferred_ids = array();
 
-      $group_required_total = $this->mrm_sum_group_transfer_amount($group_rows);
+      $pending_rows = array();
+      $already_transferred_rows = array();
+
+      foreach ($group_rows as $group_row) {
+        $row_status = (string)($group_row['status'] ?? '');
+        if ($row_status === 'transferred') {
+          $already_transferred_rows[] = $group_row;
+        } else {
+          $pending_rows[] = $group_row;
+        }
+      }
+
+      $newly_transferred_total = 0;
+      $newly_transferred_ids = array();
+
+      $group_required_total = $this->mrm_sum_group_transfer_amount($pending_rows);
       $available = $this->mrm_balance_available_for_currency($platform_balance, $currency);
-      $requires_card_balance = $this->mrm_group_requires_card_balance($group_rows, $charge_map);
+      $requires_card_balance = $this->mrm_group_requires_card_balance($pending_rows, $charge_map);
 
-      if ($group_required_total <= 0) {
-        continue;
+      if ($group_required_total > 0) {
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+          error_log(
+            '[MRM Payout] balance_preflight'
+            . ' currency=' . $currency
+            . ' group_required_total=' . (int)$group_required_total
+            . ' available_total=' . (int)$available['total']
+            . ' available_card=' . (int)$available['card']
+            . ' requires_card_balance=' . ($requires_card_balance ? 'yes' : 'no')
+            . ' connected_account_id=' . $acct
+          );
+        }
+
+        if ((int)$available['total'] < $group_required_total) {
+          $msg = sprintf(
+            'Waiting for Stripe available balance. Needed %s %0.2f, but only %s %0.2f is currently available.',
+            strtoupper($currency),
+            $group_required_total / 100,
+            strtoupper($currency),
+            ((int)$available['total']) / 100
+          );
+
+          $this->mrm_mark_group_pending_balance_wait($table, $pending_rows, $msg);
+          $summary['errors']++;
+          $summary['last_error'] = $msg;
+          continue;
+        }
+
+        if ($requires_card_balance && (int)$available['card'] < $group_required_total) {
+          $msg = sprintf(
+            'Waiting for Stripe card available balance. Needed %s %0.2f, but only %s %0.2f of card balance is currently available.',
+            strtoupper($currency),
+            $group_required_total / 100,
+            strtoupper($currency),
+            ((int)$available['card']) / 100
+          );
+
+          $this->mrm_mark_group_pending_balance_wait($table, $pending_rows, $msg);
+          $summary['errors']++;
+          $summary['last_error'] = $msg;
+          continue;
+        }
       }
 
-      if (defined('WP_DEBUG') && WP_DEBUG) {
-        error_log(
-          '[MRM Payout] balance_preflight'
-          . ' currency=' . $currency
-          . ' group_required_total=' . (int)$group_required_total
-          . ' available_total=' . (int)$available['total']
-          . ' available_card=' . (int)$available['card']
-          . ' requires_card_balance=' . ($requires_card_balance ? 'yes' : 'no')
-          . ' connected_account_id=' . $acct
-        );
-      }
-
-      if ((int)$available['total'] < $group_required_total) {
-        $msg = sprintf(
-          'Waiting for Stripe available balance. Needed %s %0.2f, but only %s %0.2f is currently available.',
-          strtoupper($currency),
-          $group_required_total / 100,
-          strtoupper($currency),
-          ((int)$available['total']) / 100
-        );
-
-        $this->mrm_mark_group_pending_balance_wait($table, $group_rows, $msg);
-        $summary['errors']++;
-        $summary['last_error'] = $msg;
-        continue;
-      }
-
-      if ($requires_card_balance && (int)$available['card'] < $group_required_total) {
-        $msg = sprintf(
-          'Waiting for Stripe card available balance. Needed %s %0.2f, but only %s %0.2f of card balance is currently available.',
-          strtoupper($currency),
-          $group_required_total / 100,
-          strtoupper($currency),
-          ((int)$available['card']) / 100
-        );
-
-        $this->mrm_mark_group_pending_balance_wait($table, $group_rows, $msg);
-        $summary['errors']++;
-        $summary['last_error'] = $msg;
-        continue;
-      }
-
-      foreach ($group_rows as $row) {
+      foreach ($pending_rows as $row) {
         $amount = (int)$row['net_cents'];
         if ($amount <= 0) continue;
         $source_txn = (string)($charge_map[(int)$row['order_id']] ?? '');
@@ -5282,8 +5317,13 @@ class MRM_Payments_Hub_Single {
         );
 
         $summary['transfers_created']++;
-        $transferred_total += $amount;
-        $transferred_ids[] = (int)$row['id'];
+        $newly_transferred_total += $amount;
+        $newly_transferred_ids[] = (int)$row['id'];
+
+        $row['status'] = 'transferred';
+        $row['transfer_id'] = (string)($transfer['id'] ?? '');
+        $row['batch_key'] = $batch_key;
+        $already_transferred_rows[] = $row;
 
         if (isset($platform_balance['available']) && is_array($platform_balance['available'])) {
           foreach ($platform_balance['available'] as &$balance_entry) {
@@ -5311,13 +5351,68 @@ class MRM_Payments_Hub_Single {
         }
       }
 
-      if ($transferred_total <= 0 || empty($transferred_ids)) {
+      $payout_candidate_rows = array();
+      $payout_total = 0;
+      $payout_ledger_ids = array();
+
+      foreach ($already_transferred_rows as $row) {
+        $ledger_id = (int)($row['id'] ?? 0);
+        $amount = (int)($row['net_cents'] ?? 0);
+        if ($ledger_id <= 0 || $amount <= 0) {
+          continue;
+        }
+
+        $payout_candidate_rows[] = $row;
+        $payout_total += $amount;
+        $payout_ledger_ids[] = $ledger_id;
+      }
+
+      if ($payout_total <= 0 || empty($payout_candidate_rows)) {
         continue;
+      }
+
+      $connected_balance = $this->stripe_retrieve_connected_account_balance($acct);
+      if (is_wp_error($connected_balance)) {
+        $summary['errors']++;
+        $summary['last_error'] = 'Unable to retrieve connected account balance before payout: ' . $connected_balance->get_error_message();
+        $this->mrm_mark_group_transferred_balance_wait(
+          $table,
+          $payout_candidate_rows,
+          'Waiting for connected account balance visibility before payout: ' . $connected_balance->get_error_message()
+        );
+        continue;
+      }
+
+      $connected_available = $this->mrm_balance_available_for_currency($connected_balance, $currency);
+
+      if ((int)$connected_available['total'] < $payout_total) {
+        $msg = sprintf(
+          'Waiting for connected account available balance. Needed %s %0.2f, but only %s %0.2f is currently available on the connected account.',
+          strtoupper($currency),
+          $payout_total / 100,
+          strtoupper($currency),
+          ((int)$connected_available['total']) / 100
+        );
+
+        $this->mrm_mark_group_transferred_balance_wait($table, $payout_candidate_rows, $msg);
+        $summary['errors']++;
+        $summary['last_error'] = $msg;
+        continue;
+      }
+
+      if (defined('WP_DEBUG') && WP_DEBUG) {
+        error_log(
+          '[MRM Payout] connected_balance_preflight'
+          . ' currency=' . $currency
+          . ' payout_total=' . (int)$payout_total
+          . ' connected_available_total=' . (int)$connected_available['total']
+          . ' connected_account_id=' . $acct
+        );
       }
 
       $payout = $this->stripe_create_connected_account_payout(
         $acct,
-        $transferred_total,
+        $payout_total,
         $currency,
         array(
           'mrm_batch_key' => $batch_key,
@@ -5327,19 +5422,26 @@ class MRM_Payments_Hub_Single {
       if (is_wp_error($payout)) {
         $summary['errors']++;
         $summary['last_error'] = $payout->get_error_message();
+
+        $this->mrm_mark_group_transferred_balance_wait(
+          $table,
+          $payout_candidate_rows,
+          'Connected account payout failed and will be retried: ' . $payout->get_error_message()
+        );
         continue;
       }
 
-      foreach ($transferred_ids as $ledger_id) {
+      foreach ($payout_ledger_ids as $ledger_id) {
         $wpdb->update(
           $table,
           array(
             'status' => 'paid_out',
             'payout_id' => (string)($payout['id'] ?? ''),
+            'notes' => '',
             'updated_at' => current_time('mysql'),
           ),
           array('id' => (int)$ledger_id),
-          array('%s','%s','%s'),
+          array('%s','%s','%s','%s'),
           array('%d')
         );
       }
