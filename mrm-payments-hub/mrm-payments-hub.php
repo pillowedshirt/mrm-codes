@@ -2513,6 +2513,10 @@ class MRM_Payments_Hub_Single {
     return is_array($row) ? $row : array();
   }
 
+  private function mrm_sheet_music_duplicate_subscription_message() {
+    return 'This email is already enrolled in the sheet music subscription. You do not need to subscribe again. If you need help, please contact us through our contact form.';
+  }
+
   private function mrm_get_sheet_music_subscription_by_portal_token($token) {
     global $wpdb;
     $table = $this->table_sheet_music_subscriptions();
@@ -5488,6 +5492,31 @@ class MRM_Payments_Hub_Single {
     $metadata['mrm_tax_calculation_id'] = (string)$tax_calc_id;
     // Back-compat key (historically used for the $5 add-on tax only).
     $metadata['mrm_addon_tax_cents'] = (string)$tax_cents;
+
+    // Early duplicate guard:
+    // If this is a lesson checkout with the $5 sheet music add-on selected,
+    // block checkout before creating the order / PaymentIntent when the email
+    // already has an active Stripe-synced sheet music subscription.
+    if ($addon_selected && $product_type === 'lesson') {
+      $existing_subscription = $this->mrm_get_active_sheet_music_subscription_by_email($email);
+
+      if (!empty($existing_subscription['id'])) {
+        $this->stripe_debug_log('create_payment_intent blocked: duplicate sheet music subscription', array(
+          'email' => $email,
+          'sku' => $sku,
+          'product_type' => $product_type,
+          'existing_subscription_id' => (string)($existing_subscription['stripe_subscription_id'] ?? ''),
+          'existing_status' => (string)($existing_subscription['stripe_status'] ?? ''),
+        ));
+
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => 'already_enrolled_sheet_music_subscription',
+          'message' => $this->mrm_sheet_music_duplicate_subscription_message(),
+          'already_enrolled' => true,
+        ), 409);
+      }
+    }
 
     // Create internal order first so order_id can be labeled in Stripe metadata
     $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
