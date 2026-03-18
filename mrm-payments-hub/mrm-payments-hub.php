@@ -5164,26 +5164,9 @@ class MRM_Payments_Hub_Single {
       return $summary;
     }
 
-    // Build order_id -> latest_charge_id map
-    $order_ids = array();
-    foreach ($rows as $r) $order_ids[] = (int)$r['order_id'];
-    $order_ids = array_values(array_unique($order_ids));
-
-    $charge_map = array();
-    if (!empty($order_ids)) {
-      $orders_table = $this->table_orders();
-      $in = implode(',', array_map('intval', $order_ids));
-      $order_rows = $wpdb->get_results("SELECT id, metadata_json FROM {$orders_table} WHERE id IN ({$in})", ARRAY_A);
-      foreach ((array)$order_rows as $or) {
-        $m = array();
-        if (!empty($or['metadata_json'])) {
-          $d = json_decode((string)$or['metadata_json'], true);
-          if (is_array($d)) $m = $d;
-        }
-        $ch = (string)($m['mrm_latest_charge_id'] ?? '');
-        if ($ch !== '') $charge_map[(int)$or['id']] = $ch;
-      }
-    }
+    // Available-funds-only payout model:
+    // do not build an order -> charge map, because instructor transfers
+    // should never use source_transaction / pending incoming charge funds.
 
     $batch_key = 'batch_' . gmdate('Ymd_His');
 
@@ -5216,17 +5199,14 @@ class MRM_Payments_Hub_Single {
 
       $group_required_total = $this->mrm_sum_group_transfer_amount($pending_rows);
       $available = $this->mrm_balance_available_for_currency($platform_balance, $currency);
-      $requires_card_balance = $this->mrm_group_requires_card_balance($pending_rows, $charge_map);
 
       if ($group_required_total > 0) {
         if (defined('WP_DEBUG') && WP_DEBUG) {
           error_log(
-            '[MRM Payout] balance_preflight'
+            '[MRM Payout] available_balance_only_preflight'
             . ' currency=' . $currency
             . ' group_required_total=' . (int)$group_required_total
             . ' available_total=' . (int)$available['total']
-            . ' available_card=' . (int)$available['card']
-            . ' requires_card_balance=' . ($requires_card_balance ? 'yes' : 'no')
             . ' connected_account_id=' . $acct
           );
         }
@@ -5246,26 +5226,11 @@ class MRM_Payments_Hub_Single {
           continue;
         }
 
-        if ($requires_card_balance && (int)$available['card'] < $group_required_total) {
-          $msg = sprintf(
-            'Waiting for Stripe card available balance. Needed %s %0.2f, but only %s %0.2f of card balance is currently available.',
-            strtoupper($currency),
-            $group_required_total / 100,
-            strtoupper($currency),
-            ((int)$available['card']) / 100
-          );
-
-          $this->mrm_mark_group_pending_balance_wait($table, $pending_rows, $msg);
-          $summary['errors']++;
-          $summary['last_error'] = $msg;
-          continue;
-        }
       }
 
       foreach ($pending_rows as $row) {
         $amount = (int)$row['net_cents'];
         if ($amount <= 0) continue;
-        $source_txn = (string)($charge_map[(int)$row['order_id']] ?? '');
 
         $transfer = $this->stripe_create_transfer(
           $amount,
@@ -5276,8 +5241,8 @@ class MRM_Payments_Hub_Single {
             'mrm_order_id' => (string)$row['order_id'],
             'mrm_payee_type' => (string)$row['payee_type'],
             'mrm_batch_key' => $batch_key,
-          ),
-          $source_txn
+            'mrm_transfer_funding_mode' => 'platform_available_balance_only',
+          )
         );
 
         if (is_wp_error($transfer)) {
@@ -5293,7 +5258,9 @@ class MRM_Payments_Hub_Single {
             $table,
             array(
               'status' => $is_balance_wait_condition ? 'pending' : 'error',
-              'notes' => $transfer_error_message,
+              'notes' => $is_balance_wait_condition
+                ? ('Waiting for platform available balance before transfer: ' . $transfer_error_message)
+                : $transfer_error_message,
               'updated_at' => current_time('mysql'),
             ),
             array('id' => (int)$row['id']),
@@ -5332,19 +5299,6 @@ class MRM_Payments_Hub_Single {
             }
 
             $balance_entry['amount'] = max(0, (int)($balance_entry['amount'] ?? 0) - $amount);
-
-            if (
-              isset($balance_entry['source_types']) &&
-              is_array($balance_entry['source_types']) &&
-              $source_txn !== '' &&
-              isset($balance_entry['source_types']['card'])
-            ) {
-              $balance_entry['source_types']['card'] = max(
-                0,
-                (int)$balance_entry['source_types']['card'] - $amount
-              );
-            }
-
             break;
           }
           unset($balance_entry);
