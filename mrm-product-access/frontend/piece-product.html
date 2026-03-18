@@ -1138,11 +1138,16 @@ a{ -webkit-tap-highlight-color:transparent; }
     const base = Number((breakdown && breakdown.base_amount_cents) || 0);
     const tax  = Number((breakdown && breakdown.tax_cents) || 0);
     const total = Number((breakdown && (breakdown.amount_cents || breakdown.total_cents)) || (base + tax));
+    const taxMessage = String(
+      breakdown?.tax_message ||
+      breakdown?.tax_policy?.policy_message ||
+      'Sales tax is calculated after billing state and ZIP are entered.'
+    ).trim();
 
     const rows = [];
     const itemLabel = String(breakdown?.label || 'Sheet music');
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated after email + ZIP are entered'}</strong></div>`);
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
     rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
 
     instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
@@ -1178,13 +1183,26 @@ a{ -webkit-tap-highlight-color:transparent; }
       const base = Number(opts.base_amount_cents ?? baseFromQuote ?? 0);
       const tax  = Number(opts.tax_cents ?? 0);
       const total = Number(opts.amount_cents ?? (base + tax));
+      const taxMessage = String(
+        opts.tax_message ||
+        opts.tax_policy?.policy_message ||
+        'Sales tax is calculated after billing state and ZIP are entered.'
+      ).trim();
 
       // ✅ CRITICAL: This feeds the Confirm Total popup
-      pendingBreakdown = { sku: pendingSku, label, base_amount_cents: base, tax_cents: tax, amount_cents: total };
+      pendingBreakdown = {
+        sku: pendingSku,
+        label,
+        base_amount_cents: base,
+        tax_cents: tax,
+        amount_cents: total,
+        tax_message: taxMessage,
+        tax_policy: opts.tax_policy || null
+      };
 
       const rows = [];
       rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${esc(label)}</span><strong>${money(base)}</strong></div>`);
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated after billing address is entered'}</strong></div>`);
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
       rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
       instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">${rows.join('')}</div>`;
     };

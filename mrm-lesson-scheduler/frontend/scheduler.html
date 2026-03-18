@@ -2266,10 +2266,16 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
   const tax = Number(breakdown?.tax_cents || 0);
   const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
 
+  const taxMessage = String(
+    breakdown?.tax_message ||
+    breakdown?.tax_policy?.policy_message ||
+    'Sales tax is calculated after billing state and ZIP are entered.'
+  ).trim();
+
   const rows = [];
   rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
   if (addon > 0) rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated at checkout'}</strong></div>`);
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
   rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
   instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
   errorEl.textContent = '';
@@ -3193,7 +3199,11 @@ function ensureLegacyBookingHandler(){
         }
 
         // Temporary pre-checkout preview only.
-        // Real sales tax is calculated server-side during create-payment-intent.
+        // Under the rollout model, tax is only applied after the backend knows:
+        // - the billing state
+        // - whether that state is registered
+        // - whether collection is enabled for that state
+        // - which taxable product profile applies
         const baseAmount = quote.amount_cents || 0;
         const chargeAmountCents = baseAmount * count;
         const sheetAddonCents = sheetMusicAddon ? 500 : 0;

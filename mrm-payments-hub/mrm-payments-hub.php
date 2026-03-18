@@ -770,6 +770,177 @@ class MRM_Payments_Hub_Single {
     update_option(self::OPT_EMAIL_LISTS, is_array($lists) ? $lists : array());
   }
 
+  private function mrm_tax_registered_states() {
+    // Manual rollout control:
+    // Add every state where you are legally registered to collect tax.
+    return array(
+      'AZ',
+    );
+  }
+
+  private function mrm_tax_collect_enabled_states() {
+    // Manual rollout control:
+    // Add every state where you want the checkout to actively collect tax.
+    // In most cases this should match mrm_tax_registered_states().
+    return array(
+      'AZ',
+    );
+  }
+
+  private function mrm_normalize_state_code($state) {
+    $state = strtoupper((string)$state);
+    $state = preg_replace('/[^A-Z]/', '', $state);
+    return substr($state, 0, 2);
+  }
+
+  private function mrm_normalize_tax_address($address = array()) {
+    return array(
+      'country' => strtoupper(trim((string)($address['country'] ?? 'US'))),
+      'state' => $this->mrm_normalize_state_code($address['state'] ?? ''),
+      'postal_code' => trim((string)($address['postal_code'] ?? '')),
+      'line1' => trim((string)($address['line1'] ?? '')),
+    );
+  }
+
+  private function mrm_get_tax_jurisdiction_rule($address = array()) {
+    $address = $this->mrm_normalize_tax_address($address);
+
+    $country = (string)$address['country'];
+    $state = (string)$address['state'];
+
+    $registered_states = array_values(array_unique(array_map(array($this, 'mrm_normalize_state_code'), $this->mrm_tax_registered_states())));
+    $collect_enabled_states = array_values(array_unique(array_map(array($this, 'mrm_normalize_state_code'), $this->mrm_tax_collect_enabled_states())));
+
+    return array(
+      'country' => $country,
+      'state' => $state,
+      'exists' => ($country === 'US' && $state !== ''),
+      'registered' => in_array($state, $registered_states, true),
+      'collect_enabled' => in_array($state, $collect_enabled_states, true),
+    );
+  }
+
+  private function mrm_get_tax_product_profiles($product_type, $addon_selected = false, $product_cfg = array(), $context = array()) {
+    $profiles = array();
+
+    if ($product_type === 'sheet_music') {
+      $profiles[] = array(
+        'key' => 'sheet_music_base',
+        'label' => 'Sheet music',
+        'taxable' => true,
+        'tax_code' => 'txcd_10302000',
+        'amount_source' => 'base',
+      );
+    }
+
+    if ($addon_selected) {
+      $profiles[] = array(
+        'key' => 'sheet_music_access',
+        'label' => 'Sheet music access subscription',
+        'taxable' => true,
+        'tax_code' => 'txcd_10302002',
+        'amount_source' => 'addon',
+      );
+    }
+
+    if ($product_type === 'lesson' && empty($profiles)) {
+      $profiles[] = array(
+        'key' => 'lesson_service',
+        'label' => 'Lesson service',
+        'taxable' => false,
+        'tax_code' => '',
+        'amount_source' => 'base',
+      );
+    }
+
+    return $profiles;
+  }
+
+  private function mrm_build_tax_policy($address, $product_type, $addon_selected = false, $product_cfg = array(), $context = array()) {
+    $address = $this->mrm_normalize_tax_address($address);
+    $jurisdiction = $this->mrm_get_tax_jurisdiction_rule($address);
+    $profiles = $this->mrm_get_tax_product_profiles($product_type, $addon_selected, $product_cfg, $context);
+
+    $has_taxable_profile = false;
+    foreach ((array)$profiles as $profile) {
+      if (!empty($profile['taxable'])) {
+        $has_taxable_profile = true;
+        break;
+      }
+    }
+
+    $policy_reason = 'collect_tax';
+    $policy_message = 'Sales tax is calculated after billing address is entered.';
+    $should_collect_tax = true;
+
+    if (!$has_taxable_profile) {
+      $policy_reason = 'non_taxable_product_profile';
+      $policy_message = 'This checkout currently has no taxable product profile.';
+      $should_collect_tax = false;
+    } elseif ($jurisdiction['country'] !== 'US') {
+      $policy_reason = 'unsupported_country_rollout';
+      $policy_message = 'Tax collection is not enabled for this country in the current rollout.';
+      $should_collect_tax = false;
+    } elseif ($jurisdiction['state'] === '') {
+      $policy_reason = 'missing_state';
+      $policy_message = 'Sales tax is calculated after billing state and ZIP are entered.';
+      $should_collect_tax = false;
+    } elseif (empty($jurisdiction['registered'])) {
+      $policy_reason = 'state_not_registered';
+      $policy_message = 'We are not currently registered to collect tax in this state.';
+      $should_collect_tax = false;
+    } elseif (empty($jurisdiction['collect_enabled'])) {
+      $policy_reason = 'state_not_collecting';
+      $policy_message = 'We are not currently collecting tax in this state.';
+      $should_collect_tax = false;
+    }
+
+    return array(
+      'address' => $address,
+      'jurisdiction' => $jurisdiction,
+      'profiles' => $profiles,
+      'policy_reason' => $policy_reason,
+      'policy_message' => $policy_message,
+      'should_collect_tax' => $should_collect_tax,
+      'allow_subscription_automatic_tax' => ($should_collect_tax && $jurisdiction['country'] === 'US' && $jurisdiction['state'] !== ''),
+    );
+  }
+
+  private function mrm_build_taxable_items_from_policy($policy, $base_amount_cents, $addon_amount_cents) {
+    $items = array();
+
+    foreach ((array)($policy['profiles'] ?? array()) as $profile) {
+      if (empty($profile['taxable'])) continue;
+
+      $amount_source = (string)($profile['amount_source'] ?? 'base');
+      $amount_cents = ($amount_source === 'addon') ? (int)$addon_amount_cents : (int)$base_amount_cents;
+
+      if ($amount_cents <= 0) continue;
+
+      $items[] = array(
+        'amount_cents' => $amount_cents,
+        'reference' => (string)($profile['key'] ?? 'item'),
+        'tax_code' => (string)($profile['tax_code'] ?? 'txcd_10000000'),
+      );
+    }
+
+    return $items;
+  }
+
+  private function mrm_should_enable_subscription_automatic_tax_from_meta($meta = array()) {
+    $country = strtoupper(trim((string)($meta['mrm_tax_country'] ?? 'US')));
+    $state = $this->mrm_normalize_state_code($meta['mrm_tax_state'] ?? '');
+
+    if ($country !== 'US' || $state === '') {
+      return false;
+    }
+
+    $registered = in_array($state, array_map(array($this, 'mrm_normalize_state_code'), $this->mrm_tax_registered_states()), true);
+    $collect_enabled = in_array($state, array_map(array($this, 'mrm_normalize_state_code'), $this->mrm_tax_collect_enabled_states()), true);
+
+    return ($registered && $collect_enabled);
+  }
+
   private function normalize_email_lines($raw) {
     $raw = (string)$raw;
     $lines = preg_split("/\r\n|\n|\r/", $raw);
@@ -1265,7 +1436,7 @@ class MRM_Payments_Hub_Single {
     return $this->stripe_api_request('GET', '/v1/payment_methods/' . rawurlencode($payment_method_id));
   }
 
-  private function stripe_create_subscription($customer_id, $price_id, $default_payment_method_id, $billing_cycle_anchor_ts, $metadata = array()) {
+  private function stripe_create_subscription($customer_id, $price_id, $default_payment_method_id, $billing_cycle_anchor_ts, $metadata = array(), $enable_automatic_tax = true) {
     $params = array(
       'customer' => (string)$customer_id,
       'items[0][price]' => (string)$price_id,
@@ -1273,9 +1444,12 @@ class MRM_Payments_Hub_Single {
       'collection_method' => 'charge_automatically',
       'proration_behavior' => 'none',
       'billing_cycle_anchor' => (int)$billing_cycle_anchor_ts,
-      'automatic_tax[enabled]' => 'true',
       'description' => 'Low Brass Lessons - Sheet Music Subscription Charge',
     );
+
+    if ($enable_automatic_tax) {
+      $params['automatic_tax[enabled]'] = 'true';
+    }
 
     $metadata['mrm_description'] = 'Low Brass Lessons - Sheet Music Subscription Charge';
 
@@ -1284,11 +1458,11 @@ class MRM_Payments_Hub_Single {
       $params["metadata[{$k}]"] = (string)$v;
     }
 
-    $this->stripe_debug_log('creating stripe subscription with automatic tax', array(
+    $this->stripe_debug_log('creating stripe subscription with rollout-aware automatic tax', array(
       'customer_id' => (string)$customer_id,
       'price_id' => (string)$price_id,
       'billing_cycle_anchor' => (int)$billing_cycle_anchor_ts,
-      'automatic_tax_enabled' => 'true',
+      'automatic_tax_enabled' => ($enable_automatic_tax ? 'true' : 'false'),
     ));
 
     return $this->stripe_api_request('POST', '/v1/subscriptions', $params);
@@ -5431,6 +5605,15 @@ class MRM_Payments_Hub_Single {
       ), 500);
     }
 
+    $preview_address = array(
+      'country' => strtoupper((string)($req->get_param('country') ?? 'US')),
+      'state' => (string)($req->get_param('state') ?? ''),
+      'postal_code' => (string)($req->get_param('postal_code') ?? ''),
+      'line1' => (string)($req->get_param('line1') ?? ''),
+    );
+
+    $preview_policy = $this->mrm_build_tax_policy($preview_address, (string)($p['product_type'] ?? 'unknown'), false, $p, array());
+
     return new WP_REST_Response(array(
       'ok' => true,
       'sku' => $sku,
@@ -5438,7 +5621,13 @@ class MRM_Payments_Hub_Single {
       'amount_cents' => $amount_cents,
       'currency' => $currency,
       'tax_pending' => true,
-      'tax_message' => 'Sales tax is calculated after billing ZIP/address is entered.',
+      'tax_message' => (string)($preview_policy['policy_message'] ?? 'Sales tax is calculated after billing state and ZIP are entered.'),
+      'tax_policy_preview' => array(
+        'policy_reason' => (string)($preview_policy['policy_reason'] ?? ''),
+        'should_collect_tax' => !empty($preview_policy['should_collect_tax']),
+        'state' => (string)($preview_policy['jurisdiction']['state'] ?? ''),
+        'country' => (string)($preview_policy['jurisdiction']['country'] ?? 'US'),
+      ),
       // Optional: only returned if you’ve stored it in products
       'price_id' => $price_id ? $price_id : null,
     ), 200);
@@ -5575,46 +5764,46 @@ class MRM_Payments_Hub_Single {
 
     $addon_selected = (isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes');
     $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
-
-    // Harden: default country to US when omitted (prevents Stripe Tax from skipping calculation)
-    if (empty($address['country'])) {
-      $address['country'] = 'US';
-    }
+    $address = $this->mrm_normalize_tax_address($address);
 
     $base_amount_cents = (int)$amount;
     $addon_amount_cents = $addon_selected ? 500 : 0;
 
-    // Stripe Tax (US-wide): calculate tax for taxable items only.
-    // Lessons are treated as non-taxable by design; sheet music and sheet music access add-ons are taxable.
-    $taxable_items = array();
+    $tax_policy = $this->mrm_build_tax_policy($address, $product_type, $addon_selected, $p, $context);
+    $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
 
-    if ($product_type === 'sheet_music') {
-      // Digital sheet music (closest match: Digital Books - downloaded - non subscription - with permanent rights)
-      $taxable_items[] = array(
-        'amount_cents' => $base_amount_cents,
-        'reference' => 'sheet_music_base',
-        'tax_code' => 'txcd_10302000',
-      );
+    $tax_result = array(
+      'ok' => true,
+      'tax_cents' => 0,
+      'amount_total_cents' => ($base_amount_cents + $addon_amount_cents),
+      'calculation_id' => '',
+      'line_items' => array(),
+      'taxability_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+    );
+
+    if (!empty($tax_policy['should_collect_tax']) && !empty($taxable_items)) {
+      $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    } else {
+      $this->stripe_debug_log('create_payment_intent tax skipped by app policy', array(
+        'sku' => $sku,
+        'product_type' => $product_type,
+        'policy_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+        'policy_message' => (string)($tax_policy['policy_message'] ?? ''),
+        'address' => $address,
+      ));
     }
 
-    if ($addon_amount_cents > 0) {
-      // Monthly sheet music access (closest match: Digital Books - downloaded - subscription - with conditional rights)
-      $taxable_items[] = array(
-        'amount_cents' => $addon_amount_cents,
-        'reference' => 'sheet_music_access',
-        'tax_code' => 'txcd_10302002',
-      );
-    }
-
-    $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
     $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
     $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
+
     if ($tax_cents <= 0 && !empty($taxable_items)) {
       $this->stripe_debug_log('create_payment_intent tax result was zero', array(
         'sku' => $sku,
         'product_type' => $product_type,
         'tax_calculation_id' => $tax_calc_id,
         'taxability_reason' => (string)($tax_result['taxability_reason'] ?? ''),
+        'policy_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+        'policy_message' => (string)($tax_policy['policy_message'] ?? ''),
         'address' => $address,
         'taxable_items' => $taxable_items,
       ));
@@ -5641,6 +5830,13 @@ class MRM_Payments_Hub_Single {
     $metadata['mrm_tax_calculation_id'] = (string)$tax_calc_id;
     // Back-compat key (historically used for the $5 add-on tax only).
     $metadata['mrm_addon_tax_cents'] = (string)$tax_cents;
+
+    $metadata['mrm_tax_country'] = (string)($address['country'] ?? 'US');
+    $metadata['mrm_tax_state'] = (string)($address['state'] ?? '');
+    $metadata['mrm_tax_postal_code'] = (string)($address['postal_code'] ?? '');
+    $metadata['mrm_tax_collect_enabled'] = !empty($tax_policy['should_collect_tax']) ? 'yes' : 'no';
+    $metadata['mrm_tax_policy_reason'] = (string)($tax_policy['policy_reason'] ?? '');
+    $metadata['mrm_tax_policy_message'] = (string)($tax_policy['policy_message'] ?? '');
 
     // Early duplicate guard:
     // If this is a lesson checkout with the $5 sheet music add-on selected,
@@ -5761,6 +5957,15 @@ class MRM_Payments_Hub_Single {
       'base_amount_cents' => $base_amount_cents,
       'addon_amount_cents' => $addon_amount_cents,
       'tax_cents' => $tax_cents,
+      'tax_message' => (string)($tax_policy['policy_message'] ?? ''),
+      'tax_policy' => array(
+        'policy_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+        'should_collect_tax' => !empty($tax_policy['should_collect_tax']),
+        'state' => (string)($tax_policy['jurisdiction']['state'] ?? ''),
+        'country' => (string)($tax_policy['jurisdiction']['country'] ?? 'US'),
+        'registered' => !empty($tax_policy['jurisdiction']['registered']),
+        'collect_enabled' => !empty($tax_policy['jurisdiction']['collect_enabled']),
+      ),
       'tax_calculation_id' => $tax_calc_id,
       'tax_debug' => array(
         'taxability_reason' => (string)($tax_result['taxability_reason'] ?? ''),
@@ -6078,9 +6283,7 @@ class MRM_Payments_Hub_Single {
     $order_id = isset($data['order_id']) ? absint($data['order_id']) : 0;
     $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
 
-    if (empty($address['country'])) {
-      $address['country'] = 'US';
-    }
+    $address = $this->mrm_normalize_tax_address($address);
 
     if ($order_id <= 0) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing order_id.'), 400);
 
@@ -6107,20 +6310,33 @@ class MRM_Payments_Hub_Single {
     $base_amount_cents = isset($meta['mrm_base_amount_cents']) ? (int)$meta['mrm_base_amount_cents'] : (int)($order['amount_cents'] ?? 0);
     $addon_amount_cents = isset($meta['mrm_addon_amount_cents']) ? (int)$meta['mrm_addon_amount_cents'] : 0;
 
-    // Recompute tax on taxable items only.
-    $taxable_items = array();
-
-    if ($product_type === 'sheet_music') {
-      $taxable_items[] = array('amount_cents'=>$base_amount_cents,'reference'=>'sheet_music_base','tax_code'=>'txcd_10302000');
-    }
-
-    if ($addon_amount_cents > 0) {
-      $taxable_items[] = array('amount_cents'=>$addon_amount_cents,'reference'=>'sheet_music_access','tax_code'=>'txcd_10302002');
-    }
-
     $currency = strtolower((string)($order['currency'] ?? 'usd'));
 
-    $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    $addon_selected = ($addon_amount_cents > 0);
+    $tax_policy = $this->mrm_build_tax_policy($address, $product_type, $addon_selected, array(), $meta);
+    $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
+
+    $tax_result = array(
+      'ok' => true,
+      'tax_cents' => 0,
+      'amount_total_cents' => ($base_amount_cents + $addon_amount_cents),
+      'calculation_id' => '',
+      'line_items' => array(),
+      'taxability_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+    );
+
+    if (!empty($tax_policy['should_collect_tax']) && !empty($taxable_items)) {
+      $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    } else {
+      $this->stripe_debug_log('update_tax skipped by app policy', array(
+        'order_id' => $order_id,
+        'product_type' => $product_type,
+        'policy_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+        'policy_message' => (string)($tax_policy['policy_message'] ?? ''),
+        'address' => $address,
+      ));
+    }
+
     $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
     $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
 
@@ -6138,6 +6354,12 @@ class MRM_Payments_Hub_Single {
     $meta['mrm_tax_cents'] = (string)$tax_cents;
     $meta['mrm_tax_calculation_id'] = (string)$tax_calc_id;
     $meta['mrm_addon_tax_cents'] = (string)$tax_cents; // back-compat
+    $meta['mrm_tax_country'] = (string)($address['country'] ?? 'US');
+    $meta['mrm_tax_state'] = (string)($address['state'] ?? '');
+    $meta['mrm_tax_postal_code'] = (string)($address['postal_code'] ?? '');
+    $meta['mrm_tax_collect_enabled'] = !empty($tax_policy['should_collect_tax']) ? 'yes' : 'no';
+    $meta['mrm_tax_policy_reason'] = (string)($tax_policy['policy_reason'] ?? '');
+    $meta['mrm_tax_policy_message'] = (string)($tax_policy['policy_message'] ?? '');
 
     $this->update_order_amount_and_metadata($order_id, $new_total_cents, $meta);
 
@@ -6148,6 +6370,15 @@ class MRM_Payments_Hub_Single {
       'base_amount_cents' => (int)$base_amount_cents,
       'addon_amount_cents' => (int)$addon_amount_cents,
       'tax_cents' => (int)$tax_cents,
+      'tax_message' => (string)($tax_policy['policy_message'] ?? ''),
+      'tax_policy' => array(
+        'policy_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+        'should_collect_tax' => !empty($tax_policy['should_collect_tax']),
+        'state' => (string)($tax_policy['jurisdiction']['state'] ?? ''),
+        'country' => (string)($tax_policy['jurisdiction']['country'] ?? 'US'),
+        'registered' => !empty($tax_policy['jurisdiction']['registered']),
+        'collect_enabled' => !empty($tax_policy['jurisdiction']['collect_enabled']),
+      ),
       'tax_calculation_id' => $tax_calc_id,
       'tax_debug' => array(
         'taxability_reason' => (string)($tax_result['taxability_reason'] ?? ''),
@@ -6284,6 +6515,8 @@ class MRM_Payments_Hub_Single {
         'email' => $email,
       ));
 
+      $enable_subscription_tax = $this->mrm_should_enable_subscription_automatic_tax_from_meta($meta);
+
       $subscription = $this->stripe_create_subscription(
         $customer_id,
         $price_id,
@@ -6294,7 +6527,11 @@ class MRM_Payments_Hub_Single {
           'mrm_source' => 'sheet_music_addon_initial_checkout',
           'mrm_source_payment_intent' => $pi_id,
           'mrm_order_id' => (string)$order_id,
-        )
+          'mrm_tax_state' => (string)($meta['mrm_tax_state'] ?? ''),
+          'mrm_tax_country' => (string)($meta['mrm_tax_country'] ?? 'US'),
+          'mrm_tax_collect_enabled' => (string)($meta['mrm_tax_collect_enabled'] ?? 'no'),
+        ),
+        $enable_subscription_tax
       );
 
       $this->stripe_debug_log('subscription create response received', array(
