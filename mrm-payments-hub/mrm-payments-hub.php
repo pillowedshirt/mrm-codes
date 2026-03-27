@@ -2274,7 +2274,19 @@ class MRM_Payments_Hub_Single {
       'status' => (string)($subscription['status'] ?? ''),
       'email' => $email,
     ));
+
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id((string)($subscription['id'] ?? ''));
+    if (!empty($local['email_plain'])) {
+      $sent = $this->mrm_send_sheet_music_subscription_cancelled_email($local, $subscription);
+
+      $this->stripe_debug_log('subscription cancellation email result', array(
+        'subscription_id' => (string)($subscription['id'] ?? ''),
+        'email' => (string)($local['email_plain'] ?? ''),
+        'sent' => ($sent ? 'yes' : 'no'),
+      ));
+    }
   }
 
   private function mrm_handle_invoice_paid_webhook($invoice) {
@@ -3771,6 +3783,115 @@ class MRM_Payments_Hub_Single {
    * Labeling policy (Stripe metadata)
    * ======================================================= */
 
+
+  private function mrm_send_autopay_lesson_charge_email($lesson, $order = array()) {
+    if (!is_array($lesson)) return false;
+
+    $email = sanitize_email((string)($lesson['student_email'] ?? ''));
+    if (!$email || !is_email($email)) return false;
+
+    $amount_cents = (int)($order['amount_cents'] ?? 0);
+    $lesson_start = (string)($lesson['start_time'] ?? '');
+    $lesson_length = (int)($lesson['lesson_length'] ?? 0);
+    $mode_label = !empty($lesson['is_online']) ? 'Online' : 'In person';
+
+    $lesson_label = $lesson_start !== ''
+      ? wp_date('F j, Y \a\t g:i A', strtotime($lesson_start), wp_timezone())
+      : 'your scheduled lesson';
+
+    $contact_url = $this->mrm_get_contact_url();
+
+    $title = 'Lesson payment received';
+    $intro = '<p>Your saved card has been successfully charged for your lesson.</p>';
+    $details =
+      '<div><strong>Lesson date:</strong> ' . esc_html($lesson_label) . '</div>' .
+      '<div><strong>Lesson format:</strong> ' . esc_html($mode_label) . '</div>' .
+      '<div><strong>Lesson length:</strong> ' . esc_html($lesson_length) . ' minutes</div>' .
+      '<div><strong>Amount charged:</strong> $' . number_format($amount_cents / 100, 2) . '</div>' .
+      '<div style="margin-top:12px;"><strong>Purchase details</strong></div>' .
+      '<div>Your lesson payment has been processed successfully.</div>';
+
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+
+    return wp_mail(
+      $email,
+      'Payment confirmation — Lesson charge',
+      $html,
+      array(
+        'Content-Type: text/html; charset=UTF-8',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+      )
+    );
+  }
+
+  private function mrm_send_sheet_music_subscription_cancelled_email($sub_row, $subscription) {
+    if (!is_array($sub_row)) return false;
+
+    $email = sanitize_email((string)($sub_row['email_plain'] ?? ''));
+    if (!$email || !is_email($email)) return false;
+
+    $ended_at = !empty($subscription['ended_at']) ? (int)$subscription['ended_at'] : 0;
+    $ended_label = $ended_at > 0 ? wp_date('F j, Y', $ended_at, wp_timezone()) : 'today';
+    $contact_url = $this->mrm_get_contact_url();
+
+    $title = 'Subscription cancelled';
+    $intro = '<p>Your sheet music subscription has been cancelled.</p>';
+    $details =
+      '<div><strong>Subscription:</strong> Monthly sheet music access</div>' .
+      '<div><strong>Status:</strong> Cancelled</div>' .
+      '<div><strong>Cancellation date:</strong> ' . esc_html($ended_label) . '</div>' .
+      '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future.</div>';
+
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+
+    return wp_mail(
+      $email,
+      'Subscription update — Sheet music access cancelled',
+      $html,
+      array(
+        'Content-Type: text/html; charset=UTF-8',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+      )
+    );
+  }
+
+  private function mrm_send_lesson_cancellation_refund_email($lesson, $refund_amount_cents = 0) {
+    if (!is_array($lesson)) return false;
+
+    $email = sanitize_email((string)($lesson['student_email'] ?? ''));
+    if (!$email || !is_email($email)) return false;
+
+    $lesson_start = (string)($lesson['start_time'] ?? '');
+    $lesson_label = $lesson_start !== ''
+      ? wp_date('F j, Y \a\t g:i A', strtotime($lesson_start), wp_timezone())
+      : 'your scheduled lesson';
+
+    $amount_label = $refund_amount_cents > 0
+      ? '$' . number_format($refund_amount_cents / 100, 2)
+      : 'your lesson payment';
+
+    $contact_url = $this->mrm_get_contact_url();
+
+    $title = 'Lesson cancelled and refund issued';
+    $intro = '<p>Your lesson has been cancelled and a refund has been issued.</p>';
+    $details =
+      '<div><strong>Cancelled lesson:</strong> ' . esc_html($lesson_label) . '</div>' .
+      '<div><strong>Refund amount:</strong> ' . esc_html($amount_label) . '</div>' .
+      '<div style="margin-top:12px;">You can expect the refunded amount to appear back in your account in approximately 3 to 5 business days, depending on your bank and card issuer.</div>';
+
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+
+    return wp_mail(
+      $email,
+      'Lesson update — Cancellation and refund issued',
+      $html,
+      array(
+        'Content-Type: text/html; charset=UTF-8',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+      )
+    );
+  }
+
   private function build_metadata($sku, $product_type, $email_hash, $context, $product_cfg) {
     $metadata = array(
       'mrm_source' => 'mrm_payments_hub',
@@ -4340,6 +4461,16 @@ class MRM_Payments_Hub_Single {
       'retained',
       'Retained by platform after fixed instructor payout'
     );
+    $email_sent = $this->mrm_send_autopay_lesson_charge_email($lesson, $order);
+
+    if (method_exists($this, 'stripe_debug_log')) {
+      $this->stripe_debug_log('autopay lesson charge email result', array(
+        'lesson_id' => $lesson_id,
+        'order_id' => $order_id,
+        'email' => (string)($lesson['student_email'] ?? ''),
+        'sent' => ($email_sent ? 'yes' : 'no'),
+      ));
+    }
   }
 
   private function mrm_finalize_autopay_lesson_failure($lesson_id, $message = '') {
@@ -4729,6 +4860,8 @@ class MRM_Payments_Hub_Single {
   }
 
   public function on_lesson_cancelled($data) {
+    global $wpdb;
+
     $lesson_id = (int)($data['lesson_id'] ?? 0);
     $payment_mode = (string)($data['payment_mode'] ?? 'none');
     $order_id = (int)($data['order_id'] ?? 0);
@@ -4736,6 +4869,12 @@ class MRM_Payments_Hub_Single {
     $series_id = (int)($data['series_id'] ?? 0);
 
     if ($lesson_id <= 0) return;
+
+    $lessons_table = $this->table_lessons();
+    $lesson = $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM {$lessons_table} WHERE id=%d LIMIT 1",
+      $lesson_id
+    ), ARRAY_A);
 
     if ($payment_mode === 'autopay') {
       $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
@@ -4747,6 +4886,13 @@ class MRM_Payments_Hub_Single {
           $lesson_order,
           'Auto-refund for cancelled autopay lesson ' . $lesson_id
         );
+
+        if ($refunded && is_array($lesson)) {
+          $this->mrm_send_lesson_cancellation_refund_email(
+            $lesson,
+            (int)($lesson_order['amount_cents'] ?? 0)
+          );
+        }
 
         if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
           error_log(
@@ -4778,6 +4924,13 @@ class MRM_Payments_Hub_Single {
               'Auto-refund for cancelled prepaid first autopay lesson ' . $lesson_id
             );
 
+            if ($refunded && is_array($lesson)) {
+              $this->mrm_send_lesson_cancellation_refund_email(
+                $lesson,
+                (int)($first_order['amount_cents'] ?? 0)
+              );
+            }
+
             if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
               error_log(
                 '[MRM Payments Hub] Auto-refund not issued for cancelled prepaid first autopay lesson. lesson_id=' . $lesson_id .
@@ -4802,6 +4955,13 @@ class MRM_Payments_Hub_Single {
           $order,
           'Auto-refund for cancelled one-time lesson ' . $lesson_id
         );
+
+        if ($refunded && is_array($lesson)) {
+          $this->mrm_send_lesson_cancellation_refund_email(
+            $lesson,
+            (int)($order['amount_cents'] ?? 0)
+          );
+        }
 
         if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
           error_log(
@@ -4838,6 +4998,13 @@ class MRM_Payments_Hub_Single {
             $per_lesson_refund_cents,
             'Partial refund for cancelled prepaid lesson ' . $lesson_id
           );
+
+          if ($refunded && is_array($lesson)) {
+            $this->mrm_send_lesson_cancellation_refund_email(
+              $lesson,
+              (int)$per_lesson_refund_cents
+            );
+          }
 
           if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
             error_log(

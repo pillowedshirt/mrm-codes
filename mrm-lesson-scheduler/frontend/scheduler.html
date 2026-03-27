@@ -2161,37 +2161,45 @@ function expandSelectedSlotsForRecurringBooking(seedSlots, repeatFrequency, repe
     countMap['12_months'] = 24;
   }
 
-  const repeatCount = countMap[duration] || 0;
+  let repeatCount = countMap[duration] || 0;
+
+  // Indefinite recurring bookings should seed a rolling 90-day local horizon.
+  if (duration === 'indefinitely') {
+    repeatCount = Math.floor(90 / intervalDays) + 1;
+  }
+
   if (repeatCount <= 1) return slots;
 
   const expanded = [];
 
-  slots.forEach((slot) => {
-    const baseStart = new Date(slot.start);
-    const baseEnd = new Date(slot.end);
-    if (Number.isNaN(baseStart.getTime()) || Number.isNaN(baseEnd.getTime())) return;
+  for (const slot of slots) {
+    const startRaw = String(slot.start || '');
+    const endRaw = String(slot.end || '');
+
+    const startTs = Date.parse(startRaw);
+    const endTs = Date.parse(endRaw);
+
+    if (!startTs || !endTs || endTs <= startTs) continue;
 
     for (let i = 0; i < repeatCount; i++) {
-      const nextStart = new Date(baseStart.getTime() + (i * intervalDays * 24 * 60 * 60 * 1000));
-      const nextEnd   = new Date(baseEnd.getTime() + (i * intervalDays * 24 * 60 * 60 * 1000));
       expanded.push({
-        key: `${slot.key || slot.start}-${i}`,
-        start: nextStart.toISOString(),
-        end: nextEnd.toISOString(),
-        instructor_id: slot.instructor_id
+        start: new Date(startTs + (i * intervalDays * 86400000)).toISOString(),
+        end: new Date(endTs + (i * intervalDays * 86400000)).toISOString(),
+        instructor_id: parseInt(slot.instructor_id || 0, 10) || 0
       });
     }
-  });
+  }
 
-  expanded.sort((a,b)=> new Date(a.start).getTime() - new Date(b.start).getTime());
+  expanded.sort((a, b) => String(a.start).localeCompare(String(b.start)));
 
   const deduped = [];
   const seen = new Set();
-  for (const s of expanded) {
-    const k = `${s.instructor_id}|${s.start}|${s.end}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    deduped.push(s);
+
+  for (const slot of expanded) {
+    const key = `${slot.instructor_id}|${slot.start}|${slot.end}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(slot);
   }
 
   return deduped;

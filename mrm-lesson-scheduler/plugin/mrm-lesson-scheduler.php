@@ -1636,6 +1636,7 @@ class MRM_Lesson_Scheduler {
         // Gate page (virtual) for joining online lessons
         add_action( 'init', array( $this, 'register_join_gate_rewrite' ) );
         add_filter( 'query_vars', array( $this, 'register_join_gate_query_vars' ) );
+        add_action( 'parse_request', array( $this, 'maybe_force_join_gate_virtual_request' ), 0 );
         add_action( 'template_redirect', array( $this, 'maybe_render_join_gate_page' ) );
         add_action( 'send_headers', array( $this, 'maybe_send_gate_nocache_headers' ), 0 );
         add_filter( 'redirect_canonical', array( $this, 'maybe_disable_canonical_for_gate' ), 10, 2 );
@@ -1968,6 +1969,12 @@ class MRM_Lesson_Scheduler {
         }
 
         $repeat_count = isset( $count_map[ $repeat_duration ] ) ? (int) $count_map[ $repeat_duration ] : 0;
+
+        // Indefinite recurring bookings should seed a rolling 90-day local horizon.
+        if ( $repeat_duration === 'indefinitely' ) {
+            $repeat_count = (int) floor( 90 / $interval_days ) + 1;
+        }
+
         if ( $repeat_count <= 1 ) return $slots;
 
         $expanded = array();
@@ -2581,6 +2588,33 @@ class MRM_Lesson_Scheduler {
         return $vars;
     }
 
+    public function maybe_force_join_gate_virtual_request( $wp ) {
+        if ( ! isset( $_SERVER['REQUEST_URI'] ) ) {
+            return;
+        }
+
+        $request_path = (string) parse_url( (string) $_SERVER['REQUEST_URI'], PHP_URL_PATH );
+        $request_path = trim( $request_path, '/' );
+
+        if ( $request_path !== 'join-online' && $request_path !== 'join-video-lesson' ) {
+            return;
+        }
+
+        if ( ! is_object( $wp ) || ! isset( $wp->query_vars ) || ! is_array( $wp->query_vars ) ) {
+            return;
+        }
+
+        $wp->query_vars['mrm_join_video_lesson'] = '1';
+        $wp->query_vars['pagename'] = 'join-online';
+        $wp->request = 'join-online';
+
+        unset( $wp->query_vars['name'], $wp->query_vars['page'], $wp->query_vars['error'] );
+
+        if ( isset( $GLOBALS['wp_query'] ) && $GLOBALS['wp_query'] instanceof WP_Query ) {
+            $GLOBALS['wp_query']->is_404 = false;
+        }
+    }
+
     protected function resolve_gate_lesson_by_shared_token( $token_hash ) {
         global $wpdb;
 
@@ -3105,19 +3139,26 @@ class MRM_Lesson_Scheduler {
 
     protected function extract_gate_link_from_description( $description ) {
         $description = is_string( $description ) ? $description : '';
-        if ( $description === '' ) return '';
+        if ( $description === '' ) {
+            return '';
+        }
 
-        // Accept both canonical + backward-compatible alias.
-        // We only trust links that point back to THIS site (home_url).
-        $home = home_url( '/' );
-        $home = rtrim( $home, '/' );
+        // Normalize any old-domain join link back to the current site.
+        $patterns = array(
+            '#https?://[^\\s"\']+/(join-online|join-video-lesson)/\\?token=([A-Za-z0-9_\\-]+)#i',
+            '#/(join-online|join-video-lesson)/\\?token=([A-Za-z0-9_\\-]+)#i',
+        );
 
-        // Match full URLs like: https://yoursite.com/join-online/?token=...
-        // or https://yoursite.com/join-video-lesson/?token=...
-        $pattern = '#(' . preg_quote( $home, '#' ) . '/(join-online|join-video-lesson)/\\?token=[A-Za-z0-9_\\-]+)#';
-
-        if ( preg_match( $pattern, $description, $m ) ) {
-            return (string) $m[1];
+        foreach ( $patterns as $pattern ) {
+            if ( preg_match( $pattern, $description, $m ) ) {
+                $token = (string) ( $m[2] ?? '' );
+                if ( $token !== '' ) {
+                    return add_query_arg(
+                        array( 'token' => $token ),
+                        home_url( '/join-online/' )
+                    );
+                }
+            }
         }
 
         return '';
@@ -3169,17 +3210,25 @@ class MRM_Lesson_Scheduler {
     }
 
     protected function is_join_gate_request() {
-        // Works for the virtual route: /join-online/?token=...
-        // We rely on your rewrite/query var that triggers the gate render.
-        $pagename = get_query_var( 'pagename' );
-        if ( is_string( $pagename ) && $pagename === 'join-online' ) return true;
-
-        // Fallback: if your rewrite sets a custom query var, keep this lightweight:
-        // If the request URI begins with /join-online/ treat it as gate.
-        if ( isset( $_SERVER['REQUEST_URI'] ) ) {
-            $uri = (string) $_SERVER['REQUEST_URI'];
-            if ( strpos( $uri, '/join-online' ) === 0 || strpos( $uri, '/join-online/' ) === 0 ) return true;
+        $is_gate = get_query_var( 'mrm_join_video_lesson' );
+        if ( (string) $is_gate === '1' ) {
+            return true;
         }
+
+        $pagename = get_query_var( 'pagename' );
+        if ( is_string( $pagename ) && in_array( $pagename, array( 'join-online', 'join-video-lesson' ), true ) ) {
+            return true;
+        }
+
+        if ( isset( $_SERVER['REQUEST_URI'] ) ) {
+            $path = (string) parse_url( (string) $_SERVER['REQUEST_URI'], PHP_URL_PATH );
+            $path = trim( $path, '/' );
+
+            if ( in_array( $path, array( 'join-online', 'join-video-lesson' ), true ) ) {
+                return true;
+            }
+        }
+
         return false;
     }
 
@@ -4068,8 +4117,179 @@ class MRM_Lesson_Scheduler {
         return $wpdb->get_results( $sql, ARRAY_A );
     }
 
+    protected function get_recurring_autopay_series_seed_rows() {
+        global $wpdb;
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+        $sql = "
+            SELECT l.*, i.calendar_id, i.timezone
+            FROM {$lessons_table} l
+            JOIN {$instructors_table} i ON i.id = l.instructor_id
+            WHERE l.series_id IS NOT NULL
+              AND l.series_id > 0
+              AND l.autopay_profile_id IS NOT NULL
+              AND l.autopay_profile_id > 0
+              AND l.google_event_id IS NOT NULL
+              AND l.google_event_id <> ''
+              AND l.status IN ('scheduled', 'payment_due', 'delivered')
+              AND l.id IN (
+                  SELECT MIN(l2.id)
+                  FROM {$lessons_table} l2
+                  WHERE l2.series_id IS NOT NULL
+                    AND l2.series_id > 0
+                    AND l2.autopay_profile_id IS NOT NULL
+                    AND l2.autopay_profile_id > 0
+                    AND l2.status IN ('scheduled', 'payment_due', 'delivered')
+                  GROUP BY l2.series_id
+              )
+            ORDER BY l.start_time ASC
+            LIMIT 100
+        ";
+
+        return $wpdb->get_results( $sql, ARRAY_A );
+    }
+
+    protected function extend_indefinite_autopay_series_horizon( $horizon_days = 90 ) {
+        global $wpdb;
+
+        $rows = $this->get_recurring_autopay_series_seed_rows();
+        if ( ! is_array( $rows ) || empty( $rows ) ) {
+            return;
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $now = current_time( 'timestamp', true );
+        $time_min = gmdate( 'c', $now - DAY_IN_SECONDS );
+        $time_max = gmdate( 'c', $now + ( max( 30, (int) $horizon_days ) * DAY_IN_SECONDS ) );
+
+        foreach ( $rows as $seed ) {
+            $calendar_id = (string) ( $seed['calendar_id'] ?? '' );
+            $master_event_id = (string) ( $seed['google_event_id'] ?? '' );
+            $series_id = (int) ( $seed['series_id'] ?? 0 );
+
+            if ( $calendar_id === '' || $master_event_id === '' || $series_id <= 0 ) {
+                continue;
+            }
+
+            $instances = $this->google_list_event_instances( $calendar_id, $master_event_id, $time_min, $time_max );
+            if ( is_wp_error( $instances ) || empty( $instances['items'] ) || ! is_array( $instances['items'] ) ) {
+                continue;
+            }
+
+            $existing_rows = $wpdb->get_results(
+                $wpdb->prepare(
+                    "SELECT id, google_instance_event_id, google_original_start_time
+                     FROM {$lessons_table}
+                     WHERE series_id = %d",
+                    $series_id
+                ),
+                ARRAY_A
+            );
+
+            $existing_instance_ids = array();
+            $existing_anchors = array();
+
+            foreach ( (array) $existing_rows as $existing_row ) {
+                $existing_instance_id = (string) ( $existing_row['google_instance_event_id'] ?? '' );
+                $existing_anchor = (string) ( $existing_row['google_original_start_time'] ?? '' );
+
+                if ( $existing_instance_id !== '' ) {
+                    $existing_instance_ids[ $existing_instance_id ] = true;
+                }
+                if ( $existing_anchor !== '' ) {
+                    $existing_anchors[ $existing_anchor ] = true;
+                }
+            }
+
+            foreach ( $instances['items'] as $event ) {
+                if ( ! is_array( $event ) ) {
+                    continue;
+                }
+
+                $status = (string) ( $event['status'] ?? '' );
+                if ( $status === 'cancelled' ) {
+                    continue;
+                }
+
+                $instance_event_id = (string) ( $event['id'] ?? '' );
+                $start_raw = (string) ( $event['start']['dateTime'] ?? '' );
+                $end_raw   = (string) ( $event['end']['dateTime'] ?? '' );
+
+                if ( $start_raw === '' || $end_raw === '' ) {
+                    continue;
+                }
+
+                $start_ts = strtotime( $start_raw );
+                $end_ts   = strtotime( $end_raw );
+
+                if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                    continue;
+                }
+
+                // Only create future rolling-horizon rows.
+                if ( $start_ts < ( $now - DAY_IN_SECONDS ) ) {
+                    continue;
+                }
+
+                $anchor_mysql = ! empty( $event['originalStartTime']['dateTime'] )
+                    ? gmdate( 'Y-m-d H:i:s', strtotime( (string) $event['originalStartTime']['dateTime'] ) )
+                    : gmdate( 'Y-m-d H:i:s', $start_ts );
+
+                if (
+                    ( $instance_event_id !== '' && isset( $existing_instance_ids[ $instance_event_id ] ) ) ||
+                    isset( $existing_anchors[ $anchor_mysql ] )
+                ) {
+                    continue;
+                }
+
+                $wpdb->insert(
+                    $lessons_table,
+                    array(
+                        'instructor_id' => (int) ( $seed['instructor_id'] ?? 0 ),
+                        'series_id' => $series_id,
+                        'student_name' => (string) ( $seed['student_name'] ?? '' ),
+                        'student_email' => (string) ( $seed['student_email'] ?? '' ),
+                        'instrument' => (string) ( $seed['instrument'] ?? 'unknown' ),
+                        'is_online' => (int) ( $seed['is_online'] ?? 0 ),
+                        'lesson_length' => (int) ( $seed['lesson_length'] ?? 60 ),
+                        'start_time' => gmdate( 'Y-m-d H:i:s', $start_ts ),
+                        'end_time' => gmdate( 'Y-m-d H:i:s', $end_ts ),
+                        'google_original_start_time' => $anchor_mysql,
+                        'status' => 'scheduled',
+                        'charge_status' => 'none',
+                        'google_event_id' => (string) ( $event['recurringEventId'] ?? $master_event_id ),
+                        'google_instance_event_id' => ( $instance_event_id !== '' ? $instance_event_id : null ),
+                        'google_meet_url' => (string) ( $event['hangoutLink'] ?? '' ),
+                        'order_id' => null,
+                        'payment_mode' => 'autopay',
+                        'payout_unlocked_at' => null,
+                        'autopay_profile_id' => (int) ( $seed['autopay_profile_id'] ?? 0 ),
+                        'agreement_id' => ! empty( $seed['agreement_id'] ) ? (int) $seed['agreement_id'] : null,
+                        'created_at' => current_time( 'mysql' ),
+                        'updated_at' => current_time( 'mysql' ),
+                        'reminder_token' => (string) ( $seed['reminder_token'] ?? '' ),
+                        'reminder_token_hash' => (string) ( $seed['reminder_token_hash'] ?? '' ),
+                        'reminder_scheduled_at' => null,
+                        'reminder_sent_at' => null,
+                    ),
+                    array(
+                        '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s',
+                        '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s'
+                    )
+                );
+            }
+        }
+    }
+
+
     public function cron_sync_upcoming_events( $lookback_hours = 72, $lookahead_days = 30 ) {
         if ( ! $this->google_is_configured() ) return;
+
+        // Before syncing existing rows, keep recurring autopay series populated
+        // about 90 days ahead so follow-up lessons always exist locally.
+        $this->extend_indefinite_autopay_series_horizon( 90 );
 
         $rows = $this->get_lessons_needing_google_truth_pass( 400 );
 
