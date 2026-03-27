@@ -66,9 +66,7 @@ class MRM_Payments_Hub_Single {
       wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
     }
 
-    if (!wp_next_scheduled('mrm_pay_hub_daily_payout_check')) {
-      wp_schedule_event(time() + 600, 'daily', 'mrm_pay_hub_daily_payout_check');
-    }
+    $this->mrm_schedule_daily_payout_check();
 
     if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
       wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
@@ -103,9 +101,7 @@ class MRM_Payments_Hub_Single {
       wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
     }
 
-    if (!wp_next_scheduled('mrm_pay_hub_daily_payout_check')) {
-      wp_schedule_event(time() + 600, 'daily', 'mrm_pay_hub_daily_payout_check');
-    }
+    $this->mrm_schedule_daily_payout_check();
 
     if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
       wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
@@ -600,10 +596,23 @@ class MRM_Payments_Hub_Single {
       'stripe_mode' => 'live',
       'one_time_sheet_music_composer_pct' => 0,
       'in_person_travel_amount_cents' => 500,
-      'instructor_payout_30_online_cents' => 0,
-      'instructor_payout_30_inperson_cents' => 0,
-      'instructor_payout_60_online_cents' => 0,
-      'instructor_payout_60_inperson_cents' => 0,
+
+      'instructor_payout_30_online_year1_cents' => 0,
+      'instructor_payout_30_online_year2_cents' => 0,
+      'instructor_payout_30_online_year3_cents' => 0,
+
+      'instructor_payout_30_inperson_year1_cents' => 0,
+      'instructor_payout_30_inperson_year2_cents' => 0,
+      'instructor_payout_30_inperson_year3_cents' => 0,
+
+      'instructor_payout_60_online_year1_cents' => 0,
+      'instructor_payout_60_online_year2_cents' => 0,
+      'instructor_payout_60_online_year3_cents' => 0,
+
+      'instructor_payout_60_inperson_year1_cents' => 0,
+      'instructor_payout_60_inperson_year2_cents' => 0,
+      'instructor_payout_60_inperson_year3_cents' => 0,
+
       'payout_anchor_date' => '',
       'composer_connected_account_id' => '',
       'test_composer_connected_account_id' => '',
@@ -792,32 +801,129 @@ class MRM_Payments_Hub_Single {
     return max(0, (int)($settings['in_person_travel_amount_cents'] ?? 500));
   }
 
-  private function mrm_get_instructor_fixed_payout_base_cents($lesson_length, $is_online) {
-    $settings = $this->get_settings();
-    $lesson_length = (int)$lesson_length;
-    $is_online = !empty($is_online);
-
-    if ($lesson_length === 30 && $is_online) {
-      return max(0, (int)($settings['instructor_payout_30_online_cents'] ?? 0));
-    }
-
-    if ($lesson_length === 30 && !$is_online) {
-      return max(0, (int)($settings['instructor_payout_30_inperson_cents'] ?? 0));
-    }
-
-    if ($lesson_length === 60 && $is_online) {
-      return max(0, (int)($settings['instructor_payout_60_online_cents'] ?? 0));
-    }
-
-    if ($lesson_length === 60 && !$is_online) {
-      return max(0, (int)($settings['instructor_payout_60_inperson_cents'] ?? 0));
-    }
-
-    return 0;
+  private function mrm_get_instructor_payout_chart_rows() {
+    return array(
+      '30_online' => array(
+        'label' => '30-Minute Online Lesson',
+        'lesson_length' => 30,
+        'is_online' => 1,
+      ),
+      '30_inperson' => array(
+        'label' => '30-Minute In-Person Lesson',
+        'lesson_length' => 30,
+        'is_online' => 0,
+      ),
+      '60_online' => array(
+        'label' => '60-Minute Online Lesson',
+        'lesson_length' => 60,
+        'is_online' => 1,
+      ),
+      '60_inperson' => array(
+        'label' => '60-Minute In-Person Lesson',
+        'lesson_length' => 60,
+        'is_online' => 0,
+      ),
+    );
   }
 
-  private function mrm_get_instructor_fixed_payout_cents($lesson_length, $is_online) {
-    $base = $this->mrm_get_instructor_fixed_payout_base_cents($lesson_length, $is_online);
+  private function mrm_get_instructor_payout_chart_columns() {
+    return array(
+      1 => 'Year 1',
+      2 => 'Year 2',
+      3 => 'Year 3+',
+    );
+  }
+
+  private function mrm_get_instructor_payout_chart_setting_key($lesson_length, $is_online, $year_bucket) {
+    $lesson_length = (int)$lesson_length;
+    $is_online = !empty($is_online);
+    $year_bucket = max(1, min(3, (int)$year_bucket));
+
+    if (!in_array($lesson_length, array(30, 60), true)) {
+      return '';
+    }
+
+    $mode = $is_online ? 'online' : 'inperson';
+    return 'instructor_payout_' . $lesson_length . '_' . $mode . '_year' . $year_bucket . '_cents';
+  }
+
+  private function mrm_get_instructor_payout_chart_admin_matrix() {
+    $settings = $this->get_settings();
+    $rows = $this->mrm_get_instructor_payout_chart_rows();
+    $matrix = array();
+
+    foreach ($rows as $row_key => $row) {
+      $matrix[$row_key] = array();
+
+      foreach (array_keys($this->mrm_get_instructor_payout_chart_columns()) as $year_bucket) {
+        $setting_key = $this->mrm_get_instructor_payout_chart_setting_key(
+          (int)$row['lesson_length'],
+          (int)$row['is_online'],
+          (int)$year_bucket
+        );
+
+        $matrix[$row_key][$year_bucket] = $this->mrm_format_cents_for_admin_input(
+          (int)($settings[$setting_key] ?? 0)
+        );
+      }
+    }
+
+    return $matrix;
+  }
+
+  private function mrm_get_instructor_employment_year_bucket($hire_date, $as_of_ts = null) {
+    $hire_date = trim((string)$hire_date);
+    if ($hire_date === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $hire_date)) {
+      return 1;
+    }
+
+    try {
+      $tz = $this->mrm_wp_tz();
+
+      if ($as_of_ts !== null && (int)$as_of_ts > 0) {
+        $now = new DateTime('@' . (int)$as_of_ts);
+        $now->setTimezone($tz);
+      } else {
+        $now = new DateTime('now', $tz);
+      }
+
+      $start = new DateTime($hire_date . ' 00:00:00', $tz);
+
+      if ($now < $start) {
+        return 1;
+      }
+
+      $full_years = (int)$start->diff($now)->y;
+      $bucket = $full_years + 1;
+
+      if ($bucket < 1) $bucket = 1;
+      if ($bucket > 3) $bucket = 3;
+
+      return $bucket;
+    } catch (Exception $e) {
+      return 1;
+    }
+  }
+
+  private function mrm_get_instructor_year_bucket_label($year_bucket) {
+    $year_bucket = (int)$year_bucket;
+    return ($year_bucket >= 3) ? '3+' : (string)max(1, $year_bucket);
+  }
+
+  private function mrm_get_instructor_payout_chart_base_cents($lesson_length, $is_online, $hire_date, $as_of_ts = null) {
+    $settings = $this->get_settings();
+    $year_bucket = $this->mrm_get_instructor_employment_year_bucket($hire_date, $as_of_ts);
+
+    $setting_key = $this->mrm_get_instructor_payout_chart_setting_key($lesson_length, $is_online, $year_bucket);
+    if ($setting_key === '') {
+      return 0;
+    }
+
+    return max(0, (int)($settings[$setting_key] ?? 0));
+  }
+
+  private function mrm_get_instructor_payout_cents_for_instructor($lesson_length, $is_online, $hire_date, $as_of_ts = null) {
+    $base = $this->mrm_get_instructor_payout_chart_base_cents($lesson_length, $is_online, $hire_date, $as_of_ts);
 
     if (!empty($is_online)) {
       return $base;
@@ -3740,24 +3846,29 @@ class MRM_Payments_Hub_Single {
     );
   }
 
-  private function mrm_build_instructor_payout_note($lesson_length, $is_online) {
+  private function mrm_build_instructor_payout_note($lesson_length, $is_online, $hire_date) {
     $lesson_length = (int)$lesson_length;
     $is_online = !empty($is_online);
 
-    $base = $this->mrm_get_instructor_fixed_payout_base_cents($lesson_length, $is_online);
+    $year_bucket = $this->mrm_get_instructor_employment_year_bucket($hire_date);
+    $year_label = $this->mrm_get_instructor_year_bucket_label($year_bucket);
+
+    $base = $this->mrm_get_instructor_payout_chart_base_cents($lesson_length, $is_online, $hire_date);
     $travel = $is_online ? 0 : $this->mrm_get_in_person_travel_cents();
     $total = $base + $travel;
 
     if ($is_online) {
       return sprintf(
-        'Fixed payout: %d-minute online lesson ($%0.2f)',
+        'Instructor payout chart: Year %s, %d-minute online lesson ($%0.2f)',
+        $year_label,
         $lesson_length,
         $total / 100
       );
     }
 
     return sprintf(
-      'Fixed payout: %d-minute in-person lesson ($%0.2f base + $%0.2f travel = $%0.2f)',
+      'Instructor payout chart: Year %s, %d-minute in-person lesson ($%0.2f base + $%0.2f travel = $%0.2f)',
+      $year_label,
       $lesson_length,
       $base / 100,
       $travel / 100,
@@ -4190,10 +4301,16 @@ class MRM_Payments_Hub_Single {
 
     $lesson_length = (int)($lesson['lesson_length'] ?? 0);
     $is_online = !empty($lesson['is_online']);
-    $instructor_share = $this->mrm_get_instructor_fixed_payout_cents($lesson_length, $is_online);
 
     $instr = $this->mrm_get_instructor_row($instructor_id);
     $instructor_acct = (string)($instr['stripe_connected_account_id'] ?? '');
+    $hire_date = (string)($instr['hire_date'] ?? '');
+
+    $instructor_share = $this->mrm_get_instructor_payout_cents_for_instructor(
+      $lesson_length,
+      $is_online,
+      $hire_date
+    );
 
     if ($instructor_share > 0) {
       $this->mrm_insert_payout_ledger_row(
@@ -4206,7 +4323,7 @@ class MRM_Payments_Hub_Single {
         $instructor_share,
         $instructor_share,
         $instructor_acct ? 'pending' : 'blocked',
-        $instructor_acct ? $this->mrm_build_instructor_payout_note($lesson_length, $is_online) : 'Missing instructor connected account ID'
+        $instructor_acct ? $this->mrm_build_instructor_payout_note($lesson_length, $is_online, $hire_date) : 'Missing instructor connected account ID'
       );
     }
 
@@ -4776,10 +4893,16 @@ class MRM_Payments_Hub_Single {
 
     $lesson_length = (int)($lesson['lesson_length'] ?? 0);
     $is_online = !empty($lesson['is_online']);
-    $instructor_share = $this->mrm_get_instructor_fixed_payout_cents($lesson_length, $is_online);
 
     $instr = $this->mrm_get_instructor_row($instructor_id);
     $instructor_acct = (string)($instr['stripe_connected_account_id'] ?? '');
+    $hire_date = (string)($instr['hire_date'] ?? '');
+
+    $instructor_share = $this->mrm_get_instructor_payout_cents_for_instructor(
+      $lesson_length,
+      $is_online,
+      $hire_date
+    );
 
     if ($instructor_share > 0) {
       $this->mrm_insert_payout_ledger_row(
@@ -4792,7 +4915,7 @@ class MRM_Payments_Hub_Single {
         $instructor_share,
         $instructor_share,
         $instructor_acct ? 'pending' : 'blocked',
-        $instructor_acct ? $this->mrm_build_instructor_payout_note($lesson_length, $is_online) : 'Missing instructor connected account ID'
+        $instructor_acct ? $this->mrm_build_instructor_payout_note($lesson_length, $is_online, $hire_date) : 'Missing instructor connected account ID'
       );
     }
   }
@@ -5058,6 +5181,65 @@ class MRM_Payments_Hub_Single {
     }
   }
 
+  private function mrm_is_after_payout_cutoff_time($as_of_ts = null) {
+    try {
+      $tz = $this->mrm_wp_tz();
+
+      if ($as_of_ts !== null && (int)$as_of_ts > 0) {
+        $now = new DateTime('@' . (int)$as_of_ts);
+        $now->setTimezone($tz);
+      } else {
+        $now = new DateTime('now', $tz);
+      }
+
+      $cutoff = clone $now;
+      $cutoff->setTime(10, 0, 0);
+
+      return ($now >= $cutoff);
+    } catch (Exception $e) {
+      return false;
+    }
+  }
+
+  private function mrm_is_biweekly_payout_window_open($as_of_ts = null) {
+    return $this->mrm_is_biweekly_payout_day() && $this->mrm_is_after_payout_cutoff_time($as_of_ts);
+  }
+
+  private function mrm_next_daily_payout_check_timestamp() {
+    $tz = $this->mrm_wp_tz();
+    $next = new DateTime('now', $tz);
+    $next->setTime(10, 0, 0);
+
+    if ($next->getTimestamp() <= time()) {
+      $next->modify('+1 day');
+    }
+
+    return $next->getTimestamp();
+  }
+
+  private function mrm_schedule_daily_payout_check() {
+    $hook = 'mrm_pay_hub_daily_payout_check';
+    $next = wp_next_scheduled($hook);
+
+    $needs_reschedule = false;
+
+    if (!$next) {
+      $needs_reschedule = true;
+    } else {
+      $local_hour = (int)wp_date('G', $next, $this->mrm_wp_tz());
+      $local_minute = (int)wp_date('i', $next, $this->mrm_wp_tz());
+
+      if ($local_hour !== 10 || $local_minute !== 0) {
+        $needs_reschedule = true;
+      }
+    }
+
+    if ($needs_reschedule) {
+      wp_clear_scheduled_hook($hook);
+      wp_schedule_event($this->mrm_next_daily_payout_check_timestamp(), 'daily', $hook);
+    }
+  }
+
   public function cron_check_upcoming_payment_methods() {
     global $wpdb;
 
@@ -5225,7 +5407,7 @@ class MRM_Payments_Hub_Single {
   }
 
   public function cron_daily_payout_check() {
-    if ($this->mrm_is_biweekly_payout_day()) {
+    if ($this->mrm_is_biweekly_payout_window_open()) {
       $this->mrm_run_payout_batch(false);
     }
   }
@@ -5238,7 +5420,7 @@ class MRM_Payments_Hub_Single {
       'last_error' => '',
     );
 
-    if (!$force && !$this->mrm_is_biweekly_payout_day()) {
+    if (!$force && !$this->mrm_is_biweekly_payout_window_open()) {
       return $summary;
     }
 
@@ -7173,15 +7355,38 @@ class MRM_Payments_Hub_Single {
       $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
       $settings['one_time_sheet_music_composer_pct'] = $this->mrm_sanitize_percent_setting($_POST['one_time_sheet_music_composer_pct'] ?? 0, 0);
       $settings['in_person_travel_amount_cents'] = $this->mrm_money_to_cents($_POST['in_person_travel_amount'] ?? '5.00', 500);
-      $settings['instructor_payout_30_online_cents'] = $this->mrm_money_to_cents($_POST['instructor_payout_30_online'] ?? '0.00', 0);
-      $settings['instructor_payout_30_inperson_cents'] = $this->mrm_money_to_cents($_POST['instructor_payout_30_inperson'] ?? '0.00', 0);
-      $settings['instructor_payout_60_online_cents'] = $this->mrm_money_to_cents($_POST['instructor_payout_60_online'] ?? '0.00', 0);
-      $settings['instructor_payout_60_inperson_cents'] = $this->mrm_money_to_cents($_POST['instructor_payout_60_inperson'] ?? '0.00', 0);
+
+      foreach ($this->mrm_get_instructor_payout_chart_rows() as $row) {
+        foreach (array_keys($this->mrm_get_instructor_payout_chart_columns()) as $year_bucket) {
+          $setting_key = $this->mrm_get_instructor_payout_chart_setting_key(
+            (int)$row['lesson_length'],
+            (int)$row['is_online'],
+            (int)$year_bucket
+          );
+
+          if ($setting_key === '') {
+            continue;
+          }
+
+          $field_name = str_replace('_cents', '', $setting_key);
+
+          $settings[$setting_key] = $this->mrm_money_to_cents(
+            $_POST[$field_name] ?? '0.00',
+            0
+          );
+        }
+      }
+
       $settings['payout_anchor_date'] = sanitize_text_field((string)($_POST['payout_anchor_date'] ?? ''));
 
       unset($settings['instructor_tier_rules']);
+      unset($settings['instructor_payout_30_online_cents']);
+      unset($settings['instructor_payout_30_inperson_cents']);
+      unset($settings['instructor_payout_60_online_cents']);
+      unset($settings['instructor_payout_60_inperson_cents']);
 
       $this->save_settings($settings);
+      $this->mrm_schedule_daily_payout_check();
 
       // ✅ Manual access row inserts (row-based UI)
       if (
@@ -7726,10 +7931,9 @@ class MRM_Payments_Hub_Single {
     $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
     $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
     $in_person_travel_amount = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['in_person_travel_amount_cents'] ?? 500)));
-    $instructor_payout_30_online = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['instructor_payout_30_online_cents'] ?? 0)));
-    $instructor_payout_30_inperson = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['instructor_payout_30_inperson_cents'] ?? 0)));
-    $instructor_payout_60_online = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['instructor_payout_60_online_cents'] ?? 0)));
-    $instructor_payout_60_inperson = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['instructor_payout_60_inperson_cents'] ?? 0)));
+    $instructor_payout_chart_rows = $this->mrm_get_instructor_payout_chart_rows();
+    $instructor_payout_chart_columns = $this->mrm_get_instructor_payout_chart_columns();
+    $instructor_payout_chart_values = $this->mrm_get_instructor_payout_chart_admin_matrix();
     $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
     $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
 
@@ -7826,41 +8030,61 @@ class MRM_Payments_Hub_Single {
           </tr>
 
           <tr>
-            <th scope="row"><label for="instructor_payout_30_online">30-Minute Online Instructor Payout</label></th>
+            <th scope="row">Instructor Payout Chart</th>
             <td>
-              <input type="number" id="instructor_payout_30_online" name="instructor_payout_30_online" value="<?php echo $instructor_payout_30_online; ?>" class="small-text" min="0" step="0.01" />
-              <p class="description">Fixed instructor payout for a delivered 30-minute online lesson.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="instructor_payout_30_inperson">30-Minute In-Person Instructor Payout</label></th>
-            <td>
-              <input type="number" id="instructor_payout_30_inperson" name="instructor_payout_30_inperson" value="<?php echo $instructor_payout_30_inperson; ?>" class="small-text" min="0" step="0.01" />
-              <p class="description">Base fixed instructor payout for a delivered 30-minute in-person lesson. The in-person travel add-on is added on top.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="instructor_payout_60_online">60-Minute Online Instructor Payout</label></th>
-            <td>
-              <input type="number" id="instructor_payout_60_online" name="instructor_payout_60_online" value="<?php echo $instructor_payout_60_online; ?>" class="small-text" min="0" step="0.01" />
-              <p class="description">Fixed instructor payout for a delivered 60-minute online lesson.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="instructor_payout_60_inperson">60-Minute In-Person Instructor Payout</label></th>
-            <td>
-              <input type="number" id="instructor_payout_60_inperson" name="instructor_payout_60_inperson" value="<?php echo $instructor_payout_60_inperson; ?>" class="small-text" min="0" step="0.01" />
-              <p class="description">Base fixed instructor payout for a delivered 60-minute in-person lesson. The in-person travel add-on is added on top.</p>
+              <table class="widefat striped" style="max-width:1000px;">
+                <thead>
+                  <tr>
+                    <th>Lesson Type</th>
+                    <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
+                      <th><?php echo esc_html($year_label); ?></th>
+                    <?php endforeach; ?>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($instructor_payout_chart_rows as $row_key => $row) : ?>
+                    <tr>
+                      <th scope="row"><?php echo esc_html($row['label']); ?></th>
+                      <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
+                        <?php
+                          $field_name = str_replace(
+                            '_cents',
+                            '',
+                            $this->mrm_get_instructor_payout_chart_setting_key(
+                              (int)$row['lesson_length'],
+                              (int)$row['is_online'],
+                              (int)$year_bucket
+                            )
+                          );
+                        ?>
+                        <td>
+                          <input
+                            type="number"
+                            name="<?php echo esc_attr($field_name); ?>"
+                            value="<?php echo esc_attr($instructor_payout_chart_values[$row_key][$year_bucket] ?? '0.00'); ?>"
+                            class="small-text"
+                            min="0"
+                            step="0.01"
+                          />
+                        </td>
+                      <?php endforeach; ?>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+              <p class="description">
+                The instructor year bucket is resolved from <code>hire_date</code> in the instructors table.
+                Year changes happen at 12:00 AM in the site timezone on each employment anniversary date.
+                Year 3+ is used for year 3 and every later year.
+                The in-person travel add-on below this section is still added separately to all in-person payouts.
+              </p>
             </td>
           </tr>
           <tr>
             <th scope="row"><label for="payout_anchor_date">Biweekly Payout Anchor Date</label></th>
             <td>
               <input type="date" id="payout_anchor_date" name="payout_anchor_date" value="<?php echo $payout_anchor_date; ?>" />
-              <p class="description">Use the first Friday that should count as a payout Friday. Every 14 days after that is a payout day.</p>
+              <p class="description">Use the first Friday that should count as a payout Friday. Every 14 days after that is a payout day. The automatic payout check is scheduled for 10:00 AM site time on each eligible payout date. For near-exact timing, your server cron should trigger WordPress cron every minute.</p>
             </td>
           </tr>
           <tr>
@@ -8097,12 +8321,15 @@ function mrm_pay_hub_singleton() {
 }
 
 register_activation_hook(__FILE__, function() {
-  if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
-    wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
+  $hub = mrm_pay_hub_singleton();
+
+  if ($hub instanceof MRM_Payments_Hub_Single) {
+    $hub->ensure_runtime_cron_schedules();
+    return;
   }
 
-  if (!wp_next_scheduled('mrm_pay_hub_daily_payout_check')) {
-    wp_schedule_event(time() + 600, 'daily', 'mrm_pay_hub_daily_payout_check');
+  if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
+    wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
   }
 
   if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {

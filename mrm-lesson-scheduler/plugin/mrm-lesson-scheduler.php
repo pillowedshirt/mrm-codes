@@ -4604,7 +4604,7 @@ class MRM_Lesson_Scheduler {
         ?>
         <div class="wrap">
             <h1>MRM Scheduler — Instructors</h1>
-            <p style="max-width:900px;"> Add instructors here. <strong>Start Date</strong> is stored in <code>hire_date</code> for future pay-tier automation. </p>
+            <p style="max-width:900px;"> Add instructors here. <strong>Start Date</strong> is stored in <code>hire_date</code> and is used by the Payments Hub instructor payout chart to determine Year 1, Year 2, or Year 3+ payout rates. </p>
             <p>
                 <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=mrm-scheduler-google' ) ); ?>">Google Calendar Settings</a>
             </p>
