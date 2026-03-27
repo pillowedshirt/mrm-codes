@@ -594,7 +594,20 @@ class MRM_Payments_Hub_Single {
 
   private function get_settings() {
     $opts = get_option(self::OPT_SETTINGS, array());
-    return is_array($opts) ? $opts : array();
+    $opts = is_array($opts) ? $opts : array();
+
+    return wp_parse_args($opts, array(
+      'stripe_mode' => 'live',
+      'one_time_sheet_music_composer_pct' => 0,
+      'in_person_travel_amount_cents' => 500,
+      'instructor_payout_30_online_cents' => 0,
+      'instructor_payout_30_inperson_cents' => 0,
+      'instructor_payout_60_online_cents' => 0,
+      'instructor_payout_60_inperson_cents' => 0,
+      'payout_anchor_date' => '',
+      'composer_connected_account_id' => '',
+      'test_composer_connected_account_id' => '',
+    ));
   }
 
   private function save_settings($opts) {
@@ -724,7 +737,93 @@ class MRM_Payments_Hub_Single {
   }
 
   private function save_products($products) {
-    update_option(self::OPT_PRODUCTS, $products);
+    update_option(self::OPT_PRODUCTS, $this->mrm_strip_legacy_sheet_music_composer_pct_from_products($products));
+  }
+
+  private function mrm_strip_legacy_sheet_music_composer_pct_from_products($products) {
+    if (!is_array($products)) return array();
+
+    foreach ($products as $sku => $product) {
+      if (!is_array($product)) continue;
+
+      $type = (string)($product['product_type'] ?? '');
+      if ($type === 'sheet_music' && array_key_exists('composer_pct', $product)) {
+        unset($product['composer_pct']);
+      }
+
+      $products[$sku] = $product;
+    }
+
+    return $products;
+  }
+
+  private function mrm_sanitize_percent_setting($value, $default = 0) {
+    if ($value === null || $value === '') return (int)$default;
+    $pct = (int)$value;
+    if ($pct < 0) $pct = 0;
+    if ($pct > 100) $pct = 100;
+    return $pct;
+  }
+
+  private function mrm_money_to_cents($value, $default = 0) {
+    if ($value === null || $value === '') return (int)$default;
+
+    $value = is_string($value) ? wp_unslash($value) : $value;
+    $value = str_replace(array('$', ',', ' '), '', (string)$value);
+
+    if ($value === '' || !is_numeric($value)) {
+      return (int)$default;
+    }
+
+    return max(0, (int) round(((float)$value) * 100));
+  }
+
+  private function mrm_format_cents_for_admin_input($cents) {
+    return number_format(((int)$cents) / 100, 2, '.', '');
+  }
+
+  private function mrm_get_one_time_sheet_music_composer_pct() {
+    $settings = $this->get_settings();
+    return $this->mrm_sanitize_percent_setting($settings['one_time_sheet_music_composer_pct'] ?? 0, 0);
+  }
+
+  private function mrm_get_in_person_travel_cents() {
+    $settings = $this->get_settings();
+    return max(0, (int)($settings['in_person_travel_amount_cents'] ?? 500));
+  }
+
+  private function mrm_get_instructor_fixed_payout_base_cents($lesson_length, $is_online) {
+    $settings = $this->get_settings();
+    $lesson_length = (int)$lesson_length;
+    $is_online = !empty($is_online);
+
+    if ($lesson_length === 30 && $is_online) {
+      return max(0, (int)($settings['instructor_payout_30_online_cents'] ?? 0));
+    }
+
+    if ($lesson_length === 30 && !$is_online) {
+      return max(0, (int)($settings['instructor_payout_30_inperson_cents'] ?? 0));
+    }
+
+    if ($lesson_length === 60 && $is_online) {
+      return max(0, (int)($settings['instructor_payout_60_online_cents'] ?? 0));
+    }
+
+    if ($lesson_length === 60 && !$is_online) {
+      return max(0, (int)($settings['instructor_payout_60_inperson_cents'] ?? 0));
+    }
+
+    return 0;
+  }
+
+  private function mrm_get_instructor_fixed_payout_cents($lesson_length, $is_online) {
+    $base = $this->mrm_get_instructor_fixed_payout_base_cents($lesson_length, $is_online);
+
+    if (!empty($is_online)) {
+      return $base;
+    }
+
+    return $base + $this->mrm_get_in_person_travel_cents();
   }
 
   private function all_access_lists() {
@@ -3578,23 +3677,19 @@ class MRM_Payments_Hub_Single {
     if ($product_type === 'sheet_music') {
       $piece_type = sanitize_text_field((string)($context['piece_type'] ?? ''));
       $piece_slug = sanitize_text_field((string)($context['piece_slug'] ?? ''));
-      // If missing piece_type/slug and sku follows piece pattern, derive values
+
       if (!$piece_type || !$piece_slug) {
         if (preg_match('/^piece-([a-z0-9\-]+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m)) {
           $piece_slug = $piece_slug ?: $m[1];
           $piece_type = $piece_type ?: $m[2];
         }
       }
+
       if ($piece_type) $metadata['mrm_piece_type'] = $piece_type;
       if ($piece_slug) $metadata['mrm_piece_slug'] = $piece_slug;
 
-      // Percent split labeling for composer/platform
-      $composer_pct = null;
-      if (isset($product_cfg['composer_pct'])) $composer_pct = (int)$product_cfg['composer_pct'];
-      if ($composer_pct === null && isset($context['composer_pct'])) $composer_pct = (int)$context['composer_pct'];
-      if ($composer_pct === null) $composer_pct = 0;
-      if ($composer_pct < 0) $composer_pct = 0;
-      if ($composer_pct > 100) $composer_pct = 100;
+      $composer_pct = $this->mrm_get_one_time_sheet_music_composer_pct();
+
       $metadata['mrm_split_model'] = 'pct';
       $metadata['mrm_composer_pct'] = (string)$composer_pct;
       $metadata['mrm_platform_pct'] = (string)(100 - $composer_pct);
@@ -3630,11 +3725,6 @@ class MRM_Payments_Hub_Single {
 
       $metadata['mrm_split_model'] = 'fixed';
       $metadata['mrm_composer_cut_cents'] = (string)$composer_cut_cents;
-
-      // Optional: scheduler may pass tier
-      if (isset($context['instructor_tier'])) {
-        $metadata['mrm_instructor_tier'] = (string)((int)$context['instructor_tier']);
-      }
     }
 
     return $metadata;
@@ -3650,50 +3740,29 @@ class MRM_Payments_Hub_Single {
     );
   }
 
-  private function mrm_parse_tier_rules($text) {
-    $rules = array();
-    $lines = preg_split('/\\r\\n|\\r|\\n/', (string)$text);
-    foreach ((array)$lines as $line) {
-      $line = trim((string)$line);
-      if ($line === '' || strpos($line, '=') === false) continue;
-      list($months, $pct) = array_map('trim', explode('=', $line, 2));
-      $months = max(0, intval($months));
-      $pct = max(0, min(100, intval($pct)));
-      $rules[$months] = $pct;
-    }
-    if (empty($rules)) {
-      $rules = array(0 => 50, 12 => 55, 24 => 60);
-    }
-    ksort($rules, SORT_NUMERIC);
-    return $rules;
-  }
+  private function mrm_build_instructor_payout_note($lesson_length, $is_online) {
+    $lesson_length = (int)$lesson_length;
+    $is_online = !empty($is_online);
 
-  private function mrm_months_since_date($date_string) {
-    $date_string = trim((string)$date_string);
-    if ($date_string === '') return 0;
-    try {
-      $tz = $this->mrm_wp_tz();
-      $start = new DateTime($date_string, $tz);
-      $now = new DateTime('now', $tz);
-      if ($start > $now) return 0;
-      $diff = $start->diff($now);
-      return max(0, ((int)$diff->y * 12) + (int)$diff->m);
-    } catch (Exception $e) {
-      return 0;
-    }
-  }
+    $base = $this->mrm_get_instructor_fixed_payout_base_cents($lesson_length, $is_online);
+    $travel = $is_online ? 0 : $this->mrm_get_in_person_travel_cents();
+    $total = $base + $travel;
 
-  private function mrm_resolve_instructor_pct($hire_date) {
-    $settings = $this->get_settings();
-    $rules = $this->mrm_parse_tier_rules($settings['instructor_tier_rules'] ?? "0=50\n12=55\n24=60");
-    $months = $this->mrm_months_since_date($hire_date);
-    $pct = 0;
-    foreach ($rules as $rule_months => $rule_pct) {
-      if ($months >= (int)$rule_months) {
-        $pct = (int)$rule_pct;
-      }
+    if ($is_online) {
+      return sprintf(
+        'Fixed payout: %d-minute online lesson ($%0.2f)',
+        $lesson_length,
+        $total / 100
+      );
     }
-    return max(0, min(100, $pct));
+
+    return sprintf(
+      'Fixed payout: %d-minute in-person lesson ($%0.2f base + $%0.2f travel = $%0.2f)',
+      $lesson_length,
+      $base / 100,
+      $travel / 100,
+      $total / 100
+    );
   }
 
   private function stripe_retrieve_balance() {
@@ -3988,16 +4057,43 @@ class MRM_Payments_Hub_Single {
     $addon_cents = isset($meta['mrm_addon_amount_cents']) ? (int)$meta['mrm_addon_amount_cents'] : 0;
 
     if ($product_type === 'sheet_music') {
-      $composer_pct = max(0, min(100, (int)($meta['mrm_composer_pct'] ?? 0)));
+      $composer_pct = $this->mrm_sanitize_percent_setting(
+        $meta['mrm_composer_pct'] ?? $this->mrm_get_one_time_sheet_music_composer_pct(),
+        $this->mrm_get_one_time_sheet_music_composer_pct()
+      );
+
       $composer_share = (int) round($base_cents * ($composer_pct / 100));
       $platform_share = max(0, $base_cents - $composer_share) + max(0, $addon_cents);
-      $composer_acct = (string)($this->get_settings()['composer_connected_account_id'] ?? '');
+      $composer_acct = $this->composer_connected_account_id();
 
       if ($composer_share > 0) {
-        $this->mrm_insert_payout_ledger_row($order_id, $pi_id, 'composer', 'composer', $composer_acct, $currency, $composer_share, $composer_share, $composer_acct ? 'pending' : 'blocked', $composer_acct ? '' : 'Missing composer connected account ID');
+        $this->mrm_insert_payout_ledger_row(
+          $order_id,
+          $pi_id,
+          'composer',
+          'composer',
+          $composer_acct,
+          $currency,
+          $composer_share,
+          $composer_share,
+          $composer_acct ? 'pending' : 'blocked',
+          $composer_acct ? 'Centralized one-time sheet music composer payout' : 'Missing composer connected account ID'
+        );
       }
 
-      $this->mrm_insert_payout_ledger_row($order_id, $pi_id, 'platform', 'platform', '', $currency, $platform_share, $platform_share, 'retained', 'Retained by platform');
+      $this->mrm_insert_payout_ledger_row(
+        $order_id,
+        $pi_id,
+        'platform',
+        'platform',
+        '',
+        $currency,
+        $platform_share,
+        $platform_share,
+        'retained',
+        'Retained by platform'
+      );
+
       return true;
     }
 
@@ -4011,7 +4107,7 @@ class MRM_Payments_Hub_Single {
       }
 
       $composer_addon_share = max(0, (int)$addon_cents);
-      $composer_acct = (string)($this->get_settings()['composer_connected_account_id'] ?? '');
+      $composer_acct = $this->composer_connected_account_id();
 
       if ($composer_addon_share > 0) {
         $this->mrm_insert_payout_ledger_row(
@@ -4092,9 +4188,11 @@ class MRM_Payments_Hub_Single {
 
     $this->link_order($order_id, 'lesson', (string)$lesson_id);
 
+    $lesson_length = (int)($lesson['lesson_length'] ?? 0);
+    $is_online = !empty($lesson['is_online']);
+    $instructor_share = $this->mrm_get_instructor_fixed_payout_cents($lesson_length, $is_online);
+
     $instr = $this->mrm_get_instructor_row($instructor_id);
-    $instr_pct = $this->mrm_resolve_instructor_pct((string)($instr['hire_date'] ?? ''));
-    $instructor_share = (int) floor($amount_cents * ($instr_pct / 100));
     $instructor_acct = (string)($instr['stripe_connected_account_id'] ?? '');
 
     if ($instructor_share > 0) {
@@ -4108,7 +4206,7 @@ class MRM_Payments_Hub_Single {
         $instructor_share,
         $instructor_share,
         $instructor_acct ? 'pending' : 'blocked',
-        $instructor_acct ? ('Autopay lesson unlocked at ' . $instr_pct . '%') : 'Missing instructor connected account ID'
+        $instructor_acct ? $this->mrm_build_instructor_payout_note($lesson_length, $is_online) : 'Missing instructor connected account ID'
       );
     }
 
@@ -4123,13 +4221,7 @@ class MRM_Payments_Hub_Single {
       $platform_share,
       $platform_share,
       'retained',
-      'Retained by platform'
-    );
-
-    error_log('[MRM AutoPay] webhook finalized successful lesson charge'
-      . ' lesson_id=' . $lesson_id
-      . ' order_id=' . $order_id
-      . ' pi_id=' . $pi_id
+      'Retained by platform after fixed instructor payout'
     );
   }
 
@@ -4665,15 +4757,28 @@ class MRM_Payments_Hub_Single {
 
     if ((int)$credit['remaining_credits'] <= 0) return;
 
+    $lessons_table = $this->table_lessons();
+    $lesson = $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM {$lessons_table} WHERE id=%d LIMIT 1",
+      $lesson_id
+    ), ARRAY_A);
+
+    if (!$lesson) {
+      $this->mrm_insert_payout_ledger_row($order_id, '', 'instructor', 'lesson:' . $lesson_id, '', (string)($credit['currency'] ?? 'usd'), 0, 0, 'blocked', 'Missing lesson row for fixed payout resolution');
+      return;
+    }
+
     $new_remaining = max(0, ((int)$credit['remaining_credits']) - 1);
     $wpdb->update($credits_table, array(
       'remaining_credits' => $new_remaining,
       'updated_at' => current_time('mysql'),
     ), array('id' => (int)$credit['id']), array('%d','%s'), array('%d'));
 
+    $lesson_length = (int)($lesson['lesson_length'] ?? 0);
+    $is_online = !empty($lesson['is_online']);
+    $instructor_share = $this->mrm_get_instructor_fixed_payout_cents($lesson_length, $is_online);
+
     $instr = $this->mrm_get_instructor_row($instructor_id);
-    $instr_pct = $this->mrm_resolve_instructor_pct((string)($instr['hire_date'] ?? ''));
-    $instructor_share = (int) floor(((int)$credit['unit_base_cents']) * ($instr_pct / 100));
     $instructor_acct = (string)($instr['stripe_connected_account_id'] ?? '');
 
     if ($instructor_share > 0) {
@@ -4687,7 +4792,7 @@ class MRM_Payments_Hub_Single {
         $instructor_share,
         $instructor_share,
         $instructor_acct ? 'pending' : 'blocked',
-        $instructor_acct ? ('Prepay lesson unlocked at ' . $instr_pct . '%') : 'Missing instructor connected account ID'
+        $instructor_acct ? $this->mrm_build_instructor_payout_note($lesson_length, $is_online) : 'Missing instructor connected account ID'
       );
     }
   }
@@ -6019,7 +6124,6 @@ class MRM_Payments_Hub_Single {
       'currency' => $currency,
       'product_type' => $product_type,
       'category' => (string)($p['category'] ?? ''),
-      'composer_pct' => isset($p['composer_pct']) ? (int)$p['composer_pct'] : null,
       // For debugging. Remove later if you want.
       'metadata' => $metadata,
     ), 200);
@@ -7067,8 +7171,16 @@ class MRM_Payments_Hub_Single {
       $settings['stripe_test_webhook_secret'] = sanitize_text_field((string)($_POST['stripe_test_webhook_secret'] ?? ''));
       $settings['stripe_test_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_test_sheet_music_subscription_price_id'] ?? ''));
       $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
-      $settings['instructor_tier_rules'] = trim((string) wp_unslash($_POST['instructor_tier_rules'] ?? "0=50\n12=55\n24=60"));
+      $settings['one_time_sheet_music_composer_pct'] = $this->mrm_sanitize_percent_setting($_POST['one_time_sheet_music_composer_pct'] ?? 0, 0);
+      $settings['in_person_travel_amount_cents'] = $this->mrm_money_to_cents($_POST['in_person_travel_amount'] ?? '5.00', 500);
+      $settings['instructor_payout_30_online_cents'] = $this->mrm_money_to_cents($_POST['instructor_payout_30_online'] ?? '0.00', 0);
+      $settings['instructor_payout_30_inperson_cents'] = $this->mrm_money_to_cents($_POST['instructor_payout_30_inperson'] ?? '0.00', 0);
+      $settings['instructor_payout_60_online_cents'] = $this->mrm_money_to_cents($_POST['instructor_payout_60_online'] ?? '0.00', 0);
+      $settings['instructor_payout_60_inperson_cents'] = $this->mrm_money_to_cents($_POST['instructor_payout_60_inperson'] ?? '0.00', 0);
       $settings['payout_anchor_date'] = sanitize_text_field((string)($_POST['payout_anchor_date'] ?? ''));
+
+      unset($settings['instructor_tier_rules']);
+
       $this->save_settings($settings);
 
       // ✅ Manual access row inserts (row-based UI)
@@ -7259,7 +7371,6 @@ class MRM_Payments_Hub_Single {
       $currencies = isset($_POST['currency']) ? (array)$_POST['currency'] : array();
       $types = isset($_POST['product_type']) ? (array)$_POST['product_type'] : array();
       $categories = isset($_POST['category']) ? (array)$_POST['category'] : array();
-      $composer_pcts = isset($_POST['composer_pct']) ? (array)$_POST['composer_pct'] : array();
       $deletes = isset($_POST['delete']) ? (array)$_POST['delete'] : array();
 
       $allowed_currencies = array('usd', 'eur');
@@ -7310,13 +7421,6 @@ class MRM_Payments_Hub_Single {
         $currency = sanitize_text_field((string)($currencies[$index] ?? 'usd'));
         if (!in_array($currency, $allowed_currencies, true)) $currency = 'usd';
 
-        $composer_pct = null;
-        if (isset($composer_pcts[$index]) && $composer_pcts[$index] !== '') {
-          $composer_pct = intval($composer_pcts[$index]);
-          if ($composer_pct < 0) $composer_pct = 0;
-          if ($composer_pct > 100) $composer_pct = 100;
-        }
-
         $products[$sku] = array(
           'sku' => $sku,
           'label' => $label,
@@ -7326,12 +7430,6 @@ class MRM_Payments_Hub_Single {
           'category' => $category,
           'active' => 1,
         );
-
-        if ($composer_pct !== null) {
-          $products[$sku]['composer_pct'] = $composer_pct;
-        } else {
-          unset($products[$sku]['composer_pct']);
-        }
       }
 
       $this->save_products($products);
@@ -7435,11 +7533,6 @@ class MRM_Payments_Hub_Single {
                 </select>
               </label>
             </p>
-            <p>
-              <label>Composer %<br />
-                <input type="number" name="composer_pct[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['composer_pct'] ?? '')); ?>" class="small-text" min="0" max="100" />
-              </label>
-            </p>
             <?php if ($type === 'sheet_music') : ?>
               <hr />
               <?php if ($sku === $all_sku) :
@@ -7538,11 +7631,6 @@ class MRM_Payments_Hub_Single {
               </select>
             </label>
           </p>
-          <p>
-            <label>Composer %<br />
-              <input type="number" name="composer_pct[<?php echo esc_attr($new_index); ?>]" value="" class="small-text" min="0" max="100" />
-            </label>
-          </p>
           <input type="hidden" name="delete[<?php echo esc_attr($new_index); ?>]" value="0" />
         </div>
       </div>
@@ -7636,7 +7724,12 @@ class MRM_Payments_Hub_Single {
     $wh_test   = esc_attr((string)($settings['stripe_test_webhook_secret'] ?? ''));
     $price_test = esc_attr((string)($settings['stripe_test_sheet_music_subscription_price_id'] ?? ''));
     $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
-    $tier_rules = esc_textarea((string)($settings['instructor_tier_rules'] ?? "0=50\n12=55\n24=60"));
+    $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
+    $in_person_travel_amount = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['in_person_travel_amount_cents'] ?? 500)));
+    $instructor_payout_30_online = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['instructor_payout_30_online_cents'] ?? 0)));
+    $instructor_payout_30_inperson = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['instructor_payout_30_inperson_cents'] ?? 0)));
+    $instructor_payout_60_online = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['instructor_payout_60_online_cents'] ?? 0)));
+    $instructor_payout_60_inperson = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['instructor_payout_60_inperson_cents'] ?? 0)));
     $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
     $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
 
@@ -7717,10 +7810,50 @@ class MRM_Payments_Hub_Single {
             </td>
           </tr>
           <tr>
-            <th scope="row"><label for="instructor_tier_rules">Instructor Tier Rules</label></th>
+            <th scope="row"><label for="one_time_sheet_music_composer_pct">One-Time Sheet Music Composer %</label></th>
             <td>
-              <textarea id="instructor_tier_rules" name="instructor_tier_rules" rows="6" class="large-text code"><?php echo $tier_rules; ?></textarea>
-              <p class="description">One rule per line in the format <code>months=pct</code>. Example:<br><code>0=50<br>12=55<br>24=60</code></p>
+              <input type="number" id="one_time_sheet_music_composer_pct" name="one_time_sheet_music_composer_pct" value="<?php echo $one_time_sheet_music_composer_pct; ?>" class="small-text" min="0" max="100" />
+              <p class="description">This centralized percentage is used for eligible one-time sheet music purchases. Per-product sheet music composer percentages are no longer used.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="in_person_travel_amount">In-Person Travel Add-On</label></th>
+            <td>
+              <input type="number" id="in_person_travel_amount" name="in_person_travel_amount" value="<?php echo $in_person_travel_amount; ?>" class="small-text" min="0" step="0.01" />
+              <p class="description">This amount is added to every in-person instructor payout in all payout paths.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="instructor_payout_30_online">30-Minute Online Instructor Payout</label></th>
+            <td>
+              <input type="number" id="instructor_payout_30_online" name="instructor_payout_30_online" value="<?php echo $instructor_payout_30_online; ?>" class="small-text" min="0" step="0.01" />
+              <p class="description">Fixed instructor payout for a delivered 30-minute online lesson.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="instructor_payout_30_inperson">30-Minute In-Person Instructor Payout</label></th>
+            <td>
+              <input type="number" id="instructor_payout_30_inperson" name="instructor_payout_30_inperson" value="<?php echo $instructor_payout_30_inperson; ?>" class="small-text" min="0" step="0.01" />
+              <p class="description">Base fixed instructor payout for a delivered 30-minute in-person lesson. The in-person travel add-on is added on top.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="instructor_payout_60_online">60-Minute Online Instructor Payout</label></th>
+            <td>
+              <input type="number" id="instructor_payout_60_online" name="instructor_payout_60_online" value="<?php echo $instructor_payout_60_online; ?>" class="small-text" min="0" step="0.01" />
+              <p class="description">Fixed instructor payout for a delivered 60-minute online lesson.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="instructor_payout_60_inperson">60-Minute In-Person Instructor Payout</label></th>
+            <td>
+              <input type="number" id="instructor_payout_60_inperson" name="instructor_payout_60_inperson" value="<?php echo $instructor_payout_60_inperson; ?>" class="small-text" min="0" step="0.01" />
+              <p class="description">Base fixed instructor payout for a delivered 60-minute in-person lesson. The in-person travel add-on is added on top.</p>
             </td>
           </tr>
           <tr>
