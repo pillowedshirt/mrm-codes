@@ -2145,7 +2145,14 @@ class MRM_Payments_Hub_Single {
     if ($order) {
       $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
       $this->mrm_maybe_create_payout_ledger_for_order($order);
-      $this->mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi, $order);
+
+      $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+      $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
+      $product_type = (string)($order['product_type'] ?? '');
+
+      if ($addon_yes && $product_type === 'lesson' && !empty($order['id'])) {
+        $this->mrm_retry_sheet_music_subscription_creation_for_order((int)$order['id']);
+      }
 
       $lesson_id = 0;
 
@@ -3517,13 +3524,18 @@ class MRM_Payments_Hub_Single {
       $details .= '<div><strong>Payment ID:</strong> ' . esc_html($pi_id) . '</div>';
     }
 
-    if ($base_cents > 0) {
-      $details .= '<div style="margin-top:10px;"><strong>Base:</strong> ' . $fmt_money($base_cents) . '</div>';
-      if ($addon_cents > 0) $details .= '<div><strong>Sheet music add-on:</strong> ' . $fmt_money($addon_cents) . '</div>';
-      if ($tax_cents > 0) $details .= '<div><strong>Add-on tax:</strong> ' . $fmt_money($tax_cents) . '</div>';
-      $details .= '<div><strong>Total:</strong> ' . $fmt_money($amount_cents) . '</div>';
+    if ($product_type === 'lesson') {
+      $lesson_amount_cents = ($base_cents > 0) ? $base_cents : $amount_cents;
+      $details .= '<div style="margin-top:10px;"><strong>Lesson payment:</strong> ' . $fmt_money($lesson_amount_cents) . '</div>';
     } else {
-      $details .= '<div style="margin-top:10px;"><strong>Total:</strong> ' . $fmt_money($amount_cents) . '</div>';
+      if ($base_cents > 0) {
+        $details .= '<div style="margin-top:10px;"><strong>Base:</strong> ' . $fmt_money($base_cents) . '</div>';
+        if ($addon_cents > 0) $details .= '<div><strong>Sheet music add-on:</strong> ' . $fmt_money($addon_cents) . '</div>';
+        if ($tax_cents > 0) $details .= '<div><strong>Add-on tax:</strong> ' . $fmt_money($tax_cents) . '</div>';
+        $details .= '<div><strong>Total:</strong> ' . $fmt_money($amount_cents) . '</div>';
+      } else {
+        $details .= '<div style="margin-top:10px;"><strong>Total:</strong> ' . $fmt_money($amount_cents) . '</div>';
+      }
     }
 
     if ($product_type === 'lesson') {
@@ -3634,11 +3646,11 @@ class MRM_Payments_Hub_Single {
       $details .= '<div>Plan: ' . esc_html($plan_display) . '</div>';
 
       if ($is_autopay_initial_receipt) {
-        $details .= '<div style="margin-top:12px;">This message confirms that we have received payment for lesson 1. You will not be charged again until after lesson 2 is delivered.</div>';
+        $details .= '<div style="margin-top:12px;">This message confirms that we have received payment for your first lesson. Any sheet music subscription selected during checkout will be confirmed separately in its own email.</div>';
       }
 
       if ($is_autopay_followup_receipt) {
-        $details .= '<div style="margin-top:12px;">This message confirms your automatic payment for this lesson.</div>';
+        $details .= '<div style="margin-top:12px;">This message confirms your automatic payment for this lesson. Subscription billing, if active, is confirmed separately in its own email.</div>';
       }
 
       $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel? Contact your instructor.</strong></div>';
@@ -3733,6 +3745,8 @@ class MRM_Payments_Hub_Single {
 
     $this->stripe_debug_log('subscription enrollment email attempt', array(
       'email' => $email,
+      'subscription_id' => (string)($sub_row['stripe_subscription_id'] ?? ''),
+      'status' => (string)($sub_row['status'] ?? ''),
       'sent' => ($sent ? 'yes' : 'no'),
     ));
 
@@ -3770,7 +3784,7 @@ class MRM_Payments_Hub_Single {
 
     return wp_mail(
       $email,
-      'Purchase confirmation — Sheet music subscription',
+      'Subscription payment confirmation — Sheet music access',
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
@@ -6981,15 +6995,15 @@ class MRM_Payments_Hub_Single {
       ));
 
       if ($customer_id === '' || $payment_method_id === '') {
-        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_customer_or_payment_method');
-        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing Stripe customer or payment method on initial payment intent.');
-        $this->stripe_debug_log('subscription path blocked: missing customer or payment method', array(
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'retry_pending_customer_or_payment_method');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Initial subscription attempt is waiting for Stripe customer/payment method readiness.');
+        $this->stripe_debug_log('subscription path deferred: missing customer or payment method', array(
           'order_id' => $order_id,
           'pi_id' => $pi_id,
           'customer_id_present' => ($customer_id !== '' ? 'yes' : 'no'),
           'payment_method_present' => ($payment_method_id !== '' ? 'yes' : 'no'),
         ));
-        error_log('[MRM Payments Hub] Cannot create sheet music subscription: missing customer or payment method.');
+        error_log('[MRM Payments Hub] Subscription creation deferred: missing customer or payment method on initial pass.');
         return;
       }
 
@@ -7100,6 +7114,59 @@ class MRM_Payments_Hub_Single {
       error_log('[MRM Payments Hub] Subscription path runtime exception: ' . $e->getMessage());
       return;
     }
+  }
+
+  private function mrm_retry_sheet_music_subscription_creation_for_order($order_id) {
+    $order_id = (int)$order_id;
+    if ($order_id <= 0) return false;
+
+    $order = $this->get_order($order_id);
+    if (!is_array($order) || empty($order)) {
+      return false;
+    }
+
+    $meta = $this->mrm_get_order_meta_array($order);
+    $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
+    $product_type = (string)($order['product_type'] ?? '');
+
+    if (!$addon_yes || $product_type !== 'lesson') {
+      return false;
+    }
+
+    $pi_id = (string)($order['payment_intent_id'] ?? '');
+    if ($pi_id === '') {
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_payment_intent');
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing payment_intent_id on order.');
+      return false;
+    }
+
+    $pi = $this->stripe_retrieve_payment_intent($pi_id);
+    if (is_wp_error($pi)) {
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'payment_intent_retrieve_failed');
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $pi->get_error_message());
+      return false;
+    }
+
+    $fresh_order = $this->get_order_by_pi($pi_id);
+    if (!is_array($fresh_order) || empty($fresh_order)) {
+      $fresh_order = $order;
+    }
+
+    $this->stripe_debug_log('subscription retry helper invoked', array(
+      'order_id' => $order_id,
+      'pi_id' => $pi_id,
+      'pi_status' => (string)($pi['status'] ?? ''),
+      'customer_id' => (string)($pi['customer'] ?? ''),
+      'payment_method_id' => (string)($pi['payment_method'] ?? ''),
+    ));
+
+    $this->mrm_maybe_create_sheet_music_subscription_from_initial_payment_intent($pi, $fresh_order);
+
+    $fresh_order = $this->get_order($order_id);
+    $status = (string)$this->mrm_get_order_meta_value($fresh_order, 'mrm_sheet_music_subscription_status', '');
+    $subscription_id = (string)$this->mrm_get_order_meta_value($fresh_order, 'mrm_sheet_music_subscription_id', '');
+
+    return ($subscription_id !== '' || in_array($status, array('active', 'trialing', 'past_due'), true));
   }
 
 
@@ -7221,6 +7288,14 @@ class MRM_Payments_Hub_Single {
       $order = $this->get_order_by_pi($pi_id);
       $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
       $this->mrm_maybe_create_payout_ledger_for_order($order);
+
+      $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+      $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
+      $product_type = (string)($order['product_type'] ?? '');
+
+      if ($addon_yes && $product_type === 'lesson' && !empty($order['id'])) {
+        $this->mrm_retry_sheet_music_subscription_creation_for_order((int)$order['id']);
+      }
     }
 
     return new WP_REST_Response(array(
