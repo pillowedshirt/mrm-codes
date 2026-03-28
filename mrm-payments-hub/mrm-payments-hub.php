@@ -2161,7 +2161,12 @@ class MRM_Payments_Hub_Single {
     $metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
     $metadata['mrm_latest_charge_id'] = $latest_charge;
 
-    $this->update_order_status_from_pi($pi_id, 'paid', (string)($pi['status'] ?? 'succeeded'), $metadata);
+      $this->update_order_status_from_pi($pi_id, 'paid', (string)($pi['status'] ?? 'succeeded'), $metadata);
+      $this->mrm_subscription_debug_log('order updated after payment success', array(
+        'order_id' => (int)($order['id'] ?? 0),
+        'payment_intent_id' => (string)($pi['id'] ?? ''),
+        'status' => 'paid',
+      ));
 
     $order = $this->get_order_by_pi($pi_id);
     if ($order) {
@@ -2538,10 +2543,11 @@ class MRM_Payments_Hub_Single {
     global $wpdb;
     $data = array(
       'status' => $status,
+      'stripe_payment_intent_id' => (string)$payment_intent_id,
       'stripe_status' => $stripe_status,
       'updated_at' => current_time('mysql'),
     );
-    $fmt = array('%s','%s','%s');
+    $fmt = array('%s','%s','%s','%s');
 
     if ($metadata !== null) {
       // Merge with any existing metadata_json so we can store local flags (like receipt sent)
@@ -3173,7 +3179,7 @@ class MRM_Payments_Hub_Single {
         'order_id' => $order_id,
         'order_status' => (string)($order['status'] ?? ''),
         'product_type' => (string)($order['product_type'] ?? ''),
-        'payment_intent_id' => (string)($order['payment_intent_id'] ?? ''),
+        'payment_intent_id' => (string)($order['stripe_payment_intent_id'] ?? ($order['payment_intent_id'] ?? '')),
       ));
 
       $order_meta = $this->mrm_get_order_meta_array($order);
@@ -3229,10 +3235,26 @@ class MRM_Payments_Hub_Single {
         return false;
       }
 
-      $pi_id = (string)($order['payment_intent_id'] ?? '');
+      $passed_pi_id = (is_array($pi) && !empty($pi)) ? (string)($pi['id'] ?? '') : '';
+      $order_pi_id = (string)($order['stripe_payment_intent_id'] ?? ($order['payment_intent_id'] ?? ''));
+
+      $this->mrm_subscription_debug_log('activation helper payment_intent source check', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'order_payment_intent_id' => $order_pi_id,
+        'passed_pi_id' => $passed_pi_id,
+      ));
+
+      $pi_id = ($passed_pi_id !== '') ? $passed_pi_id : $order_pi_id;
+
       if ($pi_id === '') {
+        $this->mrm_subscription_debug_log('activation helper exited: missing payment_intent_id on both passed PI and order', array(
+          'context' => $context,
+          'order_id' => $order_id,
+        ));
+
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_payment_intent');
-        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing payment_intent_id on order.');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing payment_intent_id on both passed PI and order.');
         return false;
       }
 
@@ -3245,12 +3267,22 @@ class MRM_Payments_Hub_Single {
             'pi_id' => $pi_id,
             'message' => $pi->get_error_message(),
           ));
+
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'payment_intent_retrieve_failed');
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $pi->get_error_message());
           return false;
         }
 
         $this->mrm_subscription_debug_log('activation helper PI retrieved', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'pi_id' => $pi_id,
+          'pi_status' => (string)($pi['status'] ?? ''),
+          'customer' => (string)($pi['customer'] ?? ''),
+          'payment_method' => (string)($pi['payment_method'] ?? ''),
+        ));
+      } else {
+        $this->mrm_subscription_debug_log('activation helper using passed PI', array(
           'context' => $context,
           'order_id' => $order_id,
           'pi_id' => $pi_id,
@@ -7477,7 +7509,7 @@ class MRM_Payments_Hub_Single {
       return false;
     }
 
-    $pi_id = (string)($order['payment_intent_id'] ?? '');
+    $pi_id = (string)($order['stripe_payment_intent_id'] ?? ($order['payment_intent_id'] ?? ''));
     if ($pi_id === '') {
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_payment_intent');
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing payment_intent_id on order.');
@@ -7633,6 +7665,13 @@ class MRM_Payments_Hub_Single {
       $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
       $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
       $product_type = (string)($order['product_type'] ?? '');
+
+      $this->mrm_subscription_debug_log('verify endpoint loaded order before activation', array(
+        'order_id' => (int)($order['id'] ?? 0),
+        'order_status' => (string)($order['status'] ?? ''),
+        'order_payment_intent_id' => (string)($order['stripe_payment_intent_id'] ?? ($order['payment_intent_id'] ?? '')),
+        'passed_pi_id' => (string)($pi['id'] ?? ''),
+      ));
 
       if ($addon_yes && $product_type === 'lesson' && !empty($order['id'])) {
         $this->mrm_attempt_sheet_music_subscription_activation((int)$order['id'], $pi, 'verify_endpoint');
