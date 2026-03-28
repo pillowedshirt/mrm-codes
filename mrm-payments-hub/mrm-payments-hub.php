@@ -5468,20 +5468,7 @@ class MRM_Payments_Hub_Single {
       return false;
     }
 
-    $status = (string)($lesson['status'] ?? '');
-    if ($status === 'finalized') {
-      return true;
-    }
-
-    $delivered_at = (string)($lesson['delivered_at'] ?? '');
-    if ($delivered_at !== '') {
-      $delivered_ts = strtotime($delivered_at);
-      if ($delivered_ts && $delivered_ts <= (time() - (7 * DAY_IN_SECONDS))) {
-        return true;
-      }
-    }
-
-    return false;
+    return ((string)($lesson['status'] ?? '') === 'finalized');
   }
 
   public function on_lesson_cancelled($data) {
@@ -5502,7 +5489,7 @@ class MRM_Payments_Hub_Single {
     ), ARRAY_A);
 
     if ($this->mrm_is_lesson_refund_locked($lesson)) {
-      $this->mrm_finalization_debug_log('refund_and_cancellation_email_blocked', array(
+      $this->mrm_finalization_debug_log('refund_and_cancellation_email_blocked_finalized_lesson', array(
         'lesson_id' => $lesson_id,
         'status' => (string)($lesson['status'] ?? ''),
         'delivered_at' => (string)($lesson['delivered_at'] ?? ''),
