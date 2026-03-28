@@ -83,6 +83,16 @@ class MRM_Lesson_Scheduler {
         );
     }
 
+    protected function mrm_finalization_debug_log( $message, $context = array() ) {
+        if ( ! is_array( $context ) ) {
+            $context = array( 'value' => $context );
+        }
+
+        error_log(
+            '[MRM Lesson Finalization] ' . $message . ' ' . wp_json_encode( $context )
+        );
+    }
+
     // Get a single Google Calendar event
     protected function google_get_event( $calendar_id, $event_id ) {
         $calendar_id = rawurldecode( trim( (string) $calendar_id ) );
@@ -1343,6 +1353,17 @@ class MRM_Lesson_Scheduler {
             );
         }
 
+        if ( (string) ( $lesson_row['status'] ?? '' ) === 'finalized' ) {
+            $this->mrm_finalization_debug_log( 'google_sync_skipped_finalized_lesson', array(
+                'lesson_id' => (int) ( $lesson_row['id'] ?? 0 ),
+            ) );
+
+            return array(
+                'status' => 'finalized_skipped',
+                'lesson_row' => $lesson_row,
+            );
+        }
+
         $calendar_id = trim( (string) $calendar_id );
         if ( $calendar_id === '' || ! $this->google_is_configured() ) {
             return array(
@@ -1624,6 +1645,7 @@ class MRM_Lesson_Scheduler {
         add_action( 'mrm_scheduler_sync_upcoming_events', array( $this, 'cron_sync_upcoming_events' ) );
         add_action( 'mrm_scheduler_reconcile_completed_lessons', array( $this, 'cron_reconcile_completed_lessons' ) );
         add_action( 'mrm_scheduler_reconcile_cancelled_lessons', array( $this, 'cron_reconcile_cancelled_lessons' ) );
+        add_action( 'mrm_scheduler_finalize_old_lessons', array( $this, 'cron_finalize_old_lessons' ) );
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
             wp_schedule_event( time() + 60, 'mrm_1min', 'mrm_scheduler_sync_upcoming_events' );
         }
@@ -1632,6 +1654,9 @@ class MRM_Lesson_Scheduler {
         }
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
             wp_schedule_event( time() + 80, 'mrm_1min', 'mrm_scheduler_reconcile_cancelled_lessons' );
+        }
+        if ( ! wp_next_scheduled( 'mrm_scheduler_finalize_old_lessons' ) ) {
+            wp_schedule_event( time() + 300, 'hourly', 'mrm_scheduler_finalize_old_lessons' );
         }
         // Gate page (virtual) for joining online lessons
         add_action( 'init', array( $this, 'register_join_gate_rewrite' ) );
@@ -1663,6 +1688,7 @@ class MRM_Lesson_Scheduler {
             'mrm_scheduler_sync_upcoming_events',
             'mrm_scheduler_reconcile_completed_lessons',
             'mrm_scheduler_reconcile_cancelled_lessons',
+            'mrm_scheduler_finalize_old_lessons',
         );
 
         foreach ( $hooks as $hook ) {
@@ -1686,6 +1712,16 @@ class MRM_Lesson_Scheduler {
         if ( ! wp_next_scheduled( 'mrm_scheduler_reconcile_cancelled_lessons' ) ) {
             wp_schedule_event( time() + 80, 'mrm_1min', 'mrm_scheduler_reconcile_cancelled_lessons' );
         }
+        if ( ! wp_next_scheduled( 'mrm_scheduler_finalize_old_lessons' ) ) {
+            wp_schedule_event( time() + 300, 'hourly', 'mrm_scheduler_finalize_old_lessons' );
+        }
+    }
+
+    public static function deactivate() {
+        wp_clear_scheduled_hook( 'mrm_scheduler_sync_upcoming_events' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_reconcile_completed_lessons' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_reconcile_cancelled_lessons' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_finalize_old_lessons' );
     }
 
     public static function install_or_upgrade() {
@@ -1727,6 +1763,7 @@ class MRM_Lesson_Scheduler {
     end_time DATETIME NOT NULL,
     google_original_start_time DATETIME NULL,
     delivered_at DATETIME NULL,
+    finalized_at DATETIME NULL,
     charge_due_at DATETIME NULL,
     charge_status VARCHAR(30) NOT NULL DEFAULT 'none',
     charge_attempts INT NOT NULL DEFAULT 0,
@@ -1753,6 +1790,7 @@ class MRM_Lesson_Scheduler {
     KEY order_id_idx (order_id),
     KEY payment_mode_idx (payment_mode),
     KEY payout_unlocked_at_idx (payout_unlocked_at),
+    KEY finalized_at_idx (finalized_at),
     KEY charge_status_idx (charge_status),
     KEY charge_due_at_idx (charge_due_at),
     KEY reminder_token_hash_idx (reminder_token_hash),
@@ -1833,6 +1871,7 @@ class MRM_Lesson_Scheduler {
         $need_lessons = array(
             'google_original_start_time',
             'delivered_at',
+            'finalized_at',
             'charge_due_at',
             'charge_status',
             'charge_attempts',
@@ -4095,11 +4134,12 @@ class MRM_Lesson_Scheduler {
           AND (
                 (
                     l.payment_mode = 'autopay'
+                    AND l.status <> 'finalized'
                     AND (
                         l.status IN ('scheduled', 'payment_due', 'delivered')
                         OR (
                             l.payout_unlocked_at IS NULL
-                            AND l.status NOT IN ('cancelled', 'series')
+                            AND l.status NOT IN ('cancelled', 'series', 'finalized')
                         )
                     )
                 )
@@ -4108,6 +4148,7 @@ class MRM_Lesson_Scheduler {
                     l.payment_mode <> 'autopay'
                     AND l.status = 'scheduled'
                     AND l.payout_unlocked_at IS NULL
+                    AND l.status <> 'finalized'
                 )
           )
         ORDER BY l.start_time ASC
@@ -4354,6 +4395,13 @@ class MRM_Lesson_Scheduler {
         if ( ! is_array( $lesson_row ) ) return;
         $lesson_id = (int) ( $lesson_row['id'] ?? 0 );
         if ( $lesson_id <= 0 ) return;
+        if ( (string) ( $lesson_row['status'] ?? '' ) === 'finalized' ) {
+            $this->mrm_finalization_debug_log( 'cancel_skip_finalized_lesson', array(
+                'lesson_id' => $lesson_id,
+                'reason'    => (string) $reason,
+            ) );
+            return;
+        }
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
 
@@ -4396,6 +4444,13 @@ class MRM_Lesson_Scheduler {
         if ( ! $rows ) return;
 
         foreach ( $rows as $l ) {
+            if ( (string) ( $l['status'] ?? '' ) === 'finalized' ) {
+                $this->mrm_finalization_debug_log( 'completed_reconcile_skipped_finalized_lesson', array(
+                    'lesson_id' => (int) ( $l['id'] ?? 0 ),
+                ) );
+                continue;
+            }
+
             $calendar_id = (string) ( $l['calendar_id'] ?? '' );
             $booking_id  = (int) ( $l['id'] ?? 0 );
 
@@ -4572,6 +4627,58 @@ class MRM_Lesson_Scheduler {
                 'autopay_profile_id' => (int) ( $synced_lesson['autopay_profile_id'] ?? 0 ),
                 'google_event_id' => $new_event_id,
                 'ended_at_utc' => (string) $new_end,
+            ) );
+        }
+    }
+
+    public function cron_finalize_old_lessons() {
+        global $wpdb;
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $now_mysql = current_time( 'mysql' );
+        $cutoff_mysql = gmdate( 'Y-m-d H:i:s', time() - ( 7 * DAY_IN_SECONDS ) );
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT *
+                 FROM {$lessons_table}
+                 WHERE status = %s
+                   AND delivered_at IS NOT NULL
+                   AND delivered_at <> ''
+                   AND delivered_at <= %s
+                   AND (finalized_at IS NULL OR finalized_at = '')",
+                'delivered',
+                $cutoff_mysql
+            ),
+            ARRAY_A
+        );
+
+        if ( ! is_array( $rows ) || empty( $rows ) ) {
+            return;
+        }
+
+        foreach ( $rows as $row ) {
+            $lesson_id = (int) ( $row['id'] ?? 0 );
+            if ( $lesson_id <= 0 ) {
+                continue;
+            }
+
+            $wpdb->update(
+                $lessons_table,
+                array(
+                    'status'       => 'finalized',
+                    'finalized_at' => $now_mysql,
+                    'updated_at'   => $now_mysql,
+                ),
+                array( 'id' => $lesson_id ),
+                array( '%s', '%s', '%s' ),
+                array( '%d' )
+            );
+
+            $this->mrm_finalization_debug_log( 'lesson_finalized', array(
+                'lesson_id'    => $lesson_id,
+                'delivered_at' => (string) ( $row['delivered_at'] ?? '' ),
+                'finalized_at' => $now_mysql,
             ) );
         }
     }
@@ -6156,6 +6263,7 @@ class MRM_Lesson_Scheduler {
  * Activation hook in main scope.
  */
 register_activation_hook( __FILE__, array( 'MRM_Lesson_Scheduler', 'activate' ) );
+register_deactivation_hook( __FILE__, array( 'MRM_Lesson_Scheduler', 'deactivate' ) );
 
 // Boot plugin.
 MRM_Lesson_Scheduler::get_instance();

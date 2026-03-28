@@ -737,6 +737,14 @@ class MRM_Payments_Hub_Single {
     $this->stripe_debug_log($message, $context);
   }
 
+  private function mrm_finalization_debug_log($message, $context = array()) {
+    if (!is_array($context)) {
+      $context = array('value' => $context);
+    }
+
+    error_log('[MRM Lesson Finalization] ' . $message . ' ' . wp_json_encode($context));
+  }
+
   private function subscription_price_id() {
     $s = $this->get_settings();
     if ($this->is_test_mode()) {
@@ -5446,6 +5454,27 @@ class MRM_Payments_Hub_Single {
     }
   }
 
+  private function mrm_is_lesson_refund_locked($lesson) {
+    if (!is_array($lesson) || empty($lesson)) {
+      return false;
+    }
+
+    $status = (string)($lesson['status'] ?? '');
+    if ($status === 'finalized') {
+      return true;
+    }
+
+    $delivered_at = (string)($lesson['delivered_at'] ?? '');
+    if ($delivered_at !== '') {
+      $delivered_ts = strtotime($delivered_at);
+      if ($delivered_ts && $delivered_ts <= (time() - (7 * DAY_IN_SECONDS))) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   public function on_lesson_cancelled($data) {
     global $wpdb;
 
@@ -5462,6 +5491,15 @@ class MRM_Payments_Hub_Single {
       "SELECT * FROM {$lessons_table} WHERE id=%d LIMIT 1",
       $lesson_id
     ), ARRAY_A);
+
+    if ($this->mrm_is_lesson_refund_locked($lesson)) {
+      $this->mrm_finalization_debug_log('refund_and_cancellation_email_blocked', array(
+        'lesson_id' => $lesson_id,
+        'status' => (string)($lesson['status'] ?? ''),
+        'delivered_at' => (string)($lesson['delivered_at'] ?? ''),
+      ));
+      return;
+    }
 
     if ($payment_mode === 'autopay') {
       $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
