@@ -742,7 +742,16 @@ class MRM_Payments_Hub_Single {
       $context = array('value' => $context);
     }
 
-    error_log('[MRM Lesson Finalization] ' . $message . ' ' . wp_json_encode($context));
+    $line = '[' . gmdate('d-M-Y H:i:s') . ' UTC] [MRM Lesson Finalization] ' . $message;
+
+    if (!empty($context)) {
+      $line .= ' ' . wp_json_encode($context);
+    }
+
+    $line .= PHP_EOL;
+
+    $log_file = trailingslashit(WP_CONTENT_DIR) . 'stripe-debug.log';
+    @file_put_contents($log_file, $line, FILE_APPEND | LOCK_EX);
   }
 
   private function subscription_price_id() {
