@@ -728,6 +728,15 @@ class MRM_Payments_Hub_Single {
     }
   }
 
+  private function mrm_subscription_debug_log($message, $context = array()) {
+    if (!is_array($context)) {
+      $context = array('value' => $context);
+    }
+
+    $context['component'] = 'sheet_music_subscription';
+    $this->stripe_debug_log($message, $context);
+  }
+
   private function subscription_price_id() {
     $s = $this->get_settings();
     if ($this->is_test_mode()) {
@@ -2269,7 +2278,48 @@ class MRM_Payments_Hub_Single {
       'status' => (string)($subscription['status'] ?? ''),
       'email' => $email,
     ));
+    $this->mrm_subscription_debug_log('customer.subscription.created webhook entered', array(
+      'subscription_id' => (string)($subscription['id'] ?? ''),
+      'status' => (string)($subscription['status'] ?? ''),
+      'email' => $email,
+    ));
+
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+
+    $subscription_id = (string)($subscription['id'] ?? '');
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+
+    if (is_array($local) && !empty($local)) {
+      $order = $this->get_order_by_meta_value('mrm_sheet_music_subscription_id', $subscription_id);
+      $email_sent_at = '';
+
+      if (is_array($order) && !empty($order)) {
+        $email_sent_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_enrollment_email_sent_at', '');
+      }
+
+      if ($email_sent_at === '' && in_array((string)($subscription['status'] ?? ''), array('trialing', 'active'), true)) {
+        $billing_anchor_ts = 0;
+        if (!empty($subscription['current_period_end'])) {
+          $billing_anchor_ts = (int)$subscription['current_period_end'];
+        }
+
+        $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $billing_anchor_ts);
+        $this->stripe_debug_log('subscription created webhook enrollment email result', array(
+          'subscription_id' => $subscription_id,
+          'email' => (string)($local['email_plain'] ?? ''),
+          'sent' => ($sent ? 'yes' : 'no'),
+        ));
+        $this->mrm_subscription_debug_log('created webhook enrollment email result', array(
+          'subscription_id' => $subscription_id,
+          'email' => (string)($local['email_plain'] ?? ''),
+          'sent' => ($sent ? 'yes' : 'no'),
+        ));
+
+        if ($sent && is_array($order) && !empty($order)) {
+          $this->mrm_set_order_meta_flag((int)$order['id'], 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
+        }
+      }
+    }
   }
 
   private function mrm_handle_customer_subscription_updated_webhook($subscription) {
@@ -2285,20 +2335,42 @@ class MRM_Payments_Hub_Single {
 
   private function mrm_handle_customer_subscription_deleted_webhook($subscription) {
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    $subscription_id = (string)($subscription['id'] ?? '');
+
     $this->stripe_debug_log('customer.subscription.deleted handler entered', array(
-      'subscription_id' => (string)($subscription['id'] ?? ''),
+      'subscription_id' => $subscription_id,
+      'status' => (string)($subscription['status'] ?? ''),
+      'email' => $email,
+    ));
+    $this->mrm_subscription_debug_log('customer.subscription.deleted webhook entered', array(
+      'subscription_id' => $subscription_id,
       'status' => (string)($subscription['status'] ?? ''),
       'email' => $email,
     ));
 
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
 
-    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id((string)($subscription['id'] ?? ''));
+    $order = $this->get_order_by_meta_value('mrm_sheet_music_subscription_id', $subscription_id);
+    if (is_array($order) && !empty($order)) {
+      $order_id = (int)($order['id'] ?? 0);
+      if ($order_id > 0) {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'retry_reopened_after_unhealthy_subscription');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Stripe reported the subscription as deleted/canceled; reopening activation.');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_id', '');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_created_at', '');
+        $this->mrm_subscription_debug_log('deleted webhook reopened order for retry', array(
+          'order_id' => $order_id,
+          'subscription_id' => $subscription_id,
+        ));
+      }
+    }
+
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
     if (!empty($local['email_plain'])) {
       $sent = $this->mrm_send_sheet_music_subscription_cancelled_email($local, $subscription);
 
       $this->stripe_debug_log('subscription cancellation email result', array(
-        'subscription_id' => (string)($subscription['id'] ?? ''),
+        'subscription_id' => $subscription_id,
         'email' => (string)($local['email_plain'] ?? ''),
         'sent' => ($sent ? 'yes' : 'no'),
       ));
@@ -3058,6 +3130,8 @@ class MRM_Payments_Hub_Single {
            OR metadata_json LIKE %s
            OR metadata_json LIKE %s
            OR metadata_json LIKE %s
+           OR metadata_json LIKE %s
+           OR metadata_json LIKE %s
          )
        ORDER BY id DESC
        LIMIT %d",
@@ -3066,6 +3140,8 @@ class MRM_Payments_Hub_Single {
       '%\"mrm_sheet_music_subscription_status\":\"payment_intent_retrieve_failed\"%',
       '%\"mrm_sheet_music_subscription_status\":\"create_failed\"%',
       '%\"mrm_sheet_music_subscription_status\":\"payment_method_not_ready\"%',
+      '%\"mrm_sheet_music_subscription_status\":\"retry_reopened_after_unhealthy_subscription\"%',
+      '%\"mrm_sheet_music_subscription_status\":\"retry_reopened_after_stale_created_flag\"%',
       $limit
     );
 
@@ -3078,6 +3154,12 @@ class MRM_Payments_Hub_Single {
       $order_id = (int)$order_id;
       if ($order_id <= 0) return false;
 
+      $this->mrm_subscription_debug_log('activation helper entered', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'pi_provided' => (!empty($pi) ? 'yes' : 'no'),
+      ));
+
       $order = $this->get_order($order_id);
       if (!is_array($order) || empty($order)) {
         return false;
@@ -3088,8 +3170,46 @@ class MRM_Payments_Hub_Single {
 
       $already_created_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_created_at', '');
       $already_subscription_id = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_id', '');
-      if ($already_created_at !== '' || $already_subscription_id !== '') {
-        return true;
+
+      $this->mrm_subscription_debug_log('activation helper existing subscription flags', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'existing_created_at' => $already_created_at,
+        'existing_subscription_id' => $already_subscription_id,
+      ));
+
+      if ($already_subscription_id !== '') {
+        $existing_local = $this->mrm_get_sheet_music_subscription_by_stripe_id($already_subscription_id);
+        $existing_status = is_array($existing_local) ? (string)($existing_local['stripe_status'] ?? '') : '';
+
+        if (in_array($existing_status, array('trialing', 'active'), true)) {
+          return true;
+        }
+
+        // If the prior subscription record exists but is no longer healthy, reopen activation.
+        if ($existing_status !== '') {
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'retry_reopened_after_unhealthy_subscription');
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Previous subscription record was not active/trialing; reopening activation.');
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_id', '');
+          $already_subscription_id = '';
+        }
+      }
+
+      if ($already_created_at !== '' && $already_subscription_id === '') {
+        $existing_local_by_order = array();
+        $email_for_lookup = sanitize_email((string)($order_meta['mrm_customer_email'] ?? ''));
+        if ($email_for_lookup && is_email($email_for_lookup)) {
+          $existing_local_by_order = $this->mrm_get_active_sheet_music_subscription_by_email($email_for_lookup);
+        }
+
+        if (!empty($existing_local_by_order['id'])) {
+          return true;
+        }
+
+        // Created-at alone should not permanently block activation if no healthy active local subscription exists.
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'retry_reopened_after_stale_created_flag');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Stale created flag found without healthy active local subscription; reopening activation.');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_created_at', '');
       }
 
       $order_status = (string)($order['status'] ?? '');
@@ -3119,7 +3239,24 @@ class MRM_Payments_Hub_Single {
       $meta = array_merge($order_meta, $pi_meta);
 
       $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
+
+      $this->mrm_subscription_debug_log('activation helper add-on check', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'product_type' => $product_type,
+        'addon_yes' => ($addon_yes ? 'yes' : 'no'),
+        'order_meta_addon' => (string)($order_meta['mrm_sheet_music_addon'] ?? ''),
+        'pi_meta_addon' => (string)($pi_meta['mrm_sheet_music_addon'] ?? ''),
+        'email' => (string)($meta['mrm_customer_email'] ?? ''),
+      ));
+
       if (!$addon_yes || $product_type !== 'lesson') {
+        $this->mrm_subscription_debug_log('activation helper exited: add-on not eligible', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'product_type' => $product_type,
+          'addon_yes' => ($addon_yes ? 'yes' : 'no'),
+        ));
         return false;
       }
 
@@ -3213,6 +3350,18 @@ class MRM_Payments_Hub_Single {
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'creating');
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', '');
 
+      $this->mrm_subscription_debug_log('about to call stripe_create_subscription', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'pi_id' => $pi_id,
+        'customer_id' => $customer_id,
+        'payment_method_id' => $payment_method_id,
+        'email' => $email,
+        'price_id' => $price_id,
+        'automatic_tax_enabled' => ($enable_subscription_tax ? 'yes' : 'no'),
+        'billing_cycle_anchor_ts' => $billing_cycle_anchor_ts,
+      ));
+
       $subscription = $this->stripe_create_subscription(
         $customer_id,
         $price_id,
@@ -3231,7 +3380,7 @@ class MRM_Payments_Hub_Single {
         $enable_subscription_tax
       );
 
-      $this->stripe_debug_log('subscription activation create response received', array(
+      $this->mrm_subscription_debug_log('subscription create response received', array(
         'context' => $context,
         'order_id' => $order_id,
         'subscription_id' => (string)($subscription['id'] ?? ''),
@@ -3249,22 +3398,53 @@ class MRM_Payments_Hub_Single {
       $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
 
       $subscription_id = (string)($subscription['id'] ?? '');
+      $subscription_status = (string)($subscription['status'] ?? '');
+
       if ($subscription_id !== '') {
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_id', $subscription_id);
       }
 
-      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', (string)($subscription['status'] ?? 'created'));
-      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_created_at', current_time('mysql'));
-      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', '');
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', ($subscription_status !== '' ? $subscription_status : 'created'));
+
+      if (in_array($subscription_status, array('trialing', 'active'), true)) {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_created_at', current_time('mysql'));
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', '');
+      } else {
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Subscription object was created but did not reach a healthy active/trialing state.');
+      }
 
       $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
       $email_sent_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_enrollment_email_sent_at', '');
 
       if (is_array($local) && !empty($local) && $email_sent_at === '') {
+        $this->mrm_subscription_debug_log('attempting enrollment email from activation helper', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'subscription_id' => $subscription_id,
+          'local_status' => (string)($local['stripe_status'] ?? ''),
+          'email' => (string)($local['email_plain'] ?? ''),
+        ));
+
         $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $billing_cycle_anchor_ts);
+
+        $this->mrm_subscription_debug_log('activation helper enrollment email result', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'subscription_id' => $subscription_id,
+          'sent' => ($sent ? 'yes' : 'no'),
+        ));
+
         if ($sent) {
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
         }
+      } else {
+        $this->mrm_subscription_debug_log('activation helper skipped enrollment email', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'subscription_id' => $subscription_id,
+          'local_row_found' => (!empty($local) ? 'yes' : 'no'),
+          'email_sent_at' => $email_sent_at,
+        ));
       }
 
       return true;
@@ -3296,7 +3476,7 @@ class MRM_Payments_Hub_Single {
       $order_id = (int)($order['id'] ?? 0);
       if ($order_id <= 0) continue;
 
-      $this->stripe_debug_log('cron retrying sheet music subscription activation', array(
+      $this->mrm_subscription_debug_log('cron retrying subscription activation', array(
         'order_id' => $order_id,
       ));
 
@@ -3479,6 +3659,18 @@ class MRM_Payments_Hub_Single {
     $canceled_at = !empty($subscription['canceled_at']) ? $this->mrm_mysql_from_ts((int)$subscription['canceled_at']) : null;
 
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? $fallback_email));
+
+    if ((!$email || !is_email($email)) && !empty($subscription['customer'])) {
+      $order_by_subscription = $this->get_order_by_meta_value('mrm_sheet_music_subscription_id', (string)$subscription['id']);
+      if (is_array($order_by_subscription) && !empty($order_by_subscription)) {
+        $order_meta_for_email = $this->mrm_get_order_meta_array($order_by_subscription);
+        $candidate_email = sanitize_email((string)($order_meta_for_email['mrm_customer_email'] ?? ''));
+        if ($candidate_email && is_email($candidate_email)) {
+          $email = $candidate_email;
+        }
+      }
+    }
+
     $email_hash = $email && is_email($email) ? $this->email_hash($email) : '';
 
     return $this->mrm_upsert_sheet_music_subscription_row(array(
@@ -3991,10 +4183,13 @@ class MRM_Payments_Hub_Single {
 
     $title = 'Sheet music subscription enrolled';
     $intro = '<p>You have successfully enrolled in the sheet music subscription service.</p>';
+    $status_label = (string)($sub_row['stripe_status'] ?? 'active');
+    if ($status_label === '') $status_label = 'active';
+
     $details =
       '<div><strong>Subscription:</strong> Monthly sheet music access</div>' .
       '<div><strong>Amount:</strong> $5.00 per month</div>' .
-      '<div><strong>Status:</strong> Active</div>' .
+      '<div><strong>Status:</strong> ' . esc_html(ucwords(str_replace('_', ' ', $status_label))) . '</div>' .
       '<div style="margin-top:12px;"><strong>Purchase details</strong></div>' .
       '<div>Your subscription has been created successfully in our billing system.</div>' .
       '<div style="margin-top:12px;">You will be billed again on or about <strong>' . esc_html($anchor_label) . '</strong>, and then monthly thereafter while the subscription remains active.</div>' .
@@ -7229,7 +7424,15 @@ class MRM_Payments_Hub_Single {
       'payment_method_id' => (string)($pi['payment_method'] ?? ''),
     ));
 
-    return $this->mrm_attempt_sheet_music_subscription_activation($order_id, $pi, 'retry_helper');
+    $result = $this->mrm_attempt_sheet_music_subscription_activation($order_id, $pi, 'retry_helper');
+
+    $this->mrm_subscription_debug_log('retry helper completed', array(
+      'order_id' => $order_id,
+      'result' => ($result ? 'true' : 'false'),
+      'pi_id' => $pi_id,
+    ));
+
+    return $result;
   }
 
 
