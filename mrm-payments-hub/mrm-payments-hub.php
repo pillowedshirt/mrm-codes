@@ -1455,9 +1455,12 @@ class MRM_Payments_Hub_Single {
     $payload = array(
       'currency' => strtolower((string)$currency),
       'customer_details' => array(
+        'address_source' => 'shipping',
         'address' => array(
-          'country' => $country,
-          'postal_code' => $postal,
+          'country' => (string)($address['country'] ?? 'US'),
+          'postal_code' => (string)($address['postal_code'] ?? ''),
+          'state' => (string)($address['state'] ?? ''),
+          'line1' => (string)($address['line1'] ?? ''),
         ),
       ),
       'line_items' => $items,
@@ -1473,11 +1476,12 @@ class MRM_Payments_Hub_Single {
 
     $this->stripe_debug_log('tax calculation request', array(
       'currency' => strtolower((string)$currency),
+      'address_source' => 'shipping',
       'address' => array(
-        'country' => $country,
-        'postal_code' => $postal,
-        'state' => $state,
-        'line1_present' => $line1 ? 'yes' : 'no',
+        'country' => (string)($address['country'] ?? 'US'),
+        'postal_code' => (string)($address['postal_code'] ?? ''),
+        'state' => (string)($address['state'] ?? ''),
+        'line1_present' => (!empty($address['line1']) ? 'yes' : 'no'),
       ),
       'line_items' => $items,
     ));
@@ -3164,6 +3168,13 @@ class MRM_Payments_Hub_Single {
       if (!is_array($order) || empty($order)) {
         return false;
       }
+      $this->mrm_subscription_debug_log('activation helper order loaded', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'order_status' => (string)($order['status'] ?? ''),
+        'product_type' => (string)($order['product_type'] ?? ''),
+        'payment_intent_id' => (string)($order['payment_intent_id'] ?? ''),
+      ));
 
       $order_meta = $this->mrm_get_order_meta_array($order);
       $product_type = (string)($order['product_type'] ?? '');
@@ -3228,10 +3239,25 @@ class MRM_Payments_Hub_Single {
       if (!is_array($pi) || empty($pi)) {
         $pi = $this->stripe_retrieve_payment_intent($pi_id);
         if (is_wp_error($pi)) {
+          $this->mrm_subscription_debug_log('activation helper PI retrieve failed', array(
+            'context' => $context,
+            'order_id' => $order_id,
+            'pi_id' => $pi_id,
+            'message' => $pi->get_error_message(),
+          ));
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'payment_intent_retrieve_failed');
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $pi->get_error_message());
           return false;
         }
+
+        $this->mrm_subscription_debug_log('activation helper PI retrieved', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'pi_id' => $pi_id,
+          'pi_status' => (string)($pi['status'] ?? ''),
+          'customer' => (string)($pi['customer'] ?? ''),
+          'payment_method' => (string)($pi['payment_method'] ?? ''),
+        ));
       }
 
       // IMPORTANT: merge PI metadata before checking whether the sheet music add-on was selected.
@@ -3240,18 +3266,18 @@ class MRM_Payments_Hub_Single {
 
       $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
 
-      $this->mrm_subscription_debug_log('activation helper add-on check', array(
+      $this->mrm_subscription_debug_log('activation helper add-on gate', array(
         'context' => $context,
         'order_id' => $order_id,
         'product_type' => $product_type,
         'addon_yes' => ($addon_yes ? 'yes' : 'no'),
         'order_meta_addon' => (string)($order_meta['mrm_sheet_music_addon'] ?? ''),
         'pi_meta_addon' => (string)($pi_meta['mrm_sheet_music_addon'] ?? ''),
-        'email' => (string)($meta['mrm_customer_email'] ?? ''),
+        'customer_email' => (string)($meta['mrm_customer_email'] ?? ''),
       ));
 
       if (!$addon_yes || $product_type !== 'lesson') {
-        $this->mrm_subscription_debug_log('activation helper exited: add-on not eligible', array(
+        $this->mrm_subscription_debug_log('activation helper exited at add-on gate', array(
           'context' => $context,
           'order_id' => $order_id,
           'product_type' => $product_type,
@@ -3261,20 +3287,47 @@ class MRM_Payments_Hub_Single {
       }
 
       $price_id = $this->subscription_price_id();
+      $this->mrm_subscription_debug_log('activation helper price lookup', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'price_id' => $price_id,
+      ));
       if ($price_id === '') {
+        $this->mrm_subscription_debug_log('activation helper exited: missing price id', array(
+          'context' => $context,
+          'order_id' => $order_id,
+        ));
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'configuration_missing');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing Stripe subscription Price ID.');
         return false;
       }
 
       $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
+      $this->mrm_subscription_debug_log('activation helper email check', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'email' => $email,
+      ));
       if (!$email || !is_email($email)) {
+        $this->mrm_subscription_debug_log('activation helper exited: invalid email', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'email' => (string)($meta['mrm_customer_email'] ?? ''),
+        ));
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_email');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing valid customer email.');
         return false;
       }
 
       $existing = $this->mrm_get_active_sheet_music_subscription_by_email($email);
+      $this->mrm_subscription_debug_log('activation helper duplicate active lookup', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'email' => $email,
+        'existing_found' => (!empty($existing['id']) ? 'yes' : 'no'),
+        'existing_subscription_id' => (string)($existing['stripe_subscription_id'] ?? ''),
+        'existing_status' => (string)($existing['stripe_status'] ?? ''),
+      ));
       if (!empty($existing['id'])) {
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'already_active');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_id', (string)($existing['stripe_subscription_id'] ?? ''));
@@ -3285,15 +3338,20 @@ class MRM_Payments_Hub_Single {
       $customer_id = (string)($pi['customer'] ?? '');
       $payment_method_id = (string)($pi['payment_method'] ?? '');
 
-      $this->stripe_debug_log('subscription activation helper inspecting PI customer/payment method', array(
+      $this->mrm_subscription_debug_log('activation helper PI customer/payment method check', array(
         'context' => $context,
         'order_id' => $order_id,
-        'pi_id' => $pi_id,
         'customer_id' => $customer_id,
         'payment_method_id' => $payment_method_id,
       ));
 
       if ($customer_id === '' || $payment_method_id === '') {
+        $this->mrm_subscription_debug_log('activation helper exited: missing customer or payment method', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'customer_present' => ($customer_id !== '' ? 'yes' : 'no'),
+          'payment_method_present' => ($payment_method_id !== '' ? 'yes' : 'no'),
+        ));
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'retry_pending_customer_or_payment_method');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Stripe customer/payment method is not ready yet.');
         return false;
@@ -3301,16 +3359,23 @@ class MRM_Payments_Hub_Single {
 
       $pm_ready = $this->mrm_ensure_customer_payment_method_ready($customer_id, $payment_method_id);
       if (is_wp_error($pm_ready)) {
-        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'payment_method_not_ready');
-        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $pm_ready->get_error_message());
-        $this->stripe_debug_log('subscription activation payment-method readiness failed', array(
+        $this->mrm_subscription_debug_log('activation helper payment-method readiness failed', array(
           'context' => $context,
           'order_id' => $order_id,
-          'pi_id' => $pi_id,
+          'customer_id' => $customer_id,
+          'payment_method_id' => $payment_method_id,
           'message' => $pm_ready->get_error_message(),
         ));
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'payment_method_not_ready');
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $pm_ready->get_error_message());
         return false;
       }
+      $this->mrm_subscription_debug_log('activation helper payment-method readiness passed', array(
+        'context' => $context,
+        'order_id' => $order_id,
+        'customer_id' => $customer_id,
+        'payment_method_id' => $payment_method_id,
+      ));
 
       $address = array(
         'line1' => (string)($meta['mrm_tax_line1'] ?? ''),
@@ -3329,11 +3394,17 @@ class MRM_Payments_Hub_Single {
       $address_ready_for_tax = !is_wp_error($customer_update);
 
       if (is_wp_error($customer_update)) {
-        $this->stripe_debug_log('subscription activation customer address refresh failed', array(
+        $this->mrm_subscription_debug_log('activation helper customer address refresh failed', array(
           'context' => $context,
           'order_id' => $order_id,
           'customer_id' => $customer_id,
           'message' => $customer_update->get_error_message(),
+        ));
+      } else {
+        $this->mrm_subscription_debug_log('activation helper customer address refresh passed', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'customer_id' => $customer_id,
         ));
       }
 
@@ -3360,6 +3431,8 @@ class MRM_Payments_Hub_Single {
         'price_id' => $price_id,
         'automatic_tax_enabled' => ($enable_subscription_tax ? 'yes' : 'no'),
         'billing_cycle_anchor_ts' => $billing_cycle_anchor_ts,
+        'tax_state' => (string)($meta['mrm_tax_state'] ?? ''),
+        'tax_country' => (string)($meta['mrm_tax_country'] ?? ''),
       ));
 
       $subscription = $this->stripe_create_subscription(
@@ -3385,6 +3458,8 @@ class MRM_Payments_Hub_Single {
         'order_id' => $order_id,
         'subscription_id' => (string)($subscription['id'] ?? ''),
         'subscription_status' => (string)($subscription['status'] ?? ''),
+        'default_payment_method' => (string)($subscription['default_payment_method'] ?? ''),
+        'customer' => (string)($subscription['customer'] ?? ''),
         'is_wp_error' => (is_wp_error($subscription) ? 'yes' : 'no'),
         'automatic_tax_enabled' => ($enable_subscription_tax ? 'yes' : 'no'),
       ));
