@@ -4794,10 +4794,12 @@ class MRM_Lesson_Scheduler {
             }
 
             $this->mrm_finalization_debug_log( 'lesson_finalized', array(
-                'lesson_id'      => $lesson_id,
-                'delivered_at'   => (string) ( $row['delivered_at'] ?? '' ),
-                'finalized_at'   => $now_mysql,
-                'rows_affected'  => $updated,
+                'lesson_id'       => $lesson_id,
+                'previous_status' => (string) ( $row['status'] ?? '' ),
+                'new_status'      => 'finalized',
+                'delivered_at'    => (string) ( $row['delivered_at'] ?? '' ),
+                'finalized_at'    => $now_mysql,
+                'rows_affected'   => $updated,
             ) );
         }
 
