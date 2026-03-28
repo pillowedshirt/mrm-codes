@@ -1689,6 +1689,7 @@ class MRM_Lesson_Scheduler {
         add_action( 'admin_post_nopriv_mrm_safety_feedback_submit', array( $this, 'handle_safety_feedback_submit' ) );
         add_action( 'admin_post_mrm_run_safety_reminder_sweep_now', array( $this, 'admin_run_safety_reminder_sweep_now' ) );
         add_action( 'admin_post_mrm_run_safety_exception_check_now', array( $this, 'admin_run_safety_exception_check_now' ) );
+        add_action( 'admin_post_mrm_run_safety_feedback_request_now', array( $this, 'admin_run_safety_feedback_request_now' ) );
         add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
         // Pattern B: periodic sync of upcoming events so gate/reminders stay accurate if instructors drag events
         add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
@@ -1699,9 +1700,6 @@ class MRM_Lesson_Scheduler {
         add_action( 'mrm_scheduler_send_safety_reminders', array( $this, 'cron_send_safety_reminders' ) );
         add_action( 'mrm_scheduler_check_safety_exceptions', array( $this, 'cron_check_safety_exceptions' ) );
         add_action( 'mrm_scheduler_send_feedback_requests', array( $this, 'cron_send_feedback_requests' ) );
-        $this->mrm_safety_log( 'safety_system_constructor_loaded', array(
-            'file' => __FILE__,
-        ) );
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
             wp_schedule_event( time() + 60, 'mrm_1min', 'mrm_scheduler_sync_upcoming_events' );
         }
@@ -1720,11 +1718,6 @@ class MRM_Lesson_Scheduler {
                 'hook' => 'mrm_scheduler_send_safety_reminders',
                 'schedule' => 'mrm_5min',
             ) );
-        } else {
-            $this->mrm_safety_log( 'cron_hook_already_scheduled', array(
-                'hook' => 'mrm_scheduler_send_safety_reminders',
-                'next_run' => wp_next_scheduled( 'mrm_scheduler_send_safety_reminders' ),
-            ) );
         }
 
         if ( ! wp_next_scheduled( 'mrm_scheduler_check_safety_exceptions' ) ) {
@@ -1733,11 +1726,6 @@ class MRM_Lesson_Scheduler {
                 'hook' => 'mrm_scheduler_check_safety_exceptions',
                 'schedule' => 'mrm_5min',
             ) );
-        } else {
-            $this->mrm_safety_log( 'cron_hook_already_scheduled', array(
-                'hook' => 'mrm_scheduler_check_safety_exceptions',
-                'next_run' => wp_next_scheduled( 'mrm_scheduler_check_safety_exceptions' ),
-            ) );
         }
 
         if ( ! wp_next_scheduled( 'mrm_scheduler_send_feedback_requests' ) ) {
@@ -1745,11 +1733,6 @@ class MRM_Lesson_Scheduler {
             $this->mrm_safety_log( 'scheduled_cron_hook', array(
                 'hook' => 'mrm_scheduler_send_feedback_requests',
                 'schedule' => 'mrm_5min',
-            ) );
-        } else {
-            $this->mrm_safety_log( 'cron_hook_already_scheduled', array(
-                'hook' => 'mrm_scheduler_send_feedback_requests',
-                'next_run' => wp_next_scheduled( 'mrm_scheduler_send_feedback_requests' ),
             ) );
         }
         // Gate page (virtual) for joining online lessons
@@ -1779,27 +1762,6 @@ class MRM_Lesson_Scheduler {
 
     protected function maybe_reschedule_cron_jobs() {
         $this->mrm_safety_log( 'maybe_reschedule_cron_jobs_entered', array() );
-        $hooks = array(
-            'mrm_scheduler_sync_upcoming_events',
-            'mrm_scheduler_reconcile_completed_lessons',
-            'mrm_scheduler_reconcile_cancelled_lessons',
-            'mrm_scheduler_finalize_old_lessons',
-            'mrm_scheduler_send_safety_reminders',
-            'mrm_scheduler_check_safety_exceptions',
-            'mrm_scheduler_send_feedback_requests',
-        );
-
-        foreach ( $hooks as $hook ) {
-            if ( function_exists( 'wp_clear_scheduled_hook' ) ) {
-                wp_clear_scheduled_hook( $hook );
-            } else {
-                while ( $timestamp = wp_next_scheduled( $hook ) ) {
-                    wp_unschedule_event( $timestamp, $hook );
-                }
-            }
-        }
-
-        add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
 
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
             wp_schedule_event( time() + 60, 'mrm_1min', 'mrm_scheduler_sync_upcoming_events' );
@@ -1813,22 +1775,28 @@ class MRM_Lesson_Scheduler {
         if ( ! wp_next_scheduled( 'mrm_scheduler_finalize_old_lessons' ) ) {
             wp_schedule_event( time() + 300, 'hourly', 'mrm_scheduler_finalize_old_lessons' );
         }
+
         if ( ! wp_next_scheduled( 'mrm_scheduler_send_safety_reminders' ) ) {
             wp_schedule_event( time() + 90, 'mrm_5min', 'mrm_scheduler_send_safety_reminders' );
-            $this->mrm_safety_log( 'rescheduled_cron_hook', array(
+            $this->mrm_safety_log( 'rescheduled_missing_cron_hook', array(
                 'hook' => 'mrm_scheduler_send_safety_reminders',
+                'schedule' => 'mrm_5min',
             ) );
         }
+
         if ( ! wp_next_scheduled( 'mrm_scheduler_check_safety_exceptions' ) ) {
-            wp_schedule_event( time() + 120, 'mrm_5min', 'mrm_scheduler_check_safety_exceptions' );
-            $this->mrm_safety_log( 'rescheduled_cron_hook', array(
+            wp_schedule_event( time() + 90, 'mrm_5min', 'mrm_scheduler_check_safety_exceptions' );
+            $this->mrm_safety_log( 'rescheduled_missing_cron_hook', array(
                 'hook' => 'mrm_scheduler_check_safety_exceptions',
+                'schedule' => 'mrm_5min',
             ) );
         }
+
         if ( ! wp_next_scheduled( 'mrm_scheduler_send_feedback_requests' ) ) {
-            wp_schedule_event( time() + 150, 'mrm_5min', 'mrm_scheduler_send_feedback_requests' );
-            $this->mrm_safety_log( 'rescheduled_cron_hook', array(
+            wp_schedule_event( time() + 90, 'mrm_5min', 'mrm_scheduler_send_feedback_requests' );
+            $this->mrm_safety_log( 'rescheduled_missing_cron_hook', array(
                 'hook' => 'mrm_scheduler_send_feedback_requests',
+                'schedule' => 'mrm_5min',
             ) );
         }
     }
@@ -5119,6 +5087,17 @@ class MRM_Lesson_Scheduler {
             array( '%d', '%s', '%s' )
         );
 
+        if ( $wpdb->last_error ) {
+            $this->mrm_safety_log( 'attendance_row_insert_db_error', array(
+                'lesson_id' => (int) $lesson_id,
+                'db_error'  => $wpdb->last_error,
+            ) );
+        }
+
+        $this->mrm_safety_log( 'attendance_row_ensured', array(
+            'lesson_id' => (int) $lesson_id,
+        ) );
+
         return $this->get_attendance_row_by_lesson_id( $lesson_id );
     }
 
@@ -5250,13 +5229,47 @@ class MRM_Lesson_Scheduler {
         );
     }
 
+    protected function get_safety_reminder_window_minutes() {
+        return array(
+            'from' => 0,
+            'to'   => 180,
+        );
+    }
+
+    public function run_safety_reminder_sweep_now() {
+        $this->mrm_safety_log( 'run_safety_reminder_sweep_now_called', array() );
+        return $this->cron_send_safety_reminders();
+    }
+
+    public function run_safety_exception_check_now() {
+        $this->mrm_safety_log( 'run_safety_exception_check_now_called', array() );
+        return $this->cron_check_safety_exceptions();
+    }
+
+    public function run_safety_feedback_request_now() {
+        $this->mrm_safety_log( 'run_safety_feedback_request_now_called', array() );
+        return $this->cron_send_feedback_requests();
+    }
+
     public function cron_send_safety_reminders() {
         global $wpdb;
 
+        $this->mrm_safety_log( 'cron_send_safety_reminders_entered', array(
+            'current_time_mysql' => current_time( 'mysql' ),
+            'current_time_ts'    => current_time( 'timestamp' ),
+        ) );
+
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $window = $this->get_safety_reminder_window_minutes();
         $now_local = current_time( 'mysql' );
-        $from_local = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) );
-        $to_local   = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) + ( 180 * MINUTE_IN_SECONDS ) );
+        $from_local = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) + ( (int) $window['from'] * MINUTE_IN_SECONDS ) );
+        $to_local   = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) + ( (int) $window['to'] * MINUTE_IN_SECONDS ) );
+
+        $this->mrm_safety_log( 'reminder_window_computed', array(
+            'now_local'  => $now_local,
+            'from_local' => $from_local,
+            'to_local'   => $to_local,
+        ) );
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
@@ -5272,6 +5285,17 @@ class MRM_Lesson_Scheduler {
             ),
             ARRAY_A
         );
+
+        $this->mrm_safety_log( 'reminder_query_completed', array(
+            'row_count' => is_array( $rows ) ? count( $rows ) : 0,
+        ) );
+
+        if ( empty( $rows ) ) {
+            $this->mrm_safety_log( 'reminder_query_returned_no_rows', array(
+                'from_local' => $from_local,
+                'to_local'   => $to_local,
+            ) );
+        }
 
         $this->mrm_safety_log( 'reminder_sweep_started', array(
             'now_local' => $now_local,
@@ -5331,6 +5355,13 @@ class MRM_Lesson_Scheduler {
         $parent_url = $this->mrm_safety_action_url( $parent_token );
         $instructor_url = $this->mrm_safety_action_url( $instructor_arrive_token );
 
+        if ( ! is_email( (string) ( $lesson['student_email'] ?? '' ) ) ) {
+            $this->mrm_safety_log( 'parent_reminder_skipped_invalid_email', array(
+                'lesson_id' => (int) $lesson_id,
+                'student_email' => (string) ( $lesson['student_email'] ?? '' ),
+            ) );
+        }
+
         if ( empty( $attendance['parent_reminder_sent_at'] ) && is_email( (string) ( $lesson['student_email'] ?? '' ) ) ) {
             $intro = '<p>Your lesson begins in about one hour.</p>';
             $details =
@@ -5369,6 +5400,18 @@ class MRM_Lesson_Scheduler {
                 'lesson_id' => $lesson_id,
                 'email' => (string) $lesson['student_email'],
                 'sent' => $sent ? 'yes' : 'no',
+            ) );
+        } elseif ( ! empty( $attendance['parent_reminder_sent_at'] ) ) {
+            $this->mrm_safety_log( 'parent_reminder_skipped_already_sent', array(
+                'lesson_id' => $lesson_id,
+                'parent_reminder_sent_at' => (string) ( $attendance['parent_reminder_sent_at'] ?? '' ),
+            ) );
+        }
+
+        if ( ! is_email( (string) ( $lesson['instructor_email'] ?? '' ) ) ) {
+            $this->mrm_safety_log( 'instructor_reminder_skipped_invalid_email', array(
+                'lesson_id' => (int) $lesson_id,
+                'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
             ) );
         }
 
@@ -5410,11 +5453,20 @@ class MRM_Lesson_Scheduler {
                 'email' => (string) $lesson['instructor_email'],
                 'sent' => $sent ? 'yes' : 'no',
             ) );
+        } elseif ( ! empty( $attendance['instructor_reminder_sent_at'] ) ) {
+            $this->mrm_safety_log( 'instructor_reminder_skipped_already_sent', array(
+                'lesson_id' => $lesson_id,
+                'instructor_reminder_sent_at' => (string) ( $attendance['instructor_reminder_sent_at'] ?? '' ),
+            ) );
         }
     }
 
     public function cron_send_feedback_requests() {
-        $this->mrm_safety_log( 'feedback_request_cron_tick', array() );
+        $this->mrm_safety_log( 'cron_send_feedback_requests_entered', array(
+            'current_time_mysql' => current_time( 'mysql' ),
+            'current_time_ts'    => current_time( 'timestamp' ),
+        ) );
+        $this->mrm_safety_log( 'feedback_request_cron_placeholder_noop', array() );
     }
 
     public function handle_safety_attendance_action() {
@@ -5655,6 +5707,11 @@ class MRM_Lesson_Scheduler {
     public function cron_check_safety_exceptions() {
         global $wpdb;
 
+        $this->mrm_safety_log( 'cron_check_safety_exceptions_entered', array(
+            'current_time_mysql' => current_time( 'mysql' ),
+            'current_time_ts'    => current_time( 'timestamp' ),
+        ) );
+
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $attendance_table = $this->table_attendance();
         $admin_email = $this->get_admin_notification_email();
@@ -5669,11 +5726,15 @@ class MRM_Lesson_Scheduler {
              FROM {$lessons_table} l
              LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
              WHERE l.status = 'scheduled'
-               AND l.start_time <= '" . esc_sql( gmdate( 'Y-m-d H:i:s', time() - (10 * MINUTE_IN_SECONDS) ) ) . "'
+               AND l.start_time <= '" . esc_sql( date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 10 * MINUTE_IN_SECONDS ) ) ) . "'
                AND (a.instructor_arrived_at IS NULL OR a.instructor_arrived_at = '')
                AND (a.arrival_alert_sent_at IS NULL OR a.arrival_alert_sent_at = '')",
             ARRAY_A
         );
+
+        $this->mrm_safety_log( 'arrival_exception_query_completed', array(
+            'row_count' => is_array( $arrival_rows ) ? count( $arrival_rows ) : 0,
+        ) );
 
         foreach ( (array) $arrival_rows as $row ) {
             $lesson_id = (int) ( $row['lesson_id'] ?? $row['id'] ?? 0 );
@@ -5690,13 +5751,17 @@ class MRM_Lesson_Scheduler {
              FROM {$lessons_table} l
              LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
              WHERE l.status IN ('scheduled','delivered')
-               AND l.end_time <= '" . esc_sql( gmdate( 'Y-m-d H:i:s', time() - (60 * MINUTE_IN_SECONDS) ) ) . "'
+               AND l.end_time <= '" . esc_sql( date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 60 * MINUTE_IN_SECONDS ) ) ) . "'
                AND a.instructor_arrived_at IS NOT NULL
                AND a.instructor_arrived_at <> ''
                AND (a.instructor_departed_at IS NULL OR a.instructor_departed_at = '')
                AND (a.departure_alert_sent_at IS NULL OR a.departure_alert_sent_at = '')",
             ARRAY_A
         );
+
+        $this->mrm_safety_log( 'departure_exception_query_completed', array(
+            'row_count' => is_array( $departure_rows ) ? count( $departure_rows ) : 0,
+        ) );
 
         foreach ( (array) $departure_rows as $row ) {
             $lesson_id = (int) ( $row['lesson_id'] ?? $row['id'] ?? 0 );
@@ -5763,7 +5828,7 @@ class MRM_Lesson_Scheduler {
             'user_id' => get_current_user_id(),
         ) );
 
-        $this->cron_send_safety_reminders();
+        $this->run_safety_reminder_sweep_now();
 
         $this->mrm_safety_log( 'manual_reminder_sweep_trigger_finished', array(
             'user_id' => get_current_user_id(),
@@ -5783,13 +5848,34 @@ class MRM_Lesson_Scheduler {
             'user_id' => get_current_user_id(),
         ) );
 
-        $this->cron_check_safety_exceptions();
+        $this->run_safety_exception_check_now();
 
         $this->mrm_safety_log( 'manual_exception_check_trigger_finished', array(
             'user_id' => get_current_user_id(),
         ) );
 
         wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-safety-attendance&manual_exception_check=1' ) );
+        exit;
+    }
+
+    public function admin_run_safety_feedback_request_now() {
+        if ( ! current_user_can( self::CAPABILITY ) ) {
+            wp_die( 'You do not have permission to do that.' );
+        }
+
+        check_admin_referer( 'mrm_run_safety_feedback_request_now' );
+
+        $this->mrm_safety_log( 'manual_feedback_request_trigger_started', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        $this->run_safety_feedback_request_now();
+
+        $this->mrm_safety_log( 'manual_feedback_request_trigger_finished', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-safety-attendance&manual_feedback_request=1' ) );
         exit;
     }
 
@@ -5834,7 +5920,8 @@ class MRM_Lesson_Scheduler {
         echo '<p>This chart shows instructor arrival/departure tracking, parent confirmations, feedback, and alert status.</p>';
         echo '<p style="margin:16px 0 24px 0;">';
         echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_reminder_sweep_now' ), 'mrm_run_safety_reminder_sweep_now' ) ) . '" class="button button-primary" style="margin-right:10px;">Run Safety Reminder Sweep Now</a>';
-        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_exception_check_now' ), 'mrm_run_safety_exception_check_now' ) ) . '" class="button">Run Safety Exception Check Now</a>';
+        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_exception_check_now' ), 'mrm_run_safety_exception_check_now' ) ) . '" class="button" style="margin-right:10px;">Run Safety Exception Check Now</a>';
+        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_feedback_request_now' ), 'mrm_run_safety_feedback_request_now' ) ) . '" class="button">Run Safety Feedback Request Now</a>';
         echo '</p>';
         echo '<table class="widefat striped"><thead><tr>
         <th>Lesson ID</th>
