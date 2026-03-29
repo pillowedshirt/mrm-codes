@@ -128,6 +128,22 @@ class MRM_Lesson_Scheduler {
         }
     }
 
+
+    protected function mrm_consultation_log( $message, $context = array() ) {
+        $log_file = trailingslashit( WP_CONTENT_DIR ) . 'consultation.log';
+
+        $line = '[MRM Consultation] ' . (string) $message;
+
+        if ( ! empty( $context ) ) {
+            $json = wp_json_encode( $context );
+            if ( $json ) {
+                $line .= ' ' . $json;
+            }
+        }
+
+        error_log( $line . "\n", 3, $log_file );
+    }
+
     protected function maybe_log_safety_boot( $message, $context = array(), $ttl = 900 ) {
         $cache_key = 'mrm_safety_boot_' . md5( (string) $message );
 
@@ -5226,6 +5242,10 @@ class MRM_Lesson_Scheduler {
 
 
     protected function maybe_send_consultation_confirmation_for_lesson( $lesson_id ) {
+        $this->mrm_consultation_log( 'maybe_send_consultation_confirmation_for_lesson_entered', array(
+            'lesson_id' => (int) $lesson_id,
+        ) );
+
         $lesson_id = (int) $lesson_id;
         if ( $lesson_id <= 0 ) {
             return false;
@@ -5241,8 +5261,19 @@ class MRM_Lesson_Scheduler {
 
         $context = $this->get_safety_lesson_context( $lesson );
         if ( empty( $context['is_consultation'] ) ) {
+            $this->mrm_consultation_log( 'consultation_confirmation_wrapper_skipped_not_consultation', array(
+                'lesson_id'     => $lesson_id,
+                'lesson_type'   => (string) ( $lesson['lesson_type'] ?? '' ),
+                'context_label' => (string) ( $context['lesson_type_label'] ?? '' ),
+            ) );
             return false;
         }
+
+        $this->mrm_consultation_log( 'consultation_confirmation_wrapper_attempting_send', array(
+            'lesson_id'     => $lesson_id,
+            'student_email' => (string) ( $lesson['student_email'] ?? '' ),
+            'lesson_type'   => (string) ( $lesson['lesson_type'] ?? '' ),
+        ) );
 
         return $this->send_consultation_scheduling_confirmation( $lesson );
     }
@@ -5454,10 +5485,22 @@ class MRM_Lesson_Scheduler {
     }
 
     protected function send_consultation_scheduling_confirmation( $lesson ) {
+        $this->mrm_consultation_log( 'send_consultation_scheduling_confirmation_entered', array(
+            'lesson_id'      => (int) ( $lesson['id'] ?? 0 ),
+            'student_email'  => (string) ( $lesson['student_email'] ?? '' ),
+            'lesson_type'    => (string) ( $lesson['lesson_type'] ?? '' ),
+            'start_time'     => (string) ( $lesson['start_time'] ?? '' ),
+        ) );
+
         $lesson = is_array( $lesson ) ? $lesson : array();
         $context = $this->get_safety_lesson_context( $lesson );
 
         if ( empty( $context['is_consultation'] ) ) {
+            $this->mrm_consultation_log( 'consultation_confirmation_skipped_not_consultation', array(
+                'lesson_id'     => (int) ( $lesson['id'] ?? 0 ),
+                'lesson_type'   => (string) ( $lesson['lesson_type'] ?? '' ),
+                'context_label' => (string) ( $context['lesson_type_label'] ?? '' ),
+            ) );
             return false;
         }
 
@@ -5498,10 +5541,12 @@ class MRM_Lesson_Scheduler {
             )
         );
 
-        $this->mrm_safety_log( 'consultation_confirmation_result', array(
-            'lesson_id' => (int) ( $lesson['id'] ?? 0 ),
-            'email'     => $student_email,
-            'sent'      => $sent ? 'yes' : 'no',
+        $this->mrm_consultation_log( 'consultation_confirmation_result', array(
+            'lesson_id'      => (int) ( $lesson['id'] ?? 0 ),
+            'email'          => $student_email,
+            'subject'        => $this->get_safety_confirmation_subject( $lesson ),
+            'type_label'     => (string) ( $context['lesson_type_label'] ?? '' ),
+            'sent'           => $sent ? 'yes' : 'no',
         ) );
 
         return $sent;
@@ -5584,6 +5629,16 @@ class MRM_Lesson_Scheduler {
 
             $format_note = 'This is an in-person lesson. Please plan to meet in the agreed open, public, or community lesson setting for the scheduled lesson time.';
         }
+
+        $this->mrm_consultation_log( 'consultation_context_evaluated', array(
+            'lesson_id'               => (int) ( $lesson['id'] ?? 0 ),
+            'raw_lesson_type'         => (string) ( $lesson['lesson_type'] ?? '' ),
+            'normalized_lesson_type'  => (string) $normalized_lesson_type,
+            'is_online'               => ! empty( $is_online ) ? 'yes' : 'no',
+            'is_consultation'         => ! empty( $is_consultation ) ? 'yes' : 'no',
+            'lesson_type_label'       => (string) $lesson_type_label,
+            'start_time'              => (string) ( $lesson['start_time'] ?? '' ),
+        ) );
 
         return array(
             'start_label'       => $start_label,
@@ -6043,6 +6098,16 @@ class MRM_Lesson_Scheduler {
         $attendance = $this->ensure_attendance_row( $lesson_id );
         $context = $this->get_safety_lesson_context( $lesson );
         $is_consultation = ! empty( $context['is_consultation'] );
+
+        $this->mrm_consultation_log( 'consultation_reminder_context', array(
+            'lesson_id'         => (int) $lesson_id,
+            'lesson_type'       => (string) ( $lesson['lesson_type'] ?? '' ),
+            'is_consultation'   => $is_consultation ? 'yes' : 'no',
+            'type_label'        => (string) ( $context['lesson_type_label'] ?? '' ),
+            'start_time'        => (string) ( $lesson['start_time'] ?? '' ),
+            'student_email'     => (string) ( $lesson['student_email'] ?? '' ),
+            'instructor_email'  => (string) ( $lesson['instructor_email'] ?? '' ),
+        ) );
         $exp = time() + ( 8 * HOUR_IN_SECONDS );
 
         $parent_arrived_token       = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'confirm_arrival', $exp );
@@ -6104,6 +6169,15 @@ class MRM_Lesson_Scheduler {
                     $parent_buttons
                 );
 
+                if ( $is_consultation ) {
+                    $this->mrm_consultation_log( 'consultation_parent_reminder_attempt', array(
+                        'lesson_id'      => (int) $lesson_id,
+                        'email'          => $student_email,
+                        'subject'        => $this->get_safety_reminder_subject( $lesson ),
+                        'type_label'     => (string) ( $context['lesson_type_label'] ?? '' ),
+                    ) );
+                }
+
                 $parent_sent = wp_mail(
                     $student_email,
                     $this->get_safety_reminder_subject( $lesson ),
@@ -6125,6 +6199,14 @@ class MRM_Lesson_Scheduler {
                     'email'     => $student_email,
                     'sent'      => $parent_sent ? 'yes' : 'no',
                 ) );
+
+                if ( $is_consultation ) {
+                    $this->mrm_consultation_log( 'consultation_parent_reminder_result', array(
+                        'lesson_id'  => (int) $lesson_id,
+                        'email'      => $student_email,
+                        'sent'       => $parent_sent ? 'yes' : 'no',
+                    ) );
+                }
             }
         } else {
             $this->mrm_safety_log( 'parent_reminder_skipped_already_sent', array(
@@ -6153,6 +6235,15 @@ class MRM_Lesson_Scheduler {
                     $instructor_buttons
                 );
 
+                if ( $is_consultation ) {
+                    $this->mrm_consultation_log( 'consultation_instructor_reminder_attempt', array(
+                        'lesson_id'      => (int) $lesson_id,
+                        'email'          => $instructor_email,
+                        'subject'        => $this->get_safety_reminder_subject( $lesson ),
+                        'type_label'     => (string) ( $context['lesson_type_label'] ?? '' ),
+                    ) );
+                }
+
                 $instructor_sent = wp_mail(
                     $instructor_email,
                     $this->get_safety_reminder_subject( $lesson ),
@@ -6174,6 +6265,14 @@ class MRM_Lesson_Scheduler {
                     'email'     => $instructor_email,
                     'sent'      => $instructor_sent ? 'yes' : 'no',
                 ) );
+
+                if ( $is_consultation ) {
+                    $this->mrm_consultation_log( 'consultation_instructor_reminder_result', array(
+                        'lesson_id'  => (int) $lesson_id,
+                        'email'      => $instructor_email,
+                        'sent'       => $instructor_sent ? 'yes' : 'no',
+                    ) );
+                }
             }
         } else {
             $this->mrm_safety_log( 'instructor_reminder_skipped_already_sent', array(
@@ -6257,6 +6356,15 @@ class MRM_Lesson_Scheduler {
         $context = $this->get_safety_lesson_context( $lesson );
         $is_consultation = ! empty( $context['is_consultation'] );
 
+        if ( $is_consultation ) {
+            $this->mrm_consultation_log( 'consultation_feedback_request_context', array(
+                'lesson_id'      => (int) $lesson_id,
+                'student_email'  => (string) ( $lesson['student_email'] ?? '' ),
+                'lesson_type'    => (string) ( $lesson['lesson_type'] ?? '' ),
+                'force_send'     => $force_send ? 'yes' : 'no',
+            ) );
+        }
+
         if ( ! empty( $attendance['feedback_submitted_at'] ) ) {
             $this->mrm_safety_log( 'feedback_request_skipped_already_submitted', array(
                 'lesson_id'             => (int) $lesson_id,
@@ -6305,6 +6413,14 @@ class MRM_Lesson_Scheduler {
             $cta
         );
 
+        if ( $is_consultation ) {
+            $this->mrm_consultation_log( 'consultation_feedback_request_attempt', array(
+                'lesson_id'  => (int) $lesson_id,
+                'email'      => $student_email,
+                'subject'    => $subject,
+            ) );
+        }
+
         $sent = wp_mail(
             $student_email,
             $subject,
@@ -6327,6 +6443,15 @@ class MRM_Lesson_Scheduler {
             'sent'      => $sent ? 'yes' : 'no',
             'forced'    => $force_send ? 'yes' : 'no',
         ) );
+
+        if ( $is_consultation ) {
+            $this->mrm_consultation_log( 'consultation_feedback_request_result', array(
+                'lesson_id' => (int) $lesson_id,
+                'email'     => $student_email,
+                'sent'      => $sent ? 'yes' : 'no',
+                'forced'    => $force_send ? 'yes' : 'no',
+            ) );
+        }
     }
 
     public function handle_safety_attendance_action() {
