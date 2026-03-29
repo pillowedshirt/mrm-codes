@@ -2460,6 +2460,8 @@ class MRM_Lesson_Scheduler {
                 $booking_id = (int) $wpdb->insert_id;
                 $created_ids[] = $booking_id;
 
+                $this->maybe_send_consultation_confirmation_for_lesson( $booking_id );
+
                 // Call existing Google Calendar insert function (already defined in this plugin)
                 // Only do this if Google is configured and the instructor has a calendar_id.
                 if ( $calendar_id === '' ) {
@@ -5223,6 +5225,28 @@ class MRM_Lesson_Scheduler {
 
 
 
+    protected function maybe_send_consultation_confirmation_for_lesson( $lesson_id ) {
+        $lesson_id = (int) $lesson_id;
+        if ( $lesson_id <= 0 ) {
+            return false;
+        }
+
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            $this->mrm_safety_log( 'consultation_confirmation_skipped_missing_lesson', array(
+                'lesson_id' => $lesson_id,
+            ) );
+            return false;
+        }
+
+        $context = $this->get_safety_lesson_context( $lesson );
+        if ( empty( $context['is_consultation'] ) ) {
+            return false;
+        }
+
+        return $this->send_consultation_scheduling_confirmation( $lesson );
+    }
+
     protected function render_safety_action_page( $args = array() ) {
         $defaults = array(
             'eyebrow'      => 'Lesson Update',
@@ -5429,6 +5453,60 @@ class MRM_Lesson_Scheduler {
     </body></html>';
     }
 
+    protected function send_consultation_scheduling_confirmation( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+        $context = $this->get_safety_lesson_context( $lesson );
+
+        if ( empty( $context['is_consultation'] ) ) {
+            return false;
+        }
+
+        $student_email = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
+        if ( ! is_email( $student_email ) ) {
+            $this->mrm_safety_log( 'consultation_confirmation_skipped_invalid_email', array(
+                'lesson_id'     => (int) ( $lesson['id'] ?? 0 ),
+                'student_email' => (string) ( $lesson['student_email'] ?? '' ),
+            ) );
+            return false;
+        }
+
+        $details = '';
+        $details .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $details .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $details .= '<div><strong>Date and time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>';
+        $details .= '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>';
+
+        if ( ! empty( $context['join_link'] ) ) {
+            $details .= '<div><strong>Consultation link:</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
+        }
+
+        $details .= '<div style="margin-top:12px;">' . esc_html( (string) $context['format_note'] ) . '</div>';
+
+        $html = $this->mrm_safety_email_wrap_html(
+            'Consultation Scheduled',
+            '<p>Your meet the instructor consultation has been scheduled successfully.</p>',
+            $details
+        );
+
+        $sent = wp_mail(
+            $student_email,
+            $this->get_safety_confirmation_subject( $lesson ),
+            $html,
+            array(
+                'Content-Type: text/html; charset=UTF-8',
+                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+            )
+        );
+
+        $this->mrm_safety_log( 'consultation_confirmation_result', array(
+            'lesson_id' => (int) ( $lesson['id'] ?? 0 ),
+            'email'     => $student_email,
+            'sent'      => $sent ? 'yes' : 'no',
+        ) );
+
+        return $sent;
+    }
+
     protected function get_safety_lesson_context( $lesson ) {
         $lesson = is_array( $lesson ) ? $lesson : array();
 
@@ -5444,6 +5522,17 @@ class MRM_Lesson_Scheduler {
         $normalized_lesson_type = strtolower( str_replace( array( '_', '-' ), ' ', $raw_lesson_type ) );
         $normalized_lesson_type = trim( preg_replace( '/\s+/', ' ', $normalized_lesson_type ) );
 
+        $is_consultation = false;
+        if ( $normalized_lesson_type !== '' ) {
+            if (
+                strpos( $normalized_lesson_type, 'consultation' ) !== false ||
+                strpos( $normalized_lesson_type, 'meet the instructor' ) !== false ||
+                strpos( $normalized_lesson_type, 'meet instructor' ) !== false
+            ) {
+                $is_consultation = true;
+            }
+        }
+
         $is_online = ! empty( $lesson['is_online'] );
         if ( $normalized_lesson_type !== '' ) {
             if ( strpos( $normalized_lesson_type, 'online' ) !== false ) {
@@ -5453,24 +5542,28 @@ class MRM_Lesson_Scheduler {
             }
         }
 
-        $lesson_type_label = $is_online ? 'Online lesson' : 'In-person lesson';
+        $lesson_type_label = $is_consultation ? 'Meet the Instructor Consultation' : ( $is_online ? 'Online lesson' : 'In-person lesson' );
 
         $join_link = '';
         $location_text = '';
         $format_note = '';
 
-        if ( $is_online ) {
-            if ( ! empty( $lesson['reminder_token'] ) ) {
-                $join_link = add_query_arg(
-                    array( 'token' => (string) $lesson['reminder_token'] ),
-                    home_url( '/join-online/' )
-                );
-            }
+        if ( ! empty( $lesson['reminder_token'] ) ) {
+            $join_link = add_query_arg(
+                array( 'token' => (string) $lesson['reminder_token'] ),
+                home_url( '/join-online/' )
+            );
+        }
 
-            if ( $join_link === '' && ! empty( $lesson['google_meet_url'] ) ) {
-                $join_link = (string) $lesson['google_meet_url'];
-            }
+        if ( $join_link === '' && ! empty( $lesson['google_meet_url'] ) ) {
+            $join_link = (string) $lesson['google_meet_url'];
+        }
 
+        if ( $is_consultation ) {
+            $is_online = true;
+            $lesson_type_label = 'Meet the Instructor Consultation';
+            $format_note = 'This is an online consultation. Please use the link above at the scheduled time.';
+        } elseif ( $is_online ) {
             $format_note = 'This is an online lesson. Please use the lesson link above at the scheduled time.';
         } else {
             $calendar_id = (string) ( $lesson['instructor_calendar_id'] ?? '' );
@@ -5499,9 +5592,10 @@ class MRM_Lesson_Scheduler {
             'join_link'         => $join_link,
             'location_text'     => $location_text,
             'format_note'       => $format_note,
+            'is_online'         => $is_online,
+            'is_consultation'   => $is_consultation,
         );
     }
-
 
     protected function get_safety_reminder_subject( $lesson ) {
         $lesson = is_array( $lesson ) ? $lesson : array();
@@ -5525,7 +5619,42 @@ class MRM_Lesson_Scheduler {
             $student_name = 'Student';
         }
 
+        $context = $this->get_safety_lesson_context( $lesson );
+        if ( ! empty( $context['is_consultation'] ) ) {
+            return $date_part . ' ' . $student_name . ' - Consultation Reminder';
+        }
+
         return $date_part . ' ' . $student_name . ' - Lesson Reminder';
+    }
+
+    protected function get_safety_confirmation_subject( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        $start_time = (string) ( $lesson['start_time'] ?? '' );
+        $student_name = trim( (string) ( $lesson['student_name'] ?? '' ) );
+
+        $date_part = '';
+        if ( $start_time !== '' ) {
+            $timestamp = strtotime( $start_time );
+            if ( $timestamp ) {
+                $date_part = wp_date( 'm/d', $timestamp, wp_timezone() );
+            }
+        }
+
+        if ( $date_part === '' ) {
+            $date_part = wp_date( 'm/d', current_time( 'timestamp' ), wp_timezone() );
+        }
+
+        if ( $student_name === '' ) {
+            $student_name = 'Student';
+        }
+
+        $context = $this->get_safety_lesson_context( $lesson );
+        if ( ! empty( $context['is_consultation'] ) ) {
+            return $date_part . ' ' . $student_name . ' - Consultation Scheduled';
+        }
+
+        return $date_part . ' ' . $student_name . ' - Lesson Scheduled';
     }
 
     protected function send_parent_no_show_alert_for_lesson( $lesson_id, $lesson, $reason = '' ) {
@@ -5913,6 +6042,7 @@ class MRM_Lesson_Scheduler {
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
         $context = $this->get_safety_lesson_context( $lesson );
+        $is_consultation = ! empty( $context['is_consultation'] );
         $exp = time() + ( 8 * HOUR_IN_SECONDS );
 
         $parent_arrived_token       = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'confirm_arrival', $exp );
@@ -5933,7 +6063,7 @@ class MRM_Lesson_Scheduler {
         $details .= '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>';
 
         if ( ! empty( $context['join_link'] ) ) {
-            $details .= '<div><strong>Lesson link:</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
+            $details .= '<div><strong>' . ( $is_consultation ? 'Consultation link' : 'Lesson link' ) . ':</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
         }
 
         if ( ! empty( $context['location_text'] ) ) {
@@ -5945,6 +6075,15 @@ class MRM_Lesson_Scheduler {
         $student_email    = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
         $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
 
+        $parent_primary_label    = $is_consultation ? 'Click here when your instructor arrives for the consultation' : 'Click here when your instructor arrives';
+        $parent_secondary_label  = $is_consultation ? 'Click here if your instructor did not arrive for the consultation' : 'Click here if your instructor did not arrive';
+        $instructor_primary_label   = $is_consultation ? 'Click here when you have arrived for your consultation' : 'Click here when you have arrived for your lesson';
+        $instructor_secondary_label = $is_consultation ? 'An emergency has arisen and I can no longer make this consultation' : 'An emergency has arisen and I can no longer make this lesson';
+        $parent_title  = $is_consultation ? 'Consultation Reminder' : 'Lesson reminder';
+        $parent_intro  = $is_consultation ? '<p>Reminder: you have a consultation coming up in one hour.</p>' : '<p>Reminder: you have a lesson coming up in one hour.</p>';
+        $instructor_title = $is_consultation ? 'Consultation Reminder' : 'Instructor lesson reminder';
+        $instructor_intro = $is_consultation ? '<p>Reminder: you have a consultation coming up in one hour.</p>' : '<p>Reminder: you have a lesson coming up in one hour.</p>';
+
         if ( empty( $attendance['parent_reminder_sent_at'] ) ) {
             if ( ! is_email( $student_email ) ) {
                 $this->mrm_safety_log( 'parent_reminder_skipped_invalid_email', array(
@@ -5954,13 +6093,13 @@ class MRM_Lesson_Scheduler {
             } else {
                 $parent_buttons =
                     '<div style="margin-top:24px;">' .
-                        '<p style="margin:0 0 12px 0;text-align:center;"><a href="' . esc_url( $parent_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here when your instructor arrives</a></p>' .
-                        '<p style="margin:0;text-align:center;"><a href="' . esc_url( $parent_no_show_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here if your instructor did not arrive</a></p>' .
+                        '<p style="margin:0 0 12px 0;text-align:center;"><a href="' . esc_url( $parent_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;max-width:420px;width:100%;">' . esc_html( $parent_primary_label ) . '</a></p>' .
+                        '<p style="margin:0;text-align:center;"><a href="' . esc_url( $parent_no_show_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">' . esc_html( $parent_secondary_label ) . '</a></p>' .
                     '</div>';
 
                 $parent_html = $this->mrm_safety_email_wrap_html_blocks(
-                    'Lesson reminder',
-                    '<p>Reminder: you have a lesson coming up in one hour.</p>',
+                    $parent_title,
+                    $parent_intro,
                     $details,
                     $parent_buttons
                 );
@@ -5997,19 +6136,19 @@ class MRM_Lesson_Scheduler {
         if ( empty( $attendance['instructor_reminder_sent_at'] ) ) {
             if ( ! is_email( $instructor_email ) ) {
                 $this->mrm_safety_log( 'instructor_reminder_skipped_invalid_email', array(
-                    'lesson_id'         => (int) $lesson_id,
-                    'instructor_email'  => (string) ( $lesson['instructor_email'] ?? '' ),
+                    'lesson_id'        => (int) $lesson_id,
+                    'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
                 ) );
             } else {
                 $instructor_buttons =
                     '<div style="margin-top:24px;">' .
-                        '<p style="margin:0 0 12px 0;text-align:center;"><a href="' . esc_url( $instructor_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here when you have arrived for your lesson</a></p>' .
-                        '<p style="margin:0;text-align:center;"><a href="' . esc_url( $instructor_emergency_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">An emergency has arisen and I can no longer make this lesson</a></p>' .
+                        '<p style="margin:0 0 12px 0;text-align:center;"><a href="' . esc_url( $instructor_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;max-width:420px;width:100%;">' . esc_html( $instructor_primary_label ) . '</a></p>' .
+                        '<p style="margin:0;text-align:center;"><a href="' . esc_url( $instructor_emergency_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">' . esc_html( $instructor_secondary_label ) . '</a></p>' .
                     '</div>';
 
                 $instructor_html = $this->mrm_safety_email_wrap_html_blocks(
-                    'Instructor lesson reminder',
-                    '<p>Reminder: you have a lesson coming up in one hour.</p>',
+                    $instructor_title,
+                    $instructor_intro,
                     $details,
                     $instructor_buttons
                 );
@@ -6043,7 +6182,6 @@ class MRM_Lesson_Scheduler {
             ) );
         }
     }
-
 
     public function cron_send_feedback_requests() {
         global $wpdb;
@@ -6116,10 +6254,12 @@ class MRM_Lesson_Scheduler {
         }
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
+        $context = $this->get_safety_lesson_context( $lesson );
+        $is_consultation = ! empty( $context['is_consultation'] );
 
         if ( ! empty( $attendance['feedback_submitted_at'] ) ) {
             $this->mrm_safety_log( 'feedback_request_skipped_already_submitted', array(
-                'lesson_id' => (int) $lesson_id,
+                'lesson_id'             => (int) $lesson_id,
                 'feedback_submitted_at' => (string) ( $attendance['feedback_submitted_at'] ?? '' ),
             ) );
             return;
@@ -6127,7 +6267,7 @@ class MRM_Lesson_Scheduler {
 
         if ( ! $force_send && ! empty( $attendance['parent_feedback_request_sent_at'] ) ) {
             $this->mrm_safety_log( 'feedback_request_skipped_already_sent', array(
-                'lesson_id' => (int) $lesson_id,
+                'lesson_id'                       => (int) $lesson_id,
                 'parent_feedback_request_sent_at' => (string) ( $attendance['parent_feedback_request_sent_at'] ?? '' ),
             ) );
             return;
@@ -6136,7 +6276,7 @@ class MRM_Lesson_Scheduler {
         $student_email = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
         if ( ! is_email( $student_email ) ) {
             $this->mrm_safety_log( 'feedback_request_skipped_invalid_email', array(
-                'lesson_id' => (int) $lesson_id,
+                'lesson_id'     => (int) $lesson_id,
                 'student_email' => (string) ( $lesson['student_email'] ?? '' ),
             ) );
             return;
@@ -6144,25 +6284,30 @@ class MRM_Lesson_Scheduler {
 
         $feedback_token = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'feedback', time() + ( 24 * HOUR_IN_SECONDS ) );
         $feedback_url   = $this->mrm_safety_action_url( $feedback_token );
-        $context = $this->get_safety_lesson_context( $lesson );
 
         $details =
             '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>' .
             '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>' .
-            '<div><strong>Lesson time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>' .
+            '<div><strong>Time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>' .
             '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>';
 
+        $subject = $is_consultation ? 'How was your consultation?' : 'How was your lesson?';
+        $cta     = $is_consultation ? 'Rate your consultation' : 'How was your lesson?';
+        $intro   = $is_consultation
+            ? '<p>Please rate the consultation and share any comments you would like us to see.</p>'
+            : '<p>Please rate the lesson and share any comments you would like us to see.</p>';
+
         $html = $this->mrm_safety_email_wrap_html(
-            'How was your lesson?',
-            '<p>Please rate the lesson and share any comments you would like us to see.</p>',
+            $subject,
+            $intro,
             $details,
             $feedback_url,
-            'Rate your lesson'
+            $cta
         );
 
         $sent = wp_mail(
             $student_email,
-            'How was your lesson?',
+            $subject,
             $html,
             array(
                 'Content-Type: text/html; charset=UTF-8',
@@ -6499,19 +6644,21 @@ class MRM_Lesson_Scheduler {
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             status_header( 404 );
             $this->render_safety_action_page( array(
-                'eyebrow'      => 'Lesson Feedback',
-                'title'        => 'Lesson Not Found',
-                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+                'eyebrow'      => 'Feedback',
+                'title'        => 'Booking Not Found',
+                'message_html' => '<p>We could not locate the booking connected to this link.</p>',
             ) );
         }
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
+        $context = $this->get_safety_lesson_context( $lesson );
+        $is_consultation = ! empty( $context['is_consultation'] );
 
         if ( ! empty( $attendance['feedback_submitted_at'] ) ) {
             $this->render_safety_action_page( array(
-                'eyebrow'      => 'Lesson Feedback',
+                'eyebrow'      => 'Feedback',
                 'title'        => 'Feedback Already Submitted',
-                'message_html' => '<p>Thank you. Your lesson feedback has already been recorded.</p>',
+                'message_html' => '<p>Thank you. Your feedback has already been recorded.</p>',
             ) );
         }
 
@@ -6521,9 +6668,14 @@ class MRM_Lesson_Scheduler {
             admin_url( 'admin-post.php' )
         );
 
+        $heading = $is_consultation ? 'How Was Your Consultation?' : 'How Was Your Lesson?';
+        $intro_message = $is_consultation
+            ? '<p>Please rate the consultation and share any comments you would like us to see.</p>'
+            : '<p>Please rate the lesson and share any comments you would like us to see.</p>';
+
         $arrival_notice = '';
         if ( $show_arrival_notice ) {
-            $arrival_notice = '<div class="mrm-panel" style="margin-bottom:18px;"><strong>Arrival confirmed.</strong><br>We have recorded that your instructor arrived for the lesson.</div>';
+            $arrival_notice = '<div class="mrm-panel" style="margin-bottom:18px;"><strong>Arrival confirmed.</strong><br>We have recorded that your instructor arrived for the ' . ( $is_consultation ? 'consultation' : 'lesson' ) . '.</div>';
         }
 
         $card_html = '
@@ -6577,7 +6729,7 @@ class MRM_Lesson_Scheduler {
                     <input type="hidden" name="token" value="' . esc_attr( $feedback_token ) . '">
 
                     <div class="mrm-rating-wrap">
-                        <label class="mrm-rating-label">How was your lesson?</label>
+                        <label class="mrm-rating-label">' . esc_html( $is_consultation ? 'How was your consultation?' : 'How was your lesson?' ) . '</label>
                         <div class="mrm-star-rating" aria-label="Star rating">
                             <input type="radio" id="mrm-star-5" name="rating" value="5" required>
                             <label for="mrm-star-5" title="5 stars">★</label>
@@ -6603,18 +6755,18 @@ class MRM_Lesson_Scheduler {
                     </div>
 
                     <div class="mrm-form-actions">
-                        <button type="submit" class="mrm-btn mrm-btn-primary">Submit Feedback</button>
+                        <button type="submit" class="mrm-btn mrm-btn-primary">' . esc_html( $is_consultation ? 'Submit Consultation Feedback' : 'Submit Feedback' ) . '</button>
                     </div>
                 </form>
             </div>
         ';
 
         $this->render_safety_action_page( array(
-            'eyebrow'      => 'Lesson Feedback',
-            'title'        => 'How Was Your Lesson?',
-            'message_html' => '<p>Please rate the lesson and share any comments you would like us to see.</p>',
+            'eyebrow'      => 'Feedback',
+            'title'        => $heading,
+            'message_html' => $intro_message,
             'card_html'    => $card_html,
-            'footer_html'  => 'Your feedback helps us maintain a high-quality lesson experience.',
+            'footer_html'  => 'Your feedback helps us maintain a high-quality experience.',
         ) );
     }
 
