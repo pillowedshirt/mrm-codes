@@ -5439,7 +5439,20 @@ class MRM_Lesson_Scheduler {
         );
 
         $minutes = (int) ( $lesson['lesson_length'] ?? 0 );
+
+        $raw_lesson_type = (string) ( $lesson['lesson_type'] ?? '' );
+        $normalized_lesson_type = strtolower( str_replace( array( '_', '-' ), ' ', $raw_lesson_type ) );
+        $normalized_lesson_type = trim( preg_replace( '/\s+/', ' ', $normalized_lesson_type ) );
+
         $is_online = ! empty( $lesson['is_online'] );
+        if ( $normalized_lesson_type !== '' ) {
+            if ( strpos( $normalized_lesson_type, 'online' ) !== false ) {
+                $is_online = true;
+            } elseif ( strpos( $normalized_lesson_type, 'in person' ) !== false ) {
+                $is_online = false;
+            }
+        }
+
         $lesson_type_label = $is_online ? 'Online lesson' : 'In-person lesson';
 
         $join_link = '';
@@ -5458,7 +5471,7 @@ class MRM_Lesson_Scheduler {
                 $join_link = (string) $lesson['google_meet_url'];
             }
 
-            $format_note = 'This is an online lesson. Please use the lesson link below at the scheduled time.';
+            $format_note = 'This is an online lesson. Please use the lesson link above at the scheduled time.';
         } else {
             $calendar_id = (string) ( $lesson['instructor_calendar_id'] ?? '' );
             $google_event_id = (string) ( $lesson['google_event_id'] ?? '' );
@@ -5487,6 +5500,32 @@ class MRM_Lesson_Scheduler {
             'location_text'     => $location_text,
             'format_note'       => $format_note,
         );
+    }
+
+
+    protected function get_safety_reminder_subject( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        $start_time = (string) ( $lesson['start_time'] ?? '' );
+        $student_name = trim( (string) ( $lesson['student_name'] ?? '' ) );
+
+        $date_part = '';
+        if ( $start_time !== '' ) {
+            $timestamp = strtotime( $start_time );
+            if ( $timestamp ) {
+                $date_part = wp_date( 'm/d', $timestamp, wp_timezone() );
+            }
+        }
+
+        if ( $date_part === '' ) {
+            $date_part = wp_date( 'm/d', current_time( 'timestamp' ), wp_timezone() );
+        }
+
+        if ( $student_name === '' ) {
+            $student_name = 'Student';
+        }
+
+        return $date_part . ' ' . $student_name . ' - Lesson Reminder';
     }
 
     protected function send_parent_no_show_alert_for_lesson( $lesson_id, $lesson, $reason = '' ) {
@@ -5915,8 +5954,8 @@ class MRM_Lesson_Scheduler {
             } else {
                 $parent_buttons =
                     '<div style="margin-top:24px;">' .
-                        '<p style="margin:0 0 12px 0;"><a href="' . esc_url( $parent_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;min-width:100%;">Click here when your instructor arrives</a></p>' .
-                        '<p style="margin:0;"><a href="' . esc_url( $parent_no_show_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;min-width:100%;">Click here if your instructor did not arrive</a></p>' .
+                        '<p style="margin:0 0 12px 0;text-align:center;"><a href="' . esc_url( $parent_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here when your instructor arrives</a></p>' .
+                        '<p style="margin:0;text-align:center;"><a href="' . esc_url( $parent_no_show_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here if your instructor did not arrive</a></p>' .
                     '</div>';
 
                 $parent_html = $this->mrm_safety_email_wrap_html_blocks(
@@ -5928,7 +5967,7 @@ class MRM_Lesson_Scheduler {
 
                 $parent_sent = wp_mail(
                     $student_email,
-                    'Lesson reminder — upcoming lesson in one hour',
+                    $this->get_safety_reminder_subject( $lesson ),
                     $parent_html,
                     array(
                         'Content-Type: text/html; charset=UTF-8',
@@ -5964,8 +6003,8 @@ class MRM_Lesson_Scheduler {
             } else {
                 $instructor_buttons =
                     '<div style="margin-top:24px;">' .
-                        '<p style="margin:0 0 12px 0;"><a href="' . esc_url( $instructor_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;min-width:100%;">Click here when you have arrived for your lesson</a></p>' .
-                        '<p style="margin:0;"><a href="' . esc_url( $instructor_emergency_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;min-width:100%;">An emergency has arisen and I can no longer make this lesson</a></p>' .
+                        '<p style="margin:0 0 12px 0;text-align:center;"><a href="' . esc_url( $instructor_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here when you have arrived for your lesson</a></p>' .
+                        '<p style="margin:0;text-align:center;"><a href="' . esc_url( $instructor_emergency_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">An emergency has arisen and I can no longer make this lesson</a></p>' .
                     '</div>';
 
                 $instructor_html = $this->mrm_safety_email_wrap_html_blocks(
@@ -5977,7 +6016,7 @@ class MRM_Lesson_Scheduler {
 
                 $instructor_sent = wp_mail(
                     $instructor_email,
-                    'Instructor lesson reminder — upcoming lesson in one hour',
+                    $this->get_safety_reminder_subject( $lesson ),
                     $instructor_html,
                     array(
                         'Content-Type: text/html; charset=UTF-8',
