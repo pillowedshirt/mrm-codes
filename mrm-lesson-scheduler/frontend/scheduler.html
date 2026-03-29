@@ -154,6 +154,14 @@ h1 {
   line-height:1.35;
 }
 
+.instructor-format-label{
+  font-size: 0.9rem;
+  line-height: 1.35;
+  margin: 4px 0 10px 0;
+  opacity: 0.85;
+  font-weight: 600;
+}
+
 .instructor-toggle {
   width: 28px;
   height: 28px;
@@ -4522,6 +4530,16 @@ function instructorSupportsSelectedInstrument(instr, instrumentKey){
   return arr.includes(instrumentKey);
 }
 
+function instructorSupportsSelectedLessonType(instr){
+  const onlineSelectEl = document.getElementById('online-select');
+  const selectedMode = (onlineSelectEl && String(onlineSelectEl.value) === '1') ? 'online' : 'in_person';
+  const offersOnline = !!(instr && Number(instr.offers_online) === 1);
+  const offersInPerson = !!(instr && Number(instr.offers_in_person) === 1);
+
+  if(selectedMode === 'online') return offersOnline;
+  return offersInPerson;
+}
+
 function loadInstructors(){
   fetch(apiBase+'/instructors')
     .then(r=>r.json())
@@ -5176,7 +5194,8 @@ function loadInstructors(){
           const st = (i.state || '').toString().trim().toUpperCase();
           if(st !== stateCode) return false;
 
-          return instructorSupportsSelectedInstrument(i, selectedInstrumentKey);
+          if(!instructorSupportsSelectedInstrument(i, selectedInstrumentKey)) return false;
+          return instructorSupportsSelectedLessonType(i);
         });
 
         console.log('[MRM Scheduler] instructor filter', {
@@ -5256,18 +5275,18 @@ function loadInstructors(){
             card.append(header);
 
             // Put short description + learn link INSIDE the header “titleWrap”
+            if (instr.teaching_format_label) {
+              const mode = document.createElement('div');
+              mode.className = 'instructor-format-label';
+              mode.textContent = instr.teaching_format_label;
+              titleWrap.appendChild(mode);
+            }
+
             if (instr.short_description) {
               const sd = document.createElement('p');
               sd.className = 'instructor-shortdesc';
               sd.textContent = instr.short_description;
               titleWrap.appendChild(sd);
-            }
-
-            if (instr.address) {
-              const addr = document.createElement('div');
-              addr.className = 'instructor-meta';
-              addr.textContent = instr.address;
-              titleWrap.appendChild(addr);
             }
 
             const learn = document.createElement('a');

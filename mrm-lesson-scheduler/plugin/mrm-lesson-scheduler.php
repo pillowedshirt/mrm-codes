@@ -26,7 +26,7 @@ class MRM_Lesson_Scheduler {
     protected static $instance;
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
-    const DB_VERSION = '1.5.6';
+    const DB_VERSION = '1.5.7';
     const CAPABILITY = 'manage_options';
     // Google endpoints
     const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -1879,14 +1879,17 @@ class MRM_Lesson_Scheduler {
     city VARCHAR(100) NOT NULL,
     state varchar(50) NOT NULL DEFAULT '',
     address VARCHAR(255) NOT NULL DEFAULT '',
+    zip_code VARCHAR(20) NOT NULL DEFAULT '',
+    offers_in_person TINYINT(1) NOT NULL DEFAULT 0,
+    offers_online TINYINT(1) NOT NULL DEFAULT 0,
     profile_image_url TEXT NULL,
     short_description TEXT NULL,
     long_description LONGTEXT NULL,
     instruments TEXT NULL,
     latitude DECIMAL(10,6) DEFAULT NULL,
     longitude DECIMAL(10,6) DEFAULT NULL,
-    calendar_id VARCHAR(255) NOT NULL,
-    timezone VARCHAR(50) NOT NULL,
+    calendar_id VARCHAR(255) NOT NULL DEFAULT '',
+    timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
     stripe_connected_account_id VARCHAR(255) DEFAULT NULL,
     hire_date DATE DEFAULT NULL,
     PRIMARY KEY (id),
@@ -2029,7 +2032,7 @@ class MRM_Lesson_Scheduler {
 
         $instructor_cols = $wpdb->get_col( "DESC {$instructors}", 0 );
         $need_instructors = array(
-            'timezone', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state', 'address',
+            'timezone', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state', 'address', 'zip_code', 'offers_in_person', 'offers_online',
         );
 
         foreach ( $need_instructors as $col ) {
@@ -3739,7 +3742,9 @@ class MRM_Lesson_Scheduler {
             'email' => '',
             'city' => '',
             'state' => '',
-            'address' => '',
+            'zip_code' => '',
+            'offers_in_person' => 0,
+            'offers_online' => 0,
             'profile_image_url' => null,
             'short_description' => null,
             'long_description' => null,
@@ -3808,7 +3813,37 @@ class MRM_Lesson_Scheduler {
             $row['instruments'] = $instruments;
             $row['instruments_display'] = $display;
             $row['instruments_text'] = implode( ', ', $display );
-            $output[] = $row;
+            $offers_in_person = ! empty( $row['offers_in_person'] ) ? 1 : 0;
+            $offers_online    = ! empty( $row['offers_online'] ) ? 1 : 0;
+
+            $teaching_format_label = '';
+            if ( $offers_in_person && $offers_online ) {
+                $teaching_format_label = 'In Person - Online';
+            } elseif ( $offers_in_person ) {
+                $teaching_format_label = 'In Person Only';
+            } elseif ( $offers_online ) {
+                $teaching_format_label = 'Online Only';
+            }
+
+            $output[] = array(
+                'id' => (int) $row['id'],
+                'name' => (string) $row['name'],
+                'email' => (string) $row['email'],
+                'city' => (string) $row['city'],
+                'state' => (string) $row['state'],
+                'profile_image_url' => $row['profile_image_url'],
+                'short_description' => $row['short_description'],
+                'long_description' => $row['long_description'],
+                'instruments' => $row['instruments'],
+                'instruments_display' => $row['instruments_display'],
+                'instruments_text' => $row['instruments_text'],
+                'latitude' => $row['latitude'],
+                'longitude' => $row['longitude'],
+                'distance' => $row['distance'] ?? null,
+                'teaching_format_label' => $teaching_format_label,
+                'offers_in_person' => $offers_in_person,
+                'offers_online' => $offers_online,
+            );
         }
         return new WP_REST_Response( $output, 200 );
     }
@@ -7263,8 +7298,11 @@ class MRM_Lesson_Scheduler {
             $state = preg_replace('/[^A-Z]/', '', $state); // keep letters only
             $state = substr($state, 0, 2); // enforce 2-letter code
             $address = isset( $_POST['address'] ) ? sanitize_text_field( wp_unslash( $_POST['address'] ) ) : '';
+            $zip_code = isset( $_POST['zip_code'] ) ? sanitize_text_field( wp_unslash( $_POST['zip_code'] ) ) : '';
+            $offers_in_person = ! empty( $_POST['offers_in_person'] ) ? 1 : 0;
+            $offers_online = ! empty( $_POST['offers_online'] ) ? 1 : 0;
             $calendar_id = isset( $_POST['calendar_id'] ) ? sanitize_text_field( wp_unslash( $_POST['calendar_id'] ) ) : '';
-            $timezone    = isset( $_POST['timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['timezone'] ) ) : '';
+            $timezone    = isset( $_POST['timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['timezone'] ) ) : 'America/Phoenix';
             $stripe_connected_account_id = isset( $_POST['stripe_connected_account_id'] ) ? sanitize_text_field( wp_unslash( $_POST['stripe_connected_account_id'] ) ) : '';
             $hire_date   = isset( $_POST['hire_date'] ) ? sanitize_text_field( wp_unslash( $_POST['hire_date'] ) ) : '';
             $profile_image_url = isset( $_POST['profile_image_url'] ) ? esc_url_raw( wp_unslash( $_POST['profile_image_url'] ) ) : '';
@@ -7288,6 +7326,9 @@ class MRM_Lesson_Scheduler {
                 if ( $stripe_connected_account_id && ! preg_match( '/^acct_[A-Za-z0-9]+$/', $stripe_connected_account_id ) ) $errors[] = 'Stripe Connected Account ID must start with acct_.';
                 if ( $hire_date && ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $hire_date ) ) $errors[] = 'Start Date must be in YYYY-MM-DD format.';
                 if ( ! $address ) $errors[] = 'Address is required.';
+                if ( ! $offers_in_person && ! $offers_online ) {
+                    $errors[] = 'At least one teaching format must be selected.';
+                }
             }
             $schema = $this->schema_status();
             if ( ! $schema['ok'] ) $errors[] = 'Database schema is not ready. Click “Run Installer/Upgrade” first.';
@@ -7298,6 +7339,9 @@ class MRM_Lesson_Scheduler {
                     'city' => $city,
                     'state' => $state,
                     'address' => $address,
+                    'zip_code' => $zip_code,
+                    'offers_in_person' => $offers_in_person,
+                    'offers_online' => $offers_online,
                     'calendar_id' => $calendar_id,
                     'timezone' => $timezone,
                     'stripe_connected_account_id' => ( $stripe_connected_account_id === '' ? null : $stripe_connected_account_id ),
@@ -7307,7 +7351,7 @@ class MRM_Lesson_Scheduler {
                     'long_description' => ( $long_description === '' ? null : $long_description ),
                     'instruments' => ( $instruments_json === '' ? null : $instruments_json ),
                 );
-                $formats = array( '%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s' );
+                $formats = array( '%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s','%s' );
                 if ( $action === 'add' ) {
                     $result = $wpdb->insert( $table, $data, $formats );
                     echo $result === false ? '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>' : '<div class="notice notice-success"><p>Instructor added (ID ' . esc_html( (int) $wpdb->insert_id ) . ').</p></div>';
@@ -7432,6 +7476,27 @@ class MRM_Lesson_Scheduler {
                         <td>
                             <input name="address" id="address" type="text" class="regular-text" placeholder="123 Main St" value="<?php echo esc_attr( $editing['address'] ?? '' ); ?>">
                             <p class="description">Instructor address used for internal reference and location-based scheduling context.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="zip_code">ZIP Code</label></th>
+                        <td>
+                            <input name="zip_code" id="zip_code" type="text" class="regular-text" placeholder="85001" value="<?php echo esc_attr( $editing['zip_code'] ?? '' ); ?>">
+                            <p class="description">Instructor ZIP code for backend reference and location-based admin use.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Teaching Format</th>
+                        <td>
+                            <label style="display:block; margin-bottom:8px;">
+                                <input type="checkbox" name="offers_in_person" value="1" <?php checked( ! empty( $editing['offers_in_person'] ) ); ?>>
+                                In Person
+                            </label>
+                            <label style="display:block;">
+                                <input type="checkbox" name="offers_online" value="1" <?php checked( ! empty( $editing['offers_online'] ) ); ?>>
+                                Online
+                            </label>
+                            <p class="description">Choose whether this instructor offers in-person lessons, online lessons, or both.</p>
                         </td>
                     </tr>
                     <tr>
