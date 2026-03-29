@@ -2591,6 +2591,8 @@ class MRM_Lesson_Scheduler {
                     $this->send_consultation_confirmation_for_lesson( $booking_id );
                 }
 
+                $this->send_instructor_scheduled_notification_for_lesson( $booking_id );
+
                 if ( ! $is_online ) {
                     $this->mrm_queue_mileage_calculation_for_lesson( $booking_id );
                 }
@@ -9315,6 +9317,93 @@ class MRM_Lesson_Scheduler {
             if ( is_array( $logo ) && ! empty( $logo[0] ) ) return $logo[0];
         }
         return '';
+    }
+
+    protected function mrm_get_instructor_booking_notification_subject( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        if ( $this->mrm_is_consultation_lesson( $lesson ) ) {
+            return 'Consultation Scheduled Notification';
+        }
+
+        return 'Private Lesson Scheduled Notification';
+    }
+
+    protected function send_instructor_scheduled_notification_for_lesson( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            return false;
+        }
+
+        $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
+        if ( ! is_email( $instructor_email ) ) {
+            return false;
+        }
+
+        $context = $this->get_safety_lesson_context( $lesson, 'instructor' );
+        $is_consultation = ! empty( $context['is_consultation'] );
+
+        $student_name    = (string) ( $lesson['student_name'] ?? 'Student' );
+        $student_email   = (string) ( $lesson['student_email'] ?? '' );
+        $instructor_name = (string) ( $lesson['instructor_name'] ?? 'Instructor' );
+        $minutes         = (int) ( $lesson['lesson_length'] ?? 0 );
+
+        $title = $this->mrm_get_instructor_booking_notification_subject( $lesson );
+
+        $intro = $is_consultation
+            ? '<p>A consultation has been scheduled on your calendar.</p>'
+            : '<p>A private lesson has been scheduled on your calendar.</p>';
+
+        $details = '';
+        $details .= '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>';
+        $details .= '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>';
+        $details .= '<div><strong>Student Email:</strong> ' . esc_html( $student_email ) . '</div>';
+        $details .= '<div><strong>Time:</strong> ' . esc_html( (string) ( $context['start_label'] ?? '' ) ) . '</div>';
+
+        if ( $is_consultation ) {
+            $details .= '<div><strong>Type:</strong> Consultation</div>';
+            $details .= '<div><strong>Consultation Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
+        } else {
+            $details .= '<div><strong>Type:</strong> ' . esc_html( (string) ( $context['lesson_type_label'] ?? 'Private Lesson' ) ) . '</div>';
+            $details .= '<div><strong>Lesson Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
+        }
+
+        if ( ! empty( $context['join_link'] ) ) {
+            $details .= '<div><strong>Lesson Link:</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
+        }
+
+        if ( ! empty( $context['location_text'] ) ) {
+            $details .= '<div><strong>Location:</strong> ' . esc_html( (string) $context['location_text'] ) . '</div>';
+        }
+
+        $details .= '<div style="margin-top:12px;">' . esc_html( (string) ( $context['format_note'] ?? '' ) ) . '</div>';
+
+        $html = $this->mrm_safety_email_wrap_html_blocks(
+            $title,
+            $intro,
+            $details,
+            ''
+        );
+
+        $sent = wp_mail(
+            $instructor_email,
+            $title,
+            $html,
+            array(
+                'Content-Type: text/html; charset=UTF-8',
+                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+            )
+        );
+
+        error_log( '[MRM Instructor Notification] booking notification result ' . wp_json_encode( array(
+            'lesson_id'       => (int) $lesson_id,
+            'email'           => $instructor_email,
+            'sent'            => $sent ? 'yes' : 'no',
+            'is_consultation' => $is_consultation ? 'yes' : 'no',
+            'subject'         => $title,
+        ) ) );
+
+        return $sent;
     }
 
     protected function send_consultation_confirmation_for_lesson( $lesson_id ) {
