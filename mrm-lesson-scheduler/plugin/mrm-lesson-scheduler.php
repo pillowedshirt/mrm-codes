@@ -1920,6 +1920,7 @@ class MRM_Lesson_Scheduler {
     lesson_length INT NOT NULL DEFAULT 60,
     start_time DATETIME NOT NULL,
     end_time DATETIME NOT NULL,
+    lesson_type VARCHAR(100) NULL,
     google_original_start_time DATETIME NULL,
     delivered_at DATETIME NULL,
     finalized_at DATETIME NULL,
@@ -2014,6 +2015,10 @@ class MRM_Lesson_Scheduler {
         dbDelta( $sql2 );
         dbDelta( $sql3 );
         dbDelta( $sql_attendance );
+        $lessons_columns = $wpdb->get_col( "DESC {$table_lessons}", 0 );
+        if ( ! in_array( 'lesson_type', $lessons_columns, true ) ) {
+            $wpdb->query( "ALTER TABLE {$table_lessons} ADD COLUMN lesson_type VARCHAR(100) NULL" );
+        }
 
         // Backfill recurring anchor for older lesson rows so moved recurring events
         // can still be resolved against Google after reschedules.
@@ -2275,15 +2280,9 @@ class MRM_Lesson_Scheduler {
         $order_id = isset( $data['order_id'] ) ? intval( $data['order_id'] ) : 0;
         $payment_mode = sanitize_text_field( (string ) ( $data['payment_mode'] ?? 'none' ) ); // prepay|one_time|autopay|none
         $autopay_profile_id = isset( $data['autopay_profile_id'] ) ? intval( $data['autopay_profile_id'] ) : 0;
-        $incoming_lesson_type = '';
-        if ( isset( $data['lesson_type'] ) ) {
-            $incoming_lesson_type = $this->normalize_scheduler_lesson_type( wp_unslash( $data['lesson_type'] ) );
-        } elseif ( isset( $data['booking_type'] ) ) {
-            $incoming_lesson_type = $this->normalize_scheduler_lesson_type( wp_unslash( $data['booking_type'] ) );
-        } elseif ( isset( $data['session_type'] ) ) {
-            $incoming_lesson_type = $this->normalize_scheduler_lesson_type( wp_unslash( $data['session_type'] ) );
-        } elseif ( isset( $data['selected_option'] ) ) {
-            $incoming_lesson_type = $this->normalize_scheduler_lesson_type( wp_unslash( $data['selected_option'] ) );
+        $incoming_lesson_type = $this->extract_scheduler_lesson_type_from_payload( $data );
+        if ( $incoming_lesson_type === '' ) {
+            $incoming_lesson_type = ! empty( $is_online ) ? 'online' : 'in_person';
         }
 
         $this->mrm_consultation_log( 'booking_payload_type_detection', array(
@@ -2437,6 +2436,14 @@ class MRM_Lesson_Scheduler {
                 );
             }
 
+            $this->mrm_consultation_log( 'booking_insert_preflight', array(
+                'incoming_lesson_type' => $incoming_lesson_type,
+                'is_online'            => ! empty( $is_online ) ? 'yes' : 'no',
+                'student_name'         => isset( $student_name ) ? (string) $student_name : '',
+                'student_email'        => isset( $student_email ) ? (string) $student_email : '',
+                'start_time'           => isset( $start_mysql ) ? (string) $start_mysql : '',
+            ) );
+
             $ok = $wpdb->insert( $lessons_table, array(
                 'instructor_id' => $instructor_id,
                 'series_id'     => ( $series_id ? $series_id : null ),
@@ -2491,6 +2498,11 @@ class MRM_Lesson_Scheduler {
                 '%s', // reminder_token_hash
                 '%s', // reminder_scheduled_at
                 '%s', // reminder_sent_at
+            ) );
+            $this->mrm_consultation_log( 'booking_insert_result', array(
+                'db_error'             => $wpdb->last_error,
+                'insert_id'            => (int) $wpdb->insert_id,
+                'incoming_lesson_type' => $incoming_lesson_type,
             ) );
 
             if ( $ok ) {
@@ -5616,6 +5628,31 @@ class MRM_Lesson_Scheduler {
         }
 
         return $value;
+    }
+
+    protected function extract_scheduler_lesson_type_from_payload( $payload ) {
+        if ( ! is_array( $payload ) || empty( $payload ) ) {
+            return '';
+        }
+
+        $keys = array(
+            'lesson_type',
+            'booking_type',
+            'session_type',
+            'selected_option',
+            'lessonType',
+            'bookingType',
+            'sessionType',
+            'selectedOption',
+        );
+
+        foreach ( $keys as $key ) {
+            if ( isset( $payload[ $key ] ) && $payload[ $key ] !== '' ) {
+                return $this->normalize_scheduler_lesson_type( wp_unslash( $payload[ $key ] ) );
+            }
+        }
+
+        return '';
     }
 
     protected function get_safety_lesson_context( $lesson ) {
