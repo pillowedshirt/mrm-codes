@@ -1700,6 +1700,9 @@ class MRM_Lesson_Scheduler {
         add_action( 'mrm_scheduler_send_safety_reminders', array( $this, 'cron_send_safety_reminders' ) );
         add_action( 'mrm_scheduler_check_safety_exceptions', array( $this, 'cron_check_safety_exceptions' ) );
         add_action( 'mrm_scheduler_send_feedback_requests', array( $this, 'cron_send_feedback_requests' ) );
+        $this->mrm_safety_log( 'safety_system_constructor_loaded', array(
+            'file' => __FILE__,
+        ) );
         if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
             wp_schedule_event( time() + 60, 'mrm_1min', 'mrm_scheduler_sync_upcoming_events' );
         }
@@ -1785,7 +1788,7 @@ class MRM_Lesson_Scheduler {
         }
 
         if ( ! wp_next_scheduled( 'mrm_scheduler_check_safety_exceptions' ) ) {
-            wp_schedule_event( time() + 90, 'mrm_5min', 'mrm_scheduler_check_safety_exceptions' );
+            wp_schedule_event( time() + 120, 'mrm_5min', 'mrm_scheduler_check_safety_exceptions' );
             $this->mrm_safety_log( 'rescheduled_missing_cron_hook', array(
                 'hook' => 'mrm_scheduler_check_safety_exceptions',
                 'schedule' => 'mrm_5min',
@@ -1793,7 +1796,7 @@ class MRM_Lesson_Scheduler {
         }
 
         if ( ! wp_next_scheduled( 'mrm_scheduler_send_feedback_requests' ) ) {
-            wp_schedule_event( time() + 90, 'mrm_5min', 'mrm_scheduler_send_feedback_requests' );
+            wp_schedule_event( time() + 150, 'mrm_5min', 'mrm_scheduler_send_feedback_requests' );
             $this->mrm_safety_log( 'rescheduled_missing_cron_hook', array(
                 'hook' => 'mrm_scheduler_send_feedback_requests',
                 'schedule' => 'mrm_5min',
@@ -5260,7 +5263,10 @@ class MRM_Lesson_Scheduler {
         ) );
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
-        $window = $this->get_safety_reminder_window_minutes();
+        $window = array(
+            'from' => 0,
+            'to'   => 180,
+        );
         $now_local = current_time( 'mysql' );
         $from_local = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) + ( (int) $window['from'] * MINUTE_IN_SECONDS ) );
         $to_local   = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) + ( (int) $window['to'] * MINUTE_IN_SECONDS ) );
@@ -5819,7 +5825,15 @@ class MRM_Lesson_Scheduler {
     }
 
     public function admin_run_safety_reminder_sweep_now() {
+        $this->mrm_safety_log( 'manual_reminder_sweep_handler_entered', array(
+            'user_id' => get_current_user_id(),
+            'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '',
+        ) );
+
         if ( ! current_user_can( self::CAPABILITY ) ) {
+            $this->mrm_safety_log( 'manual_reminder_sweep_denied_capability', array(
+                'user_id' => get_current_user_id(),
+            ) );
             wp_die( 'You do not have permission to do that.' );
         }
         check_admin_referer( 'mrm_run_safety_reminder_sweep_now' );
@@ -5839,7 +5853,15 @@ class MRM_Lesson_Scheduler {
     }
 
     public function admin_run_safety_exception_check_now() {
+        $this->mrm_safety_log( 'manual_exception_check_handler_entered', array(
+            'user_id' => get_current_user_id(),
+            'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '',
+        ) );
+
         if ( ! current_user_can( self::CAPABILITY ) ) {
+            $this->mrm_safety_log( 'manual_exception_check_denied_capability', array(
+                'user_id' => get_current_user_id(),
+            ) );
             wp_die( 'You do not have permission to do that.' );
         }
         check_admin_referer( 'mrm_run_safety_exception_check_now' );
@@ -5859,7 +5881,15 @@ class MRM_Lesson_Scheduler {
     }
 
     public function admin_run_safety_feedback_request_now() {
+        $this->mrm_safety_log( 'manual_feedback_request_handler_entered', array(
+            'user_id' => get_current_user_id(),
+            'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '',
+        ) );
+
         if ( ! current_user_can( self::CAPABILITY ) ) {
+            $this->mrm_safety_log( 'manual_feedback_request_denied_capability', array(
+                'user_id' => get_current_user_id(),
+            ) );
             wp_die( 'You do not have permission to do that.' );
         }
 
