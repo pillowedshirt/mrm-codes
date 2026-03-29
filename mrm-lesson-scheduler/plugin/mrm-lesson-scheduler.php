@@ -2018,6 +2018,7 @@ class MRM_Lesson_Scheduler {
     expense_date DATE NOT NULL,
     tax_year INT NOT NULL,
     tax_quarter TINYINT NOT NULL DEFAULT 0,
+    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
     category VARCHAR(100) NOT NULL DEFAULT '',
     vendor_name VARCHAR(190) NOT NULL DEFAULT '',
     description TEXT NULL,
@@ -2039,6 +2040,7 @@ class MRM_Lesson_Scheduler {
     lesson_id BIGINT UNSIGNED NOT NULL,
     instructor_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
     tax_year INT NOT NULL,
+    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
     trip_date DATE NOT NULL,
     origin_address VARCHAR(255) NOT NULL DEFAULT '',
     destination_address VARCHAR(255) NOT NULL DEFAULT '',
@@ -2086,6 +2088,7 @@ class MRM_Lesson_Scheduler {
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     tax_year INT NOT NULL,
     tax_quarter TINYINT NOT NULL DEFAULT 0,
+    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
     calc_key VARCHAR(100) NOT NULL,
     calc_payload LONGTEXT NULL,
     generated_at DATETIME NOT NULL,
@@ -7367,11 +7370,13 @@ class MRM_Lesson_Scheduler {
         $tax_year = isset( $input['default_tax_year'] ) ? (int) $input['default_tax_year'] : (int) gmdate( 'Y' );
         $business_type = isset( $input['business_type'] ) ? sanitize_text_field( $input['business_type'] ) : 's_corp';
         $mileage_rate = isset( $input['mileage_rate'] ) ? (float) $input['mileage_rate'] : 0.7250;
+        $environment_mode = isset( $input['environment_mode'] ) ? sanitize_text_field( $input['environment_mode'] ) : 'live';
 
         return array(
             'default_tax_year' => $tax_year,
             'business_type'    => in_array( $business_type, array( 's_corp' ), true ) ? $business_type : 's_corp',
             'mileage_rate'     => $mileage_rate,
+            'environment_mode' => in_array( $environment_mode, array( 'test', 'live' ), true ) ? $environment_mode : 'live',
         );
     }
 
@@ -7388,20 +7393,30 @@ class MRM_Lesson_Scheduler {
 
         $selected_year    = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) $settings['default_tax_year'];
         $selected_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+        $is_test_mode = ( $environment_mode === 'test' );
 
-        $overview    = $this->mrm_get_calculations_overview( $selected_year, $selected_quarter );
-        $contractors = $this->mrm_get_calculations_contractor_summary( $selected_year, $selected_quarter );
-        $mileage     = $this->mrm_get_calculations_mileage_summary( $selected_year, $selected_quarter );
-        $expenses    = $this->mrm_get_calculations_expense_summary( $selected_year, $selected_quarter );
-        $payroll     = $this->mrm_get_calculations_payroll_summary( $selected_year, $selected_quarter );
+        $overview    = $this->mrm_get_calculations_overview( $selected_year, $selected_quarter, $environment_mode );
+        $contractors = $this->mrm_get_calculations_contractor_summary( $selected_year, $selected_quarter, $environment_mode );
+        $mileage     = $this->mrm_get_calculations_mileage_summary( $selected_year, $selected_quarter, $environment_mode );
+        $expenses    = $this->mrm_get_calculations_expense_summary( $selected_year, $selected_quarter, $environment_mode );
+        $payroll     = $this->mrm_get_calculations_payroll_summary( $selected_year, $selected_quarter, $environment_mode );
 
         ?>
         <div class="wrap">
             <h1>Calculations</h1>
+            <?php
+            echo '<p><strong>Environment:</strong> ' . esc_html( strtoupper( $environment_mode ) ) . ' ';
+            echo $environment_mode === 'test'
+                ? '<span style="color:#b45309;">(Sandbox / Test Data)</span>'
+                : '<span style="color:#166534;">(Live Accounting Data)</span>';
+            echo '</p>';
+            ?>
             <?php echo '<p><em>This page provides calculation and reconciliation support for S-corporation recordkeeping, including contractor 1099 support, payroll/W-2 support, mileage, expenses, and annual business summaries. Final tax filing should still be reviewed by your accountant.</em></p>'; ?>
 
             <form method="get" style="margin:16px 0 24px 0;">
                 <input type="hidden" name="page" value="mrm-calculations">
+                <input type="hidden" name="calc_env" value="<?php echo esc_attr( $is_test_mode ? 'test' : 'live' ); ?>" id="mrm-calc-env-hidden">
                 <label for="tax_year"><strong>Tax Year</strong></label>
                 <input type="number" id="tax_year" name="tax_year" value="<?php echo esc_attr( $selected_year ); ?>" min="2020" max="2099" style="width:100px; margin:0 12px 0 8px;">
 
@@ -7414,13 +7429,34 @@ class MRM_Lesson_Scheduler {
                     <option value="4" <?php selected( $selected_quarter, 4 ); ?>>Q4</option>
                 </select>
 
+                <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px;">
+                    <input type="checkbox" id="mrm-calc-test-mode" <?php checked( $is_test_mode ); ?>>
+                    Use Test Mode
+                </label>
+
+                <span style="margin-left:10px; font-weight:600; color:<?php echo $is_test_mode ? '#b45309' : '#166534'; ?>;">
+                    Current Calculations Mode: <?php echo esc_html( strtoupper( $environment_mode ) ); ?>
+                </span>
+
                 <button type="submit" class="button button-primary" style="margin-left:12px;">Run Calculations</button>
+
+                <script>
+                document.addEventListener('DOMContentLoaded', function(){
+                    var checkbox = document.getElementById('mrm-calc-test-mode');
+                    var hidden = document.getElementById('mrm-calc-env-hidden');
+                    if (checkbox && hidden) {
+                        checkbox.addEventListener('change', function(){
+                            hidden.value = checkbox.checked ? 'test' : 'live';
+                        });
+                    }
+                });
+                </script>
             </form>
 
             <p>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_support&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_1099_support' ) ); ?>">Export Contractor CSV</a>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_mileage_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_mileage_summary' ) ); ?>">Export Mileage CSV</a>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_calculations_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_calculations_summary' ) ); ?>">Export Annual Summary CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_support&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_1099_support' ) ); ?>">Export Contractor CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_mileage_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_mileage_summary' ) ); ?>">Export Mileage CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_calculations_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_calculations_summary' ) ); ?>">Export Annual Summary CSV</a>
             </p>
 
             <h2>Overview</h2>
@@ -7452,14 +7488,31 @@ class MRM_Lesson_Scheduler {
         <?php
     }
 
-    protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0 ) {
-        $gross_revenue      = $this->mrm_calc_total_revenue( $tax_year, $tax_quarter );
-        $refunds            = $this->mrm_calc_total_refunds( $tax_year, $tax_quarter );
-        $stripe_fees        = $this->mrm_calc_total_stripe_fees( $tax_year, $tax_quarter );
-        $contractor_payouts = $this->mrm_calc_total_contractor_payouts( $tax_year, $tax_quarter );
-        $payroll_wages      = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter );
-        $manual_expenses    = $this->mrm_calc_total_manual_expenses( $tax_year, $tax_quarter );
-        $mileage_deduction  = $this->mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter );
+    protected function mrm_get_effective_calculations_environment_mode() {
+        $requested = isset( $_GET['calc_env'] ) ? sanitize_text_field( (string) $_GET['calc_env'] ) : '';
+        if ( in_array( $requested, array( 'test', 'live' ), true ) ) {
+            return $requested;
+        }
+
+        $calc_settings = get_option( 'mrm_calculations_settings', array() );
+        if ( ! empty( $calc_settings['environment_mode'] ) && in_array( $calc_settings['environment_mode'], array( 'test', 'live' ), true ) ) {
+            return (string) $calc_settings['environment_mode'];
+        }
+
+        $pay_settings = get_option( 'mrm_pay_hub_settings', array() );
+        $stripe_mode = isset( $pay_settings['stripe_mode'] ) ? (string) $pay_settings['stripe_mode'] : 'live';
+
+        return ( $stripe_mode === 'test' ) ? 'test' : 'live';
+    }
+
+    protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+        $gross_revenue      = $this->mrm_calc_total_revenue( $tax_year, $tax_quarter, $environment_mode );
+        $refunds            = $this->mrm_calc_total_refunds( $tax_year, $tax_quarter, $environment_mode );
+        $stripe_fees        = $this->mrm_calc_total_stripe_fees( $tax_year, $tax_quarter, $environment_mode );
+        $contractor_payouts = $this->mrm_calc_total_contractor_payouts( $tax_year, $tax_quarter, $environment_mode );
+        $payroll_wages      = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
+        $manual_expenses    = $this->mrm_calc_total_manual_expenses( $tax_year, $tax_quarter, $environment_mode );
+        $mileage_deduction  = $this->mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter, $environment_mode );
 
         $estimated_net_income = $gross_revenue
             - $refunds
@@ -7501,7 +7554,7 @@ class MRM_Lesson_Scheduler {
         return array( "{$tax_year}-01-01 00:00:00", "{$tax_year}-12-31 23:59:59" );
     }
 
-    protected function mrm_calc_total_revenue( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_calc_total_revenue( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
 
@@ -7515,8 +7568,10 @@ class MRM_Lesson_Scheduler {
             "SELECT COALESCE(SUM(total_amount),0)
              FROM {$orders_table}
              WHERE status IN ('paid','succeeded','completed')
+               AND environment_mode = %s
                AND created_at >= %s
                AND created_at <= %s",
+            $environment_mode,
             $start,
             $end
         );
@@ -7524,7 +7579,7 @@ class MRM_Lesson_Scheduler {
         return (float) $wpdb->get_var( $sql );
     }
 
-    protected function mrm_calc_total_refunds( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_calc_total_refunds( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
 
@@ -7538,8 +7593,10 @@ class MRM_Lesson_Scheduler {
             "SELECT COALESCE(SUM(refund_amount),0)
              FROM {$orders_table}
              WHERE refund_amount > 0
+               AND environment_mode = %s
                AND updated_at >= %s
                AND updated_at <= %s",
+            $environment_mode,
             $start,
             $end
         );
@@ -7547,7 +7604,7 @@ class MRM_Lesson_Scheduler {
         return (float) $wpdb->get_var( $sql );
     }
 
-    protected function mrm_calc_total_stripe_fees( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_calc_total_stripe_fees( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
 
@@ -7560,8 +7617,10 @@ class MRM_Lesson_Scheduler {
         $sql = $wpdb->prepare(
             "SELECT COALESCE(SUM(stripe_fee_amount),0)
              FROM {$orders_table}
-             WHERE created_at >= %s
+             WHERE environment_mode = %s
+               AND created_at >= %s
                AND created_at <= %s",
+            $environment_mode,
             $start,
             $end
         );
@@ -7569,7 +7628,7 @@ class MRM_Lesson_Scheduler {
         return (float) $wpdb->get_var( $sql );
     }
 
-    protected function mrm_calc_total_contractor_payouts( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_calc_total_contractor_payouts( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
 
@@ -7583,8 +7642,10 @@ class MRM_Lesson_Scheduler {
             "SELECT COALESCE(SUM(amount),0)
              FROM {$payouts_table}
              WHERE payout_type = 'contractor'
+               AND environment_mode = %s
                AND created_at >= %s
                AND created_at <= %s",
+            $environment_mode,
             $start,
             $end
         );
@@ -7592,7 +7653,7 @@ class MRM_Lesson_Scheduler {
         return (float) $wpdb->get_var( $sql );
     }
 
-    protected function mrm_calc_total_manual_expenses( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_calc_total_manual_expenses( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
 
@@ -7605,23 +7666,27 @@ class MRM_Lesson_Scheduler {
                 "SELECT COALESCE(SUM(amount),0)
                  FROM {$table}
                  WHERE tax_year = %d
-                   AND tax_quarter = %d",
+                   AND tax_quarter = %d
+                   AND environment_mode = %s",
                 $tax_year,
-                $tax_quarter
+                $tax_quarter,
+                $environment_mode
             );
         } else {
             $sql = $wpdb->prepare(
                 "SELECT COALESCE(SUM(amount),0)
                  FROM {$table}
-                 WHERE tax_year = %d",
-                $tax_year
+                 WHERE tax_year = %d
+                   AND environment_mode = %s",
+                $tax_year,
+                $environment_mode
             );
         }
 
         return (float) $wpdb->get_var( $sql );
     }
 
-    protected function mrm_calc_total_payroll_wages( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_calc_total_payroll_wages( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         $table = $wpdb->prefix . 'mrm_tax_payroll_imports';
 
@@ -7634,23 +7699,27 @@ class MRM_Lesson_Scheduler {
                 "SELECT COALESCE(SUM(gross_wages),0)
                  FROM {$table}
                  WHERE tax_year = %d
-                   AND tax_quarter = %d",
+                   AND tax_quarter = %d
+                   AND environment_mode = %s",
                 $tax_year,
-                $tax_quarter
+                $tax_quarter,
+                $environment_mode
             );
         } else {
             $sql = $wpdb->prepare(
                 "SELECT COALESCE(SUM(gross_wages),0)
                  FROM {$table}
-                 WHERE tax_year = %d",
-                $tax_year
+                 WHERE tax_year = %d
+                   AND environment_mode = %s",
+                $tax_year,
+                $environment_mode
             );
         }
 
         return (float) $wpdb->get_var( $sql );
     }
 
-    protected function mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
 
@@ -7663,23 +7732,27 @@ class MRM_Lesson_Scheduler {
                 "SELECT COALESCE(SUM(mileage_deduction),0)
                  FROM {$table}
                  WHERE tax_year = %d
-                   AND QUARTER(trip_date) = %d",
+                   AND QUARTER(trip_date) = %d
+                   AND environment_mode = %s",
                 $tax_year,
-                $tax_quarter
+                $tax_quarter,
+                $environment_mode
             );
         } else {
             $sql = $wpdb->prepare(
                 "SELECT COALESCE(SUM(mileage_deduction),0)
                  FROM {$table}
-                 WHERE tax_year = %d",
-                $tax_year
+                 WHERE tax_year = %d
+                   AND environment_mode = %s",
+                $tax_year,
+                $environment_mode
             );
         }
 
         return (float) $wpdb->get_var( $sql );
     }
 
-    protected function mrm_get_calculations_contractor_summary( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_get_calculations_contractor_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
 
         $payouts_table = $wpdb->prefix . 'mrm_payouts';
@@ -7705,10 +7778,12 @@ class MRM_Lesson_Scheduler {
              FROM {$payouts_table} p
              LEFT JOIN {$payee_table} pp ON pp.id = p.payee_id
              WHERE p.payout_type = 'contractor'
+               AND p.environment_mode = %s
                AND p.created_at >= %s
                AND p.created_at <= %s
              GROUP BY p.payee_id
              ORDER BY total_paid DESC",
+            $environment_mode,
             $start,
             $end
         );
@@ -7716,7 +7791,7 @@ class MRM_Lesson_Scheduler {
         return $wpdb->get_results( $sql, ARRAY_A );
     }
 
-    protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
 
@@ -7733,10 +7808,12 @@ class MRM_Lesson_Scheduler {
                  FROM {$table}
                  WHERE tax_year = %d
                    AND QUARTER(trip_date) = %d
+                   AND environment_mode = %s
                  GROUP BY instructor_id
                  ORDER BY total_miles DESC",
                 $tax_year,
-                $tax_quarter
+                $tax_quarter,
+                $environment_mode
             );
         } else {
             $sql = $wpdb->prepare(
@@ -7746,16 +7823,18 @@ class MRM_Lesson_Scheduler {
                         COALESCE(SUM(mileage_deduction),0) AS total_deduction
                  FROM {$table}
                  WHERE tax_year = %d
+                   AND environment_mode = %s
                  GROUP BY instructor_id
                  ORDER BY total_miles DESC",
-                $tax_year
+                $tax_year,
+                $environment_mode
             );
         }
 
         return $wpdb->get_results( $sql, ARRAY_A );
     }
 
-    protected function mrm_get_calculations_expense_summary( $tax_year, $tax_quarter = 0 ) {
+    protected function mrm_get_calculations_expense_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
         global $wpdb;
         $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
 
@@ -7769,27 +7848,31 @@ class MRM_Lesson_Scheduler {
                  FROM {$table}
                  WHERE tax_year = %d
                    AND tax_quarter = %d
+                   AND environment_mode = %s
                  GROUP BY category
                  ORDER BY total_amount DESC",
                 $tax_year,
-                $tax_quarter
+                $tax_quarter,
+                $environment_mode
             );
         } else {
             $sql = $wpdb->prepare(
                 "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
                  FROM {$table}
                  WHERE tax_year = %d
+                   AND environment_mode = %s
                  GROUP BY category
                  ORDER BY total_amount DESC",
-                $tax_year
+                $tax_year,
+                $environment_mode
             );
         }
 
         return $wpdb->get_results( $sql, ARRAY_A );
     }
 
-    protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter = 0 ) {
-        $total = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter );
+    protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+        $total = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
 
         return array(
             array(
@@ -7886,6 +7969,7 @@ class MRM_Lesson_Scheduler {
 
         $settings = get_option( 'mrm_calculations_settings', array() );
         $default_rate = isset( $settings['mileage_rate'] ) ? (float) $settings['mileage_rate'] : 0.7250;
+        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
 
         $start_time = (string) ( $lesson['start_time'] ?? '' );
         $trip_date = $start_time ? gmdate( 'Y-m-d', strtotime( $start_time ) ) : gmdate( 'Y-m-d' );
@@ -7897,6 +7981,7 @@ class MRM_Lesson_Scheduler {
                 'lesson_id'           => (int) $lesson_id,
                 'instructor_id'       => (int) ( $lesson['instructor_id'] ?? 0 ),
                 'tax_year'            => $tax_year,
+                'environment_mode'    => $environment_mode,
                 'trip_date'           => $trip_date,
                 'origin_address'      => (string) ( $lesson['instructor_address'] ?? '' ),
                 'destination_address' => (string) ( $lesson['address'] ?? '' ),
@@ -7910,7 +7995,7 @@ class MRM_Lesson_Scheduler {
                 'updated_at'          => current_time( 'mysql' ),
             ),
             array(
-                '%d','%d','%d','%s','%s','%s','%f','%f','%f','%f','%s','%s','%s','%s'
+                '%d','%d','%d','%s','%s','%s','%s','%f','%f','%f','%f','%s','%s','%s','%s'
             )
         );
     }
@@ -7936,7 +8021,8 @@ class MRM_Lesson_Scheduler {
 
         $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
         $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
-        $rows = $this->mrm_get_calculations_contractor_summary( $tax_year, $tax_quarter );
+        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+        $rows = $this->mrm_get_calculations_contractor_summary( $tax_year, $tax_quarter, $environment_mode );
 
         $this->mrm_send_csv_headers( 'mrm-contractor-1099-' . $tax_year . '-q' . $tax_quarter . '.csv' );
         $out = fopen( 'php://output', 'w' );
@@ -7966,7 +8052,8 @@ class MRM_Lesson_Scheduler {
 
         $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
         $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
-        $rows = $this->mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter );
+        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+        $rows = $this->mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter, $environment_mode );
 
         $this->mrm_send_csv_headers( 'mrm-mileage-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
         $out = fopen( 'php://output', 'w' );
@@ -7994,7 +8081,8 @@ class MRM_Lesson_Scheduler {
 
         $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
         $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
-        $overview = $this->mrm_get_calculations_overview( $tax_year, $tax_quarter );
+        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+        $overview = $this->mrm_get_calculations_overview( $tax_year, $tax_quarter, $environment_mode );
 
         $this->mrm_send_csv_headers( 'mrm-calculations-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
         $out = fopen( 'php://output', 'w' );
