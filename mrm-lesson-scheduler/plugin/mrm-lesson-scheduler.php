@@ -201,14 +201,15 @@ class MRM_Lesson_Scheduler {
             $scheduled = wp_next_scheduled( $hook );
 
             $this->mrm_safety_log( 'scheduled_cron_hook', array(
-                'hook'                   => $hook,
-                'schedule'               => $schedule,
-                'scheduled_for_local'    => $scheduled ? wp_date( 'Y-m-d H:i:s', $scheduled, wp_timezone() ) : '',
-                'scheduled_for_utc'      => $scheduled ? gmdate( 'Y-m-d H:i:s', $scheduled ) : '',
-                'scheduled_for_timestamp'=> $scheduled ? (int) $scheduled : 0,
+                'hook'                    => $hook,
+                'schedule'                => $schedule,
+                'scheduled_for_local'     => $scheduled ? wp_date( 'Y-m-d H:i:s', $scheduled, wp_timezone() ) : '',
+                'scheduled_for_utc'       => $scheduled ? gmdate( 'Y-m-d H:i:s', $scheduled ) : '',
+                'scheduled_for_timestamp' => $scheduled ? (int) $scheduled : 0,
             ) );
         }
     }
+
 
     // Get a single Google Calendar event
     protected function google_get_event( $calendar_id, $event_id ) {
@@ -1854,6 +1855,7 @@ class MRM_Lesson_Scheduler {
 
         $this->mrm_safety_log( 'maybe_reschedule_cron_jobs_finished', array() );
     }
+
 
     public static function deactivate() {
         wp_clear_scheduled_hook( 'mrm_scheduler_sync_upcoming_events' );
@@ -5537,6 +5539,7 @@ class MRM_Lesson_Scheduler {
     }
 
 
+
     protected function log_safety_cron_diagnostics() {
         $hooks = array(
             'mrm_scheduler_send_safety_reminders',
@@ -5561,6 +5564,7 @@ class MRM_Lesson_Scheduler {
         $this->log_safety_cron_diagnostics();
         $this->cron_send_safety_reminders();
     }
+
 
     public function run_safety_exception_check_now() {
         $this->mrm_safety_log( 'run_safety_exception_check_now_called', array() );
@@ -5601,7 +5605,7 @@ class MRM_Lesson_Scheduler {
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT l.id, l.status, l.start_time, l.student_email, l.instructor_id,
+                "SELECT l.id, l.status, l.start_time, l.student_email,
                         a.parent_reminder_sent_at, a.instructor_reminder_sent_at
                  FROM {$lessons_table} l
                  LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
@@ -5629,9 +5633,9 @@ class MRM_Lesson_Scheduler {
         }
 
         $this->mrm_safety_log( 'reminder_query_completed', array(
-            'row_count'   => is_array( $rows ) ? count( $rows ) : 0,
-            'from_local'  => $from_local,
-            'to_local'    => $to_local,
+            'row_count'  => is_array( $rows ) ? count( $rows ) : 0,
+            'from_local' => $from_local,
+            'to_local'   => $to_local,
         ) );
 
         if ( empty( $rows ) ) {
@@ -5652,12 +5656,12 @@ class MRM_Lesson_Scheduler {
             }
 
             $this->mrm_safety_log( 'reminder_candidate_selected', array(
-                'lesson_id'                  => $lesson_id,
-                'status'                     => (string) ( $row['status'] ?? '' ),
-                'start_time'                 => (string) ( $row['start_time'] ?? '' ),
-                'student_email'              => (string) ( $row['student_email'] ?? '' ),
-                'parent_reminder_sent_at'    => (string) ( $row['parent_reminder_sent_at'] ?? '' ),
-                'instructor_reminder_sent_at'=> (string) ( $row['instructor_reminder_sent_at'] ?? '' ),
+                'lesson_id'                   => $lesson_id,
+                'status'                      => (string) ( $row['status'] ?? '' ),
+                'start_time'                  => (string) ( $row['start_time'] ?? '' ),
+                'student_email'               => (string) ( $row['student_email'] ?? '' ),
+                'parent_reminder_sent_at'     => (string) ( $row['parent_reminder_sent_at'] ?? '' ),
+                'instructor_reminder_sent_at' => (string) ( $row['instructor_reminder_sent_at'] ?? '' ),
             ) );
 
             $this->send_safety_reminders_for_lesson( $lesson_id );
@@ -5667,6 +5671,7 @@ class MRM_Lesson_Scheduler {
             'processed_count' => is_array( $rows ) ? count( $rows ) : 0,
         ) );
     }
+
 
     protected function send_safety_reminders_for_lesson( $lesson_id ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
@@ -5730,8 +5735,8 @@ class MRM_Lesson_Scheduler {
         if ( empty( $attendance['parent_reminder_sent_at'] ) ) {
             if ( ! is_email( $student_email ) ) {
                 $this->mrm_safety_log( 'parent_reminder_skipped_invalid_email', array(
-                    'lesson_id'      => (int) $lesson_id,
-                    'student_email'  => (string) ( $lesson['student_email'] ?? '' ),
+                    'lesson_id'     => (int) $lesson_id,
+                    'student_email' => (string) ( $lesson['student_email'] ?? '' ),
                 ) );
             } else {
                 $parent_buttons =
@@ -5771,7 +5776,7 @@ class MRM_Lesson_Scheduler {
             }
         } else {
             $this->mrm_safety_log( 'parent_reminder_skipped_already_sent', array(
-                'lesson_id' => (int) $lesson_id,
+                'lesson_id'               => (int) $lesson_id,
                 'parent_reminder_sent_at' => (string) ( $attendance['parent_reminder_sent_at'] ?? '' ),
             ) );
         }
@@ -5820,11 +5825,12 @@ class MRM_Lesson_Scheduler {
             }
         } else {
             $this->mrm_safety_log( 'instructor_reminder_skipped_already_sent', array(
-                'lesson_id' => (int) $lesson_id,
+                'lesson_id'                   => (int) $lesson_id,
                 'instructor_reminder_sent_at' => (string) ( $attendance['instructor_reminder_sent_at'] ?? '' ),
             ) );
         }
     }
+
 
     public function cron_send_feedback_requests() {
         global $wpdb;
