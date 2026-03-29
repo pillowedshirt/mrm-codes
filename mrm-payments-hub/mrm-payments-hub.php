@@ -554,7 +554,6 @@ class MRM_Payments_Hub_Single {
     $master_sku = $this->mrm_master_all_sheet_music_sku();
 
     $start_mysql = $this->mrm_mysql_from_ts($start_ts);
-    $expires_mysql = $this->mrm_mysql_from_ts($start_ts + (31 * 24 * 60 * 60));
     $now = $this->mrm_now_mysql();
 
     $ok = $wpdb->insert($table, array(
@@ -562,7 +561,7 @@ class MRM_Payments_Hub_Single {
       'email_plain' => $email,
       'sku'         => $master_sku,
       'start_at'    => $start_mysql,
-      'expires_at'  => $expires_mysql,
+      'expires_at'  => null,
       'month_key'   => $month_key,
       'granted_at'  => $now,
       'revoked_at'  => null,
@@ -1701,6 +1700,144 @@ class MRM_Payments_Hub_Single {
 
   private function stripe_retrieve_subscription($subscription_id) {
     return $this->stripe_api_request('GET', '/v1/subscriptions/' . rawurlencode((string)$subscription_id));
+  }
+
+  private function stripe_find_customer_by_email($email) {
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) {
+      return new WP_Error('invalid_email', 'Invalid email.');
+    }
+
+    $results = $this->stripe_api_request('GET', '/v1/customers', array(
+      'email' => $email,
+      'limit' => 1,
+    ));
+
+    if (is_wp_error($results)) {
+      return $results;
+    }
+
+    if (empty($results['data']) || !is_array($results['data'])) {
+      return new WP_Error('customer_not_found', 'Stripe customer not found.');
+    }
+
+    return (array)$results['data'][0];
+  }
+
+  private function stripe_list_customer_subscriptions($customer_id) {
+    $customer_id = trim((string)$customer_id);
+    if ($customer_id === '') {
+      return new WP_Error('missing_customer_id', 'Missing Stripe customer ID.');
+    }
+
+    $subscriptions = $this->stripe_api_request('GET', '/v1/subscriptions', array(
+      'customer' => $customer_id,
+      'status'   => 'all',
+      'limit'    => 20,
+    ));
+
+    if (is_wp_error($subscriptions)) {
+      return $subscriptions;
+    }
+
+    return $subscriptions;
+  }
+
+  private function mrm_get_sheet_music_subscription_access_status_by_email($email) {
+    $email = sanitize_email((string)$email);
+
+    if (!$email || !is_email($email)) {
+      $result = array(
+        'has_access' => false,
+        'status' => '',
+        'subscription_id' => '',
+        'reason' => 'invalid_email',
+      );
+      error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
+        'email' => $email,
+        'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
+        'status' => (string)$result['status'],
+        'subscription_id' => (string)$result['subscription_id'],
+        'reason' => (string)$result['reason'],
+      )));
+      return $result;
+    }
+
+    $customer = $this->stripe_find_customer_by_email($email);
+    if (is_wp_error($customer) || empty($customer['id'])) {
+      $result = array(
+        'has_access' => false,
+        'status' => '',
+        'subscription_id' => '',
+        'reason' => 'no_customer',
+      );
+      error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
+        'email' => $email,
+        'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
+        'status' => (string)$result['status'],
+        'subscription_id' => (string)$result['subscription_id'],
+        'reason' => (string)$result['reason'],
+      )));
+      return $result;
+    }
+
+    $subscriptions = $this->stripe_list_customer_subscriptions($customer['id']);
+    if (is_wp_error($subscriptions) || empty($subscriptions['data']) || !is_array($subscriptions['data'])) {
+      $result = array(
+        'has_access' => false,
+        'status' => '',
+        'subscription_id' => '',
+        'reason' => 'no_subscriptions',
+      );
+      error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
+        'email' => $email,
+        'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
+        'status' => (string)$result['status'],
+        'subscription_id' => (string)$result['subscription_id'],
+        'reason' => (string)$result['reason'],
+      )));
+      return $result;
+    }
+
+    $allowed_statuses = array('active', 'trialing');
+
+    foreach ($subscriptions['data'] as $subscription) {
+      $status = strtolower((string)($subscription['status'] ?? ''));
+      $subscription_id = (string)($subscription['id'] ?? '');
+
+      if (in_array($status, $allowed_statuses, true)) {
+        $result = array(
+          'has_access' => true,
+          'status' => $status,
+          'subscription_id' => $subscription_id,
+          'reason' => 'stripe_active',
+        );
+        error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
+          'email' => $email,
+          'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
+          'status' => (string)$result['status'],
+          'subscription_id' => (string)$result['subscription_id'],
+          'reason' => (string)$result['reason'],
+        )));
+        return $result;
+      }
+    }
+
+    $latest = $subscriptions['data'][0];
+    $result = array(
+      'has_access' => false,
+      'status' => strtolower((string)($latest['status'] ?? '')),
+      'subscription_id' => (string)($latest['id'] ?? ''),
+      'reason' => 'stripe_not_active',
+    );
+    error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
+      'email' => $email,
+      'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
+      'status' => (string)$result['status'],
+      'subscription_id' => (string)$result['subscription_id'],
+      'reason' => (string)$result['reason'],
+    )));
+    return $result;
   }
 
   private function stripe_create_billing_portal_session($customer_id, $return_url) {
@@ -7943,10 +8080,15 @@ class MRM_Payments_Hub_Single {
 
     $lists = $this->all_access_lists();
 
-    // Rule 1: master list grants access to ANY piece
-    $master = isset($lists['all-sheet-music']) && is_array($lists['all-sheet-music'])
-      ? $lists['all-sheet-music'] : array();
-    if (in_array(strtolower($email), $master, true)) return true;
+    // Rule 1: Stripe is source-of-truth for all-sheet-music subscription access.
+    $subscription_status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email);
+    if (!empty($subscription_status['has_access'])) {
+      return true;
+    }
+
+    if ($product_slug === 'all-sheet-music') {
+      return false;
+    }
 
     // Rule 2: per-product list
     $per = isset($lists[$product_slug]) && is_array($lists[$product_slug])
@@ -8856,23 +8998,24 @@ class MRM_Payments_Hub_Single {
                         <thead>
                           <tr>
                             <th>Email</th>
-                            <th>Purchase date</th>
-                            <th>Stripe subscription active</th>
-                            <th>Expires</th>
+                            <th>Source</th>
+                            <th>Stripe Subscription Status</th>
+                            <th>Access</th>
                           </tr>
                         </thead>
                         <tbody>
                           <?php if (!empty($subscription_rows)) : ?>
                             <?php foreach ($subscription_rows as $sub_row) :
-                              $purchase_date = !empty($sub_row['created_at']) ? date_i18n('Y-m-d', strtotime($sub_row['created_at'])) : '';
-                              $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($sub_row);
-                              $expire_label = $this->mrm_sheet_music_subscription_end_date_for_admin($sub_row);
+                              $email = sanitize_email((string)($sub_row['email_plain'] ?? ''));
+                              $status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email);
+                              $status_label = ($status['status'] !== '') ? strtoupper((string)$status['status']) : 'NONE';
+                              $access_label = !empty($status['has_access']) ? '✓' : '✕';
                             ?>
                               <tr>
-                                <td><?php echo esc_html((string)($sub_row['email_plain'] ?? '')); ?></td>
-                                <td><?php echo esc_html($purchase_date); ?></td>
-                                <td style="text-align:center;"><?php echo $is_active ? '✔' : 'X'; ?></td>
-                                <td><?php echo esc_html($expire_label); ?></td>
+                                <td><?php echo esc_html($email); ?></td>
+                                <td>Stripe Subscription</td>
+                                <td><?php echo esc_html($status_label); ?></td>
+                                <td style="font-weight:700;"><?php echo esc_html($access_label); ?></td>
                               </tr>
                             <?php endforeach; ?>
                           <?php else : ?>
