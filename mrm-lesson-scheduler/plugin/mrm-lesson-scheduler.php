@@ -1878,6 +1878,7 @@ class MRM_Lesson_Scheduler {
     email VARCHAR(255) NOT NULL,
     city VARCHAR(100) NOT NULL,
     state varchar(50) NOT NULL DEFAULT '',
+    address VARCHAR(255) NOT NULL DEFAULT '',
     profile_image_url TEXT NULL,
     short_description TEXT NULL,
     long_description LONGTEXT NULL,
@@ -1899,9 +1900,11 @@ class MRM_Lesson_Scheduler {
     series_id BIGINT UNSIGNED NULL,
     student_name VARCHAR(255) NOT NULL,
     student_email VARCHAR(255) NOT NULL,
+    parent_timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
     instrument VARCHAR(100) NOT NULL,
     is_online TINYINT(1) NOT NULL DEFAULT 0,
     is_consultation TINYINT(1) NOT NULL DEFAULT 0,
+    instructor_timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
     lesson_length INT NOT NULL DEFAULT 60,
     start_time DATETIME NOT NULL,
     end_time DATETIME NOT NULL,
@@ -2026,7 +2029,7 @@ class MRM_Lesson_Scheduler {
 
         $instructor_cols = $wpdb->get_col( "DESC {$instructors}", 0 );
         $need_instructors = array(
-            'timezone', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state',
+            'timezone', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state', 'address',
         );
 
         foreach ( $need_instructors as $col ) {
@@ -2252,6 +2255,10 @@ class MRM_Lesson_Scheduler {
         $address       = sanitize_text_field( (string) ( $data['address'] ?? '' ) );
         $address_state = sanitize_text_field( (string) ( $data['address_state'] ?? '' ) );
         $address_postal= sanitize_text_field( (string) ( $data['address_postal'] ?? '' ) );
+        $parent_timezone = sanitize_text_field( (string) ( $data['parent_timezone'] ?? '' ) );
+        if ( $parent_timezone === '' ) {
+            $parent_timezone = 'America/Phoenix';
+        }
 
         $lesson_type       = sanitize_text_field( (string) ( $data['lesson_type'] ?? '' ) );          // online | inperson | consultation (per your UI)
         $repeat_frequency  = sanitize_text_field( (string) ( $data['repeat_frequency'] ?? 'none' ) ); // weekly | biweekly | none
@@ -2327,9 +2334,11 @@ class MRM_Lesson_Scheduler {
                     'series_id'     => null,
                     'student_name'  => $student_name !== '' ? $student_name : $student_email,
                     'student_email' => $student_email,
+                    'parent_timezone'     => $parent_timezone,
                     'instrument'       => $instrument !== '' ? $instrument : 'unknown',
                     'is_online'        => $is_online,
                     'is_consultation'  => $is_consultation,
+                    'instructor_timezone' => $instr_tz,
                     'lesson_length'    => $lesson_length > 0 ? $lesson_length : 60,
                     'start_time'    => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
                     'end_time'      => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['end'] ?? '' ) ) ),
@@ -2350,7 +2359,7 @@ class MRM_Lesson_Scheduler {
                     'reminder_sent_at' => null,
                 ),
                 array(
-                    '%d','%d','%s','%s','%s','%d','%d','%d','%s','%s','%s','%s','%s','%s',
+                    '%d','%d','%s','%s','%s','%s','%d','%d','%s','%d','%s','%s','%s','%s','%s',
                     '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'
                 )
             );
@@ -2425,9 +2434,11 @@ class MRM_Lesson_Scheduler {
                 'series_id'     => ( $series_id ? $series_id : null ),
                 'student_name'  => $student_name !== '' ? $student_name : $student_email,
                 'student_email'    => $student_email,
+                'parent_timezone'     => $parent_timezone,
                 'instrument'       => $instrument !== '' ? $instrument : 'unknown',
                 'is_online'        => $is_online,
                 'is_consultation'  => $is_consultation,
+                'instructor_timezone' => $instr_tz,
                 'lesson_length'    => $lesson_length > 0 ? $lesson_length : 60,
                 'start_time'    => $start_mysql,
                 'end_time'      => $end_mysql,
@@ -2452,9 +2463,11 @@ class MRM_Lesson_Scheduler {
                 '%d', // series_id
                 '%s', // student_name
                 '%s', // student_email
+                '%s', // parent_timezone
                 '%s', // instrument
                 '%d', // is_online
                 '%d', // is_consultation
+                '%s', // instructor_timezone
                 '%d', // lesson_length
                 '%s', // start_time
                 '%s', // end_time
@@ -3726,6 +3739,7 @@ class MRM_Lesson_Scheduler {
             'email' => '',
             'city' => '',
             'state' => '',
+            'address' => '',
             'profile_image_url' => null,
             'short_description' => null,
             'long_description' => null,
@@ -5233,6 +5247,7 @@ class MRM_Lesson_Scheduler {
                         i.name AS instructor_name,
                         i.email AS instructor_email,
                         i.calendar_id AS instructor_calendar_id,
+                        i.address AS instructor_address,
                         i.city AS instructor_city,
                         i.state AS instructor_state,
                         i.timezone AS instructor_timezone
@@ -5454,14 +5469,34 @@ class MRM_Lesson_Scheduler {
     </body></html>';
     }
 
-    protected function get_safety_lesson_context( $lesson ) {
+    protected function get_safety_lesson_context( $lesson, $viewer_role = 'parent' ) {
         $lesson = is_array( $lesson ) ? $lesson : array();
 
-        $start_label = wp_date(
-            'F j, Y \a\t g:i A',
-            strtotime( (string) ( $lesson['start_time'] ?? '' ) ),
-            wp_timezone()
-        );
+        $viewer_role = ( $viewer_role === 'instructor' ) ? 'instructor' : 'parent';
+
+        $timezone_string = 'America/Phoenix';
+        if ( $viewer_role === 'instructor' ) {
+            $timezone_string = trim( (string) ( $lesson['instructor_timezone'] ?? '' ) );
+        } else {
+            $timezone_string = trim( (string) ( $lesson['parent_timezone'] ?? '' ) );
+        }
+
+        if ( $timezone_string === '' ) {
+            $timezone_string = wp_timezone_string();
+        }
+
+        try {
+            $viewer_tz = new DateTimeZone( $timezone_string );
+        } catch ( Exception $e ) {
+            $viewer_tz = wp_timezone();
+            $timezone_string = wp_timezone_string();
+        }
+
+        $start_raw = (string) ( $lesson['start_time'] ?? '' );
+        $start_ts = strtotime( $start_raw );
+        $start_label = $start_raw !== '' && $start_ts
+            ? wp_date( 'F j, Y \a\t g:i A', $start_ts, $viewer_tz )
+            : '';
 
         $minutes = (int) ( $lesson['lesson_length'] ?? 0 );
 
@@ -5480,7 +5515,6 @@ class MRM_Lesson_Scheduler {
             }
         }
 
-        // Consultations should be treated as online for reminder wording/link display.
         if ( $is_consultation ) {
             $is_online = true;
         }
@@ -5506,9 +5540,9 @@ class MRM_Lesson_Scheduler {
             }
 
             if ( $is_consultation ) {
-                $format_note = 'This is an online consultation. Please use the consultation link above at the scheduled time.';
+                $format_note = 'This is an online consultation. Please use the consultation link below at the scheduled time.';
             } else {
-                $format_note = 'This is an online lesson. Please use the lesson link above at the scheduled time.';
+                $format_note = 'This is an online lesson. Please use the lesson link below at the scheduled time.';
             }
         } else {
             $calendar_id = (string) ( $lesson['instructor_calendar_id'] ?? '' );
@@ -5522,9 +5556,10 @@ class MRM_Lesson_Scheduler {
             }
 
             if ( $location_text === '' ) {
+                $address = trim( (string) ( $lesson['instructor_address'] ?? '' ) );
                 $city = trim( (string) ( $lesson['instructor_city'] ?? '' ) );
                 $state = trim( (string) ( $lesson['instructor_state'] ?? '' ) );
-                $location_text = trim( $city . ( $city !== '' && $state !== '' ? ', ' : '' ) . $state );
+                $location_text = trim( implode( ', ', array_filter( array( $address, $city, $state ) ) ) );
             }
 
             $format_note = 'This is an in-person lesson. Please plan to meet in the agreed open, public, or community lesson setting for the scheduled lesson time.';
@@ -5539,6 +5574,7 @@ class MRM_Lesson_Scheduler {
             'format_note'       => $format_note,
             'is_consultation'   => $is_consultation,
             'is_online'         => $is_online,
+            'viewer_timezone'   => $timezone_string,
         );
     }
 
@@ -5992,6 +6028,22 @@ class MRM_Lesson_Scheduler {
     }
 
 
+    protected function mrm_email_button_html( $url, $label, $variant = 'secondary' ) {
+        $is_primary = ( $variant === 'primary' );
+
+        $bg     = $is_primary ? '#111' : '#fff';
+        $color  = $is_primary ? '#fff' : '#111';
+        $border = $is_primary ? '1px solid #111' : '1px solid #111';
+
+        return '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:0 auto; width:auto; max-width:100%;">'
+            . '<tr><td align="center" style="border-radius:10px; border:' . esc_attr( $border ) . '; background:' . esc_attr( $bg ) . ';">'
+            . '<a href="' . esc_url( $url ) . '" style="display:block; width:auto; max-width:320px; padding:14px 18px; text-align:center; text-decoration:none; color:' . esc_attr( $color ) . '; font-weight:600; line-height:1.35; font-size:15px; white-space:normal; word-break:break-word;">'
+            . esc_html( $label )
+            . '</a>'
+            . '</td></tr></table>';
+    }
+
+
     protected function send_safety_reminders_for_lesson( $lesson_id ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
@@ -6020,8 +6072,9 @@ class MRM_Lesson_Scheduler {
         }
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
-        $context    = $this->get_safety_lesson_context( $lesson );
-        $is_consultation = ! empty( $context['is_consultation'] );
+        $parent_context     = $this->get_safety_lesson_context( $lesson, 'parent' );
+        $instructor_context = $this->get_safety_lesson_context( $lesson, 'instructor' );
+        $is_consultation    = ! empty( $parent_context['is_consultation'] );
         $exp        = time() + ( 8 * HOUR_IN_SECONDS );
 
         $parent_no_show_token       = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'report_no_show', $exp );
@@ -6032,28 +6085,51 @@ class MRM_Lesson_Scheduler {
         $instructor_arrived_url   = $this->mrm_safety_action_url( $instructor_arrived_token );
         $instructor_emergency_url = $this->mrm_safety_action_url( $instructor_emergency_token );
 
-        $details = '';
-        $details .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
-        $details .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
-        $details .= '<div><strong>Time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>';
+        $parent_details = '';
+        $parent_details .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $parent_details .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $parent_details .= '<div><strong>Time:</strong> ' . esc_html( (string) $parent_context['start_label'] ) . '</div>';
 
         if ( $is_consultation ) {
-            $details .= '<div><strong>Type:</strong> Consultation</div>';
-            $details .= '<div><strong>Consultation length:</strong> ' . esc_html( (string) $context['minutes'] ) . ' minutes</div>';
+            $parent_details .= '<div><strong>Type:</strong> Consultation</div>';
+            $parent_details .= '<div><strong>Consultation length:</strong> ' . esc_html( (string) $parent_context['minutes'] ) . ' minutes</div>';
         } else {
-            $details .= '<div><strong>Length:</strong> ' . esc_html( (string) $context['minutes'] ) . ' minutes</div>';
-            $details .= '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>';
+            $parent_details .= '<div><strong>Length:</strong> ' . esc_html( (string) $parent_context['minutes'] ) . ' minutes</div>';
+            $parent_details .= '<div><strong>Type:</strong> ' . esc_html( (string) $parent_context['lesson_type_label'] ) . '</div>';
         }
 
-        if ( ! empty( $context['join_link'] ) ) {
-            $details .= '<div><strong>' . ( $is_consultation ? 'Consultation link' : 'Lesson link' ) . ':</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
+        if ( ! empty( $parent_context['join_link'] ) ) {
+            $parent_details .= '<div><strong>' . ( $is_consultation ? 'Consultation link' : 'Lesson link' ) . ':</strong> <a href="' . esc_url( (string) $parent_context['join_link'] ) . '">' . esc_html( (string) $parent_context['join_link'] ) . '</a></div>';
         }
 
-        if ( ! empty( $context['location_text'] ) ) {
-            $details .= '<div><strong>Location:</strong> ' . esc_html( (string) $context['location_text'] ) . '</div>';
+        if ( ! empty( $parent_context['location_text'] ) ) {
+            $parent_details .= '<div><strong>Location:</strong> ' . esc_html( (string) $parent_context['location_text'] ) . '</div>';
         }
 
-        $details .= '<div style="margin-top:12px;">' . esc_html( (string) $context['format_note'] ) . '</div>';
+        $parent_details .= '<div style="margin-top:12px;">' . esc_html( (string) $parent_context['format_note'] ) . '</div>';
+
+        $instructor_details = '';
+        $instructor_details .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $instructor_details .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $instructor_details .= '<div><strong>Time:</strong> ' . esc_html( (string) $instructor_context['start_label'] ) . '</div>';
+
+        if ( $is_consultation ) {
+            $instructor_details .= '<div><strong>Type:</strong> Consultation</div>';
+            $instructor_details .= '<div><strong>Consultation length:</strong> ' . esc_html( (string) $instructor_context['minutes'] ) . ' minutes</div>';
+        } else {
+            $instructor_details .= '<div><strong>Length:</strong> ' . esc_html( (string) $instructor_context['minutes'] ) . ' minutes</div>';
+            $instructor_details .= '<div><strong>Type:</strong> ' . esc_html( (string) $instructor_context['lesson_type_label'] ) . '</div>';
+        }
+
+        if ( ! empty( $instructor_context['join_link'] ) ) {
+            $instructor_details .= '<div><strong>' . ( $is_consultation ? 'Consultation link' : 'Lesson link' ) . ':</strong> <a href="' . esc_url( (string) $instructor_context['join_link'] ) . '">' . esc_html( (string) $instructor_context['join_link'] ) . '</a></div>';
+        }
+
+        if ( ! empty( $instructor_context['location_text'] ) ) {
+            $instructor_details .= '<div><strong>Location:</strong> ' . esc_html( (string) $instructor_context['location_text'] ) . '</div>';
+        }
+
+        $instructor_details .= '<div style="margin-top:12px;">' . esc_html( (string) $instructor_context['format_note'] ) . '</div>';
 
         $student_email    = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
         $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
@@ -6068,7 +6144,7 @@ class MRM_Lesson_Scheduler {
                 if ( $is_consultation ) {
                     $parent_buttons =
                         '<div style="margin-top:24px;">' .
-                            '<p style="margin:0;text-align:center;"><a href="' . esc_url( $parent_no_show_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here if your instructor did not arrive</a></p>' .
+                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $parent_no_show_url, 'Click here if your instructor did not arrive', 'secondary' ) . '</div>' .
                         '</div>';
 
                     $parent_title = 'Consultation Reminder';
@@ -6079,8 +6155,8 @@ class MRM_Lesson_Scheduler {
 
                     $parent_buttons =
                         '<div style="margin-top:24px;">' .
-                            '<p style="margin:0 0 12px 0;text-align:center;"><a href="' . esc_url( $parent_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here when your instructor arrives</a></p>' .
-                            '<p style="margin:0;text-align:center;"><a href="' . esc_url( $parent_no_show_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here if your instructor did not arrive</a></p>' .
+                            '<div style="margin:0 auto 12px auto;text-align:center;">' . $this->mrm_email_button_html( $parent_arrived_url, 'Click here when your instructor arrives', 'primary' ) . '</div>' .
+                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $parent_no_show_url, 'Click here if your instructor did not arrive', 'secondary' ) . '</div>' .
                         '</div>';
 
                     $parent_title = 'Lesson reminder';
@@ -6090,7 +6166,7 @@ class MRM_Lesson_Scheduler {
                 $parent_html = $this->mrm_safety_email_wrap_html_blocks(
                     $parent_title,
                     $parent_intro,
-                    $details,
+                    $parent_details,
                     $parent_buttons
                 );
 
@@ -6134,7 +6210,7 @@ class MRM_Lesson_Scheduler {
                 if ( $is_consultation ) {
                     $instructor_buttons =
                         '<div style="margin-top:24px;">' .
-                            '<p style="margin:0;text-align:center;"><a href="' . esc_url( $instructor_emergency_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">An emergency has arisen and I can no longer make this consultation</a></p>' .
+                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_emergency_url, 'An emergency has arisen and I can no longer make this consultation', 'secondary' ) . '</div>' .
                         '</div>';
 
                     $instructor_title = 'Consultation Reminder';
@@ -6142,8 +6218,8 @@ class MRM_Lesson_Scheduler {
                 } else {
                     $instructor_buttons =
                         '<div style="margin-top:24px;">' .
-                            '<p style="margin:0 0 12px 0;text-align:center;"><a href="' . esc_url( $instructor_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;max-width:420px;width:100%;">Click here when you have arrived for your lesson</a></p>' .
-                            '<p style="margin:0;text-align:center;"><a href="' . esc_url( $instructor_emergency_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;max-width:420px;width:100%;">An emergency has arisen and I can no longer make this lesson</a></p>' .
+                            '<div style="margin:0 auto 12px auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_arrived_url, 'Click here when you have arrived for your lesson', 'primary' ) . '</div>' .
+                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_emergency_url, 'An emergency has arisen and I can no longer make this lesson', 'secondary' ) . '</div>' .
                         '</div>';
 
                     $instructor_title = 'Instructor lesson reminder';
@@ -6153,7 +6229,7 @@ class MRM_Lesson_Scheduler {
                 $instructor_html = $this->mrm_safety_email_wrap_html_blocks(
                     $instructor_title,
                     $instructor_intro,
-                    $details,
+                    $instructor_details,
                     $instructor_buttons
                 );
 
@@ -6451,13 +6527,21 @@ class MRM_Lesson_Scheduler {
                 'error' => $parsed->get_error_message(),
             ) );
             status_header( 400 );
-            echo '<h2>Invalid or expired emergency link</h2><p>' . esc_html( $parsed->get_error_message() ) . '</p>';
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Invalid or expired emergency link',
+                'message_html' => '<p class="mrm-message">' . esc_html( $parsed->get_error_message() ) . '</p>',
+            ) );
             exit;
         }
 
         if ( $message === '' ) {
             status_header( 400 );
-            echo '<h2>Please enter a message</h2>';
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Please enter a message',
+                'message_html' => '<p class="mrm-message">A message is required before sending an emergency notice.</p>',
+            ) );
             exit;
         }
 
@@ -6493,10 +6577,12 @@ class MRM_Lesson_Scheduler {
             'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
         ) );
 
-        echo '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;max-width:700px;">';
-        echo '<h2>Emergency notice sent</h2>';
-        echo '<p>Your emergency message has been recorded and sent to the parent and site administrator.</p>';
-        echo '</body></html>';
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Lesson Update',
+            'title'        => 'Emergency notice sent',
+            'message_html' => '<p class="mrm-message">Your emergency message has been recorded and sent to the parent and site administrator.</p>',
+            'card_html'    => '<div class="mrm-panel">Thank you. The family has now been notified.</div>',
+        ) );
         exit;
     }
 
@@ -6580,22 +6666,46 @@ class MRM_Lesson_Scheduler {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             status_header( 404 );
-            echo '<h2>Lesson not found</h2>';
-            return;
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson not found',
+                'message_html' => '<p class="mrm-message">We could not locate this lesson.</p>',
+            ) );
+            exit;
         }
 
         $token = $this->mrm_safety_sign_token( $lesson_id, 'instructor', 'emergency', time() + ( 4 * HOUR_IN_SECONDS ) );
         $submit_url = add_query_arg( array( 'action' => 'mrm_safety_emergency_submit' ), admin_url( 'admin-post.php' ) );
 
-        echo '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;max-width:720px;">';
-        echo '<h2>Emergency lesson notice</h2>';
-        echo '<p>Please provide a professional explanation that will be sent to the parent and site administrator.</p>';
-        echo '<form method="post" action="' . esc_url( $submit_url ) . '">';
-        echo '<input type="hidden" name="token" value="' . esc_attr( $token ) . '">';
-        echo '<p><label><strong>Message</strong></label><br><textarea name="message" rows="8" style="width:100%;max-width:680px;" required></textarea></p>';
-        echo '<p><button type="submit" style="background:#111;color:#fff;border:none;padding:12px 18px;border-radius:8px;">Send emergency notice</button></p>';
-        echo '</form>';
-        echo '</body></html>';
+        $context = $this->get_safety_lesson_context( $lesson, 'instructor' );
+        $is_consultation = ! empty( $context['is_consultation'] );
+
+        $message_html = '<p class="mrm-message">Please provide a professional explanation that will be sent to the parent and site administrator.</p>';
+
+        $card_html = '
+        <div class="mrm-panel mrm-stack">
+            <div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>
+            <div><strong>Time:</strong> ' . esc_html( (string) ( $context['start_label'] ?? '' ) ) . '</div>
+            <div><strong>Type:</strong> ' . esc_html( $is_consultation ? 'Consultation' : (string) ( $context['lesson_type_label'] ?? 'Lesson' ) ) . '</div>
+        </div>
+        <form method="post" action="' . esc_url( $submit_url ) . '" class="mrm-stack" style="margin-top:18px;">
+            <input type="hidden" name="token" value="' . esc_attr( $token ) . '">
+            <div>
+                <label class="mrm-label" for="mrm-emergency-message">Message</label>
+                <textarea id="mrm-emergency-message" name="message" rows="8" required placeholder="Briefly explain the emergency and any helpful next steps for the family."></textarea>
+            </div>
+            <div class="mrm-form-actions">
+                <button type="submit" class="mrm-btn mrm-btn-primary">Send emergency notice</button>
+            </div>
+        </form>
+    ';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Lesson Update',
+            'title'        => $is_consultation ? 'Consultation emergency notice' : 'Lesson emergency notice',
+            'message_html' => $message_html,
+            'card_html'    => $card_html,
+        ) );
         exit;
     }
 
@@ -7152,8 +7262,7 @@ class MRM_Lesson_Scheduler {
             $state = isset( $_POST['state'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_POST['state'] ) ) ) : '';
             $state = preg_replace('/[^A-Z]/', '', $state); // keep letters only
             $state = substr($state, 0, 2); // enforce 2-letter code
-            $latitude_in  = ( isset( $_POST['latitude'] ) && $_POST['latitude'] !== '' ) ? (string) wp_unslash( $_POST['latitude'] ) : '';
-            $longitude_in = ( isset( $_POST['longitude'] ) && $_POST['longitude'] !== '' ) ? (string) wp_unslash( $_POST['longitude'] ) : '';
+            $address = isset( $_POST['address'] ) ? sanitize_text_field( wp_unslash( $_POST['address'] ) ) : '';
             $calendar_id = isset( $_POST['calendar_id'] ) ? sanitize_text_field( wp_unslash( $_POST['calendar_id'] ) ) : '';
             $timezone    = isset( $_POST['timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['timezone'] ) ) : '';
             $stripe_connected_account_id = isset( $_POST['stripe_connected_account_id'] ) ? sanitize_text_field( wp_unslash( $_POST['stripe_connected_account_id'] ) ) : '';
@@ -7178,8 +7287,7 @@ class MRM_Lesson_Scheduler {
                 if ( ! $timezone ) $errors[] = 'Timezone is required.';
                 if ( $stripe_connected_account_id && ! preg_match( '/^acct_[A-Za-z0-9]+$/', $stripe_connected_account_id ) ) $errors[] = 'Stripe Connected Account ID must start with acct_.';
                 if ( $hire_date && ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $hire_date ) ) $errors[] = 'Start Date must be in YYYY-MM-DD format.';
-                if ( $latitude_in !== '' && ! is_numeric( $latitude_in ) ) $errors[] = 'Latitude must be a number (or blank).';
-                if ( $longitude_in !== '' && ! is_numeric( $longitude_in ) ) $errors[] = 'Longitude must be a number (or blank).';
+                if ( ! $address ) $errors[] = 'Address is required.';
             }
             $schema = $this->schema_status();
             if ( ! $schema['ok'] ) $errors[] = 'Database schema is not ready. Click “Run Installer/Upgrade” first.';
@@ -7189,8 +7297,7 @@ class MRM_Lesson_Scheduler {
                     'email' => $email,
                     'city' => $city,
                     'state' => $state,
-                    'latitude' => ( $latitude_in === '' ? null : (string) $latitude_in ),
-                    'longitude' => ( $longitude_in === '' ? null : (string) $longitude_in ),
+                    'address' => $address,
                     'calendar_id' => $calendar_id,
                     'timezone' => $timezone,
                     'stripe_connected_account_id' => ( $stripe_connected_account_id === '' ? null : $stripe_connected_account_id ),
@@ -7200,7 +7307,7 @@ class MRM_Lesson_Scheduler {
                     'long_description' => ( $long_description === '' ? null : $long_description ),
                     'instruments' => ( $instruments_json === '' ? null : $instruments_json ),
                 );
-                $formats = array( '%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s' );
+                $formats = array( '%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s' );
                 if ( $action === 'add' ) {
                     $result = $wpdb->insert( $table, $data, $formats );
                     echo $result === false ? '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>' : '<div class="notice notice-success"><p>Instructor added (ID ' . esc_html( (int) $wpdb->insert_id ) . ').</p></div>';
@@ -7321,15 +7428,11 @@ class MRM_Lesson_Scheduler {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><label for="latitude">Latitude</label></th>
+                        <th scope="row"><label for="address">Address</label></th>
                         <td>
-                            <input name="latitude" id="latitude" type="text" class="regular-text" placeholder="33.4484" value="<?php echo esc_attr( $editing['latitude'] ?? '' ); ?>">
-                            <p class="description">Optional. Used for proximity sorting.</p>
+                            <input name="address" id="address" type="text" class="regular-text" placeholder="123 Main St" value="<?php echo esc_attr( $editing['address'] ?? '' ); ?>">
+                            <p class="description">Instructor address used for internal reference and location-based scheduling context.</p>
                         </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><label for="longitude">Longitude</label></th>
-                        <td><input name="longitude" id="longitude" type="text" class="regular-text" placeholder="-112.0740" value="<?php echo esc_attr( $editing['longitude'] ?? '' ); ?>"></td>
                     </tr>
                     <tr>
                         <th scope="row"><label for="calendar_id">Google Calendar ID</label></th>
@@ -8345,7 +8448,7 @@ class MRM_Lesson_Scheduler {
             $details .= '<div><strong>Consultation link:</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
         }
 
-        $intro = '<p>Your consultation has been scheduled successfully.</p><p>This is an online consultation. Please use the consultation link above at the scheduled time.</p>';
+        $intro = '<p>Your consultation has been scheduled successfully.</p><p>This is an online consultation. Please use the consultation link below at the scheduled time.</p>';
 
         $html = $this->mrm_safety_email_wrap_html_blocks(
             'Consultation Confirmation',

@@ -1809,6 +1809,7 @@ h1 {
     <input id="address" type="hidden">
     <input id="address-state" type="hidden">
     <input id="address-postal" type="hidden">
+    <input id="parent-timezone" type="hidden">
     <input id="address-country" type="hidden">
     <input id="phone" type="hidden">
     <input id="frequency" type="hidden">
@@ -3137,6 +3138,10 @@ function ensureLegacyBookingHandler(){
       : getSlotMinutes();
 
 
+    const guessedParentTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Phoenix';
+    const parentTimezoneEl = document.getElementById('parent-timezone');
+    if (parentTimezoneEl) parentTimezoneEl.value = guessedParentTimezone;
+
     const payload = {
       instructor_id: instrId,
       slots,
@@ -3162,6 +3167,7 @@ function ensureLegacyBookingHandler(){
       slots_are_expanded: true,
 
       visitor_tz: visitorTZ,
+      parent_timezone: guessedParentTimezone,
 
       // new (plugin will read this)
       appointment_type: appointmentType
@@ -5255,6 +5261,13 @@ function loadInstructors(){
               sd.className = 'instructor-shortdesc';
               sd.textContent = instr.short_description;
               titleWrap.appendChild(sd);
+            }
+
+            if (instr.address) {
+              const addr = document.createElement('div');
+              addr.className = 'instructor-meta';
+              addr.textContent = instr.address;
+              titleWrap.appendChild(addr);
             }
 
             const learn = document.createElement('a');
