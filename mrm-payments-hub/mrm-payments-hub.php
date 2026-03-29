@@ -297,6 +297,7 @@ class MRM_Payments_Hub_Single {
       product_type VARCHAR(30) NOT NULL,
       amount_cents INT NOT NULL,
       currency VARCHAR(10) NOT NULL DEFAULT 'usd',
+      environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
       status VARCHAR(30) NOT NULL DEFAULT 'created',
       stripe_payment_intent_id VARCHAR(255) DEFAULT NULL,
       stripe_status VARCHAR(60) DEFAULT NULL,
@@ -351,6 +352,7 @@ class MRM_Payments_Hub_Single {
       payee_ref VARCHAR(120) DEFAULT NULL,
       connected_account_id VARCHAR(255) DEFAULT NULL,
       currency VARCHAR(10) NOT NULL DEFAULT 'usd',
+      environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
       gross_cents INT NOT NULL DEFAULT 0,
       net_cents INT NOT NULL DEFAULT 0,
       status VARCHAR(30) NOT NULL DEFAULT 'pending',
@@ -2487,17 +2489,19 @@ class MRM_Payments_Hub_Single {
   private function create_order($email_hash, $sku, $product_type, $amount_cents, $currency, $metadata) {
     global $wpdb;
     $now = current_time('mysql');
+    $environment_mode = $this->is_test_mode() ? 'test' : 'live';
     $wpdb->insert($this->table_orders(), array(
       'email_hash' => $email_hash,
       'sku' => $sku,
       'product_type' => $product_type,
       'amount_cents' => (int)$amount_cents,
       'currency' => $currency ?: 'usd',
+      'environment_mode' => $environment_mode,
       'status' => 'created',
       'metadata_json' => wp_json_encode($metadata),
       'created_at' => $now,
       'updated_at' => $now,
-    ), array('%s','%s','%s','%d','%s','%s','%s','%s','%s'));
+    ), array('%s','%s','%s','%d','%s','%s','%s','%s','%s','%s'));
     return (int)$wpdb->insert_id;
   }
 
@@ -4733,6 +4737,7 @@ class MRM_Payments_Hub_Single {
     global $wpdb;
     $table = $this->table_payout_ledger();
     $now = current_time('mysql');
+    $environment_mode = $this->is_test_mode() ? 'test' : 'live';
 
     $existing = $wpdb->get_var($wpdb->prepare(
       "SELECT id FROM {$table} WHERE order_id=%d AND payee_type=%s AND payee_ref=%s LIMIT 1",
@@ -4749,6 +4754,7 @@ class MRM_Payments_Hub_Single {
       'payee_ref' => (string)$payee_ref,
       'connected_account_id' => $connected_account_id ? (string)$connected_account_id : null,
       'currency' => strtolower((string)$currency),
+      'environment_mode' => $environment_mode,
       'gross_cents' => (int)$gross_cents,
       'net_cents' => (int)$net_cents,
       'status' => (string)$status,
@@ -4758,7 +4764,7 @@ class MRM_Payments_Hub_Single {
       'notes' => $notes !== '' ? (string)$notes : null,
       'created_at' => $now,
       'updated_at' => $now,
-    ), array('%d','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'));
+    ), array('%d','%s','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'));
 
     return (int)$wpdb->insert_id;
   }
