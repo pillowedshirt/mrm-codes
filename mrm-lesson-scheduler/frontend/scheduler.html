@@ -2636,6 +2636,19 @@ function clearSelectedSlots() {
   if (currentInstructor) updateBooking(currentInstructor);
 }
 
+function rerunInstructorSearchForCurrentFilters() {
+  if (!selectedState) return;
+
+  // Clear stale slot selections because the instructor/mode/instrument results
+  // may change after the top-bar filters change.
+  clearSelectedSlots();
+
+  // Close any expanded instructor context so the refreshed list is the source of truth.
+  currentInstructor = null;
+
+  renderInstructorListForState(selectedState);
+}
+
 function syncModalToMain() {
   const mainLength = document.getElementById('length-select');
   const mainType = document.getElementById('online-select');
@@ -2691,10 +2704,13 @@ document.addEventListener('change', (e)=>{
   if(e && e.target && e.target.id === 'lesson-option'){
     applyLessonOptionDefaults();
     applyRepeatUIRules();
+    updatePaymentCheckboxVisibility();
 
-    // If you want already-open calendars to immediately reflect any duration change,
-    // you can force a soft rerender by "marking stale" and refreshing open instructor.
-    // This is safe and additive.
+    // Refresh the instructor results so the visible cards always match
+    // the current top-bar search query.
+    rerunInstructorSearchForCurrentFilters();
+
+    // If an instructor calendar was open, mark it stale after the query changed.
     if(currentInstructor && typeof currentInstructor._mrmMarkStale === 'function'){
       currentInstructor._mrmMarkStale();
     }
@@ -5762,9 +5778,7 @@ document.getElementById('instrument-input').addEventListener('change', ()=>{
   const modalSel = document.getElementById('modal-instrument');
   if(modalSel) modalSel.value = v;
 
-  if (selectedState) {
-    renderInstructorListForState(selectedState);
-  }
+  rerunInstructorSearchForCurrentFilters();
 });
 
 document.getElementById('modal-instrument').addEventListener('change', ()=>{
@@ -5772,12 +5786,13 @@ document.getElementById('modal-instrument').addEventListener('change', ()=>{
   document.getElementById('instrument-input').value = v;
   document.getElementById('confirm-instrument').value = v;
 
-  if (selectedState) {
-    renderInstructorListForState(selectedState);
-  }
+  rerunInstructorSearchForCurrentFilters();
 });
 
 document.getElementById('lesson-option').addEventListener('change', updatePaymentCheckboxVisibility);
+document.getElementById('online-select')?.addEventListener('change', ()=>{
+  rerunInstructorSearchForCurrentFilters();
+});
 document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
 
 document.getElementById('mrm-pref-see')?.addEventListener('click', mrmApplyPrefAndLoad);
