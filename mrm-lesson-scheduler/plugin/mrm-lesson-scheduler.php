@@ -5221,11 +5221,185 @@ class MRM_Lesson_Scheduler {
         );
     }
 
+
+
+    protected function render_safety_action_page( $args = array() ) {
+        $defaults = array(
+            'eyebrow'      => 'Lesson Update',
+            'title'        => 'Update Recorded',
+            'message_html' => '',
+            'card_html'    => '',
+            'footer_html'  => '',
+        );
+
+        $args = wp_parse_args( $args, $defaults );
+
+        echo '<!doctype html><html><head><meta charset="utf-8">';
+        echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
+        echo '<title>' . esc_html( (string) $args['title'] ) . '</title>';
+        echo '<style>
+            :root{
+                --bg:#f6f4ef;
+                --card:#ffffff;
+                --text:#111111;
+                --muted:#5b5b5b;
+                --line:#dfd8ca;
+                --accent:#111111;
+                --soft:#f2ede3;
+                --star:#d4a017;
+            }
+            *{box-sizing:border-box;}
+            body{
+                margin:0;
+                background:linear-gradient(180deg,#f7f4ee 0%,#efe8db 100%);
+                color:var(--text);
+                font-family:Arial,sans-serif;
+            }
+            .mrm-shell{
+                min-height:100vh;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                padding:24px 16px;
+            }
+            .mrm-card{
+                width:100%;
+                max-width:680px;
+                background:var(--card);
+                border:1px solid var(--line);
+                border-radius:22px;
+                box-shadow:0 12px 34px rgba(0,0,0,.08);
+                overflow:hidden;
+            }
+            .mrm-card-top{
+                padding:26px 24px 10px;
+                text-align:center;
+            }
+            .mrm-eyebrow{
+                display:inline-block;
+                font-size:12px;
+                letter-spacing:.12em;
+                text-transform:uppercase;
+                color:#7b6d52;
+                margin-bottom:10px;
+            }
+            .mrm-title{
+                margin:0;
+                font-size:30px;
+                line-height:1.15;
+            }
+            .mrm-body{
+                padding:10px 24px 28px;
+                font-size:16px;
+                line-height:1.7;
+            }
+            .mrm-message{
+                color:var(--muted);
+                text-align:center;
+                max-width:560px;
+                margin:0 auto 18px;
+            }
+            .mrm-panel{
+                background:var(--soft);
+                border:1px solid var(--line);
+                border-radius:18px;
+                padding:18px;
+                margin-top:18px;
+            }
+            .mrm-btn{
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                width:100%;
+                min-height:52px;
+                text-align:center;
+                text-decoration:none;
+                border-radius:12px;
+                border:1px solid #111;
+                padding:14px 18px;
+                font-weight:700;
+                font-size:15px;
+                line-height:1.3;
+                cursor:pointer;
+            }
+            .mrm-btn-primary{
+                background:#111;
+                color:#fff;
+            }
+            .mrm-btn-secondary{
+                background:#fff;
+                color:#111;
+            }
+            .mrm-stack > * + *{
+                margin-top:12px;
+            }
+            .mrm-footer{
+                margin-top:18px;
+                color:var(--muted);
+                font-size:14px;
+                text-align:center;
+            }
+            textarea,
+            input[type="text"]{
+                width:100%;
+                border:1px solid var(--line);
+                border-radius:14px;
+                padding:14px 16px;
+                font:inherit;
+                background:#fff;
+                color:#111;
+            }
+            textarea{
+                min-height:140px;
+                resize:vertical;
+            }
+            .mrm-label{
+                display:block;
+                margin-bottom:10px;
+                font-size:15px;
+                font-weight:700;
+            }
+            .mrm-form-actions{
+                margin-top:18px;
+            }
+            @media (max-width:640px){
+                .mrm-card-top{
+                    padding:22px 18px 8px;
+                }
+                .mrm-body{
+                    padding:10px 18px 22px;
+                }
+                .mrm-title{
+                    font-size:26px;
+                }
+            }
+        </style>';
+        echo '</head><body>';
+        echo '<div class="mrm-shell">';
+        echo '<div class="mrm-card">';
+        echo '<div class="mrm-card-top">';
+        echo '<div class="mrm-eyebrow">' . esc_html( (string) $args['eyebrow'] ) . '</div>';
+        echo '<h1 class="mrm-title">' . esc_html( (string) $args['title'] ) . '</h1>';
+        echo '</div>';
+        echo '<div class="mrm-body">';
+        if ( $args['message_html'] !== '' ) {
+            echo '<div class="mrm-message">' . $args['message_html'] . '</div>';
+        }
+        echo (string) $args['card_html'];
+        if ( $args['footer_html'] !== '' ) {
+            echo '<div class="mrm-footer">' . $args['footer_html'] . '</div>';
+        }
+        echo '</div>';
+        echo '</div>';
+        echo '</div>';
+        echo '</body></html>';
+        exit;
+    }
     protected function mrm_safety_email_wrap_html( $title, $intro_html, $details_html, $cta_url = '', $cta_label = '' ) {
         $button_html = '';
         if ( $cta_url && $cta_label ) {
             $button_html = '<p style="margin:24px 0;">
-            <a href="' . esc_url( $cta_url ) . '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;">' . esc_html( $cta_label ) . '</a>
+            <a href="' . esc_url( $cta_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;">' . esc_html( $cta_label ) . '</a>
         </p>';
         }
 
@@ -5741,8 +5915,8 @@ class MRM_Lesson_Scheduler {
             } else {
                 $parent_buttons =
                     '<div style="margin-top:24px;">' .
-                        '<p style="margin:0 0 12px 0;"><a href="' . esc_url( $parent_arrived_url ) . '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;">Click here when your instructor arrives</a></p>' .
-                        '<p style="margin:0;"><a href="' . esc_url( $parent_no_show_url ) . '" style="display:inline-block;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;">Click here if your instructor has not arrived</a></p>' .
+                        '<p style="margin:0 0 12px 0;"><a href="' . esc_url( $parent_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;min-width:100%;">Click here when your instructor arrives</a></p>' .
+                        '<p style="margin:0;"><a href="' . esc_url( $parent_no_show_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;min-width:100%;">Click here if your instructor did not arrive</a></p>' .
                     '</div>';
 
                 $parent_html = $this->mrm_safety_email_wrap_html_blocks(
@@ -5790,8 +5964,8 @@ class MRM_Lesson_Scheduler {
             } else {
                 $instructor_buttons =
                     '<div style="margin-top:24px;">' .
-                        '<p style="margin:0 0 12px 0;"><a href="' . esc_url( $instructor_arrived_url ) . '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;">Click here when you have arrived for your lesson</a></p>' .
-                        '<p style="margin:0;"><a href="' . esc_url( $instructor_emergency_url ) . '" style="display:inline-block;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;">An emergency has arisen and I can no longer make this lesson</a></p>' .
+                        '<p style="margin:0 0 12px 0;"><a href="' . esc_url( $instructor_arrived_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;min-width:100%;">Click here when you have arrived for your lesson</a></p>' .
+                        '<p style="margin:0;"><a href="' . esc_url( $instructor_emergency_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#fff;color:#111;text-decoration:none;padding:14px 20px;border-radius:8px;border:1px solid #111;font-weight:600;line-height:1.3;min-width:100%;">An emergency has arisen and I can no longer make this lesson</a></p>' .
                     '</div>';
 
                 $instructor_html = $this->mrm_safety_email_wrap_html_blocks(
@@ -6146,8 +6320,11 @@ class MRM_Lesson_Scheduler {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             status_header( 404 );
-            echo '<h2>Lesson not found</h2>';
-            return;
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
         }
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
@@ -6161,24 +6338,32 @@ class MRM_Lesson_Scheduler {
         $this->send_instructor_departure_followup_for_lesson( $lesson_id, $lesson );
 
         $this->mrm_safety_log( 'instructor_arrived_recorded', array(
-            'lesson_id' => (int) $lesson_id,
-            'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
+            'lesson_id'         => (int) $lesson_id,
+            'instructor_email'  => (string) ( $lesson['instructor_email'] ?? '' ),
         ) );
 
-        echo '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;max-width:700px;">';
-        echo '<h2>Arrival recorded</h2>';
-        echo '<p>Your arrival has been recorded for this lesson.</p>';
-        echo '<p>A follow-up email has been sent with the button to mark the lesson complete after it has ended.</p>';
-        echo '</body></html>';
-        exit;
+        $card_html  = '<div class="mrm-panel">';
+        $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Status:</strong> Arrival recorded</div>';
+        $card_html .= '</div>';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Arrival Recorded',
+            'title'        => 'You’re All Set',
+            'message_html' => '<p>Your arrival has been recorded for this lesson.</p><p>A follow-up email has been sent with the button to mark the lesson complete after it has ended.</p>',
+            'card_html'    => $card_html,
+        ) );
     }
 
     protected function render_instructor_departed_page( $lesson_id ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             status_header( 404 );
-            echo '<h2>Lesson not found</h2>';
-            return;
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
         }
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
@@ -6190,17 +6375,22 @@ class MRM_Lesson_Scheduler {
         }
 
         $this->mrm_safety_log( 'instructor_departed_recorded', array(
-            'lesson_id' => $lesson_id,
+            'lesson_id'        => (int) $lesson_id,
             'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
         ) );
 
-        echo '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;">
-        <h2>Lesson end recorded</h2>
-        <p>Your departure has been recorded.</p>
-    </body></html>';
-        exit;
-    }
+        $card_html  = '<div class="mrm-panel">';
+        $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Status:</strong> Lesson completion recorded</div>';
+        $card_html .= '</div>';
 
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Lesson Completed',
+            'title'        => 'Thank You',
+            'message_html' => '<p>Your lesson completion has been recorded successfully.</p>',
+            'card_html'    => $card_html,
+        ) );
+    }
 
     protected function render_instructor_emergency_form_page( $lesson_id ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
@@ -6229,8 +6419,11 @@ class MRM_Lesson_Scheduler {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             status_header( 404 );
-            echo '<h2>Lesson not found</h2>';
-            return;
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
         }
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
@@ -6242,70 +6435,159 @@ class MRM_Lesson_Scheduler {
         }
 
         $this->mrm_safety_log( 'parent_confirmed_arrival_recorded', array(
-            'lesson_id' => (int) $lesson_id,
+            'lesson_id'     => (int) $lesson_id,
             'student_email' => (string) ( $lesson['student_email'] ?? '' ),
         ) );
 
         $this->send_parent_feedback_request_for_lesson( $lesson_id, true );
 
-        echo '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;max-width:700px;">';
-        echo '<h2>Thank you</h2>';
-        echo '<p>We have recorded that your instructor arrived for the lesson.</p>';
-        echo '<p>A follow-up feedback email has been sent so you can rate the lesson and leave comments.</p>';
-        echo '</body></html>';
-        exit;
+        $card_html  = '<div class="mrm-panel">';
+        $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Status:</strong> Arrival confirmed</div>';
+        $card_html .= '</div>';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Arrival Confirmed',
+            'title'        => 'Thank You',
+            'message_html' => '<p>We have recorded that your instructor arrived for the lesson.</p><p>A follow-up feedback email has been sent so you can rate the lesson and leave comments.</p>',
+            'card_html'    => $card_html,
+        ) );
     }
 
     protected function render_parent_feedback_form_page( $lesson_id, $show_arrival_notice = false ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             status_header( 404 );
-            echo '<h2>Lesson not found</h2>';
-            return;
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Feedback',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
         }
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
 
         if ( ! empty( $attendance['feedback_submitted_at'] ) ) {
-            echo '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;max-width:700px;">';
-            echo '<h2>Feedback already submitted</h2>';
-            echo '<p>Thank you. Your lesson feedback has already been recorded.</p>';
-            echo '</body></html>';
-            exit;
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Feedback',
+                'title'        => 'Feedback Already Submitted',
+                'message_html' => '<p>Thank you. Your lesson feedback has already been recorded.</p>',
+            ) );
         }
 
         $feedback_token = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'feedback', time() + ( 24 * HOUR_IN_SECONDS ) );
-        $submit_url = add_query_arg( array( 'action' => 'mrm_safety_feedback_submit' ), admin_url( 'admin-post.php' ) );
+        $submit_url = add_query_arg(
+            array( 'action' => 'mrm_safety_feedback_submit' ),
+            admin_url( 'admin-post.php' )
+        );
 
-        echo '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;max-width:700px;">';
+        $arrival_notice = '';
         if ( $show_arrival_notice ) {
-            echo '<h2>Thank you — arrival recorded</h2>';
-            echo '<p>We have recorded that your instructor has arrived.</p>';
-            echo '<hr style="margin:24px 0;">';
+            $arrival_notice = '<div class="mrm-panel" style="margin-bottom:18px;"><strong>Arrival confirmed.</strong><br>We have recorded that your instructor arrived for the lesson.</div>';
         }
-        echo '<h3>How was your lesson?</h3>';
-        echo '<form method="post" action="' . esc_url( $submit_url ) . '">';
-        echo '<input type="hidden" name="token" value="' . esc_attr( $feedback_token ) . '">';
-        echo '<p><strong>Rating</strong></p>';
-        echo '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:18px;">';
-        for ( $i = 5; $i >= 1; $i-- ) {
-            echo '<label style="font-size:28px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;">';
-            echo '<input type="radio" name="rating" value="' . (int) $i . '" required>';
-            echo '<span>★</span><span style="font-size:15px;">' . (int) $i . '</span></label>';
-        }
-        echo '</div><p><label><strong>Comments</strong></label><br><textarea name="comment" rows="6" style="width:100%;max-width:640px;"></textarea></p>';
-        echo '<p><button type="submit" style="background:#111;color:#fff;border:none;padding:12px 18px;border-radius:8px;">Submit feedback</button></p>';
-        echo '</form></body></html>';
-        exit;
-    }
 
+        $card_html = '
+            <style>
+                .mrm-rating-wrap{
+                    margin:18px 0 6px;
+                }
+                .mrm-rating-label{
+                    display:block;
+                    margin-bottom:10px;
+                    font-size:15px;
+                    font-weight:700;
+                }
+                .mrm-star-rating{
+                    direction:rtl;
+                    display:inline-flex;
+                    gap:4px;
+                    justify-content:center;
+                    width:100%;
+                }
+                .mrm-star-rating input{
+                    display:none;
+                }
+                .mrm-star-rating label{
+                    cursor:pointer;
+                    font-size:40px;
+                    line-height:1;
+                    color:transparent;
+                    -webkit-text-stroke:1.6px #c7b58a;
+                    transition:transform .15s ease,color .15s ease,-webkit-text-stroke-color .15s ease;
+                }
+                .mrm-star-rating label:hover,
+                .mrm-star-rating label:hover ~ label,
+                .mrm-star-rating input:checked ~ label{
+                    color:#d4a017;
+                    -webkit-text-stroke-color:#d4a017;
+                }
+                .mrm-star-rating label:active{
+                    transform:scale(.96);
+                }
+                .mrm-rating-help{
+                    margin-top:10px;
+                    text-align:center;
+                    color:#6b6457;
+                    font-size:13px;
+                }
+            </style>
+            ' . $arrival_notice . '
+            <div class="mrm-panel">
+                <form method="post" action="' . esc_url( $submit_url ) . '">
+                    <input type="hidden" name="token" value="' . esc_attr( $feedback_token ) . '">
+
+                    <div class="mrm-rating-wrap">
+                        <label class="mrm-rating-label">How was your lesson?</label>
+                        <div class="mrm-star-rating" aria-label="Star rating">
+                            <input type="radio" id="mrm-star-5" name="rating" value="5" required>
+                            <label for="mrm-star-5" title="5 stars">★</label>
+
+                            <input type="radio" id="mrm-star-4" name="rating" value="4" required>
+                            <label for="mrm-star-4" title="4 stars">★</label>
+
+                            <input type="radio" id="mrm-star-3" name="rating" value="3" required>
+                            <label for="mrm-star-3" title="3 stars">★</label>
+
+                            <input type="radio" id="mrm-star-2" name="rating" value="2" required>
+                            <label for="mrm-star-2" title="2 stars">★</label>
+
+                            <input type="radio" id="mrm-star-1" name="rating" value="1" required>
+                            <label for="mrm-star-1" title="1 star">★</label>
+                        </div>
+                        <div class="mrm-rating-help">Tap a star to choose your rating.</div>
+                    </div>
+
+                    <div style="margin-top:22px;">
+                        <label class="mrm-label">Comments</label>
+                        <textarea name="comment" rows="6" placeholder="Share any feedback you would like us to see."></textarea>
+                    </div>
+
+                    <div class="mrm-form-actions">
+                        <button type="submit" class="mrm-btn mrm-btn-primary">Submit Feedback</button>
+                    </div>
+                </form>
+            </div>
+        ';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Lesson Feedback',
+            'title'        => 'How Was Your Lesson?',
+            'message_html' => '<p>Please rate the lesson and share any comments you would like us to see.</p>',
+            'card_html'    => $card_html,
+            'footer_html'  => 'Your feedback helps us maintain a high-quality lesson experience.',
+        ) );
+    }
 
     protected function render_parent_no_show_page( $lesson_id ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             status_header( 404 );
-            echo '<h2>Lesson not found</h2>';
-            return;
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
         }
 
         $attendance = $this->ensure_attendance_row( $lesson_id );
@@ -6327,15 +6609,22 @@ class MRM_Lesson_Scheduler {
         }
 
         $this->mrm_safety_log( 'parent_no_show_reported', array(
-            'lesson_id' => (int) $lesson_id,
+            'lesson_id'     => (int) $lesson_id,
             'student_email' => (string) ( $lesson['student_email'] ?? '' ),
         ) );
 
-        echo '<!doctype html><html><body style="font-family:Arial,sans-serif;padding:32px;max-width:700px;">';
-        echo '<h2>Thank you</h2>';
-        echo '<p>We have recorded that your instructor did not arrive, and the site administrator has been notified.</p>';
-        echo '</body></html>';
-        exit;
+        $card_html  = '<div class="mrm-panel">';
+        $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Status:</strong> Instructor did not arrive reported</div>';
+        $card_html .= '</div>';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Safety Update',
+            'title'        => 'Report Received',
+            'message_html' => '<p>We have recorded that your instructor did not arrive for the lesson.</p><p>The site administrator has been notified.</p>',
+            'card_html'    => $card_html,
+        ) );
     }
 
     protected function send_parent_feedback_notifications( $lesson_id, $lesson, $rating, $comment ) {
