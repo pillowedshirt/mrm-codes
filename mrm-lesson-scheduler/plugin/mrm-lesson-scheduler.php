@@ -1779,6 +1779,12 @@ class MRM_Lesson_Scheduler {
         add_action( 'admin_post_mrm_run_safety_exception_check_now', array( $this, 'admin_run_safety_exception_check_now' ) );
         add_action( 'admin_post_mrm_run_safety_feedback_request_now', array( $this, 'admin_run_safety_feedback_request_now' ) );
 
+        add_action( 'admin_post_mrm_export_1099_support', array( $this, 'handle_mrm_export_1099_support' ) );
+        add_action( 'admin_post_mrm_export_mileage_summary', array( $this, 'handle_mrm_export_mileage_summary' ) );
+        add_action( 'admin_post_mrm_export_calculations_summary', array( $this, 'handle_mrm_export_calculations_summary' ) );
+
+        add_action( 'admin_init', array( $this, 'register_settings' ) );
+
         add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
 
         add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
@@ -2005,6 +2011,88 @@ class MRM_Lesson_Scheduler {
         dbDelta( $sql2 );
         dbDelta( $sql3 );
         dbDelta( $sql_attendance );
+
+        $tax_expenses_table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+        $sql_tax_expenses = "CREATE TABLE {$tax_expenses_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    expense_date DATE NOT NULL,
+    tax_year INT NOT NULL,
+    tax_quarter TINYINT NOT NULL DEFAULT 0,
+    category VARCHAR(100) NOT NULL DEFAULT '',
+    vendor_name VARCHAR(190) NOT NULL DEFAULT '',
+    description TEXT NULL,
+    amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    payment_method VARCHAR(50) NOT NULL DEFAULT '',
+    notes TEXT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY tax_year (tax_year),
+    KEY tax_quarter (tax_quarter),
+    KEY category (category)
+) {$charset_collate};";
+        dbDelta( $sql_tax_expenses );
+
+        $mileage_table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+        $sql_mileage = "CREATE TABLE {$mileage_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    lesson_id BIGINT UNSIGNED NOT NULL,
+    instructor_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    tax_year INT NOT NULL,
+    trip_date DATE NOT NULL,
+    origin_address VARCHAR(255) NOT NULL DEFAULT '',
+    destination_address VARCHAR(255) NOT NULL DEFAULT '',
+    one_way_miles DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    round_trip_miles DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    mileage_rate DECIMAL(8,4) NOT NULL DEFAULT 0.0000,
+    mileage_deduction DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    calc_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+    calc_source VARCHAR(30) NOT NULL DEFAULT 'manual',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY lesson_id (lesson_id),
+    KEY instructor_id (instructor_id),
+    KEY tax_year (tax_year)
+) {$charset_collate};";
+        dbDelta( $sql_mileage );
+
+        $payee_table = $wpdb->prefix . 'mrm_tax_payee_profiles';
+        $sql_payee = "CREATE TABLE {$payee_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    payee_type VARCHAR(30) NOT NULL DEFAULT 'contractor',
+    related_instructor_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    related_user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    display_name VARCHAR(190) NOT NULL DEFAULT '',
+    legal_name VARCHAR(190) NOT NULL DEFAULT '',
+    email VARCHAR(190) NOT NULL DEFAULT '',
+    tin_last4 VARCHAR(10) NOT NULL DEFAULT '',
+    w9_received TINYINT(1) NOT NULL DEFAULT 0,
+    w9_received_date DATE NULL,
+    is_1099_eligible TINYINT(1) NOT NULL DEFAULT 1,
+    is_employee TINYINT(1) NOT NULL DEFAULT 0,
+    notes TEXT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY payee_type (payee_type),
+    KEY related_instructor_id (related_instructor_id),
+    KEY is_employee (is_employee)
+) {$charset_collate};";
+        dbDelta( $sql_payee );
+
+        $calc_cache_table = $wpdb->prefix . 'mrm_tax_calculation_cache';
+        $sql_calc_cache = "CREATE TABLE {$calc_cache_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tax_year INT NOT NULL,
+    tax_quarter TINYINT NOT NULL DEFAULT 0,
+    calc_key VARCHAR(100) NOT NULL,
+    calc_payload LONGTEXT NULL,
+    generated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY year_quarter_key (tax_year, tax_quarter, calc_key)
+) {$charset_collate};";
+        dbDelta( $sql_calc_cache );
 
         // Backfill recurring anchor for older lesson rows so moved recurring events
         // can still be resolved against Google after reschedules.
@@ -2498,6 +2586,10 @@ class MRM_Lesson_Scheduler {
 
                 if ( (int) $is_consultation === 1 ) {
                     $this->send_consultation_confirmation_for_lesson( $booking_id );
+                }
+
+                if ( ! $is_online ) {
+                    $this->mrm_queue_mileage_calculation_for_lesson( $booking_id );
                 }
 
                 // Call existing Google Calendar insert function (already defined in this plugin)
@@ -7260,6 +7352,663 @@ class MRM_Lesson_Scheduler {
 
 
 
+
+    public function register_settings() {
+        register_setting(
+            'mrm_calculations_settings_group',
+            'mrm_calculations_settings',
+            array( $this, 'sanitize_calculations_settings' )
+        );
+    }
+
+    public function sanitize_calculations_settings( $input ) {
+        $input = is_array( $input ) ? $input : array();
+
+        $tax_year = isset( $input['default_tax_year'] ) ? (int) $input['default_tax_year'] : (int) gmdate( 'Y' );
+        $business_type = isset( $input['business_type'] ) ? sanitize_text_field( $input['business_type'] ) : 's_corp';
+        $mileage_rate = isset( $input['mileage_rate'] ) ? (float) $input['mileage_rate'] : 0.7250;
+
+        return array(
+            'default_tax_year' => $tax_year,
+            'business_type'    => in_array( $business_type, array( 's_corp' ), true ) ? $business_type : 's_corp',
+            'mileage_rate'     => $mileage_rate,
+        );
+    }
+
+    public function render_calculations_settings_page() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+
+        $settings = get_option( 'mrm_calculations_settings', array(
+            'default_tax_year' => (int) gmdate( 'Y' ),
+            'business_type'    => 's_corp',
+            'mileage_rate'     => 0.7250,
+        ) );
+
+        $selected_year    = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) $settings['default_tax_year'];
+        $selected_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+
+        $overview    = $this->mrm_get_calculations_overview( $selected_year, $selected_quarter );
+        $contractors = $this->mrm_get_calculations_contractor_summary( $selected_year, $selected_quarter );
+        $mileage     = $this->mrm_get_calculations_mileage_summary( $selected_year, $selected_quarter );
+        $expenses    = $this->mrm_get_calculations_expense_summary( $selected_year, $selected_quarter );
+        $payroll     = $this->mrm_get_calculations_payroll_summary( $selected_year, $selected_quarter );
+
+        ?>
+        <div class="wrap">
+            <h1>Calculations</h1>
+            <?php echo '<p><em>This page provides calculation and reconciliation support for S-corporation recordkeeping, including contractor 1099 support, payroll/W-2 support, mileage, expenses, and annual business summaries. Final tax filing should still be reviewed by your accountant.</em></p>'; ?>
+
+            <form method="get" style="margin:16px 0 24px 0;">
+                <input type="hidden" name="page" value="mrm-calculations">
+                <label for="tax_year"><strong>Tax Year</strong></label>
+                <input type="number" id="tax_year" name="tax_year" value="<?php echo esc_attr( $selected_year ); ?>" min="2020" max="2099" style="width:100px; margin:0 12px 0 8px;">
+
+                <label for="tax_quarter"><strong>Quarter</strong></label>
+                <select id="tax_quarter" name="tax_quarter">
+                    <option value="0" <?php selected( $selected_quarter, 0 ); ?>>Full Year</option>
+                    <option value="1" <?php selected( $selected_quarter, 1 ); ?>>Q1</option>
+                    <option value="2" <?php selected( $selected_quarter, 2 ); ?>>Q2</option>
+                    <option value="3" <?php selected( $selected_quarter, 3 ); ?>>Q3</option>
+                    <option value="4" <?php selected( $selected_quarter, 4 ); ?>>Q4</option>
+                </select>
+
+                <button type="submit" class="button button-primary" style="margin-left:12px;">Run Calculations</button>
+            </form>
+
+            <p>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_support&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_1099_support' ) ); ?>">Export Contractor CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_mileage_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_mileage_summary' ) ); ?>">Export Mileage CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_calculations_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_calculations_summary' ) ); ?>">Export Annual Summary CSV</a>
+            </p>
+
+            <h2>Overview</h2>
+            <table class="widefat striped">
+                <tbody>
+                    <tr><td>Gross Revenue</td><td><?php echo esc_html( number_format( (float) $overview['gross_revenue'], 2 ) ); ?></td></tr>
+                    <tr><td>Refunds</td><td><?php echo esc_html( number_format( (float) $overview['refunds'], 2 ) ); ?></td></tr>
+                    <tr><td>Stripe Fees</td><td><?php echo esc_html( number_format( (float) $overview['stripe_fees'], 2 ) ); ?></td></tr>
+                    <tr><td>Contractor Payouts</td><td><?php echo esc_html( number_format( (float) $overview['contractor_payouts'], 2 ) ); ?></td></tr>
+                    <tr><td>Payroll / Wages</td><td><?php echo esc_html( number_format( (float) $overview['payroll_wages'], 2 ) ); ?></td></tr>
+                    <tr><td>Manual Expenses</td><td><?php echo esc_html( number_format( (float) $overview['manual_expenses'], 2 ) ); ?></td></tr>
+                    <tr><td>Mileage Deduction Estimate</td><td><?php echo esc_html( number_format( (float) $overview['mileage_deduction'], 2 ) ); ?></td></tr>
+                    <tr><td>Estimated Net Income</td><td><strong><?php echo esc_html( number_format( (float) $overview['estimated_net_income'], 2 ) ); ?></strong></td></tr>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top:28px;">Contractor 1099 Summary</h2>
+            <?php $this->mrm_render_calculations_contractor_table( $contractors ); ?>
+
+            <h2 style="margin-top:28px;">Payroll / Officer Compensation Summary</h2>
+            <?php $this->mrm_render_calculations_payroll_table( $payroll ); ?>
+
+            <h2 style="margin-top:28px;">Mileage Summary</h2>
+            <?php $this->mrm_render_calculations_mileage_table( $mileage ); ?>
+
+            <h2 style="margin-top:28px;">Expense Summary</h2>
+            <?php $this->mrm_render_calculations_expense_table( $expenses ); ?>
+        </div>
+        <?php
+    }
+
+    protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0 ) {
+        $gross_revenue      = $this->mrm_calc_total_revenue( $tax_year, $tax_quarter );
+        $refunds            = $this->mrm_calc_total_refunds( $tax_year, $tax_quarter );
+        $stripe_fees        = $this->mrm_calc_total_stripe_fees( $tax_year, $tax_quarter );
+        $contractor_payouts = $this->mrm_calc_total_contractor_payouts( $tax_year, $tax_quarter );
+        $payroll_wages      = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter );
+        $manual_expenses    = $this->mrm_calc_total_manual_expenses( $tax_year, $tax_quarter );
+        $mileage_deduction  = $this->mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter );
+
+        $estimated_net_income = $gross_revenue
+            - $refunds
+            - $stripe_fees
+            - $contractor_payouts
+            - $payroll_wages
+            - $manual_expenses
+            - $mileage_deduction;
+
+        return array(
+            'gross_revenue'        => $gross_revenue,
+            'refunds'              => $refunds,
+            'stripe_fees'          => $stripe_fees,
+            'contractor_payouts'   => $contractor_payouts,
+            'payroll_wages'        => $payroll_wages,
+            'manual_expenses'      => $manual_expenses,
+            'mileage_deduction'    => $mileage_deduction,
+            'estimated_net_income' => $estimated_net_income,
+        );
+    }
+
+    protected function mrm_get_tax_period_dates( $tax_year, $tax_quarter = 0 ) {
+        $tax_year = (int) $tax_year;
+        $tax_quarter = (int) $tax_quarter;
+
+        if ( $tax_quarter === 1 ) {
+            return array( "{$tax_year}-01-01 00:00:00", "{$tax_year}-03-31 23:59:59" );
+        }
+        if ( $tax_quarter === 2 ) {
+            return array( "{$tax_year}-04-01 00:00:00", "{$tax_year}-06-30 23:59:59" );
+        }
+        if ( $tax_quarter === 3 ) {
+            return array( "{$tax_year}-07-01 00:00:00", "{$tax_year}-09-30 23:59:59" );
+        }
+        if ( $tax_quarter === 4 ) {
+            return array( "{$tax_year}-10-01 00:00:00", "{$tax_year}-12-31 23:59:59" );
+        }
+
+        return array( "{$tax_year}-01-01 00:00:00", "{$tax_year}-12-31 23:59:59" );
+    }
+
+    protected function mrm_calc_total_revenue( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+        $orders_table = $wpdb->prefix . 'mrm_orders';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) ) !== $orders_table ) {
+            return 0.0;
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(total_amount),0)
+             FROM {$orders_table}
+             WHERE status IN ('paid','succeeded','completed')
+               AND created_at >= %s
+               AND created_at <= %s",
+            $start,
+            $end
+        );
+
+        return (float) $wpdb->get_var( $sql );
+    }
+
+    protected function mrm_calc_total_refunds( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+        $orders_table = $wpdb->prefix . 'mrm_orders';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) ) !== $orders_table ) {
+            return 0.0;
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(refund_amount),0)
+             FROM {$orders_table}
+             WHERE refund_amount > 0
+               AND updated_at >= %s
+               AND updated_at <= %s",
+            $start,
+            $end
+        );
+
+        return (float) $wpdb->get_var( $sql );
+    }
+
+    protected function mrm_calc_total_stripe_fees( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+        $orders_table = $wpdb->prefix . 'mrm_orders';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) ) !== $orders_table ) {
+            return 0.0;
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(stripe_fee_amount),0)
+             FROM {$orders_table}
+             WHERE created_at >= %s
+               AND created_at <= %s",
+            $start,
+            $end
+        );
+
+        return (float) $wpdb->get_var( $sql );
+    }
+
+    protected function mrm_calc_total_contractor_payouts( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+        $payouts_table = $wpdb->prefix . 'mrm_payouts';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $payouts_table ) ) !== $payouts_table ) {
+            return 0.0;
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(amount),0)
+             FROM {$payouts_table}
+             WHERE payout_type = 'contractor'
+               AND created_at >= %s
+               AND created_at <= %s",
+            $start,
+            $end
+        );
+
+        return (float) $wpdb->get_var( $sql );
+    }
+
+    protected function mrm_calc_total_manual_expenses( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+            return 0.0;
+        }
+
+        if ( (int) $tax_quarter > 0 ) {
+            $sql = $wpdb->prepare(
+                "SELECT COALESCE(SUM(amount),0)
+                 FROM {$table}
+                 WHERE tax_year = %d
+                   AND tax_quarter = %d",
+                $tax_year,
+                $tax_quarter
+            );
+        } else {
+            $sql = $wpdb->prepare(
+                "SELECT COALESCE(SUM(amount),0)
+                 FROM {$table}
+                 WHERE tax_year = %d",
+                $tax_year
+            );
+        }
+
+        return (float) $wpdb->get_var( $sql );
+    }
+
+    protected function mrm_calc_total_payroll_wages( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_tax_payroll_imports';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+            return 0.0;
+        }
+
+        if ( (int) $tax_quarter > 0 ) {
+            $sql = $wpdb->prepare(
+                "SELECT COALESCE(SUM(gross_wages),0)
+                 FROM {$table}
+                 WHERE tax_year = %d
+                   AND tax_quarter = %d",
+                $tax_year,
+                $tax_quarter
+            );
+        } else {
+            $sql = $wpdb->prepare(
+                "SELECT COALESCE(SUM(gross_wages),0)
+                 FROM {$table}
+                 WHERE tax_year = %d",
+                $tax_year
+            );
+        }
+
+        return (float) $wpdb->get_var( $sql );
+    }
+
+    protected function mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+            return 0.0;
+        }
+
+        if ( (int) $tax_quarter > 0 ) {
+            $sql = $wpdb->prepare(
+                "SELECT COALESCE(SUM(mileage_deduction),0)
+                 FROM {$table}
+                 WHERE tax_year = %d
+                   AND QUARTER(trip_date) = %d",
+                $tax_year,
+                $tax_quarter
+            );
+        } else {
+            $sql = $wpdb->prepare(
+                "SELECT COALESCE(SUM(mileage_deduction),0)
+                 FROM {$table}
+                 WHERE tax_year = %d",
+                $tax_year
+            );
+        }
+
+        return (float) $wpdb->get_var( $sql );
+    }
+
+    protected function mrm_get_calculations_contractor_summary( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+
+        $payouts_table = $wpdb->prefix . 'mrm_payouts';
+        $payee_table   = $wpdb->prefix . 'mrm_tax_payee_profiles';
+        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $payouts_table ) ) !== $payouts_table ) {
+            return array();
+        }
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $payee_table ) ) !== $payee_table ) {
+            return array();
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT
+                p.payee_id,
+                MAX(pp.display_name) AS display_name,
+                MAX(pp.legal_name) AS legal_name,
+                MAX(pp.w9_received) AS w9_received,
+                MAX(pp.is_1099_eligible) AS is_1099_eligible,
+                COALESCE(SUM(p.amount),0) AS total_paid
+             FROM {$payouts_table} p
+             LEFT JOIN {$payee_table} pp ON pp.id = p.payee_id
+             WHERE p.payout_type = 'contractor'
+               AND p.created_at >= %s
+               AND p.created_at <= %s
+             GROUP BY p.payee_id
+             ORDER BY total_paid DESC",
+            $start,
+            $end
+        );
+
+        return $wpdb->get_results( $sql, ARRAY_A );
+    }
+
+    protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+            return array();
+        }
+
+        if ( (int) $tax_quarter > 0 ) {
+            $sql = $wpdb->prepare(
+                "SELECT instructor_id,
+                        COUNT(*) AS lesson_count,
+                        COALESCE(SUM(round_trip_miles),0) AS total_miles,
+                        COALESCE(SUM(mileage_deduction),0) AS total_deduction
+                 FROM {$table}
+                 WHERE tax_year = %d
+                   AND QUARTER(trip_date) = %d
+                 GROUP BY instructor_id
+                 ORDER BY total_miles DESC",
+                $tax_year,
+                $tax_quarter
+            );
+        } else {
+            $sql = $wpdb->prepare(
+                "SELECT instructor_id,
+                        COUNT(*) AS lesson_count,
+                        COALESCE(SUM(round_trip_miles),0) AS total_miles,
+                        COALESCE(SUM(mileage_deduction),0) AS total_deduction
+                 FROM {$table}
+                 WHERE tax_year = %d
+                 GROUP BY instructor_id
+                 ORDER BY total_miles DESC",
+                $tax_year
+            );
+        }
+
+        return $wpdb->get_results( $sql, ARRAY_A );
+    }
+
+    protected function mrm_get_calculations_expense_summary( $tax_year, $tax_quarter = 0 ) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+            return array();
+        }
+
+        if ( (int) $tax_quarter > 0 ) {
+            $sql = $wpdb->prepare(
+                "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
+                 FROM {$table}
+                 WHERE tax_year = %d
+                   AND tax_quarter = %d
+                 GROUP BY category
+                 ORDER BY total_amount DESC",
+                $tax_year,
+                $tax_quarter
+            );
+        } else {
+            $sql = $wpdb->prepare(
+                "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
+                 FROM {$table}
+                 WHERE tax_year = %d
+                 GROUP BY category
+                 ORDER BY total_amount DESC",
+                $tax_year
+            );
+        }
+
+        return $wpdb->get_results( $sql, ARRAY_A );
+    }
+
+    protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter = 0 ) {
+        $total = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter );
+
+        return array(
+            array(
+                'label' => 'Imported Payroll Wages',
+                'total' => $total,
+            ),
+        );
+    }
+
+    protected function mrm_render_calculations_contractor_table( $rows ) {
+        echo '<table class="widefat striped"><thead><tr><th>Payee</th><th>W-9</th><th>1099 Eligible</th><th>Total Paid</th></tr></thead><tbody>';
+        if ( empty( $rows ) ) {
+            echo '<tr><td colspan="4">No contractor data found.</td></tr>';
+        } else {
+            foreach ( $rows as $row ) {
+                echo '<tr>';
+                echo '<td>' . esc_html( $row['display_name'] ?: $row['legal_name'] ) . '</td>';
+                echo '<td>' . ( ! empty( $row['w9_received'] ) ? 'Yes' : 'No' ) . '</td>';
+                echo '<td>' . ( ! empty( $row['is_1099_eligible'] ) ? 'Yes' : 'No' ) . '</td>';
+                echo '<td>' . esc_html( number_format( (float) $row['total_paid'], 2 ) ) . '</td>';
+                echo '</tr>';
+            }
+        }
+        echo '</tbody></table>';
+    }
+
+    protected function mrm_render_calculations_payroll_table( $rows ) {
+        if ( empty( $rows ) ) {
+            echo '<p>Payroll import / W-2 support section ready for integration.</p>';
+            return;
+        }
+
+        echo '<table class="widefat striped"><thead><tr><th>Type</th><th>Total</th></tr></thead><tbody>';
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['label'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total'] ?? 0 ), 2 ) ) . '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+    }
+
+    protected function mrm_render_calculations_mileage_table( $rows ) {
+        echo '<table class="widefat striped"><thead><tr><th>Instructor ID</th><th>Lessons</th><th>Total Miles</th><th>Deduction</th></tr></thead><tbody>';
+        if ( empty( $rows ) ) {
+            echo '<tr><td colspan="4">No mileage data found.</td></tr>';
+        } else {
+            foreach ( $rows as $row ) {
+                echo '<tr>';
+                echo '<td>' . esc_html( $row['instructor_id'] ) . '</td>';
+                echo '<td>' . esc_html( $row['lesson_count'] ) . '</td>';
+                echo '<td>' . esc_html( number_format( (float) $row['total_miles'], 2 ) ) . '</td>';
+                echo '<td>' . esc_html( number_format( (float) $row['total_deduction'], 2 ) ) . '</td>';
+                echo '</tr>';
+            }
+        }
+        echo '</tbody></table>';
+    }
+
+    protected function mrm_render_calculations_expense_table( $rows ) {
+        if ( empty( $rows ) ) {
+            echo '<p>Expense detail section ready for integration.</p>';
+            return;
+        }
+
+        echo '<table class="widefat striped"><thead><tr><th>Category</th><th>Entries</th><th>Total</th></tr></thead><tbody>';
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['category'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['entry_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total_amount'] ?? 0 ), 2 ) ) . '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+    }
+
+    protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
+        global $wpdb;
+
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            return;
+        }
+
+        if ( ! empty( $lesson['is_online'] ) ) {
+            return;
+        }
+
+        $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+            return;
+        }
+
+        $settings = get_option( 'mrm_calculations_settings', array() );
+        $default_rate = isset( $settings['mileage_rate'] ) ? (float) $settings['mileage_rate'] : 0.7250;
+
+        $start_time = (string) ( $lesson['start_time'] ?? '' );
+        $trip_date = $start_time ? gmdate( 'Y-m-d', strtotime( $start_time ) ) : gmdate( 'Y-m-d' );
+        $tax_year = (int) gmdate( 'Y', strtotime( $trip_date ) );
+
+        $wpdb->replace(
+            $table,
+            array(
+                'lesson_id'           => (int) $lesson_id,
+                'instructor_id'       => (int) ( $lesson['instructor_id'] ?? 0 ),
+                'tax_year'            => $tax_year,
+                'trip_date'           => $trip_date,
+                'origin_address'      => (string) ( $lesson['instructor_address'] ?? '' ),
+                'destination_address' => (string) ( $lesson['address'] ?? '' ),
+                'one_way_miles'       => 0,
+                'round_trip_miles'    => 0,
+                'mileage_rate'        => $default_rate,
+                'mileage_deduction'   => 0,
+                'calc_status'         => 'pending',
+                'calc_source'         => 'queued',
+                'created_at'          => current_time( 'mysql' ),
+                'updated_at'          => current_time( 'mysql' ),
+            ),
+            array(
+                '%d','%d','%d','%s','%s','%s','%f','%f','%f','%f','%s','%s','%s','%s'
+            )
+        );
+    }
+
+    protected function mrm_send_csv_headers( $filename ) {
+        nocache_headers();
+        header( 'Content-Type: text/csv; charset=utf-8' );
+        header( 'Content-Disposition: attachment; filename=' . $filename );
+    }
+
+    protected function mrm_write_csv_row( $handle, $row ) {
+        if ( is_resource( $handle ) ) {
+            fputcsv( $handle, $row );
+        }
+    }
+
+    public function handle_mrm_export_1099_support() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Not allowed.' );
+        }
+
+        check_admin_referer( 'mrm_export_1099_support' );
+
+        $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+        $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+        $rows = $this->mrm_get_calculations_contractor_summary( $tax_year, $tax_quarter );
+
+        $this->mrm_send_csv_headers( 'mrm-contractor-1099-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+        $out = fopen( 'php://output', 'w' );
+        $this->mrm_write_csv_row( $out, array( 'payee_id', 'display_name', 'legal_name', 'w9_received', 'is_1099_eligible', 'total_paid' ) );
+
+        foreach ( $rows as $row ) {
+            $this->mrm_write_csv_row( $out, array(
+                (string) ( $row['payee_id'] ?? '' ),
+                (string) ( $row['display_name'] ?? '' ),
+                (string) ( $row['legal_name'] ?? '' ),
+                ! empty( $row['w9_received'] ) ? 'Yes' : 'No',
+                ! empty( $row['is_1099_eligible'] ) ? 'Yes' : 'No',
+                number_format( (float) ( $row['total_paid'] ?? 0 ), 2, '.', '' ),
+            ) );
+        }
+
+        fclose( $out );
+        exit;
+    }
+
+    public function handle_mrm_export_mileage_summary() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Not allowed.' );
+        }
+
+        check_admin_referer( 'mrm_export_mileage_summary' );
+
+        $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+        $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+        $rows = $this->mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter );
+
+        $this->mrm_send_csv_headers( 'mrm-mileage-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+        $out = fopen( 'php://output', 'w' );
+        $this->mrm_write_csv_row( $out, array( 'instructor_id', 'lesson_count', 'total_miles', 'total_deduction' ) );
+
+        foreach ( $rows as $row ) {
+            $this->mrm_write_csv_row( $out, array(
+                (string) ( $row['instructor_id'] ?? '' ),
+                (string) ( $row['lesson_count'] ?? 0 ),
+                number_format( (float) ( $row['total_miles'] ?? 0 ), 2, '.', '' ),
+                number_format( (float) ( $row['total_deduction'] ?? 0 ), 2, '.', '' ),
+            ) );
+        }
+
+        fclose( $out );
+        exit;
+    }
+
+    public function handle_mrm_export_calculations_summary() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Not allowed.' );
+        }
+
+        check_admin_referer( 'mrm_export_calculations_summary' );
+
+        $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+        $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+        $overview = $this->mrm_get_calculations_overview( $tax_year, $tax_quarter );
+
+        $this->mrm_send_csv_headers( 'mrm-calculations-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+        $out = fopen( 'php://output', 'w' );
+        $this->mrm_write_csv_row( $out, array( 'metric', 'value' ) );
+
+        foreach ( $overview as $metric => $value ) {
+            $this->mrm_write_csv_row( $out, array( $metric, number_format( (float) $value, 2, '.', '' ) ) );
+        }
+
+        fclose( $out );
+        exit;
+    }
+
+
     /* =========================================================
      * Admin UI
      * ========================================================= */
@@ -7274,6 +8023,14 @@ class MRM_Lesson_Scheduler {
             self::CAPABILITY,
             'mrm-scheduler-safety-attendance',
             array( $this, 'render_admin_safety_attendance_page' )
+        );
+        add_submenu_page(
+            'mrm-scheduler',
+            'Calculations',
+            'Calculations',
+            'manage_options',
+            'mrm-calculations',
+            array( $this, 'render_calculations_settings_page' )
         );
     }
 
