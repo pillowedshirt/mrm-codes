@@ -2275,6 +2275,24 @@ class MRM_Lesson_Scheduler {
         $order_id = isset( $data['order_id'] ) ? intval( $data['order_id'] ) : 0;
         $payment_mode = sanitize_text_field( (string ) ( $data['payment_mode'] ?? 'none' ) ); // prepay|one_time|autopay|none
         $autopay_profile_id = isset( $data['autopay_profile_id'] ) ? intval( $data['autopay_profile_id'] ) : 0;
+        $incoming_lesson_type = '';
+        if ( isset( $data['lesson_type'] ) ) {
+            $incoming_lesson_type = $this->normalize_scheduler_lesson_type( wp_unslash( $data['lesson_type'] ) );
+        } elseif ( isset( $data['booking_type'] ) ) {
+            $incoming_lesson_type = $this->normalize_scheduler_lesson_type( wp_unslash( $data['booking_type'] ) );
+        } elseif ( isset( $data['session_type'] ) ) {
+            $incoming_lesson_type = $this->normalize_scheduler_lesson_type( wp_unslash( $data['session_type'] ) );
+        } elseif ( isset( $data['selected_option'] ) ) {
+            $incoming_lesson_type = $this->normalize_scheduler_lesson_type( wp_unslash( $data['selected_option'] ) );
+        }
+
+        $this->mrm_consultation_log( 'booking_payload_type_detection', array(
+            'raw_lesson_type'  => isset( $data['lesson_type'] ) ? (string) $data['lesson_type'] : '',
+            'raw_booking_type' => isset( $data['booking_type'] ) ? (string) $data['booking_type'] : '',
+            'raw_session_type' => isset( $data['session_type'] ) ? (string) $data['session_type'] : '',
+            'raw_selected_option' => isset( $data['selected_option'] ) ? (string) $data['selected_option'] : '',
+            'normalized_type'  => $incoming_lesson_type,
+        ) );
 
         if ( $instructor_id <= 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
@@ -2327,6 +2345,7 @@ class MRM_Lesson_Scheduler {
                     'student_name'  => $student_name !== '' ? $student_name : $student_email,
                     'student_email' => $student_email,
                     'instrument'    => $instrument !== '' ? $instrument : 'unknown',
+                    'lesson_type'   => $incoming_lesson_type,
                     'is_online'     => $is_online,
                     'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
                     'start_time'    => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
@@ -2348,7 +2367,7 @@ class MRM_Lesson_Scheduler {
                     'reminder_sent_at' => null,
                 ),
                 array(
-                    '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s',
+                    '%d','%d','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s',
                     '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'
                 )
             );
@@ -2424,6 +2443,7 @@ class MRM_Lesson_Scheduler {
                 'student_name'  => $student_name !== '' ? $student_name : $student_email,
                 'student_email' => $student_email,
                 'instrument'    => $instrument !== '' ? $instrument : 'unknown',
+                'lesson_type'   => $incoming_lesson_type,
                 'is_online'     => $is_online,
                 'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
                 'start_time'    => $start_mysql,
@@ -2450,6 +2470,7 @@ class MRM_Lesson_Scheduler {
                 '%s', // student_name
                 '%s', // student_email
                 '%s', // instrument
+                '%s', // lesson_type
                 '%d', // is_online
                 '%d', // lesson_length
                 '%s', // start_time
@@ -2475,8 +2496,14 @@ class MRM_Lesson_Scheduler {
             if ( $ok ) {
                 $booking_id = (int) $wpdb->insert_id;
                 $created_ids[] = $booking_id;
+                $lesson_id = $booking_id;
 
-                $this->maybe_send_consultation_confirmation_for_lesson( $booking_id );
+                $this->mrm_consultation_log( 'booking_row_saved', array(
+                    'lesson_id'         => (int) $lesson_id,
+                    'saved_lesson_type' => $incoming_lesson_type,
+                ) );
+
+                $this->maybe_send_consultation_confirmation_for_lesson( $lesson_id );
 
                 // Call existing Google Calendar insert function (already defined in this plugin)
                 // Only do this if Google is configured and the instructor has a calendar_id.
@@ -5242,24 +5269,34 @@ class MRM_Lesson_Scheduler {
 
 
     protected function maybe_send_consultation_confirmation_for_lesson( $lesson_id ) {
-        $this->mrm_consultation_log( 'maybe_send_consultation_confirmation_for_lesson_entered', array(
-            'lesson_id' => (int) $lesson_id,
-        ) );
-
         $lesson_id = (int) $lesson_id;
         if ( $lesson_id <= 0 ) {
             return false;
         }
 
+        $this->mrm_consultation_log( 'maybe_send_consultation_confirmation_for_lesson_entered', array(
+            'lesson_id' => $lesson_id,
+        ) );
+
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
-            $this->mrm_safety_log( 'consultation_confirmation_skipped_missing_lesson', array(
+            $this->mrm_consultation_log( 'consultation_confirmation_skipped_missing_lesson', array(
                 'lesson_id' => $lesson_id,
             ) );
             return false;
         }
 
         $context = $this->get_safety_lesson_context( $lesson );
+
+        $this->mrm_consultation_log( 'consultation_confirmation_wrapper_loaded_lesson', array(
+            'lesson_id'       => $lesson_id,
+            'lesson_type'     => (string) ( $lesson['lesson_type'] ?? '' ),
+            'student_email'   => (string) ( $lesson['student_email'] ?? '' ),
+            'detected_type'   => (string) ( $context['detected_type'] ?? '' ),
+            'is_consultation' => ! empty( $context['is_consultation'] ) ? 'yes' : 'no',
+            'context_label'   => (string) ( $context['lesson_type_label'] ?? '' ),
+        ) );
+
         if ( empty( $context['is_consultation'] ) ) {
             $this->mrm_consultation_log( 'consultation_confirmation_wrapper_skipped_not_consultation', array(
                 'lesson_id'     => $lesson_id,
@@ -5552,6 +5589,35 @@ class MRM_Lesson_Scheduler {
         return $sent;
     }
 
+    protected function normalize_scheduler_lesson_type( $raw_value ) {
+        $value = strtolower( trim( (string) $raw_value ) );
+        $value = str_replace( array( '-', '_' ), ' ', $value );
+        $value = preg_replace( '/\s+/', ' ', $value );
+        $value = trim( (string) $value );
+
+        if ( $value === '' ) {
+            return '';
+        }
+
+        if (
+            strpos( $value, 'consultation' ) !== false ||
+            strpos( $value, 'meet the instructor' ) !== false ||
+            strpos( $value, 'meet instructor' ) !== false
+        ) {
+            return 'consultation';
+        }
+
+        if ( strpos( $value, 'in person' ) !== false ) {
+            return 'in_person';
+        }
+
+        if ( strpos( $value, 'online' ) !== false ) {
+            return 'online';
+        }
+
+        return $value;
+    }
+
     protected function get_safety_lesson_context( $lesson ) {
         $lesson = is_array( $lesson ) ? $lesson : array();
 
@@ -5564,30 +5630,37 @@ class MRM_Lesson_Scheduler {
         $minutes = (int) ( $lesson['lesson_length'] ?? 0 );
 
         $raw_lesson_type = (string) ( $lesson['lesson_type'] ?? '' );
-        $normalized_lesson_type = strtolower( str_replace( array( '_', '-' ), ' ', $raw_lesson_type ) );
-        $normalized_lesson_type = trim( preg_replace( '/\s+/', ' ', $normalized_lesson_type ) );
+        $raw_booking_type = (string) ( $lesson['booking_type'] ?? '' );
+        $raw_session_type = (string) ( $lesson['session_type'] ?? '' );
+        $raw_option = (string) ( $lesson['selected_option'] ?? '' );
 
-        $is_consultation = false;
-        if ( $normalized_lesson_type !== '' ) {
-            if (
-                strpos( $normalized_lesson_type, 'consultation' ) !== false ||
-                strpos( $normalized_lesson_type, 'meet the instructor' ) !== false ||
-                strpos( $normalized_lesson_type, 'meet instructor' ) !== false
-            ) {
-                $is_consultation = true;
+        $normalized_lesson_type = $this->normalize_scheduler_lesson_type( $raw_lesson_type );
+        $normalized_booking_type = $this->normalize_scheduler_lesson_type( $raw_booking_type );
+        $normalized_session_type = $this->normalize_scheduler_lesson_type( $raw_session_type );
+        $normalized_option = $this->normalize_scheduler_lesson_type( $raw_option );
+
+        $detected_type = '';
+        foreach ( array( $normalized_lesson_type, $normalized_booking_type, $normalized_session_type, $normalized_option ) as $candidate ) {
+            if ( $candidate !== '' ) {
+                $detected_type = $candidate;
+                break;
             }
         }
 
+        $is_consultation = ( $detected_type === 'consultation' );
         $is_online = ! empty( $lesson['is_online'] );
-        if ( $normalized_lesson_type !== '' ) {
-            if ( strpos( $normalized_lesson_type, 'online' ) !== false ) {
-                $is_online = true;
-            } elseif ( strpos( $normalized_lesson_type, 'in person' ) !== false ) {
-                $is_online = false;
-            }
+
+        if ( $detected_type === 'online' || $is_consultation ) {
+            $is_online = true;
+        } elseif ( $detected_type === 'in_person' ) {
+            $is_online = false;
         }
 
-        $lesson_type_label = $is_consultation ? 'Meet the Instructor Consultation' : ( $is_online ? 'Online lesson' : 'In-person lesson' );
+        if ( $is_consultation ) {
+            $lesson_type_label = 'Meet the Instructor Consultation';
+        } else {
+            $lesson_type_label = $is_online ? 'Online lesson' : 'In-person lesson';
+        }
 
         $join_link = '';
         $location_text = '';
@@ -5631,13 +5704,20 @@ class MRM_Lesson_Scheduler {
         }
 
         $this->mrm_consultation_log( 'consultation_context_evaluated', array(
-            'lesson_id'               => (int) ( $lesson['id'] ?? 0 ),
-            'raw_lesson_type'         => (string) ( $lesson['lesson_type'] ?? '' ),
-            'normalized_lesson_type'  => (string) $normalized_lesson_type,
-            'is_online'               => ! empty( $is_online ) ? 'yes' : 'no',
-            'is_consultation'         => ! empty( $is_consultation ) ? 'yes' : 'no',
-            'lesson_type_label'       => (string) $lesson_type_label,
-            'start_time'              => (string) ( $lesson['start_time'] ?? '' ),
+            'lesson_id'                  => (int) ( $lesson['id'] ?? 0 ),
+            'raw_lesson_type'            => $raw_lesson_type,
+            'raw_booking_type'           => $raw_booking_type,
+            'raw_session_type'           => $raw_session_type,
+            'raw_option'                 => $raw_option,
+            'normalized_lesson_type'     => $normalized_lesson_type,
+            'normalized_booking_type'    => $normalized_booking_type,
+            'normalized_session_type'    => $normalized_session_type,
+            'normalized_option'          => $normalized_option,
+            'detected_type'              => $detected_type,
+            'is_online'                  => $is_online ? 'yes' : 'no',
+            'is_consultation'            => $is_consultation ? 'yes' : 'no',
+            'lesson_type_label'          => (string) $lesson_type_label,
+            'start_time'                 => (string) ( $lesson['start_time'] ?? '' ),
         ) );
 
         return array(
@@ -5649,6 +5729,7 @@ class MRM_Lesson_Scheduler {
             'format_note'       => $format_note,
             'is_online'         => $is_online,
             'is_consultation'   => $is_consultation,
+            'detected_type'     => $detected_type,
         );
     }
 
