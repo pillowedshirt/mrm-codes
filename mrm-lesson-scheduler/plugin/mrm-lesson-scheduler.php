@@ -1901,6 +1901,7 @@ class MRM_Lesson_Scheduler {
     student_email VARCHAR(255) NOT NULL,
     instrument VARCHAR(100) NOT NULL,
     is_online TINYINT(1) NOT NULL DEFAULT 0,
+    is_consultation TINYINT(1) NOT NULL DEFAULT 0,
     lesson_length INT NOT NULL DEFAULT 60,
     start_time DATETIME NOT NULL,
     end_time DATETIME NOT NULL,
@@ -2256,6 +2257,22 @@ class MRM_Lesson_Scheduler {
         $repeat_frequency  = sanitize_text_field( (string) ( $data['repeat_frequency'] ?? 'none' ) ); // weekly | biweekly | none
         $repeat_duration   = sanitize_text_field( (string) ( $data['repeat_duration'] ?? '' ) );      // 1_month | 3_months | indefinitely (per UI)
         $appointment_type  = sanitize_text_field( (string) ( $data['appointment_type'] ?? 'lesson' ) ); // lesson | consultation
+
+        $appointment_type = strtolower( trim( $appointment_type ) );
+        $lesson_type_normalized = strtolower( trim( $lesson_type ) );
+
+        $is_consultation = 0;
+        if ( $appointment_type === 'consultation' || $lesson_type_normalized === 'consultation' ) {
+            $is_consultation = 1;
+        }
+
+        // Consultations are always online in this system.
+        if ( $is_consultation ) {
+            $is_online = 1;
+            $appointment_type = 'consultation';
+        } else {
+            $appointment_type = 'lesson';
+        }
         $order_id = isset( $data['order_id'] ) ? intval( $data['order_id'] ) : 0;
         $payment_mode = sanitize_text_field( (string ) ( $data['payment_mode'] ?? 'none' ) ); // prepay|one_time|autopay|none
         $autopay_profile_id = isset( $data['autopay_profile_id'] ) ? intval( $data['autopay_profile_id'] ) : 0;
@@ -2310,9 +2327,10 @@ class MRM_Lesson_Scheduler {
                     'series_id'     => null,
                     'student_name'  => $student_name !== '' ? $student_name : $student_email,
                     'student_email' => $student_email,
-                    'instrument'    => $instrument !== '' ? $instrument : 'unknown',
-                    'is_online'     => $is_online,
-                    'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
+                    'instrument'       => $instrument !== '' ? $instrument : 'unknown',
+                    'is_online'        => $is_online,
+                    'is_consultation'  => $is_consultation,
+                    'lesson_length'    => $lesson_length > 0 ? $lesson_length : 60,
                     'start_time'    => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
                     'end_time'      => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['end'] ?? '' ) ) ),
                     'google_original_start_time' => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
@@ -2332,7 +2350,7 @@ class MRM_Lesson_Scheduler {
                     'reminder_sent_at' => null,
                 ),
                 array(
-                    '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s',
+                    '%d','%d','%s','%s','%s','%d','%d','%d','%s','%s','%s','%s','%s','%s',
                     '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'
                 )
             );
@@ -2406,10 +2424,11 @@ class MRM_Lesson_Scheduler {
                 'instructor_id' => $instructor_id,
                 'series_id'     => ( $series_id ? $series_id : null ),
                 'student_name'  => $student_name !== '' ? $student_name : $student_email,
-                'student_email' => $student_email,
-                'instrument'    => $instrument !== '' ? $instrument : 'unknown',
-                'is_online'     => $is_online,
-                'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
+                'student_email'    => $student_email,
+                'instrument'       => $instrument !== '' ? $instrument : 'unknown',
+                'is_online'        => $is_online,
+                'is_consultation'  => $is_consultation,
+                'lesson_length'    => $lesson_length > 0 ? $lesson_length : 60,
                 'start_time'    => $start_mysql,
                 'end_time'      => $end_mysql,
                 'google_original_start_time' => $start_mysql,
@@ -2435,6 +2454,7 @@ class MRM_Lesson_Scheduler {
                 '%s', // student_email
                 '%s', // instrument
                 '%d', // is_online
+                '%d', // is_consultation
                 '%d', // lesson_length
                 '%s', // start_time
                 '%s', // end_time
@@ -2459,6 +2479,10 @@ class MRM_Lesson_Scheduler {
             if ( $ok ) {
                 $booking_id = (int) $wpdb->insert_id;
                 $created_ids[] = $booking_id;
+
+                if ( (int) $is_consultation === 1 ) {
+                    $this->send_consultation_confirmation_for_lesson( $booking_id );
+                }
 
                 // Call existing Google Calendar insert function (already defined in this plugin)
                 // Only do this if Google is configured and the instructor has a calendar_id.
@@ -2635,6 +2659,7 @@ class MRM_Lesson_Scheduler {
                         'repeat_frequency'    => (string) $repeat_frequency,
                         'repeat_duration'     => (string) $repeat_duration,
                         'appointment_type'    => (string) $appointment_type,
+                        'is_consultation'     => (string) ( $is_consultation ? '1' : '0' ),
                         'reminder_token'      => (string) $token,
                     );
 
@@ -4111,7 +4136,7 @@ class MRM_Lesson_Scheduler {
         // Pull lesson (only scheduled, only if not already sent)
         $lesson = $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT id,instructor_id,student_name,student_email,is_online,lesson_length,start_time,end_time,
+                "SELECT id,instructor_id,student_name,student_email,is_online,is_consultation,lesson_length,start_time,end_time,
                         reminder_token,reminder_scheduled_at,reminder_sent_at,google_event_id
                  FROM {$table_lessons}
                  WHERE id = %d AND status = 'scheduled'
@@ -5519,21 +5544,59 @@ class MRM_Lesson_Scheduler {
 
 
 
+    protected function mrm_get_google_event_summary_for_lesson( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        $calendar_id = trim( (string) ( $lesson['instructor_calendar_id'] ?? '' ) );
+        $event_id    = trim( (string) ( $lesson['google_event_id'] ?? '' ) );
+
+        if ( $calendar_id === '' || $event_id === '' ) {
+            return '';
+        }
+
+        if ( ! $this->google_is_configured() ) {
+            return '';
+        }
+
+        $event = $this->google_get_event( $calendar_id, $event_id );
+        if ( is_wp_error( $event ) || ! is_array( $event ) ) {
+            return '';
+        }
+
+        $summary = trim( (string) ( $event['summary'] ?? '' ) );
+        if ( $summary === '' ) {
+            $summary = trim( (string) ( $event['title'] ?? '' ) );
+        }
+
+        return $summary;
+    }
+
     protected function mrm_is_consultation_lesson( $lesson ) {
         $lesson = is_array( $lesson ) ? $lesson : array();
 
-        $appointment_type = strtolower( trim( (string) ( $lesson['appointment_type'] ?? '' ) ) );
-        $lesson_type      = strtolower( trim( (string) ( $lesson['lesson_type'] ?? '' ) ) );
+        $is_consultation = isset( $lesson['is_consultation'] ) ? (int) $lesson['is_consultation'] : 0;
+        if ( $is_consultation === 1 ) {
+            return true;
+        }
 
+        $appointment_type = strtolower( trim( (string) ( $lesson['appointment_type'] ?? '' ) ) );
         if ( $appointment_type === 'consultation' ) {
             return true;
         }
 
+        $lesson_type = strtolower( trim( (string) ( $lesson['lesson_type'] ?? '' ) ) );
         if ( $lesson_type === 'consultation' ) {
             return true;
         }
 
         if ( strpos( $lesson_type, 'consultation' ) !== false ) {
+            return true;
+        }
+
+        $google_summary = $this->mrm_get_google_event_summary_for_lesson( $lesson );
+        $google_summary = strtolower( trim( (string) $google_summary ) );
+
+        if ( $google_summary !== '' && strpos( $google_summary, 'consultation' ) !== false ) {
             return true;
         }
 
@@ -8239,6 +8302,67 @@ class MRM_Lesson_Scheduler {
             if ( is_array( $logo ) && ! empty( $logo[0] ) ) return $logo[0];
         }
         return '';
+    }
+
+    protected function send_consultation_confirmation_for_lesson( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            return false;
+        }
+
+        if ( ! $this->mrm_is_consultation_lesson( $lesson ) ) {
+            return false;
+        }
+
+        $student_email    = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
+        $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
+
+        $to = array();
+        if ( is_email( $student_email ) ) {
+            $to[] = $student_email;
+        }
+        if ( is_email( $instructor_email ) ) {
+            $to[] = $instructor_email;
+        }
+
+        if ( empty( $to ) ) {
+            return false;
+        }
+
+        $context = $this->get_safety_lesson_context( $lesson );
+        $minutes = (int) ( $lesson['lesson_length'] ?? 30 );
+        $student_name = (string) ( $lesson['student_name'] ?? 'Student' );
+        $instructor_name = (string) ( $lesson['instructor_name'] ?? 'Instructor' );
+
+        $details = '';
+        $details .= '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>';
+        $details .= '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>';
+        $details .= '<div><strong>Time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>';
+        $details .= '<div><strong>Type:</strong> Consultation</div>';
+        $details .= '<div><strong>Consultation length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
+
+        if ( ! empty( $context['join_link'] ) ) {
+            $details .= '<div><strong>Consultation link:</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
+        }
+
+        $intro = '<p>Your consultation has been scheduled successfully.</p><p>This is an online consultation. Please use the consultation link above at the scheduled time.</p>';
+
+        $html = $this->mrm_safety_email_wrap_html_blocks(
+            'Consultation Confirmation',
+            $intro,
+            $details,
+            ''
+        );
+
+        return wp_mail(
+            $to,
+            'Consultation Confirmation',
+            $html,
+            array(
+                'Content-Type: text/html; charset=UTF-8',
+                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+            )
+        );
     }
 
     protected function mrm_wrap_email_html( $title, $intro_html, $details_html, $button_url, $button_text, $options = array() ) {
