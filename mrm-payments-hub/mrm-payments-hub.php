@@ -1799,18 +1799,42 @@ class MRM_Payments_Hub_Single {
       return $result;
     }
 
-    $allowed_statuses = array('active', 'trialing');
+    $now_ts = current_time('timestamp');
 
     foreach ($subscriptions['data'] as $subscription) {
       $status = strtolower((string)($subscription['status'] ?? ''));
       $subscription_id = (string)($subscription['id'] ?? '');
+      $cancel_at_period_end = !empty($subscription['cancel_at_period_end']);
+      $current_period_end = !empty($subscription['current_period_end']) ? (int)$subscription['current_period_end'] : 0;
 
-      if (in_array($status, $allowed_statuses, true)) {
+      // Still renewing
+      if (in_array($status, array('active', 'trialing'), true) && !$cancel_at_period_end) {
         $result = array(
           'has_access' => true,
           'status' => $status,
           'subscription_id' => $subscription_id,
           'reason' => 'stripe_active',
+        );
+        error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
+          'email' => $email,
+          'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
+          'status' => (string)$result['status'],
+          'subscription_id' => (string)$result['subscription_id'],
+          'reason' => (string)$result['reason'],
+        )));
+        return $result;
+      }
+
+      // Canceled but still paid through current period
+      if (
+        ($status === 'active' || $status === 'canceled' || $cancel_at_period_end) &&
+        $current_period_end > $now_ts
+      ) {
+        $result = array(
+          'has_access' => true,
+          'status' => 'canceled',
+          'subscription_id' => $subscription_id,
+          'reason' => 'paid_through_canceled',
         );
         error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
           'email' => $email,
@@ -3792,7 +3816,11 @@ class MRM_Payments_Hub_Single {
            AND email_plain <> ''
            AND (
              stripe_status IN ('trialing','active')
-             OR (current_period_end IS NOT NULL AND current_period_end >= %s)
+             OR (
+               (cancel_at_period_end = 1 OR stripe_status = 'canceled')
+               AND current_period_end IS NOT NULL
+               AND current_period_end >= %s
+             )
            )
          ORDER BY email_plain ASC",
         $now
@@ -7866,6 +7894,55 @@ class MRM_Payments_Hub_Single {
     ), 200);
   }
 
+  private function mrm_build_piece_access_instructions_html($email, $sku) {
+    $email = sanitize_email((string)$email);
+    $sku   = $this->sanitize_sku((string)$sku);
+
+    $html  = '<p>Thank you for your purchase.</p>';
+    $html .= '<p>Your piece access has been granted.</p>';
+    $html .= '<p><strong>How to access your purchased content:</strong></p>';
+    $html .= '<ol>';
+    $html .= '<li>Return to the piece page on the website.</li>';
+    $html .= '<li>Click the access button for your purchased version.</li>';
+    $html .= '<li>Enter this email address: <strong>' . esc_html($email) . '</strong></li>';
+    $html .= '<li>Request your access code and enter it to open the purchased content.</li>';
+    $html .= '</ol>';
+    $html .= '<p><strong>Product:</strong> ' . esc_html($sku) . '</p>';
+    $html .= '<p>If you have trouble accessing your files, please contact support.</p>';
+
+    return $html;
+  }
+
+  private function mrm_send_piece_purchase_confirmation_email($email, $sku) {
+    $email = sanitize_email((string)$email);
+    $sku   = $this->sanitize_sku((string)$sku);
+
+    if (!$email || !is_email($email) || !$sku) {
+      return false;
+    }
+
+    $subject = 'Piece Purchase Confirmation';
+    $body    = $this->mrm_build_piece_access_instructions_html($email, $sku);
+
+    $sent = wp_mail(
+      $email,
+      $subject,
+      $body,
+      array(
+        'Content-Type: text/html; charset=UTF-8',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+      )
+    );
+
+    error_log('[MRM Payments Hub] piece purchase confirmation email ' . wp_json_encode(array(
+      'email' => $email,
+      'sku'   => $sku,
+      'sent'  => $sent ? 'yes' : 'no',
+    )));
+
+    return $sent;
+  }
+
   public function rest_grant_sheet_music_access(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
 
@@ -7954,6 +8031,8 @@ class MRM_Payments_Hub_Single {
 
     // ✅ Access source of truth: DB ledger row only.
     // Do NOT also mirror into the per-product "Approved Emails (OTP Access)" product UI.
+
+    $this->mrm_send_piece_purchase_confirmation_email($email, $sku);
 
     return new WP_REST_Response(array(
       'ok' => true,
@@ -8132,6 +8211,15 @@ class MRM_Payments_Hub_Single {
       array($this, 'render_admin_page'),
       'dashicons-cart',
       57
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Sheet Music Access',
+      'Sheet Music Access',
+      'manage_options',
+      'mrm-pay-hub-access',
+      array($this, 'render_access_lists_page')
     );
   }
 
@@ -8718,188 +8806,16 @@ class MRM_Payments_Hub_Single {
     return ob_get_clean();
   }
 
-  public function render_admin_page() {
+  public function render_access_lists_page() {
     if (!current_user_can('manage_options')) return;
 
     settings_errors('mrm_pay_hub');
-
-    $settings = $this->get_settings();
-    $pk_live   = esc_attr((string)($settings['stripe_publishable_key'] ?? ''));
-    $sk_live   = esc_attr((string)($settings['stripe_secret_key'] ?? ''));
-    $wh_live   = esc_attr((string)($settings['stripe_webhook_secret'] ?? ''));
-    $price_live = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
-    $pk_test   = esc_attr((string)($settings['stripe_test_publishable_key'] ?? ''));
-    $sk_test   = esc_attr((string)($settings['stripe_test_secret_key'] ?? ''));
-    $wh_test   = esc_attr((string)($settings['stripe_test_webhook_secret'] ?? ''));
-    $price_test = esc_attr((string)($settings['stripe_test_sheet_music_subscription_price_id'] ?? ''));
-    $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
-    $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
-    $in_person_travel_amount = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['in_person_travel_amount_cents'] ?? 500)));
-    $instructor_payout_chart_rows = $this->mrm_get_instructor_payout_chart_rows();
-    $instructor_payout_chart_columns = $this->mrm_get_instructor_payout_chart_columns();
-    $instructor_payout_chart_values = $this->mrm_get_instructor_payout_chart_admin_matrix();
-    $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
-    $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
-
     ?>
     <div class="wrap">
-      <h1>MRM Payments Hub</h1>
+      <h1>Sheet Music Access</h1>
 
       <form method="post">
         <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
-
-        <h2>Stripe Environment & Keys</h2>
-        <p>Select whether to operate in live or test (sandbox) mode. Provide the appropriate keys for each environment. The mode determines which keys are used for API calls.</p>
-        <table class="form-table">
-          <tr>
-            <th scope="row">Mode</th>
-            <td>
-              <fieldset>
-                <label><input type="radio" name="stripe_mode" value="live" <?php checked($mode, 'live'); ?> /> Live</label><br />
-                <label><input type="radio" name="stripe_mode" value="test" <?php checked($mode, 'test'); ?> /> Test (Sandbox)</label>
-              </fieldset>
-            </td>
-          </tr>
-        </table>
-        <h3>Live Keys</h3>
-        <table class="form-table">
-          <tr>
-            <th scope="row"><label for="stripe_publishable_key">Publishable Key</label></th>
-            <td><input type="text" id="stripe_publishable_key" name="stripe_publishable_key" value="<?php echo $pk_live; ?>" class="regular-text" /></td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="stripe_secret_key">Secret Key</label></th>
-            <td><input type="password" id="stripe_secret_key" name="stripe_secret_key" value="<?php echo $sk_live; ?>" class="regular-text" autocomplete="off" /></td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="stripe_webhook_secret">Webhook Signing Secret (optional)</label></th>
-            <td><input type="password" id="stripe_webhook_secret" name="stripe_webhook_secret" value="<?php echo $wh_live; ?>" class="regular-text" autocomplete="off" /></td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="stripe_sheet_music_subscription_price_id">Sheet Music Subscription Price ID</label></th>
-            <td>
-              <input type="text" id="stripe_sheet_music_subscription_price_id" name="stripe_sheet_music_subscription_price_id" value="<?php echo $price_live; ?>" class="regular-text" placeholder="price_..." />
-              <p class="description">Paste the live Stripe recurring Price ID for the $5 monthly sheet music subscription.</p>
-            </td>
-          </tr>
-        </table>
-
-        <h3>Test Keys</h3>
-        <table class="form-table">
-          <tr>
-            <th scope="row"><label for="stripe_test_publishable_key">Publishable Key (Test)</label></th>
-            <td><input type="text" id="stripe_test_publishable_key" name="stripe_test_publishable_key" value="<?php echo $pk_test; ?>" class="regular-text" /></td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="stripe_test_secret_key">Secret Key (Test)</label></th>
-            <td><input type="password" id="stripe_test_secret_key" name="stripe_test_secret_key" value="<?php echo $sk_test; ?>" class="regular-text" autocomplete="off" /></td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="stripe_test_webhook_secret">Webhook Signing Secret (Test, optional)</label></th>
-            <td><input type="password" id="stripe_test_webhook_secret" name="stripe_test_webhook_secret" value="<?php echo $wh_test; ?>" class="regular-text" autocomplete="off" /></td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="stripe_test_sheet_music_subscription_price_id">Sheet Music Subscription Price ID (Test)</label></th>
-            <td>
-              <input type="text" id="stripe_test_sheet_music_subscription_price_id" name="stripe_test_sheet_music_subscription_price_id" value="<?php echo $price_test; ?>" class="regular-text" placeholder="price_..." />
-              <p class="description">Paste the test Stripe recurring Price ID for the $5 monthly sheet music subscription.</p>
-            </td>
-          </tr>
-        </table>
-
-        <h2>Connect / Payout Settings</h2>
-        <p>These settings drive instructor/composer payout math and the biweekly payout batch.</p>
-        <table class="form-table">
-          <tr>
-            <th scope="row"><label for="composer_connected_account_id">Composer Connected Account ID</label></th>
-            <td>
-              <input type="text" id="composer_connected_account_id" name="composer_connected_account_id" value="<?php echo $composer_acct; ?>" class="regular-text" placeholder="acct_..." />
-              <p class="description">Paste the composer’s Stripe Connect account ID here.</p>
-            </td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="one_time_sheet_music_composer_pct">One-Time Sheet Music Composer %</label></th>
-            <td>
-              <input type="number" id="one_time_sheet_music_composer_pct" name="one_time_sheet_music_composer_pct" value="<?php echo $one_time_sheet_music_composer_pct; ?>" class="small-text" min="0" max="100" />
-              <p class="description">This centralized percentage is used for eligible one-time sheet music purchases. Per-product sheet music composer percentages are no longer used.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="in_person_travel_amount">In-Person Travel Add-On</label></th>
-            <td>
-              <input type="number" id="in_person_travel_amount" name="in_person_travel_amount" value="<?php echo $in_person_travel_amount; ?>" class="small-text" min="0" step="0.01" />
-              <p class="description">This amount is added to every in-person instructor payout in all payout paths.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row">Instructor Payout Chart</th>
-            <td>
-              <table class="widefat striped" style="max-width:1000px;">
-                <thead>
-                  <tr>
-                    <th>Lesson Type</th>
-                    <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
-                      <th><?php echo esc_html($year_label); ?></th>
-                    <?php endforeach; ?>
-                  </tr>
-                </thead>
-                <tbody>
-                  <?php foreach ($instructor_payout_chart_rows as $row_key => $row) : ?>
-                    <tr>
-                      <th scope="row"><?php echo esc_html($row['label']); ?></th>
-                      <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
-                        <?php
-                          $field_name = str_replace(
-                            '_cents',
-                            '',
-                            $this->mrm_get_instructor_payout_chart_setting_key(
-                              (int)$row['lesson_length'],
-                              (int)$row['is_online'],
-                              (int)$year_bucket
-                            )
-                          );
-                        ?>
-                        <td>
-                          <input
-                            type="number"
-                            name="<?php echo esc_attr($field_name); ?>"
-                            value="<?php echo esc_attr($instructor_payout_chart_values[$row_key][$year_bucket] ?? '0.00'); ?>"
-                            class="small-text"
-                            min="0"
-                            step="0.01"
-                          />
-                        </td>
-                      <?php endforeach; ?>
-                    </tr>
-                  <?php endforeach; ?>
-                </tbody>
-              </table>
-              <p class="description">
-                The instructor year bucket is resolved from <code>hire_date</code> in the instructors table.
-                Year changes happen at 12:00 AM in the site timezone on each employment anniversary date.
-                Year 3+ is used for year 3 and every later year.
-                The in-person travel add-on below this section is still added separately to all in-person payouts.
-              </p>
-            </td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="payout_anchor_date">Biweekly Payout Anchor Date</label></th>
-            <td>
-              <input type="date" id="payout_anchor_date" name="payout_anchor_date" value="<?php echo $payout_anchor_date; ?>" />
-              <p class="description">Use the first Friday that should count as a payout Friday. Every 14 days after that is a payout day. The automatic payout check is scheduled for 10:00 AM site time on each eligible payout date. For near-exact timing, your server cron should trigger WordPress cron every minute.</p>
-            </td>
-          </tr>
-          <tr>
-            <th scope="row">Manual Test Button</th>
-            <td>
-              <button type="submit" name="mrm_run_payout_batch" value="1" class="button">Run Payout Batch Now</button>
-              <p class="description">Use this in sandbox to test transfers and payouts immediately.</p>
-            </td>
-          </tr>
-        </table>
-
         <h2>Sheet Music Access Lists (Email-based)</h2>
         <p>Master list: <code>all-sheet-music</code> grants access to any piece.</p>
 
@@ -9094,6 +9010,196 @@ class MRM_Payments_Hub_Single {
               </td>
             </tr>
           </tbody>
+        </table>
+
+        <p class="submit">
+          <button type="submit" class="button button-primary">Save Settings</button>
+        </p>
+      </form>
+    </div>
+    <?php
+  }
+
+  public function render_admin_page() {
+    if (!current_user_can('manage_options')) return;
+
+    settings_errors('mrm_pay_hub');
+
+    $settings = $this->get_settings();
+    $pk_live   = esc_attr((string)($settings['stripe_publishable_key'] ?? ''));
+    $sk_live   = esc_attr((string)($settings['stripe_secret_key'] ?? ''));
+    $wh_live   = esc_attr((string)($settings['stripe_webhook_secret'] ?? ''));
+    $price_live = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
+    $pk_test   = esc_attr((string)($settings['stripe_test_publishable_key'] ?? ''));
+    $sk_test   = esc_attr((string)($settings['stripe_test_secret_key'] ?? ''));
+    $wh_test   = esc_attr((string)($settings['stripe_test_webhook_secret'] ?? ''));
+    $price_test = esc_attr((string)($settings['stripe_test_sheet_music_subscription_price_id'] ?? ''));
+    $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
+    $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
+    $in_person_travel_amount = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['in_person_travel_amount_cents'] ?? 500)));
+    $instructor_payout_chart_rows = $this->mrm_get_instructor_payout_chart_rows();
+    $instructor_payout_chart_columns = $this->mrm_get_instructor_payout_chart_columns();
+    $instructor_payout_chart_values = $this->mrm_get_instructor_payout_chart_admin_matrix();
+    $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
+    $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
+
+    ?>
+    <div class="wrap">
+      <h1>MRM Payments Hub</h1>
+
+      <form method="post">
+        <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
+
+        <h2>Stripe Environment & Keys</h2>
+        <p>Select whether to operate in live or test (sandbox) mode. Provide the appropriate keys for each environment. The mode determines which keys are used for API calls.</p>
+        <table class="form-table">
+          <tr>
+            <th scope="row">Mode</th>
+            <td>
+              <fieldset>
+                <label><input type="radio" name="stripe_mode" value="live" <?php checked($mode, 'live'); ?> /> Live</label><br />
+                <label><input type="radio" name="stripe_mode" value="test" <?php checked($mode, 'test'); ?> /> Test (Sandbox)</label>
+              </fieldset>
+            </td>
+          </tr>
+        </table>
+        <h3>Live Keys</h3>
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="stripe_publishable_key">Publishable Key</label></th>
+            <td><input type="text" id="stripe_publishable_key" name="stripe_publishable_key" value="<?php echo $pk_live; ?>" class="regular-text" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="stripe_secret_key">Secret Key</label></th>
+            <td><input type="password" id="stripe_secret_key" name="stripe_secret_key" value="<?php echo $sk_live; ?>" class="regular-text" autocomplete="off" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="stripe_webhook_secret">Webhook Signing Secret (optional)</label></th>
+            <td><input type="password" id="stripe_webhook_secret" name="stripe_webhook_secret" value="<?php echo $wh_live; ?>" class="regular-text" autocomplete="off" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="stripe_sheet_music_subscription_price_id">Sheet Music Subscription Price ID</label></th>
+            <td>
+              <input type="text" id="stripe_sheet_music_subscription_price_id" name="stripe_sheet_music_subscription_price_id" value="<?php echo $price_live; ?>" class="regular-text" placeholder="price_..." />
+              <p class="description">Paste the live Stripe recurring Price ID for the $5 monthly sheet music subscription.</p>
+            </td>
+          </tr>
+        </table>
+
+        <h3>Test Keys</h3>
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="stripe_test_publishable_key">Publishable Key (Test)</label></th>
+            <td><input type="text" id="stripe_test_publishable_key" name="stripe_test_publishable_key" value="<?php echo $pk_test; ?>" class="regular-text" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="stripe_test_secret_key">Secret Key (Test)</label></th>
+            <td><input type="password" id="stripe_test_secret_key" name="stripe_test_secret_key" value="<?php echo $sk_test; ?>" class="regular-text" autocomplete="off" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="stripe_test_webhook_secret">Webhook Signing Secret (Test, optional)</label></th>
+            <td><input type="password" id="stripe_test_webhook_secret" name="stripe_test_webhook_secret" value="<?php echo $wh_test; ?>" class="regular-text" autocomplete="off" /></td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="stripe_test_sheet_music_subscription_price_id">Sheet Music Subscription Price ID (Test)</label></th>
+            <td>
+              <input type="text" id="stripe_test_sheet_music_subscription_price_id" name="stripe_test_sheet_music_subscription_price_id" value="<?php echo $price_test; ?>" class="regular-text" placeholder="price_..." />
+              <p class="description">Paste the test Stripe recurring Price ID for the $5 monthly sheet music subscription.</p>
+            </td>
+          </tr>
+        </table>
+
+        <h2>Connect / Payout Settings</h2>
+        <p>These settings drive instructor/composer payout math and the biweekly payout batch.</p>
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="composer_connected_account_id">Composer Connected Account ID</label></th>
+            <td>
+              <input type="text" id="composer_connected_account_id" name="composer_connected_account_id" value="<?php echo $composer_acct; ?>" class="regular-text" placeholder="acct_..." />
+              <p class="description">Paste the composer’s Stripe Connect account ID here.</p>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="one_time_sheet_music_composer_pct">One-Time Sheet Music Composer %</label></th>
+            <td>
+              <input type="number" id="one_time_sheet_music_composer_pct" name="one_time_sheet_music_composer_pct" value="<?php echo $one_time_sheet_music_composer_pct; ?>" class="small-text" min="0" max="100" />
+              <p class="description">This centralized percentage is used for eligible one-time sheet music purchases. Per-product sheet music composer percentages are no longer used.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="in_person_travel_amount">In-Person Travel Add-On</label></th>
+            <td>
+              <input type="number" id="in_person_travel_amount" name="in_person_travel_amount" value="<?php echo $in_person_travel_amount; ?>" class="small-text" min="0" step="0.01" />
+              <p class="description">This amount is added to every in-person instructor payout in all payout paths.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row">Instructor Payout Chart</th>
+            <td>
+              <table class="widefat striped" style="max-width:1000px;">
+                <thead>
+                  <tr>
+                    <th>Lesson Type</th>
+                    <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
+                      <th><?php echo esc_html($year_label); ?></th>
+                    <?php endforeach; ?>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($instructor_payout_chart_rows as $row_key => $row) : ?>
+                    <tr>
+                      <th scope="row"><?php echo esc_html($row['label']); ?></th>
+                      <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
+                        <?php
+                          $field_name = str_replace(
+                            '_cents',
+                            '',
+                            $this->mrm_get_instructor_payout_chart_setting_key(
+                              (int)$row['lesson_length'],
+                              (int)$row['is_online'],
+                              (int)$year_bucket
+                            )
+                          );
+                        ?>
+                        <td>
+                          <input
+                            type="number"
+                            name="<?php echo esc_attr($field_name); ?>"
+                            value="<?php echo esc_attr($instructor_payout_chart_values[$row_key][$year_bucket] ?? '0.00'); ?>"
+                            class="small-text"
+                            min="0"
+                            step="0.01"
+                          />
+                        </td>
+                      <?php endforeach; ?>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+              <p class="description">
+                The instructor year bucket is resolved from <code>hire_date</code> in the instructors table.
+                Year changes happen at 12:00 AM in the site timezone on each employment anniversary date.
+                Year 3+ is used for year 3 and every later year.
+                The in-person travel add-on below this section is still added separately to all in-person payouts.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row"><label for="payout_anchor_date">Biweekly Payout Anchor Date</label></th>
+            <td>
+              <input type="date" id="payout_anchor_date" name="payout_anchor_date" value="<?php echo $payout_anchor_date; ?>" />
+              <p class="description">Use the first Friday that should count as a payout Friday. Every 14 days after that is a payout day. The automatic payout check is scheduled for 10:00 AM site time on each eligible payout date. For near-exact timing, your server cron should trigger WordPress cron every minute.</p>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Manual Test Button</th>
+            <td>
+              <button type="submit" name="mrm_run_payout_batch" value="1" class="button">Run Payout Batch Now</button>
+              <p class="description">Use this in sandbox to test transfers and payouts immediately.</p>
+            </td>
+          </tr>
         </table>
 
         <p class="submit">
