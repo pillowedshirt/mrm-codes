@@ -7894,23 +7894,69 @@ class MRM_Payments_Hub_Single {
     ), 200);
   }
 
+  private function mrm_wrap_transactional_email_html($title, $intro_html, $details_html, $button_url = '', $button_text = '', $options = array()) {
+    $brand = '#780000';
+    $options = is_array($options) ? $options : array();
+    $button_color = isset($options['button_color']) ? (string)$options['button_color'] : $brand;
+    $button_align = isset($options['button_align']) ? (string)$options['button_align'] : 'center';
+    $site = esc_html(get_bloginfo('name'));
+
+    $btn_html = '';
+    if ($button_url) {
+      $btn_html = '<div style="text-align:' . esc_attr($button_align) . ';margin:22px 0 10px 0;">
+      <a href="' . esc_url($button_url) . '" style="display:inline-block;background:' . esc_attr($button_color) . ';color:#ffffff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:10px;">
+        ' . esc_html($button_text ? $button_text : 'Open Link') . '
+      </a>
+    </div>
+    <div style="text-align:center;font-size:12px;color:#666;margin-top:10px;">
+      If the button doesn’t work, copy and paste this link:<br/>
+      <span style="word-break:break-all;">' . esc_html($button_url) . '</span>
+    </div>';
+    }
+
+    return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
+    <div style="max-width:640px;margin:0 auto;padding:24px;">
+      <div style="background:#ffffff;border-radius:16px;padding:24px;box-shadow:0 2px 10px rgba(0,0,0,0.06);font-family:Arial,sans-serif;">
+        <h1 style="margin:0 0 10px 0;font-size:20px;line-height:1.3;color:#111;">' . esc_html($title) . '</h1>
+        <div style="font-size:14px;line-height:1.6;color:#222;">' . $intro_html . '</div>
+        <div style="margin-top:14px;padding:14px;border:1px solid #eee;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.6;color:#222;">
+          ' . $details_html . '
+        </div>
+        ' . $btn_html . '
+        <div style="margin-top:20px;font-size:12px;color:#777;text-align:center;">
+          ' . $site . '
+        </div>
+      </div>
+    </div>
+  </body></html>';
+  }
+
   private function mrm_build_piece_access_instructions_html($email, $sku) {
     $email = sanitize_email((string)$email);
     $sku   = $this->sanitize_sku((string)$sku);
 
-    $html  = '<p>Thank you for your purchase.</p>';
-    $html .= '<p>Your piece access has been granted.</p>';
-    $html .= '<p><strong>How to access your purchased content:</strong></p>';
-    $html .= '<ol>';
-    $html .= '<li>Return to the piece page on the website.</li>';
-    $html .= '<li>Click the access button for your purchased version.</li>';
-    $html .= '<li>Enter this email address: <strong>' . esc_html($email) . '</strong></li>';
-    $html .= '<li>Request your access code and enter it to open the purchased content.</li>';
-    $html .= '</ol>';
-    $html .= '<p><strong>Product:</strong> ' . esc_html($sku) . '</p>';
-    $html .= '<p>If you have trouble accessing your files, please contact support.</p>';
+    $details  = '<div><strong>Email:</strong> ' . esc_html($email) . '</div>';
+    $details .= '<div><strong>Product:</strong> ' . esc_html($sku) . '</div>';
 
-    return $html;
+    $intro  = '<p>Thank you for your purchase.</p>';
+    $intro .= '<p>Your piece access has been granted successfully.</p>';
+    $intro .= '<p><strong>How to access your purchased content:</strong></p>';
+    $intro .= '<ol style="margin:10px 0 0 18px; padding:0;">';
+    $intro .= '<li>Return to the piece page on the website.</li>';
+    $intro .= '<li>Click the access button for your purchased version.</li>';
+    $intro .= '<li>Enter this email address: <strong>' . esc_html($email) . '</strong></li>';
+    $intro .= '<li>Request your access code and enter it to open the purchased content.</li>';
+    $intro .= '</ol>';
+    $intro .= '<p style="margin-top:14px;">If you have trouble accessing your files, please contact support.</p>';
+
+    return $this->mrm_wrap_transactional_email_html(
+      'Piece Purchase Confirmation',
+      $intro,
+      $details,
+      '',
+      '',
+      array()
+    );
   }
 
   private function mrm_send_piece_purchase_confirmation_email($email, $sku) {
