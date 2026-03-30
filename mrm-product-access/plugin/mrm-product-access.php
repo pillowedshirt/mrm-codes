@@ -1266,35 +1266,39 @@ class MRM_Product_Access {
         return $map;
     }
 
+    protected function mrm_get_private_asset_root() {
+        return '/home/u309866334/domains/lowbrass-lessons.com/mrm-private';
+    }
+
     protected function sanitize_track_location( $raw ) {
         $raw = trim( (string) $raw );
         if ( $raw === '' ) return '';
 
-        // Block traversal patterns early
         if ( strpos( $raw, '..' ) !== false ) return '';
 
-        // Allow full URLs
         if ( preg_match( '#^https?://#i', $raw ) ) {
             return esc_url_raw( $raw );
         }
 
-        // Allow site-relative paths like /wp-content/uploads/...
         if ( strpos( $raw, '/' ) === 0 ) {
-            // Keep it simple and safe: strip control chars
             $raw = preg_replace( '/[\\x00-\\x1F\\x7F]/u', '', $raw );
-            return $raw;
-        }
 
-        // Optionally allow absolute filesystem paths only if they live under ABSPATH
-        // (This supports cases where you store server paths, but prevents leaking arbitrary server files.)
-        if ( preg_match( '#^/[A-Za-z0-9_\\-./]+$#', $raw ) ) {
             $rp = realpath( $raw );
-            if ( ! $rp ) return '';
-            $root = realpath( ABSPATH );
-            if ( $root && strpos( $rp, $root ) === 0 ) {
-                return $rp;
+            if ( $rp ) {
+                $wp_root = realpath( ABSPATH );
+                $private_root = realpath( $this->mrm_get_private_asset_root() );
+
+                if ( $wp_root && strpos( $rp, $wp_root ) === 0 ) {
+                    return $rp;
+                }
+
+                if ( $private_root && strpos( $rp, $private_root ) === 0 ) {
+                    return $rp;
+                }
             }
-            return '';
+
+            // Keep site-relative paths like /wp-content/uploads/... untouched
+            return $raw;
         }
 
         return '';
@@ -1326,6 +1330,13 @@ class MRM_Product_Access {
                 'url'  => $url,
             );
         }
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log('[MRM Product Access] get_tracks_for_slug result ' . wp_json_encode(array(
+                'requested_slug' => $product_slug,
+                'resolved_count' => count($out),
+            )));
+        }
+
         return $out;
     }
 
@@ -1351,6 +1362,14 @@ class MRM_Product_Access {
         // If it's already a real path on disk.
         if ( file_exists( $raw ) ) {
             return $raw;
+        }
+
+        $private_root = $this->mrm_get_private_asset_root();
+        if ( $private_root ) {
+            $candidate = trailingslashit( $private_root ) . ltrim( $raw, '/' );
+            if ( file_exists( $candidate ) ) {
+                return $candidate;
+            }
         }
 
         // Convert uploads URL -> local path
@@ -2006,6 +2025,14 @@ class MRM_Product_Access {
         }
 
         $tracks = $this->get_tracks_for_slug( $product_slug );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log('[MRM Product Access] access page track lookup ' . wp_json_encode(array(
+                'product_slug' => $product_slug,
+                'track_count'  => is_array($tracks) ? count($tracks) : 0,
+            )));
+        }
+
         if ( empty( $tracks ) ) {
             status_header( 404 );
             echo 'No tracks configured for this product.';
@@ -2773,8 +2800,14 @@ Thank you.' ) );
         // Option A: Let FluentSMTP (or your SMTP plugin) control the From Name/Email.
         // Do NOT set custom headers here.
         $sent = wp_mail( $normalized_email, $subject, $body );
-if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log( sprintf( 'MRM OTP email send failure to %s', $normalized_email ) );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log( '[MRM OTP] send attempt ' . wp_json_encode( array(
+                'email'   => $normalized_email,
+                'product' => $product_slug,
+                'sent'    => $sent ? 'yes' : 'no',
+                'subject' => $subject,
+            ) ) );
         }
 
         return new WP_REST_Response( $generic, 200 );
