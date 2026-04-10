@@ -48,27 +48,83 @@ h1 {
   text-align: center;
 }
 
+.mrm-booking-header{
+  margin-bottom: 24px;
+  padding: 20px 20px 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
+  background: linear-gradient(180deg, #fcfbf8 0%, #f8f4ee 100%);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.05);
+}
+
+.mrm-booking-header-top{
+  margin-bottom: 14px;
+}
+
+.mrm-booking-header-eyebrow{
+  display: inline-block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.mrm-booking-header-title{
+  margin: 0 0 6px 0;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 800;
+  color: var(--color-text-main);
+}
+
+.mrm-booking-header-copy{
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+  max-width: 760px;
+}
+
 .filters {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px,1fr));
-  gap: 12px;
-  margin-bottom: 24px;
+  gap: 14px;
+  margin-bottom: 0;
+}
+
+.filters > div{
+  padding: 12px;
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.72);
 }
 
 .filters label {
   display:block;
-  font-size:14px;
-  margin-bottom:4px;
+  font-size:13px;
+  font-weight: 700;
+  margin-bottom:6px;
+  letter-spacing: 0.02em;
   color: var(--color-text-muted);
 }
 
 .filters select,
 .filters input {
   width:100%;
-  padding:8px 10px;
+  padding:10px 12px;
   border:1px solid var(--color-border);
-  border-radius:var(--radius-sm);
+  border-radius:12px;
   font-size:14px;
+  background: #fff;
+}
+
+.filters select:focus,
+.filters input:focus{
+  outline: none;
+  border-color: #b89d6b;
+  box-shadow: 0 0 0 3px rgba(184,157,107,0.16);
 }
 
 #length-select,
@@ -130,6 +186,23 @@ h1 {
 }
 
 @media (max-width: 767px){
+  .mrm-booking-header{
+    padding: 16px 16px 14px;
+    border-radius: 16px;
+  }
+
+  .mrm-booking-header-title{
+    font-size: 21px;
+  }
+
+  .filters{
+    gap: 10px;
+  }
+
+  .filters > div{
+    padding: 10px;
+  }
+
   .mrm-pricing-summary{
     padding: 13px 14px;
     margin-bottom: 18px;
@@ -1676,99 +1749,6 @@ h1 {
   }
 }
 
-/* Initial preferences popup */
-.mrm-pref-overlay{
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.55);
-  display: none;
-  align-items: center;
-  justify-content: center;
-  padding: 18px;
-  z-index: 999999;
-}
-.mrm-pref-modal{
-  width: 100%;
-  max-width: 560px;
-  background: #fff;
-  border-radius: 16px;
-  padding: 14px;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.25);
-}
-.mrm-pref-head{
-  display:flex;
-  align-items:center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-.mrm-pref-title{
-  font-size: 16px;
-  font-weight: 700;
-}
-.mrm-pref-close{
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  border: 1px solid #d7d7d7;
-  background: #ffffff;
-  color: #111111;
-  font-size: 22px;
-  font-weight: 800;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  padding: 0;
-}
-.mrm-pref-close:hover{
-  border-color:#bdbdbd;
-}
-.mrm-pref-close:focus{
-  outline: 2px solid rgba(0,0,0,0.25);
-  outline-offset: 2px;
-}
-.mrm-pref-grid{
-  display:grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
-}
-.mrm-pref-grid label{
-  display:block;
-  font-size: 13px;
-  margin-bottom: 6px;
-  color: #222;
-}
-.mrm-pref-grid select{
-  width: 100%;
-  padding: 10px 10px;
-  border: 1px solid #e1e1e1;
-  border-radius: 12px;
-  background: #fff;
-}
-.mrm-pref-grid select:disabled{
-  opacity: 0.65;
-  background: #f3f3f3;
-  cursor: not-allowed;
-}
-.mrm-pref-see{
-  width: 100%;
-  margin-top: 14px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: none;
-  background: #111;
-  color: #fff;
-  font-weight: 700;
-  cursor: pointer;
-}
-.mrm-pref-note{
-  margin-top: 10px;
-  font-size: 12px;
-  color: #666;
-}
-
 </style>
 </head>
 
@@ -1777,49 +1757,14 @@ h1 {
   <h1>Schedule Your Lesson</h1>
 
 
-  <!-- Initial preferences popup -->
-  <div id="mrm-pref-overlay" class="mrm-pref-overlay" aria-hidden="false" style="display:none;">
-    <div class="mrm-pref-modal" role="dialog" aria-modal="true" aria-label="Choose lesson preferences">
-      <div class="mrm-pref-head">
-        <div class="mrm-pref-title">Choose your lesson details</div>
-        <button type="button" id="mrm-pref-close" class="mrm-pref-close" aria-label="Close">×</button>
-      </div>
-
-      <div class="mrm-pref-grid">
-        <div>
-          <label>Instrument</label>
-          <select id="mrm-pref-instrument"></select>
-        </div>
-        <div>
-          <label>Lesson type</label>
-          <select id="mrm-pref-lesson-option"></select>
-        </div>
-        <div id="mrm-pref-length-wrap" class="mrm-pref-field">
-          <label>Lesson length</label>
-          <select id="mrm-pref-length"></select>
-        </div>
-        <div id="mrm-pref-frequency-wrap" class="mrm-pref-field">
-          <label>Frequency</label>
-          <select id="mrm-pref-frequency"></select>
-        </div>
-        <div id="mrm-pref-duration-wrap" class="mrm-pref-field">
-          <label>Reserve time for</label>
-          <select id="mrm-pref-duration"></select>
-        </div>
-      </div>
-
-      <div id="mrm-pref-pricing-summary" class="mrm-pricing-summary mrm-pref-pricing-summary is-hidden" aria-live="polite">
-        <div class="mrm-pricing-summary-title">Lesson Pricing</div>
-        <div id="mrm-pref-pricing-summary-main" class="mrm-pricing-summary-main"></div>
-        <div id="mrm-pref-pricing-summary-sub" class="mrm-pricing-summary-sub"></div>
-      </div>
-
-      <button type="button" id="mrm-pref-see" class="mrm-pref-see">See availability</button>
-      <div class="mrm-pref-note">You can still adjust these options after availability loads.</div>
+  <div class="mrm-booking-header">
+    <div class="mrm-booking-header-top">
+      <div class="mrm-booking-header-eyebrow">Book Your Lesson</div>
+      <h2 class="mrm-booking-header-title">Choose your lesson format, length, and schedule.</h2>
+      <p class="mrm-booking-header-copy">Select the lesson details that fit your goals, then review live availability below. Pricing updates automatically as you choose between online and in-person options.</p>
     </div>
-  </div>
 
-  <div class="filters">
+    <div class="filters">
     <div>
       <label>Instrument</label>
       <select id="instrument-input">
@@ -1868,6 +1813,7 @@ h1 {
         <option value="3_months">Three months</option>
         <option value="indefinitely">Indefinitely</option>
       </select>
+    </div>
     </div>
   </div>
 
@@ -2273,11 +2219,7 @@ function mrmRefreshAllPricingUI(){
   const mainLessonType = document.getElementById('lesson-option')?.value || 'consultation';
   const mainLength = document.getElementById('length-select')?.value || '30';
 
-  const prefLessonType = document.getElementById('mrm-pref-lesson-option')?.value || mainLessonType;
-  const prefLength = document.getElementById('mrm-pref-length')?.value || mainLength;
-
   mrmRenderLengthOptions(document.getElementById('length-select'), mainLessonType);
-  mrmRenderLengthOptions(document.getElementById('mrm-pref-length'), prefLessonType);
 
   mrmRenderPricingSummary(
     'mrm-pricing-summary',
@@ -2285,14 +2227,6 @@ function mrmRefreshAllPricingUI(){
     'mrm-pricing-summary-sub',
     mainLessonType,
     mainLength
-  );
-
-  mrmRenderPricingSummary(
-    'mrm-pref-pricing-summary',
-    'mrm-pref-pricing-summary-main',
-    'mrm-pref-pricing-summary-sub',
-    prefLessonType,
-    prefLength
   );
 }
 
@@ -3008,7 +2942,7 @@ document.addEventListener('change', (e)=>{
     }
   }
 
-  if(e.target.id === 'length-select' || e.target.id === 'mrm-pref-length' || e.target.id === 'mrm-pref-lesson-option'){
+  if(e.target.id === 'length-select'){
     mrmRefreshAllPricingUI();
   }
 });
@@ -6090,9 +6024,6 @@ document.getElementById('online-select')?.addEventListener('change', ()=>{
 });
 document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
 
-document.getElementById('mrm-pref-see')?.addEventListener('click', mrmApplyPrefAndLoad);
-document.getElementById('mrm-pref-close')?.addEventListener('click', mrmApplyPrefAndLoad);
-
 const autopayEl = document.getElementById('mrm-autopay-opt');
 const prepayEl  = document.getElementById('mrm-prepay-opt');
 
@@ -6118,174 +6049,10 @@ document.getElementById('frequency')?.addEventListener('change', updateAutopayVi
 document.getElementById('reserve-duration')?.addEventListener('change', updateAutopayVisualNote);
 updateAutopayVisualNote();
 
-// ------------------------------
-// Initial preferences popup flow
-// ------------------------------
-function mrmOpenPrefPopup(){
-  const overlay = document.getElementById('mrm-pref-overlay');
-  if(!overlay) return;
-
-  // Copy options from main selects so there is only one “source of truth”
-  const mainInstrument = document.getElementById('instrument-input');
-  const mainOpt        = document.getElementById('lesson-option');
-  const mainLen        = document.getElementById('length-select');
-  const mainFreq       = document.getElementById('repeat-frequency');
-  const mainDur        = document.getElementById('repeat-duration');
-
-  const pInstrument = document.getElementById('mrm-pref-instrument');
-  const pOpt        = document.getElementById('mrm-pref-lesson-option');
-  const pLen        = document.getElementById('mrm-pref-length');
-  const pFreq       = document.getElementById('mrm-pref-frequency');
-  const pDur        = document.getElementById('mrm-pref-duration');
-
-  if(mainInstrument && pInstrument) pInstrument.innerHTML = mainInstrument.innerHTML;
-  if(mainOpt && pOpt)              pOpt.innerHTML        = mainOpt.innerHTML;
-  if(mainLen && pLen)              pLen.innerHTML        = mainLen.innerHTML;
-  if(mainFreq && pFreq)            pFreq.innerHTML       = mainFreq.innerHTML;
-  if(mainDur && pDur)              pDur.innerHTML        = mainDur.innerHTML;
-
-  // Default values from the current page state
-  if(mainInstrument && pInstrument) pInstrument.value = mainInstrument.value || '';
-  if(mainOpt && pOpt)              pOpt.value        = mainOpt.value || 'consultation';
-  if(mainLen && pLen)              pLen.value        = mainLen.value || '60';
-  if(mainFreq && pFreq)            pFreq.value       = mainFreq.value || 'weekly';
-  if(mainDur && pDur)              pDur.value        = mainDur.value || '1_month';
-
-  // Keep popup fields consistent with consultation + repeat rules
-  if (pOpt && !pOpt.dataset.mrmBound) {
-    pOpt.dataset.mrmBound = '1';
-    pOpt.addEventListener('change', mrmPrefApplyDefaults);
-  }
-  if (pFreq && !pFreq.dataset.mrmBound) {
-    pFreq.dataset.mrmBound = '1';
-    pFreq.addEventListener('change', mrmPrefApplyRepeatRules);
-  }
-  if (pLen && !pLen.dataset.mrmBound) {
-    pLen.dataset.mrmBound = '1';
-    pLen.addEventListener('change', mrmRefreshAllPricingUI);
-  }
-
-  mrmPrefApplyDefaults();
-  mrmRefreshAllPricingUI();
-
-  overlay.style.display = 'flex';
-  overlay.setAttribute('aria-hidden','false');
-  document.body.classList.add('mrm-booking-modal-open');
-}
-
-function mrmClosePrefPopup(){
-  const overlay = document.getElementById('mrm-pref-overlay');
-  if(!overlay) return;
-  overlay.style.display = 'none';
-  overlay.setAttribute('aria-hidden','true');
-
-  // Only unlock body if booking modal is not open
-  const bookingOverlay = document.getElementById('booking-modal');
-  const bookingStillOpen = bookingOverlay && bookingOverlay.getAttribute('aria-hidden') === 'false';
-  if (!bookingStillOpen) {
-    document.body.classList.remove('mrm-booking-modal-open');
-  }
-}
-
-function mrmPrefApplyRepeatRules(){
-  const pFreq = document.getElementById('mrm-pref-frequency');
-  const pDur  = document.getElementById('mrm-pref-duration');
-  const pDurWrap = document.getElementById('mrm-pref-duration-wrap');
-
-  if(!pFreq || !pDur) return;
-
-  const isRepeating = (pFreq.value === 'weekly' || pFreq.value === 'biweekly');
-  const dashOpt = pDur.querySelector('option[value="--"]');
-
-  if (!isRepeating) {
-    if (dashOpt) dashOpt.disabled = false;
-    pDur.value = '--';
-    pDur.disabled = true;
-    pDurWrap?.classList.add('is-disabled');
-  } else {
-    pDur.disabled = false;
-    if (dashOpt) dashOpt.disabled = true;
-
-    if (!pDur.value || pDur.value === '--') {
-      pDur.value = '1_month';
-    }
-
-    pDurWrap?.classList.remove('is-disabled');
-  }
-}
-
-function mrmPrefApplyDefaults(){
-  const pOpt  = document.getElementById('mrm-pref-lesson-option');
-  const pLen  = document.getElementById('mrm-pref-length');
-  const pFreq = document.getElementById('mrm-pref-frequency');
-  const pDur  = document.getElementById('mrm-pref-duration');
-
-  const pLenWrap  = document.getElementById('mrm-pref-length-wrap');
-  const pFreqWrap = document.getElementById('mrm-pref-frequency-wrap');
-  const pDurWrap  = document.getElementById('mrm-pref-duration-wrap');
-
-  if(!pOpt || !pLen || !pFreq || !pDur) return;
-
-  if(pOpt.value === 'consultation'){
-    pLen.value = '30';
-    pLen.disabled = true;
-    pLenWrap?.classList.add('is-disabled');
-
-    pFreq.value = 'none';
-    pFreq.disabled = true;
-    pFreqWrap?.classList.add('is-disabled');
-
-    pDur.value = '--';
-    pDur.disabled = true;
-    pDurWrap?.classList.add('is-disabled');
-  } else {
-    pLen.disabled = false;
-    pFreq.disabled = false;
-
-    pLenWrap?.classList.remove('is-disabled');
-    pFreqWrap?.classList.remove('is-disabled');
-
-    mrmPrefApplyRepeatRules();
-  }
-
-  mrmRefreshAllPricingUI();
-}
-
-function mrmApplyPrefAndLoad(){
-  const mainInstrument = document.getElementById('instrument-input');
-  const mainOpt        = document.getElementById('lesson-option');
-  const mainLen        = document.getElementById('length-select');
-  const mainFreq       = document.getElementById('repeat-frequency');
-  const mainDur        = document.getElementById('repeat-duration');
-
-  const pInstrument = document.getElementById('mrm-pref-instrument');
-  const pOpt        = document.getElementById('mrm-pref-lesson-option');
-  const pLen        = document.getElementById('mrm-pref-length');
-  const pFreq       = document.getElementById('mrm-pref-frequency');
-  const pDur        = document.getElementById('mrm-pref-duration');
-
-  if(mainInstrument && pInstrument) mainInstrument.value = pInstrument.value || '';
-  if(mainOpt && pOpt)              mainOpt.value        = pOpt.value || 'consultation';
-  if(mainLen && pLen)              mainLen.value        = pLen.value || '60';
-  if(mainFreq && pFreq)            mainFreq.value       = pFreq.value || 'weekly';
-  if(mainDur && pDur)              mainDur.value        = pDur.value || '1_month';
-
-  // Apply consultation + repeat rules immediately to the main form
-  applyLessonOptionDefaults();
-  applyRepeatUIRules();
-  updatePaymentCheckboxVisibility();
-
-  mrmClosePrefPopup();
-
-  // Now load availability
-  loadInstructors();
-}
-
 applyLessonOptionDefaults();
 applyRepeatUIRules();
 updatePaymentCheckboxVisibility();
 mrmInitPricingUI();
-mrmOpenPrefPopup();
 </script>
 </body>
 </html>
