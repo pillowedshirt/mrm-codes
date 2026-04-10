@@ -71,6 +71,74 @@ h1 {
   font-size:14px;
 }
 
+.mrm-pricing-summary{
+  margin-top: 4px;
+  margin-bottom: 22px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: #fbfaf7;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+.mrm-pricing-summary.is-hidden{
+  display: none;
+}
+
+.mrm-pricing-summary-title{
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: 6px;
+}
+
+.mrm-pricing-summary-main{
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-main);
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+
+.mrm-pricing-summary-sub{
+  font-size: 14px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.mrm-pricing-summary-sub strong{
+  color: var(--color-text-main);
+}
+
+.mrm-pricing-summary-inline-note{
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.mrm-pref-pricing-summary{
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+@media (max-width: 767px){
+  .mrm-pricing-summary{
+    padding: 13px 14px;
+    margin-bottom: 18px;
+  }
+
+  .mrm-pricing-summary-main{
+    font-size: 15px;
+  }
+
+  .mrm-pricing-summary-sub{
+    font-size: 13px;
+  }
+}
+
 .city-heading {
   margin: 22px 0 12px 0;
   font-size: 20px;
@@ -1735,6 +1803,12 @@ h1 {
         </div>
       </div>
 
+      <div id="mrm-pref-pricing-summary" class="mrm-pricing-summary mrm-pref-pricing-summary is-hidden" aria-live="polite">
+        <div class="mrm-pricing-summary-title">Lesson Pricing</div>
+        <div id="mrm-pref-pricing-summary-main" class="mrm-pricing-summary-main"></div>
+        <div id="mrm-pref-pricing-summary-sub" class="mrm-pricing-summary-sub"></div>
+      </div>
+
       <button type="button" id="mrm-pref-see" class="mrm-pref-see">See availability</button>
       <div class="mrm-pref-note">You can still adjust these options after availability loads.</div>
     </div>
@@ -1790,6 +1864,12 @@ h1 {
         <option value="indefinitely">Indefinitely</option>
       </select>
     </div>
+  </div>
+
+  <div id="mrm-pricing-summary" class="mrm-pricing-summary is-hidden" aria-live="polite">
+    <div class="mrm-pricing-summary-title">Lesson Pricing</div>
+    <div id="mrm-pricing-summary-main" class="mrm-pricing-summary-main"></div>
+    <div id="mrm-pricing-summary-sub" class="mrm-pricing-summary-sub"></div>
   </div>
 
   <div id="instructor-container"></div>
@@ -2020,6 +2100,205 @@ h1 {
 <script>
 const apiBase = '/wp-json/mrm-schedule/v1';
 const payApiBase = '/wp-json/mrm-pay/v1';
+const mrmLessonPricingCache = {
+  lesson_30_online: null,
+  lesson_60_online: null,
+  lesson_30_inperson: null,
+  lesson_60_inperson: null,
+  loaded: false,
+  loadingPromise: null
+};
+
+function mrmFormatMoneyFromCents(cents){
+  return '$' + ((Number(cents || 0) / 100).toFixed(2));
+}
+
+function mrmLessonSkuFor(type, length){
+  const normalizedLength = String(length || '').trim() === '30' ? '30' : '60';
+
+  if(type === 'online') return `lesson_${normalizedLength}_online`;
+  if(type === 'in_person') return `lesson_${normalizedLength}_inperson`;
+
+  return '';
+}
+
+async function mrmLoadLessonPricing(){
+  if (mrmLessonPricingCache.loaded) return mrmLessonPricingCache;
+
+  if (mrmLessonPricingCache.loadingPromise) {
+    return mrmLessonPricingCache.loadingPromise;
+  }
+
+  const skus = [
+    'lesson_30_online',
+    'lesson_60_online',
+    'lesson_30_inperson',
+    'lesson_60_inperson'
+  ];
+
+  mrmLessonPricingCache.loadingPromise = Promise.all(
+    skus.map(async (sku) => {
+      const res = await fetch(`${payApiBase}/quote?sku=${encodeURIComponent(sku)}`);
+      const json = await res.json();
+
+      if (!res.ok || !json.ok) {
+        throw new Error(json.message || `Unable to load pricing for ${sku}.`);
+      }
+
+      mrmLessonPricingCache[sku] = {
+        sku,
+        label: json.label || sku,
+        amount_cents: Number(json.amount_cents || 0),
+        currency: json.currency || 'usd',
+        tax_message: json.tax_message || 'Sales tax is calculated after billing details are entered.'
+      };
+    })
+  ).then(() => {
+    mrmLessonPricingCache.loaded = true;
+    return mrmLessonPricingCache;
+  }).catch((err) => {
+    console.error('[MRM Scheduler Pricing] Failed to load lesson pricing.', err);
+    throw err;
+  });
+
+  return mrmLessonPricingCache.loadingPromise;
+}
+
+function mrmGetTravelFeeCents(length){
+  const onlineSku = mrmLessonSkuFor('online', length);
+  const inPersonSku = mrmLessonSkuFor('in_person', length);
+
+  const online = mrmLessonPricingCache[onlineSku];
+  const inPerson = mrmLessonPricingCache[inPersonSku];
+
+  if (!online || !inPerson) return 0;
+
+  return Math.max(0, Number(inPerson.amount_cents || 0) - Number(online.amount_cents || 0));
+}
+
+function mrmGetPricePresentation(type, length){
+  const normalizedLength = String(length || '').trim() === '30' ? '30' : '60';
+
+  if (type === 'consultation') {
+    return {
+      optionLabel: normalizedLength === '30' ? '30 minutes' : '60 minutes',
+      mainLine: 'Meet The Instructor consultation — Free',
+      subLine: 'Consultations are free and remain a 30-minute online booking.',
+      hideSummary: false
+    };
+  }
+
+  const sku = mrmLessonSkuFor(type, normalizedLength);
+  const quote = mrmLessonPricingCache[sku];
+
+  if (!quote) {
+    return {
+      optionLabel: normalizedLength === '30' ? '30 minutes' : '60 minutes',
+      mainLine: '',
+      subLine: '',
+      hideSummary: true
+    };
+  }
+
+  if (type === 'online') {
+    return {
+      optionLabel: `${normalizedLength} minutes — ${mrmFormatMoneyFromCents(quote.amount_cents)}`,
+      mainLine: `${normalizedLength}-minute online lesson — ${mrmFormatMoneyFromCents(quote.amount_cents)} per lesson`,
+      subLine: 'This is your per-lesson total before any applicable sales tax is calculated at checkout.',
+      hideSummary: false
+    };
+  }
+
+  const travelFeeCents = mrmGetTravelFeeCents(normalizedLength);
+  const baseCents = Math.max(0, Number(quote.amount_cents || 0) - travelFeeCents);
+
+  return {
+    optionLabel: `${normalizedLength} minutes — ${mrmFormatMoneyFromCents(baseCents)} + ${mrmFormatMoneyFromCents(travelFeeCents)} travel = ${mrmFormatMoneyFromCents(quote.amount_cents)}`,
+    mainLine: `${normalizedLength}-minute in-person lesson — ${mrmFormatMoneyFromCents(baseCents)} base + ${mrmFormatMoneyFromCents(travelFeeCents)} travel fee = ${mrmFormatMoneyFromCents(quote.amount_cents)} per lesson`,
+    subLine: 'In-person lessons include the travel fee in the per-lesson total shown here. Any applicable sales tax is calculated at checkout.',
+    hideSummary: false
+  };
+}
+
+function mrmRenderLengthOptions(selectEl, lessonType){
+  if (!selectEl) return;
+
+  const option30 = selectEl.querySelector('option[value="30"]');
+  const option60 = selectEl.querySelector('option[value="60"]');
+
+  if (lessonType === 'consultation') {
+    if (option30) option30.textContent = '30 minutes';
+    if (option60) option60.textContent = '60 minutes';
+    return;
+  }
+
+  if (option30) {
+    const data30 = mrmGetPricePresentation(lessonType, '30');
+    option30.textContent = data30.optionLabel || '30 minutes';
+  }
+
+  if (option60) {
+    const data60 = mrmGetPricePresentation(lessonType, '60');
+    option60.textContent = data60.optionLabel || '60 minutes';
+  }
+}
+
+function mrmRenderPricingSummary(summaryRootId, mainId, subId, lessonType, lessonLength){
+  const root = document.getElementById(summaryRootId);
+  const main = document.getElementById(mainId);
+  const sub = document.getElementById(subId);
+
+  if (!root || !main || !sub) return;
+
+  const data = mrmGetPricePresentation(lessonType, lessonLength);
+
+  if (data.hideSummary) {
+    root.classList.add('is-hidden');
+    main.textContent = '';
+    sub.textContent = '';
+    return;
+  }
+
+  root.classList.remove('is-hidden');
+  main.textContent = data.mainLine || '';
+  sub.textContent = data.subLine || '';
+}
+
+function mrmRefreshAllPricingUI(){
+  const mainLessonType = document.getElementById('lesson-option')?.value || 'consultation';
+  const mainLength = document.getElementById('length-select')?.value || '30';
+
+  const prefLessonType = document.getElementById('mrm-pref-lesson-option')?.value || mainLessonType;
+  const prefLength = document.getElementById('mrm-pref-length')?.value || mainLength;
+
+  mrmRenderLengthOptions(document.getElementById('length-select'), mainLessonType);
+  mrmRenderLengthOptions(document.getElementById('mrm-pref-length'), prefLessonType);
+
+  mrmRenderPricingSummary(
+    'mrm-pricing-summary',
+    'mrm-pricing-summary-main',
+    'mrm-pricing-summary-sub',
+    mainLessonType,
+    mainLength
+  );
+
+  mrmRenderPricingSummary(
+    'mrm-pref-pricing-summary',
+    'mrm-pref-pricing-summary-main',
+    'mrm-pref-pricing-summary-sub',
+    prefLessonType,
+    prefLength
+  );
+}
+
+async function mrmInitPricingUI(){
+  try {
+    await mrmLoadLessonPricing();
+    mrmRefreshAllPricingUI();
+  } catch (err) {
+    console.error('[MRM Scheduler Pricing] Pricing UI init failed.', err);
+  }
+}
 let stripe = null;
 let activeStripeElements = null;
 let activePaymentElement = null;
@@ -2483,6 +2762,8 @@ function applyLessonOptionDefaults(){
     if(modalFreq) modalFreq.disabled = false;
     if(modalDur)  modalDur.disabled  = false;
   }
+
+  mrmRefreshAllPricingUI();
 }
 
 function applyRepeatUIRules(){
@@ -2701,10 +2982,13 @@ function syncMainToModal() {
 
 // Optional: if user flips lesson option, enforce the defaults immediately.
 document.addEventListener('change', (e)=>{
-  if(e && e.target && e.target.id === 'lesson-option'){
+  if(!e || !e.target) return;
+
+  if(e.target.id === 'lesson-option'){
     applyLessonOptionDefaults();
     applyRepeatUIRules();
     updatePaymentCheckboxVisibility();
+    mrmRefreshAllPricingUI();
 
     // Refresh the instructor results so the visible cards always match
     // the current top-bar search query.
@@ -2718,13 +3002,19 @@ document.addEventListener('change', (e)=>{
       currentInstructor._mrmRefreshOpenDay();
     }
   }
+
+  if(e.target.id === 'length-select' || e.target.id === 'mrm-pref-length' || e.target.id === 'mrm-pref-lesson-option'){
+    mrmRefreshAllPricingUI();
+  }
 });
 
 const repeatFrequencyEl = document.getElementById('repeat-frequency');
 const repeatDurationEl  = document.getElementById('repeat-duration');
+const lengthSelectEl    = document.getElementById('length-select');
 
 if (repeatFrequencyEl) repeatFrequencyEl.addEventListener('change', ()=>{ applyRepeatUIRules(); updatePaymentCheckboxVisibility(); });
 if (repeatDurationEl)  repeatDurationEl.addEventListener('change', applyRepeatUIRules);
+if (lengthSelectEl)    lengthSelectEl.addEventListener('change', mrmRefreshAllPricingUI);
 
 // run once on page load to enforce defaults
 applyRepeatUIRules();
@@ -5865,7 +6155,13 @@ function mrmOpenPrefPopup(){
     pFreq.dataset.mrmBound = '1';
     pFreq.addEventListener('change', mrmPrefApplyRepeatRules);
   }
+  if (pLen && !pLen.dataset.mrmBound) {
+    pLen.dataset.mrmBound = '1';
+    pLen.addEventListener('change', mrmRefreshAllPricingUI);
+  }
+
   mrmPrefApplyDefaults();
+  mrmRefreshAllPricingUI();
 
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden','false');
@@ -5946,6 +6242,8 @@ function mrmPrefApplyDefaults(){
 
     mrmPrefApplyRepeatRules();
   }
+
+  mrmRefreshAllPricingUI();
 }
 
 function mrmApplyPrefAndLoad(){
@@ -5979,7 +6277,9 @@ function mrmApplyPrefAndLoad(){
 }
 
 applyLessonOptionDefaults();
+applyRepeatUIRules();
 updatePaymentCheckboxVisibility();
+mrmInitPricingUI();
 mrmOpenPrefPopup();
 </script>
 </body>
