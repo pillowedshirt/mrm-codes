@@ -2362,7 +2362,7 @@ function mrmShowCalendarSuccessPopup(options){
 
   overlay.onclick = (e) => {
     if (e.target === overlay) {
-      closePopup(e);
+      return;
     }
   };
 }
@@ -6054,10 +6054,10 @@ checkReturnFromStripe();
 
 document.getElementById('modal-close').addEventListener('click', closeBookingModal);
 document.getElementById('booking-modal').addEventListener('click', (e)=>{
-  if(e.target && e.target.id==='booking-modal') closeBookingModal();
+  if(e.target && e.target.id==='booking-modal') return;
 });
 document.addEventListener('keydown', (e)=>{
-  if(e.key==='Escape') closeBookingModal();
+  if(e.key==='Escape') return;
 });
 
 document.getElementById('modal-submit-booking').addEventListener('click', (e)=>{
@@ -6285,7 +6285,7 @@ applyLessonOptionDefaults();
 applyRepeatUIRules();
 updatePaymentCheckboxVisibility();
 mrmInitPricingUI();
-mrmOpenPrefPopup();
+loadInstructors();
 </script>
 </body>
 </html>
