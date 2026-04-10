@@ -71,6 +71,11 @@ h1 {
   font-size:14px;
 }
 
+#length-select,
+#mrm-pref-length {
+  font-weight: 700;
+}
+
 .mrm-pricing-summary{
   margin-top: 4px;
   margin-bottom: 22px;
@@ -2213,7 +2218,7 @@ function mrmGetPricePresentation(type, length){
   const baseCents = Math.max(0, Number(quote.amount_cents || 0) - travelFeeCents);
 
   return {
-    optionLabel: `${normalizedLength} minutes — ${mrmFormatMoneyFromCents(baseCents)} + ${mrmFormatMoneyFromCents(travelFeeCents)} travel = ${mrmFormatMoneyFromCents(quote.amount_cents)}`,
+    optionLabel: `${normalizedLength} minutes — ${mrmFormatMoneyFromCents(baseCents)} + ${mrmFormatMoneyFromCents(travelFeeCents)} travel`,
     mainLine: `${normalizedLength}-minute in-person lesson — ${mrmFormatMoneyFromCents(baseCents)} base + ${mrmFormatMoneyFromCents(travelFeeCents)} travel fee = ${mrmFormatMoneyFromCents(quote.amount_cents)} per lesson`,
     subLine: 'In-person lessons include the travel fee in the per-lesson total shown here. Any applicable sales tax is calculated at checkout.',
     hideSummary: false
