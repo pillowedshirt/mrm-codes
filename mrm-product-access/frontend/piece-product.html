@@ -601,7 +601,6 @@ a{ -webkit-tap-highlight-color:transparent; }
 .mrm-otpOverlay.is-open{ display:flex; }
 .hidden{ display:none; }
 
-/* ✅ RESPONSIVE: smoother mobile layout + less awkward stacking */
 @media (max-width: 980px){
   .info-grid{ grid-template-columns: 1fr; }
   .offer-body{ grid-template-columns: 1fr; }
@@ -613,14 +612,16 @@ a{ -webkit-tap-highlight-color:transparent; }
 }
 
 @media (max-width: 700px){
-  /* ✅ CHANGE YOU REQUESTED:
-     Expand the main content to screen edges so you don't see background.
-     - remove page padding
-     - let shell go full-width
-     - remove card radius + border so it blends edge-to-edge
-  */
-  .page{ padding: 0; }
-  .shell{ width: 100%; margin: 0; }
+  .page{
+    padding: 0;
+    background: #f6f4ef;
+  }
+
+  .shell{
+    width: 100%;
+    margin: 0;
+  }
+
   .card{
     border-radius: 0;
     border-left: 0;
@@ -628,27 +629,79 @@ a{ -webkit-tap-highlight-color:transparent; }
     box-shadow: none;
   }
 
-  /* Keep content comfortable with section padding (so text isn't glued to edges) */
-  .section{ padding: 16px; }
-  .header{ padding: 20px 16px; }
+  .header{
+    padding: 22px 16px 18px;
+  }
 
-  .pdf-preview{ height: clamp(320px, 46vh, 520px); }
+  .section{
+    padding: 16px;
+  }
 
-  .offer-body{ padding: 12px; gap: 12px; }
-  .offer-actions{ gap: 10px; }
-  .price-box{ padding: 12px; }
+  .pdf-preview{
+    height: clamp(320px, 46vh, 520px);
+    border-radius: 20px;
+  }
+
+  .info-grid{
+    gap: 14px;
+  }
+
+  .meta-panel,
+  .offer,
+  .price-box{
+    border-radius: 20px;
+    box-shadow: 0 10px 24px rgba(0,0,0,0.06);
+  }
+
+  .offer-body{
+    padding: 14px;
+    gap: 12px;
+  }
+
+  .offer-actions{
+    gap: 10px;
+  }
+
+  .price-box{
+    padding: 14px;
+  }
+
   .actions{
     grid-template-columns: 1fr 1fr;
     gap: 10px;
   }
-  .button-primary, .button-secondary{
+
+  .button-primary,
+  .button-secondary{
     width:100%;
     padding: 12px 12px;
+    min-height: 48px;
+    border-radius: 16px;
+  }
+
+  .modal-overlay,
+  .mrm-success-overlay{
+    padding: 0;
+    align-items: flex-end !important;
+  }
+
+  .modal,
+  .mrm-success-modal{
+    width: 100%;
+    max-width: 100%;
+    max-height: 94vh;
+    border-radius: 26px 26px 0 0;
+    box-shadow: 0 -18px 42px rgba(0,0,0,0.24);
   }
 }
 
 @media (max-width: 620px){
-  .audio-controls{ grid-template-columns: 1fr; justify-items:center; gap: 10px; }
+  .audio-controls{
+    grid-template-columns: 1fr;
+    justify-items:center;
+    gap: 10px;
+  }
+
   .audio-row-top{
     width:100%;
     display:grid;
@@ -656,6 +709,7 @@ a{ -webkit-tap-highlight-color:transparent; }
     align-items:center;
     column-gap:10px;
   }
+
   .audio-row-seek{ width:100%; }
   .audio-row-seek .progress{ height:12px; }
   .audio-row-vol{ width:100%; justify-content:center; }
