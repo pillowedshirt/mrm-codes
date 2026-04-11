@@ -3557,19 +3557,37 @@ Thank you.' ) );
         .button-secondary { background: transparent; color: var(--color-accent); }
 
         @media (max-width: 860px) {
-          .wrapper { padding: 18px; }
+          .wrapper {
+            padding: 14px;
+            background: #f6f4ef;
+          }
 
           .product-card {
             grid-template-columns: 1fr;
-            padding: 18px;
+            padding: 16px;
+            border-radius: 24px;
+            box-shadow: 0 14px 32px rgba(0,0,0,0.08);
           }
 
           .pdf-col { align-items: center; }
-          .pdf-preview { width: min(720px, 100%); height: 360px; }
+          .pdf-preview {
+            width: min(720px, 100%);
+            height: 360px;
+            border-radius: 20px;
+          }
           .pdf-preview canvas { margin: 0 auto; }
 
           .title-block { text-align: center; }
-          .actions { justify-content: center; }
+          .actions {
+            justify-content: center;
+            gap: 10px;
+          }
+
+          .button-primary,
+          .button-secondary {
+            min-height: 48px;
+            border-radius: 16px;
+          }
 
           .audio-controls {
             display: grid;
@@ -3585,7 +3603,11 @@ Thank you.' ) );
             align-items: center;
             column-gap: 10px;
           }
-          .audio-row-top .time { min-width: 0; text-align: center; }
+
+          .audio-row-top .time {
+            min-width: 0;
+            text-align: center;
+          }
 
           .audio-row-seek { width: 100%; }
           .audio-row-seek .progress { width: 100%; height: 10px; }
@@ -3612,7 +3634,6 @@ Thank you.' ) );
           color: #111111 !important;
         }
 
-        /* Close button: force readable black text and an obvious button look */
         .mrm-otpOverlay .mrm-closeBtn{
           color: #000000 !important;
           background: transparent;
@@ -3637,7 +3658,6 @@ Thank you.' ) );
           box-shadow:
             0 26px 90px rgba(0,0,0,0.38),
             0 2px 16px rgba(0,0,0,0.22);
-          transform: scale(1.35);
           transform-origin: center;
         }
 
@@ -3729,15 +3749,6 @@ Thank you.' ) );
           background: var(--color-accent);
           color: #ffffff !important;
           box-shadow: 0 10px 22px rgba(0,0,0,0.16);
-          transition: transform 120ms ease, box-shadow 120ms ease;
-        }
-        .mrm-otpOverlay button.primary:hover {
-          transform: translateY(-1px);
-          box-shadow: 0 14px 30px rgba(0,0,0,0.22);
-        }
-        .mrm-otpOverlay button.primary:active {
-          transform: translateY(0px);
-          box-shadow: 0 10px 22px rgba(0,0,0,0.16);
         }
 
         .mrm-otpOverlay button.secondary {
@@ -3746,20 +3757,51 @@ Thank you.' ) );
           background: transparent;
           cursor: pointer;
         }
-        .mrm-otpOverlay button.secondary:hover {
-          background: rgba(0,0,0,0.06);
-        }
-
         .hidden { display:none; }
-
-        @media (max-width: 900px) {
-          .mrm-otpOverlay .modal { transform: scale(1.15); }
-        }
         @media (max-width: 620px) {
-          .mrm-otpOverlay .modal { transform: none; width: min(560px, 94vw); }
-          .mrm-otpOverlay .modal > div:last-child { justify-content: stretch; }
+          .wrapper {
+            padding: 0;
+          }
+
+          .product-card {
+            border-radius: 0;
+            border-left: 0;
+            border-right: 0;
+            box-shadow: none;
+            margin-bottom: 14px;
+          }
+
+          .pdf-preview {
+            height: 320px;
+            border-radius: 18px;
+          }
+
+          .actions {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
           .mrm-otpOverlay button.primary,
-          .mrm-otpOverlay button.secondary { width: 100%; }
+          .mrm-otpOverlay button.secondary {
+            width: 100%;
+          }
+
+          .mrm-otpOverlay {
+            align-items: flex-end;
+          }
+
+          .mrm-otpOverlay .modal {
+            transform: none;
+            width: 100%;
+            max-width: 100%;
+            border-radius: 26px 26px 0 0;
+            box-shadow: 0 -18px 42px rgba(0,0,0,0.24);
+          }
+
+          .mrm-otpOverlay .modal > div:last-child {
+            justify-content: stretch;
+            flex-direction: column;
+          }
         }
         </style>
 

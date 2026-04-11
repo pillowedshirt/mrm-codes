@@ -1422,7 +1422,6 @@ h1 {
    (CSS-only additions)
    ========================= */
 
-/* Tablet and down */
 @media (max-width: 900px) {
   .wrapper {
     padding: 18px;
@@ -1434,7 +1433,9 @@ h1 {
   }
 
   .state-selector-wrap {
-    padding: 12px 12px 16px;
+    padding: 14px 14px 18px;
+    border-radius: 20px;
+    box-shadow: 0 14px 32px rgba(0,0,0,0.08);
   }
 
   .calendar-header > div {
@@ -1443,7 +1444,27 @@ h1 {
 }
 
 @media (max-width: 720px) {
-  /* Month grid: hard guarantee that 7 columns never overflow */
+  .wrapper {
+    padding: 12px;
+  }
+
+  .filters,
+  .state-selector-wrap,
+  .instructor {
+    border-radius: 22px;
+    box-shadow: 0 14px 32px rgba(0,0,0,0.08);
+  }
+
+  .instructor {
+    padding: 12px;
+    margin-bottom: 16px;
+  }
+
+  .instructor-header {
+    padding: 14px;
+    border-radius: 18px;
+  }
+
   .calendar-grid {
     width: 100%;
     max-width: 100%;
@@ -1451,26 +1472,21 @@ h1 {
 
   .calendar-day {
     box-sizing: border-box;
-    min-height: 64px;
-    padding: 2px;              /* critical: keeps circle inside narrow columns */
-    overflow: visible;         /* IMPORTANT: do not clip the mobile modal overlay */
+    min-height: 66px;
+    padding: 3px;
+    overflow: visible;
   }
 
   .calendar-day-number {
     box-sizing: border-box;
-
-    /* critical: circle scales to fit the cell width on any phone */
-    width: clamp(28px, 10.5vw, 40px);
-    height: clamp(28px, 10.5vw, 40px);
-
-    font-size: clamp(12px, 4.0vw, 16px);
+    width: clamp(30px, 10.5vw, 40px);
+    height: clamp(30px, 10.5vw, 40px);
+    font-size: clamp(12px, 4vw, 16px);
     line-height: 1;
-
     max-width: 100%;
     max-height: 100%;
   }
 
-  /* When a day is expanded on mobile, show the day panel as a fullscreen modal */
   .day-slots.is-mobile-modal {
     position: fixed;
     inset: 0;
@@ -1478,153 +1494,66 @@ h1 {
     margin: 0;
     padding: 0;
     border-top: none;
-    background: rgba(0,0,0,0.45);
+    background: rgba(0,0,0,0.48);
     display: flex;
     align-items: flex-end;
     justify-content: center;
   }
 
   .day-slots.is-mobile-modal .day-slots-sheet {
-    width: min(100%, 640px);
+    width: 100%;
+    max-width: 100%;
     background: #fff;
-    border-radius: 18px 18px 0 0;
-    padding: 16px;
+    border-radius: 28px 28px 0 0;
+    padding: 14px 14px 18px;
     margin: 0;
     display: flex;
     flex-direction: column;
     gap: 10px;
-    max-height: calc(100vh - 24px);
+    max-height: calc(100vh - 10px);
     overflow: hidden;
-    box-shadow: 0 -12px 30px rgba(0,0,0,0.18);
+    box-shadow: 0 -18px 40px rgba(0,0,0,0.20);
   }
 
   .day-slots.is-mobile-modal .day-slots-close {
     align-self: flex-end;
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
     border-radius: 999px;
-    border: 1px solid rgba(0,0,0,0.18);
+    border: 1px solid rgba(0,0,0,0.14);
     background: #fff;
     color: #111;
-    font-size: 20px;
+    font-size: 22px;
     font-weight: 700;
     line-height: 1;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.08);
   }
 
-  .day-slots.is-mobile-modal .day-slots-close:hover {
-    filter: brightness(0.98);
-  }
-
-  /* (leave the rest of your existing .day-slots.is-mobile-modal rules unchanged below) */
-}
-
-/* Phone and down */
-@media (max-width: 600px) {
-  .wrapper {
-    padding: 14px;
-  }
-
-  h1 {
-    font-size: 24px;
-    margin: 0 0 14px 0;
-  }
-
-  /* Instructor cards: prevent header overflow + make it wrap cleanly */
-  .instructor {
-    padding: 14px;
-    margin-bottom: 18px;
-  }
-
-  .instructor-header {
-    padding: 12px;
-    gap: 10px;
-    align-items: flex-start;
-  }
-
-  .instructor-header-left {
-    align-items: flex-start;
-  }
-
-  .instructor-avatar {
-    width: 42px;
-    height: 42px;
-    flex: 0 0 42px;
-  }
-
-  .instructor-title-line {
-    font-size: 15px;
-  }
-
-  .instructor-shortdesc {
-    font-size: 13px;
-  }
-
-  .calendar-header button {
-    width: 36px;
-    height: 36px;
-    font-size: 20px;
-  }
-
-  .calendar-header > div {
-    font-size: 20px;
-  }
-
-  /* Expanded day slots: slightly narrower tiles, slightly shorter rows */
-  .day-slots-grid {
-    grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
-    --slot-row-h: 38px;
-    max-height: calc((var(--slot-row-h) * 5) + (8px * 4));
-  }
-
-  .slot,
-  .slot-booked-block {
-    padding: 8px 9px;
-    border-radius: 12px;
-    font-size: 12px;
-  }
-
-  .slot-line-time {
-    font-size: 12px;
-  }
-
-  .slot-line-duration {
-    font-size: 11px;
-  }
-
-  .slot-line-mode {
-    font-size: 10px;
-  }
-
-  /* Confirm button: full width feels better on phones */
-  .confirm-wrap {
-    text-align: center;
-  }
-
-  .confirm-selection {
-    width: 100%;
-    justify-content: center;
-    display: inline-flex;
-  }
-
-  .confirm-msg {
-    text-align: center;
-  }
-
-  /* Modal: reduce padding + make content breathe on small screens */
   .modal-overlay {
-    padding: 12px;
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 100%;
+    max-height: 94vh;
+    border-radius: 26px 26px 0 0;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    box-shadow: 0 -18px 42px rgba(0,0,0,0.24);
   }
 
   .modal-header {
-    padding: 12px 12px;
+    padding: 14px 14px;
   }
 
   .modal-body {
-    padding: 12px;
+    padding: 14px;
   }
 
   .modal-title {
@@ -1632,12 +1561,43 @@ h1 {
   }
 
   .modal-close {
-    width: 34px;
-    height: 34px;
-    font-size: 20px;
+    width: 38px;
+    height: 38px;
+    font-size: 22px;
+    border-radius: 12px;
   }
 
-  /* State map wrapper: tighter padding on mobile */
+  .mrm-payment-loading-overlay,
+  .mrm-success-overlay,
+  .mrm-pref-overlay {
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .mrm-payment-loading-modal,
+  .mrm-success-modal,
+  .mrm-pref-modal {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 26px 26px 0 0;
+    box-shadow: 0 -18px 42px rgba(0,0,0,0.24);
+  }
+
+  .mrm-pref-modal {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 600px) {
+  .wrapper {
+    padding: 10px;
+  }
+
+  h1 {
+    font-size: 24px;
+    margin: 0 0 14px 0;
+  }
+
   .state-selector-wrap {
     padding: 12px;
   }
@@ -1650,24 +1610,31 @@ h1 {
     font-size: 13px;
   }
 
-  .us-map-wrap {
-    border-radius: 12px;
+  .filters {
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .confirm-msg {
+    text-align: center;
+  }
+
+  .modal-body,
+  .mrm-pref-modal,
+  .mrm-payment-loading-modal,
+  .mrm-success-modal {
+    padding-left: 14px;
+    padding-right: 14px;
   }
 }
 
-/* Very small phones */
 @media (max-width: 420px) {
   .wrapper {
-    padding: 12px;
+    padding: 8px;
   }
 
   h1 {
     font-size: 22px;
-  }
-
-  .filters {
-    gap: 10px;
-    margin-bottom: 18px;
   }
 
   .day-slots-grid {
