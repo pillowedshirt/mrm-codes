@@ -92,27 +92,70 @@ class MRM_Lesson_Scheduler {
 
     protected function mrm_get_google_scheduler_secret_bundle() {
         if ( ! defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ) {
+            error_log( 'MRM Google AWS secret constant MRM_SECRET_GOOGLE_SCHEDULER is not defined.' );
             return null;
         }
 
-        return $this->mrm_get_secret_json(
+        $secret = $this->mrm_get_secret_json(
             MRM_SECRET_GOOGLE_SCHEDULER,
-            'mrm_secret_google_scheduler'
+            'mrm_secret_google_scheduler_v2'
         );
+
+        if ( ! is_array( $secret ) ) {
+            error_log( 'MRM Google AWS secret bundle could not be loaded from Secrets Manager.' );
+            return null;
+        }
+
+        error_log(
+            'MRM Google AWS secret bundle loaded. Keys present: ' .
+            implode( ',', array_keys( $secret ) )
+        );
+
+        return $secret;
     }
 
     protected function mrm_google_service_account_uses_aws() {
         $secret = $this->mrm_get_google_scheduler_secret_bundle();
-        return ( is_array( $secret ) && ! empty( $secret['service_account_json'] ) );
+
+        if ( ! is_array( $secret ) || ! array_key_exists( 'service_account_json', $secret ) ) {
+            return false;
+        }
+
+        if ( is_string( $secret['service_account_json'] ) && trim( $secret['service_account_json'] ) !== '' ) {
+            return true;
+        }
+
+        if ( is_array( $secret['service_account_json'] ) && ! empty( $secret['service_account_json'] ) ) {
+            return true;
+        }
+
+        return false;
     }
 
     protected function mrm_get_google_service_account_json() {
         $secret = $this->mrm_get_google_scheduler_secret_bundle();
-        if ( is_array( $secret ) && ! empty( $secret['service_account_json'] ) ) {
-            return (string) $secret['service_account_json'];
+
+        if ( is_array( $secret ) && array_key_exists( 'service_account_json', $secret ) ) {
+            if ( is_string( $secret['service_account_json'] ) && trim( $secret['service_account_json'] ) !== '' ) {
+                error_log( 'MRM Google service account JSON loaded from AWS as string.' );
+                return (string) $secret['service_account_json'];
+            }
+
+            if ( is_array( $secret['service_account_json'] ) && ! empty( $secret['service_account_json'] ) ) {
+                $encoded = wp_json_encode( $secret['service_account_json'] );
+                if ( is_string( $encoded ) && $encoded !== '' ) {
+                    error_log( 'MRM Google service account JSON loaded from AWS as array and re-encoded.' );
+                    return $encoded;
+                }
+            }
+
+            error_log( 'MRM Google AWS secret bundle loaded, but service_account_json was present in an unusable format.' );
+        } else {
+            error_log( 'MRM Google AWS secret bundle missing service_account_json; falling back to plugin settings.' );
         }
 
         $opts = $this->get_settings();
+        error_log( 'MRM Google service account JSON falling back to lesson scheduler settings.' );
         return isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
     }
 
