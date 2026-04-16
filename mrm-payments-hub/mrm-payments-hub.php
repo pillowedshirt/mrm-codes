@@ -755,25 +755,71 @@ class MRM_Payments_Hub_Single {
 
   private function mrm_get_stripe_secret_bundle() {
     if (!defined('MRM_SECRET_STRIPE_KEYS')) {
+      $this->mrm_aws_debug_log('Stripe secret constant MRM_SECRET_STRIPE_KEYS is not defined.');
       return null;
     }
 
-    return $this->mrm_get_secret_json(
+    $secret = $this->mrm_get_secret_json(
       MRM_SECRET_STRIPE_KEYS,
-      'mrm_secret_stripe_keys'
+      'mrm_secret_stripe_keys_v2'
     );
+
+    if (!is_array($secret)) {
+      $this->mrm_aws_debug_log('Stripe AWS secret bundle could not be loaded.', array(
+        'secret_id' => MRM_SECRET_STRIPE_KEYS,
+      ));
+      return null;
+    }
+
+    $context = array(
+      'secret_id' => MRM_SECRET_STRIPE_KEYS,
+      'keys_present' => array_keys($secret),
+      'has_publishable_key' => array_key_exists('publishable_key', $secret),
+      'has_secret_key' => array_key_exists('secret_key', $secret),
+      'has_webhook_secret' => array_key_exists('webhook_secret', $secret),
+    );
+
+    if (array_key_exists('publishable_key', $secret) && is_string($secret['publishable_key'])) {
+      $context['publishable_key_length'] = strlen($secret['publishable_key']);
+      $context['publishable_key_preview'] = substr($secret['publishable_key'], 0, 20);
+    }
+
+    if (array_key_exists('secret_key', $secret) && is_string($secret['secret_key'])) {
+      $context['secret_key_length'] = strlen($secret['secret_key']);
+      $context['secret_key_preview'] = substr($secret['secret_key'], 0, 20);
+    }
+
+    if (array_key_exists('webhook_secret', $secret) && is_string($secret['webhook_secret'])) {
+      $context['webhook_secret_length'] = strlen($secret['webhook_secret']);
+      $context['webhook_secret_preview'] = substr($secret['webhook_secret'], 0, 20);
+    }
+
+    $this->mrm_aws_debug_log('Stripe AWS secret bundle loaded.', $context);
+
+    return $secret;
   }
 
   private function publishable_key() {
-    if (defined('MRM_STRIPE_PUBLISHABLE_KEY')) {
-      return trim((string) MRM_STRIPE_PUBLISHABLE_KEY);
+    $secret = $this->mrm_get_stripe_secret_bundle();
+    if (is_array($secret) && !empty($secret['publishable_key'])) {
+      $this->mrm_aws_debug_log('Stripe publishable_key loaded from AWS secret bundle.', array(
+        'length' => strlen((string)$secret['publishable_key']),
+        'preview' => substr((string)$secret['publishable_key'], 0, 20),
+      ));
+      return trim((string)$secret['publishable_key']);
     }
+
+    $this->mrm_aws_debug_log('Stripe publishable_key missing from AWS secret bundle. AWS-only mode active.');
     return '';
   }
 
   private function secret_key() {
     $secret = $this->mrm_get_stripe_secret_bundle();
     if (is_array($secret) && !empty($secret['secret_key'])) {
+      $this->mrm_aws_debug_log('Stripe secret_key loaded from AWS secret bundle.', array(
+        'length' => strlen((string)$secret['secret_key']),
+        'preview' => substr((string)$secret['secret_key'], 0, 20),
+      ));
       return trim((string)$secret['secret_key']);
     }
 
@@ -784,6 +830,10 @@ class MRM_Payments_Hub_Single {
   private function webhook_secret() {
     $secret = $this->mrm_get_stripe_secret_bundle();
     if (is_array($secret) && !empty($secret['webhook_secret'])) {
+      $this->mrm_aws_debug_log('Stripe webhook_secret loaded from AWS secret bundle.', array(
+        'length' => strlen((string)$secret['webhook_secret']),
+        'preview' => substr((string)$secret['webhook_secret'], 0, 20),
+      ));
       return trim((string)$secret['webhook_secret']);
     }
 
@@ -8390,9 +8440,14 @@ class MRM_Payments_Hub_Single {
     if (!current_user_can('manage_options')) return;
 
     if (isset($_POST['mrm_pay_hub_test_aws_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_test_aws_nonce'], 'mrm_pay_hub_test_aws')) {
+      $this->mrm_aws_debug_log('Stripe AWS test button pressed.');
       $result = $this->stripe_api_request('GET', '/v1/account');
 
       if (is_wp_error($result)) {
+        $this->mrm_aws_debug_log('Stripe AWS test failed.', array(
+          'error_code' => $result->get_error_code(),
+          'error_message' => $result->get_error_message(),
+        ));
         add_settings_error(
           'mrm_pay_hub',
           'aws_test_failed',
@@ -8401,6 +8456,9 @@ class MRM_Payments_Hub_Single {
         );
       } else {
         $acct_id = isset($result['id']) ? (string)$result['id'] : '';
+        $this->mrm_aws_debug_log('Stripe AWS test succeeded.', array(
+          'account_id' => isset($result['id']) ? (string)$result['id'] : '',
+        ));
         add_settings_error(
           'mrm_pay_hub',
           'aws_test_ok',
@@ -9207,7 +9265,7 @@ class MRM_Payments_Hub_Single {
     settings_errors('mrm_pay_hub');
 
     $settings = $this->get_settings();
-    $pk_current = defined('MRM_STRIPE_PUBLISHABLE_KEY') ? esc_attr((string) MRM_STRIPE_PUBLISHABLE_KEY) : '';
+    $pk_current = esc_attr((string)$this->publishable_key());
     $price_current = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
     $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
     $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
@@ -9225,13 +9283,13 @@ class MRM_Payments_Hub_Single {
         <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
 
         <h2>Stripe Configuration</h2>
-        <p>Stripe publishable key is managed in <code>wp-config.php</code>, and Stripe <code>secret_key</code> and <code>webhook_secret</code> are managed through AWS Secrets Manager at <code>lowbrass/stripe/keys</code>. WordPress no longer controls live vs test mode.</p>
+        <p>Stripe <code>publishable_key</code>, <code>secret_key</code>, and <code>webhook_secret</code> are managed through AWS Secrets Manager at <code>lowbrass/stripe/keys</code>. WordPress no longer controls live vs test mode.</p>
 
         <table class="form-table">
           <tr>
             <th scope="row">Publishable Key Source</th>
             <td>
-              <p><strong>Current:</strong> <code><?php echo $pk_current !== '' ? 'Loaded from wp-config.php' : 'Missing'; ?></code></p>
+              <p><strong>Current:</strong> <code><?php echo $pk_current !== '' ? 'Loaded from AWS Secrets Manager' : 'Missing'; ?></code></p>
               <p class="description">The active environment is determined by the Stripe keys you have configured outside WordPress.</p>
             </td>
           </tr>
