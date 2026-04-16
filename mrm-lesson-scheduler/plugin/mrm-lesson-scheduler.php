@@ -101,6 +101,11 @@ class MRM_Lesson_Scheduler {
         );
     }
 
+    protected function mrm_google_service_account_uses_aws() {
+        $secret = $this->mrm_get_google_scheduler_secret_bundle();
+        return ( is_array( $secret ) && ! empty( $secret['service_account_json'] ) );
+    }
+
     protected function mrm_get_google_service_account_json() {
         $secret = $this->mrm_get_google_scheduler_secret_bundle();
         if ( is_array( $secret ) && ! empty( $secret['service_account_json'] ) ) {
@@ -8538,8 +8543,17 @@ class MRM_Lesson_Scheduler {
                     <tr>
                         <th scope="row">Service Account JSON</th>
                         <td>
-                            <textarea name="google_service_account_json" rows="12" style="width:100%; max-width:900px;"><?php echo esc_textarea( $json ); ?></textarea>
-                            <p class="description"> Paste the full JSON key file you download from Google Cloud (contains private_key + client_email). Keep this private. </p>
+                            <?php if ( $this->mrm_google_service_account_uses_aws() ) : ?>
+                                <p><strong>AWS Secrets Manager is active for the Google service account JSON.</strong></p>
+                                <p class="description">
+                                    The scheduler is loading the Google service account JSON from
+                                    <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>.
+                                    The JSON is not shown here so AWS remains the only source of truth.
+                                </p>
+                            <?php else : ?>
+                                <textarea name="google_service_account_json" rows="12" style="width:100%; max-width:900px;"><?php echo esc_textarea( $json ); ?></textarea>
+                                <p class="description"> Paste the full JSON key file you download from Google Cloud (contains private_key + client_email). Keep this private. </p>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <tr>
@@ -8549,7 +8563,11 @@ class MRM_Lesson_Scheduler {
                                 <code style="font-size:14px;"><?php echo esc_html( $sa_email ); ?></code>
                                 <p class="description">Share each instructor calendar with this email.</p>
                             <?php else : ?>
-                                <em>Paste JSON above and Save to see the service account email.</em>
+                                <?php if ( $this->mrm_google_service_account_uses_aws() ) : ?>
+                                    <em>The service account JSON is being loaded from AWS Secrets Manager, but the JSON could not be parsed. Re-check the <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code> secret.</em>
+                                <?php else : ?>
+                                    <em>Paste JSON above and Save to see the service account email.</em>
+                                <?php endif; ?>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -8589,7 +8607,13 @@ class MRM_Lesson_Scheduler {
             </form>
             <hr>
             <h2>3) Test Connection</h2>
-            <p>After saving your JSON, click test. If it fails, you’ll get a readable error.</p>
+            <p>
+                <?php if ( $this->mrm_google_service_account_uses_aws() ) : ?>
+                    The Google service account JSON is being loaded from AWS Secrets Manager. Click test below to verify the AWS-loaded credentials.
+                <?php else : ?>
+                    After saving your JSON, click test. If it fails, you’ll get a readable error.
+                <?php endif; ?>
+            </p>
             <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
                 <?php wp_nonce_field( 'mrm_scheduler_test_google', 'mrm_scheduler_google_test_nonce' ); ?>
                 <input type="hidden" name="action" value="mrm_scheduler_test_google">
@@ -8660,7 +8684,12 @@ class MRM_Lesson_Scheduler {
         if ( ! current_user_can( self::CAPABILITY ) ) wp_die( 'Not allowed.' );
         check_admin_referer( 'mrm_scheduler_save_google', 'mrm_scheduler_google_nonce' );
         $opts = $this->get_settings();
-        if ( isset( $_POST['google_service_account_json'] ) ) {
+
+        if ( $this->mrm_google_service_account_uses_aws() ) {
+            $opts['google_service_account_json'] = '';
+        }
+
+        if ( ! $this->mrm_google_service_account_uses_aws() && isset( $_POST['google_service_account_json'] ) ) {
             $json = wp_unslash( $_POST['google_service_account_json'] );
             $opts['google_service_account_json'] = is_string( $json ) ? trim( $json ) : '';
         }
