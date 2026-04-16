@@ -1692,17 +1692,8 @@ a{ -webkit-tap-highlight-color:transparent; }
     wrap.dataset.productSlug = productSlug;
     wrap.dataset.price = priceDisplay;
 
-    wrap.innerHTML = `
-      <div class="offer-head">
-        <div class="offer-head-left">
-          <h3 class="offer-title">${escHtml(displayTitle)}</h3>
-        </div>
-      </div>
-
-      <div class="offer-body">
-        <div class="audio-stack">
-          <p class="audio-subtitle">${escHtml(subtitle)}</p>
-
+    const audioMarkup = previewAudio
+      ? `
           <div class="audio-box">
             <audio class="mrm-audio" preload="metadata" crossorigin="anonymous">
               <source src="" type="audio/mpeg">
@@ -1730,6 +1721,20 @@ a{ -webkit-tap-highlight-color:transparent; }
               </div>
             </div>
           </div>
+        `
+      : '';
+
+    wrap.innerHTML = `
+      <div class="offer-head">
+        <div class="offer-head-left">
+          <h3 class="offer-title">${escHtml(displayTitle)}</h3>
+        </div>
+      </div>
+
+      <div class="offer-body">
+        <div class="audio-stack">
+          <p class="audio-subtitle">${escHtml(subtitle)}</p>
+          ${audioMarkup}
         </div>
 
         <div class="offer-actions">
@@ -1746,9 +1751,11 @@ a{ -webkit-tap-highlight-color:transparent; }
       </div>
     `;
 
-    // set audio
-    const audioEl = wrap.querySelector('.mrm-audio');
-    applyAudioUrl(audioEl, previewAudio);
+    // set audio only when a preview audio URL exists
+    if (previewAudio) {
+      const audioEl = wrap.querySelector('.mrm-audio');
+      applyAudioUrl(audioEl, previewAudio);
+    }
 
     return wrap;
   }
