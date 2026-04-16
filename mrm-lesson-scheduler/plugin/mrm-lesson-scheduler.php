@@ -150,13 +150,11 @@ class MRM_Lesson_Scheduler {
             }
 
             error_log( 'MRM Google AWS secret bundle loaded, but service_account_json was present in an unusable format.' );
-        } else {
-            error_log( 'MRM Google AWS secret bundle missing service_account_json; falling back to plugin settings.' );
+            return '';
         }
 
-        $opts = $this->get_settings();
-        error_log( 'MRM Google service account JSON falling back to lesson scheduler settings.' );
-        return isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
+        error_log( 'MRM Google AWS secret bundle missing service_account_json. AWS-only mode active.' );
+        return '';
     }
 
     protected function mrm_get_google_sync_secret() {
@@ -8607,9 +8605,9 @@ class MRM_Lesson_Scheduler {
                                 <p class="description">Share each instructor calendar with this email.</p>
                             <?php else : ?>
                                 <?php if ( $this->mrm_google_service_account_uses_aws() ) : ?>
-                                    <em>The service account JSON is being loaded from AWS Secrets Manager, but the JSON could not be parsed. Re-check the <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code> secret.</em>
+                                    <em>The scheduler is set to use AWS Secrets Manager for the Google service account JSON, but the AWS-loaded JSON could not be parsed into a valid service account. Re-check the <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code> secret.</em>
                                 <?php else : ?>
-                                    <em>Paste JSON above and Save to see the service account email.</em>
+                                    <em>AWS Secrets Manager is not currently providing a usable service_account_json value, so the scheduler cannot initialize Google credentials in AWS-only mode.</em>
                                 <?php endif; ?>
                             <?php endif; ?>
                         </td>
@@ -8728,14 +8726,7 @@ class MRM_Lesson_Scheduler {
         check_admin_referer( 'mrm_scheduler_save_google', 'mrm_scheduler_google_nonce' );
         $opts = $this->get_settings();
 
-        if ( $this->mrm_google_service_account_uses_aws() ) {
-            $opts['google_service_account_json'] = '';
-        }
-
-        if ( ! $this->mrm_google_service_account_uses_aws() && isset( $_POST['google_service_account_json'] ) ) {
-            $json = wp_unslash( $_POST['google_service_account_json'] );
-            $opts['google_service_account_json'] = is_string( $json ) ? trim( $json ) : '';
-        }
+        $opts['google_service_account_json'] = '';
         if ( isset( $_POST['google_delegated_user'] ) ) {
             $opts['google_delegated_user'] = sanitize_email( wp_unslash( $_POST['google_delegated_user'] ) );
         }
@@ -8756,19 +8747,28 @@ class MRM_Lesson_Scheduler {
     public function handle_test_google_settings() {
         if ( ! current_user_can( self::CAPABILITY ) ) wp_die( 'Not allowed.' );
         check_admin_referer( 'mrm_scheduler_test_google', 'mrm_scheduler_google_test_nonce' );
-        if ( ! $this->google_is_configured() ) {
-            $msg = 'Google settings not configured yet. Paste Service Account JSON and save.';
-            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode($msg) ) );
+
+        if ( ! $this->mrm_google_service_account_uses_aws() ) {
+            $msg = 'AWS Secrets Manager is not providing a usable service_account_json value. The scheduler is not allowed to fall back to the WordPress settings box in AWS-only mode.';
+            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode( $msg ) ) );
             exit;
         }
+
+        if ( ! $this->google_is_configured() ) {
+            $msg = 'AWS Secrets Manager is active, but the Google service account JSON could not be parsed into a valid credential set.';
+            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode( $msg ) ) );
+            exit;
+        }
+
         $token = $this->google_get_access_token();
         if ( is_wp_error( $token ) ) {
-            $msg = 'Token fetch failed: ' . $token->get_error_message();
-            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode($msg) ) );
+            $msg = 'Token fetch failed while using AWS-loaded Google credentials: ' . $token->get_error_message();
+            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode( $msg ) ) );
             exit;
         }
-        $msg = 'Success: Access token obtained. Next: share an instructor calendar with the Service Account email and test /availability.';
-        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=ok&msg=' . rawurlencode($msg) ) );
+
+        $msg = 'Success: Access token obtained using the AWS Secrets Manager service account JSON.';
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=ok&msg=' . rawurlencode( $msg ) ) );
         exit;
     }
 
