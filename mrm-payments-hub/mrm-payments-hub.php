@@ -611,7 +611,6 @@ class MRM_Payments_Hub_Single {
     $opts = is_array($opts) ? $opts : array();
 
     return wp_parse_args($opts, array(
-      'stripe_mode' => 'live',
       'one_time_sheet_music_composer_pct' => 0,
       'in_person_travel_amount_cents' => 500,
 
@@ -765,20 +764,9 @@ class MRM_Payments_Hub_Single {
     );
   }
 
-  // Return the appropriate key depending on whether test or live mode is selected
   private function publishable_key() {
-    $s = $this->get_settings();
-    $mode = isset($s['stripe_mode']) ? (string)$s['stripe_mode'] : 'live';
-
-    if ($mode === 'test') {
-      if (defined('MRM_STRIPE_PUBLISHABLE_KEY_TEST')) {
-        return trim((string) MRM_STRIPE_PUBLISHABLE_KEY_TEST);
-      }
-      return '';
-    }
-
-    if (defined('MRM_STRIPE_PUBLISHABLE_KEY_LIVE')) {
-      return trim((string) MRM_STRIPE_PUBLISHABLE_KEY_LIVE);
+    if (defined('MRM_STRIPE_PUBLISHABLE_KEY')) {
+      return trim((string) MRM_STRIPE_PUBLISHABLE_KEY);
     }
     return '';
   }
@@ -801,12 +789,6 @@ class MRM_Payments_Hub_Single {
 
     $this->mrm_aws_debug_log('Stripe webhook_secret missing from AWS secret bundle. AWS-only mode active.');
     return '';
-  }
-
-  private function is_test_mode() {
-    $s = $this->get_settings();
-    $mode = isset($s['stripe_mode']) ? (string)$s['stripe_mode'] : 'live';
-    return ($mode === 'test');
   }
 
   private function stripe_debug_log_path() {
@@ -899,9 +881,6 @@ class MRM_Payments_Hub_Single {
 
   private function subscription_price_id() {
     $s = $this->get_settings();
-    if ($this->is_test_mode()) {
-      return trim((string)($s['stripe_test_sheet_music_subscription_price_id'] ?? ''));
-    }
     return trim((string)($s['stripe_sheet_music_subscription_price_id'] ?? ''));
   }
 
@@ -910,12 +889,7 @@ class MRM_Payments_Hub_Single {
 
     $live = trim((string)($s['composer_connected_account_id'] ?? ''));
     $test = trim((string)($s['test_composer_connected_account_id'] ?? ''));
-
-    if ($this->is_test_mode()) {
-      return ($test !== '') ? $test : $live;
-    }
-
-    return $live;
+    return ($live !== '') ? $live : $test;
   }
 
   private function all_products() {
@@ -2792,7 +2766,7 @@ class MRM_Payments_Hub_Single {
   private function create_order($email_hash, $sku, $product_type, $amount_cents, $currency, $metadata) {
     global $wpdb;
     $now = current_time('mysql');
-    $environment_mode = $this->is_test_mode() ? 'test' : 'live';
+    $environment_mode = 'live';
     $wpdb->insert($this->table_orders(), array(
       'email_hash' => $email_hash,
       'sku' => $sku,
@@ -5044,7 +5018,7 @@ class MRM_Payments_Hub_Single {
     global $wpdb;
     $table = $this->table_payout_ledger();
     $now = current_time('mysql');
-    $environment_mode = $this->is_test_mode() ? 'test' : 'live';
+    $environment_mode = 'live';
 
     $existing = $wpdb->get_var($wpdb->prepare(
       "SELECT id FROM {$table} WHERE order_id=%d AND payee_type=%s AND payee_ref=%s LIMIT 1",
@@ -8441,8 +8415,6 @@ class MRM_Payments_Hub_Single {
 
     if (isset($_POST['mrm_pay_hub_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_nonce'], 'mrm_pay_hub_save')) {
       $settings = $this->get_settings();
-      // Stripe environment mode: 'live' or 'test'
-      $settings['stripe_mode'] = sanitize_text_field((string)($_POST['stripe_mode'] ?? 'live'));
       // AWS / wp-config managed Stripe credentials are no longer stored in WordPress settings.
       $settings['stripe_publishable_key'] = '';
       $settings['stripe_secret_key'] = '';
@@ -8452,7 +8424,7 @@ class MRM_Payments_Hub_Single {
       $settings['stripe_test_webhook_secret'] = '';
 
       $settings['stripe_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_sheet_music_subscription_price_id'] ?? ''));
-      $settings['stripe_test_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_test_sheet_music_subscription_price_id'] ?? ''));
+      $settings['stripe_test_sheet_music_subscription_price_id'] = '';
       $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
       $settings['one_time_sheet_music_composer_pct'] = $this->mrm_sanitize_percent_setting($_POST['one_time_sheet_music_composer_pct'] ?? 0, 0);
       $settings['in_person_travel_amount_cents'] = $this->mrm_money_to_cents($_POST['in_person_travel_amount'] ?? '5.00', 500);
@@ -9235,14 +9207,8 @@ class MRM_Payments_Hub_Single {
     settings_errors('mrm_pay_hub');
 
     $settings = $this->get_settings();
-    $pk_live   = defined('MRM_STRIPE_PUBLISHABLE_KEY_LIVE') ? esc_attr((string) MRM_STRIPE_PUBLISHABLE_KEY_LIVE) : '';
-    $sk_live   = '';
-    $wh_live   = '';
-    $price_live = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
-    $pk_test   = defined('MRM_STRIPE_PUBLISHABLE_KEY_TEST') ? esc_attr((string) MRM_STRIPE_PUBLISHABLE_KEY_TEST) : '';
-    $sk_test   = '';
-    $wh_test   = '';
-    $price_test = esc_attr((string)($settings['stripe_test_sheet_music_subscription_price_id'] ?? ''));
+    $pk_current = defined('MRM_STRIPE_PUBLISHABLE_KEY') ? esc_attr((string) MRM_STRIPE_PUBLISHABLE_KEY) : '';
+    $price_current = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
     $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
     $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
     $in_person_travel_amount = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['in_person_travel_amount_cents'] ?? 500)));
@@ -9250,7 +9216,6 @@ class MRM_Payments_Hub_Single {
     $instructor_payout_chart_columns = $this->mrm_get_instructor_payout_chart_columns();
     $instructor_payout_chart_values = $this->mrm_get_instructor_payout_chart_admin_matrix();
     $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
-    $mode      = esc_attr((string)($settings['stripe_mode'] ?? 'live'));
 
     ?>
     <div class="wrap">
@@ -9259,25 +9224,15 @@ class MRM_Payments_Hub_Single {
       <form method="post">
         <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
 
-        <h2>Stripe Environment</h2>
-        <p>Stripe publishable keys are now managed in <code>wp-config.php</code>, and Stripe secret/webhook keys are now managed through AWS Secrets Manager. They are no longer editable from this settings page.</p>
+        <h2>Stripe Configuration</h2>
+        <p>Stripe publishable key is managed in <code>wp-config.php</code>, and Stripe <code>secret_key</code> and <code>webhook_secret</code> are managed through AWS Secrets Manager at <code>lowbrass/stripe/keys</code>. WordPress no longer controls live vs test mode.</p>
 
         <table class="form-table">
           <tr>
-            <th scope="row">Mode</th>
-            <td>
-              <fieldset>
-                <label><input type="radio" name="stripe_mode" value="live" <?php checked($mode, 'live'); ?> /> Live</label><br />
-                <label><input type="radio" name="stripe_mode" value="test" <?php checked($mode, 'test'); ?> /> Test (Sandbox)</label>
-              </fieldset>
-            </td>
-          </tr>
-          <tr>
             <th scope="row">Publishable Key Source</th>
             <td>
-              <p><strong>Live:</strong> <code><?php echo $pk_live !== '' ? 'Loaded from wp-config.php' : 'Missing'; ?></code></p>
-              <p><strong>Test:</strong> <code><?php echo $pk_test !== '' ? 'Loaded from wp-config.php' : 'Missing'; ?></code></p>
-              <p class="description">Secret keys and webhook secrets are loaded from AWS Secrets Manager via <code>lowbrass/stripe/keys</code>.</p>
+              <p><strong>Current:</strong> <code><?php echo $pk_current !== '' ? 'Loaded from wp-config.php' : 'Missing'; ?></code></p>
+              <p class="description">The active environment is determined by the Stripe keys you have configured outside WordPress.</p>
             </td>
           </tr>
           <tr>
@@ -9285,23 +9240,18 @@ class MRM_Payments_Hub_Single {
             <td>
               <button type="submit" name="mrm_pay_hub_test_aws" value="1" class="button button-secondary">Test Stripe AWS Connection</button>
               <?php wp_nonce_field('mrm_pay_hub_test_aws', 'mrm_pay_hub_test_aws_nonce'); ?>
-              <p class="description">This sends a harmless authenticated request to Stripe using the AWS-backed secret key currently in use.</p>
+              <p class="description">This sends a harmless authenticated request to Stripe using the AWS-backed secret key currently configured.</p>
             </td>
           </tr>
         </table>
 
-        <h3>Subscription Price IDs</h3>
+        <h3>Sheet Music Subscription Price ID</h3>
         <table class="form-table">
           <tr>
-            <th scope="row"><label for="stripe_sheet_music_subscription_price_id">Sheet Music Subscription Price ID (Live)</label></th>
+            <th scope="row"><label for="stripe_sheet_music_subscription_price_id">Subscription Price ID</label></th>
             <td>
-              <input type="text" id="stripe_sheet_music_subscription_price_id" name="stripe_sheet_music_subscription_price_id" value="<?php echo $price_live; ?>" class="regular-text" placeholder="price_..." />
-            </td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="stripe_test_sheet_music_subscription_price_id">Sheet Music Subscription Price ID (Test)</label></th>
-            <td>
-              <input type="text" id="stripe_test_sheet_music_subscription_price_id" name="stripe_test_sheet_music_subscription_price_id" value="<?php echo $price_test; ?>" class="regular-text" placeholder="price_..." />
+              <input type="text" id="stripe_sheet_music_subscription_price_id" name="stripe_sheet_music_subscription_price_id" value="<?php echo $price_current; ?>" class="regular-text" placeholder="price_..." />
+              <p class="description">Use the Stripe Price ID that matches the environment of the keys currently configured in AWS and <code>wp-config.php</code>.</p>
             </td>
           </tr>
         </table>
