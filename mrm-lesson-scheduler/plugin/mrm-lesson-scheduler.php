@@ -9306,7 +9306,16 @@ protected function parse_service_account_json( $json ) {
         if ( is_string( $cached ) && $cached !== '' ) return $cached;
         $opts = $this->get_settings();
         $parsed = $this->parse_service_account_json( $this->mrm_get_google_service_account_json() );
-        if ( ! $parsed ) return new WP_Error( 'google_not_configured', 'Service Account JSON not configured.' );
+        $this->mrm_aws_debug_log( 'google_get_access_token parsed credentials', array(
+            'parsed_is_array' => is_array( $parsed ),
+            'client_email' => is_array( $parsed ) && ! empty( $parsed['client_email'] ) ? $parsed['client_email'] : '',
+            'has_private_key' => is_array( $parsed ) && ! empty( $parsed['private_key'] ),
+            'token_uri' => is_array( $parsed ) && ! empty( $parsed['token_uri'] ) ? $parsed['token_uri'] : '',
+        ) );
+        if ( ! $parsed ) {
+            $this->mrm_aws_debug_log( 'google_get_access_token failed before JWT build because parsed credentials were invalid' );
+            return new WP_Error( 'google_not_configured', 'Service Account JSON not configured.' );
+        }
         $client_email = $parsed['client_email'];
         $private_key  = $parsed['private_key'];
         $token_url    = ! empty($parsed['token_uri']) ? $parsed['token_uri'] : self::GOOGLE_TOKEN_URL;
@@ -9316,6 +9325,10 @@ protected function parse_service_account_json( $json ) {
         }
         $jwt = $this->google_make_jwt( $client_email, $private_key, $scope, $token_url, $subject );
         if ( is_wp_error( $jwt ) ) return $jwt;
+        $this->mrm_aws_debug_log( 'google_get_access_token sending token request', array(
+            'token_uri' => $token_url,
+            'client_email' => $client_email,
+        ) );
         $resp = wp_remote_post( $token_url, array(
             'timeout' => 20,
             'headers' => array( 'Content-Type' => 'application/x-www-form-urlencoded' ),
@@ -9324,15 +9337,36 @@ protected function parse_service_account_json( $json ) {
                 'assertion'  => $jwt,
             ) ),
         ) );
-        if ( is_wp_error( $resp ) ) return $resp;
+        $this->mrm_aws_debug_log( 'google_get_access_token token request completed', array(
+            'is_wp_error' => is_wp_error( $resp ),
+        ) );
+        if ( is_wp_error( $resp ) ) {
+            $this->mrm_aws_debug_log( 'google_get_access_token wp_remote_post returned WP_Error', array(
+                'error_code' => $resp->get_error_code(),
+                'error_message' => $resp->get_error_message(),
+            ) );
+            return $resp;
+        }
         $code = wp_remote_retrieve_response_code( $resp );
         $body = wp_remote_retrieve_body( $resp );
+        $this->mrm_aws_debug_log( 'google_get_access_token token endpoint response', array(
+            'http_code' => $code,
+            'body_preview' => is_string( $body ) ? substr( $body, 0, 500 ) : '',
+        ) );
         $data = json_decode( $body, true );
         if ( $code < 200 || $code >= 300 || ! is_array($data) || empty($data['access_token']) ) {
+            $this->mrm_aws_debug_log( 'google_get_access_token token endpoint rejected request', array(
+                'http_code' => $code,
+                'body_preview' => is_string( $body ) ? substr( $body, 0, 500 ) : '',
+            ) );
             $detail = is_array($data) && ! empty($data['error_description']) ? $data['error_description'] : $body;
             return new WP_Error( 'google_token_failed', 'Token request failed: ' . $detail );
         }
         $token = (string) $data['access_token'];
+        $this->mrm_aws_debug_log( 'google_get_access_token succeeded', array(
+            'access_token_present' => ! empty( $token ),
+            'token_length' => is_string( $token ) ? strlen( $token ) : 0,
+        ) );
         set_transient( $cache_key, $token, 55 * MINUTE_IN_SECONDS );
         return $token;
     }
@@ -9376,7 +9410,12 @@ protected function parse_service_account_json( $json ) {
             'items'    => $items,
         );
 
-        $resp = wp_remote_post( self::GOOGLE_FREEBUSY_URL, array(
+        $url = self::GOOGLE_FREEBUSY_URL;
+        $this->mrm_aws_debug_log( 'Google Calendar API request starting', array(
+            'url' => $url,
+            'calendar_id' => implode( ',', $cal_ids ),
+        ) );
+        $resp = wp_remote_post( $url, array(
             'timeout' => 20,
             'headers' => array(
                 'Authorization' => 'Bearer ' . $token,
@@ -9384,10 +9423,23 @@ protected function parse_service_account_json( $json ) {
             ),
             'body' => wp_json_encode( $payload ),
         ) );
+        $this->mrm_aws_debug_log( 'Google Calendar API request completed', array(
+            'is_wp_error' => is_wp_error( $resp ),
+        ) );
 
-        if ( is_wp_error( $resp ) ) return $resp;
+        if ( is_wp_error( $resp ) ) {
+            $this->mrm_aws_debug_log( 'Google Calendar API WP_Error', array(
+                'error_code' => $resp->get_error_code(),
+                'error_message' => $resp->get_error_message(),
+            ) );
+            return $resp;
+        }
         $code = wp_remote_retrieve_response_code( $resp );
         $body = wp_remote_retrieve_body( $resp );
+        $this->mrm_aws_debug_log( 'Google Calendar API response', array(
+            'http_code' => $code,
+            'body_preview' => is_string( $body ) ? substr( $body, 0, 500 ) : '',
+        ) );
         $data = json_decode( $body, true );
 
         if ( $code < 200 || $code >= 300 || ! is_array( $data ) ) {
