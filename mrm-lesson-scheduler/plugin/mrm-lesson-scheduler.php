@@ -270,8 +270,8 @@ protected function mrm_get_google_service_account_json() {
             return (string) $secret['sync_secret'];
         }
 
-        $opts = $this->get_settings();
-        return (string) ( $opts['google_sync_secret'] ?? '' );
+        $this->mrm_aws_debug_log( 'Scheduler missing AWS sync_secret. AWS-only mode active.' );
+        return '';
     }
 
     protected function log_google_api_failure( $label, $url, $res ) {
@@ -8729,8 +8729,12 @@ protected function mrm_get_google_service_account_json() {
                     <tr>
                         <th scope="row">Direct Sync Secret</th>
                         <td>
-                            <input type="text" class="regular-text" name="google_sync_secret" value="<?php echo esc_attr( $this->mrm_get_google_sync_secret() ); ?>" placeholder="Paste a long random secret">
-                            <p class="description">Used by the direct Google sync endpoint for Hostinger cron. Use a long random value and keep it private.</p>
+                            <p><strong>AWS Secrets Manager is active for the direct sync secret.</strong></p>
+                            <p class="description">
+                                The scheduler is loading the direct sync secret from
+                                <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>.
+                                It is no longer editable from this settings page.
+                            </p>
                         </td>
                     </tr>
                 </table>
@@ -8834,11 +8838,9 @@ protected function mrm_get_google_service_account_json() {
         $opts = $this->get_settings();
 
         $opts['google_service_account_json'] = '';
+        $opts['google_sync_secret'] = '';
         if ( isset( $_POST['google_delegated_user'] ) ) {
             $opts['google_delegated_user'] = sanitize_email( wp_unslash( $_POST['google_delegated_user'] ) );
-        }
-        if ( isset( $_POST['google_sync_secret'] ) ) {
-            $opts['google_sync_secret'] = sanitize_text_field( wp_unslash( $_POST['google_sync_secret'] ) );
         }
         if ( isset( $_POST['save_slot_rules'] ) ) {
             $slot = isset($_POST['default_slot_minutes']) ? absint($_POST['default_slot_minutes']) : 30;
