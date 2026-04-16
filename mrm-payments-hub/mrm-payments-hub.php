@@ -641,9 +641,36 @@ class MRM_Payments_Hub_Single {
     update_option(self::OPT_SETTINGS, $opts);
   }
 
+  private function mrm_aws_debug_log($message, $context = array()) {
+    $log_file = WP_CONTENT_DIR . '/AWS Debug.log';
+
+    $line = '[' . current_time('mysql') . '] ' . $message;
+
+    if (!empty($context)) {
+      $json = wp_json_encode($context);
+      if (is_string($json) && $json !== '') {
+        $line .= ' | ' . $json;
+      }
+    }
+
+    $line .= PHP_EOL;
+
+    @file_put_contents($log_file, $line, FILE_APPEND | LOCK_EX);
+  }
+
   private function mrm_get_secret_json($secret_id, $cache_key) {
+    $this->mrm_aws_debug_log('Stripe plugin AWS call started', array(
+      'secret_id' => $secret_id,
+      'cache_key' => $cache_key,
+    ));
+
     $cached = get_transient($cache_key);
     if (is_array($cached)) {
+      $this->mrm_aws_debug_log('Stripe plugin AWS cache hit', array(
+        'secret_id' => $secret_id,
+        'cache_key' => $cache_key,
+        'keys_present' => array_keys($cached),
+      ));
       return $cached;
     }
 
@@ -652,6 +679,11 @@ class MRM_Payments_Hub_Single {
       !defined('MRM_AWS_ACCESS_KEY_ID') ||
       !defined('MRM_AWS_SECRET_ACCESS_KEY')
     ) {
+      $this->mrm_aws_debug_log('Stripe plugin AWS constants missing', array(
+        'region_defined' => defined('MRM_AWS_REGION'),
+        'key_defined' => defined('MRM_AWS_ACCESS_KEY_ID'),
+        'secret_defined' => defined('MRM_AWS_SECRET_ACCESS_KEY'),
+      ));
       return null;
     }
 
@@ -665,26 +697,59 @@ class MRM_Payments_Hub_Single {
         ),
       ));
 
+      $this->mrm_aws_debug_log('Stripe plugin calling AWS Secrets Manager', array(
+        'secret_id' => $secret_id,
+        'region' => MRM_AWS_REGION,
+      ));
+
       $result = $client->getSecretValue(array(
         'SecretId' => $secret_id,
       ));
 
       if (empty($result['SecretString'])) {
+        $this->mrm_aws_debug_log('Stripe plugin AWS returned empty SecretString', array(
+          'secret_id' => $secret_id,
+        ));
         return null;
       }
 
       $decoded = json_decode((string)$result['SecretString'], true);
+
       if (!is_array($decoded)) {
+        $this->mrm_aws_debug_log('Stripe plugin AWS SecretString did not decode to array', array(
+          'secret_id' => $secret_id,
+          'secret_string_length' => strlen((string)$result['SecretString']),
+        ));
         return null;
       }
 
+      $this->mrm_aws_debug_log('Stripe plugin AWS secret decoded successfully', array(
+        'secret_id' => $secret_id,
+        'keys_present' => array_keys($decoded),
+        'secret_key_present' => array_key_exists('secret_key', $decoded),
+        'webhook_secret_present' => array_key_exists('webhook_secret', $decoded),
+      ));
+
       set_transient($cache_key, $decoded, 15 * MINUTE_IN_SECONDS);
+
+      $this->mrm_aws_debug_log('Stripe plugin AWS secret cached', array(
+        'secret_id' => $secret_id,
+        'cache_key' => $cache_key,
+      ));
+
       return $decoded;
     } catch (AwsException $e) {
-      error_log('MRM SecretsManager error: ' . $e->getAwsErrorMessage());
+      $this->mrm_aws_debug_log('Stripe plugin AWS exception', array(
+        'secret_id' => $secret_id,
+        'aws_error_message' => $e->getAwsErrorMessage(),
+        'aws_error_code' => $e->getAwsErrorCode(),
+      ));
       return null;
     } catch (\Throwable $e) {
-      error_log('MRM SecretsManager fatal: ' . $e->getMessage());
+      $this->mrm_aws_debug_log('Stripe plugin AWS fatal exception', array(
+        'secret_id' => $secret_id,
+        'message' => $e->getMessage(),
+      ));
       return null;
     }
   }

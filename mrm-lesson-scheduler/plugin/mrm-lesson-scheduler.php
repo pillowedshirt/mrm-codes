@@ -42,9 +42,36 @@ class MRM_Lesson_Scheduler {
     // Google events list endpoint
     const GOOGLE_EVENTS_LIST_URL = 'https://www.googleapis.com/calendar/v3/calendars/%s/events';
 
+    protected function mrm_aws_debug_log( $message, $context = array() ) {
+        $log_file = WP_CONTENT_DIR . '/AWS Debug.log';
+
+        $line = '[' . current_time( 'mysql' ) . '] ' . $message;
+
+        if ( ! empty( $context ) ) {
+            $json = wp_json_encode( $context );
+            if ( is_string( $json ) && $json !== '' ) {
+                $line .= ' | ' . $json;
+            }
+        }
+
+        $line .= PHP_EOL;
+
+        @file_put_contents( $log_file, $line, FILE_APPEND | LOCK_EX );
+    }
+
     protected function mrm_get_secret_json( $secret_id, $cache_key ) {
+        $this->mrm_aws_debug_log( 'Scheduler AWS call started', array(
+            'secret_id' => $secret_id,
+            'cache_key' => $cache_key,
+        ) );
+
         $cached = get_transient( $cache_key );
         if ( is_array( $cached ) ) {
+            $this->mrm_aws_debug_log( 'Scheduler AWS cache hit', array(
+                'secret_id' => $secret_id,
+                'cache_key' => $cache_key,
+                'keys_present' => array_keys( $cached ),
+            ) );
             return $cached;
         }
 
@@ -53,6 +80,11 @@ class MRM_Lesson_Scheduler {
             ! defined( 'MRM_AWS_ACCESS_KEY_ID' ) ||
             ! defined( 'MRM_AWS_SECRET_ACCESS_KEY' )
         ) {
+            $this->mrm_aws_debug_log( 'Scheduler AWS constants missing', array(
+                'region_defined' => defined( 'MRM_AWS_REGION' ),
+                'key_defined' => defined( 'MRM_AWS_ACCESS_KEY_ID' ),
+                'secret_defined' => defined( 'MRM_AWS_SECRET_ACCESS_KEY' ),
+            ) );
             return null;
         }
 
@@ -66,26 +98,79 @@ class MRM_Lesson_Scheduler {
                 ),
             ) );
 
+            $this->mrm_aws_debug_log( 'Scheduler calling AWS Secrets Manager', array(
+                'secret_id' => $secret_id,
+                'region' => MRM_AWS_REGION,
+            ) );
+
             $result = $client->getSecretValue( array(
                 'SecretId' => $secret_id,
             ) );
 
             if ( empty( $result['SecretString'] ) ) {
+                $this->mrm_aws_debug_log( 'Scheduler AWS returned empty SecretString', array(
+                    'secret_id' => $secret_id,
+                ) );
                 return null;
             }
 
             $decoded = json_decode( (string) $result['SecretString'], true );
+
             if ( ! is_array( $decoded ) ) {
+                $this->mrm_aws_debug_log( 'Scheduler AWS SecretString did not decode to array', array(
+                    'secret_id' => $secret_id,
+                    'secret_string_length' => strlen( (string) $result['SecretString'] ),
+                ) );
                 return null;
             }
 
+            $context = array(
+                'secret_id' => $secret_id,
+                'keys_present' => array_keys( $decoded ),
+            );
+
+            if ( array_key_exists( 'service_account_json', $decoded ) ) {
+                $context['service_account_json_type'] = gettype( $decoded['service_account_json'] );
+                if ( is_string( $decoded['service_account_json'] ) ) {
+                    $context['service_account_json_length'] = strlen( $decoded['service_account_json'] );
+                    $context['service_account_json_preview'] = substr( $decoded['service_account_json'], 0, 120 );
+                }
+                if ( is_array( $decoded['service_account_json'] ) ) {
+                    $context['service_account_json_keys'] = array_keys( $decoded['service_account_json'] );
+                }
+            } else {
+                $context['service_account_json_missing'] = true;
+            }
+
+            if ( array_key_exists( 'sync_secret', $decoded ) ) {
+                $context['sync_secret_present'] = true;
+                $context['sync_secret_length'] = is_string( $decoded['sync_secret'] ) ? strlen( $decoded['sync_secret'] ) : 0;
+            } else {
+                $context['sync_secret_missing'] = true;
+            }
+
+            $this->mrm_aws_debug_log( 'Scheduler AWS secret decoded successfully', $context );
+
             set_transient( $cache_key, $decoded, 15 * MINUTE_IN_SECONDS );
+
+            $this->mrm_aws_debug_log( 'Scheduler AWS secret cached', array(
+                'secret_id' => $secret_id,
+                'cache_key' => $cache_key,
+            ) );
+
             return $decoded;
         } catch ( AwsException $e ) {
-            error_log( 'MRM SecretsManager error: ' . $e->getAwsErrorMessage() );
+            $this->mrm_aws_debug_log( 'Scheduler AWS exception', array(
+                'secret_id' => $secret_id,
+                'aws_error_message' => $e->getAwsErrorMessage(),
+                'aws_error_code' => $e->getAwsErrorCode(),
+            ) );
             return null;
         } catch ( \Throwable $e ) {
-            error_log( 'MRM SecretsManager fatal: ' . $e->getMessage() );
+            $this->mrm_aws_debug_log( 'Scheduler AWS fatal exception', array(
+                'secret_id' => $secret_id,
+                'message' => $e->getMessage(),
+            ) );
             return null;
         }
     }
@@ -146,30 +231,38 @@ class MRM_Lesson_Scheduler {
         return false;
     }
 
-    protected function mrm_get_google_service_account_json() {
-        $secret = $this->mrm_get_google_scheduler_secret_bundle();
+protected function mrm_get_google_service_account_json() {
+    $secret = $this->mrm_get_google_scheduler_secret_bundle();
 
-        if ( is_array( $secret ) && array_key_exists( 'service_account_json', $secret ) ) {
-            if ( is_string( $secret['service_account_json'] ) && trim( $secret['service_account_json'] ) !== '' ) {
-                error_log( 'MRM Google service account JSON loaded from AWS as string.' );
-                return (string) $secret['service_account_json'];
-            }
-
-            if ( is_array( $secret['service_account_json'] ) && ! empty( $secret['service_account_json'] ) ) {
-                $encoded = wp_json_encode( $secret['service_account_json'] );
-                if ( is_string( $encoded ) && $encoded !== '' ) {
-                    error_log( 'MRM Google service account JSON loaded from AWS as array and re-encoded.' );
-                    return $encoded;
-                }
-            }
-
-            error_log( 'MRM Google AWS secret bundle loaded, but service_account_json was present in an unusable format.' );
-            return '';
+    if ( is_array( $secret ) && array_key_exists( 'service_account_json', $secret ) ) {
+        if ( is_string( $secret['service_account_json'] ) && trim( $secret['service_account_json'] ) !== '' ) {
+            $this->mrm_aws_debug_log( 'Scheduler using AWS service_account_json as string', array(
+                'length' => strlen( $secret['service_account_json'] ),
+                'preview' => substr( $secret['service_account_json'], 0, 120 ),
+            ) );
+            return (string) $secret['service_account_json'];
         }
 
-        error_log( 'MRM Google AWS secret bundle missing service_account_json. AWS-only mode active.' );
+        if ( is_array( $secret['service_account_json'] ) && ! empty( $secret['service_account_json'] ) ) {
+            $encoded = wp_json_encode( $secret['service_account_json'] );
+            if ( is_string( $encoded ) && $encoded !== '' ) {
+                $this->mrm_aws_debug_log( 'Scheduler using AWS service_account_json after array re-encode', array(
+                    'length' => strlen( $encoded ),
+                    'keys' => array_keys( $secret['service_account_json'] ),
+                ) );
+                return $encoded;
+            }
+        }
+
+        $this->mrm_aws_debug_log( 'Scheduler found AWS service_account_json but it was unusable', array(
+            'type' => gettype( $secret['service_account_json'] ),
+        ) );
         return '';
     }
+
+    $this->mrm_aws_debug_log( 'Scheduler missing AWS service_account_json. AWS-only mode active.' );
+    return '';
+}
 
     protected function mrm_get_google_sync_secret() {
         $secret = $this->mrm_get_google_scheduler_secret_bundle();
@@ -8955,37 +9048,49 @@ class MRM_Lesson_Scheduler {
         return ( is_array( $parsed ) && ! empty( $parsed['client_email'] ) && ! empty( $parsed['private_key'] ) );
     }
 
-    protected function parse_service_account_json( $json ) {
-        $json = is_string( $json ) ? trim( $json ) : '';
+protected function parse_service_account_json( $json ) {
+    $json = is_string( $json ) ? trim( $json ) : '';
 
-        if ( $json === '' ) {
-            error_log( 'MRM Google parse_service_account_json received an empty string.' );
-            return null;
-        }
-
-        $data = json_decode( $json, true );
-
-        if ( ! is_array( $data ) ) {
-            error_log( 'MRM Google parse_service_account_json could not json_decode the provided string.' );
-            return null;
-        }
-
-        if ( empty( $data['client_email'] ) ) {
-            error_log( 'MRM Google parse_service_account_json missing client_email.' );
-            return null;
-        }
-
-        if ( empty( $data['private_key'] ) ) {
-            error_log( 'MRM Google parse_service_account_json missing private_key.' );
-            return null;
-        }
-
-        return array(
-            'client_email' => (string) $data['client_email'],
-            'private_key'  => (string) $data['private_key'],
-            'token_uri'    => ! empty( $data['token_uri'] ) ? (string) $data['token_uri'] : self::GOOGLE_TOKEN_URL,
-        );
+    if ( $json === '' ) {
+        $this->mrm_aws_debug_log( 'parse_service_account_json received empty string' );
+        return null;
     }
+
+    $data = json_decode( $json, true );
+
+    if ( ! is_array( $data ) ) {
+        $this->mrm_aws_debug_log( 'parse_service_account_json json_decode failed', array(
+            'input_length' => strlen( $json ),
+            'input_preview' => substr( $json, 0, 120 ),
+        ) );
+        return null;
+    }
+
+    if ( empty( $data['client_email'] ) ) {
+        $this->mrm_aws_debug_log( 'parse_service_account_json missing client_email', array(
+            'keys_present' => array_keys( $data ),
+        ) );
+        return null;
+    }
+
+    if ( empty( $data['private_key'] ) ) {
+        $this->mrm_aws_debug_log( 'parse_service_account_json missing private_key', array(
+            'keys_present' => array_keys( $data ),
+        ) );
+        return null;
+    }
+
+    $this->mrm_aws_debug_log( 'parse_service_account_json succeeded', array(
+        'client_email' => $data['client_email'],
+        'has_private_key' => ! empty( $data['private_key'] ),
+    ) );
+
+    return array(
+        'client_email' => (string) $data['client_email'],
+        'private_key'  => (string) $data['private_key'],
+        'token_uri'    => ! empty( $data['token_uri'] ) ? (string) $data['token_uri'] : self::GOOGLE_TOKEN_URL,
+    );
+}
 
     /**
      * Cache-bust token used to invalidate availability transients immediately after bookings.
