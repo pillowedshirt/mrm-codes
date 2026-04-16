@@ -19,6 +19,14 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+$autoload = ABSPATH . 'vendor/autoload.php';
+if ( file_exists( $autoload ) ) {
+    require_once $autoload;
+}
+
+use Aws\SecretsManager\SecretsManagerClient;
+use Aws\Exception\AwsException;
+
 /**
  * Main plugin class. Encapsulates all functionality for the scheduler.
  */
@@ -33,6 +41,85 @@ class MRM_Lesson_Scheduler {
     const GOOGLE_FREEBUSY_URL = 'https://www.googleapis.com/calendar/v3/freeBusy';
     // Google events list endpoint
     const GOOGLE_EVENTS_LIST_URL = 'https://www.googleapis.com/calendar/v3/calendars/%s/events';
+
+    protected function mrm_get_secret_json( $secret_id, $cache_key ) {
+        $cached = get_transient( $cache_key );
+        if ( is_array( $cached ) ) {
+            return $cached;
+        }
+
+        if (
+            ! defined( 'MRM_AWS_REGION' ) ||
+            ! defined( 'MRM_AWS_ACCESS_KEY_ID' ) ||
+            ! defined( 'MRM_AWS_SECRET_ACCESS_KEY' )
+        ) {
+            return null;
+        }
+
+        try {
+            $client = new SecretsManagerClient( array(
+                'version' => 'latest',
+                'region'  => MRM_AWS_REGION,
+                'credentials' => array(
+                    'key'    => MRM_AWS_ACCESS_KEY_ID,
+                    'secret' => MRM_AWS_SECRET_ACCESS_KEY,
+                ),
+            ) );
+
+            $result = $client->getSecretValue( array(
+                'SecretId' => $secret_id,
+            ) );
+
+            if ( empty( $result['SecretString'] ) ) {
+                return null;
+            }
+
+            $decoded = json_decode( (string) $result['SecretString'], true );
+            if ( ! is_array( $decoded ) ) {
+                return null;
+            }
+
+            set_transient( $cache_key, $decoded, 15 * MINUTE_IN_SECONDS );
+            return $decoded;
+        } catch ( AwsException $e ) {
+            error_log( 'MRM SecretsManager error: ' . $e->getAwsErrorMessage() );
+            return null;
+        } catch ( \Throwable $e ) {
+            error_log( 'MRM SecretsManager fatal: ' . $e->getMessage() );
+            return null;
+        }
+    }
+
+    protected function mrm_get_google_scheduler_secret_bundle() {
+        if ( ! defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ) {
+            return null;
+        }
+
+        return $this->mrm_get_secret_json(
+            MRM_SECRET_GOOGLE_SCHEDULER,
+            'mrm_secret_google_scheduler'
+        );
+    }
+
+    protected function mrm_get_google_service_account_json() {
+        $secret = $this->mrm_get_google_scheduler_secret_bundle();
+        if ( is_array( $secret ) && ! empty( $secret['service_account_json'] ) ) {
+            return (string) $secret['service_account_json'];
+        }
+
+        $opts = $this->get_settings();
+        return isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
+    }
+
+    protected function mrm_get_google_sync_secret() {
+        $secret = $this->mrm_get_google_scheduler_secret_bundle();
+        if ( is_array( $secret ) && ! empty( $secret['sync_secret'] ) ) {
+            return (string) $secret['sync_secret'];
+        }
+
+        $opts = $this->get_settings();
+        return (string) ( $opts['google_sync_secret'] ?? '' );
+    }
 
     protected function log_google_api_failure( $label, $url, $res ) {
         if ( ! defined( 'WP_DEBUG' ) || ! WP_DEBUG ) {
@@ -8421,7 +8508,7 @@ class MRM_Lesson_Scheduler {
     public function render_admin_google_page() {
         if ( ! current_user_can( self::CAPABILITY ) ) wp_die( 'You do not have permission to access this page.' );
         $opts = $this->get_settings();
-        $json = isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
+        $json = $this->mrm_get_google_service_account_json();
         $delegated = isset( $opts['google_delegated_user'] ) ? (string) $opts['google_delegated_user'] : '';
         $slot_default= isset( $opts['default_slot_minutes'] ) ? (int) $opts['default_slot_minutes'] : 30;
         $sa_email = '';
@@ -8476,7 +8563,7 @@ class MRM_Lesson_Scheduler {
                     <tr>
                         <th scope="row">Direct Sync Secret</th>
                         <td>
-                            <input type="text" class="regular-text" name="google_sync_secret" value="<?php echo esc_attr( (string) ( $opts['google_sync_secret'] ?? '' ) ); ?>" placeholder="Paste a long random secret">
+                            <input type="text" class="regular-text" name="google_sync_secret" value="<?php echo esc_attr( $this->mrm_get_google_sync_secret() ); ?>" placeholder="Paste a long random secret">
                             <p class="description">Used by the direct Google sync endpoint for Hostinger cron. Use a long random value and keep it private.</p>
                         </td>
                     </tr>
@@ -8524,7 +8611,7 @@ class MRM_Lesson_Scheduler {
                         add_query_arg(
                             array(
                                 'action'     => 'mrm_scheduler_google_sync_now',
-                                'sync_token' => (string) ( $opts['google_sync_secret'] ?? '' ),
+                                'sync_token' => $this->mrm_get_google_sync_secret(),
                                 'format'     => 'json',
                             ),
                             admin_url( 'admin-post.php' )
@@ -8667,8 +8754,7 @@ class MRM_Lesson_Scheduler {
         if ( $is_admin_request ) {
             check_admin_referer( 'mrm_scheduler_google_sync_now', 'mrm_scheduler_google_sync_now_nonce' );
         } else {
-            $opts = $this->get_settings();
-            $saved_token = (string) ( $opts['google_sync_secret'] ?? '' );
+            $saved_token = $this->mrm_get_google_sync_secret();
             $request_token = isset( $_REQUEST['sync_token'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['sync_token'] ) ) : '';
 
             if ( $saved_token === '' || $request_token === '' || ! hash_equals( $saved_token, $request_token ) ) {
@@ -8778,8 +8864,7 @@ class MRM_Lesson_Scheduler {
     }
 
     protected function google_is_configured() {
-        $opts = $this->get_settings();
-        $json = isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
+        $json = $this->mrm_get_google_service_account_json();
         $parsed = $this->parse_service_account_json( $json );
         return ( is_array( $parsed ) && ! empty( $parsed['client_email'] ) && ! empty( $parsed['private_key'] ) );
     }
@@ -9010,7 +9095,7 @@ class MRM_Lesson_Scheduler {
         $cached = get_transient( $cache_key );
         if ( is_string( $cached ) && $cached !== '' ) return $cached;
         $opts = $this->get_settings();
-        $parsed = $this->parse_service_account_json( isset($opts['google_service_account_json']) ? $opts['google_service_account_json'] : '' );
+        $parsed = $this->parse_service_account_json( $this->mrm_get_google_service_account_json() );
         if ( ! $parsed ) return new WP_Error( 'google_not_configured', 'Service Account JSON not configured.' );
         $client_email = $parsed['client_email'];
         $private_key  = $parsed['private_key'];

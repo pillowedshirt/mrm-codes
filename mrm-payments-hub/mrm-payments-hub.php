@@ -8,6 +8,14 @@
 
 if (!defined('ABSPATH')) exit;
 
+$autoload = ABSPATH . 'vendor/autoload.php';
+if (file_exists($autoload)) {
+  require_once $autoload;
+}
+
+use Aws\SecretsManager\SecretsManagerClient;
+use Aws\Exception\AwsException;
+
 class MRM_Payments_Hub_Single {
   const VERSION = '1.0.0';
 
@@ -633,6 +641,65 @@ class MRM_Payments_Hub_Single {
     update_option(self::OPT_SETTINGS, $opts);
   }
 
+  private function mrm_get_secret_json($secret_id, $cache_key) {
+    $cached = get_transient($cache_key);
+    if (is_array($cached)) {
+      return $cached;
+    }
+
+    if (
+      !defined('MRM_AWS_REGION') ||
+      !defined('MRM_AWS_ACCESS_KEY_ID') ||
+      !defined('MRM_AWS_SECRET_ACCESS_KEY')
+    ) {
+      return null;
+    }
+
+    try {
+      $client = new SecretsManagerClient(array(
+        'version' => 'latest',
+        'region'  => MRM_AWS_REGION,
+        'credentials' => array(
+          'key'    => MRM_AWS_ACCESS_KEY_ID,
+          'secret' => MRM_AWS_SECRET_ACCESS_KEY,
+        ),
+      ));
+
+      $result = $client->getSecretValue(array(
+        'SecretId' => $secret_id,
+      ));
+
+      if (empty($result['SecretString'])) {
+        return null;
+      }
+
+      $decoded = json_decode((string)$result['SecretString'], true);
+      if (!is_array($decoded)) {
+        return null;
+      }
+
+      set_transient($cache_key, $decoded, 15 * MINUTE_IN_SECONDS);
+      return $decoded;
+    } catch (AwsException $e) {
+      error_log('MRM SecretsManager error: ' . $e->getAwsErrorMessage());
+      return null;
+    } catch (\Throwable $e) {
+      error_log('MRM SecretsManager fatal: ' . $e->getMessage());
+      return null;
+    }
+  }
+
+  private function mrm_get_stripe_secret_bundle() {
+    if (!defined('MRM_SECRET_STRIPE_KEYS')) {
+      return null;
+    }
+
+    return $this->mrm_get_secret_json(
+      MRM_SECRET_STRIPE_KEYS,
+      'mrm_secret_stripe_keys'
+    );
+  }
+
   // Return the appropriate key depending on whether test or live mode is selected
   private function publishable_key() {
     $s = $this->get_settings();
@@ -644,6 +711,11 @@ class MRM_Payments_Hub_Single {
   }
 
   private function secret_key() {
+    $secret = $this->mrm_get_stripe_secret_bundle();
+    if (is_array($secret) && !empty($secret['secret_key'])) {
+      return trim((string)$secret['secret_key']);
+    }
+
     $s = $this->get_settings();
     $mode = isset($s['stripe_mode']) ? (string)$s['stripe_mode'] : 'live';
     if ($mode === 'test') {
@@ -653,6 +725,11 @@ class MRM_Payments_Hub_Single {
   }
 
   private function webhook_secret() {
+    $secret = $this->mrm_get_stripe_secret_bundle();
+    if (is_array($secret) && !empty($secret['webhook_secret'])) {
+      return trim((string)$secret['webhook_secret']);
+    }
+
     $s = $this->get_settings();
     $mode = isset($s['stripe_mode']) ? (string)$s['stripe_mode'] : 'live';
     if ($mode === 'test') {
