@@ -98,7 +98,7 @@ class MRM_Lesson_Scheduler {
 
         $secret = $this->mrm_get_secret_json(
             MRM_SECRET_GOOGLE_SCHEDULER,
-            'mrm_secret_google_scheduler_v2'
+            'mrm_secret_google_scheduler_v5'
         );
 
         if ( ! is_array( $secret ) ) {
@@ -110,6 +110,20 @@ class MRM_Lesson_Scheduler {
             'MRM Google AWS secret bundle loaded. Keys present: ' .
             implode( ',', array_keys( $secret ) )
         );
+
+        if ( array_key_exists( 'service_account_json', $secret ) ) {
+            error_log( 'MRM Google AWS service_account_json type: ' . gettype( $secret['service_account_json'] ) );
+
+            if ( is_string( $secret['service_account_json'] ) ) {
+                error_log( 'MRM Google AWS service_account_json length: ' . strlen( $secret['service_account_json'] ) );
+            }
+
+            if ( is_array( $secret['service_account_json'] ) ) {
+                error_log( 'MRM Google AWS service_account_json array keys: ' . implode( ',', array_keys( $secret['service_account_json'] ) ) );
+            }
+        } else {
+            error_log( 'MRM Google AWS service_account_json key is missing.' );
+        }
 
         return $secret;
     }
@@ -8755,7 +8769,7 @@ class MRM_Lesson_Scheduler {
         }
 
         if ( ! $this->google_is_configured() ) {
-            $msg = 'AWS Secrets Manager is active, but the Google service account JSON could not be parsed into a valid credential set.';
+            $msg = 'AWS Secrets Manager is active, but the Google service account JSON could not be parsed into a valid credential set. Check the PHP error log for parse_service_account_json diagnostics.';
             wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode( $msg ) ) );
             exit;
         }
@@ -8784,7 +8798,7 @@ class MRM_Lesson_Scheduler {
         );
 
         if ( ! $this->google_is_configured() ) {
-            $summary['message'] = 'Google is not configured.';
+            $summary['message'] = 'Google is not configured. AWS Secrets Manager did not provide a parseable Google service account JSON value.';
             $summary['finished_at'] = current_time( 'mysql' );
             return $summary;
         }
@@ -8942,15 +8956,34 @@ class MRM_Lesson_Scheduler {
     }
 
     protected function parse_service_account_json( $json ) {
-        $json = is_string($json) ? trim($json) : '';
-        if ( $json === '' ) return null;
+        $json = is_string( $json ) ? trim( $json ) : '';
+
+        if ( $json === '' ) {
+            error_log( 'MRM Google parse_service_account_json received an empty string.' );
+            return null;
+        }
+
         $data = json_decode( $json, true );
-        if ( ! is_array( $data ) ) return null;
-        if ( empty( $data['client_email'] ) || empty( $data['private_key'] ) ) return null;
+
+        if ( ! is_array( $data ) ) {
+            error_log( 'MRM Google parse_service_account_json could not json_decode the provided string.' );
+            return null;
+        }
+
+        if ( empty( $data['client_email'] ) ) {
+            error_log( 'MRM Google parse_service_account_json missing client_email.' );
+            return null;
+        }
+
+        if ( empty( $data['private_key'] ) ) {
+            error_log( 'MRM Google parse_service_account_json missing private_key.' );
+            return null;
+        }
+
         return array(
             'client_email' => (string) $data['client_email'],
             'private_key'  => (string) $data['private_key'],
-            'token_uri'    => ! empty($data['token_uri']) ? (string) $data['token_uri'] : self::GOOGLE_TOKEN_URL,
+            'token_uri'    => ! empty( $data['token_uri'] ) ? (string) $data['token_uri'] : self::GOOGLE_TOKEN_URL,
         );
     }
 
