@@ -1395,7 +1395,15 @@ h1 {
   width: 100%;
 }
 
+.instructor-actions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:10px;
+}
+
 .instructor-learnmore,
+.instructor-seeavailability,
 .instructor-profile-back{
   display: inline-flex;
   align-items: center;
@@ -1404,8 +1412,8 @@ h1 {
   color: #ffffff !important;
   border: 1px solid rgba(0,0,0,0.15);
   border-radius: 10px;
-  padding: 6px 10px;          /* smaller than before */
-  font-size: 13px;            /* slightly smaller */
+  padding: 6px 10px;
+  font-size: 13px;
   font-weight: 700;
   line-height: 1;
   text-decoration: none !important;
@@ -1413,8 +1421,33 @@ h1 {
 }
 
 .instructor-learnmore:hover,
+.instructor-seeavailability:hover,
 .instructor-profile-back:hover{
   opacity:0.9;
+}
+
+.day-slots-booknow{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  min-height:44px;
+  border:none;
+  border-radius:14px;
+  background: var(--color-accent);
+  color:#fff;
+  font-size:14px;
+  font-weight:700;
+  cursor:pointer;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.14);
+}
+
+.day-slots-booknow:hover{
+  filter: brightness(1.03);
+}
+
+.day-slots-booknow:active{
+  transform: translateY(1px);
 }
 
 /* =========================
@@ -4195,6 +4228,36 @@ function renderCalendar(instr, state, container){
         }
         modalContentHost.append(summary);
 
+        if (isMobile && selectedForDay.length) {
+          const mobileBookBtn = document.createElement('button');
+          mobileBookBtn.className = 'day-slots-booknow';
+          mobileBookBtn.type = 'button';
+          mobileBookBtn.textContent = 'Book now';
+
+          mobileBookBtn.onclick = (e)=>{
+            e.preventDefault();
+            e.stopPropagation();
+
+            const hasSelection = selectedSlots.some(s => String(s.instructor_id) === String(instr.id));
+            if(!hasSelection){
+              alert('Please select a time first.');
+              return;
+            }
+
+            currentInstructor = instr;
+
+            state.expandedDay = null;
+            state._refreshingDay = null;
+            state._isStale = true;
+            _closeMobileDayModal();
+            renderCalendar(instr,state,container);
+
+            setTimeout(()=>openBookingModal(instr), 0);
+          };
+
+          modalContentHost.append(mobileBookBtn);
+        }
+
         const gridWrap = document.createElement('div');
         gridWrap.className = 'day-slots-grid';
 
@@ -5567,25 +5630,51 @@ function loadInstructors(){
               titleWrap.appendChild(sd);
             }
 
+            const actionRow = document.createElement('div');
+            actionRow.className = 'instructor-actions';
+
             const learn = document.createElement('a');
-learn.className = 'instructor-learnmore';
-learn.textContent = 'Learn More';
-learn.href = `${window.location.pathname}?instructor=${encodeURIComponent(instr.id)}`;
-learn.rel = 'noopener noreferrer';
+            learn.className = 'instructor-learnmore';
+            learn.textContent = 'Learn More';
+            learn.href = `${window.location.pathname}?instructor=${encodeURIComponent(instr.id)}`;
+            learn.rel = 'noopener noreferrer';
 
-// IMPORTANT: prevent instructor header click/keydown from firing
-learn.addEventListener('mousedown', (e) => {
-  e.stopPropagation();
-});
-learn.addEventListener('click', (e) => {
-  e.stopPropagation();
-});
-learn.addEventListener('keydown', (e) => {
-  // Stops Enter/Space from bubbling to the header keydown handler
-  e.stopPropagation();
-});
+            // IMPORTANT: prevent instructor header click/keydown from firing
+            learn.addEventListener('mousedown', (e) => {
+              e.stopPropagation();
+            });
+            learn.addEventListener('click', (e) => {
+              e.stopPropagation();
+            });
+            learn.addEventListener('keydown', (e) => {
+              e.stopPropagation();
+            });
 
-titleWrap.appendChild(learn);
+            const seeAvailability = document.createElement('button');
+            seeAvailability.className = 'instructor-seeavailability';
+            seeAvailability.type = 'button';
+            seeAvailability.textContent = 'See Availability';
+
+            seeAvailability.addEventListener('mousedown', (e) => {
+              e.stopPropagation();
+            });
+            seeAvailability.addEventListener('click', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (cal.classList.contains('is-collapsed')) {
+                openCalendar();
+              } else {
+                const calendarTop = cal.getBoundingClientRect().top + window.scrollY - 12;
+                window.scrollTo({ top: calendarTop, behavior: 'smooth' });
+              }
+            });
+            seeAvailability.addEventListener('keydown', (e) => {
+              e.stopPropagation();
+            });
+
+            actionRow.appendChild(learn);
+            actionRow.appendChild(seeAvailability);
+            titleWrap.appendChild(actionRow);
 
 
             const cal=document.createElement('div');
