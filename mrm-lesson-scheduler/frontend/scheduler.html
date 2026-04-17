@@ -1418,6 +1418,11 @@ h1 {
   line-height: 1;
   text-decoration: none !important;
   cursor: pointer;
+  font-family: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .instructor-learnmore:hover,
@@ -2154,6 +2159,8 @@ async function mrmLoadLessonPricing(){
         sku,
         label: json.label || sku,
         amount_cents: Number(json.amount_cents || 0),
+        base_amount_cents: Number(json.base_amount_cents || json.amount_cents || 0),
+        travel_amount_cents: Number(json.travel_amount_cents || 0),
         currency: json.currency || 'usd',
         tax_message: json.tax_message || 'Sales tax is calculated after billing details are entered.'
       };
@@ -2170,15 +2177,10 @@ async function mrmLoadLessonPricing(){
 }
 
 function mrmGetTravelFeeCents(length){
-  const onlineSku = mrmLessonSkuFor('online', length);
   const inPersonSku = mrmLessonSkuFor('in_person', length);
-
-  const online = mrmLessonPricingCache[onlineSku];
   const inPerson = mrmLessonPricingCache[inPersonSku];
-
-  if (!online || !inPerson) return 0;
-
-  return Math.max(0, Number(inPerson.amount_cents || 0) - Number(online.amount_cents || 0));
+  if (!inPerson) return 0;
+  return Math.max(0, Number(inPerson.travel_amount_cents || 0));
 }
 
 function mrmGetPricePresentation(type, length){
@@ -2214,8 +2216,8 @@ function mrmGetPricePresentation(type, length){
     };
   }
 
-  const travelFeeCents = mrmGetTravelFeeCents(normalizedLength);
-  const baseCents = Math.max(0, Number(quote.amount_cents || 0) - travelFeeCents);
+  const travelFeeCents = Math.max(0, Number(quote.travel_amount_cents || 0));
+  const baseCents = Math.max(0, Number(quote.base_amount_cents || quote.amount_cents || 0));
 
   return {
     optionLabel: `${normalizedLength} minutes — ${mrmFormatMoneyFromCents(baseCents)} + ${mrmFormatMoneyFromCents(travelFeeCents)} travel`,

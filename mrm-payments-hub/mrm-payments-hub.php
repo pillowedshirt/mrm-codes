@@ -1360,7 +1360,7 @@ class MRM_Payments_Hub_Single {
       'lesson_60_online' => array(
         'sku' => 'lesson_60_online',
         'label' => '60 Minute Online Lesson',
-        'amount_cents' => 6700,
+        'amount_cents' => 6200,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '60_online',
@@ -1369,7 +1369,7 @@ class MRM_Payments_Hub_Single {
       'lesson_60_inperson' => array(
         'sku' => 'lesson_60_inperson',
         'label' => '60 Minute In-Person Lesson',
-        'amount_cents' => 7200,
+        'amount_cents' => 6700,
         'currency' => 'usd',
         'product_type' => 'lesson',
         'category' => '60_inperson',
@@ -7038,6 +7038,21 @@ class MRM_Payments_Hub_Single {
     $amount_cents = isset($p['amount_cents']) ? (int)$p['amount_cents'] : 0;
     $currency = strtolower((string)($p['currency'] ?? 'usd'));
     $price_id = isset($p['stripe_price_id']) ? trim((string)$p['stripe_price_id']) : '';
+    $product_type = (string)($p['product_type'] ?? '');
+    $product_category = (string)($p['category'] ?? '');
+
+    $is_inperson_lesson =
+      ($product_type === 'lesson') &&
+      (
+        strpos($product_category, 'inperson') !== false ||
+        strpos($sku, 'inperson') !== false
+      );
+
+    $travel_amount_cents = $is_inperson_lesson ? $this->mrm_get_in_person_travel_cents() : 0;
+    if ($travel_amount_cents > $amount_cents) {
+      $travel_amount_cents = $amount_cents;
+    }
+    $base_amount_cents = max(0, $amount_cents - $travel_amount_cents);
 
     // Hard fail: NEVER report ok:true with a non-positive amount
     if ($amount_cents <= 0) {
@@ -7072,6 +7087,8 @@ class MRM_Payments_Hub_Single {
       'sku' => $sku,
       'label' => (string)($p['label'] ?? $sku),
       'amount_cents' => $amount_cents,
+      'base_amount_cents' => $base_amount_cents,
+      'travel_amount_cents' => $travel_amount_cents,
       'currency' => $currency,
       'tax_pending' => true,
       'tax_message' => (string)($preview_policy['policy_message'] ?? 'Sales tax is calculated after billing state and ZIP are entered.'),
@@ -8717,7 +8734,25 @@ class MRM_Payments_Hub_Single {
       );
 
       foreach ($skus as $index => $sku_raw) {
-        $label_raw = sanitize_text_field((string)($labels[$index] ?? ''));
+        $raw_sku_value = trim((string)$sku_raw);
+        $raw_original_sku = trim((string)($original_skus[$index] ?? ''));
+        $raw_label_value = trim((string)($labels[$index] ?? ''));
+        $raw_amount_value = trim((string)($amounts[$index] ?? ''));
+        $is_delete_request = !empty($deletes[$index]);
+
+        $has_meaningful_input =
+          ($raw_sku_value !== '') ||
+          ($raw_original_sku !== '') ||
+          ($raw_label_value !== '') ||
+          ($raw_amount_value !== '') ||
+          $is_delete_request;
+
+        // Ignore the blank "new product" template row so it cannot overwrite real products.
+        if (!$has_meaningful_input) {
+          continue;
+        }
+
+        $label_raw = sanitize_text_field($raw_label_value);
         $type = sanitize_text_field((string)($types[$index] ?? 'sheet_music'));
         if (!in_array($type, $allowed_types, true)) $type = 'lesson';
         $category = sanitize_text_field((string)($categories[$index] ?? ''));
@@ -8748,12 +8783,15 @@ class MRM_Payments_Hub_Single {
         if (!$sku) continue;
 
         $label = $label_raw !== '' ? $label_raw : $sku;
-        $amount = intval($amounts[$index] ?? 0);
-        $final_amount_cents = max(0, $amount);
-        if ($final_amount_cents <= 0) {
-          // You can choose to allow 0 for certain SKUs if you want, but generally this avoids accidental free products.
-          $final_amount_cents = 0;
+
+        $amount_raw = trim((string)($amounts[$index] ?? ''));
+        if ($amount_raw === '' && $current_sku && isset($products[$current_sku]['amount_cents'])) {
+          // Preserve the existing price if the field was left blank.
+          $final_amount_cents = max(0, (int)$products[$current_sku]['amount_cents']);
+        } else {
+          $final_amount_cents = max(0, (int)$amount_raw);
         }
+
         $currency = sanitize_text_field((string)($currencies[$index] ?? 'usd'));
         if (!in_array($currency, $allowed_currencies, true)) $currency = 'usd';
 
