@@ -1183,6 +1183,100 @@ a{ -webkit-tap-highlight-color:transparent; }
     }
   }
 
+  function setOfferButtonsEnabled(offerEl, enabled) {
+    if (!offerEl) return;
+    offerEl.querySelectorAll('.mrm-purchaseBtn, .mrm-accessBtn').forEach(btn => {
+      btn.disabled = !enabled;
+      btn.style.opacity = enabled ? '1' : '0.55';
+      btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    });
+  }
+
+  function setOfferStatus(offerEl, message) {
+    if (!offerEl) return;
+    const statusEl = offerEl.querySelector('.mrm-offerStatus');
+    if (statusEl) statusEl.textContent = message || '';
+  }
+
+  async function validateResolvedOfferSku(resolvedSku) {
+    if (!resolvedSku) return { ok: false, message: 'Missing resolved SKU.' };
+
+    try {
+      const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?sku=${encodeURIComponent(resolvedSku)}`, {
+        method: 'GET'
+      });
+      const qData = await qRes.json().catch(() => ({}));
+
+      if (!qRes.ok || !qData.ok) {
+        return {
+          ok: false,
+          message: qData.message || 'This offer is not active in Payments Hub.'
+        };
+      }
+
+      return { ok: true, data: qData };
+    } catch (err) {
+      return {
+        ok: false,
+        message: 'Could not validate this offer against Payments Hub.'
+      };
+    }
+  }
+
+  async function primeOfferSkuState(offerEl) {
+    if (!offerEl) return '';
+
+    const rawSku = String(offerEl.dataset.productSlug || '').trim().toLowerCase();
+
+    if (!rawSku) {
+      offerEl.dataset.resolvedSku = '';
+      offerEl.dataset.skuValid = '0';
+      setOfferButtonsEnabled(offerEl, false);
+      setOfferStatus(offerEl, 'This offer is missing a product slug in MRM Access → Purchasing Options (Offers).');
+      return '';
+    }
+
+    const resolvedSku = await resolveCanonicalHubSkuForOffer(offerEl);
+    const validation = await validateResolvedOfferSku(resolvedSku);
+
+    if (!validation.ok) {
+      offerEl.dataset.resolvedSku = '';
+      offerEl.dataset.skuValid = '0';
+      setOfferButtonsEnabled(offerEl, false);
+      setOfferStatus(
+        offerEl,
+        `Offer unavailable: ${validation.message} Check the offer product_slug and make sure the matching Payments Hub product is active.`
+      );
+      return '';
+    }
+
+    offerEl.dataset.resolvedSku = String(resolvedSku || '').trim().toLowerCase();
+    offerEl.dataset.skuValid = '1';
+    setOfferButtonsEnabled(offerEl, true);
+    setOfferStatus(offerEl, '');
+    return offerEl.dataset.resolvedSku;
+  }
+
+  async function getValidatedOfferSkuOrThrow(offerEl) {
+    if (!offerEl) {
+      throw new Error('Offer not found.');
+    }
+
+    if (offerEl.dataset.skuValid === '1' && offerEl.dataset.resolvedSku) {
+      return offerEl.dataset.resolvedSku;
+    }
+
+    const sku = await primeOfferSkuState(offerEl);
+    if (!sku) {
+      const statusEl = offerEl.querySelector('.mrm-offerStatus');
+      throw new Error(
+        (statusEl && statusEl.textContent) || 'This offer is not configured correctly.'
+      );
+    }
+
+    return sku;
+  }
+
   function renderPiecePaymentBreakdown(breakdown){
     const instructions = document.getElementById('payment-instructions');
     if (!instructions) return;
@@ -1744,9 +1838,10 @@ a{ -webkit-tap-highlight-color:transparent; }
           </div>
 
           <div class="actions">
-            <a href="#" class="button-primary mrm-purchaseBtn">Purchase</a>
-            <a href="#" class="button-secondary mrm-accessBtn">Access</a>
+            <button type="button" class="button-primary mrm-purchaseBtn">Purchase</button>
+            <button type="button" class="button-secondary mrm-accessBtn">Access</button>
           </div>
+          <div class="mrm-offerStatus" style="margin-top:10px;font-size:13px;line-height:1.4;color:#8a1f1f;"></div>
         </div>
       </div>
     `;
@@ -1832,6 +1927,9 @@ a{ -webkit-tap-highlight-color:transparent; }
     offers.forEach(off => {
       offersWrap.appendChild(buildOfferDom(off));
     });
+
+    const renderedOffers = Array.from(offersWrap.querySelectorAll('.mrm-offer'));
+    await Promise.all(renderedOffers.map(primeOfferSkuState));
 
     // Initialize PDF + audio + OTP now that DOM is built
     initPdf(pieceEl);
@@ -2108,17 +2206,19 @@ a{ -webkit-tap-highlight-color:transparent; }
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
-        const rawSku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
+        let sku = '';
+        try {
+          sku = await getValidatedOfferSkuOrThrow(offerEl);
+        } catch (err) {
+          alert(err.message || 'This offer is not available for purchase.');
+          return;
+        }
 
-        if (!rawSku) { alert('Missing product_slug for this offer.'); return; }
-
-        const sku = await resolveCanonicalHubSkuForOffer(offerEl);
         console.log('[MRM] Purchase SKU resolved', {
-          raw_offer_slug: rawSku,
+          raw_offer_slug: offerEl ? (offerEl.dataset.productSlug || '').trim() : '',
           resolved_sku: sku,
           piece_slug: getPieceSlugFromUrl()
         });
-        if (!sku) { alert('Unable to determine product SKU for this offer.'); return; }
 
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
         let quoteData = null;
@@ -2152,11 +2252,13 @@ a{ -webkit-tap-highlight-color:transparent; }
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
-        const rawSku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
-        if (!rawSku) { alert('Missing product_slug for this offer.'); return; }
-
-        const sku = await resolveCanonicalHubSkuForOffer(offerEl);
-        if (!sku) { alert('Unable to determine product SKU for this offer.'); return; }
+        let sku = '';
+        try {
+          sku = await getValidatedOfferSkuOrThrow(offerEl);
+        } catch (err) {
+          alert(err.message || 'This offer is not available for access.');
+          return;
+        }
 
         openOtpModal(sku);
       });
