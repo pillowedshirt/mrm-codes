@@ -2089,6 +2089,11 @@ a{ -webkit-tap-highlight-color:transparent; }
       const dur   = offerEl.querySelector('.mrm-duration');
       const vol   = offerEl.querySelector('.mrm-volume');
 
+      // If this offer intentionally has no preview audio, skip audio wiring entirely.
+      if (!audio || !play || !seek || !cur || !dur || !vol) {
+        return;
+      }
+
       function syncPlayUI(){
         const playing = audio && !audio.paused && !audio.ended;
         play.classList.toggle('is-playing', !!playing);
@@ -2120,7 +2125,13 @@ a{ -webkit-tap-highlight-color:transparent; }
       vol.addEventListener('input', () => { audio.volume = Number(vol.value); });
     }
 
-    piece.querySelectorAll('.mrm-offer').forEach(syncOfferAudio);
+    piece.querySelectorAll('.mrm-offer').forEach((offerEl) => {
+      try {
+        syncOfferAudio(offerEl);
+      } catch (err) {
+        console.error('[MRM] Offer audio init failed for one offer:', err, offerEl);
+      }
+    });
 
     const payBtn = document.getElementById('mrm-pay-btn');
     if (payBtn) {

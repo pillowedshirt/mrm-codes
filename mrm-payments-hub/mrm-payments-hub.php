@@ -784,18 +784,48 @@ class MRM_Payments_Hub_Single {
     return '';
   }
 
+  private function mrm_collect_stripe_secret_candidates($secret) {
+    $candidates = array();
+
+    $push_candidate = function($value) use (&$candidates) {
+      if (is_array($value)) {
+        $candidates[] = $value;
+        return;
+      }
+
+      if (is_string($value)) {
+        $decoded = json_decode($value, true);
+        if (is_array($decoded)) {
+          $candidates[] = $decoded;
+        }
+      }
+    };
+
+    $push_candidate($secret);
+
+    if (is_array($secret)) {
+      foreach ($secret as $key => $value) {
+        if (is_array($value) || is_string($value)) {
+          $push_candidate($value);
+        }
+      }
+
+      foreach (array('stripe', 'stripe_keys', 'keys', 'credentials', 'payment', 'payments') as $nested_key) {
+        if (array_key_exists($nested_key, $secret)) {
+          $push_candidate($secret[$nested_key]);
+        }
+      }
+    }
+
+    return $candidates;
+  }
+
   private function mrm_normalize_stripe_secret_bundle($secret) {
     if (!is_array($secret)) {
       return null;
     }
 
-    $candidates = array($secret);
-
-    foreach (array('stripe', 'stripe_keys', 'keys', 'credentials') as $nested_key) {
-      if (isset($secret[$nested_key]) && is_array($secret[$nested_key])) {
-        $candidates[] = $secret[$nested_key];
-      }
-    }
+    $candidates = $this->mrm_collect_stripe_secret_candidates($secret);
 
     $publishable = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
       'publishable_key',
@@ -803,6 +833,7 @@ class MRM_Payments_Hub_Single {
       'stripe_publishable_key',
       'stripe_live_publishable_key',
       'stripe_test_publishable_key',
+      'pk',
     ));
 
     $secret_key = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
@@ -811,6 +842,7 @@ class MRM_Payments_Hub_Single {
       'stripe_secret_key',
       'stripe_live_secret_key',
       'stripe_test_secret_key',
+      'sk',
     ));
 
     $webhook = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
@@ -819,9 +851,9 @@ class MRM_Payments_Hub_Single {
       'stripe_webhook_secret',
       'stripe_live_webhook_secret',
       'stripe_test_webhook_secret',
+      'whsec',
     ));
 
-    // Final safety pass: detect Stripe-looking values even if the field names are unusual.
     foreach ($candidates as $candidate) {
       if (!is_array($candidate)) {
         continue;
@@ -889,9 +921,12 @@ class MRM_Payments_Hub_Single {
       return null;
     }
 
+    $candidates = $this->mrm_collect_stripe_secret_candidates($secret);
+
     $context = array(
       'secret_id' => MRM_SECRET_STRIPE_KEYS,
       'raw_keys_present' => array_keys($secret),
+      'candidate_count' => is_array($candidates) ? count($candidates) : 0,
       'has_publishable_key' => !empty($normalized['publishable_key']),
       'has_secret_key' => !empty($normalized['secret_key']),
       'has_webhook_secret' => !empty($normalized['webhook_secret']),
@@ -7526,6 +7561,14 @@ class MRM_Payments_Hub_Single {
       ));
     }
 
+    $publishable_key = $this->publishable_key();
+    if ($publishable_key === '') {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Stripe publishable key is not configured.',
+      ), 500);
+    }
+
     $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra, $payment_method_types);
     if (is_wp_error($pi)) {
       $data = $pi->get_error_data();
@@ -7534,14 +7577,6 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->attach_payment_intent_to_order($order_id, (string)$pi['id'], (string)($pi['status'] ?? ''));
-
-    $publishable_key = $this->publishable_key();
-    if ($publishable_key === '') {
-      return new WP_REST_Response(array(
-        'ok' => false,
-        'message' => 'Stripe publishable key is not configured.',
-      ), 500);
-    }
 
     return new WP_REST_Response(array(
       'ok' => true,
