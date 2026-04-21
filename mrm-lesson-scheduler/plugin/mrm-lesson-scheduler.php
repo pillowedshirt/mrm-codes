@@ -7,12 +7,12 @@
  * Author: Your Name
  *
  * Google Calendar integration:
- * - Service Account JSON stored in wp_options (autoload disabled)
+ * - Service Account JSON loaded from AWS Secrets Manager
  * - /availability supports:
  *   "Free" events define availability windows (calendar-driven scheduling)
  *
  * SECURITY NOTE:
- * Service Account JSON contains a private key. Restrict admin access and keep backups safe.
+ * Service Account JSON contains a private key. Keep AWS credentials and secret access tightly restricted.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -175,9 +175,111 @@ class MRM_Lesson_Scheduler {
         }
     }
 
+    protected function mrm_first_non_empty_google_string($candidates, $keys) {
+        if ( ! is_array( $candidates ) ) {
+            return '';
+        }
+
+        foreach ( $candidates as $candidate ) {
+            if ( ! is_array( $candidate ) ) {
+                continue;
+            }
+
+            foreach ( $keys as $key ) {
+                if ( ! array_key_exists( $key, $candidate ) ) {
+                    continue;
+                }
+
+                $value = $candidate[ $key ];
+
+                if ( is_array( $value ) || is_object( $value ) ) {
+                    continue;
+                }
+
+                $value = trim( (string) $value );
+                if ( $value !== '' ) {
+                    return $value;
+                }
+            }
+        }
+
+        return '';
+    }
+
+    protected function mrm_normalize_google_scheduler_secret_bundle( $secret ) {
+        if ( ! is_array( $secret ) ) {
+            return null;
+        }
+
+        $service_account_json = '';
+        $sync_secret = '';
+
+        // Case 1: Wrapped service account JSON in expected key.
+        if ( array_key_exists( 'service_account_json', $secret ) ) {
+            if ( is_string( $secret['service_account_json'] ) && trim( $secret['service_account_json'] ) !== '' ) {
+                $service_account_json = trim( (string) $secret['service_account_json'] );
+            } elseif ( is_array( $secret['service_account_json'] ) && ! empty( $secret['service_account_json'] ) ) {
+                $encoded = wp_json_encode( $secret['service_account_json'] );
+                if ( is_string( $encoded ) && $encoded !== '' ) {
+                    $service_account_json = $encoded;
+                }
+            }
+        }
+
+        // Case 2: Raw top-level Google service account object.
+        if (
+            $service_account_json === '' &&
+            ! empty( $secret['client_email'] ) &&
+            ! empty( $secret['private_key'] )
+        ) {
+            $raw_service_account = $secret;
+            unset(
+                $raw_service_account['sync_secret'],
+                $raw_service_account['google_sync_secret'],
+                $raw_service_account['sync_token']
+            );
+
+            $encoded = wp_json_encode( $raw_service_account );
+            if ( is_string( $encoded ) && $encoded !== '' ) {
+                $service_account_json = $encoded;
+            }
+        }
+
+        // Case 3: Nested service account objects.
+        if ( $service_account_json === '' ) {
+            foreach ( array( 'service_account', 'google_service_account', 'google', 'credentials' ) as $nested_key ) {
+                if ( ! isset( $secret[ $nested_key ] ) || ! is_array( $secret[ $nested_key ] ) ) {
+                    continue;
+                }
+
+                $candidate = $secret[ $nested_key ];
+                if ( empty( $candidate['client_email'] ) || empty( $candidate['private_key'] ) ) {
+                    continue;
+                }
+
+                $encoded = wp_json_encode( $candidate );
+                if ( is_string( $encoded ) && $encoded !== '' ) {
+                    $service_account_json = $encoded;
+                    break;
+                }
+            }
+        }
+
+        $sync_secret = $this->mrm_first_non_empty_google_string(
+            array( $secret ),
+            array( 'sync_secret', 'google_sync_secret', 'sync_token' )
+        );
+
+        return array(
+            'service_account_json' => $service_account_json,
+            'sync_secret'          => $sync_secret,
+            '_raw_keys'            => array_keys( $secret ),
+        );
+    }
+
     protected function mrm_get_google_scheduler_secret_bundle() {
         if ( ! defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ) {
-            error_log( 'MRM Google AWS secret constant MRM_SECRET_GOOGLE_SCHEDULER is not defined.' );
+            $this->mrm_aws_debug_log( 'MRM Google AWS secret constant MRM_SECRET_GOOGLE_SCHEDULER is not defined.' );
             return null;
         }
 
@@ -187,30 +289,40 @@ class MRM_Lesson_Scheduler {
         );
 
         if ( ! is_array( $secret ) ) {
-            error_log( 'MRM Google AWS secret bundle could not be loaded from Secrets Manager.' );
+            $this->mrm_aws_debug_log( 'MRM Google AWS secret bundle could not be loaded from Secrets Manager.', array(
+                'secret_id' => MRM_SECRET_GOOGLE_SCHEDULER,
+            ) );
             return null;
         }
 
-        error_log(
-            'MRM Google AWS secret bundle loaded. Keys present: ' .
-            implode( ',', array_keys( $secret ) )
-        );
+        $normalized = $this->mrm_normalize_google_scheduler_secret_bundle( $secret );
 
-        if ( array_key_exists( 'service_account_json', $secret ) ) {
-            error_log( 'MRM Google AWS service_account_json type: ' . gettype( $secret['service_account_json'] ) );
-
-            if ( is_string( $secret['service_account_json'] ) ) {
-                error_log( 'MRM Google AWS service_account_json length: ' . strlen( $secret['service_account_json'] ) );
-            }
-
-            if ( is_array( $secret['service_account_json'] ) ) {
-                error_log( 'MRM Google AWS service_account_json array keys: ' . implode( ',', array_keys( $secret['service_account_json'] ) ) );
-            }
-        } else {
-            error_log( 'MRM Google AWS service_account_json key is missing.' );
+        if ( ! is_array( $normalized ) ) {
+            $this->mrm_aws_debug_log( 'MRM Google AWS secret bundle normalization failed.', array(
+                'secret_id' => MRM_SECRET_GOOGLE_SCHEDULER,
+            ) );
+            return null;
         }
 
-        return $secret;
+        $context = array(
+            'secret_id' => MRM_SECRET_GOOGLE_SCHEDULER,
+            'raw_keys_present' => array_keys( $secret ),
+            'has_service_account_json' => ! empty( $normalized['service_account_json'] ),
+            'has_sync_secret' => ! empty( $normalized['sync_secret'] ),
+        );
+
+        if ( ! empty( $normalized['service_account_json'] ) ) {
+            $context['service_account_json_length'] = strlen( $normalized['service_account_json'] );
+            $context['service_account_json_preview'] = substr( $normalized['service_account_json'], 0, 120 );
+        }
+
+        if ( ! empty( $normalized['sync_secret'] ) ) {
+            $context['sync_secret_length'] = strlen( $normalized['sync_secret'] );
+        }
+
+        $this->mrm_aws_debug_log( 'MRM Google AWS secret bundle loaded and normalized.', $context );
+
+        return $normalized;
     }
 
     protected function mrm_google_service_account_uses_aws() {
@@ -2842,7 +2954,7 @@ protected function mrm_get_google_service_account_json() {
                 if ( $calendar_id === '' ) {
                     $google_messages[] = 'Instructor calendar_id is blank, so no Google Calendar event could be created.';
                 } elseif ( ! $this->google_is_configured() ) {
-                    $google_messages[] = 'Google Calendar is not configured in the plugin settings, so no calendar event could be created.';
+                    $google_messages[] = 'Google Calendar is not configured, so no calendar event could be created.';
                 }
 
                 // Non-recurring lessons still create one standalone Google event.
@@ -8691,17 +8803,12 @@ protected function mrm_get_google_service_account_json() {
                     <tr>
                         <th scope="row">Service Account JSON</th>
                         <td>
-                            <?php if ( $this->mrm_google_service_account_uses_aws() ) : ?>
-                                <p><strong>AWS Secrets Manager is active for the Google service account JSON.</strong></p>
-                                <p class="description">
-                                    The scheduler is loading the Google service account JSON from
-                                    <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>.
-                                    The JSON is not shown here so AWS remains the only source of truth.
-                                </p>
-                            <?php else : ?>
-                                <textarea name="google_service_account_json" rows="12" style="width:100%; max-width:900px;"><?php echo esc_textarea( $json ); ?></textarea>
-                                <p class="description"> Paste the full JSON key file you download from Google Cloud (contains private_key + client_email). Keep this private. </p>
-                            <?php endif; ?>
+                            <p><strong>AWS Secrets Manager is the only supported source for the Google service account JSON.</strong></p>
+                            <p class="description">
+                                The scheduler loads the Google service account JSON from
+                                <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>.
+                                This settings page no longer stores service account JSON locally in WordPress.
+                            </p>
                         </td>
                     </tr>
                     <tr>

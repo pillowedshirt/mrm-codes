@@ -753,6 +753,115 @@ class MRM_Payments_Hub_Single {
     }
   }
 
+  private function mrm_first_non_empty_string_from_candidates($candidates, $keys) {
+    if (!is_array($candidates)) {
+      return '';
+    }
+
+    foreach ($candidates as $candidate) {
+      if (!is_array($candidate)) {
+        continue;
+      }
+
+      foreach ($keys as $key) {
+        if (!array_key_exists($key, $candidate)) {
+          continue;
+        }
+
+        $value = $candidate[$key];
+
+        if (is_array($value) || is_object($value)) {
+          continue;
+        }
+
+        $value = trim((string)$value);
+        if ($value !== '') {
+          return $value;
+        }
+      }
+    }
+
+    return '';
+  }
+
+  private function mrm_normalize_stripe_secret_bundle($secret) {
+    if (!is_array($secret)) {
+      return null;
+    }
+
+    $candidates = array($secret);
+
+    foreach (array('stripe', 'stripe_keys', 'keys', 'credentials') as $nested_key) {
+      if (isset($secret[$nested_key]) && is_array($secret[$nested_key])) {
+        $candidates[] = $secret[$nested_key];
+      }
+    }
+
+    $publishable = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
+      'publishable_key',
+      'publishableKey',
+      'stripe_publishable_key',
+      'stripe_live_publishable_key',
+      'stripe_test_publishable_key',
+    ));
+
+    $secret_key = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
+      'secret_key',
+      'secretKey',
+      'stripe_secret_key',
+      'stripe_live_secret_key',
+      'stripe_test_secret_key',
+    ));
+
+    $webhook = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
+      'webhook_secret',
+      'webhookSecret',
+      'stripe_webhook_secret',
+      'stripe_live_webhook_secret',
+      'stripe_test_webhook_secret',
+    ));
+
+    // Final safety pass: detect Stripe-looking values even if the field names are unusual.
+    foreach ($candidates as $candidate) {
+      if (!is_array($candidate)) {
+        continue;
+      }
+
+      foreach ($candidate as $maybe_value) {
+        if (is_array($maybe_value) || is_object($maybe_value)) {
+          continue;
+        }
+
+        $maybe_value = trim((string)$maybe_value);
+        if ($maybe_value === '') {
+          continue;
+        }
+
+        if ($publishable === '' && preg_match('/^pk_(live|test)_/i', $maybe_value)) {
+          $publishable = $maybe_value;
+          continue;
+        }
+
+        if ($secret_key === '' && preg_match('/^sk_(live|test)_/i', $maybe_value)) {
+          $secret_key = $maybe_value;
+          continue;
+        }
+
+        if ($webhook === '' && preg_match('/^whsec_/i', $maybe_value)) {
+          $webhook = $maybe_value;
+          continue;
+        }
+      }
+    }
+
+    return array(
+      'publishable_key' => $publishable,
+      'secret_key'      => $secret_key,
+      'webhook_secret'  => $webhook,
+      '_raw_keys'       => array_keys($secret),
+    );
+  }
+
   private function mrm_get_stripe_secret_bundle() {
     if (!defined('MRM_SECRET_STRIPE_KEYS')) {
       $this->mrm_aws_debug_log('Stripe secret constant MRM_SECRET_STRIPE_KEYS is not defined.');
@@ -771,32 +880,41 @@ class MRM_Payments_Hub_Single {
       return null;
     }
 
+    $normalized = $this->mrm_normalize_stripe_secret_bundle($secret);
+
+    if (!is_array($normalized)) {
+      $this->mrm_aws_debug_log('Stripe AWS secret bundle normalization failed.', array(
+        'secret_id' => MRM_SECRET_STRIPE_KEYS,
+      ));
+      return null;
+    }
+
     $context = array(
       'secret_id' => MRM_SECRET_STRIPE_KEYS,
-      'keys_present' => array_keys($secret),
-      'has_publishable_key' => array_key_exists('publishable_key', $secret),
-      'has_secret_key' => array_key_exists('secret_key', $secret),
-      'has_webhook_secret' => array_key_exists('webhook_secret', $secret),
+      'raw_keys_present' => array_keys($secret),
+      'has_publishable_key' => !empty($normalized['publishable_key']),
+      'has_secret_key' => !empty($normalized['secret_key']),
+      'has_webhook_secret' => !empty($normalized['webhook_secret']),
     );
 
-    if (array_key_exists('publishable_key', $secret) && is_string($secret['publishable_key'])) {
-      $context['publishable_key_length'] = strlen($secret['publishable_key']);
-      $context['publishable_key_preview'] = substr($secret['publishable_key'], 0, 20);
+    if (!empty($normalized['publishable_key'])) {
+      $context['publishable_key_length'] = strlen($normalized['publishable_key']);
+      $context['publishable_key_preview'] = substr($normalized['publishable_key'], 0, 20);
     }
 
-    if (array_key_exists('secret_key', $secret) && is_string($secret['secret_key'])) {
-      $context['secret_key_length'] = strlen($secret['secret_key']);
-      $context['secret_key_preview'] = substr($secret['secret_key'], 0, 20);
+    if (!empty($normalized['secret_key'])) {
+      $context['secret_key_length'] = strlen($normalized['secret_key']);
+      $context['secret_key_preview'] = substr($normalized['secret_key'], 0, 20);
     }
 
-    if (array_key_exists('webhook_secret', $secret) && is_string($secret['webhook_secret'])) {
-      $context['webhook_secret_length'] = strlen($secret['webhook_secret']);
-      $context['webhook_secret_preview'] = substr($secret['webhook_secret'], 0, 20);
+    if (!empty($normalized['webhook_secret'])) {
+      $context['webhook_secret_length'] = strlen($normalized['webhook_secret']);
+      $context['webhook_secret_preview'] = substr($normalized['webhook_secret'], 0, 20);
     }
 
-    $this->mrm_aws_debug_log('Stripe AWS secret bundle loaded.', $context);
+    $this->mrm_aws_debug_log('Stripe AWS secret bundle loaded and normalized.', $context);
 
-    return $secret;
+    return $normalized;
   }
 
   private function publishable_key() {
@@ -7417,9 +7535,17 @@ class MRM_Payments_Hub_Single {
 
     $this->attach_payment_intent_to_order($order_id, (string)$pi['id'], (string)($pi['status'] ?? ''));
 
+    $publishable_key = $this->publishable_key();
+    if ($publishable_key === '') {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Stripe publishable key is not configured.',
+      ), 500);
+    }
+
     return new WP_REST_Response(array(
       'ok' => true,
-      'publishableKey' => $this->publishable_key(),
+      'publishableKey' => $publishable_key,
       'client_secret' => (string)($pi['client_secret'] ?? ''),
       'payment_intent_id' => (string)$pi['id'],
       'allowed_payment_methods' => array_values($payment_method_types),
@@ -7526,9 +7652,17 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok'=>false,'message'=>$si->get_error_message()), 500);
     }
 
+    $publishable_key = $this->publishable_key();
+    if ($publishable_key === '') {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Stripe publishable key is not configured.',
+      ), 500);
+    }
+
     return new WP_REST_Response(array(
       'ok' => true,
-      'publishableKey' => $this->publishable_key(),
+      'publishableKey' => $publishable_key,
       'client_secret' => (string)($si['client_secret'] ?? ''),
       'setup_intent_id' => (string)($si['id'] ?? ''),
       'autopay_profile_id' => $autopay_profile_id,
