@@ -1995,6 +1995,48 @@ class MRM_Payments_Hub_Single {
     return $this->stripe_api_request('GET', '/v1/subscriptions/' . rawurlencode((string)$subscription_id));
   }
 
+  private function stripe_update_subscription($subscription_id, $params = array()) {
+    $subscription_id = trim((string)$subscription_id);
+    if ($subscription_id === '') {
+      return new WP_Error('mrm_missing_subscription_id', 'Missing subscription ID.');
+    }
+
+    return $this->stripe_api_request(
+      'POST',
+      '/v1/subscriptions/' . rawurlencode($subscription_id),
+      is_array($params) ? $params : array()
+    );
+  }
+
+  private function mrm_resume_sheet_music_subscription($email, $payment_method_id = '', $order_id = 0) {
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) {
+      return new WP_Error('mrm_invalid_email', 'Missing valid email for subscription resume.');
+    }
+
+    $candidate = $this->mrm_get_resumable_sheet_music_subscription_by_email($email);
+    if (empty($candidate['subscription_id'])) {
+      return new WP_Error('mrm_no_resumable_subscription', 'No resumable subscription found.');
+    }
+
+    $params = array(
+      'cancel_at_period_end' => 'false',
+    );
+
+    if ($payment_method_id !== '') {
+      $params['default_payment_method'] = (string)$payment_method_id;
+    }
+
+    $updated = $this->stripe_update_subscription($candidate['subscription_id'], $params);
+    if (is_wp_error($updated)) {
+      return $updated;
+    }
+
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($updated, $email);
+
+    return $updated;
+  }
+
   private function stripe_find_customer_by_email($email) {
     $email = sanitize_email((string)$email);
     if (!$email || !is_email($email)) {
@@ -3534,6 +3576,53 @@ class MRM_Payments_Hub_Single {
     return is_array($row) ? $row : array();
   }
 
+  private function mrm_get_resumable_sheet_music_subscription_by_email($email) {
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) {
+      return array();
+    }
+
+    $status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email);
+    if (empty($status['has_access'])) {
+      return array();
+    }
+
+    if (empty($status['cancel_at_period_end'])) {
+      return array();
+    }
+
+    if (empty($status['subscription_id'])) {
+      return array();
+    }
+
+    $subscription_id = (string)$status['subscription_id'];
+    $subscription = $this->stripe_retrieve_subscription($subscription_id);
+
+    if (is_wp_error($subscription) || !is_array($subscription) || empty($subscription['id'])) {
+      return array();
+    }
+
+    $live_status = strtolower((string)($subscription['status'] ?? ''));
+    $cancel_at_period_end = !empty($subscription['cancel_at_period_end']);
+    $current_period_end = !empty($subscription['current_period_end']) ? (int)$subscription['current_period_end'] : 0;
+
+    if (
+      in_array($live_status, array('active', 'trialing'), true) &&
+      $cancel_at_period_end &&
+      $current_period_end > time()
+    ) {
+      return array(
+        'subscription_id' => (string)$subscription['id'],
+        'customer_id' => (string)($subscription['customer'] ?? ''),
+        'status' => $live_status,
+        'current_period_end' => $current_period_end,
+        'subscription' => $subscription,
+      );
+    }
+
+    return array();
+  }
+
   private function mrm_get_retryable_sheet_music_subscription_orders($limit = 25) {
     global $wpdb;
 
@@ -3819,6 +3908,35 @@ class MRM_Payments_Hub_Single {
         'payment_method_id' => $payment_method_id,
       ));
 
+      $subscription_mode = strtolower((string)($meta['mrm_sheet_music_subscription_mode'] ?? 'new'));
+
+      if ($subscription_mode === 'resume') {
+        $resumed = $this->mrm_resume_sheet_music_subscription(
+          $email,
+          $payment_method_id,
+          $order_id
+        );
+
+        if (is_wp_error($resumed)) {
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'resume_failed');
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $resumed->get_error_message());
+          return false;
+        }
+
+        $subscription_id = (string)($resumed['id'] ?? '');
+        $subscription_status = (string)($resumed['status'] ?? '');
+
+        if ($subscription_id !== '') {
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_id', $subscription_id);
+        }
+
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', ($subscription_status !== '' ? $subscription_status : 'active'));
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_created_at', current_time('mysql'));
+        $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', '');
+
+        return true;
+      }
+
       $address = array(
         'line1' => (string)($meta['mrm_tax_line1'] ?? ''),
         'state' => (string)($meta['mrm_tax_state'] ?? ''),
@@ -4094,7 +4212,22 @@ class MRM_Payments_Hub_Single {
     }
     unset($row);
 
-    return $rows;
+    $filtered = array();
+
+    foreach ($rows as $row) {
+      $email = sanitize_email((string)($row['email_plain'] ?? ''));
+      if (!$email || !is_email($email)) {
+        continue;
+      }
+
+      $status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email);
+
+      if (!empty($status['has_access'])) {
+        $filtered[] = $row;
+      }
+    }
+
+    return $filtered;
   }
 
   private function mrm_is_sheet_music_subscription_active_for_admin($row) {
@@ -7332,6 +7465,7 @@ class MRM_Payments_Hub_Single {
     // If this is a lesson checkout with the $5 sheet music add-on selected,
     // block checkout before creating the order / PaymentIntent when the email
     // already has an active Stripe-synced sheet music subscription.
+    $resumable_subscription_for_checkout = array();
     if ($addon_selected && $product_type === 'lesson') {
       $existing_subscription = $this->mrm_get_active_sheet_music_subscription_by_email($email);
 
@@ -7350,6 +7484,13 @@ class MRM_Payments_Hub_Single {
           'message' => $this->mrm_sheet_music_duplicate_subscription_message(),
           'already_enrolled' => true,
         ), 409);
+      }
+
+      $resumable_subscription_for_checkout = $this->mrm_get_resumable_sheet_music_subscription_by_email($email);
+
+      if (!empty($resumable_subscription_for_checkout['subscription_id'])) {
+        $metadata['mrm_sheet_music_subscription_mode'] = 'resume';
+        $metadata['mrm_prior_subscription_id'] = (string)$resumable_subscription_for_checkout['subscription_id'];
       }
     }
 
@@ -7468,6 +7609,20 @@ class MRM_Payments_Hub_Single {
       'currency' => $currency,
       'product_type' => $product_type,
       'category' => (string)($p['category'] ?? ''),
+      'sheet_music_resuming_subscription' => (
+        !empty($resumable_subscription_for_checkout['subscription_id'])
+          ? array(
+            'is_resuming' => true,
+            'subscription_id' => (string)$resumable_subscription_for_checkout['subscription_id'],
+            'current_period_end' => !empty($resumable_subscription_for_checkout['current_period_end']) ? (int)$resumable_subscription_for_checkout['current_period_end'] : 0,
+            'current_period_end_display' => (
+              !empty($resumable_subscription_for_checkout['current_period_end'])
+                ? wp_date(get_option('date_format'), (int)$resumable_subscription_for_checkout['current_period_end'])
+                : ''
+            ),
+          )
+          : array('is_resuming' => false)
+      ),
       // For debugging. Remove later if you want.
       'metadata' => $metadata,
     ), 200);
