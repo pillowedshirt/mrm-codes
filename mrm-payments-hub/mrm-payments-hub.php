@@ -234,7 +234,6 @@ class MRM_Payments_Hub_Single {
       foreach ($required_access_columns as $col) {
         if (!in_array($col, $existing_cols, true)) {
           $needs_upgrade = true;
-          error_log('[MRM Payments Hub] Access table missing column: ' . $col . ' — running install_or_upgrade_db().');
           break;
         }
       }
@@ -261,14 +260,12 @@ class MRM_Payments_Hub_Single {
       foreach ($required_autopay_columns as $col) {
         if (!in_array($col, $existing_autopay_cols, true)) {
           $needs_upgrade = true;
-          error_log('[MRM Payments Hub] Autopay table missing column: ' . $col . ' — running install_or_upgrade_db().');
           break;
         }
       }
     }
 
     if ($needs_upgrade) {
-      error_log('[MRM Payments Hub] DB schema upgrade required; running install_or_upgrade_db().');
       $this->install_or_upgrade_db();
     }
 
@@ -641,21 +638,8 @@ class MRM_Payments_Hub_Single {
   }
 
   private function mrm_aws_debug_log($message, $context = array()) {
-    $log_file = WP_CONTENT_DIR . '/AWS Debug.log';
-
-    $line = '[' . current_time('mysql') . '] ' . $message;
-
-    if (!empty($context)) {
-      $json = wp_json_encode($context);
-      if (is_string($json) && $json !== '') {
-        $line .= ' | ' . $json;
-      }
-    }
-
-    $line .= PHP_EOL;
-
-    @file_put_contents($log_file, $line, FILE_APPEND | LOCK_EX);
-  }
+  return;
+}
 
   private function mrm_get_secret_json($secret_id, $cache_key) {
     $this->mrm_aws_debug_log('Stripe plugin AWS call started', array(
@@ -830,27 +814,21 @@ class MRM_Payments_Hub_Single {
     $publishable = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
       'publishable_key',
       'publishableKey',
-      'stripe_publishable_key',
       'stripe_live_publishable_key',
-      'stripe_test_publishable_key',
       'pk',
     ));
 
     $secret_key = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
       'secret_key',
       'secretKey',
-      'stripe_secret_key',
       'stripe_live_secret_key',
-      'stripe_test_secret_key',
       'sk',
     ));
 
     $webhook = $this->mrm_first_non_empty_string_from_candidates($candidates, array(
       'webhook_secret',
       'webhookSecret',
-      'stripe_webhook_secret',
       'stripe_live_webhook_secret',
-      'stripe_test_webhook_secret',
       'whsec',
     ));
 
@@ -1003,84 +981,16 @@ class MRM_Payments_Hub_Single {
   }
 
   private function stripe_debug_log($message, $context = array()) {
-    try {
-      $timestamp = gmdate('d-M-Y H:i:s') . ' UTC';
-
-      if (!is_scalar($message)) {
-        $message = print_r($message, true);
-      } else {
-        $message = (string)$message;
-      }
-
-      $line = '[' . $timestamp . '] [MRM Stripe] ' . $message;
-
-      if (!empty($context)) {
-        $json = function_exists('wp_json_encode') ? wp_json_encode($context) : json_encode($context);
-        if ($json !== false && $json !== null) {
-          $line .= ' ' . $json;
-        }
-      }
-
-      $line .= PHP_EOL;
-
-      $path = $this->stripe_debug_log_path();
-      if ($path === '') {
-        error_log(trim($line));
-        return;
-      }
-
-      $dir = dirname($path);
-      if (!is_dir($dir)) {
-        error_log(trim($line));
-        return;
-      }
-
-      // If file exists but is not writable, fall back to PHP error log.
-      if (file_exists($path) && !is_writable($path)) {
-        error_log(trim($line));
-        return;
-      }
-
-      // If directory is not writable and file does not already exist, fall back.
-      if (!file_exists($path) && !is_writable($dir)) {
-        error_log(trim($line));
-        return;
-      }
-
-      $result = @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
-      if ($result === false) {
-        error_log(trim($line));
-      }
-    } catch (Throwable $e) {
-      error_log('[MRM Stripe] logger failure: ' . $e->getMessage());
-    }
-  }
+  return;
+}
 
   private function mrm_subscription_debug_log($message, $context = array()) {
-    if (!is_array($context)) {
-      $context = array('value' => $context);
-    }
-
-    $context['component'] = 'sheet_music_subscription';
-    $this->stripe_debug_log($message, $context);
-  }
+  return;
+}
 
   private function mrm_finalization_debug_log($message, $context = array()) {
-    if (!is_array($context)) {
-      $context = array('value' => $context);
-    }
-
-    $line = '[' . gmdate('d-M-Y H:i:s') . ' UTC] [MRM Lesson Finalization] ' . $message;
-
-    if (!empty($context)) {
-      $line .= ' ' . wp_json_encode($context);
-    }
-
-    $line .= PHP_EOL;
-
-    $log_file = trailingslashit(WP_CONTENT_DIR) . 'stripe-debug.log';
-    @file_put_contents($log_file, $line, FILE_APPEND | LOCK_EX);
-  }
+  return;
+}
 
   private function subscription_price_id() {
     $s = $this->get_settings();
@@ -1577,7 +1487,6 @@ class MRM_Payments_Hub_Single {
         $all[$sku] = array_merge($current, $cfg);
         $changed = true;
 
-        error_log('[MRM Payments Hub] Repaired default product: ' . $sku . ' (was amount=' . $cur_amount . ')');
       }
     }
 
@@ -2072,13 +1981,6 @@ class MRM_Payments_Hub_Single {
         'subscription_id' => '',
         'reason' => 'invalid_email',
       );
-      error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
-        'email' => $email,
-        'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
-        'status' => (string)$result['status'],
-        'subscription_id' => (string)$result['subscription_id'],
-        'reason' => (string)$result['reason'],
-      )));
       return $result;
     }
 
@@ -2090,13 +1992,6 @@ class MRM_Payments_Hub_Single {
         'subscription_id' => '',
         'reason' => 'no_customer',
       );
-      error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
-        'email' => $email,
-        'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
-        'status' => (string)$result['status'],
-        'subscription_id' => (string)$result['subscription_id'],
-        'reason' => (string)$result['reason'],
-      )));
       return $result;
     }
 
@@ -2108,13 +2003,6 @@ class MRM_Payments_Hub_Single {
         'subscription_id' => '',
         'reason' => 'no_subscriptions',
       );
-      error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
-        'email' => $email,
-        'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
-        'status' => (string)$result['status'],
-        'subscription_id' => (string)$result['subscription_id'],
-        'reason' => (string)$result['reason'],
-      )));
       return $result;
     }
 
@@ -2134,13 +2022,6 @@ class MRM_Payments_Hub_Single {
           'subscription_id' => $subscription_id,
           'reason' => 'stripe_active',
         );
-        error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
-          'email' => $email,
-          'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
-          'status' => (string)$result['status'],
-          'subscription_id' => (string)$result['subscription_id'],
-          'reason' => (string)$result['reason'],
-        )));
         return $result;
       }
 
@@ -2155,13 +2036,6 @@ class MRM_Payments_Hub_Single {
           'subscription_id' => $subscription_id,
           'reason' => 'paid_through_canceled',
         );
-        error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
-          'email' => $email,
-          'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
-          'status' => (string)$result['status'],
-          'subscription_id' => (string)$result['subscription_id'],
-          'reason' => (string)$result['reason'],
-        )));
         return $result;
       }
     }
@@ -2173,13 +2047,6 @@ class MRM_Payments_Hub_Single {
       'subscription_id' => (string)($latest['id'] ?? ''),
       'reason' => 'stripe_not_active',
     );
-    error_log('[MRM Stripe Access] subscription access lookup ' . wp_json_encode(array(
-      'email' => $email,
-      'has_access' => !empty($result['has_access']) ? 'yes' : 'no',
-      'status' => (string)$result['status'],
-      'subscription_id' => (string)$result['subscription_id'],
-      'reason' => (string)$result['reason'],
-    )));
     return $result;
   }
 
@@ -3201,14 +3068,6 @@ class MRM_Payments_Hub_Single {
     $reason = (string)($sync['reason'] ?? 'unresolved');
 
     if (defined('WP_DEBUG') && WP_DEBUG) {
-      error_log(
-        '[MRM AutoPay] google_truth_check lesson_id=' . $lesson_id .
-        ' status=' . $status .
-        ' reason=' . $reason .
-        ' calendar_id=' . $calendar_id .
-        ' local_start=' . (string)($row['start_time'] ?? '') .
-        ' local_end=' . (string)($row['end_time'] ?? '')
-      );
     }
 
     if ($status === 'cancelled') {
@@ -3239,12 +3098,6 @@ class MRM_Payments_Hub_Single {
     }
 
     if (defined('WP_DEBUG') && WP_DEBUG) {
-      error_log(
-        '[MRM AutoPay] google_truth_confirmed lesson_id=' . $lesson_id .
-        ' end_utc=' . $end_utc .
-        ' synced_start=' . (string)($synced['start_time'] ?? '') .
-        ' synced_end=' . (string)($synced['end_time'] ?? '')
-      );
     }
 
     return array(
@@ -3367,15 +3220,6 @@ class MRM_Payments_Hub_Single {
       $should_detach = ($open_count <= 0);
     }
 
-    error_log('[MRM Payments Hub] autopay detach evaluation'
-      . ' profile_id=' . $autopay_profile_id
-      . ' plan_kind=' . $plan_kind
-      . ' authorized=' . $authorized
-      . ' charged=' . $charged
-      . ' required_followup_count=' . $required_followup_count
-      . ' open_count=' . $open_count
-      . ' should_detach=' . ($should_detach ? 'yes' : 'no')
-    );
 
     if (!$should_detach) return false;
 
@@ -3383,7 +3227,6 @@ class MRM_Payments_Hub_Single {
     if ($pm_id !== '') {
       $det = $this->stripe_detach_payment_method($pm_id);
       if (is_wp_error($det)) {
-        error_log('[MRM Payments Hub] Detach PM failed for autopay profile ' . $autopay_profile_id . ': ' . $det->get_error_message());
         return false;
       }
     }
@@ -3400,11 +3243,6 @@ class MRM_Payments_Hub_Single {
       array('%d')
     );
 
-    error_log('[MRM Payments Hub] autopay profile detached'
-      . ' profile_id=' . $autopay_profile_id
-      . ' charged=' . $charged
-      . ' open_count=' . $open_count
-    );
 
     return true;
   }
@@ -3439,11 +3277,6 @@ class MRM_Payments_Hub_Single {
 
     if ($respect_refund_window && !$this->mrm_order_is_auto_refund_eligible($order, self::MRM_AUTO_REFUND_MAX_AGE_DAYS)) {
       if (defined('WP_DEBUG') && WP_DEBUG) {
-        error_log(
-          '[MRM Payments Hub] Auto-refund skipped: order is older than 7 days. order_id=' . $order_id .
-          ' created_at=' . (string)($order['created_at'] ?? '') .
-          ' note=' . (string)$note
-        );
       }
 
       $this->update_order_status_from_pi($pi_id, $status, $status, array(
@@ -3457,7 +3290,6 @@ class MRM_Payments_Hub_Single {
 
     $refund = $this->stripe_create_refund($pi_id, null, 'requested_by_customer');
     if (is_wp_error($refund)) {
-      error_log('[MRM Payments Hub] Refund failed for order ' . $order_id . ': ' . $refund->get_error_message());
       return false;
     }
 
@@ -3493,7 +3325,6 @@ class MRM_Payments_Hub_Single {
 
     $refund = $this->stripe_create_refund($pi_id, $amount_cents, 'requested_by_customer');
     if (is_wp_error($refund)) {
-      error_log('[MRM Payments Hub] Partial refund failed for order ' . $order_id . ': ' . $refund->get_error_message());
       return false;
     }
 
@@ -4069,7 +3900,6 @@ class MRM_Payments_Hub_Single {
         'message' => $e->getMessage(),
       ));
 
-      error_log('[MRM Payments Hub] Subscription activation helper runtime exception: ' . $e->getMessage());
       return false;
     }
   }
@@ -4201,7 +4031,6 @@ class MRM_Payments_Hub_Single {
     );
 
     if (defined('WP_DEBUG') && WP_DEBUG) {
-      error_log('[MRM Payments Hub] Admin piece access rows fetched. sku=' . $sku . ' row_count=' . count((array)$rows));
     }
 
     return $rows;
@@ -4319,7 +4148,6 @@ class MRM_Payments_Hub_Single {
 
     $instructor_emails = array_values(array_unique(array_filter(array_map('sanitize_email', $instructor_emails))));
 
-    error_log('[MRM Payments Hub] Instructor piece-access sync running. instructor_count=' . count($instructor_emails));
 
     // Remove rows for emails that are no longer instructors.
     $existing_rows = $wpdb->get_results(
@@ -5299,7 +5127,6 @@ class MRM_Payments_Hub_Single {
 
     $connected_account_id = $this->composer_connected_account_id();
     if ($connected_account_id === '') {
-      error_log('[MRM Payments Hub] Recurring subscription composer payout skipped: missing composer connected account setting. invoice_id=' . $invoice_id);
 
       if (method_exists($this, 'stripe_debug_log')) {
         $this->stripe_debug_log('recurring subscription composer payout skipped', array(
@@ -5339,7 +5166,6 @@ class MRM_Payments_Hub_Single {
     );
 
     if ($inserted === false) {
-      error_log('[MRM Payments Hub] Failed to insert recurring subscription payout ledger row. invoice_id=' . $invoice_id);
       return false;
     }
 
@@ -5587,10 +5413,6 @@ class MRM_Payments_Hub_Single {
       array('%d')
     );
 
-    error_log('[MRM AutoPay] webhook finalized failed lesson charge'
-      . ' lesson_id=' . $lesson_id
-      . ' message=' . (string)$message
-    );
   }
 
   private function mrm_reconcile_autopay_existing_order($lesson_id, $order) {
@@ -5606,11 +5428,6 @@ class MRM_Payments_Hub_Single {
 
     $pi = $this->stripe_retrieve_payment_intent($pi_id);
     if (is_wp_error($pi)) {
-      error_log('[MRM AutoPay] reconcile failed to retrieve PI'
-        . ' lesson_id=' . $lesson_id
-        . ' pi_id=' . $pi_id
-        . ' error=' . $pi->get_error_message()
-      );
       return false;
     }
 
@@ -5649,11 +5466,6 @@ class MRM_Payments_Hub_Single {
       return true;
     }
 
-    error_log('[MRM AutoPay] reconcile encountered unhandled PI status'
-      . ' lesson_id=' . $lesson_id
-      . ' pi_id=' . $pi_id
-      . ' status=' . $pi_status
-    );
 
     return false;
   }
@@ -5665,15 +5477,8 @@ class MRM_Payments_Hub_Single {
     $instructor_id = (int)($data['instructor_id'] ?? 0);
     $autopay_profile_id = (int)($data['autopay_profile_id'] ?? 0);
 
-    error_log('[MRM AutoPay] on_lesson_delivered fired'
-      . ' lesson_id=' . $lesson_id
-      . ' instructor_id=' . $instructor_id
-      . ' payment_mode=' . $mode
-      . ' autopay_profile_id=' . $autopay_profile_id
-    );
 
     if ($lesson_id <= 0 || $instructor_id <= 0) {
-      error_log('[MRM AutoPay] on_lesson_delivered aborted: missing lesson_id or instructor_id.');
       return;
     }
 
@@ -5683,7 +5488,6 @@ class MRM_Payments_Hub_Single {
     }
 
     if ($mode === 'autopay') {
-      error_log('[MRM AutoPay] autopay lesson delivery acknowledged; waiting for charge-due / webhook flow.');
       return;
     }
   }
@@ -5728,13 +5532,6 @@ class MRM_Payments_Hub_Single {
     }
 
     if (defined('WP_DEBUG') && WP_DEBUG) {
-      error_log(
-        '[MRM AutoPay] retry_candidate lesson_id=' . $lesson_id .
-        ' status=' . (string)($row['status'] ?? '') .
-        ' charge_status=' . (string)($row['charge_status'] ?? '') .
-        ' charge_attempts=' . (int)($row['charge_attempts'] ?? 0) .
-        ' autopay_profile_id=' . (int)($row['autopay_profile_id'] ?? 0)
-      );
     }
 
     $existing_order = $this->mrm_find_lesson_charge_order($lesson_id);
@@ -5767,7 +5564,6 @@ class MRM_Payments_Hub_Single {
       $google_error = $google_truth->get_error_code() . ': ' . $google_truth->get_error_message();
 
       if (defined('WP_DEBUG') && WP_DEBUG) {
-        error_log('[MRM AutoPay] retry_skip_google_truth lesson_id=' . $lesson_id . ' error=' . $google_error);
       }
 
       $wpdb->update(
@@ -5785,10 +5581,6 @@ class MRM_Payments_Hub_Single {
     }
 
     if (defined('WP_DEBUG') && WP_DEBUG) {
-      error_log(
-        '[MRM AutoPay] retry_charge_ready lesson_id=' . $lesson_id .
-        ' end_utc=' . (string)($google_truth['end_utc'] ?? '')
-      );
     }
 
     $this->charge_and_unlock_autopay(array(
@@ -5835,28 +5627,16 @@ class MRM_Payments_Hub_Single {
       $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
       if (is_wp_error($google_truth)) {
         if (defined('WP_DEBUG') && WP_DEBUG) {
-          error_log(
-            '[MRM AutoPay] discover_skip_google_truth lesson_id=' . $lesson_id .
-            ' error=' . $google_truth->get_error_code() . ': ' . $google_truth->get_error_message()
-          );
         }
         continue;
       }
 
       if (defined('WP_DEBUG') && WP_DEBUG) {
-        error_log(
-          '[MRM AutoPay] discover_google_truth_ready lesson_id=' . $lesson_id .
-          ' end_utc=' . (string)($google_truth['end_utc'] ?? '')
-        );
       }
 
       $status = (string)($row['status'] ?? '');
       if ($status !== 'payment_due') {
         if (defined('WP_DEBUG') && WP_DEBUG) {
-          error_log(
-            '[MRM AutoPay] discover_promote_to_payment_due lesson_id=' . $lesson_id .
-            ' old_status=' . $status
-          );
         }
 
         $wpdb->update(
@@ -5918,19 +5698,11 @@ class MRM_Payments_Hub_Single {
       $google_truth = $this->mrm_google_truth_confirms_lesson_ended($lesson_id);
       if (is_wp_error($google_truth)) {
         if (defined('WP_DEBUG') && WP_DEBUG) {
-          error_log(
-            '[MRM AutoPay] reset_skip_google_truth lesson_id=' . $lesson_id .
-            ' error=' . $google_truth->get_error_code() . ': ' . $google_truth->get_error_message()
-          );
         }
         continue;
       }
 
       if (defined('WP_DEBUG') && WP_DEBUG) {
-        error_log(
-          '[MRM AutoPay] reset_google_truth_ready lesson_id=' . $lesson_id .
-          ' end_utc=' . (string)($google_truth['end_utc'] ?? '')
-        );
       }
 
       $prev_error = trim((string)($row['charge_last_error'] ?? ''));
@@ -6006,10 +5778,6 @@ class MRM_Payments_Hub_Single {
         }
 
         if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
-          error_log(
-            '[MRM Payments Hub] Auto-refund not issued for cancelled autopay lesson. lesson_id=' . $lesson_id .
-            ' order_id=' . (int)($lesson_order['id'] ?? 0)
-          );
         }
       } elseif ($order_id > 0) {
         // Fallback for the prepaid first autopay lesson.
@@ -6043,10 +5811,6 @@ class MRM_Payments_Hub_Single {
             }
 
             if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
-              error_log(
-                '[MRM Payments Hub] Auto-refund not issued for cancelled prepaid first autopay lesson. lesson_id=' . $lesson_id .
-                ' order_id=' . (int)($first_order['id'] ?? 0)
-              );
             }
           }
         }
@@ -6075,10 +5839,6 @@ class MRM_Payments_Hub_Single {
         }
 
         if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
-          error_log(
-            '[MRM Payments Hub] Auto-refund not issued for cancelled one-time lesson. lesson_id=' . $lesson_id .
-            ' order_id=' . (int)($order['id'] ?? 0)
-          );
         }
       }
 
@@ -6097,11 +5857,6 @@ class MRM_Payments_Hub_Single {
       if ($order) {
         $per_lesson_refund_cents = $this->mrm_calculate_prepay_per_lesson_refund_cents($order);
 
-        error_log(
-          '[MRM Payments Hub] Prepay lesson cancellation refund evaluation. lesson_id=' . $lesson_id .
-          ' order_id=' . (int)($order['id'] ?? 0) .
-          ' per_lesson_refund_cents=' . $per_lesson_refund_cents
-        );
 
         if ($per_lesson_refund_cents > 0) {
           $refunded = $this->mrm_request_partial_refund_for_order(
@@ -6118,11 +5873,6 @@ class MRM_Payments_Hub_Single {
           }
 
           if (!$refunded && defined('WP_DEBUG') && WP_DEBUG) {
-            error_log(
-              '[MRM Payments Hub] Partial refund not issued for cancelled prepaid lesson. lesson_id=' . $lesson_id .
-              ' order_id=' . (int)($order['id'] ?? 0) .
-              ' amount_cents=' . $per_lesson_refund_cents
-            );
           }
         }
       }
@@ -6206,14 +5956,8 @@ class MRM_Payments_Hub_Single {
     $lesson_id = (int)($data['lesson_id'] ?? 0);
     $lessons_table = $this->table_lessons();
 
-    error_log('[MRM AutoPay] charge_and_unlock_autopay start'
-      . ' lesson_id=' . $lesson_id
-      . ' instructor_id=' . $instructor_id
-      . ' autopay_profile_id=' . $autopay_profile_id
-    );
 
     if ($autopay_profile_id <= 0 || $instructor_id <= 0 || $lesson_id <= 0) {
-      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: invalid ids.');
       return;
     }
 
@@ -6223,30 +5967,22 @@ class MRM_Payments_Hub_Single {
     ), ARRAY_A);
 
     if (!$lesson) {
-      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: lesson not found.');
       return;
     }
 
     if ((string)($lesson['payment_mode'] ?? '') !== 'autopay') {
-      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: lesson is not autopay.');
       return;
     }
 
     if ((string)($lesson['status'] ?? '') !== 'payment_due') {
-      error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson status is not payment_due. status=' . (string)($lesson['status'] ?? ''));
       return;
     }
 
     if ((string)($lesson['charge_status'] ?? '') === 'paid') {
-      error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: lesson already paid.');
       return;
     }
 
     if ((int)($lesson['order_id'] ?? 0) > 0) {
-      error_log(
-        '[MRM AutoPay] charge_and_unlock_autopay skipped: lesson has original booking order_id and is not a follow-up autopay charge candidate. order_id=' .
-        (int)($lesson['order_id'] ?? 0)
-      );
       return;
     }
 
@@ -6267,7 +6003,6 @@ class MRM_Payments_Hub_Single {
         array('%d')
       );
 
-      error_log('[MRM AutoPay] charge delayed pending Google truth for lesson_id=' . $lesson_id . ' reason=' . $message);
       return;
     }
 
@@ -6292,7 +6027,6 @@ class MRM_Payments_Hub_Single {
       }
 
       if (in_array($existing_status, array('pending', 'processing', 'requires_capture'), true)) {
-        error_log('[MRM AutoPay] charge_and_unlock_autopay skipped: existing in-flight order for lesson_id=' . $lesson_id);
         return;
       }
     }
@@ -6332,7 +6066,6 @@ class MRM_Payments_Hub_Single {
         array('%d')
       );
 
-      error_log('[MRM AutoPay] charge_and_unlock_autopay aborted: payment method still requires confirmation. lesson_id=' . $lesson_id . ' autopay_profile_id=' . $autopay_profile_id);
       return;
     }
 
@@ -6395,7 +6128,6 @@ class MRM_Payments_Hub_Single {
       ), array('id' => (int)$order_id), array('%s','%s','%s'), array('%d'));
 
       $this->mrm_finalize_autopay_lesson_failure($lesson_id, $pi->get_error_message());
-      error_log('[MRM AutoPay] off-session payment failed for lesson_id=' . $lesson_id . ' reason=' . $pi->get_error_message());
       return;
     }
 
@@ -6411,12 +6143,6 @@ class MRM_Payments_Hub_Single {
 
     $this->attach_payment_intent_to_order($order_id, $pi_id, $status, $local_order_status);
 
-    error_log('[MRM AutoPay] off-session payment intent created'
-      . ' lesson_id=' . $lesson_id
-      . ' order_id=' . $order_id
-      . ' pi_id=' . $pi_id
-      . ' status=' . $status
-    );
 
     if (in_array($status, array('succeeded', 'requires_capture'), true)) {
       // Fast-path finalize from direct Stripe truth.
@@ -6707,7 +6433,6 @@ class MRM_Payments_Hub_Single {
     // in Google Calendar and have now ended.
     do_action('mrm_scheduler_reconcile_completed_lessons');
     do_action('mrm_scheduler_reconcile_cancelled_lessons');
-    error_log('MRM payout batch: forced lesson reconciliation before payout selection.');
 
     global $wpdb;
     $table = $this->table_payout_ledger();
@@ -6767,13 +6492,6 @@ class MRM_Payments_Hub_Single {
 
       if ($group_required_total > 0) {
         if (defined('WP_DEBUG') && WP_DEBUG) {
-          error_log(
-            '[MRM Payout] available_balance_only_preflight'
-            . ' currency=' . $currency
-            . ' group_required_total=' . (int)$group_required_total
-            . ' available_total=' . (int)$available['total']
-            . ' connected_account_id=' . $acct
-          );
         }
 
         if ((int)$available['total'] < $group_required_total) {
@@ -6920,13 +6638,6 @@ class MRM_Payments_Hub_Single {
       }
 
       if (defined('WP_DEBUG') && WP_DEBUG) {
-        error_log(
-          '[MRM Payout] connected_balance_preflight'
-          . ' currency=' . $currency
-          . ' payout_total=' . (int)$payout_total
-          . ' connected_available_total=' . (int)$connected_available['total']
-          . ' connected_account_id=' . $acct
-        );
       }
 
       $payout = $this->stripe_create_connected_account_payout(
@@ -7165,26 +6876,21 @@ class MRM_Payments_Hub_Single {
   public function rest_quote(WP_REST_Request $req) {
     $sku = $this->sanitize_sku($req->get_param('sku'));
     if (!$sku) {
-      error_log('[MRM Payments Hub] /quote missing sku');
       return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
     }
 
     $p = $this->get_product($sku);
     if (!$p) {
-      error_log('[MRM Payments Hub] /quote unmapped sku=' . $sku);
       return new WP_REST_Response(array(
         'ok'=>false,
         'message'=>'Unknown sku.',
-        'debug'=>array('sku'=>$sku)
       ), 404);
     }
 
     if (empty($p['active'])) {
-      error_log('[MRM Payments Hub] /quote inactive sku=' . $sku);
       return new WP_REST_Response(array(
         'ok'=>false,
         'message'=>'Inactive sku.',
-        'debug'=>array('sku'=>$sku)
       ), 404);
     }
 
@@ -7209,20 +6915,16 @@ class MRM_Payments_Hub_Single {
 
     // Hard fail: NEVER report ok:true with a non-positive amount
     if ($amount_cents <= 0) {
-      error_log('[MRM Payments Hub] /quote invalid amount for sku=' . $sku . ' amount_cents=' . $amount_cents);
       return new WP_REST_Response(array(
         'ok'=>false,
         'message'=>'Pricing is not configured for this sku.',
-        'debug'=>array('sku'=>$sku,'amount_cents'=>$amount_cents)
       ), 500);
     }
 
     if (!$currency) {
-      error_log('[MRM Payments Hub] /quote missing currency for sku=' . $sku);
       return new WP_REST_Response(array(
         'ok'=>false,
         'message'=>'Currency is not configured for this sku.',
-        'debug'=>array('sku'=>$sku)
       ), 500);
     }
 
@@ -7327,11 +7029,9 @@ class MRM_Payments_Hub_Single {
 
     // Diagnostics for misconfigured products
     if ($base_amount <= 0) {
-      error_log('[MRM Payments Hub] create-payment-intent invalid base amount sku=' . $sku . ' amount_cents=' . $base_amount);
       return new WP_REST_Response(array(
         'ok'=>false,
         'message'=>'Invalid product price.',
-        'debug'=>array('sku'=>$sku,'amount_cents'=>$base_amount)
       ), 400);
     }
 
@@ -7348,17 +7048,14 @@ class MRM_Payments_Hub_Single {
       $expected = $base_amount * $lesson_count;
 
       if ($override > 0 && $override !== $expected) {
-        error_log('[MRM Payments Hub] prepay mismatch sku=' . $sku . ' base=' . $base_amount . ' count=' . $lesson_count . ' override=' . $override . ' expected=' . $expected);
         return new WP_REST_Response(array(
           'ok'=>false,
           'message'=>'Prepay total mismatch. Please refresh and try again.',
-          'debug'=>array(
             'sku'=>$sku,
             'base_amount_cents'=>$base_amount,
             'lesson_count'=>$lesson_count,
             'expected_amount_cents'=>$expected,
             'amount_override_cents'=>$override
-          )
         ), 400);
       }
 
@@ -7375,11 +7072,9 @@ class MRM_Payments_Hub_Single {
         if ($override >= $base_amount && $override <= $max) {
           $amount = $override;
         } else {
-          error_log('[MRM Payments Hub] Rejected amount_override_cents sku=' . $sku . ' base=' . $base_amount . ' override=' . $override);
           return new WP_REST_Response(array(
             'ok'=>false,
             'message'=>'Invalid override amount.',
-            'debug'=>array('sku'=>$sku,'base_amount_cents'=>$base_amount,'amount_override_cents'=>$override)
           ), 400);
         }
       }
@@ -7437,7 +7132,6 @@ class MRM_Payments_Hub_Single {
 
     // Final safety: NEVER create PI with amount=0
     if ($final_amount_cents <= 0) {
-      error_log('[MRM Payments Hub] Refused PI with non-positive amount sku=' . $sku . ' amount=' . $final_amount_cents);
       return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid product price.'), 400);
     }
 
@@ -7572,7 +7266,6 @@ class MRM_Payments_Hub_Single {
     $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra, $payment_method_types);
     if (is_wp_error($pi)) {
       $data = $pi->get_error_data();
-      error_log('[MRM Payments Hub] Stripe PI error sku=' . $sku . ' msg=' . $pi->get_error_message() . ' data=' . wp_json_encode($data));
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
     }
 
@@ -7603,10 +7296,6 @@ class MRM_Payments_Hub_Single {
         'stripe_controls_rollout' => true,
       ),
       'tax_calculation_id' => $tax_calc_id,
-      'tax_debug' => array(
-        'taxability_reason' => (string)($tax_result['taxability_reason'] ?? ''),
-        'line_items' => (array)($tax_result['line_items'] ?? array()),
-      ),
       'currency' => $currency,
       'product_type' => $product_type,
       'category' => (string)($p['category'] ?? ''),
@@ -7739,7 +7428,6 @@ class MRM_Payments_Hub_Single {
 
     $pm_ready = $this->mrm_ensure_customer_payment_method_ready((string)$profile['customer_id'], $payment_method_id);
     if (is_wp_error($pm_ready)) {
-      error_log('[MRM Payments Hub] finalize-autopay payment-method readiness failed: ' . $pm_ready->get_error_message());
       return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()), 400);
     }
 
@@ -7900,15 +7588,6 @@ class MRM_Payments_Hub_Single {
       $this->update_order_status_from_pi($payment_intent_id, (string)($order['status'] ?? 'paid'), 'succeeded', $meta);
     }
 
-    error_log('[MRM Payments Hub] autopay enrollment created'
-      . ' profile_id=' . $autopay_profile_id
-      . ' instructor_id=' . (int)$instructor_id
-      . ' customer_id=' . $customer_id
-      . ' payment_method_id=' . $payment_method_id
-      . ' plan_kind=' . $plan_kind
-      . ' authorized_lesson_count=' . (int)$authorized_lesson_count
-      . ' unit_base_cents=' . (int)$base_amount
-    );
 
     return new WP_REST_Response(array(
       'ok' => true,
@@ -8028,10 +7707,6 @@ class MRM_Payments_Hub_Single {
         'stripe_controls_rollout' => true,
       ),
       'tax_calculation_id' => $tax_calc_id,
-      'tax_debug' => array(
-        'taxability_reason' => (string)($tax_result['taxability_reason'] ?? ''),
-        'line_items' => (array)($tax_result['line_items'] ?? array()),
-      ),
       'total_cents' => (int)$new_total_cents,
       'currency' => $currency,
     ), 200);
@@ -8127,17 +7802,13 @@ class MRM_Payments_Hub_Single {
       $sfu = isset($pi['setup_future_usage']) ? (string)$pi['setup_future_usage'] : '';
 
       if ($customer_id && $pm_id) {
-        error_log('[MRM Payments Hub] verify PI succeeded. customer=' . $customer_id . ' pm=' . $pm_id . ' setup_future_usage=' . $sfu);
 
         $pm_ready = $this->mrm_ensure_customer_payment_method_ready($customer_id, $pm_id);
         if (is_wp_error($pm_ready)) {
-          error_log('[MRM Payments Hub] verify PI payment-method readiness failed: ' . $pm_ready->get_error_message() . ' data=' . wp_json_encode($pm_ready->get_error_data()));
         } else {
-          error_log('[MRM Payments Hub] payment method ready for customer=' . $customer_id);
         }
       } else {
         // If user expected autopay but no customer/pm is present, log it loudly
-        error_log('[MRM Payments Hub] verify PI succeeded but missing customer/pm. customer=' . $customer_id . ' pm=' . $pm_id . ' setup_future_usage=' . $sfu);
       }
     }
 
@@ -8188,7 +7859,6 @@ class MRM_Payments_Hub_Single {
             $piece_auto_grant_success = (bool) $granted;
 
             if (!$granted) {
-              error_log('[MRM Payments Hub] verify PI auto-grant failed for piece sku=' . $pi_sku . ' pi=' . $pi_id);
             }
           }
         }
@@ -8332,11 +8002,6 @@ class MRM_Payments_Hub_Single {
       )
     );
 
-    error_log('[MRM Payments Hub] piece purchase confirmation email ' . wp_json_encode(array(
-      'email' => $email,
-      'sku'   => $sku,
-      'sent'  => $sent ? 'yes' : 'no',
-    )));
 
     return $sent;
   }
@@ -8371,14 +8036,12 @@ class MRM_Payments_Hub_Single {
       // Prefer PI metadata as the source of truth when available.
       if ($pi_sku) {
         if ($sku && $sku !== $pi_sku) {
-          error_log('[MRM Payments Hub] grant-sheet-music-access sku mismatch; request=' . $sku . ' pi_meta=' . $pi_sku . ' pi=' . $pi_id);
         }
         $sku = $pi_sku;
       }
 
       if ($pi_email && is_email($pi_email)) {
         if ($email && strtolower($email) !== strtolower($pi_email)) {
-          error_log('[MRM Payments Hub] grant-sheet-music-access email mismatch; request=' . $email . ' pi_meta=' . $pi_email . ' pi=' . $pi_id);
         }
         $email = $pi_email;
       }
@@ -8405,11 +8068,9 @@ class MRM_Payments_Hub_Single {
     $access_table = $this->table_sheet_music_access();
     $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $access_table));
     if ($found !== $access_table) {
-      error_log('[MRM Payments Hub] grant access failed: missing table ' . $access_table);
       return new WP_REST_Response(array(
         'ok' => false,
         'message' => 'Server is updating. Please try again in a moment.',
-        'debug' => 'missing_access_table'
       ), 500);
     }
 
@@ -8418,12 +8079,10 @@ class MRM_Payments_Hub_Single {
     $ok = $this->grant_sheet_music_access($email_hash, $email, $sku, $pi_id ? 'stripe_pi' : 'manual', $pi_id);
     if (!$ok) {
       $last = $wpdb->last_error ? $wpdb->last_error : 'unknown_db_error';
-      error_log('[MRM Payments Hub] grant_sheet_music_access insert failed sku=' . $sku . ' email_hash=' . $email_hash . ' err=' . $last);
 
       return new WP_REST_Response(array(
         'ok' => false,
         'message' => 'Failed to grant access.',
-        'debug' => 'db_insert_failed'
       ), 500);
     }
 
@@ -8660,12 +8319,6 @@ class MRM_Payments_Hub_Single {
     if (isset($_POST['mrm_pay_hub_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_nonce'], 'mrm_pay_hub_save')) {
       $settings = $this->get_settings();
       // AWS / wp-config managed Stripe credentials are no longer stored in WordPress settings.
-      $settings['stripe_publishable_key'] = '';
-      $settings['stripe_secret_key'] = '';
-      $settings['stripe_webhook_secret'] = '';
-      $settings['stripe_test_publishable_key'] = '';
-      $settings['stripe_test_secret_key'] = '';
-      $settings['stripe_test_webhook_secret'] = '';
 
       $settings['stripe_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_sheet_music_subscription_price_id'] ?? ''));
       $settings['stripe_test_sheet_music_subscription_price_id'] = '';
@@ -9267,8 +8920,7 @@ class MRM_Payments_Hub_Single {
 
         <?php
         $instructor_rows = $this->mrm_get_piece_product_access_rows_for_admin('all-piece-products-instructors');
-        if (defined('WP_DEBUG') && WP_DEBUG) error_log('[MRM Payments Hub] Instructor piece access table render. row_count=' . count((array)$instructor_rows));
-        ?>
+        if (defined('WP_DEBUG') && WP_DEBUG)         ?>
         <h3 style="margin-top:18px;">Instructor piece access (auto-managed)</h3>
         <p><small>This list is auto-generated from the instructors table and updates automatically.</small></p>
 

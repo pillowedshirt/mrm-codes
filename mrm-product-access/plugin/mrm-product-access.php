@@ -1331,10 +1331,6 @@ class MRM_Product_Access {
             );
         }
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log('[MRM Product Access] get_tracks_for_slug result ' . wp_json_encode(array(
-                'requested_slug' => $product_slug,
-                'resolved_count' => count($out),
-            )));
         }
 
         return $out;
@@ -2027,10 +2023,6 @@ class MRM_Product_Access {
         $tracks = $this->get_tracks_for_slug( $product_slug );
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log('[MRM Product Access] access page track lookup ' . wp_json_encode(array(
-                'product_slug' => $product_slug,
-                'track_count'  => is_array($tracks) ? count($tracks) : 0,
-            )));
         }
 
         if ( empty( $tracks ) ) {
@@ -2802,12 +2794,6 @@ Thank you.' ) );
         $sent = wp_mail( $normalized_email, $subject, $body );
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log( '[MRM OTP] send attempt ' . wp_json_encode( array(
-                'email'   => $normalized_email,
-                'product' => $product_slug,
-                'sent'    => $sent ? 'yes' : 'no',
-                'subject' => $subject,
-            ) ) );
         }
 
         return new WP_REST_Response( $generic, 200 );
@@ -4188,10 +4174,6 @@ Thank you.' ) );
         if ( $asset_type === 'audio' && empty( $access_context['allow_audio_download'] ) ) {
             // Allow playback/streaming, but not explicit downloads, for subscription-based access.
             if ( $delivery_mode !== 'stream' ) {
-                error_log(
-                  '[MRM Product Access] Audio download blocked by access type. product_slug=' . $product_slug .
-                  ' source=' . (string)($access_context['source'] ?? '')
-                );
                 return new WP_REST_Response( array( 'error' => 'Audio downloads are not included with this access type.' ), 403 );
             }
         }
