@@ -2003,7 +2003,7 @@ protected function mrm_get_google_service_account_json() {
 
         add_action( 'admin_init', array( $this, 'register_settings' ) );
 
-        add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
+        // add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
 
         add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
         add_action( 'init', array( $this, 'ensure_scheduler_runtime_cron_hooks' ), 20 );
@@ -4541,7 +4541,7 @@ protected function mrm_get_google_service_account_json() {
                             array( '%d' )
                         );
 
-                        wp_schedule_single_event( $desired_send_at, 'mrm_scheduler_send_lesson_reminder', array( $lesson_id ) );
+                        // wp_schedule_single_event( $desired_send_at, 'mrm_scheduler_send_lesson_reminder', array( $lesson_id ) );
 
                         // If the new send time is in the future, stop now (don’t send early).
                         if ( $desired_send_at > time() + 90 ) {
@@ -6164,8 +6164,8 @@ protected function mrm_get_google_service_account_json() {
 
     protected function get_safety_reminder_window_minutes() {
         return array(
-            'from' => 50,
-            'to'   => 70,
+            'from' => 59,
+            'to'   => 61,
         );
     }
 
@@ -9579,17 +9579,7 @@ protected function parse_service_account_json( $json ) {
         }
 
         $student_email    = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
-        $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
-
-        $to = array();
-        if ( is_email( $student_email ) ) {
-            $to[] = $student_email;
-        }
-        if ( is_email( $instructor_email ) ) {
-            $to[] = $instructor_email;
-        }
-
-        if ( empty( $to ) ) {
+        if ( ! is_email( $student_email ) ) {
             return false;
         }
 
@@ -9619,7 +9609,7 @@ protected function parse_service_account_json( $json ) {
         );
 
         return wp_mail(
-            $to,
+            $student_email,
             'Consultation Confirmation',
             $html,
             array(
