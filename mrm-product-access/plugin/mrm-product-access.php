@@ -1641,6 +1641,38 @@ class MRM_Product_Access {
             }
         }
 
+        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m ) ) {
+            $piece_slug = (string) $m[1];
+            $package_sku = 'piece-' . $piece_slug . '-complete-package';
+
+            if ( $package_sku !== $sku ) {
+                $package_rows = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT id, email_hash, email_plain
+                     FROM {$table}
+                     WHERE sku=%s AND revoked_at IS NULL
+                     ORDER BY id DESC",
+                    (string) $package_sku
+                ) );
+
+                if ( is_array( $package_rows ) ) {
+                    foreach ( $package_rows as $row ) {
+                        if ( $row_matches_email_hash( $row ) ) {
+                            return true;
+                        }
+                    }
+                }
+
+                if ( isset( $lists[ $package_sku ] ) && is_array( $lists[ $package_sku ] ) ) {
+                    foreach ( $lists[ $package_sku ] as $em ) {
+                        $em = sanitize_email( $em );
+                        if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
         // Rule 4: per-product DB row
         $rows = $wpdb->get_results( $wpdb->prepare(
             "SELECT id, email_hash, email_plain

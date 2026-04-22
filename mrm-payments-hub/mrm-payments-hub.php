@@ -1521,6 +1521,71 @@ class MRM_Payments_Hub_Single {
     return $sku;
   }
 
+  private function mrm_parse_piece_sku_labels($sku) {
+    $sku = $this->sanitize_sku((string)$sku);
+
+    $out = array(
+      'is_piece' => false,
+      'piece_slug' => '',
+      'piece_title' => '',
+      'category_slug' => '',
+      'category_label' => '',
+      'display_label' => '',
+    );
+
+    if (!preg_match('/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m)) {
+      return $out;
+    }
+
+    $piece_slug = (string)$m[1];
+    $category_slug = (string)$m[2];
+
+    $category_map = array(
+      'fundamentals' => 'Fundamentals',
+      'trombone-euphonium' => 'Trombone/Euphonium',
+      'tuba' => 'Tuba',
+      'complete-package' => 'Complete Package',
+    );
+
+    $piece_title = ucwords(str_replace('-', ' ', $piece_slug));
+    $category_label = $category_map[$category_slug] ?? ucwords(str_replace('-', ' ', $category_slug));
+
+    $out['is_piece'] = true;
+    $out['piece_slug'] = $piece_slug;
+    $out['piece_title'] = $piece_title;
+    $out['category_slug'] = $category_slug;
+    $out['category_label'] = $category_label;
+    $out['display_label'] = $piece_title . ' — ' . $category_label;
+
+    return $out;
+  }
+
+  private function mrm_email_already_has_piece_or_package_access($email, $sku) {
+    $email = sanitize_email((string)$email);
+    $sku   = $this->sanitize_sku((string)$sku);
+
+    if (!$email || !is_email($email) || !$sku) {
+      return false;
+    }
+
+    $email_hash = $this->email_hash($email);
+
+    if ($this->has_sheet_music_access($email_hash, $sku)) {
+      return true;
+    }
+
+    if (preg_match('/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m)) {
+      $piece_slug = (string)$m[1];
+      $package_sku = 'piece-' . $piece_slug . '-complete-package';
+
+      if ($package_sku !== $sku && $this->has_sheet_music_access($email_hash, $package_sku)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   private function slugify($text) {
     $text = (string)$text;
     $text = remove_accents($text);
@@ -3926,6 +3991,44 @@ class MRM_Payments_Hub_Single {
     return 'This email is already enrolled in the sheet music subscription. You do not need to subscribe again. If you need help, please contact us through our contact form.';
   }
 
+  private function mrm_get_subscription_order_diagnostics_for_admin($subscription_id) {
+    global $wpdb;
+
+    $subscription_id = sanitize_text_field((string)$subscription_id);
+    if ($subscription_id === '') {
+      return array(
+        'order_id' => '',
+        'payment_intent_id' => '',
+        'activation_status' => '',
+        'last_activation_error' => '',
+      );
+    }
+
+    $order = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$this->table_orders()} WHERE metadata_json LIKE %s ORDER BY id DESC LIMIT 1",
+        '%"mrm_sheet_music_subscription_id":"' . $wpdb->esc_like($subscription_id) . '"%'
+      ),
+      ARRAY_A
+    );
+
+    if (!is_array($order) || empty($order)) {
+      return array(
+        'order_id' => '',
+        'payment_intent_id' => '',
+        'activation_status' => '',
+        'last_activation_error' => '',
+      );
+    }
+
+    return array(
+      'order_id' => (string)($order['id'] ?? ''),
+      'payment_intent_id' => (string)($order['stripe_payment_intent_id'] ?? ''),
+      'activation_status' => (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_status', ''),
+      'last_activation_error' => (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_error', ''),
+    );
+  }
+
   private function mrm_get_sheet_music_subscription_by_portal_token($token) {
     global $wpdb;
     $table = $this->table_sheet_music_subscriptions();
@@ -3947,12 +4050,13 @@ class MRM_Payments_Hub_Single {
     $subs = $this->table_sheet_music_subscriptions();
     $now = current_time('mysql');
 
-    return $wpdb->get_results(
+    $rows = $wpdb->get_results(
       $wpdb->prepare(
         "SELECT
             id,
             email_hash,
             email_plain,
+            stripe_subscription_id,
             stripe_status,
             cancel_at_period_end,
             current_period_start,
@@ -3976,6 +4080,21 @@ class MRM_Payments_Hub_Single {
       ),
       ARRAY_A
     );
+
+    if (!is_array($rows)) {
+      return array();
+    }
+
+    foreach ($rows as &$row) {
+      $diag = $this->mrm_get_subscription_order_diagnostics_for_admin((string)($row['stripe_subscription_id'] ?? ''));
+      $row['order_id'] = (string)($diag['order_id'] ?? '');
+      $row['payment_intent_id'] = (string)($diag['payment_intent_id'] ?? '');
+      $row['activation_status'] = (string)($diag['activation_status'] ?? '');
+      $row['last_activation_error'] = (string)($diag['last_activation_error'] ?? '');
+    }
+    unset($row);
+
+    return $rows;
   }
 
   private function mrm_is_sheet_music_subscription_active_for_admin($row) {
@@ -4399,7 +4518,13 @@ class MRM_Payments_Hub_Single {
     $product_type = (string)($meta['mrm_product_type'] ?? ($order_row['product_type'] ?? 'unknown'));
 
     $p = $sku ? $this->get_product($sku) : null;
-    $label = (is_array($p) && !empty($p['label'])) ? (string)$p['label'] : ($sku ?: 'Purchase');
+    $piece_labels = $this->mrm_parse_piece_sku_labels($sku);
+
+    if (!empty($piece_labels['is_piece'])) {
+      $label = $piece_labels['display_label'];
+    } else {
+      $label = (is_array($p) && !empty($p['label'])) ? (string)$p['label'] : ($sku ?: 'Purchase');
+    }
 
     $amount_cents = 0;
     if (isset($pi['amount_received'])) $amount_cents = (int)$pi['amount_received'];
@@ -4416,9 +4541,13 @@ class MRM_Payments_Hub_Single {
     $intro = '<p>We’ve received your payment successfully.</p>';
 
     $details = '';
-    $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
-    if ($sku && $product_type !== 'lesson') {
-      $details .= '<div><strong>SKU:</strong> ' . esc_html($sku) . '</div>';
+    if ($product_type === 'sheet_music' && !empty($piece_labels['is_piece'])) {
+      $details .= '<div><strong>Piece:</strong> ' . esc_html($piece_labels['piece_title']) . '</div>';
+      $details .= '<div><strong>Category:</strong> ' . esc_html($piece_labels['category_label']) . '</div>';
+    } elseif ($sku && $product_type !== 'lesson') {
+      $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
+    } else {
+      $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
     }
     if (!empty($order_row['id'])) {
       $details .= '<div><strong>Order #:</strong> ' . esc_html((string)$order_row['id']) . '</div>';
@@ -4573,7 +4702,13 @@ class MRM_Payments_Hub_Single {
     }
 
     if ($product_type === 'sheet_music') {
-      $details .= '<div style="margin-top:12px;">If you purchased sheet music, you can access it from the product page using your email and one-time password.</div>';
+      $details .= '<div style="margin-top:12px;"><strong>How to access your purchase</strong></div>';
+      $details .= '<ol style="margin:8px 0 0 18px;padding:0;">';
+      $details .= '<li>Return to the piece page on the website.</li>';
+      $details .= '<li>Click the access button for your purchased category.</li>';
+      $details .= '<li>Enter your purchase email address.</li>';
+      $details .= '<li>Request your one-time access code and enter it to open the content.</li>';
+      $details .= '</ol>';
     }
 
     $contact_url = $this->mrm_get_contact_url();
@@ -7021,9 +7156,20 @@ class MRM_Payments_Hub_Single {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
     }
 
+    $product_type = (string)($p['product_type'] ?? 'unknown');
+    if ($product_type === 'sheet_music') {
+      if ($this->mrm_email_already_has_piece_or_package_access($email, $sku)) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => 'already_purchased_piece_product',
+          'message' => 'This email already has access to this piece product. You do not need to purchase it again.',
+          'already_owned' => true,
+        ), 409);
+      }
+    }
+
     $amount = (int)($p['amount_cents'] ?? 0);
     $currency = (string)($p['currency'] ?? 'usd');
-    $product_type = (string)($p['product_type'] ?? 'unknown');
 
     $base_amount = (int)$amount;
 
@@ -7953,59 +8099,6 @@ class MRM_Payments_Hub_Single {
   </body></html>';
   }
 
-  private function mrm_build_piece_access_instructions_html($email, $sku) {
-    $email = sanitize_email((string)$email);
-    $sku   = $this->sanitize_sku((string)$sku);
-
-    $details  = '<div><strong>Email:</strong> ' . esc_html($email) . '</div>';
-    $details .= '<div><strong>Product:</strong> ' . esc_html($sku) . '</div>';
-
-    $intro  = '<p>Thank you for your purchase.</p>';
-    $intro .= '<p>Your piece access has been granted successfully.</p>';
-    $intro .= '<p><strong>How to access your purchased content:</strong></p>';
-    $intro .= '<ol style="margin:10px 0 0 18px; padding:0;">';
-    $intro .= '<li>Return to the piece page on the website.</li>';
-    $intro .= '<li>Click the access button for your purchased version.</li>';
-    $intro .= '<li>Enter this email address: <strong>' . esc_html($email) . '</strong></li>';
-    $intro .= '<li>Request your access code and enter it to open the purchased content.</li>';
-    $intro .= '</ol>';
-    $intro .= '<p style="margin-top:14px;">If you have trouble accessing your files, please contact support.</p>';
-
-    return $this->mrm_wrap_transactional_email_html(
-      'Piece Purchase Confirmation',
-      $intro,
-      $details,
-      '',
-      '',
-      array()
-    );
-  }
-
-  private function mrm_send_piece_purchase_confirmation_email($email, $sku) {
-    $email = sanitize_email((string)$email);
-    $sku   = $this->sanitize_sku((string)$sku);
-
-    if (!$email || !is_email($email) || !$sku) {
-      return false;
-    }
-
-    $subject = 'Piece Purchase Confirmation';
-    $body    = $this->mrm_build_piece_access_instructions_html($email, $sku);
-
-    $sent = wp_mail(
-      $email,
-      $subject,
-      $body,
-      array(
-        'Content-Type: text/html; charset=UTF-8',
-        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
-      )
-    );
-
-
-    return $sent;
-  }
-
   public function rest_grant_sheet_music_access(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
 
@@ -8089,7 +8182,6 @@ class MRM_Payments_Hub_Single {
     // ✅ Access source of truth: DB ledger row only.
     // Do NOT also mirror into the per-product "Approved Emails (OTP Access)" product UI.
 
-    $this->mrm_send_piece_purchase_confirmation_email($email, $sku);
 
     return new WP_REST_Response(array(
       'ok' => true,
@@ -8744,12 +8836,16 @@ class MRM_Payments_Hub_Single {
                       <th>Subscription Active</th>
                       <th>End Date</th>
                       <th>Stripe Status</th>
+                      <th>Order ID</th>
+                      <th>Payment Intent ID</th>
+                      <th>Activation Status</th>
+                      <th>Last Activation Error</th>
                       <th>Updated</th>
                     </tr>
                   </thead>
                   <tbody>
                   <?php if (empty($rows)) : ?>
-                    <tr><td colspan="5">No sheet music subscriptions found.</td></tr>
+                    <tr><td colspan="10">No sheet music subscriptions found.</td></tr>
                   <?php else : ?>
                     <?php foreach ($rows as $row) :
                       $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
@@ -8760,6 +8856,10 @@ class MRM_Payments_Hub_Single {
                         <td style="text-align:center;"><?php echo $is_active ? '✔' : ''; ?></td>
                         <td><?php echo esc_html($end_date); ?></td>
                         <td><?php echo esc_html((string)$row['stripe_status']); ?></td>
+                        <td><?php echo esc_html((string)($row['order_id'] ?? '')); ?></td>
+                        <td><?php echo esc_html((string)($row['payment_intent_id'] ?? '')); ?></td>
+                        <td><?php echo esc_html((string)($row['activation_status'] ?? '')); ?></td>
+                        <td><?php echo esc_html((string)($row['last_activation_error'] ?? '')); ?></td>
                         <td><?php echo esc_html((string)$row['updated_at']); ?></td>
                       </tr>
                     <?php endforeach; ?>
