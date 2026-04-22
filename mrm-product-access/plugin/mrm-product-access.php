@@ -2741,6 +2741,50 @@ class MRM_Product_Access {
         ), 200 );
     }
 
+    private function mrm_pa_get_email_logo_url() {
+        $custom_logo_id = (int) get_theme_mod( 'custom_logo' );
+        if ( $custom_logo_id > 0 ) {
+            $img = wp_get_attachment_image_src( $custom_logo_id, 'full' );
+            if ( is_array( $img ) && ! empty( $img[0] ) ) {
+                return (string) $img[0];
+            }
+        }
+        return '';
+    }
+
+    private function mrm_pa_wrap_otp_email_html( $title, $intro_html, $otp, $footer_html = '' ) {
+        $site = esc_html( get_bloginfo( 'name' ) );
+        $logo = $this->mrm_pa_get_email_logo_url();
+
+        $logo_html = '';
+        if ( $logo ) {
+            $logo_html = '<div style="text-align:center;margin:0 0 22px 0;">
+            <img src="' . esc_url( $logo ) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;display:inline-block;">
+        </div>';
+        }
+
+        $code_box = '<div style="margin:22px auto 18px auto;max-width:260px;background:#f1f1f1;border:1px solid #dddddd;border-radius:12px;padding:18px 14px;text-align:center;">
+        <div style="font-size:13px;color:#666;margin-bottom:8px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;">Your Access Code</div>
+        <div style="font-size:34px;line-height:1.1;font-weight:700;color:#111;letter-spacing:0.18em;">' . esc_html( $otp ) . '</div>
+    </div>';
+
+        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
+        <div style="max-width:640px;margin:0 auto;padding:24px;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+                ' . $logo_html . '
+                <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
+                <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
+                ' . $code_box . '
+                <div style="margin-top:10px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;text-align:center;">
+                    This code expires in 30 minutes.
+                </div>
+                ' . $footer_html . '
+                <div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
+            </div>
+        </div>
+    </body></html>';
+    }
+
     /**
      * Generate and send OTP.
      *
@@ -2815,15 +2859,32 @@ class MRM_Product_Access {
             'created_at'      => gmdate( 'Y-m-d H:i:s' ),
         ) );
 
+        $options = $this->get_options();
+
         $subject = $options['email_subject'] ?? __( 'Sheet Music Access Code', 'mrm-product-access' );
-        $body    = str_replace( '{{OTP}}', $otp, ( $options['email_body'] ?? 'Hello,
 
-Your one‑time passcode for accessing your purchased piece is {{OTP}}. It expires in 30 minutes.
+        $custom_body = (string) ( $options['email_body'] ?? '' );
+        $custom_body = str_replace( '{{OTP}}', '', $custom_body );
+        $custom_body = trim( preg_replace( '/\n{2,}/', "\n\n", $custom_body ) );
 
-Thank you.' ) );
-        // Option A: Let FluentSMTP (or your SMTP plugin) control the From Name/Email.
-        // Do NOT set custom headers here.
-        $sent = wp_mail( $normalized_email, $subject, $body );
+        $intro_html = '<p>Your one-time passcode for accessing your purchased piece is below.</p>';
+
+        if ( $custom_body !== '' ) {
+            $intro_html .= '<div style="margin-top:10px;">' . nl2br( esc_html( $custom_body ) ) . '</div>';
+        }
+
+        $html = $this->mrm_pa_wrap_otp_email_html(
+            $subject,
+            $intro_html,
+            $otp
+        );
+
+        $headers = array(
+            'Content-Type: text/html; charset=UTF-8',
+            'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+        );
+
+        $sent = wp_mail( $normalized_email, $subject, $html, $headers );
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         }

@@ -4575,28 +4575,32 @@ protected function mrm_get_google_service_account_json() {
 
         $subject = $student_name . ' ' . $minutes . ' ' . $lesson_type_label . ' ' . $thing_upper;
 
-        $body_lines = array(
-            'Reminder: you have a ' . $thing_lower . ' scheduled in 1 hour.',
-            '',
-            'Student: ' . $student_name,
-            'Length: ' . $minutes . ' minutes',
-            'Type: ' . $lesson_type_label,
-            '',
-            $thing_upper . ' link:',
+        $intro_html = '<p>Reminder: you have a scheduled ' . esc_html( strtolower( $thing_upper ) ) . ' coming up in one hour.</p>';
+
+        $details_html = '';
+        $details_html .= '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>';
+        $details_html .= '<div><strong>Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
+        $details_html .= '<div><strong>Type:</strong> ' . esc_html( $lesson_type_label ) . '</div>';
+        $details_html .= '<div style="margin-top:12px;"><strong>' . esc_html( $thing_upper ) . ' link:</strong><br><a href="' . esc_url( $join_link ) . '">' . esc_html( $join_link ) . '</a></div>';
+
+        $html = $this->mrm_safety_email_wrap_html(
+            $subject,
+            $intro_html,
+            $details_html,
             $join_link,
+            'Open Lesson Link'
         );
-        $message = implode( "\n", $body_lines );
 
         $to = array();
         if ( is_email( $student_email ) ) $to[] = $student_email;
         if ( is_email( $instructor_email ) ) $to[] = $instructor_email;
 
         $headers = array(
-            'Content-Type: text/plain; charset=UTF-8',
+            'Content-Type: text/html; charset=UTF-8',
             'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
         );
 
-        $sent = wp_mail( $to, $subject, $message, $headers );
+        $sent = wp_mail( $to, $subject, $html, $headers );
 
         if ( $sent ) {
             $wpdb->update(
@@ -5712,34 +5716,61 @@ protected function mrm_get_google_service_account_json() {
         exit;
     }
     protected function mrm_safety_email_wrap_html( $title, $intro_html, $details_html, $cta_url = '', $cta_label = '' ) {
-        $button_html = '';
-        if ( $cta_url && $cta_label ) {
-            $button_html = '<p style="margin:24px 0;">
-            <a href="' . esc_url( $cta_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;text-align:center;background:#111;color:#fff;text-decoration:none;padding:14px 20px;border-radius:8px;font-weight:600;line-height:1.3;">' . esc_html( $cta_label ) . '</a>
-        </p>';
+        $logo  = $this->mrm_get_email_logo_url();
+        $site  = esc_html( get_bloginfo( 'name' ) );
+
+        $logo_html = '';
+        if ( $logo ) {
+            $logo_html = '<div style="text-align:center;margin:0 0 22px 0;">
+            <img src="' . esc_url( $logo ) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;display:inline-block;"/>
+        </div>';
         }
 
-        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#111;">
-        <div style="max-width:640px;margin:0 auto;padding:32px 16px;">
-            <div style="background:#fff;border:1px solid #ddd;border-radius:14px;padding:28px;">
-                <h2 style="margin-top:0;">' . esc_html( $title ) . '</h2>
-                <div style="font-size:15px;line-height:1.6;">' . $intro_html . '</div>
-                <div style="margin-top:18px;font-size:14px;line-height:1.7;">' . $details_html . '</div>
+        $button_html = '';
+        if ( $cta_url && $cta_label ) {
+            $button_html = '<div style="text-align:center;margin:24px 0 0 0;">
+            <a href="' . esc_url( $cta_url ) . '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:10px;">' . esc_html( $cta_label ) . '</a>
+        </div>';
+        }
+
+        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
+        <div style="max-width:640px;margin:0 auto;padding:24px;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+                ' . $logo_html . '
+                <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
+                <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
+                <div style="margin-top:16px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;">
+                    ' . $details_html . '
+                </div>
                 ' . $button_html . '
+                <div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
             </div>
         </div>
     </body></html>';
     }
 
-
     protected function mrm_safety_email_wrap_html_blocks( $title, $intro_html, $details_html, $extra_html = '' ) {
-        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#111;">
-        <div style="max-width:640px;margin:0 auto;padding:32px 16px;">
-            <div style="background:#fff;border:1px solid #ddd;border-radius:14px;padding:28px;">
-                <h2 style="margin-top:0;">' . esc_html( $title ) . '</h2>
-                <div style="font-size:15px;line-height:1.6;">' . $intro_html . '</div>
-                <div style="margin-top:18px;font-size:14px;line-height:1.7;">' . $details_html . '</div>
+        $logo  = $this->mrm_get_email_logo_url();
+        $site  = esc_html( get_bloginfo( 'name' ) );
+
+        $logo_html = '';
+        if ( $logo ) {
+            $logo_html = '<div style="text-align:center;margin:0 0 22px 0;">
+            <img src="' . esc_url( $logo ) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;display:inline-block;"/>
+        </div>';
+        }
+
+        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
+        <div style="max-width:640px;margin:0 auto;padding:24px;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+                ' . $logo_html . '
+                <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
+                <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
+                <div style="margin-top:16px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;">
+                    ' . $details_html . '
+                </div>
                 ' . $extra_html . '
+                <div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
             </div>
         </div>
     </body></html>';
@@ -9620,49 +9651,7 @@ protected function parse_service_account_json( $json ) {
     }
 
     protected function mrm_wrap_email_html( $title, $intro_html, $details_html, $button_url, $button_text, $options = array() ) {
-        $brand = '#780000';
-        $options = is_array( $options ) ? $options : array();
-        $button_color = isset( $options['button_color'] ) ? (string) $options['button_color'] : $brand;
-        $button_align = isset( $options['button_align'] ) ? (string) $options['button_align'] : 'center';
-        $logo  = $this->mrm_get_email_logo_url();
-        $site  = esc_html( get_bloginfo( 'name' ) );
-
-        $logo_html = '';
-        if ( $logo ) {
-            $logo_html = '<div style="text-align:center;margin:0 0 18px 0;">
-                <img src="' . esc_url( $logo ) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;"/>
-            </div>';
-        }
-
-        $btn_html = '';
-        if ( $button_url ) {
-            $btn_html = '<div style="text-align:' . esc_attr( $button_align ) . ';margin:22px 0 10px 0;">
-                <a href="' . esc_url( $button_url ) . '" style="display:inline-block;background:' . esc_attr( $button_color ) . ';color:#ffffff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:10px;">
-                    ' . esc_html( $button_text ? $button_text : 'Open Link' ) . '
-                </a>
-            </div>
-            <div style="text-align:center;font-size:12px;color:#666;margin-top:10px;">
-                If the button doesn’t work, copy and paste this link:<br/>
-                <span style="word-break:break-all;">' . esc_html( $button_url ) . '</span>
-            </div>';
-        }
-
-        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
-            <div style="max-width:640px;margin:0 auto;padding:24px;">
-                <div style="background:#ffffff;border-radius:16px;padding:24px;box-shadow:0 2px 10px rgba(0,0,0,0.06);font-family:Arial,sans-serif;">
-                    ' . $logo_html . '
-                    <h1 style="margin:0 0 10px 0;font-size:20px;line-height:1.3;color:#111;">' . esc_html( $title ) . '</h1>
-                    <div style="font-size:14px;line-height:1.6;color:#222;">' . $intro_html . '</div>
-                    <div style="margin-top:14px;padding:14px;border:1px solid #eee;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.6;color:#222;">
-                        ' . $details_html . '
-                    </div>
-                    ' . $btn_html . '
-                    <div style="margin-top:20px;font-size:12px;color:#777;text-align:center;">
-                        ' . $site . '
-                    </div>
-                </div>
-            </div>
-        </body></html>';
+        return $this->mrm_safety_email_wrap_html( $title, $intro_html, $details_html, $button_url, $button_text );
     }
 
     protected function maybe_store_agreement( $email, $version, $signature, $ip ) {

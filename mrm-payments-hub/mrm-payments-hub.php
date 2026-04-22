@@ -2737,7 +2737,13 @@ class MRM_Payments_Hub_Single {
         $email_sent_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_enrollment_email_sent_at', '');
       }
 
-      if ($email_sent_at === '' && in_array((string)($subscription['status'] ?? ''), array('trialing', 'active'), true)) {
+      if (
+        $email_sent_at === '' &&
+        is_array($order) &&
+        !empty($order) &&
+        $this->mrm_claim_subscription_enrollment_send((int)$order['id']) &&
+        in_array((string)($subscription['status'] ?? ''), array('trialing', 'active'), true)
+      ) {
         $billing_anchor_ts = 0;
         if (!empty($subscription['current_period_end'])) {
           $billing_anchor_ts = (int)$subscription['current_period_end'];
@@ -2757,6 +2763,10 @@ class MRM_Payments_Hub_Single {
 
         if ($sent && is_array($order) && !empty($order)) {
           $this->mrm_set_order_meta_flag((int)$order['id'], 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
+        }
+
+        if (!$sent && is_array($order) && !empty($order)) {
+          $this->mrm_release_subscription_enrollment_send((int)$order['id']);
         }
       }
     }
@@ -3448,36 +3458,39 @@ class MRM_Payments_Hub_Single {
   }
 
   private function mrm_email_wrap_html($title, $intro_html, $details_html, $cta_url = '', $cta_label = '') {
-    $title_safe = esc_html((string)$title);
+    $site = esc_html(get_bloginfo('name'));
     $logo_url = $this->mrm_get_site_logo_url();
+
     $logo_html = '';
     if ($logo_url) {
-      $logo_html = '<div style="text-align:center;margin:0 0 12px 0;">
-    <img src="'.esc_url($logo_url).'" alt="Logo" style="max-width:180px;height:auto;display:inline-block;">
-  </div>';
-    }
-    $cta = '';
-    if ($cta_url && $cta_label) {
-      $cta = '<p style="margin:20px 0 0 0;">
-      <a href="'.esc_url($cta_url).'" style="display:inline-block;padding:12px 16px;background:#111;color:#fff;text-decoration:none;border-radius:10px;">
-        '.esc_html($cta_label).'
-      </a>
-    </p>';
+      $logo_html = '<div style="text-align:center;margin:0 0 22px 0;">
+      <img src="' . esc_url($logo_url) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;display:inline-block;">
+    </div>';
     }
 
-    return '
-  <div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;padding:18px;">
-    <div style="border:1px solid #e7e7e7;border-radius:14px;padding:18px;">
-      '.$logo_html.'
-      <h2 style="margin:0 0 10px 0;font-size:18px;line-height:1.2;text-align:center;">'.$title_safe.'</h2>
-      <div style="font-size:14px;line-height:1.5;color:#222;">'.$intro_html.'</div>
-      <div style="margin-top:12px;font-size:14px;line-height:1.5;color:#222;">'.$details_html.'</div>
-      '.$cta.'
-      <div style="margin-top:18px;font-size:12px;color:#666;">
-        If you need help, use the contact link above.
+    $cta_html = '';
+    if ($cta_url && $cta_label) {
+      $cta_html = '<div style="text-align:center;margin:24px 0 0 0;">
+      <a href="' . esc_url($cta_url) . '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:10px;">
+        ' . esc_html($cta_label) . '
+      </a>
+    </div>';
+    }
+
+    return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
+    <div style="max-width:640px;margin:0 auto;padding:24px;">
+      <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+        ' . $logo_html . '
+        <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html($title) . '</h1>
+        <div style="font-size:15px;line-height:1.7;color:#222;text-align:left;">' . $intro_html . '</div>
+        <div style="margin-top:16px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;">
+          ' . $details_html . '
+        </div>
+        ' . $cta_html . '
+        <div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
       </div>
     </div>
-  </div>';
+  </body></html>';
   }
 
   private function mrm_generate_subscription_portal_token() {
@@ -3921,26 +3934,13 @@ class MRM_Payments_Hub_Single {
       $email_sent_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_enrollment_email_sent_at', '');
 
       if (is_array($local) && !empty($local) && $email_sent_at === '') {
-        $this->mrm_subscription_debug_log('attempting enrollment email from activation helper', array(
+        $this->mrm_subscription_debug_log('activation helper skipped enrollment email intentionally; customer.subscription.created webhook is the sole sender', array(
           'context' => $context,
           'order_id' => $order_id,
           'subscription_id' => $subscription_id,
           'local_status' => (string)($local['stripe_status'] ?? ''),
           'email' => (string)($local['email_plain'] ?? ''),
         ));
-
-        $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $billing_cycle_anchor_ts);
-
-        $this->mrm_subscription_debug_log('activation helper enrollment email result', array(
-          'context' => $context,
-          'order_id' => $order_id,
-          'subscription_id' => $subscription_id,
-          'sent' => ($sent ? 'yes' : 'no'),
-        ));
-
-        if ($sent) {
-          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
-        }
       } else {
         $this->mrm_subscription_debug_log('activation helper skipped enrollment email', array(
           'context' => $context,
@@ -4466,6 +4466,29 @@ class MRM_Payments_Hub_Single {
     if ($order_id <= 0) return;
 
     $lock_key = 'mrm_receipt_claim_order_' . $order_id;
+    delete_option($lock_key);
+  }
+
+
+  private function mrm_claim_subscription_enrollment_send($order_id) {
+    $order_id = (int)$order_id;
+    if ($order_id <= 0) return false;
+
+    $lock_key = 'mrm_sub_enrollment_claim_order_' . $order_id;
+
+    if (get_option($lock_key, null)) {
+      return false;
+    }
+
+    $added = add_option($lock_key, current_time('mysql'), '', 'no');
+    return (bool)$added;
+  }
+
+  private function mrm_release_subscription_enrollment_send($order_id) {
+    $order_id = (int)$order_id;
+    if ($order_id <= 0) return;
+
+    $lock_key = 'mrm_sub_enrollment_claim_order_' . $order_id;
     delete_option($lock_key);
   }
 
@@ -8029,10 +8052,11 @@ class MRM_Payments_Hub_Single {
       $this->update_order_status_from_pi($pi_id, $new_status, $status, $metadata);
     }
 
-    // Send custom receipt email once (idempotent)
+    // Do not send the purchase receipt from the verify endpoint.
+    // The Stripe payment_intent.succeeded webhook is the sole sender
+    // for lesson purchase confirmation emails.
     if ($ok && $order) {
       $order = $this->get_order_by_pi($pi_id);
-      $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
       $this->mrm_maybe_create_payout_ledger_for_order($order);
 
       $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
@@ -8063,40 +8087,7 @@ class MRM_Payments_Hub_Single {
   }
 
   private function mrm_wrap_transactional_email_html($title, $intro_html, $details_html, $button_url = '', $button_text = '', $options = array()) {
-    $brand = '#780000';
-    $options = is_array($options) ? $options : array();
-    $button_color = isset($options['button_color']) ? (string)$options['button_color'] : $brand;
-    $button_align = isset($options['button_align']) ? (string)$options['button_align'] : 'center';
-    $site = esc_html(get_bloginfo('name'));
-
-    $btn_html = '';
-    if ($button_url) {
-      $btn_html = '<div style="text-align:' . esc_attr($button_align) . ';margin:22px 0 10px 0;">
-      <a href="' . esc_url($button_url) . '" style="display:inline-block;background:' . esc_attr($button_color) . ';color:#ffffff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:10px;">
-        ' . esc_html($button_text ? $button_text : 'Open Link') . '
-      </a>
-    </div>
-    <div style="text-align:center;font-size:12px;color:#666;margin-top:10px;">
-      If the button doesn’t work, copy and paste this link:<br/>
-      <span style="word-break:break-all;">' . esc_html($button_url) . '</span>
-    </div>';
-    }
-
-    return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
-    <div style="max-width:640px;margin:0 auto;padding:24px;">
-      <div style="background:#ffffff;border-radius:16px;padding:24px;box-shadow:0 2px 10px rgba(0,0,0,0.06);font-family:Arial,sans-serif;">
-        <h1 style="margin:0 0 10px 0;font-size:20px;line-height:1.3;color:#111;">' . esc_html($title) . '</h1>
-        <div style="font-size:14px;line-height:1.6;color:#222;">' . $intro_html . '</div>
-        <div style="margin-top:14px;padding:14px;border:1px solid #eee;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.6;color:#222;">
-          ' . $details_html . '
-        </div>
-        ' . $btn_html . '
-        <div style="margin-top:20px;font-size:12px;color:#777;text-align:center;">
-          ' . $site . '
-        </div>
-      </div>
-    </div>
-  </body></html>';
+    return $this->mrm_email_wrap_html($title, $intro_html, $details_html, $button_url, $button_text);
   }
 
   public function rest_grant_sheet_music_access(WP_REST_Request $req) {
