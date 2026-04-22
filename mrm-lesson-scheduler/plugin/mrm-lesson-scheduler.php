@@ -43,20 +43,7 @@ class MRM_Lesson_Scheduler {
     const GOOGLE_EVENTS_LIST_URL = 'https://www.googleapis.com/calendar/v3/calendars/%s/events';
 
     protected function mrm_aws_debug_log( $message, $context = array() ) {
-        $log_file = WP_CONTENT_DIR . '/AWS Debug.log';
-
-        $line = '[' . current_time( 'mysql' ) . '] ' . $message;
-
-        if ( ! empty( $context ) ) {
-            $json = wp_json_encode( $context );
-            if ( is_string( $json ) && $json !== '' ) {
-                $line .= ' | ' . $json;
-            }
-        }
-
-        $line .= PHP_EOL;
-
-        @file_put_contents( $log_file, $line, FILE_APPEND | LOCK_EX );
+        return;
     }
 
     protected function mrm_get_secret_json( $secret_id, $cache_key ) {
@@ -392,12 +379,6 @@ protected function mrm_get_google_service_account_json() {
         }
 
         if ( is_wp_error( $res ) ) {
-            error_log(
-                '[MRM] google_api_failure' .
-                ' label=' . (string) $label .
-                ' url=' . (string) $url .
-                ' wp_error=' . $res->get_error_message()
-            );
             return;
         }
 
@@ -423,61 +404,15 @@ protected function mrm_get_google_service_account_json() {
             }
         }
 
-        error_log(
-            '[MRM] google_api_failure' .
-            ' label=' . (string) $label .
-            ' code=' . $code .
-            ' status=' . $status .
-            ' reason=' . $reason .
-            ' message=' . $message .
-            ' url=' . (string) $url .
-            ' body=' . $body
-        );
     }
 
     protected function mrm_finalization_debug_log( $message, $context = array() ) {
-        if ( ! is_array( $context ) ) {
-            $context = array( 'value' => $context );
-        }
-
-        $line = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] [MRM Lesson Finalization] ' . $message;
-
-        if ( ! empty( $context ) ) {
-            $line .= ' ' . wp_json_encode( $context );
-        }
-
-        $line .= PHP_EOL;
-
-        $log_file = trailingslashit( WP_CONTENT_DIR ) . 'stripe-debug.log';
-        @file_put_contents( $log_file, $line, FILE_APPEND | LOCK_EX );
+        return;
     }
 
 
     protected function mrm_safety_log( $message, $context = array() ) {
-        if ( ! is_array( $context ) ) {
-            $context = array( 'value' => $context );
-        }
-
-        $line = '[' . gmdate( 'd-M-Y H:i:s' ) . ' UTC] [MRM Safety Reminder] ' . $message;
-
-        if ( ! empty( $context ) ) {
-            $line .= ' ' . wp_json_encode( $context );
-        }
-
-        $line .= PHP_EOL;
-
-        $log_file = trailingslashit( WP_CONTENT_DIR ) . 'safety-reminder-system.log';
-        $written = file_put_contents( $log_file, $line, FILE_APPEND | LOCK_EX );
-
-        if ( $written === false ) {
-            error_log(
-                '[MRM Safety Reminder] log_write_failed ' . wp_json_encode( array(
-                    'log_file' => $log_file,
-                    'message' => $message,
-                    'context' => $context,
-                ) )
-            );
-        }
+        return;
     }
 
     protected function maybe_log_safety_boot( $message, $context = array(), $ttl = 900 ) {
@@ -660,13 +595,6 @@ protected function mrm_get_google_service_account_json() {
         }
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] google_list_instances_success calendar_id=' . $calendar_id .
-                ' event_id=' . $event_id .
-                ' timeMin=' . $range['timeMin'] .
-                ' timeMax=' . $range['timeMax'] .
-                ' count=' . count( (array) ( $json['items'] ?? array() ) )
-            );
         }
 
         return $json;
@@ -727,12 +655,6 @@ protected function mrm_get_google_service_account_json() {
         }
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] google_list_events_success calendar_id=' . $calendar_id .
-                ' timeMin=' . $range['timeMin'] .
-                ' timeMax=' . $range['timeMax'] .
-                ' count=' . count( (array) ( $json['items'] ?? array() ) )
-            );
         }
 
         return $json;
@@ -808,12 +730,6 @@ protected function mrm_get_google_service_account_json() {
         $items = isset( $json['items'] ) && is_array( $json['items'] ) ? $json['items'] : array();
         if ( empty( $items ) ) {
             if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                error_log(
-                    '[MRM] google_find_event_by_booking_id_empty calendar_id=' . $calendar_id .
-                    ' booking_id=' . $booking_id .
-                    ' timeMin=' . $range['timeMin'] .
-                    ' timeMax=' . $range['timeMax']
-                );
             }
             return null;
         }
@@ -825,11 +741,6 @@ protected function mrm_get_google_service_account_json() {
             }
             if ( $bid === $booking_id ) {
                 if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                    error_log(
-                        '[MRM] google_find_event_by_booking_id_match calendar_id=' . $calendar_id .
-                        ' booking_id=' . $booking_id .
-                        ' matched_event_id=' . (string) ( $ev['id'] ?? '' )
-                    );
                 }
                 return $ev;
             }
@@ -897,7 +808,6 @@ protected function mrm_get_google_service_account_json() {
             }
         }
 
-        error_log( implode( ' ', $parts ) );
     }
 
     protected function google_event_original_start_to_mysql( $event ) {
@@ -985,13 +895,6 @@ protected function mrm_get_google_service_account_json() {
         }
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] google_list_events_private_success calendar_id=' . $calendar_id .
-                ' property=' . $property_clause .
-                ' timeMin=' . $range['timeMin'] .
-                ' timeMax=' . $range['timeMax'] .
-                ' count=' . count( (array) ( $json['items'] ?? array() ) )
-            );
         }
 
         return $json;
@@ -1450,12 +1353,6 @@ protected function mrm_get_google_service_account_json() {
 
             if ( is_wp_error( $normalized ) ) {
                 if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                    error_log(
-                        '[MRM] google_resolve_stage_window_normalize_failed' .
-                        ' raw_min=' . $raw_min .
-                        ' raw_max=' . $raw_max .
-                        ' error=' . $normalized->get_error_message()
-                    );
                 }
 
                 return array(
@@ -1850,16 +1747,6 @@ protected function mrm_get_google_service_account_json() {
         $resolved_reason = (string) ( $resolved['reason'] ?? '' );
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] sync_lesson_row_from_google_truth lesson_id=' . $lesson_id .
-                ' status=' . $resolved_status .
-                ' reason=' . $resolved_reason .
-                ' local_start=' . (string) ( $lesson_row['start_time'] ?? '' ) .
-                ' local_end=' . (string) ( $lesson_row['end_time'] ?? '' ) .
-                ' google_original_start_time=' . (string) ( $lesson_row['google_original_start_time'] ?? '' ) .
-                ' google_event_id=' . (string) ( $lesson_row['google_event_id'] ?? '' ) .
-                ' google_instance_event_id=' . (string) ( $lesson_row['google_instance_event_id'] ?? '' )
-            );
         }
 
         if ( $resolved_status === 'cancelled' && is_array( $resolved_event ) ) {
@@ -1941,10 +1828,6 @@ protected function mrm_get_google_service_account_json() {
 
             if ( $update_result === false ) {
                 if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                    error_log(
-                        '[MRM] sync_lesson_row_from_google_truth db_update_failed lesson_id=' . $lesson_id .
-                        ' last_error=' . (string) $wpdb->last_error
-                    );
                 }
 
                 return array(
@@ -1955,25 +1838,9 @@ protected function mrm_get_google_service_account_json() {
             }
 
             if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                error_log(
-                    '[MRM] row_updated_from_google lesson_id=' . $lesson_id .
-                    ' old_start=' . $current_start .
-                    ' old_end=' . $current_end .
-                    ' new_start=' . $new_start .
-                    ' new_end=' . $new_end .
-                    ' stored_event_id=' . $stored_event_id .
-                    ' stored_instance_event_id=' . $stored_instance_event_id
-                );
             }
         } else {
             if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                error_log(
-                    '[MRM] resolved_but_unchanged lesson_id=' . $lesson_id .
-                    ' start=' . $new_start .
-                    ' end=' . $new_end .
-                    ' stored_event_id=' . $stored_event_id .
-                    ' stored_instance_event_id=' . $stored_instance_event_id
-                );
             }
         }
 
@@ -2115,7 +1982,6 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_post_mrm_scheduler_run_upgrade', array( $this, 'handle_run_upgrade' ) );
         add_action( 'admin_post_mrm_scheduler_save_google', array( $this, 'handle_save_google_settings' ) );
         add_action( 'admin_post_mrm_scheduler_test_google', array( $this, 'handle_test_google_settings' ) );
-        add_action( 'admin_post_mrm_scheduler_debug_google_row', array( $this, 'handle_debug_google_row' ) );
         add_action( 'admin_post_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
         add_action( 'admin_post_mrm_finalize_old_lessons_now', array( $this, 'admin_finalize_old_lessons_now' ) );
         add_action( 'admin_post_nopriv_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
@@ -2865,14 +2731,6 @@ protected function mrm_get_google_service_account_json() {
             }
 
             if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                error_log(
-                    '[MRM] lesson_insert_classification'
-                    . ' slot_index=' . (int) $slot_index
-                    . ' series_id=' . (int) ( $series_id ?: 0 )
-                    . ' slot_order_id=' . (int) $slot_order_id
-                    . ' slot_payment_mode=' . (string) $slot_payment_mode
-                    . ' slot_charge_status=' . (string) $slot_charge_status
-                );
             }
 
             $ok = $wpdb->insert( $lessons_table, array(
@@ -3219,23 +3077,14 @@ protected function mrm_get_google_service_account_json() {
                         } else {
                             $msg = is_wp_error( $ins ) ? $ins->get_error_message() : 'Unknown insert response.';
                             $google_messages[] = 'Calendar event was not created: ' . $msg;
-                            error_log( 'MRM google_insert_event failed for booking_id ' . $booking_id . ': ' . $msg );
                         }
 
                     } else {
                         $msg = is_wp_error( $start_rfc3339 ) ? $start_rfc3339->get_error_message() : $end_rfc3339->get_error_message();
                         $google_messages[] = 'Calendar event was not created because time conversion failed: ' . $msg;
-                        error_log( 'MRM time->RFC3339 failed for booking_id ' . $booking_id . ': ' . $msg );
                     }
                 }
             } else {
-                error_log(
-                    'MRM booking insert failed. DB error: ' . $wpdb->last_error .
-                    ' | start=' . $start_mysql .
-                    ' | end=' . $end_mysql .
-                    ' | instructor_id=' . (int) $instructor_id .
-                    ' | student_email=' . $student_email
-                );
             }
         }
 
@@ -3404,12 +3253,6 @@ protected function mrm_get_google_service_account_json() {
 
             if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
                 if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                    error_log(
-                        '[MRM] gate_candidate_skip lesson_id=' . (int) ( $candidate['id'] ?? 0 ) .
-                        ' reason=no_valid_time' .
-                        ' timing_status=' . $timing_status .
-                        ' timing_reason=' . $timing_reason
-                    );
                 }
                 continue;
             }
@@ -3418,14 +3261,6 @@ protected function mrm_get_google_service_account_json() {
             $close_ts = $end_ts + ( 10 * MINUTE_IN_SECONDS );
 
             if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                error_log(
-                    '[MRM] gate_candidate lesson_id=' . (int) ( $effective_lesson['id'] ?? 0 ) .
-                    ' timing_source=' . $timing_source .
-                    ' timing_status=' . $timing_status .
-                    ' timing_reason=' . $timing_reason .
-                    ' start=' . gmdate( 'Y-m-d H:i:s', $start_ts ) .
-                    ' end=' . gmdate( 'Y-m-d H:i:s', $end_ts )
-                );
             }
 
             $bundle = array(
@@ -3541,20 +3376,6 @@ protected function mrm_get_google_service_account_json() {
         }
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] gate_resolve token_hash=' . $token_hash .
-                ' lesson_id=' . ( is_array( $lesson ) ? (int) ( $lesson['id'] ?? 0 ) : 0 ) .
-                ' status=' . ( is_array( $lesson ) ? (string) ( $lesson['status'] ?? '' ) : '' ) .
-                ' start_time=' . ( is_array( $lesson ) ? (string) ( $lesson['start_time'] ?? '' ) : '' ) .
-                ' end_time=' . ( is_array( $lesson ) ? (string) ( $lesson['end_time'] ?? '' ) : '' ) .
-                ' google_event_id=' . ( is_array( $lesson ) ? (string) ( $lesson['google_event_id'] ?? '' ) : '' ) .
-                ' google_original_start_time=' . ( is_array( $lesson ) ? (string) ( $lesson['google_original_start_time'] ?? '' ) : '' ) .
-                ' timing_source=' . $resolved_gate_timing_source .
-                ' timing_status=' . $resolved_gate_timing_status .
-                ' timing_reason=' . $resolved_gate_timing_reason .
-                ' resolved_start=' . ( $resolved_gate_start_ts ? gmdate( 'Y-m-d H:i:s', $resolved_gate_start_ts ) : '' ) .
-                ' resolved_end=' . ( $resolved_gate_end_ts ? gmdate( 'Y-m-d H:i:s', $resolved_gate_end_ts ) : '' )
-            );
         }
 
         if ( ! is_array( $lesson ) || empty( $lesson['id'] ) ) {
@@ -3647,14 +3468,6 @@ protected function mrm_get_google_service_account_json() {
         }
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] gate_timing lesson_id=' . (int) ( $lesson['id'] ?? 0 ) .
-                ' timing_status=' . (string) ( $gate_timing['status'] ?? '' ) .
-                ' timing_reason=' . (string) ( $gate_timing['reason'] ?? '' ) .
-                ' timing_source=' . (string) ( $gate_timing['source'] ?? $resolved_gate_timing_source ) .
-                ' gate_start=' . ( $start_ts ? gmdate( 'Y-m-d H:i:s', $start_ts ) : '' ) .
-                ' gate_end=' . ( $end_ts ? gmdate( 'Y-m-d H:i:s', $end_ts ) : '' )
-            );
         }
 
         if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
@@ -3670,14 +3483,6 @@ protected function mrm_get_google_service_account_json() {
         $now_ts   = time();
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] gate_window lesson_id=' . (int) ( $lesson['id'] ?? 0 ) .
-                ' now=' . gmdate( 'Y-m-d H:i:s', $now_ts ) .
-                ' open=' . gmdate( 'Y-m-d H:i:s', $open_ts ) .
-                ' start=' . gmdate( 'Y-m-d H:i:s', $start_ts ) .
-                ' end=' . gmdate( 'Y-m-d H:i:s', $end_ts ) .
-                ' close=' . gmdate( 'Y-m-d H:i:s', $close_ts )
-            );
         }
 
         // If outside allowed window, show professional message
@@ -5027,7 +4832,6 @@ protected function mrm_get_google_service_account_json() {
         // diagnosing whether WP‑Cron is running versus whether the resolver is failing.
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             $count = ( is_array( $rows ) ? count( $rows ) : 0 );
-            error_log( '[MRM] cron_sync_upcoming_events running at ' . current_time( 'mysql' ) . ' with ' . $count . ' rows' );
         }
 
         if ( ! is_array( $rows ) || empty( $rows ) ) return;
@@ -5039,13 +4843,6 @@ protected function mrm_get_google_service_account_json() {
             }
 
             if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                error_log(
-                    '[MRM] cron_sync_upcoming_events attempting lesson_id=' . (int) ( $lesson_row['id'] ?? 0 ) .
-                    ' start_time=' . (string) ( $lesson_row['start_time'] ?? '' ) .
-                    ' end_time=' . (string) ( $lesson_row['end_time'] ?? '' ) .
-                    ' google_event_id=' . (string) ( $lesson_row['google_event_id'] ?? '' ) .
-                    ' google_original_start_time=' . (string) ( $lesson_row['google_original_start_time'] ?? '' )
-                );
             }
 
             $sync = $this->sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, 120 );
@@ -5556,11 +5353,6 @@ protected function mrm_get_google_service_account_json() {
                     array( '%d' )
                 );
 
-                error_log(
-                    'MRM cancelled-reconcile: unresolved recurring lesson left scheduled'
-                    . ' lesson_id=' . (int) $l['id']
-                    . ' reason=' . $reason
-                );
 
                 continue;
             }
@@ -8908,21 +8700,7 @@ protected function mrm_get_google_service_account_json() {
             <hr>
             <h2>5) Debug One Google Lesson Row</h2>
             <p>Use this to run the recurring Google resolver for one lesson row and print the raw result.</p>
-            <form method="post" action="<?php echo esc_url( admin_url('admin-post.php' ) ); ?>">
-                <?php wp_nonce_field( 'mrm_scheduler_debug_google_row', 'mrm_scheduler_debug_google_row_nonce' ); ?>
-                <input type="hidden" name="action" value="mrm_scheduler_debug_google_row">
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row">Lesson ID</th>
-                        <td>
-                            <input type="number" min="1" step="1" name="lesson_id" value="">
-                            <p class="description">Enter one wp_mrm_lessons row ID.</p>
-                        </td>
-                    </tr>
-                </table>
-                <?php submit_button( 'Debug Google Row', 'secondary' ); ?>
-            </form>
-
+            
             <hr>
             <h2>Sharing Calendars (required)</h2>
             <ol>
@@ -9011,11 +8789,6 @@ protected function mrm_get_google_service_account_json() {
         $summary['rows_fetched'] = is_array( $rows ) ? count( $rows ) : 0;
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] run_google_sync_now source=' . $summary['source'] .
-                ' rows_fetched=' . (int) $summary['rows_fetched'] .
-                ' started_at=' . $summary['started_at']
-            );
         }
 
         $this->cron_sync_upcoming_events( 72, 30 );
@@ -9027,10 +8800,6 @@ protected function mrm_get_google_service_account_json() {
         $summary['finished_at'] = current_time( 'mysql' );
 
         if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log(
-                '[MRM] run_google_sync_now finished source=' . $summary['source'] .
-                ' finished_at=' . $summary['finished_at']
-            );
         }
 
         return $summary;
@@ -9087,62 +8856,6 @@ protected function mrm_get_google_service_account_json() {
         wp_safe_redirect( admin_url( 'tools.php?page=mrm-lesson-scheduler&finalization_run=1' ) );
         exit;
     }
-
-    public function handle_debug_google_row() {
-        if ( ! current_user_can( self::CAPABILITY ) ) {
-            wp_die( 'Not allowed.' );
-        }
-
-        check_admin_referer( 'mrm_scheduler_debug_google_row', 'mrm_scheduler_debug_google_row_nonce' );
-
-        global $wpdb;
-
-        $lesson_id = isset( $_POST['lesson_id'] ) ? absint( $_POST['lesson_id'] ) : 0;
-        if ( $lesson_id <= 0 ) {
-            wp_die( 'Missing lesson_id.' );
-        }
-
-        $lessons_table = $wpdb->prefix . 'mrm_lessons';
-        $instructors_table = $wpdb->prefix . 'mrm_instructors';
-
-        $lesson = $wpdb->get_row(
-            $wpdb->prepare(
-                "SELECT l.*, i.calendar_id, i.timezone
-                 FROM {$lessons_table} l
-                 LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id
-                 WHERE l.id = %d
-                 LIMIT 1",
-                $lesson_id
-            ),
-            ARRAY_A
-        );
-
-        if ( ! is_array( $lesson ) ) {
-            wp_die( 'Lesson not found.' );
-        }
-
-        $calendar_id = (string) ( $lesson['calendar_id'] ?? '' );
-        if ( $calendar_id === '' ) {
-            wp_die( 'Lesson has no calendar_id.' );
-        }
-
-        $result = array(
-            'lesson_id' => $lesson_id,
-            'calendar_id' => $calendar_id,
-            'google_event_id' => (string) ( $lesson['google_event_id'] ?? '' ),
-            'google_instance_event_id' => (string) ( $lesson['google_instance_event_id'] ?? '' ),
-            'google_original_start_time' => (string) ( $lesson['google_original_start_time'] ?? '' ),
-            'start_time' => (string) ( $lesson['start_time'] ?? '' ),
-            'end_time' => (string) ( $lesson['end_time'] ?? '' ),
-            'series_id' => (int) ( $lesson['series_id'] ?? 0 ),
-            'sync' => $this->sync_lesson_row_from_google_truth( $lesson, $calendar_id, 30 ),
-        );
-
-        header( 'Content-Type: application/json; charset=utf-8' );
-        echo wp_json_encode( $result, JSON_PRETTY_PRINT );
-        exit;
-    }
-
     /* =========================================================
      * Google Calendar (Service Account JWT)
      * ========================================================= */
@@ -9851,13 +9564,6 @@ protected function parse_service_account_json( $json ) {
             )
         );
 
-        error_log( '[MRM Instructor Notification] booking notification result ' . wp_json_encode( array(
-            'lesson_id'       => (int) $lesson_id,
-            'email'           => $instructor_email,
-            'sent'            => $sent ? 'yes' : 'no',
-            'is_consultation' => $is_consultation ? 'yes' : 'no',
-            'subject'         => $title,
-        ) ) );
 
         return $sent;
     }
