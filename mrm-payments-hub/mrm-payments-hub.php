@@ -902,7 +902,7 @@ class MRM_Payments_Hub_Single {
 
     $secret = $this->mrm_get_secret_json(
       MRM_SECRET_STRIPE_KEYS,
-      'mrm_secret_stripe_keys_v2'
+      'mrm_secret_stripe_keys_v3'
     );
 
     if (!is_array($secret)) {
