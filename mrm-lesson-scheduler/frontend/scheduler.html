@@ -2069,6 +2069,21 @@ h1 {
   </div>
 </div>
 
+<div id="mrm-sheet-music-resume-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+  <div class="modal" role="dialog" aria-modal="true" style="max-width:520px;">
+    <div class="modal-header">
+      <h2 class="modal-title">Sheet music subscription</h2>
+      <button class="modal-close" id="mrm-sheet-music-resume-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="mrm-sheet-music-resume-message" style="line-height:1.5;"></div>
+      <div class="modal-actions" style="display:flex;justify-content:flex-end;">
+        <button class="modal-submit" id="mrm-sheet-music-resume-continue" type="button">Continue</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="mrm-payment-loading-overlay" class="mrm-payment-loading-overlay" aria-hidden="true" style="display:none;">
   <div class="mrm-payment-loading-modal" role="dialog" aria-modal="true" aria-labelledby="mrm-payment-loading-title">
     <div class="mrm-payment-loading-spinner" aria-hidden="true"></div>
@@ -2658,6 +2673,51 @@ function showConfirmTotal(breakdown){
     closeBtn.onclick = ()=>{ cleanup(); resolve(false); };
     cancelBtn.onclick = ()=>{ cleanup(); resolve(false); };
     confirmBtn.onclick = ()=>{ cleanup(); resolve(true); };
+  });
+}
+
+function showSheetMusicResumePromptIfNeeded(createData){
+  const resumeInfo = createData && createData.sheet_music_resuming_subscription
+    ? createData.sheet_music_resuming_subscription
+    : null;
+  const isResuming = !!(resumeInfo && resumeInfo.is_resuming);
+
+  if (!isResuming) {
+    return Promise.resolve(true);
+  }
+
+  const overlay = document.getElementById('mrm-sheet-music-resume-overlay');
+  const closeBtn = document.getElementById('mrm-sheet-music-resume-close');
+  const continueBtn = document.getElementById('mrm-sheet-music-resume-continue');
+  const messageEl = document.getElementById('mrm-sheet-music-resume-message');
+
+  if (!overlay || !closeBtn || !continueBtn || !messageEl) {
+    return Promise.resolve(true);
+  }
+
+  const dateText = String(resumeInfo.current_period_end_display || '').trim() || 'your scheduled end date';
+  messageEl.textContent = `Your sheet music subscription is currently set to end on ${dateText}. Continuing will keep your subscription active.`;
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden', 'false');
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden', 'true');
+      closeBtn.onclick = null;
+      continueBtn.onclick = null;
+    };
+
+    closeBtn.onclick = () => {
+      cleanup();
+      resolve(false);
+    };
+
+    continueBtn.onclick = () => {
+      cleanup();
+      resolve(true);
+    };
   });
 }
 
@@ -3593,6 +3653,13 @@ function ensureLegacyBookingHandler(){
             return;
           }
 
+          const shouldContinueWithResume = await showSheetMusicResumePromptIfNeeded(createData);
+          if (!shouldContinueWithResume) {
+            setMsg('Checkout cancelled.');
+            btn.disabled = false;
+            return;
+          }
+
           const stripeInstance = ensureStripe(createData.publishableKey || '');
           if (!stripeInstance) {
             setMsg('Stripe is not configured.');
@@ -3719,6 +3786,13 @@ function ensureLegacyBookingHandler(){
           }
 
           setMsg(createData.message || 'Payment error.');
+          btn.disabled = false;
+          return;
+        }
+
+        const shouldContinueWithResume = await showSheetMusicResumePromptIfNeeded(createData);
+        if (!shouldContinueWithResume) {
+          setMsg('Checkout cancelled.');
           btn.disabled = false;
           return;
         }
