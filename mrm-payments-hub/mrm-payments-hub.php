@@ -2772,45 +2772,17 @@ class MRM_Payments_Hub_Single {
     $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
 
     if (is_array($local) && !empty($local)) {
-      $order = $this->get_order_by_meta_value('mrm_sheet_music_subscription_id', $subscription_id);
-      $email_sent_at = '';
+      $this->stripe_debug_log('customer.subscription.created webhook synced subscription only; enrollment email is handled by activation helper', array(
+        'subscription_id' => $subscription_id,
+        'email' => (string)($local['email_plain'] ?? ''),
+        'status' => (string)($local['stripe_status'] ?? ''),
+      ));
 
-      if (is_array($order) && !empty($order)) {
-        $email_sent_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_enrollment_email_sent_at', '');
-      }
-
-      if (
-        $email_sent_at === '' &&
-        is_array($order) &&
-        !empty($order) &&
-        $this->mrm_claim_subscription_enrollment_send((int)$order['id']) &&
-        in_array((string)($subscription['status'] ?? ''), array('trialing', 'active'), true)
-      ) {
-        $billing_anchor_ts = 0;
-        if (!empty($subscription['current_period_end'])) {
-          $billing_anchor_ts = (int)$subscription['current_period_end'];
-        }
-
-        $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $billing_anchor_ts);
-        $this->stripe_debug_log('subscription created webhook enrollment email result', array(
-          'subscription_id' => $subscription_id,
-          'email' => (string)($local['email_plain'] ?? ''),
-          'sent' => ($sent ? 'yes' : 'no'),
-        ));
-        $this->mrm_subscription_debug_log('created webhook enrollment email result', array(
-          'subscription_id' => $subscription_id,
-          'email' => (string)($local['email_plain'] ?? ''),
-          'sent' => ($sent ? 'yes' : 'no'),
-        ));
-
-        if ($sent && is_array($order) && !empty($order)) {
-          $this->mrm_set_order_meta_flag((int)$order['id'], 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
-        }
-
-        if (!$sent && is_array($order) && !empty($order)) {
-          $this->mrm_release_subscription_enrollment_send((int)$order['id']);
-        }
-      }
+      $this->mrm_subscription_debug_log('customer.subscription.created webhook sync complete; enrollment email intentionally not sent here', array(
+        'subscription_id' => $subscription_id,
+        'email' => (string)($local['email_plain'] ?? ''),
+        'status' => (string)($local['stripe_status'] ?? ''),
+      ));
     }
   }
 
@@ -4051,14 +4023,41 @@ class MRM_Payments_Hub_Single {
       $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
       $email_sent_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_enrollment_email_sent_at', '');
 
-      if (is_array($local) && !empty($local) && $email_sent_at === '') {
-        $this->mrm_subscription_debug_log('activation helper skipped enrollment email intentionally; customer.subscription.created webhook is the sole sender', array(
+      if (
+        is_array($local) &&
+        !empty($local) &&
+        $email_sent_at === '' &&
+        in_array((string)($local['stripe_status'] ?? ''), array('trialing', 'active'), true) &&
+        $this->mrm_claim_subscription_enrollment_send((int)$order_id)
+      ) {
+        $billing_anchor_ts = 0;
+        if (!empty($subscription['current_period_end'])) {
+          $billing_anchor_ts = (int)$subscription['current_period_end'];
+        }
+
+        $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $billing_anchor_ts);
+
+        $this->stripe_debug_log('activation helper enrollment email result', array(
           'context' => $context,
           'order_id' => $order_id,
           'subscription_id' => $subscription_id,
-          'local_status' => (string)($local['stripe_status'] ?? ''),
           'email' => (string)($local['email_plain'] ?? ''),
+          'sent' => ($sent ? 'yes' : 'no'),
         ));
+
+        $this->mrm_subscription_debug_log('activation helper enrollment email result', array(
+          'context' => $context,
+          'order_id' => $order_id,
+          'subscription_id' => $subscription_id,
+          'email' => (string)($local['email_plain'] ?? ''),
+          'sent' => ($sent ? 'yes' : 'no'),
+        ));
+
+        if ($sent) {
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_enrollment_email_sent_at', current_time('mysql'));
+        } else {
+          $this->mrm_release_subscription_enrollment_send($order_id);
+        }
       } else {
         $this->mrm_subscription_debug_log('activation helper skipped enrollment email', array(
           'context' => $context,
@@ -4066,6 +4065,7 @@ class MRM_Payments_Hub_Single {
           'subscription_id' => $subscription_id,
           'local_row_found' => (!empty($local) ? 'yes' : 'no'),
           'email_sent_at' => $email_sent_at,
+          'local_status' => (string)($local['stripe_status'] ?? ''),
         ));
       }
 
@@ -8226,7 +8226,11 @@ class MRM_Payments_Hub_Single {
       ));
 
       if ($addon_yes && $product_type === 'lesson' && !empty($order['id'])) {
-        $this->mrm_attempt_sheet_music_subscription_activation((int)$order['id'], $pi, 'verify_endpoint');
+        $this->mrm_subscription_debug_log('verify endpoint skipped subscription activation intentionally; payment_intent.succeeded webhook is the sole activator', array(
+          'order_id' => (int)($order['id'] ?? 0),
+          'payment_intent_id' => (string)($pi['id'] ?? ''),
+          'context' => 'verify_endpoint',
+        ));
       }
     }
 
