@@ -2801,7 +2801,22 @@ protected function mrm_get_google_service_account_json() {
                     $this->send_consultation_confirmation_for_lesson( $booking_id );
                 }
 
-                $this->send_instructor_scheduled_notification_for_lesson( $booking_id );
+                $timeframe_label = '';
+                if ( $is_recurring_booking ) {
+                    $timeframe_label = $this->mrm_get_timeframe_label( $repeat_frequency, $repeat_duration );
+                }
+
+                $should_send_instructor_scheduled_email =
+                    ( ! $is_recurring_booking ) || ( (int) $slot_index === 0 );
+
+                if ( $should_send_instructor_scheduled_email ) {
+                    $this->send_instructor_scheduled_notification_for_lesson(
+                        $booking_id,
+                        array(
+                            'timeframe_label' => $timeframe_label,
+                        )
+                    );
+                }
 
                 if ( ! $is_online ) {
                     $this->mrm_queue_mileage_calculation_for_lesson( $booking_id );
@@ -9572,7 +9587,50 @@ protected function parse_service_account_json( $json ) {
         return 'Private Lesson Scheduled';
     }
 
-    protected function send_instructor_scheduled_notification_for_lesson( $lesson_id ) {
+    protected function mrm_get_repeat_frequency_label( $repeat_frequency ) {
+        $repeat_frequency = strtolower( trim( (string) $repeat_frequency ) );
+
+        if ( $repeat_frequency === 'weekly' ) {
+            return 'Weekly';
+        }
+
+        if ( $repeat_frequency === 'biweekly' ) {
+            return 'Biweekly';
+        }
+
+        return '';
+    }
+
+    protected function mrm_get_repeat_duration_label( $repeat_duration ) {
+        $repeat_duration = strtolower( trim( (string) $repeat_duration ) );
+
+        if ( $repeat_duration === '1_month' ) {
+            return 'For One Month';
+        }
+
+        if ( $repeat_duration === '3_months' ) {
+            return 'For Three Months';
+        }
+
+        if ( $repeat_duration === 'indefinitely' ) {
+            return 'Indefinitely';
+        }
+
+        return '';
+    }
+
+    protected function mrm_get_timeframe_label( $repeat_frequency, $repeat_duration ) {
+        $frequency_label = $this->mrm_get_repeat_frequency_label( $repeat_frequency );
+        $duration_label  = $this->mrm_get_repeat_duration_label( $repeat_duration );
+
+        if ( $frequency_label !== '' && $duration_label !== '' ) {
+            return trim( $frequency_label . ' ' . $duration_label );
+        }
+
+        return '';
+    }
+
+    protected function send_instructor_scheduled_notification_for_lesson( $lesson_id, $options = array() ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             return false;
@@ -9590,6 +9648,8 @@ protected function parse_service_account_json( $json ) {
         $student_email   = (string) ( $lesson['student_email'] ?? '' );
         $instructor_name = (string) ( $lesson['instructor_name'] ?? 'Instructor' );
         $minutes         = (int) ( $lesson['lesson_length'] ?? 0 );
+        $options = is_array( $options ) ? $options : array();
+        $timeframe_label = (string) ( $options['timeframe_label'] ?? '' );
 
         $title = $this->mrm_get_instructor_booking_notification_subject( $lesson );
 
@@ -9609,6 +9669,10 @@ protected function parse_service_account_json( $json ) {
         } else {
             $details .= '<div><strong>Type:</strong> ' . esc_html( (string) ( $context['lesson_type_label'] ?? 'Private Lesson' ) ) . '</div>';
             $details .= '<div><strong>Lesson Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
+
+            if ( $timeframe_label !== '' ) {
+                $details .= '<div><strong>Timeframe:</strong> ' . esc_html( $timeframe_label ) . '</div>';
+            }
         }
 
         if ( ! empty( $context['join_link'] ) ) {
