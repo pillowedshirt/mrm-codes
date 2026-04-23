@@ -2984,16 +2984,98 @@ function clearSelectedSlots() {
   if (currentInstructor) updateBooking(currentInstructor);
 }
 
+function snapshotSelectedSlotState() {
+  if (!Array.isArray(selectedSlots) || !selectedSlots.length) return null;
+
+  const first = selectedSlots[0];
+  if (!first || typeof first !== 'object') return null;
+
+  return {
+    slots: JSON.parse(JSON.stringify(selectedSlots)),
+    instructorId: String(first.instructor_id || first.instructorId || currentInstructor?.id || ''),
+    start: String(first.start || first.start_time || ''),
+    end: String(first.end || first.end_time || '')
+  };
+}
+
+function slotMatchesSnapshot(slot, snap) {
+  if (!slot || !snap) return false;
+
+  const slotInstructorId = String(slot.instructor_id || slot.instructorId || '');
+  const slotStart = String(slot.start || slot.start_time || '');
+  const slotEnd   = String(slot.end || slot.end_time || '');
+
+  return (
+    slotInstructorId === snap.instructorId &&
+    slotStart === snap.start &&
+    slotEnd === snap.end
+  );
+}
+
+function tryRestoreSelectedSlotsFromSnapshot(snap) {
+  if (!snap || !snap.instructorId || !snap.start || !snap.end) return false;
+  if (!Array.isArray(window.__mrmLastRenderedInstructors) || !window.__mrmLastRenderedInstructors.length) return false;
+
+  const matchingInstructor = window.__mrmLastRenderedInstructors.find(inst => {
+    return String(inst.id || '') === snap.instructorId;
+  });
+
+  if (!matchingInstructor) return false;
+
+  const availability = Array.isArray(matchingInstructor.availability) ? matchingInstructor.availability : [];
+  const matchingSlot = availability.find(slot => slotMatchesSnapshot(slot, snap));
+
+  if (!matchingSlot) return false;
+
+  selectedSlots = snap.slots.map(s => ({ ...s }));
+  persistSelectedSlots();
+
+  currentInstructor = matchingInstructor;
+
+  renderInstructorListForState(selectedState);
+
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.slot').forEach(el => {
+      const slotInstructorId = String(el.dataset.instructorId || '');
+      const slotStart = String(el.dataset.start || '');
+      const slotEnd = String(el.dataset.end || '');
+
+      if (
+        slotInstructorId === snap.instructorId &&
+        slotStart === snap.start &&
+        slotEnd === snap.end
+      ) {
+        el.classList.add('selected');
+        el.classList.add('selected-slot');
+      }
+    });
+
+    if (currentInstructor) {
+      updateBooking(currentInstructor);
+    }
+  });
+
+  return true;
+}
+
 function rerunInstructorSearchForCurrentFilters() {
   if (!selectedState) return;
 
-  // Clear stale slot selections because the instructor/mode/instrument results
-  // may change after the top-bar filters change.
-  clearSelectedSlots();
+  const snap = snapshotSelectedSlotState();
 
-  // Close any expanded instructor context so the refreshed list is the source of truth.
+  // Close expanded instructor context before rebuilding results.
   currentInstructor = null;
 
+  renderInstructorListForState(selectedState);
+
+  // If the previously selected slot is still valid under the new filters,
+  // restore it. Otherwise fall back to the current behavior and clear it.
+  if (snap && tryRestoreSelectedSlotsFromSnapshot(snap)) {
+    return;
+  }
+
+  clearSelectedSlots();
+  currentInstructor = null;
   renderInstructorListForState(selectedState);
 }
 
@@ -5621,6 +5703,8 @@ function loadInstructors(){
           totalInstructors: Array.isArray(list) ? list.length : 0,
           filteredCount: filtered.length
         });
+
+        window.__mrmLastRenderedInstructors = Array.isArray(filtered) ? filtered : [];
 
         // Existing behavior: group by city (within state)
         const byCity = {};

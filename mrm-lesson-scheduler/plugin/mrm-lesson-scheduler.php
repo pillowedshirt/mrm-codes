@@ -5137,7 +5137,7 @@ protected function mrm_get_google_service_account_json() {
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $now_mysql = current_time( 'mysql' );
-        $cutoff_mysql = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 7 * DAY_IN_SECONDS ) );
+        $cutoff_mysql = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - HOUR_IN_SECONDS );
 
         $this->mrm_finalization_debug_log( 'finalization_cron_started', array(
             'now_mysql'    => $now_mysql,
@@ -5230,11 +5230,11 @@ protected function mrm_get_google_service_account_json() {
                 "SELECT *
                  FROM {$lessons_table}
                  WHERE status = %s
-                   AND delivered_at IS NOT NULL
-                   AND delivered_at <> ''
-                   AND delivered_at <= %s
+                   AND end_time IS NOT NULL
+                   AND end_time <> ''
+                   AND end_time <= %s
                    AND (finalized_at IS NULL OR finalized_at = '')
-                 ORDER BY delivered_at ASC
+                 ORDER BY end_time ASC
                  LIMIT 250",
                 'delivered',
                 $cutoff_mysql
@@ -5258,10 +5258,11 @@ protected function mrm_get_google_service_account_json() {
             $this->mrm_finalization_debug_log( 'lesson_finalize_candidate', array(
                 'lesson_id'           => $lesson_id,
                 'status'              => (string) ( $row['status'] ?? '' ),
+                'end_time'            => (string) ( $row['end_time'] ?? '' ),
                 'delivered_at'        => (string) ( $row['delivered_at'] ?? '' ),
                 'finalized_at_before' => (string) ( $row['finalized_at'] ?? '' ),
                 'start_time'          => (string) ( $row['start_time'] ?? '' ),
-                'end_time'            => (string) ( $row['end_time'] ?? '' ),
+                'finalization_rule'   => '1_hour_after_end_time',
             ) );
 
             $updated = $wpdb->update(
@@ -5285,12 +5286,14 @@ protected function mrm_get_google_service_account_json() {
             }
 
             $this->mrm_finalization_debug_log( 'lesson_finalized', array(
-                'lesson_id'       => $lesson_id,
-                'previous_status' => (string) ( $row['status'] ?? '' ),
-                'new_status'      => 'finalized',
-                'delivered_at'    => (string) ( $row['delivered_at'] ?? '' ),
-                'finalized_at'    => $now_mysql,
-                'rows_affected'   => $updated,
+                'lesson_id'         => $lesson_id,
+                'previous_status'   => (string) ( $row['status'] ?? '' ),
+                'new_status'        => 'finalized',
+                'end_time'          => (string) ( $row['end_time'] ?? '' ),
+                'delivered_at'      => (string) ( $row['delivered_at'] ?? '' ),
+                'finalized_at'      => $now_mysql,
+                'rows_affected'     => $updated,
+                'finalization_rule' => '1_hour_after_end_time',
             ) );
         }
 
