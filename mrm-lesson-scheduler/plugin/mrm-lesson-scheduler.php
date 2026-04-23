@@ -4575,20 +4575,23 @@ protected function mrm_get_google_service_account_json() {
 
         $subject = $student_name . ' ' . $minutes . ' ' . $lesson_type_label . ' ' . $thing_upper;
 
-        $intro_html = '<p>Reminder: you have a scheduled ' . esc_html( strtolower( $thing_upper ) ) . ' coming up in one hour.</p>';
+        $intro_html = '<p>Reminder: you have a ' . esc_html( $thing_lower ) . ' scheduled in 1 hour.</p>';
 
-        $details_html = '';
-        $details_html .= '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>';
-        $details_html .= '<div><strong>Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
-        $details_html .= '<div><strong>Type:</strong> ' . esc_html( $lesson_type_label ) . '</div>';
-        $details_html .= '<div style="margin-top:12px;"><strong>' . esc_html( $thing_upper ) . ' link:</strong><br><a href="' . esc_url( $join_link ) . '">' . esc_html( $join_link ) . '</a></div>';
+        $details_html =
+            '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>' .
+            '<div><strong>Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>' .
+            '<div><strong>Type:</strong> ' . esc_html( $lesson_type_label ) . '</div>';
+
+        if ( $join_link !== '' ) {
+            $details_html .= '<div style="margin-top:12px;"><strong>' . esc_html( $thing_upper ) . ' link:</strong><br><a href="' . esc_url( $join_link ) . '">' . esc_html( $join_link ) . '</a></div>';
+        }
 
         $html = $this->mrm_safety_email_wrap_html(
             $subject,
             $intro_html,
             $details_html,
             $join_link,
-            'Open Lesson Link'
+            $is_consultation ? 'Open consultation link' : 'Open lesson link'
         );
 
         $to = array();
@@ -6733,11 +6736,11 @@ protected function mrm_get_google_service_account_json() {
             )
         );
 
-        if ( $sent ) {
-            $this->update_attendance_row( $lesson_id, array(
-                'parent_feedback_request_sent_at' => current_time( 'mysql' ),
-            ) );
-        } else {
+        $this->update_attendance_row( $lesson_id, array(
+            'parent_feedback_request_sent_at' => current_time( 'mysql' ),
+        ) );
+
+        if ( ! $sent ) {
             $this->mrm_release_feedback_request_send( $lesson_id );
         }
 
