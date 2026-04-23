@@ -71,6 +71,26 @@ h1 {
   font-size:14px;
 }
 
+.mrm-modal-locked-select,
+#mrm-booking-modal .mrm-modal-locked-select,
+#booking-modal .mrm-modal-locked-select {
+  background: #f1f1f1;
+  color: #666;
+  border-color: #d3d3d3;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.mrm-modal-locked-select:disabled,
+#booking-modal .mrm-modal-locked-select:disabled {
+  background: #f1f1f1;
+  color: #666;
+  border-color: #d3d3d3;
+  cursor: not-allowed;
+  opacity: 1;
+  -webkit-text-fill-color: #666;
+}
+
 #length-select,
 #mrm-pref-length {
   font-weight: 700;
@@ -1939,7 +1959,7 @@ h1 {
           <input id="modal-student-name" autocomplete="name">
 
           <label for="modal-instrument">Instrument</label>
-          <select id="modal-instrument">
+          <select id="modal-instrument" disabled aria-disabled="true" class="mrm-modal-locked-select">
             <option value="" selected>Choose instrument</option>
             <option value="Trombone">Trombone</option>
             <option value="Euphonium">Euphonium</option>
@@ -6288,14 +6308,6 @@ document.getElementById('instrument-input').addEventListener('change', ()=>{
   document.getElementById('confirm-instrument').value = v;
   const modalSel = document.getElementById('modal-instrument');
   if(modalSel) modalSel.value = v;
-
-  rerunInstructorSearchForCurrentFilters();
-});
-
-document.getElementById('modal-instrument').addEventListener('change', ()=>{
-  const v = document.getElementById('modal-instrument').value || '';
-  document.getElementById('instrument-input').value = v;
-  document.getElementById('confirm-instrument').value = v;
 
   rerunInstructorSearchForCurrentFilters();
 });
