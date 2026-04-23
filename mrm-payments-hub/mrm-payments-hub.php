@@ -3635,6 +3635,14 @@ class MRM_Payments_Hub_Single {
       $order_id = (int)$order_id;
       if ($order_id <= 0) return false;
 
+      if (!$this->mrm_claim_subscription_activation($order_id)) {
+        $this->mrm_subscription_debug_log('activation helper exited: activation already claimed by another path', array(
+          'context' => $context,
+          'order_id' => $order_id,
+        ));
+        return false;
+      }
+
       $this->mrm_subscription_debug_log('activation helper entered', array(
         'context' => $context,
         'order_id' => $order_id,
@@ -3643,6 +3651,7 @@ class MRM_Payments_Hub_Single {
 
       $order = $this->get_order($order_id);
       if (!is_array($order) || empty($order)) {
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
       $this->mrm_subscription_debug_log('activation helper order loaded', array(
@@ -3703,6 +3712,7 @@ class MRM_Payments_Hub_Single {
       $order_status = (string)($order['status'] ?? '');
       if (!in_array($order_status, array('paid', 'completed', 'succeeded'), true)) {
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'waiting_for_paid_order');
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
 
@@ -3726,6 +3736,7 @@ class MRM_Payments_Hub_Single {
 
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_payment_intent');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing payment_intent_id on both passed PI and order.');
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
 
@@ -3741,6 +3752,7 @@ class MRM_Payments_Hub_Single {
 
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'payment_intent_retrieve_failed');
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $pi->get_error_message());
+          $this->mrm_release_subscription_activation($order_id);
           return false;
         }
 
@@ -3786,6 +3798,7 @@ class MRM_Payments_Hub_Single {
           'product_type' => $product_type,
           'addon_yes' => ($addon_yes ? 'yes' : 'no'),
         ));
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
 
@@ -3802,6 +3815,7 @@ class MRM_Payments_Hub_Single {
         ));
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'configuration_missing');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing Stripe subscription Price ID.');
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
 
@@ -3819,6 +3833,7 @@ class MRM_Payments_Hub_Single {
         ));
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'missing_email');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Missing valid customer email.');
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
 
@@ -3857,6 +3872,7 @@ class MRM_Payments_Hub_Single {
         ));
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'retry_pending_customer_or_payment_method');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', 'Stripe customer/payment method is not ready yet.');
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
 
@@ -3871,6 +3887,7 @@ class MRM_Payments_Hub_Single {
         ));
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'payment_method_not_ready');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $pm_ready->get_error_message());
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
       $this->mrm_subscription_debug_log('activation helper payment-method readiness passed', array(
@@ -3892,6 +3909,7 @@ class MRM_Payments_Hub_Single {
         if (is_wp_error($resumed)) {
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'resume_failed');
           $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $resumed->get_error_message());
+          $this->mrm_release_subscription_activation($order_id);
           return false;
         }
 
@@ -3999,6 +4017,7 @@ class MRM_Payments_Hub_Single {
       if (is_wp_error($subscription)) {
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'create_failed');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $subscription->get_error_message());
+        $this->mrm_release_subscription_activation($order_id);
         return false;
       }
 
@@ -4073,6 +4092,7 @@ class MRM_Payments_Hub_Single {
     } catch (Throwable $e) {
       $order_id = (int)$order_id;
       if ($order_id > 0) {
+        $this->mrm_release_subscription_activation($order_id);
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'runtime_exception');
         $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_error', $e->getMessage());
       }
@@ -4615,6 +4635,28 @@ class MRM_Payments_Hub_Single {
 
     $added = add_option($lock_key, current_time('mysql'), '', 'no');
     return (bool)$added;
+  }
+
+  private function mrm_claim_subscription_activation($order_id) {
+    $order_id = (int)$order_id;
+    if ($order_id <= 0) return false;
+
+    $lock_key = 'mrm_sub_activation_claim_order_' . $order_id;
+
+    if (get_option($lock_key, null)) {
+      return false;
+    }
+
+    $added = add_option($lock_key, current_time('mysql'), '', 'no');
+    return (bool)$added;
+  }
+
+  private function mrm_release_subscription_activation($order_id) {
+    $order_id = (int)$order_id;
+    if ($order_id <= 0) return;
+
+    $lock_key = 'mrm_sub_activation_claim_order_' . $order_id;
+    delete_option($lock_key);
   }
 
   private function mrm_release_subscription_enrollment_send($order_id) {
