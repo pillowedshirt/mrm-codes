@@ -1560,6 +1560,18 @@ class MRM_Payments_Hub_Single {
     return $out;
   }
 
+
+  private function mrm_get_piece_page_url_from_sku($sku) {
+    $labels = $this->mrm_parse_piece_sku_labels($sku);
+    $piece_slug = sanitize_title((string)($labels['piece_slug'] ?? ''));
+
+    if ($piece_slug === '') {
+      return '';
+    }
+
+    return home_url('/' . $piece_slug . '/');
+  }
+
   private function mrm_email_already_has_piece_or_package_access($email, $sku) {
     $email = sanitize_email((string)$email);
     $sku   = $this->sanitize_sku((string)$sku);
@@ -3471,7 +3483,54 @@ class MRM_Payments_Hub_Single {
     return $url;
   }
 
-  private function mrm_email_wrap_html($title, $intro_html, $details_html, $cta_url = '', $cta_label = '') {
+
+  private function mrm_get_receipt_lesson_online_context($lesson_row) {
+    $lesson_row = is_array($lesson_row) ? $lesson_row : array();
+
+    $is_online = !empty($lesson_row['is_online']);
+    if (!$is_online) {
+      return array(
+        'join_link' => '',
+        'format_note' => '',
+      );
+    }
+
+    $join_link = '';
+
+    if (!empty($lesson_row['reminder_token'])) {
+      $join_link = add_query_arg(
+        array('token' => (string)$lesson_row['reminder_token']),
+        home_url('/join-online/')
+      );
+    }
+
+    if ($join_link === '' && !empty($lesson_row['google_meet_url'])) {
+      $join_link = (string)$lesson_row['google_meet_url'];
+    }
+
+    return array(
+      'join_link' => $join_link,
+      'format_note' => 'This is an online lesson. Please use the lesson link above at the scheduled time.',
+    );
+  }
+
+  private function mrm_get_sheet_music_access_section_html() {
+    $sheet_music_url = home_url('/sheet-music/');
+
+    $html  = '<div style="margin-top:12px;"><strong>How To Access Sheet Music</strong></div>';
+    $html .= '<div style="margin-top:8px;">To access your sheet music, go to this link: <a href="' . esc_url($sheet_music_url) . '">' . esc_html($sheet_music_url) . '</a> and follow these steps:</div>';
+    $html .= '<ol style="margin:8px 0 0 18px;padding:0;">';
+    $html .= '<li>Open the sheet music page.</li>';
+    $html .= '<li>Select the piece you would like to access.</li>';
+    $html .= '<li>Use your purchase email address to request your one-time access code if prompted.</li>';
+    $html .= '<li>Open the available materials for the pieces included in your subscription.</li>';
+    $html .= '</ol>';
+    $html .= '<div style="margin-top:12px;">Subscription access includes downloadable PDF files. Audio files are streaming only. To download audio files, the customer must purchase the piece separately.</div>';
+
+    return $html;
+  }
+
+  private function mrm_email_wrap_html($title, $intro_html, $details_html, $cta_url = '', $cta_label = '', $after_cta_html = '') {
     $site = esc_html(get_bloginfo('name'));
     $logo_url = $this->mrm_get_site_logo_url();
 
@@ -3491,6 +3550,8 @@ class MRM_Payments_Hub_Single {
     </div>';
     }
 
+    $after_cta_html = (string)$after_cta_html;
+
     return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
     <div style="max-width:640px;margin:0 auto;padding:24px;">
       <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
@@ -3501,6 +3562,7 @@ class MRM_Payments_Hub_Single {
           ' . $details_html . '
         </div>
         ' . $cta_html . '
+        ' . $after_cta_html . '
         <div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
       </div>
     </div>
@@ -4735,7 +4797,7 @@ class MRM_Payments_Hub_Single {
 
     $fmt_money = function($c){ return '$' . number_format(((int)$c)/100, 2); };
 
-    $title = 'Thank you for your purchase!';
+    $title = 'Purchase Confirmation';
     $intro = '<p>We’ve received your payment successfully.</p>';
 
     $details = '';
@@ -4875,6 +4937,16 @@ class MRM_Payments_Hub_Single {
       }
       $details .= '<div>Plan: ' . esc_html($plan_display) . '</div>';
 
+      $receipt_lesson_context = $this->mrm_get_receipt_lesson_online_context($lesson_row);
+
+      if (!empty($receipt_lesson_context['join_link'])) {
+        $details .= '<div style="margin-top:12px;"><strong>Lesson Link:</strong> <a href="' . esc_url((string)$receipt_lesson_context['join_link']) . '">' . esc_html((string)$receipt_lesson_context['join_link']) . '</a></div>';
+      }
+
+      if (!empty($receipt_lesson_context['format_note'])) {
+        $details .= '<div style="margin-top:12px;">' . esc_html((string)$receipt_lesson_context['format_note']) . '</div>';
+      }
+
       if ($is_autopay_initial_receipt) {
         $details .= '<div style="margin-top:12px;">This message confirms that we have received payment for your first lesson. Any sheet music subscription selected during checkout will be confirmed separately in its own email.</div>';
       }
@@ -4900,9 +4972,17 @@ class MRM_Payments_Hub_Single {
     }
 
     if ($product_type === 'sheet_music') {
-      $details .= '<div style="margin-top:12px;"><strong>How to access your purchase</strong></div>';
+      $piece_page_url = $this->mrm_get_piece_page_url_from_sku($sku);
+
+      $details .= '<div style="margin-top:12px;"><strong>How To Access Your Purchase</strong></div>';
       $details .= '<ol style="margin:8px 0 0 18px;padding:0;">';
-      $details .= '<li>Return to the piece page on the website.</li>';
+
+      if ($piece_page_url !== '') {
+        $details .= '<li>Go to your purchased piece page here: <a href="' . esc_url($piece_page_url) . '">' . esc_html($piece_page_url) . '</a>.</li>';
+      } else {
+        $details .= '<li>Return to the piece page on the website.</li>';
+      }
+
       $details .= '<li>Click the access button for your purchased category.</li>';
       $details .= '<li>Enter your purchase email address.</li>';
       $details .= '<li>Request your one-time access code and enter it to open the content.</li>';
@@ -4919,7 +4999,7 @@ class MRM_Payments_Hub_Single {
 
     $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
 
-    $subject = 'Purchase confirmation — ' . $label;
+    $subject = 'Purchase Confirmation - ' . $label;
 
     $headers = array(
       'Content-Type: text/html; charset=UTF-8',
@@ -4954,27 +5034,32 @@ class MRM_Payments_Hub_Single {
     $contact_url = $this->mrm_get_contact_url();
     $anchor_label = $billing_anchor_ts > 0 ? wp_date('F j, Y', (int)$billing_anchor_ts, wp_timezone()) : 'the same date next month';
 
-    $title = 'Sheet music subscription enrolled';
+    $title = 'Subscription Confirmation - Sheet Music Access';
     $intro = '<p>You have successfully enrolled in the sheet music subscription service.</p>';
     $status_label = (string)($sub_row['stripe_status'] ?? 'active');
     if ($status_label === '') $status_label = 'active';
 
     $details =
-      '<div><strong>Subscription:</strong> Monthly sheet music access</div>' .
-      '<div><strong>Amount:</strong> $5.00 per month</div>' .
+      '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' .
+      '<div><strong>Amount:</strong> $5.00 Per Month</div>' .
       '<div><strong>Status:</strong> ' . esc_html(ucwords(str_replace('_', ' ', $status_label))) . '</div>' .
-      '<div style="margin-top:12px;"><strong>Purchase details</strong></div>' .
+      $this->mrm_get_sheet_music_access_section_html() .
+      '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' .
       '<div>Your subscription has been created successfully in our billing system.</div>' .
-      '<div style="margin-top:12px;">You will be billed again on or about <strong>' . esc_html($anchor_label) . '</strong>, and then monthly thereafter while the subscription remains active.</div>' .
-      '<p style="margin-top:18px;">
-       <a href="' . esc_url($manage_url) . '" style="color:#111;text-decoration:underline;">cancel subscription</a>
-     </p>';
+      '<div style="margin-top:12px;">You will be billed again on or about <strong>' . esc_html($anchor_label) . '</strong>, and then monthly thereafter while the subscription remains active.</div>';
 
-    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+    $after_cta_html = '';
+    if ($manage_url !== '') {
+      $after_cta_html = '<div style="margin-top:14px;text-align:right;">
+    <a href="' . esc_url($manage_url) . '" style="color:#111;text-decoration:underline;">Cancel Subscription</a>
+  </div>';
+    }
+
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support', $after_cta_html);
 
     $sent = wp_mail(
       $email,
-      'Subscription confirmation — Sheet music access',
+      'Subscription Confirmation - Sheet Music Access',
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
@@ -5006,24 +5091,31 @@ class MRM_Payments_Hub_Single {
     $contact_url = $this->mrm_get_contact_url();
     $next_label = $period_end_ts > 0 ? wp_date('F j, Y', $period_end_ts, wp_timezone()) : 'next month';
 
-    $title = 'Subscription payment received';
-    $intro = '<p>Your saved card has been successfully charged for your sheet music subscription.</p>';
-    $details =
-      '<div><strong>Subscription:</strong> Monthly sheet music access</div>' .
-      '<div><strong>Amount charged:</strong> $' . number_format($amount_paid / 100, 2) . '</div>' .
-      '<div><strong>Invoice ID:</strong> ' . esc_html($invoice_id) . '</div>' .
-      '<div style="margin-top:12px;"><strong>Purchase details</strong></div>' .
-      '<div>Your sheet music subscription remains active.</div>' .
-      '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong>' . esc_html($next_label) . '</strong>.</div>' .
-      '<p style="margin-top:18px;">
-       <a href="' . esc_url($manage_url) . '" style="color:#111;text-decoration:underline;">cancel subscription</a>
-     </p>';
+    $title = 'Subscription Renewal - Sheet Music Access';
+    $intro = '<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>';
 
-    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+    $details =
+      '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' .
+      '<div><strong>Amount Charged:</strong> $' . number_format($amount_paid / 100, 2) . '</div>' .
+      '<div><strong>Status:</strong> Active</div>' .
+      $this->mrm_get_sheet_music_access_section_html() .
+      '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' .
+      '<div>Your sheet music subscription remains active.</div>' .
+      '<div><strong>Invoice ID:</strong> ' . esc_html($invoice_id) . '</div>' .
+      '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong>' . esc_html($next_label) . '</strong>.</div>';
+
+    $after_cta_html = '';
+    if ($manage_url !== '') {
+      $after_cta_html = '<div style="margin-top:14px;text-align:right;">
+    <a href="' . esc_url($manage_url) . '" style="color:#111;text-decoration:underline;">Cancel Subscription</a>
+  </div>';
+    }
+
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support', $after_cta_html);
 
     return wp_mail(
       $email,
-      'Subscription payment confirmation — Sheet music access',
+      'Subscription Renewal - Sheet Music Access',
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
@@ -5087,7 +5179,7 @@ class MRM_Payments_Hub_Single {
     $ended_label = $ended_at > 0 ? wp_date('F j, Y', $ended_at, wp_timezone()) : 'today';
     $contact_url = $this->mrm_get_contact_url();
 
-    $title = 'Subscription cancelled';
+    $title = 'Subscription Cancelled';
     $intro = '<p>Your sheet music subscription has been cancelled.</p>';
     $details =
       '<div><strong>Subscription:</strong> Monthly sheet music access</div>' .
@@ -5099,7 +5191,7 @@ class MRM_Payments_Hub_Single {
 
     return wp_mail(
       $email,
-      'Subscription update — Sheet music access cancelled',
+      'Subscription Update - Sheet Music Access Cancelled',
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
