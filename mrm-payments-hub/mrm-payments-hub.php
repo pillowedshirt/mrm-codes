@@ -8226,11 +8226,44 @@ class MRM_Payments_Hub_Single {
       ));
 
       if ($addon_yes && $product_type === 'lesson' && !empty($order['id'])) {
-        $this->mrm_subscription_debug_log('verify endpoint skipped subscription activation intentionally; payment_intent.succeeded webhook is the sole activator', array(
-          'order_id' => (int)($order['id'] ?? 0),
+        $order_id = (int)($order['id'] ?? 0);
+        $order_meta = $this->mrm_get_order_meta_array($order);
+
+        $existing_subscription_id = (string)($order_meta['mrm_sheet_music_subscription_id'] ?? '');
+        $existing_created_at = (string)($order_meta['mrm_sheet_music_subscription_created_at'] ?? '');
+        $email = sanitize_email((string)($order_meta['mrm_customer_email'] ?? ($pi['metadata']['mrm_customer_email'] ?? '')));
+
+        $existing_active = array();
+        if ($email && is_email($email)) {
+          $existing_active = $this->mrm_get_active_sheet_music_subscription_by_email($email);
+        }
+
+        $this->mrm_subscription_debug_log('verify endpoint guarded activation check', array(
+          'order_id' => $order_id,
           'payment_intent_id' => (string)($pi['id'] ?? ''),
+          'existing_subscription_id' => $existing_subscription_id,
+          'existing_created_at' => $existing_created_at,
+          'existing_active_found' => (!empty($existing_active['id']) ? 'yes' : 'no'),
           'context' => 'verify_endpoint',
         ));
+
+        if ($existing_subscription_id === '' && empty($existing_active['id'])) {
+          $this->mrm_subscription_debug_log('verify endpoint invoking guarded fallback activation', array(
+            'order_id' => $order_id,
+            'payment_intent_id' => (string)($pi['id'] ?? ''),
+            'context' => 'verify_endpoint',
+          ));
+
+          $this->mrm_attempt_sheet_music_subscription_activation($order_id, $pi, 'verify_endpoint_fallback');
+        } else {
+          $this->mrm_subscription_debug_log('verify endpoint skipped fallback activation because subscription already exists or is already active', array(
+            'order_id' => $order_id,
+            'payment_intent_id' => (string)($pi['id'] ?? ''),
+            'existing_subscription_id' => $existing_subscription_id,
+            'existing_active_subscription_id' => (string)($existing_active['stripe_subscription_id'] ?? ''),
+            'context' => 'verify_endpoint',
+          ));
+        }
       }
     }
 
