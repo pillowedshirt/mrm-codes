@@ -5853,9 +5853,9 @@ protected function mrm_get_google_service_account_json() {
             }
 
             if ( $is_consultation ) {
-                $format_note = 'This is an online consultation. Please use the consultation link below at the scheduled time.';
+                $format_note = 'This is an online consultation. Please use the consultation link above at the scheduled time.';
             } else {
-                $format_note = 'This is an online lesson. Please use the lesson link below at the scheduled time.';
+                $format_note = 'This is an online lesson. Please use the lesson link above at the scheduled time.';
             }
         } else {
             $calendar_id = (string) ( $lesson['instructor_calendar_id'] ?? '' );
@@ -9566,10 +9566,10 @@ protected function parse_service_account_json( $json ) {
         $lesson = is_array( $lesson ) ? $lesson : array();
 
         if ( $this->mrm_is_consultation_lesson( $lesson ) ) {
-            return 'Consultation Scheduled Notification';
+            return 'Consultation Scheduled';
         }
 
-        return 'Private Lesson Scheduled Notification';
+        return 'Private Lesson Scheduled';
     }
 
     protected function send_instructor_scheduled_notification_for_lesson( $lesson_id ) {
@@ -9673,7 +9673,7 @@ protected function parse_service_account_json( $json ) {
             $details .= '<div><strong>Consultation link:</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
         }
 
-        $intro = '<p>Your consultation has been scheduled successfully.</p><p>This is an online consultation. Please use the consultation link below at the scheduled time.</p>';
+        $intro = '<p>Your consultation has been scheduled successfully.</p><p>This is an online consultation. Please use the consultation link above at the scheduled time.</p>';
 
         $html = $this->mrm_safety_email_wrap_html_blocks(
             'Consultation Confirmation',
