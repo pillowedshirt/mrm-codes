@@ -6634,6 +6634,32 @@ protected function mrm_get_google_service_account_json() {
         $this->mrm_safety_log( 'feedback_request_cron_finished', array( 'processed_count' => is_array( $rows ) ? count( $rows ) : 0 ) );
     }
 
+    protected function mrm_claim_feedback_request_send( $lesson_id ) {
+        $lesson_id = (int) $lesson_id;
+        if ( $lesson_id <= 0 ) {
+            return false;
+        }
+
+        $lock_key = 'mrm_feedback_request_claim_' . $lesson_id;
+
+        if ( get_option( $lock_key, null ) ) {
+            return false;
+        }
+
+        $added = add_option( $lock_key, current_time( 'mysql' ), '', 'no' );
+        return (bool) $added;
+    }
+
+    protected function mrm_release_feedback_request_send( $lesson_id ) {
+        $lesson_id = (int) $lesson_id;
+        if ( $lesson_id <= 0 ) {
+            return;
+        }
+
+        $lock_key = 'mrm_feedback_request_claim_' . $lesson_id;
+        delete_option( $lock_key );
+    }
+
     protected function send_parent_feedback_request_for_lesson( $lesson_id, $force_send = false ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
@@ -6653,10 +6679,18 @@ protected function mrm_get_google_service_account_json() {
             return;
         }
 
-        if ( ! $force_send && ! empty( $attendance['parent_feedback_request_sent_at'] ) ) {
+        if ( ! empty( $attendance['parent_feedback_request_sent_at'] ) ) {
             $this->mrm_safety_log( 'feedback_request_skipped_already_sent', array(
                 'lesson_id' => (int) $lesson_id,
                 'parent_feedback_request_sent_at' => (string) ( $attendance['parent_feedback_request_sent_at'] ?? '' ),
+            ) );
+            return;
+        }
+
+        if ( ! $this->mrm_claim_feedback_request_send( $lesson_id ) ) {
+            $this->mrm_safety_log( 'feedback_request_skipped_claim_locked', array(
+                'lesson_id' => (int) $lesson_id,
+                'forced'    => $force_send ? 'yes' : 'no',
             ) );
             return;
         }
@@ -6667,6 +6701,7 @@ protected function mrm_get_google_service_account_json() {
                 'lesson_id' => (int) $lesson_id,
                 'student_email' => (string) ( $lesson['student_email'] ?? '' ),
             ) );
+            $this->mrm_release_feedback_request_send( $lesson_id );
             return;
         }
 
@@ -6702,6 +6737,8 @@ protected function mrm_get_google_service_account_json() {
             $this->update_attendance_row( $lesson_id, array(
                 'parent_feedback_request_sent_at' => current_time( 'mysql' ),
             ) );
+        } else {
+            $this->mrm_release_feedback_request_send( $lesson_id );
         }
 
         $this->mrm_safety_log( 'feedback_request_email_result', array(
@@ -7040,7 +7077,7 @@ protected function mrm_get_google_service_account_json() {
             'student_email' => (string) ( $lesson['student_email'] ?? '' ),
         ) );
 
-        $this->send_parent_feedback_request_for_lesson( $lesson_id, true );
+        $this->send_parent_feedback_request_for_lesson( $lesson_id, false );
 
         $card_html  = '<div class="mrm-panel">';
         $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
