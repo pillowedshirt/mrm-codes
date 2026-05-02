@@ -996,17 +996,17 @@ h1 {
   margin: 0;
   padding: 0;
 }
-.mrm-terms-check-row {
+.mrm-check-row.mrm-terms-check-row {
   align-items: flex-start;
   margin-top: 10px;
 }
 
-.mrm-terms-check-row input[type="checkbox"] {
-  margin-top: 2px;
+.mrm-check-row.mrm-terms-check-row input[type="checkbox"] {
+  margin: 1px 0 0 0;
   flex: 0 0 auto;
 }
 
-.mrm-terms-check-row label {
+.mrm-check-row.mrm-terms-check-row label {
   display: block;
   margin: 0;
   color: var(--color-text-muted);
@@ -1104,6 +1104,15 @@ h1 {
 }
 .mrm-check-row.is-disabled label {
   cursor: not-allowed;
+}
+
+/* Keep the Terms checkbox aligned with the first label line, not centered against the subcaption. */
+.mrm-check-row.mrm-terms-check-row {
+  align-items: flex-start;
+}
+
+.mrm-check-row.mrm-terms-check-row input[type="checkbox"] {
+  margin-top: 1px;
 }
 
 .modal-actions {

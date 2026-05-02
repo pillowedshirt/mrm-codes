@@ -417,12 +417,20 @@ a{ -webkit-tap-highlight-color:transparent; }
   color: var(--color-text-muted);
 }
 
+.mrm-piece-terms-modal-row {
+  margin: 0 0 14px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(0,0,0,0.10);
+  border-radius: 14px;
+  background: rgba(0,0,0,0.025);
+}
+
 .mrm-piece-terms-row input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
   width: 18px;
   height: 18px;
-  margin-top: 2px;
+  margin: 1px 0 0 0;
   flex: 0 0 auto;
   border: 2px solid var(--color-accent);
   border-radius: 5px;
@@ -1012,6 +1020,16 @@ a{ -webkit-tap-highlight-color:transparent; }
                 <option value="US" selected>United States</option>
               </select>
 
+              <div class="mrm-piece-terms-row mrm-piece-terms-modal-row">
+                <input type="checkbox" class="mrm-piece-terms-check" id="mrm-piece-payment-terms">
+                <label for="mrm-piece-payment-terms">
+                  I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.
+                  <span class="mrm-piece-terms-subcaption">
+                    Includes the digital content license, access restrictions, anti-sharing rules, and non-refund terms.
+                  </span>
+                </label>
+              </div>
+
               <div id="mrm-payment-element"></div>
 
               <div style="height:18px;"></div>
@@ -1377,6 +1395,7 @@ a{ -webkit-tap-highlight-color:transparent; }
     const countrySelect = document.getElementById('mrm-billing-country');
 
     const paymentMount = document.getElementById('mrm-payment-element');
+    const termsCheck = document.getElementById('mrm-piece-payment-terms');
 
     const money = (cents) => '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
     const esc = (s) => String(s || '')
@@ -1433,6 +1452,7 @@ a{ -webkit-tap-highlight-color:transparent; }
     if (postalInput) postalInput.value = '';
     if (line1Input) line1Input.value = '';
     if (countrySelect) countrySelect.value = 'US';
+    if (termsCheck) termsCheck.checked = false;
 
     pendingClientSecret = '';
     if (activePaymentElement) {
@@ -1488,6 +1508,14 @@ a{ -webkit-tap-highlight-color:transparent; }
           return;
         }
 
+        if (!termsCheck || !termsCheck.checked) {
+          payBtn.disabled = true;
+          errorEl.textContent = 'Please agree to the Terms of Service before loading payment.';
+          return;
+        }
+
+        errorEl.textContent = '';
+
         if (pendingClientSecret || activePaymentElement) return;
 
         if (!pendingSku) {
@@ -1497,8 +1525,6 @@ a{ -webkit-tap-highlight-color:transparent; }
         }
 
         try {
-          errorEl.textContent = '';
-
           const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1508,7 +1534,7 @@ a{ -webkit-tap-highlight-color:transparent; }
               context: {
                 piece_slug: getPieceSlugFromUrl(),
                 terms_version: '2026-04-25',
-                terms_accepted: true,
+                terms_accepted: !!document.getElementById('mrm-piece-payment-terms')?.checked,
                 source_flow: 'piece_product_purchase'
               },
               address: getAddressPayload()
@@ -1559,11 +1585,12 @@ a{ -webkit-tap-highlight-color:transparent; }
       }, 450);
     };
 
-    emailInput.oninput = scheduleLoad;
-    if (postalInput) postalInput.oninput = scheduleLoad;
-    if (stateInput) stateInput.oninput = scheduleLoad;
-    if (line1Input) line1Input.oninput = scheduleLoad;
-    if (countrySelect) countrySelect.onchange = scheduleLoad;
+    [emailInput, postalInput, stateInput, line1Input, countrySelect, termsCheck].forEach((el) => {
+      if (el) {
+        el.oninput = scheduleLoad;
+        el.onchange = scheduleLoad;
+      }
+    });
   }
 
 
@@ -1904,17 +1931,6 @@ a{ -webkit-tap-highlight-color:transparent; }
             <div class="price-label">Price</div>
             <div class="price">${escHtml(priceDisplay)}</div>
           </div>
-
-        <div class="mrm-piece-terms-row">
-          <input type="checkbox" class="mrm-piece-terms-check" id="mrm-piece-terms-${escHtml(productSlug)}">
-          <label for="mrm-piece-terms-${escHtml(productSlug)}">
-            I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.
-            <span class="mrm-piece-terms-subcaption">
-              Includes the digital content license, access restrictions, anti-sharing rules, and non-refund terms.
-            </span>
-          </label>
-        </div>
-
         <div class="actions">
           <button type="button" class="button-primary mrm-purchaseBtn">Purchase</button>
           <button type="button" class="button-secondary mrm-accessBtn">Access</button>
@@ -2225,8 +2241,13 @@ a{ -webkit-tap-highlight-color:transparent; }
           errorEl.textContent = 'Missing SKU.';
           return;
         }
+        if (!document.getElementById('mrm-piece-payment-terms')?.checked) {
+          errorEl.textContent = 'Please agree to the Terms of Service before payment.';
+          return;
+        }
+
         if (!pendingClientSecret || !activeStripeElements) {
-          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email.';
+          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email, ZIP, and agree to the Terms of Service.';
           return;
         }
 
@@ -2300,12 +2321,6 @@ a{ -webkit-tap-highlight-color:transparent; }
           sku = await getValidatedOfferSkuOrThrow(offerEl);
         } catch (err) {
           alert(err.message || 'This offer is not available for purchase.');
-          return;
-        }
-
-        const termsCheck = offerEl ? offerEl.querySelector('.mrm-piece-terms-check') : null;
-        if (!termsCheck || !termsCheck.checked) {
-          alert('Please agree to the Terms of Service before purchasing.');
           return;
         }
 
