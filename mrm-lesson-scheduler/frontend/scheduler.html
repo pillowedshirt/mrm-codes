@@ -1991,8 +1991,8 @@ h1 {
           <div class="terms-row" style="margin-top:12px;">
             <input type="checkbox" id="modal-agree-terms">
             <label for="modal-agree-terms" class="terms-text">
-              I agree to terms of service —
-              <a href="/wp-content/uploads/terms.pdf" target="_blank" rel="noopener">view terms</a>
+              I agree to the Low Brass Lessons Terms of Service, including the payment authorization, cancellation, refund, digital access, safety, and recurring billing terms where applicable —
+              <a href="/terms-of-service/" target="_blank" rel="noopener">view terms</a>
             </label>
           </div>
 
@@ -2017,7 +2017,7 @@ h1 {
 
             <div class="mrm-check-row">
               <input type="checkbox" id="mrm-sheet-music-addon-opt">
-              <label for="mrm-sheet-music-addon-opt">subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)</label>
+              <label for="mrm-sheet-music-addon-opt">Subscribe for sheet music and backing track access ($5 per month; renews monthly until cancelled through the subscription portal).</label>
             </div>
           </div>
 
@@ -3633,7 +3633,22 @@ function ensureLegacyBookingHandler(){
       parent_timezone: guessedParentTimezone,
 
       // new (plugin will read this)
-      appointment_type: appointmentType
+      appointment_type: appointmentType,
+
+    agreement: {
+      terms_version: '2026-04-25',
+      terms_accepted: !!document.getElementById('agree-terms')?.checked,
+      signature: `${firstName} ${lastName} / ${email}`,
+      accepted_at_client: new Date().toISOString(),
+      source_flow: 'lesson_booking',
+      appointment_type: appointmentType,
+      lesson_type: lessonType,
+      repeat_frequency: frequency,
+      repeat_duration: reserveDuration,
+      autopay_selected: !!document.getElementById('mrm-autopay-opt')?.checked,
+      prepay_selected: !!document.getElementById('mrm-prepay-opt')?.checked,
+      sheet_music_addon_selected: !!document.getElementById('mrm-sheet-music-addon-opt')?.checked
+    }
     };
 
     if (appointmentType !== 'consultation') {

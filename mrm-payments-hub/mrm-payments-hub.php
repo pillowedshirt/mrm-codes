@@ -7437,6 +7437,9 @@ class MRM_Payments_Hub_Single {
     $sku = $this->sanitize_sku($data['sku'] ?? '');
     $email = sanitize_email((string)($data['email'] ?? ''));
     $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+    $terms_accepted = ! empty( $context['terms_accepted'] );
+    $terms_version  = sanitize_text_field( (string) ( $context['terms_version'] ?? '' ) );
+    $source_flow    = sanitize_text_field( (string) ( $context['source_flow'] ?? '' ) );
 
     if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
     if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
@@ -7576,6 +7579,15 @@ class MRM_Payments_Hub_Single {
     // Build labels
     $metadata = $this->build_metadata($sku, $product_type, $email_hash, $context, $p);
     $metadata['mrm_customer_email'] = $email;
+    if ( $terms_version !== '' ) {
+      $metadata['mrm_terms_version'] = $terms_version;
+    }
+    if ( $terms_accepted ) {
+      $metadata['mrm_terms_accepted'] = 'yes';
+    }
+    if ( $source_flow !== '' ) {
+      $metadata['mrm_terms_source_flow'] = $source_flow;
+    }
     $metadata['mrm_sheet_music_addon'] = $addon_selected ? 'yes' : 'no';
     $metadata['mrm_base_amount_cents'] = (string)$base_amount_cents;
     $metadata['mrm_addon_amount_cents'] = (string)$addon_amount_cents;

@@ -3350,6 +3350,14 @@ class MRM_Product_Access {
                       </div>
 
                       <div class="offer-actions">
+                        <label class="mrm-pa-terms-row" style="display:flex;align-items:flex-start;gap:8px;margin:10px 0;font-size:13px;line-height:1.4;">
+                          <input type="checkbox" class="mrm-pa-terms-check" style="margin-top:3px;">
+                          <span>
+                            I agree to the Low Brass Lessons Terms of Service, including the digital content license, access restrictions, non-refund terms, and anti-sharing rules.
+                            <a href="/terms-of-service/" target="_blank" rel="noopener">View terms</a>
+                          </span>
+                        </label>
+
                         <button type="button" class="buyBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>">
                           <?php echo esc_html__( 'Buy', 'mrm-product-access' ); ?>
                         </button>
@@ -4123,6 +4131,17 @@ class MRM_Product_Access {
               emailInput.value = '';
               otpInput.value = '';
             }
+            piece.querySelectorAll('.buyBtn').forEach((buyBtn) => {
+              buyBtn.addEventListener('click', function(){
+                const offerBox = buyBtn.closest('.offer');
+                const termsCheck = offerBox ? offerBox.querySelector('.mrm-pa-terms-check') : null;
+                if (!termsCheck || !termsCheck.checked) {
+                  alert('Please agree to the Terms of Service before purchasing.');
+                  return;
+                }
+                openOtpModal();
+              });
+            });
             function closeOtpModal(){
               otpOverlay.classList.remove('is-open');
               otpOverlay.setAttribute('aria-hidden', 'true');
