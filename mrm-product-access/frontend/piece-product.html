@@ -406,6 +406,68 @@ a{ -webkit-tap-highlight-color:transparent; }
   min-width: 240px;
   align-content:center;
 }
+
+.mrm-piece-terms-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+
+.mrm-piece-terms-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+  border: 2px solid var(--color-accent);
+  border-radius: 5px;
+  background: #fff;
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+}
+
+.mrm-piece-terms-row input[type="checkbox"]::after {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+  transform: rotate(-45deg);
+  opacity: 0;
+}
+
+.mrm-piece-terms-row input[type="checkbox"]:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.mrm-piece-terms-row input[type="checkbox"]:checked::after {
+  opacity: 1;
+}
+
+.mrm-piece-terms-row input[type="checkbox"]:focus-visible {
+  outline: 3px solid rgba(0,0,0,0.18);
+  outline-offset: 2px;
+}
+
+.mrm-piece-terms-row label {
+  display: block;
+  margin: 0;
+}
+
+.mrm-piece-terms-subcaption {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
 .price-box{
   border:1px solid rgba(0,0,0,0.12);
   border-radius: var(--radius-lg);
@@ -1443,7 +1505,12 @@ a{ -webkit-tap-highlight-color:transparent; }
             body: JSON.stringify({
               sku: pendingSku,
               email: email,
-              context: { piece_slug: getPieceSlugFromUrl() },
+              context: {
+                piece_slug: getPieceSlugFromUrl(),
+                terms_version: '2026-04-25',
+                terms_accepted: true,
+                source_flow: 'piece_product_purchase'
+              },
               address: getAddressPayload()
             })
           });
@@ -1838,10 +1905,20 @@ a{ -webkit-tap-highlight-color:transparent; }
             <div class="price">${escHtml(priceDisplay)}</div>
           </div>
 
-          <div class="actions">
-            <button type="button" class="button-primary mrm-purchaseBtn">Purchase</button>
-            <button type="button" class="button-secondary mrm-accessBtn">Access</button>
-          </div>
+        <div class="mrm-piece-terms-row">
+          <input type="checkbox" class="mrm-piece-terms-check" id="mrm-piece-terms-${escHtml(productSlug)}">
+          <label for="mrm-piece-terms-${escHtml(productSlug)}">
+            I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.
+            <span class="mrm-piece-terms-subcaption">
+              Includes the digital content license, access restrictions, anti-sharing rules, and non-refund terms.
+            </span>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button type="button" class="button-primary mrm-purchaseBtn">Purchase</button>
+          <button type="button" class="button-secondary mrm-accessBtn">Access</button>
+        </div>
           <div class="mrm-offerStatus" style="margin-top:10px;font-size:13px;line-height:1.4;color:#8a1f1f;"></div>
         </div>
       </div>
@@ -2223,6 +2300,12 @@ a{ -webkit-tap-highlight-color:transparent; }
           sku = await getValidatedOfferSkuOrThrow(offerEl);
         } catch (err) {
           alert(err.message || 'This offer is not available for purchase.');
+          return;
+        }
+
+        const termsCheck = offerEl ? offerEl.querySelector('.mrm-piece-terms-check') : null;
+        if (!termsCheck || !termsCheck.checked) {
+          alert('Please agree to the Terms of Service before purchasing.');
           return;
         }
 
