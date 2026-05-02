@@ -2244,6 +2244,20 @@ protected function mrm_get_google_service_account_json() {
 ) {$charset_collate};";
         dbDelta( $sql1 );
         dbDelta( $sql2 );
+        // Ensure lesson address columns exist for Calculations mileage support.
+        $lesson_required_columns = array(
+            'address' => "ALTER TABLE {$table_lessons} ADD COLUMN address varchar(255) NOT NULL DEFAULT ''",
+            'address_state' => "ALTER TABLE {$table_lessons} ADD COLUMN address_state varchar(64) NOT NULL DEFAULT ''",
+            'address_postal' => "ALTER TABLE {$table_lessons} ADD COLUMN address_postal varchar(32) NOT NULL DEFAULT ''",
+        );
+
+        foreach ( $lesson_required_columns as $col_name => $alter_sql ) {
+            $column_exists = $wpdb->get_var( $wpdb->prepare( "SHOW COLUMNS FROM {$table_lessons} LIKE %s", $col_name ) );
+            if ( empty( $column_exists ) ) {
+                $wpdb->query( $alter_sql );
+            }
+        }
+
         dbDelta( $sql3 );
         dbDelta( $sql_attendance );
 
@@ -7815,7 +7829,30 @@ protected function mrm_get_google_service_account_json() {
         return ( $stripe_mode === 'test' ) ? 'test' : 'live';
     }
 
-    protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    protected function mrm_get_tax_period_dates( $tax_year, $tax_quarter = 0 ) {
+    $tax_year = max( 2020, min( 2099, (int) $tax_year ) );
+    $tax_quarter = (int) $tax_quarter;
+
+    if ( $tax_quarter === 1 ) {
+        return array( "{$tax_year}-01-01 00:00:00", "{$tax_year}-03-31 23:59:59" );
+    }
+
+    if ( $tax_quarter === 2 ) {
+        return array( "{$tax_year}-04-01 00:00:00", "{$tax_year}-06-30 23:59:59" );
+    }
+
+    if ( $tax_quarter === 3 ) {
+        return array( "{$tax_year}-07-01 00:00:00", "{$tax_year}-09-30 23:59:59" );
+    }
+
+    if ( $tax_quarter === 4 ) {
+        return array( "{$tax_year}-10-01 00:00:00", "{$tax_year}-12-31 23:59:59" );
+    }
+
+    return array( "{$tax_year}-01-01 00:00:00", "{$tax_year}-12-31 23:59:59" );
+}
+
+protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
     $lesson_revenue      = $this->mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter, $environment_mode, 'lesson' );
     $sheet_music_revenue = $this->mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter, $environment_mode, 'sheet_music' );
     $gross_revenue       = $lesson_revenue + $sheet_music_revenue;
@@ -8245,57 +8282,200 @@ protected function mrm_get_google_service_account_json() {
     }
 
     protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
-        global $wpdb;
+    global $wpdb;
 
-        $lesson = $this->get_lesson_with_instructor( $lesson_id );
-        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
-            return;
-        }
+    $lesson = $this->get_lesson_with_instructor( $lesson_id );
 
-        if ( ! empty( $lesson['is_online'] ) ) {
-            return;
-        }
-
-        $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
-
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
-            return;
-        }
-
-        $settings = get_option( 'mrm_calculations_settings', array() );
-        $default_rate = isset( $settings['mileage_rate'] ) ? (float) $settings['mileage_rate'] : 0.7250;
-        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
-
-        $start_time = (string) ( $lesson['start_time'] ?? '' );
-        $trip_date = $start_time ? gmdate( 'Y-m-d', strtotime( $start_time ) ) : gmdate( 'Y-m-d' );
-        $tax_year = (int) gmdate( 'Y', strtotime( $trip_date ) );
-
-        $wpdb->replace(
-            $table,
-            array(
-                'lesson_id'           => (int) $lesson_id,
-                'instructor_id'       => (int) ( $lesson['instructor_id'] ?? 0 ),
-                'tax_year'            => $tax_year,
-                'environment_mode'    => $environment_mode,
-                'trip_date'           => $trip_date,
-                'origin_address'      => (string) ( $lesson['instructor_address'] ?? '' ),
-                'destination_address' => (string) ( $lesson['address'] ?? '' ),
-                'one_way_miles'       => 0,
-                'round_trip_miles'    => 0,
-                'mileage_rate'        => $default_rate,
-                'mileage_deduction'   => 0,
-                'calc_status'         => 'pending',
-                'calc_source'         => 'queued',
-                'created_at'          => current_time( 'mysql' ),
-                'updated_at'          => current_time( 'mysql' ),
-            ),
-            array(
-                '%d','%d','%d','%s','%s','%s','%s','%f','%f','%f','%f','%s','%s','%s','%s'
-            )
-        );
+    if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+        return;
     }
 
-    protected function mrm_send_csv_headers( $filename ) {
+    if ( ! empty( $lesson['is_online'] ) ) {
+        return;
+    }
+
+    $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+        return;
+    }
+
+    $settings = get_option( 'mrm_calculations_settings', array() );
+    $default_rate = isset( $settings['mileage_rate'] ) ? (float) $settings['mileage_rate'] : 0.7250;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    $origin_address = $this->mrm_format_instructor_origin_address( $lesson );
+    $destination_address = $this->mrm_format_lesson_destination_address( $lesson );
+
+    $start_time = (string) ( $lesson['start_time'] ?? '' );
+    $trip_date = $start_time ? gmdate( 'Y-m-d', strtotime( $start_time ) ) : gmdate( 'Y-m-d' );
+    $tax_year = (int) gmdate( 'Y', strtotime( $trip_date ) );
+
+    $one_way_miles = 0.0;
+    $round_trip_miles = 0.0;
+    $mileage_deduction = 0.0;
+    $calc_status = 'pending';
+    $calc_source = 'queued';
+
+    if ( $origin_address === '' || $destination_address === '' ) {
+        $calc_status = 'pending_missing_address';
+    } else {
+        $distance = $this->mrm_calculate_driving_distance_miles( $origin_address, $destination_address );
+
+        if ( is_wp_error( $distance ) ) {
+            $calc_status = 'pending_' . sanitize_key( $distance->get_error_code() );
+        } else {
+            $one_way_miles = round( (float) $distance, 2 );
+            $round_trip_miles = round( $one_way_miles * 2, 2 );
+            $mileage_deduction = round( $round_trip_miles * $default_rate, 2 );
+            $calc_status = 'calculated';
+            $calc_source = 'google_distance_matrix';
+        }
+    }
+
+    $wpdb->replace(
+        $table,
+        array(
+            'lesson_id'           => (int) $lesson_id,
+            'instructor_id'       => (int) ( $lesson['instructor_id'] ?? 0 ),
+            'tax_year'            => $tax_year,
+            'environment_mode'    => $environment_mode,
+            'trip_date'           => $trip_date,
+            'origin_address'      => $origin_address,
+            'destination_address' => $destination_address,
+            'one_way_miles'       => $one_way_miles,
+            'round_trip_miles'    => $round_trip_miles,
+            'mileage_rate'        => $default_rate,
+            'mileage_deduction'   => $mileage_deduction,
+            'calc_status'         => $calc_status,
+            'calc_source'         => $calc_source,
+            'created_at'          => current_time( 'mysql' ),
+            'updated_at'          => current_time( 'mysql' ),
+        ),
+        array(
+            '%d','%d','%d','%s','%s','%s','%s','%f','%f','%f','%f','%s','%s','%s','%s'
+        )
+    );
+}
+
+protected function mrm_format_instructor_origin_address( $lesson ) {
+    $parts = array(
+        trim( (string) ( $lesson['instructor_address'] ?? '' ) ),
+        trim( (string) ( $lesson['instructor_city'] ?? '' ) ),
+        trim( (string) ( $lesson['instructor_state'] ?? '' ) ),
+    );
+
+    return trim( implode( ', ', array_filter( $parts ) ) );
+}
+
+protected function mrm_format_lesson_destination_address( $lesson ) {
+    $street = trim( (string) ( $lesson['address'] ?? '' ) );
+    $state = trim( (string) ( $lesson['address_state'] ?? '' ) );
+    $postal = trim( (string) ( $lesson['address_postal'] ?? '' ) );
+
+    $state_postal = trim( $state . ' ' . $postal );
+
+    return trim( implode( ', ', array_filter( array( $street, $state_postal ) ) ) );
+}
+
+protected function mrm_calculate_driving_distance_miles( $origin_address, $destination_address ) {
+    $settings = get_option( 'mrm_calculations_settings', array() );
+    $api_key = trim( (string) ( $settings['google_maps_api_key'] ?? '' ) );
+
+    if ( $api_key === '' ) {
+        return new WP_Error( 'missing_api_key', 'Google Maps API key is missing.' );
+    }
+
+    $url = add_query_arg(
+        array(
+            'origins'      => $origin_address,
+            'destinations' => $destination_address,
+            'units'        => 'imperial',
+            'key'          => $api_key,
+        ),
+        'https://maps.googleapis.com/maps/api/distancematrix/json'
+    );
+
+    $response = wp_remote_get( $url, array( 'timeout' => 15 ) );
+
+    if ( is_wp_error( $response ) ) {
+        return $response;
+    }
+
+    $body = wp_remote_retrieve_body( $response );
+    $json = json_decode( $body, true );
+
+    if ( ! is_array( $json ) || (string) ( $json['status'] ?? '' ) !== 'OK' ) {
+        return new WP_Error( 'distance_api_error', 'Distance API did not return OK.' );
+    }
+
+    $element = $json['rows'][0]['elements'][0] ?? null;
+
+    if ( ! is_array( $element ) || (string) ( $element['status'] ?? '' ) !== 'OK' ) {
+        return new WP_Error( 'distance_not_found', 'Distance could not be calculated for these addresses.' );
+    }
+
+    $meters = isset( $element['distance']['value'] ) ? (float) $element['distance']['value'] : 0.0;
+
+    if ( $meters <= 0 ) {
+        return new WP_Error( 'distance_zero', 'Distance returned zero.' );
+    }
+
+    return $meters * 0.000621371;
+}
+
+
+    public function handle_mrm_recalculate_mileage_cache() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_recalculate_mileage_cache' );
+
+    global $wpdb;
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+    $lessons = $wpdb->prefix . 'mrm_lessons';
+
+    if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $lessons ) ) !== $lessons ) {
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&calc_env=' . rawurlencode( $environment_mode ) . '&mileage_error=missing_lessons_table' ) );
+        exit;
+    }
+
+    $rows = $wpdb->get_results(
+        $wpdb->prepare(
+            "SELECT id
+             FROM {$lessons}
+             WHERE is_online = 0
+               AND is_consultation = 0
+               AND start_time >= %s
+               AND start_time <= %s
+               AND status IN ('scheduled','completed','paid','delivered')
+             ORDER BY start_time ASC",
+            $start,
+            $end
+        ),
+        ARRAY_A
+    );
+
+    foreach ( (array) $rows as $row ) {
+        $this->mrm_queue_mileage_calculation_for_lesson( (int) $row['id'] );
+    }
+
+    wp_safe_redirect(
+        admin_url(
+            'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&calc_env=' . rawurlencode( $environment_mode ) . '&mileage_recalculated=1'
+        )
+    );
+    exit;
+}
+
+protected function mrm_send_csv_headers( $filename ) {
         nocache_headers();
         header( 'Content-Type: text/csv; charset=utf-8' );
         header( 'Content-Disposition: attachment; filename=' . $filename );
@@ -8308,64 +8488,84 @@ protected function mrm_get_google_service_account_json() {
     }
 
     public function handle_mrm_export_1099_support() {
-        if ( ! current_user_can( 'manage_options' ) ) {
-            wp_die( 'Not allowed.' );
-        }
-
-        check_admin_referer( 'mrm_export_1099_support' );
-
-        $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
-        $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
-        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
-        $rows = $this->mrm_get_calculations_contractor_summary( $tax_year, $tax_quarter, $environment_mode );
-
-        $this->mrm_send_csv_headers( 'mrm-contractor-1099-' . $tax_year . '-q' . $tax_quarter . '.csv' );
-        $out = fopen( 'php://output', 'w' );
-        $this->mrm_write_csv_row( $out, array( 'payee_id', 'display_name', 'legal_name', 'w9_received', 'is_1099_eligible', 'total_paid' ) );
-
-        foreach ( $rows as $row ) {
-            $this->mrm_write_csv_row( $out, array(
-                (string) ( $row['payee_id'] ?? '' ),
-                (string) ( $row['display_name'] ?? '' ),
-                (string) ( $row['legal_name'] ?? '' ),
-                ! empty( $row['w9_received'] ) ? 'Yes' : 'No',
-                ! empty( $row['is_1099_eligible'] ) ? 'Yes' : 'No',
-                number_format( (float) ( $row['total_paid'] ?? 0 ), 2, '.', '' ),
-            ) );
-        }
-
-        fclose( $out );
-        exit;
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
     }
+
+    check_admin_referer( 'mrm_export_1099_support' );
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+    $rows = $this->mrm_get_calculations_instructor_summary( $tax_year, $tax_quarter, $environment_mode );
+
+    $this->mrm_send_csv_headers( 'mrm-instructor-wages-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+    $out = fopen( 'php://output', 'w' );
+
+    $this->mrm_write_csv_row( $out, array(
+        'instructor_id',
+        'instructor_name',
+        'instructor_email',
+        'payout_entries',
+        'gross',
+        'net_wage'
+    ) );
+
+    foreach ( $rows as $row ) {
+        $this->mrm_write_csv_row( $out, array(
+            (string) ( $row['instructor_id'] ?? '' ),
+            (string) ( $row['instructor_name'] ?? '' ),
+            (string) ( $row['instructor_email'] ?? '' ),
+            (string) ( $row['payout_count'] ?? 0 ),
+            number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2, '.', '' ),
+            number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2, '.', '' ),
+        ) );
+    }
+
+    fclose( $out );
+    exit;
+}
+
 
     public function handle_mrm_export_mileage_summary() {
-        if ( ! current_user_can( 'manage_options' ) ) {
-            wp_die( 'Not allowed.' );
-        }
-
-        check_admin_referer( 'mrm_export_mileage_summary' );
-
-        $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
-        $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
-        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
-        $rows = $this->mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter, $environment_mode );
-
-        $this->mrm_send_csv_headers( 'mrm-mileage-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
-        $out = fopen( 'php://output', 'w' );
-        $this->mrm_write_csv_row( $out, array( 'instructor_id', 'lesson_count', 'total_miles', 'total_deduction' ) );
-
-        foreach ( $rows as $row ) {
-            $this->mrm_write_csv_row( $out, array(
-                (string) ( $row['instructor_id'] ?? '' ),
-                (string) ( $row['lesson_count'] ?? 0 ),
-                number_format( (float) ( $row['total_miles'] ?? 0 ), 2, '.', '' ),
-                number_format( (float) ( $row['total_deduction'] ?? 0 ), 2, '.', '' ),
-            ) );
-        }
-
-        fclose( $out );
-        exit;
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
     }
+
+    check_admin_referer( 'mrm_export_mileage_summary' );
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+    $rows = $this->mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter, $environment_mode );
+
+    $this->mrm_send_csv_headers( 'mrm-mileage-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+    $out = fopen( 'php://output', 'w' );
+
+    $this->mrm_write_csv_row( $out, array(
+        'instructor_id',
+        'instructor_name',
+        'lesson_count',
+        'total_miles',
+        'total_deduction',
+        'statuses'
+    ) );
+
+    foreach ( $rows as $row ) {
+        $this->mrm_write_csv_row( $out, array(
+            (string) ( $row['instructor_id'] ?? '' ),
+            (string) ( $row['instructor_name'] ?? '' ),
+            (string) ( $row['lesson_count'] ?? 0 ),
+            number_format( (float) ( $row['total_miles'] ?? 0 ), 2, '.', '' ),
+            number_format( (float) ( $row['total_deduction'] ?? 0 ), 2, '.', '' ),
+            (string) ( $row['calc_statuses'] ?? '' ),
+        ) );
+    }
+
+    fclose( $out );
+    exit;
+}
+
 
     public function handle_mrm_export_calculations_summary() {
         if ( ! current_user_can( 'manage_options' ) ) {
