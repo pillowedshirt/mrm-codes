@@ -6158,6 +6158,42 @@ class MRM_Payments_Hub_Single {
     return ((string)($lesson['status'] ?? '') === 'finalized');
   }
 
+  private function mrm_lesson_cancellation_refund_guard($lesson) {
+    if (!is_array($lesson) || empty($lesson)) {
+      return array(
+        'allowed' => false,
+        'reason' => 'missing_lesson_row',
+        'message' => 'Auto-refund skipped because the lesson row could not be found.',
+      );
+    }
+    $start_raw = (string)($lesson['start_time'] ?? '');
+    if ($start_raw === '') {
+      return array('allowed' => false,'reason' => 'missing_lesson_start_time','message' => 'Auto-refund skipped because the lesson start time is missing.');
+    }
+    $start_ts = strtotime($start_raw);
+    if (!$start_ts) {
+      return array('allowed' => false,'reason' => 'invalid_lesson_start_time','message' => 'Auto-refund skipped because the lesson start time could not be parsed.');
+    }
+    $seconds_until_start = $start_ts - time();
+    if ($seconds_until_start < DAY_IN_SECONDS) {
+      return array('allowed' => false,'reason' => 'cancelled_less_than_24_hours_before_start','message' => 'Auto-refund skipped because the lesson was cancelled less than 24 hours before the scheduled start time.');
+    }
+    return array('allowed' => true,'reason' => '','message' => '');
+  }
+
+  private function mrm_mark_auto_refund_skipped_for_order($order, $reason, $note = '') {
+    if (!is_array($order) || empty($order)) return false;
+    $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+    $status = (string)($order['status'] ?? '');
+    if ($pi_id === '') return false;
+    $this->update_order_status_from_pi($pi_id, $status, (string)($order['stripe_status'] ?? $status), array(
+      'mrm_auto_refund_skipped_at' => current_time('mysql'),
+      'mrm_auto_refund_skip_reason' => sanitize_text_field((string)$reason),
+      'mrm_auto_refund_note' => sanitize_textarea_field((string)$note),
+    ));
+    return true;
+  }
+
   public function on_lesson_cancelled($data) {
     global $wpdb;
 
@@ -6183,6 +6219,7 @@ class MRM_Payments_Hub_Single {
       ));
       return;
     }
+    $refund_guard = $this->mrm_lesson_cancellation_refund_guard($lesson);
 
     if ($payment_mode === 'autopay') {
       $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
@@ -6190,10 +6227,15 @@ class MRM_Payments_Hub_Single {
 
       // Refund only if this specific lesson already has its own completed lesson-level charge.
       if ($lesson_order) {
-        $refunded = $this->mrm_request_refund_for_order(
-          $lesson_order,
-          'Auto-refund for cancelled autopay lesson ' . $lesson_id
-        );
+        if (empty($refund_guard['allowed'])) {
+          $this->mrm_mark_auto_refund_skipped_for_order($lesson_order, (string)$refund_guard['reason'], (string)$refund_guard['message']);
+          $refunded = false;
+        } else {
+          $refunded = $this->mrm_request_refund_for_order(
+            $lesson_order,
+            'Auto-refund for cancelled autopay lesson ' . $lesson_id
+          );
+        }
 
         if ($refunded && is_array($lesson)) {
           $this->mrm_send_lesson_cancellation_refund_email(
@@ -6223,10 +6265,15 @@ class MRM_Payments_Hub_Single {
         ) {
           $first_order = $this->mrm_get_order_by_id($order_id);
           if ($first_order) {
-            $refunded = $this->mrm_request_refund_for_order(
-              $first_order,
-              'Auto-refund for cancelled prepaid first autopay lesson ' . $lesson_id
-            );
+            if (empty($refund_guard['allowed'])) {
+              $this->mrm_mark_auto_refund_skipped_for_order($first_order, (string)$refund_guard['reason'], (string)$refund_guard['message']);
+              $refunded = false;
+            } else {
+              $refunded = $this->mrm_request_refund_for_order(
+                $first_order,
+                'Auto-refund for cancelled prepaid first autopay lesson ' . $lesson_id
+              );
+            }
 
             if ($refunded && is_array($lesson)) {
               $this->mrm_send_lesson_cancellation_refund_email(
@@ -6251,10 +6298,15 @@ class MRM_Payments_Hub_Single {
     if ($payment_mode === 'one_time' && $order_id > 0) {
       $order = $this->mrm_get_order_by_id($order_id);
       if ($order) {
-        $refunded = $this->mrm_request_refund_for_order(
-          $order,
-          'Auto-refund for cancelled one-time lesson ' . $lesson_id
-        );
+        if (empty($refund_guard['allowed'])) {
+          $this->mrm_mark_auto_refund_skipped_for_order($order, (string)$refund_guard['reason'], (string)$refund_guard['message']);
+          $refunded = false;
+        } else {
+          $refunded = $this->mrm_request_refund_for_order(
+            $order,
+            'Auto-refund for cancelled one-time lesson ' . $lesson_id
+          );
+        }
 
         if ($refunded && is_array($lesson)) {
           $this->mrm_send_lesson_cancellation_refund_email(
@@ -9334,7 +9386,36 @@ class MRM_Payments_Hub_Single {
     return ob_get_clean();
   }
 
-  public function render_access_lists_page() {
+  
+private function mrm_legal_ledger_get_rows($limit = 250) {
+  global $wpdb;
+  $limit = max(25, min(500, absint($limit)));
+  $orders_table = $this->table_orders();
+  $q = isset($_GET['mrm_legal_q']) ? sanitize_text_field((string)$_GET['mrm_legal_q']) : '';
+  $status = isset($_GET['mrm_legal_status']) ? sanitize_text_field((string)$_GET['mrm_legal_status']) : '';
+  $where = array('1=1'); $args = array();
+  if ($q !== '') {
+    $like = '%' . $wpdb->esc_like($q) . '%';
+    $where[] = "(CAST(id AS CHAR) LIKE %s OR sku LIKE %s OR product_type LIKE %s OR stripe_payment_intent_id LIKE %s OR metadata_json LIKE %s)";
+    $args = array($like,$like,$like,$like,$like);
+  }
+  if ($status !== '') { $where[] = "status = %s"; $args[] = $status; }
+  $sql = "SELECT * FROM {$orders_table} WHERE " . implode(' AND ', $where) . " ORDER BY id DESC LIMIT %d";
+  $args[] = $limit;
+  return $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A);
+}
+private function mrm_legal_ledger_money($cents, $currency = 'usd') { $currency = strtoupper((string)$currency ?: 'USD'); return $currency . ' $' . number_format(((int)$cents) / 100, 2); }
+private function mrm_legal_ledger_meta($row) { $meta=array(); if (!empty($row['metadata_json'])) { $decoded=json_decode((string)$row['metadata_json'], true); if (is_array($decoded)) $meta=$decoded; } return $meta; }
+public function render_legal_ledger_page() {
+  if (!current_user_can('manage_options')) { wp_die('You do not have permission to view this page.'); }
+  $rows = $this->mrm_legal_ledger_get_rows(250);
+  echo '<div class="wrap"><h1>Legal Dispute Ledger</h1><table class="widefat striped"><thead><tr><th>Order</th><th>Status</th><th>Product</th><th>Amount</th><th>Terms</th></tr></thead><tbody>';
+  if (empty($rows)) { echo '<tr><td colspan="5">No matching transactions found.</td></tr>'; }
+  foreach ($rows as $row) { $meta=$this->mrm_legal_ledger_meta($row); $terms=(string)($meta['mrm_terms_accepted'] ?? ''); echo '<tr><td>#'.esc_html((string)$row['id']).'</td><td>'.esc_html((string)$row['status']).'</td><td>'.esc_html((string)$row['sku']).'</td><td>'.esc_html($this->mrm_legal_ledger_money((int)$row['amount_cents'], (string)$row['currency'])).'</td><td>'.($terms==='yes'?'Accepted':'Missing / not recorded').'</td></tr>'; }
+  echo '</tbody></table></div>';
+}
+
+public function render_access_lists_page() {
     if (!current_user_can('manage_options')) return;
 
     settings_errors('mrm_pay_hub');

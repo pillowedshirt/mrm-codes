@@ -996,6 +996,24 @@ h1 {
   margin: 0;
   padding: 0;
 }
+.mrm-terms-compact {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 1.35;
+  margin: 10px 0 4px;
+}
+.mrm-terms-compact input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.mrm-terms-note {
+  margin: 0 0 12px 26px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #666;
+}
 
 .payment-options{
   margin-top: 10px;
@@ -1988,13 +2006,13 @@ h1 {
             <option value="indefinitely">Indefinitely</option>
           </select>
 
-          <div class="terms-row" style="margin-top:12px;">
-            <input type="checkbox" id="modal-agree-terms">
-            <label for="modal-agree-terms" class="terms-text">
-              I agree to the Low Brass Lessons Terms of Service, including the payment authorization, cancellation, refund, digital access, safety, and recurring billing terms where applicable —
-              <a href="/terms-of-service/" target="_blank" rel="noopener">view terms</a>
-            </label>
-          </div>
+          <label class="mrm-terms-compact">
+            <input type="checkbox" id="modal-agree-terms" required>
+            <span>I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.</span>
+          </label>
+          <p class="mrm-terms-note">
+            Includes payment authorization, cancellation/refund terms, recurring billing terms where selected, digital access rules, and safety policies.
+          </p>
 
           <div class="payment-options">
             <div id="mrm-payment-choice-group" class="mrm-payment-choice-group">
@@ -3851,6 +3869,12 @@ function ensureLegacyBookingHandler(){
           return;
         }
 
+  const agreeTerms = document.getElementById('agree-terms');
+  if (!agreeTerms || !agreeTerms.checked) {
+    alert('Please agree to the Terms of Service before checkout.');
+    return;
+  }
+
         const createRes = await fetch(payApiBase + '/create-payment-intent', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
@@ -3862,7 +3886,10 @@ function ensureLegacyBookingHandler(){
               lesson_length: len,
               lesson_mode: lessonType,
               lesson_count: count,
-              prepay: prepay ? 'yes' : 'no'
+              prepay: prepay ? 'yes' : 'no',
+              terms_version: '2026-04-25',
+              terms_accepted: !!document.getElementById('agree-terms')?.checked,
+              source_flow: 'lesson_booking'
             },
             save_card: false,
             amount_override_cents: chargeAmountCents,

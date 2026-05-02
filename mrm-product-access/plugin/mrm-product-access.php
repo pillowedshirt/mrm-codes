@@ -3350,13 +3350,15 @@ class MRM_Product_Access {
                       </div>
 
                       <div class="offer-actions">
-                        <label class="mrm-pa-terms-row" style="display:flex;align-items:flex-start;gap:8px;margin:10px 0;font-size:13px;line-height:1.4;">
-                          <input type="checkbox" class="mrm-pa-terms-check" style="margin-top:3px;">
+                        <label class="mrm-pa-terms-row">
+                          <input type="checkbox" class="mrm-pa-terms-check">
                           <span>
-                            I agree to the Low Brass Lessons Terms of Service, including the digital content license, access restrictions, non-refund terms, and anti-sharing rules.
-                            <a href="/terms-of-service/" target="_blank" rel="noopener">View terms</a>
+                            I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.
                           </span>
                         </label>
+                        <p class="mrm-pa-terms-note">
+                          Includes the digital content license, access restrictions, anti-sharing rules, and non-refund terms.
+                        </p>
 
                         <button type="button" class="buyBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>">
                           <?php echo esc_html__( 'Buy', 'mrm-product-access' ); ?>
@@ -3450,6 +3452,24 @@ class MRM_Product_Access {
         }
 
         .pdf-col { display: flex; flex-direction: column; }
+        .mrm-pa-terms-row {
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+          margin: 10px 0 4px;
+          font-size: 14px;
+          line-height: 1.35;
+        }
+        .mrm-pa-terms-row input {
+          margin-top: 2px;
+          flex: 0 0 auto;
+        }
+        .mrm-pa-terms-note {
+          margin: 0 0 12px 26px;
+          font-size: 12px;
+          line-height: 1.35;
+          color: #666;
+        }
 
         .pdf-preview {
           width: 100%;
@@ -4133,7 +4153,7 @@ class MRM_Product_Access {
             }
             piece.querySelectorAll('.buyBtn').forEach((buyBtn) => {
               buyBtn.addEventListener('click', function(){
-                const offerBox = buyBtn.closest('.offer');
+                const offerBox = buyBtn.closest('.offer, .offer-card, .mrm-pa-offer, .purchase-option') || buyBtn.parentElement;
                 const termsCheck = offerBox ? offerBox.querySelector('.mrm-pa-terms-check') : null;
                 if (!termsCheck || !termsCheck.checked) {
                   alert('Please agree to the Terms of Service before purchasing.');
