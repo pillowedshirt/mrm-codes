@@ -34,6 +34,7 @@ class MRM_Payments_Hub_Single {
   public function __construct() {
     add_action('admin_menu', array($this, 'admin_menu'));
     add_action('admin_init', array($this, 'handle_admin_post'));
+    add_action('admin_post_mrm_export_legal_ledger', array($this, 'handle_export_legal_ledger'));
     add_action('rest_api_init', array($this, 'register_routes'));
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
     add_action('init', array($this, 'mrm_run_instructor_piece_access_sync'));
@@ -9495,31 +9496,52 @@ class MRM_Payments_Hub_Single {
   }
 
   
-private function mrm_legal_ledger_get_rows($limit = 250) {
+private function mrm_legal_ledger_get_rows($limit = 0) {
   global $wpdb;
-  $limit = max(25, min(500, absint($limit)));
   $orders_table = $this->table_orders();
   $q = isset($_GET['mrm_legal_q']) ? sanitize_text_field((string)$_GET['mrm_legal_q']) : '';
   $status = isset($_GET['mrm_legal_status']) ? sanitize_text_field((string)$_GET['mrm_legal_status']) : '';
-  $where = array('1=1'); $args = array();
+  $start_date = isset($_GET['mrm_legal_start']) ? sanitize_text_field((string)$_GET['mrm_legal_start']) : '';
+  $end_date = isset($_GET['mrm_legal_end']) ? sanitize_text_field((string)$_GET['mrm_legal_end']) : '';
+  $where = array('1=1');
+  $args = array();
   if ($q !== '') {
     $like = '%' . $wpdb->esc_like($q) . '%';
     $where[] = "(CAST(id AS CHAR) LIKE %s OR sku LIKE %s OR product_type LIKE %s OR stripe_payment_intent_id LIKE %s OR metadata_json LIKE %s)";
-    $args = array($like,$like,$like,$like,$like);
+    $args[] = $like; $args[] = $like; $args[] = $like; $args[] = $like; $args[] = $like;
   }
   if ($status !== '') { $where[] = "status = %s"; $args[] = $status; }
-  $sql = "SELECT * FROM {$orders_table} WHERE " . implode(' AND ', $where) . " ORDER BY id DESC LIMIT %d";
-  $args[] = $limit;
-  return $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A);
+  if ($start_date !== '') { $where[] = "created_at >= %s"; $args[] = $start_date . ' 00:00:00'; }
+  if ($end_date !== '') { $where[] = "created_at <= %s"; $args[] = $end_date . ' 23:59:59'; }
+  $sql = "SELECT * FROM {$orders_table} WHERE " . implode(' AND ', $where) . " ORDER BY id DESC";
+  $limit = absint($limit);
+  if ($limit > 0) { $sql .= " LIMIT %d"; $args[] = $limit; }
+  return !empty($args) ? $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A) : $wpdb->get_results($sql, ARRAY_A);
 }
 private function mrm_legal_ledger_money($cents, $currency = 'usd') { $currency = strtoupper((string)$currency ?: 'USD'); return $currency . ' $' . number_format(((int)$cents) / 100, 2); }
 private function mrm_legal_ledger_meta($row) { $meta=array(); if (!empty($row['metadata_json'])) { $decoded=json_decode((string)$row['metadata_json'], true); if (is_array($decoded)) $meta=$decoded; } return $meta; }
+public function handle_export_legal_ledger() {
+  if (!current_user_can('manage_options')) { wp_die('Not allowed.'); }
+  check_admin_referer('mrm_export_legal_ledger');
+  $rows = $this->mrm_legal_ledger_get_rows(0);
+  nocache_headers();
+  header('Content-Type: text/csv; charset=utf-8');
+  header('Content-Disposition: attachment; filename=mrm-legal-dispute-ledger-' . gmdate('Y-m-d') . '.csv');
+  $out = fopen('php://output', 'w');
+  fputcsv($out, array('order_id','created_at','updated_at','status','product_type','sku','amount','currency','stripe_payment_intent_id','terms_accepted','terms_version','source_flow','customer_email','metadata_json'));
+  foreach ((array)$rows as $row) {
+    $meta = $this->mrm_legal_ledger_meta($row);
+    fputcsv($out, array((string)($row['id'] ?? ''),(string)($row['created_at'] ?? ''),(string)($row['updated_at'] ?? ''),(string)($row['status'] ?? ''),(string)($row['product_type'] ?? ''),(string)($row['sku'] ?? ''),number_format(((int)($row['amount_cents'] ?? 0)) / 100, 2, '.', ''),strtoupper((string)($row['currency'] ?? 'usd')),(string)($row['stripe_payment_intent_id'] ?? ''),(string)($meta['mrm_terms_accepted'] ?? ''),(string)($meta['mrm_terms_version'] ?? ''),(string)($meta['mrm_terms_source_flow'] ?? ''),(string)($meta['mrm_customer_email'] ?? ''),(string)($row['metadata_json'] ?? ''),));
+  }
+  fclose($out);
+  exit;
+}
 public function render_legal_ledger_page() {
   if (!current_user_can('manage_options')) {
     wp_die('You do not have permission to view this page.');
   }
 
-  $rows = $this->mrm_legal_ledger_get_rows(250);
+  $rows = $this->mrm_legal_ledger_get_rows(0);
 
   echo '<div class="wrap">';
   echo '<h1>Legal Dispute Ledger</h1>';
@@ -9535,8 +9557,14 @@ public function render_legal_ledger_page() {
     echo '<option value="' . esc_attr($value) . '"' . selected($current_status, $value, false) . '>' . esc_html($label) . '</option>';
   }
   echo '</select> ';
-  echo '<button class="button">Filter</button>';
+  echo '<input type="date" name="mrm_legal_start" value="' . esc_attr((string)($_GET['mrm_legal_start'] ?? '')) . '" /> ';
+  echo '<input type="date" name="mrm_legal_end" value="' . esc_attr((string)($_GET['mrm_legal_end'] ?? '')) . '" /> ';
+  echo '<button class="button">Filter</button> ';
+  $export_url = wp_nonce_url(add_query_arg(array('action' => 'mrm_export_legal_ledger','mrm_legal_q' => (string)($_GET['mrm_legal_q'] ?? ''),'mrm_legal_status' => (string)($_GET['mrm_legal_status'] ?? ''),'mrm_legal_start' => (string)($_GET['mrm_legal_start'] ?? ''),'mrm_legal_end' => (string)($_GET['mrm_legal_end'] ?? ''),), admin_url('admin-post.php')),'mrm_export_legal_ledger');
+  echo '<a class="button button-secondary" href="' . esc_url($export_url) . '">Export Current Selection</a> ';
+  echo '<button type="button" class="button button-secondary" onclick="window.print()">Print</button>';
   echo '</form>';
+  echo '<style>@media print {#adminmenumain, #wpadminbar, .notice, .update-nag, form, .button { display:none !important; } #wpcontent, #wpbody-content { margin-left:0 !important; padding:0 !important; } table.widefat { font-size:11px; } code { white-space:normal; }}</style>';
 
   echo '<table class="widefat striped">';
   echo '<thead><tr>';
