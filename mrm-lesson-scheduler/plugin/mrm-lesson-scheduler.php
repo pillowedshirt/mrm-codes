@@ -34,8 +34,9 @@ class MRM_Lesson_Scheduler {
     protected static $instance;
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
-    const DB_VERSION = '1.5.7';
+    const DB_VERSION = '1.5.8';
     const CAPABILITY = 'manage_options';
+    const TERMS_VERSION = '2026-04-25';
     // Google endpoints
     const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
     const GOOGLE_FREEBUSY_URL = 'https://www.googleapis.com/calendar/v3/freeBusy';
@@ -2219,11 +2220,23 @@ protected function mrm_get_google_service_account_json() {
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     email VARCHAR(255) NOT NULL,
     agreement_version VARCHAR(50) NOT NULL,
+    agreement_scope VARCHAR(80) NOT NULL DEFAULT 'terms_of_service',
+    source_flow VARCHAR(80) NOT NULL DEFAULT '',
+    related_lesson_id BIGINT UNSIGNED NULL,
+    related_order_id BIGINT UNSIGNED NULL,
+    related_sku VARCHAR(190) NULL,
     signature TEXT NOT NULL,
+    acknowledgement_json LONGTEXT NULL,
     signed_at DATETIME NOT NULL,
     ip_address VARCHAR(45) NOT NULL,
+    user_agent TEXT NULL,
     PRIMARY KEY (id),
-    KEY email_idx (email)
+    KEY email_idx (email),
+    KEY agreement_version_idx (agreement_version),
+    KEY source_flow_idx (source_flow),
+    KEY related_lesson_idx (related_lesson_id),
+    KEY related_order_idx (related_order_id),
+    KEY related_sku_idx (related_sku)
 ) {$charset_collate};";
         dbDelta( $sql1 );
         dbDelta( $sql2 );
@@ -2596,6 +2609,37 @@ protected function mrm_get_google_service_account_json() {
         $payment_mode = sanitize_text_field( (string ) ( $data['payment_mode'] ?? 'none' ) ); // prepay|one_time|autopay|none
         $autopay_profile_id = isset( $data['autopay_profile_id'] ) ? intval( $data['autopay_profile_id'] ) : 0;
 
+        $agreement = isset( $data['agreement'] ) && is_array( $data['agreement'] ) ? $data['agreement'] : array();
+        $terms_accepted = ! empty( $agreement['terms_accepted'] );
+
+        if ( ! $terms_accepted ) {
+            return new WP_REST_Response(
+                array(
+                    'ok'      => false,
+                    'message' => 'Please agree to the Terms of Service before booking.',
+                ),
+                400
+            );
+        }
+
+        $agreement_signature = trim( (string) ( $agreement['signature'] ?? '' ) );
+        if ( $agreement_signature === '' ) {
+            $agreement_signature = 'Terms accepted electronically by ' . $student_email;
+        }
+
+        $agreement_id = $this->maybe_store_agreement(
+            $student_email,
+            self::TERMS_VERSION,
+            $agreement_signature,
+            isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( (string) $_SERVER['REMOTE_ADDR'] ) : '',
+            array(
+                'agreement_scope' => 'terms_of_service',
+                'source_flow' => 'lesson_booking',
+                'related_order_id' => $order_id > 0 ? $order_id : null,
+                'acknowledgement' => $agreement,
+            )
+        );
+
         if ( $instructor_id <= 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
         }
@@ -2662,7 +2706,7 @@ protected function mrm_get_google_service_account_json() {
                     'payment_mode'    => 'none',
                     'payout_unlocked_at' => null,
                     'autopay_profile_id' => null,
-                    'agreement_id'    => null,
+                    'agreement_id'    => ( $agreement_id > 0 ? $agreement_id : null ),
                     'created_at'      => $now,
                     'updated_at'      => $now,
                     'reminder_token'  => null,
@@ -2755,7 +2799,7 @@ protected function mrm_get_google_service_account_json() {
                 'payment_mode'    => $slot_payment_mode,
                 'payout_unlocked_at' => null,
                 'autopay_profile_id' => ( $autopay_profile_id > 0 ? $autopay_profile_id : null ),
-                'agreement_id'    => null,
+                'agreement_id'    => ( $agreement_id > 0 ? $agreement_id : null ),
                 'created_at'      => $now,
                 'updated_at'      => $now,
                 'reminder_token'  => $token,
@@ -9761,19 +9805,71 @@ protected function parse_service_account_json( $json ) {
         return $this->mrm_safety_email_wrap_html( $title, $intro_html, $details_html, $button_url, $button_text );
     }
 
-    protected function maybe_store_agreement( $email, $version, $signature, $ip ) {
+    protected function maybe_store_agreement( $email, $version, $signature, $ip, $args = array() ) {
         global $wpdb;
-        if ( ! $email || ! $version || ! $signature ) return 0;
+
+        $email     = sanitize_email( (string) $email );
+        $version   = sanitize_text_field( (string) $version );
+        $signature = sanitize_text_field( (string) $signature );
+        $ip        = sanitize_text_field( (string) $ip );
+
+        if ( ! $email || ! is_email( $email ) || ! $version || ! $signature ) {
+            return 0;
+        }
+
         $table = $wpdb->prefix . 'mrm_agreements';
-        $existing = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE email = %s AND agreement_version = %s", $email, $version ) );
-        if ( $existing ) return (int) $existing;
-        $wpdb->insert( $table, array(
-            'email'            => $email,
-            'agreement_version'=> $version,
-            'signature'        => $signature,
-            'signed_at'        => current_time( 'mysql' ),
-            'ip_address'       => $ip,
-        ), array( '%s','%s','%s','%s','%s' ) );
+
+        $scope      = sanitize_text_field( (string) ( $args['agreement_scope'] ?? 'terms_of_service' ) );
+        $source     = sanitize_text_field( (string) ( $args['source_flow'] ?? '' ) );
+        $lesson_id  = isset( $args['related_lesson_id'] ) ? absint( $args['related_lesson_id'] ) : null;
+        $order_id   = isset( $args['related_order_id'] ) ? absint( $args['related_order_id'] ) : null;
+        $sku        = sanitize_text_field( (string) ( $args['related_sku'] ?? '' ) );
+        $ack        = isset( $args['acknowledgement'] ) && is_array( $args['acknowledgement'] ) ? $args['acknowledgement'] : array();
+        $user_agent = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_textarea_field( (string) $_SERVER['HTTP_USER_AGENT'] ) : '';
+
+        $existing = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT id FROM {$table}
+                 WHERE email = %s
+                   AND agreement_version = %s
+                   AND agreement_scope = %s
+                   AND source_flow = %s
+                   AND related_order_id <=> %d
+                   AND related_sku = %s
+                 ORDER BY id DESC
+                 LIMIT 1",
+                $email,
+                $version,
+                $scope,
+                $source,
+                $order_id ? $order_id : 0,
+                $sku
+            )
+        );
+
+        if ( $existing ) {
+            return (int) $existing;
+        }
+
+        $wpdb->insert(
+            $table,
+            array(
+                'email'                => $email,
+                'agreement_version'    => $version,
+                'agreement_scope'      => $scope,
+                'source_flow'          => $source,
+                'related_lesson_id'    => $lesson_id ? $lesson_id : null,
+                'related_order_id'     => $order_id ? $order_id : null,
+                'related_sku'          => $sku !== '' ? $sku : null,
+                'signature'            => $signature,
+                'acknowledgement_json' => wp_json_encode( $ack ),
+                'signed_at'            => current_time( 'mysql' ),
+                'ip_address'           => $ip,
+                'user_agent'           => $user_agent,
+            ),
+            array( '%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s' )
+        );
+
         return (int) $wpdb->insert_id;
     }
 
