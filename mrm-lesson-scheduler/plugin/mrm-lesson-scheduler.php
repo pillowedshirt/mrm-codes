@@ -7773,7 +7773,7 @@ protected function mrm_get_google_service_account_json() {
             </form>
 
             <p>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_support&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_1099_support' ) ); ?>">Export Contractor CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_support&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_1099_support' ) ); ?>">Export Instructor CSV</a>
                 <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_mileage_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_mileage_summary' ) ); ?>">Export Mileage CSV</a>
                 <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_calculations_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_calculations_summary' ) ); ?>">Export Annual Summary CSV</a>
                 <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_recalculate_mileage_cache&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_recalculate_mileage_cache' ) ); ?>">Recalculate Mileage</a>
@@ -7790,6 +7790,7 @@ protected function mrm_get_google_service_account_json() {
                     <tr><td>Instructor Wages</td><td><?php echo esc_html( number_format( (float) $overview['instructor_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Composer Wages</td><td><?php echo esc_html( number_format( (float) $overview['composer_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Manual Expenses</td><td><?php echo esc_html( number_format( (float) $overview['manual_expenses'], 2 ) ); ?></td></tr>
+                    <tr><td>Payroll / W-2 Wages</td><td><?php echo esc_html( number_format( (float) $overview['payroll_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Mileage Deduction Estimate</td><td><?php echo esc_html( number_format( (float) $overview['mileage_deduction'], 2 ) ); ?></td></tr>
                     <tr><td>Estimated Net Income</td><td><strong><?php echo esc_html( number_format( (float) $overview['estimated_net_income'], 2 ) ); ?></strong></td></tr>
                 </tbody>
@@ -7852,16 +7853,22 @@ protected function mrm_get_google_service_account_json() {
     return array( "{$tax_year}-01-01 00:00:00", "{$tax_year}-12-31 23:59:59" );
 }
 
+protected function mrm_table_exists( $table ) {
+    global $wpdb;
+    return ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table );
+}
+
 protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
     $lesson_revenue      = $this->mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter, $environment_mode, 'lesson' );
     $sheet_music_revenue = $this->mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter, $environment_mode, 'sheet_music' );
     $gross_revenue       = $lesson_revenue + $sheet_music_revenue;
 
     $refunds             = $this->mrm_calc_total_refunds( $tax_year, $tax_quarter, $environment_mode );
-    $stripe_fees         = 0.0; // Not currently stored locally in mrm_orders.
+    $stripe_fees         = 0.0; // Stripe fees are not currently stored locally in mrm_orders.
     $instructor_wages    = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'instructor' );
     $composer_wages      = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'composer' );
     $manual_expenses     = $this->mrm_calc_total_manual_expenses( $tax_year, $tax_quarter, $environment_mode );
+    $payroll_wages       = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
     $mileage_deduction   = $this->mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter, $environment_mode );
 
     $estimated_net_income = $gross_revenue
@@ -7870,6 +7877,7 @@ protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $
         - $instructor_wages
         - $composer_wages
         - $manual_expenses
+        - $payroll_wages
         - $mileage_deduction;
 
     return array(
@@ -7881,407 +7889,487 @@ protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $
         'instructor_wages'      => $instructor_wages,
         'composer_wages'        => $composer_wages,
         'manual_expenses'       => $manual_expenses,
+        'payroll_wages'         => $payroll_wages,
         'mileage_deduction'     => $mileage_deduction,
         'estimated_net_income'  => $estimated_net_income,
     );
 }
 
-    protected function mrm_calc_total_revenue( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+protected function mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter = 0, $environment_mode = 'live', $product_type = '' ) {
+    global $wpdb;
 
-        $orders_table = $wpdb->prefix . 'mrm_orders';
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $orders_table = $wpdb->prefix . 'mrm_orders';
 
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) ) !== $orders_table ) {
-            return 0.0;
-        }
-
-        $sql = $wpdb->prepare(
-            "SELECT COALESCE(SUM(total_amount),0)
-             FROM {$orders_table}
-             WHERE status IN ('paid','succeeded','completed')
-               AND environment_mode = %s
-               AND created_at >= %s
-               AND created_at <= %s",
-            $environment_mode,
-            $start,
-            $end
-        );
-
-        return (float) $wpdb->get_var( $sql );
+    if ( ! $this->mrm_table_exists( $orders_table ) ) {
+        return 0.0;
     }
 
-    protected function mrm_calc_total_refunds( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $sql = $wpdb->prepare(
+        "SELECT COALESCE(SUM(amount_cents),0)
+         FROM {$orders_table}
+         WHERE status = 'paid'
+           AND environment_mode = %s
+           AND product_type = %s
+           AND created_at >= %s
+           AND created_at <= %s",
+        $environment_mode,
+        $product_type,
+        $start,
+        $end
+    );
 
-        $orders_table = $wpdb->prefix . 'mrm_orders';
+    return round( (float) $wpdb->get_var( $sql ) / 100, 2 );
+}
 
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) ) !== $orders_table ) {
-            return 0.0;
-        }
+protected function mrm_calc_total_refunds( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
 
-        $sql = $wpdb->prepare(
-            "SELECT COALESCE(SUM(refund_amount),0)
-             FROM {$orders_table}
-             WHERE refund_amount > 0
-               AND environment_mode = %s
-               AND updated_at >= %s
-               AND updated_at <= %s",
-            $environment_mode,
-            $start,
-            $end
-        );
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $orders_table = $wpdb->prefix . 'mrm_orders';
 
-        return (float) $wpdb->get_var( $sql );
+    if ( ! $this->mrm_table_exists( $orders_table ) ) {
+        return 0.0;
     }
 
-    protected function mrm_calc_total_stripe_fees( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $sql = $wpdb->prepare(
+        "SELECT COALESCE(SUM(amount_cents),0)
+         FROM {$orders_table}
+         WHERE status = 'refunded'
+           AND environment_mode = %s
+           AND updated_at >= %s
+           AND updated_at <= %s",
+        $environment_mode,
+        $start,
+        $end
+    );
 
-        $orders_table = $wpdb->prefix . 'mrm_orders';
+    return round( (float) $wpdb->get_var( $sql ) / 100, 2 );
+}
 
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) ) !== $orders_table ) {
-            return 0.0;
-        }
+protected function mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter = 0, $environment_mode = 'live', $payee_type = '' ) {
+    global $wpdb;
 
-        $sql = $wpdb->prepare(
-            "SELECT COALESCE(SUM(stripe_fee_amount),0)
-             FROM {$orders_table}
-             WHERE environment_mode = %s
-               AND created_at >= %s
-               AND created_at <= %s",
-            $environment_mode,
-            $start,
-            $end
-        );
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $table = $wpdb->prefix . 'mrm_payout_ledger';
 
-        return (float) $wpdb->get_var( $sql );
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return 0.0;
     }
 
-    protected function mrm_calc_total_contractor_payouts( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $sql = $wpdb->prepare(
+        "SELECT COALESCE(SUM(net_cents),0)
+         FROM {$table}
+         WHERE payee_type = %s
+           AND environment_mode = %s
+           AND status IN ('pending','transferred','paid','payout_paid')
+           AND created_at >= %s
+           AND created_at <= %s",
+        $payee_type,
+        $environment_mode,
+        $start,
+        $end
+    );
 
-        $payouts_table = $wpdb->prefix . 'mrm_payouts';
+    return round( (float) $wpdb->get_var( $sql ) / 100, 2 );
+}
 
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $payouts_table ) ) !== $payouts_table ) {
-            return 0.0;
-        }
+protected function mrm_calc_total_manual_expenses( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
 
+    $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return 0.0;
+    }
+
+    if ( (int) $tax_quarter > 0 ) {
         $sql = $wpdb->prepare(
             "SELECT COALESCE(SUM(amount),0)
-             FROM {$payouts_table}
-             WHERE payout_type = 'contractor'
-               AND environment_mode = %s
-               AND created_at >= %s
-               AND created_at <= %s",
-            $environment_mode,
-            $start,
-            $end
+             FROM {$table}
+             WHERE tax_year = %d
+               AND tax_quarter = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
         );
-
-        return (float) $wpdb->get_var( $sql );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(amount),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $environment_mode
+        );
     }
 
-    protected function mrm_calc_total_manual_expenses( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+    return round( (float) $wpdb->get_var( $sql ), 2 );
+}
 
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
-            return 0.0;
-        }
+protected function mrm_calc_total_payroll_wages( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
 
-        if ( (int) $tax_quarter > 0 ) {
-            $sql = $wpdb->prepare(
-                "SELECT COALESCE(SUM(amount),0)
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND tax_quarter = %d
-                   AND environment_mode = %s",
-                $tax_year,
-                $tax_quarter,
-                $environment_mode
-            );
-        } else {
-            $sql = $wpdb->prepare(
-                "SELECT COALESCE(SUM(amount),0)
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND environment_mode = %s",
-                $tax_year,
-                $environment_mode
-            );
-        }
+    $table = $wpdb->prefix . 'mrm_tax_payroll_imports';
 
-        return (float) $wpdb->get_var( $sql );
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return 0.0;
     }
 
-    protected function mrm_calc_total_payroll_wages( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        $table = $wpdb->prefix . 'mrm_tax_payroll_imports';
-
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
-            return 0.0;
-        }
-
-        if ( (int) $tax_quarter > 0 ) {
-            $sql = $wpdb->prepare(
-                "SELECT COALESCE(SUM(gross_wages),0)
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND tax_quarter = %d
-                   AND environment_mode = %s",
-                $tax_year,
-                $tax_quarter,
-                $environment_mode
-            );
-        } else {
-            $sql = $wpdb->prepare(
-                "SELECT COALESCE(SUM(gross_wages),0)
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND environment_mode = %s",
-                $tax_year,
-                $environment_mode
-            );
-        }
-
-        return (float) $wpdb->get_var( $sql );
+    if ( (int) $tax_quarter > 0 ) {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(gross_wages),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND tax_quarter = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
+        );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(gross_wages),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $environment_mode
+        );
     }
 
-    protected function mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+    return round( (float) $wpdb->get_var( $sql ), 2 );
+}
 
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
-            return 0.0;
-        }
+protected function mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
 
-        if ( (int) $tax_quarter > 0 ) {
-            $sql = $wpdb->prepare(
-                "SELECT COALESCE(SUM(mileage_deduction),0)
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND QUARTER(trip_date) = %d
-                   AND environment_mode = %s",
-                $tax_year,
-                $tax_quarter,
-                $environment_mode
-            );
-        } else {
-            $sql = $wpdb->prepare(
-                "SELECT COALESCE(SUM(mileage_deduction),0)
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND environment_mode = %s",
-                $tax_year,
-                $environment_mode
-            );
-        }
+    $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
 
-        return (float) $wpdb->get_var( $sql );
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return 0.0;
     }
 
-    protected function mrm_get_calculations_contractor_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
+    if ( (int) $tax_quarter > 0 ) {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(mileage_deduction),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND QUARTER(trip_date) = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
+        );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(mileage_deduction),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $environment_mode
+        );
+    }
 
-        $payouts_table = $wpdb->prefix . 'mrm_payouts';
-        $payee_table   = $wpdb->prefix . 'mrm_tax_payee_profiles';
-        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    return round( (float) $wpdb->get_var( $sql ), 2 );
+}
 
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $payouts_table ) ) !== $payouts_table ) {
-            return array();
-        }
+protected function mrm_get_calculations_instructor_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
 
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $payee_table ) ) !== $payee_table ) {
-            return array();
-        }
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
 
+    $payouts = $wpdb->prefix . 'mrm_payout_ledger';
+    $lessons = $wpdb->prefix . 'mrm_lessons';
+    $instructors = $wpdb->prefix . 'mrm_instructors';
+
+    if ( ! $this->mrm_table_exists( $payouts ) ) {
+        return array();
+    }
+
+    $join_sql = '';
+    $select_instructor_id = "0 AS instructor_id";
+    $select_instructor_name = "p.payee_ref AS instructor_name";
+    $select_instructor_email = "'' AS instructor_email";
+
+    if ( $this->mrm_table_exists( $lessons ) && $this->mrm_table_exists( $instructors ) ) {
+        $join_sql = "
+            LEFT JOIN {$lessons} l ON p.payee_ref = CONCAT('lesson:', l.id)
+            LEFT JOIN {$instructors} i ON i.id = l.instructor_id
+        ";
+        $select_instructor_id = "COALESCE(l.instructor_id, 0) AS instructor_id";
+        $select_instructor_name = "COALESCE(MAX(i.name), p.payee_ref, 'Unknown instructor') AS instructor_name";
+        $select_instructor_email = "COALESCE(MAX(i.email), '') AS instructor_email";
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT
+            {$select_instructor_id},
+            {$select_instructor_name},
+            {$select_instructor_email},
+            COUNT(*) AS payout_count,
+            COALESCE(SUM(p.gross_cents),0) AS gross_cents,
+            COALESCE(SUM(p.net_cents),0) AS net_cents
+         FROM {$payouts} p
+         {$join_sql}
+         WHERE p.payee_type = 'instructor'
+           AND p.environment_mode = %s
+           AND p.status IN ('pending','transferred','paid','payout_paid')
+           AND p.created_at >= %s
+           AND p.created_at <= %s
+         GROUP BY instructor_id, p.payee_ref
+         ORDER BY net_cents DESC",
+        $environment_mode,
+        $start,
+        $end
+    );
+
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_composer_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $payouts = $wpdb->prefix . 'mrm_payout_ledger';
+
+    if ( ! $this->mrm_table_exists( $payouts ) ) {
+        return array();
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT
+            COALESCE(payee_ref, 'composer') AS payee_ref,
+            COUNT(*) AS payout_count,
+            COALESCE(SUM(gross_cents),0) AS gross_cents,
+            COALESCE(SUM(net_cents),0) AS net_cents,
+            GROUP_CONCAT(DISTINCT notes SEPARATOR '; ') AS notes
+         FROM {$payouts}
+         WHERE payee_type = 'composer'
+           AND environment_mode = %s
+           AND status IN ('pending','transferred','paid','payout_paid')
+           AND created_at >= %s
+           AND created_at <= %s
+         GROUP BY payee_ref
+         ORDER BY net_cents DESC",
+        $environment_mode,
+        $start,
+        $end
+    );
+
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+    $instructors = $wpdb->prefix . 'mrm_instructors';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return array();
+    }
+
+    $select_name = "'' AS instructor_name";
+    $join_sql = '';
+
+    if ( $this->mrm_table_exists( $instructors ) ) {
+        $select_name = "MAX(i.name) AS instructor_name";
+        $join_sql = "LEFT JOIN {$instructors} i ON i.id = m.instructor_id";
+    }
+
+    if ( (int) $tax_quarter > 0 ) {
         $sql = $wpdb->prepare(
             "SELECT
-                p.payee_id,
-                MAX(pp.display_name) AS display_name,
-                MAX(pp.legal_name) AS legal_name,
-                MAX(pp.w9_received) AS w9_received,
-                MAX(pp.is_1099_eligible) AS is_1099_eligible,
-                COALESCE(SUM(p.amount),0) AS total_paid
-             FROM {$payouts_table} p
-             LEFT JOIN {$payee_table} pp ON pp.id = p.payee_id
-             WHERE p.payout_type = 'contractor'
-               AND p.environment_mode = %s
-               AND p.created_at >= %s
-               AND p.created_at <= %s
-             GROUP BY p.payee_id
-             ORDER BY total_paid DESC",
-            $environment_mode,
-            $start,
-            $end
+                m.instructor_id,
+                {$select_name},
+                COUNT(*) AS lesson_count,
+                COALESCE(SUM(m.round_trip_miles),0) AS total_miles,
+                COALESCE(SUM(m.mileage_deduction),0) AS total_deduction,
+                GROUP_CONCAT(DISTINCT m.calc_status ORDER BY m.calc_status SEPARATOR ', ') AS calc_statuses
+             FROM {$table} m
+             {$join_sql}
+             WHERE m.tax_year = %d
+               AND QUARTER(m.trip_date) = %d
+               AND m.environment_mode = %s
+             GROUP BY m.instructor_id
+             ORDER BY total_miles DESC",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
         );
-
-        return $wpdb->get_results( $sql, ARRAY_A );
-    }
-
-    protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
-
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
-            return array();
-        }
-
-        if ( (int) $tax_quarter > 0 ) {
-            $sql = $wpdb->prepare(
-                "SELECT instructor_id,
-                        COUNT(*) AS lesson_count,
-                        COALESCE(SUM(round_trip_miles),0) AS total_miles,
-                        COALESCE(SUM(mileage_deduction),0) AS total_deduction
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND QUARTER(trip_date) = %d
-                   AND environment_mode = %s
-                 GROUP BY instructor_id
-                 ORDER BY total_miles DESC",
-                $tax_year,
-                $tax_quarter,
-                $environment_mode
-            );
-        } else {
-            $sql = $wpdb->prepare(
-                "SELECT instructor_id,
-                        COUNT(*) AS lesson_count,
-                        COALESCE(SUM(round_trip_miles),0) AS total_miles,
-                        COALESCE(SUM(mileage_deduction),0) AS total_deduction
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND environment_mode = %s
-                 GROUP BY instructor_id
-                 ORDER BY total_miles DESC",
-                $tax_year,
-                $environment_mode
-            );
-        }
-
-        return $wpdb->get_results( $sql, ARRAY_A );
-    }
-
-    protected function mrm_get_calculations_expense_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        global $wpdb;
-        $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
-
-        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
-            return array();
-        }
-
-        if ( (int) $tax_quarter > 0 ) {
-            $sql = $wpdb->prepare(
-                "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND tax_quarter = %d
-                   AND environment_mode = %s
-                 GROUP BY category
-                 ORDER BY total_amount DESC",
-                $tax_year,
-                $tax_quarter,
-                $environment_mode
-            );
-        } else {
-            $sql = $wpdb->prepare(
-                "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
-                 FROM {$table}
-                 WHERE tax_year = %d
-                   AND environment_mode = %s
-                 GROUP BY category
-                 ORDER BY total_amount DESC",
-                $tax_year,
-                $environment_mode
-            );
-        }
-
-        return $wpdb->get_results( $sql, ARRAY_A );
-    }
-
-    protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-        $total = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
-
-        return array(
-            array(
-                'label' => 'Imported Payroll Wages',
-                'total' => $total,
-            ),
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT
+                m.instructor_id,
+                {$select_name},
+                COUNT(*) AS lesson_count,
+                COALESCE(SUM(m.round_trip_miles),0) AS total_miles,
+                COALESCE(SUM(m.mileage_deduction),0) AS total_deduction,
+                GROUP_CONCAT(DISTINCT m.calc_status ORDER BY m.calc_status SEPARATOR ', ') AS calc_statuses
+             FROM {$table} m
+             {$join_sql}
+             WHERE m.tax_year = %d
+               AND m.environment_mode = %s
+             GROUP BY m.instructor_id
+             ORDER BY total_miles DESC",
+            $tax_year,
+            $environment_mode
         );
     }
 
-    protected function mrm_render_calculations_contractor_table( $rows ) {
-        echo '<table class="widefat striped"><thead><tr><th>Payee</th><th>W-9</th><th>1099 Eligible</th><th>Total Paid</th></tr></thead><tbody>';
-        if ( empty( $rows ) ) {
-            echo '<tr><td colspan="4">No contractor data found.</td></tr>';
-        } else {
-            foreach ( $rows as $row ) {
-                echo '<tr>';
-                echo '<td>' . esc_html( $row['display_name'] ?: $row['legal_name'] ) . '</td>';
-                echo '<td>' . ( ! empty( $row['w9_received'] ) ? 'Yes' : 'No' ) . '</td>';
-                echo '<td>' . ( ! empty( $row['is_1099_eligible'] ) ? 'Yes' : 'No' ) . '</td>';
-                echo '<td>' . esc_html( number_format( (float) $row['total_paid'], 2 ) ) . '</td>';
-                echo '</tr>';
-            }
-        }
-        echo '</tbody></table>';
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_expense_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return array();
     }
 
-    protected function mrm_render_calculations_payroll_table( $rows ) {
-        if ( empty( $rows ) ) {
-            echo '<p>Payroll import / W-2 support section ready for integration.</p>';
-            return;
-        }
+    if ( (int) $tax_quarter > 0 ) {
+        $sql = $wpdb->prepare(
+            "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
+             FROM {$table}
+             WHERE tax_year = %d
+               AND tax_quarter = %d
+               AND environment_mode = %s
+             GROUP BY category
+             ORDER BY total_amount DESC",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
+        );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s
+             GROUP BY category
+             ORDER BY total_amount DESC",
+            $tax_year,
+            $environment_mode
+        );
+    }
 
-        echo '<table class="widefat striped"><thead><tr><th>Type</th><th>Total</th></tr></thead><tbody>';
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    $total = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
+
+    return array(
+        array(
+            'label' => 'Imported Payroll Wages',
+            'total' => $total,
+        ),
+    );
+}
+
+protected function mrm_render_calculations_instructor_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Email</th><th>Payout Entries</th><th>Gross</th><th>Net Wage</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="5">No instructor payout data found.</td></tr>';
+    } else {
         foreach ( $rows as $row ) {
             echo '<tr>';
-            echo '<td>' . esc_html( (string) ( $row['label'] ?? '' ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( $row['total'] ?? 0 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? 'Unknown instructor' ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_email'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
             echo '</tr>';
         }
-        echo '</tbody></table>';
     }
 
-    protected function mrm_render_calculations_mileage_table( $rows ) {
-        echo '<table class="widefat striped"><thead><tr><th>Instructor ID</th><th>Lessons</th><th>Total Miles</th><th>Deduction</th></tr></thead><tbody>';
-        if ( empty( $rows ) ) {
-            echo '<tr><td colspan="4">No mileage data found.</td></tr>';
-        } else {
-            foreach ( $rows as $row ) {
-                echo '<tr>';
-                echo '<td>' . esc_html( $row['instructor_id'] ) . '</td>';
-                echo '<td>' . esc_html( $row['lesson_count'] ) . '</td>';
-                echo '<td>' . esc_html( number_format( (float) $row['total_miles'], 2 ) ) . '</td>';
-                echo '<td>' . esc_html( number_format( (float) $row['total_deduction'], 2 ) ) . '</td>';
-                echo '</tr>';
-            }
-        }
-        echo '</tbody></table>';
-    }
+    echo '</tbody></table>';
+}
 
-    protected function mrm_render_calculations_expense_table( $rows ) {
-        if ( empty( $rows ) ) {
-            echo '<p>Expense detail section ready for integration.</p>';
-            return;
-        }
+protected function mrm_render_calculations_composer_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Composer Payee</th><th>Payout Entries</th><th>Gross</th><th>Net Composer Wage</th><th>Notes</th></tr></thead><tbody>';
 
-        echo '<table class="widefat striped"><thead><tr><th>Category</th><th>Entries</th><th>Total</th></tr></thead><tbody>';
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="5">No composer sheet music payout data found.</td></tr>';
+    } else {
         foreach ( $rows as $row ) {
             echo '<tr>';
-            echo '<td>' . esc_html( (string) ( $row['category'] ?? '' ) ) . '</td>';
-            echo '<td>' . esc_html( (string) ( $row['entry_count'] ?? 0 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( $row['total_amount'] ?? 0 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['payee_ref'] ?? 'composer' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( mb_strimwidth( (string) ( $row['notes'] ?? '' ), 0, 120, '…' ) ) . '</td>';
             echo '</tr>';
         }
-        echo '</tbody></table>';
     }
 
-    protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_payroll_table( $rows ) {
+    if ( empty( $rows ) ) {
+        echo '<p>Payroll import / W-2 support section ready for integration.</p>';
+        return;
+    }
+
+    echo '<table class="widefat striped"><thead><tr><th>Type</th><th>Total</th></tr></thead><tbody>';
+
+    foreach ( $rows as $row ) {
+        echo '<tr>';
+        echo '<td>' . esc_html( (string) ( $row['label'] ?? '' ) ) . '</td>';
+        echo '<td>' . esc_html( number_format( (float) ( $row['total'] ?? 0 ), 2 ) ) . '</td>';
+        echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_mileage_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Lessons</th><th>Total Miles</th><th>Deduction</th><th>Status</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="5">No mileage data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? ( 'Instructor ID ' . ( $row['instructor_id'] ?? '' ) ) ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
+            echo '<td>' . esc_html( (string) ( $row['lesson_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total_miles'] ?? 0 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total_deduction'] ?? 0 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['calc_statuses'] ?? '' ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_expense_table( $rows ) {
+    if ( empty( $rows ) ) {
+        echo '<p>Expense detail section ready for integration.</p>';
+        return;
+    }
+
+    echo '<table class="widefat striped"><thead><tr><th>Category</th><th>Entries</th><th>Total</th></tr></thead><tbody>';
+
+    foreach ( $rows as $row ) {
+        echo '<tr>';
+        echo '<td>' . esc_html( (string) ( $row['category'] ?? '' ) ) . '</td>';
+        echo '<td>' . esc_html( (string) ( $row['entry_count'] ?? 0 ) ) . '</td>';
+        echo '<td>' . esc_html( number_format( (float) ( $row['total_amount'] ?? 0 ), 2 ) ) . '</td>';
+        echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
     global $wpdb;
 
     $lesson = $this->get_lesson_with_instructor( $lesson_id );
@@ -8497,6 +8585,7 @@ protected function mrm_send_csv_headers( $filename ) {
     $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
     $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
     $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
     $rows = $this->mrm_get_calculations_instructor_summary( $tax_year, $tax_quarter, $environment_mode );
 
     $this->mrm_send_csv_headers( 'mrm-instructor-wages-' . $tax_year . '-q' . $tax_quarter . '.csv' );
@@ -8527,6 +8616,7 @@ protected function mrm_send_csv_headers( $filename ) {
 }
 
 
+
     public function handle_mrm_export_mileage_summary() {
     if ( ! current_user_can( 'manage_options' ) ) {
         wp_die( 'Not allowed.' );
@@ -8537,6 +8627,7 @@ protected function mrm_send_csv_headers( $filename ) {
     $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
     $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
     $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
     $rows = $this->mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter, $environment_mode );
 
     $this->mrm_send_csv_headers( 'mrm-mileage-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
@@ -8567,29 +8658,36 @@ protected function mrm_send_csv_headers( $filename ) {
 }
 
 
+
     public function handle_mrm_export_calculations_summary() {
-        if ( ! current_user_can( 'manage_options' ) ) {
-            wp_die( 'Not allowed.' );
-        }
-
-        check_admin_referer( 'mrm_export_calculations_summary' );
-
-        $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
-        $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
-        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
-        $overview = $this->mrm_get_calculations_overview( $tax_year, $tax_quarter, $environment_mode );
-
-        $this->mrm_send_csv_headers( 'mrm-calculations-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
-        $out = fopen( 'php://output', 'w' );
-        $this->mrm_write_csv_row( $out, array( 'metric', 'value' ) );
-
-        foreach ( $overview as $metric => $value ) {
-            $this->mrm_write_csv_row( $out, array( $metric, number_format( (float) $value, 2, '.', '' ) ) );
-        }
-
-        fclose( $out );
-        exit;
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
     }
+
+    check_admin_referer( 'mrm_export_calculations_summary' );
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    $overview = $this->mrm_get_calculations_overview( $tax_year, $tax_quarter, $environment_mode );
+
+    $this->mrm_send_csv_headers( 'mrm-calculations-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+    $out = fopen( 'php://output', 'w' );
+
+    $this->mrm_write_csv_row( $out, array( 'metric', 'amount' ) );
+
+    foreach ( $overview as $key => $value ) {
+        $this->mrm_write_csv_row( $out, array(
+            $key,
+            number_format( (float) $value, 2, '.', '' ),
+        ) );
+    }
+
+    fclose( $out );
+    exit;
+}
+
 
 
     /* =========================================================
