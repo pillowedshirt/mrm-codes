@@ -6642,6 +6642,47 @@ class MRM_Payments_Hub_Single {
     $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'Autopay charge not successful: ' . $status);
   }
 
+  private function mrm_get_completed_payout_period_for_today() {
+    $settings = $this->get_settings();
+    $anchor = trim((string)($settings['payout_anchor_date'] ?? ''));
+    if ($anchor === '') return null;
+
+    try {
+      $tz = $this->mrm_wp_tz();
+      $today = new DateTime('today', $tz);
+      $period_start = new DateTime($anchor, $tz);
+      $period_start->setTime(0, 0, 0);
+
+      if ((int)$period_start->format('N') !== 5) {
+        return null;
+      }
+
+      while (true) {
+        $period_end = clone $period_start;
+        $period_end->modify('+14 days');
+
+        $payout_day = clone $period_end;
+        $payout_day->modify('+5 days');
+
+        if ($today->format('Y-m-d') === $payout_day->format('Y-m-d')) {
+          return array(
+            'start_mysql' => $period_start->format('Y-m-d 00:00:00'),
+            'end_mysql'   => $period_end->format('Y-m-d 00:00:00'),
+            'payout_date' => $payout_day->format('Y-m-d'),
+          );
+        }
+
+        if ($payout_day > $today) {
+          return null;
+        }
+
+        $period_start->modify('+14 days');
+      }
+    } catch (Exception $e) {
+      return null;
+    }
+  }
+
   private function mrm_is_biweekly_payout_day() {
     $settings = $this->get_settings();
     $anchor = trim((string)($settings['payout_anchor_date'] ?? ''));
@@ -6650,13 +6691,41 @@ class MRM_Payments_Hub_Single {
     try {
       $tz = $this->mrm_wp_tz();
       $today = new DateTime('today', $tz);
-      $start = new DateTime($anchor, $tz);
+      $period_start = new DateTime($anchor, $tz);
+      $period_start->setTime(0, 0, 0);
 
-      if ($today < $start) return false;
-      if ((int)$today->format('N') !== 5) return false; // Friday
+      if ((int)$period_start->format('N') !== 5) {
+        return false; // anchor must be a Friday
+      }
 
-      $days = (int)$start->diff($today)->format('%a');
-      return ($days % 14) === 0;
+      if ($today < $period_start) {
+        return false;
+      }
+
+      // Payout day is the Wednesday after a completed two-week Friday-to-Friday period.
+      if ((int)$today->format('N') !== 3) {
+        return false; // Wednesday
+      }
+
+      $cursor = clone $period_start;
+
+      while (true) {
+        $period_end = clone $cursor;
+        $period_end->modify('+14 days');
+
+        $payout_day = clone $period_end;
+        $payout_day->modify('+5 days'); // Friday end -> following Wednesday
+
+        if ($today->format('Y-m-d') === $payout_day->format('Y-m-d')) {
+          return true;
+        }
+
+        if ($payout_day > $today) {
+          return false;
+        }
+
+        $cursor->modify('+14 days');
+      }
     } catch (Exception $e) {
       return false;
     }
@@ -6913,14 +6982,27 @@ class MRM_Payments_Hub_Single {
 
     global $wpdb;
     $table = $this->table_payout_ledger();
-    $rows = $wpdb->get_results(
-      "SELECT * FROM {$table}
-       WHERE status IN ('pending','transferred')
-         AND connected_account_id IS NOT NULL
-         AND connected_account_id <> ''
-       ORDER BY connected_account_id ASC, id ASC",
-      ARRAY_A
-    );
+    $period = $force ? null : $this->mrm_get_completed_payout_period_for_today();
+
+    $where = "WHERE status IN ('pending','transferred')
+      AND connected_account_id IS NOT NULL
+      AND connected_account_id <> ''";
+
+    $args = array();
+
+    if (is_array($period)) {
+      $where .= " AND created_at >= %s AND created_at < %s";
+      $args[] = $period['start_mysql'];
+      $args[] = $period['end_mysql'];
+    }
+
+    $sql = "SELECT * FROM {$table}
+      {$where}
+      ORDER BY connected_account_id ASC, id ASC";
+
+    $rows = !empty($args)
+      ? $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A)
+      : $wpdb->get_results($sql, ARRAY_A);
 
     if (!$rows) return $summary;
 
@@ -7502,6 +7584,23 @@ class MRM_Payments_Hub_Single {
     }
 
     $product_type = (string)($p['product_type'] ?? 'unknown');
+
+    if (in_array($product_type, array('lesson', 'sheet_music'), true) && !$terms_accepted) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Please agree to the Terms of Service before checkout.',
+        'code' => 'terms_required',
+      ), 400);
+    }
+
+    if ($terms_version === '') {
+      $terms_version = '2026-04-25';
+    }
+
+    if ($source_flow === '') {
+      $source_flow = ($product_type === 'sheet_music') ? 'piece_product_purchase' : 'lesson_booking';
+    }
+
     if ($product_type === 'sheet_music') {
       if ($this->mrm_email_already_has_piece_or_package_access($email, $sku)) {
         return new WP_REST_Response(array(
@@ -8751,6 +8850,15 @@ class MRM_Payments_Hub_Single {
       'mrm-pay-hub-access',
       array($this, 'render_access_lists_page')
     );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Legal Dispute Ledger',
+      'Legal Dispute Ledger',
+      'manage_options',
+      'mrm-pay-hub-legal-ledger',
+      array($this, 'render_legal_ledger_page')
+    );
   }
 
   public function handle_admin_post() {
@@ -9407,12 +9515,69 @@ private function mrm_legal_ledger_get_rows($limit = 250) {
 private function mrm_legal_ledger_money($cents, $currency = 'usd') { $currency = strtoupper((string)$currency ?: 'USD'); return $currency . ' $' . number_format(((int)$cents) / 100, 2); }
 private function mrm_legal_ledger_meta($row) { $meta=array(); if (!empty($row['metadata_json'])) { $decoded=json_decode((string)$row['metadata_json'], true); if (is_array($decoded)) $meta=$decoded; } return $meta; }
 public function render_legal_ledger_page() {
-  if (!current_user_can('manage_options')) { wp_die('You do not have permission to view this page.'); }
+  if (!current_user_can('manage_options')) {
+    wp_die('You do not have permission to view this page.');
+  }
+
   $rows = $this->mrm_legal_ledger_get_rows(250);
-  echo '<div class="wrap"><h1>Legal Dispute Ledger</h1><table class="widefat striped"><thead><tr><th>Order</th><th>Status</th><th>Product</th><th>Amount</th><th>Terms</th></tr></thead><tbody>';
-  if (empty($rows)) { echo '<tr><td colspan="5">No matching transactions found.</td></tr>'; }
-  foreach ($rows as $row) { $meta=$this->mrm_legal_ledger_meta($row); $terms=(string)($meta['mrm_terms_accepted'] ?? ''); echo '<tr><td>#'.esc_html((string)$row['id']).'</td><td>'.esc_html((string)$row['status']).'</td><td>'.esc_html((string)$row['sku']).'</td><td>'.esc_html($this->mrm_legal_ledger_money((int)$row['amount_cents'], (string)$row['currency'])).'</td><td>'.($terms==='yes'?'Accepted':'Missing / not recorded').'</td></tr>'; }
-  echo '</tbody></table></div>';
+
+  echo '<div class="wrap">';
+  echo '<h1>Legal Dispute Ledger</h1>';
+  echo '<p>This page summarizes transaction records useful for payment disputes, chargebacks, refund questions, Terms acceptance verification, and digital access disputes.</p>';
+
+  echo '<form method="get" style="margin: 12px 0 18px;">';
+  echo '<input type="hidden" name="page" value="mrm-pay-hub-legal-ledger" />';
+  echo '<input type="search" name="mrm_legal_q" value="' . esc_attr((string)($_GET['mrm_legal_q'] ?? '')) . '" class="regular-text" placeholder="Search order, SKU, email metadata, Stripe PI..." /> ';
+  echo '<select name="mrm_legal_status">';
+  $current_status = sanitize_text_field((string)($_GET['mrm_legal_status'] ?? ''));
+  $statuses = array('' => 'All statuses', 'created' => 'Created', 'processing' => 'Processing', 'paid' => 'Paid', 'failed' => 'Failed', 'refunded' => 'Refunded');
+  foreach ($statuses as $value => $label) {
+    echo '<option value="' . esc_attr($value) . '"' . selected($current_status, $value, false) . '>' . esc_html($label) . '</option>';
+  }
+  echo '</select> ';
+  echo '<button class="button">Filter</button>';
+  echo '</form>';
+
+  echo '<table class="widefat striped">';
+  echo '<thead><tr>';
+  echo '<th>Order</th>';
+  echo '<th>Created</th>';
+  echo '<th>Status</th>';
+  echo '<th>Product</th>';
+  echo '<th>Amount</th>';
+  echo '<th>Stripe PaymentIntent</th>';
+  echo '<th>Terms</th>';
+  echo '<th>Flow</th>';
+  echo '<th>Customer</th>';
+  echo '</tr></thead><tbody>';
+
+  if (empty($rows)) {
+    echo '<tr><td colspan="9">No matching transactions found.</td></tr>';
+  }
+
+  foreach ($rows as $row) {
+    $meta = $this->mrm_legal_ledger_meta($row);
+
+    $terms_accepted = ((string)($meta['mrm_terms_accepted'] ?? '') === 'yes');
+    $terms_version  = (string)($meta['mrm_terms_version'] ?? '');
+    $source_flow    = (string)($meta['mrm_terms_source_flow'] ?? '');
+    $customer_email = (string)($meta['mrm_customer_email'] ?? '');
+
+    echo '<tr>';
+    echo '<td>#' . esc_html((string)$row['id']) . '</td>';
+    echo '<td>' . esc_html((string)($row['created_at'] ?? '')) . '</td>';
+    echo '<td>' . esc_html((string)$row['status']) . '</td>';
+    echo '<td><code>' . esc_html((string)$row['sku']) . '</code><br><small>' . esc_html((string)$row['product_type']) . '</small></td>';
+    echo '<td>' . esc_html($this->mrm_legal_ledger_money((int)$row['amount_cents'], (string)$row['currency'])) . '</td>';
+    echo '<td><code>' . esc_html((string)($row['stripe_payment_intent_id'] ?? '')) . '</code></td>';
+    echo '<td>' . ($terms_accepted ? '<strong style="color:#008a20;">Accepted</strong>' : '<strong style="color:#b32d2e;">Missing</strong>') . '<br><small>' . esc_html($terms_version) . '</small></td>';
+    echo '<td>' . esc_html($source_flow) . '</td>';
+    echo '<td>' . esc_html($customer_email) . '</td>';
+    echo '</tr>';
+  }
+
+  echo '</tbody></table>';
+  echo '</div>';
 }
 
 public function render_access_lists_page() {
@@ -9761,10 +9926,14 @@ public function render_access_lists_page() {
             </td>
           </tr>
           <tr>
-            <th scope="row"><label for="payout_anchor_date">Biweekly Payout Anchor Date</label></th>
+            <th scope="row"><label for="payout_anchor_date">First Friday of Two-Week Payout Period</label></th>
             <td>
               <input type="date" id="payout_anchor_date" name="payout_anchor_date" value="<?php echo $payout_anchor_date; ?>" />
-              <p class="description">Use the first Friday that should count as a payout Friday. Every 14 days after that is a payout day. The automatic payout check is scheduled for 10:00 AM site time on each eligible payout date. For near-exact timing, your server cron should trigger WordPress cron every minute.</p>
+              <p class="description">
+                Choose the first Friday that begins a two-week Friday-to-Friday earning period.
+                Example: if the period starts Friday 05/01 and ends Friday 05/15, the payout batch becomes eligible the following Wednesday at 10:00 AM site time.
+                The manual test button still runs immediately for sandbox/admin testing.
+              </p>
             </td>
           </tr>
           <tr>

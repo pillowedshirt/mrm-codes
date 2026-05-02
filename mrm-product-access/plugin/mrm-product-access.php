@@ -3350,15 +3350,15 @@ class MRM_Product_Access {
                       </div>
 
                       <div class="offer-actions">
-                        <label class="mrm-pa-terms-row">
+                        <div class="mrm-pa-terms-row">
                           <input type="checkbox" class="mrm-pa-terms-check">
-                          <span>
+                          <label>
                             I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.
-                          </span>
-                        </label>
-                        <p class="mrm-pa-terms-note">
-                          Includes the digital content license, access restrictions, anti-sharing rules, and non-refund terms.
-                        </p>
+                            <span class="mrm-pa-terms-subcaption">
+                              Includes the digital content license, access restrictions, anti-sharing rules, and non-refund terms.
+                            </span>
+                          </label>
+                        </div>
 
                         <button type="button" class="buyBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>">
                           <?php echo esc_html__( 'Buy', 'mrm-product-access' ); ?>
@@ -3456,16 +3456,24 @@ class MRM_Product_Access {
           display: flex;
           align-items: flex-start;
           gap: 8px;
-          margin: 10px 0 4px;
+          margin: 10px 0 12px;
           font-size: 14px;
           line-height: 1.35;
         }
+
         .mrm-pa-terms-row input {
           margin-top: 2px;
           flex: 0 0 auto;
         }
-        .mrm-pa-terms-note {
-          margin: 0 0 12px 26px;
+
+        .mrm-pa-terms-row label {
+          display: block;
+          margin: 0;
+        }
+
+        .mrm-pa-terms-subcaption {
+          display: block;
+          margin-top: 3px;
           font-size: 12px;
           line-height: 1.35;
           color: #666;
