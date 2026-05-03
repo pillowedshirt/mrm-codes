@@ -1984,7 +1984,9 @@ protected function mrm_get_google_service_account_json() {
     }
 
     public function __construct() {
+        delete_transient( 'mrm_secret_google_scheduler_v5' );
         delete_transient( 'mrm_secret_google_scheduler_maps_distance_v1' );
+        delete_transient( 'mrm_secret_google_scheduler_maps_distance_v2' );
 
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
@@ -7723,8 +7725,8 @@ protected function mrm_get_google_service_account_json() {
 
             echo '<p><strong>Google Maps Distance API:</strong> ';
             echo $maps_key_configured
-                ? '<span style="color:#166534;">Configured through AWS Secrets Manager</span>'
-                : '<span style="color:#b32d2e;">Not found in AWS Secrets Manager</span>';
+                ? '<span style="color:#166534;">Configured through AWS Secrets Manager using <code>maps_distance_api_key</code></span>'
+                : '<span style="color:#b32d2e;">Not found in AWS Secrets Manager under <code>maps_distance_api_key</code></span>';
             echo '</p>';
 
             echo '<p><strong>AWS Secret Loaded:</strong> ';
@@ -7929,60 +7931,35 @@ protected function mrm_google_maps_distance_api_key_is_configured() {
 }
 
 protected function mrm_get_google_maps_distance_secret_status() {
+    if ( isset( $_GET['mrm_refresh_maps_secret'] ) && current_user_can( 'manage_options' ) ) {
+        delete_transient( 'mrm_secret_google_scheduler_v5' );
+        delete_transient( 'mrm_secret_google_scheduler_maps_distance_v1' );
+        delete_transient( 'mrm_secret_google_scheduler_maps_distance_v2' );
+    }
+
+    $secret = $this->mrm_get_google_scheduler_secret_bundle();
+
     $secret_id = defined( 'MRM_SECRET_GOOGLE_SCHEDULER' )
         ? MRM_SECRET_GOOGLE_SCHEDULER
         : 'lowbrass/google/scheduler';
 
-    $cache_key = 'mrm_secret_google_scheduler_maps_distance_v2';
+    $raw_keys = array();
 
-    if ( isset( $_GET['mrm_refresh_maps_secret'] ) && current_user_can( 'manage_options' ) ) {
-        delete_transient( $cache_key );
-        delete_transient( 'mrm_secret_google_scheduler_v5' );
-    }
-
-    $secret = $this->mrm_get_secret_json( $secret_id, $cache_key );
-
-    $keys = array();
-    $nested_keys = array();
-
-    if ( is_array( $secret ) ) {
-        $keys = array_keys( $secret );
-
-        foreach ( $secret as $raw_key => $value ) {
-            if ( is_array( $value ) ) {
-                foreach ( array_keys( $value ) as $nested_key ) {
-                    $nested_keys[] = (string) $raw_key . '.' . (string) $nested_key;
-                }
-            }
-        }
-    }
-
-    $api_key = '';
-    if ( is_array( $secret ) ) {
-        $api_key = $this->mrm_find_secret_value_by_normalized_key(
-            $secret,
-            array(
-                'maps_distance_api_key',
-                'google_maps_distance_api_key',
-                'distance_api_key',
-                'maps_api_key',
-                'Maps Distance API key',
-                'Maps Distance API Key',
-                'maps distance api key',
-                'google maps distance api key',
-                'google maps api key',
-            )
-        );
+    if ( is_array( $secret ) && ! empty( $secret['_raw_keys'] ) && is_array( $secret['_raw_keys'] ) ) {
+        $raw_keys = $secret['_raw_keys'];
+    } elseif ( is_array( $secret ) ) {
+        $raw_keys = array_keys( $secret );
     }
 
     return array(
-        'secret_id'       => $secret_id,
-        'loaded'          => is_array( $secret ),
-        'configured'      => $api_key !== '',
-        'top_level_keys'  => $keys,
-        'nested_keys'     => $nested_keys,
+        'secret_id'      => $secret_id,
+        'loaded'         => is_array( $secret ),
+        'configured'     => is_array( $secret ) && ! empty( $secret['maps_distance_api_key'] ),
+        'top_level_keys' => $raw_keys,
+        'nested_keys'    => array(),
     );
 }
+
 
 protected function mrm_get_effective_calculations_environment_mode() {
     return 'live';
