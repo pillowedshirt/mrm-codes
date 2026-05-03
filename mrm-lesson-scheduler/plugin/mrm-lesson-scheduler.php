@@ -7781,7 +7781,7 @@ protected function mrm_get_google_service_account_json() {
                 <div class="notice notice-success"><p>Mileage cache was cleared for the selected period.</p></div>
             <?php endif; ?>
             <?php if ( isset( $_GET['mileage_recalculated'] ) ) : ?>
-                <div class="notice notice-success"><p>Mileage cache was recalculated for the selected period. Lessons processed: <?php echo esc_html( isset( $_GET['mileage_count'] ) ? (string) absint( $_GET['mileage_count'] ) : '0' ); ?>.</p></div>
+                <div class="notice notice-success"><p>Mileage cache was recalculated for finalized in-person lessons in the selected period. Finalized lessons processed: <?php echo esc_html( isset( $_GET['mileage_count'] ) ? (string) absint( $_GET['mileage_count'] ) : '0' ); ?>.</p></div>
             <?php endif; ?>
 
             <?php if ( isset( $_GET['mileage_error'] ) ) : ?>
@@ -7927,8 +7927,8 @@ protected function mrm_get_google_service_account_json() {
             <?php $this->mrm_render_calculations_payroll_table( $payroll ); ?>
 
             <h2 style="margin-top:28px;">Instructor Mileage Support</h2>
-            <p>This section estimates round-trip driving miles for in-person lessons so instructors have mileage support records. It is not treated as a company mileage deduction.</p>
-            <p class="description">The summary uses the current instructor profile address and the current lesson destination records. The detail table below is the record you should export or review for tax-support documentation.</p>
+            <p>This section estimates round-trip driving miles for finalized in-person lessons so instructors have mileage support records. It is not treated as a company mileage deduction.</p>
+            <p class="description">Mileage is calculated only after a lesson is finalized. A lesson becomes finalized after it has been delivered and at least one hour has passed after the lesson end time. The detail table below is the record you should export or review for tax-support documentation.</p>
             <?php $this->mrm_render_calculations_mileage_table( $mileage ); ?>
             <h3 style="margin-top:24px;">Mileage Detail by Lesson</h3>
             <?php $this->mrm_render_calculations_mileage_detail_table( $mileage_detail ); ?>
@@ -8479,7 +8479,7 @@ protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter
            AND l.is_consultation = 0
            AND l.start_time >= %s
            AND l.start_time <= %s
-           AND l.status IN ('scheduled','completed','paid','delivered')
+           AND l.status = 'finalized'
          GROUP BY l.instructor_id
          ORDER BY instructor_name ASC, l.instructor_id ASC",
         $start,
@@ -8547,7 +8547,7 @@ protected function mrm_get_calculations_mileage_detail( $tax_year, $tax_quarter 
            AND l.is_consultation = 0
            AND l.start_time >= %s
            AND l.start_time <= %s
-           AND l.status IN ('scheduled','completed','paid','delivered')
+           AND l.status = 'finalized'
          ORDER BY l.start_time ASC, l.id ASC",
         $start,
         $end
@@ -8957,9 +8957,12 @@ protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
 
     list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
 
-    // For test/reconciliation accuracy, pull current Google Calendar times into wp_mrm_lessons
+    // For test/reconciliation accuracy, pull current Google Calendar times into wp_mrm_lessons,
+    // reconcile ended lessons, and finalize lessons that ended at least 1 hour ago
     // before rebuilding mileage for the selected period.
     $this->cron_sync_upcoming_events( 72, 30 );
+    $this->cron_reconcile_completed_lessons( true );
+    $this->cron_finalize_old_lessons();
 
     $lessons = $wpdb->prefix . 'mrm_lessons';
     $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
@@ -8982,7 +8985,7 @@ protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
                AND is_consultation = 0
                AND start_time >= %s
                AND start_time <= %s
-               AND status IN ('scheduled','completed','paid','delivered')
+               AND status = 'finalized'
              ORDER BY start_time ASC",
             $start,
             $end
