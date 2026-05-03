@@ -5279,12 +5279,18 @@ protected function mrm_get_google_service_account_json() {
         global $wpdb;
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
+
+        // Lesson start_time/end_time are synced from Google Calendar as UTC-style MySQL timestamps.
+        // Finalization must compare end_time against a UTC cutoff, not the site-local timestamp.
         $now_mysql = current_time( 'mysql' );
-        $cutoff_mysql = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - HOUR_IN_SECONDS );
+        $now_utc_mysql = gmdate( 'Y-m-d H:i:s' );
+        $cutoff_utc_mysql = gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS );
 
         $this->mrm_finalization_debug_log( 'finalization_cron_started', array(
-            'now_mysql'    => $now_mysql,
-            'cutoff_mysql' => $cutoff_mysql,
+            'now_mysql'          => $now_mysql,
+            'now_utc_mysql'      => $now_utc_mysql,
+            'cutoff_utc_mysql'   => $cutoff_utc_mysql,
+            'finalization_rule'  => '1_hour_after_end_time_utc',
         ) );
 
         $finalized_at_column = $wpdb->get_var(
@@ -5316,13 +5322,13 @@ protected function mrm_get_google_service_account_json() {
             )
         );
 
-        $count_delivered_with_delivered_at = (int) $wpdb->get_var(
+        $count_delivered_with_end_time = (int) $wpdb->get_var(
             $wpdb->prepare(
                 "SELECT COUNT(*)
                  FROM {$lessons_table}
                  WHERE status = %s
-                   AND delivered_at IS NOT NULL
-                   AND delivered_at <> ''",
+                   AND end_time IS NOT NULL
+                   AND end_time <> ''",
                 'delivered'
             )
         );
@@ -5332,11 +5338,11 @@ protected function mrm_get_google_service_account_json() {
                 "SELECT COUNT(*)
                  FROM {$lessons_table}
                  WHERE status = %s
-                   AND delivered_at IS NOT NULL
-                   AND delivered_at <> ''
-                   AND delivered_at <= %s",
+                   AND end_time IS NOT NULL
+                   AND end_time <> ''
+                   AND end_time <= %s",
                 'delivered',
-                $cutoff_mysql
+                $cutoff_utc_mysql
             )
         );
 
@@ -5345,21 +5351,22 @@ protected function mrm_get_google_service_account_json() {
                 "SELECT COUNT(*)
                  FROM {$lessons_table}
                  WHERE status = %s
-                   AND delivered_at IS NOT NULL
-                   AND delivered_at <> ''
-                   AND delivered_at <= %s
+                   AND end_time IS NOT NULL
+                   AND end_time <> ''
+                   AND end_time <= %s
                    AND (finalized_at IS NULL OR finalized_at = '')",
                 'delivered',
-                $cutoff_mysql
+                $cutoff_utc_mysql
             )
         );
 
         $this->mrm_finalization_debug_log( 'finalization_candidate_counts', array(
-            'delivered_total'             => $count_delivered_total,
-            'delivered_with_delivered_at' => $count_delivered_with_delivered_at,
-            'not_old_enough'              => max( 0, $count_delivered_with_delivered_at - $count_old_enough ),
-            'old_enough'                  => $count_old_enough,
-            'finalization_candidates'     => $count_candidates,
+            'delivered_total'          => $count_delivered_total,
+            'delivered_with_end_time'  => $count_delivered_with_end_time,
+            'not_old_enough'           => max( 0, $count_delivered_with_end_time - $count_old_enough ),
+            'old_enough_by_end_time'   => $count_old_enough,
+            'finalization_candidates'  => $count_candidates,
+            'cutoff_utc_mysql'         => $cutoff_utc_mysql,
         ) );
 
         if ( $count_delivered_total === 0 ) {
@@ -5380,14 +5387,14 @@ protected function mrm_get_google_service_account_json() {
                  ORDER BY end_time ASC
                  LIMIT 250",
                 'delivered',
-                $cutoff_mysql
+                $cutoff_utc_mysql
             ),
             ARRAY_A
         );
 
         if ( ! is_array( $rows ) || empty( $rows ) ) {
             $this->mrm_finalization_debug_log( 'finalization_cron_finished_no_candidates', array(
-                'cutoff_mysql' => $cutoff_mysql,
+                'cutoff_utc_mysql' => $cutoff_utc_mysql,
             ) );
             return;
         }
