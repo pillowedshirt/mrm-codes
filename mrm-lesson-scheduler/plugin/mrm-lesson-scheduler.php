@@ -7927,7 +7927,7 @@ protected function mrm_get_google_service_account_json() {
 
             <h2 style="margin-top:28px;">Instructor Mileage Support</h2>
             <p>This section estimates round-trip driving miles for in-person lessons so instructors have mileage support records. It is not treated as a company mileage deduction.</p>
-            <p class="description">Rows are grouped by instructor and origin address. If the same instructor appears more than once, that means the mileage cache contains more than one origin address for that instructor during the selected period.</p>
+            <p class="description">Rows are grouped by instructor. The “Current Instructor Origin” column comes from the current instructor profile, while “Cached Origins Found” shows any older origin strings still present in the mileage cache.</p>
             <?php $this->mrm_render_calculations_mileage_table( $mileage ); ?>
 
             <h2 style="margin-top:28px;">Expense Summary</h2>
@@ -8507,6 +8507,130 @@ protected function mrm_render_calculations_mileage_table( $rows ) {
     echo '</tbody></table>';
 }
 
+protected function mrm_get_calculations_expense_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return array();
+    }
+
+    if ( (int) $tax_quarter > 0 ) {
+        $sql = $wpdb->prepare(
+            "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
+             FROM {$table}
+             WHERE tax_year = %d
+               AND tax_quarter = %d
+               AND environment_mode = %s
+             GROUP BY category
+             ORDER BY total_amount DESC",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
+        );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s
+             GROUP BY category
+             ORDER BY total_amount DESC",
+            $tax_year,
+            $environment_mode
+        );
+    }
+
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    $total = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
+
+    return array(
+        array(
+            'label' => 'Imported Payroll / W-2 Wages',
+            'total' => $total,
+        ),
+    );
+}
+
+protected function mrm_render_calculations_instructor_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Email</th><th>Payout Entries</th><th>Gross</th><th>Net Wage</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="5">No instructor payout data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? 'Unknown instructor' ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_email'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_composer_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Composer Payee</th><th>Payout Entries</th><th>Gross</th><th>Net Composer Wage</th><th>Notes</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="5">No composer sheet music payout data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['payee_ref'] ?? 'composer' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( mb_strimwidth( (string) ( $row['notes'] ?? '' ), 0, 120, '…' ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_payroll_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Type</th><th>Total</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="2">No payroll import data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['label'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total'] ?? 0 ), 2 ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_expense_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Category</th><th>Entries</th><th>Total Amount</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="3">No manual expense data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['category'] ?? 'Uncategorized' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['entry_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total_amount'] ?? 0 ), 2 ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
 protected function mrm_format_current_instructor_address_from_row( $row ) {
     $street = trim( (string) ( $row['address'] ?? '' ) );
     $city   = trim( (string) ( $row['city'] ?? '' ) );
@@ -8885,6 +9009,18 @@ public function handle_mrm_clear_all_mileage_cache() {
     );
     exit;
 }
+
+    protected function mrm_send_csv_headers( $filename ) {
+        $filename = sanitize_file_name( (string) $filename );
+
+        if ( $filename === '' ) {
+            $filename = 'mrm-calculations-export.csv';
+        }
+
+        nocache_headers();
+        header( 'Content-Type: text/csv; charset=utf-8' );
+        header( 'Content-Disposition: attachment; filename=' . $filename );
+    }
 
     protected function mrm_write_csv_row( $handle, $row ) {
         if ( is_resource( $handle ) ) {
