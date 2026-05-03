@@ -201,6 +201,7 @@ class MRM_Lesson_Scheduler {
 
         $service_account_json = '';
         $sync_secret = '';
+        $maps_distance_api_key = '';
 
         // Case 1: Wrapped service account JSON in expected key.
         if ( array_key_exists( 'service_account_json', $secret ) ) {
@@ -258,10 +259,16 @@ class MRM_Lesson_Scheduler {
             array( 'sync_secret', 'google_sync_secret', 'sync_token' )
         );
 
+        $maps_distance_api_key = $this->mrm_first_non_empty_google_string(
+            array( $secret ),
+            array( 'maps_distance_api_key' )
+        );
+
         return array(
-            'service_account_json' => $service_account_json,
-            'sync_secret'          => $sync_secret,
-            '_raw_keys'            => array_keys( $secret ),
+            'service_account_json'    => $service_account_json,
+            'sync_secret'             => $sync_secret,
+            'maps_distance_api_key'   => $maps_distance_api_key,
+            '_raw_keys'               => array_keys( $secret ),
         );
     }
 
@@ -297,6 +304,7 @@ class MRM_Lesson_Scheduler {
             'raw_keys_present' => array_keys( $secret ),
             'has_service_account_json' => ! empty( $normalized['service_account_json'] ),
             'has_sync_secret' => ! empty( $normalized['sync_secret'] ),
+            'has_maps_distance_api_key' => ! empty( $normalized['maps_distance_api_key'] ),
         );
 
         if ( ! empty( $normalized['service_account_json'] ) ) {
@@ -1976,6 +1984,8 @@ protected function mrm_get_google_service_account_json() {
     }
 
     public function __construct() {
+        delete_transient( 'mrm_secret_google_scheduler_maps_distance_v1' );
+
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
         add_action( 'admin_notices', array( $this, 'maybe_show_schema_notice' ) );
@@ -7765,12 +7775,9 @@ protected function mrm_get_google_service_account_json() {
             <?php endif; ?>
             <p class="description">
                 Expected AWS secret:
-                <code><?php echo esc_html( (string) ( $maps_secret_status['secret_id'] ?? ( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ) ) ); ?></code>.
-                Preferred key: <code>maps_distance_api_key</code>.
-            </p>
-            <p class="description">
-                The code now also recognizes common variations such as <code>Maps Distance API key</code>,
-                <code>google_maps_distance_api_key</code>, and <code>maps distance api key</code>.
+                <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>.
+                Required key:
+                <code>maps_distance_api_key</code>.
             </p>
         </td>
     </tr>
@@ -7901,52 +7908,17 @@ protected function mrm_find_secret_value_by_normalized_key( $secret, $target_key
     return '';
 }
 
-protected function mrm_get_google_maps_distance_api_key( $force_refresh = false ) {
-    $secret_id = defined( 'MRM_SECRET_GOOGLE_SCHEDULER' )
-        ? MRM_SECRET_GOOGLE_SCHEDULER
-        : 'lowbrass/google/scheduler';
+protected function mrm_get_google_maps_distance_api_key() {
+    $secret = $this->mrm_get_google_scheduler_secret_bundle();
 
-    $cache_key = 'mrm_secret_google_scheduler_maps_distance_v2';
-
-    if ( $force_refresh ) {
-        delete_transient( $cache_key );
-        delete_transient( 'mrm_secret_google_scheduler_v5' );
+    if ( is_array( $secret ) && ! empty( $secret['maps_distance_api_key'] ) ) {
+        return trim( (string) $secret['maps_distance_api_key'] );
     }
 
-    $secret = $this->mrm_get_secret_json(
-        $secret_id,
-        $cache_key
-    );
-
-    if ( ! is_array( $secret ) ) {
-        $this->mrm_aws_debug_log( 'Google Maps Distance API key could not be loaded because scheduler secret was unavailable.', array(
-            'secret_id' => $secret_id,
-        ) );
-        return '';
-    }
-
-    $api_key = $this->mrm_find_secret_value_by_normalized_key(
-        $secret,
-        array(
-            'maps_distance_api_key',
-            'google_maps_distance_api_key',
-            'distance_api_key',
-            'maps_api_key',
-            'Maps Distance API key',
-            'Maps Distance API Key',
-            'maps distance api key',
-            'google maps distance api key',
-            'google maps api key',
-        )
-    );
-
-    if ( $api_key !== '' ) {
-        return $api_key;
-    }
-
-    $this->mrm_aws_debug_log( 'Google Maps Distance API key was not found in scheduler AWS secret.', array(
-        'secret_id' => $secret_id,
-        'available_keys' => array_keys( $secret ),
+    $this->mrm_aws_debug_log( 'Scheduler missing AWS maps_distance_api_key. AWS-only mode active.', array(
+        'secret_id' => defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler',
+        'expected_key' => 'maps_distance_api_key',
+        'available_normalized_keys' => is_array( $secret ) ? array_keys( $secret ) : array(),
     ) );
 
     return '';
