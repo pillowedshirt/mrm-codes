@@ -1939,6 +1939,7 @@ h1 {
     <input id="first-name" type="hidden">
     <input id="last-name" type="hidden">
     <input id="address" type="hidden">
+    <input id="address-city" type="hidden">
     <input id="address-state" type="hidden">
     <input id="address-postal" type="hidden">
     <input id="parent-timezone" type="hidden">
@@ -1985,6 +1986,9 @@ h1 {
 
           <label for="modal-address">Address</label>
           <input id="modal-address" autocomplete="street-address">
+
+          <label for="modal-city">City</label>
+          <input id="modal-city" autocomplete="address-level2">
 
           <label for="modal-state">State</label>
           <input id="modal-state" autocomplete="address-level1">
@@ -3355,9 +3359,10 @@ function openBookingModal(instr){
   // Prefill extra modal fields
   document.getElementById('modal-first-name').value = document.getElementById('first-name')?.value || '';
   document.getElementById('modal-last-name').value  = document.getElementById('last-name')?.value || '';
-  document.getElementById('modal-address').value    = document.getElementById('address')?.value || '';
-  document.getElementById('modal-state').value      = document.getElementById('address-state')?.value || '';
-  document.getElementById('modal-postal-code').value= document.getElementById('address-postal')?.value || '';
+  document.getElementById('modal-address').value     = document.getElementById('address')?.value || '';
+  document.getElementById('modal-city').value        = document.getElementById('address-city')?.value || '';
+  document.getElementById('modal-state').value       = document.getElementById('address-state')?.value || '';
+  document.getElementById('modal-postal-code').value = document.getElementById('address-postal')?.value || '';
   document.getElementById('modal-phone').value      = document.getElementById('phone')?.value || '';
 
   syncModalToMain();
@@ -3420,6 +3425,7 @@ function syncModalToLegacyFields(){
   const fn = document.getElementById('modal-first-name')?.value || '';
   const ln = document.getElementById('modal-last-name')?.value || '';
   const addr = document.getElementById('modal-address')?.value || '';
+  const addrCity = document.getElementById('modal-city')?.value || '';
   const addrState = document.getElementById('modal-state')?.value || '';
   const addrPostal = document.getElementById('modal-postal-code')?.value || '';
   const phone = document.getElementById('modal-phone')?.value || '';
@@ -3430,6 +3436,7 @@ function syncModalToLegacyFields(){
   const fnEl = document.getElementById('first-name'); if(fnEl) fnEl.value = fn;
   const lnEl = document.getElementById('last-name');  if(lnEl) lnEl.value = ln;
   const adEl = document.getElementById('address');    if(adEl) adEl.value = addr;
+  const acityEl = document.getElementById('address-city'); if(acityEl) acityEl.value = addrCity;
   const asEl = document.getElementById('address-state'); if(asEl) asEl.value = addrState;
   const apEl = document.getElementById('address-postal'); if(apEl) apEl.value = addrPostal;
   const acEl = document.getElementById('address-country'); if(acEl) acEl.value = 'US';
@@ -3554,6 +3561,7 @@ function ensureLegacyBookingHandler(){
     const firstName = (document.getElementById('first-name')?.value||'').trim();
     const lastName  = (document.getElementById('last-name')?.value||'').trim();
     const address   = (document.getElementById('address')?.value||'').trim();
+    const addressCity = (document.getElementById('address-city')?.value||'').trim();
     const addressState = (document.getElementById('address-state')?.value||'').trim();
     const addressPostal = (document.getElementById('address-postal')?.value||'').trim();
     const addressCountry = (document.getElementById('address-country')?.value||'US').trim() || 'US';
@@ -3570,6 +3578,18 @@ function ensureLegacyBookingHandler(){
     }
     if(!address){
       setMsg('Please enter your address.');
+      return;
+    }
+    if(!addressCity){
+      setMsg('Please enter your city.');
+      return;
+    }
+    if(!addressState){
+      setMsg('Please enter your state.');
+      return;
+    }
+    if(!addressPostal){
+      setMsg('Please enter your postal code.');
       return;
     }
     if(!phone){
@@ -3649,6 +3669,7 @@ function ensureLegacyBookingHandler(){
       student_name: studentName,
       student_email: email,
       address,
+      address_city: addressCity,
       address_state: addressState,
       address_postal: addressPostal,
       phone,

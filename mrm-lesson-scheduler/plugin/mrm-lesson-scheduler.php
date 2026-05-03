@@ -2144,6 +2144,7 @@ protected function mrm_get_google_service_account_json() {
     student_email VARCHAR(255) NOT NULL,
     parent_timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
     address VARCHAR(255) NOT NULL DEFAULT '',
+    address_city VARCHAR(100) NOT NULL DEFAULT '',
     address_state VARCHAR(50) NOT NULL DEFAULT '',
     address_postal VARCHAR(20) NOT NULL DEFAULT '',
     instrument VARCHAR(100) NOT NULL,
@@ -2260,6 +2261,7 @@ protected function mrm_get_google_service_account_json() {
         // Ensure lesson address columns exist for Calculations mileage support.
         $lesson_required_columns = array(
             'address' => "ALTER TABLE {$table_lessons} ADD COLUMN address varchar(255) NOT NULL DEFAULT ''",
+            'address_city' => "ALTER TABLE {$table_lessons} ADD COLUMN address_city varchar(100) NOT NULL DEFAULT ''",
             'address_state' => "ALTER TABLE {$table_lessons} ADD COLUMN address_state varchar(64) NOT NULL DEFAULT ''",
             'address_postal' => "ALTER TABLE {$table_lessons} ADD COLUMN address_postal varchar(32) NOT NULL DEFAULT ''",
         );
@@ -2639,6 +2641,7 @@ protected function mrm_get_google_service_account_json() {
         $phone         = sanitize_text_field( (string) ( $data['phone'] ?? '' ) );
 
         $address       = sanitize_text_field( (string) ( $data['address'] ?? '' ) );
+        $address_city  = sanitize_text_field( (string) ( $data['address_city'] ?? '' ) );
         $address_state = sanitize_text_field( (string) ( $data['address_state'] ?? '' ) );
         $address_postal= sanitize_text_field( (string) ( $data['address_postal'] ?? '' ) );
         $parent_timezone = sanitize_text_field( (string) ( $data['parent_timezone'] ?? '' ) );
@@ -2753,6 +2756,7 @@ protected function mrm_get_google_service_account_json() {
                     'student_email' => $student_email,
                     'parent_timezone'     => $parent_timezone,
                     'address'             => $address,
+                    'address_city'        => $address_city,
                     'address_state'       => $address_state,
                     'address_postal'      => $address_postal,
                     'instrument'       => $instrument !== '' ? $instrument : 'unknown',
@@ -2848,6 +2852,7 @@ protected function mrm_get_google_service_account_json() {
                 'student_email'    => $student_email,
                 'parent_timezone'     => $parent_timezone,
                 'address'             => $address,
+                'address_city'        => $address_city,
                 'address_state'       => $address_state,
                 'address_postal'      => $address_postal,
                 'instrument'       => $instrument !== '' ? $instrument : 'unknown',
@@ -2880,6 +2885,7 @@ protected function mrm_get_google_service_account_json() {
                 '%s', // student_email
                 '%s', // parent_timezone
                 '%s', // address
+                '%s', // address_city
                 '%s', // address_state
                 '%s', // address_postal
                 '%s', // instrument
@@ -3034,12 +3040,17 @@ protected function mrm_get_google_service_account_json() {
                     $location = '';
                     if ( ! $is_online ) {
                         $state_zip = trim( trim( (string) $address_state ) . ' ' . trim( (string) $address_postal ) );
-                        if ( $address !== '' && $state_zip !== '' ) {
-                            $location = trim( $address . ', ' . $state_zip );
+                        $city_state_zip = trim( implode( ', ', array_filter( array(
+                            trim( (string) $address_city ),
+                            $state_zip,
+                        ) ) ) );
+
+                        if ( $address !== '' && $city_state_zip !== '' ) {
+                            $location = trim( $address . ', ' . $city_state_zip );
                         } elseif ( $address !== '' ) {
                             $location = trim( $address );
-                        } elseif ( $state_zip !== '' ) {
-                            $location = $state_zip;
+                        } elseif ( $city_state_zip !== '' ) {
+                            $location = $city_state_zip;
                         }
                     }
 
@@ -3089,6 +3100,7 @@ protected function mrm_get_google_service_account_json() {
                     // Address fields (these are fillable boxes in the modal)
                     // Keep them present in details for plugin access; location field can still remain in-person only elsewhere.
                     $description_lines[] = 'Address: ' . (string) $address;
+                    $description_lines[] = 'City: ' . (string) $address_city;
                     $description_lines[] = 'State: ' . (string) $address_state;
                     $description_lines[] = 'Postal Code: ' . (string) $address_postal;
 
@@ -3105,6 +3117,7 @@ protected function mrm_get_google_service_account_json() {
                         'parent_last_name'    => (string) $parent_last,
                         'phone'               => (string) $phone,
                         'address'             => (string) $address,
+                        'address_city'        => (string) $address_city,
                         'address_state'       => (string) $address_state,
                         'address_postal'      => (string) $address_postal,
                         'lesson_type'         => (string) $lesson_type,
@@ -8623,6 +8636,7 @@ protected function mrm_format_instructor_origin_address( $lesson ) {
 
 protected function mrm_format_lesson_destination_address( $lesson ) {
     $street = trim( (string) ( $lesson['address'] ?? '' ) );
+    $city   = trim( (string) ( $lesson['address_city'] ?? '' ) );
     $state  = trim( (string) ( $lesson['address_state'] ?? '' ) );
     $postal = trim( (string) ( $lesson['address_postal'] ?? '' ) );
 
@@ -8630,6 +8644,7 @@ protected function mrm_format_lesson_destination_address( $lesson ) {
 
     return trim( implode( ', ', array_filter( array(
         $street,
+        $city,
         $state_postal,
         'USA',
     ) ) ) );
@@ -9142,7 +9157,7 @@ public function handle_mrm_clear_mileage_cache_for_period() {
                     'long_description' => ( $long_description === '' ? null : $long_description ),
                     'instruments' => ( $instruments_json === '' ? null : $instruments_json ),
                 );
-                $formats = array( '%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s','%s' );
+                $formats = array( '%s','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s' );
                 if ( $action === 'add' ) {
                     $result = $wpdb->insert( $table, $data, $formats );
                     echo $result === false ? '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>' : '<div class="notice notice-success"><p>Instructor added (ID ' . esc_html( (int) $wpdb->insert_id ) . ').</p></div>';
