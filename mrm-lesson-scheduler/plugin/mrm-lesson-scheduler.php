@@ -2015,6 +2015,7 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_post_mrm_export_calculations_summary', array( $this, 'handle_mrm_export_calculations_summary' ) );
         add_action( 'admin_post_mrm_recalculate_mileage_cache', array( $this, 'handle_mrm_recalculate_mileage_cache' ) );
         add_action( 'admin_post_mrm_clear_mileage_cache_for_period', array( $this, 'handle_mrm_clear_mileage_cache_for_period' ) );
+        add_action( 'admin_post_mrm_clear_all_mileage_cache', array( $this, 'handle_mrm_clear_all_mileage_cache' ) );
 
         add_action( 'admin_init', array( $this, 'register_settings' ) );
 
@@ -7896,6 +7897,7 @@ protected function mrm_get_google_service_account_json() {
                 <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_calculations_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_calculations_summary' ) ); ?>">Export Annual Summary CSV</a>
                 <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_recalculate_mileage_cache&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_recalculate_mileage_cache' ) ); ?>">Recalculate Mileage</a>
                 <a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_clear_mileage_cache_for_period&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_clear_mileage_cache_for_period' ) ); ?>" onclick="return confirm('Clear mileage cache rows for the selected year/quarter? You can rebuild them with Recalculate Mileage.');">Clear Mileage Cache</a>
+            <a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_clear_all_mileage_cache' ), 'mrm_clear_all_mileage_cache' ) ); ?>" onclick="return confirm('This will clear ALL instructor mileage cache rows for all years. You can rebuild selected years with Recalculate Mileage. Continue?');">Clear All Mileage Cache</a>
             </p>
 
             <h2>Overview</h2>
@@ -8430,168 +8432,74 @@ protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter
         return array();
     }
 
-    $select_name = "'' AS instructor_name";
+    $select_instructor = "
+        '' AS instructor_name,
+        '' AS current_instructor_address
+    ";
     $join_sql = '';
 
     if ( $this->mrm_table_exists( $instructors ) ) {
-        $select_name = "MAX(i.name) AS instructor_name";
+        $select_instructor = "
+            MAX(i.name) AS instructor_name,
+            TRIM(CONCAT_WS(', ',
+                NULLIF(MAX(i.address), ''),
+                NULLIF(MAX(i.city), ''),
+                NULLIF(TRIM(CONCAT_WS(' ', NULLIF(MAX(i.state), ''), NULLIF(MAX(i.zip_code), ''))), ''),
+                'USA'
+            )) AS current_instructor_address
+        ";
         $join_sql = "LEFT JOIN {$instructors} i ON i.id = m.instructor_id";
     }
 
-    $period_where = "m.tax_year = %d AND m.environment_mode = %s";
-    $args = array( $tax_year, $environment_mode );
+    $period_where = "m.tax_year = %d";
+    $args = array( $tax_year );
 
     if ( (int) $tax_quarter > 0 ) {
-        $period_where = "m.tax_year = %d AND QUARTER(m.trip_date) = %d AND m.environment_mode = %s";
-        $args = array( $tax_year, (int) $tax_quarter, $environment_mode );
+        $period_where = "m.tax_year = %d AND QUARTER(m.trip_date) = %d";
+        $args = array( $tax_year, (int) $tax_quarter );
     }
 
     $sql = $wpdb->prepare(
         "SELECT
             m.instructor_id,
-            {$select_name},
-            COALESCE(NULLIF(m.origin_address, ''), '(missing origin)') AS origin_address,
-            GROUP_CONCAT(DISTINCT NULLIF(m.destination_address, '') SEPARATOR ' | ') AS destination_addresses,
+            {$select_instructor},
             COUNT(*) AS lesson_count,
             COALESCE(SUM(m.round_trip_miles),0) AS total_miles,
+            GROUP_CONCAT(DISTINCT NULLIF(m.origin_address, '') SEPARATOR ' | ') AS cached_origin_addresses,
+            GROUP_CONCAT(DISTINCT NULLIF(m.destination_address, '') SEPARATOR ' | ') AS destination_addresses,
             GROUP_CONCAT(DISTINCT m.calc_status ORDER BY m.calc_status SEPARATOR ', ') AS calc_statuses,
             GROUP_CONCAT(DISTINCT NULLIF(m.calc_error_message, '') SEPARATOR ' | ') AS calc_error_messages,
-            COUNT(DISTINCT NULLIF(m.origin_address, '')) AS origin_variant_count
+            COUNT(DISTINCT NULLIF(m.origin_address, '')) AS cached_origin_variant_count
          FROM {$table} m
          {$join_sql}
          WHERE {$period_where}
-         GROUP BY m.instructor_id, m.origin_address
-         ORDER BY instructor_name ASC, origin_address ASC",
+         GROUP BY m.instructor_id
+         ORDER BY instructor_name ASC, m.instructor_id ASC",
         $args
     );
 
     return $wpdb->get_results( $sql, ARRAY_A );
 }
 
-protected function mrm_get_calculations_expense_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-    global $wpdb;
-
-    $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
-
-    if ( ! $this->mrm_table_exists( $table ) ) {
-        return array();
-    }
-
-    if ( (int) $tax_quarter > 0 ) {
-        $sql = $wpdb->prepare(
-            "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
-             FROM {$table}
-             WHERE tax_year = %d
-               AND tax_quarter = %d
-               AND environment_mode = %s
-             GROUP BY category
-             ORDER BY total_amount DESC",
-            $tax_year,
-            $tax_quarter,
-            $environment_mode
-        );
-    } else {
-        $sql = $wpdb->prepare(
-            "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
-             FROM {$table}
-             WHERE tax_year = %d
-               AND environment_mode = %s
-             GROUP BY category
-             ORDER BY total_amount DESC",
-            $tax_year,
-            $environment_mode
-        );
-    }
-
-    return $wpdb->get_results( $sql, ARRAY_A );
-}
-
-protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
-    $total = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
-
-    return array(
-        array(
-            'label' => 'Imported Payroll Wages',
-            'total' => $total,
-        ),
-    );
-}
-
-protected function mrm_render_calculations_instructor_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Email</th><th>Payout Entries</th><th>Gross</th><th>Net Wage</th></tr></thead><tbody>';
-
-    if ( empty( $rows ) ) {
-        echo '<tr><td colspan="5">No instructor payout data found.</td></tr>';
-    } else {
-        foreach ( $rows as $row ) {
-            echo '<tr>';
-            echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? 'Unknown instructor' ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
-            echo '<td>' . esc_html( (string) ( $row['instructor_email'] ?? '' ) ) . '</td>';
-            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
-            echo '</tr>';
-        }
-    }
-
-    echo '</tbody></table>';
-}
-
-protected function mrm_render_calculations_composer_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Composer Payee</th><th>Payout Entries</th><th>Gross</th><th>Net Composer Wage</th><th>Notes</th></tr></thead><tbody>';
-
-    if ( empty( $rows ) ) {
-        echo '<tr><td colspan="5">No composer sheet music payout data found.</td></tr>';
-    } else {
-        foreach ( $rows as $row ) {
-            echo '<tr>';
-            echo '<td>' . esc_html( (string) ( $row['payee_ref'] ?? 'composer' ) ) . '</td>';
-            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
-            echo '<td>' . esc_html( mb_strimwidth( (string) ( $row['notes'] ?? '' ), 0, 120, '…' ) ) . '</td>';
-            echo '</tr>';
-        }
-    }
-
-    echo '</tbody></table>';
-}
-
-protected function mrm_render_calculations_payroll_table( $rows ) {
-    if ( empty( $rows ) ) {
-        echo '<p>Payroll import / W-2 support section ready for integration.</p>';
-        return;
-    }
-
-    echo '<table class="widefat striped"><thead><tr><th>Type</th><th>Total</th></tr></thead><tbody>';
-
-    foreach ( $rows as $row ) {
-        echo '<tr>';
-        echo '<td>' . esc_html( (string) ( $row['label'] ?? '' ) ) . '</td>';
-        echo '<td>' . esc_html( number_format( (float) ( $row['total'] ?? 0 ), 2 ) ) . '</td>';
-        echo '</tr>';
-    }
-
-    echo '</tbody></table>';
-}
-
 protected function mrm_render_calculations_mileage_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Origin Used</th><th>In-Person Lessons</th><th>Total Round-Trip Miles</th><th>Destinations Sent to Google</th><th>Status</th><th>Details</th></tr></thead><tbody>';
+    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Current Instructor Origin</th><th>In-Person Lessons</th><th>Total Round-Trip Miles</th><th>Destinations Sent to Google</th><th>Status</th><th>Details</th><th>Cached Origins Found</th></tr></thead><tbody>';
 
     if ( empty( $rows ) ) {
-        echo '<tr><td colspan="7">No mileage data found.</td></tr>';
+        echo '<tr><td colspan="8">No mileage data found.</td></tr>';
     } else {
         foreach ( $rows as $row ) {
-            $origin = (string) ( $row['origin_address'] ?? '' );
+            $current_origin = (string) ( $row['current_instructor_address'] ?? '' );
+            $cached_origins = (string) ( $row['cached_origin_addresses'] ?? '' );
 
             echo '<tr>';
             echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? ( 'Instructor ID ' . ( $row['instructor_id'] ?? '' ) ) ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
-            echo '<td style="max-width:280px;">' . esc_html( $origin ) . '</td>';
+            echo '<td style="max-width:280px;">' . esc_html( $current_origin ) . '</td>';
             echo '<td>' . esc_html( (string) ( $row['lesson_count'] ?? 0 ) ) . '</td>';
             echo '<td>' . esc_html( number_format( (float) ( $row['total_miles'] ?? 0 ), 2 ) ) . '</td>';
             echo '<td style="max-width:320px;">' . esc_html( (string) ( $row['destination_addresses'] ?? '' ) ) . '</td>';
             echo '<td>' . esc_html( (string) ( $row['calc_statuses'] ?? '' ) ) . '</td>';
             echo '<td style="max-width:420px;">' . esc_html( (string) ( $row['calc_error_messages'] ?? '' ) ) . '</td>';
+            echo '<td style="max-width:320px;">' . esc_html( $cached_origins ) . '</td>';
             echo '</tr>';
         }
     }
@@ -8599,23 +8507,20 @@ protected function mrm_render_calculations_mileage_table( $rows ) {
     echo '</tbody></table>';
 }
 
+protected function mrm_format_current_instructor_address_from_row( $row ) {
+    $street = trim( (string) ( $row['address'] ?? '' ) );
+    $city   = trim( (string) ( $row['city'] ?? '' ) );
+    $state  = trim( (string) ( $row['state'] ?? '' ) );
+    $zip    = trim( (string) ( $row['zip_code'] ?? '' ) );
 
-protected function mrm_render_calculations_expense_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Category</th><th>Entries</th><th>Total Amount</th></tr></thead><tbody>';
+    $state_zip = trim( $state . ' ' . $zip );
 
-    if ( empty( $rows ) ) {
-        echo '<tr><td colspan="3">No manual expense data found.</td></tr>';
-    } else {
-        foreach ( $rows as $row ) {
-            echo '<tr>';
-            echo '<td>' . esc_html( (string) ( $row['category'] ?? 'Uncategorized' ) ) . '</td>';
-            echo '<td>' . esc_html( (string) ( $row['entry_count'] ?? 0 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( $row['total_amount'] ?? 0 ), 2 ) ) . '</td>';
-            echo '</tr>';
-        }
-    }
-
-    echo '</tbody></table>';
+    return trim( implode( ', ', array_filter( array(
+        $street,
+        $city,
+        $state_zip,
+        'USA',
+    ) ) ) );
 }
 
 protected function mrm_format_instructor_origin_address( $lesson ) {
@@ -8841,41 +8746,61 @@ protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
         exit;
     }
 
-    if ( (int) $tax_quarter > 0 ) {
-        $wpdb->query(
-            $wpdb->prepare(
-                "DELETE FROM {$mileage}
-                 WHERE tax_year = %d
-                   AND QUARTER(trip_date) = %d",
-                $tax_year,
-                $tax_quarter
-            )
-        );
-    } else {
-        $wpdb->query(
-            $wpdb->prepare(
-                "DELETE FROM {$mileage}
-                 WHERE tax_year = %d",
-                $tax_year
-            )
-        );
-    }
-
     $rows = $wpdb->get_results(
+    $wpdb->prepare(
+        "SELECT id
+         FROM {$lessons}
+         WHERE is_online = 0
+           AND is_consultation = 0
+           AND start_time >= %s
+           AND start_time <= %s
+           AND status IN ('scheduled','completed','paid','delivered')
+         ORDER BY start_time ASC",
+        $start,
+        $end
+    ),
+    ARRAY_A
+);
+
+$lesson_ids = array();
+foreach ( (array) $rows as $row ) {
+    $lesson_id = isset( $row['id'] ) ? (int) $row['id'] : 0;
+    if ( $lesson_id > 0 ) {
+        $lesson_ids[] = $lesson_id;
+    }
+}
+
+if ( ! empty( $lesson_ids ) ) {
+    $placeholders = implode( ',', array_fill( 0, count( $lesson_ids ), '%d' ) );
+    $wpdb->query(
         $wpdb->prepare(
-            "SELECT id
-             FROM {$lessons}
-             WHERE is_online = 0
-               AND is_consultation = 0
-               AND start_time >= %s
-               AND start_time <= %s
-               AND status IN ('scheduled','completed','paid','delivered')
-             ORDER BY start_time ASC",
-            $start,
-            $end
-        ),
-        ARRAY_A
+            "DELETE FROM {$mileage}
+             WHERE lesson_id IN ({$placeholders})",
+            $lesson_ids
+        )
     );
+}
+
+// Also remove legacy selected-period rows that may not line up cleanly with lesson IDs.
+if ( (int) $tax_quarter > 0 ) {
+    $wpdb->query(
+        $wpdb->prepare(
+            "DELETE FROM {$mileage}
+             WHERE tax_year = %d
+               AND QUARTER(trip_date) = %d",
+            $tax_year,
+            $tax_quarter
+        )
+    );
+} else {
+    $wpdb->query(
+        $wpdb->prepare(
+            "DELETE FROM {$mileage}
+             WHERE tax_year = %d",
+            $tax_year
+        )
+    );
+}
 
     foreach ( (array) $rows as $row ) {
         $this->mrm_queue_mileage_calculation_for_lesson( (int) $row['id'] );
@@ -8933,6 +8858,30 @@ public function handle_mrm_clear_mileage_cache_for_period() {
         admin_url(
             'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_cleared=1'
         )
+    );
+    exit;
+}
+
+public function handle_mrm_clear_all_mileage_cache() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_clear_all_mileage_cache' );
+
+    global $wpdb;
+
+    $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $mileage ) ) {
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&mileage_error=missing_mileage_table' ) );
+        exit;
+    }
+
+    $wpdb->query( "TRUNCATE TABLE {$mileage}" );
+
+    wp_safe_redirect(
+        admin_url( 'admin.php?page=mrm-calculations&mileage_cleared=1' )
     );
     exit;
 }
@@ -9132,6 +9081,7 @@ public function handle_mrm_clear_mileage_cache_for_period() {
                 if ( $stripe_connected_account_id && ! preg_match( '/^acct_[A-Za-z0-9]+$/', $stripe_connected_account_id ) ) $errors[] = 'Stripe Connected Account ID must start with acct_.';
                 if ( $hire_date && ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $hire_date ) ) $errors[] = 'Start Date must be in YYYY-MM-DD format.';
                 if ( ! $address ) $errors[] = 'Address is required.';
+                if ( ! $zip_code ) $errors[] = 'ZIP Code is required.';
                 if ( ! $offers_in_person && ! $offers_online ) {
                     $errors[] = 'At least one teaching format must be selected.';
                 }
