@@ -7671,20 +7671,15 @@ protected function mrm_get_google_service_account_json() {
     }
 
     public function sanitize_calculations_settings( $input ) {
-        $input = is_array( $input ) ? $input : array();
+    $input = is_array( $input ) ? $input : array();
 
-        $tax_year = isset( $input['default_tax_year'] ) ? (int) $input['default_tax_year'] : (int) gmdate( 'Y' );
-        $business_type = isset( $input['business_type'] ) ? sanitize_text_field( $input['business_type'] ) : 's_corp';
-        $mileage_rate = isset( $input['mileage_rate'] ) ? (float) $input['mileage_rate'] : 0.7250;
-        $environment_mode = isset( $input['environment_mode'] ) ? sanitize_text_field( $input['environment_mode'] ) : 'live';
+    $tax_year = isset( $input['default_tax_year'] ) ? (int) $input['default_tax_year'] : (int) gmdate( 'Y' );
+    $business_type = isset( $input['business_type'] ) ? sanitize_text_field( $input['business_type'] ) : 's_corp';
 
-        return array(
-            'default_tax_year'       => $tax_year,
-            'business_type'          => in_array( $business_type, array( 's_corp' ), true ) ? $business_type : 's_corp',
-            'mileage_rate'           => $mileage_rate,
-            'environment_mode'       => in_array( $environment_mode, array( 'test', 'live' ), true ) ? $environment_mode : 'live',
-            'google_maps_api_key'    => isset( $input['google_maps_api_key'] ) ? sanitize_text_field( $input['google_maps_api_key'] ) : '',
-        );
+    return array(
+        'default_tax_year' => max( 2020, min( 2099, $tax_year ) ),
+        'business_type'    => in_array( $business_type, array( 's_corp' ), true ) ? $business_type : 's_corp',
+    );
     }
 
     public function render_calculations_settings_page() {
@@ -7695,13 +7690,12 @@ protected function mrm_get_google_service_account_json() {
         $settings = get_option( 'mrm_calculations_settings', array(
             'default_tax_year' => (int) gmdate( 'Y' ),
             'business_type'    => 's_corp',
-            'mileage_rate'     => 0.7250,
         ) );
 
         $selected_year    = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) $settings['default_tax_year'];
         $selected_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
         $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
-        $is_test_mode = ( $environment_mode === 'test' );
+        $maps_key_configured = $this->mrm_google_maps_distance_api_key_is_configured();
 
         $overview    = $this->mrm_get_calculations_overview( $selected_year, $selected_quarter, $environment_mode );
         $instructors = $this->mrm_get_calculations_instructor_summary( $selected_year, $selected_quarter, $environment_mode );
@@ -7714,10 +7708,12 @@ protected function mrm_get_google_service_account_json() {
         <div class="wrap">
             <h1>Calculations</h1>
             <?php
-            echo '<p><strong>Environment:</strong> ' . esc_html( strtoupper( $environment_mode ) ) . ' ';
-            echo $environment_mode === 'test'
-                ? '<span style="color:#b45309;">(Sandbox / Test Data)</span>'
-                : '<span style="color:#166534;">(Live Accounting Data)</span>';
+            echo '<p><strong>Accounting Data Source:</strong> <span style="color:#166534;">Live records only</span></p>';
+
+            echo '<p><strong>Google Maps Distance API:</strong> ';
+            echo $maps_key_configured
+                ? '<span style="color:#166534;">Configured through AWS Secrets Manager</span>'
+                : '<span style="color:#b32d2e;">Not found in AWS Secrets Manager</span>';
             echo '</p>';
             ?>
             <?php echo '<p><em>This page provides calculation and reconciliation support for S-corporation recordkeeping, including contractor 1099 support, payroll/W-2 support, mileage, expenses, and annual business summaries. Final tax filing should still be reviewed by your accountant.</em></p>'; ?>
@@ -7725,17 +7721,35 @@ protected function mrm_get_google_service_account_json() {
                 <?php settings_fields( 'mrm_calculations_settings_group' ); ?>
                 <h2>Calculation Settings</h2>
                 <table class="form-table">
-                    <tr><th scope="row"><label for="default_tax_year">Default Tax Year</label></th><td><input type="number" id="default_tax_year" name="mrm_calculations_settings[default_tax_year]" value="<?php echo esc_attr( (int) ( $settings['default_tax_year'] ?? gmdate( 'Y' ) ) ); ?>" min="2020" max="2099"></td></tr>
-                    <tr><th scope="row"><label for="mileage_rate">Mileage Rate</label></th><td><input type="number" step="0.0001" id="mileage_rate" name="mrm_calculations_settings[mileage_rate]" value="<?php echo esc_attr( (string) ( $settings['mileage_rate'] ?? '0.7250' ) ); ?>"><p class="description">Used to estimate deductible mileage. Update this when your accountant/tax year requires a different rate.</p></td></tr>
-                    <tr><th scope="row"><label for="google_maps_api_key">Google Maps Distance API Key</label></th><td><input type="password" id="google_maps_api_key" name="mrm_calculations_settings[google_maps_api_key]" value="<?php echo esc_attr( (string) ( $settings['google_maps_api_key'] ?? '' ) ); ?>" class="regular-text"><p class="description">Used only to calculate driving distance from instructor home address to lesson address.</p></td></tr>
-                    <tr><th scope="row"><label for="environment_mode">Default Environment</label></th><td><select id="environment_mode" name="mrm_calculations_settings[environment_mode]"><option value="live" <?php selected( (string) ( $settings['environment_mode'] ?? 'live' ), 'live' ); ?>>Live</option><option value="test" <?php selected( (string) ( $settings['environment_mode'] ?? 'live' ), 'test' ); ?>>Test</option></select></td></tr>
-                </table>
+    <tr>
+        <th scope="row"><label for="default_tax_year">Default Tax Year</label></th>
+        <td>
+            <input type="number" id="default_tax_year" name="mrm_calculations_settings[default_tax_year]" value="<?php echo esc_attr( (int) ( $settings['default_tax_year'] ?? gmdate( 'Y' ) ) ); ?>" min="2020" max="2099">
+            <p class="description">Used as the default year when you open the Calculations submenu.</p>
+        </td>
+    </tr>
+    <tr>
+        <th scope="row">Google Maps Distance API Key</th>
+        <td>
+            <?php if ( $maps_key_configured ) : ?>
+                <strong style="color:#166534;">Configured in AWS Secrets Manager</strong>
+            <?php else : ?>
+                <strong style="color:#b32d2e;">Not found in AWS Secrets Manager</strong>
+            <?php endif; ?>
+            <p class="description">
+                Expected AWS secret:
+                <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>,
+                key <code>maps_distance_api_key</code>.
+            </p>
+        </td>
+    </tr>
+</table>
                 <?php submit_button( 'Save Calculation Settings' ); ?>
             </form>
 
             <form method="get" style="margin:16px 0 24px 0;">
                 <input type="hidden" name="page" value="mrm-calculations">
-                <input type="hidden" name="calc_env" value="<?php echo esc_attr( $is_test_mode ? 'test' : 'live' ); ?>" id="mrm-calc-env-hidden">
+                
                 <label for="tax_year"><strong>Tax Year</strong></label>
                 <input type="number" id="tax_year" name="tax_year" value="<?php echo esc_attr( $selected_year ); ?>" min="2020" max="2099" style="width:100px; margin:0 12px 0 8px;">
 
@@ -7748,35 +7762,18 @@ protected function mrm_get_google_service_account_json() {
                     <option value="4" <?php selected( $selected_quarter, 4 ); ?>>Q4</option>
                 </select>
 
-                <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px;">
-                    <input type="checkbox" id="mrm-calc-test-mode" <?php checked( $is_test_mode ); ?>>
-                    Use Test Mode
-                </label>
-
-                <span style="margin-left:10px; font-weight:600; color:<?php echo $is_test_mode ? '#b45309' : '#166534'; ?>;">
-                    Current Calculations Mode: <?php echo esc_html( strtoupper( $environment_mode ) ); ?>
-                </span>
+                
 
                 <button type="submit" class="button button-primary" style="margin-left:12px;">Run Calculations</button>
 
-                <script>
-                document.addEventListener('DOMContentLoaded', function(){
-                    var checkbox = document.getElementById('mrm-calc-test-mode');
-                    var hidden = document.getElementById('mrm-calc-env-hidden');
-                    if (checkbox && hidden) {
-                        checkbox.addEventListener('change', function(){
-                            hidden.value = checkbox.checked ? 'test' : 'live';
-                        });
-                    }
-                });
-                </script>
+                
             </form>
 
             <p>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_support&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_1099_support' ) ); ?>">Export Instructor CSV</a>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_mileage_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_mileage_summary' ) ); ?>">Export Mileage CSV</a>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_calculations_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_export_calculations_summary' ) ); ?>">Export Annual Summary CSV</a>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_recalculate_mileage_cache&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter . '&calc_env=' . rawurlencode( $environment_mode ) ), 'mrm_recalculate_mileage_cache' ) ); ?>">Recalculate Mileage</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_support&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_1099_support' ) ); ?>">Export Instructor CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_mileage_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_mileage_summary' ) ); ?>">Export Mileage CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_calculations_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_calculations_summary' ) ); ?>">Export Annual Summary CSV</a>
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_recalculate_mileage_cache&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_recalculate_mileage_cache' ) ); ?>">Recalculate Mileage</a>
             </p>
 
             <h2>Overview</h2>
@@ -7791,7 +7788,7 @@ protected function mrm_get_google_service_account_json() {
                     <tr><td>Composer Wages</td><td><?php echo esc_html( number_format( (float) $overview['composer_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Manual Expenses</td><td><?php echo esc_html( number_format( (float) $overview['manual_expenses'], 2 ) ); ?></td></tr>
                     <tr><td>Payroll / W-2 Wages</td><td><?php echo esc_html( number_format( (float) $overview['payroll_wages'], 2 ) ); ?></td></tr>
-                    <tr><td>Mileage Deduction Estimate</td><td><?php echo esc_html( number_format( (float) $overview['mileage_deduction'], 2 ) ); ?></td></tr>
+                    
                     <tr><td>Estimated Net Income</td><td><strong><?php echo esc_html( number_format( (float) $overview['estimated_net_income'], 2 ) ); ?></strong></td></tr>
                 </tbody>
             </table>
@@ -7804,7 +7801,8 @@ protected function mrm_get_google_service_account_json() {
             <h2 style="margin-top:28px;">Payroll / Officer Compensation Summary</h2>
             <?php $this->mrm_render_calculations_payroll_table( $payroll ); ?>
 
-            <h2 style="margin-top:28px;">Mileage Summary</h2>
+            <h2 style="margin-top:28px;">Instructor Mileage Support</h2>
+            <p>This section estimates round-trip driving miles for in-person lessons so instructors have mileage support records. It is not treated as a company mileage deduction.</p>
             <?php $this->mrm_render_calculations_mileage_table( $mileage ); ?>
 
             <h2 style="margin-top:28px;">Expense Summary</h2>
@@ -7813,22 +7811,55 @@ protected function mrm_get_google_service_account_json() {
         <?php
     }
 
-    protected function mrm_get_effective_calculations_environment_mode() {
-        $requested = isset( $_GET['calc_env'] ) ? sanitize_text_field( (string) $_GET['calc_env'] ) : '';
-        if ( in_array( $requested, array( 'test', 'live' ), true ) ) {
-            return $requested;
-        }
+    
 
-        $calc_settings = get_option( 'mrm_calculations_settings', array() );
-        if ( ! empty( $calc_settings['environment_mode'] ) && in_array( $calc_settings['environment_mode'], array( 'test', 'live' ), true ) ) {
-            return (string) $calc_settings['environment_mode'];
-        }
+protected function mrm_get_google_maps_distance_api_key() {
+    $secret_id = defined( 'MRM_SECRET_GOOGLE_SCHEDULER' )
+        ? MRM_SECRET_GOOGLE_SCHEDULER
+        : 'lowbrass/google/scheduler';
 
-        $pay_settings = get_option( 'mrm_pay_hub_settings', array() );
-        $stripe_mode = isset( $pay_settings['stripe_mode'] ) ? (string) $pay_settings['stripe_mode'] : 'live';
+    $secret = $this->mrm_get_secret_json(
+        $secret_id,
+        'mrm_secret_google_scheduler_maps_distance_v1'
+    );
 
-        return ( $stripe_mode === 'test' ) ? 'test' : 'live';
+    if ( ! is_array( $secret ) ) {
+        $this->mrm_aws_debug_log( 'Google Maps Distance API key could not be loaded because scheduler secret was unavailable.', array(
+            'secret_id' => $secret_id,
+        ) );
+        return '';
     }
+
+    $possible_keys = array(
+        'maps_distance_api_key',
+        'google_maps_distance_api_key',
+        'distance_api_key',
+        'maps_api_key',
+        'Maps Distance API key',
+        'Maps Distance API Key',
+    );
+
+    foreach ( $possible_keys as $key ) {
+        if ( isset( $secret[ $key ] ) && is_string( $secret[ $key ] ) && trim( $secret[ $key ] ) !== '' ) {
+            return trim( (string) $secret[ $key ] );
+        }
+    }
+
+    $this->mrm_aws_debug_log( 'Google Maps Distance API key was not found in scheduler AWS secret.', array(
+        'secret_id' => $secret_id,
+        'available_keys' => array_keys( $secret ),
+    ) );
+
+    return '';
+}
+
+protected function mrm_google_maps_distance_api_key_is_configured() {
+    return $this->mrm_get_google_maps_distance_api_key() !== '';
+}
+
+protected function mrm_get_effective_calculations_environment_mode() {
+    return 'live';
+}
 
     protected function mrm_get_tax_period_dates( $tax_year, $tax_quarter = 0 ) {
     $tax_year = max( 2020, min( 2099, (int) $tax_year ) );
@@ -7869,9 +7900,7 @@ protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $
     $composer_wages      = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'composer' );
     $manual_expenses     = $this->mrm_calc_total_manual_expenses( $tax_year, $tax_quarter, $environment_mode );
     $payroll_wages       = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
-    $mileage_deduction   = $this->mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter, $environment_mode );
-
-    $estimated_net_income = $gross_revenue
+        $estimated_net_income = $gross_revenue
         - $refunds
         - $stripe_fees
         - $instructor_wages
@@ -7890,8 +7919,7 @@ protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $
         'composer_wages'        => $composer_wages,
         'manual_expenses'       => $manual_expenses,
         'payroll_wages'         => $payroll_wages,
-        'mileage_deduction'     => $mileage_deduction,
-        'estimated_net_income'  => $estimated_net_income,
+                'estimated_net_income'  => $estimated_net_income,
     );
 }
 
@@ -8331,17 +8359,16 @@ protected function mrm_render_calculations_payroll_table( $rows ) {
 }
 
 protected function mrm_render_calculations_mileage_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Lessons</th><th>Total Miles</th><th>Deduction</th><th>Status</th></tr></thead><tbody>';
+    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>In-Person Lessons</th><th>Total Round-Trip Miles</th><th>Status</th></tr></thead><tbody>';
 
     if ( empty( $rows ) ) {
-        echo '<tr><td colspan="5">No mileage data found.</td></tr>';
+        echo '<tr><td colspan="4">No mileage data found.</td></tr>';
     } else {
         foreach ( $rows as $row ) {
             echo '<tr>';
             echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? ( 'Instructor ID ' . ( $row['instructor_id'] ?? '' ) ) ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
             echo '<td>' . esc_html( (string) ( $row['lesson_count'] ?? 0 ) ) . '</td>';
             echo '<td>' . esc_html( number_format( (float) ( $row['total_miles'] ?? 0 ), 2 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( $row['total_deduction'] ?? 0 ), 2 ) ) . '</td>';
             echo '<td>' . esc_html( (string) ( $row['calc_statuses'] ?? '' ) ) . '</td>';
             echo '</tr>';
         }
@@ -8388,8 +8415,7 @@ protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
         return;
     }
 
-    $settings = get_option( 'mrm_calculations_settings', array() );
-    $default_rate = isset( $settings['mileage_rate'] ) ? (float) $settings['mileage_rate'] : 0.7250;
+    $default_rate = 0.0;
     $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
 
     $origin_address = $this->mrm_format_instructor_origin_address( $lesson );
@@ -8415,7 +8441,7 @@ protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
         } else {
             $one_way_miles = round( (float) $distance, 2 );
             $round_trip_miles = round( $one_way_miles * 2, 2 );
-            $mileage_deduction = round( $round_trip_miles * $default_rate, 2 );
+            $mileage_deduction = 0.0;
             $calc_status = 'calculated';
             $calc_source = 'google_distance_matrix';
         }
@@ -8467,11 +8493,10 @@ protected function mrm_format_lesson_destination_address( $lesson ) {
 }
 
 protected function mrm_calculate_driving_distance_miles( $origin_address, $destination_address ) {
-    $settings = get_option( 'mrm_calculations_settings', array() );
-    $api_key = trim( (string) ( $settings['google_maps_api_key'] ?? '' ) );
+    $api_key = $this->mrm_get_google_maps_distance_api_key();
 
     if ( $api_key === '' ) {
-        return new WP_Error( 'missing_api_key', 'Google Maps API key is missing.' );
+        return new WP_Error( 'missing_api_key', 'Google Maps Distance API key is missing from AWS Secrets Manager.' );
     }
 
     $url = add_query_arg(
@@ -8531,7 +8556,7 @@ protected function mrm_calculate_driving_distance_miles( $origin_address, $desti
     $lessons = $wpdb->prefix . 'mrm_lessons';
 
     if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $lessons ) ) !== $lessons ) {
-        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&calc_env=' . rawurlencode( $environment_mode ) . '&mileage_error=missing_lessons_table' ) );
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_error=missing_lessons_table' ) );
         exit;
     }
 
@@ -8557,7 +8582,7 @@ protected function mrm_calculate_driving_distance_miles( $origin_address, $desti
 
     wp_safe_redirect(
         admin_url(
-            'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&calc_env=' . rawurlencode( $environment_mode ) . '&mileage_recalculated=1'
+            'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_recalculated=1'
         )
     );
     exit;
@@ -8636,9 +8661,8 @@ protected function mrm_send_csv_headers( $filename ) {
     $this->mrm_write_csv_row( $out, array(
         'instructor_id',
         'instructor_name',
-        'lesson_count',
-        'total_miles',
-        'total_deduction',
+        'in_person_lesson_count',
+        'total_round_trip_miles',
         'statuses'
     ) );
 
@@ -8648,7 +8672,6 @@ protected function mrm_send_csv_headers( $filename ) {
             (string) ( $row['instructor_name'] ?? '' ),
             (string) ( $row['lesson_count'] ?? 0 ),
             number_format( (float) ( $row['total_miles'] ?? 0 ), 2, '.', '' ),
-            number_format( (float) ( $row['total_deduction'] ?? 0 ), 2, '.', '' ),
             (string) ( $row['calc_statuses'] ?? '' ),
         ) );
     }
