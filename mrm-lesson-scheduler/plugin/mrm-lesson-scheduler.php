@@ -8957,6 +8957,10 @@ protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
 
     list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
 
+    // For test/reconciliation accuracy, pull current Google Calendar times into wp_mrm_lessons
+    // before rebuilding mileage for the selected period.
+    $this->cron_sync_upcoming_events( 72, 30 );
+
     $lessons = $wpdb->prefix . 'mrm_lessons';
     $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
 
