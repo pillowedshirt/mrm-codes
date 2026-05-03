@@ -2270,6 +2270,26 @@ protected function mrm_get_google_service_account_json() {
             }
         }
 
+        // Ensure mileage cache has error-message support for Google Distance Matrix diagnostics.
+        $mileage_table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+        $found_mileage_table = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $mileage_table ) );
+        if ( $found_mileage_table === $mileage_table ) {
+            $existing_mileage_cols = array();
+            $cols = $wpdb->get_results( "SHOW COLUMNS FROM {$mileage_table}" );
+
+            if ( is_array( $cols ) ) {
+                foreach ( $cols as $c ) {
+                    if ( ! empty( $c->Field ) ) {
+                        $existing_mileage_cols[] = (string) $c->Field;
+                    }
+                }
+            }
+
+            if ( ! in_array( 'calc_error_message', $existing_mileage_cols, true ) ) {
+                $wpdb->query( "ALTER TABLE {$mileage_table} ADD COLUMN calc_error_message TEXT NULL AFTER calc_source" );
+            }
+        }
+
         dbDelta( $sql3 );
         dbDelta( $sql_attendance );
 
@@ -2311,6 +2331,7 @@ protected function mrm_get_google_service_account_json() {
     mileage_deduction DECIMAL(12,2) NOT NULL DEFAULT 0.00,
     calc_status VARCHAR(30) NOT NULL DEFAULT 'pending',
     calc_source VARCHAR(30) NOT NULL DEFAULT 'manual',
+    calc_error_message TEXT NULL,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     PRIMARY KEY (id),
@@ -2424,6 +2445,15 @@ protected function mrm_get_google_service_account_json() {
         foreach ( $need_attendance as $col ) {
             if ( ! in_array( $col, $attendance_cols, true ) ) {
                 return array( 'ok' => false, 'reason' => 'missing_column', 'table' => 'mrm_lesson_attendance', 'column' => $col );
+            }
+        }
+
+        $mileage_cache = $wpdb->prefix . 'mrm_tax_mileage_cache';
+        $exists_mileage_cache = ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $mileage_cache ) ) === $mileage_cache );
+        if ( $exists_mileage_cache ) {
+            $mileage_cols = $wpdb->get_col( "DESC {$mileage_cache}", 0 );
+            if ( ! in_array( 'calc_error_message', $mileage_cols, true ) ) {
+                return array( 'ok' => false, 'reason' => 'missing_column', 'table' => 'mrm_tax_mileage_cache', 'column' => 'calc_error_message' );
             }
         }
 
@@ -7683,15 +7713,25 @@ protected function mrm_get_google_service_account_json() {
     }
 
     public function sanitize_calculations_settings( $input ) {
-    $input = is_array( $input ) ? $input : array();
+        $input = is_array( $input ) ? $input : array();
 
-    $tax_year = isset( $input['default_tax_year'] ) ? (int) $input['default_tax_year'] : (int) gmdate( 'Y' );
-    $business_type = isset( $input['business_type'] ) ? sanitize_text_field( $input['business_type'] ) : 's_corp';
+        $tax_year = isset( $input['default_tax_year'] ) ? (int) $input['default_tax_year'] : (int) gmdate( 'Y' );
+        $business_type = isset( $input['business_type'] ) ? sanitize_text_field( $input['business_type'] ) : 's_corp';
 
-    return array(
-        'default_tax_year' => max( 2020, min( 2099, $tax_year ) ),
-        'business_type'    => in_array( $business_type, array( 's_corp' ), true ) ? $business_type : 's_corp',
-    );
+        $stripe_fee_percent = isset( $input['stripe_fee_percent'] )
+            ? (float) $input['stripe_fee_percent']
+            : 2.9;
+
+        $stripe_fee_fixed_cents = isset( $input['stripe_fee_fixed_cents'] )
+            ? (int) $input['stripe_fee_fixed_cents']
+            : 30;
+
+        return array(
+            'default_tax_year'       => max( 2020, min( 2099, $tax_year ) ),
+            'business_type'          => in_array( $business_type, array( 's_corp' ), true ) ? $business_type : 's_corp',
+            'stripe_fee_percent'     => max( 0, min( 20, $stripe_fee_percent ) ),
+            'stripe_fee_fixed_cents' => max( 0, min( 500, $stripe_fee_fixed_cents ) ),
+        );
     }
 
     public function render_calculations_settings_page() {
@@ -7767,8 +7807,24 @@ protected function mrm_get_google_service_account_json() {
             <p class="description">Used as the default year when you open the Calculations submenu.</p>
         </td>
     </tr>
-    <tr>
-        <th scope="row">Google Maps Distance API Key</th>
+                        <tr>
+                            <th scope="row"><label for="stripe_fee_percent">Estimated Stripe Fee Percent</label></th>
+                            <td>
+                                <input type="number" step="0.01" id="stripe_fee_percent" name="mrm_calculations_settings[stripe_fee_percent]" value="<?php echo esc_attr( (string) ( $settings['stripe_fee_percent'] ?? '2.9' ) ); ?>" style="width:100px;">
+                                <span>%</span>
+                                <p class="description">Used for estimated Stripe fee calculations when actual Stripe balance transaction fees are not stored locally.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="stripe_fee_fixed_cents">Estimated Stripe Fixed Fee</label></th>
+                            <td>
+                                <input type="number" id="stripe_fee_fixed_cents" name="mrm_calculations_settings[stripe_fee_fixed_cents]" value="<?php echo esc_attr( (string) ( $settings['stripe_fee_fixed_cents'] ?? '30' ) ); ?>" style="width:100px;">
+                                <span>cents per paid transaction</span>
+                                <p class="description">For standard Stripe card pricing, this is commonly 30 cents, but use your actual Stripe pricing if different.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Google Maps Distance API Key</th>
         <td>
             <?php if ( $maps_key_configured ) : ?>
                 <strong style="color:#166534;">Configured in AWS Secrets Manager</strong>
@@ -7823,7 +7879,7 @@ protected function mrm_get_google_service_account_json() {
                     <tr><td>Sheet Music Revenue</td><td><?php echo esc_html( number_format( (float) $overview['sheet_music_revenue'], 2 ) ); ?></td></tr>
                     <tr><td>Gross Revenue</td><td><?php echo esc_html( number_format( (float) $overview['gross_revenue'], 2 ) ); ?></td></tr>
                     <tr><td>Refunds</td><td><?php echo esc_html( number_format( (float) $overview['refunds'], 2 ) ); ?></td></tr>
-                    <tr><td>Stripe Fees</td><td><?php echo esc_html( number_format( (float) $overview['stripe_fees'], 2 ) ); ?> <small>Not currently stored locally</small></td></tr>
+                    <tr><td>Estimated Stripe Fees</td><td><?php echo esc_html( number_format( (float) $overview['stripe_fees'], 2 ) ); ?> <small>Calculated from your saved Stripe fee settings, not exact Stripe balance transactions.</small></td></tr>
                     <tr><td>Instructor Wages</td><td><?php echo esc_html( number_format( (float) $overview['instructor_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Composer Wages</td><td><?php echo esc_html( number_format( (float) $overview['composer_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Manual Expenses</td><td><?php echo esc_html( number_format( (float) $overview['manual_expenses'], 2 ) ); ?></td></tr>
@@ -7999,19 +8055,18 @@ protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $
     $gross_revenue       = $lesson_revenue + $sheet_music_revenue;
 
     $refunds             = $this->mrm_calc_total_refunds( $tax_year, $tax_quarter, $environment_mode );
-    $stripe_fees         = 0.0; // Stripe fees are not currently stored locally in mrm_orders.
+    $stripe_fees         = $this->mrm_calc_estimated_stripe_fees( $tax_year, $tax_quarter, $environment_mode );
     $instructor_wages    = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'instructor' );
     $composer_wages      = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'composer' );
     $manual_expenses     = $this->mrm_calc_total_manual_expenses( $tax_year, $tax_quarter, $environment_mode );
     $payroll_wages       = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
-        $estimated_net_income = $gross_revenue
+    $estimated_net_income = $gross_revenue
         - $refunds
         - $stripe_fees
         - $instructor_wages
         - $composer_wages
         - $manual_expenses
-        - $payroll_wages
-        - $mileage_deduction;
+        - $payroll_wages;
 
     return array(
         'lesson_revenue'        => $lesson_revenue,
@@ -8077,6 +8132,50 @@ protected function mrm_calc_total_refunds( $tax_year, $tax_quarter = 0, $environ
     );
 
     return round( (float) $wpdb->get_var( $sql ) / 100, 2 );
+}
+
+protected function mrm_calc_estimated_stripe_fees( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $orders_table = $wpdb->prefix . 'mrm_orders';
+
+    if ( ! $this->mrm_table_exists( $orders_table ) ) {
+        return 0.0;
+    }
+
+    $settings = get_option( 'mrm_calculations_settings', array() );
+    $percent = isset( $settings['stripe_fee_percent'] ) ? (float) $settings['stripe_fee_percent'] : 2.9;
+    $fixed_cents = isset( $settings['stripe_fee_fixed_cents'] ) ? (int) $settings['stripe_fee_fixed_cents'] : 30;
+
+    $amounts = $wpdb->get_col(
+        $wpdb->prepare(
+            "SELECT amount_cents
+             FROM {$orders_table}
+             WHERE status = 'paid'
+               AND environment_mode = %s
+               AND created_at >= %s
+               AND created_at <= %s",
+            $environment_mode,
+            $start,
+            $end
+        )
+    );
+
+    $total_fee_cents = 0;
+
+    foreach ( (array) $amounts as $amount_cents ) {
+        $amount_cents = max( 0, (int) $amount_cents );
+
+        if ( $amount_cents <= 0 ) {
+            continue;
+        }
+
+        $fee_cents = (int) round( $amount_cents * ( $percent / 100 ) ) + $fixed_cents;
+        $total_fee_cents += max( 0, $fee_cents );
+    }
+
+    return round( $total_fee_cents / 100, 2 );
 }
 
 protected function mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter = 0, $environment_mode = 'live', $payee_type = '' ) {
@@ -8320,7 +8419,8 @@ protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter
                 COUNT(*) AS lesson_count,
                 COALESCE(SUM(m.round_trip_miles),0) AS total_miles,
                 COALESCE(SUM(m.mileage_deduction),0) AS total_deduction,
-                GROUP_CONCAT(DISTINCT m.calc_status ORDER BY m.calc_status SEPARATOR ', ') AS calc_statuses
+                GROUP_CONCAT(DISTINCT m.calc_status ORDER BY m.calc_status SEPARATOR ', ') AS calc_statuses,
+                       GROUP_CONCAT(DISTINCT NULLIF(m.calc_error_message, '') SEPARATOR ' | ') AS calc_error_messages
              FROM {$table} m
              {$join_sql}
              WHERE m.tax_year = %d
@@ -8340,7 +8440,8 @@ protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter
                 COUNT(*) AS lesson_count,
                 COALESCE(SUM(m.round_trip_miles),0) AS total_miles,
                 COALESCE(SUM(m.mileage_deduction),0) AS total_deduction,
-                GROUP_CONCAT(DISTINCT m.calc_status ORDER BY m.calc_status SEPARATOR ', ') AS calc_statuses
+                GROUP_CONCAT(DISTINCT m.calc_status ORDER BY m.calc_status SEPARATOR ', ') AS calc_statuses,
+                       GROUP_CONCAT(DISTINCT NULLIF(m.calc_error_message, '') SEPARATOR ' | ') AS calc_error_messages
              FROM {$table} m
              {$join_sql}
              WHERE m.tax_year = %d
@@ -8463,239 +8564,23 @@ protected function mrm_render_calculations_payroll_table( $rows ) {
 }
 
 protected function mrm_render_calculations_mileage_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>In-Person Lessons</th><th>Total Round-Trip Miles</th><th>Status</th></tr></thead><tbody>';
+        echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>In-Person Lessons</th><th>Total Round-Trip Miles</th><th>Status</th><th>Details</th></tr></thead><tbody>';
 
-    if ( empty( $rows ) ) {
-        echo '<tr><td colspan="4">No mileage data found.</td></tr>';
-    } else {
-        foreach ( $rows as $row ) {
-            echo '<tr>';
-            echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? ( 'Instructor ID ' . ( $row['instructor_id'] ?? '' ) ) ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
-            echo '<td>' . esc_html( (string) ( $row['lesson_count'] ?? 0 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( $row['total_miles'] ?? 0 ), 2 ) ) . '</td>';
-            echo '<td>' . esc_html( (string) ( $row['calc_statuses'] ?? '' ) ) . '</td>';
-            echo '</tr>';
-        }
-    }
-
-    echo '</tbody></table>';
-}
-
-protected function mrm_render_calculations_expense_table( $rows ) {
-    if ( empty( $rows ) ) {
-        echo '<p>Expense detail section ready for integration.</p>';
-        return;
-    }
-
-    echo '<table class="widefat striped"><thead><tr><th>Category</th><th>Entries</th><th>Total</th></tr></thead><tbody>';
-
-    foreach ( $rows as $row ) {
-        echo '<tr>';
-        echo '<td>' . esc_html( (string) ( $row['category'] ?? '' ) ) . '</td>';
-        echo '<td>' . esc_html( (string) ( $row['entry_count'] ?? 0 ) ) . '</td>';
-        echo '<td>' . esc_html( number_format( (float) ( $row['total_amount'] ?? 0 ), 2 ) ) . '</td>';
-        echo '</tr>';
-    }
-
-    echo '</tbody></table>';
-}
-
-protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
-    global $wpdb;
-
-    $lesson = $this->get_lesson_with_instructor( $lesson_id );
-
-    if ( ! is_array( $lesson ) || empty( $lesson ) ) {
-        return;
-    }
-
-    if ( ! empty( $lesson['is_online'] ) ) {
-        return;
-    }
-
-    $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
-
-    if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
-        return;
-    }
-
-    $default_rate = 0.0;
-    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
-
-    $origin_address = $this->mrm_format_instructor_origin_address( $lesson );
-    $destination_address = $this->mrm_format_lesson_destination_address( $lesson );
-
-    $start_time = (string) ( $lesson['start_time'] ?? '' );
-    $trip_date = $start_time ? gmdate( 'Y-m-d', strtotime( $start_time ) ) : gmdate( 'Y-m-d' );
-    $tax_year = (int) gmdate( 'Y', strtotime( $trip_date ) );
-
-    $one_way_miles = 0.0;
-    $round_trip_miles = 0.0;
-    $mileage_deduction = 0.0;
-    $calc_status = 'pending';
-    $calc_source = 'queued';
-
-    if ( $origin_address === '' || $destination_address === '' ) {
-        $calc_status = 'pending_missing_address';
-    } else {
-        $distance = $this->mrm_calculate_driving_distance_miles( $origin_address, $destination_address );
-
-        if ( is_wp_error( $distance ) ) {
-            $calc_status = 'pending_' . sanitize_key( $distance->get_error_code() );
+        if ( empty( $rows ) ) {
+            echo '<tr><td colspan="5">No mileage data found.</td></tr>';
         } else {
-            $one_way_miles = round( (float) $distance, 2 );
-            $round_trip_miles = round( $one_way_miles * 2, 2 );
-            $mileage_deduction = 0.0;
-            $calc_status = 'calculated';
-            $calc_source = 'google_distance_matrix';
+            foreach ( $rows as $row ) {
+                echo '<tr>';
+                echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? ( 'Instructor ID ' . ( $row['instructor_id'] ?? '' ) ) ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
+                echo '<td>' . esc_html( (string) ( $row['lesson_count'] ?? 0 ) ) . '</td>';
+                echo '<td>' . esc_html( number_format( (float) ( $row['total_miles'] ?? 0 ), 2 ) ) . '</td>';
+                echo '<td>' . esc_html( (string) ( $row['calc_statuses'] ?? '' ) ) . '</td>';
+                echo '<td style="max-width:420px;">' . esc_html( (string) ( $row['calc_error_messages'] ?? '' ) ) . '</td>';
+                echo '</tr>';
+            }
         }
-    }
 
-    $wpdb->replace(
-        $table,
-        array(
-            'lesson_id'           => (int) $lesson_id,
-            'instructor_id'       => (int) ( $lesson['instructor_id'] ?? 0 ),
-            'tax_year'            => $tax_year,
-            'environment_mode'    => $environment_mode,
-            'trip_date'           => $trip_date,
-            'origin_address'      => $origin_address,
-            'destination_address' => $destination_address,
-            'one_way_miles'       => $one_way_miles,
-            'round_trip_miles'    => $round_trip_miles,
-            'mileage_rate'        => $default_rate,
-            'mileage_deduction'   => $mileage_deduction,
-            'calc_status'         => $calc_status,
-            'calc_source'         => $calc_source,
-            'created_at'          => current_time( 'mysql' ),
-            'updated_at'          => current_time( 'mysql' ),
-        ),
-        array(
-            '%d','%d','%d','%s','%s','%s','%s','%f','%f','%f','%f','%s','%s','%s','%s'
-        )
-    );
-}
-
-protected function mrm_format_instructor_origin_address( $lesson ) {
-    $parts = array(
-        trim( (string) ( $lesson['instructor_address'] ?? '' ) ),
-        trim( (string) ( $lesson['instructor_city'] ?? '' ) ),
-        trim( (string) ( $lesson['instructor_state'] ?? '' ) ),
-    );
-
-    return trim( implode( ', ', array_filter( $parts ) ) );
-}
-
-protected function mrm_format_lesson_destination_address( $lesson ) {
-    $street = trim( (string) ( $lesson['address'] ?? '' ) );
-    $state = trim( (string) ( $lesson['address_state'] ?? '' ) );
-    $postal = trim( (string) ( $lesson['address_postal'] ?? '' ) );
-
-    $state_postal = trim( $state . ' ' . $postal );
-
-    return trim( implode( ', ', array_filter( array( $street, $state_postal ) ) ) );
-}
-
-protected function mrm_calculate_driving_distance_miles( $origin_address, $destination_address ) {
-    $api_key = $this->mrm_get_google_maps_distance_api_key();
-
-    if ( $api_key === '' ) {
-        return new WP_Error( 'missing_api_key', 'Google Maps Distance API key is missing from AWS Secrets Manager.' );
-    }
-
-    $url = add_query_arg(
-        array(
-            'origins'      => $origin_address,
-            'destinations' => $destination_address,
-            'units'        => 'imperial',
-            'key'          => $api_key,
-        ),
-        'https://maps.googleapis.com/maps/api/distancematrix/json'
-    );
-
-    $response = wp_remote_get( $url, array( 'timeout' => 15 ) );
-
-    if ( is_wp_error( $response ) ) {
-        return $response;
-    }
-
-    $body = wp_remote_retrieve_body( $response );
-    $json = json_decode( $body, true );
-
-    if ( ! is_array( $json ) || (string) ( $json['status'] ?? '' ) !== 'OK' ) {
-        return new WP_Error( 'distance_api_error', 'Distance API did not return OK.' );
-    }
-
-    $element = $json['rows'][0]['elements'][0] ?? null;
-
-    if ( ! is_array( $element ) || (string) ( $element['status'] ?? '' ) !== 'OK' ) {
-        return new WP_Error( 'distance_not_found', 'Distance could not be calculated for these addresses.' );
-    }
-
-    $meters = isset( $element['distance']['value'] ) ? (float) $element['distance']['value'] : 0.0;
-
-    if ( $meters <= 0 ) {
-        return new WP_Error( 'distance_zero', 'Distance returned zero.' );
-    }
-
-    return $meters * 0.000621371;
-}
-
-
-    public function handle_mrm_recalculate_mileage_cache() {
-    if ( ! current_user_can( 'manage_options' ) ) {
-        wp_die( 'Not allowed.' );
-    }
-
-    check_admin_referer( 'mrm_recalculate_mileage_cache' );
-
-    global $wpdb;
-
-    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
-    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
-    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
-
-    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
-
-    $lessons = $wpdb->prefix . 'mrm_lessons';
-
-    if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $lessons ) ) !== $lessons ) {
-        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_error=missing_lessons_table' ) );
-        exit;
-    }
-
-    $rows = $wpdb->get_results(
-        $wpdb->prepare(
-            "SELECT id
-             FROM {$lessons}
-             WHERE is_online = 0
-               AND is_consultation = 0
-               AND start_time >= %s
-               AND start_time <= %s
-               AND status IN ('scheduled','completed','paid','delivered')
-             ORDER BY start_time ASC",
-            $start,
-            $end
-        ),
-        ARRAY_A
-    );
-
-    foreach ( (array) $rows as $row ) {
-        $this->mrm_queue_mileage_calculation_for_lesson( (int) $row['id'] );
-    }
-
-    wp_safe_redirect(
-        admin_url(
-            'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_recalculated=1'
-        )
-    );
-    exit;
-}
-
-protected function mrm_send_csv_headers( $filename ) {
-        nocache_headers();
-        header( 'Content-Type: text/csv; charset=utf-8' );
-        header( 'Content-Disposition: attachment; filename=' . $filename );
+        echo '</tbody></table>';
     }
 
     protected function mrm_write_csv_row( $handle, $row ) {
