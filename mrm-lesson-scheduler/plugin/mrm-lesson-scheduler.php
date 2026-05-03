@@ -7695,7 +7695,8 @@ protected function mrm_get_google_service_account_json() {
         $selected_year    = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) $settings['default_tax_year'];
         $selected_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
         $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
-        $maps_key_configured = $this->mrm_google_maps_distance_api_key_is_configured();
+        $maps_secret_status = $this->mrm_get_google_maps_distance_secret_status();
+        $maps_key_configured = ! empty( $maps_secret_status['configured'] );
 
         $overview    = $this->mrm_get_calculations_overview( $selected_year, $selected_quarter, $environment_mode );
         $instructors = $this->mrm_get_calculations_instructor_summary( $selected_year, $selected_quarter, $environment_mode );
@@ -7715,6 +7716,32 @@ protected function mrm_get_google_service_account_json() {
                 ? '<span style="color:#166534;">Configured through AWS Secrets Manager</span>'
                 : '<span style="color:#b32d2e;">Not found in AWS Secrets Manager</span>';
             echo '</p>';
+
+            echo '<p><strong>AWS Secret Loaded:</strong> ';
+            echo ! empty( $maps_secret_status['loaded'] )
+                ? '<span style="color:#166534;">Yes</span>'
+                : '<span style="color:#b32d2e;">No</span>';
+            echo '</p>';
+
+            if ( ! empty( $maps_secret_status['top_level_keys'] ) ) {
+                echo '<p><strong>AWS Keys Found:</strong> <code>' . esc_html( implode( ', ', $maps_secret_status['top_level_keys'] ) ) . '</code></p>';
+            }
+
+            if ( ! empty( $maps_secret_status['nested_keys'] ) ) {
+                echo '<p><strong>Nested AWS Keys Found:</strong> <code>' . esc_html( implode( ', ', $maps_secret_status['nested_keys'] ) ) . '</code></p>';
+            }
+
+            $refresh_url = add_query_arg(
+                array(
+                    'page' => 'mrm-calculations',
+                    'tax_year' => $selected_year,
+                    'tax_quarter' => $selected_quarter,
+                    'mrm_refresh_maps_secret' => '1',
+                ),
+                admin_url( 'admin.php' )
+            );
+
+            echo '<p><a class="button button-secondary" href="' . esc_url( $refresh_url ) . '">Refresh AWS Maps Secret Check</a></p>';
             ?>
             <?php echo '<p><em>This page provides calculation and reconciliation support for S-corporation recordkeeping, including contractor 1099 support, payroll/W-2 support, mileage, expenses, and annual business summaries. Final tax filing should still be reviewed by your accountant.</em></p>'; ?>
             <form method="post" action="options.php" style="margin:16px 0 24px; padding:14px; background:#fff; border:1px solid #ccd0d4;">
@@ -7738,8 +7765,12 @@ protected function mrm_get_google_service_account_json() {
             <?php endif; ?>
             <p class="description">
                 Expected AWS secret:
-                <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>,
-                key <code>maps_distance_api_key</code>.
+                <code><?php echo esc_html( (string) ( $maps_secret_status['secret_id'] ?? ( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ) ) ); ?></code>.
+                Preferred key: <code>maps_distance_api_key</code>.
+            </p>
+            <p class="description">
+                The code now also recognizes common variations such as <code>Maps Distance API key</code>,
+                <code>google_maps_distance_api_key</code>, and <code>maps distance api key</code>.
             </p>
         </td>
     </tr>
@@ -7813,14 +7844,78 @@ protected function mrm_get_google_service_account_json() {
 
     
 
-protected function mrm_get_google_maps_distance_api_key() {
+protected function mrm_normalize_secret_key_name( $key ) {
+    $key = is_string( $key ) ? $key : '';
+    $key = trim( $key );
+    $key = strtolower( $key );
+    $key = preg_replace( '/[^a-z0-9]+/', '_', $key );
+    $key = trim( $key, '_' );
+
+    return $key;
+}
+
+protected function mrm_find_secret_value_by_normalized_key( $secret, $target_keys ) {
+    if ( ! is_array( $secret ) ) {
+        return '';
+    }
+
+    $normalized_targets = array();
+
+    foreach ( (array) $target_keys as $target ) {
+        $normalized_targets[] = $this->mrm_normalize_secret_key_name( $target );
+    }
+
+    $normalized_targets = array_unique( array_filter( $normalized_targets ) );
+
+    foreach ( $secret as $raw_key => $value ) {
+        $normalized_key = $this->mrm_normalize_secret_key_name( (string) $raw_key );
+
+        if ( in_array( $normalized_key, $normalized_targets, true ) ) {
+            if ( is_string( $value ) && trim( $value ) !== '' ) {
+                return trim( $value );
+            }
+
+            if ( is_numeric( $value ) ) {
+                return trim( (string) $value );
+            }
+        }
+
+        // Support one level of nesting, just in case the AWS secret was saved as a nested object.
+        if ( is_array( $value ) ) {
+            foreach ( $value as $nested_raw_key => $nested_value ) {
+                $nested_normalized_key = $this->mrm_normalize_secret_key_name( (string) $nested_raw_key );
+
+                if ( in_array( $nested_normalized_key, $normalized_targets, true ) ) {
+                    if ( is_string( $nested_value ) && trim( $nested_value ) !== '' ) {
+                        return trim( $nested_value );
+                    }
+
+                    if ( is_numeric( $nested_value ) ) {
+                        return trim( (string) $nested_value );
+                    }
+                }
+            }
+        }
+    }
+
+    return '';
+}
+
+protected function mrm_get_google_maps_distance_api_key( $force_refresh = false ) {
     $secret_id = defined( 'MRM_SECRET_GOOGLE_SCHEDULER' )
         ? MRM_SECRET_GOOGLE_SCHEDULER
         : 'lowbrass/google/scheduler';
 
+    $cache_key = 'mrm_secret_google_scheduler_maps_distance_v2';
+
+    if ( $force_refresh ) {
+        delete_transient( $cache_key );
+        delete_transient( 'mrm_secret_google_scheduler_v5' );
+    }
+
     $secret = $this->mrm_get_secret_json(
         $secret_id,
-        'mrm_secret_google_scheduler_maps_distance_v1'
+        $cache_key
     );
 
     if ( ! is_array( $secret ) ) {
@@ -7830,19 +7925,23 @@ protected function mrm_get_google_maps_distance_api_key() {
         return '';
     }
 
-    $possible_keys = array(
-        'maps_distance_api_key',
-        'google_maps_distance_api_key',
-        'distance_api_key',
-        'maps_api_key',
-        'Maps Distance API key',
-        'Maps Distance API Key',
+    $api_key = $this->mrm_find_secret_value_by_normalized_key(
+        $secret,
+        array(
+            'maps_distance_api_key',
+            'google_maps_distance_api_key',
+            'distance_api_key',
+            'maps_api_key',
+            'Maps Distance API key',
+            'Maps Distance API Key',
+            'maps distance api key',
+            'google maps distance api key',
+            'google maps api key',
+        )
     );
 
-    foreach ( $possible_keys as $key ) {
-        if ( isset( $secret[ $key ] ) && is_string( $secret[ $key ] ) && trim( $secret[ $key ] ) !== '' ) {
-            return trim( (string) $secret[ $key ] );
-        }
+    if ( $api_key !== '' ) {
+        return $api_key;
     }
 
     $this->mrm_aws_debug_log( 'Google Maps Distance API key was not found in scheduler AWS secret.', array(
@@ -7855,6 +7954,62 @@ protected function mrm_get_google_maps_distance_api_key() {
 
 protected function mrm_google_maps_distance_api_key_is_configured() {
     return $this->mrm_get_google_maps_distance_api_key() !== '';
+}
+
+protected function mrm_get_google_maps_distance_secret_status() {
+    $secret_id = defined( 'MRM_SECRET_GOOGLE_SCHEDULER' )
+        ? MRM_SECRET_GOOGLE_SCHEDULER
+        : 'lowbrass/google/scheduler';
+
+    $cache_key = 'mrm_secret_google_scheduler_maps_distance_v2';
+
+    if ( isset( $_GET['mrm_refresh_maps_secret'] ) && current_user_can( 'manage_options' ) ) {
+        delete_transient( $cache_key );
+        delete_transient( 'mrm_secret_google_scheduler_v5' );
+    }
+
+    $secret = $this->mrm_get_secret_json( $secret_id, $cache_key );
+
+    $keys = array();
+    $nested_keys = array();
+
+    if ( is_array( $secret ) ) {
+        $keys = array_keys( $secret );
+
+        foreach ( $secret as $raw_key => $value ) {
+            if ( is_array( $value ) ) {
+                foreach ( array_keys( $value ) as $nested_key ) {
+                    $nested_keys[] = (string) $raw_key . '.' . (string) $nested_key;
+                }
+            }
+        }
+    }
+
+    $api_key = '';
+    if ( is_array( $secret ) ) {
+        $api_key = $this->mrm_find_secret_value_by_normalized_key(
+            $secret,
+            array(
+                'maps_distance_api_key',
+                'google_maps_distance_api_key',
+                'distance_api_key',
+                'maps_api_key',
+                'Maps Distance API key',
+                'Maps Distance API Key',
+                'maps distance api key',
+                'google maps distance api key',
+                'google maps api key',
+            )
+        );
+    }
+
+    return array(
+        'secret_id'       => $secret_id,
+        'loaded'          => is_array( $secret ),
+        'configured'      => $api_key !== '',
+        'top_level_keys'  => $keys,
+        'nested_keys'     => $nested_keys,
+    );
 }
 
 protected function mrm_get_effective_calculations_environment_mode() {
