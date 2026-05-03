@@ -7909,8 +7909,8 @@ protected function mrm_get_google_service_account_json() {
                     <tr><td>Gross Revenue</td><td><?php echo esc_html( number_format( (float) $overview['gross_revenue'], 2 ) ); ?></td></tr>
                     <tr><td>Refunds</td><td><?php echo esc_html( number_format( (float) $overview['refunds'], 2 ) ); ?></td></tr>
                     <tr><td>Estimated Stripe Fees</td><td><?php echo esc_html( number_format( (float) $overview['stripe_fees'], 2 ) ); ?> <small>Calculated from your saved Stripe fee settings, not exact Stripe balance transactions.</small></td></tr>
-                    <tr><td>Instructor Wages</td><td><?php echo esc_html( number_format( (float) $overview['instructor_wages'], 2 ) ); ?></td></tr>
-                    <tr><td>Composer Wages</td><td><?php echo esc_html( number_format( (float) $overview['composer_wages'], 2 ) ); ?></td></tr>
+                    <tr><td>Paid-Out Instructor Wages</td><td><?php echo esc_html( number_format( (float) $overview['instructor_wages'], 2 ) ); ?></td></tr>
+                    <tr><td>Paid-Out Composer Wages</td><td><?php echo esc_html( number_format( (float) $overview['composer_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Manual Expenses</td><td><?php echo esc_html( number_format( (float) $overview['manual_expenses'], 2 ) ); ?></td></tr>
                     <tr><td>Payroll / W-2 Wages</td><td><?php echo esc_html( number_format( (float) $overview['payroll_wages'], 2 ) ); ?></td></tr>
                     
@@ -7918,9 +7918,11 @@ protected function mrm_get_google_service_account_json() {
                 </tbody>
             </table>
 
-            <h2 style="margin-top:28px;">Instructor Wage Summary</h2>
+            <h2 style="margin-top:28px;">Paid-Out Instructor Wage Summary</h2>
+            <p class="description">This section only includes payout ledger rows marked <code>paid_out</code> during the selected period. Pending or merely transferred amounts are excluded.</p>
             <?php $this->mrm_render_calculations_instructor_table( $instructors ); ?>
-            <h2 style="margin-top:28px;">Composer Sheet Music Wage Summary</h2>
+            <h2 style="margin-top:28px;">Paid-Out Composer Sheet Music Wage Summary</h2>
+            <p class="description">This section only includes composer payout ledger rows marked <code>paid_out</code> during the selected period. Pending subscription/add-on obligations are excluded until actually paid out.</p>
             <?php $this->mrm_render_calculations_composer_table( $composer ); ?>
 
             <h2 style="margin-top:28px;">Payroll / Officer Compensation Summary</h2>
@@ -8081,6 +8083,21 @@ protected function mrm_table_exists( $table ) {
     return ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table );
 }
 
+protected function mrm_paid_out_payout_statuses() {
+    return array( 'paid_out' );
+}
+
+protected function mrm_paid_out_payout_status_sql_list() {
+    $statuses = $this->mrm_paid_out_payout_statuses();
+    $quoted = array();
+
+    foreach ( $statuses as $status ) {
+        $quoted[] = "'" . esc_sql( (string) $status ) . "'";
+    }
+
+    return implode( ',', $quoted );
+}
+
 protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
     $lesson_revenue      = $this->mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter, $environment_mode, 'lesson' );
     $sheet_music_revenue = $this->mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter, $environment_mode, 'sheet_music' );
@@ -8220,14 +8237,16 @@ protected function mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter 
         return 0.0;
     }
 
+    $paid_statuses = $this->mrm_paid_out_payout_status_sql_list();
+
     $sql = $wpdb->prepare(
         "SELECT COALESCE(SUM(net_cents),0)
          FROM {$table}
          WHERE payee_type = %s
            AND environment_mode = %s
-           AND status IN ('pending','transferred','paid','payout_paid')
-           AND created_at >= %s
-           AND created_at <= %s",
+           AND status IN ({$paid_statuses})
+           AND updated_at >= %s
+           AND updated_at <= %s",
         $payee_type,
         $environment_mode,
         $start,
@@ -8352,6 +8371,8 @@ protected function mrm_get_calculations_instructor_summary( $tax_year, $tax_quar
         return array();
     }
 
+    $paid_statuses = $this->mrm_paid_out_payout_status_sql_list();
+
     $join_sql = '';
     $select_instructor_id = "0 AS instructor_id";
     $select_instructor_name = "p.payee_ref AS instructor_name";
@@ -8374,14 +8395,16 @@ protected function mrm_get_calculations_instructor_summary( $tax_year, $tax_quar
             {$select_instructor_email},
             COUNT(*) AS payout_count,
             COALESCE(SUM(p.gross_cents),0) AS gross_cents,
-            COALESCE(SUM(p.net_cents),0) AS net_cents
+            COALESCE(SUM(p.net_cents),0) AS net_cents,
+            MIN(p.updated_at) AS first_paid_at,
+            MAX(p.updated_at) AS last_paid_at
          FROM {$payouts} p
          {$join_sql}
          WHERE p.payee_type = 'instructor'
            AND p.environment_mode = %s
-           AND p.status IN ('pending','transferred','paid','payout_paid')
-           AND p.created_at >= %s
-           AND p.created_at <= %s
+           AND p.status IN ({$paid_statuses})
+           AND p.updated_at >= %s
+           AND p.updated_at <= %s
          GROUP BY instructor_id, p.payee_ref
          ORDER BY net_cents DESC",
         $environment_mode,
@@ -8402,19 +8425,23 @@ protected function mrm_get_calculations_composer_summary( $tax_year, $tax_quarte
         return array();
     }
 
+    $paid_statuses = $this->mrm_paid_out_payout_status_sql_list();
+
     $sql = $wpdb->prepare(
         "SELECT
             COALESCE(payee_ref, 'composer') AS payee_ref,
             COUNT(*) AS payout_count,
             COALESCE(SUM(gross_cents),0) AS gross_cents,
             COALESCE(SUM(net_cents),0) AS net_cents,
+            MIN(updated_at) AS first_paid_at,
+            MAX(updated_at) AS last_paid_at,
             GROUP_CONCAT(DISTINCT notes SEPARATOR '; ') AS notes
          FROM {$payouts}
          WHERE payee_type = 'composer'
            AND environment_mode = %s
-           AND status IN ('pending','transferred','paid','payout_paid')
-           AND created_at >= %s
-           AND created_at <= %s
+           AND status IN ({$paid_statuses})
+           AND updated_at >= %s
+           AND updated_at <= %s
          GROUP BY payee_ref
          ORDER BY net_cents DESC",
         $environment_mode,
@@ -8657,18 +8684,22 @@ protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter
 }
 
 protected function mrm_render_calculations_instructor_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Email</th><th>Payout Entries</th><th>Gross</th><th>Net Wage</th></tr></thead><tbody>';
+    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Email</th><th>Paid-Out Entries</th><th>Gross Paid</th><th>Net Paid / 1099 Amount</th><th>Paid Date Range</th></tr></thead><tbody>';
 
     if ( empty( $rows ) ) {
-        echo '<tr><td colspan="5">No instructor payout data found.</td></tr>';
+        echo '<tr><td colspan="6">No paid-out instructor payout data found for the selected period.</td></tr>';
     } else {
         foreach ( $rows as $row ) {
+            $first_paid = (string) ( $row['first_paid_at'] ?? '' );
+            $last_paid  = (string) ( $row['last_paid_at'] ?? '' );
+
             echo '<tr>';
             echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? 'Unknown instructor' ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
             echo '<td>' . esc_html( (string) ( $row['instructor_email'] ?? '' ) ) . '</td>';
             echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
             echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td><strong>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</strong></td>';
+            echo '<td>' . esc_html( trim( $first_paid . ( $last_paid && $last_paid !== $first_paid ? ' – ' . $last_paid : '' ) ) ) . '</td>';
             echo '</tr>';
         }
     }
@@ -8677,17 +8708,21 @@ protected function mrm_render_calculations_instructor_table( $rows ) {
 }
 
 protected function mrm_render_calculations_composer_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Composer Payee</th><th>Payout Entries</th><th>Gross</th><th>Net Composer Wage</th><th>Notes</th></tr></thead><tbody>';
+    echo '<table class="widefat striped"><thead><tr><th>Composer Payee</th><th>Paid-Out Entries</th><th>Gross Paid</th><th>Net Paid / 1099 Amount</th><th>Paid Date Range</th><th>Notes</th></tr></thead><tbody>';
 
     if ( empty( $rows ) ) {
-        echo '<tr><td colspan="5">No composer sheet music payout data found.</td></tr>';
+        echo '<tr><td colspan="6">No paid-out composer payout data found for the selected period.</td></tr>';
     } else {
         foreach ( $rows as $row ) {
+            $first_paid = (string) ( $row['first_paid_at'] ?? '' );
+            $last_paid  = (string) ( $row['last_paid_at'] ?? '' );
+
             echo '<tr>';
             echo '<td>' . esc_html( (string) ( $row['payee_ref'] ?? 'composer' ) ) . '</td>';
             echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
             echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
-            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td><strong>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</strong></td>';
+            echo '<td>' . esc_html( trim( $first_paid . ( $last_paid && $last_paid !== $first_paid ? ' – ' . $last_paid : '' ) ) ) . '</td>';
             echo '<td>' . esc_html( mb_strimwidth( (string) ( $row['notes'] ?? '' ), 0, 120, '…' ) ) . '</td>';
             echo '</tr>';
         }
@@ -9137,9 +9172,11 @@ public function handle_mrm_clear_all_mileage_cache() {
         'instructor_id',
         'instructor_name',
         'instructor_email',
-        'payout_entries',
-        'gross',
-        'net_wage'
+        'paid_out_entries',
+        'gross_paid',
+        'net_paid_1099_amount',
+        'first_paid_at',
+        'last_paid_at'
     ) );
 
     foreach ( $rows as $row ) {
@@ -9150,6 +9187,8 @@ public function handle_mrm_clear_all_mileage_cache() {
             (string) ( $row['payout_count'] ?? 0 ),
             number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2, '.', '' ),
             number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2, '.', '' ),
+            (string) ( $row['first_paid_at'] ?? '' ),
+            (string) ( $row['last_paid_at'] ?? '' ),
         ) );
     }
 
