@@ -7760,6 +7760,13 @@ protected function mrm_get_google_service_account_json() {
         ?>
         <div class="wrap">
             <h1>Calculations</h1>
+            <?php if ( isset( $_GET['mileage_recalculated'] ) ) : ?>
+                <div class="notice notice-success"><p>Mileage cache was recalculated for the selected period.</p></div>
+            <?php endif; ?>
+
+            <?php if ( isset( $_GET['mileage_error'] ) ) : ?>
+                <div class="notice notice-error"><p>Mileage recalculation could not run: <?php echo esc_html( sanitize_text_field( (string) $_GET['mileage_error'] ) ); ?></p></div>
+            <?php endif; ?>
             <?php
             echo '<p><strong>Accounting Data Source:</strong> <span style="color:#166534;">Live records only</span></p>';
 
@@ -8583,6 +8590,277 @@ protected function mrm_render_calculations_mileage_table( $rows ) {
         echo '</tbody></table>';
     }
 
+
+protected function mrm_render_calculations_expense_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Category</th><th>Entries</th><th>Total Amount</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="3">No manual expense data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['category'] ?? 'Uncategorized' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['entry_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total_amount'] ?? 0 ), 2 ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_format_instructor_origin_address( $lesson ) {
+    $parts = array(
+        trim( (string) ( $lesson['instructor_address'] ?? '' ) ),
+        trim( (string) ( $lesson['instructor_city'] ?? '' ) ),
+        trim( (string) ( $lesson['instructor_state'] ?? '' ) ),
+    );
+
+    return trim( implode( ', ', array_filter( $parts ) ) );
+}
+
+protected function mrm_format_lesson_destination_address( $lesson ) {
+    $street = trim( (string) ( $lesson['address'] ?? '' ) );
+    $state = trim( (string) ( $lesson['address_state'] ?? '' ) );
+    $postal = trim( (string) ( $lesson['address_postal'] ?? '' ) );
+
+    $state_postal = trim( $state . ' ' . $postal );
+
+    return trim( implode( ', ', array_filter( array( $street, $state_postal ) ) ) );
+}
+
+protected function mrm_calculate_driving_distance_miles( $origin_address, $destination_address ) {
+    $api_key = $this->mrm_get_google_maps_distance_api_key();
+
+    if ( $api_key === '' ) {
+        return new WP_Error( 'missing_api_key', 'Google Maps Distance API key is missing from AWS Secrets Manager.' );
+    }
+
+    $url = add_query_arg(
+        array(
+            'origins'      => $origin_address,
+            'destinations' => $destination_address,
+            'units'        => 'imperial',
+            'key'          => $api_key,
+        ),
+        'https://maps.googleapis.com/maps/api/distancematrix/json'
+    );
+
+    $response = wp_remote_get( $url, array( 'timeout' => 15 ) );
+
+    if ( is_wp_error( $response ) ) {
+        return $response;
+    }
+
+    $http_code = (int) wp_remote_retrieve_response_code( $response );
+    $body = wp_remote_retrieve_body( $response );
+    $json = json_decode( $body, true );
+
+    if ( $http_code < 200 || $http_code >= 300 ) {
+        return new WP_Error(
+            'distance_http_error',
+            'Google Distance Matrix HTTP error ' . $http_code . '.'
+        );
+    }
+
+    if ( ! is_array( $json ) ) {
+        return new WP_Error(
+            'distance_json_error',
+            'Google Distance Matrix returned invalid JSON.'
+        );
+    }
+
+    $top_status = (string) ( $json['status'] ?? '' );
+
+    if ( $top_status !== 'OK' ) {
+        $message = (string) ( $json['error_message'] ?? '' );
+
+        if ( $message === '' ) {
+            $message = 'Google Distance Matrix returned status: ' . $top_status . '.';
+        } else {
+            $message = 'Google Distance Matrix returned status: ' . $top_status . '. ' . $message;
+        }
+
+        return new WP_Error( 'distance_api_error', $message );
+    }
+
+    $element = $json['rows'][0]['elements'][0] ?? null;
+
+    if ( ! is_array( $element ) ) {
+        return new WP_Error(
+            'distance_not_found',
+            'Google Distance Matrix did not return a route element for these addresses.'
+        );
+    }
+
+    $element_status = (string) ( $element['status'] ?? '' );
+
+    if ( $element_status !== 'OK' ) {
+        return new WP_Error(
+            'distance_not_found',
+            'Google Distance Matrix element status: ' . $element_status . '.'
+        );
+    }
+
+    $meters = isset( $element['distance']['value'] ) ? (float) $element['distance']['value'] : 0.0;
+
+    if ( $meters <= 0 ) {
+        return new WP_Error( 'distance_zero', 'Distance returned zero.' );
+    }
+
+    return $meters * 0.000621371;
+}
+
+protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
+    global $wpdb;
+
+    $lesson = $this->get_lesson_with_instructor( $lesson_id );
+
+    if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+        return;
+    }
+
+    if ( ! empty( $lesson['is_online'] ) ) {
+        return;
+    }
+
+    $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return;
+    }
+
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    $origin_address = $this->mrm_format_instructor_origin_address( $lesson );
+    $destination_address = $this->mrm_format_lesson_destination_address( $lesson );
+
+    $start_time = (string) ( $lesson['start_time'] ?? '' );
+    $trip_date = $start_time ? gmdate( 'Y-m-d', strtotime( $start_time ) ) : gmdate( 'Y-m-d' );
+    $tax_year = (int) gmdate( 'Y', strtotime( $trip_date ) );
+
+    $one_way_miles = 0.0;
+    $round_trip_miles = 0.0;
+    $mileage_rate = 0.0;
+    $mileage_deduction = 0.0;
+    $calc_status = 'pending';
+    $calc_source = 'queued';
+    $calc_error_message = '';
+
+    if ( $origin_address === '' || $destination_address === '' ) {
+        $calc_status = 'pending_missing_address';
+        $calc_error_message = 'Missing origin or destination address. Origin: ' . $origin_address . ' | Destination: ' . $destination_address;
+    } else {
+        $distance = $this->mrm_calculate_driving_distance_miles( $origin_address, $destination_address );
+
+        if ( is_wp_error( $distance ) ) {
+            $calc_status = 'pending_' . sanitize_key( $distance->get_error_code() );
+            $calc_error_message = $distance->get_error_message();
+        } else {
+            $one_way_miles = round( (float) $distance, 2 );
+            $round_trip_miles = round( $one_way_miles * 2, 2 );
+            $calc_status = 'calculated';
+            $calc_source = 'google_distance_matrix';
+            $calc_error_message = '';
+        }
+    }
+
+    $wpdb->replace(
+        $table,
+        array(
+            'lesson_id'           => (int) $lesson_id,
+            'instructor_id'       => (int) ( $lesson['instructor_id'] ?? 0 ),
+            'tax_year'            => $tax_year,
+            'environment_mode'    => $environment_mode,
+            'trip_date'           => $trip_date,
+            'origin_address'      => $origin_address,
+            'destination_address' => $destination_address,
+            'one_way_miles'       => $one_way_miles,
+            'round_trip_miles'    => $round_trip_miles,
+            'mileage_rate'        => $mileage_rate,
+            'mileage_deduction'   => $mileage_deduction,
+            'calc_status'         => $calc_status,
+            'calc_source'         => $calc_source,
+            'calc_error_message'  => $calc_error_message,
+            'created_at'          => current_time( 'mysql' ),
+            'updated_at'          => current_time( 'mysql' ),
+        ),
+        array(
+            '%d','%d','%d','%s','%s','%s','%s','%f','%f','%f','%f','%s','%s','%s','%s','%s'
+        )
+    );
+}
+
+
+    public function handle_mrm_recalculate_mileage_cache() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_recalculate_mileage_cache' );
+
+    global $wpdb;
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+    $lessons = $wpdb->prefix . 'mrm_lessons';
+    $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $lessons ) ) {
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_error=missing_lessons_table' ) );
+        exit;
+    }
+
+    if ( ! $this->mrm_table_exists( $mileage ) ) {
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_error=missing_mileage_table' ) );
+        exit;
+    }
+
+    // Clear selected-period mileage rows before rebuilding them so old pending rows do not remain mixed with new results.
+    $wpdb->query(
+        $wpdb->prepare(
+            "DELETE FROM {$mileage}
+             WHERE trip_date >= %s
+               AND trip_date <= %s
+               AND environment_mode = %s",
+            substr( $start, 0, 10 ),
+            substr( $end, 0, 10 ),
+            $environment_mode
+        )
+    );
+
+    $rows = $wpdb->get_results(
+        $wpdb->prepare(
+            "SELECT id
+             FROM {$lessons}
+             WHERE is_online = 0
+               AND is_consultation = 0
+               AND start_time >= %s
+               AND start_time <= %s
+               AND status IN ('scheduled','completed','paid','delivered')
+             ORDER BY start_time ASC",
+            $start,
+            $end
+        ),
+        ARRAY_A
+    );
+
+    foreach ( (array) $rows as $row ) {
+        $this->mrm_queue_mileage_calculation_for_lesson( (int) $row['id'] );
+    }
+
+    wp_safe_redirect(
+        admin_url(
+            'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_recalculated=1'
+        )
+    );
+    exit;
+}
+
     protected function mrm_write_csv_row( $handle, $row ) {
         if ( is_resource( $handle ) ) {
             fputcsv( $handle, $row );
@@ -8652,7 +8930,8 @@ protected function mrm_render_calculations_mileage_table( $rows ) {
         'instructor_name',
         'in_person_lesson_count',
         'total_round_trip_miles',
-        'statuses'
+        'statuses',
+        'details'
     ) );
 
     foreach ( $rows as $row ) {
@@ -8662,6 +8941,7 @@ protected function mrm_render_calculations_mileage_table( $rows ) {
             (string) ( $row['lesson_count'] ?? 0 ),
             number_format( (float) ( $row['total_miles'] ?? 0 ), 2, '.', '' ),
             (string) ( $row['calc_statuses'] ?? '' ),
+            (string) ( $row['calc_error_messages'] ?? '' ),
         ) );
     }
 
