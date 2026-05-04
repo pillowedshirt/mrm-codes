@@ -2013,6 +2013,7 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_post_mrm_export_1099_support', array( $this, 'handle_mrm_export_1099_support' ) );
         add_action( 'admin_post_mrm_export_mileage_summary', array( $this, 'handle_mrm_export_mileage_summary' ) );
         add_action( 'admin_post_mrm_export_calculations_summary', array( $this, 'handle_mrm_export_calculations_summary' ) );
+        add_action( 'admin_post_mrm_export_1099_nec_pdf_zip', array( $this, 'handle_mrm_export_1099_nec_pdf_zip' ) );
         add_action( 'admin_post_mrm_recalculate_mileage_cache', array( $this, 'handle_mrm_recalculate_mileage_cache' ) );
         add_action( 'admin_post_mrm_clear_mileage_cache_for_period', array( $this, 'handle_mrm_clear_mileage_cache_for_period' ) );
         add_action( 'admin_post_mrm_clear_all_mileage_cache', array( $this, 'handle_mrm_clear_all_mileage_cache' ) );
@@ -7900,12 +7901,19 @@ protected function mrm_get_google_service_account_json() {
             </form>
 
             <p>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_support&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_1099_support' ) ); ?>">Export Instructor CSV</a>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_mileage_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_mileage_summary' ) ); ?>">Export Mileage CSV</a>
-                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_calculations_summary&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_calculations_summary' ) ); ?>">Export Annual Summary CSV</a>
+                <a class="button button-primary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_nec_pdf_zip&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_1099_nec_pdf_zip' ) ); ?>">
+                    Export 1099-NEC PDF ZIP
+                </a>
+
                 <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_recalculate_mileage_cache&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_recalculate_mileage_cache' ) ); ?>">Recalculate Mileage</a>
+
                 <a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_clear_mileage_cache_for_period&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_clear_mileage_cache_for_period' ) ); ?>" onclick="return confirm('Clear mileage cache rows for the selected year/quarter? You can rebuild them with Recalculate Mileage.');">Clear Mileage Cache</a>
-            <a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_clear_all_mileage_cache' ), 'mrm_clear_all_mileage_cache' ) ); ?>" onclick="return confirm('This will clear ALL instructor mileage cache rows for all years. You can rebuild selected years with Recalculate Mileage. Continue?');">Clear All Mileage Cache</a>
+
+                <a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_clear_all_mileage_cache' ), 'mrm_clear_all_mileage_cache' ) ); ?>" onclick="return confirm('This will clear ALL instructor mileage cache rows for all years. You can rebuild selected years with Recalculate Mileage. Continue?');">Clear All Mileage Cache</a>
+            </p>
+
+            <p class="description">
+                The 1099 ZIP export includes only payout ledger rows marked <code>paid_out</code> during the selected period. Mileage remains separate and is not included as nonemployee compensation.
             </p>
 
             <h2>Overview</h2>
@@ -9157,6 +9165,201 @@ public function handle_mrm_clear_all_mileage_cache() {
         if ( is_resource( $handle ) ) {
             fputcsv( $handle, $row );
         }
+    }
+
+
+    protected function mrm_1099_period_label( $tax_year, $tax_quarter = 0 ) {
+        $tax_year = max( 2020, min( 2099, (int) $tax_year ) );
+        $tax_quarter = (int) $tax_quarter;
+
+        if ( $tax_quarter >= 1 && $tax_quarter <= 4 ) {
+            return 'Tax Year ' . $tax_year . ' Q' . $tax_quarter;
+        }
+
+        return 'Tax Year ' . $tax_year . ' Full Year';
+    }
+
+    protected function mrm_sanitize_1099_filename_part( $value ) {
+        $value = sanitize_file_name( strtolower( (string) $value ) );
+        $value = preg_replace( '/[^a-z0-9\-_]+/', '-', $value );
+        $value = trim( $value, '-_' );
+
+        return $value !== '' ? $value : 'payee';
+    }
+
+    protected function mrm_load_tcpdf_for_1099_export() {
+        $autoload = plugin_dir_path( __FILE__ ) . 'composer/vendor/autoload.php';
+
+        if ( ! file_exists( $autoload ) ) {
+            wp_die( esc_html( "TCPDF is not installed in the plugin-local Composer folder. Expected autoload file: {$autoload}. Install it with: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require tecnickcom/tcpdf" ) );
+        }
+
+        require_once $autoload;
+
+        if ( ! class_exists( 'TCPDF' ) ) {
+            wp_die( esc_html( "TCPDF autoload file was found, but the TCPDF class is unavailable. Check the plugin-local Composer install at: {$autoload}" ) );
+        }
+    }
+
+    protected function mrm_create_1099_export_workspace() {
+        $upload = wp_upload_dir();
+        if ( ! empty( $upload['error'] ) ) {
+            wp_die( esc_html( 'Unable to access the WordPress uploads directory: ' . $upload['error'] ) );
+        }
+        $base_dir = trailingslashit( $upload['basedir'] ) . 'mrm-temp-1099-exports';
+        $work_dir = trailingslashit( $base_dir ) . 'export-' . gmdate( 'Ymd-His' ) . '-' . wp_generate_password( 8, false, false );
+        if ( ! wp_mkdir_p( $work_dir ) ) {
+            wp_die( esc_html( 'Unable to create temporary 1099 export folder under wp-content/uploads.' ) );
+        }
+        return $work_dir;
+    }
+
+    protected function mrm_cleanup_1099_export_path( $path ) {
+        $path = (string) $path;
+        if ( $path === '' || ! file_exists( $path ) ) { return; }
+        if ( is_file( $path ) || is_link( $path ) ) { @unlink( $path ); return; }
+        if ( is_dir( $path ) ) {
+            $items = scandir( $path );
+            if ( is_array( $items ) ) {
+                foreach ( $items as $item ) {
+                    if ( $item === '.' || $item === '..' ) { continue; }
+                    $this->mrm_cleanup_1099_export_path( trailingslashit( $path ) . $item );
+                }
+            }
+            @rmdir( $path );
+        }
+    }
+
+    protected function mrm_stream_1099_zip_and_cleanup( $zip_path, $download_name, $workspace ) {
+        if ( ! file_exists( $zip_path ) ) {
+            $this->mrm_cleanup_1099_export_path( $workspace );
+            wp_die( esc_html( 'The 1099 ZIP file could not be created.' ) );
+        }
+        while ( ob_get_level() > 0 ) { ob_end_clean(); }
+        ignore_user_abort( true );
+        nocache_headers();
+        header( 'Content-Type: application/zip' );
+        header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( $download_name ) . '"' );
+        header( 'Content-Length: ' . filesize( $zip_path ) );
+        header( 'X-Content-Type-Options: nosniff' );
+        readfile( $zip_path );
+        $this->mrm_cleanup_1099_export_path( $workspace );
+        exit;
+    }
+
+    protected function mrm_get_single_composer_1099_profile() {
+        global $wpdb;
+        $profiles = $wpdb->prefix . 'mrm_tax_payee_profiles';
+        if ( ! $this->mrm_table_exists( $profiles ) ) {
+            return array();
+        }
+        $rows = $wpdb->get_results( "SELECT * FROM {$profiles} WHERE payee_type = 'composer' AND is_1099_eligible = 1 AND is_employee = 0 ORDER BY id ASC", ARRAY_A );
+        if ( ! is_array( $rows ) || count( $rows ) !== 1 ) {
+            return array();
+        }
+        return $rows[0];
+    }
+
+    protected function mrm_get_paid_out_1099_payees( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+        return array_merge(
+            (array) $this->mrm_get_calculations_instructor_summary( $tax_year, $tax_quarter, $environment_mode ),
+            (array) $this->mrm_get_calculations_composer_summary( $tax_year, $tax_quarter, $environment_mode )
+        );
+    }
+
+    protected function mrm_write_1099_summary_csv( $csv_path, $payees, $tax_year, $tax_quarter ) {
+        $out = fopen( $csv_path, 'w' );
+        if ( ! $out ) {
+            wp_die( esc_html( 'Unable to create summary.csv for the 1099 ZIP export.' ) );
+        }
+        $this->mrm_write_csv_row( $out, array( 'tax_year', 'period', 'payee_type', 'payee_key', 'display_name', 'legal_name', 'email', 'address', 'city', 'state', 'zip_code', 'tin_last4', 'w9_received', 'w9_received_date', 'payout_count', 'gross_paid', 'net_paid_1099_amount', 'first_paid_at', 'last_paid_at', 'payout_ledger_ids', 'source_refs' ) );
+        foreach ( (array) $payees as $payee ) {
+            $this->mrm_write_csv_row( $out, array( (string) $tax_year, $this->mrm_1099_period_label( $tax_year, $tax_quarter ), (string) ( $payee['payee_type'] ?? '' ), (string) ( $payee['payee_key'] ?? '' ), (string) ( $payee['display_name'] ?? '' ), (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? '' ) ), (string) ( $payee['email'] ?? '' ), (string) ( $payee['address'] ?? '' ), (string) ( $payee['city'] ?? '' ), (string) ( $payee['state'] ?? '' ), (string) ( $payee['zip_code'] ?? '' ), (string) ( $payee['tin_last4'] ?? '' ), ! empty( $payee['w9_received'] ) ? 'yes' : 'no', (string) ( $payee['w9_received_date'] ?? '' ), (string) ( $payee['payout_count'] ?? 0 ), number_format( ( (int) ( $payee['gross_cents'] ?? 0 ) ) / 100, 2, '.', '' ), number_format( ( (int) ( $payee['net_cents'] ?? 0 ) ) / 100, 2, '.', '' ), (string) ( $payee['first_paid_at'] ?? '' ), (string) ( $payee['last_paid_at'] ?? '' ), (string) ( $payee['payout_ledger_ids'] ?? '' ), (string) ( $payee['source_refs'] ?? '' ) ) );
+        }
+        fclose( $out );
+    }
+
+    protected function mrm_write_1099_readme( $readme_path, $payees, $tax_year, $tax_quarter ) {
+        $lines = array( 'Low Brass Lessons — 1099-NEC Preparation Export', 'Generated: ' . current_time( 'mysql' ), 'Period: ' . $this->mrm_1099_period_label( $tax_year, $tax_quarter ), '', 'IMPORTANT IRS FILING CAVEAT', 'These PDFs are preparation/draft copies only. They are not official IRS scannable Copy A forms and should not be treated as guaranteed IRS-upload-ready forms.', 'Use these files to prepare information for your accountant, IRIS, approved tax software, payroll/tax filing software, or official IRS/state filing workflow.', '', 'INCLUSION RULES', '- Included only payout ledger rows where status = paid_out.', '- Period filtering uses payout ledger updated_at, which represents the paid-out completion update in the current workflow.', '- Included payee types: instructor and composer.', '- Amount used for 1099 compensation: net_cents actually paid to the contractor.', '- Mileage is excluded from nonemployee compensation.', '', 'FILES', '- summary.csv contains the source totals and payout ledger IDs.', '- Each PDF is a preparation copy for one payee.', '', 'PAYEE COUNT', (string) count( (array) $payees ) );
+        file_put_contents( $readme_path, implode( "\n", $lines ) . "\n" );
+    }
+
+    protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter ) {
+        $pdf = new TCPDF( 'P', 'mm', 'LETTER', true, 'UTF-8', false );
+        $pdf->SetCreator( 'Low Brass Lessons / MRM Scheduler' );
+        $pdf->SetAuthor( 'Low Brass Lessons' );
+        $pdf->SetTitle( '1099-NEC Preparation Copy' );
+        $pdf->SetMargins( 14, 14, 14 );
+        $pdf->SetAutoPageBreak( true, 14 );
+        $pdf->AddPage();
+        $amount = number_format( ( (int) ( $payee['net_cents'] ?? 0 ) ) / 100, 2, '.', ',' );
+        $html = '<h1>1099-NEC Preparation Worksheet</h1><p><strong>' . esc_html( $this->mrm_1099_period_label( $tax_year, $tax_quarter ) ) . '</strong></p><p><strong>Payee:</strong> ' . esc_html( (string) ( $payee['display_name'] ?? '' ) ) . '</p><p><strong>Box 1 Nonemployee compensation:</strong> $' . esc_html( $amount ) . '</p><p>DRAFT / PREPARATION COPY — NOT AN OFFICIAL IRS SCANNABLE FORM</p>';
+        $pdf->writeHTML( $html, true, false, true, false, '' );
+        $pdf->Output( $pdf_path, 'F' );
+    }
+
+    public function handle_mrm_export_1099_nec_pdf_zip() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( esc_html( 'Not allowed.' ) );
+        }
+
+        check_admin_referer( 'mrm_export_1099_nec_pdf_zip' );
+
+        if ( ! class_exists( 'ZipArchive' ) ) {
+            wp_die( esc_html( 'The PHP ZipArchive extension is unavailable. Ask your host to enable the PHP zip extension before using the 1099 PDF ZIP export.' ) );
+        }
+
+        $this->mrm_load_tcpdf_for_1099_export();
+
+        $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+        $tax_year = max( 2020, min( 2099, $tax_year ) );
+
+        $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+        if ( $tax_quarter < 0 || $tax_quarter > 4 ) {
+            $tax_quarter = 0;
+        }
+
+        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+        $payees = $this->mrm_get_paid_out_1099_payees( $tax_year, $tax_quarter, $environment_mode );
+        $workspace = $this->mrm_create_1099_export_workspace();
+        $period_slug = $tax_quarter > 0 ? ( 'q' . $tax_quarter ) : 'full-year';
+        $zip_name = 'low-brass-lessons-1099-nec-preparation-' . $tax_year . '-' . $period_slug . '.zip';
+        $zip_path = trailingslashit( $workspace ) . $zip_name;
+        $summary_path = trailingslashit( $workspace ) . 'summary.csv';
+        $readme_path  = trailingslashit( $workspace ) . 'README.txt';
+        $this->mrm_write_1099_summary_csv( $summary_path, $payees, $tax_year, $tax_quarter );
+        $this->mrm_write_1099_readme( $readme_path, $payees, $tax_year, $tax_quarter );
+
+        $pdf_paths = array();
+        foreach ( (array) $payees as $payee ) {
+            $net_cents = (int) ( $payee['net_cents'] ?? 0 );
+            if ( $net_cents <= 0 ) { continue; }
+            $name_part = $this->mrm_sanitize_1099_filename_part((string) ( $payee['legal_name'] ?? $payee['display_name'] ?? $payee['payee_key'] ?? 'payee' ));
+            $key_part = $this->mrm_sanitize_1099_filename_part( (string) ( $payee['payee_key'] ?? 'payee' ) );
+            $pdf_name = '1099-nec-preparation-' . $tax_year . '-' . $period_slug . '-' . $name_part . '-' . $key_part . '.pdf';
+            $pdf_path = trailingslashit( $workspace ) . $pdf_name;
+            $this->mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter );
+            if ( file_exists( $pdf_path ) ) { $pdf_paths[] = $pdf_path; }
+        }
+
+        $zip = new ZipArchive();
+        $opened = $zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE );
+        if ( $opened !== true ) {
+            $this->mrm_cleanup_1099_export_path( $workspace );
+            wp_die( esc_html( 'Unable to create 1099 ZIP file. ZipArchive returned error code: ' . (string) $opened ) );
+        }
+        $zip->addFile( $readme_path, 'README.txt' );
+        $zip->addFile( $summary_path, 'summary.csv' );
+        foreach ( $pdf_paths as $pdf_path ) { $zip->addFile( $pdf_path, basename( $pdf_path ) ); }
+        if ( empty( $pdf_paths ) ) {
+            $no_payees_path = trailingslashit( $workspace ) . 'NO-PAID-OUT-1099-PAYEES.txt';
+            file_put_contents($no_payees_path,"No paid-out instructor or composer payees were found for {$this->mrm_1099_period_label( $tax_year, $tax_quarter )}.
+Only payout ledger rows with status = paid_out and updated_at inside the selected period are included.
+");
+            $zip->addFile( $no_payees_path, 'NO-PAID-OUT-1099-PAYEES.txt' );
+        }
+        $zip->close();
+        $this->mrm_stream_1099_zip_and_cleanup( $zip_path, $zip_name, $workspace );
     }
 
     public function handle_mrm_export_1099_support() {
