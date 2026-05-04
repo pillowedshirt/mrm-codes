@@ -9504,7 +9504,117 @@ Only payout ledger rows with status = paid_out and updated_at inside the selecte
             'mrm-calculations',
             array( $this, 'render_calculations_settings_page' )
         );
+        add_submenu_page(
+            'mrm-scheduler',
+            'Contractor Tax Profiles',
+            'Contractor Tax Profiles',
+            'manage_options',
+            'mrm-contractor-tax-profiles',
+            array( $this, 'render_contractor_tax_profiles_page' )
+        );
     }
+
+protected function mrm_ensure_contractor_tax_profile_schema() {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_payee_profiles';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        self::install_or_upgrade();
+    }
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return false;
+    }
+
+    $existing = $wpdb->get_col( "DESC {$table}", 0 );
+    $existing = is_array( $existing ) ? $existing : array();
+
+    $columns = array(
+        'business_name'                => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'tax_classification'           => "VARCHAR(60) NOT NULL DEFAULT ''",
+        'tax_classification_other'     => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'mailing_address_1'            => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'mailing_address_2'            => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'mailing_city'                 => "VARCHAR(100) NOT NULL DEFAULT ''",
+        'mailing_state'                => "VARCHAR(40) NOT NULL DEFAULT ''",
+        'mailing_postal_code'          => "VARCHAR(30) NOT NULL DEFAULT ''",
+        'mailing_country'              => "VARCHAR(80) NOT NULL DEFAULT 'US'",
+        'tin_type'                     => "VARCHAR(20) NOT NULL DEFAULT ''",
+        'backup_withholding_required'  => "TINYINT(1) NOT NULL DEFAULT 0",
+        'backup_withholding_cents'     => "BIGINT NOT NULL DEFAULT 0",
+        'w9_file_note'                 => "VARCHAR(255) NOT NULL DEFAULT ''",
+        'exclude_from_1099'            => "TINYINT(1) NOT NULL DEFAULT 0",
+        'composer_key'                 => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'connected_account_id'         => "VARCHAR(190) NOT NULL DEFAULT ''",
+    );
+
+    foreach ( $columns as $column => $definition ) {
+        if ( ! in_array( $column, $existing, true ) ) {
+            $wpdb->query( "ALTER TABLE {$table} ADD {$column} {$definition}" );
+        }
+    }
+
+    $indexes = array(
+        'composer_key'         => 'composer_key',
+        'connected_account_id' => 'connected_account_id',
+        'exclude_from_1099'    => 'exclude_from_1099',
+    );
+
+    foreach ( $indexes as $index_name => $column_name ) {
+        $has_index = $wpdb->get_var(
+            $wpdb->prepare(
+                "SHOW INDEX FROM {$table} WHERE Key_name = %s",
+                $index_name
+            )
+        );
+
+        if ( ! $has_index ) {
+            $wpdb->query( "ALTER TABLE {$table} ADD KEY {$index_name} ({$column_name})" );
+        }
+    }
+
+    return true;
+}
+
+protected function mrm_1099_tax_classification_options() {
+    return array(
+        ''                          => 'Select from W-9',
+        'individual_sole_prop'      => 'Individual / Sole Proprietor',
+        'single_member_llc'         => 'Single-Member LLC',
+        'c_corporation'             => 'C Corporation',
+        's_corporation'             => 'S Corporation',
+        'partnership'               => 'Partnership',
+        'trust_estate'              => 'Trust/Estate',
+        'llc_c_corporation'         => 'LLC taxed as C Corporation',
+        'llc_s_corporation'         => 'LLC taxed as S Corporation',
+        'llc_partnership'           => 'LLC taxed as Partnership',
+        'other'                     => 'Other',
+    );
+}
+
+protected function mrm_1099_tin_type_options() { return array(); }
+
+protected function mrm_get_1099_payer_profile() { return array(); }
+
+protected function mrm_sanitize_1099_payer_profile( $raw ) { return array(); }
+
+protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_instructor_id = 0 ) { return array(); }
+
+protected function mrm_upsert_tax_payee_profile( $data ) { return false; }
+
+protected function mrm_get_tax_profile_for_instructor( $instructor_id ) { return array(); }
+
+protected function mrm_get_composer_connected_account_hint() { return ''; }
+
+protected function mrm_get_composer_tax_profile() { return array(); }
+
+protected function mrm_handle_contractor_tax_profiles_save() { return; }
+
+protected function mrm_render_tax_profile_card( $field_key, $profile, $context ) {}
+
+public function render_contractor_tax_profiles_page() {}
+
 
     public function render_admin_instructors_page() {
         if ( ! current_user_can( self::CAPABILITY ) ) wp_die( 'You do not have permission to access this page.' );
