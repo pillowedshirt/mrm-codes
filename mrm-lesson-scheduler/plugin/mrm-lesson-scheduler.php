@@ -9244,64 +9244,75 @@ public function handle_mrm_clear_all_mileage_cache() {
         return $template_path;
     }
 
-    protected function mrm_1099_pdf_clean_text( $value ) {
-        $value = (string) $value;
-        $value = html_entity_decode( $value, ENT_QUOTES, 'UTF-8' );
-        $value = preg_replace( '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $value );
-        return trim( $value );
-    }
-
     protected function mrm_1099_format_money_from_cents( $cents ) {
         $cents = max( 0, (int) $cents );
         return number_format( $cents / 100, 2, '.', ',' );
-    }
-
-    protected function mrm_1099_format_tin_from_last4( $tin_type, $last4 ) {
-        $last4 = preg_replace( '/[^0-9]/', '', (string) $last4 );
-        $last4 = substr( $last4, -4 );
-        if ( $last4 === '' ) { return ''; }
-        $tin_type = strtolower( (string) $tin_type );
-        if ( $tin_type === 'ein' ) { return '**-***' . $last4; }
-        return '***-**-' . $last4;
-    }
-
-    protected function mrm_1099_stamp_pdf_rect( $pdf, $rect, $text, $font_size = 8, $align = 'L' ) {
-        $text = $this->mrm_1099_pdf_clean_text( $text );
-        if ( $text === '' ) { return; }
-        $page_height = 792;
-        $x = (float) $rect[0] + 1.5;
-        $y = $page_height - (float) $rect[3] + 1.0;
-        $w = max( 1, (float) $rect[2] - (float) $rect[0] - 3.0 );
-        $h = max( 1, (float) $rect[3] - (float) $rect[1] - 1.0 );
-        $pdf->SetFont( 'helvetica', '', $font_size );
-        $pdf->SetTextColor( 0, 0, 0 );
-        $pdf->SetXY( $x, $y );
-        $pdf->MultiCell( $w, $h, $text, 0, $align, false, 1, '', '', true, 0, false, true, $h, 'M', true );
     }
 
     protected function mrm_build_1099_nec_template_values( $payee, $tax_year ) {
         $payer = $this->mrm_get_1099_payer_profile();
         $payer_legal = (string) ( $payer['legal_name'] ?? '' );
         $payer_trade = (string) ( $payer['trade_name'] ?? '' );
-        $payer_name = ( $payer_legal !== '' && $payer_trade !== '' && strtolower( $payer_legal ) !== strtolower( $payer_trade ) ) ? $payer_legal . "\n" . $payer_trade : ( $payer_legal !== '' ? $payer_legal : $payer_trade );
-        $payer_street = trim( (string) ( $payer['mailing_address_1'] ?? '' ) . ' ' . (string) ( $payer['mailing_address_2'] ?? '' ) );
+        if ( $payer_legal !== '' && $payer_trade !== '' && strtolower( $payer_legal ) !== strtolower( $payer_trade ) ) {
+            $payer_name = $payer_legal . "\n" . $payer_trade;
+        } else {
+            $payer_name = $payer_legal !== '' ? $payer_legal : $payer_trade;
+        }
         $recipient_legal = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? '' ) );
         $recipient_business = (string) ( $payee['business_name'] ?? '' );
-        $recipient_name = ( $recipient_business !== '' && strtolower( $recipient_business ) !== strtolower( $recipient_legal ) ) ? trim( $recipient_legal . "\n" . $recipient_business ) : $recipient_legal;
+        if ( $recipient_business !== '' && strtolower( $recipient_business ) !== strtolower( $recipient_legal ) ) {
+            $recipient_name = trim( $recipient_legal . "\n" . $recipient_business );
+        } else {
+            $recipient_name = $recipient_legal;
+        }
         $payer_state = strtoupper( (string) ( $payer['mailing_state'] ?? '' ) );
         $recipient_state = strtoupper( (string) ( $payee['mailing_state'] ?? ( $payee['state'] ?? '' ) ) );
         $state_id = (string) ( $payer['state_id_number'] ?? '' );
         $net_cents = (int) ( $payee['net_cents'] ?? 0 );
         $backup_cents = (int) ( $payee['backup_withholding_cents'] ?? 0 );
-        $state_payer_no = ( $recipient_state !== '' || $state_id !== '' ) ? trim( $recipient_state . ' ' . $state_id ) : '';
-        return array( 'calendar_year' => (string) (int) $tax_year, 'payer_name' => $payer_name, 'payer_street' => $payer_street, 'payer_suite' => '', 'payer_city' => (string) ( $payer['mailing_city'] ?? '' ), 'payer_phone' => (string) ( $payer['phone'] ?? '' ), 'payer_state' => $payer_state, 'payer_country' => (string) ( $payer['mailing_country'] ?? 'US' ), 'payer_zip' => (string) ( $payer['mailing_postal_code'] ?? '' ), 'payer_tin' => $this->mrm_1099_format_tin_from_last4( 'ein', (string) ( $payer['ein_last4'] ?? '' ) ), 'recipient_tin' => $this->mrm_1099_format_tin_from_last4( (string) ( $payee['tin_type'] ?? '' ), (string) ( $payee['tin_last4'] ?? '' ) ), 'recipient_name' => $recipient_name, 'recipient_street' => (string) ( $payee['mailing_address_1'] ?? ( $payee['address'] ?? '' ) ), 'recipient_apt' => (string) ( $payee['mailing_address_2'] ?? '' ), 'recipient_city' => (string) ( $payee['mailing_city'] ?? ( $payee['city'] ?? '' ) ), 'recipient_state' => $recipient_state, 'recipient_country' => (string) ( $payee['mailing_country'] ?? 'US' ), 'recipient_zip' => (string) ( $payee['mailing_postal_code'] ?? ( $payee['zip_code'] ?? '' ) ), 'account_number' => (string) ( $payee['payee_key'] ?? '' ), 'box_1a_nec' => $this->mrm_1099_format_money_from_cents( $net_cents ), 'box_1b_cash_tips' => '', 'box_1c_ttoc_1' => '', 'box_1c_ttoc_2' => '', 'box_1d_overtime' => '', 'box_3_golden' => '', 'box_4_federal_withheld' => $backup_cents > 0 ? $this->mrm_1099_format_money_from_cents( $backup_cents ) : '', 'box_5_state_withheld_1' => '', 'box_5_state_withheld_2' => '', 'box_6_state_no_1' => $state_payer_no, 'box_6_state_no_2' => '', 'box_7_state_income_1' => $state_payer_no !== '' ? $this->mrm_1099_format_money_from_cents( $net_cents ) : '', 'box_7_state_income_2' => '' );
+        $state_payer_no = trim( $recipient_state . ' ' . $state_id );
+        return array( 'calendar_year' => (string) (int) $tax_year, 'payer_name' => $payer_name, 'payer_street' => (string) ( $payer['mailing_address_1'] ?? '' ), 'payer_suite' => (string) ( $payer['mailing_address_2'] ?? '' ), 'payer_city' => (string) ( $payer['mailing_city'] ?? '' ), 'payer_phone' => (string) ( $payer['phone'] ?? '' ), 'payer_state' => $payer_state, 'payer_country' => (string) ( $payer['mailing_country'] ?? 'US' ), 'payer_zip' => (string) ( $payer['mailing_postal_code'] ?? '' ), 'payer_tin' => $this->mrm_1099_prefer_full_tin_or_last4( 'ein', (string) ( $payer['ein_full_temp'] ?? '' ), (string) ( $payer['ein_last4'] ?? '' ) ), 'recipient_tin' => $this->mrm_1099_prefer_full_tin_or_last4( (string) ( $payee['tin_type'] ?? '' ), (string) ( $payee['tin_full_temp'] ?? '' ), (string) ( $payee['tin_last4'] ?? '' ) ), 'recipient_name' => $recipient_name, 'recipient_street' => (string) ( $payee['mailing_address_1'] ?? ( $payee['address'] ?? '' ) ), 'recipient_apt' => (string) ( $payee['mailing_address_2'] ?? '' ), 'recipient_city' => (string) ( $payee['mailing_city'] ?? ( $payee['city'] ?? '' ) ), 'recipient_state' => $recipient_state, 'recipient_country' => (string) ( $payee['mailing_country'] ?? 'US' ), 'recipient_zip' => (string) ( $payee['mailing_postal_code'] ?? ( $payee['zip_code'] ?? '' ) ), 'account_number' => (string) ( $payee['payee_key'] ?? '' ), 'box_1a_nec' => $this->mrm_1099_format_money_from_cents( $net_cents ), 'box_1b_cash_tips' => '', 'box_1c_ttoc_1' => '', 'box_1c_ttoc_2' => '', 'box_1d_overtime' => '', 'box_3_golden' => '', 'box_4_federal_withheld' => $backup_cents > 0 ? $this->mrm_1099_format_money_from_cents( $backup_cents ) : '', 'box_5_state_withheld_1' => '', 'box_5_state_withheld_2' => '', 'box_6_state_no_1' => $state_payer_no, 'box_6_state_no_2' => '', 'box_7_state_income_1' => $state_payer_no !== '' ? $this->mrm_1099_format_money_from_cents( $net_cents ) : '', 'box_7_state_income_2' => '' );
+    }
+
+    protected function mrm_stamp_1099_pdf_field( $pdf, $rect, $text, $font_size = 8, $align = 'L' ) {
+        $text = $this->mrm_1099_pdf_text( $text );
+        if ( $text === '' ) { return; }
+        $page_height = 792.0;
+        $left = (float) $rect[0]; $bottom = (float) $rect[1]; $right = (float) $rect[2]; $top = (float) $rect[3];
+        $x = $left + 2.0; $y = $page_height - $top + 2.0; $w = max( 1.0, $right - $left - 4.0 ); $h = max( 1.0, $top - $bottom - 2.0 );
+        $pdf->SetFont( 'helvetica', '', $font_size );
+        $pdf->SetTextColor( 0, 0, 0 );
+        $pdf->SetXY( $x, $y );
+        $pdf->MultiCell( $w, $h, $text, 0, $align, false, 1, '', '', true, 0, false, true, $h, 'M', true );
     }
 
     protected function mrm_stamp_1099_nec_template_copy( $pdf, $values ) {
-        $this->mrm_1099_stamp_pdf_rect( $pdf, array( 417.6, 687.0, 446.4, 696.0 ), $values['calendar_year'], 8, 'C' );
-        $this->mrm_1099_stamp_pdf_rect( $pdf, array( 52.4, 720.0, 294.2, 744.0 ), $values['payer_name'], 7, 'L' );
-        $this->mrm_1099_stamp_pdf_rect( $pdf, array( 309.6, 648.0, 494.8, 660.0 ), $values['box_1a_nec'], 9, 'R' );
-        $this->mrm_1099_stamp_pdf_rect( $pdf, array( 309.6, 468.0, 494.8, 480.0 ), $values['box_4_federal_withheld'], 8, 'R' );
+        $fields = array(
+            array( 'calendar_year', array( 417.6, 687.0, 446.4, 696.0 ), 8, 'C' ),
+            array( 'payer_name', array( 52.4, 720.0, 294.2, 744.0 ), 7, 'L' ),
+            array( 'payer_street', array( 52.4, 696.0, 207.8, 708.0 ), 7, 'L' ),
+            array( 'payer_suite', array( 209.8, 696.0, 294.2, 708.0 ), 7, 'L' ),
+            array( 'payer_city', array( 52.4, 672.0, 207.8, 684.0 ), 7, 'L' ),
+            array( 'payer_phone', array( 209.8, 672.0, 294.2, 684.0 ), 7, 'L' ),
+            array( 'payer_state', array( 52.4, 648.0, 171.8, 660.0 ), 7, 'L' ),
+            array( 'payer_country', array( 173.8, 648.0, 207.8, 660.0 ), 7, 'L' ),
+            array( 'payer_zip', array( 209.8, 648.0, 294.2, 660.0 ), 7, 'L' ),
+            array( 'payer_tin', array( 52.4, 612.0, 171.8, 636.0 ), 9, 'C' ),
+            array( 'recipient_tin', array( 173.8, 612.0, 294.2, 636.0 ), 9, 'C' ),
+            array( 'recipient_name', array( 52.4, 576.0, 294.2, 600.0 ), 7, 'L' ),
+            array( 'recipient_street', array( 52.4, 552.0, 243.8, 564.0 ), 7, 'L' ),
+            array( 'recipient_apt', array( 245.8, 552.0, 294.2, 564.0 ), 7, 'L' ),
+            array( 'recipient_city', array( 52.4, 528.0, 294.2, 540.0 ), 7, 'L' ),
+            array( 'recipient_state', array( 52.4, 504.0, 171.8, 516.0 ), 7, 'L' ),
+            array( 'recipient_country', array( 173.8, 504.0, 207.8, 516.0 ), 7, 'L' ),
+            array( 'recipient_zip', array( 209.8, 504.0, 294.2, 516.0 ), 7, 'L' ),
+            array( 'account_number', array( 52.4, 432.0, 294.2, 456.0 ), 7, 'L' ),
+            array( 'box_1a_nec', array( 309.6, 648.0, 494.8, 660.0 ), 9, 'R' ),
+            array( 'box_4_federal_withheld', array( 309.6, 468.0, 494.8, 480.0 ), 8, 'R' ),
+        );
+        foreach ( $fields as $field ) {
+            $this->mrm_stamp_1099_pdf_field( $pdf, $field[1], isset( $values[ $field[0] ] ) ? $values[ $field[0] ] : '', $field[2], $field[3] );
+        }
     }
 
     protected function mrm_stream_1099_zip_and_cleanup( $zip_path, $download_name, $workspace ) {
@@ -9374,6 +9385,7 @@ public function handle_mrm_clear_all_mileage_cache() {
                     COALESCE(MAX(tp.mailing_country), 'US') AS mailing_country,
                     COALESCE(MAX(tp.tin_type), '') AS tin_type,
                     COALESCE(MAX(tp.tin_last4), '') AS tin_last4,
+                    COALESCE(MAX(tp.tin_full_temp), '') AS tin_full_temp,
                     COALESCE(MAX(tp.w9_received), 0) AS w9_received,
                     MAX(tp.w9_received_date) AS w9_received_date,
                     COALESCE(MAX(tp.w9_file_note), '') AS w9_file_note,
@@ -9478,6 +9490,7 @@ public function handle_mrm_clear_all_mileage_cache() {
                         'mailing_country'              => (string) ( $composer_profile['mailing_country'] ?? 'US' ),
                         'tin_type'                     => (string) ( $composer_profile['tin_type'] ?? '' ),
                         'tin_last4'                    => (string) ( $composer_profile['tin_last4'] ?? '' ),
+                        'tin_full_temp'                => (string) ( $composer_profile['tin_full_temp'] ?? '' ),
                         'w9_received'                  => ! empty( $composer_profile['w9_received'] ) ? 1 : 0,
                         'w9_received_date'             => (string) ( $composer_profile['w9_received_date'] ?? '' ),
                         'w9_file_note'                 => (string) ( $composer_profile['w9_file_note'] ?? '' ),
@@ -9566,26 +9579,26 @@ public function handle_mrm_clear_all_mileage_cache() {
 
     protected function mrm_write_1099_readme( $readme_path, $payees, $tax_year, $tax_quarter ) {
         $lines = array(
-            'Low Brass Lessons — 1099-NEC Preparation Export',
+            'Low Brass Lessons — 1099-NEC Filled PDF Export',
             'Generated: ' . current_time( 'mysql' ),
             'Period: ' . $this->mrm_1099_period_label( $tax_year, $tax_quarter ),
             '',
             'IMPORTANT',
-            'These PDFs are filled copies of the IRS 1099-NEC template stored in the plugin forms folder.',
+            'These PDFs are filled/stamped copies of the IRS 1099-NEC template stored in the plugin forms folder.',
             'The current bundled template may be an IRS draft and may not be fileable.',
             'The export fills Copy A, Copy 1, Copy B, and Copy 2 for each contractor, and includes the recipient instruction page.',
             '',
-            'Use these files for internal preparation, accountant review, recipient review, or transcription into approved filing workflows unless you have replaced the template with the final IRS-approved form and confirmed filing requirements with your accountant.',
-            '',
-            'IMPORTANT TIN NOTE',
-            'This plugin currently stores only TIN last four values. The PDF can only fill the masked TIN values available in the Contractor Tax Profiles. Full TINs must be completed from W-9/accountant records or a later encrypted full-TIN workflow.',
+            'TIN / EIN SECURITY NOTE',
+            'This export can use temporary full TIN/EIN values stored in the WordPress database.',
+            'Move full SSN/EIN/ITIN values to AWS Secrets Manager as soon as possible.',
+            'The summary.csv intentionally does not need to include full TIN values.',
             '',
             'INCLUSION RULES',
             '- Included payout ledger rows with paid-out statuses only.',
             '- Date filter uses payout ledger updated_at timestamps for the selected period.',
             '- Included payee types: instructor and composer.',
             '- Box 1 amount is based on net_cents paid to the contractor.',
-            '- Backup withholding is shown separately (Box 4 prep reference).',
+            '- Backup withholding is shown in Box 4 when present.',
             '',
             'FILES',
             '- summary.csv includes payee identity, tax-profile fields, and payout-source references.',
@@ -9600,36 +9613,53 @@ public function handle_mrm_clear_all_mileage_cache() {
 " );
     }
 
-    protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter ) {
-        $template_path = $this->mrm_get_1099_nec_template_path();
-        $values = $this->mrm_build_1099_nec_template_values( $payee, $tax_year );
+protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter ) {
+    $template_path = plugin_dir_path( __FILE__ ) . 'forms/f1099nec--dft.pdf';
 
-        $pdf = new \setasign\Fpdi\Tcpdf\Fpdi( 'P', 'pt', 'LETTER', true, 'UTF-8', false );
-
-        $pdf->SetCreator( 'Low Brass Lessons / MRM Scheduler' );
-        $pdf->SetAuthor( 'Low Brass Lessons' );
-        $pdf->SetTitle( '1099-NEC Filled Draft Copy' );
-        $pdf->setPrintHeader( false );
-        $pdf->setPrintFooter( false );
-        $pdf->SetMargins( 0, 0, 0 );
-        $pdf->SetAutoPageBreak( false, 0 );
-        $pdf->setFontSubsetting( true );
-
-        try {
-            $page_count = $pdf->setSourceFile( $template_path );
-            if ( $page_count < 6 ) { wp_die( esc_html( 'The 1099-NEC template does not have the expected 6 pages.' ) ); }
-            $template_pages = array( 2, 3, 4, 5, 6 );
-            foreach ( $template_pages as $template_page ) {
-                $tpl_id = $pdf->importPage( $template_page );
-                $pdf->AddPage( 'P', array( 612, 792 ) );
-                $pdf->useTemplate( $tpl_id, 0, 0, 612, 792, true );
-                if ( $template_page !== 5 ) { $this->mrm_stamp_1099_nec_template_copy( $pdf, $values ); }
-            }
-            $pdf->Output( $pdf_path, 'F' );
-        } catch ( \Exception $e ) {
-            wp_die( esc_html( 'Unable to fill the 1099-NEC PDF template: ' . $e->getMessage() ) );
-        }
+    if ( ! file_exists( $template_path ) ) {
+        wp_die( esc_html( 'The IRS 1099-NEC PDF template was not found at: ' . $template_path ) );
     }
+
+    if ( ! class_exists( '\\setasign\\Fpdi\\Tcpdf\\Fpdi' ) ) {
+        wp_die( esc_html( 'FPDI for TCPDF is not loaded. Install it with: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require setasign/fpdi-tcpdf' ) );
+    }
+
+    $values = $this->mrm_build_1099_nec_template_values( $payee, $tax_year );
+
+    $pdf = new \setasign\Fpdi\Tcpdf\Fpdi( 'P', 'pt', 'LETTER', true, 'UTF-8', false );
+    $pdf->SetCreator( 'Low Brass Lessons / MRM Scheduler' );
+    $pdf->SetAuthor( 'Low Brass Lessons' );
+    $pdf->SetTitle( '1099-NEC Filled PDF' );
+    $pdf->setPrintHeader( false );
+    $pdf->setPrintFooter( false );
+    $pdf->SetMargins( 0, 0, 0 );
+    $pdf->SetAutoPageBreak( false, 0 );
+    $pdf->setFontSubsetting( true );
+
+    try {
+        $page_count = $pdf->setSourceFile( $template_path );
+
+        if ( $page_count < 6 ) {
+            wp_die( esc_html( 'The 1099-NEC template does not have the expected 6 pages.' ) );
+        }
+
+        $template_pages = array( 2, 3, 4, 5, 6 );
+
+        foreach ( $template_pages as $template_page ) {
+            $tpl_id = $pdf->importPage( $template_page );
+            $pdf->AddPage( 'P', array( 612, 792 ) );
+            $pdf->useTemplate( $tpl_id, 0, 0, 612, 792, true );
+
+            if ( $template_page !== 5 ) {
+                $this->mrm_stamp_1099_nec_template_copy( $pdf, $values );
+            }
+        }
+
+        $pdf->Output( $pdf_path, 'F' );
+    } catch ( \Exception $e ) {
+        wp_die( esc_html( 'Unable to fill the 1099-NEC PDF template: ' . $e->getMessage() ) );
+    }
+}
 
     public function handle_mrm_export_1099_nec_pdf_zip() {
         if ( ! current_user_can( 'manage_options' ) ) {
@@ -9874,6 +9904,7 @@ protected function mrm_ensure_contractor_tax_profile_schema() {
         'mailing_postal_code'          => "VARCHAR(30) NOT NULL DEFAULT ''",
         'mailing_country'              => "VARCHAR(80) NOT NULL DEFAULT 'US'",
         'tin_type'                     => "VARCHAR(20) NOT NULL DEFAULT ''",
+        'tin_full_temp'                => "VARCHAR(20) NOT NULL DEFAULT ''",
         'backup_withholding_required'  => "TINYINT(1) NOT NULL DEFAULT 0",
         'backup_withholding_cents'     => "BIGINT NOT NULL DEFAULT 0",
         'w9_file_note'                 => "VARCHAR(255) NOT NULL DEFAULT ''",
@@ -9936,11 +9967,60 @@ protected function mrm_1099_tin_type_options() {
     );
 }
 
+protected function mrm_1099_digits_only( $value ) {
+    return preg_replace( '/[^0-9]/', '', (string) $value );
+}
+
+protected function mrm_1099_format_full_tin( $tin_type, $value ) {
+    $digits = $this->mrm_1099_digits_only( $value );
+
+    if ( strlen( $digits ) !== 9 ) {
+        return '';
+    }
+
+    $tin_type = strtolower( (string) $tin_type );
+
+    if ( $tin_type === 'ein' ) {
+        return substr( $digits, 0, 2 ) . '-' . substr( $digits, 2 );
+    }
+
+    return substr( $digits, 0, 3 ) . '-' . substr( $digits, 3, 2 ) . '-' . substr( $digits, 5 );
+}
+
+protected function mrm_1099_prefer_full_tin_or_last4( $tin_type, $full_value, $last4_value ) {
+    $full = $this->mrm_1099_format_full_tin( $tin_type, $full_value );
+
+    if ( $full !== '' ) {
+        return $full;
+    }
+
+    $last4 = substr( $this->mrm_1099_digits_only( $last4_value ), -4 );
+
+    if ( $last4 === '' ) {
+        return '';
+    }
+
+    $tin_type = strtolower( (string) $tin_type );
+
+    if ( $tin_type === 'ein' ) {
+        return '**-***' . $last4;
+    }
+
+    return '***-**-' . $last4;
+}
+
+protected function mrm_1099_pdf_text( $value ) {
+    $value = html_entity_decode( (string) $value, ENT_QUOTES, 'UTF-8' );
+    $value = preg_replace( '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $value );
+    return trim( $value );
+}
+
 protected function mrm_get_1099_payer_profile() {
     $defaults = array(
         'legal_name'          => '',
         'trade_name'          => 'Low Brass Lessons',
         'ein_last4'           => '',
+        'ein_full_temp'       => '',
         'mailing_address_1'   => '',
         'mailing_address_2'   => '',
         'mailing_city'        => '',
@@ -9961,14 +10041,23 @@ protected function mrm_get_1099_payer_profile() {
 protected function mrm_sanitize_1099_payer_profile( $raw ) {
     $raw = is_array( $raw ) ? $raw : array();
 
-    $ein_last4 = isset( $raw['ein_last4'] )
-        ? substr( preg_replace( '/[^0-9]/', '', sanitize_text_field( wp_unslash( $raw['ein_last4'] ) ) ), -4 )
+    $ein_full_temp = isset( $raw['ein_full_temp'] )
+        ? substr( $this->mrm_1099_digits_only( sanitize_text_field( wp_unslash( $raw['ein_full_temp'] ) ) ), 0, 9 )
         : '';
+
+    $ein_last4 = $ein_full_temp !== ''
+        ? substr( $ein_full_temp, -4 )
+        : (
+            isset( $raw['ein_last4'] )
+                ? substr( $this->mrm_1099_digits_only( sanitize_text_field( wp_unslash( $raw['ein_last4'] ) ) ), -4 )
+                : ''
+        );
 
     return array(
         'legal_name'          => isset( $raw['legal_name'] ) ? sanitize_text_field( wp_unslash( $raw['legal_name'] ) ) : '',
         'trade_name'          => isset( $raw['trade_name'] ) ? sanitize_text_field( wp_unslash( $raw['trade_name'] ) ) : '',
         'ein_last4'           => $ein_last4,
+        'ein_full_temp'       => $ein_full_temp,
         'mailing_address_1'   => isset( $raw['mailing_address_1'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_address_1'] ) ) : '',
         'mailing_address_2'   => isset( $raw['mailing_address_2'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_address_2'] ) ) : '',
         'mailing_city'        => isset( $raw['mailing_city'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_city'] ) ) : '',
@@ -9998,10 +10087,17 @@ protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_ins
         $tin_type = '';
     }
 
-    $tin_last4 = isset( $raw['tin_last4'] )
-        ? preg_replace( '/[^0-9]/', '', sanitize_text_field( wp_unslash( $raw['tin_last4'] ) ) )
+    $tin_full_temp = isset( $raw['tin_full_temp'] )
+        ? substr( $this->mrm_1099_digits_only( sanitize_text_field( wp_unslash( $raw['tin_full_temp'] ) ) ), 0, 9 )
         : '';
-    $tin_last4 = substr( $tin_last4, -4 );
+
+    $tin_last4 = $tin_full_temp !== ''
+        ? substr( $tin_full_temp, -4 )
+        : (
+            isset( $raw['tin_last4'] )
+                ? substr( $this->mrm_1099_digits_only( sanitize_text_field( wp_unslash( $raw['tin_last4'] ) ) ), -4 )
+                : ''
+        );
 
     $backup_withholding_raw = isset( $raw['backup_withholding_amount'] )
         ? sanitize_text_field( wp_unslash( $raw['backup_withholding_amount'] ) )
@@ -10027,6 +10123,7 @@ protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_ins
         'mailing_country'              => isset( $raw['mailing_country'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_country'] ) ) : 'US',
         'tin_type'                     => $tin_type,
         'tin_last4'                    => $tin_last4,
+        'tin_full_temp'                => $tin_full_temp,
         'w9_received'                  => ! empty( $raw['w9_received'] ) ? 1 : 0,
         'w9_received_date'             => ! empty( $raw['w9_received_date'] ) ? sanitize_text_field( wp_unslash( $raw['w9_received_date'] ) ) : null,
         'w9_file_note'                 => isset( $raw['w9_file_note'] ) ? sanitize_text_field( wp_unslash( $raw['w9_file_note'] ) ) : '',
@@ -10156,7 +10253,7 @@ protected function mrm_render_tax_profile_card( $field_key, $profile, $context )
             <tr><th scope="row"><label>Mailing Address Line 2</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[mailing_address_2]" value="<?php echo esc_attr( $profile['mailing_address_2'] ?? '' ); ?>"></td></tr>
             <tr><th scope="row"><label>City / State / ZIP / Country</label></th><td><input type="text" name="<?php echo $prefix; ?>[mailing_city]" placeholder="City" value="<?php echo esc_attr( $profile['mailing_city'] ?? '' ); ?>" style="width:180px;"><input type="text" name="<?php echo $prefix; ?>[mailing_state]" placeholder="State" value="<?php echo esc_attr( $profile['mailing_state'] ?? '' ); ?>" style="width:80px;"><input type="text" name="<?php echo $prefix; ?>[mailing_postal_code]" placeholder="ZIP" value="<?php echo esc_attr( $profile['mailing_postal_code'] ?? '' ); ?>" style="width:120px;"><input type="text" name="<?php echo $prefix; ?>[mailing_country]" placeholder="US" value="<?php echo esc_attr( $profile['mailing_country'] ?? 'US' ); ?>" style="width:90px;"></td></tr>
             <tr><th scope="row"><label>W-9 Received</label></th><td><label><input type="checkbox" name="<?php echo $prefix; ?>[w9_received]" value="1" <?php checked( ! empty( $profile['w9_received'] ) ); ?>>W-9 received</label>&nbsp;<input type="date" name="<?php echo $prefix; ?>[w9_received_date]" value="<?php echo esc_attr( $profile['w9_received_date'] ?? '' ); ?>"></td></tr>
-            <tr><th scope="row"><label>TIN Type / Last Four</label></th><td><select name="<?php echo $prefix; ?>[tin_type]"><?php foreach ( $tin_options as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( (string) ( $profile['tin_type'] ?? '' ), $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?></select><input type="text" name="<?php echo $prefix; ?>[tin_last4]" maxlength="4" pattern="[0-9]{0,4}" placeholder="Last 4" value="<?php echo esc_attr( $profile['tin_last4'] ?? '' ); ?>" style="width:90px;"><p class="description">Do not enter the full SSN/EIN here. Store only the last four digits.</p></td></tr>
+            <tr><th scope="row"><label>TIN Type / Full TIN</label></th><td><select name="<?php echo $prefix; ?>[tin_type]"><?php foreach ( $tin_options as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( (string) ( $profile['tin_type'] ?? '' ), $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?></select><input type="text" name="<?php echo $prefix; ?>[tin_full_temp]" maxlength="11" inputmode="numeric" autocomplete="off" placeholder="Full SSN/EIN/ITIN" value="<?php echo esc_attr( $this->mrm_1099_format_full_tin( (string) ( $profile['tin_type'] ?? '' ), (string) ( $profile['tin_full_temp'] ?? '' ) ) ); ?>" style="width:150px;"><input type="hidden" name="<?php echo $prefix; ?>[tin_last4]" value="<?php echo esc_attr( $profile['tin_last4'] ?? '' ); ?>"><p class="description"><strong>Temporary sensitive storage:</strong> enter the full 9-digit SSN/EIN/ITIN only while preparing 1099 PDFs. The system will still preserve the last four for compatibility. Move this to AWS Secrets Manager as soon as possible.</p></td></tr>
             <tr><th scope="row"><label>W-9 File Reference / Note</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[w9_file_note]" value="<?php echo esc_attr( $profile['w9_file_note'] ?? '' ); ?>" placeholder="Example: W-9 received by email on 2026-01-10"></td></tr>
             <tr><th scope="row"><label>Backup Withholding</label></th><td><label><input type="checkbox" name="<?php echo $prefix; ?>[backup_withholding_required]" value="1" <?php checked( ! empty( $profile['backup_withholding_required'] ) ); ?>>Backup withholding required</label>&nbsp;<input type="text" name="<?php echo $prefix; ?>[backup_withholding_amount]" placeholder="0.00" value="<?php echo esc_attr( number_format( ( (int) ( $profile['backup_withholding_cents'] ?? 0 ) ) / 100, 2, '.', '' ) ); ?>" style="width:100px;"></td></tr>
             <tr><th scope="row"><label>1099 Settings</label></th><td><label style="display:block; margin-bottom:6px;"><input type="checkbox" name="<?php echo $prefix; ?>[is_1099_eligible]" value="1" <?php checked( ! array_key_exists( 'is_1099_eligible', $profile ) || ! empty( $profile['is_1099_eligible'] ) ); ?>>1099 eligible</label><label style="display:block; margin-bottom:6px;"><input type="checkbox" name="<?php echo $prefix; ?>[is_employee]" value="1" <?php checked( ! empty( $profile['is_employee'] ) ); ?>>Employee / W-2 — exclude from contractor 1099 export</label><label style="display:block;"><input type="checkbox" name="<?php echo $prefix; ?>[exclude_from_1099]" value="1" <?php checked( ! empty( $profile['exclude_from_1099'] ) ); ?>>Explicitly exclude from 1099 export</label></td></tr>
@@ -10179,7 +10276,7 @@ public function render_contractor_tax_profiles_page() {
     $composer_profile = $this->mrm_get_composer_tax_profile();
     $composer_connected_hint = $this->mrm_get_composer_connected_account_hint();
     ?><div class="wrap"><h1>Contractor Tax Profiles</h1><div class="notice notice-info"><p><strong>Before entering tax information:</strong> collect a completed W-9 from each contractor. This page stores backend-only 1099 preparation data. It does not change public instructor cards or front-end HTML.</p><p>Store only TIN last four here. Keep full SSNs/EINs on the completed W-9 or inside your accountant/tax filing software.</p></div>
-        <form method="post" action=""><?php wp_nonce_field( 'mrm_save_contractor_tax_profiles', 'mrm_contractor_tax_profiles_nonce' ); ?><input type="hidden" name="mrm_1099_tax_profiles_action" value="save"><div style="background:#fff; border:1px solid #ccd0d4; padding:18px; margin:20px 0;"><h2 style="margin-top:0;">Payer / Business Profile</h2><p class="description">This information appears on the black 1099-NEC preparation/payer PDFs. Store EIN last four only unless you later add encrypted full EIN storage.</p><table class="form-table" role="presentation"><tr><th scope="row"><label>Payer Legal Name</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[legal_name]" value="<?php echo esc_attr( $payer['legal_name'] ); ?>"></td></tr><tr><th scope="row"><label>Trade Name / DBA</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[trade_name]" value="<?php echo esc_attr( $payer['trade_name'] ); ?>"></td></tr><tr><th scope="row"><label>Payer EIN Last Four</label></th><td><input type="text" maxlength="4" pattern="[0-9]{0,4}" name="mrm_1099_payer_profile[ein_last4]" value="<?php echo esc_attr( $payer['ein_last4'] ); ?>"></td></tr><tr><th scope="row"><label>Mailing Address Line 1</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_1]" value="<?php echo esc_attr( $payer['mailing_address_1'] ); ?>"></td></tr><tr><th scope="row"><label>Mailing Address Line 2</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_2]" value="<?php echo esc_attr( $payer['mailing_address_2'] ); ?>"></td></tr><tr><th scope="row"><label>City / State / ZIP / Country</label></th><td><input type="text" name="mrm_1099_payer_profile[mailing_city]" placeholder="City" value="<?php echo esc_attr( $payer['mailing_city'] ); ?>" style="width:180px;"><input type="text" name="mrm_1099_payer_profile[mailing_state]" placeholder="State" value="<?php echo esc_attr( $payer['mailing_state'] ); ?>" style="width:80px;"><input type="text" name="mrm_1099_payer_profile[mailing_postal_code]" placeholder="ZIP" value="<?php echo esc_attr( $payer['mailing_postal_code'] ); ?>" style="width:120px;"><input type="text" name="mrm_1099_payer_profile[mailing_country]" placeholder="US" value="<?php echo esc_attr( $payer['mailing_country'] ); ?>" style="width:90px;"></td></tr><tr><th scope="row"><label>Phone / Email</label></th><td><input type="text" name="mrm_1099_payer_profile[phone]" placeholder="Phone" value="<?php echo esc_attr( $payer['phone'] ); ?>" style="width:180px;"><input type="email" name="mrm_1099_payer_profile[email]" placeholder="Email" value="<?php echo esc_attr( $payer['email'] ); ?>" style="width:260px;"></td></tr><tr><th scope="row"><label>State ID Number</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[state_id_number]" value="<?php echo esc_attr( $payer['state_id_number'] ); ?>"></td></tr><tr><th scope="row"><label>Payer Notes</label></th><td><textarea class="large-text" rows="3" name="mrm_1099_payer_profile[notes]"><?php echo esc_textarea( $payer['notes'] ); ?></textarea></td></tr></table></div>
+        <form method="post" action=""><?php wp_nonce_field( 'mrm_save_contractor_tax_profiles', 'mrm_contractor_tax_profiles_nonce' ); ?><input type="hidden" name="mrm_1099_tax_profiles_action" value="save"><div style="background:#fff; border:1px solid #ccd0d4; padding:18px; margin:20px 0;"><h2 style="margin-top:0;">Payer / Business Profile</h2><p class="description">This information appears on the filled 1099-NEC PDF export. Full EIN storage here is temporary until migrated to AWS Secrets Manager.</p><table class="form-table" role="presentation"><tr><th scope="row"><label>Payer Legal Name</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[legal_name]" value="<?php echo esc_attr( $payer['legal_name'] ); ?>"></td></tr><tr><th scope="row"><label>Trade Name / DBA</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[trade_name]" value="<?php echo esc_attr( $payer['trade_name'] ); ?>"></td></tr><tr><th scope="row"><label>Payer EIN</label></th><td><input type="text" maxlength="10" inputmode="numeric" autocomplete="off" name="mrm_1099_payer_profile[ein_full_temp]" placeholder="Full EIN" value="<?php echo esc_attr( $this->mrm_1099_format_full_tin( 'ein', (string) ( $payer['ein_full_temp'] ?? '' ) ) ); ?>" style="width:150px;"><input type="hidden" name="mrm_1099_payer_profile[ein_last4]" value="<?php echo esc_attr( $payer['ein_last4'] ); ?>"><p class="description"><strong>Temporary sensitive storage:</strong> enter the full 9-digit payer EIN only while preparing 1099 PDFs. Move this to AWS Secrets Manager as soon as possible.</p></td></tr><tr><th scope="row"><label>Mailing Address Line 1</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_1]" value="<?php echo esc_attr( $payer['mailing_address_1'] ); ?>"></td></tr><tr><th scope="row"><label>Mailing Address Line 2</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_2]" value="<?php echo esc_attr( $payer['mailing_address_2'] ); ?>"></td></tr><tr><th scope="row"><label>City / State / ZIP / Country</label></th><td><input type="text" name="mrm_1099_payer_profile[mailing_city]" placeholder="City" value="<?php echo esc_attr( $payer['mailing_city'] ); ?>" style="width:180px;"><input type="text" name="mrm_1099_payer_profile[mailing_state]" placeholder="State" value="<?php echo esc_attr( $payer['mailing_state'] ); ?>" style="width:80px;"><input type="text" name="mrm_1099_payer_profile[mailing_postal_code]" placeholder="ZIP" value="<?php echo esc_attr( $payer['mailing_postal_code'] ); ?>" style="width:120px;"><input type="text" name="mrm_1099_payer_profile[mailing_country]" placeholder="US" value="<?php echo esc_attr( $payer['mailing_country'] ); ?>" style="width:90px;"></td></tr><tr><th scope="row"><label>Phone / Email</label></th><td><input type="text" name="mrm_1099_payer_profile[phone]" placeholder="Phone" value="<?php echo esc_attr( $payer['phone'] ); ?>" style="width:180px;"><input type="email" name="mrm_1099_payer_profile[email]" placeholder="Email" value="<?php echo esc_attr( $payer['email'] ); ?>" style="width:260px;"></td></tr><tr><th scope="row"><label>State ID Number</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[state_id_number]" value="<?php echo esc_attr( $payer['state_id_number'] ); ?>"></td></tr><tr><th scope="row"><label>Payer Notes</label></th><td><textarea class="large-text" rows="3" name="mrm_1099_payer_profile[notes]"><?php echo esc_textarea( $payer['notes'] ); ?></textarea></td></tr></table></div>
             <h2>Instructor Tax Profiles</h2><?php if ( empty( $instructors ) ) : ?><p>No instructors found.</p><?php else : ?><?php foreach ( $instructors as $instructor ) : ?><?php $profile = $this->mrm_get_tax_profile_for_instructor( (int) $instructor['id'] ); $this->mrm_render_tax_profile_card( 'instructor_' . (int) $instructor['id'], $profile, array( 'title' => 'Instructor Tax Profile — ' . (string) $instructor['name'], 'payee_type' => 'instructor', 'related_instructor_id' => (int) $instructor['id'], 'readonly_name' => (string) $instructor['name'], 'readonly_email' => (string) $instructor['email'], 'connected_account_id' => (string) ( $instructor['stripe_connected_account_id'] ?? '' ), ) ); ?><?php endforeach; ?><?php endif; ?>
             <h2>Composer Tax Profile</h2><?php $this->mrm_render_tax_profile_card( 'composer_default', $composer_profile, array( 'title' => 'Composer Tax Profile', 'payee_type' => 'composer', 'readonly_name' => ! empty( $composer_profile['display_name'] ) ? (string) $composer_profile['display_name'] : 'Composer', 'readonly_email' => ! empty( $composer_profile['email'] ) ? (string) $composer_profile['email'] : '', 'connected_account_id' => ! empty( $composer_profile['connected_account_id'] ) ? (string) $composer_profile['connected_account_id'] : $composer_connected_hint, ) ); ?>
             <?php submit_button( 'Save Contractor Tax Profiles', 'primary large' ); ?></form></div><?php
