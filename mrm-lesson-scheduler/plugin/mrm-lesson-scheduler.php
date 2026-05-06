@@ -9191,13 +9191,17 @@ public function handle_mrm_clear_all_mileage_cache() {
         $autoload = plugin_dir_path( __FILE__ ) . 'composer/vendor/autoload.php';
 
         if ( ! file_exists( $autoload ) ) {
-            wp_die( esc_html( "TCPDF is not installed in the plugin-local Composer folder. Expected autoload file: {$autoload}. Install it with: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require tecnickcom/tcpdf" ) );
+            wp_die( esc_html( "PDF export dependencies are not installed in the plugin-local Composer folder. Expected autoload file: {$autoload}. Install them with: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require tecnickcom/tcpdf setasign/fpdi-tcpdf" ) );
         }
 
         require_once $autoload;
 
         if ( ! class_exists( 'TCPDF' ) ) {
             wp_die( esc_html( "TCPDF autoload file was found, but the TCPDF class is unavailable. Check the plugin-local Composer install at: {$autoload}" ) );
+        }
+
+        if ( ! class_exists( '\\setasign\\Fpdi\\Tcpdf\\Fpdi' ) ) {
+            wp_die( esc_html( "FPDI for TCPDF is not installed. Run: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require setasign/fpdi-tcpdf" ) );
         }
     }
 
@@ -9228,6 +9232,76 @@ public function handle_mrm_clear_all_mileage_cache() {
             }
             @rmdir( $path );
         }
+    }
+
+    protected function mrm_get_1099_nec_template_path() {
+        $template_path = plugin_dir_path( __FILE__ ) . 'forms/f1099nec--dft.pdf';
+
+        if ( ! file_exists( $template_path ) ) {
+            wp_die( esc_html( 'The IRS 1099-NEC PDF template was not found. Expected file: ' . $template_path ) );
+        }
+
+        return $template_path;
+    }
+
+    protected function mrm_1099_pdf_clean_text( $value ) {
+        $value = (string) $value;
+        $value = html_entity_decode( $value, ENT_QUOTES, 'UTF-8' );
+        $value = preg_replace( '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $value );
+        return trim( $value );
+    }
+
+    protected function mrm_1099_format_money_from_cents( $cents ) {
+        $cents = max( 0, (int) $cents );
+        return number_format( $cents / 100, 2, '.', ',' );
+    }
+
+    protected function mrm_1099_format_tin_from_last4( $tin_type, $last4 ) {
+        $last4 = preg_replace( '/[^0-9]/', '', (string) $last4 );
+        $last4 = substr( $last4, -4 );
+        if ( $last4 === '' ) { return ''; }
+        $tin_type = strtolower( (string) $tin_type );
+        if ( $tin_type === 'ein' ) { return '**-***' . $last4; }
+        return '***-**-' . $last4;
+    }
+
+    protected function mrm_1099_stamp_pdf_rect( $pdf, $rect, $text, $font_size = 8, $align = 'L' ) {
+        $text = $this->mrm_1099_pdf_clean_text( $text );
+        if ( $text === '' ) { return; }
+        $page_height = 792;
+        $x = (float) $rect[0] + 1.5;
+        $y = $page_height - (float) $rect[3] + 1.0;
+        $w = max( 1, (float) $rect[2] - (float) $rect[0] - 3.0 );
+        $h = max( 1, (float) $rect[3] - (float) $rect[1] - 1.0 );
+        $pdf->SetFont( 'helvetica', '', $font_size );
+        $pdf->SetTextColor( 0, 0, 0 );
+        $pdf->SetXY( $x, $y );
+        $pdf->MultiCell( $w, $h, $text, 0, $align, false, 1, '', '', true, 0, false, true, $h, 'M', true );
+    }
+
+    protected function mrm_build_1099_nec_template_values( $payee, $tax_year ) {
+        $payer = $this->mrm_get_1099_payer_profile();
+        $payer_legal = (string) ( $payer['legal_name'] ?? '' );
+        $payer_trade = (string) ( $payer['trade_name'] ?? '' );
+        $payer_name = ( $payer_legal !== '' && $payer_trade !== '' && strtolower( $payer_legal ) !== strtolower( $payer_trade ) ) ? $payer_legal . "\n" . $payer_trade : ( $payer_legal !== '' ? $payer_legal : $payer_trade );
+        $payer_street = trim( (string) ( $payer['mailing_address_1'] ?? '' ) . ' ' . (string) ( $payer['mailing_address_2'] ?? '' ) );
+        $recipient_legal = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? '' ) );
+        $recipient_business = (string) ( $payee['business_name'] ?? '' );
+        $recipient_name = ( $recipient_business !== '' && strtolower( $recipient_business ) !== strtolower( $recipient_legal ) ) ? trim( $recipient_legal . "\n" . $recipient_business ) : $recipient_legal;
+        $payer_state = strtoupper( (string) ( $payer['mailing_state'] ?? '' ) );
+        $recipient_state = strtoupper( (string) ( $payee['mailing_state'] ?? ( $payee['state'] ?? '' ) ) );
+        $state_id = (string) ( $payer['state_id_number'] ?? '' );
+        $net_cents = (int) ( $payee['net_cents'] ?? 0 );
+        $backup_cents = (int) ( $payee['backup_withholding_cents'] ?? 0 );
+        $state_payer_no = ( $recipient_state !== '' || $state_id !== '' ) ? trim( $recipient_state . ' ' . $state_id ) : '';
+        return array( 'calendar_year' => (string) (int) $tax_year, 'payer_name' => $payer_name, 'payer_street' => $payer_street, 'payer_suite' => '', 'payer_city' => (string) ( $payer['mailing_city'] ?? '' ), 'payer_phone' => (string) ( $payer['phone'] ?? '' ), 'payer_state' => $payer_state, 'payer_country' => (string) ( $payer['mailing_country'] ?? 'US' ), 'payer_zip' => (string) ( $payer['mailing_postal_code'] ?? '' ), 'payer_tin' => $this->mrm_1099_format_tin_from_last4( 'ein', (string) ( $payer['ein_last4'] ?? '' ) ), 'recipient_tin' => $this->mrm_1099_format_tin_from_last4( (string) ( $payee['tin_type'] ?? '' ), (string) ( $payee['tin_last4'] ?? '' ) ), 'recipient_name' => $recipient_name, 'recipient_street' => (string) ( $payee['mailing_address_1'] ?? ( $payee['address'] ?? '' ) ), 'recipient_apt' => (string) ( $payee['mailing_address_2'] ?? '' ), 'recipient_city' => (string) ( $payee['mailing_city'] ?? ( $payee['city'] ?? '' ) ), 'recipient_state' => $recipient_state, 'recipient_country' => (string) ( $payee['mailing_country'] ?? 'US' ), 'recipient_zip' => (string) ( $payee['mailing_postal_code'] ?? ( $payee['zip_code'] ?? '' ) ), 'account_number' => (string) ( $payee['payee_key'] ?? '' ), 'box_1a_nec' => $this->mrm_1099_format_money_from_cents( $net_cents ), 'box_1b_cash_tips' => '', 'box_1c_ttoc_1' => '', 'box_1c_ttoc_2' => '', 'box_1d_overtime' => '', 'box_3_golden' => '', 'box_4_federal_withheld' => $backup_cents > 0 ? $this->mrm_1099_format_money_from_cents( $backup_cents ) : '', 'box_5_state_withheld_1' => '', 'box_5_state_withheld_2' => '', 'box_6_state_no_1' => $state_payer_no, 'box_6_state_no_2' => '', 'box_7_state_income_1' => $state_payer_no !== '' ? $this->mrm_1099_format_money_from_cents( $net_cents ) : '', 'box_7_state_income_2' => '' );
+    }
+
+    protected function mrm_stamp_1099_nec_template_copy( $pdf, $values ) {
+        $this->mrm_1099_stamp_pdf_rect( $pdf, array( 417.6, 687.0, 446.4, 696.0 ), $values['calendar_year'], 8, 'C' );
+        $this->mrm_1099_stamp_pdf_rect( $pdf, array( 52.4, 720.0, 294.2, 744.0 ), $values['payer_name'], 7, 'L' );
+        $this->mrm_1099_stamp_pdf_rect( $pdf, array( 309.6, 648.0, 494.8, 660.0 ), $values['box_1a_nec'], 9, 'R' );
+        $this->mrm_1099_stamp_pdf_rect( $pdf, array( 309.6, 468.0, 494.8, 480.0 ), $values['box_4_federal_withheld'], 8, 'R' );
     }
 
     protected function mrm_stream_1099_zip_and_cleanup( $zip_path, $download_name, $workspace ) {
@@ -9497,11 +9571,14 @@ public function handle_mrm_clear_all_mileage_cache() {
             'Period: ' . $this->mrm_1099_period_label( $tax_year, $tax_quarter ),
             '',
             'IMPORTANT',
-            'These PDFs are black preparation/payer copies only.',
-            'They are not IRS Copy A.',
-            'They are not official scannable IRS paper forms.',
+            'These PDFs are filled copies of the IRS 1099-NEC template stored in the plugin forms folder.',
+            'The current bundled template may be an IRS draft and may not be fileable.',
+            'The export fills Copy A, Copy 1, Copy B, and Copy 2 for each contractor, and includes the recipient instruction page.',
             '',
-            'Use these files for internal preparation, accountant review, or transcription into approved filing workflows.',
+            'Use these files for internal preparation, accountant review, recipient review, or transcription into approved filing workflows unless you have replaced the template with the final IRS-approved form and confirmed filing requirements with your accountant.',
+            '',
+            'IMPORTANT TIN NOTE',
+            'This plugin currently stores only TIN last four values. The PDF can only fill the masked TIN values available in the Contractor Tax Profiles. Full TINs must be completed from W-9/accountant records or a later encrypted full-TIN workflow.',
             '',
             'INCLUSION RULES',
             '- Included payout ledger rows with paid-out statuses only.',
@@ -9512,7 +9589,7 @@ public function handle_mrm_clear_all_mileage_cache() {
             '',
             'FILES',
             '- summary.csv includes payee identity, tax-profile fields, and payout-source references.',
-            '- Each PDF is a black 1099-NEC-style preparation sheet with manual review callouts.',
+            '- Each PDF is a filled 1099-NEC template packet for one contractor.',
             '',
             'PAYEE COUNT',
             (string) count( (array) $payees ),
@@ -9524,47 +9601,34 @@ public function handle_mrm_clear_all_mileage_cache() {
     }
 
     protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter ) {
-        $pdf = new TCPDF( 'P', 'mm', 'LETTER', true, 'UTF-8', false );
+        $template_path = $this->mrm_get_1099_nec_template_path();
+        $values = $this->mrm_build_1099_nec_template_values( $payee, $tax_year );
+
+        $pdf = new \setasign\Fpdi\Tcpdf\Fpdi( 'P', 'pt', 'LETTER', true, 'UTF-8', false );
+
         $pdf->SetCreator( 'Low Brass Lessons / MRM Scheduler' );
         $pdf->SetAuthor( 'Low Brass Lessons' );
-        $pdf->SetTitle( '1099-NEC Preparation Copy' );
-        $pdf->SetMargins( 12, 12, 12 );
-        $pdf->SetAutoPageBreak( true, 12 );
-        $pdf->AddPage();
+        $pdf->SetTitle( '1099-NEC Filled Draft Copy' );
+        $pdf->setPrintHeader( false );
+        $pdf->setPrintFooter( false );
+        $pdf->SetMargins( 0, 0, 0 );
+        $pdf->SetAutoPageBreak( false, 0 );
+        $pdf->setFontSubsetting( true );
 
-        $net_amount = number_format( ( (int) ( $payee['net_cents'] ?? 0 ) ) / 100, 2, '.', ',' );
-        $backup_amount = number_format( ( (int) ( $payee['backup_withholding_cents'] ?? 0 ) ) / 100, 2, '.', ',' );
-
-        $recipient_name = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? '' ) );
-        $recipient_business = (string) ( $payee['business_name'] ?? '' );
-        $recipient_email = (string) ( $payee['email'] ?? '' );
-        $recipient_address1 = (string) ( $payee['mailing_address_1'] ?? ( $payee['address'] ?? '' ) );
-        $recipient_address2 = (string) ( $payee['mailing_address_2'] ?? '' );
-        $recipient_city = (string) ( $payee['mailing_city'] ?? ( $payee['city'] ?? '' ) );
-        $recipient_state = (string) ( $payee['mailing_state'] ?? ( $payee['state'] ?? '' ) );
-        $recipient_zip = (string) ( $payee['mailing_postal_code'] ?? ( $payee['zip_code'] ?? '' ) );
-        $tin_last4 = (string) ( $payee['tin_last4'] ?? '' );
-        $tin_type = strtoupper( (string) ( $payee['tin_type'] ?? '' ) );
-        $w9_status = ! empty( $payee['w9_received'] ) ? 'Received' : 'Missing';
-
-        $html = '<h1 style="font-size:20px;">Form 1099-NEC (Preparation Copy)</h1>' .
-            '<p><strong>Tax Period:</strong> ' . esc_html( $this->mrm_1099_period_label( $tax_year, $tax_quarter ) ) . '</p>' .
-            '<table cellpadding="4" border="1">' .
-            '<tr><td width="50%"><strong>PAYER</strong><br/>Low Brass Lessons<br/>Prepared via MRM Scheduler</td>' .
-            '<td width="50%"><strong>RECIPIENT</strong><br/>' . esc_html( $recipient_name ) . '<br/>' . esc_html( $recipient_business ) . '<br/>' . esc_html( $recipient_email ) . '<br/>' . esc_html( trim( $recipient_address1 . ' ' . $recipient_address2 ) ) . '<br/>' . esc_html( trim( $recipient_city . ', ' . $recipient_state . ' ' . $recipient_zip ) ) . '</td></tr>' .
-            '</table>' .
-            '<br/><table cellpadding="5" border="1">' .
-            '<tr><td width="50%"><strong>TIN Type</strong>: ' . esc_html( $tin_type !== '' ? $tin_type : 'N/A' ) . '<br/><strong>TIN last four</strong>: ' . esc_html( $tin_last4 !== '' ? $tin_last4 : 'N/A' ) . '<br/><strong>W-9 status</strong>: ' . esc_html( $w9_status ) . '</td>' .
-            '<td width="50%"><strong>Box 1 — Nonemployee compensation</strong><br/>$' . esc_html( $net_amount ) . '<br/><strong>Box 4 — Federal income tax withheld</strong><br/>$' . esc_html( $backup_amount ) . '</td></tr>' .
-            '</table>' .
-            '<br/><table cellpadding="4" border="1">' .
-            '<tr><td><strong>State / Local / Manual Review</strong><br/>☐ State filing reviewed&nbsp;&nbsp; ☐ Recipient address reviewed&nbsp;&nbsp; ☐ Classification reviewed&nbsp;&nbsp; ☐ Backup withholding reviewed</td></tr>' .
-            '<tr><td><strong>Source payout ledger IDs:</strong> ' . esc_html( (string) ( $payee['payout_ledger_ids'] ?? '' ) ) . '</td></tr>' .
-            '</table>' .
-            '<p style="font-size:10px;"><strong>DRAFT / PREPARATION WARNING:</strong> Black preparation/payer copy only. Not IRS Copy A. Not official scannable IRS paper form.</p>';
-
-        $pdf->writeHTML( $html, true, false, true, false, '' );
-        $pdf->Output( $pdf_path, 'F' );
+        try {
+            $page_count = $pdf->setSourceFile( $template_path );
+            if ( $page_count < 6 ) { wp_die( esc_html( 'The 1099-NEC template does not have the expected 6 pages.' ) ); }
+            $template_pages = array( 2, 3, 4, 5, 6 );
+            foreach ( $template_pages as $template_page ) {
+                $tpl_id = $pdf->importPage( $template_page );
+                $pdf->AddPage( 'P', array( 612, 792 ) );
+                $pdf->useTemplate( $tpl_id, 0, 0, 612, 792, true );
+                if ( $template_page !== 5 ) { $this->mrm_stamp_1099_nec_template_copy( $pdf, $values ); }
+            }
+            $pdf->Output( $pdf_path, 'F' );
+        } catch ( \Exception $e ) {
+            wp_die( esc_html( 'Unable to fill the 1099-NEC PDF template: ' . $e->getMessage() ) );
+        }
     }
 
     public function handle_mrm_export_1099_nec_pdf_zip() {
