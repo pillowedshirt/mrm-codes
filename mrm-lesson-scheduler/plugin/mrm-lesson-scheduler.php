@@ -9586,7 +9586,10 @@ public function handle_mrm_clear_all_mileage_cache() {
             'IMPORTANT',
             'These PDFs are filled/stamped copies of the IRS 1099-NEC template stored in the plugin forms folder.',
             'The current bundled template may be an IRS draft and may not be fileable.',
-            'The export fills Copy A, Copy 1, Copy B, and Copy 2 for each contractor, and includes the recipient instruction page.',
+            'The export splits each contractor packet into separate folders: Form A, Form 1, and Form B and Form 2.',
+            'Form A contains IRS Copy A.',
+            'Form 1 contains the state tax department copy.',
+            'Form B and Form 2 contains the recipient packet: Copy B, Instructions for Recipient, and Copy 2.',
             '',
             'TIN / EIN SECURITY NOTE',
             'This export can use temporary full TIN/EIN values stored in the WordPress database.',
@@ -9602,7 +9605,9 @@ public function handle_mrm_clear_all_mileage_cache() {
             '',
             'FILES',
             '- summary.csv includes payee identity, tax-profile fields, and payout-source references.',
-            '- Each PDF is a filled 1099-NEC template packet for one contractor.',
+            '- Form A contains one Copy A PDF per contractor.',
+            '- Form 1 contains one Copy 1 PDF per contractor.',
+            '- Form B and Form 2 contains one recipient packet PDF per contractor with Copy B, Instructions for Recipient, and Copy 2.',
             '',
             'PAYEE COUNT',
             (string) count( (array) $payees ),
@@ -9613,7 +9618,7 @@ public function handle_mrm_clear_all_mileage_cache() {
 " );
     }
 
-protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter ) {
+protected function mrm_generate_1099_nec_pdf_packet( $pdf_path, $payee, $tax_year, $template_pages, $packet_title = '1099-NEC Filled PDF' ) {
     $template_path = plugin_dir_path( __FILE__ ) . 'forms/f1099nec--dft.pdf';
 
     if ( ! file_exists( $template_path ) ) {
@@ -9624,12 +9629,18 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         wp_die( esc_html( 'FPDI for TCPDF is not loaded. Install it with: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require setasign/fpdi-tcpdf' ) );
     }
 
+    $template_pages = array_values( array_filter( array_map( 'intval', (array) $template_pages ) ) );
+
+    if ( empty( $template_pages ) ) {
+        wp_die( esc_html( 'No 1099-NEC template pages were requested for PDF generation.' ) );
+    }
+
     $values = $this->mrm_build_1099_nec_template_values( $payee, $tax_year );
 
     $pdf = new \setasign\Fpdi\Tcpdf\Fpdi( 'P', 'pt', 'LETTER', true, 'UTF-8', false );
     $pdf->SetCreator( 'Low Brass Lessons / MRM Scheduler' );
     $pdf->SetAuthor( 'Low Brass Lessons' );
-    $pdf->SetTitle( '1099-NEC Filled PDF' );
+    $pdf->SetTitle( $packet_title );
     $pdf->setPrintHeader( false );
     $pdf->setPrintFooter( false );
     $pdf->SetMargins( 0, 0, 0 );
@@ -9643,13 +9654,19 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
             wp_die( esc_html( 'The 1099-NEC template does not have the expected 6 pages.' ) );
         }
 
-        $template_pages = array( 2, 3, 4, 5, 6 );
-
         foreach ( $template_pages as $template_page ) {
+            if ( $template_page < 1 || $template_page > $page_count ) {
+                wp_die( esc_html( 'Requested 1099-NEC template page is outside the available page range: ' . (string) $template_page ) );
+            }
+
             $tpl_id = $pdf->importPage( $template_page );
             $pdf->AddPage( 'P', array( 612, 792 ) );
             $pdf->useTemplate( $tpl_id, 0, 0, 612, 792, true );
 
+            /*
+             * IRS template page 5 is the recipient instruction page.
+             * It should be included in the recipient packet but not stamped.
+             */
             if ( $template_page !== 5 ) {
                 $this->mrm_stamp_1099_nec_template_copy( $pdf, $values );
             }
@@ -9659,6 +9676,24 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     } catch ( \Exception $e ) {
         wp_die( esc_html( 'Unable to fill the 1099-NEC PDF template: ' . $e->getMessage() ) );
     }
+}
+
+protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter ) {
+    /*
+     * Backward-compatible full packet generator.
+     * Page 2 = Copy A
+     * Page 3 = Copy 1
+     * Page 4 = Copy B
+     * Page 5 = Instructions for Recipient
+     * Page 6 = Copy 2
+     */
+    $this->mrm_generate_1099_nec_pdf_packet(
+        $pdf_path,
+        $payee,
+        $tax_year,
+        array( 2, 3, 4, 5, 6 ),
+        '1099-NEC Filled Full Packet'
+    );
 }
 
     public function handle_mrm_export_1099_nec_pdf_zip() {
@@ -9693,16 +9728,91 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         $this->mrm_write_1099_summary_csv( $summary_path, $payees, $tax_year, $tax_quarter );
         $this->mrm_write_1099_readme( $readme_path, $payees, $tax_year, $tax_quarter );
 
-        $pdf_paths = array();
+        $form_a_dir          = trailingslashit( $workspace ) . 'Form A';
+        $form_1_dir          = trailingslashit( $workspace ) . 'Form 1';
+        $recipient_forms_dir = trailingslashit( $workspace ) . 'Form B and Form 2';
+
+        foreach ( array( $form_a_dir, $form_1_dir, $recipient_forms_dir ) as $dir ) {
+            if ( ! wp_mkdir_p( $dir ) ) {
+                $this->mrm_cleanup_1099_export_path( $workspace );
+                wp_die( esc_html( 'Unable to create 1099 export subfolder: ' . $dir ) );
+            }
+        }
+
+        $pdf_entries = array();
+
         foreach ( (array) $payees as $payee ) {
             $net_cents = (int) ( $payee['net_cents'] ?? 0 );
-            if ( $net_cents <= 0 ) { continue; }
-            $name_part = $this->mrm_sanitize_1099_filename_part((string) ( $payee['legal_name'] ?? $payee['display_name'] ?? $payee['payee_key'] ?? 'payee' ));
-            $key_part = $this->mrm_sanitize_1099_filename_part( (string) ( $payee['payee_key'] ?? 'payee' ) );
-            $pdf_name = '1099-nec-preparation-' . $tax_year . '-' . $period_slug . '-' . $name_part . '-' . $key_part . '.pdf';
-            $pdf_path = trailingslashit( $workspace ) . $pdf_name;
-            $this->mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter );
-            if ( file_exists( $pdf_path ) ) { $pdf_paths[] = $pdf_path; }
+            if ( $net_cents <= 0 ) {
+                continue;
+            }
+
+            $name_part = $this->mrm_sanitize_1099_filename_part( (string) ( $payee['legal_name'] ?? $payee['display_name'] ?? $payee['payee_key'] ?? 'payee' ) );
+            $key_part  = $this->mrm_sanitize_1099_filename_part( (string) ( $payee['payee_key'] ?? 'payee' ) );
+            $base_name = $tax_year . '-' . $period_slug . '-' . $name_part . '-' . $key_part . '.pdf';
+
+            /*
+             * IRS template page map:
+             * Page 2 = Copy A
+             * Page 3 = Copy 1
+             * Page 4 = Copy B
+             * Page 5 = Instructions for Recipient
+             * Page 6 = Copy 2
+             */
+
+            $copy_a_name = '1099-nec-copy-a-' . $base_name;
+            $copy_a_path = trailingslashit( $form_a_dir ) . $copy_a_name;
+
+            $this->mrm_generate_1099_nec_pdf_packet(
+                $copy_a_path,
+                $payee,
+                $tax_year,
+                array( 2 ),
+                '1099-NEC Copy A'
+            );
+
+            if ( file_exists( $copy_a_path ) ) {
+                $pdf_entries[] = array(
+                    'path' => $copy_a_path,
+                    'zip'  => 'Form A/' . $copy_a_name,
+                );
+            }
+
+            $copy_1_name = '1099-nec-copy-1-' . $base_name;
+            $copy_1_path = trailingslashit( $form_1_dir ) . $copy_1_name;
+
+            $this->mrm_generate_1099_nec_pdf_packet(
+                $copy_1_path,
+                $payee,
+                $tax_year,
+                array( 3 ),
+                '1099-NEC Copy 1'
+            );
+
+            if ( file_exists( $copy_1_path ) ) {
+                $pdf_entries[] = array(
+                    'path' => $copy_1_path,
+                    'zip'  => 'Form 1/' . $copy_1_name,
+                );
+            }
+
+            $recipient_name = '1099-nec-copy-b-copy-2-recipient-packet-' . $base_name;
+            $recipient_path = trailingslashit( $recipient_forms_dir ) . $recipient_name;
+
+            $this->mrm_generate_1099_nec_pdf_packet(
+                $recipient_path,
+                $payee,
+                $tax_year,
+                array( 4, 5, 6 ),
+                '1099-NEC Recipient Packet - Copy B, Instructions, Copy 2'
+            );
+
+            if ( file_exists( $recipient_path ) ) {
+                $pdf_entries[] = array(
+                    'path' => $recipient_path,
+                    'zip'  => 'Form B and Form 2/' . $recipient_name,
+                );
+            }
         }
 
         $zip = new ZipArchive();
@@ -9713,12 +9823,22 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         }
         $zip->addFile( $readme_path, 'README.txt' );
         $zip->addFile( $summary_path, 'summary.csv' );
-        foreach ( $pdf_paths as $pdf_path ) { $zip->addFile( $pdf_path, basename( $pdf_path ) ); }
-        if ( empty( $pdf_paths ) ) {
+        $zip->addEmptyDir( 'Form A' );
+        $zip->addEmptyDir( 'Form 1' );
+        $zip->addEmptyDir( 'Form B and Form 2' );
+
+        foreach ( $pdf_entries as $entry ) {
+            if ( ! empty( $entry['path'] ) && ! empty( $entry['zip'] ) && file_exists( $entry['path'] ) ) {
+                $zip->addFile( $entry['path'], $entry['zip'] );
+            }
+        }
+
+        if ( empty( $pdf_entries ) ) {
             $no_payees_path = trailingslashit( $workspace ) . 'NO-PAID-OUT-1099-PAYEES.txt';
-            file_put_contents($no_payees_path,"No paid-out instructor or composer payees were found for {$this->mrm_1099_period_label( $tax_year, $tax_quarter )}.
-Only payout ledger rows with status = paid_out and updated_at inside the selected period are included.
-");
+            file_put_contents(
+                $no_payees_path,
+                "No paid-out instructor or composer payees were found for {$this->mrm_1099_period_label( $tax_year, $tax_quarter )}.\nOnly payout ledger rows with status = paid_out and updated_at inside the selected period are included.\n"
+            );
             $zip->addFile( $no_payees_path, 'NO-PAID-OUT-1099-PAYEES.txt' );
         }
         $zip->close();
