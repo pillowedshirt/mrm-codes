@@ -163,6 +163,89 @@ class MRM_Lesson_Scheduler {
         }
     }
 
+    protected function mrm_get_1099_tax_secret_id() {
+        return defined( 'MRM_SECRET_TAX_1099_PROFILES' ) ? MRM_SECRET_TAX_1099_PROFILES : 'lowbrass/tax/1099-profiles';
+    }
+
+    protected function mrm_get_1099_tax_secret_bundle() {
+        if ( isset( $_GET['mrm_refresh_tax_secret'] ) && current_user_can( 'manage_options' ) ) {
+            delete_transient( 'mrm_secret_tax_1099_profiles_v1' );
+        }
+        $secret = $this->mrm_get_secret_json( $this->mrm_get_1099_tax_secret_id(), 'mrm_secret_tax_1099_profiles_v1' );
+        return is_array( $secret ) ? $secret : array();
+    }
+
+    protected function mrm_normalize_1099_tax_secret_record( $record ) {
+        if ( ! is_array( $record ) ) {
+            return array( 'tin_type' => '', 'tin' => '', 'last4' => '', 'loaded' => false );
+        }
+        $tin_types = array_keys( $this->mrm_1099_tin_type_options() );
+        $tin_type = isset( $record['tin_type'] ) ? sanitize_key( (string) $record['tin_type'] ) : '';
+        if ( ! in_array( $tin_type, $tin_types, true ) || $tin_type === 'unknown' ) {
+            $tin_type = '';
+        }
+        $tin = isset( $record['tin'] ) ? substr( $this->mrm_1099_digits_only( (string) $record['tin'] ), 0, 9 ) : '';
+        return array( 'tin_type' => $tin_type, 'tin' => $tin, 'last4' => $tin !== '' ? substr( $tin, -4 ) : '', 'loaded' => $tin_type !== '' && strlen( $tin ) === 9 );
+    }
+
+    protected function mrm_get_1099_tax_secret_record( $payee_type, $related_instructor_id = 0 ) {
+        $bundle = $this->mrm_get_1099_tax_secret_bundle();
+        $payee_type = strtolower( (string) $payee_type );
+        if ( $payee_type === 'payer' ) {
+            return $this->mrm_normalize_1099_tax_secret_record( $bundle['payer'] ?? array() );
+        }
+        if ( $payee_type === 'composer' ) {
+            return $this->mrm_normalize_1099_tax_secret_record( $bundle['composer'] ?? array() );
+        }
+        if ( $payee_type === 'instructor' ) {
+            $instructor_id = (string) absint( $related_instructor_id );
+            $instructors = isset( $bundle['instructors'] ) && is_array( $bundle['instructors'] ) ? $bundle['instructors'] : array();
+            return $this->mrm_normalize_1099_tax_secret_record( $instructors[ $instructor_id ] ?? array() );
+        }
+        return $this->mrm_normalize_1099_tax_secret_record( array() );
+    }
+
+    protected function mrm_apply_aws_tax_secret_to_payer( $payer ) {
+        $payer = is_array( $payer ) ? $payer : array();
+        $secret = $this->mrm_get_1099_tax_secret_record( 'payer' );
+        if ( ! empty( $secret['loaded'] ) ) {
+            $payer['ein_full_temp'] = $secret['tin'];
+            $payer['ein_last4'] = $secret['last4'];
+        } else {
+            $payer['ein_full_temp'] = '';
+        }
+        return $payer;
+    }
+
+    protected function mrm_apply_aws_tax_secret_to_payee( $payee ) {
+        $payee = is_array( $payee ) ? $payee : array();
+        $payee_type = (string) ( $payee['payee_type'] ?? '' );
+        $related_instructor_id = (int) ( $payee['related_instructor_id'] ?? 0 );
+        if ( $payee_type === 'composer' ) {
+            $secret = $this->mrm_get_1099_tax_secret_record( 'composer' );
+        } elseif ( $payee_type === 'instructor' ) {
+            $secret = $this->mrm_get_1099_tax_secret_record( 'instructor', $related_instructor_id );
+        } else {
+            $secret = $this->mrm_normalize_1099_tax_secret_record( array() );
+        }
+        if ( ! empty( $secret['loaded'] ) ) {
+            $payee['tin_type'] = $secret['tin_type'];
+            $payee['tin_full_temp'] = $secret['tin'];
+            $payee['tin_last4'] = $secret['last4'];
+        } else {
+            $payee['tin_full_temp'] = '';
+        }
+        return $payee;
+    }
+
+    protected function mrm_aws_tax_secret_status_html( $payee_type, $related_instructor_id = 0 ) {
+        $secret = $this->mrm_get_1099_tax_secret_record( $payee_type, $related_instructor_id );
+        if ( ! empty( $secret['loaded'] ) ) {
+            return '<span style="color:#166534;"><strong>Configured in AWS Secrets Manager</strong></span><br><span class="description">TIN type: <code>' . esc_html( strtoupper( $secret['tin_type'] ) ) . '</code> · Last four: <code>' . esc_html( $secret['last4'] ) . '</code></span>';
+        }
+        return '<span style="color:#b32d2e;"><strong>Not found in AWS Secrets Manager</strong></span><br><span class="description">Expected secret: <code>' . esc_html( $this->mrm_get_1099_tax_secret_id() ) . '</code></span>';
+    }
+
     protected function mrm_first_non_empty_google_string($candidates, $keys) {
         if ( ! is_array( $candidates ) ) {
             return '';
@@ -9250,7 +9333,8 @@ public function handle_mrm_clear_all_mileage_cache() {
     }
 
     protected function mrm_build_1099_nec_template_values( $payee, $tax_year ) {
-        $payer = $this->mrm_get_1099_payer_profile();
+        $payer = $this->mrm_apply_aws_tax_secret_to_payer( $this->mrm_get_1099_payer_profile() );
+        $payee = $this->mrm_apply_aws_tax_secret_to_payee( $payee );
         $payer_legal = (string) ( $payer['legal_name'] ?? '' );
         $payer_trade = (string) ( $payer['trade_name'] ?? '' );
         if ( $payer_legal !== '' && $payer_trade !== '' && strtolower( $payer_legal ) !== strtolower( $payer_trade ) ) {
@@ -9512,6 +9596,10 @@ public function handle_mrm_clear_all_mileage_cache() {
             }
         }
 
+        foreach ( $rows as $idx => $row ) {
+            $rows[ $idx ] = $this->mrm_apply_aws_tax_secret_to_payee( $row );
+        }
+
         return $rows;
     }
 
@@ -9592,9 +9680,10 @@ public function handle_mrm_clear_all_mileage_cache() {
             'Form B and Form 2 contains the recipient packet: Copy B, Instructions for Recipient, and Copy 2.',
             '',
             'TIN / EIN SECURITY NOTE',
-            'This export can use temporary full TIN/EIN values stored in the WordPress database.',
-            'Move full SSN/EIN/ITIN values to AWS Secrets Manager as soon as possible.',
-            'The summary.csv intentionally does not need to include full TIN values.',
+            'Full payer and contractor SSN/EIN/ITIN values are loaded from AWS Secrets Manager.',
+            'Expected AWS secret: ' . $this->mrm_get_1099_tax_secret_id(),
+            'The WordPress database should store only non-sensitive tax profile information and last-four values.',
+            'The summary.csv intentionally does not include full TIN values.',
             '',
             'INCLUSION RULES',
             '- Included payout ledger rows with paid-out statuses only.',
@@ -10160,24 +10249,14 @@ protected function mrm_get_1099_payer_profile() {
 
 protected function mrm_sanitize_1099_payer_profile( $raw ) {
     $raw = is_array( $raw ) ? $raw : array();
-
-    $ein_full_temp = isset( $raw['ein_full_temp'] )
-        ? substr( $this->mrm_1099_digits_only( sanitize_text_field( wp_unslash( $raw['ein_full_temp'] ) ) ), 0, 9 )
-        : '';
-
-    $ein_last4 = $ein_full_temp !== ''
-        ? substr( $ein_full_temp, -4 )
-        : (
-            isset( $raw['ein_last4'] )
-                ? substr( $this->mrm_1099_digits_only( sanitize_text_field( wp_unslash( $raw['ein_last4'] ) ) ), -4 )
-                : ''
-        );
-
+    $existing = $this->mrm_get_1099_payer_profile();
+    $aws      = $this->mrm_get_1099_tax_secret_record( 'payer' );
+    $ein_last4 = ! empty( $aws['loaded'] ) ? (string) $aws['last4'] : (string) ( $existing['ein_last4'] ?? '' );
     return array(
         'legal_name'          => isset( $raw['legal_name'] ) ? sanitize_text_field( wp_unslash( $raw['legal_name'] ) ) : '',
         'trade_name'          => isset( $raw['trade_name'] ) ? sanitize_text_field( wp_unslash( $raw['trade_name'] ) ) : '',
-        'ein_last4'           => $ein_last4,
-        'ein_full_temp'       => $ein_full_temp,
+        'ein_last4'           => substr( $this->mrm_1099_digits_only( $ein_last4 ), -4 ),
+        'ein_full_temp'       => '',
         'mailing_address_1'   => isset( $raw['mailing_address_1'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_address_1'] ) ) : '',
         'mailing_address_2'   => isset( $raw['mailing_address_2'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_address_2'] ) ) : '',
         'mailing_city'        => isset( $raw['mailing_city'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_city'] ) ) : '',
@@ -10191,40 +10270,34 @@ protected function mrm_sanitize_1099_payer_profile( $raw ) {
     );
 }
 
-protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_instructor_id = 0 ) {
+protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_instructor_id = 0, $existing = array() ) {
     $raw = is_array( $raw ) ? $raw : array();
-
-    $tax_classifications = array_keys( $this->mrm_1099_tax_classification_options() );
-    $tin_types           = array_keys( $this->mrm_1099_tin_type_options() );
-
+    $payee_type = $payee_type === 'composer' ? 'composer' : 'instructor';
     $tax_classification = isset( $raw['tax_classification'] ) ? sanitize_key( wp_unslash( $raw['tax_classification'] ) ) : '';
-    if ( ! in_array( $tax_classification, $tax_classifications, true ) ) {
+    $allowed_classifications = array_keys( $this->mrm_1099_tax_classification_options() );
+    if ( ! in_array( $tax_classification, $allowed_classifications, true ) ) {
         $tax_classification = '';
     }
-
-    $tin_type = isset( $raw['tin_type'] ) ? sanitize_key( wp_unslash( $raw['tin_type'] ) ) : '';
+    $tin_types = array_keys( $this->mrm_1099_tin_type_options() );
+    $existing = is_array( $existing ) ? $existing : array();
+    $aws_secret = $payee_type === 'composer'
+        ? $this->mrm_get_1099_tax_secret_record( 'composer' )
+        : $this->mrm_get_1099_tax_secret_record( 'instructor', $related_instructor_id );
+    if ( ! empty( $aws_secret['loaded'] ) ) {
+        $tin_type  = (string) $aws_secret['tin_type'];
+        $tin_last4 = (string) $aws_secret['last4'];
+    } else {
+        $tin_type  = (string) ( $existing['tin_type'] ?? '' );
+        $tin_last4 = (string) ( $existing['tin_last4'] ?? '' );
+    }
     if ( ! in_array( $tin_type, $tin_types, true ) ) {
         $tin_type = '';
     }
-
-    $tin_full_temp = isset( $raw['tin_full_temp'] )
-        ? substr( $this->mrm_1099_digits_only( sanitize_text_field( wp_unslash( $raw['tin_full_temp'] ) ) ), 0, 9 )
-        : '';
-
-    $tin_last4 = $tin_full_temp !== ''
-        ? substr( $tin_full_temp, -4 )
-        : (
-            isset( $raw['tin_last4'] )
-                ? substr( $this->mrm_1099_digits_only( sanitize_text_field( wp_unslash( $raw['tin_last4'] ) ) ), -4 )
-                : ''
-        );
-
-    $backup_withholding_raw = isset( $raw['backup_withholding_amount'] )
-        ? sanitize_text_field( wp_unslash( $raw['backup_withholding_amount'] ) )
-        : '';
+    $tin_full_temp = '';
+    $tin_last4 = substr( $this->mrm_1099_digits_only( $tin_last4 ), -4 );
+    $backup_withholding_raw = isset( $raw['backup_withholding_amount'] ) ? sanitize_text_field( wp_unslash( $raw['backup_withholding_amount'] ) ) : '';
     $backup_withholding_raw = preg_replace( '/[^0-9.\-]/', '', $backup_withholding_raw );
     $backup_withholding_cents = $backup_withholding_raw === '' ? 0 : (int) round( (float) $backup_withholding_raw * 100 );
-
     return array(
         'payee_type'                   => $payee_type,
         'related_instructor_id'        => (int) $related_instructor_id,
@@ -10331,13 +10404,15 @@ protected function mrm_handle_contractor_tax_profiles_save() {
             if ( strpos( $key, 'instructor_' ) === 0 ) {
                 $instructor_id = (int) str_replace( 'instructor_', '', $key );
                 if ( $instructor_id > 0 ) {
-                    $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'instructor', $instructor_id );
+                    $existing = $this->mrm_get_tax_profile_for_instructor( $instructor_id );
+                    $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'instructor', $instructor_id, $existing );
                     $data['composer_key'] = '';
                     $this->mrm_upsert_tax_payee_profile( $data );
                 }
             }
             if ( $key === 'composer_default' ) {
-                $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'composer', 0 );
+                $existing = $this->mrm_get_composer_tax_profile();
+                $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'composer', 0, $existing );
                 if ( empty( $data['composer_key'] ) ) {
                     $data['composer_key'] = 'composer:default';
                 }
@@ -10373,7 +10448,13 @@ protected function mrm_render_tax_profile_card( $field_key, $profile, $context )
             <tr><th scope="row"><label>Mailing Address Line 2</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[mailing_address_2]" value="<?php echo esc_attr( $profile['mailing_address_2'] ?? '' ); ?>"></td></tr>
             <tr><th scope="row"><label>City / State / ZIP / Country</label></th><td><input type="text" name="<?php echo $prefix; ?>[mailing_city]" placeholder="City" value="<?php echo esc_attr( $profile['mailing_city'] ?? '' ); ?>" style="width:180px;"><input type="text" name="<?php echo $prefix; ?>[mailing_state]" placeholder="State" value="<?php echo esc_attr( $profile['mailing_state'] ?? '' ); ?>" style="width:80px;"><input type="text" name="<?php echo $prefix; ?>[mailing_postal_code]" placeholder="ZIP" value="<?php echo esc_attr( $profile['mailing_postal_code'] ?? '' ); ?>" style="width:120px;"><input type="text" name="<?php echo $prefix; ?>[mailing_country]" placeholder="US" value="<?php echo esc_attr( $profile['mailing_country'] ?? 'US' ); ?>" style="width:90px;"></td></tr>
             <tr><th scope="row"><label>W-9 Received</label></th><td><label><input type="checkbox" name="<?php echo $prefix; ?>[w9_received]" value="1" <?php checked( ! empty( $profile['w9_received'] ) ); ?>>W-9 received</label>&nbsp;<input type="date" name="<?php echo $prefix; ?>[w9_received_date]" value="<?php echo esc_attr( $profile['w9_received_date'] ?? '' ); ?>"></td></tr>
-            <tr><th scope="row"><label>TIN Type / Full TIN</label></th><td><select name="<?php echo $prefix; ?>[tin_type]"><?php foreach ( $tin_options as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( (string) ( $profile['tin_type'] ?? '' ), $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?></select><input type="text" name="<?php echo $prefix; ?>[tin_full_temp]" maxlength="11" inputmode="numeric" autocomplete="off" placeholder="Full SSN/EIN/ITIN" value="<?php echo esc_attr( $this->mrm_1099_format_full_tin( (string) ( $profile['tin_type'] ?? '' ), (string) ( $profile['tin_full_temp'] ?? '' ) ) ); ?>" style="width:150px;"><input type="hidden" name="<?php echo $prefix; ?>[tin_last4]" value="<?php echo esc_attr( $profile['tin_last4'] ?? '' ); ?>"><p class="description"><strong>Temporary sensitive storage:</strong> enter the full 9-digit SSN/EIN/ITIN only while preparing 1099 PDFs. The system will still preserve the last four for compatibility. Move this to AWS Secrets Manager as soon as possible.</p></td></tr>
+            <tr>
+    <th scope="row"><label>AWS Tax ID</label></th>
+    <td>
+        <?php echo wp_kses_post( $this->mrm_aws_tax_secret_status_html( $payee_type, $related_id ) ); ?>
+        <p class="description">Full SSN/EIN/ITIN values are stored only in AWS Secrets Manager. This WordPress page no longer accepts or stores full tax ID numbers.</p>
+    </td>
+</tr>
             <tr><th scope="row"><label>W-9 File Reference / Note</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[w9_file_note]" value="<?php echo esc_attr( $profile['w9_file_note'] ?? '' ); ?>" placeholder="Example: W-9 received by email on 2026-01-10"></td></tr>
             <tr><th scope="row"><label>Backup Withholding</label></th><td><label><input type="checkbox" name="<?php echo $prefix; ?>[backup_withholding_required]" value="1" <?php checked( ! empty( $profile['backup_withholding_required'] ) ); ?>>Backup withholding required</label>&nbsp;<input type="text" name="<?php echo $prefix; ?>[backup_withholding_amount]" placeholder="0.00" value="<?php echo esc_attr( number_format( ( (int) ( $profile['backup_withholding_cents'] ?? 0 ) ) / 100, 2, '.', '' ) ); ?>" style="width:100px;"></td></tr>
             <tr><th scope="row"><label>1099 Settings</label></th><td><label style="display:block; margin-bottom:6px;"><input type="checkbox" name="<?php echo $prefix; ?>[is_1099_eligible]" value="1" <?php checked( ! array_key_exists( 'is_1099_eligible', $profile ) || ! empty( $profile['is_1099_eligible'] ) ); ?>>1099 eligible</label><label style="display:block; margin-bottom:6px;"><input type="checkbox" name="<?php echo $prefix; ?>[is_employee]" value="1" <?php checked( ! empty( $profile['is_employee'] ) ); ?>>Employee / W-2 — exclude from contractor 1099 export</label><label style="display:block;"><input type="checkbox" name="<?php echo $prefix; ?>[exclude_from_1099]" value="1" <?php checked( ! empty( $profile['exclude_from_1099'] ) ); ?>>Explicitly exclude from 1099 export</label></td></tr>
@@ -10385,22 +10466,81 @@ protected function mrm_render_tax_profile_card( $field_key, $profile, $context )
 }
 
 public function render_contractor_tax_profiles_page() {
-    if ( ! current_user_can( 'manage_options' ) ) { wp_die( esc_html( 'You do not have permission to access this page.' ) ); }
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( esc_html( 'You do not have permission to access this page.' ) );
+    }
+
     global $wpdb;
+
     $this->mrm_ensure_contractor_tax_profile_schema();
     $this->mrm_handle_contractor_tax_profiles_save();
+
     $instructors_table = $wpdb->prefix . 'mrm_instructors';
     $instructors = array();
-    if ( $this->mrm_table_exists( $instructors_table ) ) { $instructors = $wpdb->get_results( "SELECT * FROM {$instructors_table} ORDER BY name ASC, id ASC", ARRAY_A ); }
+
+    if ( $this->mrm_table_exists( $instructors_table ) ) {
+        $instructors = $wpdb->get_results( "SELECT * FROM {$instructors_table} ORDER BY id ASC", ARRAY_A );
+    }
+
     $payer = $this->mrm_get_1099_payer_profile();
     $composer_profile = $this->mrm_get_composer_tax_profile();
     $composer_connected_hint = $this->mrm_get_composer_connected_account_hint();
-    ?><div class="wrap"><h1>Contractor Tax Profiles</h1><div class="notice notice-info"><p><strong>Before entering tax information:</strong> collect a completed W-9 from each contractor. This page stores backend-only 1099 preparation data. It does not change public instructor cards or front-end HTML.</p><p>Store only TIN last four here. Keep full SSNs/EINs on the completed W-9 or inside your accountant/tax filing software.</p></div>
-        <form method="post" action=""><?php wp_nonce_field( 'mrm_save_contractor_tax_profiles', 'mrm_contractor_tax_profiles_nonce' ); ?><input type="hidden" name="mrm_1099_tax_profiles_action" value="save"><div style="background:#fff; border:1px solid #ccd0d4; padding:18px; margin:20px 0;"><h2 style="margin-top:0;">Payer / Business Profile</h2><p class="description">This information appears on the filled 1099-NEC PDF export. Full EIN storage here is temporary until migrated to AWS Secrets Manager.</p><table class="form-table" role="presentation"><tr><th scope="row"><label>Payer Legal Name</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[legal_name]" value="<?php echo esc_attr( $payer['legal_name'] ); ?>"></td></tr><tr><th scope="row"><label>Trade Name / DBA</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[trade_name]" value="<?php echo esc_attr( $payer['trade_name'] ); ?>"></td></tr><tr><th scope="row"><label>Payer EIN</label></th><td><input type="text" maxlength="10" inputmode="numeric" autocomplete="off" name="mrm_1099_payer_profile[ein_full_temp]" placeholder="Full EIN" value="<?php echo esc_attr( $this->mrm_1099_format_full_tin( 'ein', (string) ( $payer['ein_full_temp'] ?? '' ) ) ); ?>" style="width:150px;"><input type="hidden" name="mrm_1099_payer_profile[ein_last4]" value="<?php echo esc_attr( $payer['ein_last4'] ); ?>"><p class="description"><strong>Temporary sensitive storage:</strong> enter the full 9-digit payer EIN only while preparing 1099 PDFs. Move this to AWS Secrets Manager as soon as possible.</p></td></tr><tr><th scope="row"><label>Mailing Address Line 1</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_1]" value="<?php echo esc_attr( $payer['mailing_address_1'] ); ?>"></td></tr><tr><th scope="row"><label>Mailing Address Line 2</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_2]" value="<?php echo esc_attr( $payer['mailing_address_2'] ); ?>"></td></tr><tr><th scope="row"><label>City / State / ZIP / Country</label></th><td><input type="text" name="mrm_1099_payer_profile[mailing_city]" placeholder="City" value="<?php echo esc_attr( $payer['mailing_city'] ); ?>" style="width:180px;"><input type="text" name="mrm_1099_payer_profile[mailing_state]" placeholder="State" value="<?php echo esc_attr( $payer['mailing_state'] ); ?>" style="width:80px;"><input type="text" name="mrm_1099_payer_profile[mailing_postal_code]" placeholder="ZIP" value="<?php echo esc_attr( $payer['mailing_postal_code'] ); ?>" style="width:120px;"><input type="text" name="mrm_1099_payer_profile[mailing_country]" placeholder="US" value="<?php echo esc_attr( $payer['mailing_country'] ); ?>" style="width:90px;"></td></tr><tr><th scope="row"><label>Phone / Email</label></th><td><input type="text" name="mrm_1099_payer_profile[phone]" placeholder="Phone" value="<?php echo esc_attr( $payer['phone'] ); ?>" style="width:180px;"><input type="email" name="mrm_1099_payer_profile[email]" placeholder="Email" value="<?php echo esc_attr( $payer['email'] ); ?>" style="width:260px;"></td></tr><tr><th scope="row"><label>State ID Number</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[state_id_number]" value="<?php echo esc_attr( $payer['state_id_number'] ); ?>"></td></tr><tr><th scope="row"><label>Payer Notes</label></th><td><textarea class="large-text" rows="3" name="mrm_1099_payer_profile[notes]"><?php echo esc_textarea( $payer['notes'] ); ?></textarea></td></tr></table></div>
-            <h2>Instructor Tax Profiles</h2><?php if ( empty( $instructors ) ) : ?><p>No instructors found.</p><?php else : ?><?php foreach ( $instructors as $instructor ) : ?><?php $profile = $this->mrm_get_tax_profile_for_instructor( (int) $instructor['id'] ); $this->mrm_render_tax_profile_card( 'instructor_' . (int) $instructor['id'], $profile, array( 'title' => 'Instructor Tax Profile — ' . (string) $instructor['name'], 'payee_type' => 'instructor', 'related_instructor_id' => (int) $instructor['id'], 'readonly_name' => (string) $instructor['name'], 'readonly_email' => (string) $instructor['email'], 'connected_account_id' => (string) ( $instructor['stripe_connected_account_id'] ?? '' ), ) ); ?><?php endforeach; ?><?php endif; ?>
-            <h2>Composer Tax Profile</h2><?php $this->mrm_render_tax_profile_card( 'composer_default', $composer_profile, array( 'title' => 'Composer Tax Profile', 'payee_type' => 'composer', 'readonly_name' => ! empty( $composer_profile['display_name'] ) ? (string) $composer_profile['display_name'] : 'Composer', 'readonly_email' => ! empty( $composer_profile['email'] ) ? (string) $composer_profile['email'] : '', 'connected_account_id' => ! empty( $composer_profile['connected_account_id'] ) ? (string) $composer_profile['connected_account_id'] : $composer_connected_hint, ) ); ?>
-            <?php submit_button( 'Save Contractor Tax Profiles', 'primary large' ); ?></form></div><?php
+
+    ?>
+    <div class="wrap">
+        <h1>Contractor Tax Profiles</h1>
+
+        <div class="notice notice-info">
+            <p><strong>Before entering tax information:</strong> collect a completed W-9 from each contractor. This page stores backend-only 1099 preparation data. It does not change public instructor cards or front-end HTML.</p>
+            <p>Full payer and contractor tax ID numbers are now read from AWS Secrets Manager: <code><?php echo esc_html( $this->mrm_get_1099_tax_secret_id() ); ?></code></p>
+            <p><a class="button" href="<?php echo esc_url( add_query_arg( 'mrm_refresh_tax_secret', '1' ) ); ?>">Refresh AWS Tax Secret Cache</a></p>
+        </div>
+
+        <form method="post" action="">
+            <?php wp_nonce_field( 'mrm_save_contractor_tax_profiles', 'mrm_contractor_tax_profiles_nonce' ); ?>
+            <input type="hidden" name="mrm_1099_tax_profiles_action" value="save">
+
+            <div style="background:#fff; border:1px solid #ccd0d4; padding:18px; margin:20px 0;">
+                <h2 style="margin-top:0;">Payer / Business Profile</h2>
+                <p class="description">This information appears on the filled 1099-NEC PDF export. The full payer EIN is read from AWS Secrets Manager.</p>
+
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><label>Payer Legal Name</label></th>
+                        <td><input type="text" class="regular-text" name="mrm_1099_payer_profile[legal_name]" value="<?php echo esc_attr( $payer['legal_name'] ); ?>"></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label>Trade Name / DBA</label></th>
+                        <td><input type="text" class="regular-text" name="mrm_1099_payer_profile[trade_name]" value="<?php echo esc_attr( $payer['trade_name'] ); ?>"></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label>AWS Payer EIN</label></th>
+                        <td>
+                            <?php echo wp_kses_post( $this->mrm_aws_tax_secret_status_html( 'payer' ) ); ?>
+                            <p class="description">Expected JSON path: <code>payer.tin</code>. This page no longer accepts or stores the full payer EIN in WordPress.</p>
+                        </td>
+                    </tr>
+                    <tr><th scope="row"><label>Mailing Address Line 1</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_1]" value="<?php echo esc_attr( $payer['mailing_address_1'] ); ?>"></td></tr>
+                    <tr><th scope="row"><label>Mailing Address Line 2</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_2]" value="<?php echo esc_attr( $payer['mailing_address_2'] ); ?>"></td></tr>
+                    <tr><th scope="row"><label>City / State / ZIP / Country</label></th><td><input type="text" name="mrm_1099_payer_profile[mailing_city]" placeholder="City" value="<?php echo esc_attr( $payer['mailing_city'] ); ?>" style="width:180px;"><input type="text" name="mrm_1099_payer_profile[mailing_state]" placeholder="State" value="<?php echo esc_attr( $payer['mailing_state'] ); ?>" style="width:80px;"><input type="text" name="mrm_1099_payer_profile[mailing_postal_code]" placeholder="ZIP" value="<?php echo esc_attr( $payer['mailing_postal_code'] ); ?>" style="width:120px;"><input type="text" name="mrm_1099_payer_profile[mailing_country]" placeholder="US" value="<?php echo esc_attr( $payer['mailing_country'] ); ?>" style="width:90px;"></td></tr>
+                    <tr><th scope="row"><label>Phone / Email</label></th><td><input type="text" name="mrm_1099_payer_profile[phone]" placeholder="Phone" value="<?php echo esc_attr( $payer['phone'] ); ?>" style="width:180px;"><input type="email" name="mrm_1099_payer_profile[email]" placeholder="Email" value="<?php echo esc_attr( $payer['email'] ); ?>" style="width:260px;"></td></tr>
+                    <tr><th scope="row"><label>State ID Number</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[state_id_number]" value="<?php echo esc_attr( $payer['state_id_number'] ); ?>"></td></tr>
+                    <tr><th scope="row"><label>Payer Notes</label></th><td><textarea class="large-text" rows="3" name="mrm_1099_payer_profile[notes]"><?php echo esc_textarea( $payer['notes'] ); ?></textarea></td></tr>
+                </table>
+            </div>
+
+            <h2>Composer Tax Profile</h2>
+            <?php $this->mrm_render_tax_profile_card( 'composer_default', $composer_profile, array( 'title' => 'Composer Tax Profile', 'payee_type' => 'composer', 'readonly_name' => ! empty( $composer_profile['display_name'] ) ? (string) $composer_profile['display_name'] : 'Composer', 'readonly_email' => ! empty( $composer_profile['email'] ) ? (string) $composer_profile['email'] : '', 'connected_account_id' => ! empty( $composer_profile['connected_account_id'] ) ? (string) $composer_profile['connected_account_id'] : $composer_connected_hint, ) ); ?>
+
+            <h2>Instructor Tax Profiles</h2>
+            <?php if ( empty( $instructors ) ) : ?><p>No instructors found.</p><?php else : ?><?php foreach ( $instructors as $instructor ) : ?><?php $profile = $this->mrm_get_tax_profile_for_instructor( (int) $instructor['id'] ); $this->mrm_render_tax_profile_card( 'instructor_' . (int) $instructor['id'], $profile, array( 'title' => 'Instructor Tax Profile #' . (int) $instructor['id'] . ' — ' . (string) $instructor['name'], 'payee_type' => 'instructor', 'related_instructor_id' => (int) $instructor['id'], 'readonly_name' => (string) $instructor['name'], 'readonly_email' => (string) $instructor['email'], 'connected_account_id' => (string) ( $instructor['stripe_connected_account_id'] ?? '' ), ) ); ?><?php endforeach; ?><?php endif; ?>
+
+            <?php submit_button( 'Save Contractor Tax Profiles', 'primary large' ); ?>
+        </form>
+    </div>
+    <?php
 }
+
 
 
     public function render_admin_instructors_page() {
@@ -10481,7 +10621,46 @@ public function render_contractor_tax_profiles_page() {
                 $formats = array( '%s','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s' );
                 if ( $action === 'add' ) {
                     $result = $wpdb->insert( $table, $data, $formats );
-                    echo $result === false ? '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>' : '<div class="notice notice-success"><p>Instructor added (ID ' . esc_html( (int) $wpdb->insert_id ) . ').</p></div>';
+                    if ( $result === false ) {
+                        echo '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>';
+                    } else {
+                        $new_instructor_id = (int) $wpdb->insert_id;
+                        $this->mrm_ensure_contractor_tax_profile_schema();
+                        $this->mrm_upsert_tax_payee_profile( array(
+                            'payee_type'                   => 'instructor',
+                            'related_instructor_id'        => $new_instructor_id,
+                            'related_user_id'              => 0,
+                            'display_name'                 => $name,
+                            'legal_name'                   => '',
+                            'business_name'                => '',
+                            'email'                        => $email,
+                            'tax_classification'           => '',
+                            'tax_classification_other'     => '',
+                            'mailing_address_1'            => '',
+                            'mailing_address_2'            => '',
+                            'mailing_city'                 => '',
+                            'mailing_state'                => '',
+                            'mailing_postal_code'          => '',
+                            'mailing_country'              => 'US',
+                            'tin_type'                     => '',
+                            'tin_last4'                    => '',
+                            'tin_full_temp'                => '',
+                            'w9_received'                  => 0,
+                            'w9_received_date'             => null,
+                            'w9_file_note'                 => '',
+                            'backup_withholding_required'  => 0,
+                            'backup_withholding_cents'     => 0,
+                            'is_1099_eligible'             => 1,
+                            'is_employee'                  => 0,
+                            'exclude_from_1099'            => 0,
+                            'composer_key'                 => '',
+                            'connected_account_id'         => ( $stripe_connected_account_id === '' ? '' : $stripe_connected_account_id ),
+                            'notes'                        => '',
+                            'created_at'                   => current_time( 'mysql' ),
+                            'updated_at'                   => current_time( 'mysql' ),
+                        ) );
+                        echo '<div class="notice notice-success"><p>Instructor added (ID ' . esc_html( $new_instructor_id ) . '). Contractor tax profile created automatically.</p></div>';
+                    }
                 } elseif ( $action === 'update' && $id ) {
                     $result = $wpdb->update( $table, $data, array( 'id' => $id ), $formats, array( '%d' ) );
                     echo $result === false ? '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>' : '<div class="notice notice-success"><p>Instructor updated (ID ' . esc_html( $id ) . ').</p></div>';
