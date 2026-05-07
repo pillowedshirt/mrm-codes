@@ -34,6 +34,7 @@ class MRM_Lesson_Scheduler {
     protected static $instance;
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
+    protected $mrm_secret_diagnostics = array();
     const DB_VERSION = '1.5.8';
     const CAPABILITY = 'manage_options';
     const TERMS_VERSION = '2026-04-25';
@@ -47,118 +48,87 @@ class MRM_Lesson_Scheduler {
         return;
     }
 
+    protected function mrm_set_secret_diagnostic( $secret_id, $data ) {
+        $secret_id = (string) $secret_id;
+
+        if ( ! is_array( $data ) ) {
+            $data = array();
+        }
+
+        $safe = array();
+
+        foreach ( $data as $key => $value ) {
+            if ( is_array( $value ) ) {
+                $safe[ $key ] = $value;
+            } elseif ( is_bool( $value ) || is_numeric( $value ) || $value === null ) {
+                $safe[ $key ] = $value;
+            } else {
+                $safe[ $key ] = sanitize_text_field( (string) $value );
+            }
+        }
+
+        $this->mrm_secret_diagnostics[ $secret_id ] = $safe;
+    }
+
+    protected function mrm_get_secret_diagnostic( $secret_id ) {
+        $secret_id = (string) $secret_id;
+
+        return isset( $this->mrm_secret_diagnostics[ $secret_id ] ) && is_array( $this->mrm_secret_diagnostics[ $secret_id ] )
+            ? $this->mrm_secret_diagnostics[ $secret_id ]
+            : array();
+    }
+
+    protected function mrm_secret_diagnostic_summary_html( $secret_id ) {
+        $diag = $this->mrm_get_secret_diagnostic( $secret_id );
+
+        if ( empty( $diag ) ) {
+            return '<p class="description">No AWS diagnostic information is available yet. Click “Refresh AWS Tax Secret Cache” and reload this page.</p>';
+        }
+
+        $status = isset( $diag['status'] ) ? (string) $diag['status'] : 'unknown';
+        $region = isset( $diag['region'] ) ? (string) $diag['region'] : ( defined( 'MRM_AWS_REGION' ) ? MRM_AWS_REGION : 'not defined' );
+        $message = isset( $diag['message'] ) ? (string) $diag['message'] : '';
+
+        $html  = '<p class="description"><strong>AWS diagnostic:</strong> <code>' . esc_html( $status ) . '</code></p>';
+        $html .= '<p class="description">Region used by site: <code>' . esc_html( $region ) . '</code></p>';
+
+        if ( $message !== '' ) {
+            $html .= '<p class="description">Details: ' . esc_html( $message ) . '</p>';
+        }
+
+        if ( ! empty( $diag['aws_error_code'] ) ) {
+            $html .= '<p class="description">AWS error code: <code>' . esc_html( (string) $diag['aws_error_code'] ) . '</code></p>';
+        }
+
+        if ( ! empty( $diag['top_level_keys'] ) && is_array( $diag['top_level_keys'] ) ) {
+            $html .= '<p class="description">Top-level JSON keys found: <code>' . esc_html( implode( ', ', array_map( 'strval', $diag['top_level_keys'] ) ) ) . '</code></p>';
+        }
+
+        return $html;
+    }
+
     protected function mrm_get_secret_json( $secret_id, $cache_key ) {
-        $this->mrm_aws_debug_log( 'Scheduler AWS call started', array(
-            'secret_id' => $secret_id,
-            'cache_key' => $cache_key,
-        ) );
-
+        $secret_id = (string) $secret_id;
+        $cache_key = (string) $cache_key;
+        $this->mrm_aws_debug_log( 'Scheduler AWS call started', array( 'secret_id' => $secret_id, 'cache_key' => $cache_key ) );
         $cached = get_transient( $cache_key );
-        if ( is_array( $cached ) ) {
-            $this->mrm_aws_debug_log( 'Scheduler AWS cache hit', array(
-                'secret_id' => $secret_id,
-                'cache_key' => $cache_key,
-                'keys_present' => array_keys( $cached ),
-            ) );
-            return $cached;
-        }
-
-        if (
-            ! defined( 'MRM_AWS_REGION' ) ||
-            ! defined( 'MRM_AWS_ACCESS_KEY_ID' ) ||
-            ! defined( 'MRM_AWS_SECRET_ACCESS_KEY' )
-        ) {
-            $this->mrm_aws_debug_log( 'Scheduler AWS constants missing', array(
-                'region_defined' => defined( 'MRM_AWS_REGION' ),
-                'key_defined' => defined( 'MRM_AWS_ACCESS_KEY_ID' ),
-                'secret_defined' => defined( 'MRM_AWS_SECRET_ACCESS_KEY' ),
-            ) );
-            return null;
-        }
-
+        if ( is_array( $cached ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'cache_hit', 'message' => 'Secret loaded from WordPress transient cache.', 'region' => defined( 'MRM_AWS_REGION' ) ? MRM_AWS_REGION : 'not defined', 'top_level_keys' => array_keys( $cached ) ) ); return $cached; }
+        if ( ! defined( 'MRM_AWS_REGION' ) || ! defined( 'MRM_AWS_ACCESS_KEY_ID' ) || ! defined( 'MRM_AWS_SECRET_ACCESS_KEY' ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'missing_aws_constants', 'message' => 'One or more required AWS constants are missing in wp-config.php.', 'region_defined' => defined( 'MRM_AWS_REGION' ) ? 'yes' : 'no', 'key_defined' => defined( 'MRM_AWS_ACCESS_KEY_ID' ) ? 'yes' : 'no', 'secret_defined' => defined( 'MRM_AWS_SECRET_ACCESS_KEY' ) ? 'yes' : 'no' ) ); return null; }
+        if ( ! class_exists( '\Aws\SecretsManager\SecretsManagerClient' ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'aws_sdk_missing', 'message' => 'The AWS SDK class Aws\\SecretsManager\\SecretsManagerClient is not available to this plugin.', 'region' => MRM_AWS_REGION ) ); return null; }
         try {
-            $client = new SecretsManagerClient( array(
-                'version' => 'latest',
-                'region'  => MRM_AWS_REGION,
-                'credentials' => array(
-                    'key'    => MRM_AWS_ACCESS_KEY_ID,
-                    'secret' => MRM_AWS_SECRET_ACCESS_KEY,
-                ),
-            ) );
-
-            $this->mrm_aws_debug_log( 'Scheduler calling AWS Secrets Manager', array(
-                'secret_id' => $secret_id,
-                'region' => MRM_AWS_REGION,
-            ) );
-
-            $result = $client->getSecretValue( array(
-                'SecretId' => $secret_id,
-            ) );
-
-            if ( empty( $result['SecretString'] ) ) {
-                $this->mrm_aws_debug_log( 'Scheduler AWS returned empty SecretString', array(
-                    'secret_id' => $secret_id,
-                ) );
-                return null;
-            }
-
-            $decoded = json_decode( (string) $result['SecretString'], true );
-
-            if ( ! is_array( $decoded ) ) {
-                $this->mrm_aws_debug_log( 'Scheduler AWS SecretString did not decode to array', array(
-                    'secret_id' => $secret_id,
-                    'secret_string_length' => strlen( (string) $result['SecretString'] ),
-                ) );
-                return null;
-            }
-
-            $context = array(
-                'secret_id' => $secret_id,
-                'keys_present' => array_keys( $decoded ),
-            );
-
-            if ( array_key_exists( 'service_account_json', $decoded ) ) {
-                $context['service_account_json_type'] = gettype( $decoded['service_account_json'] );
-                if ( is_string( $decoded['service_account_json'] ) ) {
-                    $context['service_account_json_length'] = strlen( $decoded['service_account_json'] );
-                    $context['service_account_json_preview'] = substr( $decoded['service_account_json'], 0, 120 );
-                }
-                if ( is_array( $decoded['service_account_json'] ) ) {
-                    $context['service_account_json_keys'] = array_keys( $decoded['service_account_json'] );
-                }
-            } else {
-                $context['service_account_json_missing'] = true;
-            }
-
-            if ( array_key_exists( 'sync_secret', $decoded ) ) {
-                $context['sync_secret_present'] = true;
-                $context['sync_secret_length'] = is_string( $decoded['sync_secret'] ) ? strlen( $decoded['sync_secret'] ) : 0;
-            } else {
-                $context['sync_secret_missing'] = true;
-            }
-
-            $this->mrm_aws_debug_log( 'Scheduler AWS secret decoded successfully', $context );
-
+            $client = new SecretsManagerClient( array( 'version' => 'latest', 'region' => MRM_AWS_REGION, 'credentials' => array( 'key' => MRM_AWS_ACCESS_KEY_ID, 'secret' => MRM_AWS_SECRET_ACCESS_KEY ) ) );
+            $result = $client->getSecretValue( array( 'SecretId' => $secret_id ) );
+            if ( empty( $result['SecretString'] ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'empty_secret_string', 'message' => 'AWS returned the secret, but SecretString was empty.', 'region' => MRM_AWS_REGION ) ); return null; }
+            $secret_string = (string) $result['SecretString']; $decoded = json_decode( $secret_string, true );
+            if ( ! is_array( $decoded ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'json_decode_failed', 'message' => 'SecretString was returned by AWS, but it was not valid JSON.', 'region' => MRM_AWS_REGION, 'json_error' => json_last_error_msg(), 'secret_string_length' => strlen( $secret_string ) ) ); return null; }
+            $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'loaded_from_aws', 'message' => 'Secret was successfully loaded and decoded from AWS Secrets Manager.', 'region' => MRM_AWS_REGION, 'top_level_keys' => array_keys( $decoded ) ) );
             set_transient( $cache_key, $decoded, 15 * MINUTE_IN_SECONDS );
-
-            $this->mrm_aws_debug_log( 'Scheduler AWS secret cached', array(
-                'secret_id' => $secret_id,
-                'cache_key' => $cache_key,
-            ) );
-
             return $decoded;
         } catch ( AwsException $e ) {
-            $this->mrm_aws_debug_log( 'Scheduler AWS exception', array(
-                'secret_id' => $secret_id,
-                'aws_error_message' => $e->getAwsErrorMessage(),
-                'aws_error_code' => $e->getAwsErrorCode(),
-            ) );
+            $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'aws_exception', 'message' => $e->getAwsErrorMessage(), 'aws_error_code' => $e->getAwsErrorCode(), 'region' => MRM_AWS_REGION ) );
             return null;
         } catch ( \Throwable $e ) {
-            $this->mrm_aws_debug_log( 'Scheduler AWS fatal exception', array(
-                'secret_id' => $secret_id,
-                'message' => $e->getMessage(),
-            ) );
+            $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'php_exception', 'message' => $e->getMessage(), 'region' => MRM_AWS_REGION ) );
             return null;
         }
     }
@@ -167,12 +137,43 @@ class MRM_Lesson_Scheduler {
         return defined( 'MRM_SECRET_TAX_1099_PROFILES' ) ? MRM_SECRET_TAX_1099_PROFILES : 'lowbrass/tax/1099-profiles';
     }
 
-    protected function mrm_get_1099_tax_secret_bundle() {
-        if ( isset( $_GET['mrm_refresh_tax_secret'] ) && current_user_can( 'manage_options' ) ) {
-            delete_transient( 'mrm_secret_tax_1099_profiles_v1' );
+    protected function mrm_normalize_1099_tax_secret_bundle( $secret ) {
+        if ( ! is_array( $secret ) ) {
+            return array();
         }
-        $secret = $this->mrm_get_secret_json( $this->mrm_get_1099_tax_secret_id(), 'mrm_secret_tax_1099_profiles_v1' );
-        return is_array( $secret ) ? $secret : array();
+        if ( isset( $secret['payer'] ) || isset( $secret['composer'] ) || isset( $secret['instructors'] ) ) {
+            return $secret;
+        }
+        $possible_wrappers = array( 'tax_profiles', '1099_profiles', 'profiles', 'data', 'secret', 'SecretString', 'lowbrass/tax/1099-profiles' );
+        foreach ( $possible_wrappers as $key ) {
+            if ( ! array_key_exists( $key, $secret ) ) { continue; }
+            $value = $secret[ $key ];
+            if ( is_array( $value ) && ( isset( $value['payer'] ) || isset( $value['composer'] ) || isset( $value['instructors'] ) ) ) { return $value; }
+            if ( is_string( $value ) && trim( $value ) !== '' ) {
+                $decoded = json_decode( $value, true );
+                if ( is_array( $decoded ) && ( isset( $decoded['payer'] ) || isset( $decoded['composer'] ) || isset( $decoded['instructors'] ) ) ) { return $decoded; }
+            }
+        }
+        if ( count( $secret ) === 1 ) {
+            $only_value = reset( $secret );
+            if ( is_string( $only_value ) && trim( $only_value ) !== '' ) {
+                $decoded = json_decode( $only_value, true );
+                if ( is_array( $decoded ) && ( isset( $decoded['payer'] ) || isset( $decoded['composer'] ) || isset( $decoded['instructors'] ) ) ) { return $decoded; }
+            }
+            if ( is_array( $only_value ) && ( isset( $only_value['payer'] ) || isset( $only_value['composer'] ) || isset( $only_value['instructors'] ) ) ) { return $only_value; }
+        }
+        return $secret;
+    }
+
+    protected function mrm_get_1099_tax_secret_bundle() {
+        $secret_id = $this->mrm_get_1099_tax_secret_id();
+        if ( isset( $_GET['mrm_refresh_tax_secret'] ) && current_user_can( 'manage_options' ) ) { delete_transient( 'mrm_secret_tax_1099_profiles_v1' ); }
+        $secret = $this->mrm_get_secret_json( $secret_id, 'mrm_secret_tax_1099_profiles_v1' );
+        if ( ! is_array( $secret ) ) { return array(); }
+        $normalized = $this->mrm_normalize_1099_tax_secret_bundle( $secret );
+        $diag = $this->mrm_get_secret_diagnostic( $secret_id );
+        if ( is_array( $normalized ) ) { $diag['normalized_top_level_keys'] = array_keys( $normalized ); $this->mrm_set_secret_diagnostic( $secret_id, $diag ); }
+        return is_array( $normalized ) ? $normalized : array();
     }
 
     protected function mrm_normalize_1099_tax_secret_record( $record ) {
@@ -238,12 +239,36 @@ class MRM_Lesson_Scheduler {
         return $payee;
     }
 
-    protected function mrm_aws_tax_secret_status_html( $payee_type, $related_instructor_id = 0 ) {
-        $secret = $this->mrm_get_1099_tax_secret_record( $payee_type, $related_instructor_id );
-        if ( ! empty( $secret['loaded'] ) ) {
-            return '<span style="color:#166534;"><strong>Configured in AWS Secrets Manager</strong></span><br><span class="description">TIN type: <code>' . esc_html( strtoupper( $secret['tin_type'] ) ) . '</code> · Last four: <code>' . esc_html( $secret['last4'] ) . '</code></span>';
+    protected function mrm_get_1099_aws_tax_preflight_issues( $payees ) {
+        $issues = array();
+        $payer = $this->mrm_get_1099_tax_secret_record( 'payer' );
+        if ( empty( $payer['loaded'] ) ) { $issues[] = 'Payer EIN is not available from AWS path payer.tin.'; }
+        foreach ( (array) $payees as $payee ) {
+            $payee_type = (string) ( $payee['payee_type'] ?? '' );
+            if ( $payee_type === 'composer' ) {
+                $secret = $this->mrm_get_1099_tax_secret_record( 'composer' );
+                if ( empty( $secret['loaded'] ) ) { $name = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? 'Composer' ) ); $issues[] = 'Composer TIN is not available from AWS path composer.tin for ' . $name . '.'; }
+            }
+            if ( $payee_type === 'instructor' ) {
+                $instructor_id = (int) ( $payee['related_instructor_id'] ?? 0 );
+                $secret = $this->mrm_get_1099_tax_secret_record( 'instructor', $instructor_id );
+                if ( empty( $secret['loaded'] ) ) { $name = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? ( 'Instructor ' . $instructor_id ) ) ); $issues[] = 'Instructor TIN is not available from AWS path instructors.' . $instructor_id . '.tin for ' . $name . '.'; }
+            }
         }
-        return '<span style="color:#b32d2e;"><strong>Not found in AWS Secrets Manager</strong></span><br><span class="description">Expected secret: <code>' . esc_html( $this->mrm_get_1099_tax_secret_id() ) . '</code></span>';
+        return $issues;
+    }
+
+    protected function mrm_aws_tax_secret_status_html( $payee_type, $related_instructor_id = 0 ) {
+        $secret_id = $this->mrm_get_1099_tax_secret_id();
+        $secret = $this->mrm_get_1099_tax_secret_record( $payee_type, $related_instructor_id );
+        if ( ! empty( $secret['loaded'] ) ) { return '<span style="color:#166534;"><strong>Configured in AWS Secrets Manager</strong></span><br><span class="description">TIN type: <code>' . esc_html( strtoupper( $secret['tin_type'] ) ) . '</code> · Last four: <code>' . esc_html( $secret['last4'] ) . '</code></span>'; }
+        $path = '';
+        if ( $payee_type === 'payer' ) { $path = 'payer.tin'; } elseif ( $payee_type === 'composer' ) { $path = 'composer.tin'; } elseif ( $payee_type === 'instructor' ) { $path = 'instructors.' . absint( $related_instructor_id ) . '.tin'; }
+        $html  = '<span style="color:#b32d2e;"><strong>Tax ID not available from AWS Secrets Manager</strong></span>';
+        $html .= '<br><span class="description">Expected secret: <code>' . esc_html( $secret_id ) . '</code></span>';
+        if ( $path !== '' ) { $html .= '<br><span class="description">Expected JSON path: <code>' . esc_html( $path ) . '</code></span>'; }
+        $html .= $this->mrm_secret_diagnostic_summary_html( $secret_id );
+        return $html;
     }
 
     protected function mrm_first_non_empty_google_string($candidates, $keys) {
@@ -9808,6 +9833,18 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
 
         $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
         $payees = $this->mrm_get_paid_out_1099_payees( $tax_year, $tax_quarter, $environment_mode );
+        $aws_tax_issues = $this->mrm_get_1099_aws_tax_preflight_issues( $payees );
+        if ( ! empty( $aws_tax_issues ) ) {
+            wp_die(
+                '<h1>1099 export stopped</h1>' .
+                '<p>The export was stopped because one or more required full tax ID numbers could not be loaded from AWS Secrets Manager.</p>' .
+                '<p>Expected AWS secret: <code>' . esc_html( $this->mrm_get_1099_tax_secret_id() ) . '</code></p>' .
+                '<ul><li>' . implode( '</li><li>', array_map( 'esc_html', $aws_tax_issues ) ) . '</li></ul>' .
+                '<p>Go to <strong>MRM Scheduler → Contractor Tax Profiles</strong>, click <strong>Refresh AWS Tax Secret Cache</strong>, and review the AWS diagnostic message.</p>',
+                '1099 export stopped',
+                array( 'response' => 500 )
+            );
+        }
         $workspace = $this->mrm_create_1099_export_workspace();
         $period_slug = $tax_quarter > 0 ? ( 'q' . $tax_quarter ) : 'full-year';
         $zip_name = 'low-brass-lessons-1099-nec-preparation-' . $tax_year . '-' . $period_slug . '.zip';
