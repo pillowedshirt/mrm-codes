@@ -3813,7 +3813,7 @@ protected function mrm_get_google_service_account_json() {
 
             $headers = array(
                 'Content-Type: text/html; charset=UTF-8',
-                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
             );
             wp_mail( $to, $subject, $email_html, $headers );
         }
@@ -4852,7 +4852,7 @@ protected function mrm_get_google_service_account_json() {
 
         $headers = array(
             'Content-Type: text/html; charset=UTF-8',
-            'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
         );
 
         $sent = wp_mail( $to, $subject, $html, $headers );
@@ -6277,7 +6277,7 @@ protected function mrm_get_google_service_account_json() {
             $html,
             array(
                 'Content-Type: text/html; charset=UTF-8',
-                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
             )
         );
 
@@ -6312,7 +6312,7 @@ protected function mrm_get_google_service_account_json() {
 
         $headers = array(
             'Content-Type: text/html; charset=UTF-8',
-            'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
         );
 
         $admin_sent = false;
@@ -6378,7 +6378,7 @@ protected function mrm_get_google_service_account_json() {
             $html,
             array(
                 'Content-Type: text/html; charset=UTF-8',
-                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
             )
         );
 
@@ -6749,7 +6749,7 @@ protected function mrm_get_google_service_account_json() {
                     $parent_html,
                     array(
                         'Content-Type: text/html; charset=UTF-8',
-                        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
                     )
                 );
 
@@ -6812,7 +6812,7 @@ protected function mrm_get_google_service_account_json() {
                     $instructor_html,
                     array(
                         'Content-Type: text/html; charset=UTF-8',
-                        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
                     )
                 );
 
@@ -6995,7 +6995,7 @@ protected function mrm_get_google_service_account_json() {
             $html,
             array(
                 'Content-Type: text/html; charset=UTF-8',
-                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
             )
         );
 
@@ -7546,7 +7546,7 @@ protected function mrm_get_google_service_account_json() {
         $intro = '<p>Parent feedback has been submitted for a lesson.</p>';
         $details = '<div><strong>Lesson ID:</strong> ' . (int) $lesson_id . '</div>' . '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>' . '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>' . '<div><strong>Lesson time:</strong> ' . esc_html( $start_label ) . '</div>' . '<div><strong>Rating:</strong> ' . esc_html( str_repeat( '★', (int) $rating ) ) . ' (' . (int) $rating . '/5)</div>' . '<div style="margin-top:12px;"><strong>Comment:</strong><br>' . nl2br( esc_html( (string) $comment ) ) . '</div>';
         $html = $this->mrm_safety_email_wrap_html( 'Parent Lesson Feedback', $intro, $details );
-        $headers = array( 'Content-Type: text/html; charset=UTF-8', 'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>' );
+        $headers = array( 'Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>' );
 
         $admin_sent = false;
         $instructor_sent = false;
@@ -7654,7 +7654,7 @@ protected function mrm_get_google_service_account_json() {
         $details = '<div><strong>Lesson ID:</strong> ' . $lesson_id . '</div>' . '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>' . '<div><strong>Start:</strong> ' . esc_html( $start_label ) . '</div>' . '<div><strong>End:</strong> ' . esc_html( $end_label ) . '</div>';
         $html = $this->mrm_safety_email_wrap_html( $title, $intro, $details );
 
-        $sent = wp_mail( $admin_email, $title, $html, array( 'Content-Type: text/html; charset=UTF-8', 'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>' ) );
+        $sent = wp_mail( $admin_email, $title, $html, array( 'Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>' ) );
 
         $this->mrm_safety_log( 'safety_exception_email_sent', array(
             'type'        => $type,
@@ -11961,7 +11961,7 @@ protected function parse_service_account_json( $json ) {
             $html,
             array(
                 'Content-Type: text/html; charset=UTF-8',
-                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
             )
         );
 
@@ -12015,7 +12015,7 @@ protected function parse_service_account_json( $json ) {
             $html,
             array(
                 'Content-Type: text/html; charset=UTF-8',
-                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
             )
         );
     }
