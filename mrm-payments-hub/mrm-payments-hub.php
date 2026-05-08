@@ -46,7 +46,6 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
     add_action('admin_post_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
-
     add_action('rest_api_init', array($this, 'register_routes'));
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
     add_action('init', array($this, 'mrm_run_instructor_piece_access_sync'));
@@ -2400,7 +2399,7 @@ class MRM_Payments_Hub_Single {
 
     $headers = array(
       'Content-Type: text/html; charset=UTF-8',
-      'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
     );
 
     $contact_url = $this->mrm_get_contact_url();
@@ -5016,7 +5015,7 @@ class MRM_Payments_Hub_Single {
 
     $headers = array(
       'Content-Type: text/html; charset=UTF-8',
-      'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
     );
 
     $sent = wp_mail($email, $subject, $html, $headers);
@@ -5076,7 +5075,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
 
@@ -5132,7 +5131,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
   }
@@ -5177,7 +5176,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
   }
@@ -5208,7 +5207,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
   }
@@ -5245,7 +5244,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
   }
@@ -8840,7 +8839,6 @@ class MRM_Payments_Hub_Single {
     $this->mrm_prune_expired_all_sheet_music();
   }
 
-
   /* =========================================================
    * Marketing Email Lists
    * ======================================================= */
@@ -10024,6 +10022,684 @@ public function render_access_lists_page() {
     </div>
     <?php
   }
+
+  /* =========================================================
+   * Admin UI
+   * ======================================================= */
+
+  public function admin_menu() {
+    add_menu_page(
+      'MRM Payments Hub',
+      'MRM Payments',
+      'manage_options',
+      self::MENU_SLUG,
+      array($this, 'render_admin_page'),
+      'dashicons-cart',
+      57
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Sheet Music Access',
+      'Sheet Music Access',
+      'manage_options',
+      'mrm-pay-hub-access',
+      array($this, 'render_access_lists_page')
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Legal Dispute Ledger',
+      'Legal Dispute Ledger',
+      'manage_options',
+      'mrm-pay-hub-legal-ledger',
+      array($this, 'render_legal_ledger_page')
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Marketing Email Lists',
+      'Marketing Email Lists',
+      'manage_options',
+      'mrm-pay-hub-marketing-email-lists',
+      array($this, 'render_marketing_email_lists_page')
+    );
+  }
+
+  public function handle_admin_post() {
+    if (!is_admin()) return;
+    if (!current_user_can('manage_options')) return;
+
+    if (isset($_POST['mrm_pay_hub_test_aws_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_test_aws_nonce'], 'mrm_pay_hub_test_aws')) {
+      $this->mrm_aws_debug_log('Stripe AWS test button pressed.');
+      $result = $this->stripe_api_request('GET', '/v1/account');
+
+      if (is_wp_error($result)) {
+        $this->mrm_aws_debug_log('Stripe AWS test failed.', array(
+          'error_code' => $result->get_error_code(),
+          'error_message' => $result->get_error_message(),
+        ));
+        add_settings_error(
+          'mrm_pay_hub',
+          'aws_test_failed',
+          'Stripe AWS test failed: ' . $result->get_error_message(),
+          'error'
+        );
+      } else {
+        $acct_id = isset($result['id']) ? (string)$result['id'] : '';
+        $this->mrm_aws_debug_log('Stripe AWS test succeeded.', array(
+          'account_id' => isset($result['id']) ? (string)$result['id'] : '',
+        ));
+        add_settings_error(
+          'mrm_pay_hub',
+          'aws_test_ok',
+          'Stripe AWS test succeeded. Connected account response received' . ($acct_id !== '' ? ' (' . $acct_id . ')' : '') . '.',
+          'updated'
+        );
+      }
+    }
+
+    // Repair default lesson SKUs if they were wiped to 0 by a prior update bug
+    $this->ensure_default_products();
+
+    if (isset($_POST['mrm_pay_hub_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_nonce'], 'mrm_pay_hub_save')) {
+      $settings = $this->get_settings();
+      // AWS / wp-config managed Stripe credentials are no longer stored in WordPress settings.
+
+      $settings['stripe_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_sheet_music_subscription_price_id'] ?? ''));
+      $settings['stripe_test_sheet_music_subscription_price_id'] = '';
+      $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
+      $settings['one_time_sheet_music_composer_pct'] = $this->mrm_sanitize_percent_setting($_POST['one_time_sheet_music_composer_pct'] ?? 0, 0);
+      $settings['in_person_travel_amount_cents'] = $this->mrm_money_to_cents($_POST['in_person_travel_amount'] ?? '5.00', 500);
+
+      foreach ($this->mrm_get_instructor_payout_chart_rows() as $row) {
+        foreach (array_keys($this->mrm_get_instructor_payout_chart_columns()) as $year_bucket) {
+          $setting_key = $this->mrm_get_instructor_payout_chart_setting_key(
+            (int)$row['lesson_length'],
+            (int)$row['is_online'],
+            (int)$year_bucket
+          );
+
+          if ($setting_key === '') {
+            continue;
+          }
+
+          $field_name = str_replace('_cents', '', $setting_key);
+
+          $settings[$setting_key] = $this->mrm_money_to_cents(
+            $_POST[$field_name] ?? '0.00',
+            0
+          );
+        }
+      }
+
+      $settings['payout_anchor_date'] = sanitize_text_field((string)($_POST['payout_anchor_date'] ?? ''));
+
+      unset($settings['instructor_tier_rules']);
+      unset($settings['instructor_payout_30_online_cents']);
+      unset($settings['instructor_payout_30_inperson_cents']);
+      unset($settings['instructor_payout_60_online_cents']);
+      unset($settings['instructor_payout_60_inperson_cents']);
+
+      $this->save_settings($settings);
+      $this->mrm_schedule_daily_payout_check();
+
+      // ✅ Manual access row inserts (row-based UI)
+      if (
+        isset($_POST['mrm_access_add_slug'], $_POST['mrm_access_add_email']) &&
+        is_array($_POST['mrm_access_add_slug']) &&
+        is_array($_POST['mrm_access_add_email'])
+      ) {
+        global $wpdb;
+        $access_table = $this->table_sheet_music_access();
+
+        // Ensure DB exists
+        $this->maybe_install_or_upgrade_db();
+
+        foreach ($_POST['mrm_access_add_slug'] as $i => $slug_raw) {
+          $slug = $this->sanitize_product_slug($slug_raw);
+          $email = sanitize_email((string)($_POST['mrm_access_add_email'][$i] ?? ''));
+
+          if (!$slug) continue;
+          if (!$email || !is_email($email)) continue;
+          if ($slug === 'all-sheet-music') continue;
+
+          $purchase_raw = (string)($_POST['mrm_access_add_purchase'][$i] ?? '');
+          $expires_raw  = (string)($_POST['mrm_access_add_expires'][$i] ?? '');
+
+          $purchase_dt = $purchase_raw ? date('Y-m-d 00:00:00', strtotime($purchase_raw)) : current_time('mysql');
+          $expires_dt  = $expires_raw ? date('Y-m-d 00:00:00', strtotime($expires_raw)) : null;
+
+          $email_hash = $this->email_hash($email);
+
+          // Idempotent: skip if already active
+          $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$access_table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
+            $email_hash, $slug
+          ));
+          if ($existing) continue;
+
+          $wpdb->insert($access_table, array(
+            'email_hash'  => $email_hash,
+            'email_plain' => $email,
+            'sku'         => $slug,
+            'start_at'    => $purchase_dt,
+            'expires_at'  => $expires_dt,
+            'month_key'   => null,
+            'granted_at'  => current_time('mysql'),
+            'revoked_at'  => null,
+            'source'      => 'manual_admin',
+            'source_id'   => null,
+          ), array('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'));
+        }
+      }
+
+      // ✅ Edit / delete existing active access rows (row-based UI)
+      if (isset($_POST['mrm_access_row_id']) && is_array($_POST['mrm_access_row_id'])) {
+        global $wpdb;
+        $access_table = $this->table_sheet_music_access();
+        $this->maybe_install_or_upgrade_db();
+
+        $delete_ids = array();
+        if (isset($_POST['mrm_access_row_delete']) && is_array($_POST['mrm_access_row_delete'])) {
+          foreach ($_POST['mrm_access_row_delete'] as $did) {
+            $delete_ids[(int)$did] = true;
+          }
+        }
+
+        foreach ($_POST['mrm_access_row_id'] as $i => $id_raw) {
+          $row_id = (int)$id_raw;
+          if ($row_id <= 0) continue;
+
+          $row_sku = (string)$wpdb->get_var($wpdb->prepare(
+            "SELECT sku FROM {$access_table} WHERE id = %d LIMIT 1",
+            $row_id
+          ));
+          if ($row_sku === 'all-sheet-music') {
+            continue;
+          }
+
+          // Delete (revoke) row
+          if (isset($delete_ids[$row_id])) {
+            $wpdb->update(
+              $access_table,
+              array('revoked_at' => current_time('mysql')),
+              array('id' => $row_id),
+              array('%s'),
+              array('%d')
+            );
+            continue;
+          }
+
+          $email = sanitize_email((string)($_POST['mrm_access_row_email'][$i] ?? ''));
+          if (!$email || !is_email($email)) {
+            // skip invalid edits; preserve existing row
+            continue;
+          }
+
+          $start_raw  = (string)($_POST['mrm_access_row_start'][$i] ?? '');
+          $expire_raw = (string)($_POST['mrm_access_row_expires'][$i] ?? '');
+
+          $start_dt  = $start_raw ? date('Y-m-d 00:00:00', strtotime($start_raw)) : null;
+          $expire_dt = $expire_raw ? date('Y-m-d 00:00:00', strtotime($expire_raw)) : null;
+
+          $wpdb->update(
+            $access_table,
+            array(
+              'email_plain' => $email,
+              'email_hash'  => $this->email_hash($email),
+              'start_at'    => $start_dt,
+              'expires_at'  => $expire_dt,
+            ),
+            array('id' => $row_id),
+            array('%s','%s','%s','%s'),
+            array('%d')
+          );
+        }
+      }
+
+      // Delete selected piece-product access rows
+      if (!empty($_POST['mrm_piece_access_delete']) && is_array($_POST['mrm_piece_access_delete'])) {
+        global $wpdb;
+        $access_table = $this->table_sheet_music_access();
+
+        $delete_ids = array_map('intval', (array)$_POST['mrm_piece_access_delete']);
+        $delete_ids = array_filter($delete_ids);
+
+        foreach ($delete_ids as $row_id) {
+          if ($row_id <= 0) continue;
+
+          $row_sku = (string)$wpdb->get_var($wpdb->prepare(
+            "SELECT sku FROM {$access_table} WHERE id = %d LIMIT 1",
+            $row_id
+          ));
+
+          // Never allow manual delete of the Stripe-managed subscription master row.
+          if ($row_sku === 'all-sheet-music') {
+            continue;
+          }
+
+          $wpdb->update(
+            $access_table,
+            array(
+              'revoked_at' => current_time('mysql'),
+            ),
+            array('id' => $row_id),
+            array('%s'),
+            array('%d')
+          );
+        }
+      }
+
+      // Save Access Lists
+      if (isset($_POST['mrm_access_slug']) && is_array($_POST['mrm_access_slug'])
+          && isset($_POST['mrm_access_emails']) && is_array($_POST['mrm_access_emails'])) {
+
+        $new_lists = array();
+
+        foreach ($_POST['mrm_access_slug'] as $i => $slug_raw) {
+          $slug = $this->sanitize_product_slug($slug_raw);
+          if (!$slug) continue;
+
+          $emails_raw = isset($_POST['mrm_access_emails'][$i]) ? $_POST['mrm_access_emails'][$i] : '';
+          $new_lists[$slug] = $this->normalize_email_list_textarea($emails_raw);
+        }
+
+        // Force master subscription list to be Stripe-managed only
+        $new_lists['all-sheet-music'] = array();
+
+        $this->save_access_lists($new_lists);
+      }
+
+      if (!empty($_POST['mrm_run_payout_batch'])) {
+        $result = $this->mrm_run_payout_batch(true);
+        $last = !empty($result['last_error']) ? (' Last error: ' . $result['last_error']) : '';
+        $msg = 'Payout batch run. Transfers: ' . (int)($result['transfers_created'] ?? 0) . ', payouts: ' . (int)($result['payouts_created'] ?? 0) . ', errors: ' . (int)($result['errors'] ?? 0) . $last;
+        add_settings_error('mrm_pay_hub', 'payout_batch_run', $msg, empty($result['errors']) ? 'updated' : 'error');
+      }
+
+      add_settings_error('mrm_pay_hub', 'saved', 'Settings saved.', 'updated');
+    }
+
+    if (isset($_POST['mrm_pay_hub_products_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_products_nonce'], 'mrm_pay_hub_save_products')) {
+      $existing = $this->all_products();
+      $products = is_array($existing) ? $existing : array();
+
+      $skus = isset($_POST['sku']) ? (array)$_POST['sku'] : array();
+      $original_skus = isset($_POST['original_sku']) ? (array)$_POST['original_sku'] : array();
+      $labels = isset($_POST['label']) ? (array)$_POST['label'] : array();
+      $amounts = isset($_POST['amount_cents']) ? (array)$_POST['amount_cents'] : array();
+      $currencies = isset($_POST['currency']) ? (array)$_POST['currency'] : array();
+      $types = isset($_POST['product_type']) ? (array)$_POST['product_type'] : array();
+      $categories = isset($_POST['category']) ? (array)$_POST['category'] : array();
+      $deletes = isset($_POST['delete']) ? (array)$_POST['delete'] : array();
+
+      $allowed_currencies = array('usd', 'eur');
+      $allowed_types = array('lesson', 'sheet_music');
+      $allowed_categories = array(
+        'lesson' => array('60_online', '60_inperson', '30_online', '30_inperson'),
+        'sheet_music' => array('fundamentals', 'trombone-euphonium', 'tuba', 'complete-package'),
+      );
+
+      foreach ($skus as $index => $sku_raw) {
+        $raw_sku_value = trim((string)$sku_raw);
+        $raw_original_sku = trim((string)($original_skus[$index] ?? ''));
+        $raw_label_value = trim((string)($labels[$index] ?? ''));
+        $raw_amount_value = trim((string)($amounts[$index] ?? ''));
+        $is_delete_request = !empty($deletes[$index]);
+
+        $has_meaningful_input =
+          ($raw_sku_value !== '') ||
+          ($raw_original_sku !== '') ||
+          ($raw_label_value !== '') ||
+          ($raw_amount_value !== '') ||
+          $is_delete_request;
+
+        // Ignore the blank "new product" template row so it cannot overwrite real products.
+        if (!$has_meaningful_input) {
+          continue;
+        }
+
+        $label_raw = sanitize_text_field($raw_label_value);
+        $type = sanitize_text_field((string)($types[$index] ?? 'sheet_music'));
+        if (!in_array($type, $allowed_types, true)) $type = 'lesson';
+        $category = sanitize_text_field((string)($categories[$index] ?? ''));
+        if (!in_array($category, $allowed_categories[$type], true)) {
+          $category = $allowed_categories[$type][0];
+        }
+
+        $original_sku = $this->sanitize_sku((string)($original_skus[$index] ?? ''));
+        $current_sku = $original_sku ? $original_sku : $this->sanitize_sku($sku_raw);
+        if (!empty($deletes[$index])) {
+          if ($current_sku) {
+            unset($products[$current_sku]);
+          }
+          continue;
+        }
+        if ($type === 'sheet_music') {
+          $sku = $this->generate_sheet_music_sku($label_raw, $category, $current_sku);
+          if ($current_sku && $current_sku !== $sku) {
+            unset($products[$current_sku]);
+          }
+        } else {
+          $sku = 'lesson_' . $category;
+          if ($current_sku && $current_sku !== $sku) {
+            unset($products[$current_sku]);
+          }
+        }
+        $sku = $this->sanitize_sku($sku);
+        if (!$sku) continue;
+
+        $label = $label_raw !== '' ? $label_raw : $sku;
+
+        $amount_raw = trim((string)($amounts[$index] ?? ''));
+        if ($amount_raw === '' && $current_sku && isset($products[$current_sku]['amount_cents'])) {
+          // Preserve the existing price if the field was left blank.
+          $final_amount_cents = max(0, (int)$products[$current_sku]['amount_cents']);
+        } else {
+          $final_amount_cents = max(0, (int)$amount_raw);
+        }
+
+        $currency = sanitize_text_field((string)($currencies[$index] ?? 'usd'));
+        if (!in_array($currency, $allowed_currencies, true)) $currency = 'usd';
+
+        $products[$sku] = array(
+          'sku' => $sku,
+          'label' => $label,
+          'amount_cents' => $final_amount_cents,
+          'currency' => $currency,
+          'product_type' => $type,
+          'category' => $category,
+          'active' => 1,
+        );
+      }
+
+      $this->save_products($products);
+      add_settings_error('mrm_pay_hub', 'products_saved', 'Products saved.', 'updated');
+    }
+  }
+
+  private function render_products_ui() {
+    $products = $this->all_products();
+    $all_sku = $this->get_all_sheet_music_sku();
+    $lesson_categories = array(
+      '60_online' => '60 Online',
+      '60_inperson' => '60 In-Person',
+      '30_online' => '30 Online',
+      '30_inperson' => '30 In-Person',
+    );
+    $sheet_categories = array(
+      'fundamentals' => 'Fundamentals',
+      'trombone-euphonium' => 'Trombone/Euphonium',
+      'tuba' => 'Tuba',
+      'complete-package' => 'Complete Package',
+    );
+    $currency_options = array('usd' => 'USD', 'eur' => 'EUR');
+    $type_options = array('lesson' => 'Lesson', 'sheet_music' => 'Sheet Music');
+
+    ob_start();
+    ?>
+    <h2>Products</h2>
+    <form method="post">
+      <?php wp_nonce_field('mrm_pay_hub_save_products', 'mrm_pay_hub_products_nonce'); ?>
+      <div class="mrm-products-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;">
+        <?php $index = 0; ?>
+        <?php foreach ($products as $sku => $product) :
+          $sku = $this->sanitize_sku($sku);
+          if (!$sku || !is_array($product)) continue;
+          $current_index = $index;
+          $index++;
+          $type = (string)($product['product_type'] ?? 'lesson');
+          $category = (string)($product['category'] ?? '');
+          if (!$category && $type === 'lesson') {
+            $category = str_replace('lesson_', '', $sku);
+          }
+          if (!$category && $type === 'sheet_music') {
+            if (preg_match('/^piece-[a-z0-9\-]+-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $match)) {
+              $category = $match[1];
+            }
+          }
+        ?>
+          <div class="card" style="padding:16px;">
+            <h3 style="margin-top:0;"><?php echo esc_html($sku); ?></h3>
+            <p>
+              <label>SKU<br />
+                <input type="text" class="regular-text mrm-sku-display" value="<?php echo esc_attr($sku); ?>" disabled />
+                <input type="hidden" name="sku[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr($sku); ?>" />
+                <input type="hidden" name="original_sku[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr($sku); ?>" />
+              </label>
+            </p>
+            <p>
+              <label>Label<br />
+                <input type="text" name="label[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['label'] ?? $sku)); ?>" class="regular-text" />
+              </label>
+            </p>
+            <p>
+              <label>Amount (cents)<br />
+                <input type="number" name="amount_cents[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['amount_cents'] ?? 0)); ?>" class="small-text" />
+              </label>
+            </p>
+            <p>
+              <label>Currency<br />
+                <select name="currency[<?php echo esc_attr($current_index); ?>]">
+                  <?php foreach ($currency_options as $value => $label) : ?>
+                    <option value="<?php echo esc_attr($value); ?>" <?php selected($value, (string)($product['currency'] ?? 'usd')); ?>>
+                      <?php echo esc_html($label); ?>
+                    </option>
+                  <?php endforeach; ?>
+                </select>
+              </label>
+            </p>
+            <p>
+              <label>Product Type<br />
+                <select name="product_type[<?php echo esc_attr($current_index); ?>]" class="mrm-product-type">
+                  <?php foreach ($type_options as $value => $label) : ?>
+                    <option value="<?php echo esc_attr($value); ?>" <?php selected($value, $type); ?>>
+                      <?php echo esc_html($label); ?>
+                    </option>
+                  <?php endforeach; ?>
+                </select>
+              </label>
+            </p>
+            <p>
+              <label>Category<br />
+                <select name="category[<?php echo esc_attr($current_index); ?>]" class="mrm-product-category">
+                  <?php
+                    $cat_options = ($type === 'sheet_music') ? $sheet_categories : $lesson_categories;
+                    foreach ($cat_options as $value => $label) :
+                  ?>
+                    <option value="<?php echo esc_attr($value); ?>" <?php selected($value, $category); ?>>
+                      <?php echo esc_html($label); ?>
+                    </option>
+                  <?php endforeach; ?>
+                </select>
+              </label>
+            </p>
+            <?php if ($type === 'sheet_music') : ?>
+              <hr />
+              <?php if ($sku === $all_sku) :
+                $rows = $this->mrm_get_sheet_music_subscription_rows_for_admin();
+              ?>
+                <p><strong>Stripe Subscription Status (All Sheet Music)</strong><br />
+                  <small>Synced from Stripe subscription webhooks.</small>
+                </p>
+                <table class="widefat striped">
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th>Subscription Active</th>
+                      <th>End Date</th>
+                      <th>Stripe Status</th>
+                      <th>Order ID</th>
+                      <th>Payment Intent ID</th>
+                      <th>Activation Status</th>
+                      <th>Last Activation Error</th>
+                      <th>Updated</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                  <?php if (empty($rows)) : ?>
+                    <tr><td colspan="10">No sheet music subscriptions found.</td></tr>
+                  <?php else : ?>
+                    <?php foreach ($rows as $row) :
+                      $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
+                      $end_date = $this->mrm_sheet_music_subscription_end_date_for_admin($row);
+                    ?>
+                      <tr>
+                        <td><?php echo esc_html((string)$row['email_plain']); ?></td>
+                        <td style="text-align:center;"><?php echo $is_active ? '✔' : ''; ?></td>
+                        <td><?php echo esc_html($end_date); ?></td>
+                        <td><?php echo esc_html((string)$row['stripe_status']); ?></td>
+                        <td><?php echo esc_html((string)($row['order_id'] ?? '')); ?></td>
+                        <td><?php echo esc_html((string)($row['payment_intent_id'] ?? '')); ?></td>
+                        <td><?php echo esc_html((string)($row['activation_status'] ?? '')); ?></td>
+                        <td><?php echo esc_html((string)($row['last_activation_error'] ?? '')); ?></td>
+                        <td><?php echo esc_html((string)$row['updated_at']); ?></td>
+                      </tr>
+                    <?php endforeach; ?>
+                  <?php endif; ?>
+                  </tbody>
+                </table>
+              <?php endif; ?>
+            <?php endif; ?>
+            <p>
+              <label>
+                <input type="checkbox" name="delete[<?php echo esc_attr($current_index); ?>]" value="1" />
+                Delete
+              </label>
+            </p>
+          </div>
+        <?php endforeach; ?>
+
+        <?php $new_index = $index; ?>
+        <div class="card" style="padding:16px;border:1px dashed #ccd0d4;">
+          <h3 style="margin-top:0;">Add New Product</h3>
+          <p>
+            SKU will be generated automatically based on the label and type.
+          </p>
+          <p>
+            <label>SKU<br />
+              <input type="text" class="regular-text mrm-sku-display" value="" disabled />
+              <input type="hidden" name="sku[<?php echo esc_attr($new_index); ?>]" value="" />
+              <input type="hidden" name="original_sku[<?php echo esc_attr($new_index); ?>]" value="" />
+            </label>
+          </p>
+          <p>
+            <label>Label<br />
+              <input type="text" name="label[<?php echo esc_attr($new_index); ?>]" value="" class="regular-text" />
+            </label>
+          </p>
+          <p>
+            <label>Amount (cents)<br />
+              <input type="number" name="amount_cents[<?php echo esc_attr($new_index); ?>]" value="" class="small-text" />
+            </label>
+          </p>
+          <p>
+            <label>Currency<br />
+              <select name="currency[<?php echo esc_attr($new_index); ?>]">
+                <?php foreach ($currency_options as $value => $label) : ?>
+                  <option value="<?php echo esc_attr($value); ?>"><?php echo esc_html($label); ?></option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+          </p>
+          <p>
+            <label>Product Type<br />
+              <select name="product_type[<?php echo esc_attr($new_index); ?>]" class="mrm-product-type">
+                <?php foreach ($type_options as $value => $label) : ?>
+                  <option value="<?php echo esc_attr($value); ?>"><?php echo esc_html($label); ?></option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+          </p>
+          <p>
+            <label>Category<br />
+              <select name="category[<?php echo esc_attr($new_index); ?>]" class="mrm-product-category">
+                <?php foreach ($lesson_categories as $value => $label) : ?>
+                  <option value="<?php echo esc_attr($value); ?>"><?php echo esc_html($label); ?></option>
+                <?php endforeach; ?>
+              </select>
+            </label>
+          </p>
+          <input type="hidden" name="delete[<?php echo esc_attr($new_index); ?>]" value="0" />
+        </div>
+      </div>
+      <p class="submit">
+        <button type="submit" class="button button-primary">Save Products</button>
+      </p>
+    </form>
+    <script>
+      (function() {
+        var lessonCategories = <?php echo wp_json_encode($lesson_categories); ?>;
+        var sheetCategories = <?php echo wp_json_encode($sheet_categories); ?>;
+        function updateCategory(select) {
+          var card = select.closest('.card');
+          if (!card) return;
+          var categorySelect = card.querySelector('.mrm-product-category');
+          if (!categorySelect) return;
+          var type = select.value;
+          var options = type === 'sheet_music' ? sheetCategories : lessonCategories;
+          var current = categorySelect.value;
+          categorySelect.innerHTML = '';
+          Object.keys(options).forEach(function(value) {
+            var opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = options[value];
+            if (value === current) opt.selected = true;
+            categorySelect.appendChild(opt);
+          });
+          if (!categorySelect.value) {
+            var keys = Object.keys(options);
+            if (keys.length) categorySelect.value = keys[0];
+          }
+        }
+        function slugify(s) {
+          var text = String(s || '').trim().toLowerCase();
+          text = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          text = text.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+          return text || 'untitled';
+        }
+        function updateSku(card) {
+          var labelInput = card.querySelector('input[name^="label"]');
+          var typeSelect = card.querySelector('select[name^="product_type"]');
+          var catSelect = card.querySelector('select[name^="category"]');
+          var skuInput = card.querySelector('input[name^="sku"]');
+          var skuDisplay = card.querySelector('.mrm-sku-display');
+          if (!labelInput || !typeSelect || !catSelect || !skuInput) return;
+          var labelSlug = slugify(labelInput.value);
+          var type = typeSelect.value;
+          var category = catSelect.value;
+          var sku;
+          if (type === 'sheet_music') {
+            sku = 'piece-' + labelSlug + '-' + category;
+          } else {
+            sku = 'lesson_' + category;
+          }
+          skuInput.value = sku;
+          if (skuDisplay) skuDisplay.value = sku;
+        }
+        document.querySelectorAll('.mrm-product-type').forEach(function(select) {
+          select.addEventListener('change', function() {
+            updateCategory(select);
+            updateSku(select.closest('.card'));
+          });
+          updateCategory(select);
+        });
+        document.querySelectorAll('.mrm-products-grid .card').forEach(function(card) {
+          ['input', 'change'].forEach(function(evt) {
+            card.addEventListener(evt, function() {
+              updateSku(card);
+            });
+          });
+          updateSku(card);
+        });
+      })();
+    </script>
+    <?php
+    return ob_get_clean();
+  }
+
+  
 }
 
 global $mrm_pay_hub_singleton;
