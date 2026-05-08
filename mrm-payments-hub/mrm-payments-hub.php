@@ -35,6 +35,17 @@ class MRM_Payments_Hub_Single {
     add_action('admin_menu', array($this, 'admin_menu'));
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('admin_post_mrm_export_legal_ledger', array($this, 'handle_export_legal_ledger'));
+
+    /**
+     * Marketing Email Lists admin + unsubscribe actions.
+     */
+    add_action('admin_post_mrm_marketing_email_save_lists', array($this, 'handle_marketing_email_save_lists'));
+    add_action('admin_post_mrm_marketing_email_send', array($this, 'handle_marketing_email_send'));
+    add_action('admin_post_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
+    add_action('admin_post_nopriv_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
+    add_action('admin_post_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
+    add_action('admin_post_nopriv_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
+
     add_action('rest_api_init', array($this, 'register_routes'));
     add_action('init', array($this, 'maybe_install_or_upgrade_db'), 5);
     add_action('init', array($this, 'mrm_run_instructor_piece_access_sync'));
@@ -8828,6 +8839,34 @@ class MRM_Payments_Hub_Single {
     $this->mrm_prune_expired_all_sheet_music();
   }
 
+
+  /* =========================================================
+   * Marketing Email Lists
+   * ======================================================= */
+
+  private function mrm_marketing_default_lists() { return array(); }
+  private function mrm_marketing_manual_lists() { return array(); }
+  private function mrm_marketing_unsubscribed_emails() { return array(); }
+  private function mrm_marketing_save_unsubscribed_emails($emails) { }
+  private function mrm_marketing_add_unsubscribe($email) { return false; }
+  private function mrm_marketing_normalize_emails_from_text($raw) { return array(); }
+  private function mrm_marketing_table_exists($table) { return false; }
+  private function mrm_marketing_extract_customer_email_from_order_row($row) { return ''; }
+  private function mrm_marketing_paid_order_emails_by_type($product_type) { return array(); }
+  private function mrm_marketing_sheet_music_subscriber_emails() { return array(); }
+  private function mrm_marketing_lesson_student_emails($mode = 'all') { return array(); }
+  private function mrm_marketing_get_list_recipients($list_key, $apply_suppression = true) { return array(); }
+  private function mrm_marketing_get_combined_recipients($list_keys) { return array(); }
+  private function mrm_marketing_token_for_email($email) { return ''; }
+  private function mrm_marketing_email_from_token($token) { return ''; }
+  private function mrm_marketing_unsubscribe_url($email) { return ''; }
+  private function mrm_marketing_allowed_html($html) { return (string)$html; }
+  private function mrm_marketing_wrap_email_html($subject, $body_html, $unsubscribe_url, $mailing_address = '') { return (string)$body_html; }
+  public function handle_marketing_email_save_lists() { }
+  public function handle_marketing_email_send() { }
+  public function handle_marketing_unsubscribe_confirm() { }
+  public function handle_marketing_unsubscribe_do() { }
+
   /* =========================================================
    * Admin UI
    * ======================================================= */
@@ -8850,6 +8889,16 @@ class MRM_Payments_Hub_Single {
       'manage_options',
       'mrm-pay-hub-access',
       array($this, 'render_access_lists_page')
+    );
+
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Marketing Email Lists',
+      'Marketing Email Lists',
+      'manage_options',
+      'mrm-pay-hub-marketing-email-lists',
+      array($this, 'render_marketing_email_lists_page')
     );
 
     add_submenu_page(
@@ -9536,6 +9585,15 @@ public function handle_export_legal_ledger() {
   fclose($out);
   exit;
 }
+
+public function render_marketing_email_lists_page() {
+  if (!current_user_can('manage_options')) {
+    wp_die('You do not have permission to view this page.');
+  }
+
+  echo '<div class="wrap"><h1>Marketing Email Lists</h1></div>';
+}
+
 public function render_legal_ledger_page() {
   if (!current_user_can('manage_options')) {
     wp_die('You do not have permission to view this page.');
