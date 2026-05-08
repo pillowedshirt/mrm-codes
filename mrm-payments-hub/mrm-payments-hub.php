@@ -41,6 +41,7 @@ class MRM_Payments_Hub_Single {
      */
     add_action('admin_post_mrm_marketing_email_save_lists', array($this, 'handle_marketing_email_save_lists'));
     add_action('admin_post_mrm_marketing_email_send', array($this, 'handle_marketing_email_send'));
+    add_action('admin_post_mrm_marketing_resubscribe', array($this, 'handle_marketing_resubscribe'));
     add_action('admin_post_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
     add_action('admin_post_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
@@ -8845,20 +8846,87 @@ class MRM_Payments_Hub_Single {
    * ======================================================= */
 
   private function mrm_marketing_default_lists() {
-    return array(
-      'all_sheet_music_purchasers' => array('label' => 'All Sheet Music Purchasers', 'type' => 'dynamic', 'desc' => 'Paid one-time sheet music purchasers from the orders table.'),
-      'sheet_music_subscribers' => array('label' => 'Sheet Music Subscribers', 'type' => 'dynamic', 'desc' => 'Emails from the sheet music subscription table.'),
-      'all_lesson_students' => array('label' => 'All Lesson Purchasers / Students', 'type' => 'dynamic', 'desc' => 'Anyone with a lesson record in the scheduler table.'),
-      'active_lesson_students' => array('label' => 'Active Lesson Students', 'type' => 'dynamic', 'desc' => 'Students with at least one upcoming lesson.'),
-      'past_lesson_students' => array('label' => 'Past Lesson Students With No Upcoming Lessons', 'type' => 'dynamic', 'desc' => 'Students who have booked before but have no upcoming lesson.'),
-      'band_directors' => array('label' => 'Band Directors', 'type' => 'manual', 'desc' => 'Manual list for band directors, school contacts, and program leads.'),
-      'general_interest' => array('label' => 'General Interest', 'type' => 'manual', 'desc' => 'Manual list for general updates.'),
-      'low_brass_plus_interest' => array('label' => 'Low Brass Plus Interest', 'type' => 'manual', 'desc' => 'Manual list for Low Brass Plus offers and subscription updates.'),
-      'prospective_instructors' => array('label' => 'Prospective Instructors', 'type' => 'manual', 'desc' => 'Manual list for potential future instructor recruiting.'),
-      'concert_event_interest' => array('label' => 'Concert / Event Interest', 'type' => 'manual', 'desc' => 'Manual list for events, clinics, concerts, and announcements.'),
-      'school_programs_clinics' => array('label' => 'School Programs / Clinics', 'type' => 'manual', 'desc' => 'Manual list for clinics, masterclasses, and school-program outreach.'),
-    );
-  }
+  return array(
+    'all_sheet_music_purchasers' => array(
+      'label' => 'All Sheet Music Purchasers',
+      'type' => 'dynamic',
+      'desc' => 'Paid one-time sheet music purchasers from the orders table.',
+      'example' => '',
+    ),
+    'sheet_music_subscribers' => array(
+      'label' => 'Sheet Music Subscribers',
+      'type' => 'dynamic',
+      'desc' => 'Emails from the sheet music subscription table.',
+      'example' => '',
+    ),
+    'all_lesson_students' => array(
+      'label' => 'All Lesson Purchasers / Students',
+      'type' => 'dynamic',
+      'desc' => 'Anyone with a lesson record in the scheduler table.',
+      'example' => '',
+    ),
+    'active_lesson_students' => array(
+      'label' => 'Active Lesson Students',
+      'type' => 'dynamic',
+      'desc' => 'Students with at least one upcoming lesson.',
+      'example' => '',
+    ),
+    'past_lesson_students' => array(
+      'label' => 'Past Lesson Students With No Upcoming Lessons',
+      'type' => 'dynamic',
+      'desc' => 'Students who have booked before but have no upcoming lesson.',
+      'example' => '',
+    ),
+    'band_directors' => array(
+      'label' => 'Band Directors',
+      'type' => 'manual',
+      'desc' => 'Manual list for band directors, school contacts, and program leads.',
+      'example' => "director@example.edu
+assistant.director@example.edu
+programlead@example.org",
+    ),
+    'general_interest' => array(
+      'label' => 'General Interest',
+      'type' => 'manual',
+      'desc' => 'Manual list for general updates.',
+      'example' => "parent@example.com
+studentfamily@example.com
+community@example.org",
+    ),
+    'low_brass_plus_interest' => array(
+      'label' => 'Low Brass Plus Interest',
+      'type' => 'manual',
+      'desc' => 'Manual list for Low Brass Plus offers and subscription updates.',
+      'example' => "plus.interest@example.com
+sheetmusicfan@example.com
+subscriberlead@example.org",
+    ),
+    'prospective_instructors' => array(
+      'label' => 'Prospective Instructors',
+      'type' => 'manual',
+      'desc' => 'Manual list for potential future instructor recruiting.',
+      'example' => "teacher@example.com
+tubainstructor@example.com
+trombonist@example.org",
+    ),
+    'concert_event_interest' => array(
+      'label' => 'Concert / Event Interest',
+      'type' => 'manual',
+      'desc' => 'Manual list for events, clinics, concerts, and announcements.',
+      'example' => "concertgoer@example.com
+clinicfamily@example.com
+events@example.org",
+    ),
+    'school_programs_clinics' => array(
+      'label' => 'School Programs / Clinics',
+      'type' => 'manual',
+      'desc' => 'Manual list for clinics, masterclasses, and school-program outreach.',
+      'example' => "schoolprogram@example.edu
+musicdepartment@example.edu
+cliniccontact@example.org",
+    ),
+  );
+}
 
   private function mrm_marketing_manual_lists() {
     $lists = $this->get_email_lists();
@@ -9169,6 +9237,81 @@ class MRM_Payments_Hub_Single {
     return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;"><div style="max-width:680px;margin:0 auto;padding:24px;"><div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">' . $logo_html . '<div style="font-size:15px;line-height:1.7;color:#222;text-align:left;">' . $body_html . '</div>' . $unsubscribe_html . '</div></div></body></html>';
   }
 
+  private function mrm_marketing_upload_attachments_from_request() {
+    if (empty($_FILES['mrm_marketing_attachments']) || empty($_FILES['mrm_marketing_attachments']['name'])) {
+      return array('paths' => array(), 'errors' => array());
+    }
+
+    if (!function_exists('wp_handle_upload')) {
+      require_once ABSPATH . 'wp-admin/includes/file.php';
+    }
+
+    $files = $_FILES['mrm_marketing_attachments'];
+    $paths = array();
+    $errors = array();
+
+    $allowed_mimes = array(
+      'pdf'  => 'application/pdf',
+      'doc'  => 'application/msword',
+      'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'jpg'  => 'image/jpeg',
+      'jpeg' => 'image/jpeg',
+      'png'  => 'image/png',
+    );
+
+    $max_files = 5;
+    $max_bytes_per_file = 10 * 1024 * 1024;
+    $count = is_array($files['name']) ? count($files['name']) : 0;
+    if ($count > $max_files) {
+      $errors[] = 'You can attach up to ' . $max_files . ' files per marketing email.';
+      $count = $max_files;
+    }
+
+    for ($i = 0; $i < $count; $i++) {
+      if (empty($files['name'][$i])) continue;
+      if (!empty($files['error'][$i])) {
+        $errors[] = 'Upload error for ' . sanitize_file_name((string)$files['name'][$i]) . '.';
+        continue;
+      }
+      if ((int)$files['size'][$i] > $max_bytes_per_file) {
+        $errors[] = sanitize_file_name((string)$files['name'][$i]) . ' is larger than 10MB.';
+        continue;
+      }
+
+      $single_file = array(
+        'name'     => sanitize_file_name((string)$files['name'][$i]),
+        'type'     => (string)$files['type'][$i],
+        'tmp_name' => (string)$files['tmp_name'][$i],
+        'error'    => (int)$files['error'][$i],
+        'size'     => (int)$files['size'][$i],
+      );
+
+      $upload = wp_handle_upload($single_file, array('test_form' => false, 'mimes' => $allowed_mimes));
+      if (!empty($upload['error'])) {
+        $errors[] = $single_file['name'] . ': ' . $upload['error'];
+        continue;
+      }
+      if (!empty($upload['file']) && file_exists($upload['file'])) $paths[] = $upload['file'];
+    }
+
+    return array('paths' => $paths, 'errors' => $errors);
+  }
+
+  private function mrm_marketing_delete_temp_attachments($paths) {
+    foreach ((array)$paths as $path) {
+      $path = (string)$path;
+      if ($path && file_exists($path)) @unlink($path);
+    }
+  }
+
+  private function mrm_marketing_manual_list_example_html($def) {
+    $example = isset($def['example']) ? trim((string)$def['example']) : '';
+    if ($example === '') return '';
+    return '<p style="margin:6px 0 10px 0;"><small><em>Example format:</em><br><code>' .
+      esc_html($example) .
+      '</code><br>Separate emails with new lines, commas, semicolons, or spaces.</small></p>';
+  }
+
   public function handle_marketing_email_save_lists() {
     if (!current_user_can('manage_options')) wp_die('You do not have permission to save marketing email lists.');
     check_admin_referer('mrm_marketing_email_save_lists', 'mrm_marketing_email_lists_nonce');
@@ -9192,780 +9335,110 @@ class MRM_Payments_Hub_Single {
   }
 
   public function handle_marketing_email_send() {
-    if (!current_user_can('manage_options')) wp_die('You do not have permission to send marketing emails.');
-    check_admin_referer('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
+  if (!current_user_can('manage_options')) wp_die('You do not have permission to send marketing emails.');
+  check_admin_referer('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
 
-    $subject = sanitize_text_field((string)($_POST['mrm_marketing_subject'] ?? ''));
-    $raw_body = isset($_POST['mrm_marketing_html']) ? wp_unslash($_POST['mrm_marketing_html']) : '';
-    $body_html = $this->mrm_marketing_allowed_html($raw_body);
-    $selected_lists = isset($_POST['mrm_marketing_lists']) && is_array($_POST['mrm_marketing_lists']) ? array_map('sanitize_key', (array)$_POST['mrm_marketing_lists']) : array();
+  $subject = sanitize_text_field((string)($_POST['mrm_marketing_subject'] ?? ''));
+  $raw_body = isset($_POST['mrm_marketing_html']) ? wp_unslash($_POST['mrm_marketing_html']) : '';
+  $body_html = $this->mrm_marketing_allowed_html($raw_body);
+  $selected_lists = isset($_POST['mrm_marketing_lists']) && is_array($_POST['mrm_marketing_lists']) ? array_map('sanitize_key', (array)$_POST['mrm_marketing_lists']) : array();
 
-    if ($subject === '' || trim(wp_strip_all_tags($body_html)) === '' || empty($selected_lists)) {
-      wp_safe_redirect(add_query_arg(array('page'=>'mrm-pay-hub-marketing-email-lists','mrm_marketing_error'=>rawurlencode('Subject, HTML body, and at least one list are required.')), admin_url('admin.php')));
-      exit;
-    }
-
-    $recipients = $this->mrm_marketing_get_combined_recipients($selected_lists);
-    if (empty($recipients)) {
-      wp_safe_redirect(add_query_arg(array('page'=>'mrm-pay-hub-marketing-email-lists','mrm_marketing_error'=>rawurlencode('No recipients found after deduplication and unsubscribe suppression.')), admin_url('admin.php')));
-      exit;
-    }
-
-    $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
-    $from_name = 'Low Brass Lessons';
-    $from_email = 'no-reply@lowbrass-lessons.com';
-    $headers = array('Content-Type: text/html; charset=UTF-8', 'From: ' . $from_name . ' <' . $from_email . '>', 'Reply-To: ' . $from_name . ' <' . $from_email . '>');
-
-    $sent = 0;
-    $failed = 0;
-    foreach ($recipients as $email) {
-      $unsubscribe_url = $this->mrm_marketing_unsubscribe_url($email);
-      $final_html = $this->mrm_marketing_wrap_email_html($subject, $body_html, $unsubscribe_url, $mailing_address);
-      $ok = wp_mail($email, $subject, $final_html, $headers);
-      if ($ok) $sent++; else $failed++;
-    }
-
-    wp_safe_redirect(add_query_arg(array('page'=>'mrm-pay-hub-marketing-email-lists','mrm_marketing_sent'=>(string)$sent,'mrm_marketing_failed'=>(string)$failed), admin_url('admin.php')));
+  if ($subject === '' || trim(wp_strip_all_tags($body_html)) === '' || empty($selected_lists)) {
+    wp_safe_redirect(add_query_arg(array(
+      'page' => 'mrm-pay-hub-marketing-email-lists',
+      'mrm_marketing_error' => rawurlencode('Subject, HTML body, and at least one list are required.'),
+    ), admin_url('admin.php')));
     exit;
   }
 
-  public function handle_marketing_unsubscribe_confirm() {
-    $token = isset($_GET['token']) ? sanitize_text_field((string)$_GET['token']) : '';
-    $email = $this->mrm_marketing_email_from_token($token);
-    if (!$email) wp_die('Invalid or expired unsubscribe link.');
-
-    $site = esc_html(get_bloginfo('name'));
-    echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Confirm Marketing Email Unsubscribe</title></head><body style="margin:0;padding:30px;background:#f6f6f6;font-family:Arial,Helvetica,sans-serif;color:#111;"><div style="max-width:640px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:16px;padding:28px;"><h1 style="margin-top:0;">Confirm unsubscribe</h1><p>You are about to remove <strong>' . esc_html($email) . '</strong> from marketing email lists for ' . $site . '.</p><p>You may lose access to marketing-only offers, Low Brass Plus announcements, discounts, and future customer promotions. This will not remove paid sheet music access, lesson records, receipts, or required transactional notices.</p><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_unsubscribe_do"><input type="hidden" name="token" value="' . esc_attr($token) . '"><button type="submit" style="background:#111;color:#fff;border:0;border-radius:10px;padding:12px 18px;font-weight:700;cursor:pointer;">Yes, remove me from marketing emails</button></form></div></body></html>';
+  $recipients = $this->mrm_marketing_get_combined_recipients($selected_lists);
+  if (empty($recipients)) {
+    wp_safe_redirect(add_query_arg(array(
+      'page' => 'mrm-pay-hub-marketing-email-lists',
+      'mrm_marketing_error' => rawurlencode('No recipients found after deduplication and unsubscribe suppression.'),
+    ), admin_url('admin.php')));
     exit;
   }
 
-  public function handle_marketing_unsubscribe_do() {
-    $token = isset($_POST['token']) ? sanitize_text_field((string)$_POST['token']) : '';
-    $email = $this->mrm_marketing_email_from_token($token);
-    if (!$email) wp_die('Invalid or expired unsubscribe request.');
+  $attachment_result = $this->mrm_marketing_upload_attachments_from_request();
+  $attachments = isset($attachment_result['paths']) ? (array)$attachment_result['paths'] : array();
+  $attachment_errors = isset($attachment_result['errors']) ? (array)$attachment_result['errors'] : array();
 
-    $this->mrm_marketing_add_unsubscribe($email);
-    $site = esc_html(get_bloginfo('name'));
-    echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Marketing Email Unsubscribe Confirmed</title></head><body style="margin:0;padding:30px;background:#f6f6f6;font-family:Arial,Helvetica,sans-serif;color:#111;"><div style="max-width:640px;margin:0 auto;background:#fff;border:1px solid #e5e5e5;border-radius:16px;padding:28px;"><h1 style="margin-top:0;">You have been removed</h1><p><strong>' . esc_html($email) . '</strong> has been removed from marketing email lists for ' . $site . '.</p><p>This does not remove paid sheet music access, lesson access, receipts, or required transactional account notices.</p></div></body></html>';
+  if (!empty($attachment_errors)) {
+    $this->mrm_marketing_delete_temp_attachments($attachments);
+
+    wp_safe_redirect(add_query_arg(array(
+      'page' => 'mrm-pay-hub-marketing-email-lists',
+      'mrm_marketing_error' => rawurlencode('Attachment problem: ' . implode(' ', $attachment_errors)),
+    ), admin_url('admin.php')));
     exit;
   }
 
-/* =========================================================
-   * Admin UI
-   * ======================================================= */
+  $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
+  $from_name = 'Low Brass Lessons';
+  $from_email = 'no-reply@lowbrass-lessons.com';
+  $headers = array(
+    'Content-Type: text/html; charset=UTF-8',
+    'From: ' . $from_name . ' <' . $from_email . '>',
+    'Reply-To: ' . $from_name . ' <' . $from_email . '>',
+  );
 
-  public function admin_menu() {
-    add_menu_page(
-      'MRM Payments Hub',
-      'MRM Payments',
-      'manage_options',
-      self::MENU_SLUG,
-      array($this, 'render_admin_page'),
-      'dashicons-cart',
-      57
-    );
+  $sent = 0;
+  $failed = 0;
 
-    add_submenu_page(
-      self::MENU_SLUG,
-      'Sheet Music Access',
-      'Sheet Music Access',
-      'manage_options',
-      'mrm-pay-hub-access',
-      array($this, 'render_access_lists_page')
-    );
+  foreach ($recipients as $email) {
+    $unsubscribe_url = $this->mrm_marketing_unsubscribe_url($email);
+    $final_html = $this->mrm_marketing_wrap_email_html($subject, $body_html, $unsubscribe_url, $mailing_address);
+    $ok = wp_mail($email, $subject, $final_html, $headers, $attachments);
 
-
-    add_submenu_page(
-      self::MENU_SLUG,
-      'Marketing Email Lists',
-      'Marketing Email Lists',
-      'manage_options',
-      'mrm-pay-hub-marketing-email-lists',
-      array($this, 'render_marketing_email_lists_page')
-    );
-
-    add_submenu_page(
-      self::MENU_SLUG,
-      'Legal Dispute Ledger',
-      'Legal Dispute Ledger',
-      'manage_options',
-      'mrm-pay-hub-legal-ledger',
-      array($this, 'render_legal_ledger_page')
-    );
-  }
-
-  public function handle_admin_post() {
-    if (!is_admin()) return;
-    if (!current_user_can('manage_options')) return;
-
-    if (isset($_POST['mrm_pay_hub_test_aws_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_test_aws_nonce'], 'mrm_pay_hub_test_aws')) {
-      $this->mrm_aws_debug_log('Stripe AWS test button pressed.');
-      $result = $this->stripe_api_request('GET', '/v1/account');
-
-      if (is_wp_error($result)) {
-        $this->mrm_aws_debug_log('Stripe AWS test failed.', array(
-          'error_code' => $result->get_error_code(),
-          'error_message' => $result->get_error_message(),
-        ));
-        add_settings_error(
-          'mrm_pay_hub',
-          'aws_test_failed',
-          'Stripe AWS test failed: ' . $result->get_error_message(),
-          'error'
-        );
-      } else {
-        $acct_id = isset($result['id']) ? (string)$result['id'] : '';
-        $this->mrm_aws_debug_log('Stripe AWS test succeeded.', array(
-          'account_id' => isset($result['id']) ? (string)$result['id'] : '',
-        ));
-        add_settings_error(
-          'mrm_pay_hub',
-          'aws_test_ok',
-          'Stripe AWS test succeeded. Connected account response received' . ($acct_id !== '' ? ' (' . $acct_id . ')' : '') . '.',
-          'updated'
-        );
-      }
-    }
-
-    // Repair default lesson SKUs if they were wiped to 0 by a prior update bug
-    $this->ensure_default_products();
-
-    if (isset($_POST['mrm_pay_hub_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_nonce'], 'mrm_pay_hub_save')) {
-      $settings = $this->get_settings();
-      // AWS / wp-config managed Stripe credentials are no longer stored in WordPress settings.
-
-      $settings['stripe_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_sheet_music_subscription_price_id'] ?? ''));
-      $settings['stripe_test_sheet_music_subscription_price_id'] = '';
-      $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
-      $settings['one_time_sheet_music_composer_pct'] = $this->mrm_sanitize_percent_setting($_POST['one_time_sheet_music_composer_pct'] ?? 0, 0);
-      $settings['in_person_travel_amount_cents'] = $this->mrm_money_to_cents($_POST['in_person_travel_amount'] ?? '5.00', 500);
-
-      foreach ($this->mrm_get_instructor_payout_chart_rows() as $row) {
-        foreach (array_keys($this->mrm_get_instructor_payout_chart_columns()) as $year_bucket) {
-          $setting_key = $this->mrm_get_instructor_payout_chart_setting_key(
-            (int)$row['lesson_length'],
-            (int)$row['is_online'],
-            (int)$year_bucket
-          );
-
-          if ($setting_key === '') {
-            continue;
-          }
-
-          $field_name = str_replace('_cents', '', $setting_key);
-
-          $settings[$setting_key] = $this->mrm_money_to_cents(
-            $_POST[$field_name] ?? '0.00',
-            0
-          );
-        }
-      }
-
-      $settings['payout_anchor_date'] = sanitize_text_field((string)($_POST['payout_anchor_date'] ?? ''));
-
-      unset($settings['instructor_tier_rules']);
-      unset($settings['instructor_payout_30_online_cents']);
-      unset($settings['instructor_payout_30_inperson_cents']);
-      unset($settings['instructor_payout_60_online_cents']);
-      unset($settings['instructor_payout_60_inperson_cents']);
-
-      $this->save_settings($settings);
-      $this->mrm_schedule_daily_payout_check();
-
-      // ✅ Manual access row inserts (row-based UI)
-      if (
-        isset($_POST['mrm_access_add_slug'], $_POST['mrm_access_add_email']) &&
-        is_array($_POST['mrm_access_add_slug']) &&
-        is_array($_POST['mrm_access_add_email'])
-      ) {
-        global $wpdb;
-        $access_table = $this->table_sheet_music_access();
-
-        // Ensure DB exists
-        $this->maybe_install_or_upgrade_db();
-
-        foreach ($_POST['mrm_access_add_slug'] as $i => $slug_raw) {
-          $slug = $this->sanitize_product_slug($slug_raw);
-          $email = sanitize_email((string)($_POST['mrm_access_add_email'][$i] ?? ''));
-
-          if (!$slug) continue;
-          if (!$email || !is_email($email)) continue;
-          if ($slug === 'all-sheet-music') continue;
-
-          $purchase_raw = (string)($_POST['mrm_access_add_purchase'][$i] ?? '');
-          $expires_raw  = (string)($_POST['mrm_access_add_expires'][$i] ?? '');
-
-          $purchase_dt = $purchase_raw ? date('Y-m-d 00:00:00', strtotime($purchase_raw)) : current_time('mysql');
-          $expires_dt  = $expires_raw ? date('Y-m-d 00:00:00', strtotime($expires_raw)) : null;
-
-          $email_hash = $this->email_hash($email);
-
-          // Idempotent: skip if already active
-          $existing = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$access_table} WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL LIMIT 1",
-            $email_hash, $slug
-          ));
-          if ($existing) continue;
-
-          $wpdb->insert($access_table, array(
-            'email_hash'  => $email_hash,
-            'email_plain' => $email,
-            'sku'         => $slug,
-            'start_at'    => $purchase_dt,
-            'expires_at'  => $expires_dt,
-            'month_key'   => null,
-            'granted_at'  => current_time('mysql'),
-            'revoked_at'  => null,
-            'source'      => 'manual_admin',
-            'source_id'   => null,
-          ), array('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'));
-        }
-      }
-
-      // ✅ Edit / delete existing active access rows (row-based UI)
-      if (isset($_POST['mrm_access_row_id']) && is_array($_POST['mrm_access_row_id'])) {
-        global $wpdb;
-        $access_table = $this->table_sheet_music_access();
-        $this->maybe_install_or_upgrade_db();
-
-        $delete_ids = array();
-        if (isset($_POST['mrm_access_row_delete']) && is_array($_POST['mrm_access_row_delete'])) {
-          foreach ($_POST['mrm_access_row_delete'] as $did) {
-            $delete_ids[(int)$did] = true;
-          }
-        }
-
-        foreach ($_POST['mrm_access_row_id'] as $i => $id_raw) {
-          $row_id = (int)$id_raw;
-          if ($row_id <= 0) continue;
-
-          $row_sku = (string)$wpdb->get_var($wpdb->prepare(
-            "SELECT sku FROM {$access_table} WHERE id = %d LIMIT 1",
-            $row_id
-          ));
-          if ($row_sku === 'all-sheet-music') {
-            continue;
-          }
-
-          // Delete (revoke) row
-          if (isset($delete_ids[$row_id])) {
-            $wpdb->update(
-              $access_table,
-              array('revoked_at' => current_time('mysql')),
-              array('id' => $row_id),
-              array('%s'),
-              array('%d')
-            );
-            continue;
-          }
-
-          $email = sanitize_email((string)($_POST['mrm_access_row_email'][$i] ?? ''));
-          if (!$email || !is_email($email)) {
-            // skip invalid edits; preserve existing row
-            continue;
-          }
-
-          $start_raw  = (string)($_POST['mrm_access_row_start'][$i] ?? '');
-          $expire_raw = (string)($_POST['mrm_access_row_expires'][$i] ?? '');
-
-          $start_dt  = $start_raw ? date('Y-m-d 00:00:00', strtotime($start_raw)) : null;
-          $expire_dt = $expire_raw ? date('Y-m-d 00:00:00', strtotime($expire_raw)) : null;
-
-          $wpdb->update(
-            $access_table,
-            array(
-              'email_plain' => $email,
-              'email_hash'  => $this->email_hash($email),
-              'start_at'    => $start_dt,
-              'expires_at'  => $expire_dt,
-            ),
-            array('id' => $row_id),
-            array('%s','%s','%s','%s'),
-            array('%d')
-          );
-        }
-      }
-
-      // Delete selected piece-product access rows
-      if (!empty($_POST['mrm_piece_access_delete']) && is_array($_POST['mrm_piece_access_delete'])) {
-        global $wpdb;
-        $access_table = $this->table_sheet_music_access();
-
-        $delete_ids = array_map('intval', (array)$_POST['mrm_piece_access_delete']);
-        $delete_ids = array_filter($delete_ids);
-
-        foreach ($delete_ids as $row_id) {
-          if ($row_id <= 0) continue;
-
-          $row_sku = (string)$wpdb->get_var($wpdb->prepare(
-            "SELECT sku FROM {$access_table} WHERE id = %d LIMIT 1",
-            $row_id
-          ));
-
-          // Never allow manual delete of the Stripe-managed subscription master row.
-          if ($row_sku === 'all-sheet-music') {
-            continue;
-          }
-
-          $wpdb->update(
-            $access_table,
-            array(
-              'revoked_at' => current_time('mysql'),
-            ),
-            array('id' => $row_id),
-            array('%s'),
-            array('%d')
-          );
-        }
-      }
-
-      // Save Access Lists
-      if (isset($_POST['mrm_access_slug']) && is_array($_POST['mrm_access_slug'])
-          && isset($_POST['mrm_access_emails']) && is_array($_POST['mrm_access_emails'])) {
-
-        $new_lists = array();
-
-        foreach ($_POST['mrm_access_slug'] as $i => $slug_raw) {
-          $slug = $this->sanitize_product_slug($slug_raw);
-          if (!$slug) continue;
-
-          $emails_raw = isset($_POST['mrm_access_emails'][$i]) ? $_POST['mrm_access_emails'][$i] : '';
-          $new_lists[$slug] = $this->normalize_email_list_textarea($emails_raw);
-        }
-
-        // Force master subscription list to be Stripe-managed only
-        $new_lists['all-sheet-music'] = array();
-
-        $this->save_access_lists($new_lists);
-      }
-
-      if (!empty($_POST['mrm_run_payout_batch'])) {
-        $result = $this->mrm_run_payout_batch(true);
-        $last = !empty($result['last_error']) ? (' Last error: ' . $result['last_error']) : '';
-        $msg = 'Payout batch run. Transfers: ' . (int)($result['transfers_created'] ?? 0) . ', payouts: ' . (int)($result['payouts_created'] ?? 0) . ', errors: ' . (int)($result['errors'] ?? 0) . $last;
-        add_settings_error('mrm_pay_hub', 'payout_batch_run', $msg, empty($result['errors']) ? 'updated' : 'error');
-      }
-
-      add_settings_error('mrm_pay_hub', 'saved', 'Settings saved.', 'updated');
-    }
-
-    if (isset($_POST['mrm_pay_hub_products_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_products_nonce'], 'mrm_pay_hub_save_products')) {
-      $existing = $this->all_products();
-      $products = is_array($existing) ? $existing : array();
-
-      $skus = isset($_POST['sku']) ? (array)$_POST['sku'] : array();
-      $original_skus = isset($_POST['original_sku']) ? (array)$_POST['original_sku'] : array();
-      $labels = isset($_POST['label']) ? (array)$_POST['label'] : array();
-      $amounts = isset($_POST['amount_cents']) ? (array)$_POST['amount_cents'] : array();
-      $currencies = isset($_POST['currency']) ? (array)$_POST['currency'] : array();
-      $types = isset($_POST['product_type']) ? (array)$_POST['product_type'] : array();
-      $categories = isset($_POST['category']) ? (array)$_POST['category'] : array();
-      $deletes = isset($_POST['delete']) ? (array)$_POST['delete'] : array();
-
-      $allowed_currencies = array('usd', 'eur');
-      $allowed_types = array('lesson', 'sheet_music');
-      $allowed_categories = array(
-        'lesson' => array('60_online', '60_inperson', '30_online', '30_inperson'),
-        'sheet_music' => array('fundamentals', 'trombone-euphonium', 'tuba', 'complete-package'),
-      );
-
-      foreach ($skus as $index => $sku_raw) {
-        $raw_sku_value = trim((string)$sku_raw);
-        $raw_original_sku = trim((string)($original_skus[$index] ?? ''));
-        $raw_label_value = trim((string)($labels[$index] ?? ''));
-        $raw_amount_value = trim((string)($amounts[$index] ?? ''));
-        $is_delete_request = !empty($deletes[$index]);
-
-        $has_meaningful_input =
-          ($raw_sku_value !== '') ||
-          ($raw_original_sku !== '') ||
-          ($raw_label_value !== '') ||
-          ($raw_amount_value !== '') ||
-          $is_delete_request;
-
-        // Ignore the blank "new product" template row so it cannot overwrite real products.
-        if (!$has_meaningful_input) {
-          continue;
-        }
-
-        $label_raw = sanitize_text_field($raw_label_value);
-        $type = sanitize_text_field((string)($types[$index] ?? 'sheet_music'));
-        if (!in_array($type, $allowed_types, true)) $type = 'lesson';
-        $category = sanitize_text_field((string)($categories[$index] ?? ''));
-        if (!in_array($category, $allowed_categories[$type], true)) {
-          $category = $allowed_categories[$type][0];
-        }
-
-        $original_sku = $this->sanitize_sku((string)($original_skus[$index] ?? ''));
-        $current_sku = $original_sku ? $original_sku : $this->sanitize_sku($sku_raw);
-        if (!empty($deletes[$index])) {
-          if ($current_sku) {
-            unset($products[$current_sku]);
-          }
-          continue;
-        }
-        if ($type === 'sheet_music') {
-          $sku = $this->generate_sheet_music_sku($label_raw, $category, $current_sku);
-          if ($current_sku && $current_sku !== $sku) {
-            unset($products[$current_sku]);
-          }
-        } else {
-          $sku = 'lesson_' . $category;
-          if ($current_sku && $current_sku !== $sku) {
-            unset($products[$current_sku]);
-          }
-        }
-        $sku = $this->sanitize_sku($sku);
-        if (!$sku) continue;
-
-        $label = $label_raw !== '' ? $label_raw : $sku;
-
-        $amount_raw = trim((string)($amounts[$index] ?? ''));
-        if ($amount_raw === '' && $current_sku && isset($products[$current_sku]['amount_cents'])) {
-          // Preserve the existing price if the field was left blank.
-          $final_amount_cents = max(0, (int)$products[$current_sku]['amount_cents']);
-        } else {
-          $final_amount_cents = max(0, (int)$amount_raw);
-        }
-
-        $currency = sanitize_text_field((string)($currencies[$index] ?? 'usd'));
-        if (!in_array($currency, $allowed_currencies, true)) $currency = 'usd';
-
-        $products[$sku] = array(
-          'sku' => $sku,
-          'label' => $label,
-          'amount_cents' => $final_amount_cents,
-          'currency' => $currency,
-          'product_type' => $type,
-          'category' => $category,
-          'active' => 1,
-        );
-      }
-
-      $this->save_products($products);
-      add_settings_error('mrm_pay_hub', 'products_saved', 'Products saved.', 'updated');
+    if ($ok) {
+      $sent++;
+    } else {
+      $failed++;
     }
   }
 
-  private function render_products_ui() {
-    $products = $this->all_products();
-    $all_sku = $this->get_all_sheet_music_sku();
-    $lesson_categories = array(
-      '60_online' => '60 Online',
-      '60_inperson' => '60 In-Person',
-      '30_online' => '30 Online',
-      '30_inperson' => '30 In-Person',
-    );
-    $sheet_categories = array(
-      'fundamentals' => 'Fundamentals',
-      'trombone-euphonium' => 'Trombone/Euphonium',
-      'tuba' => 'Tuba',
-      'complete-package' => 'Complete Package',
-    );
-    $currency_options = array('usd' => 'USD', 'eur' => 'EUR');
-    $type_options = array('lesson' => 'Lesson', 'sheet_music' => 'Sheet Music');
+  $this->mrm_marketing_delete_temp_attachments($attachments);
 
-    ob_start();
-    ?>
-    <h2>Products</h2>
-    <form method="post">
-      <?php wp_nonce_field('mrm_pay_hub_save_products', 'mrm_pay_hub_products_nonce'); ?>
-      <div class="mrm-products-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;">
-        <?php $index = 0; ?>
-        <?php foreach ($products as $sku => $product) :
-          $sku = $this->sanitize_sku($sku);
-          if (!$sku || !is_array($product)) continue;
-          $current_index = $index;
-          $index++;
-          $type = (string)($product['product_type'] ?? 'lesson');
-          $category = (string)($product['category'] ?? '');
-          if (!$category && $type === 'lesson') {
-            $category = str_replace('lesson_', '', $sku);
-          }
-          if (!$category && $type === 'sheet_music') {
-            if (preg_match('/^piece-[a-z0-9\-]+-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $match)) {
-              $category = $match[1];
-            }
-          }
-        ?>
-          <div class="card" style="padding:16px;">
-            <h3 style="margin-top:0;"><?php echo esc_html($sku); ?></h3>
-            <p>
-              <label>SKU<br />
-                <input type="text" class="regular-text mrm-sku-display" value="<?php echo esc_attr($sku); ?>" disabled />
-                <input type="hidden" name="sku[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr($sku); ?>" />
-                <input type="hidden" name="original_sku[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr($sku); ?>" />
-              </label>
-            </p>
-            <p>
-              <label>Label<br />
-                <input type="text" name="label[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['label'] ?? $sku)); ?>" class="regular-text" />
-              </label>
-            </p>
-            <p>
-              <label>Amount (cents)<br />
-                <input type="number" name="amount_cents[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)($product['amount_cents'] ?? 0)); ?>" class="small-text" />
-              </label>
-            </p>
-            <p>
-              <label>Currency<br />
-                <select name="currency[<?php echo esc_attr($current_index); ?>]">
-                  <?php foreach ($currency_options as $value => $label) : ?>
-                    <option value="<?php echo esc_attr($value); ?>" <?php selected($value, (string)($product['currency'] ?? 'usd')); ?>>
-                      <?php echo esc_html($label); ?>
-                    </option>
-                  <?php endforeach; ?>
-                </select>
-              </label>
-            </p>
-            <p>
-              <label>Product Type<br />
-                <select name="product_type[<?php echo esc_attr($current_index); ?>]" class="mrm-product-type">
-                  <?php foreach ($type_options as $value => $label) : ?>
-                    <option value="<?php echo esc_attr($value); ?>" <?php selected($value, $type); ?>>
-                      <?php echo esc_html($label); ?>
-                    </option>
-                  <?php endforeach; ?>
-                </select>
-              </label>
-            </p>
-            <p>
-              <label>Category<br />
-                <select name="category[<?php echo esc_attr($current_index); ?>]" class="mrm-product-category">
-                  <?php
-                    $cat_options = ($type === 'sheet_music') ? $sheet_categories : $lesson_categories;
-                    foreach ($cat_options as $value => $label) :
-                  ?>
-                    <option value="<?php echo esc_attr($value); ?>" <?php selected($value, $category); ?>>
-                      <?php echo esc_html($label); ?>
-                    </option>
-                  <?php endforeach; ?>
-                </select>
-              </label>
-            </p>
-            <?php if ($type === 'sheet_music') : ?>
-              <hr />
-              <?php if ($sku === $all_sku) :
-                $rows = $this->mrm_get_sheet_music_subscription_rows_for_admin();
-              ?>
-                <p><strong>Stripe Subscription Status (All Sheet Music)</strong><br />
-                  <small>Synced from Stripe subscription webhooks.</small>
-                </p>
-                <table class="widefat striped">
-                  <thead>
-                    <tr>
-                      <th>Email</th>
-                      <th>Subscription Active</th>
-                      <th>End Date</th>
-                      <th>Stripe Status</th>
-                      <th>Order ID</th>
-                      <th>Payment Intent ID</th>
-                      <th>Activation Status</th>
-                      <th>Last Activation Error</th>
-                      <th>Updated</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                  <?php if (empty($rows)) : ?>
-                    <tr><td colspan="10">No sheet music subscriptions found.</td></tr>
-                  <?php else : ?>
-                    <?php foreach ($rows as $row) :
-                      $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
-                      $end_date = $this->mrm_sheet_music_subscription_end_date_for_admin($row);
-                    ?>
-                      <tr>
-                        <td><?php echo esc_html((string)$row['email_plain']); ?></td>
-                        <td style="text-align:center;"><?php echo $is_active ? '✔' : ''; ?></td>
-                        <td><?php echo esc_html($end_date); ?></td>
-                        <td><?php echo esc_html((string)$row['stripe_status']); ?></td>
-                        <td><?php echo esc_html((string)($row['order_id'] ?? '')); ?></td>
-                        <td><?php echo esc_html((string)($row['payment_intent_id'] ?? '')); ?></td>
-                        <td><?php echo esc_html((string)($row['activation_status'] ?? '')); ?></td>
-                        <td><?php echo esc_html((string)($row['last_activation_error'] ?? '')); ?></td>
-                        <td><?php echo esc_html((string)$row['updated_at']); ?></td>
-                      </tr>
-                    <?php endforeach; ?>
-                  <?php endif; ?>
-                  </tbody>
-                </table>
-              <?php endif; ?>
-            <?php endif; ?>
-            <p>
-              <label>
-                <input type="checkbox" name="delete[<?php echo esc_attr($current_index); ?>]" value="1" />
-                Delete
-              </label>
-            </p>
-          </div>
-        <?php endforeach; ?>
-
-        <?php $new_index = $index; ?>
-        <div class="card" style="padding:16px;border:1px dashed #ccd0d4;">
-          <h3 style="margin-top:0;">Add New Product</h3>
-          <p>
-            SKU will be generated automatically based on the label and type.
-          </p>
-          <p>
-            <label>SKU<br />
-              <input type="text" class="regular-text mrm-sku-display" value="" disabled />
-              <input type="hidden" name="sku[<?php echo esc_attr($new_index); ?>]" value="" />
-              <input type="hidden" name="original_sku[<?php echo esc_attr($new_index); ?>]" value="" />
-            </label>
-          </p>
-          <p>
-            <label>Label<br />
-              <input type="text" name="label[<?php echo esc_attr($new_index); ?>]" value="" class="regular-text" />
-            </label>
-          </p>
-          <p>
-            <label>Amount (cents)<br />
-              <input type="number" name="amount_cents[<?php echo esc_attr($new_index); ?>]" value="" class="small-text" />
-            </label>
-          </p>
-          <p>
-            <label>Currency<br />
-              <select name="currency[<?php echo esc_attr($new_index); ?>]">
-                <?php foreach ($currency_options as $value => $label) : ?>
-                  <option value="<?php echo esc_attr($value); ?>"><?php echo esc_html($label); ?></option>
-                <?php endforeach; ?>
-              </select>
-            </label>
-          </p>
-          <p>
-            <label>Product Type<br />
-              <select name="product_type[<?php echo esc_attr($new_index); ?>]" class="mrm-product-type">
-                <?php foreach ($type_options as $value => $label) : ?>
-                  <option value="<?php echo esc_attr($value); ?>"><?php echo esc_html($label); ?></option>
-                <?php endforeach; ?>
-              </select>
-            </label>
-          </p>
-          <p>
-            <label>Category<br />
-              <select name="category[<?php echo esc_attr($new_index); ?>]" class="mrm-product-category">
-                <?php foreach ($lesson_categories as $value => $label) : ?>
-                  <option value="<?php echo esc_attr($value); ?>"><?php echo esc_html($label); ?></option>
-                <?php endforeach; ?>
-              </select>
-            </label>
-          </p>
-          <input type="hidden" name="delete[<?php echo esc_attr($new_index); ?>]" value="0" />
-        </div>
-      </div>
-      <p class="submit">
-        <button type="submit" class="button button-primary">Save Products</button>
-      </p>
-    </form>
-    <script>
-      (function() {
-        var lessonCategories = <?php echo wp_json_encode($lesson_categories); ?>;
-        var sheetCategories = <?php echo wp_json_encode($sheet_categories); ?>;
-        function updateCategory(select) {
-          var card = select.closest('.card');
-          if (!card) return;
-          var categorySelect = card.querySelector('.mrm-product-category');
-          if (!categorySelect) return;
-          var type = select.value;
-          var options = type === 'sheet_music' ? sheetCategories : lessonCategories;
-          var current = categorySelect.value;
-          categorySelect.innerHTML = '';
-          Object.keys(options).forEach(function(value) {
-            var opt = document.createElement('option');
-            opt.value = value;
-            opt.textContent = options[value];
-            if (value === current) opt.selected = true;
-            categorySelect.appendChild(opt);
-          });
-          if (!categorySelect.value) {
-            var keys = Object.keys(options);
-            if (keys.length) categorySelect.value = keys[0];
-          }
-        }
-        function slugify(s) {
-          var text = String(s || '').trim().toLowerCase();
-          text = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-          text = text.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-          return text || 'untitled';
-        }
-        function updateSku(card) {
-          var labelInput = card.querySelector('input[name^="label"]');
-          var typeSelect = card.querySelector('select[name^="product_type"]');
-          var catSelect = card.querySelector('select[name^="category"]');
-          var skuInput = card.querySelector('input[name^="sku"]');
-          var skuDisplay = card.querySelector('.mrm-sku-display');
-          if (!labelInput || !typeSelect || !catSelect || !skuInput) return;
-          var labelSlug = slugify(labelInput.value);
-          var type = typeSelect.value;
-          var category = catSelect.value;
-          var sku;
-          if (type === 'sheet_music') {
-            sku = 'piece-' + labelSlug + '-' + category;
-          } else {
-            sku = 'lesson_' + category;
-          }
-          skuInput.value = sku;
-          if (skuDisplay) skuDisplay.value = sku;
-        }
-        document.querySelectorAll('.mrm-product-type').forEach(function(select) {
-          select.addEventListener('change', function() {
-            updateCategory(select);
-            updateSku(select.closest('.card'));
-          });
-          updateCategory(select);
-        });
-        document.querySelectorAll('.mrm-products-grid .card').forEach(function(card) {
-          ['input', 'change'].forEach(function(evt) {
-            card.addEventListener(evt, function() {
-              updateSku(card);
-            });
-          });
-          updateSku(card);
-        });
-      })();
-    </script>
-    <?php
-    return ob_get_clean();
-  }
-
-  
-private function mrm_legal_ledger_get_rows($limit = 0) {
-  global $wpdb;
-  $orders_table = $this->table_orders();
-  $q = isset($_GET['mrm_legal_q']) ? sanitize_text_field((string)$_GET['mrm_legal_q']) : '';
-  $status = isset($_GET['mrm_legal_status']) ? sanitize_text_field((string)$_GET['mrm_legal_status']) : '';
-  $start_date = isset($_GET['mrm_legal_start']) ? sanitize_text_field((string)$_GET['mrm_legal_start']) : '';
-  $end_date = isset($_GET['mrm_legal_end']) ? sanitize_text_field((string)$_GET['mrm_legal_end']) : '';
-  $where = array('1=1');
-  $args = array();
-  if ($q !== '') {
-    $like = '%' . $wpdb->esc_like($q) . '%';
-    $where[] = "(CAST(id AS CHAR) LIKE %s OR sku LIKE %s OR product_type LIKE %s OR stripe_payment_intent_id LIKE %s OR metadata_json LIKE %s)";
-    $args[] = $like; $args[] = $like; $args[] = $like; $args[] = $like; $args[] = $like;
-  }
-  if ($status !== '') { $where[] = "status = %s"; $args[] = $status; }
-  if ($start_date !== '') { $where[] = "created_at >= %s"; $args[] = $start_date . ' 00:00:00'; }
-  if ($end_date !== '') { $where[] = "created_at <= %s"; $args[] = $end_date . ' 23:59:59'; }
-  $sql = "SELECT * FROM {$orders_table} WHERE " . implode(' AND ', $where) . " ORDER BY id DESC";
-  $limit = absint($limit);
-  if ($limit > 0) { $sql .= " LIMIT %d"; $args[] = $limit; }
-  return !empty($args) ? $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A) : $wpdb->get_results($sql, ARRAY_A);
+  wp_safe_redirect(add_query_arg(array(
+    'page' => 'mrm-pay-hub-marketing-email-lists',
+    'mrm_marketing_sent' => (string)$sent,
+    'mrm_marketing_failed' => (string)$failed,
+  ), admin_url('admin.php')));
+  exit;
 }
-private function mrm_legal_ledger_money($cents, $currency = 'usd') { $currency = strtoupper((string)$currency ?: 'USD'); return $currency . ' $' . number_format(((int)$cents) / 100, 2); }
-private function mrm_legal_ledger_meta($row) { $meta=array(); if (!empty($row['metadata_json'])) { $decoded=json_decode((string)$row['metadata_json'], true); if (is_array($decoded)) $meta=$decoded; } return $meta; }
-public function handle_export_legal_ledger() {
-  if (!current_user_can('manage_options')) { wp_die('Not allowed.'); }
-  check_admin_referer('mrm_export_legal_ledger');
-  $rows = $this->mrm_legal_ledger_get_rows(0);
-  nocache_headers();
-  header('Content-Type: text/csv; charset=utf-8');
-  header('Content-Disposition: attachment; filename=mrm-legal-dispute-ledger-' . gmdate('Y-m-d') . '.csv');
-  $out = fopen('php://output', 'w');
-  fputcsv($out, array('order_id','created_at','updated_at','status','product_type','sku','amount','currency','stripe_payment_intent_id','terms_accepted','terms_version','source_flow','customer_email','metadata_json'));
-  foreach ((array)$rows as $row) {
-    $meta = $this->mrm_legal_ledger_meta($row);
-    fputcsv($out, array((string)($row['id'] ?? ''),(string)($row['created_at'] ?? ''),(string)($row['updated_at'] ?? ''),(string)($row['status'] ?? ''),(string)($row['product_type'] ?? ''),(string)($row['sku'] ?? ''),number_format(((int)($row['amount_cents'] ?? 0)) / 100, 2, '.', ''),strtoupper((string)($row['currency'] ?? 'usd')),(string)($row['stripe_payment_intent_id'] ?? ''),(string)($meta['mrm_terms_accepted'] ?? ''),(string)($meta['mrm_terms_version'] ?? ''),(string)($meta['mrm_terms_source_flow'] ?? ''),(string)($meta['mrm_customer_email'] ?? ''),(string)($row['metadata_json'] ?? ''),));
+
+public function handle_marketing_resubscribe() {
+  if (!current_user_can('manage_options')) {
+    wp_die('You do not have permission to update marketing unsubscribes.');
   }
-  fclose($out);
+
+  check_admin_referer('mrm_marketing_resubscribe', 'mrm_marketing_resubscribe_nonce');
+
+  $raw = isset($_POST['mrm_marketing_resubscribe_emails']) ? wp_unslash($_POST['mrm_marketing_resubscribe_emails']) : '';
+  $emails_to_restore = $this->mrm_marketing_normalize_emails_from_text($raw);
+
+  if (empty($emails_to_restore)) {
+    wp_safe_redirect(add_query_arg(array(
+      'page' => 'mrm-pay-hub-marketing-email-lists',
+      'mrm_marketing_error' => rawurlencode('No valid emails were entered for re-subscribe.'),
+    ), admin_url('admin.php')));
+    exit;
+  }
+
+  $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+
+  foreach ($emails_to_restore as $email) {
+    unset($unsubscribed[$email]);
+  }
+
+  $this->mrm_marketing_save_unsubscribed_emails(array_keys($unsubscribed));
+
+  wp_safe_redirect(add_query_arg(array(
+    'page' => 'mrm-pay-hub-marketing-email-lists',
+    'mrm_marketing_saved' => '1',
+    'mrm_marketing_resubscribed' => (string)count($emails_to_restore),
+  ), admin_url('admin.php')));
   exit;
 }
 
@@ -9983,7 +9456,13 @@ public function render_marketing_email_lists_page() {
   echo '<h1>Marketing Email Lists</h1>';
   echo '<p>This page is for marketing emails only. It does not control paid sheet music access, lesson records, transactional receipts, or required account notices.</p>';
 
-  if (isset($_GET['mrm_marketing_saved'])) echo '<div class="notice notice-success"><p>Marketing email lists saved.</p></div>';
+  if (isset($_GET['mrm_marketing_saved'])) {
+  $extra = '';
+  if (isset($_GET['mrm_marketing_resubscribed'])) {
+    $extra = ' Re-subscribed emails processed: ' . esc_html((string)(int)$_GET['mrm_marketing_resubscribed']) . '.';
+  }
+  echo '<div class="notice notice-success"><p>Marketing email lists saved.' . $extra . '</p></div>';
+}
   if (isset($_GET['mrm_marketing_sent'])) {
     $sent = (int)$_GET['mrm_marketing_sent'];
     $failed = (int)($_GET['mrm_marketing_failed'] ?? 0);
@@ -10010,11 +9489,12 @@ public function render_marketing_email_lists_page() {
   echo '<div class="mrm-card">';
   echo '<h2>Draft and Send Marketing Email</h2>';
   echo '<p>Paste your prepared HTML below. Recipients are deduplicated across selected lists and unsubscribed emails are suppressed.</p>';
-  echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+  echo '<form method="post" enctype="multipart/form-data" action="' . esc_url(admin_url('admin-post.php')) . '">';
   echo '<input type="hidden" name="action" value="mrm_marketing_email_send">';
   wp_nonce_field('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
   echo '<p><label><strong>Subject line</strong><br><input type="text" name="mrm_marketing_subject" class="large-text" required placeholder="Subject line"></label></p>';
   echo '<p><label><strong>HTML email body</strong><br><textarea name="mrm_marketing_html" class="mrm-html-box" required placeholder="&lt;h1&gt;Your headline&lt;/h1&gt;&#10;&lt;p&gt;Your email body...&lt;/p&gt;&#10;&lt;p&gt;&lt;a href=&quot;https://lowbrass-lessons.com&quot;&gt;Call to action&lt;/a&gt;&lt;/p&gt;"></textarea></label></p>';
+  echo '<p><label><strong>Add attachments</strong><br><input type="file" name="mrm_marketing_attachments[]" multiple accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"></label><br><small>Optional. Up to 5 files. Allowed: PDF, DOC, DOCX, JPG, PNG. Maximum 10MB per file. Attachments are sent through wp_mail/FluentSMTP and temporarily deleted after the send completes.</small></p>';
 
   echo '<h3>Send to lists</h3>';
   echo '<div style="border:1px solid #dcdcde;border-radius:10px;padding:10px;background:#fafafa;">';
@@ -10057,10 +9537,22 @@ public function render_marketing_email_lists_page() {
   echo '<h2>Global Marketing Unsubscribes</h2>';
   echo '<p>These emails are suppressed from all marketing sends. They are not removed from paid access lists, lesson records, or order records.</p>';
   echo '<p><strong>Total unsubscribed:</strong> ' . esc_html((string)count($unsubscribed)) . '</p>';
+
   if (!empty($unsubscribed)) {
     echo '<details><summary>View unsubscribed emails</summary><textarea readonly class="mrm-email-list-box">' . esc_textarea(implode("
 ", array_keys($unsubscribed))) . '</textarea></details>';
   }
+
+  echo '<hr>';
+  echo '<h3>Re-subscribe emails</h3>';
+  echo '<p><small>Use this if someone unsubscribed by mistake or later asks to receive marketing emails again. This only removes the email from the global suppression list. If the person also needs to be added to a manual list, add the email to that manual list above.</small></p>';
+  echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'Are you sure you want to re-subscribe these emails to Low Brass Lessons marketing emails? Only do this if the recipient asked to receive marketing again or if you are undoing your own test unsubscribe.\');">';
+  echo '<input type="hidden" name="action" value="mrm_marketing_resubscribe">';
+  wp_nonce_field('mrm_marketing_resubscribe', 'mrm_marketing_resubscribe_nonce');
+  echo '<textarea name="mrm_marketing_resubscribe_emails" class="mrm-email-list-box" placeholder="your@email.com&#10;another@email.com"></textarea>';
+  echo '<p class="submit"><button type="submit" class="button">Re-subscribe Entered Emails</button></p>';
+  echo '</form>';
+
   echo '</div>';
   echo '</div>';
   echo '</div>';
