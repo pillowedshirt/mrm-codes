@@ -2881,7 +2881,7 @@ class MRM_Product_Access {
 
         $headers = array(
             'Content-Type: text/html; charset=UTF-8',
-            'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
         );
 
         $sent = wp_mail( $normalized_email, $subject, $html, $headers );

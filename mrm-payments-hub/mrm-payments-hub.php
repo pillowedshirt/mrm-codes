@@ -2388,7 +2388,7 @@ class MRM_Payments_Hub_Single {
 
     $headers = array(
       'Content-Type: text/html; charset=UTF-8',
-      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+      'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
     );
 
     $contact_url = $this->mrm_get_contact_url();
@@ -5004,7 +5004,7 @@ class MRM_Payments_Hub_Single {
 
     $headers = array(
       'Content-Type: text/html; charset=UTF-8',
-      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+      'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
     );
 
     $sent = wp_mail($email, $subject, $html, $headers);
@@ -5064,7 +5064,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
 
@@ -5120,7 +5120,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
   }
@@ -5165,7 +5165,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
   }
@@ -5196,7 +5196,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
   }
@@ -5233,7 +5233,7 @@ class MRM_Payments_Hub_Single {
       $html,
       array(
         'Content-Type: text/html; charset=UTF-8',
-        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
   }
