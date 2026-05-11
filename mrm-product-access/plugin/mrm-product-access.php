@@ -552,31 +552,41 @@ class MRM_Product_Access {
                 }
                 $options['verified_emails'] = array_values( array_unique( $verified ) );
             }
+            // Save Tracks Mapping (by Product Slug) to a single option: product_tracks_by_slug.
+            // IMPORTANT:
+            // Keep this option name and row shape unchanged so existing entered track data persists.
+            // Rows are saved in the same order they appear in the admin table.
+            if (
+                isset( $_POST['tracks_map_slug'] ) && is_array( $_POST['tracks_map_slug'] )
+                || isset( $_POST['tracks_map_name'] ) && is_array( $_POST['tracks_map_name'] )
+                || isset( $_POST['tracks_map_url'] ) && is_array( $_POST['tracks_map_url'] )
+            ) {
+                $rows  = array();
+                $slugs = isset( $_POST['tracks_map_slug'] ) && is_array( $_POST['tracks_map_slug'] ) ? (array) $_POST['tracks_map_slug'] : array();
+                $names = isset( $_POST['tracks_map_name'] ) && is_array( $_POST['tracks_map_name'] ) ? (array) $_POST['tracks_map_name'] : array();
+                $urls  = isset( $_POST['tracks_map_url'] ) && is_array( $_POST['tracks_map_url'] ) ? (array) $_POST['tracks_map_url'] : array();
 
-            // Save Tracks Mapping (by Product Slug) to a single option: product_tracks_by_slug
-            $rows = array();
-            if ( isset( $_POST['tracks_map_slug'] ) && is_array( $_POST['tracks_map_slug'] ) ) {
-                $slugs = (array) $_POST['tracks_map_slug'];
-                $names = isset( $_POST['tracks_map_name'] ) ? (array) $_POST['tracks_map_name'] : array();
-                $urls  = isset( $_POST['tracks_map_url'] ) ? (array) $_POST['tracks_map_url'] : array();
+                $row_count = max( count( $slugs ), count( $names ), count( $urls ) );
 
-                foreach ( $slugs as $i => $raw_slug ) {
-                    $slug = strtolower( trim( (string) $raw_slug ) );
-                    $slug = preg_replace( '/[^a-z0-9\-_]+/', '', $slug );
+                for ( $i = 0; $i < $row_count; $i++ ) {
+                    $raw_slug = isset( $slugs[ $i ] ) ? (string) $slugs[ $i ] : '';
+                    $slug     = strtolower( trim( $raw_slug ) );
+                    $slug     = preg_replace( '/[^a-z0-9\-_]+/', '', $slug );
 
-                    $name = isset( $names[ $i ] ) ? sanitize_text_field( (string) $names[ $i ] ) : '';
+                    $name    = isset( $names[ $i ] ) ? sanitize_text_field( (string) $names[ $i ] ) : '';
                     $raw_url = isset( $urls[ $i ] ) ? (string) $urls[ $i ] : '';
                     $url     = $this->sanitize_track_location( $raw_url );
 
-                    // Allow empty rows; store as-is; runtime ignores invalid ones
+                    // Allow empty rows; store as-is. Runtime already ignores invalid rows.
                     $rows[] = array(
                         'product_slug' => $slug,
                         'display_name' => $name,
-                        'url' => $url,
+                        'url'          => $url,
                     );
                 }
+
+                update_option( 'product_tracks_by_slug', $rows );
             }
-            update_option( 'product_tracks_by_slug', $rows );
 
             // Keep legacy options['products'] around for back-compat only (do not update it here).
             // $options['products'] no longer drives access, pricing, or gating.
@@ -1042,176 +1052,73 @@ class MRM_Product_Access {
                 </script>
 
                 <h2 class="title">Tracks Mapping (by Product Slug)</h2>
-                <p>Unlimited rows. Empty rows are allowed and ignored at runtime. Stored in <code>product_tracks_by_slug</code>.</p>
+<p>
+    Unlimited rows. Empty rows are allowed and ignored at runtime.
+    Drag rows to organize track order, or duplicate an existing row to create a similar track quickly.
+    Stored in <code>product_tracks_by_slug</code>.
+</p>
 
-                <style>
-                  .mrm-tracks-map-table input[type="text"]{ box-sizing:border-box; }
-                  .mrm-tracks-map-slug{ width: 180px; }
-                  .mrm-tracks-map-name{ width: 220px; }
-                  .mrm-tracks-map-url{ width: 100%; }
-                  .mrm-drag-handle{
-                    cursor: grab;
-                    user-select: none;
-                    text-align: center;
-                    font-size: 16px;
-                    opacity: 0.9;
-                  }
-                  .mrm-track-row.is-dragging{
-                    opacity: 0.55;
-                  }
-                  .mrm-order-controls{
-                    white-space: nowrap;
-                  }
-                  .mrm-order-controls .button{
-                    min-width: 34px;
-                  }
-                </style>
+<style>
+  .mrm-tracks-map-wrap { max-width: 1200px; }
+  .mrm-tracks-map-table { max-width: 1200px; }
+  .mrm-tracks-map-table input[type="text"] { box-sizing: border-box; }
+  .mrm-tracks-map-slug { width: 180px; }
+  .mrm-tracks-map-name { width: 240px; }
+  .mrm-tracks-map-url { width: 100%; }
+  .mrm-track-drag-cell { width: 44px; text-align: center; vertical-align: middle; }
+  .mrm-drag-handle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid #c3c4c7; border-radius: 6px; background: #f6f7f7; cursor: grab; user-select: none; touch-action: none; font-size: 17px; line-height: 1; }
+  .mrm-drag-handle:active { cursor: grabbing; }
+  .mrm-track-row.is-dragging { opacity: 0.55; background: #f0f6fc; }
+  .mrm-track-row.mrm-drop-before td { border-top: 3px solid #2271b1; }
+  .mrm-track-row.mrm-drop-after td { border-bottom: 3px solid #2271b1; }
+  .mrm-track-actions { width: 125px; white-space: nowrap; }
+  .mrm-track-actions .button { margin-right: 4px; }
+  .mrm-track-help { margin-top: 8px; color: #646970; }
+</style>
 
-                <?php
-                  $rows = get_option( 'product_tracks_by_slug', array() );
-                  if ( ! is_array( $rows ) ) $rows = array();
-                ?>
+<?php
+  $rows = get_option( 'product_tracks_by_slug', array() );
+  if ( ! is_array( $rows ) ) {
+      $rows = array();
+  }
+?>
 
-                <table class="widefat striped mrm-tracks-map-table" id="mrmTracksMapTable" style="max-width: 1100px;">
-                  <thead>
-                    <tr>
-                      <th style="width:36px;"></th>
-                      <th style="width:200px;">product_slug</th>
-                      <th style="width:240px;">Track / PDF Display Name</th>
-                      <th>URL / Path</th>
-                      <th style="width:120px;">Order</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <?php foreach ( $rows as $r ) : ?>
-                      <tr class="mrm-track-row" draggable="true">
-                        <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
+<div class="mrm-tracks-map-wrap">
+  <table class="widefat striped mrm-tracks-map-table" id="mrmTracksMapTable">
+    <thead><tr><th style="width:44px;">Move</th><th style="width:200px;">product_slug</th><th style="width:260px;">Track / PDF Display Name</th><th>URL / Path</th><th style="width:125px;">Actions</th></tr></thead>
+    <tbody>
+      <?php foreach ( $rows as $r ) : ?>
+        <tr class="mrm-track-row"><td class="mrm-track-drag-cell"><span class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</span></td><td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="<?php echo esc_attr( $r['product_slug'] ?? '' ); ?>" /></td><td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="<?php echo esc_attr( $r['display_name'] ?? '' ); ?>" /></td><td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="<?php echo esc_attr( $r['url'] ?? '' ); ?>" /></td><td class="mrm-track-actions"><button type="button" class="button button-small mrm-duplicate-track-row">Duplicate</button></td></tr>
+      <?php endforeach; ?>
+      <tr class="mrm-track-row"><td class="mrm-track-drag-cell"><span class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</span></td><td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td><td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td><td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="" /></td><td class="mrm-track-actions"><button type="button" class="button button-small mrm-duplicate-track-row">Duplicate</button></td></tr>
+    </tbody>
+  </table>
+  <p><button type="button" class="button" id="mrmAddTrackRow">Add Blank Row</button></p>
+  <p class="mrm-track-help">Tip: Drag using the ☰ handle. Duplicating a row copies its product slug, display name, and URL/path, then inserts the copy directly below the original.</p>
+</div>
 
-                        <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="<?php echo esc_attr( $r['product_slug'] ?? '' ); ?>" /></td>
-                        <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="<?php echo esc_attr( $r['display_name'] ?? '' ); ?>" /></td>
-                        <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="<?php echo esc_attr( $r['url'] ?? '' ); ?>" /></td>
-
-                        <td class="mrm-order-controls">
-                          <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
-                          <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
-                        </td>
-                      </tr>
-                    <?php endforeach; ?>
-
-                    <!-- Always include at least one blank row -->
-                    <tr class="mrm-track-row" draggable="true">
-                      <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
-
-                      <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="" /></td>
-
-                      <td class="mrm-order-controls">
-                        <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
-                        <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-
-                <p>
-                  <button type="button" class="button" id="mrmAddTrackRow">Add Row</button>
-                </p>
-
-                <script>
-                (function(){
-                  const btn = document.getElementById('mrmAddTrackRow');
-                  const table = document.getElementById('mrmTracksMapTable');
-                  if(!btn || !table) return;
-
-                  const tbody = table.querySelector('tbody');
-                  if(!tbody) return;
-
-                  function makeRow(){
-                    const tr = document.createElement('tr');
-                    tr.className = 'mrm-track-row';
-                    tr.setAttribute('draggable', 'true');
-                    tr.innerHTML = `
-                      <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
-                      <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="" /></td>
-                      <td class="mrm-order-controls">
-                        <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
-                        <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
-                      </td>
-                    `;
-                    return tr;
-                  }
-
-                  // Add Row button
-                  btn.addEventListener('click', function(){
-                    const tr = makeRow();
-                    tbody.appendChild(tr);
-                    const first = tr.querySelector('input');
-                    if(first) first.focus();
-                  });
-
-                  // Up/Down controls (event delegation)
-                  tbody.addEventListener('click', function(e){
-                    const up = e.target.closest('.mrm-move-up');
-                    const down = e.target.closest('.mrm-move-down');
-                    if(!up && !down) return;
-
-                    const row = e.target.closest('tr');
-                    if(!row) return;
-
-                    if(up){
-                      const prev = row.previousElementSibling;
-                      if(prev) tbody.insertBefore(row, prev);
-                    } else if(down){
-                      const next = row.nextElementSibling;
-                      if(next) tbody.insertBefore(row, next);
-                    }
-                  });
-
-                  // Drag & Drop (HTML5) - no libraries
-                  let dragRow = null;
-
-                  function isHandle(el){
-                    return !!(el && el.closest && el.closest('.mrm-drag-handle'));
-                  }
-
-                  tbody.addEventListener('dragstart', function(e){
-                    const row = e.target.closest('tr.mrm-track-row');
-                    if(!row) return;
-
-                    // Only allow dragging from the handle to avoid accidental drags while selecting text
-                    if(!isHandle(e.target)){
-                      e.preventDefault();
-                      return;
-                    }
-
-                    dragRow = row;
-                    row.classList.add('is-dragging');
-                    e.dataTransfer.effectAllowed = 'move';
-                    try { e.dataTransfer.setData('text/plain', 'mrm-track-row'); } catch(err){}
-                  });
-
-                  tbody.addEventListener('dragend', function(){
-                    if(dragRow) dragRow.classList.remove('is-dragging');
-                    dragRow = null;
-                  });
-
-                  tbody.addEventListener('dragover', function(e){
-                    if(!dragRow) return;
-                    e.preventDefault();
-
-                    const target = e.target.closest('tr.mrm-track-row');
-                    if(!target || target === dragRow) return;
-
-                    const rect = target.getBoundingClientRect();
-                    const before = (e.clientY - rect.top) < (rect.height / 2);
-                    if(before) tbody.insertBefore(dragRow, target);
-                    else tbody.insertBefore(dragRow, target.nextElementSibling);
-                  });
-                })();
-                </script>
+<script>
+(function(){
+  const table = document.getElementById('mrmTracksMapTable');
+  const addBtn = document.getElementById('mrmAddTrackRow');
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  if (!tbody) return;
+  function makeRow(values = {}) { const tr = document.createElement('tr'); tr.className = 'mrm-track-row'; tr.innerHTML = `<td class="mrm-track-drag-cell"><span class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</span></td><td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td><td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td><td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="" /></td><td class="mrm-track-actions"><button type="button" class="button button-small mrm-duplicate-track-row">Duplicate</button></td>`; const slugInput = tr.querySelector('.mrm-tracks-map-slug'); const nameInput = tr.querySelector('.mrm-tracks-map-name'); const urlInput  = tr.querySelector('.mrm-tracks-map-url'); if (slugInput) slugInput.value = values.slug || ''; if (nameInput) nameInput.value = values.name || ''; if (urlInput)  urlInput.value  = values.url || ''; return tr; }
+  function getRowValues(row) { return { slug: row.querySelector('.mrm-tracks-map-slug')?.value || '', name: row.querySelector('.mrm-tracks-map-name')?.value || '', url: row.querySelector('.mrm-tracks-map-url')?.value || '' }; }
+  function clearDropClasses() { tbody.querySelectorAll('.mrm-drop-before, .mrm-drop-after').forEach(function(row){ row.classList.remove('mrm-drop-before', 'mrm-drop-after'); }); }
+  if (addBtn) { addBtn.addEventListener('click', function(){ const row = makeRow(); tbody.appendChild(row); const firstInput = row.querySelector('input'); if (firstInput) firstInput.focus(); }); }
+  tbody.addEventListener('click', function(e){ const duplicateBtn = e.target.closest('.mrm-duplicate-track-row'); if (!duplicateBtn) return; const row = duplicateBtn.closest('tr.mrm-track-row'); if (!row) return; const duplicate = makeRow(getRowValues(row)); row.insertAdjacentElement('afterend', duplicate); const firstInput = duplicate.querySelector('input'); if (firstInput) firstInput.focus(); });
+  let dragRow = null; let pointerId = null; let ghost = null;
+  function getRowFromPoint(x, y) { if (ghost) { ghost.style.display = 'none'; } const el = document.elementFromPoint(x, y); if (ghost) { ghost.style.display = ''; } return el ? el.closest('tr.mrm-track-row') : null; }
+  function createGhost(row, x, y) { const rect = row.getBoundingClientRect(); const g = row.cloneNode(true); g.style.position = 'fixed'; g.style.left = rect.left + 'px'; g.style.top = rect.top + 'px'; g.style.width = rect.width + 'px'; g.style.pointerEvents = 'none'; g.style.opacity = '0.85'; g.style.zIndex = '999999'; g.style.background = '#fff'; g.style.boxShadow = '0 8px 24px rgba(0,0,0,0.18)'; g.style.transform = 'translateY(0)'; document.body.appendChild(g); moveGhost(x, y); return g; }
+  function moveGhost(x, y) { if (!ghost || !dragRow) return; const rect = dragRow.getBoundingClientRect(); ghost.style.left = rect.left + 'px'; ghost.style.top = (y - rect.height / 2) + 'px'; }
+  tbody.addEventListener('pointerdown', function(e){ const handle = e.target.closest('.mrm-drag-handle'); if (!handle) return; const row = handle.closest('tr.mrm-track-row'); if (!row) return; e.preventDefault(); dragRow = row; pointerId = e.pointerId; row.classList.add('is-dragging'); try { handle.setPointerCapture(pointerId); } catch(err) {} ghost = createGhost(row, e.clientX, e.clientY); });
+  tbody.addEventListener('pointermove', function(e){ if (!dragRow || e.pointerId !== pointerId) return; e.preventDefault(); moveGhost(e.clientX, e.clientY); clearDropClasses(); const target = getRowFromPoint(e.clientX, e.clientY); if (!target || target === dragRow) return; const rect = target.getBoundingClientRect(); const before = (e.clientY - rect.top) < (rect.height / 2); if (before) { target.classList.add('mrm-drop-before'); tbody.insertBefore(dragRow, target); } else { target.classList.add('mrm-drop-after'); tbody.insertBefore(dragRow, target.nextElementSibling); } });
+  function endDrag(e) { if (!dragRow || e.pointerId !== pointerId) return; clearDropClasses(); dragRow.classList.remove('is-dragging'); dragRow = null; pointerId = null; if (ghost && ghost.parentNode) { ghost.parentNode.removeChild(ghost); } ghost = null; }
+  tbody.addEventListener('pointerup', endDrag); tbody.addEventListener('pointercancel', endDrag);
+})();
+</script>
 
                 <?php submit_button( __( 'Save Settings', 'mrm-product-access' ), 'primary', 'mrm_pa_save_settings' ); ?>
             </form>
