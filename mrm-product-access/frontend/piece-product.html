@@ -205,7 +205,22 @@ a{ -webkit-tap-highlight-color:transparent; }
   gap: 18px;
   align-items:start;
 }
-.description{ margin:0; font-size:16px; line-height:1.75; }
+.description{
+  margin:0;
+  font-size:16px;
+  line-height:1.75;
+}
+
+.description p,
+.audio-subtitle p {
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+
+.description p:last-child,
+.audio-subtitle p:last-child {
+  margin-bottom: 0;
+}
 .meta-panel{
   border:1px solid rgba(0,0,0,0.10);
   background: rgba(0,0,0,0.02);
@@ -316,7 +331,7 @@ a{ -webkit-tap-highlight-color:transparent; }
   margin:0;
   font-size:17px;
   color: var(--color-text-muted);
-  line-height:1.25;
+  line-height:1.35;
   text-align:left;
 }
 
@@ -1809,6 +1824,26 @@ a{ -webkit-tap-highlight-color:transparent; }
       .replaceAll("'","&#039;");
   }
 
+  function multilineTextToHtml(value){
+    const normalized = String(value || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .trim();
+
+    if (!normalized) {
+      return '';
+    }
+
+    return normalized
+      .split(/\n{2,}/)
+      .map(paragraph => {
+        const safeParagraph = escHtml(paragraph.trim()).replace(/\n/g, '<br>');
+        return safeParagraph ? `<p>${safeParagraph}</p>` : '';
+      })
+      .filter(Boolean)
+      .join('');
+  }
+
   function applyAudioUrl(audioEl, url){
     if(!audioEl) return;
     const src = (url || '').trim();
@@ -1834,6 +1869,7 @@ a{ -webkit-tap-highlight-color:transparent; }
   function buildOfferDom(offer){
     const displayTitle = offer.display_title || offer.displayTitle || '';
     const subtitle     = offer.subtitle || '';
+    const subtitleHtml = multilineTextToHtml(subtitle);
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
     let productSlug = normalizeSkuFromOffer(offer);
@@ -1922,7 +1958,7 @@ a{ -webkit-tap-highlight-color:transparent; }
 
       <div class="offer-body">
         <div class="audio-stack">
-          <p class="audio-subtitle">${escHtml(subtitle)}</p>
+          ${subtitleHtml ? `<div class="audio-subtitle">${subtitleHtml}</div>` : ''}
           ${audioMarkup}
         </div>
 
@@ -1988,7 +2024,11 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     // long description on piece page
     const longDesc = (piece.long_description || piece.description || piece.longDescription || '').trim();
-    pieceEl.querySelector('.description').textContent = longDesc;
+    const descriptionEl = pieceEl.querySelector('.description');
+
+    if (descriptionEl) {
+      descriptionEl.innerHTML = multilineTextToHtml(longDesc);
+    }
 
     // Meta
     const meta = {
