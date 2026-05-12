@@ -639,7 +639,7 @@ class MRM_Product_Access {
 
                 <h2 class="title"><?php esc_html_e( 'Pieces Catalog (Sheet Music Listings)', 'mrm-product-access' ); ?></h2>
                 <p class="description">
-                    <?php esc_html_e( 'Enter the piece fields + purchasing options (offers) exactly like the old product HTML. URLs can be full URLs or site-relative paths (e.g. /wp-content/uploads/...).', 'mrm-product-access' ); ?>
+                    <?php esc_html_e( 'Enter the piece fields + purchasing options (offers) exactly like the old product HTML. URLs can be full URLs or site-relative paths (e.g. /wp-content/uploads/...). Use the Piece Display Order panel below to control the order used by the sheet music catalog shortcode.', 'mrm-product-access' ); ?>
                 </p>
                 <style>
                 /* Admin-only styling for a cleaner “card” editor */
@@ -698,12 +698,99 @@ class MRM_Product_Access {
                     display:flex;
                     gap:8px;
                 }
+
+                /* Piece ordering panel */
+                .mrm-pa-piece-order-panel{
+                    border: 1px solid #dcdcde;
+                    background: #fff;
+                    border-radius: 12px;
+                    padding: 14px;
+                    margin: 14px 0 18px;
+                }
+
+                .mrm-pa-piece-order-panel h3{
+                    margin: 0 0 6px;
+                    font-size: 14px;
+                }
+
+                .mrm-pa-piece-order-panel .description{
+                    margin: 0 0 10px;
+                }
+
+                #mrm-pa-piece-order-list{
+                    margin: 0;
+                    padding: 0;
+                    list-style: none;
+                }
+
+                .mrm-pa-piece-order-item{
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 12px;
+                    border: 1px solid #dcdcde;
+                    background: #f6f7f7;
+                    border-radius: 8px;
+                    padding: 8px 10px;
+                    margin: 8px 0;
+                    cursor: grab;
+                }
+
+                .mrm-pa-piece-order-item.is-dragging{
+                    opacity: .55;
+                }
+
+                .mrm-pa-piece-order-title{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    min-width: 0;
+                    font-weight: 600;
+                }
+
+                .mrm-pa-piece-order-handle{
+                    color: #646970;
+                    font-size: 16px;
+                    line-height: 1;
+                }
+
+                .mrm-pa-piece-order-name{
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .mrm-pa-piece-order-actions{
+                    display: flex;
+                    gap: 6px;
+                    flex-shrink: 0;
+                }
                 @media (max-width: 900px){
                     .mrm-pa-grid{ grid-template-columns: 1fr; }
+
+                    .mrm-pa-piece-order-item{
+                        align-items: flex-start;
+                        flex-direction: column;
+                    }
+
+                    .mrm-pa-piece-order-actions{
+                        width: 100%;
+                    }
                 }
                 </style>
 
-                <div id="mrm-pa-pieces-cards">
+                <div class="mrm-pa-piece-order-panel" id="mrm-pa-piece-order-panel">
+    <h3><?php esc_html_e( 'Piece Display Order', 'mrm-product-access' ); ?></h3>
+    <p class="description">
+        <?php esc_html_e( 'Drag pieces or use the Move Up / Move Down buttons to control the order used by the sheet music catalog shortcode.', 'mrm-product-access' ); ?>
+    </p>
+    <ol id="mrm-pa-piece-order-list" aria-label="<?php esc_attr_e( 'Piece display order', 'mrm-product-access' ); ?>"></ol>
+    <p class="mrm-pa-help">
+        <?php esc_html_e( 'This does not change any piece content. It only changes the saved display order used by [mrm_sheet_music_catalog].', 'mrm-product-access' ); ?>
+    </p>
+</div>
+
+<div id="mrm-pa-pieces-cards">
                 <?php
                 $pieces = isset( $options['pieces'] ) && is_array( $options['pieces'] ) ? $options['pieces'] : array();
                 if ( empty( $pieces ) ) {
@@ -746,7 +833,7 @@ class MRM_Product_Access {
                     $preview_audio_url = $piece['preview_audio_url'] ?? '';
                     $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
                     ?>
-                    <div class="mrm-pa-piece-card" data-piece-index="<?php echo esc_attr( $i ); ?>">
+                    <div class="mrm-pa-piece-card" data-piece-index="<?php echo esc_attr( $i ); ?>" data-piece-order-key="<?php echo esc_attr( $slug !== '' ? $slug : 'piece-' . $i ); ?>">
                         <div class="mrm-pa-piece-card-head">
                             <h3><?php echo esc_html( $title !== '' ? $title : 'New Piece' ); ?></h3>
                             <div class="mrm-pa-row-actions">
@@ -887,6 +974,8 @@ class MRM_Product_Access {
                 (function(){
                     const wrap = document.getElementById('mrm-pa-pieces-cards');
                     const addPieceBtn = document.getElementById('mrm-pa-add-piece');
+                    const orderList = document.getElementById('mrm-pa-piece-order-list');
+                    const settingsForm = wrap ? wrap.closest('form') : null;
                     if (!wrap || !addPieceBtn) return;
 
                     function pieceTemplate(index){
@@ -999,7 +1088,113 @@ class MRM_Product_Access {
                         </div>`;
                     }
 
-                    function offerRowTemplate(pieceIndex){
+                    function getPieceCards(){
+    return Array.from(wrap.children).filter(function(child){
+        return child.classList && child.classList.contains('mrm-pa-piece-card');
+    });
+}
+
+function getPieceTitle(card, index){
+    const titleInput = card.querySelector('input[name="piece_title[]"]');
+    const rawTitle = titleInput ? titleInput.value.trim() : '';
+    return rawTitle || `Untitled Piece ${index + 1}`;
+}
+
+function updatePieceCardHeadings(){
+    getPieceCards().forEach(function(card, index){
+        const heading = card.querySelector('.mrm-pa-piece-card-head h3');
+        if (heading) {
+            heading.textContent = getPieceTitle(card, index);
+        }
+    });
+}
+
+function reindexPiecesAndOffers(){
+    getPieceCards().forEach(function(card, index){
+        card.setAttribute('data-piece-index', String(index));
+
+        const offerIndexInputs = card.querySelectorAll('input[name="offer_piece_index[]"]');
+        offerIndexInputs.forEach(function(input){
+            input.value = String(index);
+        });
+    });
+}
+
+function syncPieceOrderList(){
+    if (!orderList) return;
+
+    updatePieceCardHeadings();
+    reindexPiecesAndOffers();
+
+    const cards = getPieceCards();
+    orderList.innerHTML = '';
+
+    if (!cards.length) {
+        const empty = document.createElement('li');
+        empty.className = 'mrm-pa-help';
+        empty.textContent = 'No pieces yet. Add a piece below to include it in the catalog order.';
+        orderList.appendChild(empty);
+        return;
+    }
+
+    cards.forEach(function(card, index){
+        const item = document.createElement('li');
+        item.className = 'mrm-pa-piece-order-item';
+        item.draggable = true;
+        item.setAttribute('data-piece-index', String(index));
+
+        const title = getPieceTitle(card, index);
+
+        item.innerHTML = `
+            <div class="mrm-pa-piece-order-title">
+                <span class="mrm-pa-piece-order-handle" aria-hidden="true">↕</span>
+                <span class="mrm-pa-piece-order-name"></span>
+            </div>
+            <div class="mrm-pa-piece-order-actions">
+                <button type="button" class="button button-small mrm-pa-piece-order-up">Move Up</button>
+                <button type="button" class="button button-small mrm-pa-piece-order-down">Move Down</button>
+            </div>
+        `;
+
+        const name = item.querySelector('.mrm-pa-piece-order-name');
+        if (name) {
+            name.textContent = title;
+        }
+
+        orderList.appendChild(item);
+    });
+}
+
+function movePieceCard(fromIndex, toIndex){
+    const cards = getPieceCards();
+
+    if (
+        fromIndex === toIndex ||
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= cards.length ||
+        toIndex >= cards.length
+    ) {
+        return;
+    }
+
+    const cardToMove = cards[fromIndex];
+    const targetCard = cards[toIndex];
+
+    if (!cardToMove || !targetCard) {
+        return;
+    }
+
+    if (fromIndex < toIndex) {
+        wrap.insertBefore(cardToMove, targetCard.nextSibling);
+    } else {
+        wrap.insertBefore(cardToMove, targetCard);
+    }
+
+    syncPieceOrderList();
+}
+
+function offerRowTemplate(pieceIndex){
                         return `
                         <tr class="mrm-pa-offer-row">
                             <td>
@@ -1015,24 +1210,31 @@ class MRM_Product_Access {
                     }
 
                     addPieceBtn.addEventListener('click', function(){
-                        const nextIndex = wrap.querySelectorAll('.mrm-pa-piece-card').length;
+                        const nextIndex = getPieceCards().length;
                         const temp = document.createElement('div');
                         temp.innerHTML = pieceTemplate(nextIndex);
                         wrap.appendChild(temp.firstElementChild);
+                        syncPieceOrderList();
                     });
 
                     wrap.addEventListener('click', function(e){
                         const removePieceBtn = e.target.closest('.mrm-pa-remove-piece');
                         if (removePieceBtn) {
                             const card = removePieceBtn.closest('.mrm-pa-piece-card');
-                            if (card) card.remove();
+                            if (card) {
+                                card.remove();
+                                syncPieceOrderList();
+                            }
                             return;
                         }
 
                         const addOfferBtn = e.target.closest('.mrm-pa-add-offer');
                         if (addOfferBtn) {
+                            reindexPiecesAndOffers();
+
                             const card = addOfferBtn.closest('.mrm-pa-piece-card');
                             if (!card) return;
+
                             const pieceIndex = card.getAttribute('data-piece-index');
                             const tbody = card.querySelector('.mrm-pa-offers-body');
                             if (!tbody) return;
@@ -1040,6 +1242,8 @@ class MRM_Product_Access {
                             const temp = document.createElement('tbody');
                             temp.innerHTML = offerRowTemplate(pieceIndex);
                             tbody.appendChild(temp.firstElementChild);
+
+                            reindexPiecesAndOffers();
                             return;
                         }
 
@@ -1050,6 +1254,87 @@ class MRM_Product_Access {
                             return;
                         }
                     });
+
+                    if (orderList) {
+                        let draggedPieceIndex = null;
+
+                        orderList.addEventListener('click', function(e){
+                            const item = e.target.closest('.mrm-pa-piece-order-item');
+                            if (!item) return;
+
+                            const currentIndex = parseInt(item.getAttribute('data-piece-index') || '-1', 10);
+
+                            if (e.target.closest('.mrm-pa-piece-order-up')) {
+                                movePieceCard(currentIndex, currentIndex - 1);
+                                return;
+                            }
+
+                            if (e.target.closest('.mrm-pa-piece-order-down')) {
+                                movePieceCard(currentIndex, currentIndex + 1);
+                                return;
+                            }
+                        });
+
+                        orderList.addEventListener('dragstart', function(e){
+                            const item = e.target.closest('.mrm-pa-piece-order-item');
+                            if (!item) return;
+
+                            draggedPieceIndex = parseInt(item.getAttribute('data-piece-index') || '-1', 10);
+                            item.classList.add('is-dragging');
+
+                            if (e.dataTransfer) {
+                                e.dataTransfer.effectAllowed = 'move';
+                                e.dataTransfer.setData('text/plain', String(draggedPieceIndex));
+                            }
+                        });
+
+                        orderList.addEventListener('dragover', function(e){
+                            const item = e.target.closest('.mrm-pa-piece-order-item');
+                            if (!item) return;
+
+                            e.preventDefault();
+
+                            if (e.dataTransfer) {
+                                e.dataTransfer.dropEffect = 'move';
+                            }
+                        });
+
+                        orderList.addEventListener('drop', function(e){
+                            const item = e.target.closest('.mrm-pa-piece-order-item');
+                            if (!item) return;
+
+                            e.preventDefault();
+
+                            const targetIndex = parseInt(item.getAttribute('data-piece-index') || '-1', 10);
+                            const fromIndex = draggedPieceIndex;
+
+                            draggedPieceIndex = null;
+
+                            movePieceCard(fromIndex, targetIndex);
+                        });
+
+                        orderList.addEventListener('dragend', function(){
+                            draggedPieceIndex = null;
+
+                            orderList.querySelectorAll('.mrm-pa-piece-order-item.is-dragging').forEach(function(item){
+                                item.classList.remove('is-dragging');
+                            });
+                        });
+                    }
+
+                    wrap.addEventListener('input', function(e){
+                        if (e.target && e.target.matches('input[name="piece_title[]"]')) {
+                            syncPieceOrderList();
+                        }
+                    });
+
+                    if (settingsForm) {
+                        settingsForm.addEventListener('submit', function(){
+                            reindexPiecesAndOffers();
+                        });
+                    }
+
+                    syncPieceOrderList();
                 })();
                 </script>
 
