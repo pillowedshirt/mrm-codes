@@ -455,7 +455,7 @@ class MRM_Product_Access {
 
                     $pslug = $this->sanitize_product_slug( (string) ( $offer_product_slug[ $oi ] ?? '' ) );
                     $dt    = sanitize_text_field( (string) ( $offer_display_title[ $oi ] ?? '' ) );
-                    $sub   = sanitize_text_field( (string) ( $offer_subtitle[ $oi ] ?? '' ) );
+                    $sub   = sanitize_textarea_field( wp_unslash( (string) ( $offer_subtitle[ $oi ] ?? '' ) ) );
                     $price = sanitize_text_field( (string) ( $offer_price_display[ $oi ] ?? '' ) );
                     $aud   = trim( (string) ( $offer_preview_audio_url[ $oi ] ?? '' ) );
 
@@ -505,11 +505,11 @@ class MRM_Product_Access {
                     $piece['piece_title']          = $title;
                     $piece['composer_name']        = sanitize_text_field( (string) ( $composer_names[ $i ] ?? '' ) );
                     $piece['composer_url']         = esc_url_raw( trim( (string) ( $composer_urls[ $i ] ?? '' ) ) );
-                    $legacy_desc = sanitize_textarea_field( (string) ( $descs[ $i ] ?? '' ) );
+                    $legacy_desc = sanitize_textarea_field( wp_unslash( (string) ( $descs[ $i ] ?? '' ) ) );
 
-                    $piece['short_description'] = sanitize_textarea_field( (string) ( $short_descs[ $i ] ?? '' ) );
+                    $piece['short_description'] = sanitize_textarea_field( wp_unslash( (string) ( $short_descs[ $i ] ?? '' ) ) );
 
-                    $new_long = sanitize_textarea_field( (string) ( $long_descs[ $i ] ?? '' ) );
+                    $new_long = sanitize_textarea_field( wp_unslash( (string) ( $long_descs[ $i ] ?? '' ) ) );
                     $piece['long_description']  = ( $new_long !== '' ) ? $new_long : $legacy_desc;
 
                     $piece['description'] = $piece['long_description'];
@@ -860,7 +860,9 @@ class MRM_Product_Access {
                                             <input type="text" name="offer_product_slug[]" value="<?php echo esc_attr( $ps ); ?>" placeholder="blackbeards-revenge-tuba-full-piece">
                                         </td>
                                         <td><input type="text" name="offer_display_title[]" value="<?php echo esc_attr( $dt ); ?>" placeholder="Tuba Full Piece"></td>
-                                        <td><input type="text" name="offer_subtitle[]" value="<?php echo esc_attr( $st ); ?>" placeholder="Includes the Tuba part..."></td>
+                                        <td>
+                                            <textarea name="offer_subtitle[]" rows="3" placeholder="Includes the Tuba part..."><?php echo esc_textarea( $st ); ?></textarea>
+                                        </td>
                                         <td><input type="text" name="offer_price_display[]" value="<?php echo esc_attr( $pr ); ?>" placeholder="$25"></td>
                                         <td><input type="text" name="offer_preview_audio_url[]" value="<?php echo esc_attr( $au ); ?>" placeholder="/wp-content/uploads/2025/12/Blackbeards-Revenge.mp3"></td>
                                         <td><button type="button" class="button mrm-pa-remove-offer"><?php esc_html_e( 'Remove', 'mrm-product-access' ); ?></button></td>
@@ -1005,7 +1007,7 @@ class MRM_Product_Access {
                                 <input type="text" name="offer_product_slug[]" value="" placeholder="blackbeards-revenge-tuba-full-piece">
                             </td>
                             <td><input type="text" name="offer_display_title[]" value="" placeholder="Tuba Full Piece"></td>
-                            <td><input type="text" name="offer_subtitle[]" value="" placeholder="Includes the Tuba part..."></td>
+                            <td><textarea name="offer_subtitle[]" rows="3" placeholder="Includes the Tuba part..."></textarea></td>
                             <td><input type="text" name="offer_price_display[]" value="" placeholder="$25"></td>
                             <td><input type="text" name="offer_preview_audio_url[]" value="" placeholder="/wp-content/uploads/.../demo.mp3"></td>
                             <td><button type="button" class="button mrm-pa-remove-offer">Remove</button></td>
@@ -3251,7 +3253,9 @@ class MRM_Product_Access {
                       <div class="offer-row">
                         <div>
                           <div class="offer-title"><?php echo esc_html( $offer_title ); ?></div>
-                          <?php if ( $offer_sub !== '' ) : ?><div class="offer-sub"><?php echo esc_html( $offer_sub ); ?></div><?php endif; ?>
+                          <?php if ( $offer_sub !== '' ) : ?>
+                            <div class="offer-sub"><?php echo wp_kses_post( wpautop( $offer_sub ) ); ?></div>
+                          <?php endif; ?>
                         </div>
                         <?php if ( $offer_price !== '' ) : ?><div class="offer-price"><?php echo esc_html( $offer_price ); ?></div><?php endif; ?>
                       </div>
@@ -3450,7 +3454,25 @@ class MRM_Product_Access {
           height: auto;
         }
 
-        .meta .description { font-size: 15px; line-height: 1.6; color: var(--color-text-main); margin-bottom: 20px; }
+        .meta .description {
+          font-size: 15px;
+          line-height: 1.6;
+          color: var(--color-text-main);
+          margin-bottom: 20px;
+        }
+
+        .meta .description p,
+        .mrm-long-description p,
+        .offer-sub p {
+          margin-top: 0;
+          margin-bottom: 1em;
+        }
+
+        .meta .description p:last-child,
+        .mrm-long-description p:last-child,
+        .offer-sub p:last-child {
+          margin-bottom: 0;
+        }
 
         .title-block { text-align: left; }
 
