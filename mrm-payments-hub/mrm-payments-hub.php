@@ -212,12 +212,12 @@ class MRM_Payments_Hub_Single {
     $autopay = $this->table_autopay_profiles();
     $webhooks = $this->table_webhook_events();
     $subs = $this->table_sheet_music_subscriptions();
-        $promo_redemptions = $this->table_promo_redemptions();
+    $promo_redemptions = $this->table_promo_redemptions();
 
     $needs_upgrade = false;
 
     // 1) Table existence check
-    foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks, $subs) as $t) {
+    foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks, $subs, $promo_redemptions) as $t) {
       $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
       if ($found !== $t) {
         $needs_upgrade = true;
@@ -643,7 +643,283 @@ class MRM_Payments_Hub_Single {
    * Settings / Products
    * ======================================================= */
 
-  private function get_settings() {
+  private function mrm_get_promo_codes() {
+  $codes = get_option(self::OPT_PROMO_CODES, array());
+  return is_array($codes) ? $codes : array();
+}
+
+private function mrm_save_promo_codes($codes) {
+  update_option(self::OPT_PROMO_CODES, is_array($codes) ? $codes : array(), false);
+}
+
+private function mrm_normalize_promo_code($code) {
+  $code = strtoupper(trim((string)$code));
+  $code = preg_replace('/[^A-Z0-9\-_]/', '', $code);
+  return substr($code, 0, 80);
+}
+
+private function mrm_get_active_promo_code($code) {
+  $code = $this->mrm_normalize_promo_code($code);
+  if ($code === '') return null;
+
+  $codes = $this->mrm_get_promo_codes();
+  if (empty($codes[$code]) || !is_array($codes[$code])) {
+    return null;
+  }
+
+  $promo = $codes[$code];
+
+  if (empty($promo['active'])) {
+    return null;
+  }
+
+  $expires = trim((string)($promo['expires_at'] ?? ''));
+  if ($expires !== '') {
+    $expires_ts = strtotime($expires . ' 23:59:59');
+    if ($expires_ts && $expires_ts < current_time('timestamp')) {
+      return null;
+    }
+  }
+
+  $promo['code'] = $code;
+  return $promo;
+}
+
+private function mrm_scope_allows_promo_for_product($promo, $product_type) {
+  $scope = (string)($promo['scope'] ?? 'all');
+
+  if ($scope === 'all') return true;
+  if ($scope === 'lesson' && $product_type === 'lesson') return true;
+  if ($scope === 'sheet_music' && $product_type === 'sheet_music') return true;
+
+  return false;
+}
+
+private function mrm_customer_has_used_promo($code, $email_hash) {
+  global $wpdb;
+
+  $code = $this->mrm_normalize_promo_code($code);
+  $email_hash = (string)$email_hash;
+
+  if ($code === '' || $email_hash === '') return false;
+
+  $table = $this->table_promo_redemptions();
+
+  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+  if ($found_table !== $table) {
+    $this->install_or_upgrade_db();
+  }
+
+  // Expire stale pending reservations older than 24 hours.
+  $wpdb->query($wpdb->prepare(
+    "UPDATE {$table}
+     SET status = 'expired', updated_at = %s
+     WHERE promo_code = %s
+       AND email_hash = %s
+       AND status = 'pending'
+       AND created_at < %s",
+    current_time('mysql'),
+    $code,
+    $email_hash,
+    gmdate('Y-m-d H:i:s', time() - DAY_IN_SECONDS)
+  ));
+
+  $found = $wpdb->get_var($wpdb->prepare(
+    "SELECT id FROM {$table}
+     WHERE promo_code = %s
+       AND email_hash = %s
+       AND status IN ('pending', 'paid')
+     LIMIT 1",
+    $code,
+    $email_hash
+  ));
+
+  return !empty($found);
+}
+
+private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, $product_type, $context = array()) {
+  $base_amount_cents = max(0, (int)$base_amount_cents);
+
+  if ($base_amount_cents <= 0) {
+    return array(
+      'ok' => false,
+      'message' => 'Invalid purchase amount.',
+      'discount_cents' => 0,
+    );
+  }
+
+  if (!$this->mrm_scope_allows_promo_for_product($promo, $product_type)) {
+    return array(
+      'ok' => false,
+      'message' => 'This promotional code does not apply to this purchase type.',
+      'discount_cents' => 0,
+    );
+  }
+
+  $discount_type = (string)($promo['discount_type'] ?? 'percent');
+  $applies_to = (string)($promo['applies_to'] ?? 'all_items');
+
+  $lesson_count = isset($context['lesson_count']) ? max(1, absint($context['lesson_count'])) : 1;
+  $eligible_amount_cents = $base_amount_cents;
+
+  if ($product_type === 'lesson' && $applies_to === 'first_item' && $lesson_count > 1) {
+    $eligible_amount_cents = (int)floor($base_amount_cents / $lesson_count);
+  }
+
+  $discount_cents = 0;
+
+  if ($discount_type === 'percent') {
+    $percent = max(0, min(100, (int)($promo['percent_off'] ?? 0)));
+    $discount_cents = (int)floor($eligible_amount_cents * ($percent / 100));
+  } else {
+    $discount_cents = max(0, (int)($promo['amount_off_cents'] ?? 0));
+  }
+
+  $discount_cents = min($discount_cents, $eligible_amount_cents);
+
+  // Avoid creating a $0 card PaymentIntent.
+  $max_safe_discount = max(0, $base_amount_cents - 50);
+  $discount_cents = min($discount_cents, $max_safe_discount);
+
+  return array(
+    'ok' => true,
+    'message' => '',
+    'discount_cents' => $discount_cents,
+    'eligible_amount_cents' => $eligible_amount_cents,
+  );
+}
+
+private function mrm_validate_promo_for_purchase($code, $email, $product_type, $base_amount_cents, $context = array()) {
+  $code = $this->mrm_normalize_promo_code($code);
+
+  if ($code === '') {
+    return array(
+      'ok' => false,
+      'message' => 'Please enter a promotional code.',
+      'discount_cents' => 0,
+    );
+  }
+
+  $email = sanitize_email((string)$email);
+  if (!$email || !is_email($email)) {
+    return array(
+      'ok' => false,
+      'message' => 'Please enter a valid email before applying a promotional code.',
+      'discount_cents' => 0,
+    );
+  }
+
+  $promo = $this->mrm_get_active_promo_code($code);
+  if (!$promo) {
+    return array(
+      'ok' => false,
+      'message' => 'This promotional code is invalid or expired.',
+      'discount_cents' => 0,
+    );
+  }
+
+  $email_hash = $this->email_hash($email);
+
+  if ($this->mrm_customer_has_used_promo($code, $email_hash)) {
+    return array(
+      'ok' => false,
+      'message' => 'This promotional code has already been used for this email.',
+      'discount_cents' => 0,
+    );
+  }
+
+  $calc = $this->mrm_calculate_promo_discount_cents($promo, $base_amount_cents, $product_type, $context);
+
+  if (empty($calc['ok'])) {
+    return $calc;
+  }
+
+  return array(
+    'ok' => true,
+    'message' => 'Promotional code applied.',
+    'promo' => $promo,
+    'code' => $code,
+    'discount_cents' => (int)$calc['discount_cents'],
+    'eligible_amount_cents' => (int)($calc['eligible_amount_cents'] ?? $base_amount_cents),
+  );
+}
+
+private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '') {
+  global $wpdb;
+
+  $code = $this->mrm_normalize_promo_code($code);
+  $email_hash = (string)$email_hash;
+  $order_id = (int)$order_id;
+
+  if ($code === '' || $email_hash === '' || $order_id <= 0) {
+    return false;
+  }
+
+  $table = $this->table_promo_redemptions();
+
+  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+  if ($found_table !== $table) {
+    $this->install_or_upgrade_db();
+  }
+
+  $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field((string)$_SERVER['REMOTE_ADDR']) : '';
+  $ua = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field((string)$_SERVER['HTTP_USER_AGENT']) : '';
+
+  $now = current_time('mysql');
+
+  $inserted = $wpdb->insert($table, array(
+    'promo_code' => $code,
+    'email_hash' => $email_hash,
+    'order_id' => $order_id,
+    'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
+    'status' => 'pending',
+    'ip_hash' => $ip !== '' ? hash('sha256', $ip) : null,
+    'user_agent_hash' => $ua !== '' ? hash('sha256', $ua) : null,
+    'created_at' => $now,
+    'updated_at' => $now,
+  ), array('%s','%s','%d','%s','%s','%s','%s','%s','%s'));
+
+  return !empty($inserted);
+}
+
+private function mrm_attach_payment_intent_to_promo_redemption($order_id, $payment_intent_id) {
+  global $wpdb;
+
+  $order_id = (int)$order_id;
+  if ($order_id <= 0 || $payment_intent_id === '') return;
+
+  $wpdb->update(
+    $this->table_promo_redemptions(),
+    array(
+      'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
+      'updated_at' => current_time('mysql'),
+    ),
+    array('order_id' => $order_id),
+    array('%s','%s'),
+    array('%d')
+  );
+}
+
+private function mrm_mark_promo_redemption_paid($order_id, $payment_intent_id) {
+  global $wpdb;
+
+  $order_id = (int)$order_id;
+  if ($order_id <= 0 || $payment_intent_id === '') return;
+
+  $wpdb->update(
+    $this->table_promo_redemptions(),
+    array(
+      'status' => 'paid',
+      'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
+      'updated_at' => current_time('mysql'),
+    ),
+    array('order_id' => $order_id),
+    array('%s','%s','%s'),
+    array('%d')
+  );
+}
+
+private function get_settings() {
     $opts = get_option(self::OPT_SETTINGS, array());
     $opts = is_array($opts) ? $opts : array();
 
@@ -2697,7 +2973,14 @@ class MRM_Payments_Hub_Single {
     if ($order) {
       $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
       $this->mrm_maybe_create_payout_ledger_for_order($order);
-      $this->mrm_mark_promo_redemption_paid((int)$order['id'], $pi_id);
+      $promo_code_from_meta = '';
+      if (!empty($metadata['mrm_promo_code'])) {
+        $promo_code_from_meta = $this->mrm_normalize_promo_code($metadata['mrm_promo_code']);
+      }
+
+      if ($promo_code_from_meta !== '') {
+        $this->mrm_mark_promo_redemption_paid((int)$order['id'], $pi_id);
+      }
 
       $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
       $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
@@ -10226,6 +10509,16 @@ public function render_access_lists_page() {
       'mrm-pay-hub-marketing-email-lists',
       array($this, 'render_marketing_email_lists_page')
     );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Promo Codes',
+      'Promo Codes',
+      'manage_options',
+      'mrm-pay-hub-promo-codes',
+      array($this, 'render_promo_codes_page')
+    );
+
   }
 
   public function handle_admin_post() {
