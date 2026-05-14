@@ -1142,11 +1142,37 @@ body.mrm-piece-no-scroll{
   let activePaymentElement = null;
   let activeStripeElements = null;
   let pendingSku = '';
+const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
 
   let mrmPieceAppliedPromoCode = '';
   let mrmPieceAppliedPromoDiscountCents = 0;
 
-  function mrmGetPiecePromoCodeInputValue() {
+  function mrmGetSavedPiecePaymentEmail() {
+  try {
+    return String(sessionStorage.getItem(MRM_PIECE_PAYMENT_EMAIL_KEY) || '').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+function mrmSavePiecePaymentEmail(email) {
+  email = String(email || '').trim();
+  if (!email) return;
+
+  try {
+    sessionStorage.setItem(MRM_PIECE_PAYMENT_EMAIL_KEY, email);
+  } catch (e) {}
+}
+
+function mrmGetPiecePaymentEmailValue() {
+  const paymentEmail = document.getElementById('mrm-payment-email');
+  const modalVal = paymentEmail ? String(paymentEmail.value || '').trim() : '';
+  if (modalVal) return modalVal;
+
+  return mrmGetSavedPiecePaymentEmail();
+}
+
+function mrmGetPiecePromoCodeInputValue() {
     const input = document.getElementById('mrm-piece-promo-code-input');
     return input ? String(input.value || '').trim().toUpperCase() : '';
   }
@@ -1168,13 +1194,28 @@ body.mrm-piece-no-scroll{
       mrmPieceAppliedPromoCode = '';
       mrmPieceAppliedPromoDiscountCents = 0;
       btn.style.display = input.value.trim() ? 'inline-flex' : 'none';
-      mrmSetPiecePromoMessage('', false);
+      pendingClientSecret = '';
+    if (activePaymentElement) {
+      try { activePaymentElement.unmount(); } catch (e) {}
+    }
+    activePaymentElement = null;
+    activeStripeElements = null;
+
+    const paymentMount = document.getElementById('mrm-payment-element');
+    if (paymentMount) {
+      paymentMount.innerHTML = `
+        <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+          Enter your email and ZIP to load the secure payment form.
+        </div>
+      `;
+    }
+
+    mrmSetPiecePromoMessage('', false);
     });
 
     btn.addEventListener('click', async function () {
       const code = mrmGetPiecePromoCodeInputValue();
-      const emailInput = document.getElementById('mrm-payment-email') || document.querySelector('input[type="email"]');
-      const email = emailInput ? String(emailInput.value || '').trim() : '';
+      const email = mrmGetPiecePaymentEmailValue();
 
       if (!code) {
         mrmSetPiecePromoMessage('Please enter a promotional code.', true);
@@ -1185,6 +1226,8 @@ body.mrm-piece-no-scroll{
         mrmSetPiecePromoMessage('Please enter your email before applying a promotional code.', true);
         return;
       }
+
+      mrmSavePiecePaymentEmail(email);
 
       if (!pendingSku) {
         mrmSetPiecePromoMessage('Please select a sheet music item first.', true);
@@ -1221,6 +1264,27 @@ body.mrm-piece-no-scroll{
         mrmPieceAppliedPromoCode = data.promo_code || code;
         mrmPieceAppliedPromoDiscountCents = Number(data.discount_cents || 0);
         mrmSetPiecePromoMessage(`Code applied: ${data.discount_display || ''} off`, false);
+
+        pendingClientSecret = '';
+        if (activePaymentElement) {
+          try { activePaymentElement.unmount(); } catch (e) {}
+        }
+        activePaymentElement = null;
+        activeStripeElements = null;
+
+        const paymentMount = document.getElementById('mrm-payment-element');
+        if (paymentMount) {
+          paymentMount.innerHTML = `
+            <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+              Promotional code applied. Confirm your email, ZIP, and terms to reload the secure payment form.
+            </div>
+          `;
+        }
+
+        const paymentEmail = document.getElementById('mrm-payment-email');
+        if (paymentEmail && email && !paymentEmail.value) {
+          paymentEmail.value = email;
+        }
       } catch (err) {
         mrmPieceAppliedPromoCode = '';
         mrmPieceAppliedPromoDiscountCents = 0;
@@ -1529,6 +1593,7 @@ body.mrm-piece-no-scroll{
       const label = String(opts.label || labelFromQuote || 'Item').trim();
       const base = Number(opts.base_amount_cents ?? baseFromQuote ?? 0);
       const tax  = Number(opts.tax_cents ?? 0);
+      const promoDiscount = Number(opts.promo_discount_cents ?? 0);
       const total = Number(opts.amount_cents ?? (base + tax));
       const taxMessage = String(
         opts.tax_message ||
@@ -1567,7 +1632,16 @@ body.mrm-piece-no-scroll{
     payBtn.disabled = true;
     payBtn.textContent = 'Pay';
 
-    emailInput.value = '';
+    mrmPieceAppliedPromoCode = '';
+    mrmPieceAppliedPromoDiscountCents = 0;
+
+    const promoInput = document.getElementById('mrm-piece-promo-code-input');
+    const promoBtn = document.getElementById('mrm-piece-promo-code-apply');
+    if (promoInput) promoInput.value = '';
+    if (promoBtn) promoBtn.style.display = 'none';
+    mrmSetPiecePromoMessage('', false);
+
+    emailInput.value = mrmGetSavedPiecePaymentEmail();
     if (stateInput) stateInput.value = '';
     if (postalInput) postalInput.value = '';
     if (line1Input) line1Input.value = '';
@@ -1621,6 +1695,9 @@ body.mrm-piece-no-scroll{
       clearTimeout(loadTimer);
       loadTimer = setTimeout(async () => {
         const email = (emailInput.value || '').trim();
+    if (isEmailLike(email)) {
+      mrmSavePiecePaymentEmail(email);
+    }
         const postal = (postalInput && postalInput.value) ? String(postalInput.value).trim() : '';
 
         if (!isEmailLike(email) || !isPostalLike(postal)) {
@@ -2545,7 +2622,7 @@ body.mrm-piece-no-scroll{
     stepEmail.classList.remove('hidden');
     stepOtp.classList.add('hidden');
     messageDiv.textContent = '';
-    emailInput.value = '';
+    emailInput.value = mrmGetSavedPiecePaymentEmail();
     otpInput.value = '';
   }
 
@@ -2581,6 +2658,9 @@ body.mrm-piece-no-scroll{
 
     sendBtn.addEventListener('click', function(){
       const email = (emailInput.value || '').trim();
+    if (isEmailLike(email)) {
+      mrmSavePiecePaymentEmail(email);
+    }
       if(!email){ messageDiv.textContent='Please enter your email.'; return; }
       if(!activeProductSlug){ messageDiv.textContent='Missing product selection.'; return; }
 
@@ -2613,6 +2693,9 @@ body.mrm-piece-no-scroll{
 
     verifyBtn.addEventListener('click', function(){
       const email = (emailInput.value || '').trim();
+    if (isEmailLike(email)) {
+      mrmSavePiecePaymentEmail(email);
+    }
       const otp = (otpInput.value || '').trim();
       if(!otp){ messageDiv.textContent='Enter the code you received.'; return; }
       if(!activeProductSlug){ messageDiv.textContent='Missing product selection.'; return; }

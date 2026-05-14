@@ -317,6 +317,7 @@ class MRM_Payments_Hub_Single {
     $sql_orders = "CREATE TABLE {$orders} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       email_hash CHAR(64) NOT NULL,
+      customer_email VARCHAR(190) DEFAULT NULL,
       sku VARCHAR(120) NOT NULL,
       product_type VARCHAR(30) NOT NULL,
       amount_cents INT NOT NULL,
@@ -330,6 +331,7 @@ class MRM_Payments_Hub_Single {
       updated_at DATETIME NOT NULL,
       PRIMARY KEY (id),
       KEY email_hash_idx (email_hash),
+      KEY customer_email_idx (customer_email),
       KEY sku_idx (sku),
       KEY status_idx (status),
       KEY pi_idx (stripe_payment_intent_id)
@@ -844,12 +846,13 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
   );
 }
 
-private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '') {
+private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '', $customer_email = '') {
   global $wpdb;
 
   $code = $this->mrm_normalize_promo_code($code);
   $email_hash = (string)$email_hash;
   $order_id = (int)$order_id;
+  $customer_email = sanitize_email((string)$customer_email);
 
   if ($code === '' || $email_hash === '' || $order_id <= 0) {
     return false;
@@ -870,6 +873,7 @@ private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $pa
   $inserted = $wpdb->insert($table, array(
     'promo_code' => $code,
     'email_hash' => $email_hash,
+    'customer_email' => $customer_email ?: null,
     'order_id' => $order_id,
     'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
     'status' => 'pending',
@@ -877,7 +881,7 @@ private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $pa
     'user_agent_hash' => $ua !== '' ? hash('sha256', $ua) : null,
     'created_at' => $now,
     'updated_at' => $now,
-  ), array('%s','%s','%d','%s','%s','%s','%s','%s','%s'));
+  ), array('%s','%s','%s','%d','%s','%s','%s','%s','%s','%s'));
 
   return !empty($inserted);
 }
@@ -917,6 +921,33 @@ private function mrm_mark_promo_redemption_paid($order_id, $payment_intent_id) {
     array('%s','%s','%s'),
     array('%d')
   );
+}
+
+private function mrm_get_redemptions_for_promo_code($code, $limit = 25) {
+  global $wpdb;
+
+  $code = $this->mrm_normalize_promo_code($code);
+  if ($code === '') return array();
+
+  $table = $this->table_promo_redemptions();
+
+  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+  if ($found_table !== $table) {
+    return array();
+  }
+
+  $limit = max(1, min(100, absint($limit)));
+
+  return $wpdb->get_results($wpdb->prepare(
+    "SELECT promo_code, customer_email, status, created_at, updated_at
+     FROM {$table}
+     WHERE promo_code = %s
+       AND status IN ('pending', 'paid')
+     ORDER BY updated_at DESC
+     LIMIT %d",
+    $code,
+    $limit
+  ), ARRAY_A);
 }
 
 private function get_settings() {
@@ -8211,7 +8242,7 @@ private function get_settings() {
     $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
     $metadata['mrm_order_id'] = (string)$order_id;
     if ($promo_code !== '' && $promo_discount_cents > 0) {
-      $reserved = $this->mrm_reserve_promo_redemption($promo_code, $email_hash, $order_id);
+      $reserved = $this->mrm_reserve_promo_redemption($promo_code, $email_hash, $order_id, '', $email);
       if (!$reserved) {
         return new WP_REST_Response(array(
           'ok' => false,
@@ -9876,6 +9907,33 @@ public function render_promo_codes_page() {
       <table class="widefat striped" style="margin-top:16px;"><thead><tr><th>Code</th><th>Label</th><th>Discount Type</th><th>Percent Off</th><th>Amount Off</th><th>Applies To</th><th>Item Rule</th><th>Expiration Date</th><th>Delete</th></tr></thead><tbody>
       <?php $i = 0; foreach ($codes as $code => $promo) : if (!is_array($promo)) continue; ?>
       <tr><td><input type="text" name="promo_code[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($code); ?>" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['label'] ?? '')); ?>" /></td><td><select name="promo_discount_type[<?php echo esc_attr($i); ?>]"><option value="percent" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'percent'); ?>>Percentage</option><option value="amount" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'amount'); ?>>Dollar Amount</option></select></td><td><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['percent_off'] ?? 0)); ?>" style="width:80px;" />%</td><td><input type="text" name="promo_amount_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr(number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2)); ?>" style="width:90px;" /></td><td><select name="promo_scope[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected((string)($promo['scope'] ?? 'all'), 'all'); ?>>Lessons + Sheet Music</option><option value="lesson" <?php selected((string)($promo['scope'] ?? 'all'), 'lesson'); ?>>Lessons Only</option><option value="sheet_music" <?php selected((string)($promo['scope'] ?? 'all'), 'sheet_music'); ?>>Sheet Music Only</option></select></td><td><select name="promo_applies_to[<?php echo esc_attr($i); ?>]"><option value="first_item" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'first_item'); ?>>First Item Only</option><option value="all_items" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'all_items'); ?>>All Items</option></select></td><td><input type="date" name="promo_expires_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['expires_at'] ?? '')); ?>" /></td><td><label><input type="checkbox" name="promo_delete[<?php echo esc_attr($i); ?>]" value="1" /> Delete</label></td></tr>
+      <?php $redemptions = $this->mrm_get_redemptions_for_promo_code($code, 25); ?>
+      <tr>
+        <td colspan="9" style="padding:8px 12px 14px 12px;background:#fafafa;">
+          <div style="font-size:11px;line-height:1.45;color:#555;">
+            <strong>Recent redemptions</strong>
+            <?php if (empty($redemptions)) : ?>
+              <div style="margin-top:4px;">No redemptions recorded yet.</div>
+            <?php else : ?>
+              <ul style="margin:6px 0 0 16px;padding:0;">
+                <?php foreach ($redemptions as $redemption) : ?>
+                  <?php
+                    $display_email = !empty($redemption['customer_email'])
+                      ? sanitize_email($redemption['customer_email'])
+                      : '[email not stored before this update]';
+                    $when = !empty($redemption['updated_at']) ? $redemption['updated_at'] : ($redemption['created_at'] ?? '');
+                    $status = sanitize_text_field((string)($redemption['status'] ?? ''));
+                  ?>
+                  <li>
+                    <?php echo esc_html($display_email); ?> — <?php echo esc_html($when); ?>
+                    <?php if ($status !== '') : ?><span style="opacity:.75;">(<?php echo esc_html($status); ?>)</span><?php endif; ?>
+                  </li>
+                <?php endforeach; ?>
+              </ul>
+            <?php endif; ?>
+          </div>
+        </td>
+      </tr>
       <?php $i++; endforeach; $new_i = $i; ?>
       <tr><td><input type="text" name="promo_code[<?php echo esc_attr($new_i); ?>]" placeholder="WELCOME10" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($new_i); ?>]" placeholder="Welcome discount" /></td><td><select name="promo_discount_type[<?php echo esc_attr($new_i); ?>]"><option value="percent">Percentage</option><option value="amount">Dollar Amount</option></select></td><td><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($new_i); ?>]" value="0" style="width:80px;" />%</td><td><input type="text" name="promo_amount_off[<?php echo esc_attr($new_i); ?>]" value="0.00" style="width:90px;" /></td><td><select name="promo_scope[<?php echo esc_attr($new_i); ?>]"><option value="all">Lessons + Sheet Music</option><option value="lesson">Lessons Only</option><option value="sheet_music">Sheet Music Only</option></select></td><td><select name="promo_applies_to[<?php echo esc_attr($new_i); ?>]"><option value="first_item">First Item Only</option><option value="all_items">All Items</option></select></td><td><input type="date" name="promo_expires_at[<?php echo esc_attr($new_i); ?>]" /></td><td></td></tr>
       </tbody></table>
