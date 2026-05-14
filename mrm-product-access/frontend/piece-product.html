@@ -1458,6 +1458,9 @@ body.mrm-piece-no-scroll{
 
       const rows = [];
       rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${esc(label)}</span><strong>${money(base)}</strong></div>`);
+  if (promoDiscount > 0) {
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
+  }
       rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
       rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
       instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">${rows.join('')}</div>`;
@@ -1557,6 +1560,7 @@ body.mrm-piece-no-scroll{
             body: JSON.stringify({
               sku: pendingSku,
               email: email,
+          promo_code: mrmPieceAppliedPromoCode || mrmGetPiecePromoCodeInputValue() || '',
               context: {
                 piece_slug: getPieceSlugFromUrl(),
                 terms_version: '2026-04-25',
@@ -1591,7 +1595,8 @@ body.mrm-piece-no-scroll{
             label: data.label || labelFromQuote,
             base_amount_cents: Number(data.base_amount_cents || baseFromQuote || 0),
             tax_cents: Number(data.tax_cents || 0),
-            amount_cents: Number(data.amount_cents || 0)
+            amount_cents: Number(data.amount_cents || 0),
+        promo_discount_cents: Number(data.promo_discount_cents || 0)
           });
 
           activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
