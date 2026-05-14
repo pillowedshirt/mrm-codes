@@ -1926,7 +1926,7 @@ h1 {
     <input id="student-name">
 
     <label>Email</label>
-    <input id="student-email">
+    <input id="student-email" type="email" autocomplete="email">
 
     <label>Instrument</label>
     <input id="confirm-instrument">
@@ -1982,7 +1982,7 @@ h1 {
           </select>
 
           <label for="modal-student-email">Email</label>
-          <input id="modal-student-email" autocomplete="email">
+          <input id="modal-student-email" type="email" autocomplete="email">
 
           <label for="modal-address">Address</label>
           <input id="modal-address" autocomplete="street-address">
@@ -3460,6 +3460,20 @@ function syncModalToLegacyFields(){
 let mrmAppliedPromoCode = '';
 let mrmAppliedPromoDiscountCents = 0;
 
+function mrmGetLessonPromoEmailValue() {
+  const modalEmail = document.getElementById('modal-student-email');
+  const mainEmail = document.getElementById('student-email');
+  const genericEmail = document.querySelector('input[type="email"]');
+
+  const modalVal = modalEmail ? String(modalEmail.value || '').trim() : '';
+  if (modalVal) return modalVal;
+
+  const mainVal = mainEmail ? String(mainEmail.value || '').trim() : '';
+  if (mainVal) return mainVal;
+
+  return genericEmail ? String(genericEmail.value || '').trim() : '';
+}
+
 function mrmGetPromoCodeInputValue() {
   const input = document.getElementById('mrm-promo-code-input');
   return input ? String(input.value || '').trim().toUpperCase() : '';
@@ -3486,8 +3500,7 @@ function mrmInitPromoBox() {
 
   btn.addEventListener('click', async function () {
     const code = mrmGetPromoCodeInputValue();
-    const emailInput = document.querySelector('input[type="email"]');
-    const email = emailInput ? String(emailInput.value || '').trim() : '';
+    const email = mrmGetLessonPromoEmailValue();
 
     if (!code) {
       mrmSetPromoMessage('Please enter a promotional code.', true);
@@ -3502,7 +3515,23 @@ function mrmInitPromoBox() {
     try {
       btn.disabled = true;
       mrmSetPromoMessage('Checking code…', false);
-      const skuToValidate = typeof sku !== 'undefined' && sku ? sku : '';
+      let skuToValidate = '';
+
+    const appointmentType = document.getElementById('lesson-option')?.value || '';
+    const firstSelectedSlot = Array.isArray(selectedSlots) && selectedSlots.length ? selectedSlots[0] : null;
+    const selectedMinutes = firstSelectedSlot
+      ? Math.round((new Date(firstSelectedSlot.end).getTime() - new Date(firstSelectedSlot.start).getTime()) / 60000)
+      : NaN;
+
+    const effectiveMinutes = Number.isFinite(selectedMinutes) && selectedMinutes > 0
+      ? selectedMinutes
+      : (typeof getSlotMinutes === 'function' ? getSlotMinutes() : 60);
+
+    if (appointmentType && appointmentType !== 'consultation') {
+      const len = effectiveMinutes === 60 ? '60' : '30';
+      const mode = appointmentType === 'in_person' ? 'inperson' : 'online';
+      skuToValidate = `lesson_${len}_${mode}`;
+    }
       const res = await fetch('/wp-json/mrm-pay/v1/validate-promo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
