@@ -21,6 +21,7 @@ class MRM_Payments_Hub_Single {
 
   // Options keys
   const OPT_SETTINGS = 'mrm_pay_hub_settings';
+    const OPT_PROMO_CODES = 'mrm_pay_hub_promo_codes';
   const OPT_PRODUCTS = 'mrm_pay_hub_products';
   const OPT_ACCESS_LISTS = 'mrm_pay_hub_access_lists';
   const OPT_EMAIL_LISTS = 'mrm_pay_hub_email_lists';
@@ -194,6 +195,11 @@ class MRM_Payments_Hub_Single {
     return $wpdb->prefix . 'mrm_sheet_music_subscriptions';
   }
 
+  private function table_promo_redemptions() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_promo_redemptions';
+  }
+
   public function maybe_install_or_upgrade_db() {
     // Run a lightweight existence + schema check; only dbDelta if needed.
     global $wpdb;
@@ -206,6 +212,7 @@ class MRM_Payments_Hub_Single {
     $autopay = $this->table_autopay_profiles();
     $webhooks = $this->table_webhook_events();
     $subs = $this->table_sheet_music_subscriptions();
+        $promo_redemptions = $this->table_promo_redemptions();
 
     $needs_upgrade = false;
 
@@ -470,6 +477,26 @@ class MRM_Payments_Hub_Single {
       KEY stripe_status_idx (stripe_status)
     ) {$charset};";
 
+    $sql_promo_redemptions = "CREATE TABLE {$promo_redemptions} (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      promo_code VARCHAR(80) NOT NULL,
+      email_hash CHAR(64) NOT NULL,
+      order_id BIGINT UNSIGNED DEFAULT NULL,
+      stripe_payment_intent_id VARCHAR(255) DEFAULT NULL,
+      status VARCHAR(30) NOT NULL DEFAULT 'pending',
+      ip_hash CHAR(64) DEFAULT NULL,
+      user_agent_hash CHAR(64) DEFAULT NULL,
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY promo_email_unique (promo_code, email_hash),
+      KEY promo_code_idx (promo_code),
+      KEY email_hash_idx (email_hash),
+      KEY status_idx (status),
+      KEY order_idx (order_id),
+      KEY pi_idx (stripe_payment_intent_id)
+    ) {$charset};";
+
     dbDelta($sql_orders);
     dbDelta($sql_links);
     dbDelta($sql_access);
@@ -478,6 +505,7 @@ class MRM_Payments_Hub_Single {
     dbDelta($sql_autopay);
     dbDelta($sql_webhooks);
     dbDelta($sql_subs);
+    dbDelta($sql_promo_redemptions);
   }
 
 
@@ -2669,6 +2697,7 @@ class MRM_Payments_Hub_Single {
     if ($order) {
       $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
       $this->mrm_maybe_create_payout_ledger_for_order($order);
+      $this->mrm_mark_promo_redemption_paid((int)$order['id'], $pi_id);
 
       $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
       $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
@@ -7270,6 +7299,12 @@ class MRM_Payments_Hub_Single {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/validate-promo', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_validate_promo'),
+      'permission_callback' => '__return_true',
+    ));
+
     register_rest_route('mrm-pay/v1', '/create-payment-intent', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_create_payment_intent'),
@@ -7443,6 +7478,63 @@ class MRM_Payments_Hub_Single {
     exit;
   }
 
+
+
+  public function rest_validate_promo(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+
+    $code = $this->mrm_normalize_promo_code($data['promo_code'] ?? '');
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $sku = $this->sanitize_sku($data['sku'] ?? '');
+    $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+
+    if ($sku === '') {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Missing SKU.',
+      ), 400);
+    }
+
+    $product = $this->get_product($sku);
+    if (!$product || empty($product['active'])) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Unknown or inactive product.',
+      ), 404);
+    }
+
+    $base_amount_cents = (int)($product['amount_cents'] ?? 0);
+
+    $lesson_count = isset($context['lesson_count']) ? max(1, absint($context['lesson_count'])) : 1;
+    $prepay = isset($context['prepay']) ? strtolower((string)$context['prepay']) : 'no';
+
+    if ((string)($product['product_type'] ?? '') === 'lesson' && $prepay === 'yes' && $lesson_count > 1) {
+      $base_amount_cents = $base_amount_cents * $lesson_count;
+    }
+
+    $result = $this->mrm_validate_promo_for_purchase(
+      $code,
+      $email,
+      (string)($product['product_type'] ?? 'unknown'),
+      $base_amount_cents,
+      $context
+    );
+
+    if (empty($result['ok'])) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => (string)($result['message'] ?? 'Invalid promotional code.'),
+      ), 400);
+    }
+
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'message' => 'Promotional code applied.',
+      'promo_code' => $code,
+      'discount_cents' => (int)$result['discount_cents'],
+      'discount_display' => '$' . number_format(((int)$result['discount_cents']) / 100, 2),
+    ), 200);
+  }
 
   public function rest_quote(WP_REST_Request $req) {
     $sku = $this->sanitize_sku($req->get_param('sku'));
@@ -7689,6 +7781,31 @@ class MRM_Payments_Hub_Single {
     $base_amount_cents = (int)$amount;
     $addon_amount_cents = $addon_selected ? 500 : 0;
 
+    $promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? '');
+    $promo_discount_cents = 0;
+    $promo_validation = null;
+
+    if ($promo_code !== '') {
+      $promo_validation = $this->mrm_validate_promo_for_purchase(
+        $promo_code,
+        $email,
+        $product_type,
+        $base_amount_cents,
+        $context
+      );
+
+      if (empty($promo_validation['ok'])) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => 'invalid_promo_code',
+          'message' => (string)($promo_validation['message'] ?? 'Invalid promotional code.'),
+        ), 400);
+      }
+
+      $promo_discount_cents = max(0, (int)($promo_validation['discount_cents'] ?? 0));
+      $base_amount_cents = max(50, $base_amount_cents - $promo_discount_cents);
+    }
+
     $tax_policy = $this->mrm_build_tax_policy($address, $product_type, $addon_selected, $p, $context);
     $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
 
@@ -7754,6 +7871,10 @@ class MRM_Payments_Hub_Single {
     $metadata['mrm_sheet_music_addon'] = $addon_selected ? 'yes' : 'no';
     $metadata['mrm_base_amount_cents'] = (string)$base_amount_cents;
     $metadata['mrm_addon_amount_cents'] = (string)$addon_amount_cents;
+    if ($promo_code !== '') {
+      $metadata['mrm_promo_code'] = $promo_code;
+      $metadata['mrm_promo_discount_cents'] = (string)$promo_discount_cents;
+    }
     // Total tax for this order (covers sheet music base + subscription add-on, depending on product).
     $metadata['mrm_tax_cents'] = (string)$tax_cents;
     $metadata['mrm_tax_calculation_id'] = (string)$tax_calc_id;
@@ -7806,6 +7927,16 @@ class MRM_Payments_Hub_Single {
     // Create internal order first so order_id can be labeled in Stripe metadata
     $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
     $metadata['mrm_order_id'] = (string)$order_id;
+    if ($promo_code !== '' && $promo_discount_cents > 0) {
+      $reserved = $this->mrm_reserve_promo_redemption($promo_code, $email_hash, $order_id);
+      if (!$reserved) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => 'promo_code_already_used',
+          'message' => 'This promotional code has already been used for this email.',
+        ), 409);
+      }
+    }
 
     $description = ($product_type === 'lesson')
       ? 'Low Brass Lessons - Lesson Charge'
@@ -7889,6 +8020,9 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->attach_payment_intent_to_order($order_id, (string)$pi['id'], (string)($pi['status'] ?? ''));
+    if ($promo_code !== '' && $promo_discount_cents > 0) {
+      $this->mrm_attach_payment_intent_to_promo_redemption($order_id, (string)$pi['id']);
+    }
 
     return new WP_REST_Response(array(
       'ok' => true,
@@ -7903,6 +8037,8 @@ class MRM_Payments_Hub_Single {
       'amount_cents' => $final_amount_cents,
       'base_amount_cents' => $base_amount_cents,
       'addon_amount_cents' => $addon_amount_cents,
+      'promo_code' => $promo_code,
+      'promo_discount_cents' => $promo_discount_cents,
       'tax_cents' => $tax_cents,
       'tax_message' => (string)$tax_message,
       'tax_policy' => array(
@@ -9440,6 +9576,32 @@ public function handle_marketing_resubscribe() {
   exit;
 }
 
+
+public function render_promo_codes_page() {
+  if (!current_user_can('manage_options')) {
+    wp_die('Unauthorized');
+  }
+
+  $codes = $this->mrm_get_promo_codes();
+  ?>
+  <div class="wrap">
+    <h1>Promo Codes</h1>
+    <?php settings_errors('mrm_pay_hub'); ?>
+    <p>Create promotional codes for lesson purchases, sheet music purchases, or both. Codes are enforced server-side during Stripe PaymentIntent creation.</p>
+    <form method="post">
+      <?php wp_nonce_field('mrm_pay_hub_save_promo_codes', 'mrm_pay_hub_promo_codes_nonce'); ?>
+      <table class="widefat striped" style="margin-top:16px;"><thead><tr><th>Code</th><th>Label</th><th>Discount Type</th><th>Percent Off</th><th>Amount Off</th><th>Applies To</th><th>Item Rule</th><th>Expiration Date</th><th>Delete</th></tr></thead><tbody>
+      <?php $i = 0; foreach ($codes as $code => $promo) : if (!is_array($promo)) continue; ?>
+      <tr><td><input type="text" name="promo_code[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($code); ?>" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['label'] ?? '')); ?>" /></td><td><select name="promo_discount_type[<?php echo esc_attr($i); ?>]"><option value="percent" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'percent'); ?>>Percentage</option><option value="amount" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'amount'); ?>>Dollar Amount</option></select></td><td><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['percent_off'] ?? 0)); ?>" style="width:80px;" />%</td><td><input type="text" name="promo_amount_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr(number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2)); ?>" style="width:90px;" /></td><td><select name="promo_scope[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected((string)($promo['scope'] ?? 'all'), 'all'); ?>>Lessons + Sheet Music</option><option value="lesson" <?php selected((string)($promo['scope'] ?? 'all'), 'lesson'); ?>>Lessons Only</option><option value="sheet_music" <?php selected((string)($promo['scope'] ?? 'all'), 'sheet_music'); ?>>Sheet Music Only</option></select></td><td><select name="promo_applies_to[<?php echo esc_attr($i); ?>]"><option value="first_item" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'first_item'); ?>>First Item Only</option><option value="all_items" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'all_items'); ?>>All Items</option></select></td><td><input type="date" name="promo_expires_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['expires_at'] ?? '')); ?>" /></td><td><label><input type="checkbox" name="promo_delete[<?php echo esc_attr($i); ?>]" value="1" /> Delete</label></td></tr>
+      <?php $i++; endforeach; $new_i = $i; ?>
+      <tr><td><input type="text" name="promo_code[<?php echo esc_attr($new_i); ?>]" placeholder="WELCOME10" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($new_i); ?>]" placeholder="Welcome discount" /></td><td><select name="promo_discount_type[<?php echo esc_attr($new_i); ?>]"><option value="percent">Percentage</option><option value="amount">Dollar Amount</option></select></td><td><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($new_i); ?>]" value="0" style="width:80px;" />%</td><td><input type="text" name="promo_amount_off[<?php echo esc_attr($new_i); ?>]" value="0.00" style="width:90px;" /></td><td><select name="promo_scope[<?php echo esc_attr($new_i); ?>]"><option value="all">Lessons + Sheet Music</option><option value="lesson">Lessons Only</option><option value="sheet_music">Sheet Music Only</option></select></td><td><select name="promo_applies_to[<?php echo esc_attr($new_i); ?>]"><option value="first_item">First Item Only</option><option value="all_items">All Items</option></select></td><td><input type="date" name="promo_expires_at[<?php echo esc_attr($new_i); ?>]" /></td><td></td></tr>
+      </tbody></table>
+      <p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>
+    </form>
+  </div>
+  <?php
+}
+
 public function render_marketing_email_lists_page() {
   if (!current_user_can('manage_options')) {
     wp_die('You do not have permission to view this page.');
@@ -10319,6 +10481,38 @@ public function render_access_lists_page() {
       }
 
       add_settings_error('mrm_pay_hub', 'saved', 'Settings saved.', 'updated');
+    }
+
+    if (isset($_POST['mrm_pay_hub_promo_codes_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_promo_codes_nonce'], 'mrm_pay_hub_save_promo_codes')) {
+      $codes = array();
+
+      $posted_codes = isset($_POST['promo_code']) ? (array)$_POST['promo_code'] : array();
+      $labels = isset($_POST['promo_label']) ? (array)$_POST['promo_label'] : array();
+      $discount_types = isset($_POST['promo_discount_type']) ? (array)$_POST['promo_discount_type'] : array();
+      $percent_offs = isset($_POST['promo_percent_off']) ? (array)$_POST['promo_percent_off'] : array();
+      $amount_offs = isset($_POST['promo_amount_off']) ? (array)$_POST['promo_amount_off'] : array();
+      $scopes = isset($_POST['promo_scope']) ? (array)$_POST['promo_scope'] : array();
+      $applies_to = isset($_POST['promo_applies_to']) ? (array)$_POST['promo_applies_to'] : array();
+      $expires = isset($_POST['promo_expires_at']) ? (array)$_POST['promo_expires_at'] : array();
+      $deletes = isset($_POST['promo_delete']) ? (array)$_POST['promo_delete'] : array();
+      foreach ($posted_codes as $i => $raw_code) {
+        $code = $this->mrm_normalize_promo_code($raw_code);
+        if ($code === '') continue;
+        if (!empty($deletes[$i])) continue;
+        $discount_type = sanitize_text_field((string)($discount_types[$i] ?? 'percent'));
+        if (!in_array($discount_type, array('percent', 'amount'), true)) $discount_type = 'percent';
+        $scope = sanitize_text_field((string)($scopes[$i] ?? 'all'));
+        if (!in_array($scope, array('all', 'lesson', 'sheet_music'), true)) $scope = 'all';
+        $apply = sanitize_text_field((string)($applies_to[$i] ?? 'all_items'));
+        if (!in_array($apply, array('first_item', 'all_items'), true)) $apply = 'all_items';
+        $percent = max(0, min(100, absint($percent_offs[$i] ?? 0)));
+        $amount_cents = $this->mrm_money_to_cents($amount_offs[$i] ?? '0.00', 0);
+        $expires_at = sanitize_text_field((string)($expires[$i] ?? ''));
+        if ($expires_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $expires_at)) $expires_at = '';
+        $codes[$code] = array('code'=>$code,'label'=>sanitize_text_field((string)($labels[$i] ?? '')),'discount_type'=>$discount_type,'percent_off'=>$percent,'amount_off_cents'=>max(0,(int)$amount_cents),'scope'=>$scope,'applies_to'=>$apply,'expires_at'=>$expires_at,'active'=>1,'updated_at'=>current_time('mysql'));
+      }
+      $this->mrm_save_promo_codes($codes);
+      add_settings_error('mrm_pay_hub', 'promo_codes_saved', 'Promo codes saved.', 'updated');
     }
 
     if (isset($_POST['mrm_pay_hub_products_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_products_nonce'], 'mrm_pay_hub_save_products')) {
