@@ -2104,6 +2104,9 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_post_mrm_scheduler_save_google', array( $this, 'handle_save_google_settings' ) );
         add_action( 'admin_post_mrm_scheduler_test_google', array( $this, 'handle_test_google_settings' ) );
         add_action( 'admin_post_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
+        add_action( 'admin_post_mrm_scheduler_save_contact_form', array( $this, 'handle_save_contact_form_settings' ) );
+        add_action( 'admin_post_mrm_scheduler_contact_submit', array( $this, 'handle_contact_form_submit' ) );
+        add_action( 'admin_post_nopriv_mrm_scheduler_contact_submit', array( $this, 'handle_contact_form_submit' ) );
         add_action( 'admin_post_mrm_finalize_old_lessons_now', array( $this, 'admin_finalize_old_lessons_now' ) );
         add_action( 'admin_post_nopriv_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
 
@@ -2127,6 +2130,7 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_post_mrm_clear_all_mileage_cache', array( $this, 'handle_mrm_clear_all_mileage_cache' ) );
 
         add_action( 'admin_init', array( $this, 'register_settings' ) );
+        add_shortcode( 'mrm_contact_form', array( $this, 'render_contact_form_shortcode' ) );
 
         // add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
 
@@ -10121,7 +10125,681 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
             'mrm-contractor-tax-profiles',
             array( $this, 'render_contractor_tax_profiles_page' )
         );
+
+        add_submenu_page(
+            'mrm-scheduler',
+            'Contact Form',
+            'Contact Form',
+            self::CAPABILITY,
+            'mrm-scheduler-contact-form',
+            array( $this, 'render_admin_contact_form_page' )
+        );
     }
+
+    protected function mrm_get_default_contact_form_html() {
+    return <<<'HTML'
+<section class="mrm-contact-section" id="mrm-contact-form-section">
+  <div class="mrm-contact-shell">
+    <div class="mrm-contact-card">
+      <div class="mrm-contact-accent"></div>
+
+      <div class="mrm-contact-header">
+        <p class="mrm-contact-eyebrow">Contact Low Brass Lessons</p>
+        <h2>Let’s connect.</h2>
+        <p>
+          Have a question about lessons, sheet music, teaching opportunities, collaborations,
+          or the studio? Send a message below and we’ll follow up as soon as possible.
+        </p>
+      </div>
+
+      {{mrm_contact_notice}}
+
+      <form class="mrm-contact-form" method="post" action="{{mrm_contact_action}}">
+        {{mrm_contact_nonce_field}}
+        <input type="hidden" name="action" value="mrm_scheduler_contact_submit">
+
+        <div class="mrm-contact-field mrm-contact-full">
+          <label for="mrm_contact_represents">Which best represents you? <span>*</span></label>
+          <select id="mrm_contact_represents" name="mrm_contact_represents" required>
+            <option value="">Please select one</option>
+            <option value="potential_student">Potential student</option>
+            <option value="parent_guardian">Parent or guardian of a potential student</option>
+            <option value="current_student_family">Current student or family</option>
+            <option value="interested_instructor">Interested instructor</option>
+            <option value="composer_arranger">Composer or arranger</option>
+            <option value="school_band_director">School band director / music educator</option>
+            <option value="film_media_collaborator">Film, media, or creative collaborator</option>
+            <option value="general_question">General question</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+
+        <div class="mrm-contact-field mrm-contact-full mrm-contact-other-wrap" hidden>
+          <label for="mrm_contact_represents_other">Please tell us who you are <span>*</span></label>
+          <input
+            type="text"
+            id="mrm_contact_represents_other"
+            name="mrm_contact_represents_other"
+            placeholder="Example: arts administrator, community partner, returning visitor"
+          >
+        </div>
+
+        <div class="mrm-contact-grid">
+          <div class="mrm-contact-field">
+            <label for="mrm_contact_first_name">First name <span>*</span></label>
+            <input type="text" id="mrm_contact_first_name" name="mrm_contact_first_name" autocomplete="given-name" required>
+          </div>
+
+          <div class="mrm-contact-field">
+            <label for="mrm_contact_last_name">Last name <span>*</span></label>
+            <input type="text" id="mrm_contact_last_name" name="mrm_contact_last_name" autocomplete="family-name" required>
+          </div>
+        </div>
+
+        <div class="mrm-contact-field mrm-contact-full">
+          <label for="mrm_contact_email">Email <span>*</span></label>
+          <input type="email" id="mrm_contact_email" name="mrm_contact_email" autocomplete="email" required>
+        </div>
+
+        <div class="mrm-contact-field mrm-contact-full">
+          <label for="mrm_contact_message">Message <span>*</span></label>
+          <textarea id="mrm_contact_message" name="mrm_contact_message" rows="6" required placeholder="Tell us how we can help."></textarea>
+        </div>
+
+        <div class="mrm-contact-website-field" aria-hidden="true">
+          <label for="mrm_contact_website">Website</label>
+          <input type="text" id="mrm_contact_website" name="mrm_contact_website" tabindex="-1" autocomplete="off">
+        </div>
+
+        <div class="mrm-contact-actions">
+          <button type="submit">Send Message</button>
+          <p>Messages are sent securely through the Low Brass Lessons website.</p>
+        </div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<style>
+  .mrm-contact-section {
+    --mrm-contact-bg: #f5f5f5;
+    --mrm-contact-surface: #ffffff;
+    --mrm-contact-accent: #2f2f2f;
+    --mrm-contact-gold: #c9a227;
+    --mrm-contact-text: #111111;
+    --mrm-contact-muted: #666666;
+    --mrm-contact-border: #dddddd;
+    --mrm-contact-soft: rgba(0, 0, 0, 0.08);
+
+    width: 100%;
+    box-sizing: border-box;
+    padding: clamp(42px, 6vw, 78px) 18px;
+    background:
+      radial-gradient(circle at top left, rgba(201, 162, 39, 0.10), transparent 32%),
+      var(--mrm-contact-bg);
+    color: var(--mrm-contact-text);
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .mrm-contact-section *,
+  .mrm-contact-section *::before,
+  .mrm-contact-section *::after {
+    box-sizing: border-box;
+  }
+
+  .mrm-contact-shell {
+    width: min(100%, 920px);
+    margin: 0 auto;
+  }
+
+  .mrm-contact-card {
+    position: relative;
+    overflow: hidden;
+    background: var(--mrm-contact-surface);
+    border: 1px solid var(--mrm-contact-border);
+    border-radius: 22px;
+    padding: clamp(24px, 4vw, 44px);
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.10);
+  }
+
+  .mrm-contact-accent {
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 6px;
+    background: linear-gradient(90deg, var(--mrm-contact-gold), var(--mrm-contact-accent));
+  }
+
+  .mrm-contact-header {
+    text-align: center;
+    max-width: 720px;
+    margin: 0 auto 30px;
+  }
+
+  .mrm-contact-eyebrow {
+    margin: 0 0 8px;
+    color: var(--mrm-contact-gold);
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .mrm-contact-header h2 {
+    margin: 0 0 12px;
+    color: var(--mrm-contact-text);
+    font-size: clamp(28px, 4vw, 42px);
+    line-height: 1.08;
+    font-weight: 850;
+  }
+
+  .mrm-contact-header p {
+    margin: 0;
+    color: var(--mrm-contact-muted);
+    font-size: clamp(15px, 2vw, 17px);
+    line-height: 1.65;
+  }
+
+  .mrm-contact-form {
+    display: grid;
+    gap: 18px;
+  }
+
+  .mrm-contact-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .mrm-contact-field {
+    display: grid;
+    gap: 7px;
+  }
+
+  .mrm-contact-full {
+    width: 100%;
+  }
+
+  .mrm-contact-field label {
+    color: var(--mrm-contact-text);
+    font-size: 14px;
+    font-weight: 750;
+  }
+
+  .mrm-contact-field label span {
+    color: var(--mrm-contact-gold);
+  }
+
+  .mrm-contact-field input,
+  .mrm-contact-field select,
+  .mrm-contact-field textarea {
+    width: 100%;
+    min-height: 48px;
+    border: 1px solid var(--mrm-contact-border);
+    border-radius: 12px;
+    background: #ffffff;
+    color: var(--mrm-contact-text);
+    padding: 12px 14px;
+    font: inherit;
+    font-size: 15px;
+    outline: none;
+    transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  }
+
+  .mrm-contact-field textarea {
+    min-height: 150px;
+    resize: vertical;
+    line-height: 1.55;
+  }
+
+  .mrm-contact-field input:focus,
+  .mrm-contact-field select:focus,
+  .mrm-contact-field textarea:focus {
+    border-color: var(--mrm-contact-gold);
+    box-shadow: 0 0 0 4px rgba(201, 162, 39, 0.16);
+  }
+
+  .mrm-contact-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    margin-top: 6px;
+  }
+
+  .mrm-contact-actions button {
+    appearance: none;
+    border: 0;
+    border-radius: 999px;
+    background: var(--mrm-contact-accent);
+    color: #ffffff;
+    cursor: pointer;
+    font: inherit;
+    font-size: 16px;
+    font-weight: 800;
+    padding: 14px 28px;
+    min-width: 180px;
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.18);
+    transition: transform 160ms ease, opacity 160ms ease, box-shadow 160ms ease;
+  }
+
+  .mrm-contact-actions button:hover {
+    transform: translateY(-1px);
+    opacity: 0.92;
+    box-shadow: 0 16px 32px rgba(0, 0, 0, 0.20);
+  }
+
+  .mrm-contact-actions p {
+    margin: 0;
+    color: var(--mrm-contact-muted);
+    font-size: 13px;
+    line-height: 1.45;
+    text-align: right;
+  }
+
+  .mrm-contact-notice {
+    margin: 0 0 22px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    font-weight: 700;
+    line-height: 1.45;
+  }
+
+  .mrm-contact-notice-success {
+    background: #e9f7ed;
+    color: #205c32;
+    border: 1px solid rgba(32, 92, 50, 0.18);
+  }
+
+  .mrm-contact-notice-error {
+    background: #fdecec;
+    color: #842323;
+    border: 1px solid rgba(132, 35, 35, 0.18);
+  }
+
+  .mrm-contact-website-field {
+    position: absolute;
+    left: -10000px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+
+  @media (max-width: 700px) {
+    .mrm-contact-section {
+      padding: 38px 14px;
+    }
+
+    .mrm-contact-card {
+      border-radius: 18px;
+      padding: 26px 18px;
+    }
+
+    .mrm-contact-header {
+      text-align: left;
+      margin-bottom: 24px;
+    }
+
+    .mrm-contact-grid {
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+
+    .mrm-contact-actions {
+      display: grid;
+      gap: 12px;
+    }
+
+    .mrm-contact-actions button {
+      width: 100%;
+      min-width: 0;
+    }
+
+    .mrm-contact-actions p {
+      text-align: center;
+    }
+  }
+</style>
+
+<script>
+  (function () {
+    function setupMrmContactForm(root) {
+      var select = root.querySelector('#mrm_contact_represents');
+      var otherWrap = root.querySelector('.mrm-contact-other-wrap');
+      var otherInput = root.querySelector('#mrm_contact_represents_other');
+
+      if (!select || !otherWrap || !otherInput) {
+        return;
+      }
+
+      function syncOtherField() {
+        var isOther = select.value === 'other';
+        otherWrap.hidden = !isOther;
+        otherInput.required = isOther;
+
+        if (!isOther) {
+          otherInput.value = '';
+        }
+      }
+
+      select.addEventListener('change', syncOtherField);
+      syncOtherField();
+    }
+
+    function boot() {
+      document.querySelectorAll('.mrm-contact-section').forEach(setupMrmContactForm);
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', boot);
+    } else {
+      boot();
+    }
+  })();
+</script>
+HTML;
+}
+
+public function render_admin_contact_form_page() {
+    if ( ! current_user_can( self::CAPABILITY ) ) {
+        return;
+    }
+
+    $opts = $this->get_settings();
+
+    $recipient = isset( $opts['contact_form_recipient_email'] ) && is_email( $opts['contact_form_recipient_email'] )
+        ? $opts['contact_form_recipient_email']
+        : get_option( 'admin_email' );
+
+    $html = isset( $opts['contact_form_html'] ) && trim( (string) $opts['contact_form_html'] ) !== ''
+        ? (string) $opts['contact_form_html']
+        : $this->mrm_get_default_contact_form_html();
+
+    ?>
+    <div class="wrap">
+        <h1>Contact Form</h1>
+
+        <?php if ( isset( $_GET['contact_saved'] ) && $_GET['contact_saved'] === '1' ) : ?>
+            <div class="notice notice-success is-dismissible">
+                <p><strong>Contact form settings saved.</strong></p>
+            </div>
+        <?php endif; ?>
+
+        <p>
+            Use this page to manage the custom contact form displayed by the
+            <code>[mrm_contact_form]</code> shortcode.
+        </p>
+
+        <div class="notice notice-info">
+            <p>
+                <strong>Placement:</strong> Add <code>[mrm_contact_form]</code> to your global footer, footer widget,
+                block theme footer template, or theme <code>footer.php</code> to display this form at the bottom of every page.
+            </p>
+            <p>
+                The form HTML supports these required placeholders:
+                <code>{{mrm_contact_action}}</code>,
+                <code>{{mrm_contact_nonce_field}}</code>,
+                and <code>{{mrm_contact_notice}}</code>.
+            </p>
+        </div>
+
+        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+            <?php wp_nonce_field( 'mrm_scheduler_save_contact_form', 'mrm_scheduler_contact_form_nonce' ); ?>
+            <input type="hidden" name="action" value="mrm_scheduler_save_contact_form">
+
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row">
+                        <label for="contact_form_recipient_email">Recipient Email</label>
+                    </th>
+                    <td>
+                        <input
+                            type="email"
+                            class="regular-text"
+                            id="contact_form_recipient_email"
+                            name="contact_form_recipient_email"
+                            value="<?php echo esc_attr( $recipient ); ?>"
+                            required
+                        >
+                        <p class="description">
+                            Contact form submissions will be sent here. The visitor's email will be used as the Reply-To address.
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">
+                        <label for="contact_form_html">Contact Form HTML</label>
+                    </th>
+                    <td>
+                        <textarea
+                            id="contact_form_html"
+                            name="contact_form_html"
+                            rows="34"
+                            class="large-text code"
+                            style="font-family: Consolas, Monaco, monospace;"
+                        ><?php echo esc_textarea( $html ); ?></textarea>
+
+                        <p class="description">
+                            This HTML is rendered by the <code>[mrm_contact_form]</code> shortcode. Keep the action, nonce, notice,
+                            field names, and hidden <code>action</code> input intact so submissions continue working.
+                        </p>
+                    </td>
+                </tr>
+            </table>
+
+            <?php submit_button( 'Save Contact Form' ); ?>
+        </form>
+
+        <hr>
+
+        <h2>Shortcode</h2>
+        <p>Use this shortcode wherever the contact form should appear:</p>
+        <p><code>[mrm_contact_form]</code></p>
+    </div>
+    <?php
+}
+
+public function handle_save_contact_form_settings() {
+    if ( ! current_user_can( self::CAPABILITY ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_scheduler_save_contact_form', 'mrm_scheduler_contact_form_nonce' );
+
+    $opts = $this->get_settings();
+
+    $recipient = isset( $_POST['contact_form_recipient_email'] )
+        ? sanitize_email( wp_unslash( $_POST['contact_form_recipient_email'] ) )
+        : '';
+
+    if ( ! is_email( $recipient ) ) {
+        $recipient = get_option( 'admin_email' );
+    }
+
+    $html = isset( $_POST['contact_form_html'] )
+        ? wp_unslash( $_POST['contact_form_html'] )
+        : '';
+
+    $html = is_string( $html ) ? $html : '';
+
+    if ( trim( $html ) === '' ) {
+        $html = $this->mrm_get_default_contact_form_html();
+    }
+
+    $opts['contact_form_recipient_email'] = $recipient;
+    $opts['contact_form_html'] = $html;
+
+    update_option( $this->option_key, $opts, 'no' );
+    $this->options = $opts;
+
+    wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-contact-form&contact_saved=1' ) );
+    exit;
+}
+
+public function render_contact_form_shortcode() {
+    $opts = $this->get_settings();
+
+    $html = isset( $opts['contact_form_html'] ) && trim( (string) $opts['contact_form_html'] ) !== ''
+        ? (string) $opts['contact_form_html']
+        : $this->mrm_get_default_contact_form_html();
+
+    $notice = '';
+    $status = isset( $_GET['mrm_contact_status'] ) ? sanitize_key( wp_unslash( $_GET['mrm_contact_status'] ) ) : '';
+
+    if ( $status === 'sent' ) {
+        $notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Thank you. Your message has been sent successfully.</div>';
+    } elseif ( $status === 'error' ) {
+        $notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Something went wrong. Please check the form and try again.</div>';
+    }
+
+    $replacements = array(
+        '{{mrm_contact_action}}'      => esc_url( admin_url( 'admin-post.php' ) ),
+        '{{mrm_contact_nonce_field}}' => wp_nonce_field( 'mrm_scheduler_contact_submit', 'mrm_scheduler_contact_nonce', true, false ),
+        '{{mrm_contact_notice}}'      => $notice,
+    );
+
+    return strtr( $html, $replacements );
+}
+
+protected function mrm_get_contact_represents_label( $value ) {
+    $value = sanitize_key( (string) $value );
+
+    $labels = array(
+        'potential_student'        => 'Potential student',
+        'parent_guardian'          => 'Parent or guardian of a potential student',
+        'current_student_family'   => 'Current student or family',
+        'interested_instructor'    => 'Interested instructor',
+        'composer_arranger'        => 'Composer or arranger',
+        'school_band_director'     => 'School band director / music educator',
+        'film_media_collaborator'  => 'Film, media, or creative collaborator',
+        'general_question'         => 'General question',
+        'other'                    => 'Other',
+    );
+
+    return isset( $labels[ $value ] ) ? $labels[ $value ] : '';
+}
+
+protected function mrm_contact_redirect_back( $status ) {
+    $status = sanitize_key( (string) $status );
+
+    $fallback = home_url( '/' );
+    $referer  = wp_get_referer();
+
+    $url = $referer ? $referer : $fallback;
+
+    $url = remove_query_arg( array( 'mrm_contact_status' ), $url );
+    $url = add_query_arg( 'mrm_contact_status', $status, $url );
+
+    wp_safe_redirect( $url . '#mrm-contact-form-section' );
+    exit;
+}
+
+public function handle_contact_form_submit() {
+    $nonce = isset( $_POST['mrm_scheduler_contact_nonce'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_scheduler_contact_nonce'] ) )
+        : '';
+
+    if ( ! wp_verify_nonce( $nonce, 'mrm_scheduler_contact_submit' ) ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $honeypot = isset( $_POST['mrm_contact_website'] )
+        ? trim( sanitize_text_field( wp_unslash( $_POST['mrm_contact_website'] ) ) )
+        : '';
+
+    if ( $honeypot !== '' ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $first_name = isset( $_POST['mrm_contact_first_name'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_first_name'] ) )
+        : '';
+
+    $last_name = isset( $_POST['mrm_contact_last_name'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_last_name'] ) )
+        : '';
+
+    $email = isset( $_POST['mrm_contact_email'] )
+        ? sanitize_email( wp_unslash( $_POST['mrm_contact_email'] ) )
+        : '';
+
+    $represents = isset( $_POST['mrm_contact_represents'] )
+        ? sanitize_key( wp_unslash( $_POST['mrm_contact_represents'] ) )
+        : '';
+
+    $represents_other = isset( $_POST['mrm_contact_represents_other'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_represents_other'] ) )
+        : '';
+
+    $message = isset( $_POST['mrm_contact_message'] )
+        ? sanitize_textarea_field( wp_unslash( $_POST['mrm_contact_message'] ) )
+        : '';
+
+    $represents_label = $this->mrm_get_contact_represents_label( $represents );
+
+    if (
+        $first_name === '' ||
+        $last_name === '' ||
+        ! is_email( $email ) ||
+        $represents_label === '' ||
+        $message === ''
+    ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    if ( $represents === 'other' && $represents_other === '' ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $opts = $this->get_settings();
+
+    $recipient = isset( $opts['contact_form_recipient_email'] ) && is_email( $opts['contact_form_recipient_email'] )
+        ? $opts['contact_form_recipient_email']
+        : get_option( 'admin_email' );
+
+    $full_name = trim( $first_name . ' ' . $last_name );
+
+    $subject = 'Website contact form — ' . $represents_label . ' — ' . $full_name;
+
+    $details = '';
+    $details .= '<div><strong>Name:</strong> ' . esc_html( $full_name ) . '</div>';
+    $details .= '<div><strong>Email:</strong> <a href="mailto:' . esc_attr( $email ) . '">' . esc_html( $email ) . '</a></div>';
+    $details .= '<div><strong>Which best represents them:</strong> ' . esc_html( $represents_label ) . '</div>';
+
+    if ( $represents === 'other' && $represents_other !== '' ) {
+        $details .= '<div><strong>Other description:</strong> ' . esc_html( $represents_other ) . '</div>';
+    }
+
+    $details .= '<div style="margin-top:14px;"><strong>Message:</strong></div>';
+    $details .= '<div style="white-space:pre-wrap; line-height:1.6;">' . esc_html( $message ) . '</div>';
+
+    $intro = '<p>A new website contact form submission was received.</p>';
+
+    if ( method_exists( $this, 'mrm_safety_email_wrap_html_blocks' ) ) {
+        $html = $this->mrm_safety_email_wrap_html_blocks(
+            'New Contact Form Submission',
+            $intro,
+            $details,
+            ''
+        );
+    } else {
+        $html = '<h2>New Contact Form Submission</h2>' . $intro . $details;
+    }
+
+    $headers = array(
+        'Content-Type: text/html; charset=UTF-8',
+        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        'Reply-To: ' . $full_name . ' <' . $email . '>',
+    );
+
+    $sent = wp_mail( $recipient, $subject, $html, $headers );
+
+    if ( ! $sent ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $this->mrm_contact_redirect_back( 'sent' );
+}
 
 protected function mrm_ensure_contractor_tax_profile_schema() {
     global $wpdb;
