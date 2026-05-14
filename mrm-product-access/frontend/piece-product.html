@@ -1142,6 +1142,97 @@ body.mrm-piece-no-scroll{
   let activePaymentElement = null;
   let activeStripeElements = null;
   let pendingSku = '';
+
+  let mrmPieceAppliedPromoCode = '';
+  let mrmPieceAppliedPromoDiscountCents = 0;
+
+  function mrmGetPiecePromoCodeInputValue() {
+    const input = document.getElementById('mrm-piece-promo-code-input');
+    return input ? String(input.value || '').trim().toUpperCase() : '';
+  }
+
+  function mrmSetPiecePromoMessage(message, isError) {
+    const el = document.getElementById('mrm-piece-promo-code-message');
+    if (!el) return;
+    el.textContent = message || '';
+    el.style.color = isError ? '#9f1d1d' : '#1f6f3f';
+  }
+
+  function mrmInitPiecePromoBox() {
+    const input = document.getElementById('mrm-piece-promo-code-input');
+    const btn = document.getElementById('mrm-piece-promo-code-apply');
+
+    if (!input || !btn) return;
+
+    input.addEventListener('input', function () {
+      mrmPieceAppliedPromoCode = '';
+      mrmPieceAppliedPromoDiscountCents = 0;
+      btn.style.display = input.value.trim() ? 'inline-flex' : 'none';
+      mrmSetPiecePromoMessage('', false);
+    });
+
+    btn.addEventListener('click', async function () {
+      const code = mrmGetPiecePromoCodeInputValue();
+      const emailInput = document.getElementById('mrm-payment-email') || document.querySelector('input[type="email"]');
+      const email = emailInput ? String(emailInput.value || '').trim() : '';
+
+      if (!code) {
+        mrmSetPiecePromoMessage('Please enter a promotional code.', true);
+        return;
+      }
+
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        mrmSetPiecePromoMessage('Please enter your email before applying a promotional code.', true);
+        return;
+      }
+
+      if (!pendingSku) {
+        mrmSetPiecePromoMessage('Please select a sheet music item first.', true);
+        return;
+      }
+
+      try {
+        btn.disabled = true;
+        mrmSetPiecePromoMessage('Checking code…', false);
+
+        const res = await fetch('/wp-json/mrm-pay/v1/validate-promo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            promo_code: code,
+            sku: pendingSku,
+            email: email,
+            context: {
+              piece_slug: typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '',
+              source_flow: 'piece_product_purchase'
+            }
+          })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || !data.ok) {
+          mrmPieceAppliedPromoCode = '';
+          mrmPieceAppliedPromoDiscountCents = 0;
+          mrmSetPiecePromoMessage(data.message || 'Invalid promotional code.', true);
+          return;
+        }
+
+        mrmPieceAppliedPromoCode = data.promo_code || code;
+        mrmPieceAppliedPromoDiscountCents = Number(data.discount_cents || 0);
+        mrmSetPiecePromoMessage(`Code applied: ${data.discount_display || ''} off`, false);
+      } catch (err) {
+        mrmPieceAppliedPromoCode = '';
+        mrmPieceAppliedPromoDiscountCents = 0;
+        mrmSetPiecePromoMessage('Unable to check this code right now.', true);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', mrmInitPiecePromoBox);
+
   let pendingClientSecret = '';
   let pendingOrderId = 0;
   let pendingBreakdown = null;
