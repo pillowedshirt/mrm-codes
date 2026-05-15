@@ -446,6 +446,8 @@ class MRM_Payments_Hub_Single {
   plan_kind VARCHAR(20) NOT NULL DEFAULT 'indefinite',
   authorized_lesson_count INT NOT NULL DEFAULT 0,
   charged_lesson_count INT NOT NULL DEFAULT 0,
+  promo_code VARCHAR(80) DEFAULT NULL,
+  promo_started_at DATETIME DEFAULT NULL,
   pm_brand VARCHAR(40) DEFAULT NULL,
   pm_last4 VARCHAR(10) DEFAULT NULL,
   pm_exp_month INT NOT NULL DEFAULT 0,
@@ -514,7 +516,7 @@ class MRM_Payments_Hub_Single {
       created_at DATETIME NOT NULL,
       updated_at DATETIME NOT NULL,
       PRIMARY KEY (id),
-      UNIQUE KEY promo_email_unique (promo_code, email_hash),
+      KEY promo_email_lookup (promo_code, email_hash),
       KEY promo_code_idx (promo_code),
       KEY email_hash_idx (email_hash),
       KEY customer_email_idx (customer_email),
@@ -532,6 +534,53 @@ class MRM_Payments_Hub_Single {
     dbDelta($sql_webhooks);
     dbDelta($sql_subs);
     dbDelta($sql_promo_redemptions);
+
+    // Promo codes may be reusable per email, so the old unique index must be removed.
+    // dbDelta() does not reliably remove old indexes, so do it explicitly.
+    $promo_unique_exists = $wpdb->get_var($wpdb->prepare(
+      "SELECT COUNT(1)
+       FROM information_schema.statistics
+       WHERE table_schema = DATABASE()
+         AND table_name = %s
+         AND index_name = 'promo_email_unique'",
+      $promo_redemptions
+    ));
+
+    if ((int)$promo_unique_exists > 0) {
+      $wpdb->query("ALTER TABLE {$promo_redemptions} DROP INDEX promo_email_unique");
+    }
+
+    $promo_lookup_exists = $wpdb->get_var($wpdb->prepare(
+      "SELECT COUNT(1)
+       FROM information_schema.statistics
+       WHERE table_schema = DATABASE()
+         AND table_name = %s
+         AND index_name = 'promo_email_lookup'",
+      $promo_redemptions
+    ));
+
+    if ((int)$promo_lookup_exists <= 0) {
+      $wpdb->query("ALTER TABLE {$promo_redemptions} ADD KEY promo_email_lookup (promo_code, email_hash)");
+    }
+
+    $autopay_columns = $wpdb->get_results("SHOW COLUMNS FROM {$autopay}", ARRAY_A);
+    $autopay_column_names = array();
+
+    if (is_array($autopay_columns)) {
+      foreach ($autopay_columns as $col) {
+        if (!empty($col['Field'])) {
+          $autopay_column_names[] = (string)$col['Field'];
+        }
+      }
+    }
+
+    if (!in_array('promo_code', $autopay_column_names, true)) {
+      $wpdb->query("ALTER TABLE {$autopay} ADD promo_code VARCHAR(80) DEFAULT NULL AFTER charged_lesson_count");
+    }
+
+    if (!in_array('promo_started_at', $autopay_column_names, true)) {
+      $wpdb->query("ALTER TABLE {$autopay} ADD promo_started_at DATETIME DEFAULT NULL AFTER promo_code");
+    }
   }
 
 
@@ -721,7 +770,7 @@ private function mrm_scope_allows_promo_for_product($promo, $product_type) {
   return false;
 }
 
-private function mrm_customer_has_used_promo($code, $email_hash) {
+private function mrm_customer_has_used_promo($code, $email_hash, $promo = array()) {
     global $wpdb;
 
     $code = $this->mrm_normalize_promo_code($code);
@@ -765,6 +814,77 @@ private function mrm_customer_has_used_promo($code, $email_hash) {
 
     return !empty($found);
   }
+
+private function mrm_promo_date_in_window($promo, $context = array()) {
+  $now_ts = !empty($context['now_ts']) ? (int)$context['now_ts'] : current_time('timestamp');
+
+  $starts_at = trim((string)($promo['starts_at'] ?? ''));
+  $ends_at = trim((string)($promo['ends_at'] ?? ''));
+
+  if ($starts_at !== '') {
+    $start_ts = strtotime($starts_at . ' 00:00:00');
+    if ($start_ts && $now_ts < $start_ts) {
+      return false;
+    }
+  }
+
+  if ($ends_at !== '') {
+    $end_ts = strtotime($ends_at . ' 23:59:59');
+    if ($end_ts && $now_ts > $end_ts) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+private function mrm_promo_rule_allows_context($promo, $context = array()) {
+  $rule_mode = (string)($promo['rule_mode'] ?? 'all');
+  $occurrence_number = isset($context['occurrence_number']) ? max(1, absint($context['occurrence_number'])) : 1;
+  $occurrence_count = isset($promo['occurrence_count']) ? max(0, absint($promo['occurrence_count'])) : 0;
+  $after_occurrence = isset($promo['after_occurrence']) ? max(0, absint($promo['after_occurrence'])) : 0;
+
+  if (!$this->mrm_promo_date_in_window($promo, $context)) {
+    return array('ok'=>false,'message'=>'This promotional code is not active for the current date.',);
+  }
+  if ($rule_mode === 'first_n') {
+    if ($occurrence_count > 0 && $occurrence_number > $occurrence_count) return array('ok'=>false,'message'=>'This promotional code has already reached its occurrence limit.',);
+  }
+  if ($rule_mode === 'after_n') {
+    if ($after_occurrence > 0 && $occurrence_number <= $after_occurrence) return array('ok'=>false,'message'=>'This promotional code starts after occurrence ' . $after_occurrence . '.',);
+  }
+  if ($rule_mode === 'first_n_months') {
+    $months = $occurrence_count > 0 ? $occurrence_count : 1;
+    $started_at = trim((string)($context['promo_started_at'] ?? ''));
+    if ($started_at !== '') {
+      $start_ts = strtotime($started_at);
+      $now_ts = !empty($context['now_ts']) ? (int)$context['now_ts'] : current_time('timestamp');
+      if ($start_ts) {
+        $end_ts = strtotime('+' . $months . ' months', $start_ts);
+        if ($end_ts && $now_ts >= $end_ts) return array('ok'=>false,'message'=>'This promotional code is outside its month-based discount window.',);
+      }
+    }
+  }
+  return array('ok'=>true,'message'=>'',);
+}
+
+private function mrm_promo_eligible_occurrences_for_context($promo, $context = array()) {
+  $lesson_count = isset($context['lesson_count']) ? max(1, absint($context['lesson_count'])) : 1;
+  $occurrence_number = isset($context['occurrence_number']) ? max(1, absint($context['occurrence_number'])) : 1;
+  $rule_mode = (string)($promo['rule_mode'] ?? 'all');
+  $occurrence_count = isset($promo['occurrence_count']) ? max(0, absint($promo['occurrence_count'])) : 0;
+  $after_occurrence = isset($promo['after_occurrence']) ? max(0, absint($promo['after_occurrence'])) : 0;
+  if ($rule_mode === 'first_n' && $occurrence_count > 0) {
+    $eligible_remaining = max(0, $occurrence_count - ($occurrence_number - 1));
+    return min($lesson_count, $eligible_remaining);
+  }
+  if ($rule_mode === 'after_n' && $after_occurrence > 0) {
+    $eligible = 0;
+    for ($i = 0; $i < $lesson_count; $i++) { if ($occurrence_number + $i > $after_occurrence) $eligible++; }
+    return min($lesson_count, $eligible);
+  }
+  return $lesson_count;
+}
 
 private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, $product_type, $context = array()) {
   $base_amount_cents = max(0, (int)$base_amount_cents);
@@ -849,7 +969,7 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
 
   $email_hash = $this->email_hash($email);
 
-  if ($this->mrm_customer_has_used_promo($code, $email_hash)) {
+  if ($this->mrm_customer_has_used_promo($code, $email_hash, $promo)) {
     return array(
       'ok' => false,
       'message' => 'This promotional code could not be reserved. It may already have been used by this email, or the promo redemption table may need a database upgrade.',
@@ -873,104 +993,28 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
   );
 }
 
-private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '', $customer_email = '') {
-    global $wpdb;
-
-    $code = $this->mrm_normalize_promo_code($code);
-    $email_hash = (string)$email_hash;
-    $order_id = (int)$order_id;
-    $customer_email = sanitize_email((string)$customer_email);
-
-    if ($code === '' || $email_hash === '' || $order_id <= 0) {
-      return false;
-    }
-
-    $table = $this->table_promo_redemptions();
-
-    $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
-    if ($found_table !== $table) {
-      $this->install_or_upgrade_db();
-    }
-
-    // A completed paid redemption is the only hard block.
-    $paid_id = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table}
-       WHERE promo_code = %s
-         AND email_hash = %s
-         AND status = 'paid'
-       LIMIT 1",
-      $code,
-      $email_hash
-    ));
-
-    if (!empty($paid_id)) {
-      return false;
-    }
-
-    $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field((string)$_SERVER['REMOTE_ADDR']) : '';
-    $ua = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field((string)$_SERVER['HTTP_USER_AGENT']) : '';
-    $now = current_time('mysql');
-
-    $existing_id = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table}
-       WHERE promo_code = %s
-         AND email_hash = %s
-       LIMIT 1",
-      $code,
-      $email_hash
-    ));
-
-    $row = array(
-      'promo_code' => $code,
-      'email_hash' => $email_hash,
-      'customer_email' => $customer_email ?: null,
-      'order_id' => $order_id,
-      'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
-      'status' => 'pending',
-      'ip_hash' => $ip !== '' ? hash('sha256', $ip) : null,
-      'user_agent_hash' => $ua !== '' ? hash('sha256', $ua) : null,
-      'updated_at' => $now,
-    );
-
-    if (!empty($existing_id)) {
-      $updated = $wpdb->update(
-        $table,
-        $row,
-        array('id' => (int)$existing_id),
-        array('%s','%s','%s','%d','%s','%s','%s','%s','%s'),
-        array('%d')
-      );
-
-      return $updated !== false;
-    }
-
-    $row['created_at'] = $now;
-
-    $inserted = $wpdb->insert(
-      $table,
-      $row,
-      array('%s','%s','%s','%d','%s','%s','%s','%s','%s','%s')
-    );
-
-    return !empty($inserted);
-  }
-
-private function mrm_attach_payment_intent_to_promo_redemption($order_id, $payment_intent_id) {
+private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '', $customer_email = '', $promo = array()) {
   global $wpdb;
-
+  $code = $this->mrm_normalize_promo_code($code);
+  $email_hash = (string)$email_hash;
   $order_id = (int)$order_id;
-  if ($order_id <= 0 || $payment_intent_id === '') return;
-
-  $wpdb->update(
-    $this->table_promo_redemptions(),
-    array(
-      'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
-      'updated_at' => current_time('mysql'),
-    ),
-    array('order_id' => $order_id),
-    array('%s','%s'),
-    array('%d')
-  );
+  $customer_email = sanitize_email((string)$customer_email);
+  $promo = is_array($promo) ? $promo : array();
+  if ($code === '' || $email_hash === '' || $order_id <= 0) return false;
+  $table = $this->table_promo_redemptions();
+  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+  if ($found_table !== $table) $this->install_or_upgrade_db();
+  $is_reusable = !empty($promo['reusable_per_email']);
+  if (!$is_reusable) {
+    $paid_id = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE promo_code = %s AND email_hash = %s AND status = 'paid' LIMIT 1", $code, $email_hash));
+    if (!empty($paid_id)) return false;
+  }
+  $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field((string)$_SERVER['REMOTE_ADDR']) : '';
+  $ua = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field((string)$_SERVER['HTTP_USER_AGENT']) : '';
+  $now = current_time('mysql');
+  $row = array('promo_code'=>$code,'email_hash'=>$email_hash,'customer_email'=>$customer_email ?: null,'order_id'=>$order_id,'stripe_payment_intent_id'=>sanitize_text_field((string)$payment_intent_id),'status'=>'pending','ip_hash'=>$ip !== '' ? hash('sha256', $ip) : null,'user_agent_hash'=>$ua !== '' ? hash('sha256', $ua) : null,'created_at'=>$now,'updated_at'=>$now,);
+  $inserted = $wpdb->insert($table,$row,array('%s','%s','%s','%d','%s','%s','%s','%s','%s','%s'));
+  return !empty($inserted);
 }
 
 private function mrm_mark_promo_redemption_paid($order_id, $payment_intent_id) {
@@ -6662,6 +6706,17 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     $this->link_order($order_id, 'lesson', (string)$lesson_id);
 
+      if ($autopay_promo_code !== '' && $autopay_promo_discount_cents > 0) {
+        $this->mrm_reserve_promo_redemption(
+          $autopay_promo_code,
+          (string)($profile['email_hash'] ?? ''),
+          $order_id,
+          '',
+          (string)($lesson['student_email'] ?? ''),
+          is_array($autopay_promo['promo'] ?? null) ? $autopay_promo['promo'] : array()
+        );
+      }
+
     $lesson_length = (int)($lesson['lesson_length'] ?? 0);
     $is_online = !empty($lesson['is_online']);
 
@@ -7322,7 +7377,24 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
   }
 
-  private function charge_and_unlock_autopay($data) {
+  private function mrm_get_autopay_promo_discount($profile, $lesson, $amount_cents) {
+  $profile = is_array($profile) ? $profile : array();
+  $lesson = is_array($lesson) ? $lesson : array();
+  $promo_code = $this->mrm_normalize_promo_code($profile['promo_code'] ?? '');
+  if ($promo_code === '') return array('promo_code'=>'','discount_cents'=>0,'promo'=>array(),);
+  $email_hash = (string)($profile['email_hash'] ?? '');
+  $email = '';
+  if ($email_hash !== '') $email = $this->decode_email_hash($email_hash);
+  if (!$email || !is_email($email)) $email = sanitize_email((string)($lesson['student_email'] ?? ''));
+  if (!$email || !is_email($email)) return array('promo_code'=>$promo_code,'discount_cents'=>0,'promo'=>array(),);
+  $occurrence_number = max(1, (int)($profile['charged_lesson_count'] ?? 0) + 2);
+  $context = array('lesson_count'=>1,'occurrence_number'=>$occurrence_number,'promo_started_at'=>(string)($profile['promo_started_at'] ?? ''),'autopay_profile_id'=>(int)($profile['id'] ?? 0),'lesson_id'=>(int)($lesson['id'] ?? 0),);
+  $validation = $this->mrm_validate_promo_for_purchase($promo_code,$email,'lesson',(int)$amount_cents,$context);
+  if (empty($validation['ok'])) return array('promo_code'=>$promo_code,'discount_cents'=>0,'promo'=>is_array($validation) && !empty($validation['promo']) ? $validation['promo'] : array(),);
+  return array('promo_code'=>$promo_code,'discount_cents'=>max(0, (int)($validation['discount_cents'] ?? 0)),'promo'=>is_array($validation['promo'] ?? null) ? $validation['promo'] : array(),'occurrence_number'=>$occurrence_number,);
+}
+
+private function charge_and_unlock_autopay($data) {
     global $wpdb;
 
     $autopay_profile_id = (int)($data['autopay_profile_id'] ?? 0);
@@ -7448,6 +7520,14 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $amount_cents = (int)$validated_profile['amount_cents'];
     $currency = (string)$validated_profile['currency'];
 
+    $autopay_promo = $this->mrm_get_autopay_promo_discount($profile, $lesson, $amount_cents);
+    $autopay_promo_code = (string)($autopay_promo['promo_code'] ?? '');
+    $autopay_promo_discount_cents = max(0, (int)($autopay_promo['discount_cents'] ?? 0));
+
+    if ($autopay_promo_discount_cents > 0) {
+      $amount_cents = max(50, $amount_cents - $autopay_promo_discount_cents);
+    }
+
     $pm_ready = $this->mrm_ensure_customer_payment_method_ready($customer_id, $payment_method_id);
     if (is_wp_error($pm_ready)) {
       $this->mrm_finalize_autopay_lesson_failure($lesson_id, $pm_ready->get_error_message());
@@ -7474,6 +7554,17 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     );
 
     $this->link_order($order_id, 'lesson', (string)$lesson_id);
+
+      if ($autopay_promo_code !== '' && $autopay_promo_discount_cents > 0) {
+        $this->mrm_reserve_promo_redemption(
+          $autopay_promo_code,
+          (string)($profile['email_hash'] ?? ''),
+          $order_id,
+          '',
+          (string)($lesson['student_email'] ?? ''),
+          is_array($autopay_promo['promo'] ?? null) ? $autopay_promo['promo'] : array()
+        );
+      }
 
     $pi = $this->stripe_create_offsession_payment_intent(
       $amount_cents,
@@ -7516,6 +7607,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
 
     $this->attach_payment_intent_to_order($order_id, $pi_id, $status, $local_order_status);
+
+      if ($autopay_promo_code !== '' && $autopay_promo_discount_cents > 0 && $pi_id !== '') {
+        $this->mrm_attach_payment_intent_to_promo_redemption($order_id, $pi_id);
+      }
 
 
     if (in_array($status, array('succeeded', 'requires_capture'), true)) {
@@ -8674,7 +8769,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     return new WP_REST_Response(array(
       'ok' => false,
-      'message' => 'Quote failed because Payments Hub hit a server-side error. Check wp-content/mrm-quote-debug.log.',
+      'message' => 'Quote failed because Payments Hub hit a server-side error.',
       'debug_request_id' => $request_id,
     ), 500);
   }
@@ -9016,7 +9111,14 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
     $metadata['mrm_order_id'] = (string)$order_id;
     if ($promo_code !== '' && $promo_discount_cents > 0) {
-      $reserved = $this->mrm_reserve_promo_redemption($promo_code, $email_hash, $order_id, '', $email);
+      $reserved = $this->mrm_reserve_promo_redemption(
+  $promo_code,
+  $email_hash,
+  $order_id,
+  '',
+  $email,
+  is_array($promo_validation) && !empty($promo_validation['promo']) ? $promo_validation['promo'] : array()
+);
       if (!$reserved) {
         return new WP_REST_Response(array(
           'ok' => false,
@@ -9186,6 +9288,9 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $repeat_duration = sanitize_text_field((string)($context['repeat_duration'] ?? 'indefinitely'));
     $authorized_lesson_count = isset($context['authorized_lesson_count']) ? absint($context['authorized_lesson_count']) : 0;
 
+    $promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? ($context['promo_code'] ?? ''));
+    $promo_started_at = $promo_code !== '' ? current_time('mysql') : null;
+
     $plan_kind = ($repeat_duration === 'indefinitely') ? 'indefinite' : 'bounded';
     if ($plan_kind === 'bounded' && $authorized_lesson_count <= 0) {
       $authorized_lesson_count = 1;
@@ -9337,6 +9442,9 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $repeat_duration = sanitize_text_field((string)($context['repeat_duration'] ?? 'indefinitely'));
     $authorized_lesson_count = isset($context['authorized_lesson_count']) ? absint($context['authorized_lesson_count']) : 0;
 
+    $promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? ($context['promo_code'] ?? ''));
+    $promo_started_at = $promo_code !== '' ? current_time('mysql') : null;
+
     if ($payment_intent_id === '') {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Missing payment_intent_id.'), 400);
     }
@@ -9406,6 +9514,8 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       'plan_kind' => $plan_kind,
       'authorized_lesson_count' => (int)$authorized_lesson_count,
       'charged_lesson_count' => 0,
+      'promo_code' => $promo_code !== '' ? $promo_code : null,
+      'promo_started_at' => $promo_started_at,
       'pm_brand' => (string)$pm_snap['brand'],
       'pm_last4' => (string)$pm_snap['last4'],
       'pm_exp_month' => (int)$pm_snap['exp_month'],
@@ -10717,12 +10827,24 @@ public function render_promo_codes_page() {
     <p>Create promotional codes for lesson purchases, sheet music purchases, or both. Codes are enforced server-side during Stripe PaymentIntent creation.</p>
     <form method="post">
       <?php wp_nonce_field('mrm_pay_hub_save_promo_codes', 'mrm_pay_hub_promo_codes_nonce'); ?>
-      <table class="widefat striped" style="margin-top:16px;"><thead><tr><th>Code</th><th>Label</th><th>Discount Type</th><th>Percent Off</th><th>Amount Off</th><th>Applies To</th><th>Item Rule</th><th>Expiration Date</th><th>Delete</th></tr></thead><tbody>
+      <table class="widefat striped" style="margin-top:16px;"><thead><tr><th>Code</th>
+<th>Label</th>
+<th>Discount Type</th>
+<th>Percent Off</th>
+<th>Amount Off</th>
+<th>Applies To</th>
+<th>Item Rule</th>
+<th>Occurrences</th>
+<th>After Occurrence</th>
+<th>Starts</th>
+<th>Ends / Expiration</th>
+<th>Reusable By Same Email</th>
+<th>Delete</th></tr></thead><tbody>
       <?php $i = 0; foreach ($codes as $code => $promo) : if (!is_array($promo)) continue; ?>
       <tr><td><input type="text" name="promo_code[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($code); ?>" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['label'] ?? '')); ?>" /></td><td><select name="promo_discount_type[<?php echo esc_attr($i); ?>]"><option value="percent" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'percent'); ?>>Percentage</option><option value="amount" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'amount'); ?>>Dollar Amount</option></select></td><td><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['percent_off'] ?? 0)); ?>" style="width:80px;" />%</td><td><input type="text" name="promo_amount_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr(number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2)); ?>" style="width:90px;" /></td><td><select name="promo_scope[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected((string)($promo['scope'] ?? 'all'), 'all'); ?>>Lessons + Sheet Music</option><option value="lesson" <?php selected((string)($promo['scope'] ?? 'all'), 'lesson'); ?>>Lessons Only</option><option value="sheet_music" <?php selected((string)($promo['scope'] ?? 'all'), 'sheet_music'); ?>>Sheet Music Only</option></select></td><td><select name="promo_applies_to[<?php echo esc_attr($i); ?>]"><option value="first_item" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'first_item'); ?>>First Item Only</option><option value="all_items" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'all_items'); ?>>All Items</option></select></td><td><input type="date" name="promo_expires_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['expires_at'] ?? '')); ?>" /></td><td><label><input type="checkbox" name="promo_delete[<?php echo esc_attr($i); ?>]" value="1" /> Delete</label></td></tr>
       <?php $redemptions = $this->mrm_get_redemptions_for_promo_code($code, 25); ?>
       <tr>
-        <td colspan="9" style="padding:8px 12px 14px 12px;background:#fafafa;">
+        <td colspan="13" style="padding:8px 12px 14px 12px;background:#fafafa;">
           <div style="font-size:11px;line-height:1.45;color:#555;">
             <strong>Completed redemptions</strong>
             <?php if (empty($redemptions)) : ?>
@@ -11021,7 +11143,7 @@ public function render_legal_ledger_page() {
   echo '</tr></thead><tbody>';
 
   if (empty($rows)) {
-    echo '<tr><td colspan="9">No matching transactions found.</td></tr>';
+    echo '<tr><td colspan="13">No matching transactions found.</td></tr>';
   }
 
   foreach ($rows as $row) {
