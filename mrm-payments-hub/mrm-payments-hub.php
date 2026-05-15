@@ -771,55 +771,75 @@ private function mrm_scope_allows_promo_for_product($promo, $product_type) {
 }
 
 private function mrm_customer_has_used_promo($code, $email_hash, $promo = array()) {
-    global $wpdb;
+  global $wpdb;
 
-    $code = $this->mrm_normalize_promo_code($code);
-    $email_hash = (string)$email_hash;
+  $code = $this->mrm_normalize_promo_code($code);
+  $email_hash = (string)$email_hash;
+  $promo = is_array($promo) ? $promo : array();
 
-    if ($code === '' || $email_hash === '') {
-      return false;
-    }
-
-    $table = $this->table_promo_redemptions();
-
-    $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
-    if ($found_table !== $table) {
-      $this->install_or_upgrade_db();
-    }
-
-    // Expire old pending reservations so they do not clutter admin history.
-    $wpdb->query($wpdb->prepare(
-      "UPDATE {$table}
-       SET status = 'expired', updated_at = %s
-       WHERE promo_code = %s
-         AND email_hash = %s
-         AND status = 'pending'
-         AND created_at < %s",
-      current_time('mysql'),
-      $code,
-      $email_hash,
-      gmdate('Y-m-d H:i:s', time() - HOUR_IN_SECONDS)
-    ));
-
-    // Only completed successful payments count as true redemptions.
-    $found = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table}
-       WHERE promo_code = %s
-         AND email_hash = %s
-         AND status = 'paid'
-       LIMIT 1",
-      $code,
-      $email_hash
-    ));
-
-    return !empty($found);
+  if ($code === '' || $email_hash === '') {
+    return false;
   }
 
+  /*
+   * Reusable-per-email promos are allowed to be redeemed repeatedly by the
+   * same email address. Each successful use is still recorded as a separate
+   * redemption row.
+   */
+  if (!empty($promo['reusable_per_email'])) {
+    return false;
+  }
+
+  $table = $this->table_promo_redemptions();
+
+  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+  if ($found_table !== $table) {
+    $this->install_or_upgrade_db();
+  }
+
+  $wpdb->query($wpdb->prepare(
+    "UPDATE {$table}
+     SET status = 'expired', updated_at = %s
+     WHERE promo_code = %s
+       AND email_hash = %s
+       AND status = 'pending'
+       AND created_at < %s",
+    current_time('mysql'),
+    $code,
+    $email_hash,
+    gmdate('Y-m-d H:i:s', time() - HOUR_IN_SECONDS)
+  ));
+
+  $found = $wpdb->get_var($wpdb->prepare(
+    "SELECT id FROM {$table}
+     WHERE promo_code = %s
+       AND email_hash = %s
+       AND status = 'paid'
+     LIMIT 1",
+    $code,
+    $email_hash
+  ));
+
+  return !empty($found);
+}
+
+
 private function mrm_promo_date_in_window($promo, $context = array()) {
+  $promo = is_array($promo) ? $promo : array();
+  $context = is_array($context) ? $context : array();
+
   $now_ts = !empty($context['now_ts']) ? (int)$context['now_ts'] : current_time('timestamp');
 
   $starts_at = trim((string)($promo['starts_at'] ?? ''));
-  $ends_at = trim((string)($promo['ends_at'] ?? ''));
+
+  /*
+   * expires_at is the canonical saved field. ends_at is supported as a
+   * backwards-compatible alias in case older saved promo data used that name.
+   */
+  $ends_at = trim((string)($promo['expires_at'] ?? ''));
+  if ($ends_at === '') {
+    $ends_at = trim((string)($promo['ends_at'] ?? ''));
+  }
 
   if ($starts_at !== '') {
     $start_ts = strtotime($starts_at . ' 00:00:00');
@@ -837,6 +857,7 @@ private function mrm_promo_date_in_window($promo, $context = array()) {
 
   return true;
 }
+
 
 private function mrm_promo_rule_allows_context($promo, $context = array()) {
   $rule_mode = (string)($promo['rule_mode'] ?? 'all');
@@ -887,6 +908,9 @@ private function mrm_promo_eligible_occurrences_for_context($promo, $context = a
 }
 
 private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, $product_type, $context = array()) {
+  $promo = is_array($promo) ? $promo : array();
+  $context = is_array($context) ? $context : array();
+
   $base_amount_cents = max(0, (int)$base_amount_cents);
 
   if ($base_amount_cents <= 0) {
@@ -905,14 +929,39 @@ private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, 
     );
   }
 
+  $rule_check = $this->mrm_promo_rule_allows_context($promo, $context);
+  if (empty($rule_check['ok'])) {
+    return array(
+      'ok' => false,
+      'message' => (string)($rule_check['message'] ?? 'This promotional code does not apply to this occurrence.'),
+      'discount_cents' => 0,
+    );
+  }
+
   $discount_type = (string)($promo['discount_type'] ?? 'percent');
   $applies_to = (string)($promo['applies_to'] ?? 'all_items');
 
   $lesson_count = isset($context['lesson_count']) ? max(1, absint($context['lesson_count'])) : 1;
+  $eligible_occurrences = $this->mrm_promo_eligible_occurrences_for_context($promo, $context);
+
+  if ($eligible_occurrences <= 0) {
+    return array(
+      'ok' => false,
+      'message' => 'This promotional code does not apply to this occurrence.',
+      'discount_cents' => 0,
+    );
+  }
+
   $eligible_amount_cents = $base_amount_cents;
 
-  if ($product_type === 'lesson' && $applies_to === 'first_item' && $lesson_count > 1) {
-    $eligible_amount_cents = (int)floor($base_amount_cents / $lesson_count);
+  if ($product_type === 'lesson') {
+    $per_lesson_cents = (int)floor($base_amount_cents / $lesson_count);
+
+    if ($applies_to === 'first_item') {
+      $eligible_amount_cents = $per_lesson_cents;
+    } else {
+      $eligible_amount_cents = min($base_amount_cents, $per_lesson_cents * $eligible_occurrences);
+    }
   }
 
   $discount_cents = 0;
@@ -921,12 +970,20 @@ private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, 
     $percent = max(0, min(100, (int)($promo['percent_off'] ?? 0)));
     $discount_cents = (int)floor($eligible_amount_cents * ($percent / 100));
   } else {
-    $discount_cents = max(0, (int)($promo['amount_off_cents'] ?? 0));
+    $amount_off_cents = max(0, (int)($promo['amount_off_cents'] ?? 0));
+
+    if ($product_type === 'lesson' && $applies_to === 'all_items' && $lesson_count > 1) {
+      $discount_cents = min($amount_off_cents * $eligible_occurrences, $eligible_amount_cents);
+    } else {
+      $discount_cents = min($amount_off_cents, $eligible_amount_cents);
+    }
   }
 
   $discount_cents = min($discount_cents, $eligible_amount_cents);
 
-  // Avoid creating a $0 card PaymentIntent.
+  /*
+   * Avoid creating a $0 card PaymentIntent.
+   */
   $max_safe_discount = max(0, $base_amount_cents - 50);
   $discount_cents = min($discount_cents, $max_safe_discount);
 
@@ -935,8 +992,10 @@ private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, 
     'message' => '',
     'discount_cents' => $discount_cents,
     'eligible_amount_cents' => $eligible_amount_cents,
+    'eligible_occurrences' => $eligible_occurrences,
   );
 }
+
 
 private function mrm_validate_promo_for_purchase($code, $email, $product_type, $base_amount_cents, $context = array()) {
   $code = $this->mrm_normalize_promo_code($code);
@@ -990,6 +1049,7 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
     'code' => $code,
     'discount_cents' => (int)$calc['discount_cents'],
     'eligible_amount_cents' => (int)($calc['eligible_amount_cents'] ?? $base_amount_cents),
+    'eligible_occurrences' => (int)($calc['eligible_occurrences'] ?? 1),
   );
 }
 
@@ -7550,6 +7610,9 @@ private function charge_and_unlock_autopay($data) {
         'mrm_autopay' => 'yes',
         'mrm_plan_kind' => (string)($profile['plan_kind'] ?? ''),
         'mrm_authorized_lesson_count' => (string)((int)($profile['authorized_lesson_count'] ?? 0)),
+        'mrm_promo_code' => $autopay_promo_code,
+        'mrm_promo_discount_cents' => (string)$autopay_promo_discount_cents,
+        'mrm_autopay_occurrence_number' => (string)((int)($autopay_promo['occurrence_number'] ?? 0)),
       )
     );
 
@@ -7581,6 +7644,9 @@ private function charge_and_unlock_autopay($data) {
         'mrm_autopay' => 'yes',
         'mrm_plan_kind' => (string)($profile['plan_kind'] ?? ''),
         'mrm_authorized_lesson_count' => (string)((int)($profile['authorized_lesson_count'] ?? 0)),
+        'mrm_promo_code' => $autopay_promo_code,
+        'mrm_promo_discount_cents' => (string)$autopay_promo_discount_cents,
+        'mrm_autopay_occurrence_number' => (string)((int)($autopay_promo['occurrence_number'] ?? 0)),
       ),
       'Low Brass Lessons - Lesson Charge'
     );
@@ -9314,20 +9380,38 @@ private function charge_and_unlock_autopay($data) {
     $now = current_time('mysql');
 
     $wpdb->insert($this->table_autopay_profiles(), array(
-      'instructor_id' => (int)$instructor_id,
-      'email_hash' => (string)$email_hash,
-      'customer_id' => (string)$customer_id,
-      'payment_method_id' => '',
-      'currency' => $currency,
-      'unit_base_cents' => (int)$base_amount,
-      'plan_kind' => $plan_kind,
-      'authorized_lesson_count' => (int)$authorized_lesson_count,
-      'charged_lesson_count' => 0,
-      'active' => 1,
-      'detached_at' => null,
-      'created_at' => $now,
-      'updated_at' => $now,
-    ), array('%d','%s','%s','%s','%s','%d','%s','%d','%d','%d','%s','%s','%s'));
+  'instructor_id' => (int)$instructor_id,
+  'email_hash' => (string)$email_hash,
+  'customer_id' => (string)$customer_id,
+  'payment_method_id' => '',
+  'currency' => $currency,
+  'unit_base_cents' => (int)$base_amount,
+  'plan_kind' => $plan_kind,
+  'authorized_lesson_count' => (int)$authorized_lesson_count,
+  'charged_lesson_count' => 0,
+  'promo_code' => $promo_code !== '' ? $promo_code : null,
+  'promo_started_at' => $promo_started_at,
+  'active' => 1,
+  'detached_at' => null,
+  'created_at' => $now,
+  'updated_at' => $now,
+), array(
+  '%d',
+  '%s',
+  '%s',
+  '%s',
+  '%s',
+  '%d',
+  '%s',
+  '%d',
+  '%d',
+  '%s',
+  '%s',
+  '%d',
+  '%s',
+  '%s',
+  '%s',
+));
 
     $autopay_profile_id = (int)$wpdb->insert_id;
     if ($autopay_profile_id <= 0) {
@@ -9460,6 +9544,11 @@ private function charge_and_unlock_autopay($data) {
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
     }
 
+if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
+  $promo_code = $this->mrm_normalize_promo_code($pi['metadata']['mrm_promo_code']);
+  $promo_started_at = $promo_code !== '' ? current_time('mysql') : null;
+}
+
     $status = (string)($pi['status'] ?? '');
     $customer_id = (string)($pi['customer'] ?? '');
     $payment_method_id = (string)($pi['payment_method'] ?? '');
@@ -9528,7 +9617,31 @@ private function charge_and_unlock_autopay($data) {
       'detached_at' => null,
       'created_at' => $now,
       'updated_at' => $now,
-    ), array('%d','%s','%s','%s','%s','%d','%s','%d','%d','%s','%s','%d','%d','%s','%s','%s','%d','%s','%s','%s'));
+    ), array(
+  '%d',
+  '%s',
+  '%s',
+  '%s',
+  '%s',
+  '%d',
+  '%s',
+  '%d',
+  '%d',
+  '%s',
+  '%s',
+  '%s',
+  '%s',
+  '%d',
+  '%d',
+  '%s',
+  '%s',
+  '%s',
+  '%s',
+  '%d',
+  '%s',
+  '%s',
+  '%s',
+));
 
     $autopay_profile_id = (int)$wpdb->insert_id;
     if ($autopay_profile_id <= 0) {
@@ -10816,81 +10929,66 @@ public function handle_marketing_resubscribe() {
 
 public function render_promo_codes_page() {
   if (!current_user_can('manage_options')) {
-    wp_die('Unauthorized');
+    wp_die('You do not have permission to view this page.');
   }
 
   $codes = $this->mrm_get_promo_codes();
+
   ?>
   <div class="wrap">
     <h1>Promo Codes</h1>
-    <?php settings_errors('mrm_pay_hub'); ?>
-    <p>Create promotional codes for lesson purchases, sheet music purchases, or both. Codes are enforced server-side during Stripe PaymentIntent creation.</p>
-    <form method="post">
+
+    <p>
+      Create promotional codes for lessons, sheet music, prepaid lessons, and autopay lesson charges.
+      Occurrence-based rules are especially useful for autopay or prepaid lesson promotions.
+    </p>
+
+    <style>
+      .mrm-promo-table { width: 100%; border-collapse: collapse; table-layout: auto; }
+      .mrm-promo-table th, .mrm-promo-table td { vertical-align: top; padding: 8px; }
+      .mrm-promo-table input[type="text"], .mrm-promo-table input[type="number"], .mrm-promo-table input[type="date"], .mrm-promo-table select { max-width: 100%; }
+      .mrm-promo-rule-grid { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 10px; align-items: end; }
+      .mrm-promo-field label { display: block; font-size: 11px; font-weight: 600; color: #555; margin-bottom: 3px; }
+      .mrm-promo-field .description { font-size: 11px; color: #777; margin-top: 3px; }
+      .mrm-promo-redemptions { background: #fafafa; border-left: 4px solid #dcdcde; }
+      @media (max-width: 1200px) { .mrm-promo-rule-grid { grid-template-columns: repeat(2, minmax(180px, 1fr)); } }
+      @media (max-width: 782px) { .mrm-promo-rule-grid { grid-template-columns: 1fr; } }
+    </style>
+
+    <form method="post" action="">
       <?php wp_nonce_field('mrm_pay_hub_save_promo_codes', 'mrm_pay_hub_promo_codes_nonce'); ?>
-      <table class="widefat striped" style="margin-top:16px;"><thead><tr><th>Code</th>
-<th>Label</th>
-<th>Discount Type</th>
-<th>Percent Off</th>
-<th>Amount Off</th>
-<th>Applies To</th>
-<th>Item Rule</th>
-<th>Occurrences</th>
-<th>After Occurrence</th>
-<th>Starts</th>
-<th>Ends / Expiration</th>
-<th>Reusable By Same Email</th>
-<th>Delete</th></tr></thead><tbody>
-      <?php $i = 0; foreach ($codes as $code => $promo) : if (!is_array($promo)) continue; ?>
-      <tr><td><input type="text" name="promo_code[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($code); ?>" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['label'] ?? '')); ?>" /></td><td><select name="promo_discount_type[<?php echo esc_attr($i); ?>]"><option value="percent" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'percent'); ?>>Percentage</option><option value="amount" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'amount'); ?>>Dollar Amount</option></select></td><td><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['percent_off'] ?? 0)); ?>" style="width:80px;" />%</td><td><input type="text" name="promo_amount_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr(number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2)); ?>" style="width:90px;" /></td><td><select name="promo_scope[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected((string)($promo['scope'] ?? 'all'), 'all'); ?>>Lessons + Sheet Music</option><option value="lesson" <?php selected((string)($promo['scope'] ?? 'all'), 'lesson'); ?>>Lessons Only</option><option value="sheet_music" <?php selected((string)($promo['scope'] ?? 'all'), 'sheet_music'); ?>>Sheet Music Only</option></select></td><td><select name="promo_applies_to[<?php echo esc_attr($i); ?>]"><option value="first_item" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'first_item'); ?>>First Item Only</option><option value="all_items" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'all_items'); ?>>All Items</option></select></td><td><input type="date" name="promo_expires_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['expires_at'] ?? '')); ?>" /></td><td><label><input type="checkbox" name="promo_delete[<?php echo esc_attr($i); ?>]" value="1" /> Delete</label></td></tr>
+      <table class="widefat striped mrm-promo-table"><thead><tr><th style="width:120px;">Code</th><th style="width:160px;">Label</th><th style="width:140px;">Discount</th><th style="width:170px;">Applies To</th><th>Rule / Dates / Reuse</th><th style="width:90px;">Delete</th></tr></thead>
+      <tbody>
+      <?php $i = 0; foreach ($codes as $code => $promo) : if (!is_array($promo)) { continue; }
+      $rule_mode = (string)($promo['rule_mode'] ?? 'all'); $occurrence_count = (int)($promo['occurrence_count'] ?? 0); $after_occurrence = (int)($promo['after_occurrence'] ?? 0); $starts_at = (string)($promo['starts_at'] ?? ''); $expires_at = (string)($promo['expires_at'] ?? ''); $reusable_per_email = !empty($promo['reusable_per_email']); ?>
+      <tr><td><input type="text" name="promo_code[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($code); ?>" style="width:120px;" /></td>
+      <td><input type="text" name="promo_label[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['label'] ?? '')); ?>" style="width:160px;" /></td>
+      <td><div class="mrm-promo-field"><label>Type</label><select name="promo_discount_type[<?php echo esc_attr($i); ?>]"><option value="percent" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'percent'); ?>>Percentage</option><option value="amount" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'amount'); ?>>Dollar Amount</option></select></div>
+      <div class="mrm-promo-field" style="margin-top:6px;"><label>Percent</label><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['percent_off'] ?? 0)); ?>" style="width:80px;" />%</div>
+      <div class="mrm-promo-field" style="margin-top:6px;"><label>Amount</label><input type="text" name="promo_amount_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr(number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2)); ?>" style="width:90px;" /></div></td>
+      <td><div class="mrm-promo-field"><label>Purchase Type</label><select name="promo_scope[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected((string)($promo['scope'] ?? 'all'), 'all'); ?>>Lessons + Sheet Music</option><option value="lesson" <?php selected((string)($promo['scope'] ?? 'all'), 'lesson'); ?>>Lessons Only</option><option value="sheet_music" <?php selected((string)($promo['scope'] ?? 'all'), 'sheet_music'); ?>>Sheet Music Only</option></select></div>
+      <div class="mrm-promo-field" style="margin-top:6px;"><label>Item Rule</label><select name="promo_applies_to[<?php echo esc_attr($i); ?>]"><option value="first_item" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'first_item'); ?>>First Item Only</option><option value="all_items" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'all_items'); ?>>All Eligible Items</option></select></div></td>
+      <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected($rule_mode, 'all'); ?>>All qualifying purchases</option><option value="first_n" <?php selected($rule_mode, 'first_n'); ?>>First N occurrences</option><option value="after_n" <?php selected($rule_mode, 'after_n'); ?>>After N occurrences</option><option value="first_n_months" <?php selected($rule_mode, 'first_n_months'); ?>>First N months</option><option value="date_window" <?php selected($rule_mode, 'date_window'); ?>>Date window</option></select></div>
+      <div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)$occurrence_count); ?>" style="width:110px;" /><div class="description">Used for First N occurrences or First N months.</div></div>
+      <div class="mrm-promo-field"><label>After Occurrence</label><input type="number" min="0" name="promo_after_occurrence[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)$after_occurrence); ?>" style="width:110px;" /><div class="description">For “After N occurrences.” Example: 8 starts on occurrence 9.</div></div>
+      <div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($starts_at); ?>" /></div>
+      <div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($expires_at); ?>" /></div></div>
+      <div style="margin-top:10px;"><label><input type="checkbox" name="promo_reusable_per_email[<?php echo esc_attr($i); ?>]" value="1" <?php checked($reusable_per_email); ?> /> Reusable by the same email</label><p class="description" style="margin-top:3px;">When checked, the same email can redeem this promo more than once. Each paid use is still recorded below.</p></div></td>
+      <td><label><input type="checkbox" name="promo_delete[<?php echo esc_attr($i); ?>]" value="1" /> Delete</label></td></tr>
       <?php $redemptions = $this->mrm_get_redemptions_for_promo_code($code, 25); ?>
-      <tr>
-        <td colspan="13" style="padding:8px 12px 14px 12px;background:#fafafa;">
-          <div style="font-size:11px;line-height:1.45;color:#555;">
-            <strong>Completed redemptions</strong>
-            <?php if (empty($redemptions)) : ?>
-              <div style="margin-top:4px;">No completed redemptions recorded yet.</div>
-            <?php else : ?>
-              <ul style="margin:6px 0 0 16px;padding:0;">
-                <?php foreach ($redemptions as $redemption) : ?>
-                  <?php
-                    $display_email = !empty($redemption['customer_email'])
-                      ? sanitize_email($redemption['customer_email'])
-                      : '[email not stored before this update]';
-                    $when = !empty($redemption['updated_at']) ? $redemption['updated_at'] : ($redemption['created_at'] ?? '');
-                    $status = sanitize_text_field((string)($redemption['status'] ?? ''));
-                  ?>
-                  <li style="margin-bottom:4px;">
-                    <label style="display:flex;align-items:center;gap:8px;">
-                      <input
-                        type="checkbox"
-                        name="promo_redemption_remove[]"
-                        value="<?php echo esc_attr((int)($redemption['id'] ?? 0)); ?>"
-                      />
-                      <span>
-                        <?php echo esc_html($display_email); ?> — <?php echo esc_html($when); ?>
-                        <?php if ($status !== '') : ?>
-                          <span style="opacity:.75;">(<?php echo esc_html($status); ?>)</span>
-                        <?php endif; ?>
-                      </span>
-                    </label>
-                  </li>
-                <?php endforeach; ?>
-              </ul>
-              <div style="margin-top:6px;color:#777;">
-                Check an email above and click <strong>Save Promo Codes</strong> to remove that completed redemption.
-              </div>
-            <?php endif; ?>
-          </div>
-        </td>
-      </tr>
+      <tr><td colspan="6" class="mrm-promo-redemptions"><div style="font-size:11px;line-height:1.45;color:#555;"><strong>Completed redemptions</strong><?php if (empty($redemptions)) : ?><div style="margin-top:4px;">No completed redemptions recorded yet.</div><?php else : ?><ul style="margin:6px 0 0 16px;padding:0;"><?php foreach ($redemptions as $redemption) : $display_email = !empty($redemption['customer_email']) ? sanitize_email($redemption['customer_email']) : '[email not stored before this update]'; $when = !empty($redemption['updated_at']) ? $redemption['updated_at'] : ($redemption['created_at'] ?? ''); $status = sanitize_text_field((string)($redemption['status'] ?? '')); ?><li style="margin-bottom:4px;"><label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" name="promo_redemption_remove[]" value="<?php echo esc_attr((int)($redemption['id'] ?? 0)); ?>" /><span><?php echo esc_html($display_email); ?> — <?php echo esc_html($when); ?><?php if ($status !== '') : ?><span style="opacity:.75;">(<?php echo esc_html($status); ?>)</span><?php endif; ?></span></label></li><?php endforeach; ?></ul><div style="margin-top:6px;color:#777;">Check a redemption above and click <strong>Save Promo Codes</strong> to remove that completed redemption.</div><?php endif; ?></div></td></tr>
       <?php $i++; endforeach; $new_i = $i; ?>
-      <tr><td><input type="text" name="promo_code[<?php echo esc_attr($new_i); ?>]" placeholder="WELCOME10" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($new_i); ?>]" placeholder="Welcome discount" /></td><td><select name="promo_discount_type[<?php echo esc_attr($new_i); ?>]"><option value="percent">Percentage</option><option value="amount">Dollar Amount</option></select></td><td><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($new_i); ?>]" value="0" style="width:80px;" />%</td><td><input type="text" name="promo_amount_off[<?php echo esc_attr($new_i); ?>]" value="0.00" style="width:90px;" /></td><td><select name="promo_scope[<?php echo esc_attr($new_i); ?>]"><option value="all">Lessons + Sheet Music</option><option value="lesson">Lessons Only</option><option value="sheet_music">Sheet Music Only</option></select></td><td><select name="promo_applies_to[<?php echo esc_attr($new_i); ?>]"><option value="first_item">First Item Only</option><option value="all_items">All Items</option></select></td><td><input type="date" name="promo_expires_at[<?php echo esc_attr($new_i); ?>]" /></td><td></td></tr>
+      <tr><td><input type="text" name="promo_code[<?php echo esc_attr($new_i); ?>]" placeholder="WELCOME10" style="width:120px;" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($new_i); ?>]" placeholder="Welcome discount" style="width:160px;" /></td>
+      <td><div class="mrm-promo-field"><label>Type</label><select name="promo_discount_type[<?php echo esc_attr($new_i); ?>]"><option value="percent">Percentage</option><option value="amount">Dollar Amount</option></select></div><div class="mrm-promo-field" style="margin-top:6px;"><label>Percent</label><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($new_i); ?>]" value="0" style="width:80px;" />%</div><div class="mrm-promo-field" style="margin-top:6px;"><label>Amount</label><input type="text" name="promo_amount_off[<?php echo esc_attr($new_i); ?>]" value="0.00" style="width:90px;" /></div></td>
+      <td><div class="mrm-promo-field"><label>Purchase Type</label><select name="promo_scope[<?php echo esc_attr($new_i); ?>]"><option value="all">Lessons + Sheet Music</option><option value="lesson">Lessons Only</option><option value="sheet_music">Sheet Music Only</option></select></div><div class="mrm-promo-field" style="margin-top:6px;"><label>Item Rule</label><select name="promo_applies_to[<?php echo esc_attr($new_i); ?>]"><option value="first_item">First Item Only</option><option value="all_items" selected>All Eligible Items</option></select></div></td>
+      <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($new_i); ?>]"><option value="all">All qualifying purchases</option><option value="first_n">First N occurrences</option><option value="after_n">After N occurrences</option><option value="first_n_months">First N months</option><option value="date_window">Date window</option></select></div><div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($new_i); ?>]" value="0" style="width:110px;" /></div><div class="mrm-promo-field"><label>After Occurrence</label><input type="number" min="0" name="promo_after_occurrence[<?php echo esc_attr($new_i); ?>]" value="0" style="width:110px;" /></div><div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($new_i); ?>]" /></div><div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($new_i); ?>]" /></div></div><div style="margin-top:10px;"><label><input type="checkbox" name="promo_reusable_per_email[<?php echo esc_attr($new_i); ?>]" value="1" /> Reusable by the same email</label></div></td><td></td></tr>
       </tbody></table>
       <p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>
     </form>
   </div>
   <?php
 }
+
 
 public function render_marketing_email_lists_page() {
   if (!current_user_can('manage_options')) {
@@ -11865,52 +11963,94 @@ public function render_access_lists_page() {
     }
 
     if (isset($_POST['mrm_pay_hub_promo_codes_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_promo_codes_nonce'], 'mrm_pay_hub_save_promo_codes')) {
-			$remove_redemption_ids = isset($_POST['promo_redemption_remove'])
-				? array_map('absint', (array)$_POST['promo_redemption_remove'])
-				: array();
+  $remove_redemption_ids = isset($_POST['promo_redemption_remove'])
+    ? array_map('absint', (array)$_POST['promo_redemption_remove'])
+    : array();
 
-			$removed_redemptions = 0;
+  $removed_redemptions = 0;
 
-			if (!empty($remove_redemption_ids)) {
-				$removed_redemptions = $this->mrm_delete_promo_redemption_rows($remove_redemption_ids);
-			}
+  if (!empty($remove_redemption_ids)) {
+    $removed_redemptions = $this->mrm_delete_promo_redemption_rows($remove_redemption_ids);
+  }
 
-      $codes = array();
+  $codes = array();
 
-      $posted_codes = isset($_POST['promo_code']) ? (array)$_POST['promo_code'] : array();
-      $labels = isset($_POST['promo_label']) ? (array)$_POST['promo_label'] : array();
-      $discount_types = isset($_POST['promo_discount_type']) ? (array)$_POST['promo_discount_type'] : array();
-      $percent_offs = isset($_POST['promo_percent_off']) ? (array)$_POST['promo_percent_off'] : array();
-      $amount_offs = isset($_POST['promo_amount_off']) ? (array)$_POST['promo_amount_off'] : array();
-      $scopes = isset($_POST['promo_scope']) ? (array)$_POST['promo_scope'] : array();
-      $applies_to = isset($_POST['promo_applies_to']) ? (array)$_POST['promo_applies_to'] : array();
-      $expires = isset($_POST['promo_expires_at']) ? (array)$_POST['promo_expires_at'] : array();
-      $deletes = isset($_POST['promo_delete']) ? (array)$_POST['promo_delete'] : array();
-      foreach ($posted_codes as $i => $raw_code) {
-        $code = $this->mrm_normalize_promo_code($raw_code);
-        if ($code === '') continue;
-        if (!empty($deletes[$i])) continue;
-        $discount_type = sanitize_text_field((string)($discount_types[$i] ?? 'percent'));
-        if (!in_array($discount_type, array('percent', 'amount'), true)) $discount_type = 'percent';
-        $scope = sanitize_text_field((string)($scopes[$i] ?? 'all'));
-        if (!in_array($scope, array('all', 'lesson', 'sheet_music'), true)) $scope = 'all';
-        $apply = sanitize_text_field((string)($applies_to[$i] ?? 'all_items'));
-        if (!in_array($apply, array('first_item', 'all_items'), true)) $apply = 'all_items';
-        $percent = max(0, min(100, absint($percent_offs[$i] ?? 0)));
-        $amount_cents = $this->mrm_money_to_cents($amount_offs[$i] ?? '0.00', 0);
-        $expires_at = sanitize_text_field((string)($expires[$i] ?? ''));
-        if ($expires_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $expires_at)) $expires_at = '';
-        $codes[$code] = array('code'=>$code,'label'=>sanitize_text_field((string)($labels[$i] ?? '')),'discount_type'=>$discount_type,'percent_off'=>$percent,'amount_off_cents'=>max(0,(int)$amount_cents),'scope'=>$scope,'applies_to'=>$apply,'expires_at'=>$expires_at,'active'=>1,'updated_at'=>current_time('mysql'));
-      }
-      $this->mrm_save_promo_codes($codes);
-      $message = 'Promo codes saved.';
+  $posted_codes = isset($_POST['promo_code']) ? (array)$_POST['promo_code'] : array();
+  $labels = isset($_POST['promo_label']) ? (array)$_POST['promo_label'] : array();
+  $discount_types = isset($_POST['promo_discount_type']) ? (array)$_POST['promo_discount_type'] : array();
+  $percent_offs = isset($_POST['promo_percent_off']) ? (array)$_POST['promo_percent_off'] : array();
+  $amount_offs = isset($_POST['promo_amount_off']) ? (array)$_POST['promo_amount_off'] : array();
+  $scopes = isset($_POST['promo_scope']) ? (array)$_POST['promo_scope'] : array();
+  $applies_to = isset($_POST['promo_applies_to']) ? (array)$_POST['promo_applies_to'] : array();
+  $rule_modes = isset($_POST['promo_rule_mode']) ? (array)$_POST['promo_rule_mode'] : array();
+  $occurrence_counts = isset($_POST['promo_occurrence_count']) ? (array)$_POST['promo_occurrence_count'] : array();
+  $after_occurrences = isset($_POST['promo_after_occurrence']) ? (array)$_POST['promo_after_occurrence'] : array();
+  $starts = isset($_POST['promo_starts_at']) ? (array)$_POST['promo_starts_at'] : array();
+  $expires = isset($_POST['promo_expires_at']) ? (array)$_POST['promo_expires_at'] : array();
+  $reusable_per_email = isset($_POST['promo_reusable_per_email']) ? (array)$_POST['promo_reusable_per_email'] : array();
+  $deletes = isset($_POST['promo_delete']) ? (array)$_POST['promo_delete'] : array();
 
-			if ($removed_redemptions > 0) {
-				$message .= ' Removed ' . (int)$removed_redemptions . ' completed redemption' . ($removed_redemptions === 1 ? '' : 's') . '.';
-			}
+  foreach ($posted_codes as $i => $raw_code) {
+    $code = $this->mrm_normalize_promo_code($raw_code);
 
-			add_settings_error('mrm_pay_hub', 'promo_codes_saved', $message, 'updated');
+    if ($code === '') {
+      continue;
     }
+
+    if (!empty($deletes[$i])) {
+      continue;
+    }
+
+    $discount_type = sanitize_text_field((string)($discount_types[$i] ?? 'percent'));
+    if (!in_array($discount_type, array('percent', 'amount'), true)) {
+      $discount_type = 'percent';
+    }
+
+    $scope = sanitize_text_field((string)($scopes[$i] ?? 'all'));
+    if (!in_array($scope, array('all', 'lesson', 'sheet_music'), true)) {
+      $scope = 'all';
+    }
+
+    $apply = sanitize_text_field((string)($applies_to[$i] ?? 'all_items'));
+    if (!in_array($apply, array('first_item', 'all_items'), true)) {
+      $apply = 'all_items';
+    }
+
+    $rule_mode = sanitize_text_field((string)($rule_modes[$i] ?? 'all'));
+    if (!in_array($rule_mode, array('all', 'first_n', 'after_n', 'first_n_months', 'date_window'), true)) {
+      $rule_mode = 'all';
+    }
+
+    $percent = max(0, min(100, absint($percent_offs[$i] ?? 0)));
+    $amount_cents = $this->mrm_money_to_cents($amount_offs[$i] ?? '0.00', 0);
+
+    $occurrence_count = max(0, absint($occurrence_counts[$i] ?? 0));
+    $after_occurrence = max(0, absint($after_occurrences[$i] ?? 0));
+
+    $starts_at = sanitize_text_field((string)($starts[$i] ?? ''));
+    if ($starts_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $starts_at)) {
+      $starts_at = '';
+    }
+
+    $expires_at = sanitize_text_field((string)($expires[$i] ?? ''));
+    if ($expires_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $expires_at)) {
+      $expires_at = '';
+    }
+
+    $codes[$code] = array( 'code' => $code, 'label' => sanitize_text_field((string)($labels[$i] ?? '')), 'discount_type' => $discount_type, 'percent_off' => $percent, 'amount_off_cents' => max(0, (int)$amount_cents), 'scope' => $scope, 'applies_to' => $apply, 'rule_mode' => $rule_mode, 'occurrence_count' => $occurrence_count, 'after_occurrence' => $after_occurrence, 'starts_at' => $starts_at, 'expires_at' => $expires_at, 'reusable_per_email' => !empty($reusable_per_email[$i]) ? 1 : 0, 'active' => 1, 'updated_at' => current_time('mysql'), );
+  }
+
+  $this->mrm_save_promo_codes($codes);
+
+  $message = 'Promo codes saved.';
+
+  if ($removed_redemptions > 0) {
+    $message .= ' Removed ' . (int)$removed_redemptions . ' completed redemption' . ($removed_redemptions === 1 ? '' : 's') . '.';
+  }
+
+  add_settings_error('mrm_pay_hub', 'promo_codes_saved', $message, 'updated');
+}
+
 
     if (isset($_POST['mrm_pay_hub_products_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_products_nonce'], 'mrm_pay_hub_save_products')) {
       $existing = $this->all_products();
