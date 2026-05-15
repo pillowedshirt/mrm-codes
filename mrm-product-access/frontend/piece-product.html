@@ -1526,7 +1526,11 @@ function mrmGetPiecePromoCodeInputValue() {
     if (!resolvedSku) return { ok: false, message: 'Missing resolved SKU.' };
 
     try {
-      const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?sku=${encodeURIComponent(resolvedSku)}`, {
+      const params = new URLSearchParams();
+      params.set('sku', resolvedSku);
+      params.set('piece_slug', typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '');
+
+      const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
         method: 'GET'
       });
       const qData = await qRes.json().catch(() => ({}));
@@ -1618,7 +1622,9 @@ function mrmGetPiecePromoCodeInputValue() {
       const validation = await validateResolvedOfferSku(candidate);
 
       if (validation.ok) {
-        offerEl.dataset.resolvedSku = String(candidate || '').trim().toLowerCase();
+        offerEl.dataset.resolvedSku = String(
+          (validation.data && validation.data.sku) || candidate || ''
+        ).trim().toLowerCase();
         offerEl.dataset.skuValid = '1';
         setOfferButtonsEnabled(offerEl, true);
         setOfferStatus(offerEl, '');
@@ -2721,7 +2727,10 @@ function mrmGetPiecePromoCodeInputValue() {
         // 1) Quote (validates sku exists + active in hub)
         let qData = null;
         try {
-          const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?sku=${encodeURIComponent(sku)}`, { method: 'GET' });
+          const params = new URLSearchParams();
+          params.set('sku', sku);
+          params.set('piece_slug', typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '');
+          const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, { method: 'GET' });
           qData = await qRes.json().catch(() => ({}));
           if (!qRes.ok || !qData.ok) throw new Error(qData.message || 'Quote failed.');
           quoteData = qData;
