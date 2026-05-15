@@ -1035,8 +1035,22 @@ body.mrm-piece-no-scroll{
               <input
                 type="text"
                 id="mrm-billing-line1"
-                placeholder="Street address (optional)"
+                autocomplete="address-line1"
+                required
+                placeholder="Street address"
                 style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+              />
+
+              <label for="mrm-billing-city" style="display:block;font-weight:700;margin:10px 0 6px;">
+                City
+              </label>
+              <input
+                id="mrm-billing-city"
+                type="text"
+                autocomplete="address-level2"
+                required
+                placeholder="City"
+                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);background:#fff;"
               />
 
               <select
@@ -1676,6 +1690,7 @@ function mrmGetPiecePromoCodeInputValue() {
     const stateInput = document.getElementById('mrm-billing-state');
     const postalInput = document.getElementById('mrm-billing-postal');
     const line1Input = document.getElementById('mrm-billing-line1');
+    const cityInput = document.getElementById('mrm-billing-city');
     const countrySelect = document.getElementById('mrm-billing-country');
 
     const paymentMount = document.getElementById('mrm-payment-element');
@@ -1787,10 +1802,11 @@ function mrmGetPiecePromoCodeInputValue() {
     const getAddressPayload = () => {
       const country = (countrySelect && countrySelect.value) ? String(countrySelect.value).trim() : 'US';
       return {
-        line1: (line1Input && line1Input.value) ? String(line1Input.value).trim() : '',
-        state: (stateInput && stateInput.value) ? String(stateInput.value).trim() : '',
-        postal_code: (postalInput && postalInput.value) ? String(postalInput.value).trim() : '',
-        country: country || 'US'
+        line1: String(document.getElementById('mrm-billing-line1')?.value || '').trim(),
+        city: String(document.getElementById('mrm-billing-city')?.value || '').trim(),
+        state: String(document.getElementById('mrm-billing-state')?.value || '').trim(),
+        postal_code: String(document.getElementById('mrm-billing-postal')?.value || '').trim(),
+        country: String(document.getElementById('mrm-billing-country')?.value || 'US').trim()
       };
     };
 
@@ -1813,6 +1829,21 @@ function mrmGetPiecePromoCodeInputValue() {
         if (!termsCheck || !termsCheck.checked) {
           payBtn.disabled = true;
           errorEl.textContent = 'Please agree to the Terms of Service before loading payment.';
+          return;
+        }
+
+        const addressPayload = getAddressPayload();
+
+        const missingAddress = [];
+        if (!addressPayload.line1) missingAddress.push('street address');
+        if (!addressPayload.city) missingAddress.push('city');
+        if (!addressPayload.state) missingAddress.push('state');
+        if (!addressPayload.postal_code) missingAddress.push('ZIP code');
+        if (!addressPayload.country) missingAddress.push('country');
+
+        if (missingAddress.length) {
+          payBtn.disabled = true;
+          errorEl.textContent = 'Please enter your full billing address: ' + missingAddress.join(', ') + '.';
           return;
         }
 
@@ -1840,7 +1871,7 @@ function mrmGetPiecePromoCodeInputValue() {
                 terms_accepted: !!document.getElementById('mrm-piece-payment-terms')?.checked,
                 source_flow: 'piece_product_purchase'
               },
-              address: getAddressPayload()
+              address: addressPayload
             })
           });
 
