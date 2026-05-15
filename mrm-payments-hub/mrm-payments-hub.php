@@ -284,6 +284,27 @@ class MRM_Payments_Hub_Single {
       }
     }
 
+    // 4) Promo redemption schema check
+    if (!$needs_upgrade) {
+      $promo_cols = $wpdb->get_results("SHOW COLUMNS FROM {$promo_redemptions}");
+      $promo_col_names = array();
+
+      if (is_array($promo_cols)) {
+        foreach ($promo_cols as $col) {
+          if (!empty($col->Field)) {
+            $promo_col_names[] = (string)$col->Field;
+          }
+        }
+      }
+
+      foreach (array('customer_email') as $required_col) {
+        if (!in_array($required_col, $promo_col_names, true)) {
+          $needs_upgrade = true;
+          break;
+        }
+      }
+    }
+
     if ($needs_upgrade) {
       $this->install_or_upgrade_db();
     }
@@ -313,6 +334,7 @@ class MRM_Payments_Hub_Single {
     $autopay = $this->table_autopay_profiles();
     $webhooks = $this->table_webhook_events();
     $subs = $this->table_sheet_music_subscriptions();
+    $promo_redemptions = $this->table_promo_redemptions();
 
     $sql_orders = "CREATE TABLE {$orders} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -483,6 +505,7 @@ class MRM_Payments_Hub_Single {
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
       promo_code VARCHAR(80) NOT NULL,
       email_hash CHAR(64) NOT NULL,
+      customer_email VARCHAR(190) DEFAULT NULL,
       order_id BIGINT UNSIGNED DEFAULT NULL,
       stripe_payment_intent_id VARCHAR(255) DEFAULT NULL,
       status VARCHAR(30) NOT NULL DEFAULT 'pending',
@@ -494,6 +517,7 @@ class MRM_Payments_Hub_Single {
       UNIQUE KEY promo_email_unique (promo_code, email_hash),
       KEY promo_code_idx (promo_code),
       KEY email_hash_idx (email_hash),
+      KEY customer_email_idx (customer_email),
       KEY status_idx (status),
       KEY order_idx (order_id),
       KEY pi_idx (stripe_payment_intent_id)
@@ -698,46 +722,49 @@ private function mrm_scope_allows_promo_for_product($promo, $product_type) {
 }
 
 private function mrm_customer_has_used_promo($code, $email_hash) {
-  global $wpdb;
+    global $wpdb;
 
-  $code = $this->mrm_normalize_promo_code($code);
-  $email_hash = (string)$email_hash;
+    $code = $this->mrm_normalize_promo_code($code);
+    $email_hash = (string)$email_hash;
 
-  if ($code === '' || $email_hash === '') return false;
+    if ($code === '' || $email_hash === '') {
+      return false;
+    }
 
-  $table = $this->table_promo_redemptions();
+    $table = $this->table_promo_redemptions();
 
-  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
-  if ($found_table !== $table) {
-    $this->install_or_upgrade_db();
+    $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($found_table !== $table) {
+      $this->install_or_upgrade_db();
+    }
+
+    // Expire old pending reservations so they do not clutter admin history.
+    $wpdb->query($wpdb->prepare(
+      "UPDATE {$table}
+       SET status = 'expired', updated_at = %s
+       WHERE promo_code = %s
+         AND email_hash = %s
+         AND status = 'pending'
+         AND created_at < %s",
+      current_time('mysql'),
+      $code,
+      $email_hash,
+      gmdate('Y-m-d H:i:s', time() - HOUR_IN_SECONDS)
+    ));
+
+    // Only completed successful payments count as true redemptions.
+    $found = $wpdb->get_var($wpdb->prepare(
+      "SELECT id FROM {$table}
+       WHERE promo_code = %s
+         AND email_hash = %s
+         AND status = 'paid'
+       LIMIT 1",
+      $code,
+      $email_hash
+    ));
+
+    return !empty($found);
   }
-
-  // Expire stale pending reservations older than 24 hours.
-  $wpdb->query($wpdb->prepare(
-    "UPDATE {$table}
-     SET status = 'expired', updated_at = %s
-     WHERE promo_code = %s
-       AND email_hash = %s
-       AND status = 'pending'
-       AND created_at < %s",
-    current_time('mysql'),
-    $code,
-    $email_hash,
-    gmdate('Y-m-d H:i:s', time() - DAY_IN_SECONDS)
-  ));
-
-  $found = $wpdb->get_var($wpdb->prepare(
-    "SELECT id FROM {$table}
-     WHERE promo_code = %s
-       AND email_hash = %s
-       AND status IN ('pending', 'paid')
-     LIMIT 1",
-    $code,
-    $email_hash
-  ));
-
-  return !empty($found);
-}
 
 private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, $product_type, $context = array()) {
   $base_amount_cents = max(0, (int)$base_amount_cents);
@@ -825,7 +852,7 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
   if ($this->mrm_customer_has_used_promo($code, $email_hash)) {
     return array(
       'ok' => false,
-      'message' => 'This promotional code has already been used for this email.',
+      'message' => 'This promotional code could not be reserved. It may already have been used by this email, or the promo redemption table may need a database upgrade.',
       'discount_cents' => 0,
     );
   }
@@ -847,44 +874,86 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
 }
 
 private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '', $customer_email = '') {
-  global $wpdb;
+    global $wpdb;
 
-  $code = $this->mrm_normalize_promo_code($code);
-  $email_hash = (string)$email_hash;
-  $order_id = (int)$order_id;
-  $customer_email = sanitize_email((string)$customer_email);
+    $code = $this->mrm_normalize_promo_code($code);
+    $email_hash = (string)$email_hash;
+    $order_id = (int)$order_id;
+    $customer_email = sanitize_email((string)$customer_email);
 
-  if ($code === '' || $email_hash === '' || $order_id <= 0) {
-    return false;
+    if ($code === '' || $email_hash === '' || $order_id <= 0) {
+      return false;
+    }
+
+    $table = $this->table_promo_redemptions();
+
+    $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($found_table !== $table) {
+      $this->install_or_upgrade_db();
+    }
+
+    // A completed paid redemption is the only hard block.
+    $paid_id = $wpdb->get_var($wpdb->prepare(
+      "SELECT id FROM {$table}
+       WHERE promo_code = %s
+         AND email_hash = %s
+         AND status = 'paid'
+       LIMIT 1",
+      $code,
+      $email_hash
+    ));
+
+    if (!empty($paid_id)) {
+      return false;
+    }
+
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field((string)$_SERVER['REMOTE_ADDR']) : '';
+    $ua = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field((string)$_SERVER['HTTP_USER_AGENT']) : '';
+    $now = current_time('mysql');
+
+    $existing_id = $wpdb->get_var($wpdb->prepare(
+      "SELECT id FROM {$table}
+       WHERE promo_code = %s
+         AND email_hash = %s
+       LIMIT 1",
+      $code,
+      $email_hash
+    ));
+
+    $row = array(
+      'promo_code' => $code,
+      'email_hash' => $email_hash,
+      'customer_email' => $customer_email ?: null,
+      'order_id' => $order_id,
+      'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
+      'status' => 'pending',
+      'ip_hash' => $ip !== '' ? hash('sha256', $ip) : null,
+      'user_agent_hash' => $ua !== '' ? hash('sha256', $ua) : null,
+      'updated_at' => $now,
+    );
+
+    if (!empty($existing_id)) {
+      $updated = $wpdb->update(
+        $table,
+        $row,
+        array('id' => (int)$existing_id),
+        array('%s','%s','%s','%d','%s','%s','%s','%s','%s'),
+        array('%d')
+      );
+
+      return $updated !== false;
+    }
+
+    $row['created_at'] = $now;
+
+    $inserted = $wpdb->insert(
+      $table,
+      $row,
+      array('%s','%s','%s','%d','%s','%s','%s','%s','%s','%s')
+    );
+
+    return !empty($inserted);
   }
-
-  $table = $this->table_promo_redemptions();
-
-  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
-  if ($found_table !== $table) {
-    $this->install_or_upgrade_db();
-  }
-
-  $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field((string)$_SERVER['REMOTE_ADDR']) : '';
-  $ua = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field((string)$_SERVER['HTTP_USER_AGENT']) : '';
-
-  $now = current_time('mysql');
-
-  $inserted = $wpdb->insert($table, array(
-    'promo_code' => $code,
-    'email_hash' => $email_hash,
-    'customer_email' => $customer_email ?: null,
-    'order_id' => $order_id,
-    'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
-    'status' => 'pending',
-    'ip_hash' => $ip !== '' ? hash('sha256', $ip) : null,
-    'user_agent_hash' => $ua !== '' ? hash('sha256', $ua) : null,
-    'created_at' => $now,
-    'updated_at' => $now,
-  ), array('%s','%s','%s','%d','%s','%s','%s','%s','%s','%s'));
-
-  return !empty($inserted);
-}
 
 private function mrm_attach_payment_intent_to_promo_redemption($order_id, $payment_intent_id) {
   global $wpdb;
@@ -924,31 +993,47 @@ private function mrm_mark_promo_redemption_paid($order_id, $payment_intent_id) {
 }
 
 private function mrm_get_redemptions_for_promo_code($code, $limit = 25) {
-  global $wpdb;
+    global $wpdb;
 
-  $code = $this->mrm_normalize_promo_code($code);
-  if ($code === '') return array();
+    $code = $this->mrm_normalize_promo_code($code);
+    if ($code === '') return array();
 
-  $table = $this->table_promo_redemptions();
+    $table = $this->table_promo_redemptions();
 
-  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
-  if ($found_table !== $table) {
-    return array();
+    $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($found_table !== $table) {
+      return array();
+    }
+
+    $limit = max(1, min(100, absint($limit)));
+
+    $rows = $wpdb->get_results($wpdb->prepare(
+      "SELECT promo_code, email_hash, customer_email, status, created_at, updated_at
+       FROM {$table}
+       WHERE promo_code = %s
+         AND status = 'paid'
+       ORDER BY updated_at DESC
+       LIMIT %d",
+      $code,
+      $limit
+    ), ARRAY_A);
+
+    if (!is_array($rows)) {
+      return array();
+    }
+
+    foreach ($rows as &$row) {
+      if (empty($row['customer_email']) && !empty($row['email_hash'])) {
+        $decoded = $this->decode_email_hash((string)$row['email_hash']);
+        if ($decoded) {
+          $row['customer_email'] = $decoded;
+        }
+      }
+    }
+    unset($row);
+
+    return $rows;
   }
-
-  $limit = max(1, min(100, absint($limit)));
-
-  return $wpdb->get_results($wpdb->prepare(
-    "SELECT promo_code, customer_email, status, created_at, updated_at
-     FROM {$table}
-     WHERE promo_code = %s
-       AND status IN ('pending', 'paid')
-     ORDER BY updated_at DESC
-     LIMIT %d",
-    $code,
-    $limit
-  ), ARRAY_A);
-}
 
 private function get_settings() {
     $opts = get_option(self::OPT_SETTINGS, array());
@@ -1599,6 +1684,7 @@ private function get_settings() {
       'state' => $this->mrm_normalize_state_code($address['state'] ?? ''),
       'postal_code' => trim((string)($address['postal_code'] ?? '')),
       'line1' => trim((string)($address['line1'] ?? '')),
+      'city' => sanitize_text_field((string)($address['city'] ?? '')),
     );
   }
 
@@ -1640,6 +1726,38 @@ private function get_settings() {
 
   private function mrm_build_tax_policy($address, $product_type, $addon_selected = false, $product_cfg = array(), $context = array()) {
     $address = $this->mrm_normalize_tax_address($address);
+
+    if ($product_type === 'sheet_music') {
+      $missing_address_fields = array();
+
+      if (trim((string)($address['line1'] ?? '')) === '') {
+        $missing_address_fields[] = 'street address';
+      }
+
+      if (trim((string)($address['city'] ?? '')) === '') {
+        $missing_address_fields[] = 'city';
+      }
+
+      if (trim((string)($address['state'] ?? '')) === '') {
+        $missing_address_fields[] = 'state';
+      }
+
+      if (trim((string)($address['postal_code'] ?? '')) === '') {
+        $missing_address_fields[] = 'ZIP code';
+      }
+
+      if (trim((string)($address['country'] ?? '')) === '') {
+        $missing_address_fields[] = 'country';
+      }
+
+      if (!empty($missing_address_fields)) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => 'billing_address_required',
+          'message' => 'Please enter your full billing address before purchasing sheet music: ' . implode(', ', $missing_address_fields) . '.',
+        ), 400);
+      }
+    }
     $country = (string)($address['country'] ?? 'US');
     $state = (string)($address['state'] ?? '');
 
@@ -2065,6 +2183,7 @@ private function get_settings() {
     $postal  = trim((string)($address['postal_code'] ?? ''));
     $state   = trim((string)($address['state'] ?? ''));
     $line1   = trim((string)($address['line1'] ?? ''));
+    $city    = trim((string)($address['city'] ?? ''));
 
     if (!$country || !$postal) {
       $this->stripe_debug_log('tax calculation skipped: missing minimum address fields', array(
@@ -2855,6 +2974,7 @@ private function get_settings() {
     }
 
     $line1 = trim((string)($address['line1'] ?? ''));
+    $city = trim((string)($address['city'] ?? ''));
     $state = trim((string)($address['state'] ?? ''));
     $postal = trim((string)($address['postal_code'] ?? ''));
     $country = strtoupper(trim((string)($address['country'] ?? 'US')));
@@ -2870,6 +2990,9 @@ private function get_settings() {
     if ($line1 !== '') {
       $params['address[line1]'] = $line1;
     }
+    if ($city !== '') {
+      $params['address[city]'] = $city;
+    }
     if ($state !== '') {
       $params['address[state]'] = $state;
     }
@@ -2883,6 +3006,9 @@ private function get_settings() {
     $params['shipping[name]'] = $name !== '' ? (string)$name : $email;
     if ($line1 !== '') {
       $params['shipping[address][line1]'] = $line1;
+    }
+    if ($city !== '') {
+      $params['shipping[address][city]'] = $city;
     }
     if ($state !== '') {
       $params['shipping[address][state]'] = $state;
@@ -8216,6 +8342,7 @@ private function get_settings() {
     $metadata['mrm_tax_state'] = (string)($address['state'] ?? '');
     $metadata['mrm_tax_postal_code'] = (string)($address['postal_code'] ?? '');
     $metadata['mrm_tax_line1'] = (string)($address['line1'] ?? '');
+      $metadata['mrm_tax_city'] = (string)($address['city'] ?? '');
     $metadata['mrm_tax_rollout_mode'] = 'stripe_only';
     $metadata['mrm_tax_calculation_requested'] = !empty($tax_policy['should_collect_tax']) ? 'yes' : 'no';
     $metadata['mrm_tax_policy_reason'] = (string)($tax_policy['policy_reason'] ?? '');
@@ -9937,9 +10064,9 @@ public function render_promo_codes_page() {
       <tr>
         <td colspan="9" style="padding:8px 12px 14px 12px;background:#fafafa;">
           <div style="font-size:11px;line-height:1.45;color:#555;">
-            <strong>Recent redemptions</strong>
+            <strong>Completed redemptions</strong>
             <?php if (empty($redemptions)) : ?>
-              <div style="margin-top:4px;">No redemptions recorded yet.</div>
+              <div style="margin-top:4px;">No completed redemptions recorded yet.</div>
             <?php else : ?>
               <ul style="margin:6px 0 0 16px;padding:0;">
                 <?php foreach ($redemptions as $redemption) : ?>
