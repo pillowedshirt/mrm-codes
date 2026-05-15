@@ -7841,12 +7841,29 @@ private function get_settings() {
       ), 400);
     }
 
+    $promo = isset($result['promo']) && is_array($result['promo']) ? $result['promo'] : array();
+
+    $discount_type = (string)($promo['discount_type'] ?? 'percent');
+    $percent_off = max(0, min(100, (int)($promo['percent_off'] ?? 0)));
+    $amount_off_cents = max(0, (int)($promo['amount_off_cents'] ?? 0));
+    $discount_cents = max(0, (int)($result['discount_cents'] ?? 0));
+
+    if ($discount_type === 'amount') {
+      $promo_success_message = 'Code applied: $' . number_format($discount_cents / 100, 2) . ' off.';
+    } else {
+      $promo_success_message = 'Code applied: ' . $percent_off . '% promotional discount applied.';
+    }
+
     return new WP_REST_Response(array(
       'ok' => true,
       'message' => 'Promotional code applied.',
       'promo_code' => $code,
-      'discount_cents' => (int)$result['discount_cents'],
-      'discount_display' => '$' . number_format(((int)$result['discount_cents']) / 100, 2),
+      'discount_cents' => $discount_cents,
+      'discount_display' => '$' . number_format($discount_cents / 100, 2),
+      'discount_type' => $discount_type,
+      'percent_off' => $percent_off,
+      'amount_off_cents' => $amount_off_cents,
+      'promo_success_message' => $promo_success_message,
     ), 200);
   }
 
@@ -8353,6 +8370,15 @@ private function get_settings() {
       'addon_amount_cents' => $addon_amount_cents,
       'promo_code' => $promo_code,
       'promo_discount_cents' => $promo_discount_cents,
+      'promo_discount_type' => is_array($promo_validation) && !empty($promo_validation['promo']['discount_type'])
+        ? (string)$promo_validation['promo']['discount_type']
+        : '',
+      'promo_percent_off' => is_array($promo_validation) && isset($promo_validation['promo']['percent_off'])
+        ? (int)$promo_validation['promo']['percent_off']
+        : 0,
+      'promo_amount_off_cents' => is_array($promo_validation) && isset($promo_validation['promo']['amount_off_cents'])
+        ? (int)$promo_validation['promo']['amount_off_cents']
+        : 0,
       'tax_cents' => $tax_cents,
       'tax_message' => (string)$tax_message,
       'tax_policy' => array(

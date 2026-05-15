@@ -1046,6 +1046,39 @@ body.mrm-piece-no-scroll{
                 <option value="US" selected>United States</option>
               </select>
 
+              <div
+                class="mrm-promo-box"
+                style="margin:14px 0;padding:14px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;background:rgba(255,255,255,0.72);"
+              >
+                <label
+                  for="mrm-piece-promo-code-input"
+                  style="display:block;font-weight:700;margin-bottom:6px;"
+                >
+                  Promotional code
+                </label>
+
+                <input
+                  id="mrm-piece-promo-code-input"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="Enter code"
+                  style="width:100%;max-width:320px;padding:10px 12px;border-radius:10px;border:1px solid rgba(0,0,0,0.18);"
+                />
+
+                <button
+                  id="mrm-piece-promo-code-apply"
+                  type="button"
+                  style="display:none;margin-top:8px;padding:9px 14px;border:0;border-radius:999px;background:#7c4a2d;color:#fff;font-weight:700;cursor:pointer;"
+                >
+                  Apply Code
+                </button>
+
+                <div
+                  id="mrm-piece-promo-code-message"
+                  style="margin-top:8px;font-size:0.92rem;"
+                ></div>
+              </div>
+
               <div class="mrm-piece-terms-row mrm-piece-terms-modal-row">
                 <input type="checkbox" class="mrm-piece-terms-check" id="mrm-piece-payment-terms">
                 <label for="mrm-piece-payment-terms">
@@ -1146,8 +1179,76 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
 
   let mrmPieceAppliedPromoCode = '';
   let mrmPieceAppliedPromoDiscountCents = 0;
+  let mrmPieceCurrentQuoteData = null;
+  let mrmPieceCurrentPriceDisplay = '';
 
-  function mrmGetSavedPiecePaymentEmail() {
+  function mrmPieceMoney(cents) {
+    return '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
+  }
+
+  function mrmUpdatePiecePromoTopBreakdown() {
+    const instructions = document.getElementById('payment-instructions');
+    if (!instructions || !mrmPieceCurrentQuoteData) return;
+
+  const label = String(mrmPieceCurrentQuoteData.label || 'Sheet music').trim();
+  const originalBase = Number(mrmPieceCurrentQuoteData.amount_cents || 0);
+  const discount = Number(mrmPieceAppliedPromoDiscountCents || 0);
+  const reducedSubtotal = Math.max(50, originalBase - discount);
+
+  const esc = (s) => String(s || '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+
+  const rows = [];
+
+  rows.push(`
+    <div style="display:flex;justify-content:space-between;gap:12px;">
+      <span>${esc(label)}</span>
+      <strong>${mrmPieceMoney(originalBase)}</strong>
+    </div>
+  `);
+
+  if (discount > 0) {
+    rows.push(`
+      <div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;">
+        <span>Promotional discount</span>
+        <strong>-${mrmPieceMoney(discount)}</strong>
+      </div>
+    `);
+
+    rows.push(`
+      <div style="display:flex;justify-content:space-between;gap:12px;">
+        <span>Discounted subtotal</span>
+        <strong>${mrmPieceMoney(reducedSubtotal)}</strong>
+      </div>
+    `);
+  }
+
+  rows.push(`
+    <div style="display:flex;justify-content:space-between;gap:12px;">
+      <span>Sales tax</span>
+      <strong>Calculated after ZIP is entered</strong>
+    </div>
+  `);
+
+  rows.push(`
+    <div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;">
+      <span><strong>Estimated total before tax</strong></span>
+      <strong>${mrmPieceMoney(reducedSubtotal)}</strong>
+    </div>
+  `);
+
+    instructions.innerHTML = `
+      <div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">
+        ${rows.join('')}
+      </div>
+    `;
+  }
+
+function mrmGetSavedPiecePaymentEmail() {
   try {
     return String(sessionStorage.getItem(MRM_PIECE_PAYMENT_EMAIL_KEY) || '').trim();
   } catch (e) {
@@ -1193,6 +1294,7 @@ function mrmGetPiecePromoCodeInputValue() {
     input.addEventListener('input', function () {
       mrmPieceAppliedPromoCode = '';
       mrmPieceAppliedPromoDiscountCents = 0;
+      mrmUpdatePiecePromoTopBreakdown();
       btn.style.display = input.value.trim() ? 'inline-flex' : 'none';
       pendingClientSecret = '';
     if (activePaymentElement) {
@@ -1263,7 +1365,8 @@ function mrmGetPiecePromoCodeInputValue() {
 
         mrmPieceAppliedPromoCode = data.promo_code || code;
         mrmPieceAppliedPromoDiscountCents = Number(data.discount_cents || 0);
-        mrmSetPiecePromoMessage(`Code applied: ${data.discount_display || ''} off`, false);
+        mrmSetPiecePromoMessage(data.promo_success_message || 'Promotional code applied.', false);
+        mrmUpdatePiecePromoTopBreakdown();
 
         pendingClientSecret = '';
         if (activePaymentElement) {
@@ -1564,6 +1667,9 @@ function mrmGetPiecePromoCodeInputValue() {
   }
 
   function openPaymentModal(quoteData, priceDisplay) {
+    mrmPieceCurrentQuoteData = quoteData || null;
+    mrmPieceCurrentPriceDisplay = priceDisplay || '';
+
     const overlay = document.getElementById('mrm-payment-overlay');
     const payBtn = document.getElementById('mrm-pay-btn');
     const errorEl = document.getElementById('mrm-payment-error');
@@ -1608,6 +1714,7 @@ function mrmGetPiecePromoCodeInputValue() {
         base_amount_cents: base,
         tax_cents: tax,
         amount_cents: total,
+        promo_discount_cents: promoDiscount,
         tax_message: taxMessage,
         tax_policy: opts.tax_policy || null
       };
@@ -1803,11 +1910,15 @@ function mrmGetPiecePromoCodeInputValue() {
     const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
     const base = Number(breakdown?.base_amount_cents || 0);
     const tax = Number(breakdown?.tax_cents || 0);
+    const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
     const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + tax);
 
     const rows = [];
     const itemLabel = String(breakdown?.sku || 'Sheet music');
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
+    if (promoDiscount > 0) {
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
+    }
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
     rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
     box.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
@@ -2736,4 +2847,3 @@ function mrmGetPiecePromoCodeInputValue() {
   document.addEventListener('DOMContentLoaded', checkReturnFromStripe);
 })();
 </script>
-
