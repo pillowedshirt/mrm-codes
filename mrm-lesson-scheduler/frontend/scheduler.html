@@ -2660,6 +2660,22 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
   const errorEl = document.getElementById('mrm-payment-error');
   const instructions = document.getElementById('mrm-payment-instructions');
 
+  mrmAppliedPromoCode = '';
+  mrmAppliedPromoDiscountCents = 0;
+
+  const promoInput = document.getElementById('mrm-promo-code-input');
+  const promoBtn = document.getElementById('mrm-promo-code-apply');
+
+  if (promoInput) {
+    promoInput.value = '';
+  }
+
+  if (promoBtn) {
+    promoBtn.style.display = 'none';
+  }
+
+  mrmSetPromoMessage('', false);
+
   mrmRenderLessonPaymentBreakdown(breakdown);
   errorEl.textContent = '';
   payBtn.disabled = false;
@@ -2698,6 +2714,22 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
     activePaymentElement = null;
     activeStripeElements = null;
     mrmLessonPaymentReloadContext = null;
+
+    mrmAppliedPromoCode = '';
+    mrmAppliedPromoDiscountCents = 0;
+
+    const promoInput = document.getElementById('mrm-promo-code-input');
+    const promoBtn = document.getElementById('mrm-promo-code-apply');
+
+    if (promoInput) {
+      promoInput.value = '';
+    }
+
+    if (promoBtn) {
+      promoBtn.style.display = 'none';
+    }
+
+    mrmSetPromoMessage('', false);
   };
 
   closeBtn.onclick = () => closeModal({ clearSelection: false });
@@ -3890,8 +3922,7 @@ function ensureLegacyBookingHandler(){
       last_name: lastName,
       student_name: studentName,
       student_email: email,
-                promo_code: mrmAppliedPromoCode || mrmGetPromoCodeInputValue() || '',
-      address,
+                      address,
       address_city: addressCity,
       address_state: addressState,
       address_postal: addressPostal,
@@ -3994,8 +4025,8 @@ function ensureLegacyBookingHandler(){
           const autopayPaymentRequestBody = {
             sku: sku,
             email: email,
-            promo_code: mrmAppliedPromoCode || mrmGetPromoCodeInputValue() || '',
-            context: {
+            promo_code: '',
+                        context: {
               instructor_id: instrId,
               lesson_length: len,
               lesson_mode: lessonType,
@@ -4152,8 +4183,8 @@ function ensureLegacyBookingHandler(){
         const lessonPaymentRequestBody = {
           sku: sku,
           email: email,
-          promo_code: mrmAppliedPromoCode || mrmGetPromoCodeInputValue() || '',
-          context: {
+          promo_code: '',
+                    context: {
             instructor_id: instrId,
             lesson_length: len,
             lesson_mode: lessonType,

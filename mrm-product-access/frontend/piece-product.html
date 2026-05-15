@@ -1493,70 +1493,18 @@ function mrmGetPiecePromoCodeInputValue() {
   }
 
   function normalizeSkuFromOffer(offer) {
-    // Prefer server-configured product slug (most reliable)
     const raw =
-      (offer && (offer.product_slug || offer.productSlug || offer.product_slug_id || offer.productSlugId)) || '';
+      (offer && (
+        offer.product_slug ||
+        offer.productSlug ||
+        offer.payments_hub_sku ||
+        offer.paymentsHubSku ||
+        offer.sku ||
+        offer.product_slug_id ||
+        offer.productSlugId
+      )) || '';
 
     return String(raw || '').trim().toLowerCase();
-  }
-
-  function inferSheetMusicTypeFromOfferEl(offerEl){
-    if (!offerEl) return '';
-
-    const rawSlug = String(offerEl.dataset.productSlug || '').toLowerCase();
-    const title = String((offerEl.querySelector('.offer-title') || {}).textContent || '').toLowerCase();
-    const subtitle = String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').toLowerCase();
-    const text = `${rawSlug} ${title} ${subtitle}`;
-
-    // Exact / obvious matches first
-    if (/complete-package/.test(text)) return 'complete-package';
-    if (/trombone[-\s]*euphonium/.test(text) || (/trombone/.test(text) && /euphonium/.test(text))) return 'trombone-euphonium';
-    if (/\btuba\b/.test(text)) return 'tuba';
-    if (/fundamental/.test(text)) return 'fundamentals';
-
-    // Legacy wording fallbacks (adjust if your titles use different wording)
-    if (/full[\s-]*piece|complete|bundle|all parts|all versions/.test(text)) return 'complete-package';
-
-    return '';
-  }
-
-  async function resolveCanonicalHubSkuForOffer(offerEl){
-    const rawSku = String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase();
-    if (!rawSku) return '';
-
-    // If already looks like canonical Payments Hub piece SKU (including possible numeric suffix), keep it.
-    if (/^piece-[a-z0-9-]+-(fundamentals|trombone-euphonium|tuba|complete-package)(-\d+)?$/.test(rawSku)) {
-      return rawSku;
-    }
-
-    const pieceSlug = getPieceSlugFromUrl();
-    const type = inferSheetMusicTypeFromOfferEl(offerEl);
-
-    if (!pieceSlug || !type) {
-      console.warn('[MRM] Could not infer canonical piece SKU type; using configured offer slug:', { rawSku, pieceSlug, type });
-      return rawSku;
-    }
-
-    try {
-      const r = await fetch(`/wp-json/mrm-pay/v1/resolve?piece_slug=${encodeURIComponent(pieceSlug)}&type=${encodeURIComponent(type)}`, {
-        method: 'GET'
-      });
-      const data = await r.json().catch(() => ({}));
-
-      if (r.ok && data && data.ok && data.sku) {
-        const resolved = String(data.sku).trim().toLowerCase();
-        if (resolved && resolved !== rawSku) {
-          console.info('[MRM] Resolved canonical hub SKU for offer', { rawSku, resolved, pieceSlug, type });
-        }
-        return resolved || rawSku;
-      }
-
-      console.warn('[MRM] Hub SKU resolve failed; falling back to configured offer slug', { rawSku, pieceSlug, type, data });
-      return rawSku;
-    } catch (e) {
-      console.warn('[MRM] Hub SKU resolve request error; falling back to configured offer slug', e);
-      return rawSku;
-    }
   }
 
   function setOfferButtonsEnabled(offerEl, enabled) {
@@ -1599,6 +1547,56 @@ function mrmGetPiecePromoCodeInputValue() {
     }
   }
 
+  function inferSheetMusicTypeFromOfferEl(offerEl){
+    if (!offerEl) return '';
+
+    const rawSlug = String(offerEl.dataset.productSlug || '').toLowerCase();
+    const title = String((offerEl.querySelector('.offer-title') || {}).textContent || '').toLowerCase();
+    const subtitle = String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').toLowerCase();
+    const text = `${rawSlug} ${title} ${subtitle}`;
+
+    if (/complete-package/.test(text)) return 'complete-package';
+    if (/trombone[-\s]*euphonium/.test(text) || (/trombone/.test(text) && /euphonium/.test(text))) return 'trombone-euphonium';
+    if (/\btuba\b/.test(text)) return 'tuba';
+    if (/fundamental/.test(text)) return 'fundamentals';
+    if (/full[\s-]*piece|complete|bundle|all parts|all versions/.test(text)) return 'complete-package';
+
+    return '';
+  }
+
+  async function getOfferSkuCandidates(offerEl) {
+    const candidates = [];
+    const rawSku = String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase();
+
+    if (rawSku) {
+      candidates.push(rawSku);
+    }
+
+    const pieceSlug = getPieceSlugFromUrl();
+    const type = inferSheetMusicTypeFromOfferEl(offerEl);
+
+    if (pieceSlug && type) {
+      try {
+        const r = await fetch(`/wp-json/mrm-pay/v1/resolve?piece_slug=${encodeURIComponent(pieceSlug)}&type=${encodeURIComponent(type)}`, {
+          method: 'GET'
+        });
+
+        const data = await r.json().catch(() => ({}));
+
+        if (r.ok && data && data.ok && data.sku) {
+          const resolved = String(data.sku).trim().toLowerCase();
+          if (resolved && !candidates.includes(resolved)) {
+            candidates.push(resolved);
+          }
+        }
+      } catch (e) {
+        console.warn('[MRM] Optional Hub SKU resolve failed; continuing with saved offer SKU.', e);
+      }
+    }
+
+    return candidates.filter(Boolean);
+  }
+
   async function primeOfferSkuState(offerEl) {
     if (!offerEl) return '';
 
@@ -1612,25 +1610,46 @@ function mrmGetPiecePromoCodeInputValue() {
       return '';
     }
 
-    const resolvedSku = await resolveCanonicalHubSkuForOffer(offerEl);
-    const validation = await validateResolvedOfferSku(resolvedSku);
+    const candidates = await getOfferSkuCandidates(offerEl);
 
-    if (!validation.ok) {
-      offerEl.dataset.resolvedSku = '';
-      offerEl.dataset.skuValid = '0';
-      setOfferButtonsEnabled(offerEl, false);
-      setOfferStatus(
-        offerEl,
-        `Offer unavailable: ${validation.message} Check the offer product_slug and make sure the matching Payments Hub product is active.`
-      );
-      return '';
+    let lastMessage = 'This offer is not active in Payments Hub.';
+
+    for (const candidate of candidates) {
+      const validation = await validateResolvedOfferSku(candidate);
+
+      if (validation.ok) {
+        offerEl.dataset.resolvedSku = String(candidate || '').trim().toLowerCase();
+        offerEl.dataset.skuValid = '1';
+        setOfferButtonsEnabled(offerEl, true);
+        setOfferStatus(offerEl, '');
+
+        console.info('[MRM] Offer SKU validated', {
+          raw_offer_slug: rawSku,
+          resolved_sku: offerEl.dataset.resolvedSku,
+          candidates
+        });
+
+        return offerEl.dataset.resolvedSku;
+      }
+
+      lastMessage = validation.message || lastMessage;
     }
 
-    offerEl.dataset.resolvedSku = String(resolvedSku || '').trim().toLowerCase();
-    offerEl.dataset.skuValid = '1';
-    setOfferButtonsEnabled(offerEl, true);
-    setOfferStatus(offerEl, '');
-    return offerEl.dataset.resolvedSku;
+    offerEl.dataset.resolvedSku = '';
+    offerEl.dataset.skuValid = '0';
+    setOfferButtonsEnabled(offerEl, false);
+    setOfferStatus(
+      offerEl,
+      `Offer unavailable: ${lastMessage} Check the offer product_slug and make sure the matching Payments Hub product is active.`
+    );
+
+    console.warn('[MRM] Offer SKU validation failed for all candidates', {
+      raw_offer_slug: rawSku,
+      candidates,
+      lastMessage
+    });
+
+    return '';
   }
 
   async function getValidatedOfferSkuOrThrow(offerEl) {
