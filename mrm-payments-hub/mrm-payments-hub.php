@@ -1758,9 +1758,33 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if ((string)($product['product_type'] ?? '') !== 'sheet_music') continue;
     $product_category = (string)($product['category'] ?? ''); if ($category !== '' && $product_category !== $category) continue;
     $sku_clean = $this->sanitize_sku($sku); $label_slug = $this->slugify((string)($product['label'] ?? ''));
-    if ($piece_slug_from_context !== '' && (strpos($sku_clean, 'piece-' . $piece_slug_from_context . '-') === 0 || strpos($label_slug, $piece_slug_from_context) !== false)) return $sku_clean;
+    // Only use broad piece-slug matching when we also know the intended category.
+    // Without a category, this can accidentally match the wrong offer for the same piece.
+    if ($category !== '' && $piece_slug_from_context !== '') {
+      if (
+        strpos($sku_clean, 'piece-' . $piece_slug_from_context . '-' . $category) === 0 ||
+        (
+          strpos($label_slug, $piece_slug_from_context) !== false &&
+          strpos($sku_clean, '-' . $category) !== false
+        )
+      ) {
+        return $sku_clean;
+      }
+    }
+
     $stem = $this->mrm_piece_stem_from_offer_slug($incoming_sku, $category);
-    if ($stem !== '' && (strpos($sku_clean, 'piece-' . $stem . '-') === 0 || strpos($label_slug, $stem) !== false)) return $sku_clean;
+
+    if ($category !== '' && $stem !== '') {
+      if (
+        strpos($sku_clean, 'piece-' . $stem . '-' . $category) === 0 ||
+        (
+          strpos($label_slug, $stem) !== false &&
+          strpos($sku_clean, '-' . $category) !== false
+        )
+      ) {
+        return $sku_clean;
+      }
+    }
   }
   return '';
 }
