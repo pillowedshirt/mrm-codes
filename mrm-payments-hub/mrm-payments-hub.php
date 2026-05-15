@@ -10944,7 +10944,11 @@ public function render_promo_codes_page() {
     </p>
 
     <style>
-      .mrm-promo-table { width: 100%; border-collapse: collapse; table-layout: auto; }
+      .mrm-promo-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: auto;
+      }
       .mrm-promo-table th, .mrm-promo-table td { vertical-align: top; padding: 8px; }
       .mrm-promo-table input[type="text"], .mrm-promo-table input[type="number"], .mrm-promo-table input[type="date"], .mrm-promo-table select { max-width: 100%; }
       .mrm-promo-rule-grid { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 10px; align-items: end; }
