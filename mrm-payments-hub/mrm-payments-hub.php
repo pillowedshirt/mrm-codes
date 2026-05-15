@@ -1008,7 +1008,7 @@ private function mrm_get_redemptions_for_promo_code($code, $limit = 25) {
     $limit = max(1, min(100, absint($limit)));
 
     $rows = $wpdb->get_results($wpdb->prepare(
-      "SELECT promo_code, email_hash, customer_email, status, created_at, updated_at
+      "SELECT id, promo_code, email_hash, customer_email, status, created_at, updated_at
        FROM {$table}
        WHERE promo_code = %s
          AND status = 'paid'
@@ -1033,6 +1033,36 @@ private function mrm_get_redemptions_for_promo_code($code, $limit = 25) {
     unset($row);
 
     return $rows;
+  }
+
+private function mrm_delete_promo_redemption_rows($ids) {
+    global $wpdb;
+
+    if (!current_user_can('manage_options')) {
+      return 0;
+    }
+
+    $ids = array_map('absint', (array)$ids);
+    $ids = array_values(array_filter($ids));
+
+    if (empty($ids)) {
+      return 0;
+    }
+
+    $table = $this->table_promo_redemptions();
+
+    $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($found_table !== $table) {
+      return 0;
+    }
+
+    $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+
+    $sql = "DELETE FROM {$table} WHERE id IN ({$placeholders})";
+
+    $deleted = $wpdb->query($wpdb->prepare($sql, $ids));
+
+    return is_numeric($deleted) ? (int)$deleted : 0;
   }
 
 private function get_settings() {
@@ -10077,12 +10107,26 @@ public function render_promo_codes_page() {
                     $when = !empty($redemption['updated_at']) ? $redemption['updated_at'] : ($redemption['created_at'] ?? '');
                     $status = sanitize_text_field((string)($redemption['status'] ?? ''));
                   ?>
-                  <li>
-                    <?php echo esc_html($display_email); ?> — <?php echo esc_html($when); ?>
-                    <?php if ($status !== '') : ?><span style="opacity:.75;">(<?php echo esc_html($status); ?>)</span><?php endif; ?>
+                  <li style="margin-bottom:4px;">
+                    <label style="display:flex;align-items:center;gap:8px;">
+                      <input
+                        type="checkbox"
+                        name="promo_redemption_remove[]"
+                        value="<?php echo esc_attr((int)($redemption['id'] ?? 0)); ?>"
+                      />
+                      <span>
+                        <?php echo esc_html($display_email); ?> — <?php echo esc_html($when); ?>
+                        <?php if ($status !== '') : ?>
+                          <span style="opacity:.75;">(<?php echo esc_html($status); ?>)</span>
+                        <?php endif; ?>
+                      </span>
+                    </label>
                   </li>
                 <?php endforeach; ?>
               </ul>
+              <div style="margin-top:6px;color:#777;">
+                Check an email above and click <strong>Save Promo Codes</strong> to remove that completed redemption.
+              </div>
             <?php endif; ?>
           </div>
         </td>
@@ -10988,6 +11032,16 @@ public function render_access_lists_page() {
     }
 
     if (isset($_POST['mrm_pay_hub_promo_codes_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_promo_codes_nonce'], 'mrm_pay_hub_save_promo_codes')) {
+			$remove_redemption_ids = isset($_POST['promo_redemption_remove'])
+				? array_map('absint', (array)$_POST['promo_redemption_remove'])
+				: array();
+
+			$removed_redemptions = 0;
+
+			if (!empty($remove_redemption_ids)) {
+				$removed_redemptions = $this->mrm_delete_promo_redemption_rows($remove_redemption_ids);
+			}
+
       $codes = array();
 
       $posted_codes = isset($_POST['promo_code']) ? (array)$_POST['promo_code'] : array();
@@ -11016,7 +11070,13 @@ public function render_access_lists_page() {
         $codes[$code] = array('code'=>$code,'label'=>sanitize_text_field((string)($labels[$i] ?? '')),'discount_type'=>$discount_type,'percent_off'=>$percent,'amount_off_cents'=>max(0,(int)$amount_cents),'scope'=>$scope,'applies_to'=>$apply,'expires_at'=>$expires_at,'active'=>1,'updated_at'=>current_time('mysql'));
       }
       $this->mrm_save_promo_codes($codes);
-      add_settings_error('mrm_pay_hub', 'promo_codes_saved', 'Promo codes saved.', 'updated');
+      $message = 'Promo codes saved.';
+
+			if ($removed_redemptions > 0) {
+				$message .= ' Removed ' . (int)$removed_redemptions . ' completed redemption' . ($removed_redemptions === 1 ? '' : 's') . '.';
+			}
+
+			add_settings_error('mrm_pay_hub', 'promo_codes_saved', $message, 'updated');
     }
 
     if (isset($_POST['mrm_pay_hub_products_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_products_nonce'], 'mrm_pay_hub_save_products')) {
