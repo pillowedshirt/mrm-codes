@@ -2115,9 +2115,13 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
   private function mrm_build_tax_policy($address, $product_type, $addon_selected = false, $product_cfg = array(), $context = array()) {
     $address = $this->mrm_normalize_tax_address($address);
+    $context = is_array($context) ? $context : array();
+
+    $allow_incomplete_address = !empty($context['allow_incomplete_address']);
+
+    $missing_address_fields = array();
 
     if ($product_type === 'sheet_music') {
-      $missing_address_fields = array();
 
       if (trim((string)($address['line1'] ?? '')) === '') {
         $missing_address_fields[] = 'street address';
@@ -2139,12 +2143,27 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         $missing_address_fields[] = 'country';
       }
 
-      if (!empty($missing_address_fields)) {
-        return new WP_REST_Response(array(
+      if (!empty($missing_address_fields) && !$allow_incomplete_address) {
+        return array(
           'ok' => false,
           'code' => 'billing_address_required',
           'message' => 'Please enter your full billing address before purchasing sheet music: ' . implode(', ', $missing_address_fields) . '.',
-        ), 400);
+          'address' => $address,
+          'missing_address_fields' => $missing_address_fields,
+          'jurisdiction' => array(
+            'country' => (string)($address['country'] ?? 'US'),
+            'state' => (string)($address['state'] ?? ''),
+            'exists' => false,
+            'registered' => null,
+            'collect_enabled' => null,
+            'stripe_controls_rollout' => true,
+          ),
+          'profiles' => array(),
+          'policy_reason' => 'billing_address_required',
+          'policy_message' => 'Please enter your full billing address before purchasing sheet music: ' . implode(', ', $missing_address_fields) . '.',
+          'should_collect_tax' => false,
+          'allow_subscription_automatic_tax' => false,
+        );
       }
     }
     $country = (string)($address['country'] ?? 'US');
@@ -2178,8 +2197,16 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       $should_collect_tax = false;
     }
 
+    if ($allow_incomplete_address && $product_type === 'sheet_music' && !empty($missing_address_fields)) {
+      $policy_reason = 'billing_address_preview_incomplete';
+      $policy_message = 'Sales tax is calculated after billing state and ZIP are entered.';
+      $should_collect_tax = false;
+    }
+
     return array(
+      'ok' => true,
       'address' => $address,
+      'missing_address_fields' => $missing_address_fields,
       'jurisdiction' => array(
         'country' => $country,
         'state' => $state,
@@ -8558,8 +8585,51 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       (string)($p['product_type'] ?? 'unknown'),
       false,
       $p,
-      array()
+      array(
+        'allow_incomplete_address' => true,
+        'source_flow' => 'quote_preview',
+        'sku' => $sku,
+      )
     );
+
+    if ($preview_policy instanceof WP_REST_Response) {
+      $this->mrm_quote_debug_log('quote_preview_policy_unexpected_response_object', array(
+        'request_id' => $request_id,
+        'sku' => $sku,
+        'status' => $preview_policy->get_status(),
+        'data' => $preview_policy->get_data(),
+      ));
+
+      $preview_policy = array(
+        'ok' => true,
+        'policy_reason' => 'quote_preview_policy_response_object_converted',
+        'policy_message' => 'Sales tax is calculated after billing state and ZIP are entered.',
+        'should_collect_tax' => false,
+        'jurisdiction' => array(
+          'country' => (string)($preview_address['country'] ?? 'US'),
+          'state' => (string)($preview_address['state'] ?? ''),
+        ),
+      );
+    }
+
+    if (!is_array($preview_policy)) {
+      $this->mrm_quote_debug_log('quote_preview_policy_unexpected_type', array(
+        'request_id' => $request_id,
+        'sku' => $sku,
+        'preview_policy_type' => gettype($preview_policy),
+      ));
+
+      $preview_policy = array(
+        'ok' => true,
+        'policy_reason' => 'quote_preview_policy_unexpected_type',
+        'policy_message' => 'Sales tax is calculated after billing state and ZIP are entered.',
+        'should_collect_tax' => false,
+        'jurisdiction' => array(
+          'country' => (string)($preview_address['country'] ?? 'US'),
+          'state' => (string)($preview_address['state'] ?? ''),
+        ),
+      );
+    }
 
     $response = array(
       'ok' => true,
@@ -8802,6 +8872,28 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
 
     $tax_policy = $this->mrm_build_tax_policy($address, $product_type, $addon_selected, $p, $context);
+
+    if (is_array($tax_policy) && empty($tax_policy['ok']) && !empty($tax_policy['code'])) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'code' => (string)($tax_policy['code'] ?? 'tax_policy_failed'),
+        'message' => (string)($tax_policy['message'] ?? 'Billing address is required before checkout.'),
+        'missing_address_fields' => (array)($tax_policy['missing_address_fields'] ?? array()),
+      ), 400);
+    }
+
+    if ($tax_policy instanceof WP_REST_Response) {
+      return $tax_policy;
+    }
+
+    if (!is_array($tax_policy)) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'code' => 'tax_policy_invalid_response',
+        'message' => 'Unable to validate tax policy for this checkout.',
+      ), 500);
+    }
+
     $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
 
     $tax_result = array(
@@ -9410,6 +9502,28 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     $addon_selected = ($addon_amount_cents > 0);
     $tax_policy = $this->mrm_build_tax_policy($address, $product_type, $addon_selected, array(), $meta);
+
+    if ($tax_policy instanceof WP_REST_Response) {
+      return $tax_policy;
+    }
+
+    if (is_array($tax_policy) && empty($tax_policy['ok']) && !empty($tax_policy['code'])) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'code' => (string)($tax_policy['code'] ?? 'tax_policy_failed'),
+        'message' => (string)($tax_policy['message'] ?? 'Billing address is required before checkout.'),
+        'missing_address_fields' => (array)($tax_policy['missing_address_fields'] ?? array()),
+      ), 400);
+    }
+
+    if (!is_array($tax_policy)) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'code' => 'tax_policy_invalid_response',
+        'message' => 'Unable to validate tax policy for this checkout.',
+      ), 500);
+    }
+
     $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
 
     $tax_result = array(
