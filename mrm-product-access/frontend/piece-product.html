@@ -1181,6 +1181,27 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   let mrmPieceAppliedPromoDiscountCents = 0;
   let mrmPieceCurrentQuoteData = null;
   let mrmPieceCurrentPriceDisplay = '';
+  let mrmPieceSchedulePaymentLoad = null;
+
+  function mrmResetPiecePaymentElement(message) {
+    pendingClientSecret = '';
+
+  if (activePaymentElement) {
+    try { activePaymentElement.unmount(); } catch (e) {}
+  }
+
+  activePaymentElement = null;
+  activeStripeElements = null;
+
+  const paymentMount = document.getElementById('mrm-payment-element');
+  if (paymentMount) {
+    paymentMount.innerHTML = `
+      <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+        ${message || 'Enter your email and ZIP to load the secure payment form.'}
+      </div>
+    `;
+  }
+  }
 
   function mrmPieceMoney(cents) {
     return '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
@@ -1296,23 +1317,9 @@ function mrmGetPiecePromoCodeInputValue() {
       mrmPieceAppliedPromoDiscountCents = 0;
       mrmUpdatePiecePromoTopBreakdown();
       btn.style.display = input.value.trim() ? 'inline-flex' : 'none';
-      pendingClientSecret = '';
-    if (activePaymentElement) {
-      try { activePaymentElement.unmount(); } catch (e) {}
-    }
-    activePaymentElement = null;
-    activeStripeElements = null;
+      mrmResetPiecePaymentElement('Enter your email and ZIP to load the secure payment form.');
 
-    const paymentMount = document.getElementById('mrm-payment-element');
-    if (paymentMount) {
-      paymentMount.innerHTML = `
-        <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
-          Enter your email and ZIP to load the secure payment form.
-        </div>
-      `;
-    }
-
-    mrmSetPiecePromoMessage('', false);
+      mrmSetPiecePromoMessage('', false);
     });
 
     btn.addEventListener('click', async function () {
@@ -1368,25 +1375,15 @@ function mrmGetPiecePromoCodeInputValue() {
         mrmSetPiecePromoMessage(data.promo_success_message || 'Promotional code applied.', false);
         mrmUpdatePiecePromoTopBreakdown();
 
-        pendingClientSecret = '';
-        if (activePaymentElement) {
-          try { activePaymentElement.unmount(); } catch (e) {}
-        }
-        activePaymentElement = null;
-        activeStripeElements = null;
-
-        const paymentMount = document.getElementById('mrm-payment-element');
-        if (paymentMount) {
-          paymentMount.innerHTML = `
-            <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
-              Promotional code applied. Confirm your email, ZIP, and terms to reload the secure payment form.
-            </div>
-          `;
-        }
+        mrmResetPiecePaymentElement('Promotional code applied. Reloading the secure payment form…');
 
         const paymentEmail = document.getElementById('mrm-payment-email');
         if (paymentEmail && email && !paymentEmail.value) {
           paymentEmail.value = email;
+        }
+
+        if (typeof mrmPieceSchedulePaymentLoad === 'function') {
+          mrmPieceSchedulePaymentLoad();
         }
       } catch (err) {
         mrmPieceAppliedPromoCode = '';
@@ -1780,6 +1777,7 @@ function mrmGetPiecePromoCodeInputValue() {
 
       pendingSku = '';
       pendingClientSecret = '';
+      mrmPieceSchedulePaymentLoad = null;
       errorEl.textContent = '';
     };
 
@@ -1890,6 +1888,8 @@ function mrmGetPiecePromoCodeInputValue() {
         }
       }, 450);
     };
+
+    mrmPieceSchedulePaymentLoad = scheduleLoad;
 
     [emailInput, postalInput, stateInput, line1Input, countrySelect, termsCheck].forEach((el) => {
       if (el) {
