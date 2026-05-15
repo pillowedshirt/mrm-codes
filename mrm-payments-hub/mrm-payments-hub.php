@@ -1693,6 +1693,79 @@ private function get_settings() {
     return isset($all[$sku]) && is_array($all[$sku]) ? $all[$sku] : null;
   }
 
+private function mrm_is_active_product_sku($sku) {
+  $sku = $this->sanitize_sku($sku);
+  if ($sku === '') {
+    return false;
+  }
+
+  $product = $this->get_product($sku);
+  return is_array($product) && !empty($product['active']);
+}
+
+private function mrm_add_unique_sku_candidate(&$candidates, $sku) {
+  $sku = $this->sanitize_sku($sku);
+  if ($sku !== '' && !in_array($sku, $candidates, true)) {
+    $candidates[] = $sku;
+  }
+}
+
+private function mrm_infer_sheet_music_category_from_text($text) {
+  $text = strtolower((string)$text);
+  if (strpos($text, 'trombone-euphonium') !== false || strpos($text, 'trombone_euphonium') !== false) return 'trombone-euphonium';
+  if (strpos($text, 'trombone') !== false && strpos($text, 'euphonium') !== false) return 'trombone-euphonium';
+  if (preg_match('/(^|[-_\s])tuba($|[-_\s])/', $text)) return 'tuba';
+  if (strpos($text, 'fundamental') !== false) return 'fundamentals';
+  if (strpos($text, 'complete-package') !== false || strpos($text, 'complete_package') !== false || strpos($text, 'complete package') !== false || strpos($text, 'full-piece') !== false || strpos($text, 'full piece') !== false || strpos($text, 'bundle') !== false || strpos($text, 'all-parts') !== false || strpos($text, 'all parts') !== false) return 'complete-package';
+  return '';
+}
+
+private function mrm_piece_stem_from_offer_slug($raw_sku, $category = '') {
+  $stem = $this->sanitize_sku($raw_sku);
+  if ($stem === '') return '';
+  $stem = preg_replace('/^piece-/', '', $stem);
+  $patterns = array('/-trombone-euphonium.*$/','/-trombone.*euphonium.*$/','/-tuba.*$/','/-fundamentals?.*$/','/-complete-package.*$/','/-complete.*$/','/-full-piece.*$/','/-all-parts.*$/','/-bundle.*$/',);
+  foreach ($patterns as $pattern) {
+    $cleaned = preg_replace($pattern, '', $stem);
+    if (is_string($cleaned) && $cleaned !== $stem && $cleaned !== '') { $stem = $cleaned; break; }
+  }
+  return trim($stem, '-_');
+}
+
+private function mrm_resolve_active_product_sku($incoming_sku, $context = array()) {
+  $incoming_sku = $this->sanitize_sku($incoming_sku);
+  if ($incoming_sku === '') return '';
+  if ($this->mrm_is_active_product_sku($incoming_sku)) return $incoming_sku;
+  $context = is_array($context) ? $context : array();
+  $candidates = array();
+  $this->mrm_add_unique_sku_candidate($candidates, $incoming_sku);
+  if (strpos($incoming_sku, 'piece-') !== 0) $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $incoming_sku);
+  $piece_slug_from_context = !empty($context['piece_slug']) ? $this->slugify((string)$context['piece_slug']) : '';
+  $context_text = $incoming_sku . ' ' . (string)($context['display_title'] ?? '') . ' ' . (string)($context['subtitle'] ?? '') . ' ' . (string)($context['type'] ?? '');
+  $category = $this->mrm_infer_sheet_music_category_from_text($context_text);
+  if ($category !== '') {
+    $stem = $this->mrm_piece_stem_from_offer_slug($incoming_sku, $category);
+    if ($stem !== '') $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $stem . '-' . $category);
+    if ($piece_slug_from_context !== '') $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $piece_slug_from_context . '-' . $category);
+  }
+  foreach ($candidates as $candidate) {
+    if ($this->mrm_is_active_product_sku($candidate)) return $candidate;
+    for ($i = 2; $i <= 999; $i++) { $suffixed = $candidate . '-' . $i; if ($this->mrm_is_active_product_sku($suffixed)) return $suffixed; }
+  }
+  $all = $this->all_products();
+  foreach ($all as $sku => $product) {
+    if (!is_array($product) || empty($product['active'])) continue;
+    if ((string)($product['product_type'] ?? '') !== 'sheet_music') continue;
+    $product_category = (string)($product['category'] ?? ''); if ($category !== '' && $product_category !== $category) continue;
+    $sku_clean = $this->sanitize_sku($sku); $label_slug = $this->slugify((string)($product['label'] ?? ''));
+    if ($piece_slug_from_context !== '' && (strpos($sku_clean, 'piece-' . $piece_slug_from_context . '-') === 0 || strpos($label_slug, $piece_slug_from_context) !== false)) return $sku_clean;
+    $stem = $this->mrm_piece_stem_from_offer_slug($incoming_sku, $category);
+    if ($stem !== '' && (strpos($sku_clean, 'piece-' . $stem . '-') === 0 || strpos($label_slug, $stem) !== false)) return $sku_clean;
+  }
+  return '';
+}
+
+
   private function get_email_lists() {
     $m = get_option(self::OPT_EMAIL_LISTS, array());
     return is_array($m) ? $m : array();
@@ -7965,6 +8038,11 @@ private function get_settings() {
       ), 400);
     }
 
+    $resolved_sku = $this->mrm_resolve_active_product_sku($sku, $context);
+    if ($resolved_sku !== '') {
+      $sku = $resolved_sku;
+    }
+
     $product = $this->get_product($sku);
     if (!$product || empty($product['active'])) {
       return new WP_REST_Response(array(
@@ -8027,6 +8105,18 @@ private function get_settings() {
     $sku = $this->sanitize_sku($req->get_param('sku'));
     if (!$sku) {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
+    }
+
+    $context = array(
+      'piece_slug' => sanitize_text_field((string)$req->get_param('piece_slug')),
+      'type' => sanitize_text_field((string)$req->get_param('type')),
+      'display_title' => sanitize_text_field((string)$req->get_param('display_title')),
+      'subtitle' => sanitize_text_field((string)$req->get_param('subtitle')),
+    );
+
+    $resolved_sku = $this->mrm_resolve_active_product_sku($sku, $context);
+    if ($resolved_sku !== '') {
+      $sku = $resolved_sku;
     }
 
     $p = $this->get_product($sku);
@@ -8168,6 +8258,11 @@ private function get_settings() {
 
     if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
     if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+
+    $resolved_sku = $this->mrm_resolve_active_product_sku($sku, $context);
+    if ($resolved_sku !== '') {
+      $sku = $resolved_sku;
+    }
 
     $p = $this->get_product($sku);
     if (!$p || empty($p['active'])) {
@@ -9230,6 +9325,14 @@ private function get_settings() {
     // Accept sku or product_slug (canonical is product_slug)
     $incoming_slug = isset($data['product_slug']) ? $data['product_slug'] : ($data['sku'] ?? '');
     $sku   = $this->sanitize_sku($incoming_slug);
+
+    $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+
+    $resolved_sku = $this->mrm_resolve_active_product_sku($sku, $context);
+    if ($resolved_sku !== '') {
+      $sku = $resolved_sku;
+    }
+
     $email = sanitize_email((string)($data['email'] ?? ''));
     $pi_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
 
@@ -10264,6 +10367,87 @@ public function render_marketing_email_lists_page() {
   echo '</tbody></table>';
   echo '</div>';
   echo '</div>';
+}
+
+public function handle_export_legal_ledger() {
+  if (!current_user_can('manage_options')) {
+    wp_die('You do not have permission to export this ledger.', 'Legal Dispute Ledger', array('response' => 403));
+  }
+
+  check_admin_referer('mrm_export_legal_ledger');
+
+  $rows = $this->mrm_legal_ledger_get_rows(5000);
+
+  $filename = 'mrm-legal-dispute-ledger-' . date_i18n('Y-m-d-His') . '.csv';
+
+  nocache_headers();
+  header('Content-Type: text/csv; charset=utf-8');
+  header('Content-Disposition: attachment; filename="' . $filename . '"');
+
+  $out = fopen('php://output', 'w');
+
+  fputcsv($out, array(
+    'Order ID', 'Created At', 'Updated At', 'Status', 'Stripe Status', 'SKU', 'Product Type', 'Amount', 'Currency', 'Stripe PaymentIntent', 'Customer Email', 'Terms Accepted', 'Terms Version', 'Source Flow', 'Metadata JSON',
+  ));
+
+  foreach ($rows as $row) {
+    $meta = $this->mrm_legal_ledger_meta($row);
+    fputcsv($out, array(
+      (string)($row['id'] ?? ''),(string)($row['created_at'] ?? ''),(string)($row['updated_at'] ?? ''),(string)($row['status'] ?? ''),(string)($row['stripe_status'] ?? ''),(string)($row['sku'] ?? ''),(string)($row['product_type'] ?? ''),
+      $this->mrm_legal_ledger_money((int)($row['amount_cents'] ?? 0), (string)($row['currency'] ?? 'usd')),
+      (string)($row['currency'] ?? 'usd'),(string)($row['stripe_payment_intent_id'] ?? ''),(string)($meta['mrm_customer_email'] ?? $row['customer_email'] ?? ''),
+      ((string)($meta['mrm_terms_accepted'] ?? '') === 'yes') ? 'yes' : 'no',(string)($meta['mrm_terms_version'] ?? ''),(string)($meta['mrm_terms_source_flow'] ?? ''),(string)($row['metadata_json'] ?? ''),
+    ));
+  }
+
+  fclose($out);
+  exit;
+}
+
+private function mrm_legal_ledger_money($amount_cents, $currency = 'usd') {
+  $currency = strtoupper(trim((string)$currency));
+  if ($currency === '') { $currency = 'USD'; }
+  $amount = ((int)$amount_cents) / 100;
+  if ($currency === 'USD') { return '$' . number_format($amount, 2); }
+  return number_format($amount, 2) . ' ' . $currency;
+}
+
+private function mrm_legal_ledger_meta($row) {
+  $raw = '';
+  if (is_array($row)) { $raw = (string)($row['metadata_json'] ?? ''); }
+  elseif (is_object($row)) { $raw = (string)($row->metadata_json ?? ''); }
+  if ($raw === '') { return array(); }
+  $decoded = json_decode($raw, true);
+  return is_array($decoded) ? $decoded : array();
+}
+
+private function mrm_legal_ledger_get_rows($limit = 250) {
+  global $wpdb;
+  $table = $this->table_orders();
+  $limit = (int)$limit;
+  if ($limit <= 0) { $limit = 250; }
+  if ($limit > 5000) { $limit = 5000; }
+  $where = array('1=1'); $params = array();
+  $q = isset($_GET['mrm_legal_q']) ? sanitize_text_field(wp_unslash((string)$_GET['mrm_legal_q'])) : '';
+  $status = isset($_GET['mrm_legal_status']) ? sanitize_text_field(wp_unslash((string)$_GET['mrm_legal_status'])) : '';
+  $start = isset($_GET['mrm_legal_start']) ? sanitize_text_field(wp_unslash((string)$_GET['mrm_legal_start'])) : '';
+  $end = isset($_GET['mrm_legal_end']) ? sanitize_text_field(wp_unslash((string)$_GET['mrm_legal_end'])) : '';
+  $allowed_statuses = array('created', 'processing', 'paid', 'failed', 'refunded');
+  if ($status !== '' && in_array($status, $allowed_statuses, true)) { $where[] = 'status = %s'; $params[] = $status; }
+  if ($start !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $start)) { $where[] = 'created_at >= %s'; $params[] = $start . ' 00:00:00'; }
+  if ($end !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $end)) { $where[] = 'created_at <= %s'; $params[] = $end . ' 23:59:59'; }
+  if ($q !== '') {
+    $like = '%' . $wpdb->esc_like($q) . '%';
+    $search_parts = array('sku LIKE %s','product_type LIKE %s','status LIKE %s','stripe_status LIKE %s','stripe_payment_intent_id LIKE %s','customer_email LIKE %s','metadata_json LIKE %s',);
+    $params=array_merge($params,array($like,$like,$like,$like,$like,$like,$like));
+    if (ctype_digit($q)) { $search_parts[] = 'id = %d'; $params[] = (int)$q; }
+    $where[] = '(' . implode(' OR ', $search_parts) . ')';
+  }
+  $sql = "SELECT * FROM {$table} WHERE " . implode(' AND ', $where) . " ORDER BY created_at DESC, id DESC LIMIT %d";
+  $params[] = $limit;
+  $prepared = $wpdb->prepare($sql, $params);
+  $rows = $wpdb->get_results($prepared, ARRAY_A);
+  return is_array($rows) ? $rows : array();
 }
 
 public function render_legal_ledger_page() {
