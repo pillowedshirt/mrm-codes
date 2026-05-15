@@ -1467,7 +1467,152 @@ private function get_settings() {
     return ($live !== '') ? $live : $test;
   }
 
-  private function all_products() {
+  private function mrm_quote_debug_enabled() {
+  /**
+   * Temporary diagnostic switch.
+   *
+   * Set this to false after the issue is diagnosed.
+   */
+  return true;
+}
+
+private function mrm_quote_debug_log($event, $data = array()) {
+  if (!$this->mrm_quote_debug_enabled()) {
+    return;
+  }
+
+  if (!defined('WP_CONTENT_DIR')) {
+    return;
+  }
+
+  $file = trailingslashit(WP_CONTENT_DIR) . 'mrm-quote-debug.log';
+
+  $safe_data = $this->mrm_quote_debug_sanitize($data);
+
+  $entry = array(
+    'time' => current_time('mysql'),
+    'event' => (string)$event,
+    'data' => $safe_data,
+  );
+
+  $line = wp_json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+  if (!is_string($line) || $line === '') {
+    $line = json_encode(array(
+      'time' => current_time('mysql'),
+      'event' => (string)$event,
+      'data' => 'json_encode_failed',
+    ));
+  }
+
+  /**
+   * LOCK_EX prevents two simultaneous quote requests from garbling one line.
+   */
+  @file_put_contents($file, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
+}
+
+private function mrm_quote_debug_sanitize($value) {
+  if (is_array($value)) {
+    $out = array();
+
+    foreach ($value as $key => $child) {
+      $key_string = strtolower((string)$key);
+
+      /**
+       * Avoid logging secrets or payment-sensitive values.
+       */
+      if (
+        strpos($key_string, 'secret') !== false ||
+        strpos($key_string, 'token') !== false ||
+        strpos($key_string, 'client_secret') !== false ||
+        strpos($key_string, 'webhook') !== false ||
+        strpos($key_string, 'password') !== false ||
+        strpos($key_string, 'card') !== false
+      ) {
+        $out[$key] = '[redacted]';
+        continue;
+      }
+
+      $out[$key] = $this->mrm_quote_debug_sanitize($child);
+    }
+
+    return $out;
+  }
+
+  if (is_object($value)) {
+    return $this->mrm_quote_debug_sanitize((array)$value);
+  }
+
+  if (is_string($value)) {
+    if (strlen($value) > 500) {
+      return substr($value, 0, 500) . '...[truncated]';
+    }
+
+    return $value;
+  }
+
+  return $value;
+}
+
+private function mrm_quote_debug_product_summary($product) {
+  if (!is_array($product)) {
+    return null;
+  }
+
+  return array(
+    'label' => (string)($product['label'] ?? ''),
+    'active_raw' => $product['active'] ?? null,
+    'active_bool' => !empty($product['active']),
+    'amount_cents' => isset($product['amount_cents']) ? (int)$product['amount_cents'] : null,
+    'currency' => (string)($product['currency'] ?? ''),
+    'product_type' => (string)($product['product_type'] ?? ''),
+    'category' => (string)($product['category'] ?? ''),
+    'has_stripe_price_id' => !empty($product['stripe_price_id']),
+    'keys_present' => array_keys($product),
+  );
+}
+
+private function mrm_quote_debug_nearby_product_keys($needle, $limit = 25) {
+  $needle = $this->sanitize_sku($needle);
+  $all = $this->all_products();
+
+  if (!is_array($all) || empty($all)) {
+    return array();
+  }
+
+  $matches = array();
+
+  foreach ($all as $sku => $product) {
+    $clean_sku = $this->sanitize_sku($sku);
+    $label = is_array($product) ? (string)($product['label'] ?? '') : '';
+    $label_slug = $this->slugify($label);
+
+    if (
+      $needle === '' ||
+      strpos($clean_sku, $needle) !== false ||
+      strpos($needle, $clean_sku) !== false ||
+      ($label_slug !== '' && strpos($label_slug, $needle) !== false)
+    ) {
+      $matches[] = array(
+        'sku_key' => $clean_sku,
+        'label' => $label,
+        'active' => is_array($product) ? !empty($product['active']) : false,
+        'amount_cents' => is_array($product) && isset($product['amount_cents']) ? (int)$product['amount_cents'] : null,
+        'currency' => is_array($product) ? (string)($product['currency'] ?? '') : '',
+        'product_type' => is_array($product) ? (string)($product['product_type'] ?? '') : '',
+        'category' => is_array($product) ? (string)($product['category'] ?? '') : '',
+      );
+
+      if (count($matches) >= (int)$limit) {
+        break;
+      }
+    }
+  }
+
+  return $matches;
+}
+
+private function all_products() {
     $p = get_option(self::OPT_PRODUCTS, array());
     return is_array($p) ? $p : array();
   }
@@ -1733,33 +1878,132 @@ private function mrm_piece_stem_from_offer_slug($raw_sku, $category = '') {
 }
 
 private function mrm_resolve_active_product_sku($incoming_sku, $context = array()) {
+  $original_incoming_sku = $incoming_sku;
   $incoming_sku = $this->sanitize_sku($incoming_sku);
-  if ($incoming_sku === '') return '';
-  if ($this->mrm_is_active_product_sku($incoming_sku)) return $incoming_sku;
+
+  $this->mrm_quote_debug_log('resolver_start', array(
+    'original_incoming_sku' => $original_incoming_sku,
+    'sanitized_incoming_sku' => $incoming_sku,
+    'context' => $context,
+  ));
+
+  if ($incoming_sku === '') {
+    $this->mrm_quote_debug_log('resolver_empty_incoming_sku', array(
+      'original_incoming_sku' => $original_incoming_sku,
+    ));
+    return '';
+  }
+
+  if ($this->mrm_is_active_product_sku($incoming_sku)) {
+    $this->mrm_quote_debug_log('resolver_exact_active_match', array(
+      'resolved_sku' => $incoming_sku,
+      'product' => $this->mrm_quote_debug_product_summary($this->get_product($incoming_sku)),
+    ));
+    return $incoming_sku;
+  }
+
   $context = is_array($context) ? $context : array();
+
   $candidates = array();
   $this->mrm_add_unique_sku_candidate($candidates, $incoming_sku);
-  if (strpos($incoming_sku, 'piece-') !== 0) $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $incoming_sku);
+
+  if (strpos($incoming_sku, 'piece-') !== 0) {
+    $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $incoming_sku);
+  }
+
   $piece_slug_from_context = !empty($context['piece_slug']) ? $this->slugify((string)$context['piece_slug']) : '';
-  $context_text = $incoming_sku . ' ' . (string)($context['display_title'] ?? '') . ' ' . (string)($context['subtitle'] ?? '') . ' ' . (string)($context['type'] ?? '');
+
+  $context_text = $incoming_sku . ' '
+    . (string)($context['display_title'] ?? '') . ' '
+    . (string)($context['subtitle'] ?? '') . ' '
+    . (string)($context['type'] ?? '');
+
   $category = $this->mrm_infer_sheet_music_category_from_text($context_text);
+
   if ($category !== '') {
     $stem = $this->mrm_piece_stem_from_offer_slug($incoming_sku, $category);
-    if ($stem !== '') $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $stem . '-' . $category);
-    if ($piece_slug_from_context !== '') $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $piece_slug_from_context . '-' . $category);
+
+    if ($stem !== '') {
+      $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $stem . '-' . $category);
+    }
+
+    if ($piece_slug_from_context !== '') {
+      $this->mrm_add_unique_sku_candidate($candidates, 'piece-' . $piece_slug_from_context . '-' . $category);
+    }
   }
+
+  $this->mrm_quote_debug_log('resolver_candidates_built', array(
+    'incoming_sku' => $incoming_sku,
+    'piece_slug_from_context' => $piece_slug_from_context,
+    'context_text' => $context_text,
+    'inferred_category' => $category,
+    'candidates' => $candidates,
+  ));
+
   foreach ($candidates as $candidate) {
-    if ($this->mrm_is_active_product_sku($candidate)) return $candidate;
-    for ($i = 2; $i <= 999; $i++) { $suffixed = $candidate . '-' . $i; if ($this->mrm_is_active_product_sku($suffixed)) return $suffixed; }
+    $candidate_product = $this->get_product($candidate);
+
+    $this->mrm_quote_debug_log('resolver_testing_candidate', array(
+      'candidate' => $candidate,
+      'exists' => is_array($candidate_product),
+      'product' => $this->mrm_quote_debug_product_summary($candidate_product),
+    ));
+
+    if ($this->mrm_is_active_product_sku($candidate)) {
+      $this->mrm_quote_debug_log('resolver_candidate_active_match', array(
+        'resolved_sku' => $candidate,
+      ));
+      return $candidate;
+    }
+
+    for ($i = 2; $i <= 999; $i++) {
+      $suffixed = $candidate . '-' . $i;
+      $suffixed_product = $this->get_product($suffixed);
+
+      if ($i <= 5 && is_array($suffixed_product)) {
+        $this->mrm_quote_debug_log('resolver_testing_suffixed_candidate', array(
+          'candidate' => $suffixed,
+          'exists' => true,
+          'product' => $this->mrm_quote_debug_product_summary($suffixed_product),
+        ));
+      }
+
+      if ($this->mrm_is_active_product_sku($suffixed)) {
+        $this->mrm_quote_debug_log('resolver_suffixed_active_match', array(
+          'resolved_sku' => $suffixed,
+        ));
+        return $suffixed;
+      }
+    }
   }
+
   $all = $this->all_products();
+
+  $this->mrm_quote_debug_log('resolver_scanning_all_products', array(
+    'product_count' => is_array($all) ? count($all) : 0,
+    'incoming_sku' => $incoming_sku,
+    'piece_slug_from_context' => $piece_slug_from_context,
+    'inferred_category' => $category,
+  ));
+
   foreach ($all as $sku => $product) {
-    if (!is_array($product) || empty($product['active'])) continue;
-    if ((string)($product['product_type'] ?? '') !== 'sheet_music') continue;
-    $product_category = (string)($product['category'] ?? ''); if ($category !== '' && $product_category !== $category) continue;
-    $sku_clean = $this->sanitize_sku($sku); $label_slug = $this->slugify((string)($product['label'] ?? ''));
-    // Only use broad piece-slug matching when we also know the intended category.
-    // Without a category, this can accidentally match the wrong offer for the same piece.
+    if (!is_array($product) || empty($product['active'])) {
+      continue;
+    }
+
+    if ((string)($product['product_type'] ?? '') !== 'sheet_music') {
+      continue;
+    }
+
+    $product_category = (string)($product['category'] ?? '');
+
+    if ($category !== '' && $product_category !== $category) {
+      continue;
+    }
+
+    $sku_clean = $this->sanitize_sku($sku);
+    $label_slug = $this->slugify((string)($product['label'] ?? ''));
+
     if ($category !== '' && $piece_slug_from_context !== '') {
       if (
         strpos($sku_clean, 'piece-' . $piece_slug_from_context . '-' . $category) === 0 ||
@@ -1768,6 +2012,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
           strpos($sku_clean, '-' . $category) !== false
         )
       ) {
+        $this->mrm_quote_debug_log('resolver_scan_piece_slug_match', array(
+          'resolved_sku' => $sku_clean,
+          'product' => $this->mrm_quote_debug_product_summary($product),
+        ));
         return $sku_clean;
       }
     }
@@ -1782,12 +2030,26 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
           strpos($sku_clean, '-' . $category) !== false
         )
       ) {
+        $this->mrm_quote_debug_log('resolver_scan_stem_match', array(
+          'resolved_sku' => $sku_clean,
+          'stem' => $stem,
+          'product' => $this->mrm_quote_debug_product_summary($product),
+        ));
         return $sku_clean;
       }
     }
   }
+
+  $this->mrm_quote_debug_log('resolver_no_match', array(
+    'incoming_sku' => $incoming_sku,
+    'piece_slug_from_context' => $piece_slug_from_context,
+    'inferred_category' => $category,
+    'nearby_products' => $this->mrm_quote_debug_nearby_product_keys($incoming_sku),
+  ));
+
   return '';
 }
+
 
 
   private function get_email_lists() {
@@ -8126,10 +8388,12 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   public function rest_quote(WP_REST_Request $req) {
+  $request_id = 'quote_' . gmdate('Ymd_His') . '_' . wp_generate_password(8, false, false);
+
+  try {
+    $raw_params = $req->get_params();
+
     $sku = $this->sanitize_sku($req->get_param('sku'));
-    if (!$sku) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
-    }
 
     $context = array(
       'piece_slug' => sanitize_text_field((string)$req->get_param('piece_slug')),
@@ -8138,23 +8402,77 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       'subtitle' => sanitize_text_field((string)$req->get_param('subtitle')),
     );
 
+    $this->mrm_quote_debug_log('quote_start', array(
+      'request_id' => $request_id,
+      'raw_params' => $raw_params,
+      'sanitized_sku' => $sku,
+      'context' => $context,
+      'request_uri' => isset($_SERVER['REQUEST_URI']) ? sanitize_text_field((string)$_SERVER['REQUEST_URI']) : '',
+      'referer' => isset($_SERVER['HTTP_REFERER']) ? esc_url_raw((string)$_SERVER['HTTP_REFERER']) : '',
+    ));
+
+    if (!$sku) {
+      $this->mrm_quote_debug_log('quote_fail_missing_sku', array(
+        'request_id' => $request_id,
+      ));
+
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Missing sku.',
+        'debug_request_id' => $request_id,
+      ), 400);
+    }
+
     $resolved_sku = $this->mrm_resolve_active_product_sku($sku, $context);
+
+    $this->mrm_quote_debug_log('quote_after_resolver', array(
+      'request_id' => $request_id,
+      'incoming_sku' => $sku,
+      'resolved_sku' => $resolved_sku,
+    ));
+
     if ($resolved_sku !== '') {
       $sku = $resolved_sku;
     }
 
     $p = $this->get_product($sku);
+
+    $this->mrm_quote_debug_log('quote_product_lookup', array(
+      'request_id' => $request_id,
+      'lookup_sku' => $sku,
+      'product_exists' => is_array($p),
+      'product' => $this->mrm_quote_debug_product_summary($p),
+      'nearby_products' => is_array($p) ? array() : $this->mrm_quote_debug_nearby_product_keys($sku),
+    ));
+
     if (!$p) {
+      $this->mrm_quote_debug_log('quote_fail_unknown_sku', array(
+        'request_id' => $request_id,
+        'lookup_sku' => $sku,
+        'original_requested_sku' => $this->sanitize_sku($req->get_param('sku')),
+      ));
+
       return new WP_REST_Response(array(
-        'ok'=>false,
-        'message'=>'Unknown sku.',
+        'ok' => false,
+        'message' => 'Unknown sku.',
+        'debug_request_id' => $request_id,
+        'requested_sku' => $this->sanitize_sku($req->get_param('sku')),
+        'lookup_sku' => $sku,
       ), 404);
     }
 
     if (empty($p['active'])) {
+      $this->mrm_quote_debug_log('quote_fail_inactive_sku', array(
+        'request_id' => $request_id,
+        'lookup_sku' => $sku,
+        'product' => $this->mrm_quote_debug_product_summary($p),
+      ));
+
       return new WP_REST_Response(array(
-        'ok'=>false,
-        'message'=>'Inactive sku.',
+        'ok' => false,
+        'message' => 'Inactive sku.',
+        'debug_request_id' => $request_id,
+        'lookup_sku' => $sku,
       ), 404);
     }
 
@@ -8164,6 +8482,16 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $product_type = (string)($p['product_type'] ?? '');
     $product_category = (string)($p['category'] ?? '');
 
+    $this->mrm_quote_debug_log('quote_product_config', array(
+      'request_id' => $request_id,
+      'sku' => $sku,
+      'amount_cents' => $amount_cents,
+      'currency' => $currency,
+      'price_id_present' => $price_id !== '',
+      'product_type' => $product_type,
+      'product_category' => $product_category,
+    ));
+
     $is_inperson_lesson =
       ($product_type === 'lesson') &&
       (
@@ -8172,23 +8500,43 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       );
 
     $travel_amount_cents = $is_inperson_lesson ? $this->mrm_get_in_person_travel_cents() : 0;
+
     if ($travel_amount_cents > $amount_cents) {
       $travel_amount_cents = $amount_cents;
     }
+
     $base_amount_cents = max(0, $amount_cents - $travel_amount_cents);
 
-    // Hard fail: NEVER report ok:true with a non-positive amount
     if ($amount_cents <= 0) {
+      $this->mrm_quote_debug_log('quote_fail_pricing_not_configured', array(
+        'request_id' => $request_id,
+        'sku' => $sku,
+        'amount_cents' => $amount_cents,
+        'product' => $this->mrm_quote_debug_product_summary($p),
+      ));
+
       return new WP_REST_Response(array(
-        'ok'=>false,
-        'message'=>'Pricing is not configured for this sku.',
+        'ok' => false,
+        'message' => 'Pricing is not configured for this sku.',
+        'debug_request_id' => $request_id,
+        'lookup_sku' => $sku,
+        'amount_cents' => $amount_cents,
       ), 500);
     }
 
     if (!$currency) {
+      $this->mrm_quote_debug_log('quote_fail_currency_not_configured', array(
+        'request_id' => $request_id,
+        'sku' => $sku,
+        'currency' => $currency,
+        'product' => $this->mrm_quote_debug_product_summary($p),
+      ));
+
       return new WP_REST_Response(array(
-        'ok'=>false,
-        'message'=>'Currency is not configured for this sku.',
+        'ok' => false,
+        'message' => 'Currency is not configured for this sku.',
+        'debug_request_id' => $request_id,
+        'lookup_sku' => $sku,
       ), 500);
     }
 
@@ -8199,9 +8547,21 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       'line1' => (string)($req->get_param('line1') ?? ''),
     );
 
-    $preview_policy = $this->mrm_build_tax_policy($preview_address, (string)($p['product_type'] ?? 'unknown'), false, $p, array());
+    $this->mrm_quote_debug_log('quote_before_tax_preview', array(
+      'request_id' => $request_id,
+      'sku' => $sku,
+      'preview_address' => $preview_address,
+    ));
 
-    return new WP_REST_Response(array(
+    $preview_policy = $this->mrm_build_tax_policy(
+      $preview_address,
+      (string)($p['product_type'] ?? 'unknown'),
+      false,
+      $p,
+      array()
+    );
+
+    $response = array(
       'ok' => true,
       'sku' => $sku,
       'label' => (string)($p['label'] ?? $sku),
@@ -8217,10 +8577,39 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         'state' => (string)($preview_policy['jurisdiction']['state'] ?? ''),
         'country' => (string)($preview_policy['jurisdiction']['country'] ?? 'US'),
       ),
-      // Optional: only returned if you’ve stored it in products
       'price_id' => $price_id ? $price_id : null,
-    ), 200);
+      'debug_request_id' => $request_id,
+    );
+
+    $this->mrm_quote_debug_log('quote_success', array(
+      'request_id' => $request_id,
+      'response_summary' => array(
+        'sku' => $response['sku'],
+        'amount_cents' => $response['amount_cents'],
+        'currency' => $response['currency'],
+        'label' => $response['label'],
+      ),
+    ));
+
+    return new WP_REST_Response($response, 200);
+
+  } catch (Throwable $e) {
+    $this->mrm_quote_debug_log('quote_exception', array(
+      'request_id' => $request_id,
+      'message' => $e->getMessage(),
+      'file' => $e->getFile(),
+      'line' => $e->getLine(),
+      'trace' => $e->getTraceAsString(),
+    ));
+
+    return new WP_REST_Response(array(
+      'ok' => false,
+      'message' => 'Quote failed because Payments Hub hit a server-side error. Check wp-content/mrm-quote-debug.log.',
+      'debug_request_id' => $request_id,
+    ), 500);
   }
+}
+
 
   private function resolve_sheet_music_sku($piece_slug, $type) {
     $piece_slug = $this->slugify((string)$piece_slug);
