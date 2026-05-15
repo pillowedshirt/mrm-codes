@@ -3551,7 +3551,7 @@ function mrmInitPromoBox() {
       }
       mrmAppliedPromoCode = data.promo_code || code;
       mrmAppliedPromoDiscountCents = Number(data.discount_cents || 0);
-      mrmSetPromoMessage(`Code applied: ${data.discount_display || ''} off`, false);
+      mrmSetPromoMessage(data.promo_success_message || 'Promotional code applied.', false);
     } catch (err) {
       mrmAppliedPromoCode = '';
       mrmAppliedPromoDiscountCents = 0;
