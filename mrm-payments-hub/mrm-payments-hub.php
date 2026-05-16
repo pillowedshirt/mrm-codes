@@ -859,49 +859,35 @@ private function mrm_promo_date_in_window($promo, $context = array()) {
 }
 
 
+
 private function mrm_promo_rule_allows_context($promo, $context = array()) {
+  $promo = is_array($promo) ? $promo : array();
+  $context = is_array($context) ? $context : array();
   $rule_mode = (string)($promo['rule_mode'] ?? 'all');
   $occurrence_number = isset($context['occurrence_number']) ? max(1, absint($context['occurrence_number'])) : 1;
   $occurrence_count = isset($promo['occurrence_count']) ? max(0, absint($promo['occurrence_count'])) : 0;
-  $after_occurrence = isset($promo['after_occurrence']) ? max(0, absint($promo['after_occurrence'])) : 0;
-
-  if (!$this->mrm_promo_date_in_window($promo, $context)) {
-    return array('ok'=>false,'message'=>'This promotional code is not active for the current date.',);
-  }
-  if ($rule_mode === 'first_n') {
-    if ($occurrence_count > 0 && $occurrence_number > $occurrence_count) return array('ok'=>false,'message'=>'This promotional code has already reached its occurrence limit.',);
-  }
-  if ($rule_mode === 'after_n') {
-    if ($after_occurrence > 0 && $occurrence_number <= $after_occurrence) return array('ok'=>false,'message'=>'This promotional code starts after occurrence ' . $after_occurrence . '.',);
-  }
-  if ($rule_mode === 'first_n_months') {
-    $months = $occurrence_count > 0 ? $occurrence_count : 1;
-    $started_at = trim((string)($context['promo_started_at'] ?? ''));
-    if ($started_at !== '') {
-      $start_ts = strtotime($started_at);
-      $now_ts = !empty($context['now_ts']) ? (int)$context['now_ts'] : current_time('timestamp');
-      if ($start_ts) {
-        $end_ts = strtotime('+' . $months . ' months', $start_ts);
-        if ($end_ts && $now_ts >= $end_ts) return array('ok'=>false,'message'=>'This promotional code is outside its month-based discount window.',);
-      }
-    }
-  }
+  if (!$this->mrm_promo_date_in_window($promo, $context)) return array('ok'=>false,'message'=>'This promotional code is not active for the current date.',);
+  if ($rule_mode === 'first_n' && $occurrence_count > 0 && $occurrence_number > $occurrence_count) return array('ok'=>false,'message'=>'This promotional code has already reached its occurrence limit.',);
+  if ($rule_mode === 'after_n' && $occurrence_count > 0 && $occurrence_number <= $occurrence_count) return array('ok'=>false,'message'=>'This promotional code starts after occurrence ' . $occurrence_count . '.',);
+  if ($rule_mode === 'first_n_months') { $months = $occurrence_count > 0 ? $occurrence_count : 1; $started_at = trim((string)($context['promo_started_at'] ?? '')); if ($started_at !== '') { $start_ts = strtotime($started_at); $now_ts = !empty($context['now_ts']) ? (int)$context['now_ts'] : current_time('timestamp'); if ($start_ts) { $end_ts = strtotime('+' . $months . ' months', $start_ts); if ($end_ts && $now_ts >= $end_ts) return array('ok'=>false,'message'=>'This promotional code is outside its month-based discount window.',); } } }
   return array('ok'=>true,'message'=>'',);
 }
 
 private function mrm_promo_eligible_occurrences_for_context($promo, $context = array()) {
+  $promo = is_array($promo) ? $promo : array();
+  $context = is_array($context) ? $context : array();
+
   $lesson_count = isset($context['lesson_count']) ? max(1, absint($context['lesson_count'])) : 1;
   $occurrence_number = isset($context['occurrence_number']) ? max(1, absint($context['occurrence_number'])) : 1;
   $rule_mode = (string)($promo['rule_mode'] ?? 'all');
   $occurrence_count = isset($promo['occurrence_count']) ? max(0, absint($promo['occurrence_count'])) : 0;
-  $after_occurrence = isset($promo['after_occurrence']) ? max(0, absint($promo['after_occurrence'])) : 0;
   if ($rule_mode === 'first_n' && $occurrence_count > 0) {
     $eligible_remaining = max(0, $occurrence_count - ($occurrence_number - 1));
     return min($lesson_count, $eligible_remaining);
   }
-  if ($rule_mode === 'after_n' && $after_occurrence > 0) {
+  if ($rule_mode === 'after_n' && $occurrence_count > 0) {
     $eligible = 0;
-    for ($i = 0; $i < $lesson_count; $i++) { if ($occurrence_number + $i > $after_occurrence) $eligible++; }
+    for ($i = 0; $i < $lesson_count; $i++) { if ($occurrence_number + $i > $occurrence_count) $eligible++; }
     return min($lesson_count, $eligible);
   }
   return $lesson_count;
@@ -939,8 +925,6 @@ private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, 
   }
 
   $discount_type = (string)($promo['discount_type'] ?? 'percent');
-  $applies_to = (string)($promo['applies_to'] ?? 'all_items');
-
   $lesson_count = isset($context['lesson_count']) ? max(1, absint($context['lesson_count'])) : 1;
   $eligible_occurrences = $this->mrm_promo_eligible_occurrences_for_context($promo, $context);
 
@@ -957,11 +941,7 @@ private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, 
   if ($product_type === 'lesson') {
     $per_lesson_cents = (int)floor($base_amount_cents / $lesson_count);
 
-    if ($applies_to === 'first_item') {
-      $eligible_amount_cents = $per_lesson_cents;
-    } else {
-      $eligible_amount_cents = min($base_amount_cents, $per_lesson_cents * $eligible_occurrences);
-    }
+    $eligible_amount_cents = min($base_amount_cents, $per_lesson_cents * $eligible_occurrences);
   }
 
   $discount_cents = 0;
@@ -972,7 +952,7 @@ private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, 
   } else {
     $amount_off_cents = max(0, (int)($promo['amount_off_cents'] ?? 0));
 
-    if ($product_type === 'lesson' && $applies_to === 'all_items' && $lesson_count > 1) {
+    if ($product_type === 'lesson' && $lesson_count > 1) {
       $discount_cents = min($amount_off_cents * $eligible_occurrences, $eligible_amount_cents);
     } else {
       $discount_cents = min($amount_off_cents, $eligible_amount_cents);
@@ -10940,7 +10920,7 @@ public function render_promo_codes_page() {
 
     <p>
       Create promotional codes for lessons, sheet music, prepaid lessons, and autopay lesson charges.
-      Occurrence-based rules are especially useful for autopay or prepaid lesson promotions.
+      Rule Mode and Occurrence Count now control all item/occurrence behavior.
     </p>
 
     <style>
@@ -10971,10 +10951,10 @@ public function render_promo_codes_page() {
       <div class="mrm-promo-field" style="margin-top:6px;"><label>Percent</label><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['percent_off'] ?? 0)); ?>" style="width:80px;" />%</div>
       <div class="mrm-promo-field" style="margin-top:6px;"><label>Amount</label><input type="text" name="promo_amount_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr(number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2)); ?>" style="width:90px;" /></div></td>
       <td><div class="mrm-promo-field"><label>Purchase Type</label><select name="promo_scope[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected((string)($promo['scope'] ?? 'all'), 'all'); ?>>Lessons + Sheet Music</option><option value="lesson" <?php selected((string)($promo['scope'] ?? 'all'), 'lesson'); ?>>Lessons Only</option><option value="sheet_music" <?php selected((string)($promo['scope'] ?? 'all'), 'sheet_music'); ?>>Sheet Music Only</option></select></div>
-      <div class="mrm-promo-field" style="margin-top:6px;"><label>Item Rule</label><select name="promo_applies_to[<?php echo esc_attr($i); ?>]"><option value="first_item" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'first_item'); ?>>First Item Only</option><option value="all_items" <?php selected((string)($promo['applies_to'] ?? 'all_items'), 'all_items'); ?>>All Eligible Items</option></select></div></td>
+      <input type="hidden" name="promo_applies_to[<?php echo esc_attr($i); ?>]" value="all_items" /></td>
       <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected($rule_mode, 'all'); ?>>All qualifying purchases</option><option value="first_n" <?php selected($rule_mode, 'first_n'); ?>>First N occurrences</option><option value="after_n" <?php selected($rule_mode, 'after_n'); ?>>After N occurrences</option><option value="first_n_months" <?php selected($rule_mode, 'first_n_months'); ?>>First N months</option><option value="date_window" <?php selected($rule_mode, 'date_window'); ?>>Date window</option></select></div>
       <div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)$occurrence_count); ?>" style="width:110px;" /><div class="description">Used for First N occurrences or First N months.</div></div>
-      <div class="mrm-promo-field"><label>After Occurrence</label><input type="number" min="0" name="promo_after_occurrence[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)$after_occurrence); ?>" style="width:110px;" /><div class="description">For “After N occurrences.” Example: 8 starts on occurrence 9.</div></div>
+      
       <div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($starts_at); ?>" /></div>
       <div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($expires_at); ?>" /></div></div>
       <div style="margin-top:10px;"><label><input type="checkbox" name="promo_reusable_per_email[<?php echo esc_attr($i); ?>]" value="1" <?php checked($reusable_per_email); ?> /> Reusable by the same email</label><p class="description" style="margin-top:3px;">When checked, the same email can redeem this promo more than once. Each paid use is still recorded below.</p></div></td>
@@ -10984,8 +10964,8 @@ public function render_promo_codes_page() {
       <?php $i++; endforeach; $new_i = $i; ?>
       <tr><td><input type="text" name="promo_code[<?php echo esc_attr($new_i); ?>]" placeholder="WELCOME10" style="width:120px;" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($new_i); ?>]" placeholder="Welcome discount" style="width:160px;" /></td>
       <td><div class="mrm-promo-field"><label>Type</label><select name="promo_discount_type[<?php echo esc_attr($new_i); ?>]"><option value="percent">Percentage</option><option value="amount">Dollar Amount</option></select></div><div class="mrm-promo-field" style="margin-top:6px;"><label>Percent</label><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($new_i); ?>]" value="0" style="width:80px;" />%</div><div class="mrm-promo-field" style="margin-top:6px;"><label>Amount</label><input type="text" name="promo_amount_off[<?php echo esc_attr($new_i); ?>]" value="0.00" style="width:90px;" /></div></td>
-      <td><div class="mrm-promo-field"><label>Purchase Type</label><select name="promo_scope[<?php echo esc_attr($new_i); ?>]"><option value="all">Lessons + Sheet Music</option><option value="lesson">Lessons Only</option><option value="sheet_music">Sheet Music Only</option></select></div><div class="mrm-promo-field" style="margin-top:6px;"><label>Item Rule</label><select name="promo_applies_to[<?php echo esc_attr($new_i); ?>]"><option value="first_item">First Item Only</option><option value="all_items" selected>All Eligible Items</option></select></div></td>
-      <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($new_i); ?>]"><option value="all">All qualifying purchases</option><option value="first_n">First N occurrences</option><option value="after_n">After N occurrences</option><option value="first_n_months">First N months</option><option value="date_window">Date window</option></select></div><div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($new_i); ?>]" value="0" style="width:110px;" /></div><div class="mrm-promo-field"><label>After Occurrence</label><input type="number" min="0" name="promo_after_occurrence[<?php echo esc_attr($new_i); ?>]" value="0" style="width:110px;" /></div><div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($new_i); ?>]" /></div><div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($new_i); ?>]" /></div></div><div style="margin-top:10px;"><label><input type="checkbox" name="promo_reusable_per_email[<?php echo esc_attr($new_i); ?>]" value="1" /> Reusable by the same email</label></div></td><td></td></tr>
+      <td><div class="mrm-promo-field"><label>Purchase Type</label><select name="promo_scope[<?php echo esc_attr($new_i); ?>]"><option value="all">Lessons + Sheet Music</option><option value="lesson">Lessons Only</option><option value="sheet_music">Sheet Music Only</option></select></div><input type="hidden" name="promo_applies_to[<?php echo esc_attr($new_i); ?>]" value="all_items" /></td>
+      <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($new_i); ?>]"><option value="all">All qualifying purchases</option><option value="first_n">First N occurrences</option><option value="after_n">After N occurrences</option><option value="first_n_months">First N months</option><option value="date_window">Date window</option></select></div><div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($new_i); ?>]" value="0" style="width:110px;" /></div><div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($new_i); ?>]" /></div><div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($new_i); ?>]" /></div></div><div style="margin-top:10px;"><label><input type="checkbox" name="promo_reusable_per_email[<?php echo esc_attr($new_i); ?>]" value="1" /> Reusable by the same email</label></div></td><td></td></tr>
       </tbody></table>
       <p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>
     </form>
@@ -11988,8 +11968,7 @@ public function render_access_lists_page() {
   $applies_to = isset($_POST['promo_applies_to']) ? (array)$_POST['promo_applies_to'] : array();
   $rule_modes = isset($_POST['promo_rule_mode']) ? (array)$_POST['promo_rule_mode'] : array();
   $occurrence_counts = isset($_POST['promo_occurrence_count']) ? (array)$_POST['promo_occurrence_count'] : array();
-  $after_occurrences = isset($_POST['promo_after_occurrence']) ? (array)$_POST['promo_after_occurrence'] : array();
-  $starts = isset($_POST['promo_starts_at']) ? (array)$_POST['promo_starts_at'] : array();
+    $starts = isset($_POST['promo_starts_at']) ? (array)$_POST['promo_starts_at'] : array();
   $expires = isset($_POST['promo_expires_at']) ? (array)$_POST['promo_expires_at'] : array();
   $reusable_per_email = isset($_POST['promo_reusable_per_email']) ? (array)$_POST['promo_reusable_per_email'] : array();
   $deletes = isset($_POST['promo_delete']) ? (array)$_POST['promo_delete'] : array();
@@ -12015,10 +11994,11 @@ public function render_access_lists_page() {
       $scope = 'all';
     }
 
-    $apply = sanitize_text_field((string)($applies_to[$i] ?? 'all_items'));
-    if (!in_array($apply, array('first_item', 'all_items'), true)) {
-      $apply = 'all_items';
-    }
+    /*
+ * Item Rule has been removed from the admin UI.
+ * Keep the saved key for backward compatibility, but always use all_items.
+ */
+    $apply = 'all_items';
 
     $rule_mode = sanitize_text_field((string)($rule_modes[$i] ?? 'all'));
     if (!in_array($rule_mode, array('all', 'first_n', 'after_n', 'first_n_months', 'date_window'), true)) {
@@ -12029,8 +12009,7 @@ public function render_access_lists_page() {
     $amount_cents = $this->mrm_money_to_cents($amount_offs[$i] ?? '0.00', 0);
 
     $occurrence_count = max(0, absint($occurrence_counts[$i] ?? 0));
-    $after_occurrence = max(0, absint($after_occurrences[$i] ?? 0));
-
+    
     $starts_at = sanitize_text_field((string)($starts[$i] ?? ''));
     if ($starts_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $starts_at)) {
       $starts_at = '';
@@ -12041,7 +12020,7 @@ public function render_access_lists_page() {
       $expires_at = '';
     }
 
-    $codes[$code] = array( 'code' => $code, 'label' => sanitize_text_field((string)($labels[$i] ?? '')), 'discount_type' => $discount_type, 'percent_off' => $percent, 'amount_off_cents' => max(0, (int)$amount_cents), 'scope' => $scope, 'applies_to' => $apply, 'rule_mode' => $rule_mode, 'occurrence_count' => $occurrence_count, 'after_occurrence' => $after_occurrence, 'starts_at' => $starts_at, 'expires_at' => $expires_at, 'reusable_per_email' => !empty($reusable_per_email[$i]) ? 1 : 0, 'active' => 1, 'updated_at' => current_time('mysql'), );
+    $codes[$code] = array( 'code' => $code, 'label' => sanitize_text_field((string)($labels[$i] ?? '')), 'discount_type' => $discount_type, 'percent_off' => $percent, 'amount_off_cents' => max(0, (int)$amount_cents), 'scope' => $scope, 'applies_to' => $apply, 'rule_mode' => $rule_mode, 'occurrence_count' => $occurrence_count, 'after_occurrence' => 0, 'starts_at' => $starts_at, 'expires_at' => $expires_at, 'reusable_per_email' => !empty($reusable_per_email[$i]) ? 1 : 0, 'active' => 1, 'updated_at' => current_time('mysql'), );
   }
 
   $this->mrm_save_promo_codes($codes);
