@@ -3580,7 +3580,7 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
 
     const stripeInstance = ensureStripe(data.publishableKey || '');
     if (!stripeInstance) {
-      if (errorEl) errorEl.textContent = 'Stripe is not configured.';
+      if (errorEl) errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
       if (payBtn) payBtn.disabled = false;
       return false;
     }
@@ -4076,7 +4076,7 @@ function ensureLegacyBookingHandler(){
 
           const stripeInstance = ensureStripe(createData.publishableKey || '');
           if (!stripeInstance) {
-            setMsg('Stripe is not configured.');
+            setMsg('Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
             btn.disabled = false;
             return;
           }
@@ -4230,7 +4230,7 @@ function ensureLegacyBookingHandler(){
 
         const stripeInstance = ensureStripe(createData.publishableKey || '');
         if (!stripeInstance) {
-          setMsg('Stripe is not configured.');
+          setMsg('Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
           return;
         }
         stripe = stripeInstance;
@@ -6052,12 +6052,7 @@ function loadInstructors(){
           return instructorSupportsSelectedLessonType(i);
         });
 
-        console.log('[MRM Scheduler] instructor filter', {
-          stateCode,
-          selectedInstrumentKey,
-          totalInstructors: Array.isArray(list) ? list.length : 0,
-          filteredCount: filtered.length
-        });
+        // Instructor list filtered for the selected state, instrument, and lesson type.
 
         window.__mrmLastRenderedInstructors = Array.isArray(filtered) ? filtered : [];
 

@@ -1552,13 +1552,8 @@ private function get_settings() {
   }
 
   private function mrm_quote_debug_enabled() {
-  /**
-   * Temporary diagnostic switch.
-   *
-   * Set this to false after the issue is diagnosed.
-   */
-  return true;
-}
+    return (defined('WP_DEBUG') && WP_DEBUG && current_user_can('manage_options'));
+  }
 
 private function mrm_quote_debug_log($event, $data = array()) {
   if (!$this->mrm_quote_debug_enabled()) {
@@ -6746,17 +6741,6 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     $this->link_order($order_id, 'lesson', (string)$lesson_id);
 
-      if ($autopay_promo_code !== '' && $autopay_promo_discount_cents > 0) {
-        $this->mrm_reserve_promo_redemption(
-          $autopay_promo_code,
-          (string)($profile['email_hash'] ?? ''),
-          $order_id,
-          '',
-          (string)($lesson['student_email'] ?? ''),
-          is_array($autopay_promo['promo'] ?? null) ? $autopay_promo['promo'] : array()
-        );
-      }
-
     $lesson_length = (int)($lesson['lesson_length'] ?? 0);
     $is_online = !empty($lesson['is_online']);
 
@@ -7597,17 +7581,6 @@ private function charge_and_unlock_autopay($data) {
     );
 
     $this->link_order($order_id, 'lesson', (string)$lesson_id);
-
-      if ($autopay_promo_code !== '' && $autopay_promo_discount_cents > 0) {
-        $this->mrm_reserve_promo_redemption(
-          $autopay_promo_code,
-          (string)($profile['email_hash'] ?? ''),
-          $order_id,
-          '',
-          (string)($lesson['student_email'] ?? ''),
-          is_array($autopay_promo['promo'] ?? null) ? $autopay_promo['promo'] : array()
-        );
-      }
 
     $pi = $this->stripe_create_offsession_payment_intent(
       $amount_cents,
@@ -8857,7 +8830,10 @@ private function charge_and_unlock_autopay($data) {
     if (!$type) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing type.'), 400);
 
     $sku = $this->resolve_sheet_music_sku($piece_slug, $type);
-    if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
+    if (!$sku) return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.',
+      ), 404);
 
     $p = $this->get_product($sku);
     return new WP_REST_Response(array(
@@ -8880,8 +8856,19 @@ private function charge_and_unlock_autopay($data) {
     $terms_version  = sanitize_text_field( (string) ( $context['terms_version'] ?? '' ) );
     $source_flow    = sanitize_text_field( (string) ( $context['source_flow'] ?? '' ) );
 
-    if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
-    if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+    if (!$sku) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.',
+      ), 400);
+    }
+
+    if (!$email || !is_email($email)) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Please enter a valid email address.',
+      ), 400);
+    }
 
     $resolved_sku = $this->mrm_resolve_active_product_sku($sku, $context);
     if ($resolved_sku !== '') {
@@ -8890,7 +8877,10 @@ private function charge_and_unlock_autopay($data) {
 
     $p = $this->get_product($sku);
     if (!$p || empty($p['active'])) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.',
+      ), 404);
     }
 
     $product_type = (string)($p['product_type'] ?? 'unknown');
@@ -9313,8 +9303,7 @@ private function charge_and_unlock_autopay($data) {
           )
           : array('is_resuming' => false)
       ),
-      // For debugging. Remove later if you want.
-      'metadata' => $metadata,
+      // Public response intentionally excludes raw Stripe/order metadata.
     ), 200);
   }
 
@@ -9358,6 +9347,29 @@ private function charge_and_unlock_autopay($data) {
 
     $email_hash = $this->email_hash($email);
     $now = current_time('mysql');
+
+    /*
+     * Idempotency guard: do not create multiple autopay profiles for the same
+     * successful first-payment order if the frontend retries or refreshes.
+     */
+    $existing_order_for_autopay = $this->get_order_by_pi($payment_intent_id);
+    if ($existing_order_for_autopay && !empty($existing_order_for_autopay['metadata_json'])) {
+      $existing_meta = json_decode((string)$existing_order_for_autopay['metadata_json'], true);
+      if (is_array($existing_meta) && !empty($existing_meta['mrm_autopay_profile_id'])) {
+        $existing_profile_id = absint($existing_meta['mrm_autopay_profile_id']);
+        if ($existing_profile_id > 0) {
+          return new WP_REST_Response(array(
+            'ok' => true,
+            'autopay_profile_id' => $existing_profile_id,
+            'customer_id' => $customer_id,
+            'payment_method_id' => $payment_method_id,
+            'plan_kind' => ($repeat_duration === 'indefinitely') ? 'indefinite' : 'bounded',
+            'authorized_lesson_count' => (int)$authorized_lesson_count,
+            'already_created' => true,
+          ), 200);
+        }
+      }
+    }
 
     $wpdb->insert($this->table_autopay_profiles(), array(
   'instructor_id' => (int)$instructor_id,
@@ -9564,6 +9576,29 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
 
     $email_hash = $this->email_hash($email);
     $now = current_time('mysql');
+
+    /*
+     * Idempotency guard: do not create multiple autopay profiles for the same
+     * successful first-payment order if the frontend retries or refreshes.
+     */
+    $existing_order_for_autopay = $this->get_order_by_pi($payment_intent_id);
+    if ($existing_order_for_autopay && !empty($existing_order_for_autopay['metadata_json'])) {
+      $existing_meta = json_decode((string)$existing_order_for_autopay['metadata_json'], true);
+      if (is_array($existing_meta) && !empty($existing_meta['mrm_autopay_profile_id'])) {
+        $existing_profile_id = absint($existing_meta['mrm_autopay_profile_id']);
+        if ($existing_profile_id > 0) {
+          return new WP_REST_Response(array(
+            'ok' => true,
+            'autopay_profile_id' => $existing_profile_id,
+            'customer_id' => $customer_id,
+            'payment_method_id' => $payment_method_id,
+            'plan_kind' => ($repeat_duration === 'indefinitely') ? 'indefinite' : 'bounded',
+            'authorized_lesson_count' => (int)$authorized_lesson_count,
+            'already_created' => true,
+          ), 200);
+        }
+      }
+    }
 
     $pm_live = $this->stripe_retrieve_payment_method($payment_method_id);
     $pm_snap = !is_wp_error($pm_live) ? $this->mrm_extract_card_snapshot_from_payment_method($pm_live) : array(
@@ -10066,17 +10101,34 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     $email = sanitize_email((string)($data['email'] ?? ''));
     $pi_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
 
-    // If payment_intent_id is provided, verify it succeeded and bind grant inputs to PI metadata.
-    // This prevents stale/mismatched frontend state from granting the wrong product/email.
+    $is_admin_manual_grant = current_user_can('manage_options');
+
+    /*
+     * Public access grants must always be backed by a succeeded Stripe PaymentIntent.
+     * Admin/manual grants are still allowed for logged-in administrators only.
+     */
+    if (!$pi_id && !$is_admin_manual_grant) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'We could not confirm payment for this purchase. Please contact Low Brass Lessons for assistance.',
+      ), 403);
+    }
+
     if ($pi_id) {
       $pi = $this->stripe_retrieve_payment_intent($pi_id);
       if (is_wp_error($pi)) {
-        return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'message' => 'We could not confirm payment for this purchase. Please contact Low Brass Lessons for assistance.',
+        ), 500);
       }
 
       $status = (string)($pi['status'] ?? '');
       if ($status !== 'succeeded') {
-        return new WP_REST_Response(array('ok'=>false,'message'=>'PaymentIntent not succeeded.'), 400);
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'message' => 'Payment has not been completed yet.',
+        ), 400);
       }
 
       $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
@@ -10084,31 +10136,43 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       $pi_sku = $this->sanitize_sku((string)($meta['mrm_sku'] ?? ''));
       $pi_email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
 
-      // Prefer PI metadata as the source of truth when available.
       if ($pi_sku) {
-        if ($sku && $sku !== $pi_sku) {
-        }
         $sku = $pi_sku;
       }
 
       if ($pi_email && is_email($pi_email)) {
-        if ($email && strtolower($email) !== strtolower($pi_email)) {
-        }
         $email = $pi_email;
       }
     }
 
-    if (!$sku) return new WP_REST_Response(array('ok'=>false,'message'=>'Missing sku.'), 400);
-    if (!$email || !is_email($email)) return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
+    if (!$sku) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.',
+      ), 400);
+    }
+
+    if (!$email || !is_email($email)) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Please enter a valid email address.',
+      ), 400);
+    }
 
     $p = $this->get_product($sku);
     if (!$p || empty($p['active'])) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive sku.'), 404);
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.',
+      ), 404);
     }
 
     $product_type = (string)($p['product_type'] ?? 'unknown');
     if ($product_type !== 'sheet_music') {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'SKU is not sheet_music.'), 400);
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'This purchase could not be completed for the selected item.',
+      ), 400);
     }
 
     // DB guard (updates can skip activation hook)
@@ -10953,7 +11017,7 @@ public function render_promo_codes_page() {
       <td><div class="mrm-promo-field"><label>Purchase Type</label><select name="promo_scope[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected((string)($promo['scope'] ?? 'all'), 'all'); ?>>Lessons + Sheet Music</option><option value="lesson" <?php selected((string)($promo['scope'] ?? 'all'), 'lesson'); ?>>Lessons Only</option><option value="sheet_music" <?php selected((string)($promo['scope'] ?? 'all'), 'sheet_music'); ?>>Sheet Music Only</option></select></div>
       <input type="hidden" name="promo_applies_to[<?php echo esc_attr($i); ?>]" value="all_items" /></td>
       <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected($rule_mode, 'all'); ?>>All qualifying purchases</option><option value="first_n" <?php selected($rule_mode, 'first_n'); ?>>First N occurrences</option><option value="after_n" <?php selected($rule_mode, 'after_n'); ?>>After N occurrences</option><option value="first_n_months" <?php selected($rule_mode, 'first_n_months'); ?>>First N months</option><option value="date_window" <?php selected($rule_mode, 'date_window'); ?>>Date window</option></select></div>
-      <div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)$occurrence_count); ?>" style="width:110px;" /><div class="description">Used for First N occurrences or First N months.</div></div>
+      <div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)$occurrence_count); ?>" style="width:110px;" /><div class="description">Used by First N occurrences, After N occurrences, and First N months.</div></div>
       
       <div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($starts_at); ?>" /></div>
       <div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($expires_at); ?>" /></div></div>
