@@ -2843,9 +2843,10 @@ function offerRowTemplate(pieceIndex){
         }
 
         $token = array(
-            'email' => $email_hash,
-            'sku'   => $sku,
-            'exp'   => time() + HOUR_IN_SECONDS * 6,
+            'email'        => $email_hash,
+            'product_slug' => $sku,
+            'sku'          => $sku,
+            'exp'          => time() + HOUR_IN_SECONDS * 6,
         );
 
         $options     = $this->get_options();

@@ -1709,7 +1709,7 @@ async function getOfferSkuCandidates(offerEl) {
     offerEl.dataset.resolvedSku = '';
     offerEl.dataset.skuValid = '0';
     setOfferButtonsEnabled(offerEl, false);
-    setOfferStatus(offerEl, 'This offer is missing a product slug in MRM Access → Purchasing Options (Offers).');
+    setOfferStatus(offerEl, 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
     return '';
   }
 
@@ -1741,11 +1741,7 @@ async function getOfferSkuCandidates(offerEl) {
   setOfferButtonsEnabled(offerEl, true);
   setOfferStatus(offerEl, '');
 
-  console.info('[MRM] Offer initialized without blocking page-load quote validation', {
-    raw_offer_slug: rawSku,
-    selected_sku: offerEl.dataset.resolvedSku,
-    piece_slug: getPieceSlugFromUrl()
-  });
+  // Offer initialized.
 
   return offerEl.dataset.resolvedSku;
 }
@@ -1763,7 +1759,7 @@ async function getOfferSkuCandidates(offerEl) {
 
   const rawSku = String(offerEl.dataset.productSlug || '').trim().toLowerCase();
   if (!rawSku) {
-    throw new Error('This offer is missing a product slug in MRM Access → Purchasing Options (Offers).');
+    throw new Error('This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
   }
 
   const initializedSku = await primeOfferSkuState(offerEl);
@@ -1974,7 +1970,7 @@ async function getOfferSkuCandidates(offerEl) {
         if (pendingClientSecret || activePaymentElement) return;
 
         if (!pendingSku) {
-          errorEl.textContent = 'Missing SKU.';
+          errorEl.textContent = 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
           payBtn.disabled = true;
           return;
         }
@@ -2006,7 +2002,7 @@ async function getOfferSkuCandidates(offerEl) {
 
           const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
           if (!stripeInstance) {
-            errorEl.textContent = 'Stripe is not configured.';
+            errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
             payBtn.disabled = true;
             return;
           }
@@ -2726,7 +2722,7 @@ async function getOfferSkuCandidates(offerEl) {
         errorEl.textContent = '';
 
         if (!pendingSku) {
-          errorEl.textContent = 'Missing SKU.';
+          errorEl.textContent = 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
           return;
         }
         if (!document.getElementById('mrm-piece-payment-terms')?.checked) {
@@ -2898,16 +2894,11 @@ async function getOfferSkuCandidates(offerEl) {
           String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase();
 
         if (!sku) {
-          alert('This offer is missing a product slug in MRM Access → Purchasing Options (Offers).');
+          alert('This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
           return;
         }
 
-        console.info('[MRM] Opening access modal for offer', {
-          sku,
-          raw_offer_slug: offerEl ? (offerEl.dataset.productSlug || '').trim() : '',
-          resolved_sku: offerEl ? (offerEl.dataset.resolvedSku || '').trim() : '',
-          piece_slug: getPieceSlugFromUrl()
-        });
+        // Open access modal for the selected offer.
 
         openOtpModal(sku);
       });
@@ -2991,8 +2982,7 @@ async function getOfferSkuCandidates(offerEl) {
         let data=null;
         try{ data = JSON.parse(txt); }catch(e){ data=null; }
         if(!r.ok){
-          console.log('RAW RESPONSE (request-otp):', activeProductSlug, r.status, txt);
-          messageDiv.textContent='Server error. Check Console.';
+          messageDiv.textContent='We could not send a code right now. Please try again or contact Low Brass Lessons.';
           return null;
         }
         return data || {};
@@ -3026,9 +3016,8 @@ async function getOfferSkuCandidates(offerEl) {
         const txt = await r.text();
         let data=null;
         try{ data = JSON.parse(txt); }catch(e){ data=null; }
-        console.log('RAW RESPONSE (verify-otp):', activeProductSlug, r.status, txt);
         if(!r.ok){
-          messageDiv.textContent=(data && data.message) ? data.message : 'Server error. Check Console.';
+          messageDiv.textContent=(data && data.message) ? data.message : 'We could not verify that code right now. Please try again.';
           return null;
         }
         return data || {};

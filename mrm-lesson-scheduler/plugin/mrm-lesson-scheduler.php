@@ -2828,6 +2828,133 @@ protected function mrm_get_google_service_account_json() {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No slots selected.' ), 400 );
         }
 
+        /*
+         * Payment integrity guard.
+         * Public booking requests may not create paid/autopay-linked lessons unless
+         * the referenced Payments Hub records prove payment and ownership.
+         */
+        $requires_paid_order = in_array( $payment_mode, array( 'one_time', 'prepay', 'autopay' ), true );
+
+        if ( $requires_paid_order ) {
+            if ( $order_id <= 0 ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'Payment confirmation is required before booking this lesson.',
+                    ),
+                    403
+                );
+            }
+
+            $orders_table = $wpdb->prefix . 'mrm_pay_orders';
+            $orders_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) );
+
+            if ( $orders_exists !== $orders_table ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'Payment confirmation is temporarily unavailable. Please contact Low Brass Lessons.',
+                    ),
+                    500
+                );
+            }
+
+            $order = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT id, customer_email, product_type, status, metadata_json
+                     FROM {$orders_table}
+                     WHERE id = %d
+                     LIMIT 1",
+                    $order_id
+                ),
+                ARRAY_A
+            );
+
+            $paid_statuses = array( 'paid', 'completed', 'succeeded' );
+
+            if (
+                ! is_array( $order )
+                || empty( $order['id'] )
+                || (string) ( $order['product_type'] ?? '' ) !== 'lesson'
+                || ! in_array( (string) ( $order['status'] ?? '' ), $paid_statuses, true )
+            ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'Payment confirmation is required before booking this lesson.',
+                    ),
+                    403
+                );
+            }
+
+            $order_email = sanitize_email( (string) ( $order['customer_email'] ?? '' ) );
+            if ( $order_email && strtolower( $order_email ) !== strtolower( $student_email ) ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'Payment confirmation does not match the booking email.',
+                    ),
+                    403
+                );
+            }
+        }
+
+        if ( $payment_mode === 'autopay' ) {
+            if ( $autopay_profile_id <= 0 ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'AutoPay confirmation is required before booking this lesson.',
+                    ),
+                    403
+                );
+            }
+
+            $autopay_table = $wpdb->prefix . 'mrm_autopay_profiles';
+            $autopay_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $autopay_table ) );
+
+            if ( $autopay_exists !== $autopay_table ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'AutoPay confirmation is temporarily unavailable. Please contact Low Brass Lessons.',
+                    ),
+                    500
+                );
+            }
+
+            $profile = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT id, email_hash, active
+                     FROM {$autopay_table}
+                     WHERE id = %d
+                     LIMIT 1",
+                    $autopay_profile_id
+                ),
+                ARRAY_A
+            );
+
+            $expected_hash = hash( 'sha256', strtolower( trim( $student_email ) ) );
+
+            if (
+                ! is_array( $profile )
+                || empty( $profile['id'] )
+                || empty( $profile['active'] )
+                || (
+                    ! empty( $profile['email_hash'] )
+                    && ! hash_equals( (string) $profile['email_hash'], $expected_hash )
+                )
+            ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'AutoPay confirmation does not match the booking email.',
+                    ),
+                    403
+                );
+            }
+        }
+
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $lessons_table ) );
         if ( $exists !== $lessons_table ) {
