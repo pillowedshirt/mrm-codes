@@ -7,17 +7,25 @@
  * Author: Your Name
  *
  * Google Calendar integration:
- * - Service Account JSON stored in wp_options (autoload disabled)
+ * - Service Account JSON loaded from AWS Secrets Manager
  * - /availability supports:
  *   "Free" events define availability windows (calendar-driven scheduling)
  *
  * SECURITY NOTE:
- * Service Account JSON contains a private key. Restrict admin access and keep backups safe.
+ * Service Account JSON contains a private key. Keep AWS credentials and secret access tightly restricted.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
+
+$autoload = ABSPATH . 'vendor/autoload.php';
+if ( file_exists( $autoload ) ) {
+    require_once $autoload;
+}
+
+use Aws\SecretsManager\SecretsManagerClient;
+use Aws\Exception\AwsException;
 
 /**
  * Main plugin class. Encapsulates all functionality for the scheduler.
@@ -26,17 +34,589 @@ class MRM_Lesson_Scheduler {
     protected static $instance;
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
-    const DB_VERSION = '1.5.1';
+    protected $mrm_secret_diagnostics = array();
+    const DB_VERSION = '1.5.8';
     const CAPABILITY = 'manage_options';
+    const TERMS_VERSION = '2026-04-25';
     // Google endpoints
     const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
     const GOOGLE_FREEBUSY_URL = 'https://www.googleapis.com/calendar/v3/freeBusy';
     // Google events list endpoint
     const GOOGLE_EVENTS_LIST_URL = 'https://www.googleapis.com/calendar/v3/calendars/%s/events';
 
+    protected function mrm_aws_debug_log( $message, $context = array() ) {
+        return;
+    }
+
+    protected function mrm_set_secret_diagnostic( $secret_id, $data ) {
+        $secret_id = (string) $secret_id;
+
+        if ( ! is_array( $data ) ) {
+            $data = array();
+        }
+
+        $safe = array();
+
+        foreach ( $data as $key => $value ) {
+            if ( is_array( $value ) ) {
+                $safe[ $key ] = $value;
+            } elseif ( is_bool( $value ) || is_numeric( $value ) || $value === null ) {
+                $safe[ $key ] = $value;
+            } else {
+                $safe[ $key ] = sanitize_text_field( (string) $value );
+            }
+        }
+
+        $this->mrm_secret_diagnostics[ $secret_id ] = $safe;
+    }
+
+    protected function mrm_get_secret_diagnostic( $secret_id ) {
+        $secret_id = (string) $secret_id;
+
+        return isset( $this->mrm_secret_diagnostics[ $secret_id ] ) && is_array( $this->mrm_secret_diagnostics[ $secret_id ] )
+            ? $this->mrm_secret_diagnostics[ $secret_id ]
+            : array();
+    }
+
+    protected function mrm_secret_diagnostic_summary_html( $secret_id ) {
+        $diag = $this->mrm_get_secret_diagnostic( $secret_id );
+
+        if ( empty( $diag ) ) {
+            return '<p class="description">No AWS diagnostic information is available yet. Click “Refresh AWS Tax Secret Cache” and reload this page.</p>';
+        }
+
+        $status = isset( $diag['status'] ) ? (string) $diag['status'] : 'unknown';
+        $region = isset( $diag['region'] ) ? (string) $diag['region'] : ( defined( 'MRM_AWS_REGION' ) ? MRM_AWS_REGION : 'not defined' );
+        $message = isset( $diag['message'] ) ? (string) $diag['message'] : '';
+
+        $html  = '<p class="description"><strong>AWS diagnostic:</strong> <code>' . esc_html( $status ) . '</code></p>';
+        $html .= '<p class="description">Region used by site: <code>' . esc_html( $region ) . '</code></p>';
+
+        if ( $message !== '' ) {
+            $html .= '<p class="description">Details: ' . esc_html( $message ) . '</p>';
+        }
+
+        if ( ! empty( $diag['aws_error_code'] ) ) {
+            $html .= '<p class="description">AWS error code: <code>' . esc_html( (string) $diag['aws_error_code'] ) . '</code></p>';
+        }
+
+        if ( ! empty( $diag['top_level_keys'] ) && is_array( $diag['top_level_keys'] ) ) {
+            $html .= '<p class="description">Top-level JSON keys found: <code>' . esc_html( implode( ', ', array_map( 'strval', $diag['top_level_keys'] ) ) ) . '</code></p>';
+        }
+
+        return $html;
+    }
+
+    protected function mrm_get_secret_json( $secret_id, $cache_key ) {
+        $secret_id = (string) $secret_id;
+        $cache_key = (string) $cache_key;
+        $this->mrm_aws_debug_log( 'Scheduler AWS call started', array( 'secret_id' => $secret_id, 'cache_key' => $cache_key ) );
+        $cached = get_transient( $cache_key );
+        if ( is_array( $cached ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'cache_hit', 'message' => 'Secret loaded from WordPress transient cache.', 'region' => defined( 'MRM_AWS_REGION' ) ? MRM_AWS_REGION : 'not defined', 'top_level_keys' => array_keys( $cached ) ) ); return $cached; }
+        if ( ! defined( 'MRM_AWS_REGION' ) || ! defined( 'MRM_AWS_ACCESS_KEY_ID' ) || ! defined( 'MRM_AWS_SECRET_ACCESS_KEY' ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'missing_aws_constants', 'message' => 'One or more required AWS constants are missing in wp-config.php.', 'region_defined' => defined( 'MRM_AWS_REGION' ) ? 'yes' : 'no', 'key_defined' => defined( 'MRM_AWS_ACCESS_KEY_ID' ) ? 'yes' : 'no', 'secret_defined' => defined( 'MRM_AWS_SECRET_ACCESS_KEY' ) ? 'yes' : 'no' ) ); return null; }
+        if ( ! class_exists( '\Aws\SecretsManager\SecretsManagerClient' ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'aws_sdk_missing', 'message' => 'The AWS SDK class Aws\\SecretsManager\\SecretsManagerClient is not available to this plugin.', 'region' => MRM_AWS_REGION ) ); return null; }
+        try {
+            $client = new SecretsManagerClient( array( 'version' => 'latest', 'region' => MRM_AWS_REGION, 'credentials' => array( 'key' => MRM_AWS_ACCESS_KEY_ID, 'secret' => MRM_AWS_SECRET_ACCESS_KEY ) ) );
+            $result = $client->getSecretValue( array( 'SecretId' => $secret_id ) );
+            if ( empty( $result['SecretString'] ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'empty_secret_string', 'message' => 'AWS returned the secret, but SecretString was empty.', 'region' => MRM_AWS_REGION ) ); return null; }
+            $secret_string = (string) $result['SecretString']; $decoded = json_decode( $secret_string, true );
+            if ( ! is_array( $decoded ) ) { $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'json_decode_failed', 'message' => 'SecretString was returned by AWS, but it was not valid JSON.', 'region' => MRM_AWS_REGION, 'json_error' => json_last_error_msg(), 'secret_string_length' => strlen( $secret_string ) ) ); return null; }
+            $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'loaded_from_aws', 'message' => 'Secret was successfully loaded and decoded from AWS Secrets Manager.', 'region' => MRM_AWS_REGION, 'top_level_keys' => array_keys( $decoded ) ) );
+            set_transient( $cache_key, $decoded, 15 * MINUTE_IN_SECONDS );
+            return $decoded;
+        } catch ( AwsException $e ) {
+            $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'aws_exception', 'message' => $e->getAwsErrorMessage(), 'aws_error_code' => $e->getAwsErrorCode(), 'region' => MRM_AWS_REGION ) );
+            return null;
+        } catch ( \Throwable $e ) {
+            $this->mrm_set_secret_diagnostic( $secret_id, array( 'status' => 'php_exception', 'message' => $e->getMessage(), 'region' => MRM_AWS_REGION ) );
+            return null;
+        }
+    }
+
+    protected function mrm_get_1099_tax_secret_id() {
+        return defined( 'MRM_SECRET_TAX_1099_PROFILES' ) ? MRM_SECRET_TAX_1099_PROFILES : 'lowbrass/tax/1099-profiles';
+    }
+
+    protected function mrm_normalize_1099_tax_secret_bundle( $secret ) {
+        if ( ! is_array( $secret ) ) {
+            return array();
+        }
+        if ( isset( $secret['payer'] ) || isset( $secret['composer'] ) || isset( $secret['instructors'] ) ) {
+            return $secret;
+        }
+        $possible_wrappers = array( 'tax_profiles', '1099_profiles', 'profiles', 'data', 'secret', 'SecretString', 'lowbrass/tax/1099-profiles' );
+        foreach ( $possible_wrappers as $key ) {
+            if ( ! array_key_exists( $key, $secret ) ) { continue; }
+            $value = $secret[ $key ];
+            if ( is_array( $value ) && ( isset( $value['payer'] ) || isset( $value['composer'] ) || isset( $value['instructors'] ) ) ) { return $value; }
+            if ( is_string( $value ) && trim( $value ) !== '' ) {
+                $decoded = json_decode( $value, true );
+                if ( is_array( $decoded ) && ( isset( $decoded['payer'] ) || isset( $decoded['composer'] ) || isset( $decoded['instructors'] ) ) ) { return $decoded; }
+            }
+        }
+        if ( count( $secret ) === 1 ) {
+            $only_value = reset( $secret );
+            if ( is_string( $only_value ) && trim( $only_value ) !== '' ) {
+                $decoded = json_decode( $only_value, true );
+                if ( is_array( $decoded ) && ( isset( $decoded['payer'] ) || isset( $decoded['composer'] ) || isset( $decoded['instructors'] ) ) ) { return $decoded; }
+            }
+            if ( is_array( $only_value ) && ( isset( $only_value['payer'] ) || isset( $only_value['composer'] ) || isset( $only_value['instructors'] ) ) ) { return $only_value; }
+        }
+        return $secret;
+    }
+
+    protected function mrm_get_1099_tax_secret_bundle() {
+        $secret_id = $this->mrm_get_1099_tax_secret_id();
+        if ( isset( $_GET['mrm_refresh_tax_secret'] ) && current_user_can( 'manage_options' ) ) { delete_transient( 'mrm_secret_tax_1099_profiles_v1' ); }
+        $secret = $this->mrm_get_secret_json( $secret_id, 'mrm_secret_tax_1099_profiles_v1' );
+        if ( ! is_array( $secret ) ) { return array(); }
+        $normalized = $this->mrm_normalize_1099_tax_secret_bundle( $secret );
+        $diag = $this->mrm_get_secret_diagnostic( $secret_id );
+        if ( is_array( $normalized ) ) { $diag['normalized_top_level_keys'] = array_keys( $normalized ); $this->mrm_set_secret_diagnostic( $secret_id, $diag ); }
+        return is_array( $normalized ) ? $normalized : array();
+    }
+
+    protected function mrm_normalize_1099_tax_secret_record( $record ) {
+        if ( ! is_array( $record ) ) {
+            return array( 'tin_type' => '', 'tin' => '', 'last4' => '', 'loaded' => false );
+        }
+        $tin_types = array_keys( $this->mrm_1099_tin_type_options() );
+        $tin_type = isset( $record['tin_type'] ) ? sanitize_key( (string) $record['tin_type'] ) : '';
+        if ( ! in_array( $tin_type, $tin_types, true ) || $tin_type === 'unknown' ) {
+            $tin_type = '';
+        }
+        $tin = isset( $record['tin'] ) ? substr( $this->mrm_1099_digits_only( (string) $record['tin'] ), 0, 9 ) : '';
+        return array( 'tin_type' => $tin_type, 'tin' => $tin, 'last4' => $tin !== '' ? substr( $tin, -4 ) : '', 'loaded' => $tin_type !== '' && strlen( $tin ) === 9 );
+    }
+
+    protected function mrm_get_1099_tax_secret_record( $payee_type, $related_instructor_id = 0 ) {
+        $bundle = $this->mrm_get_1099_tax_secret_bundle();
+        $payee_type = strtolower( (string) $payee_type );
+        if ( $payee_type === 'payer' ) {
+            return $this->mrm_normalize_1099_tax_secret_record( $bundle['payer'] ?? array() );
+        }
+        if ( $payee_type === 'composer' ) {
+            return $this->mrm_normalize_1099_tax_secret_record( $bundle['composer'] ?? array() );
+        }
+        if ( $payee_type === 'instructor' ) {
+            $instructor_id = (string) absint( $related_instructor_id );
+            $instructors = isset( $bundle['instructors'] ) && is_array( $bundle['instructors'] ) ? $bundle['instructors'] : array();
+            return $this->mrm_normalize_1099_tax_secret_record( $instructors[ $instructor_id ] ?? array() );
+        }
+        return $this->mrm_normalize_1099_tax_secret_record( array() );
+    }
+
+    protected function mrm_apply_aws_tax_secret_to_payer( $payer ) {
+        $payer = is_array( $payer ) ? $payer : array();
+        $secret = $this->mrm_get_1099_tax_secret_record( 'payer' );
+        if ( ! empty( $secret['loaded'] ) ) {
+            $payer['ein_full_temp'] = $secret['tin'];
+            $payer['ein_last4'] = $secret['last4'];
+        } else {
+            $payer['ein_full_temp'] = '';
+        }
+        return $payer;
+    }
+
+    protected function mrm_apply_aws_tax_secret_to_payee( $payee ) {
+        $payee = is_array( $payee ) ? $payee : array();
+        $payee_type = (string) ( $payee['payee_type'] ?? '' );
+        $related_instructor_id = (int) ( $payee['related_instructor_id'] ?? 0 );
+        if ( $payee_type === 'composer' ) {
+            $secret = $this->mrm_get_1099_tax_secret_record( 'composer' );
+        } elseif ( $payee_type === 'instructor' ) {
+            $secret = $this->mrm_get_1099_tax_secret_record( 'instructor', $related_instructor_id );
+        } else {
+            $secret = $this->mrm_normalize_1099_tax_secret_record( array() );
+        }
+        if ( ! empty( $secret['loaded'] ) ) {
+            $payee['tin_type'] = $secret['tin_type'];
+            $payee['tin_full_temp'] = $secret['tin'];
+            $payee['tin_last4'] = $secret['last4'];
+        } else {
+            $payee['tin_full_temp'] = '';
+        }
+        return $payee;
+    }
+
+    protected function mrm_get_1099_aws_tax_preflight_issues( $payees ) {
+        $issues = array();
+        $payer = $this->mrm_get_1099_tax_secret_record( 'payer' );
+        if ( empty( $payer['loaded'] ) ) { $issues[] = 'Payer EIN is not available from AWS path payer.tin.'; }
+        foreach ( (array) $payees as $payee ) {
+            $payee_type = (string) ( $payee['payee_type'] ?? '' );
+            if ( $payee_type === 'composer' ) {
+                $secret = $this->mrm_get_1099_tax_secret_record( 'composer' );
+                if ( empty( $secret['loaded'] ) ) { $name = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? 'Composer' ) ); $issues[] = 'Composer TIN is not available from AWS path composer.tin for ' . $name . '.'; }
+            }
+            if ( $payee_type === 'instructor' ) {
+                $instructor_id = (int) ( $payee['related_instructor_id'] ?? 0 );
+                $secret = $this->mrm_get_1099_tax_secret_record( 'instructor', $instructor_id );
+                if ( empty( $secret['loaded'] ) ) { $name = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? ( 'Instructor ' . $instructor_id ) ) ); $issues[] = 'Instructor TIN is not available from AWS path instructors.' . $instructor_id . '.tin for ' . $name . '.'; }
+            }
+        }
+        return $issues;
+    }
+
+    protected function mrm_aws_tax_secret_status_html( $payee_type, $related_instructor_id = 0 ) {
+        $secret_id = $this->mrm_get_1099_tax_secret_id();
+        $secret = $this->mrm_get_1099_tax_secret_record( $payee_type, $related_instructor_id );
+        if ( ! empty( $secret['loaded'] ) ) { return '<span style="color:#166534;"><strong>Configured in AWS Secrets Manager</strong></span><br><span class="description">TIN type: <code>' . esc_html( strtoupper( $secret['tin_type'] ) ) . '</code> · Last four: <code>' . esc_html( $secret['last4'] ) . '</code></span>'; }
+        $path = '';
+        if ( $payee_type === 'payer' ) { $path = 'payer.tin'; } elseif ( $payee_type === 'composer' ) { $path = 'composer.tin'; } elseif ( $payee_type === 'instructor' ) { $path = 'instructors.' . absint( $related_instructor_id ) . '.tin'; }
+        $html  = '<span style="color:#b32d2e;"><strong>Tax ID not available from AWS Secrets Manager</strong></span>';
+        $html .= '<br><span class="description">Expected secret: <code>' . esc_html( $secret_id ) . '</code></span>';
+        if ( $path !== '' ) { $html .= '<br><span class="description">Expected JSON path: <code>' . esc_html( $path ) . '</code></span>'; }
+        $html .= $this->mrm_secret_diagnostic_summary_html( $secret_id );
+        return $html;
+    }
+
+    protected function mrm_first_non_empty_google_string($candidates, $keys) {
+        if ( ! is_array( $candidates ) ) {
+            return '';
+        }
+
+        foreach ( $candidates as $candidate ) {
+            if ( ! is_array( $candidate ) ) {
+                continue;
+            }
+
+            foreach ( $keys as $key ) {
+                if ( ! array_key_exists( $key, $candidate ) ) {
+                    continue;
+                }
+
+                $value = $candidate[ $key ];
+
+                if ( is_array( $value ) || is_object( $value ) ) {
+                    continue;
+                }
+
+                $value = trim( (string) $value );
+                if ( $value !== '' ) {
+                    return $value;
+                }
+            }
+        }
+
+        return '';
+    }
+
+    protected function mrm_normalize_google_scheduler_secret_bundle( $secret ) {
+        if ( ! is_array( $secret ) ) {
+            return null;
+        }
+
+        $service_account_json = '';
+        $sync_secret = '';
+        $maps_distance_api_key = '';
+
+        // Case 1: Wrapped service account JSON in expected key.
+        if ( array_key_exists( 'service_account_json', $secret ) ) {
+            if ( is_string( $secret['service_account_json'] ) && trim( $secret['service_account_json'] ) !== '' ) {
+                $service_account_json = trim( (string) $secret['service_account_json'] );
+            } elseif ( is_array( $secret['service_account_json'] ) && ! empty( $secret['service_account_json'] ) ) {
+                $encoded = wp_json_encode( $secret['service_account_json'] );
+                if ( is_string( $encoded ) && $encoded !== '' ) {
+                    $service_account_json = $encoded;
+                }
+            }
+        }
+
+        // Case 2: Raw top-level Google service account object.
+        if (
+            $service_account_json === '' &&
+            ! empty( $secret['client_email'] ) &&
+            ! empty( $secret['private_key'] )
+        ) {
+            $raw_service_account = $secret;
+            unset(
+                $raw_service_account['sync_secret'],
+                $raw_service_account['google_sync_secret'],
+                $raw_service_account['sync_token']
+            );
+
+            $encoded = wp_json_encode( $raw_service_account );
+            if ( is_string( $encoded ) && $encoded !== '' ) {
+                $service_account_json = $encoded;
+            }
+        }
+
+        // Case 3: Nested service account objects.
+        if ( $service_account_json === '' ) {
+            foreach ( array( 'service_account', 'google_service_account', 'google', 'credentials' ) as $nested_key ) {
+                if ( ! isset( $secret[ $nested_key ] ) || ! is_array( $secret[ $nested_key ] ) ) {
+                    continue;
+                }
+
+                $candidate = $secret[ $nested_key ];
+                if ( empty( $candidate['client_email'] ) || empty( $candidate['private_key'] ) ) {
+                    continue;
+                }
+
+                $encoded = wp_json_encode( $candidate );
+                if ( is_string( $encoded ) && $encoded !== '' ) {
+                    $service_account_json = $encoded;
+                    break;
+                }
+            }
+        }
+
+        $sync_secret = $this->mrm_first_non_empty_google_string(
+            array( $secret ),
+            array( 'sync_secret', 'google_sync_secret', 'sync_token' )
+        );
+
+        $maps_distance_api_key = $this->mrm_first_non_empty_google_string(
+            array( $secret ),
+            array( 'maps_distance_api_key' )
+        );
+
+        return array(
+            'service_account_json'    => $service_account_json,
+            'sync_secret'             => $sync_secret,
+            'maps_distance_api_key'   => $maps_distance_api_key,
+            '_raw_keys'               => array_keys( $secret ),
+        );
+    }
+
+    protected function mrm_get_google_scheduler_secret_bundle() {
+        if ( ! defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ) {
+            $this->mrm_aws_debug_log( 'MRM Google AWS secret constant MRM_SECRET_GOOGLE_SCHEDULER is not defined.' );
+            return null;
+        }
+
+        $secret = $this->mrm_get_secret_json(
+            MRM_SECRET_GOOGLE_SCHEDULER,
+            'mrm_secret_google_scheduler_v5'
+        );
+
+        if ( ! is_array( $secret ) ) {
+            $this->mrm_aws_debug_log( 'MRM Google AWS secret bundle could not be loaded from Secrets Manager.', array(
+                'secret_id' => MRM_SECRET_GOOGLE_SCHEDULER,
+            ) );
+            return null;
+        }
+
+        $normalized = $this->mrm_normalize_google_scheduler_secret_bundle( $secret );
+
+        if ( ! is_array( $normalized ) ) {
+            $this->mrm_aws_debug_log( 'MRM Google AWS secret bundle normalization failed.', array(
+                'secret_id' => MRM_SECRET_GOOGLE_SCHEDULER,
+            ) );
+            return null;
+        }
+
+        $context = array(
+            'secret_id' => MRM_SECRET_GOOGLE_SCHEDULER,
+            'raw_keys_present' => array_keys( $secret ),
+            'has_service_account_json' => ! empty( $normalized['service_account_json'] ),
+            'has_sync_secret' => ! empty( $normalized['sync_secret'] ),
+            'has_maps_distance_api_key' => ! empty( $normalized['maps_distance_api_key'] ),
+        );
+
+        if ( ! empty( $normalized['service_account_json'] ) ) {
+            $context['service_account_json_length'] = strlen( $normalized['service_account_json'] );
+            $context['service_account_json_preview'] = substr( $normalized['service_account_json'], 0, 120 );
+        }
+
+        if ( ! empty( $normalized['sync_secret'] ) ) {
+            $context['sync_secret_length'] = strlen( $normalized['sync_secret'] );
+        }
+
+        $this->mrm_aws_debug_log( 'MRM Google AWS secret bundle loaded and normalized.', $context );
+
+        return $normalized;
+    }
+
+    protected function mrm_google_service_account_uses_aws() {
+        $secret = $this->mrm_get_google_scheduler_secret_bundle();
+
+        if ( ! is_array( $secret ) || ! array_key_exists( 'service_account_json', $secret ) ) {
+            return false;
+        }
+
+        if ( is_string( $secret['service_account_json'] ) && trim( $secret['service_account_json'] ) !== '' ) {
+            return true;
+        }
+
+        if ( is_array( $secret['service_account_json'] ) && ! empty( $secret['service_account_json'] ) ) {
+            return true;
+        }
+
+        return false;
+    }
+
+protected function mrm_get_google_service_account_json() {
+    $secret = $this->mrm_get_google_scheduler_secret_bundle();
+
+    if ( is_array( $secret ) && array_key_exists( 'service_account_json', $secret ) ) {
+        if ( is_string( $secret['service_account_json'] ) && trim( $secret['service_account_json'] ) !== '' ) {
+            $this->mrm_aws_debug_log( 'Scheduler using AWS service_account_json as string', array(
+                'length' => strlen( $secret['service_account_json'] ),
+                'preview' => substr( $secret['service_account_json'], 0, 120 ),
+            ) );
+            return (string) $secret['service_account_json'];
+        }
+
+        if ( is_array( $secret['service_account_json'] ) && ! empty( $secret['service_account_json'] ) ) {
+            $encoded = wp_json_encode( $secret['service_account_json'] );
+            if ( is_string( $encoded ) && $encoded !== '' ) {
+                $this->mrm_aws_debug_log( 'Scheduler using AWS service_account_json after array re-encode', array(
+                    'length' => strlen( $encoded ),
+                    'keys' => array_keys( $secret['service_account_json'] ),
+                ) );
+                return $encoded;
+            }
+        }
+
+        $this->mrm_aws_debug_log( 'Scheduler found AWS service_account_json but it was unusable', array(
+            'type' => gettype( $secret['service_account_json'] ),
+        ) );
+        return '';
+    }
+
+    $this->mrm_aws_debug_log( 'Scheduler missing AWS service_account_json. AWS-only mode active.' );
+    return '';
+}
+
+    protected function mrm_get_google_sync_secret() {
+        $secret = $this->mrm_get_google_scheduler_secret_bundle();
+        if ( is_array( $secret ) && ! empty( $secret['sync_secret'] ) ) {
+            return (string) $secret['sync_secret'];
+        }
+
+        $this->mrm_aws_debug_log( 'Scheduler missing AWS sync_secret. AWS-only mode active.' );
+        return '';
+    }
+
+    protected function log_google_api_failure( $label, $url, $res ) {
+        if ( ! defined( 'WP_DEBUG' ) || ! WP_DEBUG ) {
+            return;
+        }
+
+        if ( is_wp_error( $res ) ) {
+            return;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code( $res );
+        $body = (string) wp_remote_retrieve_body( $res );
+
+        $decoded = json_decode( $body, true );
+        $message = '';
+        $status  = '';
+        $reason  = '';
+
+        if ( is_array( $decoded ) && ! empty( $decoded['error'] ) ) {
+            if ( is_array( $decoded['error'] ) ) {
+                $message = (string) ( $decoded['error']['message'] ?? '' );
+                $status  = (string) ( $decoded['error']['status'] ?? '' );
+
+                if ( ! empty( $decoded['error']['errors'] ) && is_array( $decoded['error']['errors'] ) ) {
+                    $first_reason = $decoded['error']['errors'][0]['reason'] ?? '';
+                    $reason = is_scalar( $first_reason ) ? (string) $first_reason : '';
+                }
+            } elseif ( is_scalar( $decoded['error'] ) ) {
+                $message = (string) $decoded['error'];
+            }
+        }
+
+    }
+
+    protected function mrm_finalization_debug_log( $message, $context = array() ) {
+        return;
+    }
+
+
+    protected function mrm_safety_log( $message, $context = array() ) {
+        return;
+    }
+
+    protected function maybe_log_safety_boot( $message, $context = array(), $ttl = 900 ) {
+        $cache_key = 'mrm_safety_boot_' . md5( (string) $message );
+
+        if ( get_transient( $cache_key ) ) {
+            return;
+        }
+
+        set_transient( $cache_key, '1', max( 60, (int) $ttl ) );
+        $this->mrm_safety_log( $message, $context );
+    }
+
+    public function ensure_scheduler_runtime_cron_hooks() {
+        $hooks = array(
+            array(
+                'hook'     => 'mrm_scheduler_sync_upcoming_events',
+                'schedule' => 'mrm_1min',
+                'offset'   => 60,
+            ),
+            array(
+                'hook'     => 'mrm_scheduler_reconcile_completed_lessons',
+                'schedule' => 'mrm_1min',
+                'offset'   => 70,
+            ),
+            array(
+                'hook'     => 'mrm_scheduler_reconcile_cancelled_lessons',
+                'schedule' => 'mrm_1min',
+                'offset'   => 80,
+            ),
+            array(
+                'hook'     => 'mrm_scheduler_finalize_old_lessons',
+                'schedule' => 'hourly',
+                'offset'   => 300,
+            ),
+            array(
+                'hook'     => 'mrm_scheduler_send_safety_reminders',
+                'schedule' => 'mrm_5min',
+                'offset'   => 90,
+            ),
+            array(
+                'hook'     => 'mrm_scheduler_check_safety_exceptions',
+                'schedule' => 'mrm_5min',
+                'offset'   => 120,
+            ),
+            array(
+                'hook'     => 'mrm_scheduler_send_feedback_requests',
+                'schedule' => 'mrm_5min',
+                'offset'   => 150,
+            ),
+        );
+
+        foreach ( $hooks as $hook_config ) {
+            $hook     = (string) $hook_config['hook'];
+            $schedule = (string) $hook_config['schedule'];
+            $offset   = (int) $hook_config['offset'];
+
+            $next = wp_next_scheduled( $hook );
+
+            if ( $next ) {
+                $this->mrm_safety_log( 'cron_hook_already_scheduled', array(
+                    'hook'               => $hook,
+                    'schedule'           => $schedule,
+                    'next_run_local'     => wp_date( 'Y-m-d H:i:s', $next, wp_timezone() ),
+                    'next_run_utc'       => gmdate( 'Y-m-d H:i:s', $next ),
+                    'next_run_timestamp' => (int) $next,
+                ) );
+                continue;
+            }
+
+            wp_schedule_event( time() + $offset, $schedule, $hook );
+
+            $scheduled = wp_next_scheduled( $hook );
+
+            $this->mrm_safety_log( 'scheduled_cron_hook', array(
+                'hook'                    => $hook,
+                'schedule'                => $schedule,
+                'scheduled_for_local'     => $scheduled ? wp_date( 'Y-m-d H:i:s', $scheduled, wp_timezone() ) : '',
+                'scheduled_for_utc'       => $scheduled ? gmdate( 'Y-m-d H:i:s', $scheduled ) : '',
+                'scheduled_for_timestamp' => $scheduled ? (int) $scheduled : 0,
+            ) );
+        }
+    }
+
+
     // Get a single Google Calendar event
     protected function google_get_event( $calendar_id, $event_id ) {
-        // Prevent double-encoding of calendar IDs stored as %40, etc.
         $calendar_id = rawurldecode( trim( (string) $calendar_id ) );
 
         if ( ! $this->google_is_configured() ) {
@@ -44,7 +624,9 @@ class MRM_Lesson_Scheduler {
         }
 
         $access_token = $this->google_get_access_token();
-        if ( is_wp_error( $access_token ) ) return $access_token;
+        if ( is_wp_error( $access_token ) ) {
+            return $access_token;
+        }
 
         $url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( (string) $calendar_id ) .
                '/events/' . rawurlencode( (string) $event_id );
@@ -56,12 +638,16 @@ class MRM_Lesson_Scheduler {
             ),
         ) );
 
-        if ( is_wp_error( $res ) ) return $res;
+        if ( is_wp_error( $res ) ) {
+            $this->log_google_api_failure( 'google_get_event_wp_error', $url, $res );
+            return $res;
+        }
 
         $code = (int) wp_remote_retrieve_response_code( $res );
         $json = json_decode( wp_remote_retrieve_body( $res ), true );
 
         if ( $code < 200 || $code >= 300 || ! is_array( $json ) ) {
+            $this->log_google_api_failure( 'google_get_event_failed', $url, $res );
             return new WP_Error( 'google_get_event_failed', 'Google Calendar event fetch failed.' );
         }
 
@@ -70,22 +656,37 @@ class MRM_Lesson_Scheduler {
 
     // List instances for a recurring Google Calendar event (master -> instances)
     protected function google_list_event_instances( $calendar_id, $event_id, $time_min_rfc3339, $time_max_rfc3339 ) {
-        // Prevent double-encoding of calendar IDs stored as %40, etc.
         $calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+        $event_id    = trim( (string) $event_id );
 
         if ( ! $this->google_is_configured() ) {
             return new WP_Error( 'google_not_configured', 'Google Calendar is not configured.' );
         }
 
+        if ( $calendar_id === '' ) {
+            return new WP_Error( 'google_calendar_missing', 'Google Calendar ID is missing.' );
+        }
+
+        if ( $event_id === '' ) {
+            return new WP_Error( 'google_event_missing', 'Google event ID is missing.' );
+        }
+
+        $range = $this->normalize_google_time_range( $time_min_rfc3339, $time_max_rfc3339 );
+        if ( is_wp_error( $range ) ) {
+            return $range;
+        }
+
         $access_token = $this->google_get_access_token();
-        if ( is_wp_error( $access_token ) ) return $access_token;
+        if ( is_wp_error( $access_token ) ) {
+            return $access_token;
+        }
 
         $base = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( (string) $calendar_id ) .
                 '/events/' . rawurlencode( (string) $event_id ) . '/instances';
 
         $url = add_query_arg( array(
-            'timeMin'     => $time_min_rfc3339,
-            'timeMax'     => $time_max_rfc3339,
+            'timeMin'     => $range['timeMin'],
+            'timeMax'     => $range['timeMax'],
             'showDeleted' => 'false',
             'maxResults'  => 2500,
         ), $base );
@@ -97,36 +698,54 @@ class MRM_Lesson_Scheduler {
             ),
         ) );
 
-        if ( is_wp_error( $res ) ) return $res;
+        if ( is_wp_error( $res ) ) {
+            $this->log_google_api_failure( 'google_list_instances_wp_error', $url, $res );
+            return $res;
+        }
 
         $code = (int) wp_remote_retrieve_response_code( $res );
         $json = json_decode( wp_remote_retrieve_body( $res ), true );
 
         if ( $code < 200 || $code >= 300 || ! is_array( $json ) ) {
+            $this->log_google_api_failure( 'google_list_instances_failed', $url, $res );
             return new WP_Error( 'google_list_instances_failed', 'Google Calendar events.instances failed.' );
+        }
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         }
 
         return $json;
     }
 
+
     // List Google Calendar events for a window (Pattern B)
     protected function google_list_events( $calendar_id, $time_min_rfc3339, $time_max_rfc3339 ) {
-        // Prevent double-encoding of calendar IDs stored as %40, etc.
         $calendar_id = rawurldecode( trim( (string) $calendar_id ) );
 
         if ( ! $this->google_is_configured() ) {
             return new WP_Error( 'google_not_configured', 'Google Calendar is not configured.' );
         }
 
+        if ( $calendar_id === '' ) {
+            return new WP_Error( 'google_calendar_missing', 'Google Calendar ID is missing.' );
+        }
+
+        $range = $this->normalize_google_time_range( $time_min_rfc3339, $time_max_rfc3339 );
+        if ( is_wp_error( $range ) ) {
+            return $range;
+        }
+
         $access_token = $this->google_get_access_token();
-        if ( is_wp_error( $access_token ) ) return $access_token;
+        if ( is_wp_error( $access_token ) ) {
+            return $access_token;
+        }
 
         $base = sprintf( self::GOOGLE_EVENTS_LIST_URL, rawurlencode( (string) $calendar_id ) );
 
         $url = add_query_arg( array(
-            'timeMin'      => $time_min_rfc3339,
-            'timeMax'      => $time_max_rfc3339,
-            'singleEvents' => 'true',   // IMPORTANT: expands recurring instances
+            'timeMin'      => $range['timeMin'],
+            'timeMax'      => $range['timeMax'],
+            'singleEvents' => 'true',
             'showDeleted'  => 'false',
             'maxResults'   => 2500,
             'orderBy'      => 'startTime',
@@ -139,17 +758,25 @@ class MRM_Lesson_Scheduler {
             ),
         ) );
 
-        if ( is_wp_error( $res ) ) return $res;
+        if ( is_wp_error( $res ) ) {
+            $this->log_google_api_failure( 'google_list_events_wp_error', $url, $res );
+            return $res;
+        }
 
         $code = (int) wp_remote_retrieve_response_code( $res );
         $json = json_decode( wp_remote_retrieve_body( $res ), true );
 
         if ( $code < 200 || $code >= 300 || ! is_array( $json ) ) {
+            $this->log_google_api_failure( 'google_list_events_failed', $url, $res );
             return new WP_Error( 'google_list_events_failed', 'Google Calendar events.list failed.' );
+        }
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         }
 
         return $json;
     }
+
 
     /**
      * Find the correct Google Calendar event instance for a given booking_id
@@ -167,16 +794,62 @@ class MRM_Lesson_Scheduler {
         }
 
         $booking_id = (int) $booking_id;
-        if ( ! $booking_id ) return null;
+        if ( ! $booking_id ) {
+            return null;
+        }
 
-        $events = $this->google_list_events( $calendar_id, $timeMin, $timeMax );
-        if ( is_wp_error( $events ) ) return $events;
+        if ( $calendar_id === '' ) {
+            return new WP_Error( 'google_calendar_missing', 'Google Calendar ID is missing.' );
+        }
 
-        // google_list_events returns an array of events (items)
-        if ( ! is_array( $events ) || empty( $events ) ) return null;
+        $range = $this->normalize_google_time_range( $timeMin, $timeMax );
+        if ( is_wp_error( $range ) ) {
+            return $range;
+        }
 
-        $items = isset( $events['items'] ) && is_array( $events['items'] ) ? $events['items'] : array();
-        if ( empty( $items ) ) return null;
+        $access_token = $this->google_get_access_token();
+        if ( is_wp_error( $access_token ) ) {
+            return $access_token;
+        }
+
+        $base = sprintf( self::GOOGLE_EVENTS_LIST_URL, rawurlencode( (string) $calendar_id ) );
+
+        $url = add_query_arg( array(
+            'timeMin'                 => $range['timeMin'],
+            'timeMax'                 => $range['timeMax'],
+            'singleEvents'            => 'true',
+            'showDeleted'             => 'false',
+            'maxResults'              => 2500,
+            'orderBy'                 => 'startTime',
+            'privateExtendedProperty' => 'booking_id=' . $booking_id,
+        ), $base );
+
+        $res = wp_remote_get( $url, array(
+            'timeout' => 20,
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $access_token,
+            ),
+        ) );
+
+        if ( is_wp_error( $res ) ) {
+            $this->log_google_api_failure( 'google_find_event_by_booking_id_wp_error', $url, $res );
+            return $res;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code( $res );
+        $json = json_decode( wp_remote_retrieve_body( $res ), true );
+
+        if ( $code < 200 || $code >= 300 || ! is_array( $json ) ) {
+            $this->log_google_api_failure( 'google_find_event_by_booking_id_failed', $url, $res );
+            return new WP_Error( 'google_find_event_by_booking_id_failed', 'Google Calendar booking_id lookup failed.' );
+        }
+
+        $items = isset( $json['items'] ) && is_array( $json['items'] ) ? $json['items'] : array();
+        if ( empty( $items ) ) {
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            }
+            return null;
+        }
 
         foreach ( $items as $ev ) {
             $bid = 0;
@@ -184,12 +857,15 @@ class MRM_Lesson_Scheduler {
                 $bid = (int) $ev['extendedProperties']['private']['booking_id'];
             }
             if ( $bid === $booking_id ) {
+                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                }
                 return $ev;
             }
         }
 
         return null;
     }
+
 
     // From an instances.list payload, find the instance matching booking_id
     protected function google_find_instance_by_booking_id( $instances_payload, $booking_id ) {
@@ -213,6 +889,1109 @@ class MRM_Lesson_Scheduler {
         return null;
     }
 
+
+    protected function log_google_resolve_stage( $lesson_row, $stage, $extra = array() ) {
+        if ( ! defined( 'WP_DEBUG' ) || ! WP_DEBUG ) {
+            return;
+        }
+
+        $lesson_id  = (int) ( $lesson_row['id'] ?? 0 );
+        $series_id  = (int) ( $lesson_row['series_id'] ?? 0 );
+        $event_id   = (string) ( $lesson_row['google_event_id'] ?? '' );
+        $instance_id = (string) ( $lesson_row['google_instance_event_id'] ?? '' );
+        $anchor     = (string) ( $lesson_row['google_original_start_time'] ?? '' );
+        $start_time = (string) ( $lesson_row['start_time'] ?? '' );
+        $end_time   = (string) ( $lesson_row['end_time'] ?? '' );
+
+        $parts = array(
+            '[MRM] google_resolve_stage',
+            'lesson_id=' . $lesson_id,
+            'series_id=' . $series_id,
+            'stage=' . (string) $stage,
+            'google_event_id=' . $event_id,
+            'google_instance_event_id=' . $instance_id,
+            'anchor=' . $anchor,
+            'start_time=' . $start_time,
+            'end_time=' . $end_time,
+        );
+
+        if ( is_array( $extra ) ) {
+            foreach ( $extra as $k => $v ) {
+                if ( is_scalar( $v ) || $v === null ) {
+                    $parts[] = sanitize_key( (string) $k ) . '=' . (string) $v;
+                } else {
+                    $parts[] = sanitize_key( (string) $k ) . '=' . wp_json_encode( $v );
+                }
+            }
+        }
+
+    }
+
+    protected function google_event_original_start_to_mysql( $event ) {
+        if ( ! is_array( $event ) ) {
+            return '';
+        }
+
+        if ( ! empty( $event['originalStartTime']['dateTime'] ) ) {
+            $ts = strtotime( (string) $event['originalStartTime']['dateTime'] );
+            return $ts ? gmdate( 'Y-m-d H:i:s', $ts ) : '';
+        }
+
+        if ( ! empty( $event['originalStartTime']['date'] ) ) {
+            $ts = strtotime( (string) $event['originalStartTime']['date'] . ' 00:00:00 UTC' );
+            return $ts ? gmdate( 'Y-m-d H:i:s', $ts ) : '';
+        }
+
+        return '';
+    }
+
+    protected function google_event_is_recurring_master( $event ) {
+        return (
+            is_array( $event ) &&
+            ! empty( $event['recurrence'] ) &&
+            is_array( $event['recurrence'] )
+        );
+    }
+
+    protected function google_list_events_with_private_property( $calendar_id, $timeMin, $timeMax, $property_clause ) {
+        $calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+
+        if ( ! $this->google_is_configured() ) {
+            return new WP_Error( 'google_not_configured', 'Google Calendar is not configured.' );
+        }
+
+        $property_clause = trim( (string) $property_clause );
+        if ( $property_clause === '' ) {
+            return new WP_Error( 'missing_property_clause', 'Missing private property clause.' );
+        }
+
+        if ( $calendar_id === '' ) {
+            return new WP_Error( 'google_calendar_missing', 'Google Calendar ID is missing.' );
+        }
+
+        $range = $this->normalize_google_time_range( $timeMin, $timeMax );
+        if ( is_wp_error( $range ) ) {
+            return $range;
+        }
+
+        $access_token = $this->google_get_access_token();
+        if ( is_wp_error( $access_token ) ) {
+            return $access_token;
+        }
+
+        $base = sprintf( self::GOOGLE_EVENTS_LIST_URL, rawurlencode( (string) $calendar_id ) );
+
+        $url = add_query_arg( array(
+            'timeMin'                 => $range['timeMin'],
+            'timeMax'                 => $range['timeMax'],
+            'singleEvents'            => 'true',
+            'showDeleted'             => 'false',
+            'maxResults'              => 2500,
+            'orderBy'                 => 'startTime',
+            'privateExtendedProperty' => $property_clause,
+        ), $base );
+
+        $res = wp_remote_get( $url, array(
+            'timeout' => 20,
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $access_token,
+            ),
+        ) );
+
+        if ( is_wp_error( $res ) ) {
+            $this->log_google_api_failure( 'google_list_events_private_wp_error', $url, $res );
+            return $res;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code( $res );
+        $json = json_decode( wp_remote_retrieve_body( $res ), true );
+
+        if ( $code < 200 || $code >= 300 || ! is_array( $json ) ) {
+            $this->log_google_api_failure( 'google_list_events_private_failed', $url, $res );
+            return new WP_Error( 'google_list_events_private_filter_failed', 'Google Calendar filtered events.list failed.' );
+        }
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
+
+        return $json;
+    }
+
+
+    protected function google_find_event_by_series_id_and_anchor( $calendar_id, $series_id, $google_original_start_time, $local_start_time, $timeMin, $timeMax ) {
+        $series_id = (int) $series_id;
+        if ( $series_id <= 0 ) {
+            return null;
+        }
+
+        $payload = $this->google_list_events_with_private_property(
+            $calendar_id,
+            $timeMin,
+            $timeMax,
+            'series_id=' . $series_id
+        );
+
+        if ( is_wp_error( $payload ) || ! is_array( $payload ) ) {
+            return $payload;
+        }
+
+        $items = isset( $payload['items'] ) && is_array( $payload['items'] ) ? $payload['items'] : array();
+        if ( empty( $items ) ) {
+            return null;
+        }
+
+        $wrapped = array( 'items' => $items );
+
+        $match = $this->google_find_instance_by_original_start( $wrapped, $google_original_start_time );
+        if ( ! is_array( $match ) ) {
+            $match = $this->google_find_instance_by_local_start( $wrapped, $local_start_time );
+        }
+        if ( ! is_array( $match ) ) {
+            $match = $this->google_find_instance_nearest_anchor(
+                $wrapped,
+                $google_original_start_time,
+                $local_start_time,
+                2 * DAY_IN_SECONDS
+            );
+        }
+
+        return is_array( $match ) ? $match : null;
+    }
+
+    protected function google_find_event_by_anchor_scan( $calendar_id, $google_original_start_time, $local_start_time, $timeMin, $timeMax, $preferred_master_event_id = '' ) {
+        $payload = $this->google_list_events( $calendar_id, $timeMin, $timeMax );
+        if ( is_wp_error( $payload ) || ! is_array( $payload ) ) {
+            return $payload;
+        }
+
+        $items = isset( $payload['items'] ) && is_array( $payload['items'] ) ? $payload['items'] : array();
+        if ( empty( $items ) ) {
+            return null;
+        }
+
+        $filtered = array();
+        foreach ( $items as $ev ) {
+            if ( ! is_array( $ev ) ) {
+                continue;
+            }
+
+            if ( ! empty( $preferred_master_event_id ) ) {
+                $recurring_event_id = (string) ( $ev['recurringEventId'] ?? '' );
+                if ( $recurring_event_id !== '' && $recurring_event_id !== (string) $preferred_master_event_id ) {
+                    continue;
+                }
+            }
+
+            if ( empty( $ev['originalStartTime'] ) && empty( $ev['start'] ) ) {
+                continue;
+            }
+
+            $filtered[] = $ev;
+        }
+
+        if ( empty( $filtered ) ) {
+            return null;
+        }
+
+        $wrapped = array( 'items' => $filtered );
+
+        $match = $this->google_find_instance_by_original_start( $wrapped, $google_original_start_time );
+        if ( ! is_array( $match ) ) {
+            $match = $this->google_find_instance_by_local_start( $wrapped, $local_start_time );
+        }
+        if ( ! is_array( $match ) ) {
+            $match = $this->google_find_instance_nearest_anchor(
+                $wrapped,
+                $google_original_start_time,
+                $local_start_time,
+                2 * DAY_IN_SECONDS
+            );
+        }
+
+        return is_array( $match ) ? $match : null;
+    }
+
+    protected function google_find_instance_by_local_start( $instances_payload, $start_mysql ) {
+        if ( ! is_array( $instances_payload ) ) return null;
+
+        $items = isset( $instances_payload['items'] ) && is_array( $instances_payload['items'] )
+            ? $instances_payload['items']
+            : array();
+
+        if ( empty( $items ) ) return null;
+
+        $target_ts = strtotime( (string) $start_mysql );
+        if ( ! $target_ts ) return null;
+
+        foreach ( $items as $ev ) {
+            list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $ev );
+            if ( $g_start_ts && abs( $g_start_ts - $target_ts ) <= 180 ) {
+                return $ev;
+            }
+        }
+
+        return null;
+    }
+
+
+    protected function google_find_instance_near_now( $instances_payload, $max_diff_seconds = 43200 ) {
+        if ( ! is_array( $instances_payload ) ) return null;
+
+        $items = isset( $instances_payload['items'] ) && is_array( $instances_payload['items'] )
+            ? $instances_payload['items']
+            : array();
+
+        if ( empty( $items ) ) return null;
+
+        $now = time();
+        $best = null;
+        $best_diff = null;
+
+        foreach ( $items as $ev ) {
+            $start_utc = $this->google_event_start_utc( $ev );
+            if ( ! $start_utc ) {
+                continue;
+            }
+
+            $ts = strtotime( (string) $start_utc );
+            if ( ! $ts ) {
+                continue;
+            }
+
+            $diff = abs( $ts - $now );
+
+            if ( $best === null || $diff < $best_diff ) {
+                $best = $ev;
+                $best_diff = $diff;
+            }
+        }
+
+        if ( $best !== null && $best_diff !== null && $best_diff <= (int) $max_diff_seconds ) {
+            return $best;
+        }
+
+        return null;
+    }
+
+
+    protected function google_find_instance_by_original_start( $instances_payload, $original_start_mysql ) {
+        if ( ! is_array( $instances_payload ) ) return null;
+
+        $items = isset( $instances_payload['items'] ) && is_array( $instances_payload['items'] )
+            ? $instances_payload['items']
+            : array();
+
+        if ( empty( $items ) ) return null;
+
+        $target_ts = strtotime( (string) $original_start_mysql );
+        if ( ! $target_ts ) return null;
+
+        // Use a much wider tolerance here because this field is intended to be
+        // the immutable anchor for the recurring occurrence identity.
+        $best = null;
+        $best_diff = null;
+
+        foreach ( $items as $ev ) {
+            $orig = $ev['originalStartTime'] ?? null;
+            if ( ! is_array( $orig ) ) {
+                continue;
+            }
+
+            $orig_ts = 0;
+
+            if ( ! empty( $orig['dateTime'] ) ) {
+                $orig_ts = strtotime( (string) $orig['dateTime'] );
+            } elseif ( ! empty( $orig['date'] ) ) {
+                $orig_ts = strtotime( (string) $orig['date'] . ' 00:00:00 UTC' );
+            }
+
+            if ( ! $orig_ts ) {
+                continue;
+            }
+
+            $diff = abs( $orig_ts - $target_ts );
+
+            if ( $best === null || $diff < $best_diff ) {
+                $best = $ev;
+                $best_diff = $diff;
+            }
+
+            if ( $diff <= 180 ) {
+                return $ev;
+            }
+        }
+
+        // Wider fallback tolerance for recurring-reschedule recovery.
+        if ( $best !== null && $best_diff !== null && $best_diff <= DAY_IN_SECONDS ) {
+            return $best;
+        }
+
+        return null;
+    }
+
+    protected function google_find_instance_nearest_anchor( $instances_payload, $anchor_mysql, $fallback_start_mysql = '', $max_diff_seconds = 172800 ) {
+        if ( ! is_array( $instances_payload ) ) return null;
+
+        $items = isset( $instances_payload['items'] ) && is_array( $instances_payload['items'] )
+            ? $instances_payload['items']
+            : array();
+
+        if ( empty( $items ) ) return null;
+
+        $anchor_ts = strtotime( (string) $anchor_mysql );
+        if ( ! $anchor_ts ) {
+            $anchor_ts = strtotime( (string) $fallback_start_mysql );
+        }
+        if ( ! $anchor_ts ) {
+            return null;
+        }
+
+        $best = null;
+        $best_diff = null;
+
+        foreach ( $items as $ev ) {
+            if ( strtolower( (string) ( $ev['status'] ?? 'confirmed' ) ) === 'cancelled' ) {
+                continue;
+            }
+
+            list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $ev );
+            if ( ! $g_start_ts || ! $g_end_ts || $g_end_ts <= $g_start_ts ) {
+                continue;
+            }
+
+            $diff = abs( $g_start_ts - $anchor_ts );
+
+            if ( $best === null || $best_diff === null || $diff < $best_diff ) {
+                $best = $ev;
+                $best_diff = $diff;
+            }
+        }
+
+        if ( $best !== null && $best_diff !== null && $best_diff <= (int) $max_diff_seconds ) {
+            return $best;
+        }
+
+        return null;
+    }
+
+
+
+
+    protected function get_series_master_google_event_id( $series_id ) {
+        global $wpdb;
+
+        $series_id = (int) $series_id;
+        if ( $series_id <= 0 ) {
+            return '';
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+
+        return (string) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT google_event_id
+                 FROM {$lessons_table}
+                 WHERE id = %d
+                   AND status = 'series'
+                 LIMIT 1",
+                $series_id
+            )
+        );
+    }
+
+
+    protected function get_shared_google_meet_url_for_lesson( $lesson_row ) {
+        global $wpdb;
+
+        $table_lessons = $wpdb->prefix . 'mrm_lessons';
+        $series_id = (int) ( $lesson_row['series_id'] ?? 0 );
+
+        if ( $series_id > 0 ) {
+            $sql = $wpdb->prepare(
+                "SELECT google_meet_url
+                 FROM {$table_lessons}
+                 WHERE ( id = %d OR series_id = %d )
+                   AND google_meet_url IS NOT NULL
+                   AND google_meet_url <> ''
+                 ORDER BY CASE WHEN id = %d THEN 0 ELSE 1 END, id ASC
+                 LIMIT 1",
+                $series_id,
+                $series_id,
+                $series_id
+            );
+
+            return (string) $wpdb->get_var( $sql );
+        }
+
+        return (string) ( $lesson_row['google_meet_url'] ?? '' );
+    }
+
+    protected function persist_shared_google_meet_url_for_lesson( $lesson_row, $meet_url ) {
+        global $wpdb;
+
+        $table_lessons = $wpdb->prefix . 'mrm_lessons';
+        $lesson_id = (int) ( $lesson_row['id'] ?? 0 );
+        $series_id = (int) ( $lesson_row['series_id'] ?? 0 );
+        $meet_url = trim( (string) $meet_url );
+
+        if ( $lesson_id <= 0 || $meet_url === '' ) {
+            return;
+        }
+
+        if ( $series_id > 0 ) {
+            $wpdb->query(
+                $wpdb->prepare(
+                    "UPDATE {$table_lessons}
+                     SET google_meet_url = %s,
+                         updated_at = %s
+                     WHERE id = %d
+                        OR series_id = %d",
+                    $meet_url,
+                    current_time( 'mysql' ),
+                    $series_id,
+                    $series_id
+                )
+            );
+            return;
+        }
+
+        $wpdb->update(
+            $table_lessons,
+            array(
+                'google_meet_url' => $meet_url,
+                'updated_at'      => current_time( 'mysql' ),
+            ),
+            array( 'id' => $lesson_id ),
+            array( '%s', '%s' ),
+            array( '%d' )
+        );
+    }
+
+    protected function sync_shared_token_rows_from_google_truth( $token_hash ) {
+        global $wpdb;
+
+        $token_hash = trim( (string) $token_hash );
+        if ( $token_hash === '' ) {
+            return;
+        }
+
+        $table_lessons = $wpdb->prefix . 'mrm_lessons';
+        $table_instructors = $wpdb->prefix . 'mrm_instructors';
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT l.*, i.calendar_id
+                 FROM {$table_lessons} l
+                 LEFT JOIN {$table_instructors} i ON i.id = l.instructor_id
+                 WHERE l.reminder_token_hash = %s
+                   AND l.status IN ('scheduled','payment_due','delivered')
+                 ORDER BY l.start_time ASC
+                 LIMIT 100",
+                $token_hash
+            ),
+            ARRAY_A
+        );
+
+        if ( ! $rows ) {
+            return;
+        }
+
+        foreach ( $rows as $row ) {
+            $calendar_id = (string) ( $row['calendar_id'] ?? '' );
+            if ( $calendar_id === '' || ! $this->google_is_configured() ) {
+                continue;
+            }
+
+            if ( empty( $row['google_original_start_time'] ) && ! empty( $row['start_time'] ) ) {
+                $row['google_original_start_time'] = (string) $row['start_time'];
+
+                $wpdb->update(
+                    $table_lessons,
+                    array(
+                        'google_original_start_time' => (string) $row['google_original_start_time'],
+                        'updated_at' => current_time( 'mysql' ),
+                    ),
+                    array( 'id' => (int) $row['id'] ),
+                    array( '%s', '%s' ),
+                    array( '%d' )
+                );
+            }
+
+            $this->sync_lesson_row_from_google_truth( $row, $calendar_id, 120 );
+        }
+    }
+
+    protected function resolve_google_event_for_lesson_row( $lesson_row, $calendar_id, $instance_window_days = 30 ) {
+        if ( ! is_array( $lesson_row ) ) {
+            return array(
+                'status' => 'invalid',
+                'event'  => null,
+                'reason' => 'lesson_row_invalid',
+            );
+        }
+
+        $event_id   = (string) ( $lesson_row['google_event_id'] ?? '' );
+        $instance_event_id = (string) ( $lesson_row['google_instance_event_id'] ?? '' );
+        $series_id  = (int) ( $lesson_row['series_id'] ?? 0 );
+        $booking_id = (int) ( $lesson_row['id'] ?? 0 );
+        $start_time = (string) ( $lesson_row['start_time'] ?? '' );
+        $end_time   = (string) ( $lesson_row['end_time'] ?? '' );
+        $google_original_start_time = (string) ( $lesson_row['google_original_start_time'] ?? '' );
+
+        if ( $google_original_start_time === '' ) {
+            $google_original_start_time = $start_time;
+        }
+
+        $window_days = max( 30, (int) $instance_window_days );
+
+                $make_window = function() use ( $google_original_start_time, $start_time, $end_time, $window_days ) {
+            $anchor_ts = strtotime( (string) $google_original_start_time );
+            $start_ts  = strtotime( (string) $start_time );
+            $end_ts    = strtotime( (string) $end_time );
+
+            if ( ! $anchor_ts ) $anchor_ts = $start_ts;
+            if ( ! $start_ts )  $start_ts  = $anchor_ts;
+            if ( ! $end_ts )    $end_ts    = $start_ts;
+
+            $window_base_start = $anchor_ts ?: $start_ts ?: time();
+            $window_base_end   = $end_ts ?: $window_base_start;
+
+            $raw_min = gmdate(
+                'Y-m-d H:i:s',
+                min( $window_base_start, time() ) - ( $window_days * DAY_IN_SECONDS )
+            );
+
+            $raw_max = gmdate(
+                'Y-m-d H:i:s',
+                max( $window_base_end, time() ) + ( $window_days * DAY_IN_SECONDS )
+            );
+
+            $normalized = $this->normalize_google_time_range( $raw_min, $raw_max );
+
+            if ( is_wp_error( $normalized ) ) {
+                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                }
+
+                return array(
+                    'time_min' => gmdate( 'Y-m-d\TH:i:s\Z', strtotime( $raw_min ) ),
+                    'time_max' => gmdate( 'Y-m-d\TH:i:s\Z', strtotime( $raw_max ) ),
+                );
+            }
+
+            return array(
+                'time_min' => $normalized['timeMin'],
+                'time_max' => $normalized['timeMax'],
+            );
+        };
+
+        $explicit_cancel = function( $ev ) {
+            return is_array( $ev ) && strtolower( (string) ( $ev['status'] ?? 'confirmed' ) ) === 'cancelled';
+        };
+
+        $this->log_google_resolve_stage( $lesson_row, 'start', array(
+            'calendar_id' => (string) $calendar_id,
+            'booking_id'  => $booking_id,
+            'window_days' => $window_days,
+        ) );
+
+        $resolve_from_master = function( $master_event_id, $stage_prefix = 'master' ) use (
+            $lesson_row,
+            $calendar_id,
+            $start_time,
+            $end_time,
+            $google_original_start_time,
+            $booking_id,
+            $explicit_cancel,
+            $instance_window_days,
+            $make_window
+        ) {
+            $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_fetch_start', array(
+                'master_event_id' => $master_event_id,
+            ) );
+
+            $got = $this->google_get_event( $calendar_id, $master_event_id );
+            if ( is_wp_error( $got ) || ! is_array( $got ) ) {
+                $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_fetch_failed', array(
+                    'master_event_id' => $master_event_id,
+                    'error' => is_wp_error( $got ) ? $got->get_error_message() : 'invalid_payload',
+                ) );
+                return array(
+                    'status' => 'unresolved',
+                    'event'  => null,
+                    'reason' => 'master_fetch_failed',
+                );
+            }
+
+            if ( $explicit_cancel( $got ) ) {
+                $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_cancelled', array(
+                    'master_event_id' => $master_event_id,
+                ) );
+                return array(
+                    'status' => 'cancelled',
+                    'event'  => $got,
+                    'reason' => 'master_cancelled',
+                );
+            }
+
+            $is_master = $this->google_event_is_recurring_master( $got );
+            if ( ! $is_master ) {
+                $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_direct_event_match', array(
+                    'matched_event_id' => (string) ( $got['id'] ?? '' ),
+                ) );
+                return array(
+                    'status' => 'resolved',
+                    'event'  => $got,
+                    'reason' => 'direct_event_match',
+                );
+            }
+
+            $window = $make_window();
+            $inst = $this->google_list_event_instances( $calendar_id, $master_event_id, $window['time_min'], $window['time_max'] );
+
+            if ( is_wp_error( $inst ) || ! is_array( $inst ) ) {
+                $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_instances_failed', array(
+                    'master_event_id' => $master_event_id,
+                    'time_min' => $window['time_min'],
+                    'time_max' => $window['time_max'],
+                    'error' => is_wp_error( $inst ) ? $inst->get_error_message() : 'invalid_payload',
+                ) );
+                return array(
+                    'status' => 'unresolved',
+                    'event'  => null,
+                    'reason' => 'instance_list_failed',
+                );
+            }
+
+            $items = isset( $inst['items'] ) && is_array( $inst['items'] ) ? $inst['items'] : array();
+
+            $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_instances_loaded', array(
+                'master_event_id' => $master_event_id,
+                'count' => count( $items ),
+                'time_min' => $window['time_min'],
+                'time_max' => $window['time_max'],
+            ) );
+
+            $match = $this->google_find_instance_by_original_start( $inst, $google_original_start_time );
+            if ( is_array( $match ) ) {
+                $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_match_original_start', array(
+                    'matched_event_id' => (string) ( $match['id'] ?? '' ),
+                ) );
+            }
+
+            if ( ! is_array( $match ) ) {
+                $match = $this->google_find_instance_by_local_start( $inst, $start_time );
+                if ( is_array( $match ) ) {
+                    $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_match_local_start', array(
+                        'matched_event_id' => (string) ( $match['id'] ?? '' ),
+                    ) );
+                }
+            }
+
+            if ( ! is_array( $match ) ) {
+                $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
+                if ( is_array( $match ) ) {
+                    $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_match_booking_id', array(
+                        'matched_event_id' => (string) ( $match['id'] ?? '' ),
+                    ) );
+                }
+            }
+
+            if ( ! is_array( $match ) ) {
+                $match = $this->google_find_instance_nearest_anchor(
+                    $inst,
+                    $google_original_start_time,
+                    $start_time,
+                    2 * DAY_IN_SECONDS
+                );
+                if ( is_array( $match ) ) {
+                    $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_match_nearest_anchor', array(
+                        'matched_event_id' => (string) ( $match['id'] ?? '' ),
+                    ) );
+                }
+            }
+
+            if ( is_array( $match ) ) {
+                if ( $explicit_cancel( $match ) ) {
+                    return array(
+                        'status' => 'cancelled',
+                        'event'  => $match,
+                        'reason' => 'instance_cancelled',
+                    );
+                }
+
+                return array(
+                    'status' => 'resolved',
+                    'event'  => $match,
+                    'reason' => 'instance_match',
+                );
+            }
+
+            $this->log_google_resolve_stage( $lesson_row, $stage_prefix . '_instances_no_match', array(
+                'master_event_id' => $master_event_id,
+            ) );
+
+            return array(
+                'status' => 'unresolved',
+                'event'  => null,
+                'reason' => 'instance_unresolved',
+            );
+        };
+
+        if ( $instance_event_id !== '' ) {
+            $this->log_google_resolve_stage( $lesson_row, 'direct_instance_fetch_start', array(
+                'instance_event_id' => $instance_event_id,
+            ) );
+
+            $direct_instance = $this->google_get_event( $calendar_id, $instance_event_id );
+            if ( ! is_wp_error( $direct_instance ) && is_array( $direct_instance ) ) {
+                if ( $explicit_cancel( $direct_instance ) ) {
+                    return array(
+                        'status' => 'cancelled',
+                        'event'  => $direct_instance,
+                        'reason' => 'instance_event_cancelled',
+                    );
+                }
+
+                $is_master = $this->google_event_is_recurring_master( $direct_instance );
+                if ( ! $is_master ) {
+                    $this->log_google_resolve_stage( $lesson_row, 'direct_instance_match', array(
+                        'matched_event_id' => (string) ( $direct_instance['id'] ?? '' ),
+                    ) );
+                    return array(
+                        'status' => 'resolved',
+                        'event'  => $direct_instance,
+                        'reason' => 'direct_instance_match',
+                    );
+                }
+
+                $this->log_google_resolve_stage( $lesson_row, 'direct_instance_was_master', array(
+                    'instance_event_id' => $instance_event_id,
+                ) );
+            } else {
+                $this->log_google_resolve_stage( $lesson_row, 'direct_instance_fetch_failed', array(
+                    'instance_event_id' => $instance_event_id,
+                    'error' => is_wp_error( $direct_instance ) ? $direct_instance->get_error_message() : 'invalid_payload',
+                ) );
+            }
+        }
+
+        $series_master_event_id = '';
+        if ( $series_id > 0 ) {
+            $series_master_event_id = $this->get_series_master_google_event_id( $series_id );
+            if ( $series_master_event_id !== '' ) {
+                $series_result = $resolve_from_master( $series_master_event_id, 'series_master' );
+                if ( $series_result['status'] !== 'unresolved' ) {
+                    return $series_result;
+                }
+            }
+        }
+
+        if ( $event_id !== '' ) {
+            $direct = $resolve_from_master( $event_id, 'stored_event_id' );
+            if ( $direct['status'] !== 'unresolved' ) {
+                return $direct;
+            }
+        }
+
+        $window = $make_window();
+
+        $this->log_google_resolve_stage( $lesson_row, 'anchor_scan_start', array(
+            'time_min' => $window['time_min'],
+            'time_max' => $window['time_max'],
+            'preferred_master_event_id' => ( $series_master_event_id !== '' ? $series_master_event_id : $event_id ),
+        ) );
+
+        $anchor_scan = $this->google_find_event_by_anchor_scan(
+            $calendar_id,
+            $google_original_start_time,
+            $start_time,
+            $window['time_min'],
+            $window['time_max'],
+            ( $series_master_event_id !== '' ? $series_master_event_id : $event_id )
+        );
+
+        if ( is_wp_error( $anchor_scan ) ) {
+            $this->log_google_resolve_stage( $lesson_row, 'anchor_scan_failed', array(
+                'error' => $anchor_scan->get_error_message(),
+            ) );
+        } elseif ( is_array( $anchor_scan ) ) {
+            $this->log_google_resolve_stage( $lesson_row, 'anchor_scan_match', array(
+                'matched_event_id' => (string) ( $anchor_scan['id'] ?? '' ),
+            ) );
+
+            if ( $explicit_cancel( $anchor_scan ) ) {
+                return array(
+                    'status' => 'cancelled',
+                    'event'  => $anchor_scan,
+                    'reason' => 'anchor_scan_cancelled',
+                );
+            }
+
+            return array(
+                'status' => 'resolved',
+                'event'  => $anchor_scan,
+                'reason' => 'anchor_scan_match',
+            );
+        }
+
+        if ( $series_id > 0 ) {
+            $this->log_google_resolve_stage( $lesson_row, 'series_id_anchor_search_start', array(
+                'series_id' => $series_id,
+                'time_min' => $window['time_min'],
+                'time_max' => $window['time_max'],
+            ) );
+
+            $series_anchor_match = $this->google_find_event_by_series_id_and_anchor(
+                $calendar_id,
+                $series_id,
+                $google_original_start_time,
+                $start_time,
+                $window['time_min'],
+                $window['time_max']
+            );
+
+            if ( is_wp_error( $series_anchor_match ) ) {
+                $this->log_google_resolve_stage( $lesson_row, 'series_id_anchor_search_failed', array(
+                    'error' => $series_anchor_match->get_error_message(),
+                ) );
+            } elseif ( is_array( $series_anchor_match ) ) {
+                $this->log_google_resolve_stage( $lesson_row, 'series_id_anchor_match', array(
+                    'matched_event_id' => (string) ( $series_anchor_match['id'] ?? '' ),
+                ) );
+
+                if ( $explicit_cancel( $series_anchor_match ) ) {
+                    return array(
+                        'status' => 'cancelled',
+                        'event'  => $series_anchor_match,
+                        'reason' => 'series_id_anchor_cancelled',
+                    );
+                }
+
+                return array(
+                    'status' => 'resolved',
+                    'event'  => $series_anchor_match,
+                    'reason' => 'series_id_anchor_match',
+                );
+            }
+        }
+
+        $this->log_google_resolve_stage( $lesson_row, 'booking_id_fallback_start', array(
+            'booking_id' => $booking_id,
+            'time_min' => $window['time_min'],
+            'time_max' => $window['time_max'],
+        ) );
+
+        $found = $this->google_find_event_by_booking_id( $calendar_id, $booking_id, $window['time_min'], $window['time_max'] );
+        if ( is_wp_error( $found ) ) {
+            $this->log_google_resolve_stage( $lesson_row, 'booking_id_fallback_failed', array(
+                'error' => $found->get_error_message(),
+            ) );
+        } elseif ( is_array( $found ) ) {
+            $this->log_google_resolve_stage( $lesson_row, 'booking_id_match', array(
+                'matched_event_id' => (string) ( $found['id'] ?? '' ),
+            ) );
+
+            if ( $explicit_cancel( $found ) ) {
+                return array(
+                    'status' => 'cancelled',
+                    'event'  => $found,
+                    'reason' => 'booking_id_cancelled',
+                );
+            }
+
+            return array(
+                'status' => 'resolved',
+                'event'  => $found,
+                'reason' => 'booking_id_match',
+            );
+        }
+
+        $this->log_google_resolve_stage( $lesson_row, 'final_no_match', array(
+            'booking_id' => $booking_id,
+        ) );
+
+        return array(
+            'status' => 'unresolved',
+            'event'  => null,
+            'reason' => 'no_google_match',
+        );
+    }
+
+    public function sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, $instance_window_days = 120 ) {
+        global $wpdb;
+
+        if ( ! is_array( $lesson_row ) ) {
+            return array(
+                'status' => 'invalid',
+                'event'  => null,
+                'reason' => 'lesson_row_invalid',
+            );
+        }
+
+        $lesson_id = (int) ( $lesson_row['id'] ?? 0 );
+        if ( $lesson_id <= 0 ) {
+            return array(
+                'status' => 'invalid',
+                'event'  => null,
+                'reason' => 'lesson_id_invalid',
+            );
+        }
+
+        if ( (string) ( $lesson_row['status'] ?? '' ) === 'finalized' ) {
+            $this->mrm_finalization_debug_log( 'google_sync_skipped_finalized_lesson', array(
+                'lesson_id' => (int) ( $lesson_row['id'] ?? 0 ),
+                'status'    => (string) ( $lesson_row['status'] ?? '' ),
+            ) );
+
+            return array(
+                'status' => 'finalized_skipped',
+                'lesson_row' => $lesson_row,
+            );
+        }
+
+        $calendar_id = trim( (string) $calendar_id );
+        if ( $calendar_id === '' || ! $this->google_is_configured() ) {
+            return array(
+                'status' => 'unresolved',
+                'event'  => null,
+                'reason' => 'missing_calendar_or_google_not_configured',
+            );
+        }
+
+        $resolved = $this->resolve_google_event_for_lesson_row( $lesson_row, $calendar_id, $instance_window_days );
+        $resolved_status = (string) ( $resolved['status'] ?? 'unresolved' );
+        $resolved_event  = $resolved['event'] ?? null;
+        $resolved_reason = (string) ( $resolved['reason'] ?? '' );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
+
+        if ( $resolved_status === 'cancelled' && is_array( $resolved_event ) ) {
+            return array(
+                'status' => 'cancelled',
+                'event'  => $resolved_event,
+                'reason' => $resolved_reason,
+            );
+        }
+
+        if ( $resolved_status !== 'resolved' || ! is_array( $resolved_event ) ) {
+            return array(
+                'status' => 'unresolved',
+                'event'  => null,
+                'reason' => ( $resolved_reason !== '' ? $resolved_reason : 'unresolved' ),
+            );
+        }
+
+        list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $resolved_event );
+        if ( ! $g_start_ts || ! $g_end_ts || $g_end_ts <= $g_start_ts ) {
+            return array(
+                'status' => 'unresolved',
+                'event'  => null,
+                'reason' => 'google_event_missing_times',
+            );
+        }
+
+        $new_start = gmdate( 'Y-m-d H:i:s', $g_start_ts );
+        $new_end   = gmdate( 'Y-m-d H:i:s', $g_end_ts );
+
+        $resolved_event_id = ! empty( $resolved_event['id'] ) ? (string) $resolved_event['id'] : '';
+        $resolved_recurring_parent_id = ! empty( $resolved_event['recurringEventId'] )
+            ? (string) $resolved_event['recurringEventId']
+            : '';
+
+        $original_anchor = ! empty( $lesson_row['google_original_start_time'] )
+            ? (string) $lesson_row['google_original_start_time']
+            : (string) ( $lesson_row['start_time'] ?? $new_start );
+
+        $series_id = (int) ( $lesson_row['series_id'] ?? 0 );
+        $series_master_event_id = $this->get_series_master_google_event_id( $series_id );
+
+        $stored_event_id = ( $series_master_event_id !== '' )
+            ? $series_master_event_id
+            : ( $resolved_recurring_parent_id !== '' ? $resolved_recurring_parent_id : $resolved_event_id );
+
+        $stored_instance_event_id = $resolved_event_id;
+
+        $current_start = (string) ( $lesson_row['start_time'] ?? '' );
+        $current_end   = (string) ( $lesson_row['end_time'] ?? '' );
+        $current_google_event_id = (string) ( $lesson_row['google_event_id'] ?? '' );
+        $current_google_instance_event_id = (string) ( $lesson_row['google_instance_event_id'] ?? '' );
+        $current_anchor = (string) ( $lesson_row['google_original_start_time'] ?? '' );
+
+        $needs_update =
+            $current_start !== $new_start ||
+            $current_end !== $new_end ||
+            $current_google_event_id !== $stored_event_id ||
+            $current_google_instance_event_id !== $stored_instance_event_id ||
+            $current_anchor !== $original_anchor;
+
+        $table_lessons = $wpdb->prefix . 'mrm_lessons';
+
+        if ( $needs_update ) {
+            $update_result = $wpdb->update(
+                $table_lessons,
+                array(
+                    'start_time'                 => $new_start,
+                    'end_time'                   => $new_end,
+                    'google_original_start_time' => $original_anchor,
+                    'google_event_id'            => $stored_event_id,
+                    'google_instance_event_id'   => $stored_instance_event_id,
+                    'updated_at'                 => current_time( 'mysql' ),
+                ),
+                array( 'id' => $lesson_id ),
+                array( '%s', '%s', '%s', '%s', '%s', '%s' ),
+                array( '%d' )
+            );
+
+            if ( $update_result === false ) {
+                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                }
+
+                return array(
+                    'status' => 'unresolved',
+                    'event'  => null,
+                    'reason' => 'db_update_failed',
+                );
+            }
+
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            }
+        } else {
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            }
+        }
+
+        $fresh_row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM {$table_lessons} WHERE id = %d LIMIT 1",
+                $lesson_id
+            ),
+            ARRAY_A
+        );
+
+        if ( is_array( $fresh_row ) && ! empty( $fresh_row ) ) {
+            $lesson_row = $fresh_row;
+        } else {
+            $lesson_row['start_time'] = $new_start;
+            $lesson_row['end_time'] = $new_end;
+            $lesson_row['google_event_id'] = $stored_event_id;
+            $lesson_row['google_instance_event_id'] = $stored_instance_event_id;
+            $lesson_row['google_original_start_time'] = $original_anchor;
+        }
+
+        return array(
+            'status'     => 'resolved',
+            'event'      => $resolved_event,
+            'reason'     => ( $resolved_reason !== '' ? $resolved_reason : 'resolved' ),
+            'lesson_row' => $lesson_row,
+            'start_utc'  => $new_start,
+            'end_utc'    => $new_end,
+        );
+    }
+
+
+
+
     // Extract UTC timestamps from a Google event payload
     protected function google_event_to_utc_ts( $event ) {
         $start = '';
@@ -232,28 +2011,151 @@ class MRM_Lesson_Scheduler {
         return array( $start_ts, $end_ts );
     }
 
+    protected function google_event_end_utc( $event ) {
+        list( , $end_ts ) = $this->google_event_to_utc_ts( $event );
+        if ( ! $end_ts ) return '';
+        return gmdate( 'Y-m-d H:i:s', $end_ts );
+    }
+
+    protected function get_live_google_timing_for_lesson( $lesson_row, $calendar_id ) {
+        if ( ! is_array( $lesson_row ) ) {
+            return array(
+                'status'   => 'unresolved',
+                'reason'   => 'lesson_row_invalid',
+                'source'   => 'db_fallback',
+                'start_ts' => 0,
+                'end_ts'   => 0,
+                'lesson'   => $lesson_row,
+                'sync'     => null,
+            );
+        }
+
+        $calendar_id = trim( (string) $calendar_id );
+        if ( $calendar_id === '' || ! $this->google_is_configured() ) {
+            return array(
+                'status'   => 'unresolved',
+                'reason'   => 'missing_calendar_or_google_not_configured',
+                'source'   => 'db_fallback',
+                'start_ts' => 0,
+                'end_ts'   => 0,
+                'lesson'   => $lesson_row,
+                'sync'     => null,
+            );
+        }
+
+        $sync = $this->sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, 120 );
+        $sync_status = (string) ( $sync['status'] ?? 'unresolved' );
+
+        if ( $sync_status === 'resolved' ) {
+            $synced_lesson = isset( $sync['lesson_row'] ) && is_array( $sync['lesson_row'] )
+                ? $sync['lesson_row']
+                : $lesson_row;
+
+            $start_ts = strtotime( (string) ( $sync['start_utc'] ?? '' ) );
+            $end_ts   = strtotime( (string) ( $sync['end_utc'] ?? '' ) );
+
+            if ( $start_ts && $end_ts && $end_ts > $start_ts ) {
+                return array(
+                    'status'   => 'resolved',
+                    'reason'   => (string) ( $sync['reason'] ?? 'resolved' ),
+                    'source'   => 'google',
+                    'start_ts' => $start_ts,
+                    'end_ts'   => $end_ts,
+                    'lesson'   => $synced_lesson,
+                    'sync'     => $sync,
+                );
+            }
+        }
+
+        return array(
+            'status'   => 'unresolved',
+            'reason'   => (string) ( $sync['reason'] ?? 'unresolved' ),
+            'source'   => 'db_fallback',
+            'start_ts' => 0,
+            'end_ts'   => 0,
+            'lesson'   => $lesson_row,
+            'sync'     => $sync,
+        );
+    }
+
+
+    protected function table_attendance() {
+        global $wpdb;
+        return $wpdb->prefix . 'mrm_lesson_attendance';
+    }
+
+
+
     public static function get_instance() {
         if ( empty( self::$instance ) ) self::$instance = new self();
         return self::$instance;
     }
 
     public function __construct() {
+        delete_transient( 'mrm_secret_google_scheduler_v5' );
+        delete_transient( 'mrm_secret_google_scheduler_maps_distance_v1' );
+        delete_transient( 'mrm_secret_google_scheduler_maps_distance_v2' );
+
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
         add_action( 'admin_notices', array( $this, 'maybe_show_schema_notice' ) );
+
         add_action( 'admin_post_mrm_scheduler_run_upgrade', array( $this, 'handle_run_upgrade' ) );
         add_action( 'admin_post_mrm_scheduler_save_google', array( $this, 'handle_save_google_settings' ) );
         add_action( 'admin_post_mrm_scheduler_test_google', array( $this, 'handle_test_google_settings' ) );
-        add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
-        // Pattern B: periodic sync of upcoming events so gate/reminders stay accurate if instructors drag events
+        add_action( 'admin_post_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
+        add_action( 'admin_post_mrm_scheduler_save_contact_form', array( $this, 'handle_save_contact_form_settings' ) );
+        add_action( 'admin_post_mrm_scheduler_contact_submit', array( $this, 'handle_contact_form_submit' ) );
+        add_action( 'admin_post_nopriv_mrm_scheduler_contact_submit', array( $this, 'handle_contact_form_submit' ) );
+        add_action( 'admin_post_mrm_finalize_old_lessons_now', array( $this, 'admin_finalize_old_lessons_now' ) );
+        add_action( 'admin_post_nopriv_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
+
+        add_action( 'admin_post_mrm_safety_attendance_action', array( $this, 'handle_safety_attendance_action' ) );
+        add_action( 'admin_post_nopriv_mrm_safety_attendance_action', array( $this, 'handle_safety_attendance_action' ) );
+        add_action( 'admin_post_mrm_safety_feedback_submit', array( $this, 'handle_safety_feedback_submit' ) );
+        add_action( 'admin_post_nopriv_mrm_safety_feedback_submit', array( $this, 'handle_safety_feedback_submit' ) );
+        add_action( 'admin_post_mrm_safety_emergency_submit', array( $this, 'handle_safety_emergency_submit' ) );
+        add_action( 'admin_post_nopriv_mrm_safety_emergency_submit', array( $this, 'handle_safety_emergency_submit' ) );
+
+        add_action( 'admin_post_mrm_run_safety_reminder_sweep_now', array( $this, 'admin_run_safety_reminder_sweep_now' ) );
+        add_action( 'admin_post_mrm_run_safety_exception_check_now', array( $this, 'admin_run_safety_exception_check_now' ) );
+        add_action( 'admin_post_mrm_run_safety_feedback_request_now', array( $this, 'admin_run_safety_feedback_request_now' ) );
+
+        add_action( 'admin_post_mrm_export_1099_support', array( $this, 'handle_mrm_export_1099_support' ) );
+        add_action( 'admin_post_mrm_export_mileage_summary', array( $this, 'handle_mrm_export_mileage_summary' ) );
+        add_action( 'admin_post_mrm_export_calculations_summary', array( $this, 'handle_mrm_export_calculations_summary' ) );
+        add_action( 'admin_post_mrm_export_1099_nec_pdf_zip', array( $this, 'handle_mrm_export_1099_nec_pdf_zip' ) );
+        add_action( 'admin_post_mrm_recalculate_mileage_cache', array( $this, 'handle_mrm_recalculate_mileage_cache' ) );
+        add_action( 'admin_post_mrm_clear_mileage_cache_for_period', array( $this, 'handle_mrm_clear_mileage_cache_for_period' ) );
+        add_action( 'admin_post_mrm_clear_all_mileage_cache', array( $this, 'handle_mrm_clear_all_mileage_cache' ) );
+
+        add_action( 'admin_init', array( $this, 'register_settings' ) );
+        add_shortcode( 'mrm_contact_form', array( $this, 'render_contact_form_shortcode' ) );
+
+        // add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
+
         add_filter( 'cron_schedules', array( $this, 'register_custom_cron_schedules' ) );
+        add_action( 'init', array( $this, 'ensure_scheduler_runtime_cron_hooks' ), 20 );
+
         add_action( 'mrm_scheduler_sync_upcoming_events', array( $this, 'cron_sync_upcoming_events' ) );
-        // Gate page (virtual) for joining online lessons
+        add_action( 'mrm_scheduler_reconcile_completed_lessons', array( $this, 'cron_reconcile_completed_lessons' ) );
+        add_action( 'mrm_scheduler_reconcile_cancelled_lessons', array( $this, 'cron_reconcile_cancelled_lessons' ) );
+        add_action( 'mrm_scheduler_finalize_old_lessons', array( $this, 'cron_finalize_old_lessons' ) );
+        add_action( 'mrm_scheduler_send_safety_reminders', array( $this, 'cron_send_safety_reminders' ) );
+        add_action( 'mrm_scheduler_check_safety_exceptions', array( $this, 'cron_check_safety_exceptions' ) );
+        add_action( 'mrm_scheduler_send_feedback_requests', array( $this, 'cron_send_feedback_requests' ) );
+
+        $this->maybe_log_safety_boot( 'safety_system_constructor_loaded', array(
+            'file' => __FILE__,
+        ) );
+
         add_action( 'init', array( $this, 'register_join_gate_rewrite' ) );
         add_filter( 'query_vars', array( $this, 'register_join_gate_query_vars' ) );
+        add_action( 'parse_request', array( $this, 'maybe_force_join_gate_virtual_request' ), 0 );
         add_action( 'template_redirect', array( $this, 'maybe_render_join_gate_page' ) );
         add_action( 'send_headers', array( $this, 'maybe_send_gate_nocache_headers' ), 0 );
         add_filter( 'redirect_canonical', array( $this, 'maybe_disable_canonical_for_gate' ), 10, 2 );
+
         $this->options = get_option( $this->option_key, array() );
     }
 
@@ -268,9 +2170,54 @@ class MRM_Lesson_Scheduler {
         $inst->register_join_gate_rewrite();
         flush_rewrite_rules();
 
-        if ( ! wp_next_scheduled( 'mrm_scheduler_sync_upcoming_events' ) ) {
-            wp_schedule_event( time() + 60, 'mrm_10min', 'mrm_scheduler_sync_upcoming_events' );
+        // Reschedule cron jobs on activation to remove outdated intervals.
+        $inst->maybe_reschedule_cron_jobs();
+    }
+
+    protected function maybe_reschedule_cron_jobs() {
+        $this->mrm_safety_log( 'maybe_reschedule_cron_jobs_entered', array() );
+
+        $hooks = array(
+            'mrm_scheduler_sync_upcoming_events',
+            'mrm_scheduler_reconcile_completed_lessons',
+            'mrm_scheduler_reconcile_cancelled_lessons',
+            'mrm_scheduler_finalize_old_lessons',
+            'mrm_scheduler_send_safety_reminders',
+            'mrm_scheduler_check_safety_exceptions',
+            'mrm_scheduler_send_feedback_requests',
+        );
+
+        foreach ( $hooks as $hook ) {
+            $next_before = wp_next_scheduled( $hook );
+
+            $this->mrm_safety_log( 'cron_hook_before_clear', array(
+                'hook'               => $hook,
+                'next_run_local'     => $next_before ? wp_date( 'Y-m-d H:i:s', $next_before, wp_timezone() ) : '',
+                'next_run_utc'       => $next_before ? gmdate( 'Y-m-d H:i:s', $next_before ) : '',
+                'next_run_timestamp' => $next_before ? (int) $next_before : 0,
+            ) );
+
+            wp_clear_scheduled_hook( $hook );
+
+            $this->mrm_safety_log( 'cleared_cron_hook_before_rebuild', array(
+                'hook' => $hook,
+            ) );
         }
+
+        $this->ensure_scheduler_runtime_cron_hooks();
+
+        $this->mrm_safety_log( 'maybe_reschedule_cron_jobs_finished', array() );
+    }
+
+
+    public static function deactivate() {
+        wp_clear_scheduled_hook( 'mrm_scheduler_sync_upcoming_events' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_reconcile_completed_lessons' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_reconcile_cancelled_lessons' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_finalize_old_lessons' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_send_safety_reminders' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_check_safety_exceptions' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_send_feedback_requests' );
     }
 
     public static function install_or_upgrade() {
@@ -284,14 +2231,19 @@ class MRM_Lesson_Scheduler {
     email VARCHAR(255) NOT NULL,
     city VARCHAR(100) NOT NULL,
     state varchar(50) NOT NULL DEFAULT '',
+    address VARCHAR(255) NOT NULL DEFAULT '',
+    zip_code VARCHAR(20) NOT NULL DEFAULT '',
+    offers_in_person TINYINT(1) NOT NULL DEFAULT 0,
+    offers_online TINYINT(1) NOT NULL DEFAULT 0,
     profile_image_url TEXT NULL,
     short_description TEXT NULL,
     long_description LONGTEXT NULL,
     instruments TEXT NULL,
     latitude DECIMAL(10,6) DEFAULT NULL,
     longitude DECIMAL(10,6) DEFAULT NULL,
-    calendar_id VARCHAR(255) NOT NULL,
-    timezone VARCHAR(50) NOT NULL,
+    calendar_id VARCHAR(255) NOT NULL DEFAULT '',
+    timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
+    stripe_connected_account_id VARCHAR(255) DEFAULT NULL,
     hire_date DATE DEFAULT NULL,
     PRIMARY KEY (id),
     KEY city_idx (city),
@@ -304,14 +2256,34 @@ class MRM_Lesson_Scheduler {
     series_id BIGINT UNSIGNED NULL,
     student_name VARCHAR(255) NOT NULL,
     student_email VARCHAR(255) NOT NULL,
+    parent_timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
+    address VARCHAR(255) NOT NULL DEFAULT '',
+    address_city VARCHAR(100) NOT NULL DEFAULT '',
+    address_state VARCHAR(50) NOT NULL DEFAULT '',
+    address_postal VARCHAR(20) NOT NULL DEFAULT '',
     instrument VARCHAR(100) NOT NULL,
     is_online TINYINT(1) NOT NULL DEFAULT 0,
+    is_consultation TINYINT(1) NOT NULL DEFAULT 0,
+    instructor_timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
     lesson_length INT NOT NULL DEFAULT 60,
     start_time DATETIME NOT NULL,
     end_time DATETIME NOT NULL,
+    google_original_start_time DATETIME NULL,
+    delivered_at DATETIME NULL,
+    finalized_at DATETIME NULL,
+    charge_due_at DATETIME NULL,
+    charge_status VARCHAR(30) NOT NULL DEFAULT 'none',
+    charge_attempts INT NOT NULL DEFAULT 0,
+    charge_last_attempt_at DATETIME NULL,
+    charge_last_error LONGTEXT NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'scheduled',
     google_event_id VARCHAR(255) NULL,
+    google_instance_event_id VARCHAR(255) NULL,
     google_meet_url TEXT NULL,
+    order_id BIGINT UNSIGNED NULL,
+    payment_mode VARCHAR(20) NOT NULL DEFAULT 'none',
+    payout_unlocked_at DATETIME NULL,
+    autopay_profile_id BIGINT UNSIGNED NULL,
     agreement_id BIGINT UNSIGNED NULL,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
@@ -322,23 +2294,217 @@ class MRM_Lesson_Scheduler {
     PRIMARY KEY (id),
     KEY instructor_idx (instructor_id),
     KEY student_email_idx (student_email),
+    KEY order_id_idx (order_id),
+    KEY payment_mode_idx (payment_mode),
+    KEY payout_unlocked_at_idx (payout_unlocked_at),
+    KEY finalized_at_idx (finalized_at),
+    KEY charge_status_idx (charge_status),
+    KEY charge_due_at_idx (charge_due_at),
     KEY reminder_token_hash_idx (reminder_token_hash),
     KEY reminder_sent_at_idx (reminder_sent_at)
 ) {$charset_collate};";
         $table_agreements = $wpdb->prefix . 'mrm_agreements';
+        $table_attendance = $wpdb->prefix . 'mrm_lesson_attendance';
+        $sql_attendance = "CREATE TABLE {$table_attendance} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    lesson_id BIGINT UNSIGNED NOT NULL,
+    parent_reminder_sent_at DATETIME NULL,
+    instructor_reminder_sent_at DATETIME NULL,
+    parent_feedback_request_sent_at DATETIME NULL,
+    instructor_departure_email_sent_at DATETIME NULL,
+    instructor_arrived_at DATETIME NULL,
+    instructor_arrived_ip VARCHAR(45) NULL,
+    parent_confirmed_arrival_at DATETIME NULL,
+    parent_confirmed_arrival_ip VARCHAR(45) NULL,
+    parent_no_show_reported_at DATETIME NULL,
+    parent_no_show_reported_ip VARCHAR(45) NULL,
+    parent_no_show_reason LONGTEXT NULL,
+    no_show_admin_notified_at DATETIME NULL,
+    instructor_departed_at DATETIME NULL,
+    instructor_departed_ip VARCHAR(45) NULL,
+    instructor_emergency_reported_at DATETIME NULL,
+    instructor_emergency_reported_ip VARCHAR(45) NULL,
+    instructor_emergency_message LONGTEXT NULL,
+    instructor_emergency_notified_at DATETIME NULL,
+    parent_rating TINYINT UNSIGNED NULL,
+    parent_comment LONGTEXT NULL,
+    feedback_submitted_at DATETIME NULL,
+    arrival_alert_sent_at DATETIME NULL,
+    departure_alert_sent_at DATETIME NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY lesson_id_unique (lesson_id),
+    KEY parent_reminder_sent_idx (parent_reminder_sent_at),
+    KEY instructor_reminder_sent_idx (instructor_reminder_sent_at),
+    KEY instructor_departure_email_sent_idx (instructor_departure_email_sent_at),
+    KEY instructor_arrived_idx (instructor_arrived_at),
+    KEY parent_no_show_reported_idx (parent_no_show_reported_at),
+    KEY no_show_admin_notified_idx (no_show_admin_notified_at),
+    KEY instructor_departed_idx (instructor_departed_at),
+    KEY instructor_emergency_reported_idx (instructor_emergency_reported_at),
+    KEY instructor_emergency_notified_idx (instructor_emergency_notified_at),
+    KEY feedback_submitted_idx (feedback_submitted_at),
+    KEY arrival_alert_sent_idx (arrival_alert_sent_at),
+    KEY departure_alert_sent_idx (departure_alert_sent_at)
+) {$charset_collate};";
         $sql3 = "CREATE TABLE {$table_agreements} (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     email VARCHAR(255) NOT NULL,
     agreement_version VARCHAR(50) NOT NULL,
+    agreement_scope VARCHAR(80) NOT NULL DEFAULT 'terms_of_service',
+    source_flow VARCHAR(80) NOT NULL DEFAULT '',
+    related_lesson_id BIGINT UNSIGNED NULL,
+    related_order_id BIGINT UNSIGNED NULL,
+    related_sku VARCHAR(190) NULL,
     signature TEXT NOT NULL,
+    acknowledgement_json LONGTEXT NULL,
     signed_at DATETIME NOT NULL,
     ip_address VARCHAR(45) NOT NULL,
+    user_agent TEXT NULL,
     PRIMARY KEY (id),
-    KEY email_idx (email)
+    KEY email_idx (email),
+    KEY agreement_version_idx (agreement_version),
+    KEY source_flow_idx (source_flow),
+    KEY related_lesson_idx (related_lesson_id),
+    KEY related_order_idx (related_order_id),
+    KEY related_sku_idx (related_sku)
 ) {$charset_collate};";
         dbDelta( $sql1 );
         dbDelta( $sql2 );
+        // Ensure lesson address columns exist for Calculations mileage support.
+        $lesson_required_columns = array(
+            'address' => "ALTER TABLE {$table_lessons} ADD COLUMN address varchar(255) NOT NULL DEFAULT ''",
+            'address_city' => "ALTER TABLE {$table_lessons} ADD COLUMN address_city varchar(100) NOT NULL DEFAULT ''",
+            'address_state' => "ALTER TABLE {$table_lessons} ADD COLUMN address_state varchar(64) NOT NULL DEFAULT ''",
+            'address_postal' => "ALTER TABLE {$table_lessons} ADD COLUMN address_postal varchar(32) NOT NULL DEFAULT ''",
+        );
+
+        foreach ( $lesson_required_columns as $col_name => $alter_sql ) {
+            $column_exists = $wpdb->get_var( $wpdb->prepare( "SHOW COLUMNS FROM {$table_lessons} LIKE %s", $col_name ) );
+            if ( empty( $column_exists ) ) {
+                $wpdb->query( $alter_sql );
+            }
+        }
+
+        // Ensure mileage cache has error-message support for Google Distance Matrix diagnostics.
+        $mileage_table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+        $found_mileage_table = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $mileage_table ) );
+        if ( $found_mileage_table === $mileage_table ) {
+            $existing_mileage_cols = array();
+            $cols = $wpdb->get_results( "SHOW COLUMNS FROM {$mileage_table}" );
+
+            if ( is_array( $cols ) ) {
+                foreach ( $cols as $c ) {
+                    if ( ! empty( $c->Field ) ) {
+                        $existing_mileage_cols[] = (string) $c->Field;
+                    }
+                }
+            }
+
+            if ( ! in_array( 'calc_error_message', $existing_mileage_cols, true ) ) {
+                $wpdb->query( "ALTER TABLE {$mileage_table} ADD COLUMN calc_error_message TEXT NULL AFTER calc_source" );
+            }
+        }
+
         dbDelta( $sql3 );
+        dbDelta( $sql_attendance );
+
+        $tax_expenses_table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+        $sql_tax_expenses = "CREATE TABLE {$tax_expenses_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    expense_date DATE NOT NULL,
+    tax_year INT NOT NULL,
+    tax_quarter TINYINT NOT NULL DEFAULT 0,
+    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
+    category VARCHAR(100) NOT NULL DEFAULT '',
+    vendor_name VARCHAR(190) NOT NULL DEFAULT '',
+    description TEXT NULL,
+    amount DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    payment_method VARCHAR(50) NOT NULL DEFAULT '',
+    notes TEXT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY tax_year (tax_year),
+    KEY tax_quarter (tax_quarter),
+    KEY category (category)
+) {$charset_collate};";
+        dbDelta( $sql_tax_expenses );
+
+        $mileage_table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+        $sql_mileage = "CREATE TABLE {$mileage_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    lesson_id BIGINT UNSIGNED NOT NULL,
+    instructor_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    tax_year INT NOT NULL,
+    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
+    trip_date DATE NOT NULL,
+    origin_address VARCHAR(255) NOT NULL DEFAULT '',
+    destination_address VARCHAR(255) NOT NULL DEFAULT '',
+    one_way_miles DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    round_trip_miles DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    mileage_rate DECIMAL(8,4) NOT NULL DEFAULT 0.0000,
+    mileage_deduction DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    calc_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+    calc_source VARCHAR(30) NOT NULL DEFAULT 'manual',
+    calc_error_message TEXT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY lesson_id (lesson_id),
+    KEY instructor_id (instructor_id),
+    KEY tax_year (tax_year)
+) {$charset_collate};";
+        dbDelta( $sql_mileage );
+
+        $payee_table = $wpdb->prefix . 'mrm_tax_payee_profiles';
+        $sql_payee = "CREATE TABLE {$payee_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    payee_type VARCHAR(30) NOT NULL DEFAULT 'contractor',
+    related_instructor_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    related_user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    display_name VARCHAR(190) NOT NULL DEFAULT '',
+    legal_name VARCHAR(190) NOT NULL DEFAULT '',
+    email VARCHAR(190) NOT NULL DEFAULT '',
+    tin_last4 VARCHAR(10) NOT NULL DEFAULT '',
+    w9_received TINYINT(1) NOT NULL DEFAULT 0,
+    w9_received_date DATE NULL,
+    is_1099_eligible TINYINT(1) NOT NULL DEFAULT 1,
+    is_employee TINYINT(1) NOT NULL DEFAULT 0,
+    notes TEXT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY payee_type (payee_type),
+    KEY related_instructor_id (related_instructor_id),
+    KEY is_employee (is_employee)
+) {$charset_collate};";
+        dbDelta( $sql_payee );
+
+        $calc_cache_table = $wpdb->prefix . 'mrm_tax_calculation_cache';
+        $sql_calc_cache = "CREATE TABLE {$calc_cache_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tax_year INT NOT NULL,
+    tax_quarter TINYINT NOT NULL DEFAULT 0,
+    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
+    calc_key VARCHAR(100) NOT NULL,
+    calc_payload LONGTEXT NULL,
+    generated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY year_quarter_key (tax_year, tax_quarter, calc_key)
+) {$charset_collate};";
+        dbDelta( $sql_calc_cache );
+
+        // Backfill recurring anchor for older lesson rows so moved recurring events
+        // can still be resolved against Google after reschedules.
+        $wpdb->query(
+            "UPDATE {$table_lessons}
+             SET google_original_start_time = start_time
+             WHERE google_original_start_time IS NULL
+                OR google_original_start_time = '0000-00-00 00:00:00'"
+        );
+
         update_option( 'mrm_scheduler_db_version', self::DB_VERSION );
         if ( ! get_option( 'mrm_scheduler_settings', false ) ) {
             add_option( 'mrm_scheduler_settings', array(), '', 'no' ); // autoload disabled
@@ -348,7 +2514,6 @@ class MRM_Lesson_Scheduler {
     protected function schema_status() {
         global $wpdb;
 
-        // 1) Check instructors table
         $instructors = $wpdb->prefix . 'mrm_instructors';
         $exists_instructors = ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $instructors ) ) === $instructors );
         if ( ! $exists_instructors ) {
@@ -357,28 +2522,15 @@ class MRM_Lesson_Scheduler {
 
         $instructor_cols = $wpdb->get_col( "DESC {$instructors}", 0 );
         $need_instructors = array(
-            'timezone',
-            'hire_date',
-            'calendar_id',
-            'profile_image_url',
-            'short_description',
-            'long_description',
-            'instruments',
-            'state'
+            'timezone', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state', 'address', 'zip_code', 'offers_in_person', 'offers_online',
         );
 
         foreach ( $need_instructors as $col ) {
             if ( ! in_array( $col, $instructor_cols, true ) ) {
-                return array(
-                    'ok'     => false,
-                    'reason' => 'missing_column',
-                    'table'  => 'mrm_instructors',
-                    'column' => $col
-                );
+                return array( 'ok' => false, 'reason' => 'missing_column', 'table' => 'mrm_instructors', 'column' => $col );
             }
         }
 
-        // 2) Check lessons table (THIS is what prevents "Database insert failed" after reminder fields were added)
         $lessons = $wpdb->prefix . 'mrm_lessons';
         $exists_lessons = ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $lessons ) ) === $lessons );
         if ( ! $exists_lessons ) {
@@ -387,23 +2539,38 @@ class MRM_Lesson_Scheduler {
 
         $lesson_cols = $wpdb->get_col( "DESC {$lessons}", 0 );
         $need_lessons = array(
-            'google_event_id',
-            'google_meet_url',
-            'agreement_id',
-            'reminder_token',
-            'reminder_token_hash',
-            'reminder_scheduled_at',
-            'reminder_sent_at'
+            'google_original_start_time', 'delivered_at', 'finalized_at', 'charge_due_at', 'charge_status', 'charge_attempts', 'charge_last_attempt_at', 'charge_last_error', 'google_event_id', 'google_instance_event_id', 'google_meet_url', 'order_id', 'payment_mode', 'payout_unlocked_at', 'autopay_profile_id', 'agreement_id', 'reminder_token', 'reminder_token_hash', 'reminder_scheduled_at', 'reminder_sent_at',
         );
 
         foreach ( $need_lessons as $col ) {
             if ( ! in_array( $col, $lesson_cols, true ) ) {
-                return array(
-                    'ok'     => false,
-                    'reason' => 'missing_column',
-                    'table'  => 'mrm_lessons',
-                    'column' => $col
-                );
+                return array( 'ok' => false, 'reason' => 'missing_column', 'table' => 'mrm_lessons', 'column' => $col );
+            }
+        }
+
+        $attendance = $wpdb->prefix . 'mrm_lesson_attendance';
+        $exists_attendance = ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $attendance ) ) === $attendance );
+        if ( ! $exists_attendance ) {
+            return array( 'ok' => false, 'reason' => 'missing_table', 'table' => 'mrm_lesson_attendance' );
+        }
+
+        $attendance_cols = $wpdb->get_col( "DESC {$attendance}", 0 );
+        $need_attendance = array(
+            'lesson_id', 'parent_reminder_sent_at', 'instructor_reminder_sent_at', 'parent_feedback_request_sent_at', 'instructor_arrived_at', 'instructor_arrived_ip', 'parent_confirmed_arrival_at', 'parent_confirmed_arrival_ip', 'instructor_departed_at', 'instructor_departed_ip', 'parent_rating', 'parent_comment', 'feedback_submitted_at', 'arrival_alert_sent_at', 'departure_alert_sent_at', 'created_at', 'updated_at',
+        );
+
+        foreach ( $need_attendance as $col ) {
+            if ( ! in_array( $col, $attendance_cols, true ) ) {
+                return array( 'ok' => false, 'reason' => 'missing_column', 'table' => 'mrm_lesson_attendance', 'column' => $col );
+            }
+        }
+
+        $mileage_cache = $wpdb->prefix . 'mrm_tax_mileage_cache';
+        $exists_mileage_cache = ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $mileage_cache ) ) === $mileage_cache );
+        if ( $exists_mileage_cache ) {
+            $mileage_cols = $wpdb->get_col( "DESC {$mileage_cache}", 0 );
+            if ( ! in_array( 'calc_error_message', $mileage_cols, true ) ) {
+                return array( 'ok' => false, 'reason' => 'missing_column', 'table' => 'mrm_tax_mileage_cache', 'column' => 'calc_error_message' );
             }
         }
 
@@ -483,6 +2650,82 @@ class MRM_Lesson_Scheduler {
         ) );
     }
 
+
+    protected function expand_booking_slots_from_repeat_rule( $slots, $repeat_frequency, $repeat_duration ) {
+        $slots = is_array( $slots ) ? array_values( $slots ) : array();
+        $repeat_frequency = strtolower( trim( (string) $repeat_frequency ) );
+        $repeat_duration  = strtolower( trim( (string) $repeat_duration ) );
+
+        if ( empty( $slots ) ) return array();
+        if ( $repeat_frequency !== 'weekly' && $repeat_frequency !== 'biweekly' ) return $slots;
+
+        $interval_days = ( $repeat_frequency === 'biweekly' ) ? 14 : 7;
+
+        $count_map = array(
+            '1_month'   => 4,
+            '2_months'  => 8,
+            '3_months'  => 12,
+            '6_months'  => 24,
+            '12_months' => 48,
+        );
+
+        if ( $repeat_frequency === 'biweekly' ) {
+            $count_map = array(
+                '1_month'   => 2,
+                '2_months'  => 4,
+                '3_months'  => 6,
+                '6_months'  => 12,
+                '12_months' => 24,
+            );
+        }
+
+        $repeat_count = isset( $count_map[ $repeat_duration ] ) ? (int) $count_map[ $repeat_duration ] : 0;
+
+        // Indefinite recurring bookings should seed a rolling 90-day local horizon.
+        if ( $repeat_duration === 'indefinitely' ) {
+            $repeat_count = (int) floor( 90 / $interval_days ) + 1;
+        }
+
+        if ( $repeat_count <= 1 ) return $slots;
+
+        $expanded = array();
+
+        foreach ( $slots as $slot ) {
+            $start_raw = (string) ( $slot['start'] ?? '' );
+            $end_raw   = (string) ( $slot['end'] ?? '' );
+
+            $start_ts = strtotime( $start_raw );
+            $end_ts   = strtotime( $end_raw );
+
+            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                continue;
+            }
+
+            for ( $i = 0; $i < $repeat_count; $i++ ) {
+                $expanded[] = array(
+                    'start' => gmdate( 'c', $start_ts + ( $i * $interval_days * DAY_IN_SECONDS ) ),
+                    'end'   => gmdate( 'c', $end_ts   + ( $i * $interval_days * DAY_IN_SECONDS ) ),
+                    'instructor_id' => (int) ( $slot['instructor_id'] ?? 0 ),
+                );
+            }
+        }
+
+        usort( $expanded, function( $a, $b ) {
+            return strcmp( (string) $a['start'], (string) $b['start'] );
+        } );
+
+        $deduped = array();
+        $seen = array();
+        foreach ( $expanded as $slot ) {
+            $k = (string) $slot['instructor_id'] . '|' . (string) $slot['start'] . '|' . (string) $slot['end'];
+            if ( isset( $seen[ $k ] ) ) continue;
+            $seen[ $k ] = true;
+            $deduped[] = $slot;
+        }
+
+        return $deduped;
+    }
+
     public function rest_book_lesson( WP_REST_Request $request ) {
         global $wpdb;
 
@@ -490,6 +2733,15 @@ class MRM_Lesson_Scheduler {
 
         $instructor_id = intval( $data['instructor_id'] ?? 0 );
         $slots         = isset( $data['slots'] ) && is_array( $data['slots'] ) ? $data['slots'] : array();
+        $slots_are_expanded = ! empty( $data['slots_are_expanded'] );
+
+        if ( ! $slots_are_expanded ) {
+            $slots = $this->expand_booking_slots_from_repeat_rule(
+                $slots,
+                (string) ( $data['repeat_frequency'] ?? 'none' ),
+                (string) ( $data['repeat_duration'] ?? '' )
+            );
+        }
 
         $student_name  = sanitize_text_field( (string) ( $data['student_name'] ?? '' ) );
         $student_email = sanitize_email( (string) ( $data['student_email'] ?? '' ) );
@@ -503,13 +2755,68 @@ class MRM_Lesson_Scheduler {
         $phone         = sanitize_text_field( (string) ( $data['phone'] ?? '' ) );
 
         $address       = sanitize_text_field( (string) ( $data['address'] ?? '' ) );
+        $address_city  = sanitize_text_field( (string) ( $data['address_city'] ?? '' ) );
         $address_state = sanitize_text_field( (string) ( $data['address_state'] ?? '' ) );
         $address_postal= sanitize_text_field( (string) ( $data['address_postal'] ?? '' ) );
+        $parent_timezone = sanitize_text_field( (string) ( $data['parent_timezone'] ?? '' ) );
+        if ( $parent_timezone === '' ) {
+            $parent_timezone = 'America/Phoenix';
+        }
 
         $lesson_type       = sanitize_text_field( (string) ( $data['lesson_type'] ?? '' ) );          // online | inperson | consultation (per your UI)
         $repeat_frequency  = sanitize_text_field( (string) ( $data['repeat_frequency'] ?? 'none' ) ); // weekly | biweekly | none
         $repeat_duration   = sanitize_text_field( (string) ( $data['repeat_duration'] ?? '' ) );      // 1_month | 3_months | indefinitely (per UI)
         $appointment_type  = sanitize_text_field( (string) ( $data['appointment_type'] ?? 'lesson' ) ); // lesson | consultation
+
+        $appointment_type = strtolower( trim( $appointment_type ) );
+        $lesson_type_normalized = strtolower( trim( $lesson_type ) );
+
+        $is_consultation = 0;
+        if ( $appointment_type === 'consultation' || $lesson_type_normalized === 'consultation' ) {
+            $is_consultation = 1;
+        }
+
+        // Consultations are always online in this system.
+        if ( $is_consultation ) {
+            $is_online = 1;
+            $appointment_type = 'consultation';
+        } else {
+            $appointment_type = 'lesson';
+        }
+        $order_id = isset( $data['order_id'] ) ? intval( $data['order_id'] ) : 0;
+        $payment_mode = sanitize_text_field( (string ) ( $data['payment_mode'] ?? 'none' ) ); // prepay|one_time|autopay|none
+        $autopay_profile_id = isset( $data['autopay_profile_id'] ) ? intval( $data['autopay_profile_id'] ) : 0;
+
+        $agreement = isset( $data['agreement'] ) && is_array( $data['agreement'] ) ? $data['agreement'] : array();
+        $terms_accepted = ! empty( $agreement['terms_accepted'] );
+
+        if ( ! $terms_accepted ) {
+            return new WP_REST_Response(
+                array(
+                    'ok'      => false,
+                    'message' => 'Please agree to the Terms of Service before booking.',
+                ),
+                400
+            );
+        }
+
+        $agreement_signature = trim( (string) ( $agreement['signature'] ?? '' ) );
+        if ( $agreement_signature === '' ) {
+            $agreement_signature = 'Terms accepted electronically by ' . $student_email;
+        }
+
+        $agreement_id = $this->maybe_store_agreement(
+            $student_email,
+            self::TERMS_VERSION,
+            $agreement_signature,
+            isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( (string) $_SERVER['REMOTE_ADDR'] ) : '',
+            array(
+                'agreement_scope' => 'terms_of_service',
+                'source_flow' => 'lesson_booking',
+                'related_order_id' => $order_id > 0 ? $order_id : null,
+                'acknowledgement' => $agreement,
+            )
+        );
 
         if ( $instructor_id <= 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing instructor_id.' ), 400 );
@@ -521,6 +2828,133 @@ class MRM_Lesson_Scheduler {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'No slots selected.' ), 400 );
         }
 
+        /*
+         * Payment integrity guard.
+         * Public booking requests may not create paid/autopay-linked lessons unless
+         * the referenced Payments Hub records prove payment and ownership.
+         */
+        $requires_paid_order = in_array( $payment_mode, array( 'one_time', 'prepay', 'autopay' ), true );
+
+        if ( $requires_paid_order ) {
+            if ( $order_id <= 0 ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'Payment confirmation is required before booking this lesson.',
+                    ),
+                    403
+                );
+            }
+
+            $orders_table = $wpdb->prefix . 'mrm_pay_orders';
+            $orders_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) );
+
+            if ( $orders_exists !== $orders_table ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'Payment confirmation is temporarily unavailable. Please contact Low Brass Lessons.',
+                    ),
+                    500
+                );
+            }
+
+            $order = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT id, customer_email, product_type, status, metadata_json
+                     FROM {$orders_table}
+                     WHERE id = %d
+                     LIMIT 1",
+                    $order_id
+                ),
+                ARRAY_A
+            );
+
+            $paid_statuses = array( 'paid', 'completed', 'succeeded' );
+
+            if (
+                ! is_array( $order )
+                || empty( $order['id'] )
+                || (string) ( $order['product_type'] ?? '' ) !== 'lesson'
+                || ! in_array( (string) ( $order['status'] ?? '' ), $paid_statuses, true )
+            ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'Payment confirmation is required before booking this lesson.',
+                    ),
+                    403
+                );
+            }
+
+            $order_email = sanitize_email( (string) ( $order['customer_email'] ?? '' ) );
+            if ( $order_email && strtolower( $order_email ) !== strtolower( $student_email ) ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'Payment confirmation does not match the booking email.',
+                    ),
+                    403
+                );
+            }
+        }
+
+        if ( $payment_mode === 'autopay' ) {
+            if ( $autopay_profile_id <= 0 ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'AutoPay confirmation is required before booking this lesson.',
+                    ),
+                    403
+                );
+            }
+
+            $autopay_table = $wpdb->prefix . 'mrm_autopay_profiles';
+            $autopay_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $autopay_table ) );
+
+            if ( $autopay_exists !== $autopay_table ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'AutoPay confirmation is temporarily unavailable. Please contact Low Brass Lessons.',
+                    ),
+                    500
+                );
+            }
+
+            $profile = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT id, email_hash, active
+                     FROM {$autopay_table}
+                     WHERE id = %d
+                     LIMIT 1",
+                    $autopay_profile_id
+                ),
+                ARRAY_A
+            );
+
+            $expected_hash = hash( 'sha256', strtolower( trim( $student_email ) ) );
+
+            if (
+                ! is_array( $profile )
+                || empty( $profile['id'] )
+                || empty( $profile['active'] )
+                || (
+                    ! empty( $profile['email_hash'] )
+                    && ! hash_equals( (string) $profile['email_hash'], $expected_hash )
+                )
+            ) {
+                return new WP_REST_Response(
+                    array(
+                        'ok'      => false,
+                        'message' => 'AutoPay confirmation does not match the booking email.',
+                    ),
+                    403
+                );
+            }
+        }
+
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $lessons_table ) );
         if ( $exists !== $lessons_table ) {
@@ -529,6 +2963,7 @@ class MRM_Lesson_Scheduler {
 
         $now = current_time( 'mysql' );
         $created_ids = array();
+        $google_messages = array();
 
         // Fetch instructor calendar + timezone (required for Google event insert)
         $table_instructors = $wpdb->prefix . 'mrm_instructors';
@@ -546,7 +2981,71 @@ class MRM_Lesson_Scheduler {
         $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
         $instr_tz    = ( is_array( $instr ) && ! empty( $instr['timezone'] ) ) ? (string) $instr['timezone'] : 'UTC';
 
-        foreach ( $slots as $slot ) {
+        $is_recurring_booking = (
+            in_array( strtolower( (string) $repeat_frequency ), array( 'weekly', 'biweekly' ), true ) &&
+            count( $slots ) >= 1
+        );
+
+        $series_id = null;
+        if ( $is_recurring_booking ) {
+            $wpdb->insert(
+                $lessons_table,
+                array(
+                    'instructor_id' => $instructor_id,
+                    'series_id'     => null,
+                    'student_name'  => $student_name !== '' ? $student_name : $student_email,
+                    'student_email' => $student_email,
+                    'parent_timezone'     => $parent_timezone,
+                    'address'             => $address,
+                    'address_city'        => $address_city,
+                    'address_state'       => $address_state,
+                    'address_postal'      => $address_postal,
+                    'instrument'       => $instrument !== '' ? $instrument : 'unknown',
+                    'is_online'        => $is_online,
+                    'is_consultation'  => $is_consultation,
+                    'instructor_timezone' => $instr_tz,
+                    'lesson_length'    => $lesson_length > 0 ? $lesson_length : 60,
+                    'start_time'    => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
+                    'end_time'      => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['end'] ?? '' ) ) ),
+                    'google_original_start_time' => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
+                    'status'        => 'series',
+                    'google_event_id' => null,
+                    'google_meet_url' => null,
+                    'order_id'        => null,
+                    'payment_mode'    => 'none',
+                    'payout_unlocked_at' => null,
+                    'autopay_profile_id' => null,
+                    'agreement_id'    => ( $agreement_id > 0 ? $agreement_id : null ),
+                    'created_at'      => $now,
+                    'updated_at'      => $now,
+                    'reminder_token'  => null,
+                    'reminder_token_hash' => null,
+                    'reminder_scheduled_at' => null,
+                    'reminder_sent_at' => null,
+                ),
+                array(
+                    '%d','%d','%s','%s','%s','%s','%s','%s','%s','%d','%d','%s','%d','%s','%s','%s','%s','%s',
+                    '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'
+                )
+            );
+
+            $series_id = (int) $wpdb->insert_id;
+            if ( $series_id <= 0 ) {
+                $series_id = null;
+            }
+        }
+
+        $series_shared_token = '';
+        $series_shared_token_hash = '';
+        $series_master_google_event_id = '';
+        $series_master_google_meet_url = '';
+
+        if ( $is_recurring_booking ) {
+            $series_shared_token = bin2hex( random_bytes( 16 ) );
+            $series_shared_token_hash = hash( 'sha256', $series_shared_token );
+        }
+
+        foreach ( $slots as $slot_index => $slot ) {
             $start_raw = (string) ( $slot['start'] ?? '' );
             $end_raw   = (string) ( $slot['end'] ?? '' );
 
@@ -560,23 +3059,60 @@ class MRM_Lesson_Scheduler {
             $start_mysql = gmdate( 'Y-m-d H:i:s', $start_ts );
             $end_mysql   = gmdate( 'Y-m-d H:i:s', $end_ts );
 
-            $token = bin2hex( random_bytes( 16 ) );
-            $token_hash = hash( 'sha256', $token );
+            if ( $is_recurring_booking ) {
+                $token = $series_shared_token;
+                $token_hash = $series_shared_token_hash;
+            } else {
+                $token = bin2hex( random_bytes( 16 ) );
+                $token_hash = hash( 'sha256', $token );
+            }
+
+            $slot_order_id = $order_id;
+            $slot_payment_mode = ( $payment_mode !== '' ? $payment_mode : 'none' );
+            $slot_charge_status = 'none';
+
+            if ( $payment_mode === 'autopay' ) {
+                if ( $slot_index > 0 ) {
+                    $slot_order_id = 0;
+                    $slot_payment_mode = 'autopay';
+                    $slot_charge_status = 'none';
+                } else {
+                    // First lesson in an autopay series is already paid by the initial checkout.
+                    $slot_payment_mode = 'one_time';
+                    $slot_charge_status = ( $slot_order_id > 0 ? 'paid' : 'none' );
+                }
+            }
+
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            }
 
             $ok = $wpdb->insert( $lessons_table, array(
                 'instructor_id' => $instructor_id,
-                'series_id'     => null,
+                'series_id'     => ( $series_id ? $series_id : null ),
                 'student_name'  => $student_name !== '' ? $student_name : $student_email,
-                'student_email' => $student_email,
-                'instrument'    => $instrument !== '' ? $instrument : 'unknown',
-                'is_online'     => $is_online,
-                'lesson_length' => $lesson_length > 0 ? $lesson_length : 60,
+                'student_email'    => $student_email,
+                'parent_timezone'     => $parent_timezone,
+                'address'             => $address,
+                'address_city'        => $address_city,
+                'address_state'       => $address_state,
+                'address_postal'      => $address_postal,
+                'instrument'       => $instrument !== '' ? $instrument : 'unknown',
+                'is_online'        => $is_online,
+                'is_consultation'  => $is_consultation,
+                'instructor_timezone' => $instr_tz,
+                'lesson_length'    => $lesson_length > 0 ? $lesson_length : 60,
                 'start_time'    => $start_mysql,
                 'end_time'      => $end_mysql,
+                'google_original_start_time' => $start_mysql,
                 'status'        => 'scheduled',
-                'google_event_id' => null,
+                'charge_status' => $slot_charge_status,
+                'google_event_id' => ( $series_master_google_event_id !== '' ? $series_master_google_event_id : null ),
                 'google_meet_url' => null,
-                'agreement_id'    => null,
+                'order_id'        => ( $slot_order_id > 0 ? $slot_order_id : null ),
+                'payment_mode'    => $slot_payment_mode,
+                'payout_unlocked_at' => null,
+                'autopay_profile_id' => ( $autopay_profile_id > 0 ? $autopay_profile_id : null ),
+                'agreement_id'    => ( $agreement_id > 0 ? $agreement_id : null ),
                 'created_at'      => $now,
                 'updated_at'      => $now,
                 'reminder_token'  => $token,
@@ -584,16 +3120,83 @@ class MRM_Lesson_Scheduler {
                 'reminder_scheduled_at' => null,
                 'reminder_sent_at' => null,
             ), array(
-                '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'
+                '%d', // instructor_id
+                '%d', // series_id
+                '%s', // student_name
+                '%s', // student_email
+                '%s', // parent_timezone
+                '%s', // address
+                '%s', // address_city
+                '%s', // address_state
+                '%s', // address_postal
+                '%s', // instrument
+                '%d', // is_online
+                '%d', // is_consultation
+                '%s', // instructor_timezone
+                '%d', // lesson_length
+                '%s', // start_time
+                '%s', // end_time
+                '%s', // google_original_start_time
+                '%s', // status
+                '%s', // charge_status
+                '%s', // google_event_id
+                '%s', // google_meet_url
+                '%d', // order_id
+                '%s', // payment_mode
+                '%s', // payout_unlocked_at
+                '%d', // autopay_profile_id
+                '%d', // agreement_id
+                '%s', // created_at
+                '%s', // updated_at
+                '%s', // reminder_token
+                '%s', // reminder_token_hash
+                '%s', // reminder_scheduled_at
+                '%s', // reminder_sent_at
             ) );
 
             if ( $ok ) {
                 $booking_id = (int) $wpdb->insert_id;
                 $created_ids[] = $booking_id;
 
+                if ( (int) $is_consultation === 1 ) {
+                    $this->send_consultation_confirmation_for_lesson( $booking_id );
+                }
+
+                $timeframe_label = '';
+                if ( $is_recurring_booking ) {
+                    $timeframe_label = $this->mrm_get_timeframe_label( $repeat_frequency, $repeat_duration );
+                }
+
+                $should_send_instructor_scheduled_email =
+                    ( ! $is_recurring_booking ) || ( (int) $slot_index === 0 );
+
+                if ( $should_send_instructor_scheduled_email ) {
+                    $this->send_instructor_scheduled_notification_for_lesson(
+                        $booking_id,
+                        array(
+                            'timeframe_label' => $timeframe_label,
+                        )
+                    );
+                }
+
+                if ( ! $is_online ) {
+                    $this->mrm_queue_mileage_calculation_for_lesson( $booking_id );
+                }
+
                 // Call existing Google Calendar insert function (already defined in this plugin)
                 // Only do this if Google is configured and the instructor has a calendar_id.
-                if ( $calendar_id !== '' && $this->google_is_configured() ) {
+                if ( $calendar_id === '' ) {
+                    $google_messages[] = 'Instructor calendar_id is blank, so no Google Calendar event could be created.';
+                } elseif ( ! $this->google_is_configured() ) {
+                    $google_messages[] = 'Google Calendar is not configured, so no calendar event could be created.';
+                }
+
+                // Non-recurring lessons still create one standalone Google event.
+                // Recurring lessons create exactly one Google recurring master event
+                // on the first slot only.
+                $should_create_google_event = ( ! $is_recurring_booking || $slot_index === 0 );
+
+                if ( $should_create_google_event && $calendar_id !== '' && $this->google_is_configured() ) {
 
                     // ------------------------------------------------------------
                     // Event title/location/description (minimal but complete)
@@ -631,6 +3234,8 @@ class MRM_Lesson_Scheduler {
                     } else {
                         $name_for_title = $student_display;
                     }
+
+                    $name_for_calendar = $name_for_title;
 
                     // Lesson type label (keep readable)
                     if ( $lt_raw === '' ) {
@@ -676,12 +3281,17 @@ class MRM_Lesson_Scheduler {
                     $location = '';
                     if ( ! $is_online ) {
                         $state_zip = trim( trim( (string) $address_state ) . ' ' . trim( (string) $address_postal ) );
-                        if ( $address !== '' && $state_zip !== '' ) {
-                            $location = trim( $address . ', ' . $state_zip );
+                        $city_state_zip = trim( implode( ', ', array_filter( array(
+                            trim( (string) $address_city ),
+                            $state_zip,
+                        ) ) ) );
+
+                        if ( $address !== '' && $city_state_zip !== '' ) {
+                            $location = trim( $address . ', ' . $city_state_zip );
                         } elseif ( $address !== '' ) {
                             $location = trim( $address );
-                        } elseif ( $state_zip !== '' ) {
-                            $location = $state_zip;
+                        } elseif ( $city_state_zip !== '' ) {
+                            $location = $city_state_zip;
                         }
                     }
 
@@ -731,6 +3341,7 @@ class MRM_Lesson_Scheduler {
                     // Address fields (these are fillable boxes in the modal)
                     // Keep them present in details for plugin access; location field can still remain in-person only elsewhere.
                     $description_lines[] = 'Address: ' . (string) $address;
+                    $description_lines[] = 'City: ' . (string) $address_city;
                     $description_lines[] = 'State: ' . (string) $address_state;
                     $description_lines[] = 'Postal Code: ' . (string) $address_postal;
 
@@ -739,28 +3350,33 @@ class MRM_Lesson_Scheduler {
                     // Your sync logic expects this to exist:
                     // extendedProperties.private.booking_id
                     $extended_private = array(
-                        'booking_id'          => (string) $booking_id,
                         'student_email'       => (string) $student_email,
-                        // Store parent name as primary display name for calendar-based workflows
                         'student_name'        => (string) $name_for_calendar,
                         'student_last_name'   => (string) $student_last_name,
                         'instrument'          => (string) $instrument,
-
                         'parent_first_name'   => (string) $parent_first,
                         'parent_last_name'    => (string) $parent_last,
                         'phone'               => (string) $phone,
-
                         'address'             => (string) $address,
+                        'address_city'        => (string) $address_city,
                         'address_state'       => (string) $address_state,
                         'address_postal'      => (string) $address_postal,
-
                         'lesson_type'         => (string) $lesson_type,
                         'repeat_frequency'    => (string) $repeat_frequency,
                         'repeat_duration'     => (string) $repeat_duration,
                         'appointment_type'    => (string) $appointment_type,
-
+                        'is_consultation'     => (string) ( $is_consultation ? '1' : '0' ),
                         'reminder_token'      => (string) $token,
                     );
+
+                    // Always attach the concrete lesson-row booking_id so each lesson can be
+                    // resolved directly from Google.
+                    $extended_private['booking_id'] = (string) $booking_id;
+
+                    if ( $is_recurring_booking ) {
+                        $extended_private['series_id'] = (string) ( $series_id ?: '' );
+                        $extended_private['series_anchor_start_utc'] = (string) $start_mysql;
+                    }
 
                     // Use your existing RFC3339 UTC helper (already in this file)
                     $start_rfc3339 = $this->to_rfc3339_utc( $start_raw );
@@ -769,8 +3385,13 @@ class MRM_Lesson_Scheduler {
                     // If conversion fails, do not break booking — just log
                     if ( ! is_wp_error( $start_rfc3339 ) && ! is_wp_error( $end_rfc3339 ) ) {
 
-                        // IMPORTANT: We pass create_meet = false to respect your existing design:
-                        // Meet is created later by the join gate / reminder flow, not on calendar insert.
+                        $recurrence_rules = array();
+                        $create_meet = false;
+
+                        if ( $is_recurring_booking ) {
+                            $recurrence_rules = $this->build_google_recurrence_rules( $repeat_frequency, $repeat_duration, $start_ts );
+                        }
+
                         $ins = $this->google_insert_event(
                             $calendar_id,
                             $title,
@@ -778,50 +3399,101 @@ class MRM_Lesson_Scheduler {
                             $location,
                             $start_rfc3339,
                             $end_rfc3339,
-                            'UTC',              // dateTime values are UTC Z strings
+                            'UTC',
                             $extended_private,
-                            array(),            // recurrence not used here; your UI sends explicit slots
-                            false,              // create_meet disabled (deferred Meet is your current architecture)
+                            $recurrence_rules,
+                            $create_meet,
                             (array) ( is_email( $student_email ) ? array( $student_email ) : array() )
                         );
 
                         if ( ! is_wp_error( $ins ) && is_array( $ins ) && ! empty( $ins['id'] ) ) {
-                            // Store google_event_id so your sync code can find/update later
-                            $wpdb->update(
-                                $lessons_table,
-                                array(
-                                    'google_event_id' => (string) $ins['id'],
-                                    'updated_at'      => $now,
-                                ),
-                                array( 'id' => $booking_id ),
-                                array( '%s', '%s' ),
-                                array( '%d' )
-                            );
+                            $created_event_id = (string) $ins['id'];
+                            $created_meet_url = ! empty( $ins['meet_url'] ) ? (string) $ins['meet_url'] : '';
+
+                            if ( $is_recurring_booking ) {
+                                $series_master_google_event_id = $created_event_id;
+                                $series_master_google_meet_url = $created_meet_url;
+
+                                $wpdb->update(
+                                    $lessons_table,
+                                    array(
+                                        'google_event_id' => $series_master_google_event_id,
+                                        'google_meet_url' => null,
+                                        'updated_at'      => $now,
+                                    ),
+                                    array( 'id' => $booking_id ),
+                                    array( '%s', '%s', '%s' ),
+                                    array( '%d' )
+                                );
+
+                                if ( $series_id ) {
+                                    $wpdb->update(
+                                        $lessons_table,
+                                        array(
+                                            'google_event_id' => $series_master_google_event_id,
+                                            'google_meet_url' => null,
+                                            'updated_at'      => $now,
+                                        ),
+                                        array( 'id' => $series_id ),
+                                        array( '%s', '%s', '%s' ),
+                                        array( '%d' )
+                                    );
+                                }
+
+                                $google_messages[] = 'Recurring Google Calendar series created successfully.';
+                            } else {
+                                $wpdb->update(
+                                    $lessons_table,
+                                    array(
+                                        'google_event_id' => $created_event_id,
+                                        'google_instance_event_id' => $created_event_id,
+                                        'google_meet_url' => null,
+                                        'updated_at'      => $now,
+                                    ),
+                                    array( 'id' => $booking_id ),
+                                    array( '%s', '%s', '%s', '%s' ),
+                                    array( '%d' )
+                                );
+
+                                $google_messages[] = 'Calendar event created successfully.';
+                            }
                         } else {
                             $msg = is_wp_error( $ins ) ? $ins->get_error_message() : 'Unknown insert response.';
-                            error_log( 'MRM google_insert_event failed for booking_id ' . $booking_id . ': ' . $msg );
+                            $google_messages[] = 'Calendar event was not created: ' . $msg;
                         }
 
                     } else {
                         $msg = is_wp_error( $start_rfc3339 ) ? $start_rfc3339->get_error_message() : $end_rfc3339->get_error_message();
-                        error_log( 'MRM time->RFC3339 failed for booking_id ' . $booking_id . ': ' . $msg );
+                        $google_messages[] = 'Calendar event was not created because time conversion failed: ' . $msg;
                     }
                 }
+            } else {
             }
         }
 
+        $this->bump_cache_bust_token();
+
         if ( empty( $created_ids ) ) {
-            return new WP_REST_Response( array( 'ok' => false, 'message' => 'No valid slots could be booked.' ), 400 );
+            return new WP_REST_Response( array(
+                'ok' => false,
+                'message' => 'Booking could not be saved. The selected time may still appear open, but the lesson record was not inserted. Please check the plugin error log.'
+            ), 400 );
         }
 
         // Removed: lesson purchases should NOT grant "all sheet music" access.
         // Only the $5 sheet-music add-on payment grants ledger access.
 
+        $response_message = 'Booking confirmed!';
+        if ( ! empty( $google_messages ) ) {
+            $response_message .= ' ' . implode( ' ', array_unique( $google_messages ) );
+        }
+
         return new WP_REST_Response( array(
             'ok' => true,
             'success' => true,
-            'message' => 'Booking confirmed!',
+            'message' => $response_message,
             'lesson_ids' => $created_ids,
+            'google_messages' => array_values( array_unique( $google_messages ) ),
         ), 200 );
     }
 
@@ -842,6 +3514,191 @@ class MRM_Lesson_Scheduler {
         $vars[] = 'mrm_join_video_lesson';
         return $vars;
     }
+
+    public function maybe_force_join_gate_virtual_request( $wp ) {
+        if ( ! isset( $_SERVER['REQUEST_URI'] ) ) {
+            return;
+        }
+
+        $request_path = (string) parse_url( (string) $_SERVER['REQUEST_URI'], PHP_URL_PATH );
+        $request_path = trim( $request_path, '/' );
+
+        if ( $request_path !== 'join-online' && $request_path !== 'join-video-lesson' ) {
+            return;
+        }
+
+        if ( ! is_object( $wp ) || ! isset( $wp->query_vars ) || ! is_array( $wp->query_vars ) ) {
+            return;
+        }
+
+        $wp->query_vars['mrm_join_video_lesson'] = '1';
+        $wp->query_vars['pagename'] = 'join-online';
+        $wp->request = 'join-online';
+
+        unset( $wp->query_vars['name'], $wp->query_vars['page'], $wp->query_vars['error'] );
+
+        if ( isset( $GLOBALS['wp_query'] ) && $GLOBALS['wp_query'] instanceof WP_Query ) {
+            $GLOBALS['wp_query']->is_404 = false;
+        }
+    }
+
+    protected function resolve_gate_lesson_by_shared_token( $token_hash ) {
+        global $wpdb;
+
+        $table_lessons = $wpdb->prefix . 'mrm_lessons';
+        $table_instructors = $wpdb->prefix . 'mrm_instructors';
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT l.*, i.calendar_id, i.timezone
+                 FROM {$table_lessons} l
+                 LEFT JOIN {$table_instructors} i ON i.id = l.instructor_id
+                 WHERE l.reminder_token_hash = %s
+                   AND l.status IN ('scheduled','payment_due','delivered')
+                 ORDER BY l.start_time ASC
+                 LIMIT 100",
+                $token_hash
+            ),
+            ARRAY_A
+        );
+
+        if ( ! $rows ) {
+            return array(
+                'lesson' => null,
+                'appointment_type' => '',
+                'start_ts' => 0,
+                'end_ts' => 0,
+                'timing_source' => '',
+                'timing_status' => 'unresolved',
+                'timing_reason' => 'no_rows',
+            );
+        }
+
+        $now = time();
+
+        $current_match = null;
+
+        $nearest_upcoming = null;
+        $nearest_upcoming_diff = null;
+
+        $nearest_recent = null;
+        $nearest_recent_diff = null;
+
+        foreach ( $rows as $candidate ) {
+            if ( empty( $candidate['is_online'] ) ) {
+                continue;
+            }
+
+            $effective_lesson = $candidate;
+            $calendar_id = (string) ( $candidate['calendar_id'] ?? '' );
+
+            $timing_source = 'db';
+            $timing_status = 'unresolved';
+            $timing_reason = '';
+            $start_ts = 0;
+            $end_ts = 0;
+
+            if ( $calendar_id !== '' && $this->google_is_configured() ) {
+                $gate_timing = $this->get_live_google_timing_for_lesson( $candidate, $calendar_id );
+                $timing_status = (string) ( $gate_timing['status'] ?? 'unresolved' );
+                $timing_reason = (string) ( $gate_timing['reason'] ?? '' );
+
+                if ( $timing_status === 'resolved' ) {
+                    $effective_lesson = isset( $gate_timing['lesson'] ) && is_array( $gate_timing['lesson'] )
+                        ? $gate_timing['lesson']
+                        : $candidate;
+
+                    $start_ts = (int) ( $gate_timing['start_ts'] ?? 0 );
+                    $end_ts   = (int) ( $gate_timing['end_ts'] ?? 0 );
+                    $timing_source = 'google';
+                }
+            }
+
+            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                $start_ts = strtotime( (string) ( $effective_lesson['start_time'] ?? '' ) );
+                $end_ts   = strtotime( (string) ( $effective_lesson['end_time'] ?? '' ) );
+
+                if ( ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) && ! empty( $effective_lesson['google_original_start_time'] ) ) {
+                    $fallback_start_ts = strtotime( (string) $effective_lesson['google_original_start_time'] );
+                    if ( $fallback_start_ts ) {
+                        $start_ts = $fallback_start_ts;
+                        $end_ts = $fallback_start_ts + ( max( 1, (int) ( $effective_lesson['lesson_length'] ?? 60 ) ) * MINUTE_IN_SECONDS );
+                    }
+                }
+
+                if ( $start_ts && $end_ts && $end_ts > $start_ts && $timing_source !== 'google' ) {
+                    $timing_source = 'db';
+                    if ( $timing_status === '' ) {
+                        $timing_status = 'fallback';
+                    }
+                }
+            }
+
+            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+                }
+                continue;
+            }
+
+            $open_ts  = $start_ts - ( 10 * MINUTE_IN_SECONDS );
+            $close_ts = $end_ts + ( 10 * MINUTE_IN_SECONDS );
+
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            }
+
+            $bundle = array(
+                'lesson' => $effective_lesson,
+                'appointment_type' => '',
+                'start_ts' => $start_ts,
+                'end_ts' => $end_ts,
+                'timing_source' => $timing_source,
+                'timing_status' => $timing_status,
+                'timing_reason' => $timing_reason,
+            );
+
+            if ( $now >= $open_ts && $now <= $close_ts ) {
+                $current_match = $bundle;
+                break;
+            }
+
+            if ( $now < $open_ts ) {
+                $diff = $open_ts - $now;
+                if ( $nearest_upcoming === null || $nearest_upcoming_diff === null || $diff < $nearest_upcoming_diff ) {
+                    $nearest_upcoming = $bundle;
+                    $nearest_upcoming_diff = $diff;
+                }
+            } else {
+                $diff = $now - $close_ts;
+                if ( $nearest_recent === null || $nearest_recent_diff === null || $diff < $nearest_recent_diff ) {
+                    $nearest_recent = $bundle;
+                    $nearest_recent_diff = $diff;
+                }
+            }
+        }
+
+        if ( $current_match !== null ) {
+            return $current_match;
+        }
+
+        if ( $nearest_upcoming !== null ) {
+            return $nearest_upcoming;
+        }
+
+        if ( $nearest_recent !== null ) {
+            return $nearest_recent;
+        }
+
+        return array(
+            'lesson' => null,
+            'appointment_type' => '',
+            'start_ts' => 0,
+            'end_ts' => 0,
+            'timing_source' => '',
+            'timing_status' => 'unresolved',
+            'timing_reason' => 'no_scored_candidates',
+        );
+    }
+
 
     public function maybe_render_join_gate_page() {
         // Absolute: this route must never be cached.
@@ -869,18 +3726,41 @@ class MRM_Lesson_Scheduler {
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
         $table_instructors = $wpdb->prefix . 'mrm_instructors';
 
-        $lesson = $wpdb->get_row(
-            $wpdb->prepare(
-                "SELECT id,instructor_id,student_name,student_email,is_online,lesson_length,start_time,end_time,status,google_event_id,google_meet_url,reminder_token_hash
-                 FROM {$table_lessons}
-                 WHERE reminder_token_hash = %s
-                 LIMIT 1",
-                $token_hash
-            ),
-            ARRAY_A
-        );
+        $resolved_gate = $this->resolve_gate_lesson_by_shared_token( $token_hash );
 
-        $appointment_type = '';
+        $lesson = isset( $resolved_gate['lesson'] ) && is_array( $resolved_gate['lesson'] )
+            ? $resolved_gate['lesson']
+            : null;
+
+        $appointment_type = isset( $resolved_gate['appointment_type'] )
+            ? (string) $resolved_gate['appointment_type']
+            : '';
+
+        $resolved_gate_start_ts = (int) ( $resolved_gate['start_ts'] ?? 0 );
+        $resolved_gate_end_ts   = (int) ( $resolved_gate['end_ts'] ?? 0 );
+        $resolved_gate_timing_source = (string) ( $resolved_gate['timing_source'] ?? '' );
+        $resolved_gate_timing_status = (string) ( $resolved_gate['timing_status'] ?? '' );
+        $resolved_gate_timing_reason = (string) ( $resolved_gate['timing_reason'] ?? '' );
+
+        // Re-read the selected lesson row after token-based sync and gate resolution so this
+        // request uses the latest DB values written from Google truth.
+        if ( is_array( $lesson ) && ! empty( $lesson['id'] ) ) {
+            $fresh_lesson = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT * FROM {$table_lessons} WHERE id = %d LIMIT 1",
+                    (int) $lesson['id']
+                ),
+                ARRAY_A
+            );
+
+            if ( is_array( $fresh_lesson ) && ! empty( $fresh_lesson ) ) {
+                $lesson = array_merge( $lesson, $fresh_lesson );
+            }
+        }
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
+
         if ( ! is_array( $lesson ) || empty( $lesson['id'] ) ) {
             $this->render_gate_message_page(
                 'Invalid Link',
@@ -889,10 +3769,27 @@ class MRM_Lesson_Scheduler {
             exit;
         }
 
-        if ( (string) $lesson['status'] !== 'scheduled' ) {
+        if ( empty( $lesson['google_original_start_time'] ) && ! empty( $lesson['start_time'] ) ) {
+            $lesson['google_original_start_time'] = (string) $lesson['start_time'];
+
+            $wpdb->update(
+                $table_lessons,
+                array(
+                    'google_original_start_time' => (string) $lesson['google_original_start_time'],
+                    'updated_at' => current_time( 'mysql' ),
+                ),
+                array( 'id' => (int) $lesson['id'] ),
+                array( '%s', '%s' ),
+                array( '%d' )
+            );
+        }
+
+        $allowed_gate_statuses = array( 'scheduled', 'payment_due', 'delivered' );
+
+        if ( ! in_array( (string) $lesson['status'], $allowed_gate_statuses, true ) ) {
             $this->render_gate_message_page(
                 'Lesson Not Available',
-                'This lesson is not currently scheduled. If you believe this is an error, please contact support.'
+                'This lesson is not currently available. If you believe this is an error, please contact support.'
             );
             exit;
         }
@@ -917,120 +3814,62 @@ class MRM_Lesson_Scheduler {
             ARRAY_A
         );
 
-        // ------------------------------------------------------------
-        // IMMEDIATE SYNC ON GATE OPEN (Pattern B / Option B)
-        //
-        // The gate MUST reflect the instructor's current Google Calendar time,
-        // even if they dragged/rescheduled the event moments ago.
-        // We do an events.list scan in a tight window and match booking_id.
-        // This avoids stale google_event_id issues (especially recurring instances).
-        // ------------------------------------------------------------
         $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
-        $booking_id  = isset( $lesson['id'] ) ? (int) $lesson['id'] : 0;
 
-        if ( $calendar_id !== '' && $booking_id > 0 && $this->google_is_configured() ) {
+        $gate_timing = array(
+            'status' => $resolved_gate_timing_status,
+            'reason' => $resolved_gate_timing_reason,
+            'source' => $resolved_gate_timing_source,
+        );
 
-            // ------------------------------------------------------------
-            // FAST PATH SYNC (reliable):
-            // 1) If we have google_event_id, try events.get (exact when it is an instance ID).
-            // 2) If it is a recurring master, fetch instances and match booking_id.
-            // 3) If we still can't resolve, fall back to scanning events.list by booking_id.
-            // ------------------------------------------------------------
+        if ( $resolved_gate_start_ts && $resolved_gate_end_ts && $resolved_gate_end_ts > $resolved_gate_start_ts ) {
+            $start_ts = $resolved_gate_start_ts;
+            $end_ts   = $resolved_gate_end_ts;
+        } else {
+            // Final safety fallback for unexpected cases.
+            $gate_timing = $this->get_live_google_timing_for_lesson( $lesson, $calendar_id );
 
-            // Use a wider window so reschedules from "days out" -> "soon" are always discoverable.
-            $min_ts = time() - DAY_IN_SECONDS;            // now - 24h
-            $max_ts = time() + ( 14 * DAY_IN_SECONDS );   // now + 14d
+            if ( (string) ( $gate_timing['status'] ?? '' ) === 'resolved' ) {
+                $lesson = isset( $gate_timing['lesson'] ) && is_array( $gate_timing['lesson'] )
+                    ? $gate_timing['lesson']
+                    : $lesson;
 
-            $time_min = gmdate( 'c', $min_ts );
-            $time_max = gmdate( 'c', $max_ts );
+                $start_ts = (int) ( $gate_timing['start_ts'] ?? 0 );
+                $end_ts   = (int) ( $gate_timing['end_ts'] ?? 0 );
+            } else {
+                $start_ts = strtotime( (string) ( $lesson['start_time'] ?? '' ) );
+                $end_ts   = strtotime( (string) ( $lesson['end_time'] ?? '' ) );
 
-            $resolved_event = null;
-            $event_id = ! empty( $lesson['google_event_id'] ) ? (string) $lesson['google_event_id'] : '';
-
-            // Prefer direct GET if we have a stored event id (often updated to instance id by your cron sync)
-            if ( $calendar_id !== '' && $event_id !== '' ) {
-                $got = $this->google_get_event( $calendar_id, $event_id );
-
-                if ( is_array( $got ) ) {
-                    // If this looks like a recurring master (has recurrence rules), resolve via instances
-                    $is_master = isset( $got['recurrence'] ) && is_array( $got['recurrence'] ) && ! empty( $got['recurrence'] );
-
-                    if ( $is_master ) {
-                        $inst = $this->google_list_event_instances( $calendar_id, $event_id, $time_min, $time_max );
-                        if ( is_array( $inst ) ) {
-                            $match = $this->google_find_instance_by_booking_id( $inst, $booking_id );
-                            if ( is_array( $match ) ) {
-                                $resolved_event = $match;
-                            }
-                        }
-                    } else {
-                        // If it's an instance (or normal single event), use it directly
-                        $resolved_event = $got;
-                    }
-                }
-            }
-
-            // If we still didn't resolve, fall back to your existing Pattern-B scan by booking_id
-            if ( ! is_array( $resolved_event ) && $calendar_id !== '' ) {
-                $ev = $this->google_find_event_by_booking_id( $calendar_id, $booking_id, $time_min, $time_max );
-                if ( is_array( $ev ) ) {
-                    $resolved_event = $ev;
-                }
-            }
-
-            if ( is_array( $resolved_event ) ) {
-                list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $resolved_event );
-
-                if ( isset( $resolved_event['extendedProperties']['private']['appointment_type'] ) ) {
-                    $appointment_type = (string) $resolved_event['extendedProperties']['private']['appointment_type'];
-                }
-
-                if ( $g_start_ts && $g_end_ts ) {
-                    $new_start = gmdate( 'Y-m-d H:i:s', $g_start_ts );
-                    $new_end   = gmdate( 'Y-m-d H:i:s', $g_end_ts );
-                    $new_event_id = ! empty( $resolved_event['id'] ) ? (string) $resolved_event['id'] : '';
-
-                    // Persist to DB (keeps gate + reminder logic consistent)
-                    $wpdb->update(
-                        $table_lessons,
-                        array(
-                            'start_time'      => $new_start,
-                            'end_time'        => $new_end,
-                            'google_event_id' => ( $new_event_id !== '' ? $new_event_id : null ),
-                            'updated_at'      => current_time( 'mysql' ),
-                        ),
-                        array( 'id' => $booking_id ),
-                        array( '%s','%s','%s','%s' ),
-                        array( '%d' )
-                    );
-
-                    // Update in-memory lesson so the gate uses the refreshed time immediately
-                    $lesson['start_time'] = $new_start;
-                    $lesson['end_time']   = $new_end;
-                    if ( $new_event_id !== '' ) {
-                        $lesson['google_event_id'] = $new_event_id;
+                if ( ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) && ! empty( $lesson['google_original_start_time'] ) ) {
+                    $fallback_start_ts = strtotime( (string) $lesson['google_original_start_time'] );
+                    if ( $fallback_start_ts ) {
+                        $start_ts = $fallback_start_ts;
+                        $end_ts = $fallback_start_ts + ( max( 1, (int) ( $lesson['lesson_length'] ?? 60 ) ) * MINUTE_IN_SECONDS );
                     }
                 }
             }
         }
 
-        // Enforce 10-min before / 10-min after window
-        $start_ts = strtotime( (string) $lesson['start_time'] . ' UTC' );
-        $end_ts   = strtotime( (string) $lesson['end_time'] . ' UTC' );
-        if ( ! $start_ts || ! $end_ts ) {
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
+
+        if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
             $this->render_gate_message_page(
-                'Time Error',
-                'This lesson has an invalid time window. Please contact support.'
+                'Schedule Unavailable',
+                'We could not determine the lesson time for this link. Please contact your instructor.'
             );
             exit;
         }
 
-        $now = time();
         $open_ts  = $start_ts - ( 10 * MINUTE_IN_SECONDS );
         $close_ts = $end_ts + ( 10 * MINUTE_IN_SECONDS );
+        $now_ts   = time();
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
 
         // If outside allowed window, show professional message
-        if ( $now < $open_ts || $now > $close_ts ) {
+        if ( $now_ts < $open_ts || $now_ts > $close_ts ) {
             $open_str  = gmdate( 'g:i A', $open_ts );
             $start_str = gmdate( 'g:i A', $start_ts );
             $this->render_gate_message_page(
@@ -1105,14 +3944,15 @@ class MRM_Lesson_Scheduler {
 
             $headers = array(
                 'Content-Type: text/html; charset=UTF-8',
-                'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
             );
             wp_mail( $to, $subject, $email_html, $headers );
         }
 
-        // If Meet already exists, go there
-        if ( ! empty( $lesson['google_meet_url'] ) ) {
-            wp_redirect( (string) $lesson['google_meet_url'], 302 );
+        // For recurring series, reuse one shared deferred room URL across the whole series.
+        $shared_meet_url = $this->get_shared_google_meet_url_for_lesson( $lesson );
+        if ( $shared_meet_url !== '' ) {
+            wp_redirect( $shared_meet_url, 302 );
             exit;
         }
 
@@ -1128,17 +3968,7 @@ class MRM_Lesson_Scheduler {
             exit;
         }
 
-        // Persist meet url to DB
-        $wpdb->update(
-            $table_lessons,
-            array(
-                'google_meet_url' => (string) $meet_url,
-                'updated_at'      => current_time( 'mysql' ),
-            ),
-            array( 'id' => (int) $lesson['id'] ),
-            array( '%s','%s' ),
-            array( '%d' )
-        );
+        $this->persist_shared_google_meet_url_for_lesson( $lesson, (string) $meet_url );
 
         wp_redirect( (string) $meet_url, 302 );
         exit;
@@ -1192,19 +4022,26 @@ class MRM_Lesson_Scheduler {
 
     protected function extract_gate_link_from_description( $description ) {
         $description = is_string( $description ) ? $description : '';
-        if ( $description === '' ) return '';
+        if ( $description === '' ) {
+            return '';
+        }
 
-        // Accept both canonical + backward-compatible alias.
-        // We only trust links that point back to THIS site (home_url).
-        $home = home_url( '/' );
-        $home = rtrim( $home, '/' );
+        // Normalize any old-domain join link back to the current site.
+        $patterns = array(
+            '#https?://[^\\s"\']+/(join-online|join-video-lesson)/\\?token=([A-Za-z0-9_\\-]+)#i',
+            '#/(join-online|join-video-lesson)/\\?token=([A-Za-z0-9_\\-]+)#i',
+        );
 
-        // Match full URLs like: https://yoursite.com/join-online/?token=...
-        // or https://yoursite.com/join-video-lesson/?token=...
-        $pattern = '#(' . preg_quote( $home, '#' ) . '/(join-online|join-video-lesson)/\\?token=[A-Za-z0-9_\\-]+)#';
-
-        if ( preg_match( $pattern, $description, $m ) ) {
-            return (string) $m[1];
+        foreach ( $patterns as $pattern ) {
+            if ( preg_match( $pattern, $description, $m ) ) {
+                $token = (string) ( $m[2] ?? '' );
+                if ( $token !== '' ) {
+                    return add_query_arg(
+                        array( 'token' => $token ),
+                        home_url( '/join-online/' )
+                    );
+                }
+            }
         }
 
         return '';
@@ -1256,17 +4093,25 @@ class MRM_Lesson_Scheduler {
     }
 
     protected function is_join_gate_request() {
-        // Works for the virtual route: /join-online/?token=...
-        // We rely on your rewrite/query var that triggers the gate render.
-        $pagename = get_query_var( 'pagename' );
-        if ( is_string( $pagename ) && $pagename === 'join-online' ) return true;
-
-        // Fallback: if your rewrite sets a custom query var, keep this lightweight:
-        // If the request URI begins with /join-online/ treat it as gate.
-        if ( isset( $_SERVER['REQUEST_URI'] ) ) {
-            $uri = (string) $_SERVER['REQUEST_URI'];
-            if ( strpos( $uri, '/join-online' ) === 0 || strpos( $uri, '/join-online/' ) === 0 ) return true;
+        $is_gate = get_query_var( 'mrm_join_video_lesson' );
+        if ( (string) $is_gate === '1' ) {
+            return true;
         }
+
+        $pagename = get_query_var( 'pagename' );
+        if ( is_string( $pagename ) && in_array( $pagename, array( 'join-online', 'join-video-lesson' ), true ) ) {
+            return true;
+        }
+
+        if ( isset( $_SERVER['REQUEST_URI'] ) ) {
+            $path = (string) parse_url( (string) $_SERVER['REQUEST_URI'], PHP_URL_PATH );
+            $path = trim( $path, '/' );
+
+            if ( in_array( $path, array( 'join-online', 'join-video-lesson' ), true ) ) {
+                return true;
+            }
+        }
+
         return false;
     }
 
@@ -1534,6 +4379,9 @@ class MRM_Lesson_Scheduler {
             'email' => '',
             'city' => '',
             'state' => '',
+            'zip_code' => '',
+            'offers_in_person' => 0,
+            'offers_online' => 0,
             'profile_image_url' => null,
             'short_description' => null,
             'long_description' => null,
@@ -1542,6 +4390,7 @@ class MRM_Lesson_Scheduler {
             'longitude' => null,
             'calendar_id' => '',
             'timezone' => '',
+            'stripe_connected_account_id' => null,
             'hire_date' => null,
         );
         foreach ( $instructors as &$row ) {
@@ -1601,7 +4450,37 @@ class MRM_Lesson_Scheduler {
             $row['instruments'] = $instruments;
             $row['instruments_display'] = $display;
             $row['instruments_text'] = implode( ', ', $display );
-            $output[] = $row;
+            $offers_in_person = ! empty( $row['offers_in_person'] ) ? 1 : 0;
+            $offers_online    = ! empty( $row['offers_online'] ) ? 1 : 0;
+
+            $teaching_format_label = '';
+            if ( $offers_in_person && $offers_online ) {
+                $teaching_format_label = 'In Person - Online';
+            } elseif ( $offers_in_person ) {
+                $teaching_format_label = 'In Person Only';
+            } elseif ( $offers_online ) {
+                $teaching_format_label = 'Online Only';
+            }
+
+            $output[] = array(
+                'id' => (int) $row['id'],
+                'name' => (string) $row['name'],
+                'email' => (string) $row['email'],
+                'city' => (string) $row['city'],
+                'state' => (string) $row['state'],
+                'profile_image_url' => $row['profile_image_url'],
+                'short_description' => $row['short_description'],
+                'long_description' => $row['long_description'],
+                'instruments' => $row['instruments'],
+                'instruments_display' => $row['instruments_display'],
+                'instruments_text' => $row['instruments_text'],
+                'latitude' => $row['latitude'],
+                'longitude' => $row['longitude'],
+                'distance' => $row['distance'] ?? null,
+                'teaching_format_label' => $teaching_format_label,
+                'offers_in_person' => $offers_in_person,
+                'offers_online' => $offers_online,
+            );
         }
         return new WP_REST_Response( $output, 200 );
     }
@@ -1943,7 +4822,7 @@ class MRM_Lesson_Scheduler {
         // Pull lesson (only scheduled, only if not already sent)
         $lesson = $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT id,instructor_id,student_name,student_email,is_online,lesson_length,start_time,end_time,
+                "SELECT id,instructor_id,student_name,student_email,is_online,is_consultation,lesson_length,start_time,end_time,
                         reminder_token,reminder_scheduled_at,reminder_sent_at,google_event_id
                  FROM {$table_lessons}
                  WHERE id = %d AND status = 'scheduled'
@@ -2045,7 +4924,7 @@ class MRM_Lesson_Scheduler {
                             array( '%d' )
                         );
 
-                        wp_schedule_single_event( $desired_send_at, 'mrm_scheduler_send_lesson_reminder', array( $lesson_id ) );
+                        // wp_schedule_single_event( $desired_send_at, 'mrm_scheduler_send_lesson_reminder', array( $lesson_id ) );
 
                         // If the new send time is in the future, stop now (don’t send early).
                         if ( $desired_send_at > time() + 90 ) {
@@ -2079,28 +4958,35 @@ class MRM_Lesson_Scheduler {
 
         $subject = $student_name . ' ' . $minutes . ' ' . $lesson_type_label . ' ' . $thing_upper;
 
-        $body_lines = array(
-            'Reminder: you have a ' . $thing_lower . ' scheduled in 1 hour.',
-            '',
-            'Student: ' . $student_name,
-            'Length: ' . $minutes . ' minutes',
-            'Type: ' . $lesson_type_label,
-            '',
-            $thing_upper . ' link:',
+        $intro_html = '<p>Reminder: you have a ' . esc_html( $thing_lower ) . ' scheduled in 1 hour.</p>';
+
+        $details_html =
+            '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>' .
+            '<div><strong>Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>' .
+            '<div><strong>Type:</strong> ' . esc_html( $lesson_type_label ) . '</div>';
+
+        if ( $join_link !== '' ) {
+            $details_html .= '<div style="margin-top:12px;"><strong>' . esc_html( $thing_upper ) . ' link:</strong><br><a href="' . esc_url( $join_link ) . '">' . esc_html( $join_link ) . '</a></div>';
+        }
+
+        $html = $this->mrm_safety_email_wrap_html(
+            $subject,
+            $intro_html,
+            $details_html,
             $join_link,
+            $is_consultation ? 'Open consultation link' : 'Open lesson link'
         );
-        $message = implode( "\n", $body_lines );
 
         $to = array();
         if ( is_email( $student_email ) ) $to[] = $student_email;
         if ( is_email( $instructor_email ) ) $to[] = $instructor_email;
 
         $headers = array(
-            'Content-Type: text/plain; charset=UTF-8',
-            'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+            'Content-Type: text/html; charset=UTF-8',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
         );
 
-        $sent = wp_mail( $to, $subject, $message, $headers );
+        $sent = wp_mail( $to, $subject, $html, $headers );
 
         if ( $sent ) {
             $wpdb->update(
@@ -2116,110 +5002,764 @@ class MRM_Lesson_Scheduler {
         }
     }
 
-    public function cron_sync_upcoming_events() {
-        // Guard: only run if Google is configured
-        if ( ! $this->google_is_configured() ) return;
-
+    protected function get_lessons_needing_google_truth_pass( $limit = 300 ) {
         global $wpdb;
-        $table_lessons = $wpdb->prefix . 'mrm_lessons';
-        $table_instructors = $wpdb->prefix . 'mrm_instructors';
 
-        // Window: now-6h to now+7d (UTC)
-        // -6h: catches just-missed boundary / timezone edge cases
-        // +7d: ensures moves from farther future into the near future get discovered quickly
-        $now_ts = time();
-        $min_ts = $now_ts - ( 6 * HOUR_IN_SECONDS );
-        $max_ts = $now_ts + ( 7 * DAY_IN_SECONDS );
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+        $limit = max( 1, (int) $limit );
 
-        $min_utc = gmdate( 'Y-m-d H:i:s', $min_ts );
-        $max_utc = gmdate( 'Y-m-d H:i:s', $max_ts );
+        $sql = "
+        SELECT l.*, i.calendar_id, i.timezone
+        FROM {$lessons_table} l
+        JOIN {$instructors_table} i ON i.id = l.instructor_id
+        WHERE i.calendar_id IS NOT NULL
+          AND i.calendar_id <> ''
+          AND (
+                (
+                    l.payment_mode = 'autopay'
+                    AND l.status <> 'finalized'
+                    AND (
+                        l.status IN ('scheduled', 'payment_due', 'delivered')
+                        OR (
+                            l.payout_unlocked_at IS NULL
+                            AND l.status NOT IN ('cancelled', 'series', 'finalized')
+                        )
+                    )
+                )
+                OR
+                (
+                    l.payment_mode <> 'autopay'
+                    AND l.status = 'scheduled'
+                    AND l.payout_unlocked_at IS NULL
+                    AND l.status <> 'finalized'
+                )
+          )
+        ORDER BY l.start_time ASC
+        LIMIT {$limit}
+    ";
 
-        // Find instructors to sync (Pattern B):
-        // Do NOT rely on lesson DB times, because Google events can be dragged earlier/later.
-        // Instead: sync calendars for all instructors that have a calendar_id.
-        $instructor_ids = $wpdb->get_col(
-            "SELECT id
-             FROM {$table_instructors}
-             WHERE calendar_id IS NOT NULL
-               AND calendar_id <> ''"
-        );
+        return $wpdb->get_results( $sql, ARRAY_A );
+    }
 
-        if ( ! is_array( $instructor_ids ) || empty( $instructor_ids ) ) return;
+    protected function get_recurring_autopay_series_seed_rows() {
+        global $wpdb;
 
-        foreach ( $instructor_ids as $iid ) {
-            $iid = (int) $iid;
-            if ( ! $iid ) continue;
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
 
-            $instr = $wpdb->get_row(
+        $sql = "
+            SELECT l.*, i.calendar_id, i.timezone
+            FROM {$lessons_table} l
+            JOIN {$instructors_table} i ON i.id = l.instructor_id
+            WHERE l.series_id IS NOT NULL
+              AND l.series_id > 0
+              AND l.autopay_profile_id IS NOT NULL
+              AND l.autopay_profile_id > 0
+              AND l.google_event_id IS NOT NULL
+              AND l.google_event_id <> ''
+              AND l.status IN ('scheduled', 'payment_due', 'delivered')
+              AND l.id IN (
+                  SELECT MIN(l2.id)
+                  FROM {$lessons_table} l2
+                  WHERE l2.series_id IS NOT NULL
+                    AND l2.series_id > 0
+                    AND l2.autopay_profile_id IS NOT NULL
+                    AND l2.autopay_profile_id > 0
+                    AND l2.status IN ('scheduled', 'payment_due', 'delivered')
+                  GROUP BY l2.series_id
+              )
+            ORDER BY l.start_time ASC
+            LIMIT 100
+        ";
+
+        return $wpdb->get_results( $sql, ARRAY_A );
+    }
+
+    protected function extend_indefinite_autopay_series_horizon( $horizon_days = 90 ) {
+        global $wpdb;
+
+        $rows = $this->get_recurring_autopay_series_seed_rows();
+        if ( ! is_array( $rows ) || empty( $rows ) ) {
+            return;
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $now = current_time( 'timestamp', true );
+        $time_min = gmdate( 'c', $now - DAY_IN_SECONDS );
+        $time_max = gmdate( 'c', $now + ( max( 30, (int) $horizon_days ) * DAY_IN_SECONDS ) );
+
+        foreach ( $rows as $seed ) {
+            $calendar_id = (string) ( $seed['calendar_id'] ?? '' );
+            $master_event_id = (string) ( $seed['google_event_id'] ?? '' );
+            $series_id = (int) ( $seed['series_id'] ?? 0 );
+
+            if ( $calendar_id === '' || $master_event_id === '' || $series_id <= 0 ) {
+                continue;
+            }
+
+            $instances = $this->google_list_event_instances( $calendar_id, $master_event_id, $time_min, $time_max );
+            if ( is_wp_error( $instances ) || empty( $instances['items'] ) || ! is_array( $instances['items'] ) ) {
+                continue;
+            }
+
+            $existing_rows = $wpdb->get_results(
                 $wpdb->prepare(
-                    "SELECT id,calendar_id,timezone,email
-                     FROM {$table_instructors}
-                     WHERE id = %d
-                     LIMIT 1",
-                    $iid
+                    "SELECT id, google_instance_event_id, google_original_start_time
+                     FROM {$lessons_table}
+                     WHERE series_id = %d",
+                    $series_id
                 ),
                 ARRAY_A
             );
 
-            if ( ! is_array( $instr ) || empty( $instr['calendar_id'] ) ) continue;
+            $existing_instance_ids = array();
+            $existing_anchors = array();
 
-            $calendar_id = (string) $instr['calendar_id'];
+            foreach ( (array) $existing_rows as $existing_row ) {
+                $existing_instance_id = (string) ( $existing_row['google_instance_event_id'] ?? '' );
+                $existing_anchor = (string) ( $existing_row['google_original_start_time'] ?? '' );
 
-            // Query Google events in the same window (RFC3339)
-            $time_min = gmdate( 'c', $min_ts );
-            $time_max = gmdate( 'c', $max_ts );
-
-            $events = $this->google_list_events( $calendar_id, $time_min, $time_max );
-            if ( is_wp_error( $events ) ) continue;
-
-            $items = isset( $events['items'] ) && is_array( $events['items'] ) ? $events['items'] : array();
-            if ( empty( $items ) ) continue;
-
-            foreach ( $items as $ev ) {
-                // Match by extendedProperties.private.booking_id (you already set booking_id on insert)
-                $booking_id = 0;
-                if ( isset( $ev['extendedProperties']['private']['booking_id'] ) ) {
-                    $booking_id = (int) $ev['extendedProperties']['private']['booking_id'];
+                if ( $existing_instance_id !== '' ) {
+                    $existing_instance_ids[ $existing_instance_id ] = true;
                 }
-                if ( ! $booking_id ) continue;
+                if ( $existing_anchor !== '' ) {
+                    $existing_anchors[ $existing_anchor ] = true;
+                }
+            }
 
-                list( $g_start_ts, $g_end_ts ) = $this->google_event_to_utc_ts( $ev );
-                if ( ! $g_start_ts || ! $g_end_ts ) continue;
+            foreach ( $instances['items'] as $event ) {
+                if ( ! is_array( $event ) ) {
+                    continue;
+                }
 
-                $new_start = gmdate( 'Y-m-d H:i:s', $g_start_ts );
-                $new_end   = gmdate( 'Y-m-d H:i:s', $g_end_ts );
-                $google_event_id = ! empty( $ev['id'] ) ? (string) $ev['id'] : '';
+                $status = (string) ( $event['status'] ?? '' );
+                if ( $status === 'cancelled' ) {
+                    continue;
+                }
 
-                // Load lesson to see if it changed
-                $lesson = $wpdb->get_row(
-                    $wpdb->prepare(
-                        "SELECT id,start_time,end_time
-                         FROM {$table_lessons}
-                         WHERE id = %d AND status = 'scheduled'
-                         LIMIT 1",
-                        $booking_id
+                $instance_event_id = (string) ( $event['id'] ?? '' );
+                $start_raw = (string) ( $event['start']['dateTime'] ?? '' );
+                $end_raw   = (string) ( $event['end']['dateTime'] ?? '' );
+
+                if ( $start_raw === '' || $end_raw === '' ) {
+                    continue;
+                }
+
+                $start_ts = strtotime( $start_raw );
+                $end_ts   = strtotime( $end_raw );
+
+                if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+                    continue;
+                }
+
+                // Only create future rolling-horizon rows.
+                if ( $start_ts < ( $now - DAY_IN_SECONDS ) ) {
+                    continue;
+                }
+
+                $anchor_mysql = ! empty( $event['originalStartTime']['dateTime'] )
+                    ? gmdate( 'Y-m-d H:i:s', strtotime( (string) $event['originalStartTime']['dateTime'] ) )
+                    : gmdate( 'Y-m-d H:i:s', $start_ts );
+
+                if (
+                    ( $instance_event_id !== '' && isset( $existing_instance_ids[ $instance_event_id ] ) ) ||
+                    isset( $existing_anchors[ $anchor_mysql ] )
+                ) {
+                    continue;
+                }
+
+                $wpdb->insert(
+                    $lessons_table,
+                    array(
+                        'instructor_id' => (int) ( $seed['instructor_id'] ?? 0 ),
+                        'series_id' => $series_id,
+                        'student_name' => (string) ( $seed['student_name'] ?? '' ),
+                        'student_email' => (string) ( $seed['student_email'] ?? '' ),
+                        'instrument' => (string) ( $seed['instrument'] ?? 'unknown' ),
+                        'is_online' => (int) ( $seed['is_online'] ?? 0 ),
+                        'lesson_length' => (int) ( $seed['lesson_length'] ?? 60 ),
+                        'start_time' => gmdate( 'Y-m-d H:i:s', $start_ts ),
+                        'end_time' => gmdate( 'Y-m-d H:i:s', $end_ts ),
+                        'google_original_start_time' => $anchor_mysql,
+                        'status' => 'scheduled',
+                        'charge_status' => 'none',
+                        'google_event_id' => (string) ( $event['recurringEventId'] ?? $master_event_id ),
+                        'google_instance_event_id' => ( $instance_event_id !== '' ? $instance_event_id : null ),
+                        'google_meet_url' => (string) ( $event['hangoutLink'] ?? '' ),
+                        'order_id' => null,
+                        'payment_mode' => 'autopay',
+                        'payout_unlocked_at' => null,
+                        'autopay_profile_id' => (int) ( $seed['autopay_profile_id'] ?? 0 ),
+                        'agreement_id' => ! empty( $seed['agreement_id'] ) ? (int) $seed['agreement_id'] : null,
+                        'created_at' => current_time( 'mysql' ),
+                        'updated_at' => current_time( 'mysql' ),
+                        'reminder_token' => (string) ( $seed['reminder_token'] ?? '' ),
+                        'reminder_token_hash' => (string) ( $seed['reminder_token_hash'] ?? '' ),
+                        'reminder_scheduled_at' => null,
+                        'reminder_sent_at' => null,
                     ),
-                    ARRAY_A
+                    array(
+                        '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s',
+                        '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s'
+                    )
                 );
-                if ( ! is_array( $lesson ) ) continue;
+            }
+        }
+    }
 
-                $changed = ( (string) $lesson['start_time'] !== $new_start ) || ( (string) $lesson['end_time'] !== $new_end );
 
-                if ( $changed || $google_event_id !== '' ) {
-                    // Update lesson times (UTC) + store instance event id (so gate has a direct id)
+    public function cron_sync_upcoming_events( $lookback_hours = 72, $lookahead_days = 30 ) {
+        if ( ! $this->google_is_configured() ) return;
+
+        // Before syncing existing rows, keep recurring autopay series populated
+        // about 90 days ahead so follow-up lessons always exist locally.
+        $this->extend_indefinite_autopay_series_horizon( 90 );
+
+        $rows = $this->get_lessons_needing_google_truth_pass( 400 );
+
+        // Debug: record when the sync job fires and how many rows were fetched.  This aids in
+        // diagnosing whether WP‑Cron is running versus whether the resolver is failing.
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            $count = ( is_array( $rows ) ? count( $rows ) : 0 );
+        }
+
+        if ( ! is_array( $rows ) || empty( $rows ) ) return;
+
+        foreach ( $rows as $lesson_row ) {
+            $calendar_id = (string) ( $lesson_row['calendar_id'] ?? '' );
+            if ( $calendar_id === '' ) {
+                continue;
+            }
+
+            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            }
+
+            $sync = $this->sync_lesson_row_from_google_truth( $lesson_row, $calendar_id, 120 );
+
+            if ( (string) ( $sync['status'] ?? '' ) === 'cancelled' ) {
+                $this->cancel_lesson_and_notify( $lesson_row, 'google_event_cancelled' );
+                continue;
+            }
+
+            // unresolved rows are left for later runs / payment recovery pass
+        }
+    }
+
+    public function register_custom_cron_schedules( $schedules ) {
+        if ( ! isset( $schedules['mrm_1min'] ) ) {
+            $schedules['mrm_1min'] = array(
+                'interval' => 60,
+                'display'  => __( 'Every 1 minute (MRM)', 'mrm-lesson-scheduler' ),
+            );
+        }
+
+        if ( ! isset( $schedules['mrm_5min'] ) ) {
+            $schedules['mrm_5min'] = array(
+                'interval' => 300,
+                'display'  => 'Every 5 Minutes',
+            );
+        }
+
+        if ( ! isset( $schedules['mrm_10min'] ) ) {
+            $schedules['mrm_10min'] = array(
+                'interval' => 10 * 60,
+                'display'  => __( 'Every 10 minutes (MRM)', 'mrm-lesson-scheduler' ),
+            );
+        }
+
+        return $schedules;
+    }
+
+
+    protected function cancel_lesson_and_notify( $lesson_row, $reason = '' ) {
+        global $wpdb;
+
+        if ( ! is_array( $lesson_row ) ) return;
+        $lesson_id = (int) ( $lesson_row['id'] ?? 0 );
+        if ( $lesson_id <= 0 ) return;
+        if ( (string) ( $lesson_row['status'] ?? '' ) === 'finalized' ) {
+            $this->mrm_finalization_debug_log( 'cancel_skip_finalized_lesson', array(
+                'lesson_id' => $lesson_id,
+                'reason'    => (string) $reason,
+            ) );
+            return;
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+
+        $wpdb->update(
+            $lessons_table,
+            array(
+                'status' => 'cancelled',
+                'updated_at' => current_time( 'mysql' ),
+            ),
+            array( 'id' => $lesson_id ),
+            array( '%s', '%s' ),
+            array( '%d' )
+        );
+
+        do_action( 'mrm_lesson_cancelled', array(
+            'lesson_id' => $lesson_id,
+            'instructor_id' => (int) ( $lesson_row['instructor_id'] ?? 0 ),
+            'student_email' => (string) ( $lesson_row['student_email'] ?? '' ),
+            'lesson_length' => (int) ( $lesson_row['lesson_length'] ?? 0 ),
+            'is_online' => (int) ( $lesson_row['is_online'] ?? 0 ),
+            'order_id' => (int) ( $lesson_row['order_id'] ?? 0 ),
+            'payment_mode' => (string) ( $lesson_row['payment_mode'] ?? 'none' ),
+            'autopay_profile_id' => (int) ( $lesson_row['autopay_profile_id'] ?? 0 ),
+            'series_id' => (int) ( $lesson_row['series_id'] ?? 0 ),
+            'google_event_id' => (string) ( $lesson_row['google_event_id'] ?? '' ),
+            'cancel_reason' => (string) $reason,
+        ) );
+    }
+
+    public function cron_reconcile_completed_lessons( $skip_initial_sync = false ) {
+        global $wpdb;
+
+        if ( ! $skip_initial_sync ) {
+            $this->cron_sync_upcoming_events( 72, 30 );
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $rows = $this->get_lessons_needing_google_truth_pass( 300 );
+
+        if ( ! $rows ) return;
+
+        foreach ( $rows as $l ) {
+            if ( (string) ( $l['status'] ?? '' ) === 'finalized' ) {
+                $this->mrm_finalization_debug_log( 'completed_reconcile_skipped_finalized_lesson', array(
+                    'lesson_id' => (int) ( $l['id'] ?? 0 ),
+                    'status'    => (string) ( $l['status'] ?? '' ),
+                ) );
+                continue;
+            }
+
+            $calendar_id = (string) ( $l['calendar_id'] ?? '' );
+            $booking_id  = (int) ( $l['id'] ?? 0 );
+
+            if ( $calendar_id === '' || ! $this->google_is_configured() ) {
+                continue;
+            }
+
+            $sync = $this->sync_lesson_row_from_google_truth( $l, $calendar_id, 120 );
+            $sync_status = (string) ( $sync['status'] ?? 'unresolved' );
+            $ev = $sync['event'] ?? null;
+
+            if ( $sync_status === 'cancelled' ) {
+                $this->cancel_lesson_and_notify( $l, 'google_event_cancelled' );
+                continue;
+            }
+
+            if ( $sync_status !== 'resolved' || ! is_array( $ev ) ) {
+                continue;
+            }
+
+            $synced_lesson = isset( $sync['lesson_row'] ) && is_array( $sync['lesson_row'] )
+                ? $sync['lesson_row']
+                : $l;
+
+            $google_status = strtolower( (string) ( $ev['status'] ?? 'confirmed' ) );
+            if ( $google_status === 'cancelled' ) {
+                $this->cancel_lesson_and_notify( $synced_lesson, 'google_event_cancelled' );
+                continue;
+            }
+
+            $new_start = (string) ( $sync['start_utc'] ?? '' );
+            $new_end   = (string) ( $sync['end_utc'] ?? '' );
+            if ( $new_end === '' ) {
+                continue;
+            }
+
+            // Google end time is the source of truth.
+            if ( strtotime( $new_end ) > time() ) {
+                continue;
+            }
+
+            $new_event_id = (string) ( $synced_lesson['google_event_id'] ?? ( $ev['id'] ?? '' ) );
+            $payment_mode = (string) ( $synced_lesson['payment_mode'] ?? 'none' );
+            $charge_status = (string) ( $synced_lesson['charge_status'] ?? 'none' );
+            $lesson_order_id = (int) ( $synced_lesson['order_id'] ?? 0 );
+            $now_mysql = current_time( 'mysql' );
+
+            $is_prepaid_initial_autopay = (
+                $payment_mode === 'autopay'
+                && $lesson_order_id > 0
+                && $charge_status === 'paid'
+            );
+
+            if ( $is_prepaid_initial_autopay ) {
+                $wpdb->update(
+                    $lessons_table,
+                    array(
+                        'start_time'         => ( $new_start ?: (string) ( $synced_lesson['start_time'] ?? '' ) ),
+                        'end_time'           => $new_end,
+                        'google_event_id'    => ( $new_event_id !== '' ? $new_event_id : null ),
+                        'payment_mode'       => 'one_time',
+                        'status'             => 'delivered',
+                        'delivered_at'       => $now_mysql,
+                        'payout_unlocked_at' => $now_mysql,
+                        'charge_due_at'      => null,
+                        'charge_last_error'  => null,
+                        'updated_at'         => $now_mysql,
+                    ),
+                    array( 'id' => $booking_id ),
+                    array( '%s','%s','%s','%s','%s','%s','%s','%s','%s','%s' ),
+                    array( '%d' )
+                );
+
+                do_action( 'mrm_lesson_delivered', array(
+                    'lesson_id' => $booking_id,
+                    'instructor_id' => (int) $synced_lesson['instructor_id'],
+                    'student_email' => (string) $synced_lesson['student_email'],
+                    'lesson_length' => (int) $synced_lesson['lesson_length'],
+                    'is_online' => (int) $synced_lesson['is_online'],
+                    'order_id' => $lesson_order_id,
+                    'payment_mode' => 'one_time',
+                    'autopay_profile_id' => (int) ( $synced_lesson['autopay_profile_id'] ?? 0 ),
+                    'google_event_id' => $new_event_id,
+                    'ended_at_utc' => (string) $new_end,
+                ) );
+
+                continue;
+            }
+
+            if ( $payment_mode === 'autopay' ) {
+                $autopay_profile_id = (int) ( $synced_lesson['autopay_profile_id'] ?? 0 );
+
+                if ( $autopay_profile_id <= 0 ) {
                     $wpdb->update(
-                        $table_lessons,
+                        $lessons_table,
                         array(
-                            'start_time'      => $new_start,
-                            'end_time'        => $new_end,
-                            'google_event_id' => ( $google_event_id !== '' ? $google_event_id : null ),
-                            'updated_at'      => current_time( 'mysql' ),
+                            'start_time'        => ( $new_start ?: (string) ( $synced_lesson['start_time'] ?? '' ) ),
+                            'end_time'          => $new_end,
+                            'google_event_id'   => ( $new_event_id !== '' ? $new_event_id : null ),
+                            'delivered_at'      => $now_mysql,
+                            'charge_due_at'     => $now_mysql,
+                            'charge_status'     => 'failed',
+                            'charge_last_error' => 'Missing autopay_profile_id on ended autopay lesson row.',
+                            'status'            => 'payment_due',
+                            'updated_at'        => $now_mysql,
                         ),
                         array( 'id' => $booking_id ),
-                        array( '%s','%s','%s','%s' ),
+                        array( '%s','%s','%s','%s','%s','%s','%s','%s','%s' ),
                         array( '%d' )
                     );
+                    continue;
                 }
+
+                $wpdb->update(
+                    $lessons_table,
+                    array(
+                        'start_time'        => ( $new_start ?: (string) ( $synced_lesson['start_time'] ?? '' ) ),
+                        'end_time'          => $new_end,
+                        'google_event_id'   => ( $new_event_id !== '' ? $new_event_id : null ),
+                        'delivered_at'      => $now_mysql,
+                        'charge_due_at'     => $now_mysql,
+                        'charge_status'     => ( (string) ( $synced_lesson['charge_status'] ?? '' ) === 'paid' ? 'paid' : 'due' ),
+                        'charge_last_error' => ( (string) ( $synced_lesson['charge_status'] ?? '' ) === 'paid' ? null : null ),
+                        'status'            => ( (string) ( $synced_lesson['charge_status'] ?? '' ) === 'paid' ? 'delivered' : 'payment_due' ),
+                        'updated_at'        => $now_mysql,
+                    ),
+                    array( 'id' => $booking_id ),
+                    array( '%s','%s','%s','%s','%s','%s','%s','%s','%s' ),
+                    array( '%d' )
+                );
+
+                if ( (string) ( $synced_lesson['charge_status'] ?? '' ) !== 'paid' ) {
+                    do_action( 'mrm_lesson_charge_due', array(
+                        'lesson_id' => $booking_id,
+                        'instructor_id' => (int) $synced_lesson['instructor_id'],
+                        'student_email' => (string) $synced_lesson['student_email'],
+                        'lesson_length' => (int) $synced_lesson['lesson_length'],
+                        'is_online' => (int) $synced_lesson['is_online'],
+                        'order_id' => (int) ( $synced_lesson['order_id'] ?? 0 ),
+                        'payment_mode' => $payment_mode,
+                        'autopay_profile_id' => $autopay_profile_id,
+                        'google_event_id' => $new_event_id,
+                        'ended_at_utc' => (string) $new_end,
+                    ) );
+                }
+
+                continue;
+            }
+
+            $wpdb->update(
+                $lessons_table,
+                array(
+                    'start_time'         => ( $new_start ?: (string) ( $synced_lesson['start_time'] ?? '' ) ),
+                    'end_time'           => $new_end,
+                    'google_event_id'    => ( $new_event_id !== '' ? $new_event_id : null ),
+                    'status'             => 'delivered',
+                    'delivered_at'       => $now_mysql,
+                    'payout_unlocked_at' => $now_mysql,
+                    'updated_at'         => $now_mysql
+                ),
+                array( 'id' => $booking_id ),
+                array( '%s','%s','%s','%s','%s','%s' ),
+                array( '%d' )
+            );
+
+            do_action( 'mrm_lesson_delivered', array(
+                'lesson_id' => $booking_id,
+                'instructor_id' => (int) $synced_lesson['instructor_id'],
+                'student_email' => (string) $synced_lesson['student_email'],
+                'lesson_length' => (int) $synced_lesson['lesson_length'],
+                'is_online' => (int) $synced_lesson['is_online'],
+                'order_id' => (int) ( $synced_lesson['order_id'] ?? 0 ),
+                'payment_mode' => $payment_mode,
+                'autopay_profile_id' => (int) ( $synced_lesson['autopay_profile_id'] ?? 0 ),
+                'google_event_id' => $new_event_id,
+                'ended_at_utc' => (string) $new_end,
+            ) );
+        }
+    }
+
+    public function cron_finalize_old_lessons() {
+        global $wpdb;
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+
+        // Lesson start_time/end_time are synced from Google Calendar as UTC-style MySQL timestamps.
+        // Finalization must compare end_time against a UTC cutoff, not the site-local timestamp.
+        $now_mysql = current_time( 'mysql' );
+        $now_utc_mysql = gmdate( 'Y-m-d H:i:s' );
+        $cutoff_utc_mysql = gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS );
+
+        $this->mrm_finalization_debug_log( 'finalization_cron_started', array(
+            'now_mysql'          => $now_mysql,
+            'now_utc_mysql'      => $now_utc_mysql,
+            'cutoff_utc_mysql'   => $cutoff_utc_mysql,
+            'finalization_rule'  => '1_hour_after_end_time_utc',
+        ) );
+
+        $finalized_at_column = $wpdb->get_var(
+            $wpdb->prepare(
+                "SHOW COLUMNS FROM {$lessons_table} LIKE %s",
+                'finalized_at'
+            )
+        );
+
+        if ( empty( $finalized_at_column ) ) {
+            $this->mrm_finalization_debug_log( 'finalization_schema_missing_finalized_at', array(
+                'table' => $lessons_table,
+            ) );
+            return;
+        }
+
+        $this->mrm_finalization_debug_log( 'finalization_schema_ready', array(
+            'table'               => $lessons_table,
+            'finalized_at_column' => $finalized_at_column,
+        ) );
+
+        // High-level counts for diagnosis
+        $count_delivered_total = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*)
+                 FROM {$lessons_table}
+                 WHERE status = %s",
+                'delivered'
+            )
+        );
+
+        $count_delivered_with_end_time = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*)
+                 FROM {$lessons_table}
+                 WHERE status = %s
+                   AND end_time IS NOT NULL
+                   AND end_time <> ''",
+                'delivered'
+            )
+        );
+
+        $count_old_enough = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*)
+                 FROM {$lessons_table}
+                 WHERE status = %s
+                   AND end_time IS NOT NULL
+                   AND end_time <> ''
+                   AND end_time <= %s",
+                'delivered',
+                $cutoff_utc_mysql
+            )
+        );
+
+        $count_candidates = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*)
+                 FROM {$lessons_table}
+                 WHERE status = %s
+                   AND end_time IS NOT NULL
+                   AND end_time <> ''
+                   AND end_time <= %s
+                   AND (finalized_at IS NULL OR finalized_at = '')",
+                'delivered',
+                $cutoff_utc_mysql
+            )
+        );
+
+        $this->mrm_finalization_debug_log( 'finalization_candidate_counts', array(
+            'delivered_total'          => $count_delivered_total,
+            'delivered_with_end_time'  => $count_delivered_with_end_time,
+            'not_old_enough'           => max( 0, $count_delivered_with_end_time - $count_old_enough ),
+            'old_enough_by_end_time'   => $count_old_enough,
+            'finalization_candidates'  => $count_candidates,
+            'cutoff_utc_mysql'         => $cutoff_utc_mysql,
+        ) );
+
+        if ( $count_delivered_total === 0 ) {
+            $this->mrm_finalization_debug_log( 'finalization_no_delivered_rows_exist', array(
+                'table' => $lessons_table,
+            ) );
+        }
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT *
+                 FROM {$lessons_table}
+                 WHERE status = %s
+                   AND end_time IS NOT NULL
+                   AND end_time <> ''
+                   AND end_time <= %s
+                   AND (finalized_at IS NULL OR finalized_at = '')
+                 ORDER BY end_time ASC
+                 LIMIT 250",
+                'delivered',
+                $cutoff_utc_mysql
+            ),
+            ARRAY_A
+        );
+
+        if ( ! is_array( $rows ) || empty( $rows ) ) {
+            $this->mrm_finalization_debug_log( 'finalization_cron_finished_no_candidates', array(
+                'cutoff_utc_mysql' => $cutoff_utc_mysql,
+            ) );
+            return;
+        }
+
+        foreach ( $rows as $row ) {
+            $lesson_id = (int) ( $row['id'] ?? 0 );
+            if ( $lesson_id <= 0 ) {
+                continue;
+            }
+
+            $this->mrm_finalization_debug_log( 'lesson_finalize_candidate', array(
+                'lesson_id'           => $lesson_id,
+                'status'              => (string) ( $row['status'] ?? '' ),
+                'end_time'            => (string) ( $row['end_time'] ?? '' ),
+                'delivered_at'        => (string) ( $row['delivered_at'] ?? '' ),
+                'finalized_at_before' => (string) ( $row['finalized_at'] ?? '' ),
+                'start_time'          => (string) ( $row['start_time'] ?? '' ),
+                'finalization_rule'   => '1_hour_after_end_time',
+            ) );
+
+            $updated = $wpdb->update(
+                $lessons_table,
+                array(
+                    'status'       => 'finalized',
+                    'finalized_at' => $now_mysql,
+                    'updated_at'   => $now_mysql,
+                ),
+                array( 'id' => $lesson_id ),
+                array( '%s', '%s', '%s' ),
+                array( '%d' )
+            );
+
+            if ( $updated === false ) {
+                $this->mrm_finalization_debug_log( 'lesson_finalization_update_failed', array(
+                    'lesson_id' => $lesson_id,
+                    'db_error'  => $wpdb->last_error,
+                ) );
+                continue;
+            }
+
+            $this->mrm_finalization_debug_log( 'lesson_finalized', array(
+                'lesson_id'         => $lesson_id,
+                'previous_status'   => (string) ( $row['status'] ?? '' ),
+                'new_status'        => 'finalized',
+                'end_time'          => (string) ( $row['end_time'] ?? '' ),
+                'delivered_at'      => (string) ( $row['delivered_at'] ?? '' ),
+                'finalized_at'      => $now_mysql,
+                'rows_affected'     => $updated,
+                'finalization_rule' => '1_hour_after_end_time',
+            ) );
+        }
+
+        $this->mrm_finalization_debug_log( 'finalization_cron_finished', array(
+            'processed_rows' => count( $rows ),
+        ) );
+    }
+
+    public function cron_reconcile_cancelled_lessons( $skip_initial_sync = false ) {
+        global $wpdb;
+
+        if ( ! $this->google_is_configured() ) return;
+
+        // Sync first so moved recurring instances update local start/end times.
+        if ( ! $skip_initial_sync ) {
+            $this->cron_sync_upcoming_events( 72, 30 );
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+        $rows = $wpdb->get_results("
+            SELECT l.*, i.calendar_id, i.timezone
+            FROM {$lessons_table} l
+            JOIN {$instructors_table} i ON i.id = l.instructor_id
+            WHERE l.status='scheduled'
+              AND l.google_event_id IS NOT NULL
+              AND l.google_event_id <> ''
+              AND l.start_time > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 14 DAY)
+            ORDER BY l.start_time ASC
+            LIMIT 200
+        ", ARRAY_A);
+
+        if ( ! $rows ) return;
+
+        foreach ( $rows as $l ) {
+            $calendar_id = (string) ( $l['calendar_id'] ?? '' );
+            $event_id    = (string) ( $l['google_event_id'] ?? '' );
+            $booking_id  = (int) ( $l['id'] ?? 0 );
+
+            if ( $calendar_id === '' || $event_id === '' || $booking_id <= 0 ) continue;
+
+            $resolved = $this->resolve_google_event_for_lesson_row( $l, $calendar_id, 30 );
+            $resolved_status = (string) ( $resolved['status'] ?? 'unresolved' );
+            $ev = $resolved['event'] ?? null;
+            $reason = (string) ( $resolved['reason'] ?? '' );
+
+            // Only explicit Google cancellation should cancel immediately.
+            if ( $resolved_status === 'cancelled' ) {
+                $this->cancel_lesson_and_notify( $l, 'google_event_cancelled' );
+                continue;
+            }
+
+            // If still unresolved, do not cancel on the first miss.
+            // Require stronger proof by checking for a previous unresolved marker.
+            if ( $resolved_status === 'unresolved' ) {
+                $last_reason = (string) ( $l['google_event_id'] ?? '' );
+
+                // First unresolved pass: mark/update timestamp only, do not cancel yet.
+                $wpdb->update(
+                    $lessons_table,
+                    array(
+                        'updated_at' => current_time( 'mysql' ),
+                    ),
+                    array( 'id' => (int) $l['id'] ),
+                    array( '%s' ),
+                    array( '%d' )
+                );
+
+
+                continue;
+            }
+
+            // Resolved and not cancelled: keep scheduled.
+            if ( $resolved_status === 'resolved' && is_array( $ev ) ) {
+                continue;
             }
         }
     }
@@ -2278,6 +5818,4407 @@ class MRM_Lesson_Scheduler {
         return false;
     }
 
+    protected function get_attendance_row_by_lesson_id( $lesson_id ) {
+        global $wpdb;
+        $table = $this->table_attendance();
+        return $wpdb->get_row(
+            $wpdb->prepare( "SELECT * FROM {$table} WHERE lesson_id = %d LIMIT 1", (int) $lesson_id ),
+            ARRAY_A
+        );
+    }
+
+    protected function ensure_attendance_row( $lesson_id ) {
+        global $wpdb;
+        $lesson_id = (int) $lesson_id;
+        if ( $lesson_id <= 0 ) return array();
+
+        $row = $this->get_attendance_row_by_lesson_id( $lesson_id );
+        if ( is_array( $row ) && ! empty( $row ) ) {
+            return $row;
+        }
+
+        $table = $this->table_attendance();
+        $now = current_time( 'mysql' );
+
+        $wpdb->insert(
+            $table,
+            array(
+                'lesson_id'   => $lesson_id,
+                'created_at'  => $now,
+                'updated_at'  => $now,
+            ),
+            array( '%d', '%s', '%s' )
+        );
+
+        if ( $wpdb->last_error ) {
+            $this->mrm_safety_log( 'attendance_row_insert_db_error', array(
+                'lesson_id' => (int) $lesson_id,
+                'db_error'  => $wpdb->last_error,
+            ) );
+        }
+
+        $this->mrm_safety_log( 'attendance_row_ensured', array(
+            'lesson_id' => (int) $lesson_id,
+        ) );
+
+        return $this->get_attendance_row_by_lesson_id( $lesson_id );
+    }
+
+    protected function update_attendance_row( $lesson_id, $data ) {
+        global $wpdb;
+
+        $lesson_id = (int) $lesson_id;
+        if ( $lesson_id <= 0 || ! is_array( $data ) || empty( $data ) ) {
+            $this->mrm_safety_log( 'attendance_row_update_skipped_invalid_input', array(
+                'lesson_id' => $lesson_id,
+                'data_keys' => is_array( $data ) ? array_keys( $data ) : array(),
+            ) );
+            return false;
+        }
+
+        $this->ensure_attendance_row( $lesson_id );
+
+        $table = $this->table_attendance();
+        $data['updated_at'] = current_time( 'mysql' );
+
+        $formats = array();
+        foreach ( $data as $value ) {
+            $formats[] = is_int( $value ) ? '%d' : '%s';
+        }
+
+        $result = $wpdb->update(
+            $table,
+            $data,
+            array( 'lesson_id' => $lesson_id ),
+            $formats,
+            array( '%d' )
+        );
+
+        if ( $result === false ) {
+            $this->mrm_safety_log( 'attendance_row_update_failed', array(
+                'lesson_id' => $lesson_id,
+                'data_keys' => array_keys( $data ),
+                'db_error'  => $wpdb->last_error,
+            ) );
+            return false;
+        }
+
+        $this->mrm_safety_log( 'attendance_row_updated', array(
+            'lesson_id'      => $lesson_id,
+            'data_keys'      => array_keys( $data ),
+            'affected_rows'  => (int) $result,
+        ) );
+
+        return $result;
+    }
+
+    protected function get_lesson_with_instructor( $lesson_id ) {
+        global $wpdb;
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+        return $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT l.*,
+                        i.name AS instructor_name,
+                        i.email AS instructor_email,
+                        i.calendar_id AS instructor_calendar_id,
+                        i.address AS instructor_address,
+                        i.city AS instructor_city,
+                        i.state AS instructor_state,
+                        i.zip_code AS instructor_zip_code,
+                        i.timezone AS instructor_timezone
+                 FROM {$lessons_table} l
+                 LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id
+                 WHERE l.id = %d
+                 LIMIT 1",
+                (int) $lesson_id
+            ),
+            ARRAY_A
+        );
+    }
+
+
+
+    protected function render_safety_action_page( $args = array() ) {
+        $defaults = array(
+            'eyebrow'      => 'Lesson Update',
+            'title'        => 'Update Recorded',
+            'message_html' => '',
+            'card_html'    => '',
+            'footer_html'  => '',
+        );
+
+        $args = wp_parse_args( $args, $defaults );
+
+        echo '<!doctype html><html><head><meta charset="utf-8">';
+        echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
+        echo '<title>' . esc_html( (string) $args['title'] ) . '</title>';
+        echo '<style>
+            :root{
+                --bg:#f6f4ef;
+                --card:#ffffff;
+                --text:#111111;
+                --muted:#5b5b5b;
+                --line:#dfd8ca;
+                --accent:#111111;
+                --soft:#f2ede3;
+                --star:#d4a017;
+            }
+            *{box-sizing:border-box;}
+            body{
+                margin:0;
+                background:linear-gradient(180deg,#f7f4ee 0%,#efe8db 100%);
+                color:var(--text);
+                font-family:Arial,sans-serif;
+            }
+            .mrm-shell{
+                min-height:100vh;
+                display:flex;
+                align-items:center;
+                justify-content:center;
+                padding:24px 16px;
+            }
+            .mrm-card{
+                width:100%;
+                max-width:680px;
+                background:var(--card);
+                border:1px solid var(--line);
+                border-radius:22px;
+                box-shadow:0 12px 34px rgba(0,0,0,.08);
+                overflow:hidden;
+            }
+            .mrm-card-top{
+                padding:26px 24px 10px;
+                text-align:center;
+            }
+            .mrm-eyebrow{
+                display:inline-block;
+                font-size:12px;
+                letter-spacing:.12em;
+                text-transform:uppercase;
+                color:#7b6d52;
+                margin-bottom:10px;
+            }
+            .mrm-title{
+                margin:0;
+                font-size:30px;
+                line-height:1.15;
+            }
+            .mrm-body{
+                padding:10px 24px 28px;
+                font-size:16px;
+                line-height:1.7;
+            }
+            .mrm-message{
+                color:var(--muted);
+                text-align:center;
+                max-width:560px;
+                margin:0 auto 18px;
+            }
+            .mrm-panel{
+                background:var(--soft);
+                border:1px solid var(--line);
+                border-radius:18px;
+                padding:18px;
+                margin-top:18px;
+            }
+            .mrm-btn{
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                width:100%;
+                min-height:52px;
+                text-align:center;
+                text-decoration:none;
+                border-radius:12px;
+                border:1px solid #111;
+                padding:14px 18px;
+                font-weight:700;
+                font-size:15px;
+                line-height:1.3;
+                cursor:pointer;
+            }
+            .mrm-btn-primary{
+                background:#111;
+                color:#fff;
+            }
+            .mrm-btn-secondary{
+                background:#fff;
+                color:#111;
+            }
+            .mrm-stack > * + *{
+                margin-top:12px;
+            }
+            .mrm-footer{
+                margin-top:18px;
+                color:var(--muted);
+                font-size:14px;
+                text-align:center;
+            }
+            textarea,
+            input[type="text"]{
+                width:100%;
+                border:1px solid var(--line);
+                border-radius:14px;
+                padding:14px 16px;
+                font:inherit;
+                background:#fff;
+                color:#111;
+            }
+            textarea{
+                min-height:140px;
+                resize:vertical;
+            }
+            .mrm-label{
+                display:block;
+                margin-bottom:10px;
+                font-size:15px;
+                font-weight:700;
+            }
+            .mrm-form-actions{
+                margin-top:18px;
+            }
+            @media (max-width:640px){
+                .mrm-card-top{
+                    padding:22px 18px 8px;
+                }
+                .mrm-body{
+                    padding:10px 18px 22px;
+                }
+                .mrm-title{
+                    font-size:26px;
+                }
+            }
+        </style>';
+        echo '</head><body>';
+        echo '<div class="mrm-shell">';
+        echo '<div class="mrm-card">';
+        echo '<div class="mrm-card-top">';
+        echo '<div class="mrm-eyebrow">' . esc_html( (string) $args['eyebrow'] ) . '</div>';
+        echo '<h1 class="mrm-title">' . esc_html( (string) $args['title'] ) . '</h1>';
+        echo '</div>';
+        echo '<div class="mrm-body">';
+        if ( $args['message_html'] !== '' ) {
+            echo '<div class="mrm-message">' . $args['message_html'] . '</div>';
+        }
+        echo (string) $args['card_html'];
+        if ( $args['footer_html'] !== '' ) {
+            echo '<div class="mrm-footer">' . $args['footer_html'] . '</div>';
+        }
+        echo '</div>';
+        echo '</div>';
+        echo '</div>';
+        echo '</body></html>';
+        exit;
+    }
+    protected function mrm_safety_email_wrap_html( $title, $intro_html, $details_html, $cta_url = '', $cta_label = '' ) {
+        $logo  = $this->mrm_get_email_logo_url();
+        $site  = esc_html( get_bloginfo( 'name' ) );
+
+        $logo_html = '';
+        if ( $logo ) {
+            $logo_html = '<div style="text-align:center;margin:0 0 22px 0;">
+            <img src="' . esc_url( $logo ) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;display:inline-block;"/>
+        </div>';
+        }
+
+        $button_html = '';
+        if ( $cta_url && $cta_label ) {
+            $button_html = '<div style="text-align:center;margin:24px 0 0 0;">
+            <a href="' . esc_url( $cta_url ) . '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:10px;">' . esc_html( $cta_label ) . '</a>
+        </div>';
+        }
+
+        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
+        <div style="max-width:640px;margin:0 auto;padding:24px;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+                ' . $logo_html . '
+                <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
+                <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
+                <div style="margin-top:16px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;">
+                    ' . $details_html . '
+                </div>
+                ' . $button_html . '
+                <div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
+            </div>
+        </div>
+    </body></html>';
+    }
+
+    protected function mrm_safety_email_wrap_html_blocks( $title, $intro_html, $details_html, $extra_html = '' ) {
+        $logo  = $this->mrm_get_email_logo_url();
+        $site  = esc_html( get_bloginfo( 'name' ) );
+
+        $logo_html = '';
+        if ( $logo ) {
+            $logo_html = '<div style="text-align:center;margin:0 0 22px 0;">
+            <img src="' . esc_url( $logo ) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;display:inline-block;"/>
+        </div>';
+        }
+
+        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
+        <div style="max-width:640px;margin:0 auto;padding:24px;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+                ' . $logo_html . '
+                <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
+                <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
+                <div style="margin-top:16px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;">
+                    ' . $details_html . '
+                </div>
+                ' . $extra_html . '
+                <div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
+            </div>
+        </div>
+    </body></html>';
+    }
+
+    protected function get_safety_lesson_context( $lesson, $viewer_role = 'parent' ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        $viewer_role = ( $viewer_role === 'instructor' ) ? 'instructor' : 'parent';
+
+        $timezone_string = 'America/Phoenix';
+        if ( $viewer_role === 'instructor' ) {
+            $timezone_string = trim( (string) ( $lesson['instructor_timezone'] ?? '' ) );
+        } else {
+            $timezone_string = trim( (string) ( $lesson['parent_timezone'] ?? '' ) );
+        }
+
+        if ( $timezone_string === '' ) {
+            $timezone_string = wp_timezone_string();
+        }
+
+        try {
+            $viewer_tz = new DateTimeZone( $timezone_string );
+        } catch ( Exception $e ) {
+            $viewer_tz = wp_timezone();
+            $timezone_string = wp_timezone_string();
+        }
+
+        $start_raw = (string) ( $lesson['start_time'] ?? '' );
+        $start_ts = strtotime( $start_raw );
+        $start_label = $start_raw !== '' && $start_ts
+            ? wp_date( 'F j, Y \a\t g:i A', $start_ts, $viewer_tz )
+            : '';
+
+        $minutes = (int) ( $lesson['lesson_length'] ?? 0 );
+
+        $raw_lesson_type = (string) ( $lesson['lesson_type'] ?? '' );
+        $normalized_lesson_type = strtolower( str_replace( array( '_', '-' ), ' ', $raw_lesson_type ) );
+        $normalized_lesson_type = trim( preg_replace( '/\s+/', ' ', $normalized_lesson_type ) );
+
+        $is_consultation = $this->mrm_is_consultation_lesson( $lesson );
+
+        $is_online = ! empty( $lesson['is_online'] );
+        if ( $normalized_lesson_type !== '' ) {
+            if ( strpos( $normalized_lesson_type, 'online' ) !== false ) {
+                $is_online = true;
+            } elseif ( strpos( $normalized_lesson_type, 'in person' ) !== false ) {
+                $is_online = false;
+            }
+        }
+
+        if ( $is_consultation ) {
+            $is_online = true;
+        }
+
+        $lesson_type_label = $is_consultation
+            ? 'Consultation'
+            : ( $is_online ? 'Online lesson' : 'In-person lesson' );
+
+        $join_link = '';
+        $location_text = '';
+        $format_note = '';
+
+        if ( $is_online ) {
+            if ( ! empty( $lesson['reminder_token'] ) ) {
+                $join_link = add_query_arg(
+                    array( 'token' => (string) $lesson['reminder_token'] ),
+                    home_url( '/join-online/' )
+                );
+            }
+
+            if ( $join_link === '' && ! empty( $lesson['google_meet_url'] ) ) {
+                $join_link = (string) $lesson['google_meet_url'];
+            }
+
+            if ( $is_consultation ) {
+                $format_note = 'This is an online consultation. Please use the consultation link above at the scheduled time.';
+            } else {
+                $format_note = 'This is an online lesson. Please use the lesson link above at the scheduled time.';
+            }
+        } else {
+            $calendar_id = (string) ( $lesson['instructor_calendar_id'] ?? '' );
+            $google_event_id = (string) ( $lesson['google_event_id'] ?? '' );
+
+            if ( $calendar_id !== '' && $google_event_id !== '' && $this->google_is_configured() ) {
+                $event = $this->google_get_event( $calendar_id, $google_event_id );
+                if ( ! is_wp_error( $event ) ) {
+                    $location_text = trim( (string) ( $event['location'] ?? '' ) );
+                }
+            }
+
+            if ( $location_text === '' ) {
+                $address = trim( (string) ( $lesson['instructor_address'] ?? '' ) );
+                $city = trim( (string) ( $lesson['instructor_city'] ?? '' ) );
+                $state = trim( (string) ( $lesson['instructor_state'] ?? '' ) );
+                $location_text = trim( implode( ', ', array_filter( array( $address, $city, $state ) ) ) );
+            }
+
+            $format_note = 'This is an in-person lesson. Please plan to meet in the agreed open, public, or community lesson setting for the scheduled lesson time.';
+        }
+
+        return array(
+            'start_label'       => $start_label,
+            'minutes'           => $minutes,
+            'lesson_type_label' => $lesson_type_label,
+            'join_link'         => $join_link,
+            'location_text'     => $location_text,
+            'format_note'       => $format_note,
+            'is_consultation'   => $is_consultation,
+            'is_online'         => $is_online,
+            'viewer_timezone'   => $timezone_string,
+        );
+    }
+
+
+
+    protected function mrm_get_google_event_summary_for_lesson( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        $calendar_id = trim( (string) ( $lesson['instructor_calendar_id'] ?? '' ) );
+        $event_id    = trim( (string) ( $lesson['google_event_id'] ?? '' ) );
+
+        if ( $calendar_id === '' || $event_id === '' ) {
+            return '';
+        }
+
+        if ( ! $this->google_is_configured() ) {
+            return '';
+        }
+
+        $event = $this->google_get_event( $calendar_id, $event_id );
+        if ( is_wp_error( $event ) || ! is_array( $event ) ) {
+            return '';
+        }
+
+        $summary = trim( (string) ( $event['summary'] ?? '' ) );
+        if ( $summary === '' ) {
+            $summary = trim( (string) ( $event['title'] ?? '' ) );
+        }
+
+        return $summary;
+    }
+
+    protected function mrm_is_consultation_lesson( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        $is_consultation = isset( $lesson['is_consultation'] ) ? (int) $lesson['is_consultation'] : 0;
+        if ( $is_consultation === 1 ) {
+            return true;
+        }
+
+        $appointment_type = strtolower( trim( (string) ( $lesson['appointment_type'] ?? '' ) ) );
+        if ( $appointment_type === 'consultation' ) {
+            return true;
+        }
+
+        $lesson_type = strtolower( trim( (string) ( $lesson['lesson_type'] ?? '' ) ) );
+        if ( $lesson_type === 'consultation' ) {
+            return true;
+        }
+
+        if ( strpos( $lesson_type, 'consultation' ) !== false ) {
+            return true;
+        }
+
+        $google_summary = $this->mrm_get_google_event_summary_for_lesson( $lesson );
+        $google_summary = strtolower( trim( (string) $google_summary ) );
+
+        if ( $google_summary !== '' && strpos( $google_summary, 'consultation' ) !== false ) {
+            return true;
+        }
+
+        return false;
+    }
+
+    protected function get_safety_reminder_subject( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        $start_time   = (string) ( $lesson['start_time'] ?? '' );
+        $student_name = trim( (string) ( $lesson['student_name'] ?? '' ) );
+        $is_consultation = $this->mrm_is_consultation_lesson( $lesson );
+
+        $date_part = '';
+        if ( $start_time !== '' ) {
+            $timestamp = strtotime( $start_time );
+            if ( $timestamp ) {
+                $date_part = wp_date( 'm/d', $timestamp, wp_timezone() );
+            }
+        }
+
+        if ( $date_part === '' ) {
+            $date_part = wp_date( 'm/d', current_time( 'timestamp' ), wp_timezone() );
+        }
+
+        if ( $student_name === '' ) {
+            $student_name = 'Student';
+        }
+
+        if ( $is_consultation ) {
+            return $date_part . ' ' . $student_name . ' - Consultation Reminder';
+        }
+
+        return $date_part . ' ' . $student_name . ' - Lesson Reminder';
+    }
+
+
+    protected function send_parent_no_show_alert_for_lesson( $lesson_id, $lesson, $reason = '' ) {
+        $admin_email = $this->get_admin_notification_email();
+        if ( ! is_email( $admin_email ) ) {
+            $this->mrm_safety_log( 'parent_no_show_alert_skipped_missing_admin_email', array(
+                'lesson_id' => (int) $lesson_id,
+            ) );
+            return false;
+        }
+
+        $context = $this->get_safety_lesson_context( $lesson );
+
+        $details =
+            '<div><strong>Lesson ID:</strong> ' . (int) $lesson_id . '</div>' .
+            '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>' .
+            '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>' .
+            '<div><strong>Time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>' .
+            '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>';
+
+        if ( $reason !== '' ) {
+            $details .= '<div style="margin-top:12px;"><strong>Parent note:</strong><br>' . nl2br( esc_html( (string) $reason ) ) . '</div>';
+        }
+
+        $html = $this->mrm_safety_email_wrap_html_blocks(
+            'Safety alert — parent reported instructor did not arrive',
+            '<p>A parent has reported that the instructor did not arrive for the scheduled lesson.</p>',
+            $details
+        );
+
+        $sent = wp_mail(
+            $admin_email,
+            'Safety alert — parent reported instructor did not arrive',
+            $html,
+            array(
+                'Content-Type: text/html; charset=UTF-8',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+            )
+        );
+
+        $this->mrm_safety_log( 'parent_no_show_alert_result', array(
+            'lesson_id'   => (int) $lesson_id,
+            'admin_email' => $admin_email,
+            'sent'        => $sent ? 'yes' : 'no',
+        ) );
+
+        return $sent;
+    }
+
+    protected function send_instructor_emergency_notifications( $lesson_id, $lesson, $message ) {
+        $admin_email = $this->get_admin_notification_email();
+        $student_email = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
+
+        $context = $this->get_safety_lesson_context( $lesson );
+
+        $details =
+            '<div><strong>Lesson ID:</strong> ' . (int) $lesson_id . '</div>' .
+            '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>' .
+            '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>' .
+            '<div><strong>Time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>' .
+            '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>' .
+            '<div style="margin-top:12px;"><strong>Instructor message:</strong><br>' . nl2br( esc_html( (string) $message ) ) . '</div>';
+
+        $html = $this->mrm_safety_email_wrap_html_blocks(
+            'Lesson emergency notice',
+            '<p>An emergency has been reported by the instructor and they can no longer make the lesson as scheduled.</p>',
+            $details
+        );
+
+        $headers = array(
+            'Content-Type: text/html; charset=UTF-8',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        );
+
+        $admin_sent = false;
+        $parent_sent = false;
+
+        if ( is_email( $admin_email ) ) {
+            $admin_sent = wp_mail( $admin_email, 'Lesson emergency notice', $html, $headers );
+        }
+
+        if ( is_email( $student_email ) ) {
+            $parent_sent = wp_mail( $student_email, 'Lesson emergency notice', $html, $headers );
+        }
+
+        $this->mrm_safety_log( 'instructor_emergency_notifications_result', array(
+            'lesson_id'    => (int) $lesson_id,
+            'admin_sent'   => $admin_sent ? 'yes' : 'no',
+            'parent_sent'  => $parent_sent ? 'yes' : 'no',
+            'parent_email' => $student_email,
+        ) );
+
+        return ( $admin_sent || $parent_sent );
+    }
+
+    protected function send_instructor_departure_followup_for_lesson( $lesson_id, $lesson ) {
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+        if ( ! empty( $attendance['instructor_departure_email_sent_at'] ) ) {
+            $this->mrm_safety_log( 'instructor_departure_followup_skipped_already_sent', array(
+                'lesson_id' => (int) $lesson_id,
+            ) );
+            return false;
+        }
+
+        $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
+        if ( ! is_email( $instructor_email ) ) {
+            $this->mrm_safety_log( 'instructor_departure_followup_skipped_invalid_email', array(
+                'lesson_id' => (int) $lesson_id,
+                'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
+            ) );
+            return false;
+        }
+
+        $depart_token = $this->mrm_safety_sign_token( $lesson_id, 'instructor', 'departed', time() + ( 12 * HOUR_IN_SECONDS ) );
+        $depart_url = $this->mrm_safety_action_url( $depart_token );
+        $context = $this->get_safety_lesson_context( $lesson );
+
+        $details =
+            '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>' .
+            '<div><strong>Time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>' .
+            '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>' .
+            '<div style="margin-top:12px;">When the lesson has ended and you have left the lesson, use the button below.</div>';
+
+        $html = $this->mrm_safety_email_wrap_html(
+            'Please mark your lesson complete',
+            '<p>Your arrival has been recorded. Please mark the lesson complete after it has ended.</p>',
+            $details,
+            $depart_url,
+            'Click here when you have ended your lesson'
+        );
+
+        $sent = wp_mail(
+            $instructor_email,
+            'Please mark your lesson complete',
+            $html,
+            array(
+                'Content-Type: text/html; charset=UTF-8',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+            )
+        );
+
+        if ( $sent ) {
+            $this->update_attendance_row( $lesson_id, array(
+                'instructor_departure_email_sent_at' => current_time( 'mysql' ),
+            ) );
+        }
+
+        $this->mrm_safety_log( 'instructor_departure_followup_result', array(
+            'lesson_id' => (int) $lesson_id,
+            'email'     => $instructor_email,
+            'sent'      => $sent ? 'yes' : 'no',
+        ) );
+
+        return $sent;
+    }
+
+    protected function get_admin_notification_email() {
+        return sanitize_email( (string) get_option( 'admin_email', '' ) );
+    }
+
+    protected function mrm_safety_sign_token( $lesson_id, $role, $verb, $expires_ts ) {
+        $lesson_id = (int) $lesson_id;
+        $role = (string) $role;
+        $verb = (string) $verb;
+        $expires_ts = (int) $expires_ts;
+
+        $payload = $lesson_id . '|' . $role . '|' . $verb . '|' . $expires_ts;
+        $sig = hash_hmac( 'sha256', $payload, wp_salt( 'mrm_safety_attendance' ) );
+
+        return base64_encode( $payload . '|' . $sig );
+    }
+
+    protected function mrm_safety_verify_token( $token, $expected_role = '', $expected_verb = '' ) {
+        $decoded = base64_decode( (string) $token, true );
+        if ( ! is_string( $decoded ) || $decoded === '' ) return new WP_Error( 'bad_token', 'Invalid token.' );
+
+        $parts = explode( '|', $decoded );
+        if ( count( $parts ) !== 5 ) return new WP_Error( 'bad_token', 'Malformed token.' );
+
+        list( $lesson_id, $role, $verb, $expires_ts, $sig ) = $parts;
+
+        $payload = $lesson_id . '|' . $role . '|' . $verb . '|' . $expires_ts;
+        $expected_sig = hash_hmac( 'sha256', $payload, wp_salt( 'mrm_safety_attendance' ) );
+
+        if ( ! hash_equals( $expected_sig, $sig ) ) {
+            return new WP_Error( 'bad_sig', 'Invalid signature.' );
+        }
+
+        if ( (int) $expires_ts < time() ) {
+            return new WP_Error( 'expired', 'This link has expired.' );
+        }
+
+        if ( $expected_role !== '' && $role !== $expected_role ) {
+            return new WP_Error( 'wrong_role', 'Invalid role.' );
+        }
+
+        if ( $expected_verb !== '' && $verb !== $expected_verb ) {
+            return new WP_Error( 'wrong_verb', 'Invalid action.' );
+        }
+
+        return array(
+            'lesson_id' => (int) $lesson_id,
+            'role'      => (string) $role,
+            'verb'      => (string) $verb,
+            'expires'   => (int) $expires_ts,
+        );
+    }
+
+    protected function mrm_safety_action_url( $token ) {
+        return add_query_arg(
+            array(
+                'action' => 'mrm_safety_attendance_action',
+                'token'  => rawurlencode( $token ),
+            ),
+            admin_url( 'admin-post.php' )
+        );
+    }
+
+    protected function get_safety_reminder_window_minutes() {
+        return array(
+            'from' => 59,
+            'to'   => 61,
+        );
+    }
+
+
+
+    protected function log_safety_cron_diagnostics() {
+        $hooks = array(
+            'mrm_scheduler_send_safety_reminders',
+            'mrm_scheduler_check_safety_exceptions',
+            'mrm_scheduler_send_feedback_requests',
+        );
+
+        foreach ( $hooks as $hook ) {
+            $next = wp_next_scheduled( $hook );
+
+            $this->mrm_safety_log( 'cron_diagnostic_snapshot', array(
+                'hook'               => $hook,
+                'next_run_local'     => $next ? wp_date( 'Y-m-d H:i:s', $next, wp_timezone() ) : '',
+                'next_run_utc'       => $next ? gmdate( 'Y-m-d H:i:s', $next ) : '',
+                'next_run_timestamp' => $next ? (int) $next : 0,
+            ) );
+        }
+    }
+
+    public function run_safety_reminder_sweep_now() {
+        $this->mrm_safety_log( 'run_safety_reminder_sweep_now_called', array() );
+        $this->log_safety_cron_diagnostics();
+        $this->cron_send_safety_reminders();
+    }
+
+
+    public function run_safety_exception_check_now() {
+        $this->mrm_safety_log( 'run_safety_exception_check_now_called', array() );
+        return $this->cron_check_safety_exceptions();
+    }
+
+    public function run_safety_feedback_request_now() {
+        $this->mrm_safety_log( 'run_safety_feedback_request_now_called', array() );
+        return $this->cron_send_feedback_requests();
+    }
+
+    public function cron_send_safety_reminders() {
+        global $wpdb;
+
+        $window = $this->get_safety_reminder_window_minutes();
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $attendance_table = $this->table_attendance();
+
+        $current_ts = current_time( 'timestamp' );
+        $now_local  = wp_date( 'Y-m-d H:i:s', $current_ts, wp_timezone() );
+        $from_ts    = $current_ts + ( (int) $window['from'] * MINUTE_IN_SECONDS );
+        $to_ts      = $current_ts + ( (int) $window['to'] * MINUTE_IN_SECONDS );
+        $from_local = wp_date( 'Y-m-d H:i:s', $from_ts, wp_timezone() );
+        $to_local   = wp_date( 'Y-m-d H:i:s', $to_ts, wp_timezone() );
+
+        $next_scheduled = wp_next_scheduled( 'mrm_scheduler_send_safety_reminders' );
+
+        $this->mrm_safety_log( 'cron_send_safety_reminders_entered', array(
+            'current_time_local'      => $now_local,
+            'current_time_timestamp'  => $current_ts,
+            'window_from_min'         => (int) $window['from'],
+            'window_to_min'           => (int) $window['to'],
+            'from_local'              => $from_local,
+            'to_local'                => $to_local,
+            'next_hook_run_local'     => $next_scheduled ? wp_date( 'Y-m-d H:i:s', $next_scheduled, wp_timezone() ) : '',
+            'next_hook_run_timestamp' => $next_scheduled ? (int) $next_scheduled : 0,
+        ) );
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT l.id, l.status, l.start_time, l.student_email,
+                        a.parent_reminder_sent_at, a.instructor_reminder_sent_at
+                 FROM {$lessons_table} l
+                 LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
+                 WHERE l.status = %s
+                   AND l.start_time BETWEEN %s AND %s
+                   AND (
+                        a.lesson_id IS NULL
+                        OR a.parent_reminder_sent_at IS NULL OR a.parent_reminder_sent_at = ''
+                        OR a.instructor_reminder_sent_at IS NULL OR a.instructor_reminder_sent_at = ''
+                   )
+                 ORDER BY l.start_time ASC
+                 LIMIT 250",
+                'scheduled',
+                $from_local,
+                $to_local
+            ),
+            ARRAY_A
+        );
+
+        if ( $wpdb->last_error ) {
+            $this->mrm_safety_log( 'reminder_query_db_error', array(
+                'db_error' => $wpdb->last_error,
+            ) );
+            return;
+        }
+
+        $this->mrm_safety_log( 'reminder_query_completed', array(
+            'row_count'  => is_array( $rows ) ? count( $rows ) : 0,
+            'from_local' => $from_local,
+            'to_local'   => $to_local,
+        ) );
+
+        if ( empty( $rows ) ) {
+            $this->mrm_safety_log( 'reminder_query_returned_no_rows', array(
+                'from_local' => $from_local,
+                'to_local'   => $to_local,
+            ) );
+            return;
+        }
+
+        foreach ( (array) $rows as $row ) {
+            $lesson_id = (int) ( $row['id'] ?? 0 );
+            if ( $lesson_id <= 0 ) {
+                $this->mrm_safety_log( 'reminder_candidate_skipped_invalid_lesson_id', array(
+                    'raw_row' => $row,
+                ) );
+                continue;
+            }
+
+            $this->mrm_safety_log( 'reminder_candidate_selected', array(
+                'lesson_id'                   => $lesson_id,
+                'status'                      => (string) ( $row['status'] ?? '' ),
+                'start_time'                  => (string) ( $row['start_time'] ?? '' ),
+                'student_email'               => (string) ( $row['student_email'] ?? '' ),
+                'parent_reminder_sent_at'     => (string) ( $row['parent_reminder_sent_at'] ?? '' ),
+                'instructor_reminder_sent_at' => (string) ( $row['instructor_reminder_sent_at'] ?? '' ),
+            ) );
+
+            $this->send_safety_reminders_for_lesson( $lesson_id );
+        }
+
+        $this->mrm_safety_log( 'reminder_sweep_finished', array(
+            'processed_count' => is_array( $rows ) ? count( $rows ) : 0,
+        ) );
+    }
+
+
+    protected function mrm_email_button_html( $url, $label, $variant = 'secondary' ) {
+        $is_primary = ( $variant === 'primary' );
+
+        $bg     = $is_primary ? '#111' : '#fff';
+        $color  = $is_primary ? '#fff' : '#111';
+        $border = $is_primary ? '1px solid #111' : '1px solid #111';
+
+        return '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:0 auto; width:auto; max-width:100%;">'
+            . '<tr><td align="center" style="border-radius:10px; border:' . esc_attr( $border ) . '; background:' . esc_attr( $bg ) . ';">'
+            . '<a href="' . esc_url( $url ) . '" style="display:block; width:auto; max-width:320px; padding:14px 18px; text-align:center; text-decoration:none; color:' . esc_attr( $color ) . '; font-weight:600; line-height:1.35; font-size:15px; white-space:normal; word-break:break-word;">'
+            . esc_html( $label )
+            . '</a>'
+            . '</td></tr></table>';
+    }
+
+
+    protected function send_safety_reminders_for_lesson( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            $this->mrm_safety_log( 'reminder_skipped_missing_lesson', array(
+                'lesson_id' => (int) $lesson_id,
+            ) );
+            return;
+        }
+
+        $this->mrm_safety_log( 'evaluating_lesson_for_safety_reminders', array(
+            'lesson_id'        => (int) $lesson_id,
+            'status'           => (string) ( $lesson['status'] ?? '' ),
+            'start_time'       => (string) ( $lesson['start_time'] ?? '' ),
+            'student_email'    => (string) ( $lesson['student_email'] ?? '' ),
+            'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
+            'appointment_type' => (string) ( $lesson['appointment_type'] ?? '' ),
+            'lesson_type'      => (string) ( $lesson['lesson_type'] ?? '' ),
+        ) );
+
+        if ( (string) ( $lesson['status'] ?? '' ) !== 'scheduled' ) {
+            $this->mrm_safety_log( 'reminder_skipped_non_scheduled_lesson', array(
+                'lesson_id' => (int) $lesson_id,
+                'status'    => (string) ( $lesson['status'] ?? '' ),
+            ) );
+            return;
+        }
+
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+        $parent_context     = $this->get_safety_lesson_context( $lesson, 'parent' );
+        $instructor_context = $this->get_safety_lesson_context( $lesson, 'instructor' );
+        $is_consultation    = ! empty( $parent_context['is_consultation'] );
+        $exp        = time() + ( 8 * HOUR_IN_SECONDS );
+
+        $parent_no_show_token       = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'report_no_show', $exp );
+        $instructor_arrived_token   = $this->mrm_safety_sign_token( $lesson_id, 'instructor', 'arrived', $exp );
+        $instructor_emergency_token = $this->mrm_safety_sign_token( $lesson_id, 'instructor', 'emergency', $exp );
+
+        $parent_no_show_url       = $this->mrm_safety_action_url( $parent_no_show_token );
+        $instructor_arrived_url   = $this->mrm_safety_action_url( $instructor_arrived_token );
+        $instructor_emergency_url = $this->mrm_safety_action_url( $instructor_emergency_token );
+
+        $parent_details = '';
+        $parent_details .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $parent_details .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $parent_details .= '<div><strong>Time:</strong> ' . esc_html( (string) $parent_context['start_label'] ) . '</div>';
+
+        if ( $is_consultation ) {
+            $parent_details .= '<div><strong>Type:</strong> Consultation</div>';
+            $parent_details .= '<div><strong>Consultation length:</strong> ' . esc_html( (string) $parent_context['minutes'] ) . ' minutes</div>';
+        } else {
+            $parent_details .= '<div><strong>Length:</strong> ' . esc_html( (string) $parent_context['minutes'] ) . ' minutes</div>';
+            $parent_details .= '<div><strong>Type:</strong> ' . esc_html( (string) $parent_context['lesson_type_label'] ) . '</div>';
+        }
+
+        if ( ! empty( $parent_context['join_link'] ) ) {
+            $parent_details .= '<div><strong>' . ( $is_consultation ? 'Consultation link' : 'Lesson link' ) . ':</strong> <a href="' . esc_url( (string) $parent_context['join_link'] ) . '">' . esc_html( (string) $parent_context['join_link'] ) . '</a></div>';
+        }
+
+        if ( ! empty( $parent_context['location_text'] ) ) {
+            $parent_details .= '<div><strong>Location:</strong> ' . esc_html( (string) $parent_context['location_text'] ) . '</div>';
+        }
+
+        $parent_details .= '<div style="margin-top:12px;">' . esc_html( (string) $parent_context['format_note'] ) . '</div>';
+
+        $instructor_details = '';
+        $instructor_details .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $instructor_details .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $instructor_details .= '<div><strong>Time:</strong> ' . esc_html( (string) $instructor_context['start_label'] ) . '</div>';
+
+        if ( $is_consultation ) {
+            $instructor_details .= '<div><strong>Type:</strong> Consultation</div>';
+            $instructor_details .= '<div><strong>Consultation length:</strong> ' . esc_html( (string) $instructor_context['minutes'] ) . ' minutes</div>';
+        } else {
+            $instructor_details .= '<div><strong>Length:</strong> ' . esc_html( (string) $instructor_context['minutes'] ) . ' minutes</div>';
+            $instructor_details .= '<div><strong>Type:</strong> ' . esc_html( (string) $instructor_context['lesson_type_label'] ) . '</div>';
+        }
+
+        if ( ! empty( $instructor_context['join_link'] ) ) {
+            $instructor_details .= '<div><strong>' . ( $is_consultation ? 'Consultation link' : 'Lesson link' ) . ':</strong> <a href="' . esc_url( (string) $instructor_context['join_link'] ) . '">' . esc_html( (string) $instructor_context['join_link'] ) . '</a></div>';
+        }
+
+        if ( ! empty( $instructor_context['location_text'] ) ) {
+            $instructor_details .= '<div><strong>Location:</strong> ' . esc_html( (string) $instructor_context['location_text'] ) . '</div>';
+        }
+
+        $instructor_details .= '<div style="margin-top:12px;">' . esc_html( (string) $instructor_context['format_note'] ) . '</div>';
+
+        $student_email    = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
+        $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
+
+        if ( empty( $attendance['parent_reminder_sent_at'] ) ) {
+            if ( ! is_email( $student_email ) ) {
+                $this->mrm_safety_log( 'parent_reminder_skipped_invalid_email', array(
+                    'lesson_id'     => (int) $lesson_id,
+                    'student_email' => (string) ( $lesson['student_email'] ?? '' ),
+                ) );
+            } else {
+                if ( $is_consultation ) {
+                    $parent_buttons =
+                        '<div style="margin-top:24px;">' .
+                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $parent_no_show_url, 'Click here if your instructor did not arrive', 'secondary' ) . '</div>' .
+                        '</div>';
+
+                    $parent_title = 'Consultation Reminder';
+                    $parent_intro = '<p>Reminder: you have a consultation coming up in one hour.</p>';
+                } else {
+                    $parent_arrived_token = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'confirm_arrival', $exp );
+                    $parent_arrived_url   = $this->mrm_safety_action_url( $parent_arrived_token );
+
+                    $parent_buttons =
+                        '<div style="margin-top:24px;">' .
+                            '<div style="margin:0 auto 12px auto;text-align:center;">' . $this->mrm_email_button_html( $parent_arrived_url, 'Click here when your instructor arrives', 'primary' ) . '</div>' .
+                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $parent_no_show_url, 'Click here if your instructor did not arrive', 'secondary' ) . '</div>' .
+                        '</div>';
+
+                    $parent_title = 'Lesson reminder';
+                    $parent_intro = '<p>Reminder: you have a lesson coming up in one hour.</p>';
+                }
+
+                $parent_html = $this->mrm_safety_email_wrap_html_blocks(
+                    $parent_title,
+                    $parent_intro,
+                    $parent_details,
+                    $parent_buttons
+                );
+
+                $parent_sent = wp_mail(
+                    $student_email,
+                    $this->get_safety_reminder_subject( $lesson ),
+                    $parent_html,
+                    array(
+                        'Content-Type: text/html; charset=UTF-8',
+                        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+                    )
+                );
+
+                if ( $parent_sent ) {
+                    $this->update_attendance_row( $lesson_id, array(
+                        'parent_reminder_sent_at' => current_time( 'mysql' ),
+                    ) );
+                }
+
+                $this->mrm_safety_log( 'parent_reminder_result', array(
+                    'lesson_id'        => (int) $lesson_id,
+                    'email'            => $student_email,
+                    'sent'             => $parent_sent ? 'yes' : 'no',
+                    'is_consultation'  => $is_consultation ? 'yes' : 'no',
+                ) );
+            }
+        } else {
+            $this->mrm_safety_log( 'parent_reminder_skipped_already_sent', array(
+                'lesson_id'               => (int) $lesson_id,
+                'parent_reminder_sent_at' => (string) ( $attendance['parent_reminder_sent_at'] ?? '' ),
+            ) );
+        }
+
+        if ( empty( $attendance['instructor_reminder_sent_at'] ) ) {
+            if ( ! is_email( $instructor_email ) ) {
+                $this->mrm_safety_log( 'instructor_reminder_skipped_invalid_email', array(
+                    'lesson_id'        => (int) $lesson_id,
+                    'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
+                ) );
+            } else {
+                if ( $is_consultation ) {
+                    $instructor_buttons =
+                        '<div style="margin-top:24px;">' .
+                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_emergency_url, 'An emergency has arisen and I can no longer make this consultation', 'secondary' ) . '</div>' .
+                        '</div>';
+
+                    $instructor_title = 'Consultation Reminder';
+                    $instructor_intro = '<p>Reminder: you have a consultation coming up in one hour.</p>';
+                } else {
+                    $instructor_buttons =
+                        '<div style="margin-top:24px;">' .
+                            '<div style="margin:0 auto 12px auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_arrived_url, 'Click here when you have arrived for your lesson', 'primary' ) . '</div>' .
+                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_emergency_url, 'An emergency has arisen and I can no longer make this lesson', 'secondary' ) . '</div>' .
+                        '</div>';
+
+                    $instructor_title = 'Instructor lesson reminder';
+                    $instructor_intro = '<p>Reminder: you have a lesson coming up in one hour.</p>';
+                }
+
+                $instructor_html = $this->mrm_safety_email_wrap_html_blocks(
+                    $instructor_title,
+                    $instructor_intro,
+                    $instructor_details,
+                    $instructor_buttons
+                );
+
+                $instructor_sent = wp_mail(
+                    $instructor_email,
+                    $this->get_safety_reminder_subject( $lesson ),
+                    $instructor_html,
+                    array(
+                        'Content-Type: text/html; charset=UTF-8',
+                        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+                    )
+                );
+
+                if ( $instructor_sent ) {
+                    $this->update_attendance_row( $lesson_id, array(
+                        'instructor_reminder_sent_at' => current_time( 'mysql' ),
+                    ) );
+                }
+
+                $this->mrm_safety_log( 'instructor_reminder_result', array(
+                    'lesson_id'        => (int) $lesson_id,
+                    'email'            => $instructor_email,
+                    'sent'             => $instructor_sent ? 'yes' : 'no',
+                    'is_consultation'  => $is_consultation ? 'yes' : 'no',
+                ) );
+            }
+        } else {
+            $this->mrm_safety_log( 'instructor_reminder_skipped_already_sent', array(
+                'lesson_id'                   => (int) $lesson_id,
+                'instructor_reminder_sent_at' => (string) ( $attendance['instructor_reminder_sent_at'] ?? '' ),
+            ) );
+        }
+    }
+
+
+
+    public function cron_send_feedback_requests() {
+        global $wpdb;
+
+        $this->mrm_safety_log( 'cron_send_feedback_requests_entered', array(
+            'current_time_mysql' => current_time( 'mysql' ),
+            'current_time_ts'    => current_time( 'timestamp' ),
+        ) );
+
+        $lessons_table    = $wpdb->prefix . 'mrm_lessons';
+        $attendance_table = $this->table_attendance();
+
+        $from_local = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 24 * HOUR_IN_SECONDS ) );
+        $to_local   = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 15 * MINUTE_IN_SECONDS ) );
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT l.id
+                 FROM {$lessons_table} l
+                 LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
+                 WHERE l.status IN ('scheduled','delivered')
+                   AND l.end_time BETWEEN %s AND %s
+                   AND (
+                        a.lesson_id IS NULL
+                        OR (
+                            (a.feedback_submitted_at IS NULL OR a.feedback_submitted_at = '')
+                            AND (a.parent_feedback_request_sent_at IS NULL OR a.parent_feedback_request_sent_at = '')
+                        )
+                   )
+                 ORDER BY l.end_time ASC
+                 LIMIT 250",
+                $from_local,
+                $to_local
+            ),
+            ARRAY_A
+        );
+
+        if ( $wpdb->last_error ) {
+            $this->mrm_safety_log( 'feedback_request_query_db_error', array( 'db_error' => $wpdb->last_error ) );
+            return;
+        }
+
+        $this->mrm_safety_log( 'feedback_request_query_completed', array(
+            'row_count'   => is_array( $rows ) ? count( $rows ) : 0,
+            'from_local'  => $from_local,
+            'to_local'    => $to_local,
+        ) );
+
+        if ( empty( $rows ) ) {
+            $this->mrm_safety_log( 'feedback_request_query_returned_no_rows', array() );
+            return;
+        }
+
+        foreach ( (array) $rows as $row ) {
+            $lesson_id = (int) ( $row['id'] ?? 0 );
+            if ( $lesson_id <= 0 ) { continue; }
+            $this->send_parent_feedback_request_for_lesson( $lesson_id );
+        }
+
+        $this->mrm_safety_log( 'feedback_request_cron_finished', array( 'processed_count' => is_array( $rows ) ? count( $rows ) : 0 ) );
+    }
+
+    protected function mrm_claim_feedback_request_send( $lesson_id ) {
+        $lesson_id = (int) $lesson_id;
+        if ( $lesson_id <= 0 ) {
+            return false;
+        }
+
+        $lock_key = 'mrm_feedback_request_claim_' . $lesson_id;
+
+        if ( get_option( $lock_key, null ) ) {
+            return false;
+        }
+
+        $added = add_option( $lock_key, current_time( 'mysql' ), '', 'no' );
+        return (bool) $added;
+    }
+
+    protected function mrm_release_feedback_request_send( $lesson_id ) {
+        $lesson_id = (int) $lesson_id;
+        if ( $lesson_id <= 0 ) {
+            return;
+        }
+
+        $lock_key = 'mrm_feedback_request_claim_' . $lesson_id;
+        delete_option( $lock_key );
+    }
+
+    protected function send_parent_feedback_request_for_lesson( $lesson_id, $force_send = false ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            $this->mrm_safety_log( 'feedback_request_skipped_missing_lesson', array(
+                'lesson_id' => (int) $lesson_id,
+            ) );
+            return;
+        }
+
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+
+        if ( ! empty( $attendance['feedback_submitted_at'] ) ) {
+            $this->mrm_safety_log( 'feedback_request_skipped_already_submitted', array(
+                'lesson_id' => (int) $lesson_id,
+                'feedback_submitted_at' => (string) ( $attendance['feedback_submitted_at'] ?? '' ),
+            ) );
+            return;
+        }
+
+        if ( ! empty( $attendance['parent_feedback_request_sent_at'] ) ) {
+            $this->mrm_safety_log( 'feedback_request_skipped_already_sent', array(
+                'lesson_id' => (int) $lesson_id,
+                'parent_feedback_request_sent_at' => (string) ( $attendance['parent_feedback_request_sent_at'] ?? '' ),
+            ) );
+            return;
+        }
+
+        if ( ! $this->mrm_claim_feedback_request_send( $lesson_id ) ) {
+            $this->mrm_safety_log( 'feedback_request_skipped_claim_locked', array(
+                'lesson_id' => (int) $lesson_id,
+                'forced'    => $force_send ? 'yes' : 'no',
+            ) );
+            return;
+        }
+
+        $student_email = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
+        if ( ! is_email( $student_email ) ) {
+            $this->mrm_safety_log( 'feedback_request_skipped_invalid_email', array(
+                'lesson_id' => (int) $lesson_id,
+                'student_email' => (string) ( $lesson['student_email'] ?? '' ),
+            ) );
+            $this->mrm_release_feedback_request_send( $lesson_id );
+            return;
+        }
+
+        $feedback_token = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'feedback', time() + ( 24 * HOUR_IN_SECONDS ) );
+        $feedback_url   = $this->mrm_safety_action_url( $feedback_token );
+        $context = $this->get_safety_lesson_context( $lesson );
+
+        $details =
+            '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>' .
+            '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>' .
+            '<div><strong>Lesson time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>' .
+            '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>';
+
+        $html = $this->mrm_safety_email_wrap_html(
+            'How was your lesson?',
+            '<p>Please rate the lesson and share any comments you would like us to see.</p>',
+            $details,
+            $feedback_url,
+            'Rate your lesson'
+        );
+
+        $sent = wp_mail(
+            $student_email,
+            'How was your lesson?',
+            $html,
+            array(
+                'Content-Type: text/html; charset=UTF-8',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+            )
+        );
+
+        $this->update_attendance_row( $lesson_id, array(
+            'parent_feedback_request_sent_at' => current_time( 'mysql' ),
+        ) );
+
+        if ( ! $sent ) {
+            $this->mrm_release_feedback_request_send( $lesson_id );
+        }
+
+        $this->mrm_safety_log( 'feedback_request_email_result', array(
+            'lesson_id' => (int) $lesson_id,
+            'email'     => $student_email,
+            'sent'      => $sent ? 'yes' : 'no',
+            'forced'    => $force_send ? 'yes' : 'no',
+        ) );
+    }
+
+    public function handle_safety_attendance_action() {
+        $token = isset( $_GET['token'] ) ? rawurldecode( (string) $_GET['token'] ) : '';
+
+        $this->mrm_safety_log( 'handle_safety_attendance_action_entered', array(
+            'has_token'   => $token !== '' ? 'yes' : 'no',
+            'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '',
+            'remote_addr' => isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : '',
+        ) );
+
+        $parsed = $this->mrm_safety_verify_token( $token );
+
+        if ( is_wp_error( $parsed ) ) {
+            $this->mrm_safety_log( 'handle_safety_attendance_action_invalid_token', array(
+                'error' => $parsed->get_error_message(),
+            ) );
+            status_header( 400 );
+            echo '<h2>Invalid or expired link</h2><p>' . esc_html( $parsed->get_error_message() ) . '</p>';
+            exit;
+        }
+
+        $lesson_id = (int) $parsed['lesson_id'];
+        $role      = (string) $parsed['role'];
+        $verb      = (string) $parsed['verb'];
+
+        $this->mrm_safety_log( 'handle_safety_attendance_action_token_valid', array(
+            'lesson_id' => $lesson_id,
+            'role'      => $role,
+            'verb'      => $verb,
+        ) );
+
+        if ( $role === 'instructor' && $verb === 'arrived' ) {
+            $this->render_instructor_arrived_page( $lesson_id );
+            exit;
+        }
+
+        if ( $role === 'instructor' && $verb === 'departed' ) {
+            $this->render_instructor_departed_page( $lesson_id );
+            exit;
+        }
+
+        if ( $role === 'instructor' && $verb === 'emergency' ) {
+            $this->render_instructor_emergency_form_page( $lesson_id );
+            exit;
+        }
+
+        if ( $role === 'parent' && $verb === 'confirm_arrival' ) {
+            $this->render_parent_confirm_arrival_page( $lesson_id );
+            exit;
+        }
+
+        if ( $role === 'parent' && $verb === 'report_no_show' ) {
+            $this->render_parent_no_show_page( $lesson_id );
+            exit;
+        }
+
+        if ( $role === 'parent' && $verb === 'feedback' ) {
+            $this->render_parent_feedback_form_page( $lesson_id, false );
+            exit;
+        }
+
+        $this->mrm_safety_log( 'handle_safety_attendance_action_unsupported_action', array(
+            'lesson_id' => $lesson_id,
+            'role'      => $role,
+            'verb'      => $verb,
+        ) );
+
+        status_header( 400 );
+        echo '<h2>Unsupported action</h2>';
+        exit;
+    }
+
+    public function handle_safety_feedback_submit() {
+        $token = isset( $_POST['token'] ) ? (string) wp_unslash( $_POST['token'] ) : '';
+
+        $this->mrm_safety_log( 'handle_safety_feedback_submit_entered', array(
+            'has_token'   => $token !== '' ? 'yes' : 'no',
+            'remote_addr' => isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : '',
+        ) );
+
+        $parsed = $this->mrm_safety_verify_token( $token, 'parent', 'feedback' );
+        if ( is_wp_error( $parsed ) ) {
+            $this->mrm_safety_log( 'handle_safety_feedback_submit_invalid_token', array( 'error' => $parsed->get_error_message() ) );
+            status_header( 400 ); echo '<h2>Invalid or expired feedback link</h2><p>' . esc_html( $parsed->get_error_message() ) . '</p>'; exit;
+        }
+
+        $lesson_id = (int) $parsed['lesson_id'];
+        $rating    = isset( $_POST['rating'] ) ? (int) $_POST['rating'] : 0;
+        $comment   = isset( $_POST['comment'] ) ? wp_kses_post( wp_unslash( $_POST['comment'] ) ) : '';
+
+        if ( $rating < 1 || $rating > 5 ) {
+            $this->mrm_safety_log( 'handle_safety_feedback_submit_invalid_rating', array( 'lesson_id' => $lesson_id, 'rating' => $rating ) );
+            status_header( 400 ); echo '<h2>Please choose a rating</h2>'; exit;
+        }
+
+        $this->ensure_attendance_row( $lesson_id );
+        $this->update_attendance_row( $lesson_id, array( 'parent_rating' => $rating, 'parent_comment' => $comment, 'feedback_submitted_at' => current_time( 'mysql' ) ) );
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        $this->send_parent_feedback_notifications( $lesson_id, $lesson, $rating, $comment );
+
+        $this->mrm_safety_log( 'parent_feedback_submitted', array( 'lesson_id' => $lesson_id, 'rating' => $rating, 'comment_length' => strlen( (string) $comment ) ) );
+
+        echo '<h2>Thank you</h2><p>Your feedback has been submitted.</p>';
+        exit;
+    }
+
+
+    public function handle_safety_emergency_submit() {
+        $token = isset( $_POST['token'] ) ? (string) wp_unslash( $_POST['token'] ) : '';
+        $message = isset( $_POST['message'] ) ? trim( wp_kses_post( wp_unslash( $_POST['message'] ) ) ) : '';
+
+        $this->mrm_safety_log( 'handle_safety_emergency_submit_entered', array(
+            'has_token'   => $token !== '' ? 'yes' : 'no',
+            'message_len' => strlen( $message ),
+            'remote_addr' => isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : '',
+        ) );
+
+        $parsed = $this->mrm_safety_verify_token( $token, 'instructor', 'emergency' );
+        if ( is_wp_error( $parsed ) ) {
+            $this->mrm_safety_log( 'handle_safety_emergency_submit_invalid_token', array(
+                'error' => $parsed->get_error_message(),
+            ) );
+            status_header( 400 );
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Invalid or expired emergency link',
+                'message_html' => '<p class="mrm-message">' . esc_html( $parsed->get_error_message() ) . '</p>',
+            ) );
+            exit;
+        }
+
+        if ( $message === '' ) {
+            status_header( 400 );
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Please enter a message',
+                'message_html' => '<p class="mrm-message">A message is required before sending an emergency notice.</p>',
+            ) );
+            exit;
+        }
+
+        $lesson_id = (int) $parsed['lesson_id'];
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            status_header( 404 );
+            echo '<h2>Lesson not found</h2>';
+            exit;
+        }
+
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+
+        if ( empty( $attendance['instructor_emergency_reported_at'] ) ) {
+            $this->update_attendance_row( $lesson_id, array(
+                'instructor_emergency_reported_at' => current_time( 'mysql' ),
+                'instructor_emergency_reported_ip' => isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( (string) $_SERVER['REMOTE_ADDR'] ) : '',
+                'instructor_emergency_message'     => $message,
+            ) );
+        }
+
+        if ( empty( $attendance['instructor_emergency_notified_at'] ) ) {
+            $sent = $this->send_instructor_emergency_notifications( $lesson_id, $lesson, $message );
+            if ( $sent ) {
+                $this->update_attendance_row( $lesson_id, array(
+                    'instructor_emergency_notified_at' => current_time( 'mysql' ),
+                ) );
+            }
+        }
+
+        $this->mrm_safety_log( 'instructor_emergency_recorded', array(
+            'lesson_id' => (int) $lesson_id,
+            'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
+        ) );
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Lesson Update',
+            'title'        => 'Emergency notice sent',
+            'message_html' => '<p class="mrm-message">Your emergency message has been recorded and sent to the parent and site administrator.</p>',
+            'card_html'    => '<div class="mrm-panel">Thank you. The family has now been notified.</div>',
+        ) );
+        exit;
+    }
+
+    protected function render_instructor_arrived_page( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            status_header( 404 );
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
+        }
+
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+        if ( empty( $attendance['instructor_arrived_at'] ) ) {
+            $this->update_attendance_row( $lesson_id, array(
+                'instructor_arrived_at' => current_time( 'mysql' ),
+                'instructor_arrived_ip' => isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( (string) $_SERVER['REMOTE_ADDR'] ) : '',
+            ) );
+        }
+
+        $this->send_instructor_departure_followup_for_lesson( $lesson_id, $lesson );
+
+        $this->mrm_safety_log( 'instructor_arrived_recorded', array(
+            'lesson_id'         => (int) $lesson_id,
+            'instructor_email'  => (string) ( $lesson['instructor_email'] ?? '' ),
+        ) );
+
+        $card_html  = '<div class="mrm-panel">';
+        $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Status:</strong> Arrival recorded</div>';
+        $card_html .= '</div>';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Arrival Recorded',
+            'title'        => 'You’re All Set',
+            'message_html' => '<p>Your arrival has been recorded for this lesson.</p><p>A follow-up email has been sent with the button to mark the lesson complete after it has ended.</p>',
+            'card_html'    => $card_html,
+        ) );
+    }
+
+    protected function render_instructor_departed_page( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            status_header( 404 );
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
+        }
+
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+        if ( empty( $attendance['instructor_departed_at'] ) ) {
+            $this->update_attendance_row( $lesson_id, array(
+                'instructor_departed_at' => current_time( 'mysql' ),
+                'instructor_departed_ip' => isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( (string) $_SERVER['REMOTE_ADDR'] ) : '',
+            ) );
+        }
+
+        $this->mrm_safety_log( 'instructor_departed_recorded', array(
+            'lesson_id'        => (int) $lesson_id,
+            'instructor_email' => (string) ( $lesson['instructor_email'] ?? '' ),
+        ) );
+
+        $card_html  = '<div class="mrm-panel">';
+        $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Status:</strong> Lesson completion recorded</div>';
+        $card_html .= '</div>';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Lesson Completed',
+            'title'        => 'Thank You',
+            'message_html' => '<p>Your lesson completion has been recorded successfully.</p>',
+            'card_html'    => $card_html,
+        ) );
+    }
+
+    protected function render_instructor_emergency_form_page( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            status_header( 404 );
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson not found',
+                'message_html' => '<p class="mrm-message">We could not locate this lesson.</p>',
+            ) );
+            exit;
+        }
+
+        $token = $this->mrm_safety_sign_token( $lesson_id, 'instructor', 'emergency', time() + ( 4 * HOUR_IN_SECONDS ) );
+        $submit_url = add_query_arg( array( 'action' => 'mrm_safety_emergency_submit' ), admin_url( 'admin-post.php' ) );
+
+        $context = $this->get_safety_lesson_context( $lesson, 'instructor' );
+        $is_consultation = ! empty( $context['is_consultation'] );
+
+        $message_html = '<p class="mrm-message">Please provide a professional explanation that will be sent to the parent and site administrator.</p>';
+
+        $card_html = '
+        <div class="mrm-panel mrm-stack">
+            <div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>
+            <div><strong>Time:</strong> ' . esc_html( (string) ( $context['start_label'] ?? '' ) ) . '</div>
+            <div><strong>Type:</strong> ' . esc_html( $is_consultation ? 'Consultation' : (string) ( $context['lesson_type_label'] ?? 'Lesson' ) ) . '</div>
+        </div>
+        <form method="post" action="' . esc_url( $submit_url ) . '" class="mrm-stack" style="margin-top:18px;">
+            <input type="hidden" name="token" value="' . esc_attr( $token ) . '">
+            <div>
+                <label class="mrm-label" for="mrm-emergency-message">Message</label>
+                <textarea id="mrm-emergency-message" name="message" rows="8" required placeholder="Briefly explain the emergency and any helpful next steps for the family."></textarea>
+            </div>
+            <div class="mrm-form-actions">
+                <button type="submit" class="mrm-btn mrm-btn-primary">Send emergency notice</button>
+            </div>
+        </form>
+    ';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Lesson Update',
+            'title'        => $is_consultation ? 'Consultation emergency notice' : 'Lesson emergency notice',
+            'message_html' => $message_html,
+            'card_html'    => $card_html,
+        ) );
+        exit;
+    }
+
+    protected function render_parent_confirm_arrival_page( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            status_header( 404 );
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
+        }
+
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+        if ( empty( $attendance['parent_confirmed_arrival_at'] ) ) {
+            $this->update_attendance_row( $lesson_id, array(
+                'parent_confirmed_arrival_at' => current_time( 'mysql' ),
+                'parent_confirmed_arrival_ip' => isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( (string) $_SERVER['REMOTE_ADDR'] ) : '',
+            ) );
+        }
+
+        $this->mrm_safety_log( 'parent_confirmed_arrival_recorded', array(
+            'lesson_id'     => (int) $lesson_id,
+            'student_email' => (string) ( $lesson['student_email'] ?? '' ),
+        ) );
+
+        $this->send_parent_feedback_request_for_lesson( $lesson_id, false );
+
+        $card_html  = '<div class="mrm-panel">';
+        $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Status:</strong> Arrival confirmed</div>';
+        $card_html .= '</div>';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Arrival Confirmed',
+            'title'        => 'Thank You',
+            'message_html' => '<p>We have recorded that your instructor arrived for the lesson.</p><p>A follow-up feedback email has been sent so you can rate the lesson and leave comments.</p>',
+            'card_html'    => $card_html,
+        ) );
+    }
+
+    protected function render_parent_feedback_form_page( $lesson_id, $show_arrival_notice = false ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            status_header( 404 );
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Feedback',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
+        }
+
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+
+        if ( ! empty( $attendance['feedback_submitted_at'] ) ) {
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Feedback',
+                'title'        => 'Feedback Already Submitted',
+                'message_html' => '<p>Thank you. Your lesson feedback has already been recorded.</p>',
+            ) );
+        }
+
+        $feedback_token = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'feedback', time() + ( 24 * HOUR_IN_SECONDS ) );
+        $submit_url = add_query_arg(
+            array( 'action' => 'mrm_safety_feedback_submit' ),
+            admin_url( 'admin-post.php' )
+        );
+
+        $arrival_notice = '';
+        if ( $show_arrival_notice ) {
+            $arrival_notice = '<div class="mrm-panel" style="margin-bottom:18px;"><strong>Arrival confirmed.</strong><br>We have recorded that your instructor arrived for the lesson.</div>';
+        }
+
+        $card_html = '
+            <style>
+                .mrm-rating-wrap{
+                    margin:18px 0 6px;
+                }
+                .mrm-rating-label{
+                    display:block;
+                    margin-bottom:10px;
+                    font-size:15px;
+                    font-weight:700;
+                }
+                .mrm-star-rating{
+                    direction:rtl;
+                    display:inline-flex;
+                    gap:4px;
+                    justify-content:center;
+                    width:100%;
+                }
+                .mrm-star-rating input{
+                    display:none;
+                }
+                .mrm-star-rating label{
+                    cursor:pointer;
+                    font-size:40px;
+                    line-height:1;
+                    color:transparent;
+                    -webkit-text-stroke:1.6px #c7b58a;
+                    transition:transform .15s ease,color .15s ease,-webkit-text-stroke-color .15s ease;
+                }
+                .mrm-star-rating label:hover,
+                .mrm-star-rating label:hover ~ label,
+                .mrm-star-rating input:checked ~ label{
+                    color:#d4a017;
+                    -webkit-text-stroke-color:#d4a017;
+                }
+                .mrm-star-rating label:active{
+                    transform:scale(.96);
+                }
+                .mrm-rating-help{
+                    margin-top:10px;
+                    text-align:center;
+                    color:#6b6457;
+                    font-size:13px;
+                }
+            </style>
+            ' . $arrival_notice . '
+            <div class="mrm-panel">
+                <form method="post" action="' . esc_url( $submit_url ) . '">
+                    <input type="hidden" name="token" value="' . esc_attr( $feedback_token ) . '">
+
+                    <div class="mrm-rating-wrap">
+                        <label class="mrm-rating-label">How was your lesson?</label>
+                        <div class="mrm-star-rating" aria-label="Star rating">
+                            <input type="radio" id="mrm-star-5" name="rating" value="5" required>
+                            <label for="mrm-star-5" title="5 stars">★</label>
+
+                            <input type="radio" id="mrm-star-4" name="rating" value="4" required>
+                            <label for="mrm-star-4" title="4 stars">★</label>
+
+                            <input type="radio" id="mrm-star-3" name="rating" value="3" required>
+                            <label for="mrm-star-3" title="3 stars">★</label>
+
+                            <input type="radio" id="mrm-star-2" name="rating" value="2" required>
+                            <label for="mrm-star-2" title="2 stars">★</label>
+
+                            <input type="radio" id="mrm-star-1" name="rating" value="1" required>
+                            <label for="mrm-star-1" title="1 star">★</label>
+                        </div>
+                        <div class="mrm-rating-help">Tap a star to choose your rating.</div>
+                    </div>
+
+                    <div style="margin-top:22px;">
+                        <label class="mrm-label">Comments</label>
+                        <textarea name="comment" rows="6" placeholder="Share any feedback you would like us to see."></textarea>
+                    </div>
+
+                    <div class="mrm-form-actions">
+                        <button type="submit" class="mrm-btn mrm-btn-primary">Submit Feedback</button>
+                    </div>
+                </form>
+            </div>
+        ';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Lesson Feedback',
+            'title'        => 'How Was Your Lesson?',
+            'message_html' => '<p>Please rate the lesson and share any comments you would like us to see.</p>',
+            'card_html'    => $card_html,
+            'footer_html'  => 'Your feedback helps us maintain a high-quality lesson experience.',
+        ) );
+    }
+
+    protected function render_parent_no_show_page( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            status_header( 404 );
+            $this->render_safety_action_page( array(
+                'eyebrow'      => 'Lesson Update',
+                'title'        => 'Lesson Not Found',
+                'message_html' => '<p>We could not locate the lesson connected to this link.</p>',
+            ) );
+        }
+
+        $attendance = $this->ensure_attendance_row( $lesson_id );
+
+        if ( empty( $attendance['parent_no_show_reported_at'] ) ) {
+            $this->update_attendance_row( $lesson_id, array(
+                'parent_no_show_reported_at' => current_time( 'mysql' ),
+                'parent_no_show_reported_ip' => isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( (string) $_SERVER['REMOTE_ADDR'] ) : '',
+            ) );
+        }
+
+        if ( empty( $attendance['no_show_admin_notified_at'] ) ) {
+            $sent = $this->send_parent_no_show_alert_for_lesson( $lesson_id, $lesson );
+            if ( $sent ) {
+                $this->update_attendance_row( $lesson_id, array(
+                    'no_show_admin_notified_at' => current_time( 'mysql' ),
+                ) );
+            }
+        }
+
+        $this->mrm_safety_log( 'parent_no_show_reported', array(
+            'lesson_id'     => (int) $lesson_id,
+            'student_email' => (string) ( $lesson['student_email'] ?? '' ),
+        ) );
+
+        $card_html  = '<div class="mrm-panel">';
+        $card_html .= '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>';
+        $card_html .= '<div><strong>Status:</strong> Instructor did not arrive reported</div>';
+        $card_html .= '</div>';
+
+        $this->render_safety_action_page( array(
+            'eyebrow'      => 'Safety Update',
+            'title'        => 'Report Received',
+            'message_html' => '<p>We have recorded that your instructor did not arrive for the lesson.</p><p>The site administrator has been notified.</p>',
+            'card_html'    => $card_html,
+        ) );
+    }
+
+    protected function send_parent_feedback_notifications( $lesson_id, $lesson, $rating, $comment ) {
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            $this->mrm_safety_log( 'parent_feedback_notifications_skipped_missing_lesson', array( 'lesson_id' => (int) $lesson_id ) );
+            return;
+        }
+
+        $admin_email      = $this->get_admin_notification_email();
+        $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
+        $student_name     = (string) ( $lesson['student_name'] ?? '' );
+        $instructor_name  = (string) ( $lesson['instructor_name'] ?? '' );
+        $start_label      = wp_date( 'F j, Y \a\t g:i A', strtotime( (string) ( $lesson['start_time'] ?? '' ) ), wp_timezone() );
+
+        $intro = '<p>Parent feedback has been submitted for a lesson.</p>';
+        $details = '<div><strong>Lesson ID:</strong> ' . (int) $lesson_id . '</div>' . '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>' . '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>' . '<div><strong>Lesson time:</strong> ' . esc_html( $start_label ) . '</div>' . '<div><strong>Rating:</strong> ' . esc_html( str_repeat( '★', (int) $rating ) ) . ' (' . (int) $rating . '/5)</div>' . '<div style="margin-top:12px;"><strong>Comment:</strong><br>' . nl2br( esc_html( (string) $comment ) ) . '</div>';
+        $html = $this->mrm_safety_email_wrap_html( 'Parent Lesson Feedback', $intro, $details );
+        $headers = array( 'Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>' );
+
+        $admin_sent = false;
+        $instructor_sent = false;
+        if ( is_email( $admin_email ) ) { $admin_sent = wp_mail( $admin_email, 'Parent lesson feedback received', $html, $headers ); }
+        if ( is_email( $instructor_email ) ) { $instructor_sent = wp_mail( $instructor_email, 'Parent lesson feedback received', $html, $headers ); }
+
+        $this->mrm_safety_log( 'parent_feedback_notifications_sent', array(
+            'lesson_id'         => (int) $lesson_id,
+            'admin_email'       => $admin_email,
+            'admin_sent'        => $admin_sent ? 'yes' : 'no',
+            'instructor_email'  => $instructor_email,
+            'instructor_sent'   => $instructor_sent ? 'yes' : 'no',
+        ) );
+    }
+
+    public function cron_check_safety_exceptions() {
+        global $wpdb;
+
+        $this->mrm_safety_log( 'cron_check_safety_exceptions_entered', array(
+            'current_time_mysql' => current_time( 'mysql' ),
+            'current_time_ts'    => current_time( 'timestamp' ),
+        ) );
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $attendance_table = $this->table_attendance();
+        $admin_email = $this->get_admin_notification_email();
+
+        if ( ! is_email( $admin_email ) ) {
+            $this->mrm_safety_log( 'exception_monitor_skipped_missing_admin_email', array() );
+            return;
+        }
+
+        $arrival_rows = $wpdb->get_results(
+            "SELECT l.*, a.*
+             FROM {$lessons_table} l
+             LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
+             WHERE l.status = 'scheduled'
+               AND l.start_time <= '" . esc_sql( date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 10 * MINUTE_IN_SECONDS ) ) ) . "'
+               AND (a.instructor_arrived_at IS NULL OR a.instructor_arrived_at = '')
+               AND (a.arrival_alert_sent_at IS NULL OR a.arrival_alert_sent_at = '')",
+            ARRAY_A
+        );
+
+        $this->mrm_safety_log( 'arrival_exception_query_completed', array(
+            'row_count' => is_array( $arrival_rows ) ? count( $arrival_rows ) : 0,
+        ) );
+
+        foreach ( (array) $arrival_rows as $row ) {
+            $lesson_id = (int) ( $row['lesson_id'] ?? $row['id'] ?? 0 );
+            if ( $lesson_id <= 0 ) continue;
+
+            $this->send_safety_exception_email( 'arrival_missing', $row, $admin_email );
+            $this->update_attendance_row( $lesson_id, array(
+                'arrival_alert_sent_at' => current_time( 'mysql' ),
+            ) );
+        }
+
+        $departure_rows = $wpdb->get_results(
+            "SELECT l.*, a.*
+             FROM {$lessons_table} l
+             LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
+             WHERE l.status IN ('scheduled','delivered')
+               AND l.end_time <= '" . esc_sql( date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 60 * MINUTE_IN_SECONDS ) ) ) . "'
+               AND a.instructor_arrived_at IS NOT NULL
+               AND a.instructor_arrived_at <> ''
+               AND (a.instructor_departed_at IS NULL OR a.instructor_departed_at = '')
+               AND (a.departure_alert_sent_at IS NULL OR a.departure_alert_sent_at = '')",
+            ARRAY_A
+        );
+
+        $this->mrm_safety_log( 'departure_exception_query_completed', array(
+            'row_count' => is_array( $departure_rows ) ? count( $departure_rows ) : 0,
+        ) );
+
+        foreach ( (array) $departure_rows as $row ) {
+            $lesson_id = (int) ( $row['lesson_id'] ?? $row['id'] ?? 0 );
+            if ( $lesson_id <= 0 ) continue;
+
+            $this->send_safety_exception_email( 'departure_missing', $row, $admin_email );
+            $this->update_attendance_row( $lesson_id, array(
+                'departure_alert_sent_at' => current_time( 'mysql' ),
+            ) );
+        }
+
+        $this->mrm_safety_log( 'exception_monitor_finished', array(
+            'arrival_alerts' => is_array( $arrival_rows ) ? count( $arrival_rows ) : 0,
+            'departure_alerts' => is_array( $departure_rows ) ? count( $departure_rows ) : 0,
+        ) );
+    }
+
+    protected function send_safety_exception_email( $type, $row, $admin_email ) {
+        $lesson_id    = (int) ( $row['lesson_id'] ?? $row['id'] ?? 0 );
+        $student_name = (string) ( $row['student_name'] ?? '' );
+        $start_label  = wp_date( 'F j, Y \a\t g:i A', strtotime( (string) ( $row['start_time'] ?? '' ) ), wp_timezone() );
+        $end_label    = wp_date( 'F j, Y \a\t g:i A', strtotime( (string) ( $row['end_time'] ?? '' ) ), wp_timezone() );
+
+        if ( $type === 'arrival_missing' ) {
+            $title = 'Safety alert — instructor has not checked in';
+            $intro = '<p>An instructor has not marked arrival for a lesson by the expected threshold.</p>';
+        } else {
+            $title = 'Safety alert — instructor has not checked out';
+            $intro = '<p>An instructor marked arrival but has not marked the lesson as ended by the expected threshold.</p>';
+        }
+
+        $details = '<div><strong>Lesson ID:</strong> ' . $lesson_id . '</div>' . '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>' . '<div><strong>Start:</strong> ' . esc_html( $start_label ) . '</div>' . '<div><strong>End:</strong> ' . esc_html( $end_label ) . '</div>';
+        $html = $this->mrm_safety_email_wrap_html( $title, $intro, $details );
+
+        $sent = wp_mail( $admin_email, $title, $html, array( 'Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>' ) );
+
+        $this->mrm_safety_log( 'safety_exception_email_sent', array(
+            'type'        => $type,
+            'lesson_id'   => $lesson_id,
+            'admin_email' => $admin_email,
+            'sent'        => $sent ? 'yes' : 'no',
+        ) );
+    }
+
+    public function admin_run_safety_reminder_sweep_now() {
+        $this->mrm_safety_log( 'manual_reminder_sweep_handler_entered', array(
+            'user_id' => get_current_user_id(),
+            'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '',
+        ) );
+
+        if ( ! current_user_can( self::CAPABILITY ) ) {
+            $this->mrm_safety_log( 'manual_reminder_sweep_denied_capability', array(
+                'user_id' => get_current_user_id(),
+            ) );
+            wp_die( 'You do not have permission to do that.' );
+        }
+        check_admin_referer( 'mrm_run_safety_reminder_sweep_now' );
+
+        $this->mrm_safety_log( 'manual_reminder_sweep_trigger_started', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        $this->run_safety_reminder_sweep_now();
+
+        $this->mrm_safety_log( 'manual_reminder_sweep_trigger_finished', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-safety-attendance&manual_reminder_sweep=1' ) );
+        exit;
+    }
+
+    public function admin_run_safety_exception_check_now() {
+        $this->mrm_safety_log( 'manual_exception_check_handler_entered', array(
+            'user_id' => get_current_user_id(),
+            'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '',
+        ) );
+
+        if ( ! current_user_can( self::CAPABILITY ) ) {
+            $this->mrm_safety_log( 'manual_exception_check_denied_capability', array(
+                'user_id' => get_current_user_id(),
+            ) );
+            wp_die( 'You do not have permission to do that.' );
+        }
+        check_admin_referer( 'mrm_run_safety_exception_check_now' );
+
+        $this->mrm_safety_log( 'manual_exception_check_trigger_started', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        $this->run_safety_exception_check_now();
+
+        $this->mrm_safety_log( 'manual_exception_check_trigger_finished', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-safety-attendance&manual_exception_check=1' ) );
+        exit;
+    }
+
+    public function admin_run_safety_feedback_request_now() {
+        $this->mrm_safety_log( 'manual_feedback_request_handler_entered', array(
+            'user_id' => get_current_user_id(),
+            'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '',
+        ) );
+
+        if ( ! current_user_can( self::CAPABILITY ) ) {
+            $this->mrm_safety_log( 'manual_feedback_request_denied_capability', array(
+                'user_id' => get_current_user_id(),
+            ) );
+            wp_die( 'You do not have permission to do that.' );
+        }
+
+        check_admin_referer( 'mrm_run_safety_feedback_request_now' );
+
+        $this->mrm_safety_log( 'manual_feedback_request_trigger_started', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        $this->run_safety_feedback_request_now();
+
+        $this->mrm_safety_log( 'manual_feedback_request_trigger_finished', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-safety-attendance&manual_feedback_request=1' ) );
+        exit;
+    }
+
+    public function render_admin_safety_attendance_page() {
+        if ( ! current_user_can( self::CAPABILITY ) ) {
+            wp_die( 'You do not have permission to access this page.' );
+        }
+
+        global $wpdb;
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $attendance_table = $this->table_attendance();
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
+
+        $rows = $wpdb->get_results(
+            "SELECT l.id AS lesson_id,
+                    l.student_name,
+                    l.student_email,
+                    l.start_time,
+                    l.end_time,
+                    l.status,
+                    i.name AS instructor_name,
+                    i.email AS instructor_email,
+                    a.parent_reminder_sent_at,
+                    a.instructor_reminder_sent_at,
+                    a.instructor_arrived_at,
+                    a.parent_confirmed_arrival_at,
+                    a.instructor_departed_at,
+                    a.parent_rating,
+                    a.parent_comment,
+                    a.feedback_submitted_at,
+                    a.arrival_alert_sent_at,
+                    a.departure_alert_sent_at
+             FROM {$lessons_table} l
+             LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
+             LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id
+             ORDER BY l.start_time DESC
+             LIMIT 500",
+            ARRAY_A
+        );
+
+        echo '<div class="wrap"><h1>Safety Attendance</h1>';
+        echo '<p>This chart shows instructor arrival/departure tracking, parent confirmations, feedback, and alert status.</p>';
+        echo '<p style="margin:16px 0 24px 0;">';
+        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_reminder_sweep_now' ), 'mrm_run_safety_reminder_sweep_now' ) ) . '" class="button button-primary" style="margin-right:10px;">Run Safety Reminder Sweep Now</a>';
+        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_exception_check_now' ), 'mrm_run_safety_exception_check_now' ) ) . '" class="button" style="margin-right:10px;">Run Safety Exception Check Now</a>';
+        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_feedback_request_now' ), 'mrm_run_safety_feedback_request_now' ) ) . '" class="button">Run Safety Feedback Request Now</a>';
+        echo '</p>';
+        echo '<table class="widefat striped"><thead><tr>
+        <th>Lesson ID</th>
+        <th>Lesson Time</th>
+        <th>Status</th>
+        <th>Student</th>
+        <th>Instructor</th>
+        <th>Parent Reminder</th>
+        <th>Instructor Reminder</th>
+        <th>Instructor Arrived</th>
+        <th>Parent Confirmed</th>
+        <th>Instructor Ended</th>
+        <th>Rating</th>
+        <th>Comment</th>
+        <th>Arrival Alert</th>
+        <th>Departure Alert</th>
+    </tr></thead><tbody>';
+
+        foreach ( (array) $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . (int) $row['lesson_id'] . '</td>';
+            echo '<td>' . esc_html( (string) $row['start_time'] ) . '<br><small>to ' . esc_html( (string) $row['end_time'] ) . '</small></td>';
+            echo '<td>' . esc_html( (string) $row['status'] ) . '</td>';
+            echo '<td>' . esc_html( (string) $row['student_name'] ) . '<br><small>' . esc_html( (string) $row['student_email'] ) . '</small></td>';
+            echo '<td>' . esc_html( (string) $row['instructor_name'] ) . '<br><small>' . esc_html( (string) $row['instructor_email'] ) . '</small></td>';
+            echo '<td>' . esc_html( (string) $row['parent_reminder_sent_at'] ) . '</td>';
+            echo '<td>' . esc_html( (string) $row['instructor_reminder_sent_at'] ) . '</td>';
+            echo '<td>' . esc_html( (string) $row['instructor_arrived_at'] ) . '</td>';
+            echo '<td>' . esc_html( (string) $row['parent_confirmed_arrival_at'] ) . '</td>';
+            echo '<td>' . esc_html( (string) $row['instructor_departed_at'] ) . '</td>';
+            echo '<td>' . esc_html( (string) $row['parent_rating'] ) . '</td>';
+            echo '<td>' . esc_html( mb_strimwidth( (string) $row['parent_comment'], 0, 80, '…' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) $row['arrival_alert_sent_at'] ) . '</td>';
+            echo '<td>' . esc_html( (string) $row['departure_alert_sent_at'] ) . '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody></table></div>';
+    }
+
+
+
+
+
+    public function register_settings() {
+        register_setting(
+            'mrm_calculations_settings_group',
+            'mrm_calculations_settings',
+            array( $this, 'sanitize_calculations_settings' )
+        );
+    }
+
+    public function sanitize_calculations_settings( $input ) {
+        $input = is_array( $input ) ? $input : array();
+
+        $tax_year = isset( $input['default_tax_year'] ) ? (int) $input['default_tax_year'] : (int) gmdate( 'Y' );
+        $business_type = isset( $input['business_type'] ) ? sanitize_text_field( $input['business_type'] ) : 's_corp';
+
+        $stripe_fee_percent = isset( $input['stripe_fee_percent'] )
+            ? (float) $input['stripe_fee_percent']
+            : 2.9;
+
+        $stripe_fee_fixed_cents = isset( $input['stripe_fee_fixed_cents'] )
+            ? (int) $input['stripe_fee_fixed_cents']
+            : 30;
+
+        return array(
+            'default_tax_year'       => max( 2020, min( 2099, $tax_year ) ),
+            'business_type'          => in_array( $business_type, array( 's_corp' ), true ) ? $business_type : 's_corp',
+            'stripe_fee_percent'     => max( 0, min( 20, $stripe_fee_percent ) ),
+            'stripe_fee_fixed_cents' => max( 0, min( 500, $stripe_fee_fixed_cents ) ),
+        );
+    }
+
+    public function render_calculations_settings_page() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+
+        $settings = get_option( 'mrm_calculations_settings', array(
+            'default_tax_year' => (int) gmdate( 'Y' ),
+            'business_type'    => 's_corp',
+        ) );
+
+        $selected_year    = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) $settings['default_tax_year'];
+        $selected_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+        $maps_secret_status = $this->mrm_get_google_maps_distance_secret_status();
+        $maps_key_configured = ! empty( $maps_secret_status['configured'] );
+
+        $overview    = $this->mrm_get_calculations_overview( $selected_year, $selected_quarter, $environment_mode );
+        $instructors = $this->mrm_get_calculations_instructor_summary( $selected_year, $selected_quarter, $environment_mode );
+        $composer    = $this->mrm_get_calculations_composer_summary( $selected_year, $selected_quarter, $environment_mode );
+        $mileage     = $this->mrm_get_calculations_mileage_summary( $selected_year, $selected_quarter, $environment_mode );
+        $mileage_detail = $this->mrm_get_calculations_mileage_detail( $selected_year, $selected_quarter, $environment_mode );
+        $expenses    = $this->mrm_get_calculations_expense_summary( $selected_year, $selected_quarter, $environment_mode );
+        $payroll     = $this->mrm_get_calculations_payroll_summary( $selected_year, $selected_quarter, $environment_mode );
+
+        ?>
+        <div class="wrap">
+            <h1>Calculations</h1>
+            <?php if ( isset( $_GET['mileage_cleared'] ) ) : ?>
+                <div class="notice notice-success"><p>Mileage cache was cleared for the selected period.</p></div>
+            <?php endif; ?>
+            <?php if ( isset( $_GET['mileage_recalculated'] ) ) : ?>
+                <div class="notice notice-success"><p>Mileage cache was recalculated for finalized in-person lessons in the selected period. Finalized lessons processed: <?php echo esc_html( isset( $_GET['mileage_count'] ) ? (string) absint( $_GET['mileage_count'] ) : '0' ); ?>.</p></div>
+            <?php endif; ?>
+
+            <?php if ( isset( $_GET['mileage_error'] ) ) : ?>
+                <div class="notice notice-error"><p>Mileage recalculation could not run: <?php echo esc_html( sanitize_text_field( (string) $_GET['mileage_error'] ) ); ?></p></div>
+            <?php endif; ?>
+            <?php
+            echo '<p><strong>Accounting Data Source:</strong> <span style="color:#166534;">Live records only</span></p>';
+
+            echo '<p><strong>Google Maps Distance API:</strong> ';
+            echo $maps_key_configured
+                ? '<span style="color:#166534;">Configured through AWS Secrets Manager using <code>maps_distance_api_key</code></span>'
+                : '<span style="color:#b32d2e;">Not found in AWS Secrets Manager under <code>maps_distance_api_key</code></span>';
+            echo '</p>';
+
+            echo '<p><strong>AWS Secret Loaded:</strong> ';
+            echo ! empty( $maps_secret_status['loaded'] )
+                ? '<span style="color:#166534;">Yes</span>'
+                : '<span style="color:#b32d2e;">No</span>';
+            echo '</p>';
+
+            if ( ! empty( $maps_secret_status['top_level_keys'] ) ) {
+                echo '<p><strong>AWS Keys Found:</strong> <code>' . esc_html( implode( ', ', $maps_secret_status['top_level_keys'] ) ) . '</code></p>';
+            }
+
+            if ( ! empty( $maps_secret_status['nested_keys'] ) ) {
+                echo '<p><strong>Nested AWS Keys Found:</strong> <code>' . esc_html( implode( ', ', $maps_secret_status['nested_keys'] ) ) . '</code></p>';
+            }
+
+            $refresh_url = add_query_arg(
+                array(
+                    'page' => 'mrm-calculations',
+                    'tax_year' => $selected_year,
+                    'tax_quarter' => $selected_quarter,
+                    'mrm_refresh_maps_secret' => '1',
+                ),
+                admin_url( 'admin.php' )
+            );
+
+            echo '<p><a class="button button-secondary" href="' . esc_url( $refresh_url ) . '">Refresh AWS Maps Secret Check</a></p>';
+            ?>
+            <?php echo '<p><em>This page provides calculation and reconciliation support for S-corporation recordkeeping, including contractor 1099 support, payroll/W-2 support, mileage, expenses, and annual business summaries. Final tax filing should still be reviewed by your accountant.</em></p>'; ?>
+            <form method="post" action="options.php" style="margin:16px 0 24px; padding:14px; background:#fff; border:1px solid #ccd0d4;">
+                <?php settings_fields( 'mrm_calculations_settings_group' ); ?>
+                <h2>Calculation Settings</h2>
+                <table class="form-table">
+    <tr>
+        <th scope="row"><label for="default_tax_year">Default Tax Year</label></th>
+        <td>
+            <input type="number" id="default_tax_year" name="mrm_calculations_settings[default_tax_year]" value="<?php echo esc_attr( (int) ( $settings['default_tax_year'] ?? gmdate( 'Y' ) ) ); ?>" min="2020" max="2099">
+            <p class="description">Used as the default year when you open the Calculations submenu.</p>
+        </td>
+    </tr>
+                        <tr>
+                            <th scope="row"><label for="stripe_fee_percent">Estimated Stripe Fee Percent</label></th>
+                            <td>
+                                <input type="number" step="0.01" id="stripe_fee_percent" name="mrm_calculations_settings[stripe_fee_percent]" value="<?php echo esc_attr( (string) ( $settings['stripe_fee_percent'] ?? '2.9' ) ); ?>" style="width:100px;">
+                                <span>%</span>
+                                <p class="description">Used for estimated Stripe fee calculations when actual Stripe balance transaction fees are not stored locally.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="stripe_fee_fixed_cents">Estimated Stripe Fixed Fee</label></th>
+                            <td>
+                                <input type="number" id="stripe_fee_fixed_cents" name="mrm_calculations_settings[stripe_fee_fixed_cents]" value="<?php echo esc_attr( (string) ( $settings['stripe_fee_fixed_cents'] ?? '30' ) ); ?>" style="width:100px;">
+                                <span>cents per paid transaction</span>
+                                <p class="description">For standard Stripe card pricing, this is commonly 30 cents, but use your actual Stripe pricing if different.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Google Maps Distance API Key</th>
+        <td>
+            <?php if ( $maps_key_configured ) : ?>
+                <strong style="color:#166534;">Configured in AWS Secrets Manager</strong>
+            <?php else : ?>
+                <strong style="color:#b32d2e;">Not found in AWS Secrets Manager</strong>
+            <?php endif; ?>
+            <p class="description">
+                Expected AWS secret:
+                <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>.
+                Required key:
+                <code>maps_distance_api_key</code>.
+            </p>
+        </td>
+    </tr>
+</table>
+                <?php submit_button( 'Save Calculation Settings' ); ?>
+            </form>
+
+            <form method="get" style="margin:16px 0 24px 0;">
+                <input type="hidden" name="page" value="mrm-calculations">
+                
+                <label for="tax_year"><strong>Tax Year</strong></label>
+                <input type="number" id="tax_year" name="tax_year" value="<?php echo esc_attr( $selected_year ); ?>" min="2020" max="2099" style="width:100px; margin:0 12px 0 8px;">
+
+                <label for="tax_quarter"><strong>Quarter</strong></label>
+                <select id="tax_quarter" name="tax_quarter">
+                    <option value="0" <?php selected( $selected_quarter, 0 ); ?>>Full Year</option>
+                    <option value="1" <?php selected( $selected_quarter, 1 ); ?>>Q1</option>
+                    <option value="2" <?php selected( $selected_quarter, 2 ); ?>>Q2</option>
+                    <option value="3" <?php selected( $selected_quarter, 3 ); ?>>Q3</option>
+                    <option value="4" <?php selected( $selected_quarter, 4 ); ?>>Q4</option>
+                </select>
+
+                
+
+                <button type="submit" class="button button-primary" style="margin-left:12px;">Run Calculations</button>
+
+                
+            </form>
+
+            <p>
+                <a class="button button-primary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_export_1099_nec_pdf_zip&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_export_1099_nec_pdf_zip' ) ); ?>">
+                    Export 1099-NEC PDF ZIP
+                </a>
+
+                <a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_recalculate_mileage_cache&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_recalculate_mileage_cache' ) ); ?>">Recalculate Mileage</a>
+
+                <a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_clear_mileage_cache_for_period&tax_year=' . $selected_year . '&tax_quarter=' . $selected_quarter ), 'mrm_clear_mileage_cache_for_period' ) ); ?>" onclick="return confirm('Clear mileage cache rows for the selected year/quarter? You can rebuild them with Recalculate Mileage.');">Clear Mileage Cache</a>
+
+                <a class="button button-secondary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_clear_all_mileage_cache' ), 'mrm_clear_all_mileage_cache' ) ); ?>" onclick="return confirm('This will clear ALL instructor mileage cache rows for all years. You can rebuild selected years with Recalculate Mileage. Continue?');">Clear All Mileage Cache</a>
+            </p>
+
+            <p class="description">
+                The 1099 ZIP export includes only payout ledger rows marked <code>paid_out</code> during the selected period. Mileage remains separate and is not included as nonemployee compensation.
+            </p>
+
+            <h2>Overview</h2>
+            <table class="widefat striped">
+                <tbody>
+                    <tr><td>Lesson Revenue</td><td><?php echo esc_html( number_format( (float) $overview['lesson_revenue'], 2 ) ); ?></td></tr>
+                    <tr><td>Sheet Music Revenue</td><td><?php echo esc_html( number_format( (float) $overview['sheet_music_revenue'], 2 ) ); ?></td></tr>
+                    <tr><td>Gross Revenue</td><td><?php echo esc_html( number_format( (float) $overview['gross_revenue'], 2 ) ); ?></td></tr>
+                    <tr><td>Refunds</td><td><?php echo esc_html( number_format( (float) $overview['refunds'], 2 ) ); ?></td></tr>
+                    <tr><td>Estimated Stripe Fees</td><td><?php echo esc_html( number_format( (float) $overview['stripe_fees'], 2 ) ); ?> <small>Calculated from your saved Stripe fee settings, not exact Stripe balance transactions.</small></td></tr>
+                    <tr><td>Paid-Out Instructor Wages</td><td><?php echo esc_html( number_format( (float) $overview['instructor_wages'], 2 ) ); ?></td></tr>
+                    <tr><td>Paid-Out Composer Wages</td><td><?php echo esc_html( number_format( (float) $overview['composer_wages'], 2 ) ); ?></td></tr>
+                    <tr><td>Manual Expenses</td><td><?php echo esc_html( number_format( (float) $overview['manual_expenses'], 2 ) ); ?></td></tr>
+                    <tr><td>Payroll / W-2 Wages</td><td><?php echo esc_html( number_format( (float) $overview['payroll_wages'], 2 ) ); ?></td></tr>
+                    
+                    <tr><td>Estimated Net Income</td><td><strong><?php echo esc_html( number_format( (float) $overview['estimated_net_income'], 2 ) ); ?></strong></td></tr>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top:28px;">Paid-Out Instructor Wage Summary</h2>
+            <p class="description">This section only includes payout ledger rows marked <code>paid_out</code> during the selected period. Pending or merely transferred amounts are excluded.</p>
+            <?php $this->mrm_render_calculations_instructor_table( $instructors ); ?>
+            <h2 style="margin-top:28px;">Paid-Out Composer Sheet Music Wage Summary</h2>
+            <p class="description">This section only includes composer payout ledger rows marked <code>paid_out</code> during the selected period. Pending subscription/add-on obligations are excluded until actually paid out.</p>
+            <?php $this->mrm_render_calculations_composer_table( $composer ); ?>
+
+            <h2 style="margin-top:28px;">Payroll / Officer Compensation Summary</h2>
+            <?php $this->mrm_render_calculations_payroll_table( $payroll ); ?>
+
+            <h2 style="margin-top:28px;">Instructor Mileage Support</h2>
+            <p>This section estimates round-trip driving miles for finalized in-person lessons so instructors have mileage support records. It is not treated as a company mileage deduction.</p>
+            <p class="description">Mileage is calculated only after a lesson is finalized. A lesson becomes finalized after it has been delivered and at least one hour has passed after the lesson end time. The detail table below is the record you should export or review for tax-support documentation.</p>
+            <?php $this->mrm_render_calculations_mileage_table( $mileage ); ?>
+            <h3 style="margin-top:24px;">Mileage Detail by Lesson</h3>
+            <?php $this->mrm_render_calculations_mileage_detail_table( $mileage_detail ); ?>
+
+            <h2 style="margin-top:28px;">Expense Summary</h2>
+            <?php $this->mrm_render_calculations_expense_table( $expenses ); ?>
+        </div>
+        <?php
+    }
+
+    
+
+protected function mrm_normalize_secret_key_name( $key ) {
+    $key = is_string( $key ) ? $key : '';
+    $key = trim( $key );
+    $key = strtolower( $key );
+    $key = preg_replace( '/[^a-z0-9]+/', '_', $key );
+    $key = trim( $key, '_' );
+
+    return $key;
+}
+
+protected function mrm_find_secret_value_by_normalized_key( $secret, $target_keys ) {
+    if ( ! is_array( $secret ) ) {
+        return '';
+    }
+
+    $normalized_targets = array();
+
+    foreach ( (array) $target_keys as $target ) {
+        $normalized_targets[] = $this->mrm_normalize_secret_key_name( $target );
+    }
+
+    $normalized_targets = array_unique( array_filter( $normalized_targets ) );
+
+    foreach ( $secret as $raw_key => $value ) {
+        $normalized_key = $this->mrm_normalize_secret_key_name( (string) $raw_key );
+
+        if ( in_array( $normalized_key, $normalized_targets, true ) ) {
+            if ( is_string( $value ) && trim( $value ) !== '' ) {
+                return trim( $value );
+            }
+
+            if ( is_numeric( $value ) ) {
+                return trim( (string) $value );
+            }
+        }
+
+        // Support one level of nesting, just in case the AWS secret was saved as a nested object.
+        if ( is_array( $value ) ) {
+            foreach ( $value as $nested_raw_key => $nested_value ) {
+                $nested_normalized_key = $this->mrm_normalize_secret_key_name( (string) $nested_raw_key );
+
+                if ( in_array( $nested_normalized_key, $normalized_targets, true ) ) {
+                    if ( is_string( $nested_value ) && trim( $nested_value ) !== '' ) {
+                        return trim( $nested_value );
+                    }
+
+                    if ( is_numeric( $nested_value ) ) {
+                        return trim( (string) $nested_value );
+                    }
+                }
+            }
+        }
+    }
+
+    return '';
+}
+
+protected function mrm_get_google_maps_distance_api_key() {
+    $secret = $this->mrm_get_google_scheduler_secret_bundle();
+
+    if ( is_array( $secret ) && ! empty( $secret['maps_distance_api_key'] ) ) {
+        return trim( (string) $secret['maps_distance_api_key'] );
+    }
+
+    $this->mrm_aws_debug_log( 'Scheduler missing AWS maps_distance_api_key. AWS-only mode active.', array(
+        'secret_id' => defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler',
+        'expected_key' => 'maps_distance_api_key',
+        'available_normalized_keys' => is_array( $secret ) ? array_keys( $secret ) : array(),
+    ) );
+
+    return '';
+}
+
+protected function mrm_google_maps_distance_api_key_is_configured() {
+    return $this->mrm_get_google_maps_distance_api_key() !== '';
+}
+
+protected function mrm_get_google_maps_distance_secret_status() {
+    if ( isset( $_GET['mrm_refresh_maps_secret'] ) && current_user_can( 'manage_options' ) ) {
+        delete_transient( 'mrm_secret_google_scheduler_v5' );
+        delete_transient( 'mrm_secret_google_scheduler_maps_distance_v1' );
+        delete_transient( 'mrm_secret_google_scheduler_maps_distance_v2' );
+    }
+
+    $secret = $this->mrm_get_google_scheduler_secret_bundle();
+
+    $secret_id = defined( 'MRM_SECRET_GOOGLE_SCHEDULER' )
+        ? MRM_SECRET_GOOGLE_SCHEDULER
+        : 'lowbrass/google/scheduler';
+
+    $raw_keys = array();
+
+    if ( is_array( $secret ) && ! empty( $secret['_raw_keys'] ) && is_array( $secret['_raw_keys'] ) ) {
+        $raw_keys = $secret['_raw_keys'];
+    } elseif ( is_array( $secret ) ) {
+        $raw_keys = array_keys( $secret );
+    }
+
+    return array(
+        'secret_id'      => $secret_id,
+        'loaded'         => is_array( $secret ),
+        'configured'     => is_array( $secret ) && ! empty( $secret['maps_distance_api_key'] ),
+        'top_level_keys' => $raw_keys,
+        'nested_keys'    => array(),
+    );
+}
+
+
+protected function mrm_get_effective_calculations_environment_mode() {
+    return 'live';
+}
+
+    protected function mrm_get_tax_period_dates( $tax_year, $tax_quarter = 0 ) {
+    $tax_year = max( 2020, min( 2099, (int) $tax_year ) );
+    $tax_quarter = (int) $tax_quarter;
+
+    if ( $tax_quarter === 1 ) {
+        return array( "{$tax_year}-01-01 00:00:00", "{$tax_year}-03-31 23:59:59" );
+    }
+
+    if ( $tax_quarter === 2 ) {
+        return array( "{$tax_year}-04-01 00:00:00", "{$tax_year}-06-30 23:59:59" );
+    }
+
+    if ( $tax_quarter === 3 ) {
+        return array( "{$tax_year}-07-01 00:00:00", "{$tax_year}-09-30 23:59:59" );
+    }
+
+    if ( $tax_quarter === 4 ) {
+        return array( "{$tax_year}-10-01 00:00:00", "{$tax_year}-12-31 23:59:59" );
+    }
+
+    return array( "{$tax_year}-01-01 00:00:00", "{$tax_year}-12-31 23:59:59" );
+}
+
+protected function mrm_table_exists( $table ) {
+    global $wpdb;
+    return ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table );
+}
+
+protected function mrm_paid_out_payout_statuses() {
+    return array( 'paid_out' );
+}
+
+protected function mrm_paid_out_payout_status_sql_list() {
+    $statuses = $this->mrm_paid_out_payout_statuses();
+    $quoted = array();
+
+    foreach ( $statuses as $status ) {
+        $quoted[] = "'" . esc_sql( (string) $status ) . "'";
+    }
+
+    return implode( ',', $quoted );
+}
+
+protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    $lesson_revenue      = $this->mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter, $environment_mode, 'lesson' );
+    $sheet_music_revenue = $this->mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter, $environment_mode, 'sheet_music' );
+    $gross_revenue       = $lesson_revenue + $sheet_music_revenue;
+
+    $refunds             = $this->mrm_calc_total_refunds( $tax_year, $tax_quarter, $environment_mode );
+    $stripe_fees         = $this->mrm_calc_estimated_stripe_fees( $tax_year, $tax_quarter, $environment_mode );
+    $instructor_wages    = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'instructor' );
+    $composer_wages      = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'composer' );
+    $manual_expenses     = $this->mrm_calc_total_manual_expenses( $tax_year, $tax_quarter, $environment_mode );
+    $payroll_wages       = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
+    $estimated_net_income = $gross_revenue
+        - $refunds
+        - $stripe_fees
+        - $instructor_wages
+        - $composer_wages
+        - $manual_expenses
+        - $payroll_wages;
+
+    return array(
+        'lesson_revenue'        => $lesson_revenue,
+        'sheet_music_revenue'   => $sheet_music_revenue,
+        'gross_revenue'         => $gross_revenue,
+        'refunds'               => $refunds,
+        'stripe_fees'           => $stripe_fees,
+        'instructor_wages'      => $instructor_wages,
+        'composer_wages'        => $composer_wages,
+        'manual_expenses'       => $manual_expenses,
+        'payroll_wages'         => $payroll_wages,
+                'estimated_net_income'  => $estimated_net_income,
+    );
+}
+
+protected function mrm_calc_order_revenue_by_product( $tax_year, $tax_quarter = 0, $environment_mode = 'live', $product_type = '' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $orders_table = $wpdb->prefix . 'mrm_orders';
+
+    if ( ! $this->mrm_table_exists( $orders_table ) ) {
+        return 0.0;
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT COALESCE(SUM(amount_cents),0)
+         FROM {$orders_table}
+         WHERE status = 'paid'
+           AND environment_mode = %s
+           AND product_type = %s
+           AND created_at >= %s
+           AND created_at <= %s",
+        $environment_mode,
+        $product_type,
+        $start,
+        $end
+    );
+
+    return round( (float) $wpdb->get_var( $sql ) / 100, 2 );
+}
+
+protected function mrm_calc_total_refunds( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $orders_table = $wpdb->prefix . 'mrm_orders';
+
+    if ( ! $this->mrm_table_exists( $orders_table ) ) {
+        return 0.0;
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT COALESCE(SUM(amount_cents),0)
+         FROM {$orders_table}
+         WHERE status = 'refunded'
+           AND environment_mode = %s
+           AND updated_at >= %s
+           AND updated_at <= %s",
+        $environment_mode,
+        $start,
+        $end
+    );
+
+    return round( (float) $wpdb->get_var( $sql ) / 100, 2 );
+}
+
+protected function mrm_calc_estimated_stripe_fees( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $orders_table = $wpdb->prefix . 'mrm_orders';
+
+    if ( ! $this->mrm_table_exists( $orders_table ) ) {
+        return 0.0;
+    }
+
+    $settings = get_option( 'mrm_calculations_settings', array() );
+    $percent = isset( $settings['stripe_fee_percent'] ) ? (float) $settings['stripe_fee_percent'] : 2.9;
+    $fixed_cents = isset( $settings['stripe_fee_fixed_cents'] ) ? (int) $settings['stripe_fee_fixed_cents'] : 30;
+
+    $amounts = $wpdb->get_col(
+        $wpdb->prepare(
+            "SELECT amount_cents
+             FROM {$orders_table}
+             WHERE status = 'paid'
+               AND environment_mode = %s
+               AND created_at >= %s
+               AND created_at <= %s",
+            $environment_mode,
+            $start,
+            $end
+        )
+    );
+
+    $total_fee_cents = 0;
+
+    foreach ( (array) $amounts as $amount_cents ) {
+        $amount_cents = max( 0, (int) $amount_cents );
+
+        if ( $amount_cents <= 0 ) {
+            continue;
+        }
+
+        $fee_cents = (int) round( $amount_cents * ( $percent / 100 ) ) + $fixed_cents;
+        $total_fee_cents += max( 0, $fee_cents );
+    }
+
+    return round( $total_fee_cents / 100, 2 );
+}
+
+protected function mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter = 0, $environment_mode = 'live', $payee_type = '' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $table = $wpdb->prefix . 'mrm_payout_ledger';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return 0.0;
+    }
+
+    $paid_statuses = $this->mrm_paid_out_payout_status_sql_list();
+
+    $sql = $wpdb->prepare(
+        "SELECT COALESCE(SUM(net_cents),0)
+         FROM {$table}
+         WHERE payee_type = %s
+           AND environment_mode = %s
+           AND status IN ({$paid_statuses})
+           AND updated_at >= %s
+           AND updated_at <= %s",
+        $payee_type,
+        $environment_mode,
+        $start,
+        $end
+    );
+
+    return round( (float) $wpdb->get_var( $sql ) / 100, 2 );
+}
+
+protected function mrm_calc_total_manual_expenses( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return 0.0;
+    }
+
+    if ( (int) $tax_quarter > 0 ) {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(amount),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND tax_quarter = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
+        );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(amount),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $environment_mode
+        );
+    }
+
+    return round( (float) $wpdb->get_var( $sql ), 2 );
+}
+
+protected function mrm_calc_total_payroll_wages( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_payroll_imports';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return 0.0;
+    }
+
+    if ( (int) $tax_quarter > 0 ) {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(gross_wages),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND tax_quarter = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
+        );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(gross_wages),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $environment_mode
+        );
+    }
+
+    return round( (float) $wpdb->get_var( $sql ), 2 );
+}
+
+protected function mrm_calc_total_mileage_deduction( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return 0.0;
+    }
+
+    if ( (int) $tax_quarter > 0 ) {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(mileage_deduction),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND QUARTER(trip_date) = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
+        );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT COALESCE(SUM(mileage_deduction),0)
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s",
+            $tax_year,
+            $environment_mode
+        );
+    }
+
+    return round( (float) $wpdb->get_var( $sql ), 2 );
+}
+
+protected function mrm_get_calculations_instructor_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+    $payouts = $wpdb->prefix . 'mrm_payout_ledger';
+    $lessons = $wpdb->prefix . 'mrm_lessons';
+    $instructors = $wpdb->prefix . 'mrm_instructors';
+
+    if ( ! $this->mrm_table_exists( $payouts ) ) {
+        return array();
+    }
+
+    $paid_statuses = $this->mrm_paid_out_payout_status_sql_list();
+
+    $join_sql = '';
+    $select_instructor_id = "0 AS instructor_id";
+    $select_instructor_name = "p.payee_ref AS instructor_name";
+    $select_instructor_email = "'' AS instructor_email";
+
+    if ( $this->mrm_table_exists( $lessons ) && $this->mrm_table_exists( $instructors ) ) {
+        $join_sql = "
+            LEFT JOIN {$lessons} l ON p.payee_ref = CONCAT('lesson:', l.id)
+            LEFT JOIN {$instructors} i ON i.id = l.instructor_id
+        ";
+        $select_instructor_id = "COALESCE(l.instructor_id, 0) AS instructor_id";
+        $select_instructor_name = "COALESCE(MAX(i.name), p.payee_ref, 'Unknown instructor') AS instructor_name";
+        $select_instructor_email = "COALESCE(MAX(i.email), '') AS instructor_email";
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT
+            {$select_instructor_id},
+            {$select_instructor_name},
+            {$select_instructor_email},
+            COUNT(*) AS payout_count,
+            COALESCE(SUM(p.gross_cents),0) AS gross_cents,
+            COALESCE(SUM(p.net_cents),0) AS net_cents,
+            MIN(p.updated_at) AS first_paid_at,
+            MAX(p.updated_at) AS last_paid_at
+         FROM {$payouts} p
+         {$join_sql}
+         WHERE p.payee_type = 'instructor'
+           AND p.environment_mode = %s
+           AND p.status IN ({$paid_statuses})
+           AND p.updated_at >= %s
+           AND p.updated_at <= %s
+         GROUP BY instructor_id, p.payee_ref
+         ORDER BY net_cents DESC",
+        $environment_mode,
+        $start,
+        $end
+    );
+
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_composer_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+    $payouts = $wpdb->prefix . 'mrm_payout_ledger';
+
+    if ( ! $this->mrm_table_exists( $payouts ) ) {
+        return array();
+    }
+
+    $paid_statuses = $this->mrm_paid_out_payout_status_sql_list();
+
+    $sql = $wpdb->prepare(
+        "SELECT
+            COALESCE(payee_ref, 'composer') AS payee_ref,
+            COUNT(*) AS payout_count,
+            COALESCE(SUM(gross_cents),0) AS gross_cents,
+            COALESCE(SUM(net_cents),0) AS net_cents,
+            MIN(updated_at) AS first_paid_at,
+            MAX(updated_at) AS last_paid_at,
+            GROUP_CONCAT(DISTINCT notes SEPARATOR '; ') AS notes
+         FROM {$payouts}
+         WHERE payee_type = 'composer'
+           AND environment_mode = %s
+           AND status IN ({$paid_statuses})
+           AND updated_at >= %s
+           AND updated_at <= %s
+         GROUP BY payee_ref
+         ORDER BY net_cents DESC",
+        $environment_mode,
+        $start,
+        $end
+    );
+
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $lessons = $wpdb->prefix . 'mrm_lessons';
+    $instructors = $wpdb->prefix . 'mrm_instructors';
+    $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $lessons ) || ! $this->mrm_table_exists( $instructors ) ) {
+        return array();
+    }
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+    $mileage_join = '';
+    $mileage_select = "
+        0 AS total_miles,
+        'not_calculated' AS calc_statuses,
+        '' AS calc_error_messages
+    ";
+
+    if ( $this->mrm_table_exists( $mileage ) ) {
+        $mileage_join = "LEFT JOIN {$mileage} m ON m.lesson_id = l.id";
+        $mileage_select = "
+            COALESCE(SUM(m.round_trip_miles),0) AS total_miles,
+            GROUP_CONCAT(DISTINCT COALESCE(NULLIF(m.calc_status, ''), 'not_calculated') ORDER BY m.calc_status SEPARATOR ', ') AS calc_statuses,
+            GROUP_CONCAT(DISTINCT NULLIF(m.calc_error_message, '') SEPARATOR ' | ') AS calc_error_messages
+        ";
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT
+            l.instructor_id,
+            MAX(i.name) AS instructor_name,
+            TRIM(CONCAT_WS(', ',
+                NULLIF(MAX(i.address), ''),
+                NULLIF(MAX(i.city), ''),
+                NULLIF(TRIM(CONCAT_WS(' ', NULLIF(MAX(i.state), ''), NULLIF(MAX(i.zip_code), ''))), ''),
+                'USA'
+            )) AS current_instructor_address,
+            COUNT(DISTINCT l.id) AS lesson_count,
+            GROUP_CONCAT(DISTINCT TRIM(CONCAT_WS(', ',
+                NULLIF(l.address, ''),
+                NULLIF(l.address_city, ''),
+                NULLIF(TRIM(CONCAT_WS(' ', NULLIF(l.address_state, ''), NULLIF(l.address_postal, ''))), ''),
+                'USA'
+            )) SEPARATOR ' | ') AS current_destination_addresses,
+            {$mileage_select}
+         FROM {$lessons} l
+         LEFT JOIN {$instructors} i ON i.id = l.instructor_id
+         {$mileage_join}
+         WHERE l.is_online = 0
+           AND l.is_consultation = 0
+           AND l.start_time >= %s
+           AND l.start_time <= %s
+           AND l.status = 'finalized'
+         GROUP BY l.instructor_id
+         ORDER BY instructor_name ASC, l.instructor_id ASC",
+        $start,
+        $end
+    );
+
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_mileage_detail( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $lessons = $wpdb->prefix . 'mrm_lessons';
+    $instructors = $wpdb->prefix . 'mrm_instructors';
+    $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $lessons ) || ! $this->mrm_table_exists( $instructors ) ) {
+        return array();
+    }
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+    $mileage_join = '';
+    $mileage_select = "
+        0 AS one_way_miles,
+        0 AS round_trip_miles,
+        'not_calculated' AS calc_status,
+        '' AS calc_error_message
+    ";
+
+    if ( $this->mrm_table_exists( $mileage ) ) {
+        $mileage_join = "LEFT JOIN {$mileage} m ON m.lesson_id = l.id";
+        $mileage_select = "
+            COALESCE(m.one_way_miles,0) AS one_way_miles,
+            COALESCE(m.round_trip_miles,0) AS round_trip_miles,
+            COALESCE(NULLIF(m.calc_status, ''), 'not_calculated') AS calc_status,
+            COALESCE(m.calc_error_message, '') AS calc_error_message
+        ";
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT
+            l.id AS lesson_id,
+            l.start_time,
+            l.student_name,
+            l.instructor_id,
+            i.name AS instructor_name,
+            TRIM(CONCAT_WS(', ',
+                NULLIF(i.address, ''),
+                NULLIF(i.city, ''),
+                NULLIF(TRIM(CONCAT_WS(' ', NULLIF(i.state, ''), NULLIF(i.zip_code, ''))), ''),
+                'USA'
+            )) AS current_instructor_address,
+            TRIM(CONCAT_WS(', ',
+                NULLIF(l.address, ''),
+                NULLIF(l.address_city, ''),
+                NULLIF(TRIM(CONCAT_WS(' ', NULLIF(l.address_state, ''), NULLIF(l.address_postal, ''))), ''),
+                'USA'
+            )) AS current_destination_address,
+            {$mileage_select}
+         FROM {$lessons} l
+         LEFT JOIN {$instructors} i ON i.id = l.instructor_id
+         {$mileage_join}
+         WHERE l.is_online = 0
+           AND l.is_consultation = 0
+           AND l.start_time >= %s
+           AND l.start_time <= %s
+           AND l.status = 'finalized'
+         ORDER BY l.start_time ASC, l.id ASC",
+        $start,
+        $end
+    );
+
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_render_calculations_mileage_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Current Instructor Origin</th><th>In-Person Lessons</th><th>Total Round-Trip Miles</th><th>Destinations</th><th>Status</th><th>Details</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="7">No mileage data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? ( 'Instructor ID ' . ( $row['instructor_id'] ?? '' ) ) ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
+            echo '<td style="max-width:280px;">' . esc_html( (string) ( $row['current_instructor_address'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['lesson_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total_miles'] ?? 0 ), 2 ) ) . '</td>';
+            echo '<td style="max-width:340px;">' . esc_html( (string) ( $row['current_destination_addresses'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['calc_statuses'] ?? '' ) ) . '</td>';
+            echo '<td style="max-width:420px;">' . esc_html( (string) ( $row['calc_error_messages'] ?? '' ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_mileage_detail_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Date</th><th>Lesson</th><th>Instructor</th><th>Origin</th><th>Destination</th><th>One-Way Miles</th><th>Round-Trip Miles</th><th>Status</th><th>Details</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="9">No in-person lesson mileage details found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            $date = '';
+            if ( ! empty( $row['start_time'] ) ) {
+                $date = date_i18n( 'Y-m-d', strtotime( (string) $row['start_time'] ) );
+            }
+
+            echo '<tr>';
+            echo '<td>' . esc_html( $date ) . '</td>';
+            echo '<td>#' . esc_html( (string) ( $row['lesson_id'] ?? '' ) ) . '<br><small>' . esc_html( (string) ( $row['student_name'] ?? '' ) ) . '</small></td>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? '' ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
+            echo '<td style="max-width:260px;">' . esc_html( (string) ( $row['current_instructor_address'] ?? '' ) ) . '</td>';
+            echo '<td style="max-width:260px;">' . esc_html( (string) ( $row['current_destination_address'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['one_way_miles'] ?? 0 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['round_trip_miles'] ?? 0 ), 2 ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['calc_status'] ?? '' ) ) . '</td>';
+            echo '<td style="max-width:420px;">' . esc_html( (string) ( $row['calc_error_message'] ?? '' ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_get_calculations_expense_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_manual_expenses';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return array();
+    }
+
+    if ( (int) $tax_quarter > 0 ) {
+        $sql = $wpdb->prepare(
+            "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
+             FROM {$table}
+             WHERE tax_year = %d
+               AND tax_quarter = %d
+               AND environment_mode = %s
+             GROUP BY category
+             ORDER BY total_amount DESC",
+            $tax_year,
+            $tax_quarter,
+            $environment_mode
+        );
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT category, COUNT(*) AS entry_count, COALESCE(SUM(amount),0) AS total_amount
+             FROM {$table}
+             WHERE tax_year = %d
+               AND environment_mode = %s
+             GROUP BY category
+             ORDER BY total_amount DESC",
+            $tax_year,
+            $environment_mode
+        );
+    }
+
+    return $wpdb->get_results( $sql, ARRAY_A );
+}
+
+protected function mrm_get_calculations_payroll_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    $total = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
+
+    return array(
+        array(
+            'label' => 'Imported Payroll / W-2 Wages',
+            'total' => $total,
+        ),
+    );
+}
+
+protected function mrm_render_calculations_instructor_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Instructor</th><th>Email</th><th>Paid-Out Entries</th><th>Gross Paid</th><th>Net Paid / 1099 Amount</th><th>Paid Date Range</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="6">No paid-out instructor payout data found for the selected period.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            $first_paid = (string) ( $row['first_paid_at'] ?? '' );
+            $last_paid  = (string) ( $row['last_paid_at'] ?? '' );
+
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_name'] ?? 'Unknown instructor' ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['instructor_id'] ?? '' ) ) . '</small></td>';
+            echo '<td>' . esc_html( (string) ( $row['instructor_email'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td><strong>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</strong></td>';
+            echo '<td>' . esc_html( trim( $first_paid . ( $last_paid && $last_paid !== $first_paid ? ' – ' . $last_paid : '' ) ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_composer_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Composer Payee</th><th>Paid-Out Entries</th><th>Gross Paid</th><th>Net Paid / 1099 Amount</th><th>Paid Date Range</th><th>Notes</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="6">No paid-out composer payout data found for the selected period.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            $first_paid = (string) ( $row['first_paid_at'] ?? '' );
+            $last_paid  = (string) ( $row['last_paid_at'] ?? '' );
+
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['payee_ref'] ?? 'composer' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td><strong>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</strong></td>';
+            echo '<td>' . esc_html( trim( $first_paid . ( $last_paid && $last_paid !== $first_paid ? ' – ' . $last_paid : '' ) ) ) . '</td>';
+            echo '<td>' . esc_html( mb_strimwidth( (string) ( $row['notes'] ?? '' ), 0, 120, '…' ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_payroll_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Type</th><th>Total</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="2">No payroll import data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['label'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total'] ?? 0 ), 2 ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_expense_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Category</th><th>Entries</th><th>Total Amount</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="3">No manual expense data found.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['category'] ?? 'Uncategorized' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['entry_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( $row['total_amount'] ?? 0 ), 2 ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_format_current_instructor_address_from_row( $row ) {
+    $street = trim( (string) ( $row['address'] ?? '' ) );
+    $city   = trim( (string) ( $row['city'] ?? '' ) );
+    $state  = trim( (string) ( $row['state'] ?? '' ) );
+    $zip    = trim( (string) ( $row['zip_code'] ?? '' ) );
+
+    $state_zip = trim( $state . ' ' . $zip );
+
+    return trim( implode( ', ', array_filter( array(
+        $street,
+        $city,
+        $state_zip,
+        'USA',
+    ) ) ) );
+}
+
+protected function mrm_format_instructor_origin_address( $lesson ) {
+    $street = trim( (string) ( $lesson['instructor_address'] ?? '' ) );
+    $city   = trim( (string) ( $lesson['instructor_city'] ?? '' ) );
+    $state  = trim( (string) ( $lesson['instructor_state'] ?? '' ) );
+    $zip    = trim( (string) ( $lesson['instructor_zip_code'] ?? '' ) );
+
+    $state_zip = trim( $state . ' ' . $zip );
+
+    return trim( implode( ', ', array_filter( array(
+        $street,
+        $city,
+        $state_zip,
+        'USA',
+    ) ) ) );
+}
+
+protected function mrm_format_lesson_destination_address( $lesson ) {
+    $street = trim( (string) ( $lesson['address'] ?? '' ) );
+    $city   = trim( (string) ( $lesson['address_city'] ?? '' ) );
+    $state  = trim( (string) ( $lesson['address_state'] ?? '' ) );
+    $postal = trim( (string) ( $lesson['address_postal'] ?? '' ) );
+
+    $state_postal = trim( $state . ' ' . $postal );
+
+    return trim( implode( ', ', array_filter( array(
+        $street,
+        $city,
+        $state_postal,
+        'USA',
+    ) ) ) );
+}
+
+protected function mrm_calculate_driving_distance_miles( $origin_address, $destination_address ) {
+    $api_key = $this->mrm_get_google_maps_distance_api_key();
+
+    if ( $api_key === '' ) {
+        return new WP_Error( 'missing_api_key', 'Google Maps Distance API key is missing from AWS Secrets Manager.' );
+    }
+
+    $url = add_query_arg(
+        array(
+            'origins'      => $origin_address,
+            'destinations' => $destination_address,
+            'units'        => 'imperial',
+            'key'          => $api_key,
+        ),
+        'https://maps.googleapis.com/maps/api/distancematrix/json'
+    );
+
+    $response = wp_remote_get( $url, array( 'timeout' => 15 ) );
+
+    if ( is_wp_error( $response ) ) {
+        return $response;
+    }
+
+    $http_code = (int) wp_remote_retrieve_response_code( $response );
+    $body = wp_remote_retrieve_body( $response );
+    $json = json_decode( $body, true );
+
+    if ( $http_code < 200 || $http_code >= 300 ) {
+        return new WP_Error(
+            'distance_http_error',
+            'Google Distance Matrix HTTP error ' . $http_code . '.'
+        );
+    }
+
+    if ( ! is_array( $json ) ) {
+        return new WP_Error(
+            'distance_json_error',
+            'Google Distance Matrix returned invalid JSON.'
+        );
+    }
+
+    $top_status = (string) ( $json['status'] ?? '' );
+
+    if ( $top_status !== 'OK' ) {
+        $message = (string) ( $json['error_message'] ?? '' );
+
+        if ( $message === '' ) {
+            $message = 'Google Distance Matrix returned status: ' . $top_status . '.';
+        } else {
+            $message = 'Google Distance Matrix returned status: ' . $top_status . '. ' . $message;
+        }
+
+        return new WP_Error( 'distance_api_error', $message );
+    }
+
+    $element = $json['rows'][0]['elements'][0] ?? null;
+
+    if ( ! is_array( $element ) ) {
+        return new WP_Error(
+            'distance_not_found',
+            'Google Distance Matrix did not return a route element for these addresses.'
+        );
+    }
+
+    $element_status = (string) ( $element['status'] ?? '' );
+
+    if ( $element_status !== 'OK' ) {
+        return new WP_Error(
+            'distance_not_found',
+            'Google Distance Matrix element status: ' . $element_status . '.'
+        );
+    }
+
+    $meters = isset( $element['distance']['value'] ) ? (float) $element['distance']['value'] : 0.0;
+
+    if ( $meters <= 0 ) {
+        return new WP_Error( 'distance_zero', 'Distance returned zero.' );
+    }
+
+    return $meters * 0.000621371;
+}
+
+protected function mrm_queue_mileage_calculation_for_lesson( $lesson_id ) {
+    global $wpdb;
+
+    $lesson = $this->get_lesson_with_instructor( $lesson_id );
+
+    if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+        return;
+    }
+
+    if ( ! empty( $lesson['is_online'] ) ) {
+        return;
+    }
+
+    $table = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return;
+    }
+
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    $origin_address = $this->mrm_format_instructor_origin_address( $lesson );
+    $destination_address = $this->mrm_format_lesson_destination_address( $lesson );
+
+    $start_time = (string) ( $lesson['start_time'] ?? '' );
+    $trip_date = $start_time ? gmdate( 'Y-m-d', strtotime( $start_time ) ) : gmdate( 'Y-m-d' );
+    $tax_year = (int) gmdate( 'Y', strtotime( $trip_date ) );
+
+    $one_way_miles = 0.0;
+    $round_trip_miles = 0.0;
+    $mileage_rate = 0.0;
+    $mileage_deduction = 0.0;
+    $calc_status = 'pending';
+    $calc_source = 'queued';
+    $calc_error_message = '';
+
+    if ( $origin_address === '' || $destination_address === '' ) {
+        $calc_status = 'pending_missing_address';
+        $calc_error_message = 'Missing origin or destination address. Origin: ' . $origin_address . ' | Destination: ' . $destination_address;
+    } else {
+        $distance = $this->mrm_calculate_driving_distance_miles( $origin_address, $destination_address );
+
+        if ( is_wp_error( $distance ) ) {
+            $calc_status = 'pending_' . sanitize_key( $distance->get_error_code() );
+            $calc_error_message = $distance->get_error_message();
+        } else {
+            $one_way_miles = round( (float) $distance, 2 );
+            $round_trip_miles = round( $one_way_miles * 2, 2 );
+            $calc_status = 'calculated';
+            $calc_source = 'google_distance_matrix';
+            $calc_error_message = '';
+        }
+    }
+
+    $wpdb->replace(
+        $table,
+        array(
+            'lesson_id'           => (int) $lesson_id,
+            'instructor_id'       => (int) ( $lesson['instructor_id'] ?? 0 ),
+            'tax_year'            => $tax_year,
+            'environment_mode'    => $environment_mode,
+            'trip_date'           => $trip_date,
+            'origin_address'      => $origin_address,
+            'destination_address' => $destination_address,
+            'one_way_miles'       => $one_way_miles,
+            'round_trip_miles'    => $round_trip_miles,
+            'mileage_rate'        => $mileage_rate,
+            'mileage_deduction'   => $mileage_deduction,
+            'calc_status'         => $calc_status,
+            'calc_source'         => $calc_source,
+            'calc_error_message'  => $calc_error_message,
+            'created_at'          => current_time( 'mysql' ),
+            'updated_at'          => current_time( 'mysql' ),
+        ),
+        array(
+            '%d','%d','%d','%s','%s','%s','%s','%f','%f','%f','%f','%s','%s','%s','%s','%s'
+        )
+    );
+}
+
+
+    public function handle_mrm_recalculate_mileage_cache() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_recalculate_mileage_cache' );
+
+    global $wpdb;
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+    // For test/reconciliation accuracy, pull current Google Calendar times into wp_mrm_lessons,
+    // reconcile ended lessons, and finalize lessons that ended at least 1 hour ago
+    // before rebuilding mileage for the selected period.
+    $this->cron_sync_upcoming_events( 72, 30 );
+    $this->cron_reconcile_completed_lessons( true );
+    $this->cron_finalize_old_lessons();
+
+    $lessons = $wpdb->prefix . 'mrm_lessons';
+    $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $lessons ) ) {
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_error=missing_lessons_table' ) );
+        exit;
+    }
+
+    if ( ! $this->mrm_table_exists( $mileage ) ) {
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_error=missing_mileage_table' ) );
+        exit;
+    }
+
+    $rows = $wpdb->get_results(
+        $wpdb->prepare(
+            "SELECT id
+             FROM {$lessons}
+             WHERE is_online = 0
+               AND is_consultation = 0
+               AND start_time >= %s
+               AND start_time <= %s
+               AND status = 'finalized'
+             ORDER BY start_time ASC",
+            $start,
+            $end
+        ),
+        ARRAY_A
+    );
+
+    // Delete every cache row for the selected tax period first.
+    // The mileage cache is derived data, so this is safe and prevents stale origins/statuses from surviving.
+    if ( (int) $tax_quarter > 0 ) {
+        $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$mileage}
+                 WHERE tax_year = %d
+                   AND QUARTER(trip_date) = %d",
+                $tax_year,
+                $tax_quarter
+            )
+        );
+    } else {
+        $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$mileage}
+                 WHERE tax_year = %d",
+                $tax_year
+            )
+        );
+    }
+
+    foreach ( (array) $rows as $row ) {
+        $this->mrm_queue_mileage_calculation_for_lesson( (int) $row['id'] );
+    }
+
+    wp_safe_redirect(
+        admin_url(
+            'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_recalculated=1&mileage_count=' . count( (array) $rows )
+        )
+    );
+    exit;
+}
+
+
+public function handle_mrm_clear_mileage_cache_for_period() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_clear_mileage_cache_for_period' );
+
+    global $wpdb;
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+
+    $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $mileage ) ) {
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_error=missing_mileage_table' ) );
+        exit;
+    }
+
+    if ( (int) $tax_quarter > 0 ) {
+        $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$mileage}
+                 WHERE tax_year = %d
+                   AND QUARTER(trip_date) = %d",
+                $tax_year,
+                $tax_quarter
+            )
+        );
+    } else {
+        $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$mileage}
+                 WHERE tax_year = %d",
+                $tax_year
+            )
+        );
+    }
+
+    wp_safe_redirect(
+        admin_url(
+            'admin.php?page=mrm-calculations&tax_year=' . $tax_year . '&tax_quarter=' . $tax_quarter . '&mileage_cleared=1'
+        )
+    );
+    exit;
+}
+
+public function handle_mrm_clear_all_mileage_cache() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_clear_all_mileage_cache' );
+
+    global $wpdb;
+
+    $mileage = $wpdb->prefix . 'mrm_tax_mileage_cache';
+
+    if ( ! $this->mrm_table_exists( $mileage ) ) {
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-calculations&mileage_error=missing_mileage_table' ) );
+        exit;
+    }
+
+    $wpdb->query( "TRUNCATE TABLE {$mileage}" );
+
+    wp_safe_redirect(
+        admin_url( 'admin.php?page=mrm-calculations&mileage_cleared=1' )
+    );
+    exit;
+}
+
+    protected function mrm_send_csv_headers( $filename ) {
+        $filename = sanitize_file_name( (string) $filename );
+
+        if ( $filename === '' ) {
+            $filename = 'mrm-calculations-export.csv';
+        }
+
+        nocache_headers();
+        header( 'Content-Type: text/csv; charset=utf-8' );
+        header( 'Content-Disposition: attachment; filename=' . $filename );
+    }
+
+    protected function mrm_write_csv_row( $handle, $row ) {
+        if ( is_resource( $handle ) ) {
+            fputcsv( $handle, $row );
+        }
+    }
+
+
+    protected function mrm_1099_period_label( $tax_year, $tax_quarter = 0 ) {
+        $tax_year = max( 2020, min( 2099, (int) $tax_year ) );
+        $tax_quarter = (int) $tax_quarter;
+
+        if ( $tax_quarter >= 1 && $tax_quarter <= 4 ) {
+            return 'Tax Year ' . $tax_year . ' Q' . $tax_quarter;
+        }
+
+        return 'Tax Year ' . $tax_year . ' Full Year';
+    }
+
+    protected function mrm_sanitize_1099_filename_part( $value ) {
+        $value = sanitize_file_name( strtolower( (string) $value ) );
+        $value = preg_replace( '/[^a-z0-9\-_]+/', '-', $value );
+        $value = trim( $value, '-_' );
+
+        return $value !== '' ? $value : 'payee';
+    }
+
+    protected function mrm_load_tcpdf_for_1099_export() {
+        $autoload = plugin_dir_path( __FILE__ ) . 'composer/vendor/autoload.php';
+
+        if ( ! file_exists( $autoload ) ) {
+            wp_die( esc_html( "PDF export dependencies are not installed in the plugin-local Composer folder. Expected autoload file: {$autoload}. Install them with: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require tecnickcom/tcpdf setasign/fpdi-tcpdf" ) );
+        }
+
+        require_once $autoload;
+
+        if ( ! class_exists( 'TCPDF' ) ) {
+            wp_die( esc_html( "TCPDF autoload file was found, but the TCPDF class is unavailable. Check the plugin-local Composer install at: {$autoload}" ) );
+        }
+
+        if ( ! class_exists( '\\setasign\\Fpdi\\Tcpdf\\Fpdi' ) ) {
+            wp_die( esc_html( "FPDI for TCPDF is not installed. Run: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require setasign/fpdi-tcpdf" ) );
+        }
+    }
+
+    protected function mrm_create_1099_export_workspace() {
+        $upload = wp_upload_dir();
+        if ( ! empty( $upload['error'] ) ) {
+            wp_die( esc_html( 'Unable to access the WordPress uploads directory: ' . $upload['error'] ) );
+        }
+        $base_dir = trailingslashit( $upload['basedir'] ) . 'mrm-temp-1099-exports';
+        $work_dir = trailingslashit( $base_dir ) . 'export-' . gmdate( 'Ymd-His' ) . '-' . wp_generate_password( 8, false, false );
+        if ( ! wp_mkdir_p( $work_dir ) ) {
+            wp_die( esc_html( 'Unable to create temporary 1099 export folder under wp-content/uploads.' ) );
+        }
+        return $work_dir;
+    }
+
+    protected function mrm_cleanup_1099_export_path( $path ) {
+        $path = (string) $path;
+        if ( $path === '' || ! file_exists( $path ) ) { return; }
+        if ( is_file( $path ) || is_link( $path ) ) { @unlink( $path ); return; }
+        if ( is_dir( $path ) ) {
+            $items = scandir( $path );
+            if ( is_array( $items ) ) {
+                foreach ( $items as $item ) {
+                    if ( $item === '.' || $item === '..' ) { continue; }
+                    $this->mrm_cleanup_1099_export_path( trailingslashit( $path ) . $item );
+                }
+            }
+            @rmdir( $path );
+        }
+    }
+
+    protected function mrm_get_1099_nec_template_path() {
+        $template_path = plugin_dir_path( __FILE__ ) . 'forms/f1099nec--dft.pdf';
+
+        if ( ! file_exists( $template_path ) ) {
+            wp_die( esc_html( 'The IRS 1099-NEC PDF template was not found. Expected file: ' . $template_path ) );
+        }
+
+        return $template_path;
+    }
+
+    protected function mrm_1099_format_money_from_cents( $cents ) {
+        $cents = max( 0, (int) $cents );
+        return number_format( $cents / 100, 2, '.', ',' );
+    }
+
+    protected function mrm_build_1099_nec_template_values( $payee, $tax_year ) {
+        $payer = $this->mrm_apply_aws_tax_secret_to_payer( $this->mrm_get_1099_payer_profile() );
+        $payee = $this->mrm_apply_aws_tax_secret_to_payee( $payee );
+        $payer_legal = (string) ( $payer['legal_name'] ?? '' );
+        $payer_trade = (string) ( $payer['trade_name'] ?? '' );
+        if ( $payer_legal !== '' && $payer_trade !== '' && strtolower( $payer_legal ) !== strtolower( $payer_trade ) ) {
+            $payer_name = $payer_legal . "\n" . $payer_trade;
+        } else {
+            $payer_name = $payer_legal !== '' ? $payer_legal : $payer_trade;
+        }
+        $recipient_legal = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? '' ) );
+        $recipient_business = (string) ( $payee['business_name'] ?? '' );
+        if ( $recipient_business !== '' && strtolower( $recipient_business ) !== strtolower( $recipient_legal ) ) {
+            $recipient_name = trim( $recipient_legal . "\n" . $recipient_business );
+        } else {
+            $recipient_name = $recipient_legal;
+        }
+        $payer_state = strtoupper( (string) ( $payer['mailing_state'] ?? '' ) );
+        $recipient_state = strtoupper( (string) ( $payee['mailing_state'] ?? ( $payee['state'] ?? '' ) ) );
+        $state_id = (string) ( $payer['state_id_number'] ?? '' );
+        $net_cents = (int) ( $payee['net_cents'] ?? 0 );
+        $backup_cents = (int) ( $payee['backup_withholding_cents'] ?? 0 );
+        $state_payer_no = trim( $recipient_state . ' ' . $state_id );
+        return array( 'calendar_year' => (string) (int) $tax_year, 'payer_name' => $payer_name, 'payer_street' => (string) ( $payer['mailing_address_1'] ?? '' ), 'payer_suite' => (string) ( $payer['mailing_address_2'] ?? '' ), 'payer_city' => (string) ( $payer['mailing_city'] ?? '' ), 'payer_phone' => (string) ( $payer['phone'] ?? '' ), 'payer_state' => $payer_state, 'payer_country' => (string) ( $payer['mailing_country'] ?? 'US' ), 'payer_zip' => (string) ( $payer['mailing_postal_code'] ?? '' ), 'payer_tin' => $this->mrm_1099_prefer_full_tin_or_last4( 'ein', (string) ( $payer['ein_full_temp'] ?? '' ), (string) ( $payer['ein_last4'] ?? '' ) ), 'recipient_tin' => $this->mrm_1099_prefer_full_tin_or_last4( (string) ( $payee['tin_type'] ?? '' ), (string) ( $payee['tin_full_temp'] ?? '' ), (string) ( $payee['tin_last4'] ?? '' ) ), 'recipient_name' => $recipient_name, 'recipient_street' => (string) ( $payee['mailing_address_1'] ?? ( $payee['address'] ?? '' ) ), 'recipient_apt' => (string) ( $payee['mailing_address_2'] ?? '' ), 'recipient_city' => (string) ( $payee['mailing_city'] ?? ( $payee['city'] ?? '' ) ), 'recipient_state' => $recipient_state, 'recipient_country' => (string) ( $payee['mailing_country'] ?? 'US' ), 'recipient_zip' => (string) ( $payee['mailing_postal_code'] ?? ( $payee['zip_code'] ?? '' ) ), 'account_number' => '', 'box_1a_nec' => $this->mrm_1099_format_money_from_cents( $net_cents ), 'box_1b_cash_tips' => '', 'box_1c_ttoc_1' => '', 'box_1c_ttoc_2' => '', 'box_1d_overtime' => '', 'box_3_golden' => '', 'box_4_federal_withheld' => $backup_cents > 0 ? $this->mrm_1099_format_money_from_cents( $backup_cents ) : '', 'box_5_state_withheld_1' => '', 'box_5_state_withheld_2' => '', 'box_6_state_no_1' => $state_payer_no, 'box_6_state_no_2' => '', 'box_7_state_income_1' => $state_payer_no !== '' ? $this->mrm_1099_format_money_from_cents( $net_cents ) : '', 'box_7_state_income_2' => '' );
+    }
+
+    protected function mrm_stamp_1099_pdf_field( $pdf, $rect, $text, $font_size = 8, $align = 'L' ) {
+        $text = $this->mrm_1099_pdf_text( $text );
+        if ( $text === '' ) { return; }
+        $page_height = 792.0;
+        $left = (float) $rect[0]; $bottom = (float) $rect[1]; $right = (float) $rect[2]; $top = (float) $rect[3];
+        $x = $left + 2.0; $y = $page_height - $top + 2.0; $w = max( 1.0, $right - $left - 4.0 ); $h = max( 1.0, $top - $bottom - 2.0 );
+        $pdf->SetFont( 'helvetica', '', $font_size );
+        $pdf->SetTextColor( 0, 0, 0 );
+        $pdf->SetXY( $x, $y );
+        $pdf->MultiCell( $w, $h, $text, 0, $align, false, 1, '', '', true, 0, false, true, $h, 'M', true );
+    }
+
+    protected function mrm_stamp_1099_nec_template_copy( $pdf, $values ) {
+        $fields = array(
+            array( 'calendar_year', array( 417.6, 687.0, 446.4, 696.0 ), 8, 'C' ),
+            array( 'payer_name', array( 52.4, 720.0, 294.2, 744.0 ), 7, 'L' ),
+            array( 'payer_street', array( 52.4, 696.0, 207.8, 708.0 ), 7, 'L' ),
+            array( 'payer_suite', array( 209.8, 696.0, 294.2, 708.0 ), 7, 'L' ),
+            array( 'payer_city', array( 52.4, 672.0, 207.8, 684.0 ), 7, 'L' ),
+            array( 'payer_phone', array( 209.8, 672.0, 294.2, 684.0 ), 7, 'L' ),
+            array( 'payer_state', array( 52.4, 648.0, 171.8, 660.0 ), 7, 'L' ),
+            array( 'payer_country', array( 173.8, 648.0, 207.8, 660.0 ), 7, 'L' ),
+            array( 'payer_zip', array( 209.8, 648.0, 294.2, 660.0 ), 7, 'L' ),
+            array( 'payer_tin', array( 52.4, 612.0, 171.8, 636.0 ), 9, 'C' ),
+            array( 'recipient_tin', array( 173.8, 612.0, 294.2, 636.0 ), 9, 'C' ),
+            array( 'recipient_name', array( 52.4, 576.0, 294.2, 600.0 ), 7, 'L' ),
+            array( 'recipient_street', array( 52.4, 552.0, 243.8, 564.0 ), 7, 'L' ),
+            array( 'recipient_apt', array( 245.8, 552.0, 294.2, 564.0 ), 7, 'L' ),
+            array( 'recipient_city', array( 52.4, 528.0, 294.2, 540.0 ), 7, 'L' ),
+            array( 'recipient_state', array( 52.4, 504.0, 171.8, 516.0 ), 7, 'L' ),
+            array( 'recipient_country', array( 173.8, 504.0, 207.8, 516.0 ), 7, 'L' ),
+            array( 'recipient_zip', array( 209.8, 504.0, 294.2, 516.0 ), 7, 'L' ),
+            array( 'account_number', array( 52.4, 432.0, 294.2, 456.0 ), 7, 'L' ),
+            array( 'box_1a_nec', array( 309.6, 648.0, 494.8, 660.0 ), 9, 'R' ),
+            array( 'box_4_federal_withheld', array( 309.6, 468.0, 494.8, 480.0 ), 8, 'R' ),
+        );
+        foreach ( $fields as $field ) {
+            $this->mrm_stamp_1099_pdf_field( $pdf, $field[1], isset( $values[ $field[0] ] ) ? $values[ $field[0] ] : '', $field[2], $field[3] );
+        }
+    }
+
+    protected function mrm_stream_1099_zip_and_cleanup( $zip_path, $download_name, $workspace ) {
+        if ( ! file_exists( $zip_path ) ) {
+            $this->mrm_cleanup_1099_export_path( $workspace );
+            wp_die( esc_html( 'The 1099 ZIP file could not be created.' ) );
+        }
+        while ( ob_get_level() > 0 ) { ob_end_clean(); }
+        ignore_user_abort( true );
+        nocache_headers();
+        header( 'Content-Type: application/zip' );
+        header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( $download_name ) . '"' );
+        header( 'Content-Length: ' . filesize( $zip_path ) );
+        header( 'X-Content-Type-Options: nosniff' );
+        readfile( $zip_path );
+        $this->mrm_cleanup_1099_export_path( $workspace );
+        exit;
+    }
+
+    protected function mrm_get_single_composer_1099_profile() {
+        global $wpdb;
+        $profiles = $wpdb->prefix . 'mrm_tax_payee_profiles';
+        if ( ! $this->mrm_table_exists( $profiles ) ) {
+            return array();
+        }
+        $rows = $wpdb->get_results( "SELECT * FROM {$profiles} WHERE payee_type = 'composer' AND is_1099_eligible = 1 AND is_employee = 0 ORDER BY id ASC", ARRAY_A );
+        if ( ! is_array( $rows ) || count( $rows ) !== 1 ) {
+            return array();
+        }
+        return $rows[0];
+    }
+
+    protected function mrm_get_paid_out_1099_payees( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+        global $wpdb;
+
+        $this->mrm_ensure_contractor_tax_profile_schema();
+
+        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+        $payouts     = $wpdb->prefix . 'mrm_payout_ledger';
+        $lessons     = $wpdb->prefix . 'mrm_lessons';
+        $instructors = $wpdb->prefix . 'mrm_instructors';
+        $profiles    = $wpdb->prefix . 'mrm_tax_payee_profiles';
+
+        if ( ! $this->mrm_table_exists( $payouts ) ) {
+            return array();
+        }
+
+        $paid_statuses = $this->mrm_paid_out_payout_status_sql_list();
+        $rows = array();
+
+        if ( $this->mrm_table_exists( $lessons ) && $this->mrm_table_exists( $instructors ) && $this->mrm_table_exists( $profiles ) ) {
+            $sql = $wpdb->prepare(
+                "SELECT
+                    'instructor' AS payee_type,
+                    CONCAT('instructor:', l.instructor_id) AS payee_key,
+                    l.instructor_id AS related_instructor_id,
+                    '' AS composer_key,
+                    COALESCE(NULLIF(MAX(tp.display_name), ''), MAX(i.name), CONCAT('Instructor ', l.instructor_id)) AS display_name,
+                    COALESCE(NULLIF(MAX(tp.legal_name), ''), NULLIF(MAX(tp.display_name), ''), MAX(i.name), CONCAT('Instructor ', l.instructor_id)) AS legal_name,
+                    COALESCE(MAX(tp.business_name), '') AS business_name,
+                    COALESCE(NULLIF(MAX(tp.email), ''), MAX(i.email), '') AS email,
+                    COALESCE(MAX(tp.tax_classification), '') AS tax_classification,
+                    COALESCE(MAX(tp.tax_classification_other), '') AS tax_classification_other,
+                    COALESCE(MAX(tp.mailing_address_1), '') AS mailing_address_1,
+                    COALESCE(MAX(tp.mailing_address_2), '') AS mailing_address_2,
+                    COALESCE(MAX(tp.mailing_city), '') AS mailing_city,
+                    COALESCE(MAX(tp.mailing_state), '') AS mailing_state,
+                    COALESCE(MAX(tp.mailing_postal_code), '') AS mailing_postal_code,
+                    COALESCE(MAX(tp.mailing_country), 'US') AS mailing_country,
+                    COALESCE(MAX(tp.tin_type), '') AS tin_type,
+                    COALESCE(MAX(tp.tin_last4), '') AS tin_last4,
+                    COALESCE(MAX(tp.tin_full_temp), '') AS tin_full_temp,
+                    COALESCE(MAX(tp.w9_received), 0) AS w9_received,
+                    MAX(tp.w9_received_date) AS w9_received_date,
+                    COALESCE(MAX(tp.w9_file_note), '') AS w9_file_note,
+                    COALESCE(MAX(tp.backup_withholding_required), 0) AS backup_withholding_required,
+                    COALESCE(MAX(tp.backup_withholding_cents), 0) AS backup_withholding_cents,
+                    COALESCE(MAX(tp.is_1099_eligible), 1) AS is_1099_eligible,
+                    COALESCE(MAX(tp.is_employee), 0) AS is_employee,
+                    COALESCE(MAX(tp.exclude_from_1099), 0) AS exclude_from_1099,
+                    COALESCE(NULLIF(MAX(tp.connected_account_id), ''), MAX(i.stripe_connected_account_id), '') AS connected_account_id,
+                    COUNT(*) AS payout_count,
+                    COALESCE(SUM(p.gross_cents), 0) AS gross_cents,
+                    COALESCE(SUM(p.net_cents), 0) AS net_cents,
+                    MIN(p.updated_at) AS first_paid_at,
+                    MAX(p.updated_at) AS last_paid_at,
+                    GROUP_CONCAT(p.id ORDER BY p.id ASC SEPARATOR ',') AS payout_ledger_ids,
+                    GROUP_CONCAT(DISTINCT p.payee_ref ORDER BY p.payee_ref ASC SEPARATOR ', ') AS source_refs
+                 FROM {$payouts} p
+                 INNER JOIN {$lessons} l ON p.payee_ref = CONCAT('lesson:', l.id)
+                 LEFT JOIN {$instructors} i ON i.id = l.instructor_id
+                 LEFT JOIN {$profiles} tp
+                    ON tp.payee_type = 'instructor'
+                   AND tp.related_instructor_id = l.instructor_id
+                 WHERE p.payee_type = 'instructor'
+                   AND p.environment_mode = %s
+                   AND p.status IN ({$paid_statuses})
+                   AND p.updated_at >= %s
+                   AND p.updated_at <= %s
+                   AND p.net_cents > 0
+                   AND l.instructor_id > 0
+                 GROUP BY l.instructor_id
+                 HAVING net_cents > 0
+                    AND is_1099_eligible = 1
+                    AND is_employee = 0
+                    AND exclude_from_1099 = 0
+                 ORDER BY legal_name ASC, display_name ASC",
+                $environment_mode,
+                $start,
+                $end
+            );
+
+            $instructor_rows = $wpdb->get_results( $sql, ARRAY_A );
+
+            foreach ( (array) $instructor_rows as $row ) {
+                $rows[] = $row;
+            }
+        }
+
+        if ( $this->mrm_table_exists( $profiles ) ) {
+            $composer_profile = $this->mrm_get_composer_tax_profile();
+
+            $composer_key = ! empty( $composer_profile['composer_key'] ) ? (string) $composer_profile['composer_key'] : 'composer:default';
+            $composer_connected_account = ! empty( $composer_profile['connected_account_id'] )
+                ? (string) $composer_profile['connected_account_id']
+                : $this->mrm_get_composer_connected_account_hint();
+
+            $composer_sql = $wpdb->prepare(
+                "SELECT
+                    COUNT(*) AS payout_count,
+                    COALESCE(SUM(gross_cents), 0) AS gross_cents,
+                    COALESCE(SUM(net_cents), 0) AS net_cents,
+                    MIN(updated_at) AS first_paid_at,
+                    MAX(updated_at) AS last_paid_at,
+                    GROUP_CONCAT(id ORDER BY id ASC SEPARATOR ',') AS payout_ledger_ids,
+                    GROUP_CONCAT(DISTINCT payee_ref ORDER BY payee_ref ASC SEPARATOR ', ') AS source_refs,
+                    COALESCE(MAX(connected_account_id), '') AS ledger_connected_account_id
+                 FROM {$payouts}
+                 WHERE payee_type = 'composer'
+                   AND environment_mode = %s
+                   AND status IN ({$paid_statuses})
+                   AND updated_at >= %s
+                   AND updated_at <= %s
+                   AND net_cents > 0",
+                $environment_mode,
+                $start,
+                $end
+            );
+
+            $composer_totals = $wpdb->get_row( $composer_sql, ARRAY_A );
+
+            if ( is_array( $composer_totals ) && (int) ( $composer_totals['net_cents'] ?? 0 ) > 0 ) {
+                $is_eligible = array_key_exists( 'is_1099_eligible', $composer_profile ) ? (int) $composer_profile['is_1099_eligible'] : 1;
+                $is_employee = ! empty( $composer_profile['is_employee'] ) ? 1 : 0;
+                $excluded    = ! empty( $composer_profile['exclude_from_1099'] ) ? 1 : 0;
+
+                if ( $is_eligible && ! $is_employee && ! $excluded ) {
+                    $rows[] = array(
+                        'payee_type'                   => 'composer',
+                        'payee_key'                    => $composer_key,
+                        'related_instructor_id'        => 0,
+                        'composer_key'                 => $composer_key,
+                        'display_name'                 => ! empty( $composer_profile['display_name'] ) ? (string) $composer_profile['display_name'] : 'Composer',
+                        'legal_name'                   => ! empty( $composer_profile['legal_name'] ) ? (string) $composer_profile['legal_name'] : ( ! empty( $composer_profile['display_name'] ) ? (string) $composer_profile['display_name'] : 'Composer' ),
+                        'business_name'                => (string) ( $composer_profile['business_name'] ?? '' ),
+                        'email'                        => (string) ( $composer_profile['email'] ?? '' ),
+                        'tax_classification'           => (string) ( $composer_profile['tax_classification'] ?? '' ),
+                        'tax_classification_other'     => (string) ( $composer_profile['tax_classification_other'] ?? '' ),
+                        'mailing_address_1'            => (string) ( $composer_profile['mailing_address_1'] ?? '' ),
+                        'mailing_address_2'            => (string) ( $composer_profile['mailing_address_2'] ?? '' ),
+                        'mailing_city'                 => (string) ( $composer_profile['mailing_city'] ?? '' ),
+                        'mailing_state'                => (string) ( $composer_profile['mailing_state'] ?? '' ),
+                        'mailing_postal_code'          => (string) ( $composer_profile['mailing_postal_code'] ?? '' ),
+                        'mailing_country'              => (string) ( $composer_profile['mailing_country'] ?? 'US' ),
+                        'tin_type'                     => (string) ( $composer_profile['tin_type'] ?? '' ),
+                        'tin_last4'                    => (string) ( $composer_profile['tin_last4'] ?? '' ),
+                        'tin_full_temp'                => (string) ( $composer_profile['tin_full_temp'] ?? '' ),
+                        'w9_received'                  => ! empty( $composer_profile['w9_received'] ) ? 1 : 0,
+                        'w9_received_date'             => (string) ( $composer_profile['w9_received_date'] ?? '' ),
+                        'w9_file_note'                 => (string) ( $composer_profile['w9_file_note'] ?? '' ),
+                        'backup_withholding_required'  => ! empty( $composer_profile['backup_withholding_required'] ) ? 1 : 0,
+                        'backup_withholding_cents'     => (int) ( $composer_profile['backup_withholding_cents'] ?? 0 ),
+                        'is_1099_eligible'             => $is_eligible,
+                        'is_employee'                  => $is_employee,
+                        'exclude_from_1099'            => $excluded,
+                        'connected_account_id'         => $composer_connected_account !== '' ? $composer_connected_account : (string) ( $composer_totals['ledger_connected_account_id'] ?? '' ),
+                        'payout_count'                 => (int) ( $composer_totals['payout_count'] ?? 0 ),
+                        'gross_cents'                  => (int) ( $composer_totals['gross_cents'] ?? 0 ),
+                        'net_cents'                    => (int) ( $composer_totals['net_cents'] ?? 0 ),
+                        'first_paid_at'                => (string) ( $composer_totals['first_paid_at'] ?? '' ),
+                        'last_paid_at'                 => (string) ( $composer_totals['last_paid_at'] ?? '' ),
+                        'payout_ledger_ids'            => (string) ( $composer_totals['payout_ledger_ids'] ?? '' ),
+                        'source_refs'                  => (string) ( $composer_totals['source_refs'] ?? '' ),
+                    );
+                }
+            }
+        }
+
+        foreach ( $rows as $idx => $row ) {
+            $rows[ $idx ] = $this->mrm_apply_aws_tax_secret_to_payee( $row );
+        }
+
+        return $rows;
+    }
+
+    protected function mrm_write_1099_summary_csv( $csv_path, $payees, $tax_year, $tax_quarter ) {
+        $out = fopen( $csv_path, 'w' );
+        if ( ! $out ) {
+            wp_die( esc_html( 'Unable to create summary.csv for the 1099 ZIP export.' ) );
+        }
+
+        $this->mrm_write_csv_row( $out, array(
+            'tax_year', 'period', 'payee_type', 'payee_key', 'related_instructor_id', 'composer_key',
+            'display_name', 'legal_name', 'business_name', 'email',
+            'tax_classification', 'tax_classification_other',
+            'mailing_address_1', 'mailing_address_2', 'mailing_city', 'mailing_state', 'mailing_postal_code', 'mailing_country',
+            'tin_type', 'tin_last4', 'w9_received', 'w9_received_date', 'w9_file_note',
+            'backup_withholding_required', 'backup_withholding_amount',
+            'is_1099_eligible', 'is_employee', 'exclude_from_1099',
+            'connected_account_id', 'payout_count', 'gross_paid', 'net_paid_1099_amount', 'first_paid_at', 'last_paid_at',
+            'payout_ledger_ids', 'source_refs'
+        ) );
+
+        foreach ( (array) $payees as $payee ) {
+            $this->mrm_write_csv_row( $out, array(
+                (string) $tax_year,
+                $this->mrm_1099_period_label( $tax_year, $tax_quarter ),
+                (string) ( $payee['payee_type'] ?? '' ),
+                (string) ( $payee['payee_key'] ?? '' ),
+                (string) ( $payee['related_instructor_id'] ?? '' ),
+                (string) ( $payee['composer_key'] ?? '' ),
+                (string) ( $payee['display_name'] ?? '' ),
+                (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? '' ) ),
+                (string) ( $payee['business_name'] ?? '' ),
+                (string) ( $payee['email'] ?? '' ),
+                (string) ( $payee['tax_classification'] ?? '' ),
+                (string) ( $payee['tax_classification_other'] ?? '' ),
+                (string) ( $payee['mailing_address_1'] ?? ( $payee['address'] ?? '' ) ),
+                (string) ( $payee['mailing_address_2'] ?? '' ),
+                (string) ( $payee['mailing_city'] ?? ( $payee['city'] ?? '' ) ),
+                (string) ( $payee['mailing_state'] ?? ( $payee['state'] ?? '' ) ),
+                (string) ( $payee['mailing_postal_code'] ?? ( $payee['zip_code'] ?? '' ) ),
+                (string) ( $payee['mailing_country'] ?? 'US' ),
+                (string) ( $payee['tin_type'] ?? '' ),
+                (string) ( $payee['tin_last4'] ?? '' ),
+                ! empty( $payee['w9_received'] ) ? 'yes' : 'no',
+                (string) ( $payee['w9_received_date'] ?? '' ),
+                (string) ( $payee['w9_file_note'] ?? '' ),
+                ! empty( $payee['backup_withholding_required'] ) ? 'yes' : 'no',
+                number_format( ( (int) ( $payee['backup_withholding_cents'] ?? 0 ) ) / 100, 2, '.', '' ),
+                ! empty( $payee['is_1099_eligible'] ) ? 'yes' : 'no',
+                ! empty( $payee['is_employee'] ) ? 'yes' : 'no',
+                ! empty( $payee['exclude_from_1099'] ) ? 'yes' : 'no',
+                (string) ( $payee['connected_account_id'] ?? '' ),
+                (string) ( $payee['payout_count'] ?? 0 ),
+                number_format( ( (int) ( $payee['gross_cents'] ?? 0 ) ) / 100, 2, '.', '' ),
+                number_format( ( (int) ( $payee['net_cents'] ?? 0 ) ) / 100, 2, '.', '' ),
+                (string) ( $payee['first_paid_at'] ?? '' ),
+                (string) ( $payee['last_paid_at'] ?? '' ),
+                (string) ( $payee['payout_ledger_ids'] ?? '' ),
+                (string) ( $payee['source_refs'] ?? '' ),
+            ) );
+        }
+
+        fclose( $out );
+    }
+
+    protected function mrm_write_1099_readme( $readme_path, $payees, $tax_year, $tax_quarter ) {
+        $lines = array(
+            'Low Brass Lessons — 1099-NEC Filled PDF Export',
+            'Generated: ' . current_time( 'mysql' ),
+            'Period: ' . $this->mrm_1099_period_label( $tax_year, $tax_quarter ),
+            '',
+            'IMPORTANT',
+            'These PDFs are filled/stamped copies of the IRS 1099-NEC template stored in the plugin forms folder.',
+            'The current bundled template may be an IRS draft and may not be fileable.',
+            'The export splits each contractor packet into separate folders: Form A, Form 1, and Form B and Form 2.',
+            'Form A contains IRS Copy A.',
+            'Form 1 contains the state tax department copy.',
+            'Form B and Form 2 contains the recipient packet: Copy B, Instructions for Recipient, and Copy 2.',
+            '',
+            'TIN / EIN SECURITY NOTE',
+            'Full payer and contractor SSN/EIN/ITIN values are loaded from AWS Secrets Manager.',
+            'Expected AWS secret: ' . $this->mrm_get_1099_tax_secret_id(),
+            'The WordPress database should store only non-sensitive tax profile information and last-four values.',
+            'The summary.csv intentionally does not include full TIN values.',
+            '',
+            'INCLUSION RULES',
+            '- Included payout ledger rows with paid-out statuses only.',
+            '- Date filter uses payout ledger updated_at timestamps for the selected period.',
+            '- Included payee types: instructor and composer.',
+            '- Box 1 amount is based on net_cents paid to the contractor.',
+            '- Backup withholding is shown in Box 4 when present.',
+            '',
+            'FILES',
+            '- summary.csv includes payee identity, tax-profile fields, and payout-source references.',
+            '- Form A contains one Copy A PDF per contractor.',
+            '- Form 1 contains one Copy 1 PDF per contractor.',
+            '- Form B and Form 2 contains one recipient packet PDF per contractor with Copy B, Instructions for Recipient, and Copy 2.',
+            '',
+            'PAYEE COUNT',
+            (string) count( (array) $payees ),
+        );
+
+        file_put_contents( $readme_path, implode( "
+", $lines ) . "
+" );
+    }
+
+protected function mrm_generate_1099_nec_pdf_packet( $pdf_path, $payee, $tax_year, $template_pages, $packet_title = '1099-NEC Filled PDF' ) {
+    $template_path = plugin_dir_path( __FILE__ ) . 'forms/f1099nec--dft.pdf';
+
+    if ( ! file_exists( $template_path ) ) {
+        wp_die( esc_html( 'The IRS 1099-NEC PDF template was not found at: ' . $template_path ) );
+    }
+
+    if ( ! class_exists( '\\setasign\\Fpdi\\Tcpdf\\Fpdi' ) ) {
+        wp_die( esc_html( 'FPDI for TCPDF is not loaded. Install it with: cd wp-content/plugins/mrm-lesson-scheduler/composer && composer2 require setasign/fpdi-tcpdf' ) );
+    }
+
+    $template_pages = array_values( array_filter( array_map( 'intval', (array) $template_pages ) ) );
+
+    if ( empty( $template_pages ) ) {
+        wp_die( esc_html( 'No 1099-NEC template pages were requested for PDF generation.' ) );
+    }
+
+    $values = $this->mrm_build_1099_nec_template_values( $payee, $tax_year );
+
+    $pdf = new \setasign\Fpdi\Tcpdf\Fpdi( 'P', 'pt', 'LETTER', true, 'UTF-8', false );
+    $pdf->SetCreator( 'Low Brass Lessons / MRM Scheduler' );
+    $pdf->SetAuthor( 'Low Brass Lessons' );
+    $pdf->SetTitle( $packet_title );
+    $pdf->setPrintHeader( false );
+    $pdf->setPrintFooter( false );
+    $pdf->SetMargins( 0, 0, 0 );
+    $pdf->SetAutoPageBreak( false, 0 );
+    $pdf->setFontSubsetting( true );
+
+    try {
+        $page_count = $pdf->setSourceFile( $template_path );
+
+        if ( $page_count < 6 ) {
+            wp_die( esc_html( 'The 1099-NEC template does not have the expected 6 pages.' ) );
+        }
+
+        foreach ( $template_pages as $template_page ) {
+            if ( $template_page < 1 || $template_page > $page_count ) {
+                wp_die( esc_html( 'Requested 1099-NEC template page is outside the available page range: ' . (string) $template_page ) );
+            }
+
+            $tpl_id = $pdf->importPage( $template_page );
+            $pdf->AddPage( 'P', array( 612, 792 ) );
+            $pdf->useTemplate( $tpl_id, 0, 0, 612, 792, true );
+
+            /*
+             * IRS template page 5 is the recipient instruction page.
+             * It should be included in the recipient packet but not stamped.
+             */
+            if ( $template_page !== 5 ) {
+                $this->mrm_stamp_1099_nec_template_copy( $pdf, $values );
+            }
+        }
+
+        $pdf->Output( $pdf_path, 'F' );
+    } catch ( \Exception $e ) {
+        wp_die( esc_html( 'Unable to fill the 1099-NEC PDF template: ' . $e->getMessage() ) );
+    }
+}
+
+protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $tax_year, $tax_quarter ) {
+    /*
+     * Backward-compatible full packet generator.
+     * Page 2 = Copy A
+     * Page 3 = Copy 1
+     * Page 4 = Copy B
+     * Page 5 = Instructions for Recipient
+     * Page 6 = Copy 2
+     */
+    $this->mrm_generate_1099_nec_pdf_packet(
+        $pdf_path,
+        $payee,
+        $tax_year,
+        array( 2, 3, 4, 5, 6 ),
+        '1099-NEC Filled Full Packet'
+    );
+}
+
+    public function handle_mrm_export_1099_nec_pdf_zip() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( esc_html( 'Not allowed.' ) );
+        }
+
+        check_admin_referer( 'mrm_export_1099_nec_pdf_zip' );
+
+        if ( ! class_exists( 'ZipArchive' ) ) {
+            wp_die( esc_html( 'The PHP ZipArchive extension is unavailable. Ask your host to enable the PHP zip extension before using the 1099 PDF ZIP export.' ) );
+        }
+
+        $this->mrm_load_tcpdf_for_1099_export();
+
+        $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+        $tax_year = max( 2020, min( 2099, $tax_year ) );
+
+        $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+        if ( $tax_quarter < 0 || $tax_quarter > 4 ) {
+            $tax_quarter = 0;
+        }
+
+        $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+        $payees = $this->mrm_get_paid_out_1099_payees( $tax_year, $tax_quarter, $environment_mode );
+        $aws_tax_issues = $this->mrm_get_1099_aws_tax_preflight_issues( $payees );
+        if ( ! empty( $aws_tax_issues ) ) {
+            wp_die(
+                '<h1>1099 export stopped</h1>' .
+                '<p>The export was stopped because one or more required full tax ID numbers could not be loaded from AWS Secrets Manager.</p>' .
+                '<p>Expected AWS secret: <code>' . esc_html( $this->mrm_get_1099_tax_secret_id() ) . '</code></p>' .
+                '<ul><li>' . implode( '</li><li>', array_map( 'esc_html', $aws_tax_issues ) ) . '</li></ul>' .
+                '<p>Go to <strong>MRM Scheduler → Contractor Tax Profiles</strong>, click <strong>Refresh AWS Tax Secret Cache</strong>, and review the AWS diagnostic message.</p>',
+                '1099 export stopped',
+                array( 'response' => 500 )
+            );
+        }
+        $workspace = $this->mrm_create_1099_export_workspace();
+        $period_slug = $tax_quarter > 0 ? ( 'q' . $tax_quarter ) : 'full-year';
+        $zip_name = 'low-brass-lessons-1099-nec-preparation-' . $tax_year . '-' . $period_slug . '.zip';
+        $zip_path = trailingslashit( $workspace ) . $zip_name;
+        $summary_path = trailingslashit( $workspace ) . 'summary.csv';
+        $readme_path  = trailingslashit( $workspace ) . 'README.txt';
+        $this->mrm_write_1099_summary_csv( $summary_path, $payees, $tax_year, $tax_quarter );
+        $this->mrm_write_1099_readme( $readme_path, $payees, $tax_year, $tax_quarter );
+
+        $form_a_dir          = trailingslashit( $workspace ) . 'Form A';
+        $form_1_dir          = trailingslashit( $workspace ) . 'Form 1';
+        $recipient_forms_dir = trailingslashit( $workspace ) . 'Form B and Form 2';
+
+        foreach ( array( $form_a_dir, $form_1_dir, $recipient_forms_dir ) as $dir ) {
+            if ( ! wp_mkdir_p( $dir ) ) {
+                $this->mrm_cleanup_1099_export_path( $workspace );
+                wp_die( esc_html( 'Unable to create 1099 export subfolder: ' . $dir ) );
+            }
+        }
+
+        $pdf_entries = array();
+
+        foreach ( (array) $payees as $payee ) {
+            $net_cents = (int) ( $payee['net_cents'] ?? 0 );
+            if ( $net_cents <= 0 ) {
+                continue;
+            }
+
+            $name_part = $this->mrm_sanitize_1099_filename_part( (string) ( $payee['legal_name'] ?? $payee['display_name'] ?? $payee['payee_key'] ?? 'payee' ) );
+            $key_part  = $this->mrm_sanitize_1099_filename_part( (string) ( $payee['payee_key'] ?? 'payee' ) );
+            $base_name = $tax_year . '-' . $period_slug . '-' . $name_part . '-' . $key_part . '.pdf';
+
+            /*
+             * IRS template page map:
+             * Page 2 = Copy A
+             * Page 3 = Copy 1
+             * Page 4 = Copy B
+             * Page 5 = Instructions for Recipient
+             * Page 6 = Copy 2
+             */
+
+            $copy_a_name = '1099-nec-copy-a-' . $base_name;
+            $copy_a_path = trailingslashit( $form_a_dir ) . $copy_a_name;
+
+            $this->mrm_generate_1099_nec_pdf_packet(
+                $copy_a_path,
+                $payee,
+                $tax_year,
+                array( 2 ),
+                '1099-NEC Copy A'
+            );
+
+            if ( file_exists( $copy_a_path ) ) {
+                $pdf_entries[] = array(
+                    'path' => $copy_a_path,
+                    'zip'  => 'Form A/' . $copy_a_name,
+                );
+            }
+
+            $copy_1_name = '1099-nec-copy-1-' . $base_name;
+            $copy_1_path = trailingslashit( $form_1_dir ) . $copy_1_name;
+
+            $this->mrm_generate_1099_nec_pdf_packet(
+                $copy_1_path,
+                $payee,
+                $tax_year,
+                array( 3 ),
+                '1099-NEC Copy 1'
+            );
+
+            if ( file_exists( $copy_1_path ) ) {
+                $pdf_entries[] = array(
+                    'path' => $copy_1_path,
+                    'zip'  => 'Form 1/' . $copy_1_name,
+                );
+            }
+
+            $recipient_name = '1099-nec-copy-b-copy-2-recipient-packet-' . $base_name;
+            $recipient_path = trailingslashit( $recipient_forms_dir ) . $recipient_name;
+
+            $this->mrm_generate_1099_nec_pdf_packet(
+                $recipient_path,
+                $payee,
+                $tax_year,
+                array( 4, 5, 6 ),
+                '1099-NEC Recipient Packet - Copy B, Instructions, Copy 2'
+            );
+
+            if ( file_exists( $recipient_path ) ) {
+                $pdf_entries[] = array(
+                    'path' => $recipient_path,
+                    'zip'  => 'Form B and Form 2/' . $recipient_name,
+                );
+            }
+        }
+
+        $zip = new ZipArchive();
+        $opened = $zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE );
+        if ( $opened !== true ) {
+            $this->mrm_cleanup_1099_export_path( $workspace );
+            wp_die( esc_html( 'Unable to create 1099 ZIP file. ZipArchive returned error code: ' . (string) $opened ) );
+        }
+        $zip->addFile( $readme_path, 'README.txt' );
+        $zip->addFile( $summary_path, 'summary.csv' );
+        $zip->addEmptyDir( 'Form A' );
+        $zip->addEmptyDir( 'Form 1' );
+        $zip->addEmptyDir( 'Form B and Form 2' );
+
+        foreach ( $pdf_entries as $entry ) {
+            if ( ! empty( $entry['path'] ) && ! empty( $entry['zip'] ) && file_exists( $entry['path'] ) ) {
+                $zip->addFile( $entry['path'], $entry['zip'] );
+            }
+        }
+
+        if ( empty( $pdf_entries ) ) {
+            $no_payees_path = trailingslashit( $workspace ) . 'NO-PAID-OUT-1099-PAYEES.txt';
+            file_put_contents(
+                $no_payees_path,
+                "No paid-out instructor or composer payees were found for {$this->mrm_1099_period_label( $tax_year, $tax_quarter )}.\nOnly payout ledger rows with status = paid_out and updated_at inside the selected period are included.\n"
+            );
+            $zip->addFile( $no_payees_path, 'NO-PAID-OUT-1099-PAYEES.txt' );
+        }
+        $zip->close();
+        $this->mrm_stream_1099_zip_and_cleanup( $zip_path, $zip_name, $workspace );
+    }
+
+    public function handle_mrm_export_1099_support() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_export_1099_support' );
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    $rows = $this->mrm_get_calculations_instructor_summary( $tax_year, $tax_quarter, $environment_mode );
+
+    $this->mrm_send_csv_headers( 'mrm-instructor-wages-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+    $out = fopen( 'php://output', 'w' );
+
+    $this->mrm_write_csv_row( $out, array(
+        'instructor_id',
+        'instructor_name',
+        'instructor_email',
+        'paid_out_entries',
+        'gross_paid',
+        'net_paid_1099_amount',
+        'first_paid_at',
+        'last_paid_at'
+    ) );
+
+    foreach ( $rows as $row ) {
+        $this->mrm_write_csv_row( $out, array(
+            (string) ( $row['instructor_id'] ?? '' ),
+            (string) ( $row['instructor_name'] ?? '' ),
+            (string) ( $row['instructor_email'] ?? '' ),
+            (string) ( $row['payout_count'] ?? 0 ),
+            number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2, '.', '' ),
+            number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2, '.', '' ),
+            (string) ( $row['first_paid_at'] ?? '' ),
+            (string) ( $row['last_paid_at'] ?? '' ),
+        ) );
+    }
+
+    fclose( $out );
+    exit;
+}
+
+
+
+    public function handle_mrm_export_mileage_summary() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_export_mileage_summary' );
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    $rows = $this->mrm_get_calculations_mileage_summary( $tax_year, $tax_quarter, $environment_mode );
+
+    $this->mrm_send_csv_headers( 'mrm-mileage-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+    $out = fopen( 'php://output', 'w' );
+
+    $this->mrm_write_csv_row( $out, array(
+        'instructor_id',
+        'instructor_name',
+        'in_person_lesson_count',
+        'total_round_trip_miles',
+        'statuses',
+        'details'
+    ) );
+
+    foreach ( $rows as $row ) {
+        $this->mrm_write_csv_row( $out, array(
+            (string) ( $row['instructor_id'] ?? '' ),
+            (string) ( $row['instructor_name'] ?? '' ),
+            (string) ( $row['lesson_count'] ?? 0 ),
+            number_format( (float) ( $row['total_miles'] ?? 0 ), 2, '.', '' ),
+            (string) ( $row['calc_statuses'] ?? '' ),
+            (string) ( $row['calc_error_messages'] ?? '' ),
+        ) );
+    }
+
+    fclose( $out );
+    exit;
+}
+
+
+
+    public function handle_mrm_export_calculations_summary() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_export_calculations_summary' );
+
+    $tax_year = isset( $_GET['tax_year'] ) ? (int) $_GET['tax_year'] : (int) gmdate( 'Y' );
+    $tax_quarter = isset( $_GET['tax_quarter'] ) ? (int) $_GET['tax_quarter'] : 0;
+    $environment_mode = $this->mrm_get_effective_calculations_environment_mode();
+
+    $overview = $this->mrm_get_calculations_overview( $tax_year, $tax_quarter, $environment_mode );
+
+    $this->mrm_send_csv_headers( 'mrm-calculations-summary-' . $tax_year . '-q' . $tax_quarter . '.csv' );
+    $out = fopen( 'php://output', 'w' );
+
+    $this->mrm_write_csv_row( $out, array( 'metric', 'amount' ) );
+
+    foreach ( $overview as $key => $value ) {
+        $this->mrm_write_csv_row( $out, array(
+            $key,
+            number_format( (float) $value, 2, '.', '' ),
+        ) );
+    }
+
+    fclose( $out );
+    exit;
+}
+
 
 
     /* =========================================================
@@ -2287,7 +10228,1162 @@ class MRM_Lesson_Scheduler {
         add_menu_page( 'MRM Scheduler', 'MRM Scheduler', self::CAPABILITY, 'mrm-scheduler', array( $this, 'render_admin_instructors_page' ), 'dashicons-calendar-alt', 58 );
         add_submenu_page( 'mrm-scheduler', 'Instructors', 'Instructors', self::CAPABILITY, 'mrm-scheduler-instructors', array( $this, 'render_admin_instructors_page' ) );
         add_submenu_page( 'mrm-scheduler', 'Google Calendar', 'Google Calendar', self::CAPABILITY, 'mrm-scheduler-google', array( $this, 'render_admin_google_page' ) );
+        add_submenu_page(
+            'mrm-scheduler',
+            'Safety Attendance',
+            'Safety Attendance',
+            self::CAPABILITY,
+            'mrm-scheduler-safety-attendance',
+            array( $this, 'render_admin_safety_attendance_page' )
+        );
+        add_submenu_page(
+            'mrm-scheduler',
+            'Calculations',
+            'Calculations',
+            'manage_options',
+            'mrm-calculations',
+            array( $this, 'render_calculations_settings_page' )
+        );
+        add_submenu_page(
+            'mrm-scheduler',
+            'Contractor Tax Profiles',
+            'Contractor Tax Profiles',
+            'manage_options',
+            'mrm-contractor-tax-profiles',
+            array( $this, 'render_contractor_tax_profiles_page' )
+        );
+
+        add_submenu_page(
+            'mrm-scheduler',
+            'Contact Form',
+            'Contact Form',
+            self::CAPABILITY,
+            'mrm-scheduler-contact-form',
+            array( $this, 'render_admin_contact_form_page' )
+        );
     }
+
+    protected function mrm_get_default_contact_form_html() {
+    return <<<'HTML'
+<section class="mrm-contact-section" id="mrm-contact-form-section">
+  <div class="mrm-contact-shell">
+    <div class="mrm-contact-card">
+      <div class="mrm-contact-accent"></div>
+
+      <div class="mrm-contact-header">
+        <p class="mrm-contact-eyebrow">Contact Low Brass Lessons</p>
+        <h2>Let’s connect.</h2>
+        <p>
+          Have a question about lessons, sheet music, teaching opportunities, collaborations,
+          or the studio? Send a message below and we’ll follow up as soon as possible.
+        </p>
+      </div>
+
+      {{mrm_contact_notice}}
+
+      <form class="mrm-contact-form" method="post" action="{{mrm_contact_action}}">
+        {{mrm_contact_nonce_field}}
+        <input type="hidden" name="action" value="mrm_scheduler_contact_submit">
+
+        <div class="mrm-contact-field mrm-contact-full">
+          <label for="mrm_contact_represents">Which best represents you? <span>*</span></label>
+          <select id="mrm_contact_represents" name="mrm_contact_represents" required>
+            <option value="">Please select one</option>
+            <option value="potential_student">Potential student</option>
+            <option value="parent_guardian">Parent or guardian of a potential student</option>
+            <option value="current_student_family">Current student or family</option>
+            <option value="interested_instructor">Interested instructor</option>
+            <option value="composer_arranger">Composer or arranger</option>
+            <option value="school_band_director">School band director / music educator</option>
+            <option value="film_media_collaborator">Film, media, or creative collaborator</option>
+            <option value="general_question">General question</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+
+        <div class="mrm-contact-field mrm-contact-full mrm-contact-other-wrap" hidden>
+          <label for="mrm_contact_represents_other">Please tell us who you are <span>*</span></label>
+          <input
+            type="text"
+            id="mrm_contact_represents_other"
+            name="mrm_contact_represents_other"
+            placeholder="Example: arts administrator, community partner, returning visitor"
+          >
+        </div>
+
+        <div class="mrm-contact-grid">
+          <div class="mrm-contact-field">
+            <label for="mrm_contact_first_name">First name <span>*</span></label>
+            <input type="text" id="mrm_contact_first_name" name="mrm_contact_first_name" autocomplete="given-name" required>
+          </div>
+
+          <div class="mrm-contact-field">
+            <label for="mrm_contact_last_name">Last name <span>*</span></label>
+            <input type="text" id="mrm_contact_last_name" name="mrm_contact_last_name" autocomplete="family-name" required>
+          </div>
+        </div>
+
+        <div class="mrm-contact-field mrm-contact-full">
+          <label for="mrm_contact_email">Email <span>*</span></label>
+          <input type="email" id="mrm_contact_email" name="mrm_contact_email" autocomplete="email" required>
+        </div>
+
+        <div class="mrm-contact-field mrm-contact-full">
+          <label for="mrm_contact_message">Message <span>*</span></label>
+          <textarea id="mrm_contact_message" name="mrm_contact_message" rows="6" required placeholder="Tell us how we can help."></textarea>
+        </div>
+
+        <div class="mrm-contact-website-field" aria-hidden="true">
+          <label for="mrm_contact_website">Website</label>
+          <input type="text" id="mrm_contact_website" name="mrm_contact_website" tabindex="-1" autocomplete="off">
+        </div>
+
+        <div class="mrm-contact-actions">
+          <button type="submit">Send Message</button>
+          <p>Messages are sent securely through the Low Brass Lessons website.</p>
+        </div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<style>
+  .mrm-contact-section {
+    --mrm-contact-bg: #f5f5f5;
+    --mrm-contact-surface: #ffffff;
+    --mrm-contact-accent: #2f2f2f;
+    --mrm-contact-gold: #c9a227;
+    --mrm-contact-text: #111111;
+    --mrm-contact-muted: #666666;
+    --mrm-contact-border: #dddddd;
+    --mrm-contact-soft: rgba(0, 0, 0, 0.08);
+
+    width: 100%;
+    box-sizing: border-box;
+    padding: clamp(42px, 6vw, 78px) 18px;
+    background:
+      radial-gradient(circle at top left, rgba(201, 162, 39, 0.10), transparent 32%),
+      var(--mrm-contact-bg);
+    color: var(--mrm-contact-text);
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .mrm-contact-section *,
+  .mrm-contact-section *::before,
+  .mrm-contact-section *::after {
+    box-sizing: border-box;
+  }
+
+  .mrm-contact-shell {
+    width: min(100%, 920px);
+    margin: 0 auto;
+  }
+
+  .mrm-contact-card {
+    position: relative;
+    overflow: hidden;
+    background: var(--mrm-contact-surface);
+    border: 1px solid var(--mrm-contact-border);
+    border-radius: 22px;
+    padding: clamp(24px, 4vw, 44px);
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.10);
+  }
+
+  .mrm-contact-accent {
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 6px;
+    background: linear-gradient(90deg, var(--mrm-contact-gold), var(--mrm-contact-accent));
+  }
+
+  .mrm-contact-header {
+    text-align: center;
+    max-width: 720px;
+    margin: 0 auto 30px;
+  }
+
+  .mrm-contact-eyebrow {
+    margin: 0 0 8px;
+    color: var(--mrm-contact-gold);
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .mrm-contact-header h2 {
+    margin: 0 0 12px;
+    color: var(--mrm-contact-text);
+    font-size: clamp(28px, 4vw, 42px);
+    line-height: 1.08;
+    font-weight: 850;
+  }
+
+  .mrm-contact-header p {
+    margin: 0;
+    color: var(--mrm-contact-muted);
+    font-size: clamp(15px, 2vw, 17px);
+    line-height: 1.65;
+  }
+
+  .mrm-contact-form {
+    display: grid;
+    gap: 18px;
+  }
+
+  .mrm-contact-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .mrm-contact-field {
+    display: grid;
+    gap: 7px;
+  }
+
+  .mrm-contact-full {
+    width: 100%;
+  }
+
+  .mrm-contact-field label {
+    color: var(--mrm-contact-text);
+    font-size: 14px;
+    font-weight: 750;
+  }
+
+  .mrm-contact-field label span {
+    color: var(--mrm-contact-gold);
+  }
+
+  .mrm-contact-field input,
+  .mrm-contact-field select,
+  .mrm-contact-field textarea {
+    width: 100%;
+    min-height: 48px;
+    border: 1px solid var(--mrm-contact-border);
+    border-radius: 12px;
+    background: #ffffff;
+    color: var(--mrm-contact-text);
+    padding: 12px 14px;
+    font: inherit;
+    font-size: 15px;
+    outline: none;
+    transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  }
+
+  .mrm-contact-field textarea {
+    min-height: 150px;
+    resize: vertical;
+    line-height: 1.55;
+  }
+
+  .mrm-contact-field input:focus,
+  .mrm-contact-field select:focus,
+  .mrm-contact-field textarea:focus {
+    border-color: var(--mrm-contact-gold);
+    box-shadow: 0 0 0 4px rgba(201, 162, 39, 0.16);
+  }
+
+  .mrm-contact-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    margin-top: 6px;
+  }
+
+  .mrm-contact-actions button {
+    appearance: none;
+    border: 0;
+    border-radius: 999px;
+    background: var(--mrm-contact-accent);
+    color: #ffffff;
+    cursor: pointer;
+    font: inherit;
+    font-size: 16px;
+    font-weight: 800;
+    padding: 14px 28px;
+    min-width: 180px;
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.18);
+    transition: transform 160ms ease, opacity 160ms ease, box-shadow 160ms ease;
+  }
+
+  .mrm-contact-actions button:hover {
+    transform: translateY(-1px);
+    opacity: 0.92;
+    box-shadow: 0 16px 32px rgba(0, 0, 0, 0.20);
+  }
+
+  .mrm-contact-actions p {
+    margin: 0;
+    color: var(--mrm-contact-muted);
+    font-size: 13px;
+    line-height: 1.45;
+    text-align: right;
+  }
+
+  .mrm-contact-notice {
+    margin: 0 0 22px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    font-weight: 700;
+    line-height: 1.45;
+  }
+
+  .mrm-contact-notice-success {
+    background: #e9f7ed;
+    color: #205c32;
+    border: 1px solid rgba(32, 92, 50, 0.18);
+  }
+
+  .mrm-contact-notice-error {
+    background: #fdecec;
+    color: #842323;
+    border: 1px solid rgba(132, 35, 35, 0.18);
+  }
+
+  .mrm-contact-website-field {
+    position: absolute;
+    left: -10000px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+
+  @media (max-width: 700px) {
+    .mrm-contact-section {
+      padding: 38px 14px;
+    }
+
+    .mrm-contact-card {
+      border-radius: 18px;
+      padding: 26px 18px;
+    }
+
+    .mrm-contact-header {
+      text-align: left;
+      margin-bottom: 24px;
+    }
+
+    .mrm-contact-grid {
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+
+    .mrm-contact-actions {
+      display: grid;
+      gap: 12px;
+    }
+
+    .mrm-contact-actions button {
+      width: 100%;
+      min-width: 0;
+    }
+
+    .mrm-contact-actions p {
+      text-align: center;
+    }
+  }
+</style>
+
+<script>
+  (function () {
+    function setupMrmContactForm(root) {
+      var select = root.querySelector('#mrm_contact_represents');
+      var otherWrap = root.querySelector('.mrm-contact-other-wrap');
+      var otherInput = root.querySelector('#mrm_contact_represents_other');
+
+      if (!select || !otherWrap || !otherInput) {
+        return;
+      }
+
+      function syncOtherField() {
+        var isOther = select.value === 'other';
+        otherWrap.hidden = !isOther;
+        otherInput.required = isOther;
+
+        if (!isOther) {
+          otherInput.value = '';
+        }
+      }
+
+      select.addEventListener('change', syncOtherField);
+      syncOtherField();
+    }
+
+    function boot() {
+      document.querySelectorAll('.mrm-contact-section').forEach(setupMrmContactForm);
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', boot);
+    } else {
+      boot();
+    }
+  })();
+</script>
+HTML;
+}
+
+public function render_admin_contact_form_page() {
+    if ( ! current_user_can( self::CAPABILITY ) ) {
+        return;
+    }
+
+    $opts = $this->get_settings();
+
+    $recipient = isset( $opts['contact_form_recipient_email'] ) && is_email( $opts['contact_form_recipient_email'] )
+        ? $opts['contact_form_recipient_email']
+        : get_option( 'admin_email' );
+
+    $html = isset( $opts['contact_form_html'] ) && trim( (string) $opts['contact_form_html'] ) !== ''
+        ? (string) $opts['contact_form_html']
+        : $this->mrm_get_default_contact_form_html();
+
+    ?>
+    <div class="wrap">
+        <h1>Contact Form</h1>
+
+        <?php if ( isset( $_GET['contact_saved'] ) && $_GET['contact_saved'] === '1' ) : ?>
+            <div class="notice notice-success is-dismissible">
+                <p><strong>Contact form settings saved.</strong></p>
+            </div>
+        <?php endif; ?>
+
+        <p>
+            Use this page to manage the custom contact form displayed by the
+            <code>[mrm_contact_form]</code> shortcode.
+        </p>
+
+        <div class="notice notice-info">
+            <p>
+                <strong>Placement:</strong> Add <code>[mrm_contact_form]</code> to your global footer, footer widget,
+                block theme footer template, or theme <code>footer.php</code> to display this form at the bottom of every page.
+            </p>
+            <p>
+                The form HTML supports these required placeholders:
+                <code>{{mrm_contact_action}}</code>,
+                <code>{{mrm_contact_nonce_field}}</code>,
+                and <code>{{mrm_contact_notice}}</code>.
+            </p>
+        </div>
+
+        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+            <?php wp_nonce_field( 'mrm_scheduler_save_contact_form', 'mrm_scheduler_contact_form_nonce' ); ?>
+            <input type="hidden" name="action" value="mrm_scheduler_save_contact_form">
+
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row">
+                        <label for="contact_form_recipient_email">Recipient Email</label>
+                    </th>
+                    <td>
+                        <input
+                            type="email"
+                            class="regular-text"
+                            id="contact_form_recipient_email"
+                            name="contact_form_recipient_email"
+                            value="<?php echo esc_attr( $recipient ); ?>"
+                            required
+                        >
+                        <p class="description">
+                            Contact form submissions will be sent here. The visitor's email will be used as the Reply-To address.
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">
+                        <label for="contact_form_html">Contact Form HTML</label>
+                    </th>
+                    <td>
+                        <textarea
+                            id="contact_form_html"
+                            name="contact_form_html"
+                            rows="34"
+                            class="large-text code"
+                            style="font-family: Consolas, Monaco, monospace;"
+                        ><?php echo esc_textarea( $html ); ?></textarea>
+
+                        <p class="description">
+                            This HTML is rendered by the <code>[mrm_contact_form]</code> shortcode. Keep the action, nonce, notice,
+                            field names, and hidden <code>action</code> input intact so submissions continue working.
+                        </p>
+                    </td>
+                </tr>
+            </table>
+
+            <?php submit_button( 'Save Contact Form' ); ?>
+        </form>
+
+        <hr>
+
+        <h2>Shortcode</h2>
+        <p>Use this shortcode wherever the contact form should appear:</p>
+        <p><code>[mrm_contact_form]</code></p>
+    </div>
+    <?php
+}
+
+public function handle_save_contact_form_settings() {
+    if ( ! current_user_can( self::CAPABILITY ) ) {
+        wp_die( 'Not allowed.' );
+    }
+
+    check_admin_referer( 'mrm_scheduler_save_contact_form', 'mrm_scheduler_contact_form_nonce' );
+
+    $opts = $this->get_settings();
+
+    $recipient = isset( $_POST['contact_form_recipient_email'] )
+        ? sanitize_email( wp_unslash( $_POST['contact_form_recipient_email'] ) )
+        : '';
+
+    if ( ! is_email( $recipient ) ) {
+        $recipient = get_option( 'admin_email' );
+    }
+
+    $html = isset( $_POST['contact_form_html'] )
+        ? wp_unslash( $_POST['contact_form_html'] )
+        : '';
+
+    $html = is_string( $html ) ? $html : '';
+
+    if ( trim( $html ) === '' ) {
+        $html = $this->mrm_get_default_contact_form_html();
+    }
+
+    $opts['contact_form_recipient_email'] = $recipient;
+    $opts['contact_form_html'] = $html;
+
+    update_option( $this->option_key, $opts, 'no' );
+    $this->options = $opts;
+
+    wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-contact-form&contact_saved=1' ) );
+    exit;
+}
+
+public function render_contact_form_shortcode() {
+    $opts = $this->get_settings();
+
+    $html = isset( $opts['contact_form_html'] ) && trim( (string) $opts['contact_form_html'] ) !== ''
+        ? (string) $opts['contact_form_html']
+        : $this->mrm_get_default_contact_form_html();
+
+    $notice = '';
+    $status = isset( $_GET['mrm_contact_status'] ) ? sanitize_key( wp_unslash( $_GET['mrm_contact_status'] ) ) : '';
+
+    if ( $status === 'sent' ) {
+        $notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Thank you. Your message has been sent successfully.</div>';
+    } elseif ( $status === 'error' ) {
+        $notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Something went wrong. Please check the form and try again.</div>';
+    }
+
+    $replacements = array(
+        '{{mrm_contact_action}}'      => esc_url( admin_url( 'admin-post.php' ) ),
+        '{{mrm_contact_nonce_field}}' => wp_nonce_field( 'mrm_scheduler_contact_submit', 'mrm_scheduler_contact_nonce', true, false ),
+        '{{mrm_contact_notice}}'      => $notice,
+    );
+
+    return strtr( $html, $replacements );
+}
+
+protected function mrm_get_contact_represents_label( $value ) {
+    $value = sanitize_key( (string) $value );
+
+    $labels = array(
+        'potential_student'        => 'Potential student',
+        'parent_guardian'          => 'Parent or guardian of a potential student',
+        'current_student_family'   => 'Current student or family',
+        'interested_instructor'    => 'Interested instructor',
+        'composer_arranger'        => 'Composer or arranger',
+        'school_band_director'     => 'School band director / music educator',
+        'film_media_collaborator'  => 'Film, media, or creative collaborator',
+        'general_question'         => 'General question',
+        'other'                    => 'Other',
+    );
+
+    return isset( $labels[ $value ] ) ? $labels[ $value ] : '';
+}
+
+protected function mrm_contact_redirect_back( $status ) {
+    $status = sanitize_key( (string) $status );
+
+    $fallback = home_url( '/' );
+    $referer  = wp_get_referer();
+
+    $url = $referer ? $referer : $fallback;
+
+    $url = remove_query_arg( array( 'mrm_contact_status' ), $url );
+    $url = add_query_arg( 'mrm_contact_status', $status, $url );
+
+    wp_safe_redirect( $url . '#mrm-contact-form-section' );
+    exit;
+}
+
+public function handle_contact_form_submit() {
+    $nonce = isset( $_POST['mrm_scheduler_contact_nonce'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_scheduler_contact_nonce'] ) )
+        : '';
+
+    if ( ! wp_verify_nonce( $nonce, 'mrm_scheduler_contact_submit' ) ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $honeypot = isset( $_POST['mrm_contact_website'] )
+        ? trim( sanitize_text_field( wp_unslash( $_POST['mrm_contact_website'] ) ) )
+        : '';
+
+    if ( $honeypot !== '' ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $first_name = isset( $_POST['mrm_contact_first_name'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_first_name'] ) )
+        : '';
+
+    $last_name = isset( $_POST['mrm_contact_last_name'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_last_name'] ) )
+        : '';
+
+    $email = isset( $_POST['mrm_contact_email'] )
+        ? sanitize_email( wp_unslash( $_POST['mrm_contact_email'] ) )
+        : '';
+
+    $represents = isset( $_POST['mrm_contact_represents'] )
+        ? sanitize_key( wp_unslash( $_POST['mrm_contact_represents'] ) )
+        : '';
+
+    $represents_other = isset( $_POST['mrm_contact_represents_other'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_represents_other'] ) )
+        : '';
+
+    $message = isset( $_POST['mrm_contact_message'] )
+        ? sanitize_textarea_field( wp_unslash( $_POST['mrm_contact_message'] ) )
+        : '';
+
+    $represents_label = $this->mrm_get_contact_represents_label( $represents );
+
+    if (
+        $first_name === '' ||
+        $last_name === '' ||
+        ! is_email( $email ) ||
+        $represents_label === '' ||
+        $message === ''
+    ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    if ( $represents === 'other' && $represents_other === '' ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $opts = $this->get_settings();
+
+    $recipient = isset( $opts['contact_form_recipient_email'] ) && is_email( $opts['contact_form_recipient_email'] )
+        ? $opts['contact_form_recipient_email']
+        : get_option( 'admin_email' );
+
+    $full_name = trim( $first_name . ' ' . $last_name );
+
+    $subject = 'Website contact form — ' . $represents_label . ' — ' . $full_name;
+
+    $details = '';
+    $details .= '<div><strong>Name:</strong> ' . esc_html( $full_name ) . '</div>';
+    $details .= '<div><strong>Email:</strong> <a href="mailto:' . esc_attr( $email ) . '">' . esc_html( $email ) . '</a></div>';
+    $details .= '<div><strong>Which best represents them:</strong> ' . esc_html( $represents_label ) . '</div>';
+
+    if ( $represents === 'other' && $represents_other !== '' ) {
+        $details .= '<div><strong>Other description:</strong> ' . esc_html( $represents_other ) . '</div>';
+    }
+
+    $details .= '<div style="margin-top:14px;"><strong>Message:</strong></div>';
+    $details .= '<div style="white-space:pre-wrap; line-height:1.6;">' . esc_html( $message ) . '</div>';
+
+    $intro = '<p>A new website contact form submission was received.</p>';
+
+    if ( method_exists( $this, 'mrm_safety_email_wrap_html_blocks' ) ) {
+        $html = $this->mrm_safety_email_wrap_html_blocks(
+            'New Contact Form Submission',
+            $intro,
+            $details,
+            ''
+        );
+    } else {
+        $html = '<h2>New Contact Form Submission</h2>' . $intro . $details;
+    }
+
+    $headers = array(
+        'Content-Type: text/html; charset=UTF-8',
+        'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        'Reply-To: ' . $full_name . ' <' . $email . '>',
+    );
+
+    $sent = wp_mail( $recipient, $subject, $html, $headers );
+
+    if ( ! $sent ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $this->mrm_contact_redirect_back( 'sent' );
+}
+
+protected function mrm_ensure_contractor_tax_profile_schema() {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_tax_payee_profiles';
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        self::install_or_upgrade();
+    }
+
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return false;
+    }
+
+    $existing = $wpdb->get_col( "DESC {$table}", 0 );
+    $existing = is_array( $existing ) ? $existing : array();
+
+    $columns = array(
+        'business_name'                => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'tax_classification'           => "VARCHAR(60) NOT NULL DEFAULT ''",
+        'tax_classification_other'     => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'mailing_address_1'            => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'mailing_address_2'            => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'mailing_city'                 => "VARCHAR(100) NOT NULL DEFAULT ''",
+        'mailing_state'                => "VARCHAR(40) NOT NULL DEFAULT ''",
+        'mailing_postal_code'          => "VARCHAR(30) NOT NULL DEFAULT ''",
+        'mailing_country'              => "VARCHAR(80) NOT NULL DEFAULT 'US'",
+        'tin_type'                     => "VARCHAR(20) NOT NULL DEFAULT ''",
+        'tin_full_temp'                => "VARCHAR(20) NOT NULL DEFAULT ''",
+        'backup_withholding_required'  => "TINYINT(1) NOT NULL DEFAULT 0",
+        'backup_withholding_cents'     => "BIGINT NOT NULL DEFAULT 0",
+        'w9_file_note'                 => "VARCHAR(255) NOT NULL DEFAULT ''",
+        'exclude_from_1099'            => "TINYINT(1) NOT NULL DEFAULT 0",
+        'composer_key'                 => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'connected_account_id'         => "VARCHAR(190) NOT NULL DEFAULT ''",
+    );
+
+    foreach ( $columns as $column => $definition ) {
+        if ( ! in_array( $column, $existing, true ) ) {
+            $wpdb->query( "ALTER TABLE {$table} ADD {$column} {$definition}" );
+        }
+    }
+
+    $indexes = array(
+        'composer_key'         => 'composer_key',
+        'connected_account_id' => 'connected_account_id',
+        'exclude_from_1099'    => 'exclude_from_1099',
+    );
+
+    foreach ( $indexes as $index_name => $column_name ) {
+        $has_index = $wpdb->get_var(
+            $wpdb->prepare(
+                "SHOW INDEX FROM {$table} WHERE Key_name = %s",
+                $index_name
+            )
+        );
+
+        if ( ! $has_index ) {
+            $wpdb->query( "ALTER TABLE {$table} ADD KEY {$index_name} ({$column_name})" );
+        }
+    }
+
+    return true;
+}
+
+protected function mrm_1099_tax_classification_options() {
+    return array(
+        ''                          => 'Select from W-9',
+        'individual_sole_prop'      => 'Individual / Sole Proprietor',
+        'single_member_llc'         => 'Single-Member LLC',
+        'c_corporation'             => 'C Corporation',
+        's_corporation'             => 'S Corporation',
+        'partnership'               => 'Partnership',
+        'trust_estate'              => 'Trust/Estate',
+        'llc_c_corporation'         => 'LLC taxed as C Corporation',
+        'llc_s_corporation'         => 'LLC taxed as S Corporation',
+        'llc_partnership'           => 'LLC taxed as Partnership',
+        'other'                     => 'Other',
+    );
+}
+
+protected function mrm_1099_tin_type_options() {
+    return array(
+        ''        => 'Unknown / Not Entered',
+        'ssn'     => 'SSN',
+        'ein'     => 'EIN',
+        'itin'    => 'ITIN',
+        'unknown' => 'Unknown',
+    );
+}
+
+protected function mrm_1099_digits_only( $value ) {
+    return preg_replace( '/[^0-9]/', '', (string) $value );
+}
+
+protected function mrm_1099_format_full_tin( $tin_type, $value ) {
+    $digits = $this->mrm_1099_digits_only( $value );
+
+    if ( strlen( $digits ) !== 9 ) {
+        return '';
+    }
+
+    $tin_type = strtolower( (string) $tin_type );
+
+    if ( $tin_type === 'ein' ) {
+        return substr( $digits, 0, 2 ) . '-' . substr( $digits, 2 );
+    }
+
+    return substr( $digits, 0, 3 ) . '-' . substr( $digits, 3, 2 ) . '-' . substr( $digits, 5 );
+}
+
+protected function mrm_1099_prefer_full_tin_or_last4( $tin_type, $full_value, $last4_value ) {
+    $full = $this->mrm_1099_format_full_tin( $tin_type, $full_value );
+
+    if ( $full !== '' ) {
+        return $full;
+    }
+
+    $last4 = substr( $this->mrm_1099_digits_only( $last4_value ), -4 );
+
+    if ( $last4 === '' ) {
+        return '';
+    }
+
+    $tin_type = strtolower( (string) $tin_type );
+
+    if ( $tin_type === 'ein' ) {
+        return '**-***' . $last4;
+    }
+
+    return '***-**-' . $last4;
+}
+
+protected function mrm_1099_pdf_text( $value ) {
+    $value = html_entity_decode( (string) $value, ENT_QUOTES, 'UTF-8' );
+    $value = preg_replace( '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $value );
+    return trim( $value );
+}
+
+protected function mrm_get_1099_payer_profile() {
+    $defaults = array(
+        'legal_name'          => '',
+        'trade_name'          => 'Low Brass Lessons',
+        'ein_last4'           => '',
+        'ein_full_temp'       => '',
+        'mailing_address_1'   => '',
+        'mailing_address_2'   => '',
+        'mailing_city'        => '',
+        'mailing_state'       => '',
+        'mailing_postal_code' => '',
+        'mailing_country'     => 'US',
+        'phone'               => '',
+        'email'               => '',
+        'state_id_number'     => '',
+        'notes'               => '',
+    );
+
+    $saved = get_option( 'mrm_1099_payer_profile', array() );
+
+    return wp_parse_args( is_array( $saved ) ? $saved : array(), $defaults );
+}
+
+protected function mrm_sanitize_1099_payer_profile( $raw ) {
+    $raw = is_array( $raw ) ? $raw : array();
+    $existing = $this->mrm_get_1099_payer_profile();
+    $aws      = $this->mrm_get_1099_tax_secret_record( 'payer' );
+    $ein_last4 = ! empty( $aws['loaded'] ) ? (string) $aws['last4'] : (string) ( $existing['ein_last4'] ?? '' );
+    return array(
+        'legal_name'          => isset( $raw['legal_name'] ) ? sanitize_text_field( wp_unslash( $raw['legal_name'] ) ) : '',
+        'trade_name'          => isset( $raw['trade_name'] ) ? sanitize_text_field( wp_unslash( $raw['trade_name'] ) ) : '',
+        'ein_last4'           => substr( $this->mrm_1099_digits_only( $ein_last4 ), -4 ),
+        'ein_full_temp'       => '',
+        'mailing_address_1'   => isset( $raw['mailing_address_1'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_address_1'] ) ) : '',
+        'mailing_address_2'   => isset( $raw['mailing_address_2'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_address_2'] ) ) : '',
+        'mailing_city'        => isset( $raw['mailing_city'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_city'] ) ) : '',
+        'mailing_state'       => isset( $raw['mailing_state'] ) ? strtoupper( sanitize_text_field( wp_unslash( $raw['mailing_state'] ) ) ) : '',
+        'mailing_postal_code' => isset( $raw['mailing_postal_code'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_postal_code'] ) ) : '',
+        'mailing_country'     => isset( $raw['mailing_country'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_country'] ) ) : 'US',
+        'phone'               => isset( $raw['phone'] ) ? sanitize_text_field( wp_unslash( $raw['phone'] ) ) : '',
+        'email'               => isset( $raw['email'] ) ? sanitize_email( wp_unslash( $raw['email'] ) ) : '',
+        'state_id_number'     => isset( $raw['state_id_number'] ) ? sanitize_text_field( wp_unslash( $raw['state_id_number'] ) ) : '',
+        'notes'               => isset( $raw['notes'] ) ? sanitize_textarea_field( wp_unslash( $raw['notes'] ) ) : '',
+    );
+}
+
+protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_instructor_id = 0, $existing = array() ) {
+    $raw = is_array( $raw ) ? $raw : array();
+    $payee_type = $payee_type === 'composer' ? 'composer' : 'instructor';
+    $tax_classification = isset( $raw['tax_classification'] ) ? sanitize_key( wp_unslash( $raw['tax_classification'] ) ) : '';
+    $allowed_classifications = array_keys( $this->mrm_1099_tax_classification_options() );
+    if ( ! in_array( $tax_classification, $allowed_classifications, true ) ) {
+        $tax_classification = '';
+    }
+    $tin_types = array_keys( $this->mrm_1099_tin_type_options() );
+    $existing = is_array( $existing ) ? $existing : array();
+    $aws_secret = $payee_type === 'composer'
+        ? $this->mrm_get_1099_tax_secret_record( 'composer' )
+        : $this->mrm_get_1099_tax_secret_record( 'instructor', $related_instructor_id );
+    if ( ! empty( $aws_secret['loaded'] ) ) {
+        $tin_type  = (string) $aws_secret['tin_type'];
+        $tin_last4 = (string) $aws_secret['last4'];
+    } else {
+        $tin_type  = (string) ( $existing['tin_type'] ?? '' );
+        $tin_last4 = (string) ( $existing['tin_last4'] ?? '' );
+    }
+    if ( ! in_array( $tin_type, $tin_types, true ) ) {
+        $tin_type = '';
+    }
+    $tin_full_temp = '';
+    $tin_last4 = substr( $this->mrm_1099_digits_only( $tin_last4 ), -4 );
+    $backup_withholding_raw = isset( $raw['backup_withholding_amount'] ) ? sanitize_text_field( wp_unslash( $raw['backup_withholding_amount'] ) ) : '';
+    $backup_withholding_raw = preg_replace( '/[^0-9.\-]/', '', $backup_withholding_raw );
+    $backup_withholding_cents = $backup_withholding_raw === '' ? 0 : (int) round( (float) $backup_withholding_raw * 100 );
+    return array(
+        'payee_type'                   => $payee_type,
+        'related_instructor_id'        => (int) $related_instructor_id,
+        'related_user_id'              => 0,
+        'display_name'                 => isset( $raw['display_name'] ) ? sanitize_text_field( wp_unslash( $raw['display_name'] ) ) : '',
+        'legal_name'                   => isset( $raw['legal_name'] ) ? sanitize_text_field( wp_unslash( $raw['legal_name'] ) ) : '',
+        'business_name'                => isset( $raw['business_name'] ) ? sanitize_text_field( wp_unslash( $raw['business_name'] ) ) : '',
+        'email'                        => isset( $raw['email'] ) ? sanitize_email( wp_unslash( $raw['email'] ) ) : '',
+        'tax_classification'           => $tax_classification,
+        'tax_classification_other'     => isset( $raw['tax_classification_other'] ) ? sanitize_text_field( wp_unslash( $raw['tax_classification_other'] ) ) : '',
+        'mailing_address_1'            => isset( $raw['mailing_address_1'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_address_1'] ) ) : '',
+        'mailing_address_2'            => isset( $raw['mailing_address_2'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_address_2'] ) ) : '',
+        'mailing_city'                 => isset( $raw['mailing_city'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_city'] ) ) : '',
+        'mailing_state'                => isset( $raw['mailing_state'] ) ? strtoupper( sanitize_text_field( wp_unslash( $raw['mailing_state'] ) ) ) : '',
+        'mailing_postal_code'          => isset( $raw['mailing_postal_code'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_postal_code'] ) ) : '',
+        'mailing_country'              => isset( $raw['mailing_country'] ) ? sanitize_text_field( wp_unslash( $raw['mailing_country'] ) ) : 'US',
+        'tin_type'                     => $tin_type,
+        'tin_last4'                    => $tin_last4,
+        'tin_full_temp'                => $tin_full_temp,
+        'w9_received'                  => ! empty( $raw['w9_received'] ) ? 1 : 0,
+        'w9_received_date'             => ! empty( $raw['w9_received_date'] ) ? sanitize_text_field( wp_unslash( $raw['w9_received_date'] ) ) : null,
+        'w9_file_note'                 => isset( $raw['w9_file_note'] ) ? sanitize_text_field( wp_unslash( $raw['w9_file_note'] ) ) : '',
+        'backup_withholding_required'  => ! empty( $raw['backup_withholding_required'] ) ? 1 : 0,
+        'backup_withholding_cents'     => max( 0, $backup_withholding_cents ),
+        'is_1099_eligible'             => ! empty( $raw['is_1099_eligible'] ) ? 1 : 0,
+        'is_employee'                  => ! empty( $raw['is_employee'] ) ? 1 : 0,
+        'exclude_from_1099'            => ! empty( $raw['exclude_from_1099'] ) ? 1 : 0,
+        'composer_key'                 => isset( $raw['composer_key'] ) ? sanitize_text_field( wp_unslash( $raw['composer_key'] ) ) : '',
+        'connected_account_id'         => isset( $raw['connected_account_id'] ) ? sanitize_text_field( wp_unslash( $raw['connected_account_id'] ) ) : '',
+        'notes'                        => isset( $raw['notes'] ) ? sanitize_textarea_field( wp_unslash( $raw['notes'] ) ) : '',
+        'updated_at'                   => current_time( 'mysql' ),
+    );
+}
+
+protected function mrm_upsert_tax_payee_profile( $data ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'mrm_tax_payee_profiles';
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return false;
+    }
+    $payee_type = (string) ( $data['payee_type'] ?? '' );
+    $existing_id = 0;
+    if ( $payee_type === 'instructor' ) {
+        $existing_id = (int) $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE payee_type = 'instructor' AND related_instructor_id = %d LIMIT 1", (int) ( $data['related_instructor_id'] ?? 0 ) ) );
+    } elseif ( $payee_type === 'composer' ) {
+        $composer_key = (string) ( $data['composer_key'] ?? 'composer:default' );
+        if ( $composer_key === '' ) {
+            $composer_key = 'composer:default';
+        }
+        $existing_id = (int) $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE payee_type = 'composer' AND composer_key = %s LIMIT 1", $composer_key ) );
+    }
+    if ( $existing_id > 0 ) {
+        return $wpdb->update( $table, $data, array( 'id' => $existing_id ) );
+    }
+    $data['created_at'] = current_time( 'mysql' );
+    return $wpdb->insert( $table, $data );
+}
+
+protected function mrm_get_tax_profile_for_instructor( $instructor_id ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'mrm_tax_payee_profiles';
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return array();
+    }
+    $row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE payee_type = 'instructor' AND related_instructor_id = %d LIMIT 1", (int) $instructor_id ), ARRAY_A );
+    return is_array( $row ) ? $row : array();
+}
+
+protected function mrm_get_composer_connected_account_hint() {
+    global $wpdb;
+    $payouts = $wpdb->prefix . 'mrm_payout_ledger';
+    if ( ! $this->mrm_table_exists( $payouts ) ) {
+        return '';
+    }
+    $value = $wpdb->get_var( "SELECT connected_account_id FROM {$payouts} WHERE payee_type = 'composer' AND connected_account_id IS NOT NULL AND connected_account_id <> '' ORDER BY updated_at DESC, id DESC LIMIT 1" );
+    return $value ? (string) $value : '';
+}
+
+protected function mrm_get_composer_tax_profile() {
+    global $wpdb;
+    $table = $wpdb->prefix . 'mrm_tax_payee_profiles';
+    if ( ! $this->mrm_table_exists( $table ) ) {
+        return array();
+    }
+    $row = $wpdb->get_row( "SELECT * FROM {$table} WHERE payee_type = 'composer' ORDER BY id ASC LIMIT 1", ARRAY_A );
+    return is_array( $row ) ? $row : array();
+}
+
+protected function mrm_handle_contractor_tax_profiles_save() {
+    if ( empty( $_POST['mrm_1099_tax_profiles_action'] ) ) {
+        return;
+    }
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( esc_html( 'Not allowed.' ) );
+    }
+    check_admin_referer( 'mrm_save_contractor_tax_profiles', 'mrm_contractor_tax_profiles_nonce' );
+    $this->mrm_ensure_contractor_tax_profile_schema();
+    if ( isset( $_POST['mrm_1099_payer_profile'] ) && is_array( $_POST['mrm_1099_payer_profile'] ) ) {
+        update_option( 'mrm_1099_payer_profile', $this->mrm_sanitize_1099_payer_profile( $_POST['mrm_1099_payer_profile'] ), false );
+    }
+    if ( isset( $_POST['mrm_tax_profiles'] ) && is_array( $_POST['mrm_tax_profiles'] ) ) {
+        foreach ( $_POST['mrm_tax_profiles'] as $key => $raw_profile ) {
+            $key = sanitize_key( $key );
+            if ( strpos( $key, 'instructor_' ) === 0 ) {
+                $instructor_id = (int) str_replace( 'instructor_', '', $key );
+                if ( $instructor_id > 0 ) {
+                    $existing = $this->mrm_get_tax_profile_for_instructor( $instructor_id );
+                    $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'instructor', $instructor_id, $existing );
+                    $data['composer_key'] = '';
+                    $this->mrm_upsert_tax_payee_profile( $data );
+                }
+            }
+            if ( $key === 'composer_default' ) {
+                $existing = $this->mrm_get_composer_tax_profile();
+                $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'composer', 0, $existing );
+                if ( empty( $data['composer_key'] ) ) {
+                    $data['composer_key'] = 'composer:default';
+                }
+                $this->mrm_upsert_tax_payee_profile( $data );
+            }
+        }
+    }
+    echo '<div class="notice notice-success"><p>Contractor tax profiles saved.</p></div>';
+}
+
+protected function mrm_render_tax_profile_card( $field_key, $profile, $context ) {
+    $profile = is_array( $profile ) ? $profile : array();
+    $context = is_array( $context ) ? $context : array();
+    $tax_options = $this->mrm_1099_tax_classification_options();
+    $tin_options = $this->mrm_1099_tin_type_options();
+    $payee_type     = (string) ( $context['payee_type'] ?? '' );
+    $readonly_name  = (string) ( $context['readonly_name'] ?? '' );
+    $readonly_email = (string) ( $context['readonly_email'] ?? '' );
+    $related_id     = (int) ( $context['related_instructor_id'] ?? 0 );
+    $prefix = 'mrm_tax_profiles[' . esc_attr( $field_key ) . ']';
+    ?>
+    <div style="background:#fff; border:1px solid #ccd0d4; padding:18px; margin:20px 0;">
+        <h2 style="margin-top:0;"><?php echo esc_html( (string) ( $context['title'] ?? 'Tax Profile' ) ); ?></h2>
+        <p class="description">Enter this information only after receiving a completed W-9 from the contractor. Store only the TIN last four here; keep the full TIN on the W-9 or in accountant/tax software.</p>
+        <table class="form-table" role="presentation"><tr><th scope="row">Payee Type</th><td><code><?php echo esc_html( $payee_type ); ?></code><?php if ( $payee_type === 'instructor' ) : ?><br><span class="description">Related instructor ID: <code><?php echo esc_html( (string) $related_id ); ?></code></span><?php endif; ?></td></tr><tr><th scope="row">Current Admin Name / Email</th><td><strong><?php echo esc_html( $readonly_name ); ?></strong><br><code><?php echo esc_html( $readonly_email ); ?></code></td></tr>
+            <tr><th scope="row"><label>1099 Display Name</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[display_name]" value="<?php echo esc_attr( $profile['display_name'] ?? $readonly_name ); ?>"></td></tr>
+            <tr><th scope="row"><label>Legal Name from W-9</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[legal_name]" value="<?php echo esc_attr( $profile['legal_name'] ?? '' ); ?>"></td></tr>
+            <tr><th scope="row"><label>Business Name / DBA</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[business_name]" value="<?php echo esc_attr( $profile['business_name'] ?? '' ); ?>"></td></tr>
+            <tr><th scope="row"><label>Email Override</label></th><td><input type="email" class="regular-text" name="<?php echo $prefix; ?>[email]" value="<?php echo esc_attr( $profile['email'] ?? $readonly_email ); ?>"></td></tr>
+            <tr><th scope="row"><label>Tax Classification</label></th><td><select name="<?php echo $prefix; ?>[tax_classification]"><?php foreach ( $tax_options as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( (string) ( $profile['tax_classification'] ?? '' ), $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?></select><p class="description">Use the classification shown on the contractor’s W-9.</p></td></tr>
+            <tr><th scope="row"><label>Other Classification Detail</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[tax_classification_other]" value="<?php echo esc_attr( $profile['tax_classification_other'] ?? '' ); ?>"></td></tr>
+            <tr><th scope="row"><label>Mailing Address Line 1</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[mailing_address_1]" value="<?php echo esc_attr( $profile['mailing_address_1'] ?? '' ); ?>"></td></tr>
+            <tr><th scope="row"><label>Mailing Address Line 2</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[mailing_address_2]" value="<?php echo esc_attr( $profile['mailing_address_2'] ?? '' ); ?>"></td></tr>
+            <tr><th scope="row"><label>City / State / ZIP / Country</label></th><td><input type="text" name="<?php echo $prefix; ?>[mailing_city]" placeholder="City" value="<?php echo esc_attr( $profile['mailing_city'] ?? '' ); ?>" style="width:180px;"><input type="text" name="<?php echo $prefix; ?>[mailing_state]" placeholder="State" value="<?php echo esc_attr( $profile['mailing_state'] ?? '' ); ?>" style="width:80px;"><input type="text" name="<?php echo $prefix; ?>[mailing_postal_code]" placeholder="ZIP" value="<?php echo esc_attr( $profile['mailing_postal_code'] ?? '' ); ?>" style="width:120px;"><input type="text" name="<?php echo $prefix; ?>[mailing_country]" placeholder="US" value="<?php echo esc_attr( $profile['mailing_country'] ?? 'US' ); ?>" style="width:90px;"></td></tr>
+            <tr><th scope="row"><label>W-9 Received</label></th><td><label><input type="checkbox" name="<?php echo $prefix; ?>[w9_received]" value="1" <?php checked( ! empty( $profile['w9_received'] ) ); ?>>W-9 received</label>&nbsp;<input type="date" name="<?php echo $prefix; ?>[w9_received_date]" value="<?php echo esc_attr( $profile['w9_received_date'] ?? '' ); ?>"></td></tr>
+            <tr>
+    <th scope="row"><label>AWS Tax ID</label></th>
+    <td>
+        <?php echo wp_kses_post( $this->mrm_aws_tax_secret_status_html( $payee_type, $related_id ) ); ?>
+        <p class="description">Full SSN/EIN/ITIN values are stored only in AWS Secrets Manager. This WordPress page no longer accepts or stores full tax ID numbers.</p>
+    </td>
+</tr>
+            <tr><th scope="row"><label>W-9 File Reference / Note</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[w9_file_note]" value="<?php echo esc_attr( $profile['w9_file_note'] ?? '' ); ?>" placeholder="Example: W-9 received by email on 2026-01-10"></td></tr>
+            <tr><th scope="row"><label>Backup Withholding</label></th><td><label><input type="checkbox" name="<?php echo $prefix; ?>[backup_withholding_required]" value="1" <?php checked( ! empty( $profile['backup_withholding_required'] ) ); ?>>Backup withholding required</label>&nbsp;<input type="text" name="<?php echo $prefix; ?>[backup_withholding_amount]" placeholder="0.00" value="<?php echo esc_attr( number_format( ( (int) ( $profile['backup_withholding_cents'] ?? 0 ) ) / 100, 2, '.', '' ) ); ?>" style="width:100px;"></td></tr>
+            <tr><th scope="row"><label>1099 Settings</label></th><td><label style="display:block; margin-bottom:6px;"><input type="checkbox" name="<?php echo $prefix; ?>[is_1099_eligible]" value="1" <?php checked( ! array_key_exists( 'is_1099_eligible', $profile ) || ! empty( $profile['is_1099_eligible'] ) ); ?>>1099 eligible</label><label style="display:block; margin-bottom:6px;"><input type="checkbox" name="<?php echo $prefix; ?>[is_employee]" value="1" <?php checked( ! empty( $profile['is_employee'] ) ); ?>>Employee / W-2 — exclude from contractor 1099 export</label><label style="display:block;"><input type="checkbox" name="<?php echo $prefix; ?>[exclude_from_1099]" value="1" <?php checked( ! empty( $profile['exclude_from_1099'] ) ); ?>>Explicitly exclude from 1099 export</label></td></tr>
+            <?php if ( $payee_type === 'composer' ) : ?><tr><th scope="row"><label>Composer Key</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[composer_key]" value="<?php echo esc_attr( $profile['composer_key'] ?? 'composer:default' ); ?>"><p class="description">Use <code>composer:default</code> unless you later support multiple composers.</p></td></tr><?php else : ?><input type="hidden" name="<?php echo $prefix; ?>[composer_key]" value=""><?php endif; ?>
+            <tr><th scope="row"><label>Connected Account ID</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[connected_account_id]" value="<?php echo esc_attr( $profile['connected_account_id'] ?? ( $context['connected_account_id'] ?? '' ) ); ?>"></td></tr>
+            <tr><th scope="row"><label>Tax Notes</label></th><td><textarea class="large-text" rows="3" name="<?php echo $prefix; ?>[notes]"><?php echo esc_textarea( $profile['notes'] ?? '' ); ?></textarea></td></tr></table>
+    </div>
+    <?php
+}
+
+public function render_contractor_tax_profiles_page() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( esc_html( 'You do not have permission to access this page.' ) );
+    }
+
+    global $wpdb;
+
+    $this->mrm_ensure_contractor_tax_profile_schema();
+    $this->mrm_handle_contractor_tax_profiles_save();
+
+    $instructors_table = $wpdb->prefix . 'mrm_instructors';
+    $instructors = array();
+
+    if ( $this->mrm_table_exists( $instructors_table ) ) {
+        $instructors = $wpdb->get_results( "SELECT * FROM {$instructors_table} ORDER BY id ASC", ARRAY_A );
+    }
+
+    $payer = $this->mrm_get_1099_payer_profile();
+    $composer_profile = $this->mrm_get_composer_tax_profile();
+    $composer_connected_hint = $this->mrm_get_composer_connected_account_hint();
+
+    ?>
+    <div class="wrap">
+        <h1>Contractor Tax Profiles</h1>
+
+        <div class="notice notice-info">
+            <p><strong>Before entering tax information:</strong> collect a completed W-9 from each contractor. This page stores backend-only 1099 preparation data. It does not change public instructor cards or front-end HTML.</p>
+            <p>Full payer and contractor tax ID numbers are now read from AWS Secrets Manager: <code><?php echo esc_html( $this->mrm_get_1099_tax_secret_id() ); ?></code></p>
+            <p><a class="button" href="<?php echo esc_url( add_query_arg( 'mrm_refresh_tax_secret', '1' ) ); ?>">Refresh AWS Tax Secret Cache</a></p>
+        </div>
+
+        <form method="post" action="">
+            <?php wp_nonce_field( 'mrm_save_contractor_tax_profiles', 'mrm_contractor_tax_profiles_nonce' ); ?>
+            <input type="hidden" name="mrm_1099_tax_profiles_action" value="save">
+
+            <div style="background:#fff; border:1px solid #ccd0d4; padding:18px; margin:20px 0;">
+                <h2 style="margin-top:0;">Payer / Business Profile</h2>
+                <p class="description">This information appears on the filled 1099-NEC PDF export. The full payer EIN is read from AWS Secrets Manager.</p>
+
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><label>Payer Legal Name</label></th>
+                        <td><input type="text" class="regular-text" name="mrm_1099_payer_profile[legal_name]" value="<?php echo esc_attr( $payer['legal_name'] ); ?>"></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label>Trade Name / DBA</label></th>
+                        <td><input type="text" class="regular-text" name="mrm_1099_payer_profile[trade_name]" value="<?php echo esc_attr( $payer['trade_name'] ); ?>"></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label>AWS Payer EIN</label></th>
+                        <td>
+                            <?php echo wp_kses_post( $this->mrm_aws_tax_secret_status_html( 'payer' ) ); ?>
+                            <p class="description">Expected JSON path: <code>payer.tin</code>. This page no longer accepts or stores the full payer EIN in WordPress.</p>
+                        </td>
+                    </tr>
+                    <tr><th scope="row"><label>Mailing Address Line 1</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_1]" value="<?php echo esc_attr( $payer['mailing_address_1'] ); ?>"></td></tr>
+                    <tr><th scope="row"><label>Mailing Address Line 2</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[mailing_address_2]" value="<?php echo esc_attr( $payer['mailing_address_2'] ); ?>"></td></tr>
+                    <tr><th scope="row"><label>City / State / ZIP / Country</label></th><td><input type="text" name="mrm_1099_payer_profile[mailing_city]" placeholder="City" value="<?php echo esc_attr( $payer['mailing_city'] ); ?>" style="width:180px;"><input type="text" name="mrm_1099_payer_profile[mailing_state]" placeholder="State" value="<?php echo esc_attr( $payer['mailing_state'] ); ?>" style="width:80px;"><input type="text" name="mrm_1099_payer_profile[mailing_postal_code]" placeholder="ZIP" value="<?php echo esc_attr( $payer['mailing_postal_code'] ); ?>" style="width:120px;"><input type="text" name="mrm_1099_payer_profile[mailing_country]" placeholder="US" value="<?php echo esc_attr( $payer['mailing_country'] ); ?>" style="width:90px;"></td></tr>
+                    <tr><th scope="row"><label>Phone / Email</label></th><td><input type="text" name="mrm_1099_payer_profile[phone]" placeholder="Phone" value="<?php echo esc_attr( $payer['phone'] ); ?>" style="width:180px;"><input type="email" name="mrm_1099_payer_profile[email]" placeholder="Email" value="<?php echo esc_attr( $payer['email'] ); ?>" style="width:260px;"></td></tr>
+                    <tr><th scope="row"><label>State ID Number</label></th><td><input type="text" class="regular-text" name="mrm_1099_payer_profile[state_id_number]" value="<?php echo esc_attr( $payer['state_id_number'] ); ?>"></td></tr>
+                    <tr><th scope="row"><label>Payer Notes</label></th><td><textarea class="large-text" rows="3" name="mrm_1099_payer_profile[notes]"><?php echo esc_textarea( $payer['notes'] ); ?></textarea></td></tr>
+                </table>
+            </div>
+
+            <h2>Composer Tax Profile</h2>
+            <?php $this->mrm_render_tax_profile_card( 'composer_default', $composer_profile, array( 'title' => 'Composer Tax Profile', 'payee_type' => 'composer', 'readonly_name' => ! empty( $composer_profile['display_name'] ) ? (string) $composer_profile['display_name'] : 'Composer', 'readonly_email' => ! empty( $composer_profile['email'] ) ? (string) $composer_profile['email'] : '', 'connected_account_id' => ! empty( $composer_profile['connected_account_id'] ) ? (string) $composer_profile['connected_account_id'] : $composer_connected_hint, ) ); ?>
+
+            <h2>Instructor Tax Profiles</h2>
+            <?php if ( empty( $instructors ) ) : ?><p>No instructors found.</p><?php else : ?><?php foreach ( $instructors as $instructor ) : ?><?php $profile = $this->mrm_get_tax_profile_for_instructor( (int) $instructor['id'] ); $this->mrm_render_tax_profile_card( 'instructor_' . (int) $instructor['id'], $profile, array( 'title' => 'Instructor Tax Profile #' . (int) $instructor['id'] . ' — ' . (string) $instructor['name'], 'payee_type' => 'instructor', 'related_instructor_id' => (int) $instructor['id'], 'readonly_name' => (string) $instructor['name'], 'readonly_email' => (string) $instructor['email'], 'connected_account_id' => (string) ( $instructor['stripe_connected_account_id'] ?? '' ), ) ); ?><?php endforeach; ?><?php endif; ?>
+
+            <?php submit_button( 'Save Contractor Tax Profiles', 'primary large' ); ?>
+        </form>
+    </div>
+    <?php
+}
+
+
 
     public function render_admin_instructors_page() {
         if ( ! current_user_can( self::CAPABILITY ) ) wp_die( 'You do not have permission to access this page.' );
@@ -2309,10 +11405,13 @@ class MRM_Lesson_Scheduler {
             $state = isset( $_POST['state'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_POST['state'] ) ) ) : '';
             $state = preg_replace('/[^A-Z]/', '', $state); // keep letters only
             $state = substr($state, 0, 2); // enforce 2-letter code
-            $latitude_in  = ( isset( $_POST['latitude'] ) && $_POST['latitude'] !== '' ) ? (string) wp_unslash( $_POST['latitude'] ) : '';
-            $longitude_in = ( isset( $_POST['longitude'] ) && $_POST['longitude'] !== '' ) ? (string) wp_unslash( $_POST['longitude'] ) : '';
+            $address = isset( $_POST['address'] ) ? sanitize_text_field( wp_unslash( $_POST['address'] ) ) : '';
+            $zip_code = isset( $_POST['zip_code'] ) ? sanitize_text_field( wp_unslash( $_POST['zip_code'] ) ) : '';
+            $offers_in_person = ! empty( $_POST['offers_in_person'] ) ? 1 : 0;
+            $offers_online = ! empty( $_POST['offers_online'] ) ? 1 : 0;
             $calendar_id = isset( $_POST['calendar_id'] ) ? sanitize_text_field( wp_unslash( $_POST['calendar_id'] ) ) : '';
-            $timezone    = isset( $_POST['timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['timezone'] ) ) : '';
+            $timezone    = isset( $_POST['timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['timezone'] ) ) : 'America/Phoenix';
+            $stripe_connected_account_id = isset( $_POST['stripe_connected_account_id'] ) ? sanitize_text_field( wp_unslash( $_POST['stripe_connected_account_id'] ) ) : '';
             $hire_date   = isset( $_POST['hire_date'] ) ? sanitize_text_field( wp_unslash( $_POST['hire_date'] ) ) : '';
             $profile_image_url = isset( $_POST['profile_image_url'] ) ? esc_url_raw( wp_unslash( $_POST['profile_image_url'] ) ) : '';
             $short_description = isset( $_POST['short_description'] ) ? sanitize_text_field( wp_unslash( $_POST['short_description'] ) ) : '';
@@ -2332,9 +11431,13 @@ class MRM_Lesson_Scheduler {
                 if ( ! $state || strlen($state) !== 2 ) $errors[] = 'State is required (2-letter code like AZ).';
                 if ( ! $calendar_id ) $errors[] = 'Calendar ID is required.';
                 if ( ! $timezone ) $errors[] = 'Timezone is required.';
+                if ( $stripe_connected_account_id && ! preg_match( '/^acct_[A-Za-z0-9]+$/', $stripe_connected_account_id ) ) $errors[] = 'Stripe Connected Account ID must start with acct_.';
                 if ( $hire_date && ! preg_match( '/^\d{4}-\d{2}-\d{2}$/', $hire_date ) ) $errors[] = 'Start Date must be in YYYY-MM-DD format.';
-                if ( $latitude_in !== '' && ! is_numeric( $latitude_in ) ) $errors[] = 'Latitude must be a number (or blank).';
-                if ( $longitude_in !== '' && ! is_numeric( $longitude_in ) ) $errors[] = 'Longitude must be a number (or blank).';
+                if ( ! $address ) $errors[] = 'Address is required.';
+                if ( ! $zip_code ) $errors[] = 'ZIP Code is required.';
+                if ( ! $offers_in_person && ! $offers_online ) {
+                    $errors[] = 'At least one teaching format must be selected.';
+                }
             }
             $schema = $this->schema_status();
             if ( ! $schema['ok'] ) $errors[] = 'Database schema is not ready. Click “Run Installer/Upgrade” first.';
@@ -2344,20 +11447,62 @@ class MRM_Lesson_Scheduler {
                     'email' => $email,
                     'city' => $city,
                     'state' => $state,
-                    'latitude' => ( $latitude_in === '' ? null : (string) $latitude_in ),
-                    'longitude' => ( $longitude_in === '' ? null : (string) $longitude_in ),
+                    'address' => $address,
+                    'zip_code' => $zip_code,
+                    'offers_in_person' => $offers_in_person,
+                    'offers_online' => $offers_online,
                     'calendar_id' => $calendar_id,
                     'timezone' => $timezone,
+                    'stripe_connected_account_id' => ( $stripe_connected_account_id === '' ? null : $stripe_connected_account_id ),
                     'hire_date' => ( $hire_date === '' ? null : $hire_date ),
                     'profile_image_url' => ( $profile_image_url === '' ? null : $profile_image_url ),
                     'short_description' => ( $short_description === '' ? null : $short_description ),
                     'long_description' => ( $long_description === '' ? null : $long_description ),
                     'instruments' => ( $instruments_json === '' ? null : $instruments_json ),
                 );
-                $formats = array( '%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s' );
+                $formats = array( '%s','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s' );
                 if ( $action === 'add' ) {
                     $result = $wpdb->insert( $table, $data, $formats );
-                    echo $result === false ? '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>' : '<div class="notice notice-success"><p>Instructor added (ID ' . esc_html( (int) $wpdb->insert_id ) . ').</p></div>';
+                    if ( $result === false ) {
+                        echo '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>';
+                    } else {
+                        $new_instructor_id = (int) $wpdb->insert_id;
+                        $this->mrm_ensure_contractor_tax_profile_schema();
+                        $this->mrm_upsert_tax_payee_profile( array(
+                            'payee_type'                   => 'instructor',
+                            'related_instructor_id'        => $new_instructor_id,
+                            'related_user_id'              => 0,
+                            'display_name'                 => $name,
+                            'legal_name'                   => '',
+                            'business_name'                => '',
+                            'email'                        => $email,
+                            'tax_classification'           => '',
+                            'tax_classification_other'     => '',
+                            'mailing_address_1'            => '',
+                            'mailing_address_2'            => '',
+                            'mailing_city'                 => '',
+                            'mailing_state'                => '',
+                            'mailing_postal_code'          => '',
+                            'mailing_country'              => 'US',
+                            'tin_type'                     => '',
+                            'tin_last4'                    => '',
+                            'tin_full_temp'                => '',
+                            'w9_received'                  => 0,
+                            'w9_received_date'             => null,
+                            'w9_file_note'                 => '',
+                            'backup_withholding_required'  => 0,
+                            'backup_withholding_cents'     => 0,
+                            'is_1099_eligible'             => 1,
+                            'is_employee'                  => 0,
+                            'exclude_from_1099'            => 0,
+                            'composer_key'                 => '',
+                            'connected_account_id'         => ( $stripe_connected_account_id === '' ? '' : $stripe_connected_account_id ),
+                            'notes'                        => '',
+                            'created_at'                   => current_time( 'mysql' ),
+                            'updated_at'                   => current_time( 'mysql' ),
+                        ) );
+                        echo '<div class="notice notice-success"><p>Instructor added (ID ' . esc_html( $new_instructor_id ) . '). Contractor tax profile created automatically.</p></div>';
+                    }
                 } elseif ( $action === 'update' && $id ) {
                     $result = $wpdb->update( $table, $data, array( 'id' => $id ), $formats, array( '%d' ) );
                     echo $result === false ? '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>' : '<div class="notice notice-success"><p>Instructor updated (ID ' . esc_html( $id ) . ').</p></div>';
@@ -2392,7 +11537,7 @@ class MRM_Lesson_Scheduler {
         ?>
         <div class="wrap">
             <h1>MRM Scheduler — Instructors</h1>
-            <p style="max-width:900px;"> Add instructors here. <strong>Start Date</strong> is stored in <code>hire_date</code> for future pay-tier automation. </p>
+            <p style="max-width:900px;"> Add instructors here. <strong>Start Date</strong> is stored in <code>hire_date</code> and is used by the Payments Hub instructor payout chart to determine Year 1, Year 2, or Year 3+ payout rates. </p>
             <p>
                 <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=mrm-scheduler-google' ) ); ?>">Google Calendar Settings</a>
             </p>
@@ -2475,15 +11620,32 @@ class MRM_Lesson_Scheduler {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><label for="latitude">Latitude</label></th>
+                        <th scope="row"><label for="address">Address</label></th>
                         <td>
-                            <input name="latitude" id="latitude" type="text" class="regular-text" placeholder="33.4484" value="<?php echo esc_attr( $editing['latitude'] ?? '' ); ?>">
-                            <p class="description">Optional. Used for proximity sorting.</p>
+                            <input name="address" id="address" type="text" class="regular-text" placeholder="123 Main St" value="<?php echo esc_attr( $editing['address'] ?? '' ); ?>">
+                            <p class="description">Instructor address used for internal reference and location-based scheduling context.</p>
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row"><label for="longitude">Longitude</label></th>
-                        <td><input name="longitude" id="longitude" type="text" class="regular-text" placeholder="-112.0740" value="<?php echo esc_attr( $editing['longitude'] ?? '' ); ?>"></td>
+                        <th scope="row"><label for="zip_code">ZIP Code</label></th>
+                        <td>
+                            <input name="zip_code" id="zip_code" type="text" class="regular-text" placeholder="85001" value="<?php echo esc_attr( $editing['zip_code'] ?? '' ); ?>">
+                            <p class="description">Instructor ZIP code for backend reference and location-based admin use.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Teaching Format</th>
+                        <td>
+                            <label style="display:block; margin-bottom:8px;">
+                                <input type="checkbox" name="offers_in_person" value="1" <?php checked( ! empty( $editing['offers_in_person'] ) ); ?>>
+                                In Person
+                            </label>
+                            <label style="display:block;">
+                                <input type="checkbox" name="offers_online" value="1" <?php checked( ! empty( $editing['offers_online'] ) ); ?>>
+                                Online
+                            </label>
+                            <p class="description">Choose whether this instructor offers in-person lessons, online lessons, or both.</p>
+                        </td>
                     </tr>
                     <tr>
                         <th scope="row"><label for="calendar_id">Google Calendar ID</label></th>
@@ -2498,6 +11660,13 @@ class MRM_Lesson_Scheduler {
                                 <?php endforeach; ?>
                             </select>
                             <p class="description">Instructor’s home timezone. Student-facing times should be converted in frontend.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="stripe_connected_account_id">Stripe Connected Account ID</label></th>
+                        <td>
+                            <input name="stripe_connected_account_id" id="stripe_connected_account_id" type="text" class="regular-text" placeholder="acct_..." value="<?php echo esc_attr( $editing['stripe_connected_account_id'] ?? '' ); ?>">
+                            <p class="description">Paste the instructor’s Stripe Connect account ID here after onboarding.</p>
                         </td>
                     </tr>
                     <tr>
@@ -2518,7 +11687,7 @@ class MRM_Lesson_Scheduler {
                 <table class="widefat striped">
                     <thead>
                         <tr>
-                            <th>ID</th><th>Name</th><th>Email</th><th>City</th><th>Start Date</th><th>Calendar ID</th><th>Timezone</th><th>Actions</th>
+                            <th>ID</th><th>Name</th><th>Email</th><th>City</th><th>Start Date</th><th>Stripe Acct</th><th>Calendar ID</th><th>Timezone</th><th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -2529,6 +11698,7 @@ class MRM_Lesson_Scheduler {
                                 <td><?php echo esc_html( $r['email'] ); ?></td>
                                 <td><?php echo esc_html( $r['city'] ); ?></td>
                                 <td><?php echo esc_html( $r['hire_date'] ); ?></td>
+                                <td><code><?php echo esc_html( $r['stripe_connected_account_id'] ?? '' ); ?></code></td>
                                 <td><code><?php echo esc_html( $r['calendar_id'] ); ?></code></td>
                                 <td><code><?php echo esc_html( $r['timezone'] ); ?></code></td>
                                 <td>
@@ -2552,7 +11722,7 @@ class MRM_Lesson_Scheduler {
     public function render_admin_google_page() {
         if ( ! current_user_can( self::CAPABILITY ) ) wp_die( 'You do not have permission to access this page.' );
         $opts = $this->get_settings();
-        $json = isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
+        $json = $this->mrm_get_google_service_account_json();
         $delegated = isset( $opts['google_delegated_user'] ) ? (string) $opts['google_delegated_user'] : '';
         $slot_default= isset( $opts['default_slot_minutes'] ) ? (int) $opts['default_slot_minutes'] : 30;
         $sa_email = '';
@@ -2561,6 +11731,17 @@ class MRM_Lesson_Scheduler {
         ?>
         <div class="wrap">
             <h1>MRM Scheduler — Google Calendar</h1>
+            <?php if ( isset( $_GET['sync_now'] ) ) : ?>
+                <div class="<?php echo ( (string) $_GET['sync_now'] === '1' ? 'notice notice-success' : 'notice notice-error' ); ?>"><p>
+                    <?php
+                    echo esc_html(
+                        ( (string) $_GET['sync_now'] === '1' )
+                            ? 'Direct Google sync finished. Rows fetched: ' . (int) ( $_GET['rows'] ?? 0 ) . '.'
+                            : 'Direct Google sync failed.'
+                    );
+                    ?>
+                </p></div>
+            <?php endif; ?>
             <p style="max-width:900px;"> This plugin uses a <strong>Google Cloud Service Account</strong> (JWT) to call the Google Calendar API. For each instructor calendar, share the calendar with the Service Account email below. </p>
             <hr>
             <h2>1) Service Account Credentials</h2>
@@ -2571,8 +11752,12 @@ class MRM_Lesson_Scheduler {
                     <tr>
                         <th scope="row">Service Account JSON</th>
                         <td>
-                            <textarea name="google_service_account_json" rows="12" style="width:100%; max-width:900px;"><?php echo esc_textarea( $json ); ?></textarea>
-                            <p class="description"> Paste the full JSON key file you download from Google Cloud (contains private_key + client_email). Keep this private. </p>
+                            <p><strong>AWS Secrets Manager is the only supported source for the Google service account JSON.</strong></p>
+                            <p class="description">
+                                The scheduler loads the Google service account JSON from
+                                <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>.
+                                This settings page no longer stores service account JSON locally in WordPress.
+                            </p>
                         </td>
                     </tr>
                     <tr>
@@ -2582,7 +11767,11 @@ class MRM_Lesson_Scheduler {
                                 <code style="font-size:14px;"><?php echo esc_html( $sa_email ); ?></code>
                                 <p class="description">Share each instructor calendar with this email.</p>
                             <?php else : ?>
-                                <em>Paste JSON above and Save to see the service account email.</em>
+                                <?php if ( $this->mrm_google_service_account_uses_aws() ) : ?>
+                                    <em>The scheduler is set to use AWS Secrets Manager for the Google service account JSON, but the AWS-loaded JSON could not be parsed into a valid service account. Re-check the <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code> secret.</em>
+                                <?php else : ?>
+                                    <em>AWS Secrets Manager is not currently providing a usable service_account_json value, so the scheduler cannot initialize Google credentials in AWS-only mode.</em>
+                                <?php endif; ?>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -2591,6 +11780,17 @@ class MRM_Lesson_Scheduler {
                         <td>
                             <input type="email" class="regular-text" name="google_delegated_user" value="<?php echo esc_attr( $delegated ); ?>" placeholder="you@yourdomain.com">
                             <p class="description"> Leave blank unless you set up <strong>Domain-wide Delegation</strong> in Google Workspace. If blank, sharing calendars with the Service Account email is enough. </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Direct Sync Secret</th>
+                        <td>
+                            <p><strong>AWS Secrets Manager is active for the direct sync secret.</strong></p>
+                            <p class="description">
+                                The scheduler is loading the direct sync secret from
+                                <code><?php echo esc_html( defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler' ); ?></code>.
+                                It is no longer editable from this settings page.
+                            </p>
                         </td>
                     </tr>
                 </table>
@@ -2615,12 +11815,49 @@ class MRM_Lesson_Scheduler {
             </form>
             <hr>
             <h2>3) Test Connection</h2>
-            <p>After saving your JSON, click test. If it fails, you’ll get a readable error.</p>
+            <p>
+                <?php if ( $this->mrm_google_service_account_uses_aws() ) : ?>
+                    The Google service account JSON is being loaded from AWS Secrets Manager. Click test below to verify the AWS-loaded credentials.
+                <?php else : ?>
+                    After saving your JSON, click test. If it fails, you’ll get a readable error.
+                <?php endif; ?>
+            </p>
             <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
                 <?php wp_nonce_field( 'mrm_scheduler_test_google', 'mrm_scheduler_google_test_nonce' ); ?>
                 <input type="hidden" name="action" value="mrm_scheduler_test_google">
                 <?php submit_button( 'Test Google Calendar API', 'secondary' ); ?>
             </form>
+            <hr>
+            <h2>4) Direct Google Sync</h2>
+            <p>Use this when you want to force the plugin to pull Google event timing into <code>wp_mrm_lessons</code> immediately instead of waiting for WP-Cron.</p>
+            <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
+                <?php wp_nonce_field( 'mrm_scheduler_google_sync_now', 'mrm_scheduler_google_sync_now_nonce' ); ?>
+                <input type="hidden" name="action" value="mrm_scheduler_google_sync_now">
+                <?php submit_button( 'Run Google Sync Now', 'secondary' ); ?>
+            </form>
+            <p><strong>Direct endpoint for Hostinger cron:</strong></p>
+            <p>
+                <code style="display:block; max-width:100%; overflow:auto;">
+                    <?php
+                    echo esc_html(
+                        add_query_arg(
+                            array(
+                                'action'     => 'mrm_scheduler_google_sync_now',
+                                'sync_token' => $this->mrm_get_google_sync_secret(),
+                                'format'     => 'json',
+                            ),
+                            admin_url( 'admin-post.php' )
+                        )
+                    );
+                    ?>
+                </code>
+            </p>
+
+
+            <hr>
+            <h2>5) Debug One Google Lesson Row</h2>
+            <p>Use this to run the recurring Google resolver for one lesson row and print the raw result.</p>
+            
             <hr>
             <h2>Sharing Calendars (required)</h2>
             <ol>
@@ -2641,10 +11878,9 @@ class MRM_Lesson_Scheduler {
         if ( ! current_user_can( self::CAPABILITY ) ) wp_die( 'Not allowed.' );
         check_admin_referer( 'mrm_scheduler_save_google', 'mrm_scheduler_google_nonce' );
         $opts = $this->get_settings();
-        if ( isset( $_POST['google_service_account_json'] ) ) {
-            $json = wp_unslash( $_POST['google_service_account_json'] );
-            $opts['google_service_account_json'] = is_string( $json ) ? trim( $json ) : '';
-        }
+
+        $opts['google_service_account_json'] = '';
+        $opts['google_sync_secret'] = '';
         if ( isset( $_POST['google_delegated_user'] ) ) {
             $opts['google_delegated_user'] = sanitize_email( wp_unslash( $_POST['google_delegated_user'] ) );
         }
@@ -2662,22 +11898,121 @@ class MRM_Lesson_Scheduler {
     public function handle_test_google_settings() {
         if ( ! current_user_can( self::CAPABILITY ) ) wp_die( 'Not allowed.' );
         check_admin_referer( 'mrm_scheduler_test_google', 'mrm_scheduler_google_test_nonce' );
-        if ( ! $this->google_is_configured() ) {
-            $msg = 'Google settings not configured yet. Paste Service Account JSON and save.';
-            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode($msg) ) );
+
+        if ( ! $this->mrm_google_service_account_uses_aws() ) {
+            $msg = 'AWS Secrets Manager is not providing a usable service_account_json value. The scheduler is not allowed to fall back to the WordPress settings box in AWS-only mode.';
+            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode( $msg ) ) );
             exit;
         }
+
+        if ( ! $this->google_is_configured() ) {
+            $msg = 'AWS Secrets Manager is active, but the Google service account JSON could not be parsed into a valid credential set. Check the PHP error log for parse_service_account_json diagnostics.';
+            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode( $msg ) ) );
+            exit;
+        }
+
         $token = $this->google_get_access_token();
         if ( is_wp_error( $token ) ) {
-            $msg = 'Token fetch failed: ' . $token->get_error_message();
-            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode($msg) ) );
+            $msg = 'Token fetch failed while using AWS-loaded Google credentials: ' . $token->get_error_message();
+            wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=fail&msg=' . rawurlencode( $msg ) ) );
             exit;
         }
-        $msg = 'Success: Access token obtained. Next: share an instructor calendar with the Service Account email and test /availability.';
-        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=ok&msg=' . rawurlencode($msg) ) );
+
+        $msg = 'Success: Access token obtained using the AWS Secrets Manager service account JSON.';
+        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-google&test=ok&msg=' . rawurlencode( $msg ) ) );
         exit;
     }
 
+    protected function run_google_sync_now( $source = 'manual' ) {
+        $summary = array(
+            'ok'            => false,
+            'source'        => (string) $source,
+            'started_at'    => current_time( 'mysql' ),
+            'finished_at'   => '',
+            'rows_fetched'  => 0,
+            'google_ready'  => false,
+            'message'       => '',
+        );
+
+        if ( ! $this->google_is_configured() ) {
+            $summary['message'] = 'Google is not configured. AWS Secrets Manager did not provide a parseable Google service account JSON value.';
+            $summary['finished_at'] = current_time( 'mysql' );
+            return $summary;
+        }
+
+        $summary['google_ready'] = true;
+
+        $rows = $this->get_lessons_needing_google_truth_pass( 400 );
+        $summary['rows_fetched'] = is_array( $rows ) ? count( $rows ) : 0;
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
+
+        $this->cron_sync_upcoming_events( 72, 30 );
+        $this->cron_reconcile_completed_lessons( true );
+        $this->cron_reconcile_cancelled_lessons( true );
+
+        $summary['ok'] = true;
+        $summary['message'] = 'Direct Google sync completed.';
+        $summary['finished_at'] = current_time( 'mysql' );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
+
+        return $summary;
+    }
+
+    public function handle_google_sync_now_request() {
+        $is_admin_request = current_user_can( self::CAPABILITY ) && isset( $_POST['mrm_scheduler_google_sync_now_nonce'] );
+
+        if ( $is_admin_request ) {
+            check_admin_referer( 'mrm_scheduler_google_sync_now', 'mrm_scheduler_google_sync_now_nonce' );
+        } else {
+            $saved_token = $this->mrm_get_google_sync_secret();
+            $request_token = isset( $_REQUEST['sync_token'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['sync_token'] ) ) : '';
+
+            if ( $saved_token === '' || $request_token === '' || ! hash_equals( $saved_token, $request_token ) ) {
+                wp_die( 'Not allowed.', 'Not allowed', array( 'response' => 403 ) );
+            }
+        }
+
+        $summary = $this->run_google_sync_now( $is_admin_request ? 'admin_button' : 'direct_endpoint' );
+
+        $wants_json = ! $is_admin_request || ( isset( $_REQUEST['format'] ) && strtolower( (string) $_REQUEST['format'] ) === 'json' );
+
+        if ( $wants_json ) {
+            wp_send_json( $summary, ( ! empty( $summary['ok'] ) ? 200 : 500 ) );
+        }
+
+        wp_safe_redirect(
+            admin_url(
+                'admin.php?page=mrm-scheduler-google&sync_now=' . ( ! empty( $summary['ok'] ) ? '1' : '0' ) .
+                '&rows=' . (int) ( $summary['rows_fetched'] ?? 0 )
+            )
+        );
+        exit;
+    }
+
+
+
+    public function admin_finalize_old_lessons_now() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Unauthorized' );
+        }
+
+        $this->mrm_finalization_debug_log( 'manual_finalization_trigger_started', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        $this->cron_finalize_old_lessons();
+
+        $this->mrm_finalization_debug_log( 'manual_finalization_trigger_finished', array(
+            'user_id' => get_current_user_id(),
+        ) );
+
+        wp_safe_redirect( admin_url( 'tools.php?page=mrm-lesson-scheduler&finalization_run=1' ) );
+        exit;
+    }
     /* =========================================================
      * Google Calendar (Service Account JWT)
      * ========================================================= */
@@ -2687,24 +12022,54 @@ class MRM_Lesson_Scheduler {
     }
 
     protected function google_is_configured() {
-        $opts = $this->get_settings();
-        $json = isset( $opts['google_service_account_json'] ) ? (string) $opts['google_service_account_json'] : '';
+        $json = $this->mrm_get_google_service_account_json();
         $parsed = $this->parse_service_account_json( $json );
         return ( is_array( $parsed ) && ! empty( $parsed['client_email'] ) && ! empty( $parsed['private_key'] ) );
     }
 
-    protected function parse_service_account_json( $json ) {
-        $json = is_string($json) ? trim($json) : '';
-        if ( $json === '' ) return null;
-        $data = json_decode( $json, true );
-        if ( ! is_array( $data ) ) return null;
-        if ( empty( $data['client_email'] ) || empty( $data['private_key'] ) ) return null;
-        return array(
-            'client_email' => (string) $data['client_email'],
-            'private_key'  => (string) $data['private_key'],
-            'token_uri'    => ! empty($data['token_uri']) ? (string) $data['token_uri'] : self::GOOGLE_TOKEN_URL,
-        );
+protected function parse_service_account_json( $json ) {
+    $json = is_string( $json ) ? trim( $json ) : '';
+
+    if ( $json === '' ) {
+        $this->mrm_aws_debug_log( 'parse_service_account_json received empty string' );
+        return null;
     }
+
+    $data = json_decode( $json, true );
+
+    if ( ! is_array( $data ) ) {
+        $this->mrm_aws_debug_log( 'parse_service_account_json json_decode failed', array(
+            'input_length' => strlen( $json ),
+            'input_preview' => substr( $json, 0, 120 ),
+        ) );
+        return null;
+    }
+
+    if ( empty( $data['client_email'] ) ) {
+        $this->mrm_aws_debug_log( 'parse_service_account_json missing client_email', array(
+            'keys_present' => array_keys( $data ),
+        ) );
+        return null;
+    }
+
+    if ( empty( $data['private_key'] ) ) {
+        $this->mrm_aws_debug_log( 'parse_service_account_json missing private_key', array(
+            'keys_present' => array_keys( $data ),
+        ) );
+        return null;
+    }
+
+    $this->mrm_aws_debug_log( 'parse_service_account_json succeeded', array(
+        'client_email' => $data['client_email'],
+        'has_private_key' => ! empty( $data['private_key'] ),
+    ) );
+
+    return array(
+        'client_email' => (string) $data['client_email'],
+        'private_key'  => (string) $data['private_key'],
+        'token_uri'    => ! empty( $data['token_uri'] ) ? (string) $data['token_uri'] : self::GOOGLE_TOKEN_URL,
+    );
+}
 
     /**
      * Cache-bust token used to invalidate availability transients immediately after bookings.
@@ -2832,7 +12197,50 @@ class MRM_Lesson_Scheduler {
         return gmdate( 'Y-m-d\TH:i:s\Z', $ts );
     }
 
-protected function base64url_encode( $data ) {
+    protected function normalize_google_time_range( $time_min, $time_max ) {
+        $time_min_n = $this->to_rfc3339_utc( $time_min );
+        if ( is_wp_error( $time_min_n ) ) {
+            return new WP_Error(
+                'invalid_google_time_min',
+                'Invalid Google timeMin: ' . $time_min_n->get_error_message()
+            );
+        }
+
+        $time_max_n = $this->to_rfc3339_utc( $time_max );
+        if ( is_wp_error( $time_max_n ) ) {
+            return new WP_Error(
+                'invalid_google_time_max',
+                'Invalid Google timeMax: ' . $time_max_n->get_error_message()
+            );
+        }
+
+        $min_ts = strtotime( $time_min_n );
+        $max_ts = strtotime( $time_max_n );
+
+        if ( ! $min_ts || ! $max_ts ) {
+            return new WP_Error(
+                'invalid_google_time_range',
+                'Google time window could not be parsed after normalization.'
+            );
+        }
+
+        if ( $max_ts <= $min_ts ) {
+            return new WP_Error(
+                'invalid_google_time_range',
+                'Google timeMax must be greater than timeMin.'
+            );
+        }
+
+        return array(
+            'timeMin' => $time_min_n,
+            'timeMax' => $time_max_n,
+            'min_ts'  => $min_ts,
+            'max_ts'  => $max_ts,
+        );
+    }
+
+
+    protected function base64url_encode( $data ) {
         return rtrim( strtr( base64_encode( $data ), '+/', '-_' ), '=' );
     }
 
@@ -2876,8 +12284,17 @@ protected function base64url_encode( $data ) {
         $cached = get_transient( $cache_key );
         if ( is_string( $cached ) && $cached !== '' ) return $cached;
         $opts = $this->get_settings();
-        $parsed = $this->parse_service_account_json( isset($opts['google_service_account_json']) ? $opts['google_service_account_json'] : '' );
-        if ( ! $parsed ) return new WP_Error( 'google_not_configured', 'Service Account JSON not configured.' );
+        $parsed = $this->parse_service_account_json( $this->mrm_get_google_service_account_json() );
+        $this->mrm_aws_debug_log( 'google_get_access_token parsed credentials', array(
+            'parsed_is_array' => is_array( $parsed ),
+            'client_email' => is_array( $parsed ) && ! empty( $parsed['client_email'] ) ? $parsed['client_email'] : '',
+            'has_private_key' => is_array( $parsed ) && ! empty( $parsed['private_key'] ),
+            'token_uri' => is_array( $parsed ) && ! empty( $parsed['token_uri'] ) ? $parsed['token_uri'] : '',
+        ) );
+        if ( ! $parsed ) {
+            $this->mrm_aws_debug_log( 'google_get_access_token failed before JWT build because parsed credentials were invalid' );
+            return new WP_Error( 'google_not_configured', 'Service Account JSON not configured.' );
+        }
         $client_email = $parsed['client_email'];
         $private_key  = $parsed['private_key'];
         $token_url    = ! empty($parsed['token_uri']) ? $parsed['token_uri'] : self::GOOGLE_TOKEN_URL;
@@ -2887,6 +12304,10 @@ protected function base64url_encode( $data ) {
         }
         $jwt = $this->google_make_jwt( $client_email, $private_key, $scope, $token_url, $subject );
         if ( is_wp_error( $jwt ) ) return $jwt;
+        $this->mrm_aws_debug_log( 'google_get_access_token sending token request', array(
+            'token_uri' => $token_url,
+            'client_email' => $client_email,
+        ) );
         $resp = wp_remote_post( $token_url, array(
             'timeout' => 20,
             'headers' => array( 'Content-Type' => 'application/x-www-form-urlencoded' ),
@@ -2895,15 +12316,36 @@ protected function base64url_encode( $data ) {
                 'assertion'  => $jwt,
             ) ),
         ) );
-        if ( is_wp_error( $resp ) ) return $resp;
+        $this->mrm_aws_debug_log( 'google_get_access_token token request completed', array(
+            'is_wp_error' => is_wp_error( $resp ),
+        ) );
+        if ( is_wp_error( $resp ) ) {
+            $this->mrm_aws_debug_log( 'google_get_access_token wp_remote_post returned WP_Error', array(
+                'error_code' => $resp->get_error_code(),
+                'error_message' => $resp->get_error_message(),
+            ) );
+            return $resp;
+        }
         $code = wp_remote_retrieve_response_code( $resp );
         $body = wp_remote_retrieve_body( $resp );
+        $this->mrm_aws_debug_log( 'google_get_access_token token endpoint response', array(
+            'http_code' => $code,
+            'body_preview' => is_string( $body ) ? substr( $body, 0, 500 ) : '',
+        ) );
         $data = json_decode( $body, true );
         if ( $code < 200 || $code >= 300 || ! is_array($data) || empty($data['access_token']) ) {
+            $this->mrm_aws_debug_log( 'google_get_access_token token endpoint rejected request', array(
+                'http_code' => $code,
+                'body_preview' => is_string( $body ) ? substr( $body, 0, 500 ) : '',
+            ) );
             $detail = is_array($data) && ! empty($data['error_description']) ? $data['error_description'] : $body;
             return new WP_Error( 'google_token_failed', 'Token request failed: ' . $detail );
         }
         $token = (string) $data['access_token'];
+        $this->mrm_aws_debug_log( 'google_get_access_token succeeded', array(
+            'access_token_present' => ! empty( $token ),
+            'token_length' => is_string( $token ) ? strlen( $token ) : 0,
+        ) );
         set_transient( $cache_key, $token, 55 * MINUTE_IN_SECONDS );
         return $token;
     }
@@ -2947,7 +12389,12 @@ protected function base64url_encode( $data ) {
             'items'    => $items,
         );
 
-        $resp = wp_remote_post( self::GOOGLE_FREEBUSY_URL, array(
+        $url = self::GOOGLE_FREEBUSY_URL;
+        $this->mrm_aws_debug_log( 'Google Calendar API request starting', array(
+            'url' => $url,
+            'calendar_id' => implode( ',', $cal_ids ),
+        ) );
+        $resp = wp_remote_post( $url, array(
             'timeout' => 20,
             'headers' => array(
                 'Authorization' => 'Bearer ' . $token,
@@ -2955,10 +12402,23 @@ protected function base64url_encode( $data ) {
             ),
             'body' => wp_json_encode( $payload ),
         ) );
+        $this->mrm_aws_debug_log( 'Google Calendar API request completed', array(
+            'is_wp_error' => is_wp_error( $resp ),
+        ) );
 
-        if ( is_wp_error( $resp ) ) return $resp;
+        if ( is_wp_error( $resp ) ) {
+            $this->mrm_aws_debug_log( 'Google Calendar API WP_Error', array(
+                'error_code' => $resp->get_error_code(),
+                'error_message' => $resp->get_error_message(),
+            ) );
+            return $resp;
+        }
         $code = wp_remote_retrieve_response_code( $resp );
         $body = wp_remote_retrieve_body( $resp );
+        $this->mrm_aws_debug_log( 'Google Calendar API response', array(
+            'http_code' => $code,
+            'body_preview' => is_string( $body ) ? substr( $body, 0, 500 ) : '',
+        ) );
         $data = json_decode( $body, true );
 
         if ( $code < 200 || $code >= 300 || ! is_array( $data ) ) {
@@ -3185,65 +12645,255 @@ protected function base64url_encode( $data ) {
         return '';
     }
 
-    protected function mrm_wrap_email_html( $title, $intro_html, $details_html, $button_url, $button_text, $options = array() ) {
-        $brand = '#780000';
-        $options = is_array( $options ) ? $options : array();
-        $button_color = isset( $options['button_color'] ) ? (string) $options['button_color'] : $brand;
-        $button_align = isset( $options['button_align'] ) ? (string) $options['button_align'] : 'center';
-        $logo  = $this->mrm_get_email_logo_url();
-        $site  = esc_html( get_bloginfo( 'name' ) );
+    protected function mrm_get_instructor_booking_notification_subject( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
 
-        $logo_html = '';
-        if ( $logo ) {
-            $logo_html = '<div style="text-align:center;margin:0 0 18px 0;">
-                <img src="' . esc_url( $logo ) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;"/>
-            </div>';
+        if ( $this->mrm_is_consultation_lesson( $lesson ) ) {
+            return 'Consultation Scheduled';
         }
 
-        $btn_html = '';
-        if ( $button_url ) {
-            $btn_html = '<div style="text-align:' . esc_attr( $button_align ) . ';margin:22px 0 10px 0;">
-                <a href="' . esc_url( $button_url ) . '" style="display:inline-block;background:' . esc_attr( $button_color ) . ';color:#ffffff;text-decoration:none;font-weight:700;padding:12px 18px;border-radius:10px;">
-                    ' . esc_html( $button_text ? $button_text : 'Open Link' ) . '
-                </a>
-            </div>
-            <div style="text-align:center;font-size:12px;color:#666;margin-top:10px;">
-                If the button doesn’t work, copy and paste this link:<br/>
-                <span style="word-break:break-all;">' . esc_html( $button_url ) . '</span>
-            </div>';
-        }
-
-        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
-            <div style="max-width:640px;margin:0 auto;padding:24px;">
-                <div style="background:#ffffff;border-radius:16px;padding:24px;box-shadow:0 2px 10px rgba(0,0,0,0.06);font-family:Arial,sans-serif;">
-                    ' . $logo_html . '
-                    <h1 style="margin:0 0 10px 0;font-size:20px;line-height:1.3;color:#111;">' . esc_html( $title ) . '</h1>
-                    <div style="font-size:14px;line-height:1.6;color:#222;">' . $intro_html . '</div>
-                    <div style="margin-top:14px;padding:14px;border:1px solid #eee;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.6;color:#222;">
-                        ' . $details_html . '
-                    </div>
-                    ' . $btn_html . '
-                    <div style="margin-top:20px;font-size:12px;color:#777;text-align:center;">
-                        ' . $site . '
-                    </div>
-                </div>
-            </div>
-        </body></html>';
+        return 'Private Lesson Scheduled';
     }
 
-    protected function maybe_store_agreement( $email, $version, $signature, $ip ) {
+    protected function mrm_get_repeat_frequency_label( $repeat_frequency ) {
+        $repeat_frequency = strtolower( trim( (string) $repeat_frequency ) );
+
+        if ( $repeat_frequency === 'weekly' ) {
+            return 'Weekly';
+        }
+
+        if ( $repeat_frequency === 'biweekly' ) {
+            return 'Biweekly';
+        }
+
+        return '';
+    }
+
+    protected function mrm_get_repeat_duration_label( $repeat_duration ) {
+        $repeat_duration = strtolower( trim( (string) $repeat_duration ) );
+
+        if ( $repeat_duration === '1_month' ) {
+            return 'For One Month';
+        }
+
+        if ( $repeat_duration === '3_months' ) {
+            return 'For Three Months';
+        }
+
+        if ( $repeat_duration === 'indefinitely' ) {
+            return 'Indefinitely';
+        }
+
+        return '';
+    }
+
+    protected function mrm_get_timeframe_label( $repeat_frequency, $repeat_duration ) {
+        $frequency_label = $this->mrm_get_repeat_frequency_label( $repeat_frequency );
+        $duration_label  = $this->mrm_get_repeat_duration_label( $repeat_duration );
+
+        if ( $frequency_label !== '' && $duration_label !== '' ) {
+            return trim( $frequency_label . ' ' . $duration_label );
+        }
+
+        return '';
+    }
+
+    protected function send_instructor_scheduled_notification_for_lesson( $lesson_id, $options = array() ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            return false;
+        }
+
+        $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
+        if ( ! is_email( $instructor_email ) ) {
+            return false;
+        }
+
+        $context = $this->get_safety_lesson_context( $lesson, 'instructor' );
+        $is_consultation = ! empty( $context['is_consultation'] );
+
+        $student_name    = (string) ( $lesson['student_name'] ?? 'Student' );
+        $student_email   = (string) ( $lesson['student_email'] ?? '' );
+        $instructor_name = (string) ( $lesson['instructor_name'] ?? 'Instructor' );
+        $minutes         = (int) ( $lesson['lesson_length'] ?? 0 );
+        $options = is_array( $options ) ? $options : array();
+        $timeframe_label = (string) ( $options['timeframe_label'] ?? '' );
+
+        $title = $this->mrm_get_instructor_booking_notification_subject( $lesson );
+
+        $intro = $is_consultation
+            ? '<p>A consultation has been scheduled on your calendar.</p>'
+            : '<p>A private lesson has been scheduled on your calendar.</p>';
+
+        $details = '';
+        $details .= '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>';
+        $details .= '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>';
+        $details .= '<div><strong>Student Email:</strong> ' . esc_html( $student_email ) . '</div>';
+        $details .= '<div><strong>Time:</strong> ' . esc_html( (string) ( $context['start_label'] ?? '' ) ) . '</div>';
+
+        if ( $is_consultation ) {
+            $details .= '<div><strong>Type:</strong> Consultation</div>';
+            $details .= '<div><strong>Consultation Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
+        } else {
+            $details .= '<div><strong>Type:</strong> ' . esc_html( (string) ( $context['lesson_type_label'] ?? 'Private Lesson' ) ) . '</div>';
+            $details .= '<div><strong>Lesson Length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
+
+            if ( $timeframe_label !== '' ) {
+                $details .= '<div><strong>Timeframe:</strong> ' . esc_html( $timeframe_label ) . '</div>';
+            }
+        }
+
+        if ( ! empty( $context['join_link'] ) ) {
+            $details .= '<div><strong>Lesson Link:</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
+        }
+
+        if ( ! empty( $context['location_text'] ) ) {
+            $details .= '<div><strong>Location:</strong> ' . esc_html( (string) $context['location_text'] ) . '</div>';
+        }
+
+        $details .= '<div style="margin-top:12px;">' . esc_html( (string) ( $context['format_note'] ?? '' ) ) . '</div>';
+
+        $html = $this->mrm_safety_email_wrap_html_blocks(
+            $title,
+            $intro,
+            $details,
+            ''
+        );
+
+        $sent = wp_mail(
+            $instructor_email,
+            $title,
+            $html,
+            array(
+                'Content-Type: text/html; charset=UTF-8',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+            )
+        );
+
+
+        return $sent;
+    }
+
+    protected function send_consultation_confirmation_for_lesson( $lesson_id ) {
+        $lesson = $this->get_lesson_with_instructor( $lesson_id );
+        if ( ! is_array( $lesson ) || empty( $lesson ) ) {
+            return false;
+        }
+
+        if ( ! $this->mrm_is_consultation_lesson( $lesson ) ) {
+            return false;
+        }
+
+        $student_email    = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
+        if ( ! is_email( $student_email ) ) {
+            return false;
+        }
+
+        $context = $this->get_safety_lesson_context( $lesson );
+        $minutes = (int) ( $lesson['lesson_length'] ?? 30 );
+        $student_name = (string) ( $lesson['student_name'] ?? 'Student' );
+        $instructor_name = (string) ( $lesson['instructor_name'] ?? 'Instructor' );
+
+        $details = '';
+        $details .= '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>';
+        $details .= '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>';
+        $details .= '<div><strong>Time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>';
+        $details .= '<div><strong>Type:</strong> Consultation</div>';
+        $details .= '<div><strong>Consultation length:</strong> ' . esc_html( (string) $minutes ) . ' minutes</div>';
+
+        if ( ! empty( $context['join_link'] ) ) {
+            $details .= '<div><strong>Consultation link:</strong> <a href="' . esc_url( (string) $context['join_link'] ) . '">' . esc_html( (string) $context['join_link'] ) . '</a></div>';
+        }
+
+        $intro = '<p>Your consultation has been scheduled successfully.</p><p>This is an online consultation. Please use the consultation link above at the scheduled time.</p>';
+
+        $html = $this->mrm_safety_email_wrap_html_blocks(
+            'Consultation Confirmation',
+            $intro,
+            $details,
+            ''
+        );
+
+        return wp_mail(
+            $student_email,
+            'Consultation Confirmation',
+            $html,
+            array(
+                'Content-Type: text/html; charset=UTF-8',
+                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+            )
+        );
+    }
+
+    protected function mrm_wrap_email_html( $title, $intro_html, $details_html, $button_url, $button_text, $options = array() ) {
+        return $this->mrm_safety_email_wrap_html( $title, $intro_html, $details_html, $button_url, $button_text );
+    }
+
+    protected function maybe_store_agreement( $email, $version, $signature, $ip, $args = array() ) {
         global $wpdb;
-        if ( ! $email || ! $version || ! $signature ) return 0;
+
+        $email     = sanitize_email( (string) $email );
+        $version   = sanitize_text_field( (string) $version );
+        $signature = sanitize_text_field( (string) $signature );
+        $ip        = sanitize_text_field( (string) $ip );
+
+        if ( ! $email || ! is_email( $email ) || ! $version || ! $signature ) {
+            return 0;
+        }
+
         $table = $wpdb->prefix . 'mrm_agreements';
-        $existing = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE email = %s AND agreement_version = %s", $email, $version ) );
-        if ( $existing ) return (int) $existing;
-        $wpdb->insert( $table, array(
-            'email'            => $email,
-            'agreement_version'=> $version,
-            'signature'        => $signature,
-            'signed_at'        => current_time( 'mysql' ),
-            'ip_address'       => $ip,
-        ), array( '%s','%s','%s','%s','%s' ) );
+
+        $scope      = sanitize_text_field( (string) ( $args['agreement_scope'] ?? 'terms_of_service' ) );
+        $source     = sanitize_text_field( (string) ( $args['source_flow'] ?? '' ) );
+        $lesson_id  = isset( $args['related_lesson_id'] ) ? absint( $args['related_lesson_id'] ) : null;
+        $order_id   = isset( $args['related_order_id'] ) ? absint( $args['related_order_id'] ) : null;
+        $sku        = sanitize_text_field( (string) ( $args['related_sku'] ?? '' ) );
+        $ack        = isset( $args['acknowledgement'] ) && is_array( $args['acknowledgement'] ) ? $args['acknowledgement'] : array();
+        $user_agent = isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_textarea_field( (string) $_SERVER['HTTP_USER_AGENT'] ) : '';
+
+        $existing = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT id FROM {$table}
+                 WHERE email = %s
+                   AND agreement_version = %s
+                   AND agreement_scope = %s
+                   AND source_flow = %s
+                   AND related_order_id <=> %d
+                   AND related_sku = %s
+                 ORDER BY id DESC
+                 LIMIT 1",
+                $email,
+                $version,
+                $scope,
+                $source,
+                $order_id ? $order_id : 0,
+                $sku
+            )
+        );
+
+        if ( $existing ) {
+            return (int) $existing;
+        }
+
+        $wpdb->insert(
+            $table,
+            array(
+                'email'                => $email,
+                'agreement_version'    => $version,
+                'agreement_scope'      => $scope,
+                'source_flow'          => $source,
+                'related_lesson_id'    => $lesson_id ? $lesson_id : null,
+                'related_order_id'     => $order_id ? $order_id : null,
+                'related_sku'          => $sku !== '' ? $sku : null,
+                'signature'            => $signature,
+                'acknowledgement_json' => wp_json_encode( $ack ),
+                'signed_at'            => current_time( 'mysql' ),
+                'ip_address'           => $ip,
+                'user_agent'           => $user_agent,
+            ),
+            array( '%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s' )
+        );
+
         return (int) $wpdb->insert_id;
     }
 
@@ -3277,6 +12927,54 @@ protected function base64url_encode( $data ) {
      * @param array  $attendee_emails Emails to add as attendees for calendar reminders
      * @return true|WP_Error
      */
+    protected function build_google_recurrence_rules( $repeat_frequency, $repeat_duration, $start_ts ) {
+        $repeat_frequency = strtolower( trim( (string) $repeat_frequency ) );
+        $repeat_duration  = strtolower( trim( (string) $repeat_duration ) );
+        $start_ts         = (int) $start_ts;
+
+        if ( $start_ts <= 0 ) return array();
+        if ( $repeat_frequency !== 'weekly' && $repeat_frequency !== 'biweekly' ) return array();
+
+        $interval = ( $repeat_frequency === 'biweekly' ) ? 2 : 1;
+
+        // If duration is indefinite, do not include COUNT/UNTIL.
+        if ( $repeat_duration === 'indefinitely' ) {
+            return array(
+                'RRULE:FREQ=WEEKLY;INTERVAL=' . $interval
+            );
+        }
+
+        // Map your UI values to a lesson count.
+        $count_map = array(
+            '1_month'  => 4,
+            '2_months' => 8,
+            '3_months' => 12,
+            '6_months' => 24,
+            '12_months' => 48,
+        );
+
+        if ( $interval === 2 ) {
+            $count_map = array(
+                '1_month'  => 2,
+                '2_months' => 4,
+                '3_months' => 6,
+                '6_months' => 12,
+                '12_months' => 24,
+            );
+        }
+
+        $count = isset( $count_map[ $repeat_duration ] ) ? (int) $count_map[ $repeat_duration ] : 0;
+        if ( $count <= 0 ) {
+            return array(
+                'RRULE:FREQ=WEEKLY;INTERVAL=' . $interval
+            );
+        }
+
+        return array(
+            'RRULE:FREQ=WEEKLY;INTERVAL=' . $interval . ';COUNT=' . $count
+        );
+    }
+
     protected function google_insert_event( $calendar_id, $title, $description, $location, $start_rfc3339, $end_rfc3339, $timezone, $extended_private, $recurrence = array(), $create_meet = false, $attendee_emails = array() ) {
         $token = $this->google_get_access_token();
         if ( is_wp_error( $token ) ) return $token;
@@ -3423,6 +13121,7 @@ protected function base64url_encode( $data ) {
  * Activation hook in main scope.
  */
 register_activation_hook( __FILE__, array( 'MRM_Lesson_Scheduler', 'activate' ) );
+register_deactivation_hook( __FILE__, array( 'MRM_Lesson_Scheduler', 'deactivate' ) );
 
 // Boot plugin.
 MRM_Lesson_Scheduler::get_instance();

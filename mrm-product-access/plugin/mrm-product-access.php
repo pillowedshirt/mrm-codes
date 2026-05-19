@@ -231,6 +231,12 @@ class MRM_Product_Access {
             'callback'            => array( $this, 'api_authorize' ),
             'permission_callback' => '__return_true',
         ) );
+
+        register_rest_route( 'mrm-pa/v1', '/access-context', array(
+            'methods'  => WP_REST_Server::CREATABLE,
+            'callback' => array( $this, 'rest_access_context' ),
+            'permission_callback' => '__return_true',
+        ) );
     }
 
     /**
@@ -449,7 +455,7 @@ class MRM_Product_Access {
 
                     $pslug = $this->sanitize_product_slug( (string) ( $offer_product_slug[ $oi ] ?? '' ) );
                     $dt    = sanitize_text_field( (string) ( $offer_display_title[ $oi ] ?? '' ) );
-                    $sub   = sanitize_text_field( (string) ( $offer_subtitle[ $oi ] ?? '' ) );
+                    $sub   = sanitize_textarea_field( wp_unslash( (string) ( $offer_subtitle[ $oi ] ?? '' ) ) );
                     $price = sanitize_text_field( (string) ( $offer_price_display[ $oi ] ?? '' ) );
                     $aud   = trim( (string) ( $offer_preview_audio_url[ $oi ] ?? '' ) );
 
@@ -458,10 +464,12 @@ class MRM_Product_Access {
                         continue;
                     }
 
-                    // Back-compat only: if older configs relied on derived slugs, keep behavior ONLY if an admin saved an empty slug.
-                    // Prefer explicit product_slug always.
+                    // IMPORTANT: Do NOT auto-derive offer product_slug from display title.
+                    // Payments Hub sheet-music SKUs follow a strict canonical format (piece-<title>-<type>[optional-suffix]).
+                    // Deriving from display title can create mismatches that break quoting/access grants.
+                    // Leave blank so the frontend/admin clearly indicates a configuration error and the slug can be corrected intentionally.
                     if ( $pslug === '' && $dt !== '' ) {
-                        $pslug = $this->sanitize_product_slug( $dt );
+                        $pslug = '';
                     }
 
                     if ( ! isset( $offers_by_piece[ $pi ] ) ) {
@@ -497,11 +505,11 @@ class MRM_Product_Access {
                     $piece['piece_title']          = $title;
                     $piece['composer_name']        = sanitize_text_field( (string) ( $composer_names[ $i ] ?? '' ) );
                     $piece['composer_url']         = esc_url_raw( trim( (string) ( $composer_urls[ $i ] ?? '' ) ) );
-                    $legacy_desc = sanitize_textarea_field( (string) ( $descs[ $i ] ?? '' ) );
+                    $legacy_desc = sanitize_textarea_field( wp_unslash( (string) ( $descs[ $i ] ?? '' ) ) );
 
-                    $piece['short_description'] = sanitize_textarea_field( (string) ( $short_descs[ $i ] ?? '' ) );
+                    $piece['short_description'] = sanitize_textarea_field( wp_unslash( (string) ( $short_descs[ $i ] ?? '' ) ) );
 
-                    $new_long = sanitize_textarea_field( (string) ( $long_descs[ $i ] ?? '' ) );
+                    $new_long = sanitize_textarea_field( wp_unslash( (string) ( $long_descs[ $i ] ?? '' ) ) );
                     $piece['long_description']  = ( $new_long !== '' ) ? $new_long : $legacy_desc;
 
                     $piece['description'] = $piece['long_description'];
@@ -544,31 +552,41 @@ class MRM_Product_Access {
                 }
                 $options['verified_emails'] = array_values( array_unique( $verified ) );
             }
+            // Save Tracks Mapping (by Product Slug) to a single option: product_tracks_by_slug.
+            // IMPORTANT:
+            // Keep this option name and row shape unchanged so existing entered track data persists.
+            // Rows are saved in the same order they appear in the admin table.
+            if (
+                isset( $_POST['tracks_map_slug'] ) && is_array( $_POST['tracks_map_slug'] )
+                || isset( $_POST['tracks_map_name'] ) && is_array( $_POST['tracks_map_name'] )
+                || isset( $_POST['tracks_map_url'] ) && is_array( $_POST['tracks_map_url'] )
+            ) {
+                $rows  = array();
+                $slugs = isset( $_POST['tracks_map_slug'] ) && is_array( $_POST['tracks_map_slug'] ) ? (array) $_POST['tracks_map_slug'] : array();
+                $names = isset( $_POST['tracks_map_name'] ) && is_array( $_POST['tracks_map_name'] ) ? (array) $_POST['tracks_map_name'] : array();
+                $urls  = isset( $_POST['tracks_map_url'] ) && is_array( $_POST['tracks_map_url'] ) ? (array) $_POST['tracks_map_url'] : array();
 
-            // Save Tracks Mapping (by Product Slug) to a single option: product_tracks_by_slug
-            $rows = array();
-            if ( isset( $_POST['tracks_map_slug'] ) && is_array( $_POST['tracks_map_slug'] ) ) {
-                $slugs = (array) $_POST['tracks_map_slug'];
-                $names = isset( $_POST['tracks_map_name'] ) ? (array) $_POST['tracks_map_name'] : array();
-                $urls  = isset( $_POST['tracks_map_url'] ) ? (array) $_POST['tracks_map_url'] : array();
+                $row_count = max( count( $slugs ), count( $names ), count( $urls ) );
 
-                foreach ( $slugs as $i => $raw_slug ) {
-                    $slug = strtolower( trim( (string) $raw_slug ) );
-                    $slug = preg_replace( '/[^a-z0-9\-_]+/', '', $slug );
+                for ( $i = 0; $i < $row_count; $i++ ) {
+                    $raw_slug = isset( $slugs[ $i ] ) ? (string) $slugs[ $i ] : '';
+                    $slug     = strtolower( trim( $raw_slug ) );
+                    $slug     = preg_replace( '/[^a-z0-9\-_]+/', '', $slug );
 
-                    $name = isset( $names[ $i ] ) ? sanitize_text_field( (string) $names[ $i ] ) : '';
+                    $name    = isset( $names[ $i ] ) ? sanitize_text_field( (string) $names[ $i ] ) : '';
                     $raw_url = isset( $urls[ $i ] ) ? (string) $urls[ $i ] : '';
                     $url     = $this->sanitize_track_location( $raw_url );
 
-                    // Allow empty rows; store as-is; runtime ignores invalid ones
+                    // Allow empty rows; store as-is. Runtime already ignores invalid rows.
                     $rows[] = array(
                         'product_slug' => $slug,
                         'display_name' => $name,
-                        'url' => $url,
+                        'url'          => $url,
                     );
                 }
+
+                update_option( 'product_tracks_by_slug', $rows );
             }
-            update_option( 'product_tracks_by_slug', $rows );
 
             // Keep legacy options['products'] around for back-compat only (do not update it here).
             // $options['products'] no longer drives access, pricing, or gating.
@@ -621,7 +639,7 @@ class MRM_Product_Access {
 
                 <h2 class="title"><?php esc_html_e( 'Pieces Catalog (Sheet Music Listings)', 'mrm-product-access' ); ?></h2>
                 <p class="description">
-                    <?php esc_html_e( 'Enter the piece fields + purchasing options (offers) exactly like the old product HTML. URLs can be full URLs or site-relative paths (e.g. /wp-content/uploads/...).', 'mrm-product-access' ); ?>
+                    <?php esc_html_e( 'Enter the piece fields + purchasing options (offers) exactly like the old product HTML. URLs can be full URLs or site-relative paths (e.g. /wp-content/uploads/...). Use the Piece Display Order panel below to control the order used by the sheet music catalog shortcode.', 'mrm-product-access' ); ?>
                 </p>
                 <style>
                 /* Admin-only styling for a cleaner “card” editor */
@@ -680,12 +698,99 @@ class MRM_Product_Access {
                     display:flex;
                     gap:8px;
                 }
+
+                /* Piece ordering panel */
+                .mrm-pa-piece-order-panel{
+                    border: 1px solid #dcdcde;
+                    background: #fff;
+                    border-radius: 12px;
+                    padding: 14px;
+                    margin: 14px 0 18px;
+                }
+
+                .mrm-pa-piece-order-panel h3{
+                    margin: 0 0 6px;
+                    font-size: 14px;
+                }
+
+                .mrm-pa-piece-order-panel .description{
+                    margin: 0 0 10px;
+                }
+
+                #mrm-pa-piece-order-list{
+                    margin: 0;
+                    padding: 0;
+                    list-style: none;
+                }
+
+                .mrm-pa-piece-order-item{
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 12px;
+                    border: 1px solid #dcdcde;
+                    background: #f6f7f7;
+                    border-radius: 8px;
+                    padding: 8px 10px;
+                    margin: 8px 0;
+                    cursor: grab;
+                }
+
+                .mrm-pa-piece-order-item.is-dragging{
+                    opacity: .55;
+                }
+
+                .mrm-pa-piece-order-title{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    min-width: 0;
+                    font-weight: 600;
+                }
+
+                .mrm-pa-piece-order-handle{
+                    color: #646970;
+                    font-size: 16px;
+                    line-height: 1;
+                }
+
+                .mrm-pa-piece-order-name{
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .mrm-pa-piece-order-actions{
+                    display: flex;
+                    gap: 6px;
+                    flex-shrink: 0;
+                }
                 @media (max-width: 900px){
                     .mrm-pa-grid{ grid-template-columns: 1fr; }
+
+                    .mrm-pa-piece-order-item{
+                        align-items: flex-start;
+                        flex-direction: column;
+                    }
+
+                    .mrm-pa-piece-order-actions{
+                        width: 100%;
+                    }
                 }
                 </style>
 
-                <div id="mrm-pa-pieces-cards">
+                <div class="mrm-pa-piece-order-panel" id="mrm-pa-piece-order-panel">
+    <h3><?php esc_html_e( 'Piece Display Order', 'mrm-product-access' ); ?></h3>
+    <p class="description">
+        <?php esc_html_e( 'Drag pieces or use the Move Up / Move Down buttons to control the order used by the sheet music catalog shortcode.', 'mrm-product-access' ); ?>
+    </p>
+    <ol id="mrm-pa-piece-order-list" aria-label="<?php esc_attr_e( 'Piece display order', 'mrm-product-access' ); ?>"></ol>
+    <p class="mrm-pa-help">
+        <?php esc_html_e( 'This does not change any piece content. It only changes the saved display order used by [mrm_sheet_music_catalog].', 'mrm-product-access' ); ?>
+    </p>
+</div>
+
+<div id="mrm-pa-pieces-cards">
                 <?php
                 $pieces = isset( $options['pieces'] ) && is_array( $options['pieces'] ) ? $options['pieces'] : array();
                 if ( empty( $pieces ) ) {
@@ -728,7 +833,7 @@ class MRM_Product_Access {
                     $preview_audio_url = $piece['preview_audio_url'] ?? '';
                     $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
                     ?>
-                    <div class="mrm-pa-piece-card" data-piece-index="<?php echo esc_attr( $i ); ?>">
+                    <div class="mrm-pa-piece-card" data-piece-index="<?php echo esc_attr( $i ); ?>" data-piece-order-key="<?php echo esc_attr( $slug !== '' ? $slug : 'piece-' . $i ); ?>">
                         <div class="mrm-pa-piece-card-head">
                             <h3><?php echo esc_html( $title !== '' ? $title : 'New Piece' ); ?></h3>
                             <div class="mrm-pa-row-actions">
@@ -842,7 +947,9 @@ class MRM_Product_Access {
                                             <input type="text" name="offer_product_slug[]" value="<?php echo esc_attr( $ps ); ?>" placeholder="blackbeards-revenge-tuba-full-piece">
                                         </td>
                                         <td><input type="text" name="offer_display_title[]" value="<?php echo esc_attr( $dt ); ?>" placeholder="Tuba Full Piece"></td>
-                                        <td><input type="text" name="offer_subtitle[]" value="<?php echo esc_attr( $st ); ?>" placeholder="Includes the Tuba part..."></td>
+                                        <td>
+                                            <textarea name="offer_subtitle[]" rows="3" placeholder="Includes the Tuba part..."><?php echo esc_textarea( $st ); ?></textarea>
+                                        </td>
                                         <td><input type="text" name="offer_price_display[]" value="<?php echo esc_attr( $pr ); ?>" placeholder="$25"></td>
                                         <td><input type="text" name="offer_preview_audio_url[]" value="<?php echo esc_attr( $au ); ?>" placeholder="/wp-content/uploads/2025/12/Blackbeards-Revenge.mp3"></td>
                                         <td><button type="button" class="button mrm-pa-remove-offer"><?php esc_html_e( 'Remove', 'mrm-product-access' ); ?></button></td>
@@ -867,6 +974,8 @@ class MRM_Product_Access {
                 (function(){
                     const wrap = document.getElementById('mrm-pa-pieces-cards');
                     const addPieceBtn = document.getElementById('mrm-pa-add-piece');
+                    const orderList = document.getElementById('mrm-pa-piece-order-list');
+                    const settingsForm = wrap ? wrap.closest('form') : null;
                     if (!wrap || !addPieceBtn) return;
 
                     function pieceTemplate(index){
@@ -979,7 +1088,113 @@ class MRM_Product_Access {
                         </div>`;
                     }
 
-                    function offerRowTemplate(pieceIndex){
+                    function getPieceCards(){
+    return Array.from(wrap.children).filter(function(child){
+        return child.classList && child.classList.contains('mrm-pa-piece-card');
+    });
+}
+
+function getPieceTitle(card, index){
+    const titleInput = card.querySelector('input[name="piece_title[]"]');
+    const rawTitle = titleInput ? titleInput.value.trim() : '';
+    return rawTitle || `Untitled Piece ${index + 1}`;
+}
+
+function updatePieceCardHeadings(){
+    getPieceCards().forEach(function(card, index){
+        const heading = card.querySelector('.mrm-pa-piece-card-head h3');
+        if (heading) {
+            heading.textContent = getPieceTitle(card, index);
+        }
+    });
+}
+
+function reindexPiecesAndOffers(){
+    getPieceCards().forEach(function(card, index){
+        card.setAttribute('data-piece-index', String(index));
+
+        const offerIndexInputs = card.querySelectorAll('input[name="offer_piece_index[]"]');
+        offerIndexInputs.forEach(function(input){
+            input.value = String(index);
+        });
+    });
+}
+
+function syncPieceOrderList(){
+    if (!orderList) return;
+
+    updatePieceCardHeadings();
+    reindexPiecesAndOffers();
+
+    const cards = getPieceCards();
+    orderList.innerHTML = '';
+
+    if (!cards.length) {
+        const empty = document.createElement('li');
+        empty.className = 'mrm-pa-help';
+        empty.textContent = 'No pieces yet. Add a piece below to include it in the catalog order.';
+        orderList.appendChild(empty);
+        return;
+    }
+
+    cards.forEach(function(card, index){
+        const item = document.createElement('li');
+        item.className = 'mrm-pa-piece-order-item';
+        item.draggable = true;
+        item.setAttribute('data-piece-index', String(index));
+
+        const title = getPieceTitle(card, index);
+
+        item.innerHTML = `
+            <div class="mrm-pa-piece-order-title">
+                <span class="mrm-pa-piece-order-handle" aria-hidden="true">↕</span>
+                <span class="mrm-pa-piece-order-name"></span>
+            </div>
+            <div class="mrm-pa-piece-order-actions">
+                <button type="button" class="button button-small mrm-pa-piece-order-up">Move Up</button>
+                <button type="button" class="button button-small mrm-pa-piece-order-down">Move Down</button>
+            </div>
+        `;
+
+        const name = item.querySelector('.mrm-pa-piece-order-name');
+        if (name) {
+            name.textContent = title;
+        }
+
+        orderList.appendChild(item);
+    });
+}
+
+function movePieceCard(fromIndex, toIndex){
+    const cards = getPieceCards();
+
+    if (
+        fromIndex === toIndex ||
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= cards.length ||
+        toIndex >= cards.length
+    ) {
+        return;
+    }
+
+    const cardToMove = cards[fromIndex];
+    const targetCard = cards[toIndex];
+
+    if (!cardToMove || !targetCard) {
+        return;
+    }
+
+    if (fromIndex < toIndex) {
+        wrap.insertBefore(cardToMove, targetCard.nextSibling);
+    } else {
+        wrap.insertBefore(cardToMove, targetCard);
+    }
+
+    syncPieceOrderList();
+}
+
+function offerRowTemplate(pieceIndex){
                         return `
                         <tr class="mrm-pa-offer-row">
                             <td>
@@ -987,7 +1202,7 @@ class MRM_Product_Access {
                                 <input type="text" name="offer_product_slug[]" value="" placeholder="blackbeards-revenge-tuba-full-piece">
                             </td>
                             <td><input type="text" name="offer_display_title[]" value="" placeholder="Tuba Full Piece"></td>
-                            <td><input type="text" name="offer_subtitle[]" value="" placeholder="Includes the Tuba part..."></td>
+                            <td><textarea name="offer_subtitle[]" rows="3" placeholder="Includes the Tuba part..."></textarea></td>
                             <td><input type="text" name="offer_price_display[]" value="" placeholder="$25"></td>
                             <td><input type="text" name="offer_preview_audio_url[]" value="" placeholder="/wp-content/uploads/.../demo.mp3"></td>
                             <td><button type="button" class="button mrm-pa-remove-offer">Remove</button></td>
@@ -995,24 +1210,31 @@ class MRM_Product_Access {
                     }
 
                     addPieceBtn.addEventListener('click', function(){
-                        const nextIndex = wrap.querySelectorAll('.mrm-pa-piece-card').length;
+                        const nextIndex = getPieceCards().length;
                         const temp = document.createElement('div');
                         temp.innerHTML = pieceTemplate(nextIndex);
                         wrap.appendChild(temp.firstElementChild);
+                        syncPieceOrderList();
                     });
 
                     wrap.addEventListener('click', function(e){
                         const removePieceBtn = e.target.closest('.mrm-pa-remove-piece');
                         if (removePieceBtn) {
                             const card = removePieceBtn.closest('.mrm-pa-piece-card');
-                            if (card) card.remove();
+                            if (card) {
+                                card.remove();
+                                syncPieceOrderList();
+                            }
                             return;
                         }
 
                         const addOfferBtn = e.target.closest('.mrm-pa-add-offer');
                         if (addOfferBtn) {
+                            reindexPiecesAndOffers();
+
                             const card = addOfferBtn.closest('.mrm-pa-piece-card');
                             if (!card) return;
+
                             const pieceIndex = card.getAttribute('data-piece-index');
                             const tbody = card.querySelector('.mrm-pa-offers-body');
                             if (!tbody) return;
@@ -1020,6 +1242,8 @@ class MRM_Product_Access {
                             const temp = document.createElement('tbody');
                             temp.innerHTML = offerRowTemplate(pieceIndex);
                             tbody.appendChild(temp.firstElementChild);
+
+                            reindexPiecesAndOffers();
                             return;
                         }
 
@@ -1030,180 +1254,158 @@ class MRM_Product_Access {
                             return;
                         }
                     });
+
+                    if (orderList) {
+                        let draggedPieceIndex = null;
+
+                        orderList.addEventListener('click', function(e){
+                            const item = e.target.closest('.mrm-pa-piece-order-item');
+                            if (!item) return;
+
+                            const currentIndex = parseInt(item.getAttribute('data-piece-index') || '-1', 10);
+
+                            if (e.target.closest('.mrm-pa-piece-order-up')) {
+                                movePieceCard(currentIndex, currentIndex - 1);
+                                return;
+                            }
+
+                            if (e.target.closest('.mrm-pa-piece-order-down')) {
+                                movePieceCard(currentIndex, currentIndex + 1);
+                                return;
+                            }
+                        });
+
+                        orderList.addEventListener('dragstart', function(e){
+                            const item = e.target.closest('.mrm-pa-piece-order-item');
+                            if (!item) return;
+
+                            draggedPieceIndex = parseInt(item.getAttribute('data-piece-index') || '-1', 10);
+                            item.classList.add('is-dragging');
+
+                            if (e.dataTransfer) {
+                                e.dataTransfer.effectAllowed = 'move';
+                                e.dataTransfer.setData('text/plain', String(draggedPieceIndex));
+                            }
+                        });
+
+                        orderList.addEventListener('dragover', function(e){
+                            const item = e.target.closest('.mrm-pa-piece-order-item');
+                            if (!item) return;
+
+                            e.preventDefault();
+
+                            if (e.dataTransfer) {
+                                e.dataTransfer.dropEffect = 'move';
+                            }
+                        });
+
+                        orderList.addEventListener('drop', function(e){
+                            const item = e.target.closest('.mrm-pa-piece-order-item');
+                            if (!item) return;
+
+                            e.preventDefault();
+
+                            const targetIndex = parseInt(item.getAttribute('data-piece-index') || '-1', 10);
+                            const fromIndex = draggedPieceIndex;
+
+                            draggedPieceIndex = null;
+
+                            movePieceCard(fromIndex, targetIndex);
+                        });
+
+                        orderList.addEventListener('dragend', function(){
+                            draggedPieceIndex = null;
+
+                            orderList.querySelectorAll('.mrm-pa-piece-order-item.is-dragging').forEach(function(item){
+                                item.classList.remove('is-dragging');
+                            });
+                        });
+                    }
+
+                    wrap.addEventListener('input', function(e){
+                        if (e.target && e.target.matches('input[name="piece_title[]"]')) {
+                            syncPieceOrderList();
+                        }
+                    });
+
+                    if (settingsForm) {
+                        settingsForm.addEventListener('submit', function(){
+                            reindexPiecesAndOffers();
+                        });
+                    }
+
+                    syncPieceOrderList();
                 })();
                 </script>
 
                 <h2 class="title">Tracks Mapping (by Product Slug)</h2>
-                <p>Unlimited rows. Empty rows are allowed and ignored at runtime. Stored in <code>product_tracks_by_slug</code>.</p>
+<p>
+    Unlimited rows. Empty rows are allowed and ignored at runtime.
+    Drag rows to organize track order, or duplicate an existing row to create a similar track quickly.
+    Stored in <code>product_tracks_by_slug</code>.
+</p>
 
-                <style>
-                  .mrm-tracks-map-table input[type="text"]{ box-sizing:border-box; }
-                  .mrm-tracks-map-slug{ width: 180px; }
-                  .mrm-tracks-map-name{ width: 220px; }
-                  .mrm-tracks-map-url{ width: 100%; }
-                  .mrm-drag-handle{
-                    cursor: grab;
-                    user-select: none;
-                    text-align: center;
-                    font-size: 16px;
-                    opacity: 0.9;
-                  }
-                  .mrm-track-row.is-dragging{
-                    opacity: 0.55;
-                  }
-                  .mrm-order-controls{
-                    white-space: nowrap;
-                  }
-                  .mrm-order-controls .button{
-                    min-width: 34px;
-                  }
-                </style>
+<style>
+  .mrm-tracks-map-wrap { max-width: 1200px; }
+  .mrm-tracks-map-table { max-width: 1200px; }
+  .mrm-tracks-map-table input[type="text"] { box-sizing: border-box; }
+  .mrm-tracks-map-slug { width: 180px; }
+  .mrm-tracks-map-name { width: 240px; }
+  .mrm-tracks-map-url { width: 100%; }
+  .mrm-track-drag-cell { width: 44px; text-align: center; vertical-align: middle; }
+  .mrm-drag-handle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid #c3c4c7; border-radius: 6px; background: #f6f7f7; cursor: grab; user-select: none; touch-action: none; font-size: 17px; line-height: 1; }
+  .mrm-drag-handle:active { cursor: grabbing; }
+  .mrm-track-row.is-dragging { opacity: 0.55; background: #f0f6fc; }
+  .mrm-track-row.mrm-drop-before td { border-top: 3px solid #2271b1; }
+  .mrm-track-row.mrm-drop-after td { border-bottom: 3px solid #2271b1; }
+  .mrm-track-actions { width: 125px; white-space: nowrap; }
+  .mrm-track-actions .button { margin-right: 4px; }
+  .mrm-track-help { margin-top: 8px; color: #646970; }
+</style>
 
-                <?php
-                  $rows = get_option( 'product_tracks_by_slug', array() );
-                  if ( ! is_array( $rows ) ) $rows = array();
-                ?>
+<?php
+  $rows = get_option( 'product_tracks_by_slug', array() );
+  if ( ! is_array( $rows ) ) {
+      $rows = array();
+  }
+?>
 
-                <table class="widefat striped mrm-tracks-map-table" id="mrmTracksMapTable" style="max-width: 1100px;">
-                  <thead>
-                    <tr>
-                      <th style="width:36px;"></th>
-                      <th style="width:200px;">product_slug</th>
-                      <th style="width:240px;">Track / PDF Display Name</th>
-                      <th>URL / Path</th>
-                      <th style="width:120px;">Order</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <?php foreach ( $rows as $r ) : ?>
-                      <tr class="mrm-track-row" draggable="true">
-                        <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
+<div class="mrm-tracks-map-wrap">
+  <table class="widefat striped mrm-tracks-map-table" id="mrmTracksMapTable">
+    <thead><tr><th style="width:44px;">Move</th><th style="width:200px;">product_slug</th><th style="width:260px;">Track / PDF Display Name</th><th>URL / Path</th><th style="width:125px;">Actions</th></tr></thead>
+    <tbody>
+      <?php foreach ( $rows as $r ) : ?>
+        <tr class="mrm-track-row"><td class="mrm-track-drag-cell"><span class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</span></td><td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="<?php echo esc_attr( $r['product_slug'] ?? '' ); ?>" /></td><td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="<?php echo esc_attr( $r['display_name'] ?? '' ); ?>" /></td><td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="<?php echo esc_attr( $r['url'] ?? '' ); ?>" /></td><td class="mrm-track-actions"><button type="button" class="button button-small mrm-duplicate-track-row">Duplicate</button></td></tr>
+      <?php endforeach; ?>
+      <tr class="mrm-track-row"><td class="mrm-track-drag-cell"><span class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</span></td><td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td><td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td><td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="" /></td><td class="mrm-track-actions"><button type="button" class="button button-small mrm-duplicate-track-row">Duplicate</button></td></tr>
+    </tbody>
+  </table>
+  <p><button type="button" class="button" id="mrmAddTrackRow">Add Blank Row</button></p>
+  <p class="mrm-track-help">Tip: Drag using the ☰ handle. Duplicating a row copies its product slug, display name, and URL/path, then inserts the copy directly below the original.</p>
+</div>
 
-                        <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="<?php echo esc_attr( $r['product_slug'] ?? '' ); ?>" /></td>
-                        <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="<?php echo esc_attr( $r['display_name'] ?? '' ); ?>" /></td>
-                        <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="<?php echo esc_attr( $r['url'] ?? '' ); ?>" /></td>
-
-                        <td class="mrm-order-controls">
-                          <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
-                          <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
-                        </td>
-                      </tr>
-                    <?php endforeach; ?>
-
-                    <!-- Always include at least one blank row -->
-                    <tr class="mrm-track-row" draggable="true">
-                      <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
-
-                      <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="" /></td>
-
-                      <td class="mrm-order-controls">
-                        <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
-                        <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-
-                <p>
-                  <button type="button" class="button" id="mrmAddTrackRow">Add Row</button>
-                </p>
-
-                <script>
-                (function(){
-                  const btn = document.getElementById('mrmAddTrackRow');
-                  const table = document.getElementById('mrmTracksMapTable');
-                  if(!btn || !table) return;
-
-                  const tbody = table.querySelector('tbody');
-                  if(!tbody) return;
-
-                  function makeRow(){
-                    const tr = document.createElement('tr');
-                    tr.className = 'mrm-track-row';
-                    tr.setAttribute('draggable', 'true');
-                    tr.innerHTML = `
-                      <td class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</td>
-                      <td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td>
-                      <td><input class="mrm-tracks-map-url"  type="text" name="tracks_map_url[]"  value="" /></td>
-                      <td class="mrm-order-controls">
-                        <button type="button" class="button button-small mrm-move-up" aria-label="Move up">↑</button>
-                        <button type="button" class="button button-small mrm-move-down" aria-label="Move down">↓</button>
-                      </td>
-                    `;
-                    return tr;
-                  }
-
-                  // Add Row button
-                  btn.addEventListener('click', function(){
-                    const tr = makeRow();
-                    tbody.appendChild(tr);
-                    const first = tr.querySelector('input');
-                    if(first) first.focus();
-                  });
-
-                  // Up/Down controls (event delegation)
-                  tbody.addEventListener('click', function(e){
-                    const up = e.target.closest('.mrm-move-up');
-                    const down = e.target.closest('.mrm-move-down');
-                    if(!up && !down) return;
-
-                    const row = e.target.closest('tr');
-                    if(!row) return;
-
-                    if(up){
-                      const prev = row.previousElementSibling;
-                      if(prev) tbody.insertBefore(row, prev);
-                    } else if(down){
-                      const next = row.nextElementSibling;
-                      if(next) tbody.insertBefore(row, next);
-                    }
-                  });
-
-                  // Drag & Drop (HTML5) - no libraries
-                  let dragRow = null;
-
-                  function isHandle(el){
-                    return !!(el && el.closest && el.closest('.mrm-drag-handle'));
-                  }
-
-                  tbody.addEventListener('dragstart', function(e){
-                    const row = e.target.closest('tr.mrm-track-row');
-                    if(!row) return;
-
-                    // Only allow dragging from the handle to avoid accidental drags while selecting text
-                    if(!isHandle(e.target)){
-                      e.preventDefault();
-                      return;
-                    }
-
-                    dragRow = row;
-                    row.classList.add('is-dragging');
-                    e.dataTransfer.effectAllowed = 'move';
-                    try { e.dataTransfer.setData('text/plain', 'mrm-track-row'); } catch(err){}
-                  });
-
-                  tbody.addEventListener('dragend', function(){
-                    if(dragRow) dragRow.classList.remove('is-dragging');
-                    dragRow = null;
-                  });
-
-                  tbody.addEventListener('dragover', function(e){
-                    if(!dragRow) return;
-                    e.preventDefault();
-
-                    const target = e.target.closest('tr.mrm-track-row');
-                    if(!target || target === dragRow) return;
-
-                    const rect = target.getBoundingClientRect();
-                    const before = (e.clientY - rect.top) < (rect.height / 2);
-                    if(before) tbody.insertBefore(dragRow, target);
-                    else tbody.insertBefore(dragRow, target.nextElementSibling);
-                  });
-                })();
-                </script>
+<script>
+(function(){
+  const table = document.getElementById('mrmTracksMapTable');
+  const addBtn = document.getElementById('mrmAddTrackRow');
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  if (!tbody) return;
+  function makeRow(values = {}) { const tr = document.createElement('tr'); tr.className = 'mrm-track-row'; tr.innerHTML = `<td class="mrm-track-drag-cell"><span class="mrm-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">☰</span></td><td><input class="mrm-tracks-map-slug" type="text" name="tracks_map_slug[]" value="" /></td><td><input class="mrm-tracks-map-name" type="text" name="tracks_map_name[]" value="" /></td><td><input class="mrm-tracks-map-url" type="text" name="tracks_map_url[]" value="" /></td><td class="mrm-track-actions"><button type="button" class="button button-small mrm-duplicate-track-row">Duplicate</button></td>`; const slugInput = tr.querySelector('.mrm-tracks-map-slug'); const nameInput = tr.querySelector('.mrm-tracks-map-name'); const urlInput  = tr.querySelector('.mrm-tracks-map-url'); if (slugInput) slugInput.value = values.slug || ''; if (nameInput) nameInput.value = values.name || ''; if (urlInput)  urlInput.value  = values.url || ''; return tr; }
+  function getRowValues(row) { return { slug: row.querySelector('.mrm-tracks-map-slug')?.value || '', name: row.querySelector('.mrm-tracks-map-name')?.value || '', url: row.querySelector('.mrm-tracks-map-url')?.value || '' }; }
+  function clearDropClasses() { tbody.querySelectorAll('.mrm-drop-before, .mrm-drop-after').forEach(function(row){ row.classList.remove('mrm-drop-before', 'mrm-drop-after'); }); }
+  if (addBtn) { addBtn.addEventListener('click', function(){ const row = makeRow(); tbody.appendChild(row); const firstInput = row.querySelector('input'); if (firstInput) firstInput.focus(); }); }
+  tbody.addEventListener('click', function(e){ const duplicateBtn = e.target.closest('.mrm-duplicate-track-row'); if (!duplicateBtn) return; const row = duplicateBtn.closest('tr.mrm-track-row'); if (!row) return; const duplicate = makeRow(getRowValues(row)); row.insertAdjacentElement('afterend', duplicate); const firstInput = duplicate.querySelector('input'); if (firstInput) firstInput.focus(); });
+  let dragRow = null; let pointerId = null; let ghost = null;
+  function getRowFromPoint(x, y) { if (ghost) { ghost.style.display = 'none'; } const el = document.elementFromPoint(x, y); if (ghost) { ghost.style.display = ''; } return el ? el.closest('tr.mrm-track-row') : null; }
+  function createGhost(row, x, y) { const rect = row.getBoundingClientRect(); const g = row.cloneNode(true); g.style.position = 'fixed'; g.style.left = rect.left + 'px'; g.style.top = rect.top + 'px'; g.style.width = rect.width + 'px'; g.style.pointerEvents = 'none'; g.style.opacity = '0.85'; g.style.zIndex = '999999'; g.style.background = '#fff'; g.style.boxShadow = '0 8px 24px rgba(0,0,0,0.18)'; g.style.transform = 'translateY(0)'; document.body.appendChild(g); moveGhost(x, y); return g; }
+  function moveGhost(x, y) { if (!ghost || !dragRow) return; const rect = dragRow.getBoundingClientRect(); ghost.style.left = rect.left + 'px'; ghost.style.top = (y - rect.height / 2) + 'px'; }
+  tbody.addEventListener('pointerdown', function(e){ const handle = e.target.closest('.mrm-drag-handle'); if (!handle) return; const row = handle.closest('tr.mrm-track-row'); if (!row) return; e.preventDefault(); dragRow = row; pointerId = e.pointerId; row.classList.add('is-dragging'); try { handle.setPointerCapture(pointerId); } catch(err) {} ghost = createGhost(row, e.clientX, e.clientY); });
+  tbody.addEventListener('pointermove', function(e){ if (!dragRow || e.pointerId !== pointerId) return; e.preventDefault(); moveGhost(e.clientX, e.clientY); clearDropClasses(); const target = getRowFromPoint(e.clientX, e.clientY); if (!target || target === dragRow) return; const rect = target.getBoundingClientRect(); const before = (e.clientY - rect.top) < (rect.height / 2); if (before) { target.classList.add('mrm-drop-before'); tbody.insertBefore(dragRow, target); } else { target.classList.add('mrm-drop-after'); tbody.insertBefore(dragRow, target.nextElementSibling); } });
+  function endDrag(e) { if (!dragRow || e.pointerId !== pointerId) return; clearDropClasses(); dragRow.classList.remove('is-dragging'); dragRow = null; pointerId = null; if (ghost && ghost.parentNode) { ghost.parentNode.removeChild(ghost); } ghost = null; }
+  tbody.addEventListener('pointerup', endDrag); tbody.addEventListener('pointercancel', endDrag);
+})();
+</script>
 
                 <?php submit_button( __( 'Save Settings', 'mrm-product-access' ), 'primary', 'mrm_pa_save_settings' ); ?>
             </form>
@@ -1258,35 +1460,39 @@ class MRM_Product_Access {
         return $map;
     }
 
+    protected function mrm_get_private_asset_root() {
+        return '/home/u309866334/domains/lowbrass-lessons.com/mrm-private';
+    }
+
     protected function sanitize_track_location( $raw ) {
         $raw = trim( (string) $raw );
         if ( $raw === '' ) return '';
 
-        // Block traversal patterns early
         if ( strpos( $raw, '..' ) !== false ) return '';
 
-        // Allow full URLs
         if ( preg_match( '#^https?://#i', $raw ) ) {
             return esc_url_raw( $raw );
         }
 
-        // Allow site-relative paths like /wp-content/uploads/...
         if ( strpos( $raw, '/' ) === 0 ) {
-            // Keep it simple and safe: strip control chars
             $raw = preg_replace( '/[\\x00-\\x1F\\x7F]/u', '', $raw );
-            return $raw;
-        }
 
-        // Optionally allow absolute filesystem paths only if they live under ABSPATH
-        // (This supports cases where you store server paths, but prevents leaking arbitrary server files.)
-        if ( preg_match( '#^/[A-Za-z0-9_\\-./]+$#', $raw ) ) {
             $rp = realpath( $raw );
-            if ( ! $rp ) return '';
-            $root = realpath( ABSPATH );
-            if ( $root && strpos( $rp, $root ) === 0 ) {
-                return $rp;
+            if ( $rp ) {
+                $wp_root = realpath( ABSPATH );
+                $private_root = realpath( $this->mrm_get_private_asset_root() );
+
+                if ( $wp_root && strpos( $rp, $wp_root ) === 0 ) {
+                    return $rp;
+                }
+
+                if ( $private_root && strpos( $rp, $private_root ) === 0 ) {
+                    return $rp;
+                }
             }
-            return '';
+
+            // Keep site-relative paths like /wp-content/uploads/... untouched
+            return $raw;
         }
 
         return '';
@@ -1318,6 +1524,9 @@ class MRM_Product_Access {
                 'url'  => $url,
             );
         }
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
+
         return $out;
     }
 
@@ -1343,6 +1552,14 @@ class MRM_Product_Access {
         // If it's already a real path on disk.
         if ( file_exists( $raw ) ) {
             return $raw;
+        }
+
+        $private_root = $this->mrm_get_private_asset_root();
+        if ( $private_root ) {
+            $candidate = trailingslashit( $private_root ) . ltrim( $raw, '/' );
+            if ( file_exists( $candidate ) ) {
+                return $candidate;
+            }
         }
 
         // Convert uploads URL -> local path
@@ -1474,41 +1691,143 @@ class MRM_Product_Access {
         $sku = preg_replace( '/[^a-z0-9\-_]+/', '', $sku );
         if ( ! $sku ) return false;
 
-        // Pull lists from Payments Hub (source of truth for email lists)
+        // Pull lists from Payments Hub (legacy/option-based fallback)
         $lists = get_option( 'mrm_pay_hub_access_lists', array() );
         if ( ! is_array( $lists ) ) $lists = array();
 
-        // Convert hash -> compare against list (we only have hash here).
-        // We can safely compare by hashing list emails with the same hash_email.
         $hash_of = function( $email ) {
             return $this->hash_email( strtolower( trim( (string) $email ) ) );
         };
 
-        // Rule 1: master all-sheet-music ledger (DB), auto-expiring
-        $settings = get_option( 'mrm_pay_hub_settings', array() );
-        $master_sku = isset( $settings['all_sheet_music_sku'] ) ? (string) $settings['all_sheet_music_sku'] : 'piece-all-sheet-music-access-complete-package';
-        $master_sku = strtolower( trim( $master_sku ) );
-        $master_sku = preg_replace( '/[^a-z0-9\-_]+/', '', $master_sku );
-        if ( ! $master_sku ) $master_sku = 'piece-all-sheet-music-access-complete-package';
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        if ( $exists !== $table ) {
+            // fallback to option lists only
+            if ( isset( $lists['all-sheet-music'] ) && is_array( $lists['all-sheet-music'] ) ) {
+                foreach ( $lists['all-sheet-music'] as $em ) {
+                    $em = sanitize_email( $em );
+                    if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
+                }
+            }
+            if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
+                foreach ( $lists[ $sku ] as $em ) {
+                    $em = sanitize_email( $em );
+                    if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
+                }
+            }
+            return false;
+        }
 
         $now = current_time( 'mysql' );
-        $master_id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table}
-             WHERE email_hash=%s AND sku=%s AND revoked_at IS NULL
-               AND (
-                 (expires_at IS NOT NULL AND expires_at > %s)
-                 OR
-                 (expires_at IS NULL AND DATE_ADD(granted_at, INTERVAL 31 DAY) > %s)
-               )
-             ORDER BY id DESC LIMIT 1",
-            (string) $email_hash,
-            (string) $master_sku,
-            (string) $now,
-            (string) $now
-        ) );
-        if ( ! empty( $master_id ) ) return true;
 
-        // Rule 2: per-product list
+        // Helper: match a DB row against Product Access hash (salted) OR exact db hash (legacy/current)
+        $row_matches_email_hash = function( $row ) use ( $email_hash ) {
+            $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+            if ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) {
+                return true;
+            }
+
+            $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
+            if ( $email_plain !== '' ) {
+                $salted = $this->hash_email( strtolower( trim( $email_plain ) ) );
+                if ( hash_equals( $email_hash, $salted ) ) {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        // Rule 1: Stripe-synced all-sheet-music subscription (primary truth)
+        $subs_table = $wpdb->prefix . 'mrm_sheet_music_subscriptions';
+        $subs_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $subs_table ) );
+
+        if ( $subs_exists === $subs_table ) {
+            $sub_rows = $wpdb->get_results(
+                "SELECT id, email_hash, email_plain, stripe_status, current_period_end
+                 FROM {$subs_table}
+                 ORDER BY id DESC"
+            );
+
+            if ( is_array( $sub_rows ) ) {
+                foreach ( $sub_rows as $row ) {
+                    $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+                    $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
+
+                    $matches = false;
+                    if ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) {
+                        $matches = true;
+                    } elseif ( $email_plain !== '' ) {
+                        $salted = $this->hash_email( strtolower( trim( $email_plain ) ) );
+                        if ( hash_equals( $email_hash, $salted ) ) {
+                            $matches = true;
+                        }
+                    }
+
+                    if ( ! $matches ) {
+                        continue;
+                    }
+
+                    $status = isset( $row->stripe_status ) ? (string) $row->stripe_status : '';
+                    $period_end = isset( $row->current_period_end ) ? (string) $row->current_period_end : '';
+                    $period_end_ts = $period_end ? strtotime( $period_end ) : 0;
+
+                    $active = in_array( $status, array( 'trialing', 'active' ), true );
+                    $paid_through = ( $period_end_ts > strtotime( $now ) );
+
+                    if ( $active || $paid_through ) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Rule 1B: instructor-wide piece-product master access
+        $instructor_master_sku = 'all-piece-products-instructors';
+        $instructor_rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, email_hash, email_plain
+             FROM {$table}
+             WHERE sku=%s AND revoked_at IS NULL
+             ORDER BY id DESC",
+            (string) $instructor_master_sku
+        ) );
+
+        if ( is_array( $instructor_rows ) ) {
+            foreach ( $instructor_rows as $row ) {
+                if ( $row_matches_email_hash( $row ) ) {
+                    return true;
+                }
+            }
+        }
+
+        // Rule 2: master all-sheet-music ledger (legacy fallback)
+        $master_sku = 'all-sheet-music';
+        $master_rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, email_hash, email_plain, expires_at, granted_at
+             FROM {$table}
+             WHERE sku=%s AND revoked_at IS NULL
+             ORDER BY id DESC",
+            (string) $master_sku
+        ) );
+
+        if ( is_array( $master_rows ) ) {
+            foreach ( $master_rows as $row ) {
+                if ( ! $row_matches_email_hash( $row ) ) continue;
+
+                $expires_at = isset( $row->expires_at ) ? (string) $row->expires_at : '';
+                $granted_at = isset( $row->granted_at ) ? (string) $row->granted_at : '';
+
+                $active = false;
+                if ( $expires_at !== '' ) {
+                    $active = ( strtotime( $expires_at ) > strtotime( $now ) );
+                } elseif ( $granted_at !== '' ) {
+                    $active = ( strtotime( $granted_at . ' +31 days' ) > strtotime( $now ) );
+                }
+
+                if ( $active ) return true;
+            }
+        }
+
+        // Rule 3: per-product option list (fallback)
         if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
             foreach ( $lists[ $sku ] as $em ) {
                 $em = sanitize_email( $em );
@@ -1516,17 +1835,156 @@ class MRM_Product_Access {
             }
         }
 
-        // Rule 3: DB row exists (also controlled by Payments Hub)
-        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
-        if ( $exists !== $table ) return false;
+        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m ) ) {
+            $piece_slug = (string) $m[1];
+            $package_sku = 'piece-' . $piece_slug . '-complete-package';
 
-        $id = $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$table} WHERE email_hash = %s AND sku = %s AND revoked_at IS NULL LIMIT 1",
-            (string) $email_hash,
+            if ( $package_sku !== $sku ) {
+                $package_rows = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT id, email_hash, email_plain
+                     FROM {$table}
+                     WHERE sku=%s AND revoked_at IS NULL
+                     ORDER BY id DESC",
+                    (string) $package_sku
+                ) );
+
+                if ( is_array( $package_rows ) ) {
+                    foreach ( $package_rows as $row ) {
+                        if ( $row_matches_email_hash( $row ) ) {
+                            return true;
+                        }
+                    }
+                }
+
+                if ( isset( $lists[ $package_sku ] ) && is_array( $lists[ $package_sku ] ) ) {
+                    foreach ( $lists[ $package_sku ] as $em ) {
+                        $em = sanitize_email( $em );
+                        if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Rule 4: per-product DB row
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, email_hash, email_plain
+             FROM {$table}
+             WHERE sku=%s AND revoked_at IS NULL
+             ORDER BY id DESC",
             (string) $sku
         ) );
 
-        return ! empty( $id );
+        if ( is_array( $rows ) ) {
+            foreach ( $rows as $row ) {
+                if ( $row_matches_email_hash( $row ) ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+
+    private function payments_hub_access_context( $email_hash, $sku ) {
+        global $wpdb;
+
+        $table = $wpdb->prefix . 'mrm_sheet_music_access';
+        $subs_table = $wpdb->prefix . 'mrm_sheet_music_subscriptions';
+        $now = current_time( 'mysql' );
+
+        $context = array(
+            'has_access' => false,
+            'source' => '',
+            'allow_audio_download' => false,
+        );
+
+        $sku = strtolower( trim( (string) $sku ) );
+        if ( $sku === '' ) return $context;
+
+        // Instructor-wide piece access
+        $instructor_master_sku = 'all-piece-products-instructors';
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, email_hash, email_plain
+             FROM {$table}
+             WHERE sku=%s AND revoked_at IS NULL
+             ORDER BY id DESC",
+            $instructor_master_sku
+        ) );
+
+        if ( is_array( $rows ) ) {
+            foreach ( $rows as $row ) {
+                $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+                $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
+
+                if (
+                    ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) ||
+                    ( $email_plain !== '' && hash_equals( $email_hash, $this->hash_email( strtolower( trim( $email_plain ) ) ) ) )
+                ) {
+                    $context['has_access'] = true;
+                    $context['source'] = 'instructor_master';
+                    $context['allow_audio_download'] = true;
+                    return $context;
+                }
+            }
+        }
+
+        // Customer subscription master access: no audio downloads
+        $subs_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $subs_table ) );
+        if ( $subs_exists === $subs_table ) {
+            $sub_rows = $wpdb->get_results(
+                "SELECT id, email_hash, email_plain, stripe_status, current_period_end
+                 FROM {$subs_table}
+                 ORDER BY id DESC"
+            );
+
+            if ( is_array( $sub_rows ) ) {
+                foreach ( $sub_rows as $row ) {
+                    $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+                    $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
+
+                    $matches = false;
+                    if ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) {
+                        $matches = true;
+                    } elseif ( $email_plain !== '' ) {
+                        $salted = $this->hash_email( strtolower( trim( $email_plain ) ) );
+                        if ( hash_equals( $email_hash, $salted ) ) {
+                            $matches = true;
+                        }
+                    }
+
+                    if ( ! $matches ) {
+                        continue;
+                    }
+
+                    $status = isset( $row->stripe_status ) ? (string) $row->stripe_status : '';
+                    $period_end = isset( $row->current_period_end ) ? (string) $row->current_period_end : '';
+                    $period_end_ts = $period_end ? strtotime( $period_end ) : 0;
+
+                    $active = in_array( $status, array( 'trialing', 'active' ), true );
+                    $paid_through = ( $period_end_ts > strtotime( $now ) );
+
+                    if ( $active || $paid_through ) {
+                        $context['has_access'] = true;
+                        $context['source'] = 'sheet_music_subscription';
+                        $context['allow_audio_download'] = false;
+                        return $context;
+                    }
+                }
+            }
+        }
+
+        // Direct piece purchase / legacy access rows: audio downloads allowed
+        if ( $this->payments_hub_has_access( $email_hash, $sku ) ) {
+            $context['has_access'] = true;
+            $context['source'] = 'piece_purchase_or_legacy';
+            $context['allow_audio_download'] = true;
+            return $context;
+        }
+
+        return $context;
     }
 
 
@@ -1789,6 +2247,10 @@ class MRM_Product_Access {
         }
 
         $tracks = $this->get_tracks_for_slug( $product_slug );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+        }
+
         if ( empty( $tracks ) ) {
             status_header( 404 );
             echo 'No tracks configured for this product.';
@@ -1813,6 +2275,7 @@ class MRM_Product_Access {
         };
 
         $has_tracks = ! empty( $tracks ) && is_array( $tracks );
+        $access_context = $this->payments_hub_access_context( (string) ( $payload['email_hash'] ?? '' ), $product_slug );
         // Use the same accent colour as the main site (golden‑olive tone).
         $accent = '#7b734a';
 
@@ -2194,12 +2657,16 @@ class MRM_Product_Access {
 
               $download_url = '';
               if ( $local !== '' ) {
-                  $download_url = $build( array(
+                  $download_args = array(
                       'product_slug' => $product_slug,
                       'asset_type'   => $type,
                       'track'        => (string) $idx,
                       'inline'       => $type === 'pdf' ? '1' : '0',
-                  ) );
+                  );
+                  if ( $type === 'audio' ) {
+                      $download_args['delivery_mode'] = 'stream';
+                  }
+                  $download_url = $build( $download_args );
               } else {
                   // Fallback: direct URL (not gated) if admin provided a remote URL.
                   $download_url = esc_url( $raw );
@@ -2208,7 +2675,7 @@ class MRM_Product_Access {
             <div class="item">
               <div class="top">
                 <div class="label"><?php echo esc_html( $label ); ?></div>
-                <?php if ( $download_url ) : ?>
+                <?php if ( $download_url && ! ( $type === 'audio' && (string) ( $access_context['source'] ?? '' ) === 'sheet_music_subscription' ) ) : ?>
                   <a class="btn primary" href="<?php echo esc_url( $download_url ); ?>" target="_blank" rel="noopener">
                     <?php echo 'Download'; ?>
                   </a>
@@ -2376,9 +2843,10 @@ class MRM_Product_Access {
         }
 
         $token = array(
-            'email' => $email_hash,
-            'sku'   => $sku,
-            'exp'   => time() + HOUR_IN_SECONDS * 6,
+            'email'        => $email_hash,
+            'product_slug' => $sku,
+            'sku'          => $sku,
+            'exp'          => time() + HOUR_IN_SECONDS * 6,
         );
 
         $options     = $this->get_options();
@@ -2402,6 +2870,23 @@ class MRM_Product_Access {
         ) );
 
         return new WP_REST_Response( array( 'ok' => true ), 200 );
+    }
+
+    public function rest_access_context( WP_REST_Request $req ) {
+        $email = sanitize_email( (string) $req->get_param( 'email' ) );
+        $sku   = sanitize_text_field( (string) $req->get_param( 'sku' ) );
+
+        if ( ! $email || ! is_email( $email ) || $sku === '' ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing email or sku.' ), 400 );
+        }
+
+        $email_hash = $this->hash_email( strtolower( trim( $email ) ) );
+        $context = $this->payments_hub_access_context( $email_hash, $sku );
+
+        return new WP_REST_Response( array(
+            'ok' => true,
+            'context' => $context,
+        ), 200 );
     }
 
     /**
@@ -2449,6 +2934,50 @@ class MRM_Product_Access {
             'catalog_url' => $catalog_url,
             'piece'       => $found,
         ), 200 );
+    }
+
+    private function mrm_pa_get_email_logo_url() {
+        $custom_logo_id = (int) get_theme_mod( 'custom_logo' );
+        if ( $custom_logo_id > 0 ) {
+            $img = wp_get_attachment_image_src( $custom_logo_id, 'full' );
+            if ( is_array( $img ) && ! empty( $img[0] ) ) {
+                return (string) $img[0];
+            }
+        }
+        return '';
+    }
+
+    private function mrm_pa_wrap_otp_email_html( $title, $intro_html, $otp, $footer_html = '' ) {
+        $site = esc_html( get_bloginfo( 'name' ) );
+        $logo = $this->mrm_pa_get_email_logo_url();
+
+        $logo_html = '';
+        if ( $logo ) {
+            $logo_html = '<div style="text-align:center;margin:0 0 22px 0;">
+            <img src="' . esc_url( $logo ) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;display:inline-block;">
+        </div>';
+        }
+
+        $code_box = '<div style="margin:22px auto 18px auto;max-width:260px;background:#f1f1f1;border:1px solid #dddddd;border-radius:12px;padding:18px 14px;text-align:center;">
+        <div style="font-size:13px;color:#666;margin-bottom:8px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;">Your Access Code</div>
+        <div style="font-size:34px;line-height:1.1;font-weight:700;color:#111;letter-spacing:0.18em;">' . esc_html( $otp ) . '</div>
+    </div>';
+
+        return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
+        <div style="max-width:640px;margin:0 auto;padding:24px;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+                ' . $logo_html . '
+                <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
+                <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
+                ' . $code_box . '
+                <div style="margin-top:10px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;text-align:center;">
+                    This code expires in 30 minutes.
+                </div>
+                ' . $footer_html . '
+                <div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
+            </div>
+        </div>
+    </body></html>';
     }
 
     /**
@@ -2525,17 +3054,34 @@ class MRM_Product_Access {
             'created_at'      => gmdate( 'Y-m-d H:i:s' ),
         ) );
 
+        $options = $this->get_options();
+
         $subject = $options['email_subject'] ?? __( 'Sheet Music Access Code', 'mrm-product-access' );
-        $body    = str_replace( '{{OTP}}', $otp, ( $options['email_body'] ?? 'Hello,
 
-Your one‑time passcode for accessing your purchased piece is {{OTP}}. It expires in 30 minutes.
+        $custom_body = (string) ( $options['email_body'] ?? '' );
+        $custom_body = str_replace( '{{OTP}}', '', $custom_body );
+        $custom_body = trim( preg_replace( '/\n{2,}/', "\n\n", $custom_body ) );
 
-Thank you.' ) );
-        // Option A: Let FluentSMTP (or your SMTP plugin) control the From Name/Email.
-        // Do NOT set custom headers here.
-        $sent = wp_mail( $normalized_email, $subject, $body );
-if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-            error_log( sprintf( 'MRM OTP email send failure to %s', $normalized_email ) );
+        $intro_html = '<p>Your one-time passcode for accessing your purchased piece is below.</p>';
+
+        if ( $custom_body !== '' ) {
+            $intro_html .= '<div style="margin-top:10px;">' . nl2br( esc_html( $custom_body ) ) . '</div>';
+        }
+
+        $html = $this->mrm_pa_wrap_otp_email_html(
+            $subject,
+            $intro_html,
+            $otp
+        );
+
+        $headers = array(
+            'Content-Type: text/html; charset=UTF-8',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        );
+
+        $sent = wp_mail( $normalized_email, $subject, $html, $headers );
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         }
 
         return new WP_REST_Response( $generic, 200 );
@@ -2993,12 +3539,24 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
                       <div class="offer-row">
                         <div>
                           <div class="offer-title"><?php echo esc_html( $offer_title ); ?></div>
-                          <?php if ( $offer_sub !== '' ) : ?><div class="offer-sub"><?php echo esc_html( $offer_sub ); ?></div><?php endif; ?>
+                          <?php if ( $offer_sub !== '' ) : ?>
+                            <div class="offer-sub"><?php echo wp_kses_post( wpautop( $offer_sub ) ); ?></div>
+                          <?php endif; ?>
                         </div>
                         <?php if ( $offer_price !== '' ) : ?><div class="offer-price"><?php echo esc_html( $offer_price ); ?></div><?php endif; ?>
                       </div>
 
                       <div class="offer-actions">
+                        <div class="mrm-pa-terms-row">
+                          <input type="checkbox" class="mrm-pa-terms-check">
+                          <label>
+                            I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.
+                            <span class="mrm-pa-terms-subcaption">
+                              Includes the digital content license, access restrictions, anti-sharing rules, and non-refund terms.
+                            </span>
+                          </label>
+                        </div>
+
                         <button type="button" class="buyBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>">
                           <?php echo esc_html__( 'Buy', 'mrm-product-access' ); ?>
                         </button>
@@ -3091,6 +3649,32 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         }
 
         .pdf-col { display: flex; flex-direction: column; }
+        .mrm-pa-terms-row {
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+          margin: 10px 0 12px;
+          font-size: 14px;
+          line-height: 1.35;
+        }
+
+        .mrm-pa-terms-row input {
+          margin-top: 2px;
+          flex: 0 0 auto;
+        }
+
+        .mrm-pa-terms-row label {
+          display: block;
+          margin: 0;
+        }
+
+        .mrm-pa-terms-subcaption {
+          display: block;
+          margin-top: 3px;
+          font-size: 12px;
+          line-height: 1.35;
+          color: #666;
+        }
 
         .pdf-preview {
           width: 100%;
@@ -3156,7 +3740,25 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           height: auto;
         }
 
-        .meta .description { font-size: 15px; line-height: 1.6; color: var(--color-text-main); margin-bottom: 20px; }
+        .meta .description {
+          font-size: 15px;
+          line-height: 1.6;
+          color: var(--color-text-main);
+          margin-bottom: 20px;
+        }
+
+        .meta .description p,
+        .mrm-long-description p,
+        .offer-sub p {
+          margin-top: 0;
+          margin-bottom: 1em;
+        }
+
+        .meta .description p:last-child,
+        .mrm-long-description p:last-child,
+        .offer-sub p:last-child {
+          margin-bottom: 0;
+        }
 
         .title-block { text-align: left; }
 
@@ -3285,19 +3887,37 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         .button-secondary { background: transparent; color: var(--color-accent); }
 
         @media (max-width: 860px) {
-          .wrapper { padding: 18px; }
+          .wrapper {
+            padding: 14px;
+            background: #f6f4ef;
+          }
 
           .product-card {
             grid-template-columns: 1fr;
-            padding: 18px;
+            padding: 16px;
+            border-radius: 24px;
+            box-shadow: 0 14px 32px rgba(0,0,0,0.08);
           }
 
           .pdf-col { align-items: center; }
-          .pdf-preview { width: min(720px, 100%); height: 360px; }
+          .pdf-preview {
+            width: min(720px, 100%);
+            height: 360px;
+            border-radius: 20px;
+          }
           .pdf-preview canvas { margin: 0 auto; }
 
           .title-block { text-align: center; }
-          .actions { justify-content: center; }
+          .actions {
+            justify-content: center;
+            gap: 10px;
+          }
+
+          .button-primary,
+          .button-secondary {
+            min-height: 48px;
+            border-radius: 16px;
+          }
 
           .audio-controls {
             display: grid;
@@ -3313,7 +3933,11 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
             align-items: center;
             column-gap: 10px;
           }
-          .audio-row-top .time { min-width: 0; text-align: center; }
+
+          .audio-row-top .time {
+            min-width: 0;
+            text-align: center;
+          }
 
           .audio-row-seek { width: 100%; }
           .audio-row-seek .progress { width: 100%; height: 10px; }
@@ -3340,7 +3964,6 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           color: #111111 !important;
         }
 
-        /* Close button: force readable black text and an obvious button look */
         .mrm-otpOverlay .mrm-closeBtn{
           color: #000000 !important;
           background: transparent;
@@ -3365,7 +3988,6 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           box-shadow:
             0 26px 90px rgba(0,0,0,0.38),
             0 2px 16px rgba(0,0,0,0.22);
-          transform: scale(1.35);
           transform-origin: center;
         }
 
@@ -3457,15 +4079,6 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           background: var(--color-accent);
           color: #ffffff !important;
           box-shadow: 0 10px 22px rgba(0,0,0,0.16);
-          transition: transform 120ms ease, box-shadow 120ms ease;
-        }
-        .mrm-otpOverlay button.primary:hover {
-          transform: translateY(-1px);
-          box-shadow: 0 14px 30px rgba(0,0,0,0.22);
-        }
-        .mrm-otpOverlay button.primary:active {
-          transform: translateY(0px);
-          box-shadow: 0 10px 22px rgba(0,0,0,0.16);
         }
 
         .mrm-otpOverlay button.secondary {
@@ -3474,20 +4087,51 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
           background: transparent;
           cursor: pointer;
         }
-        .mrm-otpOverlay button.secondary:hover {
-          background: rgba(0,0,0,0.06);
-        }
-
         .hidden { display:none; }
-
-        @media (max-width: 900px) {
-          .mrm-otpOverlay .modal { transform: scale(1.15); }
-        }
         @media (max-width: 620px) {
-          .mrm-otpOverlay .modal { transform: none; width: min(560px, 94vw); }
-          .mrm-otpOverlay .modal > div:last-child { justify-content: stretch; }
+          .wrapper {
+            padding: 0;
+          }
+
+          .product-card {
+            border-radius: 0;
+            border-left: 0;
+            border-right: 0;
+            box-shadow: none;
+            margin-bottom: 14px;
+          }
+
+          .pdf-preview {
+            height: 320px;
+            border-radius: 18px;
+          }
+
+          .actions {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
           .mrm-otpOverlay button.primary,
-          .mrm-otpOverlay button.secondary { width: 100%; }
+          .mrm-otpOverlay button.secondary {
+            width: 100%;
+          }
+
+          .mrm-otpOverlay {
+            align-items: flex-end;
+          }
+
+          .mrm-otpOverlay .modal {
+            transform: none;
+            width: 100%;
+            max-width: 100%;
+            border-radius: 26px 26px 0 0;
+            box-shadow: 0 -18px 42px rgba(0,0,0,0.24);
+          }
+
+          .mrm-otpOverlay .modal > div:last-child {
+            justify-content: stretch;
+            flex-direction: column;
+          }
         }
         </style>
 
@@ -3730,6 +4374,17 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
               emailInput.value = '';
               otpInput.value = '';
             }
+            piece.querySelectorAll('.buyBtn').forEach((buyBtn) => {
+              buyBtn.addEventListener('click', function(){
+                const offerBox = buyBtn.closest('.offer, .offer-card, .mrm-pa-offer, .purchase-option') || buyBtn.parentElement;
+                const termsCheck = offerBox ? offerBox.querySelector('.mrm-pa-terms-check') : null;
+                if (!termsCheck || !termsCheck.checked) {
+                  alert('Please agree to the Terms of Service before purchasing.');
+                  return;
+                }
+                openOtpModal();
+              });
+            });
             function closeOtpModal(){
               otpOverlay.classList.remove('is-open');
               otpOverlay.setAttribute('aria-hidden', 'true');
@@ -3822,6 +4477,7 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
     public function api_download( $request ) {
         $product_slug = isset( $_GET['product_slug'] ) ? $this->sanitize_product_slug( $_GET['product_slug'] ) : '';
         $asset_type   = isset( $_GET['asset_type'] ) ? sanitize_key( $_GET['asset_type'] ) : '';
+        $delivery_mode = strtolower( sanitize_text_field( (string) $request->get_param('delivery_mode') ) );
         $track        = isset( $_GET['track'] ) ? sanitize_key( $_GET['track'] ) : '';
         $inline       = ! empty( $_GET['inline'] );
         $force_dl     = ! empty( $_GET['download'] );
@@ -3865,8 +4521,16 @@ if ( ! $sent && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
         }
 
         // ✅ Hub is the ONLY source of truth for access (download time enforcement).
-        if ( ! $this->payments_hub_has_access( (string) $email_hash, $product_slug ) ) {
+        $access_context = $this->payments_hub_access_context( (string) $email_hash, $product_slug );
+        if ( empty( $access_context['has_access'] ) ) {
             return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
+        }
+
+        if ( $asset_type === 'audio' && empty( $access_context['allow_audio_download'] ) ) {
+            // Allow playback/streaming, but not explicit downloads, for subscription-based access.
+            if ( $delivery_mode !== 'stream' ) {
+                return new WP_REST_Response( array( 'error' => 'Audio downloads are not included with this access type.' ), 403 );
+            }
         }
 
         $tracks = $this->get_tracks_for_slug( $product_slug );

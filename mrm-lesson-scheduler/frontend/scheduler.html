@@ -71,6 +71,79 @@ h1 {
   font-size:14px;
 }
 
+#length-select,
+#mrm-pref-length {
+  font-weight: 700;
+}
+
+.mrm-pricing-summary{
+  margin-top: 4px;
+  margin-bottom: 22px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+}
+
+.mrm-pricing-summary.is-hidden{
+  display: none;
+}
+
+.mrm-pricing-summary-title{
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: 6px;
+}
+
+.mrm-pricing-summary-main{
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-main);
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+
+.mrm-pricing-summary-sub{
+  font-size: 14px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.mrm-pricing-summary-sub strong{
+  color: var(--color-text-main);
+}
+
+.mrm-pricing-summary-inline-note{
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.mrm-pref-pricing-summary{
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+@media (max-width: 767px){
+  .mrm-pricing-summary{
+    padding: 13px 14px;
+    margin-bottom: 18px;
+  }
+
+  .mrm-pricing-summary-main{
+    font-size: 15px;
+  }
+
+  .mrm-pricing-summary-sub{
+    font-size: 13px;
+  }
+}
+
 .city-heading {
   margin: 22px 0 12px 0;
   font-size: 20px;
@@ -152,6 +225,14 @@ h1 {
   color:#6b6b6b;
   font-size:12.5px;
   line-height:1.35;
+}
+
+.instructor-format-label{
+  font-size: 0.9rem;
+  line-height: 1.35;
+  margin: 4px 0 10px 0;
+  opacity: 0.85;
+  font-weight: 600;
 }
 
 .instructor-toggle {
@@ -915,6 +996,31 @@ h1 {
   margin: 0;
   padding: 0;
 }
+.mrm-check-row.mrm-terms-check-row {
+  align-items: flex-start;
+  margin-top: 10px;
+}
+
+.mrm-check-row.mrm-terms-check-row input[type="checkbox"] {
+  margin: 1px 0 0 0;
+  flex: 0 0 auto;
+}
+
+.mrm-check-row.mrm-terms-check-row label {
+  display: block;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.mrm-check-subcaption {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #666;
+}
 
 .payment-options{
   margin-top: 10px;
@@ -922,11 +1028,42 @@ h1 {
   color: var(--color-text-muted);
 }
 
+.mrm-payment-choice-group{
+  display:none;
+  margin-top:12px;
+  padding:14px 14px 12px;
+  border:1px solid rgba(0,0,0,0.18);
+  border-radius:14px;
+  background:rgba(0,0,0,0.02);
+}
+
+.mrm-payment-choice-title{
+  margin:0 0 8px 0;
+  font-size:13px;
+  font-weight:700;
+  color:var(--color-text-main);
+  text-transform:none;
+}
+
 .mrm-check-row{
   display:flex;
   align-items:center;
   gap:8px;
   margin-top:10px;
+}
+
+.mrm-payment-choice-group .mrm-check-row:first-of-type{
+  margin-top:0;
+}
+
+.mrm-pref-field.is-disabled label{
+  color:#777;
+}
+
+.mrm-pref-field.is-disabled select{
+  opacity:0.65;
+  background:#f3f3f3;
+  cursor:not-allowed;
 }
 
 .mrm-check-row input[type="checkbox"]{
@@ -969,6 +1106,15 @@ h1 {
   cursor: not-allowed;
 }
 
+/* Keep the Terms checkbox aligned with the first label line, not centered against the subcaption. */
+.mrm-check-row.mrm-terms-check-row {
+  align-items: flex-start;
+}
+
+.mrm-check-row.mrm-terms-check-row input[type="checkbox"] {
+  margin-top: 1px;
+}
+
 .modal-actions {
   display: flex;
   align-items: center;
@@ -990,6 +1136,59 @@ h1 {
   margin-top: 10px;
   font-size: 14px;
   color: rgba(0,0,0,0.75);
+}
+
+/* =========================================================
+   Payment Loading Overlay
+   ========================================================= */
+.mrm-payment-loading-overlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 100003;
+}
+
+.mrm-payment-loading-modal{
+  width: min(420px, 100%);
+  background: var(--color-surface);
+  border: 1px solid rgba(0,0,0,0.14);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 22px 60px rgba(0,0,0,0.22);
+  padding: 26px 20px 20px;
+  text-align: center;
+}
+
+.mrm-payment-loading-spinner{
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 14px;
+  border-radius: 999px;
+  border: 4px solid rgba(0,0,0,0.12);
+  border-top-color: var(--color-accent);
+  animation: mrm-spin 0.9s linear infinite;
+}
+
+.mrm-payment-loading-title{
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.mrm-payment-loading-text{
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+@keyframes mrm-spin{
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }
 
 /* =========================================================
@@ -1040,8 +1239,15 @@ h1 {
 }
 
 .mrm-success-text{
-  margin: 0 0 16px;
+  margin: 0 0 8px;
   font-size: 14px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.mrm-success-note{
+  margin: 0 0 16px;
+  font-size: 13px;
   line-height: 1.45;
   color: var(--color-text-muted);
 }
@@ -1054,23 +1260,34 @@ h1 {
 
 .mrm-toast {
   position: fixed;
+  top: 50%;
   left: 50%;
-  bottom: 20px;
-  transform: translateX(-50%);
-  background: var(--color-accent);
-  color: #fff;
-  padding: 10px 16px;
-  border-radius: var(--radius-md);
-  font-size: 13px;
-  font-weight: 600;
-  box-shadow: 0 12px 24px rgba(0,0,0,0.18);
+  transform: translate(-50%, -50%) scale(0.96);
+  background: var(--color-surface);
+  color: var(--color-text-main);
+  padding: 16px 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(0,0,0,0.12);
+  box-shadow: 0 20px 50px rgba(0,0,0,0.22);
+  font-size: 14px;
+  line-height: 1.45;
+  font-weight: 500;
+  text-align: center;
+  width: min(360px, calc(100vw - 32px));
   opacity: 0;
-  transition: opacity 0.45s ease;
+  transition: opacity 0.22s ease, transform 0.22s ease;
   z-index: 10001;
+  pointer-events: none;
 }
 
 .mrm-toast.is-visible {
   opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.mrm-toast strong {
+  font-weight: 800;
+  color: var(--color-text-main);
 }
 
 /* =========================
@@ -1212,7 +1429,15 @@ h1 {
   width: 100%;
 }
 
+.instructor-actions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:10px;
+}
+
 .instructor-learnmore,
+.instructor-seeavailability,
 .instructor-profile-back{
   display: inline-flex;
   align-items: center;
@@ -1221,17 +1446,47 @@ h1 {
   color: #ffffff !important;
   border: 1px solid rgba(0,0,0,0.15);
   border-radius: 10px;
-  padding: 6px 10px;          /* smaller than before */
-  font-size: 13px;            /* slightly smaller */
+  padding: 6px 10px;
+  font-size: 13px;
   font-weight: 700;
   line-height: 1;
   text-decoration: none !important;
   cursor: pointer;
+  font-family: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .instructor-learnmore:hover,
+.instructor-seeavailability:hover,
 .instructor-profile-back:hover{
   opacity:0.9;
+}
+
+.day-slots-booknow{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  min-height:44px;
+  border:none;
+  border-radius:14px;
+  background: var(--color-accent);
+  color:#fff;
+  font-size:14px;
+  font-weight:700;
+  cursor:pointer;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.14);
+}
+
+.day-slots-booknow:hover{
+  filter: brightness(1.03);
+}
+
+.day-slots-booknow:active{
+  transform: translateY(1px);
 }
 
 /* =========================
@@ -1239,7 +1494,6 @@ h1 {
    (CSS-only additions)
    ========================= */
 
-/* Tablet and down */
 @media (max-width: 900px) {
   .wrapper {
     padding: 18px;
@@ -1251,7 +1505,9 @@ h1 {
   }
 
   .state-selector-wrap {
-    padding: 12px 12px 16px;
+    padding: 14px 14px 18px;
+    border-radius: 20px;
+    box-shadow: 0 14px 32px rgba(0,0,0,0.08);
   }
 
   .calendar-header > div {
@@ -1260,7 +1516,27 @@ h1 {
 }
 
 @media (max-width: 720px) {
-  /* Month grid: hard guarantee that 7 columns never overflow */
+  .wrapper {
+    padding: 12px;
+  }
+
+  .filters,
+  .state-selector-wrap,
+  .instructor {
+    border-radius: 22px;
+    box-shadow: 0 14px 32px rgba(0,0,0,0.08);
+  }
+
+  .instructor {
+    padding: 12px;
+    margin-bottom: 16px;
+  }
+
+  .instructor-header {
+    padding: 14px;
+    border-radius: 18px;
+  }
+
   .calendar-grid {
     width: 100%;
     max-width: 100%;
@@ -1268,26 +1544,21 @@ h1 {
 
   .calendar-day {
     box-sizing: border-box;
-    min-height: 64px;
-    padding: 2px;              /* critical: keeps circle inside narrow columns */
-    overflow: visible;         /* IMPORTANT: do not clip the mobile modal overlay */
+    min-height: 66px;
+    padding: 3px;
+    overflow: visible;
   }
 
   .calendar-day-number {
     box-sizing: border-box;
-
-    /* critical: circle scales to fit the cell width on any phone */
-    width: clamp(28px, 10.5vw, 40px);
-    height: clamp(28px, 10.5vw, 40px);
-
-    font-size: clamp(12px, 4.0vw, 16px);
+    width: clamp(30px, 10.5vw, 40px);
+    height: clamp(30px, 10.5vw, 40px);
+    font-size: clamp(12px, 4vw, 16px);
     line-height: 1;
-
     max-width: 100%;
     max-height: 100%;
   }
 
-  /* When a day is expanded on mobile, show the day panel as a fullscreen modal */
   .day-slots.is-mobile-modal {
     position: fixed;
     inset: 0;
@@ -1295,153 +1566,66 @@ h1 {
     margin: 0;
     padding: 0;
     border-top: none;
-    background: rgba(0,0,0,0.45);
+    background: rgba(0,0,0,0.48);
     display: flex;
     align-items: flex-end;
     justify-content: center;
   }
 
   .day-slots.is-mobile-modal .day-slots-sheet {
-    width: min(100%, 640px);
+    width: 100%;
+    max-width: 100%;
     background: #fff;
-    border-radius: 18px 18px 0 0;
-    padding: 16px;
+    border-radius: 28px 28px 0 0;
+    padding: 14px 14px 18px;
     margin: 0;
     display: flex;
     flex-direction: column;
     gap: 10px;
-    max-height: calc(100vh - 24px);
+    max-height: calc(100vh - 10px);
     overflow: hidden;
-    box-shadow: 0 -12px 30px rgba(0,0,0,0.18);
+    box-shadow: 0 -18px 40px rgba(0,0,0,0.20);
   }
 
   .day-slots.is-mobile-modal .day-slots-close {
     align-self: flex-end;
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
     border-radius: 999px;
-    border: 1px solid rgba(0,0,0,0.18);
+    border: 1px solid rgba(0,0,0,0.14);
     background: #fff;
     color: #111;
-    font-size: 20px;
+    font-size: 22px;
     font-weight: 700;
     line-height: 1;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.08);
   }
 
-  .day-slots.is-mobile-modal .day-slots-close:hover {
-    filter: brightness(0.98);
-  }
-
-  /* (leave the rest of your existing .day-slots.is-mobile-modal rules unchanged below) */
-}
-
-/* Phone and down */
-@media (max-width: 600px) {
-  .wrapper {
-    padding: 14px;
-  }
-
-  h1 {
-    font-size: 24px;
-    margin: 0 0 14px 0;
-  }
-
-  /* Instructor cards: prevent header overflow + make it wrap cleanly */
-  .instructor {
-    padding: 14px;
-    margin-bottom: 18px;
-  }
-
-  .instructor-header {
-    padding: 12px;
-    gap: 10px;
-    align-items: flex-start;
-  }
-
-  .instructor-header-left {
-    align-items: flex-start;
-  }
-
-  .instructor-avatar {
-    width: 42px;
-    height: 42px;
-    flex: 0 0 42px;
-  }
-
-  .instructor-title-line {
-    font-size: 15px;
-  }
-
-  .instructor-shortdesc {
-    font-size: 13px;
-  }
-
-  .calendar-header button {
-    width: 36px;
-    height: 36px;
-    font-size: 20px;
-  }
-
-  .calendar-header > div {
-    font-size: 20px;
-  }
-
-  /* Expanded day slots: slightly narrower tiles, slightly shorter rows */
-  .day-slots-grid {
-    grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
-    --slot-row-h: 38px;
-    max-height: calc((var(--slot-row-h) * 5) + (8px * 4));
-  }
-
-  .slot,
-  .slot-booked-block {
-    padding: 8px 9px;
-    border-radius: 12px;
-    font-size: 12px;
-  }
-
-  .slot-line-time {
-    font-size: 12px;
-  }
-
-  .slot-line-duration {
-    font-size: 11px;
-  }
-
-  .slot-line-mode {
-    font-size: 10px;
-  }
-
-  /* Confirm button: full width feels better on phones */
-  .confirm-wrap {
-    text-align: center;
-  }
-
-  .confirm-selection {
-    width: 100%;
-    justify-content: center;
-    display: inline-flex;
-  }
-
-  .confirm-msg {
-    text-align: center;
-  }
-
-  /* Modal: reduce padding + make content breathe on small screens */
   .modal-overlay {
-    padding: 12px;
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 100%;
+    max-height: 94vh;
+    border-radius: 26px 26px 0 0;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    box-shadow: 0 -18px 42px rgba(0,0,0,0.24);
   }
 
   .modal-header {
-    padding: 12px 12px;
+    padding: 14px 14px;
   }
 
   .modal-body {
-    padding: 12px;
+    padding: 14px;
   }
 
   .modal-title {
@@ -1449,12 +1633,43 @@ h1 {
   }
 
   .modal-close {
-    width: 34px;
-    height: 34px;
-    font-size: 20px;
+    width: 38px;
+    height: 38px;
+    font-size: 22px;
+    border-radius: 12px;
   }
 
-  /* State map wrapper: tighter padding on mobile */
+  .mrm-payment-loading-overlay,
+  .mrm-success-overlay,
+  .mrm-pref-overlay {
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .mrm-payment-loading-modal,
+  .mrm-success-modal,
+  .mrm-pref-modal {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 26px 26px 0 0;
+    box-shadow: 0 -18px 42px rgba(0,0,0,0.24);
+  }
+
+  .mrm-pref-modal {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 600px) {
+  .wrapper {
+    padding: 10px;
+  }
+
+  h1 {
+    font-size: 24px;
+    margin: 0 0 14px 0;
+  }
+
   .state-selector-wrap {
     padding: 12px;
   }
@@ -1467,24 +1682,31 @@ h1 {
     font-size: 13px;
   }
 
-  .us-map-wrap {
-    border-radius: 12px;
+  .filters {
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .confirm-msg {
+    text-align: center;
+  }
+
+  .modal-body,
+  .mrm-pref-modal,
+  .mrm-payment-loading-modal,
+  .mrm-success-modal {
+    padding-left: 14px;
+    padding-right: 14px;
   }
 }
 
-/* Very small phones */
 @media (max-width: 420px) {
   .wrapper {
-    padding: 12px;
+    padding: 8px;
   }
 
   h1 {
     font-size: 22px;
-  }
-
-  .filters {
-    gap: 10px;
-    margin-bottom: 18px;
   }
 
   .day-slots-grid {
@@ -1611,18 +1833,24 @@ h1 {
           <label>Lesson type</label>
           <select id="mrm-pref-lesson-option"></select>
         </div>
-        <div>
+        <div id="mrm-pref-length-wrap" class="mrm-pref-field">
           <label>Lesson length</label>
           <select id="mrm-pref-length"></select>
         </div>
-        <div>
+        <div id="mrm-pref-frequency-wrap" class="mrm-pref-field">
           <label>Frequency</label>
           <select id="mrm-pref-frequency"></select>
         </div>
-        <div>
+        <div id="mrm-pref-duration-wrap" class="mrm-pref-field">
           <label>Reserve time for</label>
           <select id="mrm-pref-duration"></select>
         </div>
+      </div>
+
+      <div id="mrm-pref-pricing-summary" class="mrm-pricing-summary mrm-pref-pricing-summary is-hidden" aria-live="polite">
+        <div class="mrm-pricing-summary-title">Lesson Pricing</div>
+        <div id="mrm-pref-pricing-summary-main" class="mrm-pricing-summary-main"></div>
+        <div id="mrm-pref-pricing-summary-sub" class="mrm-pricing-summary-sub"></div>
       </div>
 
       <button type="button" id="mrm-pref-see" class="mrm-pref-see">See availability</button>
@@ -1682,6 +1910,12 @@ h1 {
     </div>
   </div>
 
+  <div id="mrm-pricing-summary" class="mrm-pricing-summary is-hidden" aria-live="polite">
+    <div class="mrm-pricing-summary-title">Lesson Pricing</div>
+    <div id="mrm-pricing-summary-main" class="mrm-pricing-summary-main"></div>
+    <div id="mrm-pricing-summary-sub" class="mrm-pricing-summary-sub"></div>
+  </div>
+
   <div id="instructor-container"></div>
 
   <div class="booking" id="booking-panel" style="display:none;">
@@ -1692,7 +1926,7 @@ h1 {
     <input id="student-name">
 
     <label>Email</label>
-    <input id="student-email">
+    <input id="student-email" type="email" autocomplete="email">
 
     <label>Instrument</label>
     <input id="confirm-instrument">
@@ -1705,8 +1939,10 @@ h1 {
     <input id="first-name" type="hidden">
     <input id="last-name" type="hidden">
     <input id="address" type="hidden">
+    <input id="address-city" type="hidden">
     <input id="address-state" type="hidden">
     <input id="address-postal" type="hidden">
+    <input id="parent-timezone" type="hidden">
     <input id="address-country" type="hidden">
     <input id="phone" type="hidden">
     <input id="frequency" type="hidden">
@@ -1738,7 +1974,7 @@ h1 {
           <input id="modal-student-name" autocomplete="name">
 
           <label for="modal-instrument">Instrument</label>
-          <select id="modal-instrument">
+          <select id="modal-instrument" disabled aria-disabled="true">
             <option value="" selected>Choose instrument</option>
             <option value="Trombone">Trombone</option>
             <option value="Euphonium">Euphonium</option>
@@ -1746,10 +1982,13 @@ h1 {
           </select>
 
           <label for="modal-student-email">Email</label>
-          <input id="modal-student-email" autocomplete="email">
+          <input id="modal-student-email" type="email" autocomplete="email">
 
           <label for="modal-address">Address</label>
           <input id="modal-address" autocomplete="street-address">
+
+          <label for="modal-city">City</label>
+          <input id="modal-city" autocomplete="address-level2">
 
           <label for="modal-state">State</label>
           <input id="modal-state" autocomplete="address-level1">
@@ -1787,28 +2026,39 @@ h1 {
             <option value="indefinitely">Indefinitely</option>
           </select>
 
-          <div class="terms-row" style="margin-top:12px;">
-            <input type="checkbox" id="modal-agree-terms">
-            <label for="modal-agree-terms" class="terms-text">
-              I agree to terms of service —
-              <a href="/wp-content/uploads/terms.pdf" target="_blank" rel="noopener">view terms</a>
+          <div class="mrm-check-row mrm-terms-check-row">
+            <input type="checkbox" id="modal-agree-terms" required>
+            <label for="modal-agree-terms">
+              I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.
+              <span class="mrm-check-subcaption">
+                Includes payment authorization, cancellation/refund terms, recurring billing terms where selected, digital access rules, and safety policies.
+              </span>
             </label>
           </div>
 
           <div class="payment-options">
-            <div class="mrm-check-row">
-              <input type="checkbox" id="mrm-autopay-opt">
-              <label for="mrm-autopay-opt">I am aware that I am signing up for auto-pay for future lessons.</label>
+            <div id="mrm-payment-choice-group" class="mrm-payment-choice-group">
+              <div class="mrm-payment-choice-title">Select your payment option</div>
+
+              <div class="mrm-check-row">
+                <input type="checkbox" id="mrm-autopay-opt">
+                <label for="mrm-autopay-opt">I am aware that I am signing up for auto-pay for future lessons.</label>
+              </div>
+
+              <div class="mrm-check-row">
+                <input type="checkbox" id="mrm-prepay-opt">
+                <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
+              </div>
+
+              <div id="mrm-autopay-visual-note" style="display:none; margin-top:10px; font-size:12.5px; line-height:1.45;"></div>
+
+              <div style="margin-top:8px;">By selecting auto-pay, you authorize Low Brass Lessons to store your card and charge for future lessons.</div>
             </div>
-            <div class="mrm-check-row">
-              <input type="checkbox" id="mrm-prepay-opt">
-              <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
-            </div>
+
             <div class="mrm-check-row">
               <input type="checkbox" id="mrm-sheet-music-addon-opt">
-              <label for="mrm-sheet-music-addon-opt">subscribe for sheet music and backing track access ($5 per month auto-cancelled when no longer enrolled in lessons)</label>
+              <label for="mrm-sheet-music-addon-opt">Subscribe for sheet music and backing track access ($5 per month; renews monthly until cancelled through the subscription portal).</label>
             </div>
-            <div style="margin-top:6px;">By selecting auto-pay, you authorize MRM to store your card and charge for future lessons.</div>
           </div>
 
           <div class="modal-actions">
@@ -1830,6 +2080,12 @@ h1 {
       </div>
       <div class="modal-body">
         <p id="mrm-payment-instructions"></p>
+        <div class="mrm-promo-box" style="margin:14px 0;padding:14px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;background:rgba(255,255,255,0.72);">
+          <label for="mrm-promo-code-input" style="display:block;font-weight:700;margin-bottom:6px;">Promotional code</label>
+          <input id="mrm-promo-code-input" type="text" autocomplete="off" placeholder="Enter code" style="width:100%;max-width:320px;padding:10px 12px;border-radius:10px;border:1px solid rgba(0,0,0,0.18);" />
+          <button id="mrm-promo-code-apply" type="button" style="display:none;margin-top:8px;padding:9px 14px;border:0;border-radius:999px;background:var(--color-accent,#7c4a2d);color:#fff;font-weight:700;">Apply Code</button>
+          <div id="mrm-promo-code-message" style="margin-top:8px;font-size:0.92rem;"></div>
+        </div>
         <div id="mrm-payment-element"></div>
         <div class="modal-actions">
           <button class="modal-submit" id="mrm-pay-btn">Pay</button>
@@ -1859,6 +2115,31 @@ h1 {
   </div>
 </div>
 
+<div id="mrm-sheet-music-resume-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+  <div class="modal" role="dialog" aria-modal="true" style="max-width:520px;">
+    <div class="modal-header">
+      <h2 class="modal-title">Sheet music subscription</h2>
+      <button class="modal-close" id="mrm-sheet-music-resume-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="mrm-sheet-music-resume-message" style="line-height:1.5;"></div>
+      <div class="modal-actions" style="display:flex;justify-content:flex-end;">
+        <button class="modal-submit" id="mrm-sheet-music-resume-continue" type="button">Continue</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="mrm-payment-loading-overlay" class="mrm-payment-loading-overlay" aria-hidden="true" style="display:none;">
+  <div class="mrm-payment-loading-modal" role="dialog" aria-modal="true" aria-labelledby="mrm-payment-loading-title">
+    <div class="mrm-payment-loading-spinner" aria-hidden="true"></div>
+    <h2 id="mrm-payment-loading-title" class="mrm-payment-loading-title">Finalizing your booking</h2>
+    <p id="mrm-payment-loading-text" class="mrm-payment-loading-text">
+      Please wait while we confirm your payment and create your lesson.
+    </p>
+  </div>
+</div>
+
 <div id="instructorProfileView" style="display:none;"></div>
 
 <!-- =========================================================
@@ -1877,6 +2158,7 @@ h1 {
     <p id="mrm-success-text" class="mrm-success-text">
       Please check your email for our confirmation.
     </p>
+    <p id="mrm-success-note" class="mrm-success-note" style="display:none;"></p>
 
     <div class="mrm-success-actions">
       <!-- Reuse your existing button styling -->
@@ -1889,6 +2171,202 @@ h1 {
 <script>
 const apiBase = '/wp-json/mrm-schedule/v1';
 const payApiBase = '/wp-json/mrm-pay/v1';
+const mrmLessonPricingCache = {
+  lesson_30_online: null,
+  lesson_60_online: null,
+  lesson_30_inperson: null,
+  lesson_60_inperson: null,
+  loaded: false,
+  loadingPromise: null
+};
+
+function mrmFormatMoneyFromCents(cents){
+  return '$' + ((Number(cents || 0) / 100).toFixed(2));
+}
+
+function mrmLessonSkuFor(type, length){
+  const normalizedLength = String(length || '').trim() === '30' ? '30' : '60';
+
+  if(type === 'online') return `lesson_${normalizedLength}_online`;
+  if(type === 'in_person') return `lesson_${normalizedLength}_inperson`;
+
+  return '';
+}
+
+async function mrmLoadLessonPricing(){
+  if (mrmLessonPricingCache.loaded) return mrmLessonPricingCache;
+
+  if (mrmLessonPricingCache.loadingPromise) {
+    return mrmLessonPricingCache.loadingPromise;
+  }
+
+  const skus = [
+    'lesson_30_online',
+    'lesson_60_online',
+    'lesson_30_inperson',
+    'lesson_60_inperson'
+  ];
+
+  mrmLessonPricingCache.loadingPromise = Promise.all(
+    skus.map(async (sku) => {
+      const res = await fetch(`${payApiBase}/quote?sku=${encodeURIComponent(sku)}`);
+      const json = await res.json();
+
+      if (!res.ok || !json.ok) {
+        throw new Error(json.message || `Unable to load pricing for ${sku}.`);
+      }
+
+      mrmLessonPricingCache[sku] = {
+        sku,
+        label: json.label || sku,
+        amount_cents: Number(json.amount_cents || 0),
+        base_amount_cents: Number(json.base_amount_cents || json.amount_cents || 0),
+        travel_amount_cents: Number(json.travel_amount_cents || 0),
+        currency: json.currency || 'usd',
+        tax_message: json.tax_message || 'Sales tax is calculated after billing details are entered.'
+      };
+    })
+  ).then(() => {
+    mrmLessonPricingCache.loaded = true;
+    return mrmLessonPricingCache;
+  }).catch((err) => {
+    console.error('[MRM Scheduler Pricing] Failed to load lesson pricing.', err);
+    throw err;
+  });
+
+  return mrmLessonPricingCache.loadingPromise;
+}
+
+function mrmGetTravelFeeCents(length){
+  const inPersonSku = mrmLessonSkuFor('in_person', length);
+  const inPerson = mrmLessonPricingCache[inPersonSku];
+  if (!inPerson) return 0;
+  return Math.max(0, Number(inPerson.travel_amount_cents || 0));
+}
+
+function mrmGetPricePresentation(type, length){
+  const normalizedLength = String(length || '').trim() === '30' ? '30' : '60';
+
+  if (type === 'consultation') {
+    return {
+      optionLabel: normalizedLength === '30' ? '30 minutes' : '60 minutes',
+      mainLine: 'Meet The Instructor consultation — Free',
+      subLine: 'Consultations are free and remain a 30-minute online booking.',
+      hideSummary: false
+    };
+  }
+
+  const sku = mrmLessonSkuFor(type, normalizedLength);
+  const quote = mrmLessonPricingCache[sku];
+
+  if (!quote) {
+    return {
+      optionLabel: normalizedLength === '30' ? '30 minutes' : '60 minutes',
+      mainLine: '',
+      subLine: '',
+      hideSummary: true
+    };
+  }
+
+  if (type === 'online') {
+    return {
+      optionLabel: `${normalizedLength} minutes — ${mrmFormatMoneyFromCents(quote.amount_cents)}`,
+      mainLine: `${normalizedLength}-minute online lesson — ${mrmFormatMoneyFromCents(quote.amount_cents)} per lesson`,
+      subLine: 'This is your per-lesson total before any applicable sales tax is calculated at checkout.',
+      hideSummary: false
+    };
+  }
+
+  const travelFeeCents = Math.max(0, Number(quote.travel_amount_cents || 0));
+  const baseCents = Math.max(0, Number(quote.base_amount_cents || quote.amount_cents || 0));
+
+  return {
+    optionLabel: `${normalizedLength} minutes — ${mrmFormatMoneyFromCents(baseCents)} + ${mrmFormatMoneyFromCents(travelFeeCents)} travel`,
+    mainLine: `${normalizedLength}-minute in-person lesson — ${mrmFormatMoneyFromCents(baseCents)} base + ${mrmFormatMoneyFromCents(travelFeeCents)} travel fee = ${mrmFormatMoneyFromCents(quote.amount_cents)} per lesson`,
+    subLine: 'In-person lessons include the travel fee in the per-lesson total shown here. Any applicable sales tax is calculated at checkout.',
+    hideSummary: false
+  };
+}
+
+function mrmRenderLengthOptions(selectEl, lessonType){
+  if (!selectEl) return;
+
+  const option30 = selectEl.querySelector('option[value="30"]');
+  const option60 = selectEl.querySelector('option[value="60"]');
+
+  if (lessonType === 'consultation') {
+    if (option30) option30.textContent = '30 minutes';
+    if (option60) option60.textContent = '60 minutes';
+    return;
+  }
+
+  if (option30) {
+    const data30 = mrmGetPricePresentation(lessonType, '30');
+    option30.textContent = data30.optionLabel || '30 minutes';
+  }
+
+  if (option60) {
+    const data60 = mrmGetPricePresentation(lessonType, '60');
+    option60.textContent = data60.optionLabel || '60 minutes';
+  }
+}
+
+function mrmRenderPricingSummary(summaryRootId, mainId, subId, lessonType, lessonLength){
+  const root = document.getElementById(summaryRootId);
+  const main = document.getElementById(mainId);
+  const sub = document.getElementById(subId);
+
+  if (!root || !main || !sub) return;
+
+  const data = mrmGetPricePresentation(lessonType, lessonLength);
+
+  if (data.hideSummary) {
+    root.classList.add('is-hidden');
+    main.textContent = '';
+    sub.textContent = '';
+    return;
+  }
+
+  root.classList.remove('is-hidden');
+  main.textContent = data.mainLine || '';
+  sub.textContent = data.subLine || '';
+}
+
+function mrmRefreshAllPricingUI(){
+  const mainLessonType = document.getElementById('lesson-option')?.value || 'consultation';
+  const mainLength = document.getElementById('length-select')?.value || '30';
+
+  const prefLessonType = document.getElementById('mrm-pref-lesson-option')?.value || mainLessonType;
+  const prefLength = document.getElementById('mrm-pref-length')?.value || mainLength;
+
+  mrmRenderLengthOptions(document.getElementById('length-select'), mainLessonType);
+  mrmRenderLengthOptions(document.getElementById('mrm-pref-length'), prefLessonType);
+
+  mrmRenderPricingSummary(
+    'mrm-pricing-summary',
+    'mrm-pricing-summary-main',
+    'mrm-pricing-summary-sub',
+    mainLessonType,
+    mainLength
+  );
+
+  mrmRenderPricingSummary(
+    'mrm-pref-pricing-summary',
+    'mrm-pref-pricing-summary-main',
+    'mrm-pref-pricing-summary-sub',
+    prefLessonType,
+    prefLength
+  );
+}
+
+async function mrmInitPricingUI(){
+  try {
+    await mrmLoadLessonPricing();
+    mrmRefreshAllPricingUI();
+  } catch (err) {
+    console.error('[MRM Scheduler Pricing] Pricing UI init failed.', err);
+  }
+}
 let stripe = null;
 let activeStripeElements = null;
 let activePaymentElement = null;
@@ -1897,39 +2375,83 @@ let activePaymentElement = null;
    Calendar Success Popup (Event Created)
    Reload happens ONLY when Close is clicked.
    ========================================================= */
-function mrmShowCalendarSuccessPopup(customText){
+function mrmShowCalendarSuccessPopup(options){
   const overlay  = document.getElementById('mrm-success-overlay');
   const textEl   = document.getElementById('mrm-success-text');
+  const noteEl   = document.getElementById('mrm-success-note');
   const closeBtn = document.getElementById('mrm-success-close');
 
   if(!overlay || !textEl || !closeBtn) return;
 
-  // Set message text
-  if(typeof customText === 'string' && customText.trim()){
-    textEl.textContent = customText.trim();
-  }else{
-    textEl.textContent = 'Please check your email for our confirmation.';
+  let mainText = 'Please check your email for our confirmation.';
+  let noteText = '';
+
+  if (typeof options === 'string' && options.trim()) {
+    mainText = options.trim();
+  } else if (options && typeof options === 'object') {
+    if (typeof options.text === 'string' && options.text.trim()) {
+      mainText = options.text.trim();
+    }
+    if (typeof options.note === 'string' && options.note.trim()) {
+      noteText = options.note.trim();
+    }
   }
 
-  // Show overlay
+  textEl.textContent = mainText;
+
+  if (noteEl) {
+    if (noteText) {
+      noteEl.textContent = noteText;
+      noteEl.style.display = 'block';
+    } else {
+      noteEl.textContent = '';
+      noteEl.style.display = 'none';
+    }
+  }
+
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden', 'false');
 
-  // Ensure ONLY the Close button can dismiss + reload
-  closeBtn.onclick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Hide popup first
+  const closePopup = (e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     overlay.style.display = 'none';
     overlay.setAttribute('aria-hidden', 'true');
-
-    // Reload at the very end of this click handler sequence
-    // (setTimeout 0 ensures the DOM hide applies before reload)
-    setTimeout(() => {
-      window.location.reload();
-    }, 0);
   };
+
+  closeBtn.onclick = closePopup;
+
+  overlay.onclick = (e) => {
+    if (e.target === overlay) {
+      return;
+    }
+  };
+}
+
+function mrmShowPaymentLoading(message){
+  const overlay = document.getElementById('mrm-payment-loading-overlay');
+  const textEl = document.getElementById('mrm-payment-loading-text');
+
+  if (!overlay) return;
+
+  if (textEl) {
+    textEl.textContent = (typeof message === 'string' && message.trim())
+      ? message.trim()
+      : 'Please wait while we confirm your payment and create your lesson.';
+  }
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function mrmHidePaymentLoading(){
+  const overlay = document.getElementById('mrm-payment-loading-overlay');
+  if (!overlay) return;
+
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden', 'true');
 }
 
 function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDuration){
@@ -1963,6 +2485,108 @@ function estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDur
   return Math.max(1, base * occurrences);
 }
 
+function estimateAutopayAuthorizedLessonCount(baseSelectedCount, repeatFrequency, repeatDuration){
+  const derived = estimatePrepayLessonCount(baseSelectedCount, repeatFrequency, repeatDuration);
+  if (derived === null) return 0; // indefinite
+  return Math.max(1, parseInt(derived, 10) || 0);
+}
+
+function expandSelectedSlotsForRecurringBooking(seedSlots, repeatFrequency, repeatDuration){
+  const slots = Array.isArray(seedSlots) ? seedSlots.slice() : [];
+  const freq = String(repeatFrequency || 'none').trim().toLowerCase();
+  const duration = String(repeatDuration || '').trim().toLowerCase();
+
+  if (!slots.length) return [];
+  if (freq !== 'weekly' && freq !== 'biweekly') return slots;
+
+  const intervalDays = (freq === 'biweekly') ? 14 : 7;
+
+  const countMap = {
+    '1_month': 4,
+    '2_months': 8,
+    '3_months': 12,
+    '6_months': 24,
+    '12_months': 48
+  };
+
+  if (freq === 'biweekly') {
+    countMap['1_month'] = 2;
+    countMap['2_months'] = 4;
+    countMap['3_months'] = 6;
+    countMap['6_months'] = 12;
+    countMap['12_months'] = 24;
+  }
+
+  let repeatCount = countMap[duration] || 0;
+
+  // Indefinite recurring bookings should seed a rolling 90-day local horizon.
+  if (duration === 'indefinitely') {
+    repeatCount = Math.floor(90 / intervalDays) + 1;
+  }
+
+  if (repeatCount <= 1) return slots;
+
+  const expanded = [];
+
+  for (const slot of slots) {
+    const startRaw = String(slot.start || '');
+    const endRaw = String(slot.end || '');
+
+    const startTs = Date.parse(startRaw);
+    const endTs = Date.parse(endRaw);
+
+    if (!startTs || !endTs || endTs <= startTs) continue;
+
+    for (let i = 0; i < repeatCount; i++) {
+      expanded.push({
+        start: new Date(startTs + (i * intervalDays * 86400000)).toISOString(),
+        end: new Date(endTs + (i * intervalDays * 86400000)).toISOString(),
+        instructor_id: parseInt(slot.instructor_id || 0, 10) || 0
+      });
+    }
+  }
+
+  expanded.sort((a, b) => String(a.start).localeCompare(String(b.start)));
+
+  const deduped = [];
+  const seen = new Set();
+
+  for (const slot of expanded) {
+    const key = `${slot.instructor_id}|${slot.start}|${slot.end}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(slot);
+  }
+
+  return deduped;
+}
+
+function updateAutopayVisualNote() {
+  const noteEl = document.getElementById('mrm-autopay-visual-note');
+  const autopayCb = document.getElementById('mrm-autopay-opt');
+  const frequency = (document.getElementById('frequency')?.value || 'none').trim();
+  const reserveDuration = (document.getElementById('reserve-duration')?.value || '--').trim();
+
+  if (!noteEl || !autopayCb) return;
+
+  const count = selectedSlots.length || 1;
+  const authorized = estimateAutopayAuthorizedLessonCount(count, frequency, reserveDuration);
+
+  if (!autopayCb.checked) {
+    noteEl.style.display = 'none';
+    noteEl.textContent = '';
+    return;
+  }
+
+  if (authorized > 0) {
+    noteEl.textContent = `Auto-pay enrollment: the first lesson is prepaid now, and your card will remain on file for up to ${authorized} total lesson charge${authorized === 1 ? '' : 's'} under this enrollment. Remaining lessons are charged automatically after delivery.`;
+  } else {
+    noteEl.textContent = 'Auto-pay enrollment: the first lesson is prepaid now, and future recurring lessons are charged automatically after delivery while lessons remain scheduled. Your saved card will be removed automatically when recurring lessons are canceled.';
+  }
+
+  noteEl.style.display = 'block';
+}
+
 function ensureStripe(publishableKey){
   const key = (publishableKey || '').trim();
   if (!key || typeof Stripe !== 'function') return null;
@@ -1973,25 +2597,86 @@ function ensureStripe(publishableKey){
   return stripe;
 }
 
-function openPaymentModal(clientSecret, breakdown){
+function mrmBuildPaymentElementOptions(allowedMethods){
+  const methods = Array.isArray(allowedMethods) && allowedMethods.length
+    ? allowedMethods.filter(Boolean)
+    : ['card'];
+
+  return {
+    paymentMethodOrder: methods,
+    wallets: {
+      applePay: 'auto',
+      googlePay: 'auto',
+      link: 'never'
+    },
+    layout: {
+      type: 'accordion',
+      defaultCollapsed: false,
+      visibleAccordionItemsCount: 0
+    }
+  };
+}
+
+function mrmRenderLessonPaymentBreakdown(breakdown) {
+  const instructions = document.getElementById('mrm-payment-instructions');
+  if (!instructions) return;
+
+  const money = (cents) => '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
+
+  const base = Number(breakdown?.base_amount_cents || 0);
+  const addon = Number(breakdown?.addon_amount_cents || 0);
+  const tax = Number(breakdown?.tax_cents || 0);
+  const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
+  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
+
+  const taxMessage = String(
+    breakdown?.tax_message ||
+    breakdown?.tax_policy?.policy_message ||
+    'Sales tax is calculated after billing state and ZIP are entered.'
+  ).trim();
+
+  const rows = [];
+
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
+
+  if (promoDiscount > 0) {
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
+  }
+
+  if (addon > 0) {
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
+  }
+
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
+  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+
+  instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+}
+
+function openPaymentModal(clientSecret, breakdown, allowedMethods){
   const overlay = document.getElementById('mrm-payment-overlay');
   const closeBtn = document.getElementById('mrm-payment-close');
   const payBtn = document.getElementById('mrm-pay-btn');
   const errorEl = document.getElementById('mrm-payment-error');
   const instructions = document.getElementById('mrm-payment-instructions');
 
-  const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
-  const base = Number(breakdown?.base_amount_cents || 0);
-  const addon = Number(breakdown?.addon_amount_cents || 0);
-  const tax = Number(breakdown?.tax_cents || 0);
-  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
+  mrmAppliedPromoCode = '';
+  mrmAppliedPromoDiscountCents = 0;
 
-  const rows = [];
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
-  if (addon > 0) rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : 'Calculated at checkout'}</strong></div>`);
-  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
-  instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+  const promoInput = document.getElementById('mrm-promo-code-input');
+  const promoBtn = document.getElementById('mrm-promo-code-apply');
+
+  if (promoInput) {
+    promoInput.value = '';
+  }
+
+  if (promoBtn) {
+    promoBtn.style.display = 'none';
+  }
+
+  mrmSetPromoMessage('', false);
+
+  mrmRenderLessonPaymentBreakdown(breakdown);
   errorEl.textContent = '';
   payBtn.disabled = false;
 
@@ -2000,7 +2685,10 @@ function openPaymentModal(clientSecret, breakdown){
   document.body.classList.add('mrm-booking-modal-open');
 
   activeStripeElements = stripe.elements({ clientSecret });
-  activePaymentElement = activeStripeElements.create('payment');
+  activePaymentElement = activeStripeElements.create(
+    'payment',
+    mrmBuildPaymentElementOptions(allowedMethods)
+  );
   activePaymentElement.mount('#mrm-payment-element');
 
   const closeModal = (opts = {}) => {
@@ -2025,6 +2713,23 @@ function openPaymentModal(clientSecret, breakdown){
     }
     activePaymentElement = null;
     activeStripeElements = null;
+    mrmLessonPaymentReloadContext = null;
+
+    mrmAppliedPromoCode = '';
+    mrmAppliedPromoDiscountCents = 0;
+
+    const promoInput = document.getElementById('mrm-promo-code-input');
+    const promoBtn = document.getElementById('mrm-promo-code-apply');
+
+    if (promoInput) {
+      promoInput.value = '';
+    }
+
+    if (promoBtn) {
+      promoBtn.style.display = 'none';
+    }
+
+    mrmSetPromoMessage('', false);
   };
 
   closeBtn.onclick = () => closeModal({ clearSelection: false });
@@ -2066,6 +2771,51 @@ function showConfirmTotal(breakdown){
     closeBtn.onclick = ()=>{ cleanup(); resolve(false); };
     cancelBtn.onclick = ()=>{ cleanup(); resolve(false); };
     confirmBtn.onclick = ()=>{ cleanup(); resolve(true); };
+  });
+}
+
+function showSheetMusicResumePromptIfNeeded(createData){
+  const resumeInfo = createData && createData.sheet_music_resuming_subscription
+    ? createData.sheet_music_resuming_subscription
+    : null;
+  const isResuming = !!(resumeInfo && resumeInfo.is_resuming);
+
+  if (!isResuming) {
+    return Promise.resolve(true);
+  }
+
+  const overlay = document.getElementById('mrm-sheet-music-resume-overlay');
+  const closeBtn = document.getElementById('mrm-sheet-music-resume-close');
+  const continueBtn = document.getElementById('mrm-sheet-music-resume-continue');
+  const messageEl = document.getElementById('mrm-sheet-music-resume-message');
+
+  if (!overlay || !closeBtn || !continueBtn || !messageEl) {
+    return Promise.resolve(true);
+  }
+
+  const dateText = String(resumeInfo.current_period_end_display || '').trim() || 'your scheduled end date';
+  messageEl.textContent = `Your sheet music subscription is currently set to end on ${dateText}. Continuing will keep your subscription active.`;
+
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden', 'false');
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      overlay.style.display = 'none';
+      overlay.setAttribute('aria-hidden', 'true');
+      closeBtn.onclick = null;
+      continueBtn.onclick = null;
+    };
+
+    closeBtn.onclick = () => {
+      cleanup();
+      resolve(false);
+    };
+
+    continueBtn.onclick = () => {
+      cleanup();
+      resolve(true);
+    };
   });
 }
 
@@ -2177,6 +2927,8 @@ function applyLessonOptionDefaults(){
     if(modalFreq) modalFreq.disabled = false;
     if(modalDur)  modalDur.disabled  = false;
   }
+
+  mrmRefreshAllPricingUI();
 }
 
 function applyRepeatUIRules(){
@@ -2235,10 +2987,11 @@ function applyRepeatUIRules(){
 }
 
 function updatePaymentCheckboxVisibility() {
-  const appointmentType = document.getElementById('lesson-option')?.value; // 'consultation' or lesson type
-  const frequency = document.getElementById('repeat-frequency')?.value || 'none'; // weekly | biweekly | none
+  const appointmentType = document.getElementById('lesson-option')?.value || 'consultation';
+  const frequency = document.getElementById('repeat-frequency')?.value || 'none';
 
   const termsRow = document.querySelector('.terms-row');
+  const paymentChoiceGroup = document.getElementById('mrm-payment-choice-group');
 
   const autopayCb = document.getElementById('mrm-autopay-opt');
   const prepayCb  = document.getElementById('mrm-prepay-opt');
@@ -2248,53 +3001,47 @@ function updatePaymentCheckboxVisibility() {
   const prepayRow  = prepayCb?.closest('.mrm-check-row');
   const sheetRow   = sheetCb?.closest('.mrm-check-row');
 
-  if (!termsRow || !autopayRow || !prepayRow || !sheetRow) return;
+  if (!termsRow || !paymentChoiceGroup || !autopayRow || !prepayRow || !sheetRow) return;
 
-  // Default: hide everything
-  termsRow.style.display  = 'none';
+  termsRow.style.display = 'none';
+  paymentChoiceGroup.style.display = 'none';
   autopayRow.style.display = 'none';
-  prepayRow.style.display  = 'none';
-  sheetRow.style.display   = 'none';
+  prepayRow.style.display = 'none';
+  sheetRow.style.display = 'none';
 
-  // Consultation: ONLY terms of service
   if (appointmentType === 'consultation') {
     termsRow.style.display = '';
 
-    // Ensure hidden options are not selected
     if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
     if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
     if (sheetCb)   { sheetCb.checked   = false; }
 
-    // Remove any disabled styling
     autopayRow.classList.remove('is-disabled');
     prepayRow.classList.remove('is-disabled');
     return;
   }
 
-  // Non-consultation lesson: terms always visible
   termsRow.style.display = '';
-
-  // Sheet music subscription: always visible for online/in-person lessons
   sheetRow.style.display = '';
 
-  // Auto-pay + Prepay only visible for repeating lessons
   const isRepeating = (frequency === 'weekly' || frequency === 'biweekly');
 
   if (isRepeating) {
+    paymentChoiceGroup.style.display = 'block';
     autopayRow.style.display = '';
     prepayRow.style.display  = '';
   } else {
+    paymentChoiceGroup.style.display = 'none';
     autopayRow.style.display = 'none';
     prepayRow.style.display  = 'none';
 
-    // If lesson does not repeat, force these off + fully enabled
     if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
     if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
+
     autopayRow.classList.remove('is-disabled');
     prepayRow.classList.remove('is-disabled');
   }
 
-  // Apply mutual-exclusion state if they are visible
   applyAutoPrepayMutualExclusion();
 }
 
@@ -2333,6 +3080,101 @@ function clearSelectedSlots() {
     el.classList.remove('selected-slot');
   });
   if (currentInstructor) updateBooking(currentInstructor);
+}
+
+function snapshotSelectedSlotState() {
+  if (!Array.isArray(selectedSlots) || !selectedSlots.length) return null;
+
+  const first = selectedSlots[0];
+  if (!first || typeof first !== 'object') return null;
+
+  return {
+    slots: JSON.parse(JSON.stringify(selectedSlots)),
+    instructorId: String(first.instructor_id || first.instructorId || currentInstructor?.id || ''),
+    start: String(first.start || first.start_time || ''),
+    end: String(first.end || first.end_time || '')
+  };
+}
+
+function slotMatchesSnapshot(slot, snap) {
+  if (!slot || !snap) return false;
+
+  const slotInstructorId = String(slot.instructor_id || slot.instructorId || '');
+  const slotStart = String(slot.start || slot.start_time || '');
+  const slotEnd   = String(slot.end || slot.end_time || '');
+
+  return (
+    slotInstructorId === snap.instructorId &&
+    slotStart === snap.start &&
+    slotEnd === snap.end
+  );
+}
+
+function tryRestoreSelectedSlotsFromSnapshot(snap) {
+  if (!snap || !snap.instructorId || !snap.start || !snap.end) return false;
+  if (!Array.isArray(window.__mrmLastRenderedInstructors) || !window.__mrmLastRenderedInstructors.length) return false;
+
+  const matchingInstructor = window.__mrmLastRenderedInstructors.find(inst => {
+    return String(inst.id || '') === snap.instructorId;
+  });
+
+  if (!matchingInstructor) return false;
+
+  const availability = Array.isArray(matchingInstructor.availability) ? matchingInstructor.availability : [];
+  const matchingSlot = availability.find(slot => slotMatchesSnapshot(slot, snap));
+
+  if (!matchingSlot) return false;
+
+  selectedSlots = snap.slots.map(s => ({ ...s }));
+  persistSelectedSlots();
+
+  currentInstructor = matchingInstructor;
+
+  renderInstructorListForState(selectedState);
+
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.slot').forEach(el => {
+      const slotInstructorId = String(el.dataset.instructorId || '');
+      const slotStart = String(el.dataset.start || '');
+      const slotEnd = String(el.dataset.end || '');
+
+      if (
+        slotInstructorId === snap.instructorId &&
+        slotStart === snap.start &&
+        slotEnd === snap.end
+      ) {
+        el.classList.add('selected');
+        el.classList.add('selected-slot');
+      }
+    });
+
+    if (currentInstructor) {
+      updateBooking(currentInstructor);
+    }
+  });
+
+  return true;
+}
+
+function rerunInstructorSearchForCurrentFilters() {
+  if (!selectedState) return;
+
+  const snap = snapshotSelectedSlotState();
+
+  // Close expanded instructor context before rebuilding results.
+  currentInstructor = null;
+
+  renderInstructorListForState(selectedState);
+
+  // If the previously selected slot is still valid under the new filters,
+  // restore it. Otherwise fall back to the current behavior and clear it.
+  if (snap && tryRestoreSelectedSlotsFromSnapshot(snap)) {
+    return;
+  }
+
+  clearSelectedSlots();
+  currentInstructor = null;
+  renderInstructorListForState(selectedState);
 }
 
 function syncModalToMain() {
@@ -2387,13 +3229,19 @@ function syncMainToModal() {
 
 // Optional: if user flips lesson option, enforce the defaults immediately.
 document.addEventListener('change', (e)=>{
-  if(e && e.target && e.target.id === 'lesson-option'){
+  if(!e || !e.target) return;
+
+  if(e.target.id === 'lesson-option'){
     applyLessonOptionDefaults();
     applyRepeatUIRules();
+    updatePaymentCheckboxVisibility();
+    mrmRefreshAllPricingUI();
 
-    // If you want already-open calendars to immediately reflect any duration change,
-    // you can force a soft rerender by "marking stale" and refreshing open instructor.
-    // This is safe and additive.
+    // Refresh the instructor results so the visible cards always match
+    // the current top-bar search query.
+    rerunInstructorSearchForCurrentFilters();
+
+    // If an instructor calendar was open, mark it stale after the query changed.
     if(currentInstructor && typeof currentInstructor._mrmMarkStale === 'function'){
       currentInstructor._mrmMarkStale();
     }
@@ -2401,13 +3249,19 @@ document.addEventListener('change', (e)=>{
       currentInstructor._mrmRefreshOpenDay();
     }
   }
+
+  if(e.target.id === 'length-select' || e.target.id === 'mrm-pref-length' || e.target.id === 'mrm-pref-lesson-option'){
+    mrmRefreshAllPricingUI();
+  }
 });
 
 const repeatFrequencyEl = document.getElementById('repeat-frequency');
 const repeatDurationEl  = document.getElementById('repeat-duration');
+const lengthSelectEl    = document.getElementById('length-select');
 
 if (repeatFrequencyEl) repeatFrequencyEl.addEventListener('change', ()=>{ applyRepeatUIRules(); updatePaymentCheckboxVisibility(); });
 if (repeatDurationEl)  repeatDurationEl.addEventListener('change', applyRepeatUIRules);
+if (lengthSelectEl)    lengthSelectEl.addEventListener('change', mrmRefreshAllPricingUI);
 
 // run once on page load to enforce defaults
 applyRepeatUIRules();
@@ -2563,9 +3417,10 @@ function openBookingModal(instr){
   // Prefill extra modal fields
   document.getElementById('modal-first-name').value = document.getElementById('first-name')?.value || '';
   document.getElementById('modal-last-name').value  = document.getElementById('last-name')?.value || '';
-  document.getElementById('modal-address').value    = document.getElementById('address')?.value || '';
-  document.getElementById('modal-state').value      = document.getElementById('address-state')?.value || '';
-  document.getElementById('modal-postal-code').value= document.getElementById('address-postal')?.value || '';
+  document.getElementById('modal-address').value     = document.getElementById('address')?.value || '';
+  document.getElementById('modal-city').value        = document.getElementById('address-city')?.value || '';
+  document.getElementById('modal-state').value       = document.getElementById('address-state')?.value || '';
+  document.getElementById('modal-postal-code').value = document.getElementById('address-postal')?.value || '';
   document.getElementById('modal-phone').value      = document.getElementById('phone')?.value || '';
 
   syncModalToMain();
@@ -2628,6 +3483,7 @@ function syncModalToLegacyFields(){
   const fn = document.getElementById('modal-first-name')?.value || '';
   const ln = document.getElementById('modal-last-name')?.value || '';
   const addr = document.getElementById('modal-address')?.value || '';
+  const addrCity = document.getElementById('modal-city')?.value || '';
   const addrState = document.getElementById('modal-state')?.value || '';
   const addrPostal = document.getElementById('modal-postal-code')?.value || '';
   const phone = document.getElementById('modal-phone')?.value || '';
@@ -2638,13 +3494,211 @@ function syncModalToLegacyFields(){
   const fnEl = document.getElementById('first-name'); if(fnEl) fnEl.value = fn;
   const lnEl = document.getElementById('last-name');  if(lnEl) lnEl.value = ln;
   const adEl = document.getElementById('address');    if(adEl) adEl.value = addr;
+  const acityEl = document.getElementById('address-city'); if(acityEl) acityEl.value = addrCity;
   const asEl = document.getElementById('address-state'); if(asEl) asEl.value = addrState;
   const apEl = document.getElementById('address-postal'); if(apEl) apEl.value = addrPostal;
   const acEl = document.getElementById('address-country'); if(acEl) acEl.value = 'US';
   const phEl = document.getElementById('phone');      if(phEl) phEl.value = phone;
   const frEl = document.getElementById('frequency');  if(frEl) frEl.value = freq;
   const rdEl = document.getElementById('reserve-duration'); if(rdEl) rdEl.value = dur;
+  updateAutopayVisualNote();
 }
+
+
+let mrmAppliedPromoCode = '';
+let mrmAppliedPromoDiscountCents = 0;
+let mrmLessonPaymentReloadContext = null;
+
+function mrmGetLessonPromoEmailValue() {
+  const modalEmail = document.getElementById('modal-student-email');
+  const mainEmail = document.getElementById('student-email');
+  const genericEmail = document.querySelector('input[type="email"]');
+
+  const modalVal = modalEmail ? String(modalEmail.value || '').trim() : '';
+  if (modalVal) return modalVal;
+
+  const mainVal = mainEmail ? String(mainEmail.value || '').trim() : '';
+  if (mainVal) return mainVal;
+
+  return genericEmail ? String(genericEmail.value || '').trim() : '';
+}
+
+async function mrmReloadLessonPaymentIntentWithPromo() {
+  if (!mrmLessonPaymentReloadContext || !mrmLessonPaymentReloadContext.requestBody) {
+    return false;
+  }
+
+  const overlay = document.getElementById('mrm-payment-overlay');
+  const paymentMount = document.getElementById('mrm-payment-element');
+  const payBtn = document.getElementById('mrm-pay-btn');
+  const errorEl = document.getElementById('mrm-payment-error');
+
+  if (!overlay || overlay.style.display === 'none') {
+    return false;
+  }
+
+  const promoCode = mrmAppliedPromoCode || mrmGetPromoCodeInputValue();
+  if (!promoCode) return false;
+
+  try {
+    if (payBtn) payBtn.disabled = true;
+    if (errorEl) errorEl.textContent = '';
+
+    if (activePaymentElement) {
+      try { activePaymentElement.unmount(); } catch (e) {}
+    }
+
+    activePaymentElement = null;
+    activeStripeElements = null;
+
+    if (paymentMount) {
+      paymentMount.innerHTML = `
+        <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+          Promotional code applied. Reloading the secure payment form…
+        </div>
+      `;
+    }
+
+    const requestBody = JSON.parse(JSON.stringify(mrmLessonPaymentReloadContext.requestBody));
+    requestBody.promo_code = promoCode;
+
+    const res = await fetch(mrmLessonPaymentReloadContext.payApiBase + '/create-payment-intent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody)
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || !data.ok) {
+      if (errorEl) errorEl.textContent = data.message || 'Unable to apply promotional code to payment.';
+      if (payBtn) payBtn.disabled = false;
+      return false;
+    }
+
+    Object.assign(mrmLessonPaymentReloadContext.currentData, data);
+
+    const stripeInstance = ensureStripe(data.publishableKey || '');
+    if (!stripeInstance) {
+      if (errorEl) errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
+      if (payBtn) payBtn.disabled = false;
+      return false;
+    }
+
+    stripe = stripeInstance;
+
+    mrmRenderLessonPaymentBreakdown(mrmLessonPaymentReloadContext.currentData);
+
+    activeStripeElements = stripe.elements({ clientSecret: data.client_secret });
+    activePaymentElement = activeStripeElements.create(
+      'payment',
+      mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card'])
+    );
+
+    if (paymentMount) paymentMount.innerHTML = '';
+    activePaymentElement.mount('#mrm-payment-element');
+
+    if (payBtn) payBtn.disabled = false;
+    return true;
+  } catch (err) {
+    console.error('[MRM] promo reload payment intent error:', err);
+    if (errorEl) errorEl.textContent = 'Unable to reload payment form with promotional code.';
+    if (payBtn) payBtn.disabled = false;
+    return false;
+  }
+}
+
+function mrmGetPromoCodeInputValue() {
+  const input = document.getElementById('mrm-promo-code-input');
+  return input ? String(input.value || '').trim().toUpperCase() : '';
+}
+
+function mrmSetPromoMessage(message, isError) {
+  const el = document.getElementById('mrm-promo-code-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.style.color = isError ? '#9f1d1d' : '#1f6f3f';
+}
+
+function mrmInitPromoBox() {
+  const input = document.getElementById('mrm-promo-code-input');
+  const btn = document.getElementById('mrm-promo-code-apply');
+  if (!input || !btn) return;
+
+  input.addEventListener('input', function () {
+    mrmAppliedPromoCode = '';
+    mrmAppliedPromoDiscountCents = 0;
+    btn.style.display = input.value.trim() ? 'inline-flex' : 'none';
+    mrmSetPromoMessage('', false);
+  });
+
+  btn.addEventListener('click', async function () {
+    const code = mrmGetPromoCodeInputValue();
+    const email = mrmGetLessonPromoEmailValue();
+
+    if (!code) {
+      mrmSetPromoMessage('Please enter a promotional code.', true);
+      return;
+    }
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      mrmSetPromoMessage('Please enter your email before applying a promotional code.', true);
+      return;
+    }
+
+    try {
+      btn.disabled = true;
+      mrmSetPromoMessage('Checking code…', false);
+      let skuToValidate = '';
+
+    const appointmentType = document.getElementById('lesson-option')?.value || '';
+    const firstSelectedSlot = Array.isArray(selectedSlots) && selectedSlots.length ? selectedSlots[0] : null;
+    const selectedMinutes = firstSelectedSlot
+      ? Math.round((new Date(firstSelectedSlot.end).getTime() - new Date(firstSelectedSlot.start).getTime()) / 60000)
+      : NaN;
+
+    const effectiveMinutes = Number.isFinite(selectedMinutes) && selectedMinutes > 0
+      ? selectedMinutes
+      : (typeof getSlotMinutes === 'function' ? getSlotMinutes() : 60);
+
+    if (appointmentType && appointmentType !== 'consultation') {
+      const len = effectiveMinutes === 60 ? '60' : '30';
+      const mode = appointmentType === 'in_person' ? 'inperson' : 'online';
+      skuToValidate = `lesson_${len}_${mode}`;
+    }
+      const res = await fetch('/wp-json/mrm-pay/v1/validate-promo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          promo_code: code,
+          sku: skuToValidate,
+          email: email,
+          context: { lesson_count: 1, prepay: 'no' }
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        mrmAppliedPromoCode = '';
+        mrmAppliedPromoDiscountCents = 0;
+        mrmSetPromoMessage(data.message || 'Invalid promotional code.', true);
+        return;
+      }
+      mrmAppliedPromoCode = data.promo_code || code;
+      mrmAppliedPromoDiscountCents = Number(data.discount_cents || 0);
+      mrmSetPromoMessage(data.promo_success_message || 'Promotional code applied.', false);
+
+        await mrmReloadLessonPaymentIntentWithPromo();
+    } catch (err) {
+      mrmAppliedPromoCode = '';
+      mrmAppliedPromoDiscountCents = 0;
+      mrmSetPromoMessage('Unable to check this code right now.', true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+document.addEventListener('DOMContentLoaded', mrmInitPromoBox);
 
 async function submitBooking(payload, setMsg){
   const r = await fetch(apiBase + '/book', {
@@ -2654,43 +3708,81 @@ async function submitBooking(payload, setMsg){
   });
 
   let data = null;
-  try{ data = await r.json(); }catch(_){ data = null; }
-
-  if(!r.ok){
-    const err = (data && (data.message || data.error)) ? (data.message || data.error) : ('Booking failed (HTTP ' + r.status + ').');
-    setMsg(err);
-    return { ok: false };
+  try {
+    data = await r.json();
+  } catch (_) {
+    data = null;
   }
 
-  const ok = (data && (data.success===true || data.ok===true)) || (!data);
-  if(!ok){
-    const err = (data && (data.message || data.error)) ? (data.message || data.error) : 'Booking failed.';
+  if (!r.ok) {
+    const err = (data && (data.message || data.error))
+      ? (data.message || data.error)
+      : ('Booking failed (HTTP ' + r.status + ').');
     setMsg(err);
-    return { ok: false };
+    return { ok: false, data };
   }
 
-  setMsg((data && data.message) ? data.message : 'Booking confirmed!');
+  const ok = !!(data && (data.success === true || data.ok === true));
+  if (!ok) {
+    const err = (data && (data.message || data.error))
+      ? (data.message || data.error)
+      : 'Booking failed.';
+    setMsg(err);
+    return { ok: false, data };
+  }
 
-  selectedSlots.length = 0;
-  document.querySelectorAll('.slot.selected').forEach(el=>el.classList.remove('selected'));
+  const backendMsg = (data && data.message) ? data.message : 'Booking confirmed!';
+  setMsg(backendMsg);
 
   const bookedInstructor = currentInstructor;
   closeBookingModal();
 
-  mrmShowCalendarSuccessPopup('Please check your email for our confirmation.');
+  let popupText = 'Please check your email for our confirmation.';
+  let popupNote = '';
+
+  if ((payload.payment_mode || '') === 'autopay') {
+    popupNote = '(Auto-pay enabled)';
+  }
+
+  mrmShowCalendarSuccessPopup({
+    text: popupText,
+    note: popupNote
+  });
 
   updateBooking(currentInstructor);
-  if(bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function'){
+  if (bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function') {
     bookedInstructor._mrmMarkStale();
   }
-  if(bookedInstructor && typeof bookedInstructor._mrmRefreshOpenDay === 'function'){
+  if (bookedInstructor && typeof bookedInstructor._mrmRefreshOpenDay === 'function') {
     bookedInstructor._mrmRefreshOpenDay();
   }
-  if(bookedInstructor && typeof bookedInstructor._mrmRefreshVisibleMonth === 'function'){
+  if (bookedInstructor && typeof bookedInstructor._mrmRefreshVisibleMonth === 'function') {
     bookedInstructor._mrmRefreshVisibleMonth();
   }
 
-  return { ok: true };
+  return { ok: true, data };
+}
+
+function handleExistingSheetMusicSubscriptionGuard(createData, setMsg){
+  const code = createData && createData.code ? String(createData.code) : '';
+  const alreadyEnrolled = !!(createData && createData.already_enrolled);
+
+  if (code !== 'already_enrolled_sheet_music_subscription' && !alreadyEnrolled) {
+    return false;
+  }
+
+  const addonCheckbox = document.getElementById('mrm-sheet-music-addon-opt');
+  if (addonCheckbox) {
+    addonCheckbox.checked = false;
+  }
+
+  setMsg(
+    (createData && createData.message)
+      ? createData.message
+      : 'This email is already enrolled in the sheet music subscription. You do not need to subscribe again. If you need help, please contact us through our contact form.'
+  );
+
+  return true;
 }
 
 function ensureLegacyBookingHandler(){
@@ -2723,6 +3815,7 @@ function ensureLegacyBookingHandler(){
     const firstName = (document.getElementById('first-name')?.value||'').trim();
     const lastName  = (document.getElementById('last-name')?.value||'').trim();
     const address   = (document.getElementById('address')?.value||'').trim();
+    const addressCity = (document.getElementById('address-city')?.value||'').trim();
     const addressState = (document.getElementById('address-state')?.value||'').trim();
     const addressPostal = (document.getElementById('address-postal')?.value||'').trim();
     const addressCountry = (document.getElementById('address-country')?.value||'US').trim() || 'US';
@@ -2739,6 +3832,18 @@ function ensureLegacyBookingHandler(){
     }
     if(!address){
       setMsg('Please enter your address.');
+      return;
+    }
+    if(!addressCity){
+      setMsg('Please enter your city.');
+      return;
+    }
+    if(!addressState){
+      setMsg('Please enter your state.');
+      return;
+    }
+    if(!addressPostal){
+      setMsg('Please enter your postal code.');
       return;
     }
     if(!phone){
@@ -2779,7 +3884,13 @@ function ensureLegacyBookingHandler(){
       return;
     }
 
-    const slots = relevantSelected.map(s=>({
+    const expandedSelected = expandSelectedSlotsForRecurringBooking(
+      relevantSelected,
+      frequency,
+      reserveDuration
+    );
+
+    const slots = expandedSelected.map(s=>({
       start: s.start,
       end: s.end,
       instructor_id: s.instructor_id
@@ -2800,6 +3911,10 @@ function ensureLegacyBookingHandler(){
       : getSlotMinutes();
 
 
+    const guessedParentTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Phoenix';
+    const parentTimezoneEl = document.getElementById('parent-timezone');
+    if (parentTimezoneEl) parentTimezoneEl.value = guessedParentTimezone;
+
     const payload = {
       instructor_id: instrId,
       slots,
@@ -2807,7 +3922,8 @@ function ensureLegacyBookingHandler(){
       last_name: lastName,
       student_name: studentName,
       student_email: email,
-      address,
+                      address,
+      address_city: addressCity,
       address_state: addressState,
       address_postal: addressPostal,
       phone,
@@ -2822,11 +3938,28 @@ function ensureLegacyBookingHandler(){
       // Recurrence controls
       repeat_frequency: frequency,          // weekly | biweekly | none
       repeat_duration: reserveDuration,     // 1_month | 3_months | indefinitely
+      slots_are_expanded: true,
 
       visitor_tz: visitorTZ,
+      parent_timezone: guessedParentTimezone,
 
       // new (plugin will read this)
-      appointment_type: appointmentType
+      appointment_type: appointmentType,
+
+    agreement: {
+      terms_version: '2026-04-25',
+      terms_accepted: !!document.getElementById('agree-terms')?.checked,
+      signature: `${firstName} ${lastName} / ${email}`,
+      accepted_at_client: new Date().toISOString(),
+      source_flow: 'lesson_booking',
+      appointment_type: appointmentType,
+      lesson_type: lessonType,
+      repeat_frequency: frequency,
+      repeat_duration: reserveDuration,
+      autopay_selected: !!document.getElementById('mrm-autopay-opt')?.checked,
+      prepay_selected: !!document.getElementById('mrm-prepay-opt')?.checked,
+      sheet_music_addon_selected: !!document.getElementById('mrm-sheet-music-addon-opt')?.checked
+    }
     };
 
     if (appointmentType !== 'consultation') {
@@ -2868,28 +4001,44 @@ function ensureLegacyBookingHandler(){
           return;
         }
 
+        // Temporary pre-checkout preview only.
+        // Under the Stripe-only tax model, final tax is determined server-side after:
+        // - the billing state and ZIP are known
+        // - the taxable product profile is known
+        // - Stripe Tax evaluates the jurisdiction using your Stripe registrations
         const baseAmount = quote.amount_cents || 0;
         const chargeAmountCents = baseAmount * count;
         const sheetAddonCents = sheetMusicAddon ? 500 : 0;
-        const sheetAddonTax = sheetMusicAddon ? (quote.addon_tax_cents || 0) : 0;
+        const sheetAddonTax = 0;
         const finalAmountCents = chargeAmountCents + sheetAddonCents + sheetAddonTax;
         const finalAmountDollars = (finalAmountCents / 100).toFixed(2);
 
-        const createRes = await fetch(payApiBase + '/create-payment-intent', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({
+        if (autopay && !prepay) {
+          setMsg('Charging first lesson and saving card for auto-pay…');
+          btn.disabled = true;
+
+          const authorizedLessonCount = estimateAutopayAuthorizedLessonCount(count, frequency, reserveDuration);
+
+          
+
+
+          const autopayPaymentRequestBody = {
             sku: sku,
             email: email,
-            context:{
+            promo_code: '',
+                        context: {
               instructor_id: instrId,
               lesson_length: len,
               lesson_mode: lessonType,
-              lesson_count: count,
-              prepay: prepay ? 'yes' : 'no'
+              lesson_count: 1,
+              prepay: 'no',
+              autopay: 'yes',
+              repeat_frequency: frequency,
+              repeat_duration: reserveDuration,
+              authorized_lesson_count: authorizedLessonCount
             },
-            save_card: autopay,
-            amount_override_cents: chargeAmountCents,
+            save_card: true,
+            amount_override_cents: baseAmount,
             sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
             address: {
               line1: address,
@@ -2897,56 +4046,269 @@ function ensureLegacyBookingHandler(){
               postal_code: addressPostal,
               country: addressCountry
             }
-          })
+          };
+
+          const createRes = await fetch(payApiBase + '/create-payment-intent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(autopayPaymentRequestBody)
+          });
+
+          const createData = await createRes.json();
+
+          if (!createRes.ok || !createData.ok) {
+            if (handleExistingSheetMusicSubscriptionGuard(createData, setMsg)) {
+              btn.disabled = false;
+              return;
+            }
+
+            setMsg(createData.message || 'Unable to start first auto-pay charge.');
+            btn.disabled = false;
+            return;
+          }
+
+          const shouldContinueWithResume = await showSheetMusicResumePromptIfNeeded(createData);
+          if (!shouldContinueWithResume) {
+            setMsg('Checkout cancelled.');
+            btn.disabled = false;
+            return;
+          }
+
+          const stripeInstance = ensureStripe(createData.publishableKey || '');
+          if (!stripeInstance) {
+            setMsg('Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
+            btn.disabled = false;
+            return;
+          }
+          stripe = stripeInstance;
+
+          persistSelectedSlots();
+
+          mrmLessonPaymentReloadContext = {
+            payApiBase,
+            requestBody: autopayPaymentRequestBody,
+            currentData: createData
+          };
+
+          const { payBtn, errorEl, closeModal } = openPaymentModal(
+            createData.client_secret,
+            createData,
+            createData.allowed_payment_methods || ['card']
+          );
+
+          payBtn.onclick = async () => {
+            payBtn.disabled = true;
+            errorEl.textContent = '';
+
+            const okToPay = await showConfirmTotal(createData);
+            if (!okToPay) {
+              payBtn.disabled = false;
+              return;
+            }
+
+            mrmShowPaymentLoading('Please wait while we confirm your payment and enable Auto-pay.');
+
+            try {
+              const { error, paymentIntent } = await stripe.confirmPayment({
+                elements: activeStripeElements,
+                confirmParams: { return_url: window.location.href },
+                redirect: 'if_required'
+              });
+
+              if (error) {
+                mrmHidePaymentLoading();
+                errorEl.textContent = error.message || 'Payment failed.';
+                payBtn.disabled = false;
+                return;
+              }
+
+              if (paymentIntent && paymentIntent.status === 'succeeded') {
+                await verifyPaymentIntent(paymentIntent.id, email);
+
+                const enrollRes = await fetch(payApiBase + '/create-autopay-enrollment', {
+                  method:'POST',
+                  headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({
+                    payment_intent_id: paymentIntent.id,
+                    email: email,
+                    context: {
+                      instructor_id: instrId,
+                      lesson_length: len,
+                      lesson_mode: lessonType,
+                      repeat_frequency: frequency,
+                      repeat_duration: reserveDuration,
+                      authorized_lesson_count: authorizedLessonCount
+                    }
+                  })
+                });
+
+                const enrollData = await enrollRes.json();
+                if (!enrollRes.ok || !enrollData.ok) {
+                  mrmHidePaymentLoading();
+                  errorEl.textContent = enrollData.message || 'Unable to finalize auto-pay enrollment.';
+                  payBtn.disabled = false;
+                  return;
+                }
+
+                payload.payment_mode = 'autopay';
+                payload.autopay_profile_id = enrollData.autopay_profile_id;
+                payload.order_id = createData.order_id;
+
+                closeModal({ clearSelection: false });
+                await submitBooking(payload, setMsg);
+                mrmHidePaymentLoading();
+                return;
+              }
+
+              mrmHidePaymentLoading();
+              errorEl.textContent = 'Payment could not be confirmed.';
+              payBtn.disabled = false;
+            } catch (err) {
+              mrmHidePaymentLoading();
+              errorEl.textContent = (err && err.message) ? err.message : 'Payment failed.';
+              payBtn.disabled = false;
+            }
+          };
+
+          btn.disabled = false;
+          return;
+        }
+
+  const agreeTerms = document.getElementById('agree-terms');
+  if (!agreeTerms || !agreeTerms.checked) {
+    alert('Please agree to the Terms of Service before checkout.');
+    return;
+  }
+
+        const lessonPaymentRequestBody = {
+          sku: sku,
+          email: email,
+          promo_code: '',
+                    context: {
+            instructor_id: instrId,
+            lesson_length: len,
+            lesson_mode: lessonType,
+            lesson_count: count,
+            prepay: prepay ? 'yes' : 'no',
+            terms_version: '2026-04-25',
+            terms_accepted: !!document.getElementById('agree-terms')?.checked,
+            source_flow: 'lesson_booking'
+          },
+          save_card: false,
+          amount_override_cents: chargeAmountCents,
+          sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
+          address: {
+            line1: address,
+            state: addressState,
+            postal_code: addressPostal,
+            country: addressCountry
+          }
+        };
+        const createRes = await fetch(payApiBase + '/create-payment-intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(lessonPaymentRequestBody)
         });
         const createData = await createRes.json();
         if(!createRes.ok || !createData.ok){
+          if (handleExistingSheetMusicSubscriptionGuard(createData, setMsg)) {
+            btn.disabled = false;
+            return;
+          }
+
           setMsg(createData.message || 'Payment error.');
+          btn.disabled = false;
+          return;
+        }
+
+        const shouldContinueWithResume = await showSheetMusicResumePromptIfNeeded(createData);
+        if (!shouldContinueWithResume) {
+          setMsg('Checkout cancelled.');
+          btn.disabled = false;
           return;
         }
 
         const stripeInstance = ensureStripe(createData.publishableKey || '');
         if (!stripeInstance) {
-          setMsg('Stripe is not configured.');
+          setMsg('Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
           return;
         }
         stripe = stripeInstance;
 
         persistSelectedSlots();
 
+        mrmLessonPaymentReloadContext = {
+          payApiBase,
+          requestBody: lessonPaymentRequestBody,
+          currentData: createData
+        };
+
         sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
           payload,
           email,
-          payment_intent_id: createData.payment_intent_id
+          payment_intent_id: createData.payment_intent_id,
+          order_id: createData.order_id,
+          payment_mode: prepay ? 'prepay' : 'one_time'
         }));
 
-        const { payBtn, errorEl, closeModal } = openPaymentModal(createData.client_secret, createData);
+        const { payBtn, errorEl, closeModal } = openPaymentModal(
+          createData.client_secret,
+          createData,
+          createData.allowed_payment_methods || ['card']
+        );
 
         payBtn.onclick = async () => {
           payBtn.disabled = true;
+          errorEl.textContent = '';
+
           const okToPay = await showConfirmTotal(createData);
           if (!okToPay) {
             payBtn.disabled = false;
             return;
           }
-          const { error, paymentIntent } = await stripe.confirmPayment({
-            elements: activeStripeElements,
-            
-            // Keep return_url for cases where Stripe MUST redirect (3DS/SCA).
-            confirmParams: { return_url: window.location.href },
 
-            // CRITICAL: prevents a full page reload for normal successful payments.
-            redirect: 'if_required'
-          });
-          if (error) {
-            errorEl.textContent = error.message || 'Payment failed.';
+          mrmShowPaymentLoading('Please wait while we confirm your payment and create your lesson.');
+
+          try {
+            const { error, paymentIntent } = await stripe.confirmPayment({
+              elements: activeStripeElements,
+              
+              // Keep return_url for cases where Stripe MUST redirect (3DS/SCA).
+              confirmParams: { return_url: window.location.href },
+
+              // CRITICAL: prevents a full page reload for normal successful payments.
+              redirect: 'if_required'
+            });
+
+            if (error) {
+              mrmHidePaymentLoading();
+              errorEl.textContent = error.message || 'Payment failed.';
+              payBtn.disabled = false;
+              return;
+            }
+
+            if (paymentIntent && paymentIntent.status === 'succeeded') {
+              await verifyPaymentIntent(paymentIntent.id, email);
+
+              payload.order_id = createData.order_id;
+              payload.payment_mode = prepay ? 'prepay' : 'one_time';
+              payload.autopay_profile_id = null;
+
+              // Close Stripe payment modal first so the normal booking success popup displays cleanly
+              closeModal({ clearSelection: false });
+
+              await submitBooking(payload, setMsg);
+              mrmHidePaymentLoading();
+              return;
+            }
+
+            mrmHidePaymentLoading();
+            errorEl.textContent = 'Payment could not be confirmed.';
             payBtn.disabled = false;
-            return;
-          }
-          if (paymentIntent && paymentIntent.status === 'succeeded') {
-            await verifyPaymentIntent(paymentIntent.id, email);
-            await submitBooking(payload, setMsg);
-            closeModal({ clearSelection: true });
+          } catch (err) {
+            mrmHidePaymentLoading();
+            errorEl.textContent = (err && err.message) ? err.message : 'Payment failed.';
+            payBtn.disabled = false;
           }
         };
       }catch(err){
@@ -2995,6 +4357,9 @@ async function checkReturnFromStripe(){
   };
   try{
     await verifyPaymentIntent(piId, ctx.email);
+    if (ctx.order_id) ctx.payload.order_id = ctx.order_id;
+    if (!ctx.payload.payment_mode) ctx.payload.payment_mode = (ctx.payment_mode || 'one_time');
+    if (typeof ctx.payload.autopay_profile_id === 'undefined') ctx.payload.autopay_profile_id = null;
     await submitBooking(ctx.payload, setMsg);
   }catch(err){
     setMsg(err.message || 'Payment verification failed.');
@@ -3140,16 +4505,25 @@ function _closeMobileDayModal(){
 function renderCalendar(instr, state, container){
   container.innerHTML='';
 
-  function showCourtesyToast(message){
+  function showCourtesyToast(messageHtml){
     const existing = document.querySelector('.mrm-toast');
     if(existing) existing.remove();
+
     const toast = document.createElement('div');
     toast.className = 'mrm-toast';
-    toast.textContent = message;
+    toast.innerHTML = messageHtml;
+
     (document.querySelector('.wrapper') || document.body).append(toast);
+
     requestAnimationFrame(()=>toast.classList.add('is-visible'));
     setTimeout(()=>toast.classList.remove('is-visible'), 2200);
     setTimeout(()=>toast.remove(), 3000);
+  }
+
+  function formatCourtesyLessonLabel(minutes, mode){
+    const durationText = `${minutes}-minute`;
+    const modeText = (mode === 'online') ? 'online' : 'in-person';
+    return `${durationText} ${modeText} lesson`;
   }
 
   const header=document.createElement('div');
@@ -3366,6 +4740,36 @@ function renderCalendar(instr, state, container){
           summary.textContent = 'Selected: none';
         }
         modalContentHost.append(summary);
+
+        if (isMobile && selectedForDay.length) {
+          const mobileBookBtn = document.createElement('button');
+          mobileBookBtn.className = 'day-slots-booknow';
+          mobileBookBtn.type = 'button';
+          mobileBookBtn.textContent = 'Book now';
+
+          mobileBookBtn.onclick = (e)=>{
+            e.preventDefault();
+            e.stopPropagation();
+
+            const hasSelection = selectedSlots.some(s => String(s.instructor_id) === String(instr.id));
+            if(!hasSelection){
+              alert('Please select a time first.');
+              return;
+            }
+
+            currentInstructor = instr;
+
+            state.expandedDay = null;
+            state._refreshingDay = null;
+            state._isStale = true;
+            _closeMobileDayModal();
+            renderCalendar(instr,state,container);
+
+            setTimeout(()=>openBookingModal(instr), 0);
+          };
+
+          modalContentHost.append(mobileBookBtn);
+        }
 
         const gridWrap = document.createElement('div');
         gridWrap.className = 'day-slots-grid';
@@ -3662,6 +5066,10 @@ function renderCalendar(instr, state, container){
                 const wantLen = String(minutes);
                 const wantMode = (mode === 'online') ? '1' : '0';
 
+                const courtesyChangedLength = !!(lengthSelect && prevLen !== wantLen);
+                const courtesyChangedMode = !!(onlineSelect && prevMode !== wantMode);
+                const courtesyChangedSelection = courtesyChangedLength || courtesyChangedMode;
+
                 // only mark auto-change when we are changing away from the user's current selection
                 if(lengthSelect && prevLen !== wantLen){
                   lengthSelect.dataset.mrmAutoFrom = prevLen;
@@ -3670,6 +5078,11 @@ function renderCalendar(instr, state, container){
                 if(onlineSelect && prevMode !== wantMode){
                   onlineSelect.dataset.mrmAutoFrom = prevMode;
                   onlineSelect.value = wantMode;
+                }
+
+                if(courtesyChangedSelection){
+                  const courtesyLabel = formatCourtesyLessonLabel(minutes, mode);
+                  showCourtesyToast(`Your lesson has been changed to <strong>${courtesyLabel}</strong>.`);
                 }
 
                 const wasSelected = selectedSlots.some(s => s.key === slotKey);
@@ -3936,6 +5349,51 @@ function getSlotMinutes(){
   return parseInt(document.getElementById('length-select').value,10)||60;
 }
 
+
+let selectedState = null;
+let renderInstructorListForState = null;
+
+function getSelectedInstrumentKey(){
+  const mainSel = document.getElementById('instrument-input');
+  const modalSel = document.getElementById('modal-instrument');
+
+  const raw = (
+    (mainSel && mainSel.value) ||
+    (modalSel && modalSel.value) ||
+    ''
+  ).toString().trim().toLowerCase();
+
+  if(!raw) return '';
+
+  // Normalize common labels to stored instructor instrument keys.
+  if(raw === 'trombone') return 'trombone';
+  if(raw === 'euphonium') return 'euphonium';
+  if(raw === 'tuba') return 'tuba';
+
+  return raw;
+}
+
+function instructorSupportsSelectedInstrument(instr, instrumentKey){
+  if(!instrumentKey) return true;
+  if(!instr || typeof instr !== 'object') return false;
+
+  const arr = Array.isArray(instr.instruments)
+    ? instr.instruments.map(v => String(v || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+
+  return arr.includes(instrumentKey);
+}
+
+function instructorSupportsSelectedLessonType(instr){
+  const onlineSelectEl = document.getElementById('online-select');
+  const selectedMode = (onlineSelectEl && String(onlineSelectEl.value) === '1') ? 'online' : 'in_person';
+  const offersOnline = !!(instr && Number(instr.offers_online) === 1);
+  const offersInPerson = !!(instr && Number(instr.offers_in_person) === 1);
+
+  if(selectedMode === 'online') return offersOnline;
+  return offersInPerson;
+}
+
 function loadInstructors(){
   fetch(apiBase+'/instructors')
     .then(r=>r.json())
@@ -3949,7 +5407,7 @@ function loadInstructors(){
 
       // Persist selection for convenience
       const STORAGE_KEY = 'mrm_selected_state';
-      let selectedState = null; // Always show map first; user must click a state
+      selectedState = null; // Always show map first; user must click a state
 
       // --- Inline SVG goes here ---
       // You MUST paste a "blank USA states" SVG (no labels) as a string.
@@ -4486,7 +5944,7 @@ function loadInstructors(){
         wrap.appendChild(box);
       }
 
-      function renderInstructorListForState(stateCode){
+      renderInstructorListForState = function(stateCode){
         wrap.innerHTML = '';
 
         // Header bar: selected state + change link (isolated)
@@ -4583,11 +6041,20 @@ function loadInstructors(){
           renderStateSelector();
         };
 
-        // Filter list to this state
+        // Filter list to this state + selected instrument
+        const selectedInstrumentKey = getSelectedInstrumentKey();
+
         const filtered = (list || []).filter(i=>{
           const st = (i.state || '').toString().trim().toUpperCase();
-          return st === stateCode;
+          if(st !== stateCode) return false;
+
+          if(!instructorSupportsSelectedInstrument(i, selectedInstrumentKey)) return false;
+          return instructorSupportsSelectedLessonType(i);
         });
+
+        // Instructor list filtered for the selected state, instrument, and lesson type.
+
+        window.__mrmLastRenderedInstructors = Array.isArray(filtered) ? filtered : [];
 
         // Existing behavior: group by city (within state)
         const byCity = {};
@@ -4598,6 +6065,17 @@ function loadInstructors(){
         });
 
         const cities = Object.keys(byCity).sort((a,b)=>a.localeCompare(b));
+
+        if(!filtered.length){
+          const empty = document.createElement('div');
+          empty.className = 'availability-message';
+          empty.style.margin = '14px 0 8px';
+          empty.textContent = selectedInstrumentKey
+            ? 'No instructors in this area currently teach the selected instrument.'
+            : 'No instructors found in this area.';
+          wrap.append(empty);
+          return;
+        }
 
         cities.forEach(city=>{
           const heading = document.createElement('h2');
@@ -4648,6 +6126,13 @@ function loadInstructors(){
             card.append(header);
 
             // Put short description + learn link INSIDE the header “titleWrap”
+            if (instr.teaching_format_label) {
+              const mode = document.createElement('div');
+              mode.className = 'instructor-format-label';
+              mode.textContent = instr.teaching_format_label;
+              titleWrap.appendChild(mode);
+            }
+
             if (instr.short_description) {
               const sd = document.createElement('p');
               sd.className = 'instructor-shortdesc';
@@ -4655,25 +6140,51 @@ function loadInstructors(){
               titleWrap.appendChild(sd);
             }
 
+            const actionRow = document.createElement('div');
+            actionRow.className = 'instructor-actions';
+
             const learn = document.createElement('a');
-learn.className = 'instructor-learnmore';
-learn.textContent = 'Learn More';
-learn.href = `${window.location.pathname}?instructor=${encodeURIComponent(instr.id)}`;
-learn.rel = 'noopener noreferrer';
+            learn.className = 'instructor-learnmore';
+            learn.textContent = 'Learn More';
+            learn.href = `${window.location.pathname}?instructor=${encodeURIComponent(instr.id)}`;
+            learn.rel = 'noopener noreferrer';
 
-// IMPORTANT: prevent instructor header click/keydown from firing
-learn.addEventListener('mousedown', (e) => {
-  e.stopPropagation();
-});
-learn.addEventListener('click', (e) => {
-  e.stopPropagation();
-});
-learn.addEventListener('keydown', (e) => {
-  // Stops Enter/Space from bubbling to the header keydown handler
-  e.stopPropagation();
-});
+            // IMPORTANT: prevent instructor header click/keydown from firing
+            learn.addEventListener('mousedown', (e) => {
+              e.stopPropagation();
+            });
+            learn.addEventListener('click', (e) => {
+              e.stopPropagation();
+            });
+            learn.addEventListener('keydown', (e) => {
+              e.stopPropagation();
+            });
 
-titleWrap.appendChild(learn);
+            const seeAvailability = document.createElement('button');
+            seeAvailability.className = 'instructor-seeavailability';
+            seeAvailability.type = 'button';
+            seeAvailability.textContent = 'See Availability';
+
+            seeAvailability.addEventListener('mousedown', (e) => {
+              e.stopPropagation();
+            });
+            seeAvailability.addEventListener('click', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (cal.classList.contains('is-collapsed')) {
+                openCalendar();
+              } else {
+                const calendarTop = cal.getBoundingClientRect().top + window.scrollY - 12;
+                window.scrollTo({ top: calendarTop, behavior: 'smooth' });
+              }
+            });
+            seeAvailability.addEventListener('keydown', (e) => {
+              e.stopPropagation();
+            });
+
+            actionRow.appendChild(learn);
+            actionRow.appendChild(seeAvailability);
+            titleWrap.appendChild(actionRow);
 
 
             const cal=document.createElement('div');
@@ -5109,10 +6620,10 @@ checkReturnFromStripe();
 
 document.getElementById('modal-close').addEventListener('click', closeBookingModal);
 document.getElementById('booking-modal').addEventListener('click', (e)=>{
-  if(e.target && e.target.id==='booking-modal') closeBookingModal();
+  if(e.target && e.target.id==='booking-modal') return;
 });
 document.addEventListener('keydown', (e)=>{
-  if(e.key==='Escape') closeBookingModal();
+  if(e.key==='Escape') return;
 });
 
 document.getElementById('modal-submit-booking').addEventListener('click', (e)=>{
@@ -5127,15 +6638,14 @@ document.getElementById('instrument-input').addEventListener('change', ()=>{
   document.getElementById('confirm-instrument').value = v;
   const modalSel = document.getElementById('modal-instrument');
   if(modalSel) modalSel.value = v;
-});
 
-document.getElementById('modal-instrument').addEventListener('change', ()=>{
-  const v = document.getElementById('modal-instrument').value || '';
-  document.getElementById('instrument-input').value = v;
-  document.getElementById('confirm-instrument').value = v;
+  rerunInstructorSearchForCurrentFilters();
 });
 
 document.getElementById('lesson-option').addEventListener('change', updatePaymentCheckboxVisibility);
+document.getElementById('online-select')?.addEventListener('change', ()=>{
+  rerunInstructorSearchForCurrentFilters();
+});
 document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
 
 document.getElementById('mrm-pref-see')?.addEventListener('click', mrmApplyPrefAndLoad);
@@ -5149,6 +6659,7 @@ if (autopayEl) {
     // If turning on autopay, force prepay off
     if (autopayEl.checked && prepayEl) prepayEl.checked = false;
     applyAutoPrepayMutualExclusion();
+    updateAutopayVisualNote();
   });
 }
 
@@ -5157,9 +6668,13 @@ if (prepayEl) {
     // If turning on prepay, force autopay off
     if (prepayEl.checked && autopayEl) autopayEl.checked = false;
     applyAutoPrepayMutualExclusion();
+    updateAutopayVisualNote();
   });
 }
 
+document.getElementById('frequency')?.addEventListener('change', updateAutopayVisualNote);
+document.getElementById('reserve-duration')?.addEventListener('change', updateAutopayVisualNote);
+updateAutopayVisualNote();
 
 // ------------------------------
 // Initial preferences popup flow
@@ -5194,9 +6709,22 @@ function mrmOpenPrefPopup(){
   if(mainFreq && pFreq)            pFreq.value       = mainFreq.value || 'weekly';
   if(mainDur && pDur)              pDur.value        = mainDur.value || '1_month';
 
-  // Keep popup fields consistent with consultation rules
-  pOpt?.addEventListener('change', mrmPrefApplyDefaults);
+  // Keep popup fields consistent with consultation + repeat rules
+  if (pOpt && !pOpt.dataset.mrmBound) {
+    pOpt.dataset.mrmBound = '1';
+    pOpt.addEventListener('change', mrmPrefApplyDefaults);
+  }
+  if (pFreq && !pFreq.dataset.mrmBound) {
+    pFreq.dataset.mrmBound = '1';
+    pFreq.addEventListener('change', mrmPrefApplyRepeatRules);
+  }
+  if (pLen && !pLen.dataset.mrmBound) {
+    pLen.dataset.mrmBound = '1';
+    pLen.addEventListener('change', mrmRefreshAllPricingUI);
+  }
+
   mrmPrefApplyDefaults();
+  mrmRefreshAllPricingUI();
 
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden','false');
@@ -5217,29 +6745,68 @@ function mrmClosePrefPopup(){
   }
 }
 
+function mrmPrefApplyRepeatRules(){
+  const pFreq = document.getElementById('mrm-pref-frequency');
+  const pDur  = document.getElementById('mrm-pref-duration');
+  const pDurWrap = document.getElementById('mrm-pref-duration-wrap');
+
+  if(!pFreq || !pDur) return;
+
+  const isRepeating = (pFreq.value === 'weekly' || pFreq.value === 'biweekly');
+  const dashOpt = pDur.querySelector('option[value="--"]');
+
+  if (!isRepeating) {
+    if (dashOpt) dashOpt.disabled = false;
+    pDur.value = '--';
+    pDur.disabled = true;
+    pDurWrap?.classList.add('is-disabled');
+  } else {
+    pDur.disabled = false;
+    if (dashOpt) dashOpt.disabled = true;
+
+    if (!pDur.value || pDur.value === '--') {
+      pDur.value = '1_month';
+    }
+
+    pDurWrap?.classList.remove('is-disabled');
+  }
+}
+
 function mrmPrefApplyDefaults(){
   const pOpt  = document.getElementById('mrm-pref-lesson-option');
   const pLen  = document.getElementById('mrm-pref-length');
   const pFreq = document.getElementById('mrm-pref-frequency');
   const pDur  = document.getElementById('mrm-pref-duration');
+
+  const pLenWrap  = document.getElementById('mrm-pref-length-wrap');
+  const pFreqWrap = document.getElementById('mrm-pref-frequency-wrap');
+  const pDurWrap  = document.getElementById('mrm-pref-duration-wrap');
+
   if(!pOpt || !pLen || !pFreq || !pDur) return;
 
   if(pOpt.value === 'consultation'){
-    // consultation defaults (match main form behavior)
     pLen.value = '30';
     pLen.disabled = true;
+    pLenWrap?.classList.add('is-disabled');
 
     pFreq.value = 'none';
     pFreq.disabled = true;
+    pFreqWrap?.classList.add('is-disabled');
 
     pDur.value = '--';
     pDur.disabled = true;
+    pDurWrap?.classList.add('is-disabled');
   } else {
-    // lessons can choose these
     pLen.disabled = false;
     pFreq.disabled = false;
-    pDur.disabled = false;
+
+    pLenWrap?.classList.remove('is-disabled');
+    pFreqWrap?.classList.remove('is-disabled');
+
+    mrmPrefApplyRepeatRules();
   }
+
+  mrmRefreshAllPricingUI();
 }
 
 function mrmApplyPrefAndLoad(){
@@ -5261,8 +6828,9 @@ function mrmApplyPrefAndLoad(){
   if(mainFreq && pFreq)            mainFreq.value       = pFreq.value || 'weekly';
   if(mainDur && pDur)              mainDur.value        = pDur.value || '1_month';
 
-  // Apply consultation rules and checkbox visibility rules immediately
+  // Apply consultation + repeat rules immediately to the main form
   applyLessonOptionDefaults();
+  applyRepeatUIRules();
   updatePaymentCheckboxVisibility();
 
   mrmClosePrefPopup();
@@ -5272,8 +6840,10 @@ function mrmApplyPrefAndLoad(){
 }
 
 applyLessonOptionDefaults();
+applyRepeatUIRules();
 updatePaymentCheckboxVisibility();
-mrmOpenPrefPopup();
+mrmInitPricingUI();
+loadInstructors();
 </script>
 </body>
 </html>

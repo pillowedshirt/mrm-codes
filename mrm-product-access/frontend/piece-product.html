@@ -1,13 +1,6 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Piece Product</title>
-
 <style>
 /* ====== YOUR EXISTING STYLES (UNCHANGED) ====== */
-:root{
+.mrm-piece-product-page{
   --color-bg:#f5f5f5;
   --color-surface:#ffffff;
   --color-accent:#2f2f2f;
@@ -22,34 +15,53 @@
   --radius-sm:10px;
 
   --shadow: 0 18px 60px rgba(0,0,0,0.10);
-}
 
-html,body{height:100%;}
-body{
-  margin:0;
   background:var(--color-bg);
   font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
   color:var(--color-text-main);
 }
-body.no-scroll{
+
+/* Lock body scroll only when a piece-product modal is open. */
+body.mrm-piece-no-scroll{
   overflow:hidden;
   position:fixed;
   width:100%;
-  left:0; right:0;
+  left:0;
+  right:0;
 }
 
-/* ✅ Mobile smoothing / "seamless" rendering helpers */
-*{ box-sizing:border-box; }
-img,canvas,svg,video{ max-width:100%; height:auto; }
-button,input,select,textarea{ font:inherit; }
-a{ -webkit-tap-highlight-color:transparent; }
+.mrm-piece-product-page,
+.mrm-piece-product-page * ,
+.mrm-piece-product-page *::before,
+.mrm-piece-product-page *::after{
+  box-sizing:border-box;
+}
+
+.mrm-piece-product-page img,
+.mrm-piece-product-page canvas,
+.mrm-piece-product-page svg,
+.mrm-piece-product-page video{
+  max-width:100%;
+  height:auto;
+}
+
+.mrm-piece-product-page button,
+.mrm-piece-product-page input,
+.mrm-piece-product-page select,
+.mrm-piece-product-page textarea{
+  font:inherit;
+}
+
+.mrm-piece-product-page a{
+  -webkit-tap-highlight-color:transparent;
+}
 
 /* PAGE WRAP */
-.page{ padding: clamp(18px, 3vw, 42px); box-sizing:border-box; }
-.shell{ width:min(1100px, 100%); margin:0 auto; }
+.mrm-piece-product-page.page{ padding: clamp(18px, 3vw, 42px); box-sizing:border-box; }
+.mrm-piece-product-page .shell{ width:min(1100px, 100%); margin:0 auto; }
 
 /* CARD */
-.card{
+.mrm-piece-product-page .card{
   background:var(--color-surface);
   border:1px solid var(--color-border);
   border-radius:var(--radius-xl);
@@ -57,8 +69,8 @@ a{ -webkit-tap-highlight-color:transparent; }
   overflow:hidden;
 }
 
-/* HEADER */
-.header{
+/* PIECE HEADER */
+.mrm-piece-header{
   padding: clamp(18px, 2.6vw, 34px);
   border-bottom:1px solid rgba(0,0,0,0.08);
   background: linear-gradient(180deg, rgba(0,0,0,0.03), rgba(0,0,0,0.00));
@@ -81,9 +93,9 @@ a{ -webkit-tap-highlight-color:transparent; }
 .piece-composer a:hover{ opacity:0.85; }
 
 /* SECTIONS */
-.section{ padding: clamp(18px, 2.6vw, 34px); }
-.section + .section{ border-top:1px solid rgba(0,0,0,0.08); }
-.center{ display:flex; justify-content:center; }
+.mrm-piece-product-page .section{ padding: clamp(18px, 2.6vw, 34px); }
+.mrm-piece-product-page .section + .section{ border-top:1px solid rgba(0,0,0,0.08); }
+.mrm-piece-product-page .center{ display:flex; justify-content:center; }
 
 /* PAYMENT MODAL (scroll-safe) */
 .modal-overlay{
@@ -147,6 +159,27 @@ a{ -webkit-tap-highlight-color:transparent; }
   outline-offset: 2px;
 }
 
+/* =========================
+   Confirm Total Modal: button colors
+   ========================= */
+#mrm-confirm-total-overlay .button-primary{
+  background: #000 !important;
+  border-color: #000 !important;
+  color: #fff !important;
+}
+#mrm-confirm-total-overlay .button-secondary{
+  background: #fff !important;
+  border-color: #000 !important;
+  color: #000 !important;
+}
+
+/* =========================
+   Confirm Total Modal: center pane
+   ========================= */
+#mrm-confirm-total-overlay{
+  align-items: center !important;
+}
+
 /* PDF */
 .pdf-preview{
   width: min(860px, 100%);
@@ -184,7 +217,22 @@ a{ -webkit-tap-highlight-color:transparent; }
   gap: 18px;
   align-items:start;
 }
-.description{ margin:0; font-size:16px; line-height:1.75; }
+.description{
+  margin:0;
+  font-size:16px;
+  line-height:1.75;
+}
+
+.description p,
+.audio-subtitle p {
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+
+.description p:last-child,
+.audio-subtitle p:last-child {
+  margin-bottom: 0;
+}
 .meta-panel{
   border:1px solid rgba(0,0,0,0.10);
   background: rgba(0,0,0,0.02);
@@ -295,7 +343,7 @@ a{ -webkit-tap-highlight-color:transparent; }
   margin:0;
   font-size:17px;
   color: var(--color-text-muted);
-  line-height:1.25;
+  line-height:1.35;
   text-align:left;
 }
 
@@ -385,6 +433,76 @@ a{ -webkit-tap-highlight-color:transparent; }
   min-width: 240px;
   align-content:center;
 }
+
+.mrm-piece-terms-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+
+.mrm-piece-terms-modal-row {
+  margin: 0 0 14px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(0,0,0,0.10);
+  border-radius: 14px;
+  background: rgba(0,0,0,0.025);
+}
+
+.mrm-piece-terms-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0 0;
+  flex: 0 0 auto;
+  border: 2px solid var(--color-accent);
+  border-radius: 5px;
+  background: #fff;
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+}
+
+.mrm-piece-terms-row input[type="checkbox"]::after {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+  transform: rotate(-45deg);
+  opacity: 0;
+}
+
+.mrm-piece-terms-row input[type="checkbox"]:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.mrm-piece-terms-row input[type="checkbox"]:checked::after {
+  opacity: 1;
+}
+
+.mrm-piece-terms-row input[type="checkbox"]:focus-visible {
+  outline: 3px solid rgba(0,0,0,0.18);
+  outline-offset: 2px;
+}
+
+.mrm-piece-terms-row label {
+  display: block;
+  margin: 0;
+}
+
+.mrm-piece-terms-subcaption {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
 .price-box{
   border:1px solid rgba(0,0,0,0.12);
   border-radius: var(--radius-lg);
@@ -411,15 +529,16 @@ a{ -webkit-tap-highlight-color:transparent; }
    ✅ FIX: Never underline ANY button text (anchors or buttons)
    + Professional hover/active/focus indication
    ========================= */
-.button-primary,
-.button-secondary,
-.preview-more-row a{
+.mrm-piece-product-page .button-primary,
+.mrm-piece-product-page .button-secondary,
+.mrm-piece-product-page .preview-more-row a{
   text-decoration: none !important;
   -webkit-text-decoration: none !important;
   text-underline-offset: 0 !important;
 }
 
-.button-primary,.button-secondary{
+.mrm-piece-product-page .button-primary,
+.mrm-piece-product-page .button-secondary{
   padding: 11px 12px;
   border-radius: 14px;
   font-weight: 900;
@@ -433,41 +552,42 @@ a{ -webkit-tap-highlight-color:transparent; }
   user-select:none;
   transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease, background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
-.button-primary{
+.mrm-piece-product-page .button-primary{
   background: var(--color-accent);
   color: var(--color-surface);
   box-shadow: 0 10px 22px rgba(0,0,0,0.14);
 }
-.button-secondary{
+.mrm-piece-product-page .button-secondary{
   background: transparent;
   color: var(--color-accent);
 }
-.button-primary:hover{
+.mrm-piece-product-page .button-primary:hover{
   transform: translateY(-1px);
   box-shadow: 0 14px 34px rgba(0,0,0,0.18);
   filter: brightness(1.03);
 }
-.button-secondary:hover{
+.mrm-piece-product-page .button-secondary:hover{
   transform: translateY(-1px);
   box-shadow: 0 12px 30px rgba(0,0,0,0.10);
-  background: rgba(0,0,0,0.03);
+  background: rgba(120,120,120,0.18);
+  color: var(--color-accent);
 }
-.button-primary:active,
-.button-secondary:active{
+.mrm-piece-product-page .button-primary:active,
+.mrm-piece-product-page .button-secondary:active{
   transform: translateY(0px);
   filter: brightness(0.98);
 }
-.button-primary:focus-visible,
-.button-secondary:focus-visible{
+.mrm-piece-product-page .button-primary:focus-visible,
+.mrm-piece-product-page .button-secondary:focus-visible{
   outline: none;
   box-shadow: 0 0 0 3px rgba(47,47,47,0.22), 0 10px 22px rgba(0,0,0,0.14);
 }
 
 /* remove underlines for visited/hover states too */
-.button-primary:visited,
-.button-secondary:visited,
-.button-primary:hover,
-.button-secondary:hover{
+.mrm-piece-product-page .button-primary:visited,
+.mrm-piece-product-page .button-secondary:visited,
+.mrm-piece-product-page .button-primary:hover,
+.mrm-piece-product-page .button-secondary:hover{
   text-decoration:none !important;
 }
 
@@ -580,7 +700,6 @@ a{ -webkit-tap-highlight-color:transparent; }
 .mrm-otpOverlay.is-open{ display:flex; }
 .hidden{ display:none; }
 
-/* ✅ RESPONSIVE: smoother mobile layout + less awkward stacking */
 @media (max-width: 980px){
   .info-grid{ grid-template-columns: 1fr; }
   .offer-body{ grid-template-columns: 1fr; }
@@ -592,42 +711,96 @@ a{ -webkit-tap-highlight-color:transparent; }
 }
 
 @media (max-width: 700px){
-  /* ✅ CHANGE YOU REQUESTED:
-     Expand the main content to screen edges so you don't see background.
-     - remove page padding
-     - let shell go full-width
-     - remove card radius + border so it blends edge-to-edge
-  */
-  .page{ padding: 0; }
-  .shell{ width: 100%; margin: 0; }
-  .card{
+  .mrm-piece-product-page.page{
+    padding: 0;
+    background: #f6f4ef;
+  }
+
+  .mrm-piece-product-page .shell{
+    width: 100%;
+    margin: 0;
+  }
+
+  .mrm-piece-product-page .card{
     border-radius: 0;
     border-left: 0;
     border-right: 0;
     box-shadow: none;
   }
 
-  /* Keep content comfortable with section padding (so text isn't glued to edges) */
-  .section{ padding: 16px; }
-  .header{ padding: 20px 16px; }
+  .mrm-piece-header{
+    padding: 22px 16px 18px;
+  }
 
-  .pdf-preview{ height: clamp(320px, 46vh, 520px); }
+  .mrm-piece-product-page .section{
+    padding: 16px;
+  }
 
-  .offer-body{ padding: 12px; gap: 12px; }
-  .offer-actions{ gap: 10px; }
-  .price-box{ padding: 12px; }
+  .pdf-preview{
+    height: clamp(320px, 46vh, 520px);
+    border-radius: 20px;
+  }
+
+  .info-grid{
+    gap: 14px;
+  }
+
+  .meta-panel,
+  .offer,
+  .price-box{
+    border-radius: 20px;
+    box-shadow: 0 10px 24px rgba(0,0,0,0.06);
+  }
+
+  .offer-body{
+    padding: 14px;
+    gap: 12px;
+  }
+
+  .offer-actions{
+    gap: 10px;
+  }
+
+  .price-box{
+    padding: 14px;
+  }
+
   .actions{
     grid-template-columns: 1fr 1fr;
     gap: 10px;
   }
-  .button-primary, .button-secondary{
+
+  .mrm-piece-product-page .button-primary,
+  .mrm-piece-product-page .button-secondary{
     width:100%;
     padding: 12px 12px;
+    min-height: 48px;
+    border-radius: 16px;
+  }
+
+  .modal-overlay,
+  .mrm-success-overlay{
+    padding: 0;
+    align-items: flex-end !important;
+  }
+
+  .modal,
+  .mrm-success-modal{
+    width: 100%;
+    max-width: 100%;
+    max-height: 94vh;
+    border-radius: 26px 26px 0 0;
+    box-shadow: 0 -18px 42px rgba(0,0,0,0.24);
   }
 }
 
 @media (max-width: 620px){
-  .audio-controls{ grid-template-columns: 1fr; justify-items:center; gap: 10px; }
+  .audio-controls{
+    grid-template-columns: 1fr;
+    justify-items:center;
+    gap: 10px;
+  }
+
   .audio-row-top{
     width:100%;
     display:grid;
@@ -635,6 +808,7 @@ a{ -webkit-tap-highlight-color:transparent; }
     align-items:center;
     column-gap:10px;
   }
+
   .audio-row-seek{ width:100%; }
   .audio-row-seek .progress{ height:12px; }
   .audio-row-vol{ width:100%; justify-content:center; }
@@ -710,10 +884,8 @@ a{ -webkit-tap-highlight-color:transparent; }
 }
 
 </style>
-</head>
 
-<body>
-<main class="page">
+<main class="mrm-piece-product-page page">
   <div class="shell">
     <div class="card">
 
@@ -724,7 +896,7 @@ a{ -webkit-tap-highlight-color:transparent; }
       >
 
         <!-- TOP -->
-        <header class="header">
+        <header class="mrm-piece-header">
           <h1 class="piece-title">Loading…</h1>
           <div class="piece-composer">
             <a href="#" aria-label="View composer page" style="text-decoration:none;"></a>
@@ -834,11 +1006,7 @@ a{ -webkit-tap-highlight-color:transparent; }
               <button id="payment-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
             </div>
             <div class="modal-body">
-              <p id="payment-instructions"></p>
-
-              <div id="mrm-payment-element"></div>
-
-              <div style="height:50px;"></div>
+              <div id="payment-instructions"></div>
 
               <input
                 type="email"
@@ -848,8 +1016,130 @@ a{ -webkit-tap-highlight-color:transparent; }
                 style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
               />
 
+              <div style="display:flex;gap:10px;margin-bottom:12px;">
+                <input
+                  type="text"
+                  id="mrm-billing-state"
+                  placeholder="State (e.g., AZ)"
+                  style="flex:1;padding:10px 12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+                />
+                <input
+                  type="text"
+                  id="mrm-billing-postal"
+                  placeholder="ZIP"
+                  required
+                  style="flex:1;padding:10px 12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+                />
+              </div>
+
+              <input
+                type="text"
+                id="mrm-billing-line1"
+                autocomplete="address-line1"
+                required
+                placeholder="Street address"
+                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
+              />
+
+              <label for="mrm-billing-city" style="display:block;font-weight:700;margin:10px 0 6px;">
+                City
+              </label>
+              <input
+                id="mrm-billing-city"
+                type="text"
+                autocomplete="address-level2"
+                required
+                placeholder="City"
+                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);background:#fff;"
+              />
+
+              <select
+                id="mrm-billing-country"
+                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);background:#fff;"
+              >
+                <option value="US" selected>United States</option>
+              </select>
+
+              <div
+                class="mrm-promo-box"
+                style="margin:14px 0;padding:14px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;background:rgba(255,255,255,0.72);"
+              >
+                <label
+                  for="mrm-piece-promo-code-input"
+                  style="display:block;font-weight:700;margin-bottom:6px;"
+                >
+                  Promotional code
+                </label>
+
+                <input
+                  id="mrm-piece-promo-code-input"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="Enter code"
+                  style="width:100%;max-width:320px;padding:10px 12px;border-radius:10px;border:1px solid rgba(0,0,0,0.18);"
+                />
+
+                <button
+                  id="mrm-piece-promo-code-apply"
+                  type="button"
+                  style="display:none;margin-top:8px;padding:9px 14px;border:0;border-radius:999px;background:#7c4a2d;color:#fff;font-weight:700;cursor:pointer;"
+                >
+                  Apply Code
+                </button>
+
+                <div
+                  id="mrm-piece-promo-code-message"
+                  style="margin-top:8px;font-size:0.92rem;"
+                ></div>
+              </div>
+
+              <div class="mrm-piece-terms-row mrm-piece-terms-modal-row">
+                <input type="checkbox" class="mrm-piece-terms-check" id="mrm-piece-payment-terms">
+                <label for="mrm-piece-payment-terms">
+                  I agree to the <a href="/terms-of-service/" target="_blank" rel="noopener">Terms of Service</a>.
+                  <span class="mrm-piece-terms-subcaption">
+                    Includes the digital content license, access restrictions, anti-sharing rules, and non-refund terms.
+                  </span>
+                </label>
+              </div>
+
+              <div id="mrm-payment-element"></div>
+
+              <div style="height:18px;"></div>
+
               <button id="mrm-pay-btn" class="button-primary" style="width:100%;">Pay</button>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Confirm Total Overlay -->
+        <div id="mrm-confirm-total-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+          <div class="modal" role="dialog" aria-modal="true" style="max-width:520px;">
+            <div class="modal-header">
+              <h2 class="modal-title">Confirm total</h2>
+              <!-- Match the X button style used in the main Purchase modal -->
+              <button id="mrm-confirm-total-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
+            </div>
+
+            <div class="modal-body">
+              <p style="margin-top:0;color:var(--color-text-muted);">
+                Please confirm the total amount before placing your order.
+              </p>
+
+              <div id="mrm-confirm-total-breakdown"></div>
+
+              <div style="display:flex;gap:10px;margin-top:12px;">
+                <!-- Back button: white with black border/text -->
+                <button id="mrm-confirm-total-cancel" type="button" class="button-secondary" style="flex:1;">
+                  Back
+                </button>
+
+                <!-- Confirm button: black -->
+                <button id="mrm-confirm-total-confirm" type="button" class="button-primary" style="flex:1;">
+                  Confirm &amp; pay
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -899,7 +1189,231 @@ a{ -webkit-tap-highlight-color:transparent; }
   let activePaymentElement = null;
   let activeStripeElements = null;
   let pendingSku = '';
+const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
+
+  let mrmPieceAppliedPromoCode = '';
+  let mrmPieceAppliedPromoDiscountCents = 0;
+  let mrmPieceCurrentQuoteData = null;
+  let mrmPieceCurrentPriceDisplay = '';
+  let mrmPieceSchedulePaymentLoad = null;
+
+  function mrmResetPiecePaymentElement(message) {
+    pendingClientSecret = '';
+
+  if (activePaymentElement) {
+    try { activePaymentElement.unmount(); } catch (e) {}
+  }
+
+  activePaymentElement = null;
+  activeStripeElements = null;
+
+  const paymentMount = document.getElementById('mrm-payment-element');
+  if (paymentMount) {
+    paymentMount.innerHTML = `
+      <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+        ${message || 'Enter your email and ZIP to load the secure payment form.'}
+      </div>
+    `;
+  }
+  }
+
+  function mrmPieceMoney(cents) {
+    return '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
+  }
+
+  function mrmUpdatePiecePromoTopBreakdown() {
+    const instructions = document.getElementById('payment-instructions');
+    if (!instructions || !mrmPieceCurrentQuoteData) return;
+
+  const label = String(mrmPieceCurrentQuoteData.label || 'Sheet music').trim();
+  const originalBase = Number(mrmPieceCurrentQuoteData.amount_cents || 0);
+  const discount = Number(mrmPieceAppliedPromoDiscountCents || 0);
+  const reducedSubtotal = Math.max(50, originalBase - discount);
+
+  const esc = (s) => String(s || '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+
+  const rows = [];
+
+  rows.push(`
+    <div style="display:flex;justify-content:space-between;gap:12px;">
+      <span>${esc(label)}</span>
+      <strong>${mrmPieceMoney(originalBase)}</strong>
+    </div>
+  `);
+
+  if (discount > 0) {
+    rows.push(`
+      <div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;">
+        <span>Promotional discount</span>
+        <strong>-${mrmPieceMoney(discount)}</strong>
+      </div>
+    `);
+
+    rows.push(`
+      <div style="display:flex;justify-content:space-between;gap:12px;">
+        <span>Discounted subtotal</span>
+        <strong>${mrmPieceMoney(reducedSubtotal)}</strong>
+      </div>
+    `);
+  }
+
+  rows.push(`
+    <div style="display:flex;justify-content:space-between;gap:12px;">
+      <span>Sales tax</span>
+      <strong>Calculated after ZIP is entered</strong>
+    </div>
+  `);
+
+  rows.push(`
+    <div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;">
+      <span><strong>Estimated total before tax</strong></span>
+      <strong>${mrmPieceMoney(reducedSubtotal)}</strong>
+    </div>
+  `);
+
+    instructions.innerHTML = `
+      <div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">
+        ${rows.join('')}
+      </div>
+    `;
+  }
+
+function mrmGetSavedPiecePaymentEmail() {
+  try {
+    return String(sessionStorage.getItem(MRM_PIECE_PAYMENT_EMAIL_KEY) || '').trim();
+  } catch (e) {
+    return '';
+  }
+}
+
+function mrmSavePiecePaymentEmail(email) {
+  email = String(email || '').trim();
+  if (!email) return;
+
+  try {
+    sessionStorage.setItem(MRM_PIECE_PAYMENT_EMAIL_KEY, email);
+  } catch (e) {}
+}
+
+function mrmGetPiecePaymentEmailValue() {
+  const paymentEmail = document.getElementById('mrm-payment-email');
+  const modalVal = paymentEmail ? String(paymentEmail.value || '').trim() : '';
+  if (modalVal) return modalVal;
+
+  return mrmGetSavedPiecePaymentEmail();
+}
+
+function mrmGetPiecePromoCodeInputValue() {
+    const input = document.getElementById('mrm-piece-promo-code-input');
+    return input ? String(input.value || '').trim().toUpperCase() : '';
+  }
+
+  function mrmSetPiecePromoMessage(message, isError) {
+    const el = document.getElementById('mrm-piece-promo-code-message');
+    if (!el) return;
+    el.textContent = message || '';
+    el.style.color = isError ? '#9f1d1d' : '#1f6f3f';
+  }
+
+  function mrmInitPiecePromoBox() {
+    const input = document.getElementById('mrm-piece-promo-code-input');
+    const btn = document.getElementById('mrm-piece-promo-code-apply');
+
+    if (!input || !btn) return;
+
+    input.addEventListener('input', function () {
+      mrmPieceAppliedPromoCode = '';
+      mrmPieceAppliedPromoDiscountCents = 0;
+      mrmUpdatePiecePromoTopBreakdown();
+      btn.style.display = input.value.trim() ? 'inline-flex' : 'none';
+      mrmResetPiecePaymentElement('Enter your email and ZIP to load the secure payment form.');
+
+      mrmSetPiecePromoMessage('', false);
+    });
+
+    btn.addEventListener('click', async function () {
+      const code = mrmGetPiecePromoCodeInputValue();
+      const email = mrmGetPiecePaymentEmailValue();
+
+      if (!code) {
+        mrmSetPiecePromoMessage('Please enter a promotional code.', true);
+        return;
+      }
+
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        mrmSetPiecePromoMessage('Please enter your email before applying a promotional code.', true);
+        return;
+      }
+
+      mrmSavePiecePaymentEmail(email);
+
+      if (!pendingSku) {
+        mrmSetPiecePromoMessage('Please select a sheet music item first.', true);
+        return;
+      }
+
+      try {
+        btn.disabled = true;
+        mrmSetPiecePromoMessage('Checking code…', false);
+
+        const res = await fetch('/wp-json/mrm-pay/v1/validate-promo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            promo_code: code,
+            sku: pendingSku,
+            email: email,
+            context: {
+              piece_slug: typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '',
+              source_flow: 'piece_product_purchase'
+            }
+          })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || !data.ok) {
+          mrmPieceAppliedPromoCode = '';
+          mrmPieceAppliedPromoDiscountCents = 0;
+          mrmSetPiecePromoMessage(data.message || 'Invalid promotional code.', true);
+          return;
+        }
+
+        mrmPieceAppliedPromoCode = data.promo_code || code;
+        mrmPieceAppliedPromoDiscountCents = Number(data.discount_cents || 0);
+        mrmSetPiecePromoMessage(data.promo_success_message || 'Promotional code applied.', false);
+        mrmUpdatePiecePromoTopBreakdown();
+
+        mrmResetPiecePaymentElement('Promotional code applied. Reloading the secure payment form…');
+
+        const paymentEmail = document.getElementById('mrm-payment-email');
+        if (paymentEmail && email && !paymentEmail.value) {
+          paymentEmail.value = email;
+        }
+
+        if (typeof mrmPieceSchedulePaymentLoad === 'function') {
+          mrmPieceSchedulePaymentLoad();
+        }
+      } catch (err) {
+        mrmPieceAppliedPromoCode = '';
+        mrmPieceAppliedPromoDiscountCents = 0;
+        mrmSetPiecePromoMessage('Unable to check this code right now.', true);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', mrmInitPiecePromoBox);
+
   let pendingClientSecret = '';
+  let pendingOrderId = 0;
+  let pendingBreakdown = null;
 
   document.addEventListener('DOMContentLoaded', () => {
     const pk = (window.__mrmStripePk || '').trim();
@@ -917,6 +1431,26 @@ a{ -webkit-tap-highlight-color:transparent; }
       stripe._mrmPk = key;
     }
     return stripe;
+  }
+
+  function mrmBuildPaymentElementOptions(allowedMethods){
+    const methods = Array.isArray(allowedMethods) && allowedMethods.length
+      ? allowedMethods.filter(Boolean)
+      : ['card'];
+
+    return {
+      paymentMethodOrder: methods,
+      wallets: {
+        applePay: 'auto',
+        googlePay: 'auto',
+        link: 'never'
+      },
+      layout: {
+        type: 'accordion',
+        defaultCollapsed: false,
+        visibleAccordionItemsCount: 0
+      }
+    };
   }
 
   // pdf.js worker
@@ -952,29 +1486,382 @@ a{ -webkit-tap-highlight-color:transparent; }
   }
 
   function getPieceSlugFromUrl() {
-    // expects /piece-slug/ (last non-empty segment)
-    const parts = window.location.pathname.split('/').filter(Boolean);
-    const raw = (parts[parts.length - 1] || '').trim();
-    return mrmSlugify(raw);
+  const params = new URLSearchParams(window.location.search || '');
+
+  const querySlug =
+    params.get('piece_slug') ||
+    params.get('piece') ||
+    params.get('slug') ||
+    params.get('mrm_piece') ||
+    '';
+
+  if (querySlug) {
+    return mrmSlugify(querySlug);
   }
 
+  const pieceEl = document.querySelector('.mrm-piece');
+  if (pieceEl && pieceEl.dataset && pieceEl.dataset.pieceSlug) {
+    return mrmSlugify(pieceEl.dataset.pieceSlug);
+  }
+
+  const parts = window.location.pathname.split('/').filter(Boolean);
+
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = mrmSlugify(parts[i]);
+
+    if (
+      part &&
+      part !== 'piece-product' &&
+      part !== 'sheet-music' &&
+      part !== 'product' &&
+      part !== 'products'
+    ) {
+      return part;
+    }
+  }
+
+  return '';
+}
+
+
   function normalizeSkuFromOffer(offer) {
-    // Prefer server-configured product slug (most reliable)
     const raw =
-      (offer && (offer.product_slug || offer.productSlug || offer.product_slug_id || offer.productSlugId)) || '';
+      (offer && (
+        offer.product_slug ||
+        offer.productSlug ||
+        offer.payments_hub_sku ||
+        offer.paymentsHubSku ||
+        offer.sku ||
+        offer.product_slug_id ||
+        offer.productSlugId
+      )) || '';
 
     return String(raw || '').trim().toLowerCase();
   }
 
-  function openPaymentModal(priceDisplay) {
+  function setOfferButtonsEnabled(offerEl, enabled) {
+    if (!offerEl) return;
+    offerEl.querySelectorAll('.mrm-purchaseBtn, .mrm-accessBtn').forEach(btn => {
+      btn.disabled = !enabled;
+      btn.style.opacity = enabled ? '1' : '0.55';
+      btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+    });
+  }
+
+  function setOfferStatus(offerEl, message) {
+    if (!offerEl) return;
+    const statusEl = offerEl.querySelector('.mrm-offerStatus');
+    if (statusEl) statusEl.textContent = message || '';
+  }
+
+  async function validateResolvedOfferSku(resolvedSku, offerEl) {
+  if (!resolvedSku) {
+    return {
+      ok: false,
+      message: 'Missing resolved SKU.'
+    };
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.set('sku', resolvedSku);
+    params.set('piece_slug', typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '');
+
+    if (offerEl) {
+      params.set('type', typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : '');
+      params.set('display_title', String((offerEl.querySelector('.offer-title') || {}).textContent || '').trim());
+      params.set('subtitle', String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').trim());
+    }
+
+    const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
+      method: 'GET'
+    });
+
+    const qData = await qRes.json().catch(() => ({}));
+
+    if (!qRes.ok || !qData.ok) {
+      return {
+        ok: false,
+        message: qData.message || 'This offer is not active in Payments Hub.'
+      };
+    }
+
+    return {
+      ok: true,
+      data: qData
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: 'Could not validate this offer against Payments Hub.'
+    };
+  }
+}
+
+
+  function inferSheetMusicTypeFromOfferEl(offerEl){
+    if (!offerEl) return '';
+
+    const rawSlug = String(offerEl.dataset.productSlug || '').toLowerCase();
+    const title = String((offerEl.querySelector('.offer-title') || {}).textContent || '').toLowerCase();
+    const subtitle = String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').toLowerCase();
+    const text = `${rawSlug} ${title} ${subtitle}`;
+
+    if (/complete-package/.test(text)) return 'complete-package';
+    if (/trombone[-\s]*euphonium/.test(text) || (/trombone/.test(text) && /euphonium/.test(text))) return 'trombone-euphonium';
+    if (/\btuba\b/.test(text)) return 'tuba';
+    if (/fundamental/.test(text)) return 'fundamentals';
+    if (/full[\s-]*piece|complete|bundle|all parts|all versions/.test(text)) return 'complete-package';
+
+    return '';
+  }
+
+  async function resolveCanonicalHubSkuForOffer(offerEl){
+  const rawSku = String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase();
+  if (!rawSku) return '';
+
+  // If already looks like canonical Payments Hub piece SKU, keep it.
+  if (/^piece-[a-z0-9-]+-(fundamentals|trombone-euphonium|tuba|complete-package)(-\d+)?$/.test(rawSku)) {
+    return rawSku;
+  }
+
+  const pieceSlug = getPieceSlugFromUrl();
+  const type = inferSheetMusicTypeFromOfferEl(offerEl);
+
+  if (!pieceSlug || !type) {
+    console.warn('[MRM] Could not infer canonical piece SKU type; using configured offer slug:', {
+      rawSku,
+      pieceSlug,
+      type
+    });
+    return rawSku;
+  }
+
+  try {
+    const r = await fetch(`/wp-json/mrm-pay/v1/resolve?piece_slug=${encodeURIComponent(pieceSlug)}&type=${encodeURIComponent(type)}`, {
+      method: 'GET'
+    });
+
+    const data = await r.json().catch(() => ({}));
+
+    if (r.ok && data && data.ok && data.sku) {
+      const resolved = String(data.sku).trim().toLowerCase();
+
+      if (resolved && resolved !== rawSku) {
+        console.info('[MRM] Resolved canonical hub SKU for offer', {
+          rawSku,
+          resolved,
+          pieceSlug,
+          type
+        });
+      }
+
+      return resolved || rawSku;
+    }
+
+    console.warn('[MRM] Hub SKU resolve failed; falling back to configured offer slug', {
+      rawSku,
+      pieceSlug,
+      type,
+      data
+    });
+
+    return rawSku;
+  } catch (e) {
+    console.warn('[MRM] Hub SKU resolve request error; falling back to configured offer slug', e);
+    return rawSku;
+  }
+}
+
+async function getOfferSkuCandidates(offerEl) {
+  const candidates = [];
+  const rawSku = String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase();
+
+  if (rawSku) {
+    candidates.push(rawSku);
+  }
+
+  const canonicalSku = await resolveCanonicalHubSkuForOffer(offerEl);
+  if (canonicalSku && !candidates.includes(canonicalSku)) {
+    candidates.push(canonicalSku);
+  }
+
+  const pieceSlug = getPieceSlugFromUrl();
+  const type = inferSheetMusicTypeFromOfferEl(offerEl);
+
+  if (pieceSlug && type) {
+    const synthesized = `piece-${pieceSlug}-${type}`;
+    if (synthesized && !candidates.includes(synthesized)) {
+      candidates.push(synthesized);
+    }
+  }
+
+  return candidates.filter(Boolean);
+}
+
+
+  async function primeOfferSkuState(offerEl) {
+  if (!offerEl) return '';
+
+  const rawSku = String(offerEl.dataset.productSlug || '').trim().toLowerCase();
+
+  if (!rawSku) {
+    offerEl.dataset.resolvedSku = '';
+    offerEl.dataset.skuValid = '0';
+    setOfferButtonsEnabled(offerEl, false);
+    setOfferStatus(offerEl, 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
+    return '';
+  }
+
+  let selectedSku = rawSku;
+
+  try {
+    const candidates = await getOfferSkuCandidates(offerEl);
+
+    if (Array.isArray(candidates) && candidates.length) {
+      const canonicalCandidate = candidates.find(candidate =>
+        /^piece-[a-z0-9-]+-(fundamentals|trombone-euphonium|tuba|complete-package)(-\d+)?$/.test(String(candidate || ''))
+      );
+
+      selectedSku = canonicalCandidate || candidates[0] || rawSku;
+    }
+  } catch (err) {
+    console.warn('[MRM] Could not build offer SKU candidates. Falling back to configured product_slug.', {
+      rawSku,
+      err
+    });
+    selectedSku = rawSku;
+  }
+
+  offerEl.dataset.resolvedSku = String(selectedSku || rawSku).trim().toLowerCase();
+
+  // This means "usable frontend offer slug exists", not "Payments Hub quote already passed".
+  offerEl.dataset.skuValid = '1';
+
+  setOfferButtonsEnabled(offerEl, true);
+  setOfferStatus(offerEl, '');
+
+  // Offer initialized.
+
+  return offerEl.dataset.resolvedSku;
+}
+
+
+  async function getValidatedOfferSkuOrThrow(offerEl) {
+  if (!offerEl) {
+    throw new Error('Offer not found.');
+  }
+
+  const existingResolved = String(offerEl.dataset.resolvedSku || '').trim().toLowerCase();
+  if (existingResolved) {
+    return existingResolved;
+  }
+
+  const rawSku = String(offerEl.dataset.productSlug || '').trim().toLowerCase();
+  if (!rawSku) {
+    throw new Error('This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
+  }
+
+  const initializedSku = await primeOfferSkuState(offerEl);
+  if (initializedSku) {
+    return initializedSku;
+  }
+
+  return rawSku;
+}
+
+
+  function renderPiecePaymentBreakdown(breakdown){
+    const instructions = document.getElementById('payment-instructions');
+    if (!instructions) return;
+
+    const money = (cents) => '$' + (Math.round(Number(cents || 0)) / 100).toFixed(2);
+
+    const base = Number((breakdown && breakdown.base_amount_cents) || 0);
+    const tax  = Number((breakdown && breakdown.tax_cents) || 0);
+    const total = Number((breakdown && (breakdown.amount_cents || breakdown.total_cents)) || (base + tax));
+    const taxMessage = String(
+      breakdown?.tax_message ||
+      breakdown?.tax_policy?.policy_message ||
+      'Sales tax is calculated after billing state and ZIP are entered.'
+    ).trim();
+
+    const rows = [];
+    const itemLabel = String(breakdown?.label || 'Sheet music');
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
+    rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+
+    instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+  }
+
+  function openPaymentModal(quoteData, priceDisplay) {
+    mrmPieceCurrentQuoteData = quoteData || null;
+    mrmPieceCurrentPriceDisplay = priceDisplay || '';
+
     const overlay = document.getElementById('mrm-payment-overlay');
     const payBtn = document.getElementById('mrm-pay-btn');
     const errorEl = document.getElementById('mrm-payment-error');
     const instructions = document.getElementById('payment-instructions');
     const emailInput = document.getElementById('mrm-payment-email');
-    const paymentMount = document.getElementById('mrm-payment-element');
 
-    instructions.textContent = `${priceDisplay} – enter your email below to load payment options.`;
+    const stateInput = document.getElementById('mrm-billing-state');
+    const postalInput = document.getElementById('mrm-billing-postal');
+    const line1Input = document.getElementById('mrm-billing-line1');
+    const cityInput = document.getElementById('mrm-billing-city');
+    const countrySelect = document.getElementById('mrm-billing-country');
+
+    const paymentMount = document.getElementById('mrm-payment-element');
+    const termsCheck = document.getElementById('mrm-piece-payment-terms');
+
+    const money = (cents) => '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
+    const esc = (s) => String(s || '')
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+
+    const baseFromQuote = Number(quoteData && quoteData.amount_cents ? quoteData.amount_cents : 0);
+    const labelFromQuote = String((quoteData && quoteData.label) ? quoteData.label : '').trim();
+
+    const renderBreakdown = (opts = {}) => {
+      const label = String(opts.label || labelFromQuote || 'Item').trim();
+      const base = Number(opts.base_amount_cents ?? baseFromQuote ?? 0);
+      const tax  = Number(opts.tax_cents ?? 0);
+      const promoDiscount = Number(opts.promo_discount_cents ?? 0);
+      const total = Number(opts.amount_cents ?? (base + tax));
+      const taxMessage = String(
+        opts.tax_message ||
+        opts.tax_policy?.policy_message ||
+        'Sales tax is calculated after billing state and ZIP are entered.'
+      ).trim();
+
+      // ✅ CRITICAL: This feeds the Confirm Total popup
+      pendingBreakdown = {
+        sku: pendingSku,
+        label,
+        base_amount_cents: base,
+        tax_cents: tax,
+        amount_cents: total,
+        promo_discount_cents: promoDiscount,
+        tax_message: taxMessage,
+        tax_policy: opts.tax_policy || null
+      };
+
+      const rows = [];
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${esc(label)}</span><strong>${money(base)}</strong></div>`);
+  if (promoDiscount > 0) {
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
+  }
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
+      rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+      instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">${rows.join('')}</div>`;
+    };
+
+    // Initial breakdown (tax pending)
+    renderBreakdown({ base_amount_cents: baseFromQuote, tax_cents: 0, amount_cents: baseFromQuote });
+
     overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden', 'false');
 
@@ -982,7 +1869,21 @@ a{ -webkit-tap-highlight-color:transparent; }
     payBtn.disabled = true;
     payBtn.textContent = 'Pay';
 
-    emailInput.value = '';
+    mrmPieceAppliedPromoCode = '';
+    mrmPieceAppliedPromoDiscountCents = 0;
+
+    const promoInput = document.getElementById('mrm-piece-promo-code-input');
+    const promoBtn = document.getElementById('mrm-piece-promo-code-apply');
+    if (promoInput) promoInput.value = '';
+    if (promoBtn) promoBtn.style.display = 'none';
+    mrmSetPiecePromoMessage('', false);
+
+    emailInput.value = mrmGetSavedPiecePaymentEmail();
+    if (stateInput) stateInput.value = '';
+    if (postalInput) postalInput.value = '';
+    if (line1Input) line1Input.value = '';
+    if (countrySelect) countrySelect.value = 'US';
+    if (termsCheck) termsCheck.checked = false;
 
     pendingClientSecret = '';
     if (activePaymentElement) {
@@ -993,7 +1894,7 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     paymentMount.innerHTML = `
       <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
-        Enter your email to load the secure payment form.
+        Enter your email and ZIP to load the secure payment form.
       </div>
     `;
 
@@ -1009,40 +1910,86 @@ a{ -webkit-tap-highlight-color:transparent; }
 
       pendingSku = '';
       pendingClientSecret = '';
+      mrmPieceSchedulePaymentLoad = null;
       errorEl.textContent = '';
     };
 
     const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
+    const isPostalLike = (v) => String(v || '').trim().length >= 4;
+
+    const getAddressPayload = () => {
+      const country = (countrySelect && countrySelect.value) ? String(countrySelect.value).trim() : 'US';
+      return {
+        line1: String(document.getElementById('mrm-billing-line1')?.value || '').trim(),
+        city: String(document.getElementById('mrm-billing-city')?.value || '').trim(),
+        state: String(document.getElementById('mrm-billing-state')?.value || '').trim(),
+        postal_code: String(document.getElementById('mrm-billing-postal')?.value || '').trim(),
+        country: String(document.getElementById('mrm-billing-country')?.value || 'US').trim()
+      };
+    };
 
     let loadTimer = null;
-    emailInput.oninput = function () {
+
+    const scheduleLoad = () => {
       clearTimeout(loadTimer);
       loadTimer = setTimeout(async () => {
         const email = (emailInput.value || '').trim();
+    if (isEmailLike(email)) {
+      mrmSavePiecePaymentEmail(email);
+    }
+        const postal = (postalInput && postalInput.value) ? String(postalInput.value).trim() : '';
 
-        if (!isEmailLike(email)) {
+        if (!isEmailLike(email) || !isPostalLike(postal)) {
           payBtn.disabled = true;
           return;
         }
 
+        if (!termsCheck || !termsCheck.checked) {
+          payBtn.disabled = true;
+          errorEl.textContent = 'Please agree to the Terms of Service before loading payment.';
+          return;
+        }
+
+        const addressPayload = getAddressPayload();
+
+        const missingAddress = [];
+        if (!addressPayload.line1) missingAddress.push('street address');
+        if (!addressPayload.city) missingAddress.push('city');
+        if (!addressPayload.state) missingAddress.push('state');
+        if (!addressPayload.postal_code) missingAddress.push('ZIP code');
+        if (!addressPayload.country) missingAddress.push('country');
+
+        if (missingAddress.length) {
+          payBtn.disabled = true;
+          errorEl.textContent = 'Please enter your full billing address: ' + missingAddress.join(', ') + '.';
+          return;
+        }
+
+        errorEl.textContent = '';
+
         if (pendingClientSecret || activePaymentElement) return;
 
         if (!pendingSku) {
-          errorEl.textContent = 'Missing SKU.';
+          errorEl.textContent = 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
           payBtn.disabled = true;
           return;
         }
 
         try {
-          errorEl.textContent = '';
-
           const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               sku: pendingSku,
               email: email,
-              context: { piece_slug: getPieceSlugFromUrl() }
+          promo_code: mrmPieceAppliedPromoCode || mrmGetPiecePromoCodeInputValue() || '',
+              context: {
+                piece_slug: getPieceSlugFromUrl(),
+                terms_version: '2026-04-25',
+                terms_accepted: !!document.getElementById('mrm-piece-payment-terms')?.checked,
+                source_flow: 'piece_product_purchase'
+              },
+              address: addressPayload
             })
           });
 
@@ -1055,7 +2002,7 @@ a{ -webkit-tap-highlight-color:transparent; }
 
           const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
           if (!stripeInstance) {
-            errorEl.textContent = 'Stripe is not configured.';
+            errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
             payBtn.disabled = true;
             return;
           }
@@ -1063,30 +2010,84 @@ a{ -webkit-tap-highlight-color:transparent; }
           stripe = stripeInstance;
           window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
 
-          pendingClientSecret = data.client_secret;
-          activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
-          activePaymentElement = activeStripeElements.create('payment');
+          pendingClientSecret = data.client_secret || '';
 
+          // Update breakdown with tax + totals from server
+          renderBreakdown({
+            label: data.label || labelFromQuote,
+            base_amount_cents: Number(data.base_amount_cents || baseFromQuote || 0),
+            tax_cents: Number(data.tax_cents || 0),
+            amount_cents: Number(data.amount_cents || 0),
+        promo_discount_cents: Number(data.promo_discount_cents || 0)
+          });
+
+          activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
+          activePaymentElement = activeStripeElements.create(
+            'payment',
+            mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card'])
+          );
           paymentMount.innerHTML = '';
           activePaymentElement.mount('#mrm-payment-element');
 
-          sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
-            email: email,
-            sku: pendingSku,
-            pi: data.payment_intent_id
-          }));
-
           payBtn.disabled = false;
         } catch (err) {
-          errorEl.textContent = 'Payment setup failed. Please try again.';
+          console.error('[MRM] create-payment-intent error:', err);
+          errorEl.textContent = 'Unable to load payment form.';
           payBtn.disabled = true;
         }
-      }, 350);
+      }, 450);
     };
 
-    return { payBtn, errorEl, emailInput };
+    mrmPieceSchedulePaymentLoad = scheduleLoad;
+
+    [emailInput, postalInput, stateInput, line1Input, countrySelect, termsCheck].forEach((el) => {
+      if (el) {
+        el.oninput = scheduleLoad;
+        el.onchange = scheduleLoad;
+      }
+    });
   }
 
+
+  function showConfirmTotal(breakdown){
+    const overlay = document.getElementById('mrm-confirm-total-overlay');
+    const closeBtn = document.getElementById('mrm-confirm-total-close');
+    const cancelBtn = document.getElementById('mrm-confirm-total-cancel');
+    const confirmBtn = document.getElementById('mrm-confirm-total-confirm');
+    const box = document.getElementById('mrm-confirm-total-breakdown');
+
+    const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
+    const base = Number(breakdown?.base_amount_cents || 0);
+    const tax = Number(breakdown?.tax_cents || 0);
+    const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
+    const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + tax);
+
+    const rows = [];
+    const itemLabel = String(breakdown?.sku || 'Sheet music');
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
+    if (promoDiscount > 0) {
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
+    }
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
+    rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
+    box.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+
+    overlay.style.display = 'flex';
+    overlay.setAttribute('aria-hidden','false');
+
+    return new Promise((resolve)=>{
+      const cleanup = ()=>{
+        overlay.style.display = 'none';
+        overlay.setAttribute('aria-hidden','true');
+        closeBtn.onclick = null;
+        cancelBtn.onclick = null;
+        confirmBtn.onclick = null;
+      };
+      closeBtn.onclick = ()=>{ cleanup(); resolve(false); };
+      cancelBtn.onclick = ()=>{ cleanup(); resolve(false); };
+      confirmBtn.onclick = ()=>{ cleanup(); resolve(true); };
+    });
+  }
 
   /* =========================================================
      Piece Purchase Success Popup (reload only on Close click)
@@ -1129,40 +2130,129 @@ a{ -webkit-tap-highlight-color:transparent; }
   }
 
   async function verifyAndGrant(piId, email, sku){
-    const vRes = await fetch('/wp-json/mrm-pay/v1/verify-payment-intent', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ payment_intent_id: piId, email: email })
-    });
-    const vData = await vRes.json();
-    if(!vRes.ok || !vData.ok){ alert('Payment not completed.'); return; }
+    // We keep the function name to minimize changes elsewhere,
+    // but this is now a GRANT finalizer (not verify-only).
     const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ product_slug: sku, email: email, payment_intent_id: piId })
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        payment_intent_id: piId
+        // IMPORTANT: Do NOT send sku/email here.
+        // Backend binds canonical sku + email from Stripe PI metadata.
+      })
     });
-    const gData = await gRes.json();
-    if(!gRes.ok || !gData.ok){
-      const debug = (gData && (gData.message || gData.debug)) ? `\n\nDetails: ${gData.message || gData.debug}` : '';
-      alert('We could not finalize access yet. Please try again in a moment.' + debug);
-      return;
+
+    let gData = {};
+    try { gData = await gRes.json(); } catch (e) {}
+
+    console.log('[MRM] grant-sheet-music-access response (post-payment)', {
+      status: gRes.status,
+      data: gData,
+      piId,
+      requestedSku: sku,
+      requestedEmail: email
+    });
+
+    if (!gRes.ok || !gData.ok) {
+      const msg = (gData && (gData.message || gData.debug))
+        ? (gData.message || gData.debug)
+        : 'Payment succeeded, but access grant failed.';
+      throw new Error(msg);
     }
+
     mrmShowPieceSuccessPopup(
       'Thank you!',
       'Access has been granted. Check your email for download instructions.'
     );
+
+    return gData;
+  }
+
+
+  async function verifyAndGrantByPiOnly(piId){
+    const gRes = await fetch('/wp-json/mrm-pay/v1/grant-sheet-music-access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        payment_intent_id: piId
+      })
+    });
+
+    let gData = {};
+    try { gData = await gRes.json(); } catch (e) {}
+
+    console.log('[MRM] grant-sheet-music-access response (PI-only)', {
+      status: gRes.status,
+      data: gData,
+      piId
+    });
+
+    if (!gRes.ok || !gData.ok) {
+      const msg = (gData && (gData.message || gData.debug))
+        ? (gData.message || gData.debug)
+        : 'Payment returned from Stripe, but access grant failed.';
+      throw new Error(msg);
+    }
+
+    mrmShowPieceSuccessPopup(
+      'Thank you!',
+      'Access has been granted. Check your email for download instructions.'
+    );
+
+    return gData;
   }
 
   function checkReturnFromStripe(){
     const params = new URLSearchParams(window.location.search);
     const piId = params.get('payment_intent');
     if (!piId) return;
+
     const stored = sessionStorage.getItem('mrmPiecePayment');
-    if (!stored) return;
+
+    // If Stripe returned but sessionStorage context is missing, try a PI-only finalize using backend metadata.
+    if (!stored) {
+      verifyAndGrantByPiOnly(piId)
+        .catch((err) => {
+          console.error('[MRM] Stripe return PI-only finalize failed:', err);
+          const errorEl = document.getElementById('mrm-payment-error');
+          if (errorEl) {
+            errorEl.textContent = (err && err.message)
+              ? err.message
+              : 'Payment returned from Stripe, but purchase finalization could not be completed.';
+          }
+        })
+        .finally(() => {
+          try {
+            const cleanUrl = window.location.pathname + (window.location.hash || '');
+            window.history.replaceState({}, document.title, cleanUrl);
+          } catch (e) {}
+        });
+      return;
+    }
+
     try {
       const ctx = JSON.parse(stored);
       if (ctx && ctx.email && ctx.sku) {
-        verifyAndGrant(piId, ctx.email, ctx.sku).finally(() => {
-          sessionStorage.removeItem('mrmPiecePayment');
-        });
+        verifyAndGrant(piId, ctx.email, ctx.sku)
+          .catch((err) => {
+            console.error('[MRM] Stripe return verifyAndGrant failed:', err);
+            const errorEl = document.getElementById('mrm-payment-error');
+            if (errorEl) {
+              errorEl.textContent = (err && err.message)
+                ? err.message
+                : 'Payment verification or access grant failed after returning from Stripe.';
+            }
+          })
+          .finally(() => {
+            sessionStorage.removeItem('mrmPiecePayment');
+            // Clean Stripe params from URL after handling
+            try {
+              const cleanUrl = window.location.pathname + (window.location.hash || '');
+              window.history.replaceState({}, document.title, cleanUrl);
+            } catch (e) {}
+          });
+      } else {
+        sessionStorage.removeItem('mrmPiecePayment');
       }
     } catch (e) {
       sessionStorage.removeItem('mrmPiecePayment');
@@ -1176,6 +2266,26 @@ a{ -webkit-tap-highlight-color:transparent; }
       .replaceAll('>','&gt;')
       .replaceAll('"','&quot;')
       .replaceAll("'","&#039;");
+  }
+
+  function multilineTextToHtml(value){
+    const normalized = String(value || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .trim();
+
+    if (!normalized) {
+      return '';
+    }
+
+    return normalized
+      .split(/\n{2,}/)
+      .map(paragraph => {
+        const safeParagraph = escHtml(paragraph.trim()).replace(/\n/g, '<br>');
+        return safeParagraph ? `<p>${safeParagraph}</p>` : '';
+      })
+      .filter(Boolean)
+      .join('');
   }
 
   function applyAudioUrl(audioEl, url){
@@ -1203,6 +2313,7 @@ a{ -webkit-tap-highlight-color:transparent; }
   function buildOfferDom(offer){
     const displayTitle = offer.display_title || offer.displayTitle || '';
     const subtitle     = offer.subtitle || '';
+    const subtitleHtml = multilineTextToHtml(subtitle);
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
     let productSlug = normalizeSkuFromOffer(offer);
@@ -1250,17 +2361,8 @@ a{ -webkit-tap-highlight-color:transparent; }
     wrap.dataset.productSlug = productSlug;
     wrap.dataset.price = priceDisplay;
 
-    wrap.innerHTML = `
-      <div class="offer-head">
-        <div class="offer-head-left">
-          <h3 class="offer-title">${escHtml(displayTitle)}</h3>
-        </div>
-      </div>
-
-      <div class="offer-body">
-        <div class="audio-stack">
-          <p class="audio-subtitle">${escHtml(subtitle)}</p>
-
+    const audioMarkup = previewAudio
+      ? `
           <div class="audio-box">
             <audio class="mrm-audio" preload="metadata" crossorigin="anonymous">
               <source src="" type="audio/mpeg">
@@ -1288,6 +2390,20 @@ a{ -webkit-tap-highlight-color:transparent; }
               </div>
             </div>
           </div>
+        `
+      : '';
+
+    wrap.innerHTML = `
+      <div class="offer-head">
+        <div class="offer-head-left">
+          <h3 class="offer-title">${escHtml(displayTitle)}</h3>
+        </div>
+      </div>
+
+      <div class="offer-body">
+        <div class="audio-stack">
+          ${subtitleHtml ? `<div class="audio-subtitle">${subtitleHtml}</div>` : ''}
+          ${audioMarkup}
         </div>
 
         <div class="offer-actions">
@@ -1295,18 +2411,20 @@ a{ -webkit-tap-highlight-color:transparent; }
             <div class="price-label">Price</div>
             <div class="price">${escHtml(priceDisplay)}</div>
           </div>
-
-          <div class="actions">
-            <a href="#" class="button-primary mrm-purchaseBtn">Purchase</a>
-            <a href="#" class="button-secondary mrm-accessBtn">Access</a>
-          </div>
+        <div class="actions">
+          <button type="button" class="button-primary mrm-purchaseBtn">Purchase</button>
+          <button type="button" class="button-secondary mrm-accessBtn">Access</button>
+        </div>
+          <div class="mrm-offerStatus" style="margin-top:10px;font-size:13px;line-height:1.4;color:#8a1f1f;"></div>
         </div>
       </div>
     `;
 
-    // set audio
-    const audioEl = wrap.querySelector('.mrm-audio');
-    applyAudioUrl(audioEl, previewAudio);
+    // set audio only when a preview audio URL exists
+    if (previewAudio) {
+      const audioEl = wrap.querySelector('.mrm-audio');
+      applyAudioUrl(audioEl, previewAudio);
+    }
 
     return wrap;
   }
@@ -1350,7 +2468,11 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     // long description on piece page
     const longDesc = (piece.long_description || piece.description || piece.longDescription || '').trim();
-    pieceEl.querySelector('.description').textContent = longDesc;
+    const descriptionEl = pieceEl.querySelector('.description');
+
+    if (descriptionEl) {
+      descriptionEl.innerHTML = multilineTextToHtml(longDesc);
+    }
 
     // Meta
     const meta = {
@@ -1383,6 +2505,9 @@ a{ -webkit-tap-highlight-color:transparent; }
     offers.forEach(off => {
       offersWrap.appendChild(buildOfferDom(off));
     });
+
+    const renderedOffers = Array.from(offersWrap.querySelectorAll('.mrm-offer'));
+    await Promise.all(renderedOffers.map(primeOfferSkuState));
 
     // Initialize PDF + audio + OTP now that DOM is built
     initPdf(pieceEl);
@@ -1475,7 +2600,7 @@ a{ -webkit-tap-highlight-color:transparent; }
 
       scrollY = window.scrollY || window.pageYOffset || 0;
       document.body.style.top = `-${scrollY}px`;
-      document.body.classList.add('no-scroll');
+      document.body.classList.add('mrm-piece-no-scroll');
 
       overlay.classList.add('is-open');
       overlay.setAttribute('aria-hidden','false');
@@ -1489,7 +2614,7 @@ a{ -webkit-tap-highlight-color:transparent; }
       overlay.classList.remove('is-open');
       overlay.setAttribute('aria-hidden','true');
 
-      document.body.classList.remove('no-scroll');
+      document.body.classList.remove('mrm-piece-no-scroll');
       const top = document.body.style.top;
       document.body.style.top = "";
       const restoreY = top ? -parseInt(top,10) : scrollY;
@@ -1542,6 +2667,11 @@ a{ -webkit-tap-highlight-color:transparent; }
       const dur   = offerEl.querySelector('.mrm-duration');
       const vol   = offerEl.querySelector('.mrm-volume');
 
+      // If this offer intentionally has no preview audio, skip audio wiring entirely.
+      if (!audio || !play || !seek || !cur || !dur || !vol) {
+        return;
+      }
+
       function syncPlayUI(){
         const playing = audio && !audio.paused && !audio.ended;
         play.classList.toggle('is-playing', !!playing);
@@ -1573,35 +2703,94 @@ a{ -webkit-tap-highlight-color:transparent; }
       vol.addEventListener('input', () => { audio.volume = Number(vol.value); });
     }
 
-    piece.querySelectorAll('.mrm-offer').forEach(syncOfferAudio);
+    piece.querySelectorAll('.mrm-offer').forEach((offerEl) => {
+      try {
+        syncOfferAudio(offerEl);
+      } catch (err) {
+        console.error('[MRM] Offer audio init failed for one offer:', err, offerEl);
+      }
+    });
 
     const payBtn = document.getElementById('mrm-pay-btn');
     if (payBtn) {
-      payBtn.onclick = async function () {
+      payBtn.onclick = async function (evt) {
+        if (evt && typeof evt.preventDefault === 'function') evt.preventDefault();
+
         const errorEl = document.getElementById('mrm-payment-error');
         const email = (document.getElementById('mrm-payment-email').value || '').trim();
 
+        errorEl.textContent = '';
+
         if (!pendingSku) {
-          errorEl.textContent = 'Missing SKU.';
+          errorEl.textContent = 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
           return;
         }
+        if (!document.getElementById('mrm-piece-payment-terms')?.checked) {
+          errorEl.textContent = 'Please agree to the Terms of Service before payment.';
+          return;
+        }
+
         if (!pendingClientSecret || !activeStripeElements) {
-          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email.';
+          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email, ZIP, and agree to the Terms of Service.';
           return;
         }
 
         this.disabled = true;
-        const { error, paymentIntent } = await stripe.confirmPayment({
-          elements: activeStripeElements,
-          confirmParams: { return_url: window.location.href }
-        });
-        if (error) {
-          errorEl.textContent = error.message || 'Payment failed.';
+
+        try {
+          const okToPay = await showConfirmTotal(pendingBreakdown);
+          if (!okToPay) {
+            this.disabled = false;
+            return;
+          }
+
+          // Save context so redirect-return handler can finalize access + popup
+          try {
+            sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
+              email: email,
+              sku: pendingSku
+            }));
+          } catch (e) {}
+
+          const { error, paymentIntent } = await stripe.confirmPayment({
+            elements: activeStripeElements,
+            redirect: 'if_required',
+            confirmParams: { return_url: window.location.href }
+          });
+
+          if (error) {
+            errorEl.textContent = error.message || 'Payment failed.';
+            this.disabled = false;
+            return;
+          }
+
+          // Immediate success path (most cards)
+          if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'requires_capture')) {
+            try {
+              await verifyAndGrant(paymentIntent.id, email, pendingSku);
+              // success popup handles reload
+              return;
+            } catch (e) {
+              console.error('[MRM] verifyAndGrant failed after successful payment:', e);
+              errorEl.textContent = (e && e.message)
+                ? e.message
+                : 'Payment succeeded, but access setup did not finish. Please refresh and try Access, or contact support.';
+              this.disabled = false;
+              return;
+            }
+          }
+
+          // If Stripe did not return a terminal status immediately, rely on redirect-return handler.
+          // Keep the button enabled so user is not stuck if no redirect occurs.
+          if (paymentIntent && paymentIntent.status) {
+            console.warn('[MRM] Non-terminal immediate paymentIntent status:', paymentIntent.status);
+          }
           this.disabled = false;
-          return;
-        }
-        if (paymentIntent && paymentIntent.status === 'succeeded') {
-          await verifyAndGrant(paymentIntent.id, email, pendingSku);
+
+        } catch (e) {
+          console.error('[MRM] Pay flow error:', e);
+          errorEl.textContent = (e && e.message) ? e.message : 'Unexpected error while processing payment.';
+          this.disabled = false;
         }
       };
     }
@@ -1611,19 +2800,75 @@ a{ -webkit-tap-highlight-color:transparent; }
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
-        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
-        const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
+        let sku = '';
+        try {
+          sku = await getValidatedOfferSkuOrThrow(offerEl);
+        } catch (err) {
+          alert(err.message || 'This offer is not available for purchase.');
+          return;
+        }
 
-        if (!sku) { alert('Missing product_slug for this offer.'); return; }
+        console.log('[MRM] Purchase SKU resolved', {
+          raw_offer_slug: offerEl ? (offerEl.dataset.productSlug || '').trim() : '',
+          resolved_sku: sku,
+          piece_slug: getPieceSlugFromUrl()
+        });
+
+        const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
+        let quoteData = null;
 
         // 1) Quote (validates sku exists + active in hub)
+        let qData = null;
         try {
-          const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?sku=${encodeURIComponent(sku)}`, { method: 'GET' });
-          const qData = await qRes.json().catch(() => ({}));
-          if (!qRes.ok || !qData.ok) throw new Error(qData.message || 'Quote failed.');
+          const params = new URLSearchParams();
+          params.set('sku', sku);
+          params.set('piece_slug', typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '');
+          params.set('type', typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : '');
+            params.set('display_title', String((offerEl.querySelector('.offer-title') || {}).textContent || '').trim());
+            params.set('subtitle', String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').trim());
+
+            const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
+              method: 'GET'
+            });
+          qData = await qRes.json().catch(() => ({}));
+
+          if (!qRes.ok || !qData.ok) {
+            console.warn('[MRM] Payments Hub quote rejected offer', {
+              status: qRes.status,
+              response: qData,
+              requested_sku: sku,
+              raw_offer_slug: offerEl ? (offerEl.dataset.productSlug || '').trim() : '',
+              resolved_sku: offerEl ? (offerEl.dataset.resolvedSku || '').trim() : '',
+              piece_slug: getPieceSlugFromUrl(),
+              type: typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : ''
+            });
+
+            throw new Error((qData && qData.message) ? qData.message : 'Quote failed.');
+          }
+
+          quoteData = qData;
+
+          if (qData && qData.sku) {
+            sku = String(qData.sku).trim().toLowerCase();
+            if (offerEl) {
+              offerEl.dataset.resolvedSku = sku;
+            }
+          }
         } catch (err) {
-          console.error('[MRM] Quote failed:', err);
-          alert(err.message || 'This offer is not available for purchase.');
+          console.error('[MRM] Quote failed:', {
+            error: err,
+            sku,
+            raw_offer_slug: offerEl ? (offerEl.dataset.productSlug || '').trim() : '',
+            resolved_sku: offerEl ? (offerEl.dataset.resolvedSku || '').trim() : '',
+            piece_slug: getPieceSlugFromUrl()
+          });
+
+          alert(
+            (err && err.message)
+              ? err.message
+              : 'This offer is not available for purchase. Please check the matching Payments Hub product.'
+          );
+
           return;
         }
 
@@ -1634,7 +2879,7 @@ a{ -webkit-tap-highlight-color:transparent; }
           try { activePaymentElement.unmount(); } catch (e) {}
           activePaymentElement = null;
         }
-        openPaymentModal(priceDisplay);
+        openPaymentModal(quoteData, priceDisplay);
       });
     });
 
@@ -1643,8 +2888,17 @@ a{ -webkit-tap-highlight-color:transparent; }
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
-        const sku = offerEl ? (offerEl.dataset.productSlug || '').trim() : '';
-        if (!sku) { alert('Missing product_slug for this offer.'); return; }
+
+        const sku =
+          String((offerEl && offerEl.dataset.resolvedSku) || '').trim().toLowerCase() ||
+          String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase();
+
+        if (!sku) {
+          alert('This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
+          return;
+        }
+
+        // Open access modal for the selected offer.
 
         openOtpModal(sku);
       });
@@ -1669,12 +2923,12 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     const y = window.scrollY || window.pageYOffset || 0;
     document.body.style.top = `-${y}px`;
-    document.body.classList.add('no-scroll');
+    document.body.classList.add('mrm-piece-no-scroll');
 
     stepEmail.classList.remove('hidden');
     stepOtp.classList.add('hidden');
     messageDiv.textContent = '';
-    emailInput.value = '';
+    emailInput.value = mrmGetSavedPiecePaymentEmail();
     otpInput.value = '';
   }
 
@@ -1698,7 +2952,7 @@ a{ -webkit-tap-highlight-color:transparent; }
       otpOverlay.classList.remove('is-open');
       otpOverlay.setAttribute('aria-hidden','true');
 
-      document.body.classList.remove('no-scroll');
+      document.body.classList.remove('mrm-piece-no-scroll');
       const top = document.body.style.top;
       document.body.style.top = "";
       const restoreY = top ? -parseInt(top,10) : 0;
@@ -1710,6 +2964,9 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     sendBtn.addEventListener('click', function(){
       const email = (emailInput.value || '').trim();
+    if (isEmailLike(email)) {
+      mrmSavePiecePaymentEmail(email);
+    }
       if(!email){ messageDiv.textContent='Please enter your email.'; return; }
       if(!activeProductSlug){ messageDiv.textContent='Missing product selection.'; return; }
 
@@ -1725,8 +2982,7 @@ a{ -webkit-tap-highlight-color:transparent; }
         let data=null;
         try{ data = JSON.parse(txt); }catch(e){ data=null; }
         if(!r.ok){
-          console.log('RAW RESPONSE (request-otp):', activeProductSlug, r.status, txt);
-          messageDiv.textContent='Server error. Check Console.';
+          messageDiv.textContent='We could not send a code right now. Please try again or contact Low Brass Lessons.';
           return null;
         }
         return data || {};
@@ -1742,6 +2998,9 @@ a{ -webkit-tap-highlight-color:transparent; }
 
     verifyBtn.addEventListener('click', function(){
       const email = (emailInput.value || '').trim();
+    if (isEmailLike(email)) {
+      mrmSavePiecePaymentEmail(email);
+    }
       const otp = (otpInput.value || '').trim();
       if(!otp){ messageDiv.textContent='Enter the code you received.'; return; }
       if(!activeProductSlug){ messageDiv.textContent='Missing product selection.'; return; }
@@ -1757,9 +3016,8 @@ a{ -webkit-tap-highlight-color:transparent; }
         const txt = await r.text();
         let data=null;
         try{ data = JSON.parse(txt); }catch(e){ data=null; }
-        console.log('RAW RESPONSE (verify-otp):', activeProductSlug, r.status, txt);
         if(!r.ok){
-          messageDiv.textContent=(data && data.message) ? data.message : 'Server error. Check Console.';
+          messageDiv.textContent=(data && data.message) ? data.message : 'We could not verify that code right now. Please try again.';
           return null;
         }
         return data || {};
@@ -1776,10 +3034,9 @@ a{ -webkit-tap-highlight-color:transparent; }
     });
   }
 
-  document.addEventListener('DOMContentLoaded', initPiecePage);
+  document.addEventListener('DOMContentLoaded', function(){
+    initPiecePage();
+  });
   document.addEventListener('DOMContentLoaded', checkReturnFromStripe);
 })();
 </script>
-
-</body>
-</html>
