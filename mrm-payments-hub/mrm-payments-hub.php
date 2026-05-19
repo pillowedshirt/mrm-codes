@@ -7404,18 +7404,83 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   private function mrm_get_autopay_promo_discount($profile, $lesson, $amount_cents) {
   $profile = is_array($profile) ? $profile : array();
   $lesson = is_array($lesson) ? $lesson : array();
+
   $promo_code = $this->mrm_normalize_promo_code($profile['promo_code'] ?? '');
-  if ($promo_code === '') return array('promo_code'=>'','discount_cents'=>0,'promo'=>array(),);
-  $email_hash = (string)($profile['email_hash'] ?? '');
-  $email = '';
-  if ($email_hash !== '') $email = $this->decode_email_hash($email_hash);
-  if (!$email || !is_email($email)) $email = sanitize_email((string)($lesson['student_email'] ?? ''));
-  if (!$email || !is_email($email)) return array('promo_code'=>$promo_code,'discount_cents'=>0,'promo'=>array(),);
+
+  if ($promo_code === '') {
+    return array(
+      'promo_code' => '',
+      'discount_cents' => 0,
+      'promo' => array(),
+      'occurrence_number' => 0,
+    );
+  }
+
+  $amount_cents = max(0, (int) $amount_cents);
+
+  if ($amount_cents <= 0) {
+    return array(
+      'promo_code' => $promo_code,
+      'discount_cents' => 0,
+      'promo' => array(),
+      'occurrence_number' => 0,
+    );
+  }
+
+  $promo = $this->mrm_get_active_promo_code($promo_code);
+
+  if (!$promo || !is_array($promo)) {
+    return array(
+      'promo_code' => $promo_code,
+      'discount_cents' => 0,
+      'promo' => array(),
+      'occurrence_number' => 0,
+    );
+  }
+
+  /*
+   * Auto-pay profiles represent one continuing enrollment.
+   * Do not reject future eligible auto-pay discounts merely because the same
+   * email already redeemed the code on the first paid lesson.
+   *
+   * Eligibility is controlled by:
+   * - the saved promo_code on the auto-pay profile,
+   * - charged_lesson_count,
+   * - promo_started_at,
+   * - and the promo rule_mode / occurrence_count settings.
+   */
   $occurrence_number = max(1, (int)($profile['charged_lesson_count'] ?? 0) + 2);
-  $context = array('lesson_count'=>1,'occurrence_number'=>$occurrence_number,'promo_started_at'=>(string)($profile['promo_started_at'] ?? ''),'autopay_profile_id'=>(int)($profile['id'] ?? 0),'lesson_id'=>(int)($lesson['id'] ?? 0),);
-  $validation = $this->mrm_validate_promo_for_purchase($promo_code,$email,'lesson',(int)$amount_cents,$context);
-  if (empty($validation['ok'])) return array('promo_code'=>$promo_code,'discount_cents'=>0,'promo'=>is_array($validation) && !empty($validation['promo']) ? $validation['promo'] : array(),);
-  return array('promo_code'=>$promo_code,'discount_cents'=>max(0, (int)($validation['discount_cents'] ?? 0)),'promo'=>is_array($validation['promo'] ?? null) ? $validation['promo'] : array(),'occurrence_number'=>$occurrence_number,);
+
+  $context = array(
+    'lesson_count' => 1,
+    'occurrence_number' => $occurrence_number,
+    'promo_started_at' => (string)($profile['promo_started_at'] ?? ''),
+    'autopay_profile_id' => (int)($profile['id'] ?? 0),
+    'lesson_id' => (int)($lesson['id'] ?? 0),
+  );
+
+  $calc = $this->mrm_calculate_promo_discount_cents(
+    $promo,
+    $amount_cents,
+    'lesson',
+    $context
+  );
+
+  if (empty($calc['ok'])) {
+    return array(
+      'promo_code' => $promo_code,
+      'discount_cents' => 0,
+      'promo' => $promo,
+      'occurrence_number' => $occurrence_number,
+    );
+  }
+
+  return array(
+    'promo_code' => $promo_code,
+    'discount_cents' => max(0, (int)($calc['discount_cents'] ?? 0)),
+    'promo' => $promo,
+    'occurrence_number' => $occurrence_number,
+  );
 }
 
 private function charge_and_unlock_autopay($data) {
