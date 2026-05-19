@@ -1011,7 +1011,8 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
   if ($this->mrm_customer_has_used_promo($code, $email_hash, $promo)) {
     return array(
       'ok' => false,
-      'message' => 'This promotional code could not be reserved. It may already have been used by this email, or the promo redemption table may need a database upgrade.',
+      'code' => 'promo_code_already_used',
+      'message' => 'This promotional code has already been used for this email.',
       'discount_cents' => 0,
     );
   }
@@ -6831,14 +6832,18 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       'retained',
       'Retained by platform after fixed instructor payout'
     );
-    $email_sent = $this->mrm_send_autopay_lesson_charge_email($lesson, $order);
-
+    /*
+     * Do not send the separate "Payment confirmation — Lesson charge" email here.
+     *
+     * The normal Stripe payment_intent.succeeded flow already sends the canonical
+     * "Purchase Confirmation" receipt through mrm_maybe_send_purchase_receipt_email().
+     * Sending another auto-pay-specific receipt creates duplicate customer emails.
+     */
     if (method_exists($this, 'stripe_debug_log')) {
-      $this->stripe_debug_log('autopay lesson charge email result', array(
+      $this->stripe_debug_log('autopay lesson charge duplicate payment-confirmation email skipped', array(
         'lesson_id' => $lesson_id,
         'order_id' => $order_id,
         'email' => (string)($lesson['student_email'] ?? ''),
-        'sent' => ($email_sent ? 'yes' : 'no'),
       ));
     }
   }

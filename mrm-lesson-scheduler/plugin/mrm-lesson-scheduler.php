@@ -6639,9 +6639,16 @@ protected function mrm_get_google_service_account_json() {
     }
 
     protected function get_safety_reminder_window_minutes() {
+        /*
+         * WP-Cron is not guaranteed to run at the exact minute.
+         * The old 59-61 minute window could miss reminders when cron ran late.
+         *
+         * This wider window still targets the one-hour reminder, but allows the
+         * 5-minute sweep to catch lessons reliably.
+         */
         return array(
-            'from' => 59,
-            'to'   => 61,
+            'from' => 45,
+            'to'   => 75,
         );
     }
 
@@ -6690,10 +6697,19 @@ protected function mrm_get_google_service_account_json() {
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $attendance_table = $this->table_attendance();
 
-        $current_ts = current_time( 'timestamp' );
+        $current_ts = current_time( 'timestamp', true );
         $now_local  = wp_date( 'Y-m-d H:i:s', $current_ts, wp_timezone() );
-        $from_ts    = $current_ts + ( (int) $window['from'] * MINUTE_IN_SECONDS );
-        $to_ts      = $current_ts + ( (int) $window['to'] * MINUTE_IN_SECONDS );
+        $from_ts = $current_ts + ( (int) $window['from'] * MINUTE_IN_SECONDS );
+        $to_ts   = $current_ts + ( (int) $window['to'] * MINUTE_IN_SECONDS );
+
+        /*
+         * Lesson start_time/end_time are stored as database UTC-style strings.
+         * Use UTC strings for SQL comparison, and keep local strings only for
+         * display/logging.
+         */
+        $from_utc = gmdate( 'Y-m-d H:i:s', $from_ts );
+        $to_utc   = gmdate( 'Y-m-d H:i:s', $to_ts );
+
         $from_local = wp_date( 'Y-m-d H:i:s', $from_ts, wp_timezone() );
         $to_local   = wp_date( 'Y-m-d H:i:s', $to_ts, wp_timezone() );
 
@@ -6724,10 +6740,10 @@ protected function mrm_get_google_service_account_json() {
                         OR a.instructor_reminder_sent_at IS NULL OR a.instructor_reminder_sent_at = ''
                    )
                  ORDER BY l.start_time ASC
-                 LIMIT 250",
+                LIMIT 250",
                 'scheduled',
-                $from_local,
-                $to_local
+                $from_utc,
+                $to_utc
             ),
             ARRAY_A
         );
@@ -7029,8 +7045,10 @@ protected function mrm_get_google_service_account_json() {
         $lessons_table    = $wpdb->prefix . 'mrm_lessons';
         $attendance_table = $this->table_attendance();
 
-        $from_local = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 24 * HOUR_IN_SECONDS ) );
-        $to_local   = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 15 * MINUTE_IN_SECONDS ) );
+        $current_ts = current_time( 'timestamp', true );
+
+        $from_utc = gmdate( 'Y-m-d H:i:s', $current_ts - ( 24 * HOUR_IN_SECONDS ) );
+        $to_utc   = gmdate( 'Y-m-d H:i:s', $current_ts - ( 15 * MINUTE_IN_SECONDS ) );
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
@@ -7048,8 +7066,8 @@ protected function mrm_get_google_service_account_json() {
                    )
                  ORDER BY l.end_time ASC
                  LIMIT 250",
-                $from_local,
-                $to_local
+                $from_utc,
+                $to_utc
             ),
             ARRAY_A
         );
@@ -7061,8 +7079,8 @@ protected function mrm_get_google_service_account_json() {
 
         $this->mrm_safety_log( 'feedback_request_query_completed', array(
             'row_count'   => is_array( $rows ) ? count( $rows ) : 0,
-            'from_local'  => $from_local,
-            'to_local'    => $to_local,
+            'from_utc'    => $from_utc,
+            'to_utc'      => $to_utc,
         ) );
 
         if ( empty( $rows ) ) {
@@ -7752,6 +7770,10 @@ protected function mrm_get_google_service_account_json() {
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $attendance_table = $this->table_attendance();
         $admin_email = $this->get_admin_notification_email();
+        $current_ts = current_time( 'timestamp', true );
+
+        $arrival_cutoff_utc = gmdate( 'Y-m-d H:i:s', $current_ts - ( 10 * MINUTE_IN_SECONDS ) );
+        $departure_cutoff_utc = gmdate( 'Y-m-d H:i:s', $current_ts - ( 60 * MINUTE_IN_SECONDS ) );
 
         if ( ! is_email( $admin_email ) ) {
             $this->mrm_safety_log( 'exception_monitor_skipped_missing_admin_email', array() );
@@ -7763,7 +7785,7 @@ protected function mrm_get_google_service_account_json() {
              FROM {$lessons_table} l
              LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
              WHERE l.status = 'scheduled'
-               AND l.start_time <= '" . esc_sql( date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 10 * MINUTE_IN_SECONDS ) ) ) . "'
+               AND l.start_time <= '" . esc_sql( $arrival_cutoff_utc ) . "'
                AND (a.instructor_arrived_at IS NULL OR a.instructor_arrived_at = '')
                AND (a.arrival_alert_sent_at IS NULL OR a.arrival_alert_sent_at = '')",
             ARRAY_A
@@ -7788,7 +7810,7 @@ protected function mrm_get_google_service_account_json() {
              FROM {$lessons_table} l
              LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
              WHERE l.status IN ('scheduled','delivered')
-               AND l.end_time <= '" . esc_sql( date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 60 * MINUTE_IN_SECONDS ) ) ) . "'
+               AND l.end_time <= '" . esc_sql( $departure_cutoff_utc ) . "'
                AND a.instructor_arrived_at IS NOT NULL
                AND a.instructor_arrived_at <> ''
                AND (a.instructor_departed_at IS NULL OR a.instructor_departed_at = '')
