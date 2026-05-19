@@ -9040,6 +9040,7 @@ private function charge_and_unlock_autopay($data) {
     $address = $this->mrm_normalize_tax_address($address);
 
     $base_amount_cents = (int)$amount;
+    $original_base_amount_cents = $base_amount_cents;
     $addon_amount_cents = $addon_selected ? 500 : 0;
 
     $promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? '');
@@ -9152,6 +9153,7 @@ private function charge_and_unlock_autopay($data) {
       $metadata['mrm_terms_source_flow'] = $source_flow;
     }
     $metadata['mrm_sheet_music_addon'] = $addon_selected ? 'yes' : 'no';
+    $metadata['mrm_original_base_amount_cents'] = (string)$original_base_amount_cents;
     $metadata['mrm_base_amount_cents'] = (string)$base_amount_cents;
     $metadata['mrm_addon_amount_cents'] = (string)$addon_amount_cents;
     if ($promo_code !== '') {
@@ -9326,6 +9328,7 @@ private function charge_and_unlock_autopay($data) {
       'sku' => $sku,
       'label' => (string)($p['label'] ?? $sku),
       'amount_cents' => $final_amount_cents,
+      'original_base_amount_cents' => $original_base_amount_cents,
       'base_amount_cents' => $base_amount_cents,
       'addon_amount_cents' => $addon_amount_cents,
       'promo_code' => $promo_code,

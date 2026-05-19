@@ -2623,11 +2623,23 @@ function mrmRenderLessonPaymentBreakdown(breakdown) {
 
   const money = (cents) => '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
 
-  const base = Number(breakdown?.base_amount_cents || 0);
+  const discountedBase = Number(breakdown?.base_amount_cents || 0);
+  const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
+
+  /*
+   * Payments Hub currently returns base_amount_cents after promo discount.
+   * Prefer original_base_amount_cents when available; otherwise reconstruct it
+   * so the customer sees the actual subtotal and the promo discount clearly.
+   */
+  const originalBase = Number(
+    breakdown?.original_base_amount_cents ||
+    breakdown?.subtotal_before_discount_cents ||
+    (discountedBase + promoDiscount)
+  );
+
   const addon = Number(breakdown?.addon_amount_cents || 0);
   const tax = Number(breakdown?.tax_cents || 0);
-  const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
-  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
+  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (discountedBase + addon + tax);
 
   const taxMessage = String(
     breakdown?.tax_message ||
@@ -2637,7 +2649,7 @@ function mrmRenderLessonPaymentBreakdown(breakdown) {
 
   const rows = [];
 
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson subtotal</span><strong>${money(originalBase)}</strong></div>`);
 
   if (promoDiscount > 0) {
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
@@ -2757,13 +2769,25 @@ function showConfirmTotal(breakdown){
   const box = document.getElementById('mrm-confirm-total-breakdown');
 
   const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
-  const base = Number(breakdown?.base_amount_cents || 0);
+  const discountedBase = Number(breakdown?.base_amount_cents || 0);
+  const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
+  const originalBase = Number(
+    breakdown?.original_base_amount_cents ||
+    breakdown?.subtotal_before_discount_cents ||
+    (discountedBase + promoDiscount)
+  );
+
   const addon = Number(breakdown?.addon_amount_cents || 0);
   const tax = Number(breakdown?.tax_cents || 0);
-  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + addon + tax);
+  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (discountedBase + addon + tax);
 
   const rows = [];
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson</span><strong>${money(base)}</strong></div>`);
+  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson subtotal</span><strong>${money(originalBase)}</strong></div>`);
+
+  if (promoDiscount > 0) {
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
+  }
+
   if (addon > 0) rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
   rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
   rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
@@ -3550,6 +3574,46 @@ let mrmAppliedPromoCode = '';
 let mrmAppliedPromoDiscountCents = 0;
 let mrmLessonPaymentReloadContext = null;
 
+function mrmGetActiveLessonPaymentData(fallbackData) {
+  if (
+    mrmLessonPaymentReloadContext &&
+    mrmLessonPaymentReloadContext.currentData &&
+    typeof mrmLessonPaymentReloadContext.currentData === 'object'
+  ) {
+    return mrmLessonPaymentReloadContext.currentData;
+  }
+
+  return fallbackData || {};
+}
+
+function mrmUpdateStoredSchedulerPaymentFromActiveData(activeData) {
+  if (!activeData || typeof activeData !== 'object') return;
+
+  try {
+    const raw = sessionStorage.getItem('mrmSchedulerPayment');
+    if (!raw) return;
+
+    const stored = JSON.parse(raw);
+    if (!stored || typeof stored !== 'object') return;
+
+    if (activeData.payment_intent_id) {
+      stored.payment_intent_id = activeData.payment_intent_id;
+    }
+
+    if (activeData.order_id) {
+      stored.order_id = activeData.order_id;
+    }
+
+    if (activeData.promo_code) {
+      stored.promo_code = activeData.promo_code;
+    }
+
+    sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify(stored));
+  } catch (e) {
+    // Non-critical. Normal in-page payments do not rely on this unless Stripe redirects.
+  }
+}
+
 function mrmGetLessonPromoEmailValue() {
   const modalEmail = document.getElementById('modal-student-email');
   const mainEmail = document.getElementById('student-email');
@@ -3585,24 +3649,20 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
     if (payBtn) payBtn.disabled = true;
     if (errorEl) errorEl.textContent = '';
 
-    if (activePaymentElement) {
-      try { activePaymentElement.unmount(); } catch (e) {}
-    }
-
-    activePaymentElement = null;
-    activeStripeElements = null;
-
-    if (paymentMount) {
-      paymentMount.innerHTML = `
-        <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
-          Promotional code applied. Reloading the secure payment form…
-        </div>
-      `;
-    }
-
     const requestBody = JSON.parse(JSON.stringify(mrmLessonPaymentReloadContext.requestBody));
     requestBody.promo_code = promoCode;
 
+    if (!requestBody.context || typeof requestBody.context !== 'object') {
+      requestBody.context = {};
+    }
+
+    requestBody.context.promo_code = promoCode;
+
+    /*
+     * Important:
+     * Do not unmount the existing Stripe Payment Element until the replacement
+     * discounted PaymentIntent has been successfully created.
+     */
     const res = await fetch(mrmLessonPaymentReloadContext.payApiBase + '/create-payment-intent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3611,39 +3671,55 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
 
     const data = await res.json();
 
-    if (!res.ok || !data.ok) {
-      if (errorEl) errorEl.textContent = data.message || 'Unable to apply promotional code to payment.';
+    if (!res.ok || !data.ok || !data.client_secret) {
+      if (errorEl) {
+        errorEl.textContent = data.message || 'Unable to apply promotional code to payment.';
+      }
       if (payBtn) payBtn.disabled = false;
       return false;
     }
-
-    Object.assign(mrmLessonPaymentReloadContext.currentData, data);
 
     const stripeInstance = ensureStripe(data.publishableKey || '');
     if (!stripeInstance) {
-      if (errorEl) errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
+      if (errorEl) {
+        errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
+      }
       if (payBtn) payBtn.disabled = false;
       return false;
     }
 
-    stripe = stripeInstance;
-
-    mrmRenderLessonPaymentBreakdown(mrmLessonPaymentReloadContext.currentData);
-
-    activeStripeElements = stripe.elements({ clientSecret: data.client_secret });
-    activePaymentElement = activeStripeElements.create(
+    const nextElements = stripeInstance.elements({ clientSecret: data.client_secret });
+    const nextPaymentElement = nextElements.create(
       'payment',
       mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card'])
     );
 
-    if (paymentMount) paymentMount.innerHTML = '';
+    if (activePaymentElement) {
+      try { activePaymentElement.unmount(); } catch (e) {}
+    }
+
+    if (paymentMount) {
+      paymentMount.innerHTML = '';
+    }
+
+    stripe = stripeInstance;
+    activeStripeElements = nextElements;
+    activePaymentElement = nextPaymentElement;
     activePaymentElement.mount('#mrm-payment-element');
+
+    Object.assign(mrmLessonPaymentReloadContext.currentData, data);
+    mrmLessonPaymentReloadContext.requestBody = requestBody;
+
+    mrmRenderLessonPaymentBreakdown(mrmLessonPaymentReloadContext.currentData);
+    mrmUpdateStoredSchedulerPaymentFromActiveData(mrmLessonPaymentReloadContext.currentData);
 
     if (payBtn) payBtn.disabled = false;
     return true;
   } catch (err) {
     console.error('[MRM] promo reload payment intent error:', err);
-    if (errorEl) errorEl.textContent = 'Unable to reload payment form with promotional code.';
+    if (errorEl) {
+      errorEl.textContent = 'Unable to reload payment form with promotional code. Please remove the code or refresh and try again.';
+    }
     if (payBtn) payBtn.disabled = false;
     return false;
   }
@@ -3747,9 +3823,17 @@ function mrmInitPromoBox() {
       }
       mrmAppliedPromoCode = data.promo_code || code;
       mrmAppliedPromoDiscountCents = Number(data.discount_cents || 0);
-      mrmSetPromoMessage(data.promo_success_message || 'Promotional code applied.', false);
 
-        await mrmReloadLessonPaymentIntentWithPromo();
+      const reloaded = await mrmReloadLessonPaymentIntentWithPromo();
+
+      if (!reloaded) {
+        mrmAppliedPromoCode = '';
+        mrmAppliedPromoDiscountCents = 0;
+        mrmSetPromoMessage('This code is valid, but the discounted checkout could not be loaded. Please try again.', true);
+        return;
+      }
+
+      mrmSetPromoMessage(data.promo_success_message || 'Promotional code applied.', false);
     } catch (err) {
       mrmAppliedPromoCode = '';
       mrmAppliedPromoDiscountCents = 0;
@@ -4167,8 +4251,16 @@ function ensureLegacyBookingHandler(){
             payBtn.disabled = true;
             errorEl.textContent = '';
 
-            const okToPay = await showConfirmTotal(createData);
+            const okToPay = await showConfirmTotal(mrmGetActiveLessonPaymentData(createData));
             if (!okToPay) {
+              payBtn.disabled = false;
+              return;
+            }
+
+            const activePaymentData = mrmGetActiveLessonPaymentData(createData);
+
+            if (!stripe || !activeStripeElements) {
+              errorEl.textContent = 'Payment confirmation is temporarily unavailable. Please close this payment window and try again.';
               payBtn.disabled = false;
               return;
             }
@@ -4192,13 +4284,16 @@ function ensureLegacyBookingHandler(){
               if (paymentIntent && paymentIntent.status === 'succeeded') {
                 await verifyPaymentIntent(paymentIntent.id, email);
 
+                const latestPaymentData = mrmGetActiveLessonPaymentData(createData);
+                const activePromoCode = latestPaymentData.promo_code || mrmAppliedPromoCode || '';
+
                 const enrollRes = await fetch(payApiBase + '/create-autopay-enrollment', {
                   method:'POST',
                   headers:{'Content-Type':'application/json'},
                   body: JSON.stringify({
                     payment_intent_id: paymentIntent.id,
                     email: email,
-                    promo_code: createData.promo_code || mrmAppliedPromoCode || '',
+                    promo_code: activePromoCode,
                     context: {
                       instructor_id: instrId,
                       lesson_length: len,
@@ -4206,7 +4301,7 @@ function ensureLegacyBookingHandler(){
                       repeat_frequency: frequency,
                       repeat_duration: reserveDuration,
                       authorized_lesson_count: authorizedLessonCount,
-                      promo_code: createData.promo_code || mrmAppliedPromoCode || ''
+                      promo_code: activePromoCode
                     }
                   })
                 });
@@ -4221,7 +4316,7 @@ function ensureLegacyBookingHandler(){
 
                 payload.payment_mode = 'autopay';
                 payload.autopay_profile_id = enrollData.autopay_profile_id;
-                payload.order_id = createData.order_id;
+                payload.order_id = latestPaymentData.order_id || createData.order_id;
 
                 closeModal({ clearSelection: false });
                 await submitBooking(payload, setMsg);
@@ -4335,8 +4430,16 @@ function ensureLegacyBookingHandler(){
           payBtn.disabled = true;
           errorEl.textContent = '';
 
-          const okToPay = await showConfirmTotal(createData);
+          const okToPay = await showConfirmTotal(mrmGetActiveLessonPaymentData(createData));
           if (!okToPay) {
+            payBtn.disabled = false;
+            return;
+          }
+
+          const activePaymentData = mrmGetActiveLessonPaymentData(createData);
+
+          if (!stripe || !activeStripeElements) {
+            errorEl.textContent = 'Payment confirmation is temporarily unavailable. Please close this payment window and try again.';
             payBtn.disabled = false;
             return;
           }
@@ -4364,7 +4467,8 @@ function ensureLegacyBookingHandler(){
             if (paymentIntent && paymentIntent.status === 'succeeded') {
               await verifyPaymentIntent(paymentIntent.id, email);
 
-              payload.order_id = createData.order_id;
+              const latestPaymentData = mrmGetActiveLessonPaymentData(createData);
+              payload.order_id = latestPaymentData.order_id || createData.order_id;
               payload.payment_mode = prepay ? 'prepay' : 'one_time';
               payload.autopay_profile_id = null;
 
