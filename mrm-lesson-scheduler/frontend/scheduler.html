@@ -2042,12 +2042,12 @@ h1 {
 
               <div class="mrm-check-row">
                 <input type="checkbox" id="mrm-autopay-opt">
-                <label for="mrm-autopay-opt">I am aware that I am signing up for auto-pay for future lessons.</label>
+                <label for="mrm-autopay-opt">I authorize Low Brass Lessons to charge the first lesson now and automatically charge future recurring lessons after they are delivered.</label>
               </div>
 
               <div class="mrm-check-row">
                 <input type="checkbox" id="mrm-prepay-opt">
-                <label for="mrm-prepay-opt">I would like to prepay for all selected lessons.</label>
+                <label for="mrm-prepay-opt">I would like to prepay for the full selected recurring lesson period.</label>
               </div>
 
               <div id="mrm-autopay-visual-note" style="display:none; margin-top:10px; font-size:12.5px; line-height:1.45;"></div>
@@ -2684,6 +2684,18 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
   overlay.setAttribute('aria-hidden', 'false');
   document.body.classList.add('mrm-booking-modal-open');
 
+  if (!clientSecret || typeof clientSecret !== 'string') {
+    errorEl.textContent = 'Checkout could not start because Stripe did not return a valid payment session. Please refresh and try again.';
+    payBtn.disabled = true;
+    return { payBtn, errorEl, closeModal };
+  }
+
+  if (!stripe || typeof stripe.elements !== 'function') {
+    errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
+    payBtn.disabled = true;
+    return { payBtn, errorEl, closeModal };
+  }
+
   activeStripeElements = stripe.elements({ clientSecret });
   activePaymentElement = activeStripeElements.create(
     'payment',
@@ -2988,9 +3000,17 @@ function applyRepeatUIRules(){
 
 function updatePaymentCheckboxVisibility() {
   const appointmentType = document.getElementById('lesson-option')?.value || 'consultation';
-  const frequency = document.getElementById('repeat-frequency')?.value || 'none';
 
-  const termsRow = document.querySelector('.terms-row');
+  const frequency =
+    document.getElementById('repeat-frequency')?.value ||
+    document.getElementById('modal-frequency')?.value ||
+    document.getElementById('frequency')?.value ||
+    'none';
+
+  const termsRow =
+    document.querySelector('.mrm-terms-check-row') ||
+    document.querySelector('.terms-row');
+
   const paymentChoiceGroup = document.getElementById('mrm-payment-choice-group');
 
   const autopayCb = document.getElementById('mrm-autopay-opt');
@@ -3001,28 +3021,35 @@ function updatePaymentCheckboxVisibility() {
   const prepayRow  = prepayCb?.closest('.mrm-check-row');
   const sheetRow   = sheetCb?.closest('.mrm-check-row');
 
-  if (!termsRow || !paymentChoiceGroup || !autopayRow || !prepayRow || !sheetRow) return;
-
-  termsRow.style.display = 'none';
-  paymentChoiceGroup.style.display = 'none';
-  autopayRow.style.display = 'none';
-  prepayRow.style.display = 'none';
-  sheetRow.style.display = 'none';
-
-  if (appointmentType === 'consultation') {
-    termsRow.style.display = '';
-
-    if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
-    if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
-    if (sheetCb)   { sheetCb.checked   = false; }
-
-    autopayRow.classList.remove('is-disabled');
-    prepayRow.classList.remove('is-disabled');
+  if (!paymentChoiceGroup || !autopayCb || !prepayCb || !autopayRow || !prepayRow) {
     return;
   }
 
-  termsRow.style.display = '';
-  sheetRow.style.display = '';
+  if (termsRow) termsRow.style.display = 'none';
+  paymentChoiceGroup.style.display = 'none';
+  autopayRow.style.display = 'none';
+  prepayRow.style.display = 'none';
+  if (sheetRow) sheetRow.style.display = 'none';
+
+  if (appointmentType === 'consultation') {
+    if (termsRow) termsRow.style.display = '';
+
+    autopayCb.checked = false;
+    prepayCb.checked = false;
+    autopayCb.disabled = false;
+    prepayCb.disabled = false;
+
+    if (sheetCb) sheetCb.checked = false;
+
+    autopayRow.classList.remove('is-disabled');
+    prepayRow.classList.remove('is-disabled');
+
+    updateAutopayVisualNote();
+    return;
+  }
+
+  if (termsRow) termsRow.style.display = '';
+  if (sheetRow) sheetRow.style.display = '';
 
   const isRepeating = (frequency === 'weekly' || frequency === 'biweekly');
 
@@ -3035,14 +3062,17 @@ function updatePaymentCheckboxVisibility() {
     autopayRow.style.display = 'none';
     prepayRow.style.display  = 'none';
 
-    if (autopayCb) { autopayCb.checked = false; autopayCb.disabled = false; }
-    if (prepayCb)  { prepayCb.checked  = false; prepayCb.disabled  = false; }
+    autopayCb.checked = false;
+    prepayCb.checked = false;
+    autopayCb.disabled = false;
+    prepayCb.disabled = false;
 
     autopayRow.classList.remove('is-disabled');
     prepayRow.classList.remove('is-disabled');
   }
 
   applyAutoPrepayMutualExclusion();
+  updateAutopayVisualNote();
 }
 
 function applyAutoPrepayMutualExclusion() {
@@ -3436,6 +3466,8 @@ function openBookingModal(instr){
     modalFrequency.addEventListener('change', ()=>{
       syncMainToModal();
       syncModalToLegacyFields();
+      updatePaymentCheckboxVisibility();
+      updateAutopayVisualNote();
       persistSelectedSlots();
     });
   }
@@ -3445,6 +3477,8 @@ function openBookingModal(instr){
     modalDuration.addEventListener('change', ()=>{
       syncMainToModal();
       syncModalToLegacyFields();
+      updatePaymentCheckboxVisibility();
+      updateAutopayVisualNote();
       persistSelectedSlots();
     });
   }
@@ -3488,8 +3522,15 @@ function syncModalToLegacyFields(){
   const addrPostal = document.getElementById('modal-postal-code')?.value || '';
   const phone = document.getElementById('modal-phone')?.value || '';
 
-  const freq = document.getElementById('repeat-frequency')?.value || 'weekly';
-  const dur  = document.getElementById('repeat-duration')?.value || '1_month';
+  const freq =
+    document.getElementById('modal-frequency')?.value ||
+    document.getElementById('repeat-frequency')?.value ||
+    'weekly';
+
+  const dur =
+    document.getElementById('modal-repeat-duration')?.value ||
+    document.getElementById('repeat-duration')?.value ||
+    '1_month';
 
   const fnEl = document.getElementById('first-name'); if(fnEl) fnEl.value = fn;
   const lnEl = document.getElementById('last-name');  if(lnEl) lnEl.value = ln;
@@ -3650,22 +3691,43 @@ function mrmInitPromoBox() {
       btn.disabled = true;
       mrmSetPromoMessage('Checking code…', false);
       let skuToValidate = '';
+      let contextToValidate = {};
 
-    const appointmentType = document.getElementById('lesson-option')?.value || '';
-    const firstSelectedSlot = Array.isArray(selectedSlots) && selectedSlots.length ? selectedSlots[0] : null;
-    const selectedMinutes = firstSelectedSlot
-      ? Math.round((new Date(firstSelectedSlot.end).getTime() - new Date(firstSelectedSlot.start).getTime()) / 60000)
-      : NaN;
+      if (mrmLessonPaymentReloadContext && mrmLessonPaymentReloadContext.requestBody) {
+        skuToValidate = mrmLessonPaymentReloadContext.requestBody.sku || '';
+        contextToValidate = JSON.parse(JSON.stringify(mrmLessonPaymentReloadContext.requestBody.context || {}));
+      }
 
-    const effectiveMinutes = Number.isFinite(selectedMinutes) && selectedMinutes > 0
-      ? selectedMinutes
-      : (typeof getSlotMinutes === 'function' ? getSlotMinutes() : 60);
+      if (!skuToValidate) {
+        const appointmentType = document.getElementById('lesson-option')?.value || '';
+        const firstSelectedSlot = Array.isArray(selectedSlots) && selectedSlots.length ? selectedSlots[0] : null;
+        const selectedMinutes = firstSelectedSlot
+          ? Math.round((new Date(firstSelectedSlot.end).getTime() - new Date(firstSelectedSlot.start).getTime()) / 60000)
+          : NaN;
 
-    if (appointmentType && appointmentType !== 'consultation') {
-      const len = effectiveMinutes === 60 ? '60' : '30';
-      const mode = appointmentType === 'in_person' ? 'inperson' : 'online';
-      skuToValidate = `lesson_${len}_${mode}`;
-    }
+        const effectiveMinutes = Number.isFinite(selectedMinutes) && selectedMinutes > 0
+          ? selectedMinutes
+          : (typeof getSlotMinutes === 'function' ? getSlotMinutes() : 60);
+
+        if (appointmentType && appointmentType !== 'consultation') {
+          const len = effectiveMinutes === 60 ? '60' : '30';
+          const mode = appointmentType === 'in_person' ? 'inperson' : 'online';
+          skuToValidate = `lesson_${len}_${mode}`;
+        }
+      }
+
+      if (!contextToValidate || typeof contextToValidate !== 'object') {
+        contextToValidate = {};
+      }
+
+      if (!contextToValidate.lesson_count) {
+        contextToValidate.lesson_count = 1;
+      }
+
+      if (!contextToValidate.prepay) {
+        contextToValidate.prepay = 'no';
+      }
+
       const res = await fetch('/wp-json/mrm-pay/v1/validate-promo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3673,7 +3735,7 @@ function mrmInitPromoBox() {
           promo_code: code,
           sku: skuToValidate,
           email: email,
-          context: { lesson_count: 1, prepay: 'no' }
+          context: contextToValidate
         })
       });
       const data = await res.json();
@@ -4025,8 +4087,8 @@ function ensureLegacyBookingHandler(){
           const autopayPaymentRequestBody = {
             sku: sku,
             email: email,
-            promo_code: '',
-                        context: {
+            promo_code: mrmAppliedPromoCode || '',
+            context: {
               instructor_id: instrId,
               lesson_length: len,
               lesson_mode: lessonType,
@@ -4035,13 +4097,18 @@ function ensureLegacyBookingHandler(){
               autopay: 'yes',
               repeat_frequency: frequency,
               repeat_duration: reserveDuration,
-              authorized_lesson_count: authorizedLessonCount
+              authorized_lesson_count: authorizedLessonCount,
+              occurrence_number: 1,
+              terms_version: '2026-04-25',
+              terms_accepted: !!document.getElementById('agree-terms')?.checked,
+              source_flow: 'lesson_booking'
             },
             save_card: true,
             amount_override_cents: baseAmount,
             sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
             address: {
               line1: address,
+              city: addressCity,
               state: addressState,
               postal_code: addressPostal,
               country: addressCountry
@@ -4131,13 +4198,15 @@ function ensureLegacyBookingHandler(){
                   body: JSON.stringify({
                     payment_intent_id: paymentIntent.id,
                     email: email,
+                    promo_code: createData.promo_code || mrmAppliedPromoCode || '',
                     context: {
                       instructor_id: instrId,
                       lesson_length: len,
                       lesson_mode: lessonType,
                       repeat_frequency: frequency,
                       repeat_duration: reserveDuration,
-                      authorized_lesson_count: authorizedLessonCount
+                      authorized_lesson_count: authorizedLessonCount,
+                      promo_code: createData.promo_code || mrmAppliedPromoCode || ''
                     }
                   })
                 });
@@ -4183,13 +4252,17 @@ function ensureLegacyBookingHandler(){
         const lessonPaymentRequestBody = {
           sku: sku,
           email: email,
-          promo_code: '',
-                    context: {
+          promo_code: mrmAppliedPromoCode || '',
+          context: {
             instructor_id: instrId,
             lesson_length: len,
             lesson_mode: lessonType,
             lesson_count: count,
             prepay: prepay ? 'yes' : 'no',
+            autopay: 'no',
+            repeat_frequency: frequency,
+            repeat_duration: reserveDuration,
+            occurrence_number: 1,
             terms_version: '2026-04-25',
             terms_accepted: !!document.getElementById('agree-terms')?.checked,
             source_flow: 'lesson_booking'
@@ -4199,6 +4272,7 @@ function ensureLegacyBookingHandler(){
           sheet_music_addon: sheetMusicAddon ? 'yes' : 'no',
           address: {
             line1: address,
+            city: addressCity,
             state: addressState,
             postal_code: addressPostal,
             country: addressCountry
