@@ -3954,10 +3954,16 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
   private function create_order($email_hash, $sku, $product_type, $amount_cents, $currency, $metadata) {
     global $wpdb;
+
     $now = current_time('mysql');
     $environment_mode = 'live';
+
+    $metadata = is_array($metadata) ? $metadata : array();
+    $customer_email = sanitize_email((string)($metadata['mrm_customer_email'] ?? ''));
+
     $wpdb->insert($this->table_orders(), array(
       'email_hash' => $email_hash,
+      'customer_email' => $customer_email ?: null,
       'sku' => $sku,
       'product_type' => $product_type,
       'amount_cents' => (int)$amount_cents,
@@ -3967,7 +3973,8 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       'metadata_json' => wp_json_encode($metadata),
       'created_at' => $now,
       'updated_at' => $now,
-    ), array('%s','%s','%s','%d','%s','%s','%s','%s','%s','%s'));
+    ), array('%s','%s','%s','%s','%d','%s','%s','%s','%s','%s','%s'));
+
     return (int)$wpdb->insert_id;
   }
 

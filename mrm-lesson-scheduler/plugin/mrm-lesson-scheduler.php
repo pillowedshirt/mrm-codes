@@ -2846,14 +2846,36 @@ protected function mrm_get_google_service_account_json() {
                 );
             }
 
-            $orders_table = $wpdb->prefix . 'mrm_pay_orders';
-            $orders_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) );
+            /*
+             * Payments Hub currently stores orders in wp_mrm_orders.
+             * Older scheduler code looked for wp_mrm_pay_orders, which causes confirmed
+             * Stripe payments to be rejected after checkout.
+             *
+             * Prefer the current Payments Hub table, but keep the legacy fallback so
+             * older installs/data do not break.
+             */
+            $orders_table_current = $wpdb->prefix . 'mrm_orders';
+            $orders_table_legacy  = $wpdb->prefix . 'mrm_pay_orders';
 
-            if ( $orders_exists !== $orders_table ) {
+            $orders_table = '';
+            $current_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table_current ) );
+
+            if ( $current_exists === $orders_table_current ) {
+                $orders_table = $orders_table_current;
+            } else {
+                $legacy_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table_legacy ) );
+
+                if ( $legacy_exists === $orders_table_legacy ) {
+                    $orders_table = $orders_table_legacy;
+                }
+            }
+
+            if ( $orders_table === '' ) {
                 return new WP_REST_Response(
                     array(
                         'ok'      => false,
                         'message' => 'Payment confirmation is temporarily unavailable. Please contact Low Brass Lessons.',
+                        'code'    => 'payments_order_table_missing',
                     ),
                     500
                 );
@@ -2861,7 +2883,7 @@ protected function mrm_get_google_service_account_json() {
 
             $order = $wpdb->get_row(
                 $wpdb->prepare(
-                    "SELECT id, customer_email, product_type, status, metadata_json
+                    "SELECT id, customer_email, email_hash, product_type, status, metadata_json
                      FROM {$orders_table}
                      WHERE id = %d
                      LIMIT 1",
@@ -2882,17 +2904,43 @@ protected function mrm_get_google_service_account_json() {
                     array(
                         'ok'      => false,
                         'message' => 'Payment confirmation is required before booking this lesson.',
+                        'code'    => 'paid_lesson_order_not_found',
                     ),
                     403
                 );
             }
 
             $order_email = sanitize_email( (string) ( $order['customer_email'] ?? '' ) );
+
+            if ( ! $order_email && ! empty( $order['metadata_json'] ) ) {
+                $order_meta = json_decode( (string) $order['metadata_json'], true );
+
+                if ( is_array( $order_meta ) ) {
+                    $order_email = sanitize_email( (string) ( $order_meta['mrm_customer_email'] ?? '' ) );
+                }
+            }
+
+            if ( ! $order_email && ! empty( $order['email_hash'] ) && $student_email ) {
+                $expected_hash = hash( 'sha256', strtolower( trim( $student_email ) ) );
+
+                if ( ! hash_equals( (string) $order['email_hash'], $expected_hash ) ) {
+                    return new WP_REST_Response(
+                        array(
+                            'ok'      => false,
+                            'message' => 'Payment confirmation does not match the booking email.',
+                            'code'    => 'payment_email_hash_mismatch',
+                        ),
+                        403
+                    );
+                }
+            }
+
             if ( $order_email && strtolower( $order_email ) !== strtolower( $student_email ) ) {
                 return new WP_REST_Response(
                     array(
                         'ok'      => false,
                         'message' => 'Payment confirmation does not match the booking email.',
+                        'code'    => 'payment_email_mismatch',
                     ),
                     403
                 );

@@ -3874,64 +3874,20 @@ document.addEventListener('DOMContentLoaded', mrmInitPromoBox);
 async function submitBooking(payload, setMsg){
   const r = await fetch(apiBase + '/book', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {'Content-Type':'application/json'},
     body: JSON.stringify(payload)
   });
 
-  let data = null;
-  try {
-    data = await r.json();
-  } catch (_) {
-    data = null;
+  const data = await mrmReadJsonOrError(r);
+
+  if(!r.ok || !data.ok) {
+    throw new Error(data.message || 'Booking failed.');
   }
 
-  if (!r.ok) {
-    const err = (data && (data.message || data.error))
-      ? (data.message || data.error)
-      : ('Booking failed (HTTP ' + r.status + ').');
-    setMsg(err);
-    return { ok: false, data };
-  }
-
-  const ok = !!(data && (data.success === true || data.ok === true));
-  if (!ok) {
-    const err = (data && (data.message || data.error))
-      ? (data.message || data.error)
-      : 'Booking failed.';
-    setMsg(err);
-    return { ok: false, data };
-  }
-
-  const backendMsg = (data && data.message) ? data.message : 'Booking confirmed!';
-  setMsg(backendMsg);
-
-  const bookedInstructor = currentInstructor;
-  closeBookingModal();
-
-  let popupText = 'Please check your email for our confirmation.';
-  let popupNote = '';
-
-  if ((payload.payment_mode || '') === 'autopay') {
-    popupNote = '(Auto-pay enabled)';
-  }
-
-  mrmShowCalendarSuccessPopup({
-    text: popupText,
-    note: popupNote
-  });
-
-  updateBooking(currentInstructor);
-  if (bookedInstructor && typeof bookedInstructor._mrmMarkStale === 'function') {
-    bookedInstructor._mrmMarkStale();
-  }
-  if (bookedInstructor && typeof bookedInstructor._mrmRefreshOpenDay === 'function') {
-    bookedInstructor._mrmRefreshOpenDay();
-  }
-  if (bookedInstructor && typeof bookedInstructor._mrmRefreshVisibleMonth === 'function') {
-    bookedInstructor._mrmRefreshVisibleMonth();
-  }
-
-  return { ok: true, data };
+  clearSelectedSlots();
+  setMsg('');
+  closeBookingModal({ clearSelection: true });
+  mrmShowCalendarSuccessPopup('Your lesson has been booked. Please check your email for the confirmation.');
 }
 
 function handleExistingSheetMusicSubscriptionGuard(createData, setMsg){
