@@ -1057,6 +1057,48 @@ private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $pa
   return !empty($inserted);
 }
 
+private function mrm_attach_payment_intent_to_promo_redemption($order_id, $payment_intent_id) {
+  global $wpdb;
+
+  $order_id = absint($order_id);
+  $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
+
+  if ($order_id <= 0 || $payment_intent_id === '') {
+    return false;
+  }
+
+  $table = $this->table_promo_redemptions();
+
+  $found_table = $wpdb->get_var($wpdb->prepare(
+    "SHOW TABLES LIKE %s",
+    $table
+  ));
+
+  if ($found_table !== $table) {
+    $this->install_or_upgrade_db();
+  }
+
+  $updated = $wpdb->update(
+    $table,
+    array(
+      'stripe_payment_intent_id' => $payment_intent_id,
+      'updated_at' => current_time('mysql'),
+    ),
+    array(
+      'order_id' => $order_id,
+    ),
+    array(
+      '%s',
+      '%s',
+    ),
+    array(
+      '%d',
+    )
+  );
+
+  return ($updated !== false);
+}
+
 private function mrm_mark_promo_redemption_paid($order_id, $payment_intent_id) {
   global $wpdb;
 

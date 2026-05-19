@@ -3669,7 +3669,7 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
       body: JSON.stringify(requestBody)
     });
 
-    const data = await res.json();
+    const data = await mrmReadJsonOrError(res);
 
     if (!res.ok || !data.ok || !data.client_secret) {
       if (errorEl) {
@@ -3735,6 +3735,31 @@ function mrmSetPromoMessage(message, isError) {
   if (!el) return;
   el.textContent = message || '';
   el.style.color = isError ? '#9f1d1d' : '#1f6f3f';
+}
+
+async function mrmReadJsonOrError(response) {
+  const text = await response.text();
+
+  if (!text) {
+    return {
+      ok: false,
+      message: 'The server returned an empty response. Please try again.'
+    };
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    const cleanText = text
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return {
+      ok: false,
+      message: cleanText || 'The server returned an unexpected response. Please try again.'
+    };
+  }
 }
 
 function mrmInitPromoBox() {
@@ -3814,7 +3839,7 @@ function mrmInitPromoBox() {
           context: contextToValidate
         })
       });
-      const data = await res.json();
+      const data = await mrmReadJsonOrError(res);
       if (!res.ok || !data.ok) {
         mrmAppliedPromoCode = '';
         mrmAppliedPromoDiscountCents = 0;
