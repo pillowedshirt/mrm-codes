@@ -358,7 +358,45 @@ public function render_tax_profiles_page() {
 	echo '</tbody></table>';
 	echo '</div>';
 }
-public function render_email_log_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Email Log</h1></div>'; }
+public function render_email_log_page() {
+		$this->must_admin();
+
+		global $wpdb;
+
+		$table = $this->t( 'mrm_masterclass_email_log' );
+		$rows  = $wpdb->get_results( "SELECT * FROM {$table} ORDER BY sent_at DESC LIMIT 300" );
+
+		echo '<div class="wrap">';
+		echo '<h1>Masterclass Email Log</h1>';
+
+		$this->admin_card_open( 'Recent Emails', 'This log records masterclass transactional email attempts, including confirmations, reminders, and failure records.' );
+
+		echo '<table class="widefat striped">';
+		echo '<thead><tr><th>Status</th><th>Type</th><th>Recipient</th><th>Subject</th><th>Event</th><th>Registration</th><th>Sent At</th><th>Error</th></tr></thead><tbody>';
+
+		if ( $rows ) {
+			foreach ( $rows as $row ) {
+				echo '<tr>';
+				echo '<td>' . esc_html( $row->status ) . '</td>';
+				echo '<td>' . esc_html( $row->email_type ) . '</td>';
+				echo '<td>' . esc_html( $row->recipient_email ) . '</td>';
+				echo '<td>' . esc_html( $row->subject ) . '</td>';
+				echo '<td>' . esc_html( $row->event_id ?: '—' ) . '</td>';
+				echo '<td>' . esc_html( $row->registration_id ?: '—' ) . '</td>';
+				echo '<td>' . esc_html( $row->sent_at ) . '</td>';
+				echo '<td>' . esc_html( $row->error_message ?: '—' ) . '</td>';
+				echo '</tr>';
+			}
+		} else {
+			echo '<tr><td colspan="8">No masterclass email records found yet.</td></tr>';
+		}
+
+		echo '</tbody></table>';
+
+		$this->admin_card_close();
+
+		echo '</div>';
+	}
 
 	public function register_rest_routes(){ register_rest_route(self::REST_NAMESPACE,'/events',array('methods'=>'GET','callback'=>array($this,'rest_events'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/event',array('methods'=>'GET','callback'=>array($this,'rest_event'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/create-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_create_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/verify-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_verify_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/finalize-registration',array('methods'=>'POST','callback'=>array($this,'rest_finalize'),'permission_callback'=>'__return_true'));    }
 	public function rest_events(){ global $wpdb; $rows=$wpdb->get_results("SELECT e.id,e.title,e.description,p.name presenter_name,e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,(e.capacity-(SELECT COUNT(*) FROM {$this->t('mrm_masterclass_registrations')} r WHERE r.event_id=e.id AND r.payment_status='paid')) available_seats FROM {$this->t('mrm_masterclass_events')} e LEFT JOIN {$this->t('mrm_masterclass_presenters')} p ON p.id=e.presenter_id WHERE e.status='scheduled' ORDER BY e.start_time ASC"); return rest_ensure_response($rows); }
