@@ -1,22 +1,20 @@
 <!doctype html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MRM Masterclass</title>
-<style>body{font-family:Arial;margin:0;background:#f7f8fb;color:#1b1f23}.wrap{max-width:1100px;margin:0 auto;padding:24px}.hero{background:#111827;color:#fff;padding:24px;border-radius:12px}.controls{display:flex;justify-content:space-between;align-items:center;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}.day{background:#fff;min-height:110px;border-radius:8px;padding:8px}.day h4{margin:0 0 8px;font-size:13px}.evt{background:#dbeafe;padding:6px;border-radius:6px;cursor:pointer;margin-bottom:4px;font-size:12px}.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center}.modal .card{background:#fff;width:min(640px,95vw);border-radius:12px;padding:18px;max-height:90vh;overflow:auto}input:not([type="checkbox"]), textarea, button {
-  width: 100%;
-  padding: 10px;
-  margin: 6px 0;
-  box-sizing: border-box;
-}
-
-input[type="checkbox"] {
-  width: auto;
-  margin-right: 8px;
-}button{background:#111827;color:#fff;border:0;border-radius:8px;cursor:pointer}</style>
+<style>
+:root { --mc-ink: #1f2933; --mc-muted: #6b7280; --mc-bg: #f6f1e8; --mc-card: #ffffff; --mc-brass: #9f6b2d; --mc-brass-dark: #6f431f; --mc-blue: #1f4f68; --mc-border: #e3d7c4; --mc-shadow: 0 18px 45px rgba(31,41,51,.14);}*{box-sizing:border-box;}body{margin:0;background:radial-gradient(circle at top left, rgba(159,107,45,.18), transparent 32rem),linear-gradient(180deg,#fffaf2 0%,var(--mc-bg) 100%);color:var(--mc-ink);font-family:Georgia,'Times New Roman',serif;} .wrap{max-width:1180px;margin:0 auto;padding:42px 22px 64px;} .calendar-shell{margin-top:28px;background:rgba(255,255,255,.72);backdrop-filter:blur(12px);border:1px solid var(--mc-border);border-radius:28px;padding:22px;} .calendar-toolbar{display:grid;grid-template-columns:54px 1fr 54px;align-items:center;gap:14px;text-align:center;margin-bottom:18px;} .month-arrow{width:54px;height:54px;border-radius:50%;border:1px solid var(--mc-border);background:#fff;color:var(--mc-brass-dark);font-size:34px;} .eyebrow{margin:0 0 4px;color:var(--mc-brass-dark);font-size:12px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;font-family:Arial,sans-serif;} #monthLabel{margin:0;} .weekdays{display:grid;grid-template-columns:repeat(7,1fr);} .grid{display:grid;grid-template-columns:repeat(7,1fr);} </style>
 <script src="https://js.stripe.com/v3/"></script>
 </head>
 <body>
 <div class="wrap"><div class="hero"><h1>Low Brass Lessons Masterclasses</h1><p>Join upcoming online masterclasses.</p></div>
-<div class="controls"><button id="prev">Previous</button><h2 id="monthLabel"></h2><button id="next">Next</button></div>
+<div class="calendar-toolbar">
+  <button class="month-arrow" id="prev" aria-label="Previous month">‹</button>
+  <div>
+    <p class="eyebrow">Masterclass Calendar</p>
+    <h2 id="monthLabel"></h2>
+  </div>
+  <button class="month-arrow" id="next" aria-label="Next month">›</button>
+</div>
 <div class="weekdays">
   <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
 </div>
