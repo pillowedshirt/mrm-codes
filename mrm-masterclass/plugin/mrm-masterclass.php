@@ -32,9 +32,11 @@ class MRM_Masterclass_Plugin {
 			'mrm_masterclass_emergency_cancel_execute' => 'handle_emergency_cancel_execute',
 		);
 		foreach ( $actions as $k => $m ) { add_action( 'admin_post_' . $k, array( $this, $m ) ); add_action( 'admin_post_nopriv_' . $k, array( $this, $m ) ); }
+		add_action( 'admin_notices', array( $this, 'render_activation_diagnostic_notice' ) );
 	}
 
-	public static function activate() { self::install_tables(); if ( ! wp_next_scheduled( 'mrm_masterclass_send_reminders' ) ) { wp_schedule_event( time()+120, 'mrm_masterclass_15min', 'mrm_masterclass_send_reminders' ); } if ( ! wp_next_scheduled( 'mrm_masterclass_reconcile_events' ) ) { wp_schedule_event( time()+300, 'hourly', 'mrm_masterclass_reconcile_events' ); } }
+	public static function activate() { self::install_tables(); set_transient( 'mrm_masterclass_activation_notice', 1, 60 ); if ( ! wp_next_scheduled( 'mrm_masterclass_send_reminders' ) ) { wp_schedule_event( time()+120, 'mrm_masterclass_15min', 'mrm_masterclass_send_reminders' ); } if ( ! wp_next_scheduled( 'mrm_masterclass_reconcile_events' ) ) { wp_schedule_event( time()+300, 'hourly', 'mrm_masterclass_reconcile_events' ); } }
+	public static function deactivate() { wp_clear_scheduled_hook( 'mrm_masterclass_send_reminders' ); wp_clear_scheduled_hook( 'mrm_masterclass_reconcile_events' ); }
 	public function runtime_upgrade(){ if(get_option('mrm_masterclass_db_version')!==self::DB_VERSION){ self::install_tables(); }}
 	private function t($n){global $wpdb; return $wpdb->prefix.$n;}
 	public static function install_tables(){ global $wpdb; require_once ABSPATH.'wp-admin/includes/upgrade.php'; $c=$wpdb->get_charset_collate(); $p=$wpdb->prefix;
@@ -95,6 +97,8 @@ class MRM_Masterclass_Plugin {
 	public function handle_emergency_cancel_execute(){ $p=$this->verify_token(sanitize_text_field($_POST['token']??'')); if(!$p) wp_die('Invalid token'); wp_die('Emergency cancellation executed.'); }
 }
 
+if ( ! defined( 'MRM_MASTERCLASS_FILE' ) ) {
+	define( 'MRM_MASTERCLASS_FILE', __FILE__ );
+}
+
 function mrm_masterclass_plugin() { static $instance = null; if ( ! $instance ) { $instance = new MRM_Masterclass_Plugin(); } return $instance; }
-mrm_masterclass_plugin();
-register_activation_hook( __FILE__, array( 'MRM_Masterclass_Plugin', 'activate' ) );
