@@ -8,6 +8,429 @@
   <script src="https://js.stripe.com/v3/"></script>
 
   <style>
-    :root { --ink:#1f2933;--muted:#6b7280;--paper:#fffaf2;--cream:#f6f1e8;--card:#ffffff;--brass:#9f6b2d;--brass-dark:#6f431f;--blue:#1f4f68;--border:#e3d7c4;--shadow:0 18px 45px rgba(31,41,51,.14);}*{box-sizing:border-box;}body{margin:0;background:radial-gradient(circle at top left, rgba(159,107,45,.18), transparent 32rem),linear-gradient(180deg, #fffaf2 0%, var(--cream) 100%);color:var(--ink);font-family:Georgia,"Times New Roman",serif}.mc-wrap{max-width:1120px;margin:0 auto;padding:42px 18px 70px}.mc-intro{background:linear-gradient(135deg, rgba(31,79,104,.97), rgba(31,41,51,.98)),#1f2933;color:#fff;border-radius:28px;padding:clamp(26px, 5vw, 46px);box-shadow:var(--shadow);overflow:hidden;position:relative}.mc-intro::after{content:"";position:absolute;right:-80px;top:-80px;width:260px;height:260px;border-radius:50%;background:rgba(245,198,122,.18)}.mc-eyebrow{font-family:Arial,sans-serif;font-size:12px;font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:#f6d59b;margin:0 0 10px}.mc-intro h1{margin:0 0 14px;font-size:clamp(36px, 6vw, 62px);line-height:.96;letter-spacing:-.04em;position:relative;z-index:1}.mc-intro p{max-width:760px;margin:0;font-family:Arial,sans-serif;font-size:17px;line-height:1.7;color:rgba(255,255,255,.88);position:relative;z-index:1}.mc-instructions{margin-top:18px;background:rgba(255,255,255,.78);border:1px solid var(--border);border-radius:22px;padding:18px 20px;font-family:Arial,sans-serif;color:var(--muted);line-height:1.6}.calendar-shell{margin-top:26px;background:rgba(255,255,255,.76);border:1px solid var(--border);border-radius:28px;padding:22px;box-shadow:0 14px 38px rgba(31,41,51,.08)}.calendar-toolbar{display:grid;grid-template-columns:54px 1fr 54px;align-items:center;gap:14px;text-align:center;margin-bottom:18px}.month-arrow{width:54px;height:54px;border-radius:50%;border:1px solid var(--border);background:#fff;color:var(--brass-dark);font-size:34px;line-height:1;cursor:pointer;box-shadow:0 8px 20px rgba(31,41,51,.08)}.month-arrow:hover{background:#fff8ec;transform:translateY(-1px)}#monthLabel{margin:0;font-size:clamp(28px, 4vw, 42px);letter-spacing:-.03em}.weekdays{display:grid;grid-template-columns:repeat(7, 1fr);gap:10px;margin-bottom:10px;color:var(--muted);font-family:Arial,sans-serif;font-size:12px;font-weight:800;letter-spacing:.08em;text-align:center;text-transform:uppercase}.calendar-grid{display:grid;grid-template-columns:repeat(7, 1fr);gap:10px}.day{min-height:132px;background:var(--card);border:1px solid #eadfce;border-radius:18px;padding:10px;box-shadow:0 8px 22px rgba(31,41,51,.05)}.day.empty{opacity:.42;background:rgba(255,255,255,.45)}.date-num{margin:0 0 8px;font-family:Arial,sans-serif;font-size:13px;font-weight:800;color:var(--muted)}.event-button{display:block;width:100%;margin:6px 0 0;padding:8px 9px;border-radius:12px;background:linear-gradient(135deg, #f4dfb9, #d9a85a);color:#2e1c0d;font-family:Arial,sans-serif;font-size:12px;font-weight:800;text-align:left;border:0;cursor:pointer}.modal{position:fixed;inset:0;z-index:9999;background:rgba(18,24,31,.58);display:none;align-items:center;justify-content:center;padding:20px}.modal-card{width:min(680px, 95vw);max-height:90vh;overflow:auto;background:#fffaf2;border:1px solid var(--border);border-radius:26px;padding:26px;box-shadow:var(--shadow}.modal-card h2{margin-top:0;font-size:32px;line-height:1.05}.modal-meta{font-family:Arial,sans-serif;color:var(--muted);line-height:1.6}input:not([type="checkbox"]){width:100%;padding:13px 14px;margin:8px 0;border:1px solid var(--border);border-radius:14px;background:#fff;color:var(--ink);font-family:Arial,sans-serif}label{display:block;margin:14px 0;font-family:Arial,sans-serif;color:var(--ink);line-height:1.5}input[type="checkbox"]{width:auto;margin-right:8px}.primary-btn,.secondary-btn{width:100%;padding:13px 16px;border-radius:14px;font-family:Arial,sans-serif;font-weight:800;cursor:pointer;margin-top:10px}.primary-btn{border:0;background:linear-gradient(135deg,var(--brass),var(--brass-dark));color:#fff}.secondary-btn{border:1px solid var(--border);background:#fff;color:var(--ink)}.message{margin-top:12px;font-family:Arial,sans-serif;color:var(--muted)}
+    :root {
+      --ink:#1f2933;
+      --muted:#6b7280;
+      --paper:#fffaf2;
+      --cream:#f6f1e8;
+      --card:#ffffff;
+      --brass:#9f6b2d;
+      --brass-dark:#6f431f;
+      --blue:#1f4f68;
+      --border:#e3d7c4;
+      --shadow:0 18px 45px rgba(31,41,51,.14);
+    }
+
+    * { box-sizing:border-box; }
+
+    body {
+      margin:0;
+      background:linear-gradient(180deg,#fffaf2 0%,var(--cream) 100%);
+      color:var(--ink);
+      font-family:Georgia,"Times New Roman",serif;
+    }
+
+    .mc-wrap {
+      max-width:1120px;
+      margin:0 auto;
+      padding:42px 18px 70px;
+    }
+
+    .mc-intro {
+      background:linear-gradient(135deg,rgba(31,79,104,.97),rgba(31,41,51,.98));
+      color:#fff;
+      border-radius:28px;
+      padding:clamp(26px,5vw,46px);
+      box-shadow:var(--shadow);
+    }
+
+    .mc-eyebrow {
+      font-family:Arial,sans-serif;
+      font-size:12px;
+      font-weight:800;
+      letter-spacing:.18em;
+      text-transform:uppercase;
+      color:#f6d59b;
+      margin:0 0 10px;
+    }
+
+    .mc-intro h1 {
+      margin:0 0 14px;
+      font-size:clamp(36px,6vw,62px);
+      line-height:.96;
+    }
+
+    .mc-intro p {
+      max-width:760px;
+      margin:0;
+      font-family:Arial,sans-serif;
+      font-size:17px;
+      line-height:1.7;
+      color:rgba(255,255,255,.88);
+    }
+
+    .mc-instructions {
+      margin-top:18px;
+      background:rgba(255,255,255,.78);
+      border:1px solid var(--border);
+      border-radius:22px;
+      padding:18px 20px;
+      font-family:Arial,sans-serif;
+      color:var(--muted);
+      line-height:1.6;
+    }
+
+    .calendar-shell {
+      margin-top:26px;
+      background:rgba(255,255,255,.76);
+      border:1px solid var(--border);
+      border-radius:28px;
+      padding:22px;
+      box-shadow:0 14px 38px rgba(31,41,51,.08);
+    }
+
+    .event-list {
+      display:grid;
+      gap:14px;
+    }
+
+    .event-card {
+      background:#fff;
+      border:1px solid var(--border);
+      border-radius:18px;
+      padding:18px;
+      box-shadow:0 8px 22px rgba(31,41,51,.05);
+    }
+
+    .event-card h3 {
+      margin:0 0 8px;
+      font-size:24px;
+    }
+
+    .event-meta {
+      font-family:Arial,sans-serif;
+      color:var(--muted);
+      line-height:1.6;
+      margin:0 0 12px;
+    }
+
+    .event-button,
+    .primary-btn,
+    .secondary-btn {
+      width:100%;
+      padding:13px 16px;
+      border-radius:14px;
+      font-family:Arial,sans-serif;
+      font-weight:800;
+      cursor:pointer;
+      margin-top:10px;
+    }
+
+    .event-button,
+    .primary-btn {
+      border:0;
+      background:linear-gradient(135deg,var(--brass),var(--brass-dark));
+      color:#fff;
+    }
+
+    .secondary-btn {
+      border:1px solid var(--border);
+      background:#fff;
+      color:var(--ink);
+    }
+
+    .modal {
+      position:fixed;
+      inset:0;
+      z-index:9999;
+      background:rgba(18,24,31,.58);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      padding:20px;
+    }
+
+    .modal-card {
+      width:min(680px,95vw);
+      max-height:90vh;
+      overflow:auto;
+      background:#fffaf2;
+      border:1px solid var(--border);
+      border-radius:26px;
+      padding:26px;
+      box-shadow:var(--shadow);
+    }
+
+    .modal-card h2 {
+      margin-top:0;
+      font-size:32px;
+      line-height:1.05;
+    }
+
+    .modal-meta {
+      font-family:Arial,sans-serif;
+      color:var(--muted);
+      line-height:1.6;
+    }
+
+    input:not([type="checkbox"]) {
+      width:100%;
+      padding:13px 14px;
+      margin:8px 0;
+      border:1px solid var(--border);
+      border-radius:14px;
+      background:#fff;
+      color:var(--ink);
+      font-family:Arial,sans-serif;
+    }
+
+    label {
+      display:block;
+      margin:14px 0;
+      font-family:Arial,sans-serif;
+      color:var(--ink);
+      line-height:1.5;
+    }
+
+    input[type="checkbox"] {
+      width:auto;
+      margin-right:8px;
+    }
+
+    .message {
+      margin-top:12px;
+      font-family:Arial,sans-serif;
+      color:var(--muted);
+    }
   </style>
-</head><body></body></html>
+</head>
+
+<body>
+  <main class="mc-wrap">
+    <section class="mc-intro">
+      <p class="mc-eyebrow">Low Brass Lessons</p>
+      <h1>Masterclasses</h1>
+      <p>Select an available masterclass below. After choosing a session, you will complete registration and payment in a secure popup.</p>
+    </section>
+
+    <section class="mc-instructions">
+      <strong>How registration works:</strong> choose a masterclass, enter your information, accept the terms, and complete payment. After payment is confirmed, your registration will be recorded.
+    </section>
+
+    <section class="calendar-shell">
+      <div id="masterclassEvents" class="event-list">
+        <p class="message">Loading available masterclasses...</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="registrationModal" class="modal">
+    <div class="modal-card">
+      <h2 id="modalTitle">Register</h2>
+      <p id="modalMeta" class="modal-meta"></p>
+
+      <input id="firstName" type="text" placeholder="First name">
+      <input id="lastName" type="text" placeholder="Last name">
+      <input id="email" type="email" placeholder="Email address">
+
+      <label>
+        <input id="termsAccepted" type="checkbox">
+        I agree to the masterclass terms and cancellation policy.
+      </label>
+
+      <button id="payButton" class="primary-btn">Continue to Payment</button>
+      <button id="closeModal" class="secondary-btn" type="button">Close</button>
+
+      <div id="paymentElement" style="margin-top:16px;"></div>
+      <button id="submitPayment" class="primary-btn" style="display:none;">Submit Payment</button>
+
+      <p id="modalMessage" class="message"></p>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = '/wp-json/mrm-masterclass/v1';
+    let selectedEvent = null;
+    let stripe = null;
+    let elements = null;
+    let paymentIntentClientSecret = null;
+
+    const eventsEl = document.getElementById('masterclassEvents');
+    const modal = document.getElementById('registrationModal');
+    const modalTitle = document.getElementById('modalTitle');
+    const modalMeta = document.getElementById('modalMeta');
+    const modalMessage = document.getElementById('modalMessage');
+    const payButton = document.getElementById('payButton');
+    const submitPayment = document.getElementById('submitPayment');
+    const paymentElement = document.getElementById('paymentElement');
+
+    function centsToDollars(cents) {
+      return '$' + (Number(cents || 0) / 100).toFixed(2);
+    }
+
+    function formatDate(value) {
+      const date = new Date(String(value).replace(' ', 'T'));
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString([], {
+        weekday:'short',
+        month:'short',
+        day:'numeric',
+        hour:'numeric',
+        minute:'2-digit'
+      });
+    }
+
+    async function loadEvents() {
+      try {
+        const response = await fetch(API_BASE + '/events');
+        const events = await response.json();
+
+        if (!Array.isArray(events) || !events.length) {
+          eventsEl.innerHTML = '<p class="message">No masterclasses are currently open for registration.</p>';
+          return;
+        }
+
+        eventsEl.innerHTML = events.map(event => `
+          <article class="event-card">
+            <h3>${escapeHtml(event.title)}</h3>
+            <p class="event-meta">
+              ${escapeHtml(formatDate(event.start_time))}<br>
+              Presenter: ${escapeHtml(event.presenter_name || 'To be announced')}<br>
+              Price: ${escapeHtml(centsToDollars(event.price_cents))}<br>
+              Seats available: ${escapeHtml(event.available_seats)}
+            </p>
+            <button class="event-button" data-event-id="${event.id}">Register</button>
+          </article>
+        `).join('');
+
+        document.querySelectorAll('[data-event-id]').forEach(button => {
+          button.addEventListener('click', () => openEvent(button.dataset.eventId));
+        });
+      } catch (error) {
+        eventsEl.innerHTML = '<p class="message">Unable to load masterclasses right now. Please try again later.</p>';
+      }
+    }
+
+    async function openEvent(eventId) {
+      modalMessage.textContent = '';
+      paymentElement.innerHTML = '';
+      submitPayment.style.display = 'none';
+      payButton.style.display = 'block';
+
+      const response = await fetch(API_BASE + '/event?id=' + encodeURIComponent(eventId));
+      selectedEvent = await response.json();
+
+      modalTitle.textContent = selectedEvent.title;
+      modalMeta.innerHTML = `
+        ${escapeHtml(formatDate(selectedEvent.start_time))}<br>
+        Presenter: ${escapeHtml(selectedEvent.presenter_name || 'To be announced')}<br>
+        Price: ${escapeHtml(centsToDollars(selectedEvent.price_cents))}
+      `;
+
+      modal.style.display = 'flex';
+    }
+
+    payButton.addEventListener('click', async () => {
+      const firstName = document.getElementById('firstName').value.trim();
+      const lastName = document.getElementById('lastName').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const termsAccepted = document.getElementById('termsAccepted').checked;
+
+      if (!selectedEvent || !firstName || !lastName || !email || !termsAccepted) {
+        modalMessage.textContent = 'Please complete all fields and accept the terms.';
+        return;
+      }
+
+      modalMessage.textContent = 'Preparing secure payment...';
+
+      const response = await fetch(API_BASE + '/create-payment-intent', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          event_id:selectedEvent.id,
+          email:email,
+          terms_accepted:termsAccepted
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.client_secret || !data.publishable_key) {
+        modalMessage.textContent = data.message || 'Unable to start payment.';
+        return;
+      }
+
+      paymentIntentClientSecret = data.client_secret;
+      stripe = Stripe(data.publishable_key);
+      elements = stripe.elements({clientSecret: paymentIntentClientSecret});
+
+      const payment = elements.create('payment');
+      payment.mount('#paymentElement');
+
+      payButton.style.display = 'none';
+      submitPayment.style.display = 'block';
+      modalMessage.textContent = '';
+    });
+
+    submitPayment.addEventListener('click', async () => {
+      modalMessage.textContent = 'Processing payment...';
+
+      const result = await stripe.confirmPayment({
+        elements,
+        redirect:'if_required'
+      });
+
+      if (result.error) {
+        modalMessage.textContent = result.error.message || 'Payment failed.';
+        return;
+      }
+
+      const paymentIntentId = result.paymentIntent && result.paymentIntent.id;
+
+      if (!paymentIntentId) {
+        modalMessage.textContent = 'Payment status could not be verified.';
+        return;
+      }
+
+      const finalizeResponse = await fetch(API_BASE + '/finalize-registration', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          event_id:selectedEvent.id,
+          payment_intent_id:paymentIntentId,
+          first_name:document.getElementById('firstName').value.trim(),
+          last_name:document.getElementById('lastName').value.trim(),
+          email:document.getElementById('email').value.trim()
+        })
+      });
+
+      const finalizeData = await finalizeResponse.json();
+
+      if (!finalizeResponse.ok || !finalizeData.ok) {
+        modalMessage.textContent = finalizeData.message || 'Payment succeeded, but registration could not be finalized. Please contact support.';
+        return;
+      }
+
+      modalMessage.textContent = 'Registration confirmed. Thank you!';
+      submitPayment.style.display = 'none';
+      loadEvents();
+    });
+
+    document.getElementById('closeModal').addEventListener('click', () => {
+      modal.style.display = 'none';
+    });
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&':'&amp;',
+        '<':'&lt;',
+        '>':'&gt;',
+        '"':'&quot;',
+        "'":'&#039;'
+      }[char]));
+    }
+
+    loadEvents();
+  </script>
+</body>
+</html>
