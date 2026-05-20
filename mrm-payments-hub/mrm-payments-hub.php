@@ -1012,7 +1012,7 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
     return array(
       'ok' => false,
       'code' => 'promo_code_already_used',
-      'message' => 'This promotional code has already been used for this email.',
+      'message' => 'This email has already used this promotional code.',
       'discount_cents' => 0,
     );
   }
@@ -6156,45 +6156,19 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
 
   private function mrm_send_autopay_lesson_charge_email($lesson, $order = array()) {
-    if (!is_array($lesson)) return false;
-
-    $email = sanitize_email((string)($lesson['student_email'] ?? ''));
-    if (!$email || !is_email($email)) return false;
-
-    $amount_cents = (int)($order['amount_cents'] ?? 0);
-    $lesson_start = (string)($lesson['start_time'] ?? '');
-    $lesson_length = (int)($lesson['lesson_length'] ?? 0);
-    $mode_label = !empty($lesson['is_online']) ? 'Online' : 'In person';
-
-    $lesson_label = $lesson_start !== ''
-      ? wp_date('F j, Y \a\t g:i A', strtotime($lesson_start), wp_timezone())
-      : 'your scheduled lesson';
-
-    $contact_url = $this->mrm_get_contact_url();
-
-    $title = 'Lesson payment received';
-    $intro = '<p>Your saved card has been successfully charged for your lesson.</p>';
-    $details =
-      '<div><strong>Lesson date:</strong> ' . esc_html($lesson_label) . '</div>' .
-      '<div><strong>Lesson format:</strong> ' . esc_html($mode_label) . '</div>' .
-      '<div><strong>Lesson length:</strong> ' . esc_html($lesson_length) . ' minutes</div>' .
-      '<div><strong>Amount charged:</strong> $' . number_format($amount_cents / 100, 2) . '</div>' .
-      '<div style="margin-top:12px;"><strong>Purchase details</strong></div>' .
-      '<div>Your lesson payment has been processed successfully.</div>';
-
-    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
-
-    return wp_mail(
-      $email,
-      'Payment confirmation — Lesson charge',
-      $html,
-      array(
-        'Content-Type: text/html; charset=UTF-8',
-        'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
-      )
-    );
+    /*
+     * Deprecated intentionally.
+     *
+     * Do not send the separate "Payment confirmation — Lesson charge" email.
+     * The canonical customer-facing receipt is sent through:
+     * mrm_maybe_send_purchase_receipt_email()
+     *
+     * Keeping this method as a no-op prevents fatal errors if older internal code
+     * still calls it, while guaranteeing customers do not receive the duplicate
+     * Payment Confirmation email.
+     */
+    return false;
   }
-
   private function mrm_send_sheet_music_subscription_cancelled_email($sub_row, $subscription) {
     if (!is_array($sub_row)) return false;
 
@@ -9111,9 +9085,13 @@ private function charge_and_unlock_autopay($data) {
       );
 
       if (empty($promo_validation['ok'])) {
+        $promo_error_code = !empty($promo_validation['code'])
+          ? sanitize_key((string)$promo_validation['code'])
+          : 'invalid_promo_code';
+
         return new WP_REST_Response(array(
           'ok' => false,
-          'code' => 'invalid_promo_code',
+          'code' => $promo_error_code,
           'message' => (string)($promo_validation['message'] ?? 'Invalid promotional code.'),
         ), 400);
       }
@@ -9280,7 +9258,7 @@ private function charge_and_unlock_autopay($data) {
         return new WP_REST_Response(array(
           'ok' => false,
           'code' => 'promo_code_already_used',
-          'message' => 'This promotional code has already been used for this email.',
+          'message' => 'This email has already used this promotional code.',
         ), 409);
       }
     }
@@ -9308,8 +9286,17 @@ private function charge_and_unlock_autopay($data) {
       $payment_method_types = array('card');
     }
 
-    // Enable Stripe receipt emails
-    $extra['receipt_email'] = $email;
+    /*
+     * Do not ask Stripe to send its own customer receipt email.
+     *
+     * Low Brass Lessons sends the canonical branded receipt through
+     * mrm_maybe_send_purchase_receipt_email(), with the subject:
+     * "Purchase Confirmation - [Item]".
+     *
+     * Leaving receipt_email enabled can cause customers to receive a second
+     * Stripe-generated confirmation/receipt email in addition to the branded
+     * Purchase Confirmation email.
+     */
 
     if ($save_card || $requires_customer_for_subscription || $requires_customer_for_piece_purchase) {
       $this->stripe_debug_log('create_payment_intent resolving stripe customer', array(
@@ -9471,27 +9458,14 @@ private function charge_and_unlock_autopay($data) {
     $now = current_time('mysql');
 
     /*
-     * Idempotency guard: do not create multiple autopay profiles for the same
-     * successful first-payment order if the frontend retries or refreshes.
+     * This legacy setup-intent route creates a new autopay profile before a setup
+     * intent exists. The active frontend autopay flow uses
+     * rest_create_autopay_enrollment(), which performs idempotency checks from the
+     * successful first-payment PaymentIntent.
+     *
+     * Do not reference $payment_intent_id or $payment_method_id here; those values
+     * are not available in this legacy setup-intent route.
      */
-    $existing_order_for_autopay = $this->get_order_by_pi($payment_intent_id);
-    if ($existing_order_for_autopay && !empty($existing_order_for_autopay['metadata_json'])) {
-      $existing_meta = json_decode((string)$existing_order_for_autopay['metadata_json'], true);
-      if (is_array($existing_meta) && !empty($existing_meta['mrm_autopay_profile_id'])) {
-        $existing_profile_id = absint($existing_meta['mrm_autopay_profile_id']);
-        if ($existing_profile_id > 0) {
-          return new WP_REST_Response(array(
-            'ok' => true,
-            'autopay_profile_id' => $existing_profile_id,
-            'customer_id' => $customer_id,
-            'payment_method_id' => $payment_method_id,
-            'plan_kind' => ($repeat_duration === 'indefinitely') ? 'indefinite' : 'bounded',
-            'authorized_lesson_count' => (int)$authorized_lesson_count,
-            'already_created' => true,
-          ), 200);
-        }
-      }
-    }
 
     $wpdb->insert($this->table_autopay_profiles(), array(
   'instructor_id' => (int)$instructor_id,
