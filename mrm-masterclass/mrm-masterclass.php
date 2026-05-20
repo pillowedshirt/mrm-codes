@@ -45,7 +45,9 @@ class MRM_Masterclass_Plugin {
 			'mrm_masterclass_emergency_cancel_confirm' => 'handle_emergency_cancel_confirm',
 			'mrm_masterclass_emergency_cancel_execute' => 'handle_emergency_cancel_execute',
 		);
-		foreach ( $actions as $k => $m ) { add_action( 'admin_post_' . $k, array( $this, $m ) ); add_action( 'admin_post_nopriv_' . $k, array( $this, $m ) ); }
+		foreach ( $actions as $k => $m ) {
+			add_action( 'admin_post_' . $k, array( $this, $m ) );
+		}
 		add_action( 'admin_notices', array( $this, 'render_activation_diagnostic_notice' ) );
 	}
 
@@ -202,6 +204,15 @@ class MRM_Masterclass_Plugin {
 
 	add_submenu_page(
 		'mrm-masterclass',
+		'Presenter Tax Profiles',
+		'Presenter Tax Profiles',
+		'manage_options',
+		'mrm-masterclass-tax-profiles',
+		array( $this, 'render_tax_profiles_page' )
+	);
+
+	add_submenu_page(
+		'mrm-masterclass',
 		'Email Log',
 		'Email Log',
 		'manage_options',
@@ -250,18 +261,65 @@ public function render_registrations_page() { $this->must_admin(); echo '<div cl
 public function render_payments_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Payments</h1></div>'; }
 public function render_payouts_page() { $this->must_admin(); echo '<div class="wrap"><h1>Presenter Payouts</h1><p>This submenu is reserved for marking presenter payout periods as paid out. It needs the payout-period creation workflow added next.</p></div>'; }
 public function render_1099_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass 1099 Documents</h1></div>'; }
+public function render_tax_profiles_page() {
+	$this->must_admin();
+
+	global $wpdb;
+
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+	$profiles_table   = $this->t( 'mrm_masterclass_presenter_tax_profiles' );
+
+	$rows = $wpdb->get_results(
+		"SELECT p.id, p.name, p.email, t.legal_name, t.business_name, t.tin_last4, t.w9_received, t.is_1099_eligible, t.exclude_from_1099
+		 FROM {$presenters_table} p
+		 LEFT JOIN {$profiles_table} t ON t.presenter_id = p.id
+		 ORDER BY p.name ASC"
+	);
+
+	echo '<div class="wrap">';
+	echo '<h1>Presenter Tax Profiles</h1>';
+	echo '<p>Use this page to track W-9 status, 1099 eligibility, and presenter tax profile readiness. Do not store full SSNs or full EINs in WordPress.</p>';
+
+	echo '<table class="widefat striped">';
+	echo '<thead><tr>';
+	echo '<th>Presenter</th>';
+	echo '<th>Email</th>';
+	echo '<th>Legal Name</th>';
+	echo '<th>Business Name</th>';
+	echo '<th>TIN Last 4</th>';
+	echo '<th>W-9 Received</th>';
+	echo '<th>1099 Eligible</th>';
+	echo '<th>Excluded</th>';
+	echo '</tr></thead><tbody>';
+
+	if ( $rows ) {
+		foreach ( $rows as $row ) {
+			echo '<tr>';
+			echo '<td>' . esc_html( $row->name ) . '</td>';
+			echo '<td>' . esc_html( $row->email ) . '</td>';
+			echo '<td>' . esc_html( $row->legal_name ?: '—' ) . '</td>';
+			echo '<td>' . esc_html( $row->business_name ?: '—' ) . '</td>';
+			echo '<td>' . esc_html( $row->tin_last4 ?: '—' ) . '</td>';
+			echo '<td>' . ( $row->w9_received ? 'Yes' : 'No' ) . '</td>';
+			echo '<td>' . ( is_null( $row->is_1099_eligible ) || $row->is_1099_eligible ? 'Yes' : 'No' ) . '</td>';
+			echo '<td>' . ( $row->exclude_from_1099 ? 'Yes' : 'No' ) . '</td>';
+			echo '</tr>';
+		}
+	} else {
+		echo '<tr><td colspan="8">No presenters found yet.</td></tr>';
+	}
+
+	echo '</tbody></table>';
+	echo '</div>';
+}
 public function render_email_log_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Email Log</h1></div>'; }
 
-
-	public function render_email_log_page() {
-		$this->must_admin();
-	}
 	public function register_rest_routes(){ register_rest_route(self::REST_NAMESPACE,'/events',array('methods'=>'GET','callback'=>array($this,'rest_events'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/event',array('methods'=>'GET','callback'=>array($this,'rest_event'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/create-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_create_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/verify-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_verify_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/finalize-registration',array('methods'=>'POST','callback'=>array($this,'rest_finalize'),'permission_callback'=>'__return_true'));    }
 	public function rest_events(){ global $wpdb; $rows=$wpdb->get_results("SELECT e.id,e.title,e.description,p.name presenter_name,e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,(e.capacity-(SELECT COUNT(*) FROM {$this->t('mrm_masterclass_registrations')} r WHERE r.event_id=e.id AND r.payment_status='paid')) available_seats FROM {$this->t('mrm_masterclass_events')} e LEFT JOIN {$this->t('mrm_masterclass_presenters')} p ON p.id=e.presenter_id WHERE e.status='scheduled' ORDER BY e.start_time ASC"); return rest_ensure_response($rows); }
 	public function rest_event($r){ global $wpdb; $id=absint($r->get_param('id')); $row=$wpdb->get_row($wpdb->prepare("SELECT e.id,e.title,e.description,p.name presenter_name,e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,e.google_meet_url FROM {$this->t('mrm_masterclass_events')} e LEFT JOIN {$this->t('mrm_masterclass_presenters')} p ON p.id=e.presenter_id WHERE e.id=%d",$id)); return $row?rest_ensure_response($row):new WP_Error('not_found','Event not found',array('status'=>404)); }
 	public function rest_create_pi($r){ global $wpdb; $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",absint($r['event_id']))); if(!$event) return new WP_Error('bad_event','Event not found',array('status'=>404)); $email=sanitize_email($r['email']); $terms=rest_sanitize_boolean($r['terms_accepted']); if(!$terms) return new WP_Error('terms','Terms required',array('status'=>400)); $pi=$this->mrm_mc_create_payment_intent($event,$email,array('version'=>'v1','accepted'=>$terms)); if(is_wp_error($pi)||empty($pi['client_secret'])) return new WP_Error('stripe','Unable to create payment intent',array('status'=>500)); return array('client_secret'=>$pi['client_secret'],'publishable_key'=>$this->mrm_mc_get_stripe_publishable_key()); }
 	public function rest_verify_pi($r){ $pi=$this->mrm_mc_retrieve_payment_intent(sanitize_text_field($r['payment_intent_id'])); if(is_wp_error($pi)) return $pi; return array('ok'=>($pi['status']??'')==='succeeded','status'=>$pi['status']??'unknown'); }
-	public function rest_finalize($r){ global $wpdb; $event_id=absint($r['event_id']); $pi_id=sanitize_text_field($r['payment_intent_id']); $pi=$this->mrm_mc_retrieve_payment_intent($pi_id); if(is_wp_error($pi)||($pi['status']??'')!=='succeeded') return new WP_Error('unpaid','Payment not complete',array('status'=>400)); $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",$event_id)); $now=$this->now(); $wpdb->insert($this->t('mrm_masterclass_registrations'),array('event_id'=>$event_id,'first_name'=>sanitize_text_field($r['first_name']),'last_name'=>sanitize_text_field($r['last_name']),'email'=>sanitize_email($r['email']),'email_hash'=>hash('sha256',strtolower(trim($r['email']))),'stripe_payment_intent_id'=>$pi_id,'amount_cents'=>$event->price_cents,'payment_status'=>'paid','terms_accepted'=>1,'created_at'=>$now,'updated_at'=>$now)); $rid = $wpdb->insert_id; $split = $this->calculate_masterclass_payment_split( $event, absint( $event->price_cents ) ); $wpdb->insert($this->t( 'mrm_masterclass_payment_ledger' ),array('event_id'=>$event_id,'registration_id'=>$rid,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$pi_id,'gross_cents'=>$split['gross_cents'],'stripe_fee_cents'=>$split['stripe_fee_cents'],'net_cents'=>$split['net_cents'],'presenter_share_cents'=>$split['presenter_share_cents'],'platform_share_cents'=>$split['platform_share_cents'],'status'=>'recorded','notes'=>'Masterclass registration payment recorded after successful Stripe payment.','created_at'=>$now,'updated_at'=>$now,)); $this->send_email(sanitize_email( $r['email'] ),'Masterclass registration confirmed','<h2>Registration Confirmed</h2><p>Thanks for registering. You will receive your masterclass details by email.</p>','confirmation',$event_id,$rid); return array('ok'=>true,'registration_id'=>$rid); }
+	public function rest_finalize($r){ global $wpdb; $event_id=absint($r['event_id']); $pi_id=sanitize_text_field($r['payment_intent_id']); $pi=$this->mrm_mc_retrieve_payment_intent($pi_id); if(is_wp_error($pi)||($pi['status']??'')!=='succeeded') return new WP_Error('unpaid','Payment not complete',array('status'=>400)); $existing = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$this->t('mrm_masterclass_registrations')} WHERE stripe_payment_intent_id = %s LIMIT 1", $pi_id ) ); if ( $existing ) { return new WP_Error( 'duplicate_registration', 'This payment has already been used for a registration.', array( 'status' => 409 ) ); } $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",$event_id)); if ( ! $event ) { return new WP_Error( 'event_not_found', 'Masterclass event not found.', array( 'status' => 404 ) ); } $paid_count = absint( $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$this->t('mrm_masterclass_registrations')} WHERE event_id = %d AND payment_status = 'paid'", $event_id ) ) ); if ( $paid_count >= absint( $event->capacity ) ) { return new WP_Error( 'event_full', 'This masterclass is full.', array( 'status' => 409 ) ); } $now=$this->now(); $wpdb->insert($this->t('mrm_masterclass_registrations'),array('event_id'=>$event_id,'first_name'=>sanitize_text_field($r['first_name']),'last_name'=>sanitize_text_field($r['last_name']),'email'=>sanitize_email($r['email']),'email_hash'=>hash('sha256',strtolower(trim($r['email']))),'stripe_payment_intent_id'=>$pi_id,'amount_cents'=>$event->price_cents,'payment_status'=>'paid','terms_accepted'=>1,'created_at'=>$now,'updated_at'=>$now)); $rid = $wpdb->insert_id; $split = $this->calculate_masterclass_payment_split( $event, absint( $event->price_cents ) ); $wpdb->insert($this->t( 'mrm_masterclass_payment_ledger' ),array('event_id'=>$event_id,'registration_id'=>$rid,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$pi_id,'gross_cents'=>$split['gross_cents'],'stripe_fee_cents'=>$split['stripe_fee_cents'],'net_cents'=>$split['net_cents'],'presenter_share_cents'=>$split['presenter_share_cents'],'platform_share_cents'=>$split['platform_share_cents'],'status'=>'recorded','notes'=>'Masterclass registration payment recorded after successful Stripe payment.','created_at'=>$now,'updated_at'=>$now,)); $this->send_email(sanitize_email( $r['email'] ),'Masterclass registration confirmed','<h2>Registration Confirmed</h2><p>Thanks for registering. You will receive your masterclass details by email.</p>','confirmation',$event_id,$rid); return array('ok'=>true,'registration_id'=>$rid); }
 	
 	
 	
@@ -380,7 +438,30 @@ private function send_email($to,$subject,$body,$type,$event_id=0,$registration_i
 	private function sign_token($payload,$ttl=3600){ $payload['exp']=time()+$ttl; $raw=wp_json_encode($payload); $sig=hash_hmac('sha256',$raw,wp_salt('auth')); return rtrim(strtr(base64_encode($raw.'||'.$sig),'+/','-_'),'='); }
 	private function verify_token($token){ $dec=base64_decode(strtr($token,'-_','+/')); if(!$dec||strpos($dec,'||')===false) return false; list($raw,$sig)=explode('||',$dec,2); if(!hash_equals(hash_hmac('sha256',$raw,wp_salt('auth')),$sig)) return false; $p=json_decode($raw,true); if(empty($p['exp'])||time()>$p['exp']) return false; return $p; }
 	public function handle_emergency_cancel_confirm(){ $token=sanitize_text_field($_GET['token']??''); $p=$this->verify_token($token); if(!$p) wp_die('Invalid token'); echo '<h1>Confirm Emergency Cancellation</h1><p>This will cancel the masterclass, notify all paid participants, and issue refunds.</p><form method="post" action="'.esc_url(admin_url('admin-post.php')).'"><input type="hidden" name="action" value="mrm_masterclass_emergency_cancel_execute"/><input type="hidden" name="token" value="'.esc_attr($token).'"/><button type="submit">Confirm cancellation and refunds</button></form>'; exit; }
-	public function handle_emergency_cancel_execute(){ $p=$this->verify_token(sanitize_text_field($_POST['token']??'')); if(!$p) wp_die('Invalid token'); wp_die('Emergency cancellation executed.'); }
+	public function handle_emergency_cancel_execute(){
+	$p=$this->verify_token(sanitize_text_field($_POST['token']??''));
+	if(!$p) {
+		wp_die('Invalid token');
+	}
+
+	wp_die('Emergency cancellation executed.');
+}
+
+public function render_activation_diagnostic_notice() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		return;
+	}
+
+	if ( ! get_transient( 'mrm_masterclass_activation_notice' ) ) {
+		return;
+	}
+
+	delete_transient( 'mrm_masterclass_activation_notice' );
+
+	echo '<div class="notice notice-success is-dismissible">';
+	echo '<p><strong>MRM Masterclass activated.</strong> Database tables were checked and the masterclass admin menus are available.</p>';
+	echo '</div>';
+}
 }
 
 function mrm_masterclass_plugin() {
