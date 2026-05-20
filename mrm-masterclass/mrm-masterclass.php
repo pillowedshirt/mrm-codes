@@ -112,6 +112,52 @@ class MRM_Masterclass_Plugin {
 	}
 	public function add_cron_schedule($s){$s['mrm_masterclass_15min']=array('interval'=>900,'display'=>'Every 15 Minutes'); return $s;}
 	private function now(){return gmdate('Y-m-d H:i:s');}
+
+private function cents_to_dollars( $cents ) {
+	return '$' . number_format( absint( $cents ) / 100, 2 );
+}
+
+private function dollars_to_cents( $value ) {
+	$value = preg_replace( '/[^0-9.]/', '', (string) $value );
+	return (int) round( floatval( $value ) * 100 );
+}
+
+private function settings() {
+	$defaults = array(
+		'masterclass_calendar_id'       => '',
+		'default_price_cents'           => self::DEFAULT_PRICE_CENTS,
+		'default_capacity'              => 100,
+		'default_timezone'              => 'America/Phoenix',
+		'admin_notification_email'      => get_option( 'admin_email' ),
+		'from_email'                    => 'no-reply@lowbrass-lessons.com',
+		'terms_version'                 => 'v1',
+		'presenter_default_percent'     => 70,
+		'stripe_fee_estimate_percent'   => 2.9,
+		'stripe_fee_estimate_fixed'     => 30,
+		'cancellation_policy_text'      => '',
+	);
+
+	$saved = get_option( 'mrm_masterclass_settings', array() );
+
+	if ( ! is_array( $saved ) ) {
+		$saved = array();
+	}
+
+	return wp_parse_args( $saved, $defaults );
+}
+
+private function admin_card_open( $title, $description = '' ) {
+	echo '<div style="background:#fff;border:1px solid #d7c7ad;border-radius:16px;padding:18px 20px;margin:16px 0;box-shadow:0 8px 22px rgba(31,41,51,.06);">';
+	echo '<h2 style="margin-top:0;">' . esc_html( $title ) . '</h2>';
+
+	if ( $description ) {
+		echo '<p style="max-width:900px;color:#5f6b76;line-height:1.6;">' . wp_kses_post( $description ) . '</p>';
+	}
+}
+
+private function admin_card_close() {
+	echo '</div>';
+}
 	private function must_admin(){ if(!current_user_can('manage_options')) wp_die('Unauthorized'); }
 	private function mrm_mc_get_secret_json($secret_id){ if(!defined('AWS_ACCESS_KEY_ID')) return null; return null; }
 	private function mrm_mc_get_google_scheduler_secret_bundle(){ return $this->mrm_mc_get_secret_json('lowbrass/google/scheduler'); }
@@ -406,8 +452,127 @@ private function send_email($to,$subject,$body,$type,$event_id=0,$registration_i
 	exit;
 }
 	public function handle_delete_presenter() {
-		$this->must_admin();
+	$this->must_admin();
+
+	$id = absint( $_GET['id'] ?? 0 );
+
+	if ( ! $id ) {
+		wp_die( 'Missing presenter ID.' );
 	}
+
+	check_admin_referer( 'mrm_masterclass_delete_presenter_' . $id );
+
+	global $wpdb;
+
+	$events_count = absint(
+		$wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$this->t( 'mrm_masterclass_events' )} WHERE presenter_id = %d",
+				$id
+			)
+		)
+	);
+
+	if ( $events_count > 0 ) {
+		wp_die( 'This presenter is assigned to one or more events. Cancel/archive those events or create a replacement presenter before deleting.' );
+	}
+
+	$wpdb->delete( $this->t( 'mrm_masterclass_presenters' ), array( 'id' => $id ), array( '%d' ) );
+
+	wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-presenters&deleted=1' ) );
+	exit;
+}
+
+public function handle_mark_payouts_paid() {
+	$this->must_admin();
+	check_admin_referer( 'mrm_masterclass_mark_payouts_paid' );
+
+	$ids = isset( $_POST['ledger_ids'] ) && is_array( $_POST['ledger_ids'] )
+		? array_map( 'absint', $_POST['ledger_ids'] )
+		: array();
+
+	$ids = array_values( array_filter( $ids ) );
+
+	if ( ! $ids ) {
+		wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-payouts' ) );
+		exit;
+	}
+
+	global $wpdb;
+
+	$placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+
+	$wpdb->query(
+		$wpdb->prepare(
+			"UPDATE {$this->t( 'mrm_masterclass_payment_ledger' )}
+			 SET status = 'paid_out', updated_at = %s
+			 WHERE id IN ({$placeholders})
+			   AND ledger_type = 'registration_payment'
+			   AND status = 'recorded'",
+			array_merge( array( $this->now() ), $ids )
+		)
+	);
+
+	wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-payouts&paid=1' ) );
+	exit;
+}
+
+public function handle_save_tax_profile() {
+	$this->must_admin();
+
+	$presenter_id = absint( $_POST['presenter_id'] ?? 0 );
+
+	if ( ! $presenter_id ) {
+		wp_die( 'Missing presenter ID.' );
+	}
+
+	check_admin_referer( 'mrm_masterclass_save_tax_profile_' . $presenter_id );
+
+	global $wpdb;
+
+	$table = $this->t( 'mrm_masterclass_presenter_tax_profiles' );
+	$now   = $this->now();
+
+	$tin_last4 = preg_replace( '/[^0-9]/', '', wp_unslash( $_POST['tin_last4'] ?? '' ) );
+	$tin_last4 = substr( $tin_last4, -4 );
+
+	$data = array(
+		'presenter_id'       => $presenter_id,
+		'legal_name'         => sanitize_text_field( wp_unslash( $_POST['legal_name'] ?? '' ) ),
+		'business_name'      => sanitize_text_field( wp_unslash( $_POST['business_name'] ?? '' ) ),
+		'email'              => sanitize_email( wp_unslash( $_POST['email'] ?? '' ) ),
+		'tin_last4'          => $tin_last4,
+		'tin_type'           => sanitize_text_field( wp_unslash( $_POST['tin_type'] ?? '' ) ),
+		'w9_received'        => isset( $_POST['w9_received'] ) ? 1 : 0,
+		'w9_received_date'   => sanitize_text_field( wp_unslash( $_POST['w9_received_date'] ?? '' ) ) ?: null,
+		'address_line1'      => sanitize_text_field( wp_unslash( $_POST['address_line1'] ?? '' ) ),
+		'address_line2'      => sanitize_text_field( wp_unslash( $_POST['address_line2'] ?? '' ) ),
+		'city'               => sanitize_text_field( wp_unslash( $_POST['city'] ?? '' ) ),
+		'state'              => sanitize_text_field( wp_unslash( $_POST['state'] ?? '' ) ),
+		'zip'                => sanitize_text_field( wp_unslash( $_POST['zip'] ?? '' ) ),
+		'is_1099_eligible'   => isset( $_POST['is_1099_eligible'] ) ? 1 : 0,
+		'exclude_from_1099'  => isset( $_POST['exclude_from_1099'] ) ? 1 : 0,
+		'notes'              => sanitize_textarea_field( wp_unslash( $_POST['notes'] ?? '' ) ),
+		'updated_at'         => $now,
+	);
+
+	$existing_id = $wpdb->get_var(
+		$wpdb->prepare(
+			"SELECT id FROM {$table} WHERE presenter_id = %d LIMIT 1",
+			$presenter_id
+		)
+	);
+
+	if ( $existing_id ) {
+		$wpdb->update( $table, $data, array( 'id' => absint( $existing_id ) ) );
+	} else {
+		$data['created_at'] = $now;
+		$wpdb->insert( $table, $data );
+	}
+
+	wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-tax-profiles&updated=1' ) );
+	exit;
+}
 	public function handle_save_event() {
 	$this->must_admin();
 	check_admin_referer( 'mrm_masterclass_save_event' );
@@ -431,8 +596,49 @@ private function send_email($to,$subject,$body,$type,$event_id=0,$registration_i
 	wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-events&created=1' ) ); exit;
 }
 	public function handle_cancel_event() {
-		$this->must_admin();
+	$this->must_admin();
+
+	$id = absint( $_GET['id'] ?? 0 );
+
+	if ( ! $id ) {
+		wp_die( 'Missing event ID.' );
 	}
+
+	check_admin_referer( 'mrm_masterclass_cancel_event_' . $id );
+
+	global $wpdb;
+
+	$event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$this->t( 'mrm_masterclass_events' )} WHERE id = %d",
+			$id
+		)
+	);
+
+	if ( ! $event ) {
+		wp_die( 'Event not found.' );
+	}
+
+	$wpdb->update(
+		$this->t( 'mrm_masterclass_events' ),
+		array(
+			'status'              => 'cancelled',
+			'registration_open'   => 0,
+			'cancellation_reason' => 'Cancelled from Masterclass admin.',
+			'updated_at'          => $this->now(),
+		),
+		array( 'id' => $id ),
+		array( '%s', '%d', '%s', '%s' ),
+		array( '%d' )
+	);
+
+	if ( ! empty( $event->google_event_id ) ) {
+		$this->mrm_mc_google_cancel_event( $event->google_event_id );
+	}
+
+	wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-events&cancelled=1' ) );
+	exit;
+}
 	public function handle_resend_confirmation(){ $this->must_admin(); }
 	public function handle_resend_reminder(){ $this->must_admin(); }
 	private function sign_token($payload,$ttl=3600){ $payload['exp']=time()+$ttl; $raw=wp_json_encode($payload); $sig=hash_hmac('sha256',$raw,wp_salt('auth')); return rtrim(strtr(base64_encode($raw.'||'.$sig),'+/','-_'),'='); }
