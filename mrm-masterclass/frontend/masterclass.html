@@ -1,77 +1,13 @@
 <!doctype html>
-<html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MRM Masterclass</title>
-<style>
-:root { --mc-ink: #1f2933; --mc-muted: #6b7280; --mc-bg: #f6f1e8; --mc-card: #ffffff; --mc-brass: #9f6b2d; --mc-brass-dark: #6f431f; --mc-blue: #1f4f68; --mc-border: #e3d7c4; --mc-shadow: 0 18px 45px rgba(31,41,51,.14);}*{box-sizing:border-box;}body{margin:0;background:radial-gradient(circle at top left, rgba(159,107,45,.18), transparent 32rem),linear-gradient(180deg,#fffaf2 0%,var(--mc-bg) 100%);color:var(--mc-ink);font-family:Georgia,'Times New Roman',serif;} .wrap{max-width:1180px;margin:0 auto;padding:42px 22px 64px;} .calendar-shell{margin-top:28px;background:rgba(255,255,255,.72);backdrop-filter:blur(12px);border:1px solid var(--mc-border);border-radius:28px;padding:22px;} .calendar-toolbar{display:grid;grid-template-columns:54px 1fr 54px;align-items:center;gap:14px;text-align:center;margin-bottom:18px;} .month-arrow{width:54px;height:54px;border-radius:50%;border:1px solid var(--mc-border);background:#fff;color:var(--mc-brass-dark);font-size:34px;} .eyebrow{margin:0 0 4px;color:var(--mc-brass-dark);font-size:12px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;font-family:Arial,sans-serif;} #monthLabel{margin:0;} .weekdays{display:grid;grid-template-columns:repeat(7,1fr);} .grid{display:grid;grid-template-columns:repeat(7,1fr);} </style>
-<script src="https://js.stripe.com/v3/"></script>
-</head>
-<body>
-<div class="wrap"><div class="hero"><h1>Low Brass Lessons Masterclasses</h1><p>Join upcoming online masterclasses.</p></div>
-<div class="calendar-toolbar">
-  <button class="month-arrow" id="prev" aria-label="Previous month">‹</button>
-  <div>
-    <p class="eyebrow">Masterclass Calendar</p>
-    <h2 id="monthLabel"></h2>
-  </div>
-  <button class="month-arrow" id="next" aria-label="Next month">›</button>
-</div>
-<div class="weekdays">
-  <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
-</div>
-<div class="grid" id="calendar"></div>
-<h2>Upcoming Masterclasses</h2>
-<div id="upcomingEvents" class="upcoming"></div></div>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Low Brass Lessons Masterclasses</title>
 
-<div class="modal" id="eventModal"><div class="card"><h3 id="evtTitle"></h3><p id="evtMeta"></p><p id="evtDesc"></p><button id="openReg">Register ($20)</button><button onclick="closeModal('eventModal')">Close</button></div></div>
-<div class="modal" id="registerModal"><div class="card"><h3>Register</h3><input id="firstName" placeholder="First name"><input id="lastName" placeholder="Last name"><input id="email" type="email" placeholder="Email"><label><input id="terms" type="checkbox"> I agree to Terms of Service.</label><button id="startCheckout">Continue to Checkout</button><button onclick="closeModal('registerModal')">Close</button></div></div>
-<div class="modal" id="paymentModal"><div class="card"><h3>Checkout</h3><div id="paymentElement"></div><button id="payBtn">Pay $20</button><div id="payMsg"></div></div></div>
-<div class="modal" id="successModal"><div class="card"><h3>Success</h3><p>You are registered.</p><button onclick="closeModal('successModal')">Close</button></div></div>
-<div class="modal" id="unmuteModal"><div class="card"><h3>Request to Unmute</h3><input id="umName" placeholder="Your name"><input id="umEmail" placeholder="Your email"><textarea id="umNote" placeholder="Why you'd like to unmute"></textarea><button id="umSubmit">Send request</button><p id="umMsg"></p><button onclick="closeModal('unmuteModal')">Close</button></div></div>
+  <script src="https://js.stripe.com/v3/"></script>
 
-<script>
-const masterclassApiBase = '/wp-json/mrm-masterclass/v1';
-let current=new Date(),events=[],selectedEvent=null,stripe,elements,clientSecret;
-
-function renderUpcomingEvents() {
-  const box = document.getElementById('upcomingEvents');
-  if (!box) return;
-  const upcoming = [...events].sort((a,b)=>new Date(a.start_time)-new Date(b.start_time)).slice(0,6);
-  if (!upcoming.length) { box.innerHTML = '<p>No upcoming masterclasses are currently open for registration.</p>'; return; }
-  box.innerHTML = upcoming.map(e => `
-    <div class="upcoming-card">
-      <h3>${escapeHtml(e.title)}</h3>
-      <p><strong>Date:</strong> ${formatEventDate(e.start_time)}</p>
-      <p><strong>Presenter:</strong> ${escapeHtml(e.presenter_name || 'TBA')}</p>
-      <p><strong>Price:</strong> $${(Number(e.price_cents || 0) / 100).toFixed(2)}</p>
-      <p><strong>Seats:</strong> ${Number(e.available_seats || 0)} available</p>
-      <button type="button" onclick="openEventById(${Number(e.id)})">View Details</button>
-    </div>
-  `).join('');
-}
-function formatEventDate(value){ const d=new Date(value.replace(' ','T')); if(Number.isNaN(d.getTime())) return value; return d.toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }
-function escapeHtml(value){ return String(value||'').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[s])); }
-function openEventById(id){ const el=document.querySelector(`.evt[data-id="${id}"]`); if(el){el.click();return;} const event=events.find(e=>Number(e.id)===Number(id)); if(!event)return; selectedEvent=event; document.getElementById('evtTitle').textContent=event.title; document.getElementById('evtMeta').textContent=`${formatEventDate(event.start_time)} • ${event.presenter_name || 'TBA'} • $${(Number(event.price_cents || 0) / 100).toFixed(2)}`; document.getElementById('evtDesc').textContent=event.description||''; openModal('eventModal'); }
-
-function openModal(id){document.getElementById(id).style.display='flex'} function closeModal(id){document.getElementById(id).style.display='none'}
-async function loadEvents(){
-  try {
-    const response = await fetch(`${masterclassApiBase}/events`);
-    events = await response.json();
-    if (!Array.isArray(events)) events = [];
-    renderCalendar();
-    renderUpcomingEvents();
-  } catch (error) {
-    events = [];
-    renderCalendar();
-    renderUpcomingEvents();
-    console.error(error);
-  }
-}
-function renderCalendar(){const cal=document.getElementById('calendar'); cal.innerHTML=''; const y=current.getFullYear(),m=current.getMonth(); document.getElementById('monthLabel').textContent=current.toLocaleString([], {month:'long', year:'numeric'}); const first=new Date(y,m,1),start=first.getDay(),days=new Date(y,m+1,0).getDate(); for(let i=0;i<start;i++){cal.insertAdjacentHTML('beforeend','<div class="day"></div>')} for(let d=1;d<=days;d++){const key=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`; const ev=events.filter(e=>e.start_time.startsWith(key)); const cell=document.createElement('div'); cell.className='day'; cell.innerHTML=`<h4>${d}</h4>`+ev.map(e=>`<div class='evt' data-id='${e.id}'>${e.title}</div>`).join(''); cal.appendChild(cell);} document.querySelectorAll('.evt').forEach(n=>n.onclick=()=>showEvent(parseInt(n.dataset.id,10))); }
-function showEvent(id){selectedEvent=events.find(e=>e.id===id); document.getElementById('evtTitle').textContent=selectedEvent.title; document.getElementById('evtMeta').textContent=`${selectedEvent.start_time} (${selectedEvent.timezone}) • ${selectedEvent.presenter_name||'TBA'}`; document.getElementById('evtDesc').textContent=selectedEvent.description||''; openModal('eventModal');}
-async function startCheckout(){ if(!document.getElementById('terms').checked){alert('Terms required');return;} const body={event_id:selectedEvent.id,email:email.value,terms_accepted:true}; const r=await fetch(`${masterclassApiBase}/create-payment-intent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const j=await r.json(); clientSecret=j.client_secret; stripe=Stripe(j.publishable_key); elements=stripe.elements({clientSecret}); elements.create('payment').mount('#paymentElement'); openModal('paymentModal'); }
-async function pay(){ const {error}=await stripe.confirmPayment({elements,redirect:'if_required'}); if(error){payMsg.textContent=error.message;return;} const pi=clientSecret.split('_secret')[0]; await fetch(`${masterclassApiBase}/finalize-registration`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_id:selectedEvent.id,payment_intent_id:pi,first_name:firstName.value,last_name:lastName.value,email:email.value})}); closeModal('paymentModal'); openModal('successModal'); }
-async function submitUnmute(){const res=await fetch(`${masterclassApiBase}/unmute-request`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_id:selectedEvent?.id||0,participant_name:umName.value,participant_email:umEmail.value,request_note:umNote.value})}); const j=await res.json(); umMsg.textContent=j.message||'Sent';}
-prev.onclick=()=>{current.setMonth(current.getMonth()-1);renderCalendar()}; next.onclick=()=>{current.setMonth(current.getMonth()+1);renderCalendar()}; openReg.onclick=()=>openModal('registerModal'); startCheckout.onclick=startCheckout; payBtn.onclick=pay; umSubmit.onclick=submitUnmute; loadEvents();
-</script>
-</body></html>
+  <style>
+    :root { --ink:#1f2933;--muted:#6b7280;--paper:#fffaf2;--cream:#f6f1e8;--card:#ffffff;--brass:#9f6b2d;--brass-dark:#6f431f;--blue:#1f4f68;--border:#e3d7c4;--shadow:0 18px 45px rgba(31,41,51,.14);}*{box-sizing:border-box;}body{margin:0;background:radial-gradient(circle at top left, rgba(159,107,45,.18), transparent 32rem),linear-gradient(180deg, #fffaf2 0%, var(--cream) 100%);color:var(--ink);font-family:Georgia,"Times New Roman",serif}.mc-wrap{max-width:1120px;margin:0 auto;padding:42px 18px 70px}.mc-intro{background:linear-gradient(135deg, rgba(31,79,104,.97), rgba(31,41,51,.98)),#1f2933;color:#fff;border-radius:28px;padding:clamp(26px, 5vw, 46px);box-shadow:var(--shadow);overflow:hidden;position:relative}.mc-intro::after{content:"";position:absolute;right:-80px;top:-80px;width:260px;height:260px;border-radius:50%;background:rgba(245,198,122,.18)}.mc-eyebrow{font-family:Arial,sans-serif;font-size:12px;font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:#f6d59b;margin:0 0 10px}.mc-intro h1{margin:0 0 14px;font-size:clamp(36px, 6vw, 62px);line-height:.96;letter-spacing:-.04em;position:relative;z-index:1}.mc-intro p{max-width:760px;margin:0;font-family:Arial,sans-serif;font-size:17px;line-height:1.7;color:rgba(255,255,255,.88);position:relative;z-index:1}.mc-instructions{margin-top:18px;background:rgba(255,255,255,.78);border:1px solid var(--border);border-radius:22px;padding:18px 20px;font-family:Arial,sans-serif;color:var(--muted);line-height:1.6}.calendar-shell{margin-top:26px;background:rgba(255,255,255,.76);border:1px solid var(--border);border-radius:28px;padding:22px;box-shadow:0 14px 38px rgba(31,41,51,.08)}.calendar-toolbar{display:grid;grid-template-columns:54px 1fr 54px;align-items:center;gap:14px;text-align:center;margin-bottom:18px}.month-arrow{width:54px;height:54px;border-radius:50%;border:1px solid var(--border);background:#fff;color:var(--brass-dark);font-size:34px;line-height:1;cursor:pointer;box-shadow:0 8px 20px rgba(31,41,51,.08)}.month-arrow:hover{background:#fff8ec;transform:translateY(-1px)}#monthLabel{margin:0;font-size:clamp(28px, 4vw, 42px);letter-spacing:-.03em}.weekdays{display:grid;grid-template-columns:repeat(7, 1fr);gap:10px;margin-bottom:10px;color:var(--muted);font-family:Arial,sans-serif;font-size:12px;font-weight:800;letter-spacing:.08em;text-align:center;text-transform:uppercase}.calendar-grid{display:grid;grid-template-columns:repeat(7, 1fr);gap:10px}.day{min-height:132px;background:var(--card);border:1px solid #eadfce;border-radius:18px;padding:10px;box-shadow:0 8px 22px rgba(31,41,51,.05)}.day.empty{opacity:.42;background:rgba(255,255,255,.45)}.date-num{margin:0 0 8px;font-family:Arial,sans-serif;font-size:13px;font-weight:800;color:var(--muted)}.event-button{display:block;width:100%;margin:6px 0 0;padding:8px 9px;border-radius:12px;background:linear-gradient(135deg, #f4dfb9, #d9a85a);color:#2e1c0d;font-family:Arial,sans-serif;font-size:12px;font-weight:800;text-align:left;border:0;cursor:pointer}.modal{position:fixed;inset:0;z-index:9999;background:rgba(18,24,31,.58);display:none;align-items:center;justify-content:center;padding:20px}.modal-card{width:min(680px, 95vw);max-height:90vh;overflow:auto;background:#fffaf2;border:1px solid var(--border);border-radius:26px;padding:26px;box-shadow:var(--shadow}.modal-card h2{margin-top:0;font-size:32px;line-height:1.05}.modal-meta{font-family:Arial,sans-serif;color:var(--muted);line-height:1.6}input:not([type="checkbox"]){width:100%;padding:13px 14px;margin:8px 0;border:1px solid var(--border);border-radius:14px;background:#fff;color:var(--ink);font-family:Arial,sans-serif}label{display:block;margin:14px 0;font-family:Arial,sans-serif;color:var(--ink);line-height:1.5}input[type="checkbox"]{width:auto;margin-right:8px}.primary-btn,.secondary-btn{width:100%;padding:13px 16px;border-radius:14px;font-family:Arial,sans-serif;font-weight:800;cursor:pointer;margin-top:10px}.primary-btn{border:0;background:linear-gradient(135deg,var(--brass),var(--brass-dark));color:#fff}.secondary-btn{border:1px solid var(--border);background:#fff;color:var(--ink)}.message{margin-top:12px;font-family:Arial,sans-serif;color:var(--muted)}
+  </style>
+</head><body></body></html>
