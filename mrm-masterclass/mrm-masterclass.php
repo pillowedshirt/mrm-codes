@@ -218,24 +218,99 @@ class MRM_Masterclass_Plugin {
 		array( $this, 'render_settings_page' )
 	);
 }
+
+public function render_dashboard_page() {
+	$this->must_admin();
+
+	global $wpdb;
+
+	$events_table        = $this->t( 'mrm_masterclass_events' );
+	$registrations_table = $this->t( 'mrm_masterclass_registrations' );
+	$ledger_table        = $this->t( 'mrm_masterclass_payment_ledger' );
+
+	$total_events = absint( $wpdb->get_var( "SELECT COUNT(*) FROM {$events_table}" ) );
+	$scheduled    = absint( $wpdb->get_var( "SELECT COUNT(*) FROM {$events_table} WHERE status = 'scheduled'" ) );
+	$paid_regs    = absint( $wpdb->get_var( "SELECT COUNT(*) FROM {$registrations_table} WHERE payment_status = 'paid'" ) );
+	$gross_cents  = absint( $wpdb->get_var( "SELECT COALESCE(SUM(gross_cents),0) FROM {$ledger_table} WHERE ledger_type = 'registration_payment'" ) );
+	?>
+	<div class="wrap"><h1>MRM Masterclass Dashboard</h1></div>
+	<?php
+}
+
+public function render_settings_page() {
+	$this->must_admin();
+	?>
+	<div class="wrap"><h1>MRM Masterclass Settings</h1></div>
+	<?php
+}
+
+public function render_presenters_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Presenters</h1></div>'; }
+public function render_events_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Events</h1></div>'; }
+public function render_registrations_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Registrations</h1></div>'; }
+public function render_payments_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Payments</h1></div>'; }
+public function render_payouts_page() { $this->must_admin(); echo '<div class="wrap"><h1>Presenter Payouts</h1><p>This submenu is reserved for marking presenter payout periods as paid out. It needs the payout-period creation workflow added next.</p></div>'; }
+public function render_1099_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass 1099 Documents</h1></div>'; }
+public function render_email_log_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Email Log</h1></div>'; }
+
+
 	public function render_email_log_page() {
 		$this->must_admin();
 	}
-	public function register_rest_routes(){ register_rest_route(self::REST_NAMESPACE,'/events',array('methods'=>'GET','callback'=>array($this,'rest_events'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/event',array('methods'=>'GET','callback'=>array($this,'rest_event'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/create-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_create_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/verify-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_verify_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/finalize-registration',array('methods'=>'POST','callback'=>array($this,'rest_finalize'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/unmute-request',array('methods'=>'POST','callback'=>array($this,'rest_unmute_request'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/presenter/unmute-requests',array('methods'=>'GET','callback'=>array($this,'rest_presenter_unmute_requests'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/presenter/respond-unmute',array('methods'=>'POST','callback'=>array($this,'rest_presenter_respond_unmute'),'permission_callback'=>'__return_true')); }
+	public function register_rest_routes(){ register_rest_route(self::REST_NAMESPACE,'/events',array('methods'=>'GET','callback'=>array($this,'rest_events'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/event',array('methods'=>'GET','callback'=>array($this,'rest_event'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/create-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_create_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/verify-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_verify_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/finalize-registration',array('methods'=>'POST','callback'=>array($this,'rest_finalize'),'permission_callback'=>'__return_true'));    }
 	public function rest_events(){ global $wpdb; $rows=$wpdb->get_results("SELECT e.id,e.title,e.description,p.name presenter_name,e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,(e.capacity-(SELECT COUNT(*) FROM {$this->t('mrm_masterclass_registrations')} r WHERE r.event_id=e.id AND r.payment_status='paid')) available_seats FROM {$this->t('mrm_masterclass_events')} e LEFT JOIN {$this->t('mrm_masterclass_presenters')} p ON p.id=e.presenter_id WHERE e.status='scheduled' ORDER BY e.start_time ASC"); return rest_ensure_response($rows); }
 	public function rest_event($r){ global $wpdb; $id=absint($r->get_param('id')); $row=$wpdb->get_row($wpdb->prepare("SELECT e.id,e.title,e.description,p.name presenter_name,e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,e.google_meet_url FROM {$this->t('mrm_masterclass_events')} e LEFT JOIN {$this->t('mrm_masterclass_presenters')} p ON p.id=e.presenter_id WHERE e.id=%d",$id)); return $row?rest_ensure_response($row):new WP_Error('not_found','Event not found',array('status'=>404)); }
 	public function rest_create_pi($r){ global $wpdb; $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",absint($r['event_id']))); if(!$event) return new WP_Error('bad_event','Event not found',array('status'=>404)); $email=sanitize_email($r['email']); $terms=rest_sanitize_boolean($r['terms_accepted']); if(!$terms) return new WP_Error('terms','Terms required',array('status'=>400)); $pi=$this->mrm_mc_create_payment_intent($event,$email,array('version'=>'v1','accepted'=>$terms)); if(is_wp_error($pi)||empty($pi['client_secret'])) return new WP_Error('stripe','Unable to create payment intent',array('status'=>500)); return array('client_secret'=>$pi['client_secret'],'publishable_key'=>$this->mrm_mc_get_stripe_publishable_key()); }
 	public function rest_verify_pi($r){ $pi=$this->mrm_mc_retrieve_payment_intent(sanitize_text_field($r['payment_intent_id'])); if(is_wp_error($pi)) return $pi; return array('ok'=>($pi['status']??'')==='succeeded','status'=>$pi['status']??'unknown'); }
 	public function rest_finalize($r){ global $wpdb; $event_id=absint($r['event_id']); $pi_id=sanitize_text_field($r['payment_intent_id']); $pi=$this->mrm_mc_retrieve_payment_intent($pi_id); if(is_wp_error($pi)||($pi['status']??'')!=='succeeded') return new WP_Error('unpaid','Payment not complete',array('status'=>400)); $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",$event_id)); $now=$this->now(); $wpdb->insert($this->t('mrm_masterclass_registrations'),array('event_id'=>$event_id,'first_name'=>sanitize_text_field($r['first_name']),'last_name'=>sanitize_text_field($r['last_name']),'email'=>sanitize_email($r['email']),'email_hash'=>hash('sha256',strtolower(trim($r['email']))),'stripe_payment_intent_id'=>$pi_id,'amount_cents'=>$event->price_cents,'payment_status'=>'paid','terms_accepted'=>1,'created_at'=>$now,'updated_at'=>$now)); $rid = $wpdb->insert_id; $split = $this->calculate_masterclass_payment_split( $event, absint( $event->price_cents ) ); $wpdb->insert($this->t( 'mrm_masterclass_payment_ledger' ),array('event_id'=>$event_id,'registration_id'=>$rid,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$pi_id,'gross_cents'=>$split['gross_cents'],'stripe_fee_cents'=>$split['stripe_fee_cents'],'net_cents'=>$split['net_cents'],'presenter_share_cents'=>$split['presenter_share_cents'],'platform_share_cents'=>$split['platform_share_cents'],'status'=>'recorded','notes'=>'Masterclass registration payment recorded after successful Stripe payment.','created_at'=>$now,'updated_at'=>$now,)); $this->send_email(sanitize_email( $r['email'] ),'Masterclass registration confirmed','<h2>Registration Confirmed</h2><p>Thanks for registering. You will receive your masterclass details by email.</p>','confirmation',$event_id,$rid); return array('ok'=>true,'registration_id'=>$rid); }
-	public function rest_unmute_request($r){ global $wpdb; $wpdb->insert($this->t('mrm_masterclass_unmute_requests'),array('event_id'=>absint($r['event_id']),'registration_id'=>absint($r['registration_id']),'participant_name'=>sanitize_text_field($r['participant_name']),'participant_email'=>sanitize_email($r['participant_email']),'request_note'=>sanitize_textarea_field($r['request_note']),'status'=>'pending','created_at'=>$this->now())); return array('ok'=>true,'message'=>'Your request has been sent to the presenter. Approval inside this page does not automatically control Google Meet audio; the presenter will manage audio permissions inside Google Meet.'); }
-	public function rest_presenter_unmute_requests($r){ global $wpdb; $event_id=absint($r['event_id']); return $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_unmute_requests')} WHERE event_id=%d ORDER BY created_at DESC",$event_id)); }
-	public function rest_presenter_respond_unmute($r){ global $wpdb; $status=in_array($r['status'],array('approved','denied'),true)?$r['status']:'denied'; $wpdb->update($this->t('mrm_masterclass_unmute_requests'),array('status'=>$status,'presenter_response'=>sanitize_textarea_field($r['response']),'responded_at'=>$this->now()),array('id'=>absint($r['request_id']))); return array('ok'=>true); }
-	private function send_email($to,$subject,$body,$type,$event_id=0,$registration_id=0){ $headers=array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>'); $wrapped='<div style="font-family:Arial,sans-serif">'.$body.'</div>'; $ok=wp_mail($to,$subject,$wrapped,$headers); global $wpdb; $wpdb->insert($this->t('mrm_masterclass_email_log'),array('event_id'=>$event_id?:null,'registration_id'=>$registration_id?:null,'recipient_email'=>$to,'email_type'=>$type,'subject'=>$subject,'status'=>$ok?'sent':'failed','sent_at'=>$this->now())); return $ok; }
+	
+	
+	
+	private function calculate_masterclass_payment_split( $event, $amount_cents ) {
+	$settings = get_option( 'mrm_masterclass_settings', array() );
+
+	$presenter_percent = floatval( $settings['presenter_default_percent'] ?? 70 );
+	$stripe_percent    = floatval( $settings['stripe_fee_estimate_percent'] ?? 2.9 );
+	$stripe_fixed      = absint( $settings['stripe_fee_estimate_fixed'] ?? 30 );
+
+	if ( $presenter_percent < 0 ) {
+		$presenter_percent = 0;
+	}
+
+	if ( $presenter_percent > 100 ) {
+		$presenter_percent = 100;
+	}
+
+	$stripe_fee_cents = (int) round( ( $amount_cents * ( $stripe_percent / 100 ) ) + $stripe_fixed );
+	$net_cents        = max( 0, $amount_cents - $stripe_fee_cents );
+
+	$presenter_share_cents = (int) round( $net_cents * ( $presenter_percent / 100 ) );
+	$platform_share_cents  = max( 0, $net_cents - $presenter_share_cents );
+
+	return array(
+		'gross_cents'           => $amount_cents,
+		'stripe_fee_cents'      => $stripe_fee_cents,
+		'net_cents'             => $net_cents,
+		'presenter_share_cents' => $presenter_share_cents,
+		'platform_share_cents'  => $platform_share_cents,
+	);
+}
+
+private function send_email($to,$subject,$body,$type,$event_id=0,$registration_id=0){ $headers=array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>'); $wrapped='<div style="font-family:Arial,sans-serif">'.$body.'</div>'; $ok=wp_mail($to,$subject,$wrapped,$headers); global $wpdb; $wpdb->insert($this->t('mrm_masterclass_email_log'),array('event_id'=>$event_id?:null,'registration_id'=>$registration_id?:null,'recipient_email'=>$to,'email_type'=>$type,'subject'=>$subject,'status'=>$ok?'sent':'failed','sent_at'=>$this->now())); return $ok; }
 	public function send_reminders(){}
 	public function reconcile_events(){}
 	public function handle_save_settings() {
 	$this->must_admin();
 	check_admin_referer( 'mrm_masterclass_save_settings' );
+
+	$presenter_percent = floatval( $_POST['presenter_default_percent'] ?? 70 );
+
+	if ( $presenter_percent < 0 ) {
+		$presenter_percent = 0;
+	}
+
+	if ( $presenter_percent > 100 ) {
+		$presenter_percent = 100;
+	}
 
 	$settings = array(
 		'masterclass_calendar_id'       => sanitize_text_field( wp_unslash( $_POST['masterclass_calendar_id'] ?? '' ) ),
@@ -245,13 +320,18 @@ class MRM_Masterclass_Plugin {
 		'admin_notification_email'      => sanitize_email( wp_unslash( $_POST['admin_notification_email'] ?? get_option( 'admin_email' ) ) ),
 		'from_email'                    => sanitize_email( wp_unslash( $_POST['from_email'] ?? 'no-reply@lowbrass-lessons.com' ) ),
 		'terms_version'                 => sanitize_text_field( wp_unslash( $_POST['terms_version'] ?? 'v1' ) ),
-		'google_meet_host_instructions' => wp_kses_post( wp_unslash( $_POST['google_meet_host_instructions'] ?? '' ) ),
+		'presenter_default_percent'     => $presenter_percent,
+		'stripe_fee_estimate_percent'   => floatval( $_POST['stripe_fee_estimate_percent'] ?? 2.9 ),
+		'stripe_fee_estimate_fixed'     => max( 0, absint( $_POST['stripe_fee_estimate_fixed'] ?? 30 ) ),
 		'cancellation_policy_text'      => wp_kses_post( wp_unslash( $_POST['cancellation_policy_text'] ?? '' ) ),
 	);
+
 	update_option( 'mrm_masterclass_settings', $settings );
+
 	wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-settings&updated=1' ) );
 	exit;
 }
+
 	public function handle_save_presenter() {
 	$this->must_admin();
 	check_admin_referer( 'mrm_masterclass_save_presenter' );
