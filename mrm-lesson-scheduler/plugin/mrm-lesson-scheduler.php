@@ -2846,14 +2846,36 @@ protected function mrm_get_google_service_account_json() {
                 );
             }
 
-            $orders_table = $wpdb->prefix . 'mrm_pay_orders';
-            $orders_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) );
+            /*
+             * Payments Hub currently stores orders in wp_mrm_orders.
+             * Older scheduler code looked for wp_mrm_pay_orders, which causes confirmed
+             * Stripe payments to be rejected after checkout.
+             *
+             * Prefer the current Payments Hub table, but keep the legacy fallback so
+             * older installs/data do not break.
+             */
+            $orders_table_current = $wpdb->prefix . 'mrm_orders';
+            $orders_table_legacy  = $wpdb->prefix . 'mrm_pay_orders';
 
-            if ( $orders_exists !== $orders_table ) {
+            $orders_table = '';
+            $current_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table_current ) );
+
+            if ( $current_exists === $orders_table_current ) {
+                $orders_table = $orders_table_current;
+            } else {
+                $legacy_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table_legacy ) );
+
+                if ( $legacy_exists === $orders_table_legacy ) {
+                    $orders_table = $orders_table_legacy;
+                }
+            }
+
+            if ( $orders_table === '' ) {
                 return new WP_REST_Response(
                     array(
                         'ok'      => false,
                         'message' => 'Payment confirmation is temporarily unavailable. Please contact Low Brass Lessons.',
+                        'code'    => 'payments_order_table_missing',
                     ),
                     500
                 );
@@ -2861,7 +2883,7 @@ protected function mrm_get_google_service_account_json() {
 
             $order = $wpdb->get_row(
                 $wpdb->prepare(
-                    "SELECT id, customer_email, product_type, status, metadata_json
+                    "SELECT id, customer_email, email_hash, product_type, status, metadata_json
                      FROM {$orders_table}
                      WHERE id = %d
                      LIMIT 1",
@@ -2882,17 +2904,43 @@ protected function mrm_get_google_service_account_json() {
                     array(
                         'ok'      => false,
                         'message' => 'Payment confirmation is required before booking this lesson.',
+                        'code'    => 'paid_lesson_order_not_found',
                     ),
                     403
                 );
             }
 
             $order_email = sanitize_email( (string) ( $order['customer_email'] ?? '' ) );
+
+            if ( ! $order_email && ! empty( $order['metadata_json'] ) ) {
+                $order_meta = json_decode( (string) $order['metadata_json'], true );
+
+                if ( is_array( $order_meta ) ) {
+                    $order_email = sanitize_email( (string) ( $order_meta['mrm_customer_email'] ?? '' ) );
+                }
+            }
+
+            if ( ! $order_email && ! empty( $order['email_hash'] ) && $student_email ) {
+                $expected_hash = hash( 'sha256', strtolower( trim( $student_email ) ) );
+
+                if ( ! hash_equals( (string) $order['email_hash'], $expected_hash ) ) {
+                    return new WP_REST_Response(
+                        array(
+                            'ok'      => false,
+                            'message' => 'Payment confirmation does not match the booking email.',
+                            'code'    => 'payment_email_hash_mismatch',
+                        ),
+                        403
+                    );
+                }
+            }
+
             if ( $order_email && strtolower( $order_email ) !== strtolower( $student_email ) ) {
                 return new WP_REST_Response(
                     array(
                         'ok'      => false,
                         'message' => 'Payment confirmation does not match the booking email.',
+                        'code'    => 'payment_email_mismatch',
                     ),
                     403
                 );
@@ -6591,9 +6639,16 @@ protected function mrm_get_google_service_account_json() {
     }
 
     protected function get_safety_reminder_window_minutes() {
+        /*
+         * WP-Cron is not guaranteed to run at the exact minute.
+         * The old 59-61 minute window could miss reminders when cron ran late.
+         *
+         * This wider window still targets the one-hour reminder, but allows the
+         * 5-minute sweep to catch lessons reliably.
+         */
         return array(
-            'from' => 59,
-            'to'   => 61,
+            'from' => 45,
+            'to'   => 75,
         );
     }
 
@@ -6642,10 +6697,19 @@ protected function mrm_get_google_service_account_json() {
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $attendance_table = $this->table_attendance();
 
-        $current_ts = current_time( 'timestamp' );
+        $current_ts = current_time( 'timestamp', true );
         $now_local  = wp_date( 'Y-m-d H:i:s', $current_ts, wp_timezone() );
-        $from_ts    = $current_ts + ( (int) $window['from'] * MINUTE_IN_SECONDS );
-        $to_ts      = $current_ts + ( (int) $window['to'] * MINUTE_IN_SECONDS );
+        $from_ts = $current_ts + ( (int) $window['from'] * MINUTE_IN_SECONDS );
+        $to_ts   = $current_ts + ( (int) $window['to'] * MINUTE_IN_SECONDS );
+
+        /*
+         * Lesson start_time/end_time are stored as database UTC-style strings.
+         * Use UTC strings for SQL comparison, and keep local strings only for
+         * display/logging.
+         */
+        $from_utc = gmdate( 'Y-m-d H:i:s', $from_ts );
+        $to_utc   = gmdate( 'Y-m-d H:i:s', $to_ts );
+
         $from_local = wp_date( 'Y-m-d H:i:s', $from_ts, wp_timezone() );
         $to_local   = wp_date( 'Y-m-d H:i:s', $to_ts, wp_timezone() );
 
@@ -6676,10 +6740,10 @@ protected function mrm_get_google_service_account_json() {
                         OR a.instructor_reminder_sent_at IS NULL OR a.instructor_reminder_sent_at = ''
                    )
                  ORDER BY l.start_time ASC
-                 LIMIT 250",
+                LIMIT 250",
                 'scheduled',
-                $from_local,
-                $to_local
+                $from_utc,
+                $to_utc
             ),
             ARRAY_A
         );
@@ -6981,8 +7045,10 @@ protected function mrm_get_google_service_account_json() {
         $lessons_table    = $wpdb->prefix . 'mrm_lessons';
         $attendance_table = $this->table_attendance();
 
-        $from_local = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 24 * HOUR_IN_SECONDS ) );
-        $to_local   = date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 15 * MINUTE_IN_SECONDS ) );
+        $current_ts = current_time( 'timestamp', true );
+
+        $from_utc = gmdate( 'Y-m-d H:i:s', $current_ts - ( 24 * HOUR_IN_SECONDS ) );
+        $to_utc   = gmdate( 'Y-m-d H:i:s', $current_ts - ( 15 * MINUTE_IN_SECONDS ) );
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
@@ -7000,8 +7066,8 @@ protected function mrm_get_google_service_account_json() {
                    )
                  ORDER BY l.end_time ASC
                  LIMIT 250",
-                $from_local,
-                $to_local
+                $from_utc,
+                $to_utc
             ),
             ARRAY_A
         );
@@ -7013,8 +7079,8 @@ protected function mrm_get_google_service_account_json() {
 
         $this->mrm_safety_log( 'feedback_request_query_completed', array(
             'row_count'   => is_array( $rows ) ? count( $rows ) : 0,
-            'from_local'  => $from_local,
-            'to_local'    => $to_local,
+            'from_utc'    => $from_utc,
+            'to_utc'      => $to_utc,
         ) );
 
         if ( empty( $rows ) ) {
@@ -7704,6 +7770,10 @@ protected function mrm_get_google_service_account_json() {
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         $attendance_table = $this->table_attendance();
         $admin_email = $this->get_admin_notification_email();
+        $current_ts = current_time( 'timestamp', true );
+
+        $arrival_cutoff_utc = gmdate( 'Y-m-d H:i:s', $current_ts - ( 10 * MINUTE_IN_SECONDS ) );
+        $departure_cutoff_utc = gmdate( 'Y-m-d H:i:s', $current_ts - ( 60 * MINUTE_IN_SECONDS ) );
 
         if ( ! is_email( $admin_email ) ) {
             $this->mrm_safety_log( 'exception_monitor_skipped_missing_admin_email', array() );
@@ -7715,7 +7785,7 @@ protected function mrm_get_google_service_account_json() {
              FROM {$lessons_table} l
              LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
              WHERE l.status = 'scheduled'
-               AND l.start_time <= '" . esc_sql( date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 10 * MINUTE_IN_SECONDS ) ) ) . "'
+               AND l.start_time <= '" . esc_sql( $arrival_cutoff_utc ) . "'
                AND (a.instructor_arrived_at IS NULL OR a.instructor_arrived_at = '')
                AND (a.arrival_alert_sent_at IS NULL OR a.arrival_alert_sent_at = '')",
             ARRAY_A
@@ -7740,7 +7810,7 @@ protected function mrm_get_google_service_account_json() {
              FROM {$lessons_table} l
              LEFT JOIN {$attendance_table} a ON a.lesson_id = l.id
              WHERE l.status IN ('scheduled','delivered')
-               AND l.end_time <= '" . esc_sql( date( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( 60 * MINUTE_IN_SECONDS ) ) ) . "'
+               AND l.end_time <= '" . esc_sql( $departure_cutoff_utc ) . "'
                AND a.instructor_arrived_at IS NOT NULL
                AND a.instructor_arrived_at <> ''
                AND (a.instructor_departed_at IS NULL OR a.instructor_departed_at = '')
