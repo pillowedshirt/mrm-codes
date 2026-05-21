@@ -343,89 +343,102 @@ class LowBrass_MRM_Masterclass_Plugin {
 	}
 
 	public function runtime_upgrade() {
-	$saved_version = get_option( 'mrm_masterclass_db_version', '' );
+		$saved_version = get_option( 'mrm_masterclass_db_version', '' );
 
-	if ( $this->mrm_mc_should_diagnose_current_request() ) {
-		$this->mrm_mc_debug_log(
-			'Runtime upgrade checkpoint reached.',
-			array(
-				'saved_version'    => $saved_version,
-				'code_version'     => self::DB_VERSION,
-				'is_admin'         => is_admin() ? 1 : 0,
-				'is_cron'          => ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) ? 1 : 0,
-				'is_rest'          => $this->mrm_mc_is_rest_request() ? 1 : 0,
-				'has_fail_lock'    => get_transient( 'mrm_masterclass_runtime_upgrade_failed' ) ? 1 : 0,
-				'request_uri'      => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-			)
-		);
-	}
-
-	if ( $saved_version === self::DB_VERSION ) {
 		if ( $this->mrm_mc_should_diagnose_current_request() ) {
-			$this->mrm_mc_debug_log( 'Runtime upgrade skipped because saved DB version already matches code version.' );
+			$this->mrm_mc_debug_log(
+				'Runtime upgrade checkpoint reached.',
+				array(
+					'saved_version'    => $saved_version,
+					'code_version'     => self::DB_VERSION,
+					'is_admin'         => is_admin() ? 1 : 0,
+					'is_cron'          => ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) ? 1 : 0,
+					'is_rest'          => $this->mrm_mc_is_rest_request() ? 1 : 0,
+					'has_fail_lock'    => get_transient( 'mrm_masterclass_runtime_upgrade_failed' ) ? 1 : 0,
+					'has_run_lock'     => get_transient( 'mrm_masterclass_runtime_upgrade_running' ) ? 1 : 0,
+					'request_uri'      => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+				)
+			);
 		}
-		return;
-	}
 
-	if ( get_transient( 'mrm_masterclass_runtime_upgrade_failed' ) ) {
-		if ( $this->mrm_mc_should_diagnose_current_request() ) {
-			$this->mrm_mc_debug_log( 'Runtime upgrade skipped because failure lock transient is active.' );
+		if ( $saved_version === self::DB_VERSION ) {
+			if ( $this->mrm_mc_should_diagnose_current_request() ) {
+				$this->mrm_mc_debug_log( 'Runtime upgrade skipped because saved DB version already matches code version.' );
+			}
+			return;
 		}
-		return;
-	}
 
-	if ( ! is_admin() && ! wp_doing_cron() && ! $this->mrm_mc_is_rest_request() ) {
-		if ( $this->mrm_mc_should_diagnose_current_request() ) {
-			$this->mrm_mc_debug_log( 'Runtime upgrade skipped on frontend non-REST request.' );
+		if ( get_transient( 'mrm_masterclass_runtime_upgrade_failed' ) ) {
+			if ( $this->mrm_mc_should_diagnose_current_request() ) {
+				$this->mrm_mc_debug_log( 'Runtime upgrade skipped because failure lock transient is active.' );
+			}
+			return;
 		}
-		return;
+
+		if ( get_transient( 'mrm_masterclass_runtime_upgrade_running' ) ) {
+			if ( $this->mrm_mc_should_diagnose_current_request() ) {
+				$this->mrm_mc_debug_log( 'Runtime upgrade skipped because another request is already running it.' );
+			}
+			return;
+		}
+
+		if ( ! is_admin() && ! wp_doing_cron() && ! $this->mrm_mc_is_rest_request() ) {
+			if ( $this->mrm_mc_should_diagnose_current_request() ) {
+				$this->mrm_mc_debug_log( 'Runtime upgrade skipped on frontend non-REST request.' );
+			}
+			return;
+		}
+
+		set_transient( 'mrm_masterclass_runtime_upgrade_running', 1, 2 * MINUTE_IN_SECONDS );
+
+		try {
+			$this->mrm_mc_debug_log(
+				'Runtime database upgrade starting.',
+				array(
+					'from_version' => $saved_version,
+					'to_version'   => self::DB_VERSION,
+				)
+			);
+
+			self::install_tables();
+
+			update_option( 'mrm_masterclass_db_version', self::DB_VERSION, false );
+			delete_option( 'mrm_masterclass_activation_error' );
+			delete_transient( 'mrm_masterclass_runtime_upgrade_failed' );
+			delete_transient( 'mrm_masterclass_runtime_upgrade_running' );
+
+			$this->mrm_mc_debug_log(
+				'Runtime database upgrade completed.',
+				array(
+					'db_version_saved_after' => get_option( 'mrm_masterclass_db_version', '' ),
+					'code_version'           => self::DB_VERSION,
+				)
+			);
+		} catch ( \Throwable $e ) {
+			delete_transient( 'mrm_masterclass_runtime_upgrade_running' );
+			set_transient( 'mrm_masterclass_runtime_upgrade_failed', 1, 10 * MINUTE_IN_SECONDS );
+
+			update_option(
+				'mrm_masterclass_activation_error',
+				array(
+					'message' => $e->getMessage(),
+					'file'    => $e->getFile(),
+					'line'    => $e->getLine(),
+					'time'    => gmdate( 'Y-m-d H:i:s' ),
+				),
+				false
+			);
+
+			$this->mrm_mc_debug_log(
+				'Runtime database upgrade failed safely.',
+				array(
+					'error' => $e->getMessage(),
+					'file'  => $e->getFile(),
+					'line'  => $e->getLine(),
+				)
+			);
+		}
 	}
-
-	try {
-		$this->mrm_mc_debug_log(
-			'Runtime database upgrade starting.',
-			array(
-				'from_version' => $saved_version,
-				'to_version'   => self::DB_VERSION,
-			)
-		);
-
-		self::install_tables();
-
-		delete_option( 'mrm_masterclass_activation_error' );
-		delete_transient( 'mrm_masterclass_runtime_upgrade_failed' );
-
-		$this->mrm_mc_debug_log(
-			'Runtime database upgrade completed.',
-			array(
-				'db_version_saved_after' => get_option( 'mrm_masterclass_db_version', '' ),
-				'code_version'           => self::DB_VERSION,
-			)
-		);
-	} catch ( \Throwable $e ) {
-		set_transient( 'mrm_masterclass_runtime_upgrade_failed', 1, 10 * MINUTE_IN_SECONDS );
-
-		update_option(
-			'mrm_masterclass_activation_error',
-			array(
-				'message' => $e->getMessage(),
-				'file'    => $e->getFile(),
-				'line'    => $e->getLine(),
-				'time'    => gmdate( 'Y-m-d H:i:s' ),
-			),
-			false
-		);
-
-		$this->mrm_mc_debug_log(
-			'Runtime database upgrade failed safely.',
-			array(
-				'error' => $e->getMessage(),
-				'file'  => $e->getFile(),
-				'line'  => $e->getLine(),
-			)
-		);
-	}
-}
 
 private function mrm_mc_should_diagnose_current_request( $file = '' ) {
 	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
@@ -570,7 +583,7 @@ public function mrm_mc_shutdown_fatal_error_logger() {
 }
 
 
-public function mrm_mc_runtime_error_logger( $errno, $errstr, $errfile, $errline ) {
+	public function mrm_mc_runtime_error_logger( $errno, $errstr, $errfile, $errline ) {
 	$watched_types = array(
 		E_WARNING,
 		E_USER_WARNING,
@@ -585,7 +598,18 @@ public function mrm_mc_runtime_error_logger( $errno, $errstr, $errfile, $errline
 		return false;
 	}
 
-	if ( ! $this->mrm_mc_should_diagnose_current_request( (string) $errfile ) ) {
+	$errfile_string = (string) $errfile;
+
+	/*
+	 * Do not flood the Masterclass log with WordPress core dbDelta warnings.
+	 * The fatal we are fixing is plugin-local. Core upgrade.php warnings are
+	 * useful only when debugging schema formatting, not normal page loads.
+	 */
+	if ( false !== strpos( str_replace( '\\', '/', $errfile_string ), '/wp-admin/includes/upgrade.php' ) ) {
+		return false;
+	}
+
+	if ( ! $this->mrm_mc_should_diagnose_current_request( $errfile_string ) ) {
 		return false;
 	}
 
@@ -596,7 +620,7 @@ public function mrm_mc_runtime_error_logger( $errno, $errstr, $errfile, $errline
 		array(
 			'type'        => (int) $errno,
 			'message'     => (string) $errstr,
-			'file'        => (string) $errfile,
+			'file'        => $errfile_string,
 			'line'        => (int) $errline,
 			'request_uri' => $request_uri,
 			'wp_page'     => isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '',
@@ -640,6 +664,22 @@ public function mrm_mc_render_critical_error_notice() {
 	echo '</div>';
 }
 
+	private function t( $table_name ) {
+		global $wpdb;
+
+		$table_name = sanitize_key( (string) $table_name );
+
+		if ( '' === $table_name ) {
+			return $wpdb->prefix . 'mrm_masterclass_invalid_table';
+		}
+
+		/*
+		 * This helper is intentionally tiny and local to the Masterclass plugin.
+		 * It restores the table-name helper expected throughout the plugin after
+		 * the class was renamed to LowBrass_MRM_Masterclass_Plugin.
+		 */
+		return $wpdb->prefix . $table_name;
+	}
 
 	private function mrm_mc_required_tables() {
 		return array(
