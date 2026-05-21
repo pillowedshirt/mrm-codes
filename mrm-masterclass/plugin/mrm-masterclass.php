@@ -35,7 +35,7 @@ if ( ! defined( 'MRM_MASTERCLASS_URL' ) ) {
 class MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
-	const DB_VERSION = '1.2.1';
+	const DB_VERSION = '1.2.2';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 
@@ -75,117 +75,247 @@ class MRM_Masterclass_Plugin {
 	public static function deactivate() { wp_clear_scheduled_hook( 'mrm_masterclass_send_reminders' ); wp_clear_scheduled_hook( 'mrm_masterclass_reconcile_events' ); }
 	public function runtime_upgrade(){ if(get_option('mrm_masterclass_db_version')!==self::DB_VERSION){ self::install_tables(); }}
 	private function t($n){global $wpdb; return $wpdb->prefix.$n;}
-	public static function install_tables(){ global $wpdb; require_once ABSPATH.'wp-admin/includes/upgrade.php'; $c=$wpdb->get_charset_collate(); $p=$wpdb->prefix;
-		dbDelta("CREATE TABLE {$p}mrm_masterclass_presenters (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, name VARCHAR(191) NOT NULL, email VARCHAR(191) NOT NULL, bio TEXT NULL, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, PRIMARY KEY(id), KEY email(email));");
-		dbDelta("CREATE TABLE {$p}mrm_masterclass_events (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, title VARCHAR(191) NOT NULL, description LONGTEXT NULL, presenter_id BIGINT UNSIGNED NULL, presenter_email VARCHAR(191) NULL, start_time DATETIME NOT NULL, end_time DATETIME NOT NULL, timezone VARCHAR(64) NOT NULL DEFAULT 'UTC', price_cents INT NOT NULL DEFAULT 2000, capacity INT NOT NULL DEFAULT 100, status VARCHAR(32) NOT NULL DEFAULT 'scheduled', registration_open TINYINT(1) NOT NULL DEFAULT 1, google_event_id VARCHAR(191) NULL, google_meet_url TEXT NULL, cancellation_reason TEXT NULL, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, PRIMARY KEY(id), KEY start_time(start_time));");
-		dbDelta("CREATE TABLE {$p}mrm_masterclass_registrations (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, event_id BIGINT UNSIGNED NOT NULL, first_name VARCHAR(191) NOT NULL, last_name VARCHAR(191) NOT NULL, email VARCHAR(191) NOT NULL, email_hash VARCHAR(64) NOT NULL, stripe_payment_intent_id VARCHAR(191) NULL, amount_cents INT NOT NULL, currency VARCHAR(10) NOT NULL DEFAULT 'usd', payment_status VARCHAR(32) NOT NULL DEFAULT 'pending', google_attendee_added TINYINT(1) NOT NULL DEFAULT 0, terms_version VARCHAR(32) NOT NULL DEFAULT 'v1', terms_accepted TINYINT(1) NOT NULL DEFAULT 0, reminder_24_sent TINYINT(1) NOT NULL DEFAULT 0, reminder_1_sent TINYINT(1) NOT NULL DEFAULT 0, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, PRIMARY KEY(id), KEY event_id(event_id), KEY email(email));");
-		dbDelta("CREATE TABLE {$p}mrm_masterclass_refunds (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, registration_id BIGINT UNSIGNED NOT NULL, event_id BIGINT UNSIGNED NOT NULL, stripe_refund_id VARCHAR(191) NULL, amount_cents INT NOT NULL, status VARCHAR(32) NOT NULL, notes TEXT NULL, created_at DATETIME NOT NULL, PRIMARY KEY(id), KEY event_id(event_id));");
-		dbDelta("CREATE TABLE {$p}mrm_masterclass_email_log (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, event_id BIGINT UNSIGNED NULL, registration_id BIGINT UNSIGNED NULL, recipient_email VARCHAR(191) NOT NULL, email_type VARCHAR(64) NOT NULL, subject VARCHAR(255) NOT NULL, status VARCHAR(32) NOT NULL, error_message TEXT NULL, sent_at DATETIME NOT NULL, PRIMARY KEY(id), KEY event_id(event_id));");
-		dbDelta("CREATE TABLE {$p}mrm_masterclass_unmute_requests (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, event_id BIGINT UNSIGNED NOT NULL, registration_id BIGINT UNSIGNED NULL, participant_name VARCHAR(191) NOT NULL, participant_email VARCHAR(191) NOT NULL, request_note TEXT NULL, status VARCHAR(32) NOT NULL DEFAULT 'pending', presenter_response TEXT NULL, responded_at DATETIME NULL, created_at DATETIME NOT NULL, PRIMARY KEY(id), KEY event_id(event_id));");
-		dbDelta("CREATE TABLE {$p}mrm_masterclass_presenter_tax_profiles (
-	id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-	presenter_id BIGINT UNSIGNED NOT NULL,
-	legal_name VARCHAR(191) NULL,
-	business_name VARCHAR(191) NULL,
-	email VARCHAR(191) NULL,
-	tin_last4 VARCHAR(4) NULL,
-	tin_type VARCHAR(20) NULL,
-	w9_received TINYINT(1) NOT NULL DEFAULT 0,
-	w9_received_date DATE NULL,
-	address_line1 VARCHAR(191) NULL,
-	address_line2 VARCHAR(191) NULL,
-	city VARCHAR(100) NULL,
-	state VARCHAR(50) NULL,
-	zip VARCHAR(20) NULL,
-	is_1099_eligible TINYINT(1) NOT NULL DEFAULT 1,
-	exclude_from_1099 TINYINT(1) NOT NULL DEFAULT 0,
-	notes TEXT NULL,
-	created_at DATETIME NOT NULL,
-	updated_at DATETIME NOT NULL,
-	PRIMARY KEY(id),
-	KEY presenter_id(presenter_id)
-) {$c};");
-		dbDelta("CREATE TABLE {$p}mrm_masterclass_payment_ledger (
-	id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-	event_id BIGINT UNSIGNED NULL,
-	registration_id BIGINT UNSIGNED NULL,
-	presenter_id BIGINT UNSIGNED NULL,
-	ledger_type VARCHAR(50) NOT NULL,
-	stripe_payment_intent_id VARCHAR(191) NULL,
-	stripe_refund_id VARCHAR(191) NULL,
-	gross_cents INT NOT NULL DEFAULT 0,
-	stripe_fee_cents INT NOT NULL DEFAULT 0,
-	net_cents INT NOT NULL DEFAULT 0,
-	presenter_share_cents INT NOT NULL DEFAULT 0,
-	platform_share_cents INT NOT NULL DEFAULT 0,
-	status VARCHAR(50) NOT NULL DEFAULT 'recorded',
-	notes TEXT NULL,
-	created_at DATETIME NOT NULL,
-	updated_at DATETIME NOT NULL,
-	PRIMARY KEY(id),
-	KEY event_id(event_id),
-	KEY registration_id(registration_id),
-	KEY presenter_id(presenter_id),
-	KEY status(status)
-) {$c};");
+	public static function install_tables() {
+	global $wpdb;
 
-		$presenters_table = $p . 'mrm_masterclass_presenters';
-		$events_table     = $p . 'mrm_masterclass_events';
-		$ledger_table     = $p . 'mrm_masterclass_payment_ledger';
+	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 
-		$presenter_columns = $wpdb->get_col( "DESC {$presenters_table}", 0 );
+	$c = $wpdb->get_charset_collate();
+	$p = $wpdb->prefix;
 
-		$presenter_adds = array(
-			'city'                        => "ALTER TABLE {$presenters_table} ADD city VARCHAR(100) NULL",
-			'state'                       => "ALTER TABLE {$presenters_table} ADD state VARCHAR(50) NULL",
-			'address'                     => "ALTER TABLE {$presenters_table} ADD address VARCHAR(191) NULL",
-			'zip_code'                    => "ALTER TABLE {$presenters_table} ADD zip_code VARCHAR(20) NULL",
-			'timezone'                    => "ALTER TABLE {$presenters_table} ADD timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix'",
-			'stripe_connected_account_id' => "ALTER TABLE {$presenters_table} ADD stripe_connected_account_id VARCHAR(191) NULL",
-			'hire_date'                   => "ALTER TABLE {$presenters_table} ADD hire_date DATE NULL",
-			'profile_image_url'           => "ALTER TABLE {$presenters_table} ADD profile_image_url TEXT NULL",
-			'short_description'           => "ALTER TABLE {$presenters_table} ADD short_description TEXT NULL",
-			'long_description'            => "ALTER TABLE {$presenters_table} ADD long_description LONGTEXT NULL",
-			'instruments'                 => "ALTER TABLE {$presenters_table} ADD instruments TEXT NULL",
-			'presenter_page_id'           => "ALTER TABLE {$presenters_table} ADD presenter_page_id BIGINT UNSIGNED NULL",
-		);
+	$presenters_table   = $p . 'mrm_masterclass_presenters';
+	$events_table       = $p . 'mrm_masterclass_events';
+	$registrations_table = $p . 'mrm_masterclass_registrations';
+	$refunds_table      = $p . 'mrm_masterclass_refunds';
+	$email_log_table    = $p . 'mrm_masterclass_email_log';
+	$unmute_table       = $p . 'mrm_masterclass_unmute_requests';
+	$tax_table          = $p . 'mrm_masterclass_presenter_tax_profiles';
+	$ledger_table       = $p . 'mrm_masterclass_payment_ledger';
 
-		foreach ( $presenter_adds as $column => $sql ) {
-			if ( ! in_array( $column, $presenter_columns, true ) ) {
-				$wpdb->query( $sql );
-			}
-		}
+	dbDelta(
+		"CREATE TABLE {$presenters_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			name VARCHAR(191) NOT NULL,
+			email VARCHAR(191) NOT NULL,
+			bio TEXT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY email (email)
+		) {$c};"
+	);
 
-		$event_columns = $wpdb->get_col( "DESC {$events_table}", 0 );
+	dbDelta(
+		"CREATE TABLE {$events_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			title VARCHAR(191) NOT NULL,
+			description LONGTEXT NULL,
+			presenter_id BIGINT UNSIGNED NULL,
+			presenter_email VARCHAR(191) NULL,
+			start_time DATETIME NOT NULL,
+			end_time DATETIME NOT NULL,
+			timezone VARCHAR(64) NOT NULL DEFAULT 'UTC',
+			price_cents INT NOT NULL DEFAULT 2000,
+			capacity INT NOT NULL DEFAULT 100,
+			status VARCHAR(32) NOT NULL DEFAULT 'scheduled',
+			registration_open TINYINT(1) NOT NULL DEFAULT 1,
+			google_event_id VARCHAR(191) NULL,
+			google_meet_url TEXT NULL,
+			cancellation_reason TEXT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY start_time (start_time)
+		) {$c};"
+	);
 
-		$event_adds = array(
-			'calendar_id'    => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
-			'proctor_email'  => "ALTER TABLE {$events_table} ADD proctor_email VARCHAR(191) NULL",
-			'cohost_note'    => "ALTER TABLE {$events_table} ADD cohost_note TEXT NULL",
-		);
+	dbDelta(
+		"CREATE TABLE {$registrations_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			event_id BIGINT UNSIGNED NOT NULL,
+			first_name VARCHAR(191) NOT NULL,
+			last_name VARCHAR(191) NOT NULL,
+			email VARCHAR(191) NOT NULL,
+			email_hash VARCHAR(64) NOT NULL,
+			stripe_payment_intent_id VARCHAR(191) NULL,
+			amount_cents INT NOT NULL,
+			currency VARCHAR(10) NOT NULL DEFAULT 'usd',
+			payment_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+			google_attendee_added TINYINT(1) NOT NULL DEFAULT 0,
+			terms_version VARCHAR(32) NOT NULL DEFAULT 'v1',
+			terms_accepted TINYINT(1) NOT NULL DEFAULT 0,
+			reminder_24_sent TINYINT(1) NOT NULL DEFAULT 0,
+			reminder_1_sent TINYINT(1) NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY event_id (event_id),
+			KEY email (email)
+		) {$c};"
+	);
 
-		foreach ( $event_adds as $column => $sql ) {
-			if ( ! in_array( $column, $event_columns, true ) ) {
-				$wpdb->query( $sql );
-			}
-		}
+	dbDelta(
+		"CREATE TABLE {$refunds_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			registration_id BIGINT UNSIGNED NOT NULL,
+			event_id BIGINT UNSIGNED NOT NULL,
+			stripe_refund_id VARCHAR(191) NULL,
+			amount_cents INT NOT NULL,
+			status VARCHAR(32) NOT NULL,
+			notes TEXT NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY event_id (event_id)
+		) {$c};"
+	);
 
-		$ledger_columns = $wpdb->get_col( "DESC {$ledger_table}", 0 );
+	dbDelta(
+		"CREATE TABLE {$email_log_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			event_id BIGINT UNSIGNED NULL,
+			registration_id BIGINT UNSIGNED NULL,
+			recipient_email VARCHAR(191) NOT NULL,
+			email_type VARCHAR(64) NOT NULL,
+			subject VARCHAR(255) NOT NULL,
+			status VARCHAR(32) NOT NULL,
+			error_message TEXT NULL,
+			sent_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY event_id (event_id)
+		) {$c};"
+	);
 
-		$ledger_adds = array(
-			'paid_out_at'        => "ALTER TABLE {$ledger_table} ADD paid_out_at DATETIME NULL",
-			'payout_batch_id'    => "ALTER TABLE {$ledger_table} ADD payout_batch_id VARCHAR(64) NULL",
-			'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
-		);
+	dbDelta(
+		"CREATE TABLE {$unmute_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			event_id BIGINT UNSIGNED NOT NULL,
+			registration_id BIGINT UNSIGNED NULL,
+			participant_name VARCHAR(191) NOT NULL,
+			participant_email VARCHAR(191) NOT NULL,
+			request_note TEXT NULL,
+			status VARCHAR(32) NOT NULL DEFAULT 'pending',
+			presenter_response TEXT NULL,
+			responded_at DATETIME NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY event_id (event_id)
+		) {$c};"
+	);
 
-		foreach ( $ledger_adds as $column => $sql ) {
-			if ( ! in_array( $column, $ledger_columns, true ) ) {
-				$wpdb->query( $sql );
-			}
-		}
+	dbDelta(
+		"CREATE TABLE {$tax_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			presenter_id BIGINT UNSIGNED NOT NULL,
+			legal_name VARCHAR(191) NULL,
+			business_name VARCHAR(191) NULL,
+			email VARCHAR(191) NULL,
+			tin_last4 VARCHAR(4) NULL,
+			tin_type VARCHAR(20) NULL,
+			w9_received TINYINT(1) NOT NULL DEFAULT 0,
+			w9_received_date DATE NULL,
+			address_line1 VARCHAR(191) NULL,
+			address_line2 VARCHAR(191) NULL,
+			city VARCHAR(100) NULL,
+			state VARCHAR(50) NULL,
+			zip VARCHAR(20) NULL,
+			is_1099_eligible TINYINT(1) NOT NULL DEFAULT 1,
+			exclude_from_1099 TINYINT(1) NOT NULL DEFAULT 0,
+			notes TEXT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY presenter_id (presenter_id)
+		) {$c};"
+	);
 
-		update_option('mrm_masterclass_db_version', self::DB_VERSION);
+	dbDelta(
+		"CREATE TABLE {$ledger_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			event_id BIGINT UNSIGNED NULL,
+			registration_id BIGINT UNSIGNED NULL,
+			presenter_id BIGINT UNSIGNED NULL,
+			ledger_type VARCHAR(50) NOT NULL,
+			stripe_payment_intent_id VARCHAR(191) NULL,
+			stripe_refund_id VARCHAR(191) NULL,
+			gross_cents INT NOT NULL DEFAULT 0,
+			stripe_fee_cents INT NOT NULL DEFAULT 0,
+			net_cents INT NOT NULL DEFAULT 0,
+			presenter_share_cents INT NOT NULL DEFAULT 0,
+			platform_share_cents INT NOT NULL DEFAULT 0,
+			status VARCHAR(50) NOT NULL DEFAULT 'recorded',
+			notes TEXT NULL,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY event_id (event_id),
+			KEY registration_id (registration_id),
+			KEY presenter_id (presenter_id),
+			KEY status (status)
+		) {$c};"
+	);
+
+	$presenter_columns = $wpdb->get_col( "DESC {$presenters_table}", 0 );
+	if ( ! is_array( $presenter_columns ) ) {
+		$presenter_columns = array();
 	}
+
+	$presenter_adds = array(
+		'city'                        => "ALTER TABLE {$presenters_table} ADD city VARCHAR(100) NULL",
+		'state'                       => "ALTER TABLE {$presenters_table} ADD state VARCHAR(50) NULL",
+		'address'                     => "ALTER TABLE {$presenters_table} ADD address VARCHAR(191) NULL",
+		'zip_code'                    => "ALTER TABLE {$presenters_table} ADD zip_code VARCHAR(20) NULL",
+		'timezone'                    => "ALTER TABLE {$presenters_table} ADD timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix'",
+		'stripe_connected_account_id' => "ALTER TABLE {$presenters_table} ADD stripe_connected_account_id VARCHAR(191) NULL",
+		'hire_date'                   => "ALTER TABLE {$presenters_table} ADD hire_date DATE NULL",
+		'profile_image_url'           => "ALTER TABLE {$presenters_table} ADD profile_image_url TEXT NULL",
+		'short_description'           => "ALTER TABLE {$presenters_table} ADD short_description TEXT NULL",
+		'long_description'            => "ALTER TABLE {$presenters_table} ADD long_description LONGTEXT NULL",
+		'instruments'                 => "ALTER TABLE {$presenters_table} ADD instruments TEXT NULL",
+		'presenter_page_id'           => "ALTER TABLE {$presenters_table} ADD presenter_page_id BIGINT UNSIGNED NULL",
+	);
+
+	foreach ( $presenter_adds as $column => $sql ) {
+		if ( ! in_array( $column, $presenter_columns, true ) ) {
+			$wpdb->query( $sql );
+		}
+	}
+
+	$event_columns = $wpdb->get_col( "DESC {$events_table}", 0 );
+	if ( ! is_array( $event_columns ) ) {
+		$event_columns = array();
+	}
+
+	$event_adds = array(
+		'calendar_id'   => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
+		'proctor_email' => "ALTER TABLE {$events_table} ADD proctor_email VARCHAR(191) NULL",
+		'cohost_note'   => "ALTER TABLE {$events_table} ADD cohost_note TEXT NULL",
+	);
+
+	foreach ( $event_adds as $column => $sql ) {
+		if ( ! in_array( $column, $event_columns, true ) ) {
+			$wpdb->query( $sql );
+		}
+	}
+
+	$ledger_columns = $wpdb->get_col( "DESC {$ledger_table}", 0 );
+	if ( ! is_array( $ledger_columns ) ) {
+		$ledger_columns = array();
+	}
+
+	$ledger_adds = array(
+		'paid_out_at'        => "ALTER TABLE {$ledger_table} ADD paid_out_at DATETIME NULL",
+		'payout_batch_id'    => "ALTER TABLE {$ledger_table} ADD payout_batch_id VARCHAR(64) NULL",
+		'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
+	);
+
+	foreach ( $ledger_adds as $column => $sql ) {
+		if ( ! in_array( $column, $ledger_columns, true ) ) {
+			$wpdb->query( $sql );
+		}
+	}
+
+	update_option( 'mrm_masterclass_db_version', self::DB_VERSION );
+}
 	public function add_cron_schedule($s){$s['mrm_masterclass_15min']=array('interval'=>900,'display'=>'Every 15 Minutes'); return $s;}
 	private function now(){return gmdate('Y-m-d H:i:s');}
 
