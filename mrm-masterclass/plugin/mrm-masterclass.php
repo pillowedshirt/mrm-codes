@@ -357,35 +357,85 @@ private function admin_card_close() {
 	private function mrm_mc_parse_service_account_json( $json ) { $json = is_string( $json ) ? trim( $json ) : ''; if ( $json === '' ) { return null; } $data = json_decode( $json, true ); if ( ! is_array( $data ) || empty( $data['client_email'] ) || empty( $data['private_key'] ) ) { return null; } return array('client_email'=>(string)$data['client_email'],'private_key'=>(string)$data['private_key'],'token_uri'=>!empty($data['token_uri'])?(string)$data['token_uri']:'https://oauth2.googleapis.com/token'); }
 	private function mrm_mc_base64url_encode( $data ) { return rtrim( strtr( base64_encode( $data ), '+/', '-_' ), '=' ); }
 	private function mrm_mc_google_make_jwt( $client_email, $private_key, $scope, $token_url ) { $now=time(); $header=array('alg'=>'RS256','typ'=>'JWT'); $claims=array('iss'=>$client_email,'scope'=>$scope,'aud'=>$token_url,'iat'=>$now,'exp'=>$now+3600); $segments=array($this->mrm_mc_base64url_encode(wp_json_encode($header)),$this->mrm_mc_base64url_encode(wp_json_encode($claims))); $signing_input=implode('.', $segments); $signature=''; $ok=openssl_sign($signing_input,$signature,$private_key,'sha256'); if(!$ok){ return new WP_Error('jwt_sign_failed','OpenSSL failed to sign the Google service account JWT.'); } $segments[]=$this->mrm_mc_base64url_encode($signature); return implode('.', $segments); }
-	private function mrm_mc_google_get_access_token() { return ''; }
+	private function mrm_mc_google_get_access_token() {
+		$scope    = 'https://www.googleapis.com/auth/calendar';
+		$cachekey = 'mrm_masterclass_google_access_token';
+		$cached   = get_transient( $cachekey );
+		if ( is_string( $cached ) && $cached !== '' ) { return $cached; }
+		$parsed = $this->mrm_mc_parse_service_account_json( $this->mrm_mc_get_google_service_account_json() );
+		if ( ! $parsed ) { $this->mrm_mc_debug_log( 'Google token failed: service account JSON missing or invalid.' ); return new WP_Error( 'google_not_configured', 'Google service account JSON is not configured.' ); }
+		$jwt = $this->mrm_mc_google_make_jwt( $parsed['client_email'], $parsed['private_key'], $scope, $parsed['token_uri'] );
+		if ( is_wp_error( $jwt ) ) { $this->mrm_mc_debug_log( 'Google token failed: JWT creation failed.', array( 'error' => $jwt->get_error_message() ) ); return $jwt; }
+		$response = wp_remote_post( $parsed['token_uri'], array( 'timeout' => 20, 'headers' => array( 'Content-Type' => 'application/x-www-form-urlencoded' ), 'body' => http_build_query( array( 'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer', 'assertion' => $jwt ) ) ) );
+		if ( is_wp_error( $response ) ) { $this->mrm_mc_debug_log( 'Google token HTTP request failed.', array( 'error' => $response->get_error_message() ) ); return $response; }
+		$code = wp_remote_retrieve_response_code( $response ); $body = wp_remote_retrieve_body( $response ); $data = json_decode( $body, true );
+		if ( $code < 200 || $code >= 300 || ! is_array( $data ) || empty( $data['access_token'] ) ) { $this->mrm_mc_debug_log( 'Google token endpoint rejected request.', array( 'http_code' => $code, 'body' => substr( (string) $body, 0, 500 ) ) ); return new WP_Error( 'google_token_failed', 'Google token request failed.' ); }
+		set_transient( $cachekey, (string) $data['access_token'], 55 * MINUTE_IN_SECONDS );
+		$this->mrm_mc_debug_log( 'Google access token created successfully.' );
+		return (string) $data['access_token'];
+	}
 	private function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
-	$token = $this->mrm_mc_google_get_access_token();
-	if ( is_wp_error( $token ) ) { return $token; }
-	$args = array('method'=>$method,'timeout'=>20,'headers'=>array('Authorization'=>'Bearer '.$token,'Content-Type'=>'application/json')); if ( null !== $body ) { $args['body'] = wp_json_encode( $body ); }
-	$response = wp_remote_request( $url, $args ); if ( is_wp_error( $response ) ) { return $response; }
-	$code = wp_remote_retrieve_response_code( $response ); $raw  = wp_remote_retrieve_body( $response ); $data = json_decode( $raw, true ); if ( $code < 200 || $code >= 300 ) { return new WP_Error( 'google_calendar_http', 'Google Calendar request failed.' ); }
-	return is_array( $data ) ? $data : array();
-}
+		$token = $this->mrm_mc_google_get_access_token(); if ( is_wp_error( $token ) ) { return $token; }
+		$args = array( 'method' => $method, 'timeout' => 20, 'headers' => array( 'Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json' ) ); if ( null !== $body ) { $args['body'] = wp_json_encode( $body ); }
+		$response = wp_remote_request( $url, $args );
+		if ( is_wp_error( $response ) ) { $this->mrm_mc_debug_log( 'Google Calendar HTTP request failed.', array( 'method' => $method, 'url' => $url, 'error' => $response->get_error_message() ) ); return $response; }
+		$code = wp_remote_retrieve_response_code( $response ); $raw  = wp_remote_retrieve_body( $response ); $data = json_decode( $raw, true );
+		if ( $code < 200 || $code >= 300 ) { $this->mrm_mc_debug_log( 'Google Calendar request returned non-2xx.', array( 'method' => $method, 'url' => $url, 'http_code' => $code, 'body' => substr( (string) $raw, 0, 500 ) ) ); return new WP_Error( 'google_calendar_http', 'Google Calendar request failed.' ); }
+		return is_array( $data ) ? $data : array();
+	}
 	private function mrm_mc_extract_meet_url( $event ) {
-	if ( ! is_array( $event ) ) {
+		if ( ! is_array( $event ) ) { return ''; }
+		if ( ! empty( $event['hangoutLink'] ) ) { return esc_url_raw( $event['hangoutLink'] ); }
+		if ( empty( $event['conferenceData']['entryPoints'] ) || ! is_array( $event['conferenceData']['entryPoints'] ) ) { return ''; }
+		foreach ( $event['conferenceData']['entryPoints'] as $ep ) { if ( is_array( $ep ) && ( $ep['entryPointType'] ?? '' ) === 'video' && ! empty( $ep['uri'] ) ) { return esc_url_raw( $ep['uri'] ); } }
 		return '';
 	}
-	if ( ! empty( $event['hangoutLink'] ) ) {
-		return esc_url_raw( $event['hangoutLink'] );
+	private function mrm_mc_google_insert_event( $event, $presenter_email ) {
+		$settings = $this->settings(); $calendar_id = trim( (string) ( $event->calendar_id ?: ( $settings['masterclass_calendar_id'] ?? '' ) ) );
+		if ( $calendar_id === '' ) { $this->mrm_mc_debug_log( 'Google event creation skipped: missing calendar ID.', array( 'event_id' => $event->id ?? 0 ) ); return new WP_Error( 'missing_calendar_id', 'Masterclass Google Calendar ID is missing.' ); }
+		$attendees = array(); if ( is_email( $presenter_email ) ) { $attendees[] = array( 'email' => $presenter_email ); } if ( ! empty( $event->proctor_email ) && is_email( $event->proctor_email ) ) { $attendees[] = array( 'email' => $event->proctor_email ); }
+		$timezone = ! empty( $event->timezone ) ? (string) $event->timezone : 'America/Phoenix';
+		$payload = array( 'summary' => (string) $event->title, 'description' => wp_strip_all_tags( (string) $event->description ), 'start' => array( 'dateTime' => date( 'c', strtotime( $event->start_time ) ), 'timeZone' => $timezone ), 'end' => array( 'dateTime' => date( 'c', strtotime( $event->end_time ) ), 'timeZone' => $timezone ), 'attendees' => $attendees, 'reminders' => array( 'useDefault' => false, 'overrides' => array() ), 'conferenceData' => array( 'createRequest' => array( 'requestId' => 'mrm-masterclass-' . absint( $event->id ) . '-' . time(), 'conferenceSolutionKey' => array( 'type' => 'hangoutsMeet' ) ) ), 'extendedProperties' => array( 'private' => array( 'mrm_source' => 'masterclass', 'mrm_masterclass_event_id' => (string) $event->id, 'mrm_presenter_email' => (string) $presenter_email, 'mrm_proctor_email' => (string) ( $event->proctor_email ?? '' ) ) ) );
+		$url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( rawurldecode( $calendar_id ) ) . '/events'; $url = add_query_arg( 'sendUpdates', 'all', $url ); $url = add_query_arg( 'conferenceDataVersion', 1, $url );
+		$result = $this->mrm_mc_google_calendar_request( 'POST', $url, $payload );
+		if ( is_wp_error( $result ) ) { $this->mrm_mc_debug_log( 'Google event creation failed.', array( 'event_id' => $event->id ?? 0, 'error' => $result->get_error_message() ) ); return $result; }
+		$google_event_id = ! empty( $result['id'] ) ? (string) $result['id'] : ''; $meet_url = $this->mrm_mc_extract_meet_url( $result );
+		$this->mrm_mc_debug_log( 'Google event creation result.', array( 'event_id' => $event->id ?? 0, 'google_event_id' => $google_event_id, 'has_meet_url' => $meet_url ? 'yes' : 'no' ) );
+		return array( 'google_event_id' => $google_event_id, 'google_meet_url' => $meet_url );
 	}
-	if ( empty( $event['conferenceData']['entryPoints'] ) || ! is_array( $event['conferenceData']['entryPoints'] ) ) {
-		return '';
+	private function mrm_mc_google_patch_event_attendees( $event, $emails ) {
+		$settings = $this->settings(); $calendar_id = trim( (string) ( $event->calendar_id ?: ( $settings['masterclass_calendar_id'] ?? '' ) ) );
+		if ( $calendar_id === '' || empty( $event->google_event_id ) ) { return false; }
+		$attendees = array(); if ( ! empty( $event->presenter_email ) && is_email( $event->presenter_email ) ) { $attendees[] = array( 'email' => $event->presenter_email ); } if ( ! empty( $event->proctor_email ) && is_email( $event->proctor_email ) ) { $attendees[] = array( 'email' => $event->proctor_email ); }
+		foreach ( (array) $emails as $email ) { $email = sanitize_email( $email ); if ( is_email( $email ) ) { $attendees[] = array( 'email' => $email ); } }
+		$url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( rawurldecode( $calendar_id ) ) . '/events/' . rawurlencode( $event->google_event_id ); $url = add_query_arg( 'sendUpdates', 'all', $url );
+		$result = $this->mrm_mc_google_calendar_request( 'PATCH', $url, array( 'attendees' => $attendees ) );
+		return ! is_wp_error( $result );
 	}
-	foreach ( $event['conferenceData']['entryPoints'] as $ep ) { if ( is_array( $ep ) && ( $ep['entryPointType'] ?? '' ) === 'video' && ! empty( $ep['uri'] ) ) { return esc_url_raw( $ep['uri'] ); }}
-	return '';
-}
-	private function mrm_mc_google_insert_event( $event, $presenter_email ) { return array('google_event_id'=>'','google_meet_url'=>''); }
-	private function mrm_mc_google_patch_event_attendees( $event, $emails ) { return true; }
-	private function mrm_mc_google_cancel_event( $google_event_id ) { return true; }
+	private function mrm_mc_google_cancel_event( $google_event_id ) {
+		$settings = $this->settings(); $calendar_id = trim( (string) ( $settings['masterclass_calendar_id'] ?? '' ) );
+		if ( $calendar_id === '' || empty( $google_event_id ) ) { return false; }
+		$url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( rawurldecode( $calendar_id ) ) . '/events/' . rawurlencode( $google_event_id ); $url = add_query_arg( 'sendUpdates', 'all', $url );
+		$result = $this->mrm_mc_google_calendar_request( 'DELETE', $url );
+		return ! is_wp_error( $result );
+	}
 	private function mrm_mc_stripe_request($method,$endpoint,$body=array()){ $sk=$this->mrm_mc_get_stripe_secret_key(); if(!$sk) return new WP_Error('stripe_missing','Stripe key missing'); $args=array('method'=>$method,'headers'=>array('Authorization'=>'Bearer '.$sk,'Content-Type'=>'application/x-www-form-urlencoded')); if($body)$args['body']=http_build_query($body); $r=wp_remote_request('https://api.stripe.com/v1/'.$endpoint,$args); if(is_wp_error($r)) return $r; return json_decode(wp_remote_retrieve_body($r),true); }
 	private function mrm_mc_create_payment_intent($event,$email,$terms){ return $this->mrm_mc_stripe_request('POST','payment_intents',array('amount'=>$event->price_cents,'currency'=>'usd','automatic_payment_methods[enabled]'=>'true','metadata[mrm_masterclass_event_id]'=>$event->id,'metadata[mrm_masterclass_customer_email]'=>$email,'metadata[mrm_product_type]'=>'masterclass','metadata[source_flow]'=>'masterclass_registration','metadata[terms_version]'=>$terms['version'],'metadata[terms_accepted]'=>$terms['accepted']?'1':'0')); }
 	private function mrm_mc_retrieve_payment_intent($id){ return $this->mrm_mc_stripe_request('GET','payment_intents/'.rawurlencode($id)); }
 	private function mrm_mc_refund_payment_intent($pi,$amt){ return $this->mrm_mc_stripe_request('POST','refunds',array('payment_intent'=>$pi,'amount'=>$amt)); }
+	public function render_masterclass_shortcode() {
+		$path = trailingslashit( dirname( MRM_MASTERCLASS_DIR ) ) . 'frontend/masterclass.html';
+		if ( ! file_exists( $path ) ) { $this->mrm_mc_debug_log( 'Masterclass shortcode could not find frontend HTML.', array( 'expected_path' => $path ) ); return '<div class="mrm-masterclass-error">Masterclass registration page is not available yet.</div>'; }
+		$html = file_get_contents( $path );
+		if ( ! is_string( $html ) || trim( $html ) === '' ) { $this->mrm_mc_debug_log( 'Masterclass shortcode found empty frontend HTML.', array( 'expected_path' => $path ) ); return '<div class="mrm-masterclass-error">Masterclass registration page is empty.</div>'; }
+		$html = preg_replace( '/<!doctype[^>]*>/i', '', $html );
+		$html = preg_replace( '/<\/?html[^>]*>/i', '', $html );
+		$html = preg_replace( '/<\/?head[^>]*>/i', '', $html );
+		$html = preg_replace( '/<title[^>]*>.*?<\/title>/is', '', $html );
+		$html = preg_replace( '/<meta[^>]*>/i', '', $html );
+		$html = preg_replace( '/<\/?body[^>]*>/i', '', $html );
+		return $html;
+	}
 	public function register_admin_menu() {
 	$this->mrm_mc_debug_log( 'Registering Masterclass admin menu.' );
 
@@ -1029,7 +1079,7 @@ public function render_email_log_page() {
 	public function rest_event($r){ global $wpdb; $id=absint($r->get_param('id')); $row=$wpdb->get_row($wpdb->prepare("SELECT e.id,e.title,e.description,p.name presenter_name,e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,e.google_meet_url FROM {$this->t('mrm_masterclass_events')} e LEFT JOIN {$this->t('mrm_masterclass_presenters')} p ON p.id=e.presenter_id WHERE e.id=%d",$id)); return $row?rest_ensure_response($row):new WP_Error('not_found','Event not found',array('status'=>404)); }
 	public function rest_create_pi($r){ global $wpdb; $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",absint($r['event_id']))); if(!$event) return new WP_Error('bad_event','Event not found',array('status'=>404)); $email=sanitize_email($r['email']); $terms=rest_sanitize_boolean($r['terms_accepted']); if(!$terms) return new WP_Error('terms','Terms required',array('status'=>400)); $pi=$this->mrm_mc_create_payment_intent($event,$email,array('version'=>'v1','accepted'=>$terms)); if(is_wp_error($pi)||empty($pi['client_secret'])) return new WP_Error('stripe','Unable to create payment intent',array('status'=>500)); return array('client_secret'=>$pi['client_secret'],'publishable_key'=>$this->mrm_mc_get_stripe_publishable_key()); }
 	public function rest_verify_pi($r){ $pi=$this->mrm_mc_retrieve_payment_intent(sanitize_text_field($r['payment_intent_id'])); if(is_wp_error($pi)) return $pi; return array('ok'=>($pi['status']??'')==='succeeded','status'=>$pi['status']??'unknown'); }
-	public function rest_finalize($r){ global $wpdb; $event_id=absint($r['event_id']); $pi_id=sanitize_text_field($r['payment_intent_id']); $pi=$this->mrm_mc_retrieve_payment_intent($pi_id); if(is_wp_error($pi)||($pi['status']??'')!=='succeeded') return new WP_Error('unpaid','Payment not complete',array('status'=>400)); $existing = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$this->t('mrm_masterclass_registrations')} WHERE stripe_payment_intent_id = %s LIMIT 1", $pi_id ) ); if ( $existing ) { return new WP_Error( 'duplicate_registration', 'This payment has already been used for a registration.', array( 'status' => 409 ) ); } $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",$event_id)); if ( ! $event ) { return new WP_Error( 'event_not_found', 'Masterclass event not found.', array( 'status' => 404 ) ); } $paid_count = absint( $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$this->t('mrm_masterclass_registrations')} WHERE event_id = %d AND payment_status = 'paid'", $event_id ) ) ); if ( $paid_count >= absint( $event->capacity ) ) { return new WP_Error( 'event_full', 'This masterclass is full.', array( 'status' => 409 ) ); } $now=$this->now(); $wpdb->insert($this->t('mrm_masterclass_registrations'),array('event_id'=>$event_id,'first_name'=>sanitize_text_field($r['first_name']),'last_name'=>sanitize_text_field($r['last_name']),'email'=>sanitize_email($r['email']),'email_hash'=>hash('sha256',strtolower(trim($r['email']))),'stripe_payment_intent_id'=>$pi_id,'amount_cents'=>$event->price_cents,'payment_status'=>'paid','terms_accepted'=>1,'created_at'=>$now,'updated_at'=>$now)); $rid = $wpdb->insert_id; $split = $this->calculate_masterclass_payment_split( $event, absint( $event->price_cents ) ); $wpdb->insert($this->t( 'mrm_masterclass_payment_ledger' ),array('event_id'=>$event_id,'registration_id'=>$rid,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$pi_id,'gross_cents'=>$split['gross_cents'],'stripe_fee_cents'=>$split['stripe_fee_cents'],'net_cents'=>$split['net_cents'],'presenter_share_cents'=>$split['presenter_share_cents'],'platform_share_cents'=>$split['platform_share_cents'],'status'=>'recorded','notes'=>'Masterclass registration payment recorded after successful Stripe payment.','created_at'=>$now,'updated_at'=>$now,)); $this->send_email(sanitize_email( $r['email'] ),'Masterclass registration confirmed','<h2>Registration Confirmed</h2><p>Thanks for registering. You will receive your masterclass details by email.</p>','confirmation',$event_id,$rid); return array('ok'=>true,'registration_id'=>$rid); }
+	public function rest_finalize($r){ global $wpdb; $event_id=absint($r['event_id']); $pi_id=sanitize_text_field($r['payment_intent_id']); $pi=$this->mrm_mc_retrieve_payment_intent($pi_id); if(is_wp_error($pi)||($pi['status']??'')!=='succeeded') return new WP_Error('unpaid','Payment not complete',array('status'=>400)); $existing = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$this->t('mrm_masterclass_registrations')} WHERE stripe_payment_intent_id = %s LIMIT 1", $pi_id ) ); if ( $existing ) { return new WP_Error( 'duplicate_registration', 'This payment has already been used for a registration.', array( 'status' => 409 ) ); } $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",$event_id)); if ( ! $event ) { return new WP_Error( 'event_not_found', 'Masterclass event not found.', array( 'status' => 404 ) ); } $paid_count = absint( $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$this->t('mrm_masterclass_registrations')} WHERE event_id = %d AND payment_status = 'paid'", $event_id ) ) ); if ( $paid_count >= absint( $event->capacity ) ) { return new WP_Error( 'event_full', 'This masterclass is full.', array( 'status' => 409 ) ); } $now=$this->now(); $wpdb->insert($this->t('mrm_masterclass_registrations'),array('event_id'=>$event_id,'first_name'=>sanitize_text_field($r['first_name']),'last_name'=>sanitize_text_field($r['last_name']),'email'=>sanitize_email($r['email']),'email_hash'=>hash('sha256',strtolower(trim($r['email']))),'stripe_payment_intent_id'=>$pi_id,'amount_cents'=>$event->price_cents,'payment_status'=>'paid','terms_accepted'=>1,'created_at'=>$now,'updated_at'=>$now)); $rid = $wpdb->insert_id; $google_added = $this->mrm_mc_google_patch_event_attendees( $event, array( sanitize_email( $r['email'] ) ) ); if ( $google_added ) { $wpdb->update( $this->t( 'mrm_masterclass_registrations' ), array( 'google_attendee_added' => 1, 'updated_at' => $this->now(), ), array( 'id' => $rid ), array( '%d', '%s' ), array( '%d' ) ); } $split = $this->calculate_masterclass_payment_split( $event, absint( $event->price_cents ) ); $wpdb->insert($this->t( 'mrm_masterclass_payment_ledger' ),array('event_id'=>$event_id,'registration_id'=>$rid,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$pi_id,'gross_cents'=>$split['gross_cents'],'stripe_fee_cents'=>$split['stripe_fee_cents'],'net_cents'=>$split['net_cents'],'presenter_share_cents'=>$split['presenter_share_cents'],'platform_share_cents'=>$split['platform_share_cents'],'status'=>'recorded','notes'=>'Masterclass registration payment recorded after successful Stripe payment.','created_at'=>$now,'updated_at'=>$now,)); $body  = '<h2>Masterclass Registration Confirmed</h2>'; $body .= '<p>Thank you for registering for <strong>' . esc_html( $event->title ) . '</strong>.</p>'; $body .= '<p><strong>Session time:</strong> ' . esc_html( $event->start_time ) . '</p>'; if ( ! empty( $event->google_meet_url ) ) { $body .= '<p><a href="' . esc_url( $event->google_meet_url ) . '">Join the masterclass online</a></p>'; } $body .= '<p>Please keep this email for your records.</p>'; $this->send_email( sanitize_email( $r['email'] ), 'Masterclass Registration Confirmed', $body, 'confirmation', $event_id, $rid ); return array('ok'=>true,'registration_id'=>$rid); }
 	
 	
 	
@@ -1462,9 +1512,7 @@ public function handle_create_presenter_page() {
 		if ( $event ) {
 			$google = $this->mrm_mc_google_insert_event( $event, $event->presenter_email );
 
-			if ( is_wp_error( $google ) ) {
-				$this->mrm_mc_debug_log( 'Google event creation failed.', array( 'event_id' => $event_id, 'error' => $google->get_error_message() ) );
-			} elseif ( is_array( $google ) && ( ! empty( $google['google_event_id'] ) || ! empty( $google['google_meet_url'] ) ) ) {
+			if ( ! is_wp_error( $google ) && ( ! empty( $google['google_event_id'] ) || ! empty( $google['google_meet_url'] ) ) ) {
 				$wpdb->update(
 					$this->t( 'mrm_masterclass_events' ),
 					array(
@@ -1472,10 +1520,21 @@ public function handle_create_presenter_page() {
 						'google_meet_url' => esc_url_raw( $google['google_meet_url'] ?? '' ),
 						'updated_at'      => $this->now(),
 					),
-					array( 'id' => $event_id )
+					array( 'id' => $event_id ),
+					array( '%s', '%s', '%s' ),
+					array( '%d' )
 				);
 
-				$this->mrm_mc_debug_log( 'Google event fields saved.', array( 'event_id' => $event_id, 'has_meet_url' => ! empty( $google['google_meet_url'] ) ? 'yes' : 'no' ) );
+				$this->mrm_mc_debug_log( 'Google event values saved to local event.', array(
+					'event_id'        => $event_id,
+					'google_event_id' => $google['google_event_id'] ?? '',
+					'has_meet_url'    => ! empty( $google['google_meet_url'] ) ? 'yes' : 'no',
+				) );
+			} elseif ( is_wp_error( $google ) ) {
+				$this->mrm_mc_debug_log( 'Google event creation returned WP_Error.', array(
+					'event_id' => $event_id,
+					'error'    => $google->get_error_message(),
+				) );
 			} else {
 				$this->mrm_mc_debug_log( 'Google event creation skipped or returned empty values.', array( 'event_id' => $event_id ) );
 			}
