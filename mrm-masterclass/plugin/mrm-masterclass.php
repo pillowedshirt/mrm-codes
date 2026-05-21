@@ -68,7 +68,7 @@ class MRM_Masterclass_Plugin {
 			add_action( 'admin_post_' . $k, array( $this, $m ) );
 		}
 		add_action( 'admin_notices', array( $this, 'render_activation_diagnostic_notice' ) );
-		add_shortcode( 'mrm_masterclass', array( $this, 'render_masterclass_shortcode' ) );
+		$this->mrm_mc_debug_log( 'Masterclass plugin initialized in REST-only frontend mode. No shortcode rendering is registered.' );
 	}
 
 	public static function activate() { self::install_tables(); @file_put_contents( trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log', '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] Masterclass plugin activated.' . PHP_EOL, FILE_APPEND | LOCK_EX ); set_transient( 'mrm_masterclass_activation_notice', 1, 60 ); if ( ! wp_next_scheduled( 'mrm_masterclass_send_reminders' ) ) { wp_schedule_event( time()+120, 'mrm_masterclass_15min', 'mrm_masterclass_send_reminders' ); } if ( ! wp_next_scheduled( 'mrm_masterclass_reconcile_events' ) ) { wp_schedule_event( time()+300, 'hourly', 'mrm_masterclass_reconcile_events' ); } }
@@ -585,19 +585,7 @@ private function mrm_mc_stripe_request($method,$endpoint,$body=array()){ $sk=$th
 	private function mrm_mc_create_payment_intent($event,$email,$terms){ return $this->mrm_mc_stripe_request('POST','payment_intents',array('amount'=>$event->price_cents,'currency'=>'usd','automatic_payment_methods[enabled]'=>'true','metadata[mrm_masterclass_event_id]'=>$event->id,'metadata[mrm_masterclass_customer_email]'=>$email,'metadata[mrm_product_type]'=>'masterclass','metadata[source_flow]'=>'masterclass_registration','metadata[terms_version]'=>$terms['version'],'metadata[terms_accepted]'=>$terms['accepted']?'1':'0')); }
 	private function mrm_mc_retrieve_payment_intent($id){ return $this->mrm_mc_stripe_request('GET','payment_intents/'.rawurlencode($id)); }
 	private function mrm_mc_refund_payment_intent($pi,$amt){ return $this->mrm_mc_stripe_request('POST','refunds',array('payment_intent'=>$pi,'amount'=>$amt)); }
-	public function render_masterclass_shortcode() {
-		$path = trailingslashit( dirname( MRM_MASTERCLASS_DIR ) ) . 'frontend/masterclass.html';
-		if ( ! file_exists( $path ) ) { $this->mrm_mc_debug_log( 'Masterclass shortcode could not find frontend HTML.', array( 'expected_path' => $path ) ); return '<div class="mrm-masterclass-error">Masterclass registration page is not available yet.</div>'; }
-		$html = file_get_contents( $path );
-		if ( ! is_string( $html ) || trim( $html ) === '' ) { $this->mrm_mc_debug_log( 'Masterclass shortcode found empty frontend HTML.', array( 'expected_path' => $path ) ); return '<div class="mrm-masterclass-error">Masterclass registration page is empty.</div>'; }
-		$html = preg_replace( '/<!doctype[^>]*>/i', '', $html );
-		$html = preg_replace( '/<\/?html[^>]*>/i', '', $html );
-		$html = preg_replace( '/<\/?head[^>]*>/i', '', $html );
-		$html = preg_replace( '/<title[^>]*>.*?<\/title>/is', '', $html );
-		$html = preg_replace( '/<meta[^>]*>/i', '', $html );
-		$html = preg_replace( '/<\/?body[^>]*>/i', '', $html );
-		return $html;
-	}
+
 	public function register_admin_menu() {
 	$this->mrm_mc_debug_log( 'Registering Masterclass admin menu.' );
 
@@ -1236,7 +1224,17 @@ public function render_email_log_page() {
 		echo '</div>';
 	}
 
-	public function register_rest_routes(){ register_rest_route(self::REST_NAMESPACE,'/events',array('methods'=>'GET','callback'=>array($this,'rest_events'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/event',array('methods'=>'GET','callback'=>array($this,'rest_event'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/create-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_create_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/verify-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_verify_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/finalize-registration',array('methods'=>'POST','callback'=>array($this,'rest_finalize'),'permission_callback'=>'__return_true'));    }
+	public function register_rest_routes(){ register_rest_route(self::REST_NAMESPACE,'/events',array('methods'=>'GET','callback'=>array($this,'rest_events'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/event',array('methods'=>'GET','callback'=>array($this,'rest_event'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/create-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_create_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/verify-payment-intent',array('methods'=>'POST','callback'=>array($this,'rest_verify_pi'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/finalize-registration',array('methods'=>'POST','callback'=>array($this,'rest_finalize'),'permission_callback'=>'__return_true')); register_rest_route(self::REST_NAMESPACE,'/health',array('methods'=>'GET','callback'=>array($this,'rest_health'),'permission_callback'=>'__return_true'));    }
+	public function rest_health() {
+		return rest_ensure_response(
+			array(
+				'ok'        => true,
+				'plugin'    => 'mrm-masterclass',
+				'mode'      => 'rest-only-frontend',
+				'timestamp' => gmdate( 'c' ),
+			)
+		);
+	}
 	public function rest_events(){ global $wpdb; $rows=$wpdb->get_results("SELECT e.id,e.title,e.description,p.name presenter_name,e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,(e.capacity-(SELECT COUNT(*) FROM {$this->t('mrm_masterclass_registrations')} r WHERE r.event_id=e.id AND r.payment_status='paid')) available_seats FROM {$this->t('mrm_masterclass_events')} e LEFT JOIN {$this->t('mrm_masterclass_presenters')} p ON p.id=e.presenter_id WHERE e.status='scheduled' ORDER BY e.start_time ASC"); return rest_ensure_response($rows); }
 	public function rest_event($r){ global $wpdb; $id=absint($r->get_param('id')); $row=$wpdb->get_row($wpdb->prepare("SELECT e.id,e.title,e.description,p.name presenter_name,e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,e.google_meet_url FROM {$this->t('mrm_masterclass_events')} e LEFT JOIN {$this->t('mrm_masterclass_presenters')} p ON p.id=e.presenter_id WHERE e.id=%d",$id)); return $row?rest_ensure_response($row):new WP_Error('not_found','Event not found',array('status'=>404)); }
 	public function rest_create_pi($r){ global $wpdb; $event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->t('mrm_masterclass_events')} WHERE id=%d",absint($r['event_id']))); if(!$event) return new WP_Error('bad_event','Event not found',array('status'=>404)); $email=sanitize_email($r['email']); $terms=rest_sanitize_boolean($r['terms_accepted']); if(!$terms) return new WP_Error('terms','Terms required',array('status'=>400)); $pi=$this->mrm_mc_create_payment_intent($event,$email,array('version'=>'v1','accepted'=>$terms)); if(is_wp_error($pi)||empty($pi['client_secret'])) return new WP_Error('stripe','Unable to create payment intent',array('status'=>500)); return array('client_secret'=>$pi['client_secret'],'publishable_key'=>$this->mrm_mc_get_stripe_publishable_key()); }

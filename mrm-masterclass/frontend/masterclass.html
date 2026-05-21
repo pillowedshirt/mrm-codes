@@ -1,9 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Low Brass Lessons Masterclasses</title>
 
   <script src="https://js.stripe.com/v3/"></script>
 
@@ -306,6 +300,24 @@ input[type="checkbox"] {
 
   <script>
     const API_BASE = '/wp-json/mrm-masterclass/v1';
+
+    async function checkMasterclassApiHealth() {
+      try {
+        const response = await fetch(API_BASE + '/health');
+        const data = await response.json();
+
+        if (!response.ok || !data.ok) {
+          console.warn('Masterclass API health check failed:', data);
+          return false;
+        }
+
+        console.log('Masterclass API connected:', data);
+        return true;
+      } catch (error) {
+        console.warn('Masterclass API health check error:', error);
+        return false;
+      }
+    }
     let selectedEvent = null;
     let stripe = null;
     let elements = null;
@@ -337,6 +349,8 @@ input[type="checkbox"] {
     }
 
     async function loadEvents() {
+      await checkMasterclassApiHealth();
+
       try {
         const response = await fetch(API_BASE + '/events');
         const events = await response.json();
@@ -488,5 +502,3 @@ input[type="checkbox"] {
 
     loadEvents();
   </script>
-</body>
-</html>
