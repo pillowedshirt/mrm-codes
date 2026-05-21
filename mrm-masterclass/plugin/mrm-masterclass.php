@@ -174,6 +174,10 @@ class MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
+	$this->mrm_mc_add_action_if_method_exists( 'init', 'mrm_mc_log_init_checkpoint', 0, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'wp_loaded', 'mrm_mc_log_wp_loaded_checkpoint', 999, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'mrm_mc_log_template_redirect_checkpoint', 0, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'shutdown', 'mrm_mc_log_shutdown_action_checkpoint', 999, 0 );
 
 	if ( method_exists( $this, 'mrm_mc_render_critical_error_notice' ) ) {
 		$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'mrm_mc_render_critical_error_notice' );
@@ -339,77 +343,171 @@ class MRM_Masterclass_Plugin {
 	}
 
 	public function runtime_upgrade() {
-		if ( get_option( 'mrm_masterclass_db_version' ) === self::DB_VERSION ) {
-			return;
-		}
+	$saved_version = get_option( 'mrm_masterclass_db_version', '' );
 
-		if ( get_transient( 'mrm_masterclass_runtime_upgrade_failed' ) ) {
-			return;
-		}
-
-		if ( ! is_admin() && ! wp_doing_cron() && ! $this->mrm_mc_is_rest_request() ) {
-			return;
-		}
-
-		try {
-			self::install_tables();
-			delete_option( 'mrm_masterclass_activation_error' );
-		} catch ( \Throwable $e ) {
-			set_transient( 'mrm_masterclass_runtime_upgrade_failed', 1, 10 * MINUTE_IN_SECONDS );
-
-			update_option(
-				'mrm_masterclass_activation_error',
-				array(
-					'message' => $e->getMessage(),
-					'file'    => $e->getFile(),
-					'line'    => $e->getLine(),
-					'time'    => gmdate( 'Y-m-d H:i:s' ),
-				),
-				false
-			);
-
-			$this->mrm_mc_debug_log(
-				'Runtime database upgrade failed safely.',
-				array(
-					'error' => $e->getMessage(),
-					'file'  => $e->getFile(),
-					'line'  => $e->getLine(),
-				)
-			);
-		}
-	}
-	private function t( $n ) {
-		global $wpdb;
-		return $wpdb->prefix . $n;
-	}
-
-	private static function safe_debug_log( $message, $context = array() ) {
-		if ( ! defined( 'WP_CONTENT_DIR' ) ) {
-			return;
-		}
-
-		$line = '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] ' . (string) $message;
-
-		if ( is_array( $context ) && ! empty( $context ) ) {
-			$safe_context = array();
-
-			foreach ( $context as $key => $value ) {
-				if ( is_scalar( $value ) || null === $value ) {
-					$safe_context[ $key ] = $value;
-				} else {
-					$safe_context[ $key ] = '[non-scalar]';
-				}
-			}
-
-			$line .= ' ' . wp_json_encode( $safe_context );
-		}
-
-		@file_put_contents(
-			trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log',
-			$line . PHP_EOL,
-			FILE_APPEND | LOCK_EX
+	if ( $this->mrm_mc_should_diagnose_current_request() ) {
+		$this->mrm_mc_debug_log(
+			'Runtime upgrade checkpoint reached.',
+			array(
+				'saved_version'    => $saved_version,
+				'code_version'     => self::DB_VERSION,
+				'is_admin'         => is_admin() ? 1 : 0,
+				'is_cron'          => ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) ? 1 : 0,
+				'is_rest'          => $this->mrm_mc_is_rest_request() ? 1 : 0,
+				'has_fail_lock'    => get_transient( 'mrm_masterclass_runtime_upgrade_failed' ) ? 1 : 0,
+				'request_uri'      => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+			)
 		);
 	}
+
+	if ( $saved_version === self::DB_VERSION ) {
+		if ( $this->mrm_mc_should_diagnose_current_request() ) {
+			$this->mrm_mc_debug_log( 'Runtime upgrade skipped because saved DB version already matches code version.' );
+		}
+		return;
+	}
+
+	if ( get_transient( 'mrm_masterclass_runtime_upgrade_failed' ) ) {
+		if ( $this->mrm_mc_should_diagnose_current_request() ) {
+			$this->mrm_mc_debug_log( 'Runtime upgrade skipped because failure lock transient is active.' );
+		}
+		return;
+	}
+
+	if ( ! is_admin() && ! wp_doing_cron() && ! $this->mrm_mc_is_rest_request() ) {
+		if ( $this->mrm_mc_should_diagnose_current_request() ) {
+			$this->mrm_mc_debug_log( 'Runtime upgrade skipped on frontend non-REST request.' );
+		}
+		return;
+	}
+
+	try {
+		$this->mrm_mc_debug_log(
+			'Runtime database upgrade starting.',
+			array(
+				'from_version' => $saved_version,
+				'to_version'   => self::DB_VERSION,
+			)
+		);
+
+		self::install_tables();
+
+		delete_option( 'mrm_masterclass_activation_error' );
+		delete_transient( 'mrm_masterclass_runtime_upgrade_failed' );
+
+		$this->mrm_mc_debug_log(
+			'Runtime database upgrade completed.',
+			array(
+				'db_version_saved_after' => get_option( 'mrm_masterclass_db_version', '' ),
+				'code_version'           => self::DB_VERSION,
+			)
+		);
+	} catch ( \Throwable $e ) {
+		set_transient( 'mrm_masterclass_runtime_upgrade_failed', 1, 10 * MINUTE_IN_SECONDS );
+
+		update_option(
+			'mrm_masterclass_activation_error',
+			array(
+				'message' => $e->getMessage(),
+				'file'    => $e->getFile(),
+				'line'    => $e->getLine(),
+				'time'    => gmdate( 'Y-m-d H:i:s' ),
+			),
+			false
+		);
+
+		$this->mrm_mc_debug_log(
+			'Runtime database upgrade failed safely.',
+			array(
+				'error' => $e->getMessage(),
+				'file'  => $e->getFile(),
+				'line'  => $e->getLine(),
+			)
+		);
+	}
+}
+
+private function mrm_mc_should_diagnose_current_request( $file = '' ) {
+	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+	$wp_page     = isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '';
+
+	$is_masterclass_uri = false !== stripos( $request_uri, '/masterclass' )
+		|| false !== stripos( $request_uri, 'mrm-masterclass' )
+		|| false !== stripos( $request_uri, 'mrm_masterclass' );
+
+	$is_watched_admin_page = is_admin() && in_array(
+		$wp_page,
+		array(
+			'admin.php',
+			'admin-post.php',
+			'plugins.php',
+			'options-general.php',
+			'edit.php',
+			'post.php',
+			'post-new.php',
+		),
+		true
+	);
+
+	$is_masterclass_rest = false !== stripos( $request_uri, '/wp-json/mrm-masterclass/' )
+		|| false !== stripos( $request_uri, 'rest_route=/mrm-masterclass/' );
+
+	$is_plugin_file = false;
+
+	if ( '' !== (string) $file && defined( 'MRM_MASTERCLASS_DIR' ) ) {
+		$normalized_file = function_exists( 'wp_normalize_path' )
+			? wp_normalize_path( (string) $file )
+			: str_replace( '\\', '/', (string) $file );
+
+		$normalized_dir = function_exists( 'wp_normalize_path' )
+			? wp_normalize_path( MRM_MASTERCLASS_DIR )
+			: str_replace( '\\', '/', MRM_MASTERCLASS_DIR );
+
+		$is_plugin_file = false !== strpos( $normalized_file, $normalized_dir );
+	}
+
+	$is_cron = function_exists( 'wp_doing_cron' ) ? wp_doing_cron() : ( defined( 'DOING_CRON' ) && DOING_CRON );
+
+	return $is_masterclass_uri || $is_watched_admin_page || $is_masterclass_rest || $is_plugin_file || $is_cron;
+}
+
+private function mrm_mc_diagnostic_checkpoint( $phase ) {
+	if ( ! $this->mrm_mc_should_diagnose_current_request() ) {
+		return;
+	}
+
+	$this->mrm_mc_debug_log(
+		'Masterclass diagnostic checkpoint: ' . sanitize_text_field( (string) $phase ),
+		array(
+			'phase'            => sanitize_text_field( (string) $phase ),
+			'request_uri'      => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+			'wp_page'          => isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '',
+			'is_admin'         => is_admin() ? 1 : 0,
+			'is_rest'          => $this->mrm_mc_is_rest_request() ? 1 : 0,
+			'is_cron'          => ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) ? 1 : 0,
+			'current_filter'   => function_exists( 'current_filter' ) ? current_filter() : '',
+			'db_version_code'  => self::DB_VERSION,
+			'db_version_saved' => get_option( 'mrm_masterclass_db_version', '' ),
+			'memory_usage'     => function_exists( 'memory_get_usage' ) ? memory_get_usage() : 0,
+		)
+	);
+}
+
+public function mrm_mc_log_init_checkpoint() {
+	$this->mrm_mc_diagnostic_checkpoint( 'init' );
+}
+
+public function mrm_mc_log_wp_loaded_checkpoint() {
+	$this->mrm_mc_diagnostic_checkpoint( 'wp_loaded' );
+}
+
+public function mrm_mc_log_template_redirect_checkpoint() {
+	$this->mrm_mc_diagnostic_checkpoint( 'template_redirect' );
+}
+
+public function mrm_mc_log_shutdown_action_checkpoint() {
+	$this->mrm_mc_diagnostic_checkpoint( 'wordpress_shutdown_action' );
+}
 
 public function mrm_mc_shutdown_fatal_error_logger() {
 	$error = error_get_last();
@@ -434,39 +532,43 @@ public function mrm_mc_shutdown_fatal_error_logger() {
 	$file        = isset( $error['file'] ) ? (string) $error['file'] : '';
 	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
 
-	$is_masterclass_file = false;
-
-	if ( defined( 'MRM_MASTERCLASS_DIR' ) && '' !== $file ) {
-		$is_masterclass_file = false !== strpos(
-			wp_normalize_path( $file ),
-			wp_normalize_path( MRM_MASTERCLASS_DIR )
-		);
-	}
-
-	$is_masterclass_request = false !== strpos( $request_uri, 'mrm-masterclass' );
-
-	if ( ! $is_masterclass_file && ! $is_masterclass_request ) {
-		return;
-	}
-
+	/*
+	 * Temporary broad fatal logging:
+	 * While the site/admin are still returning critical errors, log every fatal
+	 * that occurs while this plugin is active. This may catch a fatal caused by
+	 * a theme or another plugin during the /masterclass/ request.
+	 */
 	$record = array(
-		'type'        => (int) $error['type'],
-		'message'     => isset( $error['message'] ) ? (string) $error['message'] : '',
-		'file'        => $file,
-		'line'        => isset( $error['line'] ) ? (int) $error['line'] : 0,
-		'request_uri' => $request_uri,
-		'is_admin'    => is_admin() ? 1 : 0,
-		'is_rest'     => $this->mrm_mc_is_rest_request() ? 1 : 0,
-		'timestamp'   => gmdate( 'c' ),
+		'type'             => (int) $error['type'],
+		'message'          => isset( $error['message'] ) ? (string) $error['message'] : '',
+		'file'             => $file,
+		'line'             => isset( $error['line'] ) ? (int) $error['line'] : 0,
+		'request_uri'      => $request_uri,
+		'wp_page'          => isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '',
+		'is_admin'         => is_admin() ? 1 : 0,
+		'is_rest'          => $this->mrm_mc_is_rest_request() ? 1 : 0,
+		'is_cron'          => ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) ? 1 : 0,
+		'is_diagnostic'    => $this->mrm_mc_should_diagnose_current_request( $file ) ? 1 : 0,
+		'db_version_code'  => self::DB_VERSION,
+		'db_version_saved' => get_option( 'mrm_masterclass_db_version', '' ),
+		'timestamp'        => gmdate( 'c' ),
 	);
 
 	update_option( 'mrm_masterclass_last_critical_error', $record, false );
 
 	$this->mrm_mc_debug_log(
-		'CRITICAL PHP ERROR detected during Masterclass request shutdown.',
+		'CRITICAL PHP ERROR detected during request shutdown.',
 		$record
 	);
+
+	if ( function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
+		mrm_masterclass_emergency_file_log(
+			'CRITICAL PHP ERROR detected by emergency shutdown logger.',
+			$record
+		);
+	}
 }
+
 
 public function mrm_mc_runtime_error_logger( $errno, $errstr, $errfile, $errline ) {
 	$watched_types = array(
@@ -483,31 +585,21 @@ public function mrm_mc_runtime_error_logger( $errno, $errstr, $errfile, $errline
 		return false;
 	}
 
-	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
-
-	$is_masterclass_file = false;
-
-	if ( defined( 'MRM_MASTERCLASS_DIR' ) && is_string( $errfile ) ) {
-		$is_masterclass_file = false !== strpos(
-			wp_normalize_path( $errfile ),
-			wp_normalize_path( MRM_MASTERCLASS_DIR )
-		);
-	}
-
-	$is_masterclass_request = false !== strpos( $request_uri, 'mrm-masterclass' );
-
-	if ( ! $is_masterclass_file && ! $is_masterclass_request ) {
+	if ( ! $this->mrm_mc_should_diagnose_current_request( (string) $errfile ) ) {
 		return false;
 	}
 
+	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+
 	$this->mrm_mc_debug_log(
-		'PHP runtime warning/notice detected during Masterclass request.',
+		'PHP runtime warning/notice detected during watched Masterclass-related request.',
 		array(
 			'type'        => (int) $errno,
 			'message'     => (string) $errstr,
 			'file'        => (string) $errfile,
 			'line'        => (int) $errline,
 			'request_uri' => $request_uri,
+			'wp_page'     => isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '',
 			'is_admin'    => is_admin() ? 1 : 0,
 			'is_rest'     => $this->mrm_mc_is_rest_request() ? 1 : 0,
 		)
@@ -515,6 +607,7 @@ public function mrm_mc_runtime_error_logger( $errno, $errstr, $errfile, $errline
 
 	return false;
 }
+
 
 public function mrm_mc_render_critical_error_notice() {
 	if ( ! is_admin() || ! current_user_can( 'manage_options' ) ) {
