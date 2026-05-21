@@ -926,9 +926,25 @@ public function mrm_mc_admin_boot_debug() {
 		return;
 	}
 
-	$page = isset( $_GET['page'] ) ? sanitize_text_field( wp_unslash( $_GET['page'] ) ) : '';
+	$page        = isset( $_GET['page'] ) ? sanitize_text_field( wp_unslash( $_GET['page'] ) ) : '';
+	$wp_page     = isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '';
+	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
 
-	if ( 0 !== strpos( $page, 'mrm-masterclass' ) ) {
+	$should_log = false;
+
+	if ( 0 === strpos( $page, 'mrm-masterclass' ) ) {
+		$should_log = true;
+	}
+
+	if ( in_array( $wp_page, array( 'admin.php', 'plugins.php', 'options-general.php', 'edit.php' ), true ) ) {
+		$should_log = true;
+	}
+
+	if ( false !== strpos( $request_uri, 'mrm-masterclass' ) ) {
+		$should_log = true;
+	}
+
+	if ( ! $should_log ) {
 		return;
 	}
 
@@ -943,8 +959,12 @@ public function mrm_mc_admin_boot_debug() {
 	);
 
 	$status = array(
-		'page'       => $page,
-		'db_version' => get_option( 'mrm_masterclass_db_version' ),
+		'wp_page'          => $wp_page,
+		'page'             => $page,
+		'request_uri'      => $request_uri,
+		'db_version_saved' => get_option( 'mrm_masterclass_db_version', '' ),
+		'db_version_code'  => self::DB_VERSION,
+		'tables_ready'     => $this->mrm_mc_required_tables_ready() ? 1 : 0,
 	);
 
 	foreach ( $tables as $label => $table ) {
@@ -952,7 +972,7 @@ public function mrm_mc_admin_boot_debug() {
 		$status[ $label . '_table' ] = $exists ? 'exists' : 'missing';
 	}
 
-	$this->mrm_mc_debug_log( 'Masterclass admin page loaded.', $status );
+	$this->mrm_mc_debug_log( 'Masterclass admin diagnostic checkpoint loaded.', $status );
 }
 
 private function mrm_mc_table_exists( $table ) {
@@ -1539,6 +1559,326 @@ private function mrm_mc_stripe_request( $method, $endpoint, $body = array() ) {
 		wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-events&settings_updated=1' ) );
 		exit;
 	}
+
+	private function mrm_mc_safe_admin_redirect( $page, $args = array() ) {
+	$page = sanitize_key( (string) $page );
+
+	if ( '' === $page ) {
+		$page = 'mrm-masterclass-events';
+	}
+
+	$url = admin_url( 'admin.php?page=' . $page );
+
+	if ( is_array( $args ) && ! empty( $args ) ) {
+		$url = add_query_arg( array_map( 'rawurlencode', $args ), $url );
+	}
+
+	wp_safe_redirect( $url );
+	exit;
+}
+
+private function mrm_mc_verify_admin_post_nonce_or_die( $action ) {
+	$action = (string) $action;
+
+	if ( '' === $action ) {
+		wp_die(
+			esc_html__( 'Invalid Masterclass admin action.', 'mrm-masterclass' ),
+			esc_html__( 'Masterclass Error', 'mrm-masterclass' ),
+			array( 'response' => 403 )
+		);
+	}
+
+	check_admin_referer( $action );
+}
+
+public function handle_save_presenter() {
+	$this->must_admin();
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_save_presenter' );
+
+	$this->mrm_mc_debug_log(
+		'Safe presenter save fallback reached. Full presenter save implementation is not installed yet.',
+		array(
+			'action'      => 'mrm_masterclass_save_presenter',
+			'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-presenters',
+		array(
+			'mrm_mc_notice' => 'presenter_save_fallback_reached',
+		)
+	);
+}
+
+public function handle_delete_presenter() {
+	$this->must_admin();
+
+	$presenter_id = absint( $_POST['presenter_id'] ?? $_GET['presenter_id'] ?? 0 );
+
+	if ( $presenter_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_delete_presenter_' . $presenter_id );
+	}
+
+	$this->mrm_mc_debug_log(
+		'Safe presenter delete fallback reached. Destructive deletion is disabled in this stabilization patch.',
+		array(
+			'action'       => 'mrm_masterclass_delete_presenter',
+			'presenter_id' => $presenter_id,
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-presenters',
+		array(
+			'mrm_mc_notice' => 'presenter_delete_disabled_safe_patch',
+		)
+	);
+}
+
+public function handle_save_event() {
+	$this->must_admin();
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_save_event' );
+
+	$this->mrm_mc_debug_log(
+		'Safe event save fallback reached. Full event save implementation is not installed yet.',
+		array(
+			'action'      => 'mrm_masterclass_save_event',
+			'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-events',
+		array(
+			'mrm_mc_notice' => 'event_save_fallback_reached',
+		)
+	);
+}
+
+public function handle_cancel_event() {
+	$this->must_admin();
+
+	$event_id = absint( $_POST['event_id'] ?? $_GET['event_id'] ?? 0 );
+
+	if ( $event_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_cancel_event_' . $event_id );
+	}
+
+	$this->mrm_mc_debug_log(
+		'Safe event cancel fallback reached. Cancellation is disabled in this stabilization patch.',
+		array(
+			'action'   => 'mrm_masterclass_cancel_event',
+			'event_id' => $event_id,
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-events',
+		array(
+			'mrm_mc_notice' => 'event_cancel_disabled_safe_patch',
+		)
+	);
+}
+
+public function handle_mark_payouts_paid() {
+	$this->must_admin();
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_mark_payouts_paid' );
+
+	$this->mrm_mc_debug_log(
+		'Safe mark-payouts-paid fallback reached. Payout mutation is disabled in this stabilization patch.',
+		array(
+			'action' => 'mrm_masterclass_mark_payouts_paid',
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-payouts',
+		array(
+			'mrm_mc_notice' => 'payout_mutation_disabled_safe_patch',
+		)
+	);
+}
+
+public function handle_save_tax_profile() {
+	$this->must_admin();
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_save_tax_profile' );
+
+	$this->mrm_mc_debug_log(
+		'Safe tax profile save fallback reached. Full tax profile save implementation is not installed yet.',
+		array(
+			'action' => 'mrm_masterclass_save_tax_profile',
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-tax-profiles',
+		array(
+			'mrm_mc_notice' => 'tax_profile_save_fallback_reached',
+		)
+	);
+}
+
+public function handle_create_presenter_page() {
+	$this->must_admin();
+
+	$presenter_id = absint( $_POST['presenter_id'] ?? $_GET['presenter_id'] ?? 0 );
+
+	if ( $presenter_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_create_presenter_page_' . $presenter_id );
+	}
+
+	$this->mrm_mc_debug_log(
+		'Safe presenter page generation fallback reached. Full page generation is not installed yet.',
+		array(
+			'action'       => 'mrm_masterclass_create_presenter_page',
+			'presenter_id' => $presenter_id,
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-presenters',
+		array(
+			'mrm_mc_notice' => 'presenter_page_generation_fallback_reached',
+		)
+	);
+}
+
+public function handle_resend_confirmation() {
+	$this->must_admin();
+
+	$registration_id = absint( $_POST['registration_id'] ?? $_GET['registration_id'] ?? 0 );
+
+	if ( $registration_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_resend_confirmation_' . $registration_id );
+	}
+
+	$this->mrm_mc_debug_log(
+		'Safe resend confirmation fallback reached. Resend is disabled in this stabilization patch.',
+		array(
+			'action'          => 'mrm_masterclass_resend_confirmation',
+			'registration_id' => $registration_id,
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-registrations-payments',
+		array(
+			'mrm_mc_notice' => 'resend_confirmation_disabled_safe_patch',
+		)
+	);
+}
+
+public function handle_resend_reminder() {
+	$this->must_admin();
+
+	$registration_id = absint( $_POST['registration_id'] ?? $_GET['registration_id'] ?? 0 );
+
+	if ( $registration_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_resend_reminder_' . $registration_id );
+	}
+
+	$this->mrm_mc_debug_log(
+		'Safe resend reminder fallback reached. Resend is disabled in this stabilization patch.',
+		array(
+			'action'          => 'mrm_masterclass_resend_reminder',
+			'registration_id' => $registration_id,
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-registrations-payments',
+		array(
+			'mrm_mc_notice' => 'resend_reminder_disabled_safe_patch',
+		)
+	);
+}
+
+public function handle_emergency_cancel_confirm() {
+	$this->must_admin();
+
+	$event_id = absint( $_POST['event_id'] ?? $_GET['event_id'] ?? 0 );
+
+	if ( $event_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_emergency_cancel_confirm_' . $event_id );
+	}
+
+	$this->mrm_mc_debug_log(
+		'Safe emergency cancel confirmation fallback reached. Emergency cancellation is disabled in this stabilization patch.',
+		array(
+			'action'   => 'mrm_masterclass_emergency_cancel_confirm',
+			'event_id' => $event_id,
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-events',
+		array(
+			'mrm_mc_notice' => 'emergency_cancel_disabled_safe_patch',
+		)
+	);
+}
+
+public function handle_emergency_cancel_execute() {
+	$this->must_admin();
+
+	$event_id = absint( $_POST['event_id'] ?? $_GET['event_id'] ?? 0 );
+
+	if ( $event_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_emergency_cancel_execute_' . $event_id );
+	}
+
+	$this->mrm_mc_debug_log(
+		'Safe emergency cancel execute fallback reached. Emergency cancellation is disabled in this stabilization patch.',
+		array(
+			'action'   => 'mrm_masterclass_emergency_cancel_execute',
+			'event_id' => $event_id,
+		)
+	);
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-events',
+		array(
+			'mrm_mc_notice' => 'emergency_cancel_disabled_safe_patch',
+		)
+	);
+}
+
+public function register_masterclass_gate_query_vars( $vars ) {
+	if ( ! is_array( $vars ) ) {
+		$vars = array();
+	}
+
+	$vars[] = 'mrm_masterclass_gate';
+
+	return array_values( array_unique( $vars ) );
+}
+
+public function maybe_render_masterclass_gate_page() {
+	$token = get_query_var( 'mrm_masterclass_gate' );
+
+	if ( empty( $token ) ) {
+		return;
+	}
+
+	$this->mrm_mc_debug_log(
+		'Masterclass gate placeholder reached. Full gate implementation is not installed yet.',
+		array(
+			'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+		)
+	);
+
+	status_header( 503 );
+	nocache_headers();
+
+	wp_die(
+		esc_html__( 'Masterclass access is not available yet. Please contact Low Brass Lessons support if your event is starting soon.', 'mrm-masterclass' ),
+		esc_html__( 'Masterclass Access Not Ready', 'mrm-masterclass' ),
+		array(
+			'response' => 503,
+		)
+	);
+}
 
 	public function register_admin_menu() {
 	$this->mrm_mc_debug_log( 'Registering Masterclass admin menu.' );
@@ -2208,6 +2548,16 @@ public function render_email_log_page() {
 
 		register_rest_route(
 			self::REST_NAMESPACE,
+			'/apply-promo',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( $this, 'rest_apply_promo' ),
+				'permission_callback' => '__return_true',
+			)
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
 			'/create-payment-intent',
 			array(
 				'methods'             => 'POST',
@@ -2246,6 +2596,164 @@ public function render_email_log_page() {
 			)
 		);
 	}
+
+	private function mrm_mc_rest_not_implemented_error( $feature ) {
+	return new WP_Error(
+		'mrm_masterclass_feature_not_implemented',
+		sprintf(
+			'The Masterclass %s endpoint exists, but the full implementation has not been installed yet.',
+			sanitize_text_field( (string) $feature )
+		),
+		array(
+			'status' => 501,
+		)
+	);
+}
+
+private function mrm_mc_get_rest_json_body() {
+	$raw = file_get_contents( 'php://input' );
+
+	if ( ! is_string( $raw ) || '' === trim( $raw ) ) {
+		return array();
+	}
+
+	$data = json_decode( $raw, true );
+
+	if ( ! is_array( $data ) ) {
+		return array();
+	}
+
+	return $data;
+}
+
+public function rest_event( WP_REST_Request $request ) {
+	$event_id = absint( $request->get_param( 'id' ) );
+
+	$this->mrm_mc_debug_log(
+		'REST single-event endpoint reached.',
+		array(
+			'event_id' => $event_id,
+		)
+	);
+
+	if ( ! $this->mrm_mc_required_tables_ready() ) {
+		return $this->mrm_mc_rest_tables_error();
+	}
+
+	if ( $event_id <= 0 ) {
+		return new WP_Error(
+			'mrm_masterclass_missing_event_id',
+			'Missing Masterclass event ID.',
+			array(
+				'status' => 400,
+			)
+		);
+	}
+
+	global $wpdb;
+
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+	$regs_table       = $this->t( 'mrm_masterclass_registrations' );
+
+	if (
+		! $this->mrm_mc_table_exists( $events_table ) ||
+		! $this->mrm_mc_table_exists( $presenters_table ) ||
+		! $this->mrm_mc_table_exists( $regs_table )
+	) {
+		return $this->mrm_mc_rest_tables_error();
+	}
+
+	$row = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT e.id,e.title,e.description,p.name AS presenter_name,p.presenter_page_id,
+			        e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,
+			        (e.capacity-(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id=e.id AND r.payment_status='paid')) AS available_seats
+			 FROM {$events_table} e
+			 LEFT JOIN {$presenters_table} p ON p.id=e.presenter_id
+			 WHERE e.id=%d
+			 LIMIT 1",
+			$event_id
+		),
+		ARRAY_A
+	);
+
+	if ( ! is_array( $row ) || empty( $row ) ) {
+		return new WP_Error(
+			'mrm_masterclass_event_not_found',
+			'This Masterclass could not be found.',
+			array(
+				'status' => 404,
+			)
+		);
+	}
+
+	$page_id = absint( $row['presenter_page_id'] ?? 0 );
+
+	$row['presenter_page_url'] = $page_id ? get_permalink( $page_id ) : '';
+	$row['description_html']   = wp_kses_post( $row['description'] ?? '' );
+	$row['price_cents']        = absint( $row['price_cents'] ?? 0 );
+	$row['available_seats']    = max( 0, absint( $row['available_seats'] ?? 0 ) );
+
+	return rest_ensure_response( $row );
+}
+
+public function rest_apply_promo( WP_REST_Request $request ) {
+	$data       = $this->mrm_mc_get_rest_json_body();
+	$promo_code = strtoupper( sanitize_text_field( $data['promo_code'] ?? '' ) );
+
+	$this->mrm_mc_debug_log(
+		'REST promo placeholder endpoint reached.',
+		array(
+			'has_promo_code' => '' !== $promo_code ? 1 : 0,
+		)
+	);
+
+	if ( '' === $promo_code ) {
+		return rest_ensure_response(
+			array(
+				'ok'             => true,
+				'discount_cents' => 0,
+				'message'        => '',
+			)
+		);
+	}
+
+	return rest_ensure_response(
+		array(
+			'ok'             => true,
+			'discount_cents' => 0,
+			'message'        => 'Promo code support for Masterclasses is being prepared and is not active yet.',
+			'promo_code'     => $promo_code,
+		)
+	);
+}
+
+public function rest_create_pi( WP_REST_Request $request ) {
+	$this->mrm_mc_debug_log( 'REST create-payment-intent placeholder endpoint reached.' );
+
+	if ( ! $this->mrm_mc_required_tables_ready() ) {
+		return $this->mrm_mc_rest_tables_error();
+	}
+
+	return $this->mrm_mc_rest_not_implemented_error( 'payment setup' );
+}
+
+public function rest_verify_pi( WP_REST_Request $request ) {
+	$this->mrm_mc_debug_log( 'REST verify-payment-intent placeholder endpoint reached.' );
+
+	return $this->mrm_mc_rest_not_implemented_error( 'payment verification' );
+}
+
+public function rest_finalize( WP_REST_Request $request ) {
+	$this->mrm_mc_debug_log( 'REST finalize-registration placeholder endpoint reached.' );
+
+	if ( ! $this->mrm_mc_required_tables_ready() ) {
+		return $this->mrm_mc_rest_tables_error();
+	}
+
+	return $this->mrm_mc_rest_not_implemented_error( 'registration finalization' );
+}
 
 	public function rest_health() {
 		return rest_ensure_response(
