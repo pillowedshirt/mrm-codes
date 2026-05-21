@@ -80,52 +80,152 @@ class MRM_Masterclass_Plugin {
 	const DEFAULT_PRICE_CENTS = 2000;
 
 	public function __construct() {
-		add_action( 'init', array( $this, 'runtime_upgrade' ) );
-		add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
-		add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
-		add_action( 'admin_init', array( $this, 'mrm_mc_admin_boot_debug' ) );
-		add_filter( 'cron_schedules', array( $this, 'add_cron_schedule' ) );
-		if ( method_exists( $this, 'send_reminders' ) ) {
-			add_action( 'mrm_masterclass_send_reminders', array( $this, 'send_reminders' ) );
-		}
+		/*
+		 * Emergency diagnostics:
+		 * These are registered as early as possible so the plugin can log fatal
+		 * runtime errors that happen later during admin, REST, frontend, or cron.
+		 */
+		register_shutdown_function( array( $this, 'mrm_mc_shutdown_fatal_error_logger' ) );
+		set_error_handler( array( $this, 'mrm_mc_runtime_error_logger' ) );
 
-		if ( method_exists( $this, 'reconcile_events' ) ) {
-			add_action( 'mrm_masterclass_reconcile_events', array( $this, 'reconcile_events' ) );
-		}
-		$actions = array(
-			'mrm_masterclass_save_settings' => 'handle_save_settings',
-			'mrm_masterclass_save_presenter' => 'handle_save_presenter',
-			'mrm_masterclass_delete_presenter' => 'handle_delete_presenter',
-			'mrm_masterclass_save_event' => 'handle_save_event',
-			'mrm_masterclass_cancel_event' => 'handle_cancel_event',
-
-			// These methods already exist later in the class, but were not registered.
-			'mrm_masterclass_mark_payouts_paid' => 'handle_mark_payouts_paid',
-			'mrm_masterclass_save_tax_profile' => 'handle_save_tax_profile',
-			'mrm_masterclass_create_presenter_page' => 'handle_create_presenter_page',
-
-			'mrm_masterclass_resend_confirmation' => 'handle_resend_confirmation',
-			'mrm_masterclass_resend_reminder' => 'handle_resend_reminder',
-			'mrm_masterclass_emergency_cancel_confirm' => 'handle_emergency_cancel_confirm',
-			'mrm_masterclass_emergency_cancel_execute' => 'handle_emergency_cancel_execute',
+		$this->mrm_mc_debug_log(
+			'Masterclass plugin constructor started.',
+			array(
+				'php_version'       => PHP_VERSION,
+				'wp_version'        => function_exists( 'get_bloginfo' ) ? get_bloginfo( 'version' ) : '',
+				'is_admin'          => is_admin() ? 1 : 0,
+				'request_uri'       => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+				'plugin_file'       => MRM_MASTERCLASS_FILE,
+				'plugin_dir'        => MRM_MASTERCLASS_DIR,
+				'source_root_dir'   => defined( 'MRM_MASTERCLASS_SOURCE_ROOT_DIR' ) ? MRM_MASTERCLASS_SOURCE_ROOT_DIR : '',
+				'frontend_dir'      => defined( 'MRM_MASTERCLASS_FRONTEND_DIR' ) ? MRM_MASTERCLASS_FRONTEND_DIR : '',
+				'db_version_code'   => self::DB_VERSION,
+				'db_version_saved'  => get_option( 'mrm_masterclass_db_version', '' ),
+			)
 		);
-		foreach ( $actions as $k => $m ) {
-			if ( method_exists( $this, $m ) ) {
-				add_action( 'admin_post_' . $k, array( $this, $m ) );
+
+		$this->mrm_mc_add_action_if_method_exists( 'init', 'runtime_upgrade' );
+		$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
+		$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
+		$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
+		$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
+		$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'mrm_mc_render_critical_error_notice' );
+
+		if ( method_exists( $this, 'add_cron_schedule' ) ) {
+			add_filter( 'cron_schedules', array( $this, 'add_cron_schedule' ) );
+		} else {
+			$this->mrm_mc_debug_log(
+				'Skipped missing cron_schedules callback.',
+				array(
+					'method' => 'add_cron_schedule',
+				)
+			);
+		}
+
+		$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_send_reminders', 'send_reminders' );
+		$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_reconcile_events', 'reconcile_events' );
+
+		$actions = array(
+			'mrm_masterclass_save_settings'             => 'handle_save_settings',
+			'mrm_masterclass_save_presenter'            => 'handle_save_presenter',
+			'mrm_masterclass_delete_presenter'          => 'handle_delete_presenter',
+			'mrm_masterclass_save_event'                => 'handle_save_event',
+			'mrm_masterclass_cancel_event'              => 'handle_cancel_event',
+			'mrm_masterclass_mark_payouts_paid'         => 'handle_mark_payouts_paid',
+			'mrm_masterclass_save_tax_profile'          => 'handle_save_tax_profile',
+			'mrm_masterclass_create_presenter_page'     => 'handle_create_presenter_page',
+			'mrm_masterclass_resend_confirmation'       => 'handle_resend_confirmation',
+			'mrm_masterclass_resend_reminder'           => 'handle_resend_reminder',
+			'mrm_masterclass_emergency_cancel_confirm'  => 'handle_emergency_cancel_confirm',
+			'mrm_masterclass_emergency_cancel_execute'  => 'handle_emergency_cancel_execute',
+		);
+
+		foreach ( $actions as $action => $method ) {
+			if ( method_exists( $this, $method ) ) {
+				add_action( 'admin_post_' . $action, array( $this, $method ) );
 			} else {
 				$this->mrm_mc_debug_log(
 					'Skipped missing admin_post callback.',
 					array(
-						'action' => $k,
-						'method' => $m,
+						'action' => $action,
+						'method' => $method,
 					)
 				);
 			}
 		}
-		add_action( 'query_vars', array( $this, 'register_masterclass_gate_query_vars' ) );
-		add_action( 'template_redirect', array( $this, 'maybe_render_masterclass_gate_page' ) );
-		add_action( 'admin_notices', array( $this, 'render_activation_diagnostic_notice' ) );
-		$this->mrm_mc_debug_log( 'Masterclass plugin initialized in REST-only frontend mode. No shortcode rendering is registered.' );
+
+		/*
+		 * These hooks previously created a fatal-error risk because they were
+		 * registered even when their callback methods were not present.
+		 */
+		$this->mrm_mc_add_filter_if_method_exists( 'query_vars', 'register_masterclass_gate_query_vars' );
+		$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'maybe_render_masterclass_gate_page' );
+
+		$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely in REST-only frontend mode. No shortcode rendering is registered.' );
+	}
+
+
+
+	private function mrm_mc_add_action_if_method_exists( $hook, $method, $priority = 10, $accepted_args = 1 ) {
+		$hook   = (string) $hook;
+		$method = (string) $method;
+
+		if ( '' === $hook || '' === $method ) {
+			$this->mrm_mc_debug_log(
+				'Skipped invalid add_action request.',
+				array(
+					'hook'   => $hook,
+					'method' => $method,
+				)
+			);
+			return false;
+		}
+
+		if ( ! method_exists( $this, $method ) ) {
+			$this->mrm_mc_debug_log(
+				'Skipped missing add_action callback.',
+				array(
+					'hook'   => $hook,
+					'method' => $method,
+				)
+			);
+			return false;
+		}
+
+		add_action( $hook, array( $this, $method ), absint( $priority ), absint( $accepted_args ) );
+
+		return true;
+	}
+
+	private function mrm_mc_add_filter_if_method_exists( $hook, $method, $priority = 10, $accepted_args = 1 ) {
+		$hook   = (string) $hook;
+		$method = (string) $method;
+
+		if ( '' === $hook || '' === $method ) {
+			$this->mrm_mc_debug_log(
+				'Skipped invalid add_filter request.',
+				array(
+					'hook'   => $hook,
+					'method' => $method,
+				)
+			);
+			return false;
+		}
+
+		if ( ! method_exists( $this, $method ) ) {
+			$this->mrm_mc_debug_log(
+				'Skipped missing add_filter callback.',
+				array(
+					'hook'   => $hook,
+					'method' => $method,
+				)
+			);
+			return false;
+		}
+
+		add_filter( $hook, array( $this, $method ), absint( $priority ), absint( $accepted_args ) );
+
+		return true;
 	}
 
 	public static function activate() {
@@ -2013,7 +2113,7 @@ public function render_activation_diagnostic_notice() {
 			echo '<p><code>' . esc_html( ( $error['file'] ?? '' ) . ':' . ( $error['line'] ?? '' ) ) . '</code></p>';
 		}
 
-		echo '<p>Deactivate and reactivate the plugin after applying the stabilization patch. If the notice remains, check <code>wp-content/masterclass-debug.log</code>.</p>';
+		echo '<p>After applying the stabilization patch, reload the failing admin/settings/frontend page and check <code>wp-content/masterclass-debug.log</code>. If the notice remains, the stored critical-error details below should identify the file and line that failed.</p>';
 		echo '</div>';
 	}
 
