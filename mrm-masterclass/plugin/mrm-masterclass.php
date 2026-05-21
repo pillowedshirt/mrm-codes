@@ -15,8 +15,6 @@ if ( file_exists( $autoload ) ) {
 	require_once $autoload;
 }
 
-use Aws\SecretsManager\SecretsManagerClient;
-use Aws\Exception\AwsException;
 
 if ( ! defined( 'MRM_MASTERCLASS_FILE' ) ) {
 	define( 'MRM_MASTERCLASS_FILE', __FILE__ );
@@ -66,6 +64,7 @@ class MRM_Masterclass_Plugin {
 			add_action( 'admin_post_' . $k, array( $this, $m ) );
 		}
 		add_action( 'admin_notices', array( $this, 'render_activation_diagnostic_notice' ) );
+		add_shortcode( 'mrm_masterclass', array( $this, 'render_masterclass_shortcode' ) );
 	}
 
 	public static function activate() { self::install_tables(); @file_put_contents( trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log', '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] Masterclass plugin activated.' . PHP_EOL, FILE_APPEND | LOCK_EX ); set_transient( 'mrm_masterclass_activation_notice', 1, 60 ); if ( ! wp_next_scheduled( 'mrm_masterclass_send_reminders' ) ) { wp_schedule_event( time()+120, 'mrm_masterclass_15min', 'mrm_masterclass_send_reminders' ); } if ( ! wp_next_scheduled( 'mrm_masterclass_reconcile_events' ) ) { wp_schedule_event( time()+300, 'hourly', 'mrm_masterclass_reconcile_events' ); } }
@@ -337,7 +336,16 @@ private function admin_card_close() {
 	}
 	private function mrm_mc_get_secret_diagnostic( $secret_id ) { $secret_id = (string) $secret_id; return isset( $this->mrm_secret_diagnostics[ $secret_id ] ) && is_array( $this->mrm_secret_diagnostics[ $secret_id ] ) ? $this->mrm_secret_diagnostics[ $secret_id ] : array(); }
 	private function mrm_mc_secret_diagnostic_summary_html( $secret_id ) { $diag = $this->mrm_mc_get_secret_diagnostic( $secret_id ); if ( empty( $diag ) ) { return '<p class="description">No AWS diagnostic information is available yet.</p>'; } $status  = isset( $diag['status'] ) ? (string) $diag['status'] : 'unknown'; $region  = isset( $diag['region'] ) ? (string) $diag['region'] : ( defined( 'MRM_AWS_REGION' ) ? MRM_AWS_REGION : 'not defined' ); $message = isset( $diag['message'] ) ? (string) $diag['message'] : ''; $html  = '<p class="description"><strong>AWS diagnostic:</strong> <code>' . esc_html( $status ) . '</code></p>'; $html .= '<p class="description">Region used by site: <code>' . esc_html( $region ) . '</code></p>'; if ( $message !== '' ) { $html .= '<p class="description">Details: ' . esc_html( $message ) . '</p>'; } if ( ! empty( $diag['aws_error_code'] ) ) { $html .= '<p class="description">AWS error code: <code>' . esc_html( (string) $diag['aws_error_code'] ) . '</code></p>'; } if ( ! empty( $diag['top_level_keys'] ) && is_array( $diag['top_level_keys'] ) ) { $html .= '<p class="description">Top-level JSON keys found: <code>' . esc_html( implode( ', ', array_map( 'strval', $diag['top_level_keys'] ) ) ) . '</code></p>'; } return $html; }
-	private function mrm_mc_get_secret_json( $secret_id, $cache_key = '' ) { $secret_id=(string)$secret_id; $cache_key=$cache_key?(string)$cache_key:'mrm_masterclass_secret_'.md5($secret_id); $cached=get_transient($cache_key); if(is_array($cached)){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'cache_hit','message'=>'Secret loaded from WordPress transient cache.','region'=>defined('MRM_AWS_REGION')?MRM_AWS_REGION:'not defined','top_level_keys'=>array_keys($cached))); return $cached; } if(!defined('MRM_AWS_REGION')||!defined('MRM_AWS_ACCESS_KEY_ID')||!defined('MRM_AWS_SECRET_ACCESS_KEY')){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'missing_aws_constants','message'=>'One or more required AWS constants are missing in wp-config.php.','region_defined'=>defined('MRM_AWS_REGION')?'yes':'no','key_defined'=>defined('MRM_AWS_ACCESS_KEY_ID')?'yes':'no','secret_defined'=>defined('MRM_AWS_SECRET_ACCESS_KEY')?'yes':'no')); return null; } if(!class_exists('\Aws\SecretsManager\SecretsManagerClient')){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'aws_sdk_missing','message'=>'The AWS SDK class Aws\SecretsManager\SecretsManagerClient is not available.','region'=>MRM_AWS_REGION)); return null; } try { $client=new SecretsManagerClient(array('version'=>'latest','region'=>MRM_AWS_REGION,'credentials'=>array('key'=>MRM_AWS_ACCESS_KEY_ID,'secret'=>MRM_AWS_SECRET_ACCESS_KEY))); $result=$client->getSecretValue(array('SecretId'=>$secret_id)); if(empty($result['SecretString'])){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'empty_secret_string','message'=>'AWS returned the secret, but SecretString was empty.','region'=>MRM_AWS_REGION)); return null; } $decoded=json_decode((string)$result['SecretString'],true); if(!is_array($decoded)){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'json_decode_failed','message'=>'SecretString was returned by AWS, but it was not valid JSON.','region'=>MRM_AWS_REGION,'json_error'=>json_last_error_msg())); return null; } $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'loaded_from_aws','message'=>'Secret was successfully loaded and decoded from AWS Secrets Manager.','region'=>MRM_AWS_REGION,'top_level_keys'=>array_keys($decoded))); set_transient($cache_key,$decoded,15*MINUTE_IN_SECONDS); return $decoded; } catch ( AwsException $e ) { $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'aws_exception','message'=>$e->getAwsErrorMessage(),'aws_error_code'=>$e->getAwsErrorCode(),'region'=>MRM_AWS_REGION)); return null; } catch ( \Throwable $e ) { $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'php_exception','message'=>$e->getMessage(),'region'=>MRM_AWS_REGION)); return null; } }
+	private function mrm_mc_get_secret_json( $secret_id, $cache_key = '' ) { $secret_id=(string)$secret_id; $cache_key=$cache_key?(string)$cache_key:'mrm_masterclass_secret_'.md5($secret_id); $cached=get_transient($cache_key); if(is_array($cached)){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'cache_hit','message'=>'Secret loaded from WordPress transient cache.','region'=>defined('MRM_AWS_REGION')?MRM_AWS_REGION:'not defined','top_level_keys'=>array_keys($cached))); return $cached; } if(!defined('MRM_AWS_REGION')||!defined('MRM_AWS_ACCESS_KEY_ID')||!defined('MRM_AWS_SECRET_ACCESS_KEY')){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'missing_aws_constants','message'=>'One or more required AWS constants are missing in wp-config.php.','region_defined'=>defined('MRM_AWS_REGION')?'yes':'no','key_defined'=>defined('MRM_AWS_ACCESS_KEY_ID')?'yes':'no','secret_defined'=>defined('MRM_AWS_SECRET_ACCESS_KEY')?'yes':'no')); return null; } if(!class_exists('\Aws\SecretsManager\SecretsManagerClient')){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'aws_sdk_missing','message'=>'The AWS SDK class Aws\SecretsManager\SecretsManagerClient is not available.','region'=>MRM_AWS_REGION)); return null; } try { $client = new \Aws\SecretsManager\SecretsManagerClient(
+			array(
+				'version'     => 'latest',
+				'region'      => MRM_AWS_REGION,
+				'credentials' => array(
+					'key'    => MRM_AWS_ACCESS_KEY_ID,
+					'secret' => MRM_AWS_SECRET_ACCESS_KEY,
+				),
+			)
+		); $result=$client->getSecretValue(array('SecretId'=>$secret_id)); if(empty($result['SecretString'])){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'empty_secret_string','message'=>'AWS returned the secret, but SecretString was empty.','region'=>MRM_AWS_REGION)); return null; } $decoded=json_decode((string)$result['SecretString'],true); if(!is_array($decoded)){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'json_decode_failed','message'=>'SecretString was returned by AWS, but it was not valid JSON.','region'=>MRM_AWS_REGION,'json_error'=>json_last_error_msg())); return null; } $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'loaded_from_aws','message'=>'Secret was successfully loaded and decoded from AWS Secrets Manager.','region'=>MRM_AWS_REGION,'top_level_keys'=>array_keys($decoded))); set_transient($cache_key,$decoded,15*MINUTE_IN_SECONDS); return $decoded; } catch ( \Aws\Exception\AwsException $e ) { $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'aws_exception','message'=>$e->getAwsErrorMessage(),'aws_error_code'=>$e->getAwsErrorCode(),'region'=>MRM_AWS_REGION)); return null; } catch ( \Throwable $e ) { $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'php_exception','message'=>$e->getMessage(),'region'=>MRM_AWS_REGION)); return null; } }
 	private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler'; }
 	private function mrm_mc_get_stripe_secret_id() { return defined( 'MRM_SECRET_STRIPE_KEYS' ) ? MRM_SECRET_STRIPE_KEYS : 'lowbrass/stripe/keys'; }
 	private function mrm_mc_get_tax_secret_id() { return defined( 'MRM_SECRET_MASTERCLASS_TAX_1099_PROFILES' ) ? MRM_SECRET_MASTERCLASS_TAX_1099_PROFILES : 'lowbrass/masterclass/tax/1099-profiles'; }
@@ -350,8 +358,27 @@ private function admin_card_close() {
 	private function mrm_mc_base64url_encode( $data ) { return rtrim( strtr( base64_encode( $data ), '+/', '-_' ), '=' ); }
 	private function mrm_mc_google_make_jwt( $client_email, $private_key, $scope, $token_url ) { $now=time(); $header=array('alg'=>'RS256','typ'=>'JWT'); $claims=array('iss'=>$client_email,'scope'=>$scope,'aud'=>$token_url,'iat'=>$now,'exp'=>$now+3600); $segments=array($this->mrm_mc_base64url_encode(wp_json_encode($header)),$this->mrm_mc_base64url_encode(wp_json_encode($claims))); $signing_input=implode('.', $segments); $signature=''; $ok=openssl_sign($signing_input,$signature,$private_key,'sha256'); if(!$ok){ return new WP_Error('jwt_sign_failed','OpenSSL failed to sign the Google service account JWT.'); } $segments[]=$this->mrm_mc_base64url_encode($signature); return implode('.', $segments); }
 	private function mrm_mc_google_get_access_token() { return ''; }
-	private function mrm_mc_google_calendar_request( $method, $url, $body = null ) { return array(); }
-	private function mrm_mc_extract_meet_url($event){ if(empty($event['conferenceData']['entryPoints'])) return ''; foreach($event['conferenceData']['entryPoints'] as $ep){ if(($ep['entryPointType']??'')==='video') return $ep['uri']??''; } return ''; }
+	private function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
+	$token = $this->mrm_mc_google_get_access_token();
+	if ( is_wp_error( $token ) ) { return $token; }
+	$args = array('method'=>$method,'timeout'=>20,'headers'=>array('Authorization'=>'Bearer '.$token,'Content-Type'=>'application/json')); if ( null !== $body ) { $args['body'] = wp_json_encode( $body ); }
+	$response = wp_remote_request( $url, $args ); if ( is_wp_error( $response ) ) { return $response; }
+	$code = wp_remote_retrieve_response_code( $response ); $raw  = wp_remote_retrieve_body( $response ); $data = json_decode( $raw, true ); if ( $code < 200 || $code >= 300 ) { return new WP_Error( 'google_calendar_http', 'Google Calendar request failed.' ); }
+	return is_array( $data ) ? $data : array();
+}
+	private function mrm_mc_extract_meet_url( $event ) {
+	if ( ! is_array( $event ) ) {
+		return '';
+	}
+	if ( ! empty( $event['hangoutLink'] ) ) {
+		return esc_url_raw( $event['hangoutLink'] );
+	}
+	if ( empty( $event['conferenceData']['entryPoints'] ) || ! is_array( $event['conferenceData']['entryPoints'] ) ) {
+		return '';
+	}
+	foreach ( $event['conferenceData']['entryPoints'] as $ep ) { if ( is_array( $ep ) && ( $ep['entryPointType'] ?? '' ) === 'video' && ! empty( $ep['uri'] ) ) { return esc_url_raw( $ep['uri'] ); }}
+	return '';
+}
 	private function mrm_mc_google_insert_event( $event, $presenter_email ) { return array('google_event_id'=>'','google_meet_url'=>''); }
 	private function mrm_mc_google_patch_event_attendees( $event, $emails ) { return true; }
 	private function mrm_mc_google_cancel_event( $google_event_id ) { return true; }
