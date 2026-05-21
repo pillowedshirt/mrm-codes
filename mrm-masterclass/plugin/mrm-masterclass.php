@@ -25,11 +25,49 @@ if ( ! defined( 'MRM_MASTERCLASS_FILE' ) ) {
 }
 
 if ( ! defined( 'MRM_MASTERCLASS_DIR' ) ) {
-	define( 'MRM_MASTERCLASS_DIR', plugin_dir_path( __FILE__ ) );
+	define( 'MRM_MASTERCLASS_DIR', plugin_dir_path( MRM_MASTERCLASS_FILE ) );
 }
 
 if ( ! defined( 'MRM_MASTERCLASS_URL' ) ) {
-	define( 'MRM_MASTERCLASS_URL', plugin_dir_url( __FILE__ ) );
+	define( 'MRM_MASTERCLASS_URL', plugin_dir_url( MRM_MASTERCLASS_FILE ) );
+}
+
+/*
+ * Path safety:
+ *
+ * GitHub source layout:
+ * mrm-masterclass/plugin/mrm-masterclass.php
+ * mrm-masterclass/frontend/masterclass.html
+ *
+ * Live WordPress layout:
+ * wp-content/plugins/mrm-masterclass/mrm-masterclass.php
+ *
+ * These constants avoid assuming that GitHub and live WordPress have the same
+ * directory depth.
+ */
+if ( ! defined( 'MRM_MASTERCLASS_SOURCE_ROOT_DIR' ) ) {
+	$maybe_github_root = trailingslashit( dirname( MRM_MASTERCLASS_DIR ) );
+
+	if ( file_exists( $maybe_github_root . 'frontend/masterclass.html' ) ) {
+		define( 'MRM_MASTERCLASS_SOURCE_ROOT_DIR', $maybe_github_root );
+	} else {
+		define( 'MRM_MASTERCLASS_SOURCE_ROOT_DIR', MRM_MASTERCLASS_DIR );
+	}
+}
+
+if ( ! defined( 'MRM_MASTERCLASS_FRONTEND_DIR' ) ) {
+	define( 'MRM_MASTERCLASS_FRONTEND_DIR', trailingslashit( MRM_MASTERCLASS_SOURCE_ROOT_DIR . 'frontend' ) );
+}
+
+if ( ! defined( 'MRM_MASTERCLASS_FRONTEND_URL' ) ) {
+	/*
+	 * In the live plugin-root deployment, frontend assets would be under:
+	 * wp-content/plugins/mrm-masterclass/frontend/
+	 *
+	 * In GitHub, this constant is mostly informational because the HTML is
+	 * copied to a WordPress page manually and calls REST endpoints directly.
+	 */
+	define( 'MRM_MASTERCLASS_FRONTEND_URL', trailingslashit( MRM_MASTERCLASS_URL . 'frontend' ) );
 }
 
 if ( ! class_exists( 'MRM_Masterclass_Plugin', false ) ) {
@@ -37,7 +75,7 @@ if ( ! class_exists( 'MRM_Masterclass_Plugin', false ) ) {
 class MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
-	const DB_VERSION = '1.2.3';
+	const DB_VERSION = '1.2.4';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 
@@ -84,6 +122,8 @@ class MRM_Masterclass_Plugin {
 				);
 			}
 		}
+		add_action( 'query_vars', array( $this, 'register_masterclass_gate_query_vars' ) );
+		add_action( 'template_redirect', array( $this, 'maybe_render_masterclass_gate_page' ) );
 		add_action( 'admin_notices', array( $this, 'render_activation_diagnostic_notice' ) );
 		$this->mrm_mc_debug_log( 'Masterclass plugin initialized in REST-only frontend mode. No shortcode rendering is registered.' );
 	}
@@ -484,13 +524,38 @@ class MRM_Masterclass_Plugin {
 	}
 
 	$event_adds = array(
-		'calendar_id'   => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
-		'proctor_email' => "ALTER TABLE {$events_table} ADD proctor_email VARCHAR(191) NULL",
-		'cohost_note'   => "ALTER TABLE {$events_table} ADD cohost_note TEXT NULL",
+		'calendar_id'       => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
+		'proctor_email'     => "ALTER TABLE {$events_table} ADD proctor_email VARCHAR(191) NULL",
+		'cohost_note'       => "ALTER TABLE {$events_table} ADD cohost_note TEXT NULL",
+		'google_last_error' => "ALTER TABLE {$events_table} ADD google_last_error TEXT NULL",
+		'confirmation_note' => "ALTER TABLE {$events_table} ADD confirmation_note TEXT NULL",
 	);
 
 	foreach ( $event_adds as $column => $sql ) {
 		if ( ! in_array( $column, $event_columns, true ) ) {
+			$wpdb->query( $sql );
+		}
+	}
+
+	$registration_columns = $wpdb->get_col( "DESC {$registrations_table}", 0 );
+	if ( ! is_array( $registration_columns ) ) {
+		$registration_columns = array();
+	}
+
+	$registration_adds = array(
+		'promo_code'           => "ALTER TABLE {$registrations_table} ADD promo_code VARCHAR(100) NULL",
+		'discount_cents'       => "ALTER TABLE {$registrations_table} ADD discount_cents INT NOT NULL DEFAULT 0",
+		'gate_token_hash'      => "ALTER TABLE {$registrations_table} ADD gate_token_hash VARCHAR(64) NULL",
+		'gate_url'             => "ALTER TABLE {$registrations_table} ADD gate_url TEXT NULL",
+		'terms_snapshot'       => "ALTER TABLE {$registrations_table} ADD terms_snapshot LONGTEXT NULL",
+		'confirmation_sent'    => "ALTER TABLE {$registrations_table} ADD confirmation_sent TINYINT(1) NOT NULL DEFAULT 0",
+		'confirmation_sent_at' => "ALTER TABLE {$registrations_table} ADD confirmation_sent_at DATETIME NULL",
+		'reminder_24_sent_at'  => "ALTER TABLE {$registrations_table} ADD reminder_24_sent_at DATETIME NULL",
+		'reminder_1_sent_at'   => "ALTER TABLE {$registrations_table} ADD reminder_1_sent_at DATETIME NULL",
+	);
+
+	foreach ( $registration_adds as $column => $sql ) {
+		if ( ! in_array( $column, $registration_columns, true ) ) {
 			$wpdb->query( $sql );
 		}
 	}
