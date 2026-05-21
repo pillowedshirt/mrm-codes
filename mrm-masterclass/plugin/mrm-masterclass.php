@@ -174,6 +174,8 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
+	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_remove_stale_admin_visibility_css_hooks', 1, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_remove_stale_admin_visibility_css_hooks', 1, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_admin_visibility_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'mrm_mc_log_init_checkpoint', 0, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_loaded', 'mrm_mc_log_wp_loaded_checkpoint', 999, 0 );
@@ -2010,6 +2012,33 @@ public function maybe_render_masterclass_gate_page() {
 		esc_html__( 'Masterclass Access Not Ready', 'mrm-masterclass' ),
 		array(
 			'response' => 503,
+		)
+	);
+}
+
+public function mrm_mc_remove_stale_admin_visibility_css_hooks() {
+	/*
+	 * Emergency cleanup:
+	 * Older versions of this plugin registered admin_head using the old class
+	 * name MRM_Masterclass_Plugin. If that callback points to a private method,
+	 * WordPress fatals during admin-header.php.
+	 *
+	 * This cleanup is Masterclass-only and removes stale callbacks before
+	 * admin_head runs.
+	 */
+	$old_class_callback = array( 'MRM_Masterclass_Plugin', 'mrm_mc_admin_visibility_css' );
+	$new_class_callback = array( 'LowBrass_MRM_Masterclass_Plugin', 'mrm_mc_admin_visibility_css' );
+
+	for ( $priority = 0; $priority <= 999; $priority++ ) {
+		remove_action( 'admin_head', $old_class_callback, $priority );
+		remove_action( 'admin_head', $new_class_callback, $priority );
+	}
+
+	$this->mrm_mc_debug_log(
+		'Removed stale Masterclass admin_head visibility CSS callbacks.',
+		array(
+			'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+			'is_admin'    => is_admin() ? 1 : 0,
 		)
 	);
 }
