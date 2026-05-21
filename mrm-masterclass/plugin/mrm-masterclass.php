@@ -10,10 +10,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-$autoload = ABSPATH . 'vendor/autoload.php';
-if ( file_exists( $autoload ) ) {
-	require_once $autoload;
-}
+/*
+ * Do not load the root Composer autoloader from public_html/vendor/autoload.php.
+ * The Masterclass plugin should not depend on root Composer because it can create
+ * runtime conflicts with other plugins or host-level packages.
+ *
+ * If AWS SDK loading is needed later, use a plugin-local vendor path or reuse
+ * an already-loaded AWS SDK class safely with class_exists().
+ */
 
 
 if ( ! defined( 'MRM_MASTERCLASS_FILE' ) ) {
@@ -336,7 +340,70 @@ private function admin_card_close() {
 	}
 	private function mrm_mc_get_secret_diagnostic( $secret_id ) { $secret_id = (string) $secret_id; return isset( $this->mrm_secret_diagnostics[ $secret_id ] ) && is_array( $this->mrm_secret_diagnostics[ $secret_id ] ) ? $this->mrm_secret_diagnostics[ $secret_id ] : array(); }
 	private function mrm_mc_secret_diagnostic_summary_html( $secret_id ) { $diag = $this->mrm_mc_get_secret_diagnostic( $secret_id ); if ( empty( $diag ) ) { return '<p class="description">No AWS diagnostic information is available yet.</p>'; } $status  = isset( $diag['status'] ) ? (string) $diag['status'] : 'unknown'; $region  = isset( $diag['region'] ) ? (string) $diag['region'] : ( defined( 'MRM_AWS_REGION' ) ? MRM_AWS_REGION : 'not defined' ); $message = isset( $diag['message'] ) ? (string) $diag['message'] : ''; $html  = '<p class="description"><strong>AWS diagnostic:</strong> <code>' . esc_html( $status ) . '</code></p>'; $html .= '<p class="description">Region used by site: <code>' . esc_html( $region ) . '</code></p>'; if ( $message !== '' ) { $html .= '<p class="description">Details: ' . esc_html( $message ) . '</p>'; } if ( ! empty( $diag['aws_error_code'] ) ) { $html .= '<p class="description">AWS error code: <code>' . esc_html( (string) $diag['aws_error_code'] ) . '</code></p>'; } if ( ! empty( $diag['top_level_keys'] ) && is_array( $diag['top_level_keys'] ) ) { $html .= '<p class="description">Top-level JSON keys found: <code>' . esc_html( implode( ', ', array_map( 'strval', $diag['top_level_keys'] ) ) ) . '</code></p>'; } return $html; }
-	private function mrm_mc_get_secret_json( $secret_id, $cache_key = '' ) { $secret_id=(string)$secret_id; $cache_key=$cache_key?(string)$cache_key:'mrm_masterclass_secret_'.md5($secret_id); $cached=get_transient($cache_key); if(is_array($cached)){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'cache_hit','message'=>'Secret loaded from WordPress transient cache.','region'=>defined('MRM_AWS_REGION')?MRM_AWS_REGION:'not defined','top_level_keys'=>array_keys($cached))); return $cached; } if(!defined('MRM_AWS_REGION')||!defined('MRM_AWS_ACCESS_KEY_ID')||!defined('MRM_AWS_SECRET_ACCESS_KEY')){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'missing_aws_constants','message'=>'One or more required AWS constants are missing in wp-config.php.','region_defined'=>defined('MRM_AWS_REGION')?'yes':'no','key_defined'=>defined('MRM_AWS_ACCESS_KEY_ID')?'yes':'no','secret_defined'=>defined('MRM_AWS_SECRET_ACCESS_KEY')?'yes':'no')); return null; } if(!class_exists('\Aws\SecretsManager\SecretsManagerClient')){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'aws_sdk_missing','message'=>'The AWS SDK class Aws\SecretsManager\SecretsManagerClient is not available.','region'=>MRM_AWS_REGION)); return null; } try { $client = new \Aws\SecretsManager\SecretsManagerClient(
+	private function mrm_mc_get_secret_json( $secret_id, $cache_key = '' ) {
+	$secret_id = (string) $secret_id;
+	$cache_key = $cache_key ? (string) $cache_key : 'mrm_masterclass_secret_' . md5( $secret_id );
+
+	$cached = get_transient( $cache_key );
+
+	if ( is_array( $cached ) ) {
+		$this->mrm_mc_set_secret_diagnostic(
+			$secret_id,
+			array(
+				'status'         => 'cache_hit',
+				'message'        => 'Secret loaded from WordPress transient cache.',
+				'region'         => defined( 'MRM_AWS_REGION' ) ? MRM_AWS_REGION : 'not defined',
+				'top_level_keys' => array_keys( $cached ),
+			)
+		);
+
+		return $cached;
+	}
+
+	if ( ! defined( 'MRM_AWS_REGION' ) || ! defined( 'MRM_AWS_ACCESS_KEY_ID' ) || ! defined( 'MRM_AWS_SECRET_ACCESS_KEY' ) ) {
+		$this->mrm_mc_set_secret_diagnostic(
+			$secret_id,
+			array(
+				'status'         => 'missing_aws_constants',
+				'message'        => 'One or more required AWS constants are missing in wp-config.php.',
+				'region_defined' => defined( 'MRM_AWS_REGION' ) ? 'yes' : 'no',
+				'key_defined'    => defined( 'MRM_AWS_ACCESS_KEY_ID' ) ? 'yes' : 'no',
+				'secret_defined' => defined( 'MRM_AWS_SECRET_ACCESS_KEY' ) ? 'yes' : 'no',
+			)
+		);
+
+		$this->mrm_mc_debug_log(
+			'AWS secret load skipped: missing AWS constants.',
+			array(
+				'secret_id' => $secret_id,
+			)
+		);
+
+		return null;
+	}
+
+	if ( ! class_exists( '\Aws\SecretsManager\SecretsManagerClient' ) ) {
+		$this->mrm_mc_set_secret_diagnostic(
+			$secret_id,
+			array(
+				'status'  => 'aws_sdk_missing',
+				'message' => 'AWS SDK class Aws\SecretsManager\SecretsManagerClient is not available. The Masterclass plugin will not load root Composer automatically.',
+				'region'  => MRM_AWS_REGION,
+			)
+		);
+
+		$this->mrm_mc_debug_log(
+			'AWS secret load skipped: AWS SDK missing.',
+			array(
+				'secret_id' => $secret_id,
+			)
+		);
+
+		return null;
+	}
+
+	try {
+		$client = new \Aws\SecretsManager\SecretsManagerClient(
 			array(
 				'version'     => 'latest',
 				'region'      => MRM_AWS_REGION,
@@ -345,8 +412,78 @@ private function admin_card_close() {
 					'secret' => MRM_AWS_SECRET_ACCESS_KEY,
 				),
 			)
-		); $result=$client->getSecretValue(array('SecretId'=>$secret_id)); if(empty($result['SecretString'])){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'empty_secret_string','message'=>'AWS returned the secret, but SecretString was empty.','region'=>MRM_AWS_REGION)); return null; } $decoded=json_decode((string)$result['SecretString'],true); if(!is_array($decoded)){ $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'json_decode_failed','message'=>'SecretString was returned by AWS, but it was not valid JSON.','region'=>MRM_AWS_REGION,'json_error'=>json_last_error_msg())); return null; } $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'loaded_from_aws','message'=>'Secret was successfully loaded and decoded from AWS Secrets Manager.','region'=>MRM_AWS_REGION,'top_level_keys'=>array_keys($decoded))); set_transient($cache_key,$decoded,15*MINUTE_IN_SECONDS); return $decoded; } catch ( \Aws\Exception\AwsException $e ) { $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'aws_exception','message'=>$e->getAwsErrorMessage(),'aws_error_code'=>$e->getAwsErrorCode(),'region'=>MRM_AWS_REGION)); return null; } catch ( \Throwable $e ) { $this->mrm_mc_set_secret_diagnostic($secret_id,array('status'=>'php_exception','message'=>$e->getMessage(),'region'=>MRM_AWS_REGION)); return null; } }
-	private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler'; }
+		);
+
+		$result = $client->getSecretValue(
+			array(
+				'SecretId' => $secret_id,
+			)
+		);
+
+		if ( empty( $result['SecretString'] ) ) {
+			$this->mrm_mc_set_secret_diagnostic(
+				$secret_id,
+				array(
+					'status'  => 'empty_secret_string',
+					'message' => 'AWS returned the secret, but SecretString was empty.',
+					'region'  => MRM_AWS_REGION,
+				)
+			);
+
+			return null;
+		}
+
+		$decoded = json_decode( (string) $result['SecretString'], true );
+
+		if ( ! is_array( $decoded ) ) {
+			$this->mrm_mc_set_secret_diagnostic(
+				$secret_id,
+				array(
+					'status'     => 'json_decode_failed',
+					'message'    => 'SecretString was returned by AWS, but it was not valid JSON.',
+					'region'     => MRM_AWS_REGION,
+					'json_error' => json_last_error_msg(),
+				)
+			);
+
+			return null;
+		}
+
+		$this->mrm_mc_set_secret_diagnostic(
+			$secret_id,
+			array(
+				'status'         => 'loaded_from_aws',
+				'message'        => 'Secret was successfully loaded and decoded from AWS Secrets Manager.',
+				'region'         => MRM_AWS_REGION,
+				'top_level_keys' => array_keys( $decoded ),
+			)
+		);
+
+		set_transient( $cache_key, $decoded, 15 * MINUTE_IN_SECONDS );
+
+		return $decoded;
+	} catch ( \Throwable $e ) {
+		$this->mrm_mc_set_secret_diagnostic(
+			$secret_id,
+			array(
+				'status'  => 'php_exception',
+				'message' => $e->getMessage(),
+				'region'  => defined( 'MRM_AWS_REGION' ) ? MRM_AWS_REGION : 'not defined',
+			)
+		);
+
+		$this->mrm_mc_debug_log(
+			'AWS secret load failed safely.',
+			array(
+				'secret_id' => $secret_id,
+				'error'     => $e->getMessage(),
+			)
+		);
+
+		return null;
+	}
+}
+private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler'; }
 	private function mrm_mc_get_stripe_secret_id() { return defined( 'MRM_SECRET_STRIPE_KEYS' ) ? MRM_SECRET_STRIPE_KEYS : 'lowbrass/stripe/keys'; }
 	private function mrm_mc_get_tax_secret_id() { return defined( 'MRM_SECRET_MASTERCLASS_TAX_1099_PROFILES' ) ? MRM_SECRET_MASTERCLASS_TAX_1099_PROFILES : 'lowbrass/masterclass/tax/1099-profiles'; }
 	private function mrm_mc_get_google_scheduler_secret_bundle() { return $this->mrm_mc_get_secret_json( $this->mrm_mc_get_google_scheduler_secret_id(), 'mrm_masterclass_google_scheduler_secret' ); }
@@ -358,68 +495,93 @@ private function admin_card_close() {
 	private function mrm_mc_base64url_encode( $data ) { return rtrim( strtr( base64_encode( $data ), '+/', '-_' ), '=' ); }
 	private function mrm_mc_google_make_jwt( $client_email, $private_key, $scope, $token_url ) { $now=time(); $header=array('alg'=>'RS256','typ'=>'JWT'); $claims=array('iss'=>$client_email,'scope'=>$scope,'aud'=>$token_url,'iat'=>$now,'exp'=>$now+3600); $segments=array($this->mrm_mc_base64url_encode(wp_json_encode($header)),$this->mrm_mc_base64url_encode(wp_json_encode($claims))); $signing_input=implode('.', $segments); $signature=''; $ok=openssl_sign($signing_input,$signature,$private_key,'sha256'); if(!$ok){ return new WP_Error('jwt_sign_failed','OpenSSL failed to sign the Google service account JWT.'); } $segments[]=$this->mrm_mc_base64url_encode($signature); return implode('.', $segments); }
 	private function mrm_mc_google_get_access_token() {
-		$scope    = 'https://www.googleapis.com/auth/calendar';
-		$cachekey = 'mrm_masterclass_google_access_token';
-		$cached   = get_transient( $cachekey );
-		if ( is_string( $cached ) && $cached !== '' ) { return $cached; }
-		$parsed = $this->mrm_mc_parse_service_account_json( $this->mrm_mc_get_google_service_account_json() );
-		if ( ! $parsed ) { $this->mrm_mc_debug_log( 'Google token failed: service account JSON missing or invalid.' ); return new WP_Error( 'google_not_configured', 'Google service account JSON is not configured.' ); }
-		$jwt = $this->mrm_mc_google_make_jwt( $parsed['client_email'], $parsed['private_key'], $scope, $parsed['token_uri'] );
-		if ( is_wp_error( $jwt ) ) { $this->mrm_mc_debug_log( 'Google token failed: JWT creation failed.', array( 'error' => $jwt->get_error_message() ) ); return $jwt; }
-		$response = wp_remote_post( $parsed['token_uri'], array( 'timeout' => 20, 'headers' => array( 'Content-Type' => 'application/x-www-form-urlencoded' ), 'body' => http_build_query( array( 'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer', 'assertion' => $jwt ) ) ) );
-		if ( is_wp_error( $response ) ) { $this->mrm_mc_debug_log( 'Google token HTTP request failed.', array( 'error' => $response->get_error_message() ) ); return $response; }
-		$code = wp_remote_retrieve_response_code( $response ); $body = wp_remote_retrieve_body( $response ); $data = json_decode( $body, true );
-		if ( $code < 200 || $code >= 300 || ! is_array( $data ) || empty( $data['access_token'] ) ) { $this->mrm_mc_debug_log( 'Google token endpoint rejected request.', array( 'http_code' => $code, 'body' => substr( (string) $body, 0, 500 ) ) ); return new WP_Error( 'google_token_failed', 'Google token request failed.' ); }
-		set_transient( $cachekey, (string) $data['access_token'], 55 * MINUTE_IN_SECONDS );
-		$this->mrm_mc_debug_log( 'Google access token created successfully.' );
-		return (string) $data['access_token'];
+	$service_account_json = $this->mrm_mc_get_google_service_account_json();
+
+	if ( ! $service_account_json ) {
+		$this->mrm_mc_debug_log( 'Google access token skipped: service_account_json missing from AWS secret.' );
+		return new WP_Error( 'google_not_configured', 'Google service account JSON is not configured.' );
 	}
-	private function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
-		$token = $this->mrm_mc_google_get_access_token(); if ( is_wp_error( $token ) ) { return $token; }
-		$args = array( 'method' => $method, 'timeout' => 20, 'headers' => array( 'Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json' ) ); if ( null !== $body ) { $args['body'] = wp_json_encode( $body ); }
-		$response = wp_remote_request( $url, $args );
-		if ( is_wp_error( $response ) ) { $this->mrm_mc_debug_log( 'Google Calendar HTTP request failed.', array( 'method' => $method, 'url' => $url, 'error' => $response->get_error_message() ) ); return $response; }
-		$code = wp_remote_retrieve_response_code( $response ); $raw  = wp_remote_retrieve_body( $response ); $data = json_decode( $raw, true );
-		if ( $code < 200 || $code >= 300 ) { $this->mrm_mc_debug_log( 'Google Calendar request returned non-2xx.', array( 'method' => $method, 'url' => $url, 'http_code' => $code, 'body' => substr( (string) $raw, 0, 500 ) ) ); return new WP_Error( 'google_calendar_http', 'Google Calendar request failed.' ); }
-		return is_array( $data ) ? $data : array();
+
+	$this->mrm_mc_debug_log( 'Google access token skipped: live Google token exchange intentionally disabled during stabilization.' );
+
+	return new WP_Error(
+		'google_temporarily_disabled',
+		'Google Calendar integration is temporarily disabled while the Masterclass plugin is being stabilized.'
+	);
+}
+
+private function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
+	$token = $this->mrm_mc_google_get_access_token();
+
+	if ( is_wp_error( $token ) ) {
+		return $token;
 	}
-	private function mrm_mc_extract_meet_url( $event ) {
-		if ( ! is_array( $event ) ) { return ''; }
-		if ( ! empty( $event['hangoutLink'] ) ) { return esc_url_raw( $event['hangoutLink'] ); }
-		if ( empty( $event['conferenceData']['entryPoints'] ) || ! is_array( $event['conferenceData']['entryPoints'] ) ) { return ''; }
-		foreach ( $event['conferenceData']['entryPoints'] as $ep ) { if ( is_array( $ep ) && ( $ep['entryPointType'] ?? '' ) === 'video' && ! empty( $ep['uri'] ) ) { return esc_url_raw( $ep['uri'] ); } }
+
+	return new WP_Error(
+		'google_temporarily_disabled',
+		'Google Calendar request was not sent because Google Calendar integration is temporarily disabled.'
+	);
+}
+
+private function mrm_mc_extract_meet_url( $event ) {
+	if ( ! is_array( $event ) ) {
 		return '';
 	}
-	private function mrm_mc_google_insert_event( $event, $presenter_email ) {
-		$settings = $this->settings(); $calendar_id = trim( (string) ( $event->calendar_id ?: ( $settings['masterclass_calendar_id'] ?? '' ) ) );
-		if ( $calendar_id === '' ) { $this->mrm_mc_debug_log( 'Google event creation skipped: missing calendar ID.', array( 'event_id' => $event->id ?? 0 ) ); return new WP_Error( 'missing_calendar_id', 'Masterclass Google Calendar ID is missing.' ); }
-		$attendees = array(); if ( is_email( $presenter_email ) ) { $attendees[] = array( 'email' => $presenter_email ); } if ( ! empty( $event->proctor_email ) && is_email( $event->proctor_email ) ) { $attendees[] = array( 'email' => $event->proctor_email ); }
-		$timezone = ! empty( $event->timezone ) ? (string) $event->timezone : 'America/Phoenix';
-		$payload = array( 'summary' => (string) $event->title, 'description' => wp_strip_all_tags( (string) $event->description ), 'start' => array( 'dateTime' => date( 'c', strtotime( $event->start_time ) ), 'timeZone' => $timezone ), 'end' => array( 'dateTime' => date( 'c', strtotime( $event->end_time ) ), 'timeZone' => $timezone ), 'attendees' => $attendees, 'reminders' => array( 'useDefault' => false, 'overrides' => array() ), 'conferenceData' => array( 'createRequest' => array( 'requestId' => 'mrm-masterclass-' . absint( $event->id ) . '-' . time(), 'conferenceSolutionKey' => array( 'type' => 'hangoutsMeet' ) ) ), 'extendedProperties' => array( 'private' => array( 'mrm_source' => 'masterclass', 'mrm_masterclass_event_id' => (string) $event->id, 'mrm_presenter_email' => (string) $presenter_email, 'mrm_proctor_email' => (string) ( $event->proctor_email ?? '' ) ) ) );
-		$url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( rawurldecode( $calendar_id ) ) . '/events'; $url = add_query_arg( 'sendUpdates', 'all', $url ); $url = add_query_arg( 'conferenceDataVersion', 1, $url );
-		$result = $this->mrm_mc_google_calendar_request( 'POST', $url, $payload );
-		if ( is_wp_error( $result ) ) { $this->mrm_mc_debug_log( 'Google event creation failed.', array( 'event_id' => $event->id ?? 0, 'error' => $result->get_error_message() ) ); return $result; }
-		$google_event_id = ! empty( $result['id'] ) ? (string) $result['id'] : ''; $meet_url = $this->mrm_mc_extract_meet_url( $result );
-		$this->mrm_mc_debug_log( 'Google event creation result.', array( 'event_id' => $event->id ?? 0, 'google_event_id' => $google_event_id, 'has_meet_url' => $meet_url ? 'yes' : 'no' ) );
-		return array( 'google_event_id' => $google_event_id, 'google_meet_url' => $meet_url );
+
+	if ( ! empty( $event['hangoutLink'] ) ) {
+		return esc_url_raw( $event['hangoutLink'] );
 	}
-	private function mrm_mc_google_patch_event_attendees( $event, $emails ) {
-		$settings = $this->settings(); $calendar_id = trim( (string) ( $event->calendar_id ?: ( $settings['masterclass_calendar_id'] ?? '' ) ) );
-		if ( $calendar_id === '' || empty( $event->google_event_id ) ) { return false; }
-		$attendees = array(); if ( ! empty( $event->presenter_email ) && is_email( $event->presenter_email ) ) { $attendees[] = array( 'email' => $event->presenter_email ); } if ( ! empty( $event->proctor_email ) && is_email( $event->proctor_email ) ) { $attendees[] = array( 'email' => $event->proctor_email ); }
-		foreach ( (array) $emails as $email ) { $email = sanitize_email( $email ); if ( is_email( $email ) ) { $attendees[] = array( 'email' => $email ); } }
-		$url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( rawurldecode( $calendar_id ) ) . '/events/' . rawurlencode( $event->google_event_id ); $url = add_query_arg( 'sendUpdates', 'all', $url );
-		$result = $this->mrm_mc_google_calendar_request( 'PATCH', $url, array( 'attendees' => $attendees ) );
-		return ! is_wp_error( $result );
+
+	if ( empty( $event['conferenceData']['entryPoints'] ) || ! is_array( $event['conferenceData']['entryPoints'] ) ) {
+		return '';
 	}
-	private function mrm_mc_google_cancel_event( $google_event_id ) {
-		$settings = $this->settings(); $calendar_id = trim( (string) ( $settings['masterclass_calendar_id'] ?? '' ) );
-		if ( $calendar_id === '' || empty( $google_event_id ) ) { return false; }
-		$url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( rawurldecode( $calendar_id ) ) . '/events/' . rawurlencode( $google_event_id ); $url = add_query_arg( 'sendUpdates', 'all', $url );
-		$result = $this->mrm_mc_google_calendar_request( 'DELETE', $url );
-		return ! is_wp_error( $result );
+
+	foreach ( $event['conferenceData']['entryPoints'] as $ep ) {
+		if ( is_array( $ep ) && ( $ep['entryPointType'] ?? '' ) === 'video' && ! empty( $ep['uri'] ) ) {
+			return esc_url_raw( $ep['uri'] );
+		}
 	}
-	private function mrm_mc_stripe_request($method,$endpoint,$body=array()){ $sk=$this->mrm_mc_get_stripe_secret_key(); if(!$sk) return new WP_Error('stripe_missing','Stripe key missing'); $args=array('method'=>$method,'headers'=>array('Authorization'=>'Bearer '.$sk,'Content-Type'=>'application/x-www-form-urlencoded')); if($body)$args['body']=http_build_query($body); $r=wp_remote_request('https://api.stripe.com/v1/'.$endpoint,$args); if(is_wp_error($r)) return $r; return json_decode(wp_remote_retrieve_body($r),true); }
+
+	return '';
+}
+
+private function mrm_mc_google_insert_event( $event, $presenter_email ) {
+	$this->mrm_mc_debug_log(
+		'Google event creation safely skipped during stabilization.',
+		array(
+			'event_id'        => isset( $event->id ) ? absint( $event->id ) : 0,
+			'presenter_email' => is_email( $presenter_email ) ? $presenter_email : '',
+		)
+	);
+
+	return new WP_Error(
+		'google_temporarily_disabled',
+		'Google Calendar event creation is temporarily disabled during stabilization.'
+	);
+}
+
+private function mrm_mc_google_patch_event_attendees( $event, $emails ) {
+	$this->mrm_mc_debug_log(
+		'Google attendee patch safely skipped during stabilization.',
+		array(
+			'event_id' => isset( $event->id ) ? absint( $event->id ) : 0,
+		)
+	);
+
+	return false;
+}
+
+private function mrm_mc_google_cancel_event( $google_event_id ) {
+	$this->mrm_mc_debug_log(
+		'Google event cancellation safely skipped during stabilization.',
+		array(
+			'google_event_id' => $google_event_id ? '[present]' : '[missing]',
+		)
+	);
+
+	return false;
+}
+private function mrm_mc_stripe_request($method,$endpoint,$body=array()){ $sk=$this->mrm_mc_get_stripe_secret_key(); if(!$sk) return new WP_Error('stripe_missing','Stripe key missing'); $args=array('method'=>$method,'headers'=>array('Authorization'=>'Bearer '.$sk,'Content-Type'=>'application/x-www-form-urlencoded')); if($body)$args['body']=http_build_query($body); $r=wp_remote_request('https://api.stripe.com/v1/'.$endpoint,$args); if(is_wp_error($r)) return $r; return json_decode(wp_remote_retrieve_body($r),true); }
 	private function mrm_mc_create_payment_intent($event,$email,$terms){ return $this->mrm_mc_stripe_request('POST','payment_intents',array('amount'=>$event->price_cents,'currency'=>'usd','automatic_payment_methods[enabled]'=>'true','metadata[mrm_masterclass_event_id]'=>$event->id,'metadata[mrm_masterclass_customer_email]'=>$email,'metadata[mrm_product_type]'=>'masterclass','metadata[source_flow]'=>'masterclass_registration','metadata[terms_version]'=>$terms['version'],'metadata[terms_accepted]'=>$terms['accepted']?'1':'0')); }
 	private function mrm_mc_retrieve_payment_intent($id){ return $this->mrm_mc_stripe_request('GET','payment_intents/'.rawurlencode($id)); }
 	private function mrm_mc_refund_payment_intent($pi,$amt){ return $this->mrm_mc_stripe_request('POST','refunds',array('payment_intent'=>$pi,'amount'=>$amt)); }
@@ -1531,7 +1693,7 @@ public function handle_create_presenter_page() {
 					'has_meet_url'    => ! empty( $google['google_meet_url'] ) ? 'yes' : 'no',
 				) );
 			} elseif ( is_wp_error( $google ) ) {
-				$this->mrm_mc_debug_log( 'Google event creation returned WP_Error.', array(
+				$this->mrm_mc_debug_log( 'Google event creation skipped safely.', array(
 					'event_id' => $event_id,
 					'error'    => $google->get_error_message(),
 				) );
