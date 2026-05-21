@@ -33,7 +33,7 @@ if ( ! defined( 'MRM_MASTERCLASS_URL' ) ) {
 class MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
-	const DB_VERSION = '1.1.0';
+	const DB_VERSION = '1.2.0';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 
@@ -124,6 +124,62 @@ class MRM_Masterclass_Plugin {
 	KEY presenter_id(presenter_id),
 	KEY status(status)
 ) {$c};");
+
+		$presenters_table = $p . 'mrm_masterclass_presenters';
+		$events_table     = $p . 'mrm_masterclass_events';
+		$ledger_table     = $p . 'mrm_masterclass_payment_ledger';
+
+		$presenter_columns = $wpdb->get_col( "DESC {$presenters_table}", 0 );
+
+		$presenter_adds = array(
+			'city'                        => "ALTER TABLE {$presenters_table} ADD city VARCHAR(100) NULL",
+			'state'                       => "ALTER TABLE {$presenters_table} ADD state VARCHAR(50) NULL",
+			'address'                     => "ALTER TABLE {$presenters_table} ADD address VARCHAR(191) NULL",
+			'zip_code'                    => "ALTER TABLE {$presenters_table} ADD zip_code VARCHAR(20) NULL",
+			'timezone'                    => "ALTER TABLE {$presenters_table} ADD timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix'",
+			'stripe_connected_account_id' => "ALTER TABLE {$presenters_table} ADD stripe_connected_account_id VARCHAR(191) NULL",
+			'hire_date'                   => "ALTER TABLE {$presenters_table} ADD hire_date DATE NULL",
+			'profile_image_url'           => "ALTER TABLE {$presenters_table} ADD profile_image_url TEXT NULL",
+			'short_description'           => "ALTER TABLE {$presenters_table} ADD short_description TEXT NULL",
+			'long_description'            => "ALTER TABLE {$presenters_table} ADD long_description LONGTEXT NULL",
+			'instruments'                 => "ALTER TABLE {$presenters_table} ADD instruments TEXT NULL",
+			'presenter_page_id'           => "ALTER TABLE {$presenters_table} ADD presenter_page_id BIGINT UNSIGNED NULL",
+		);
+
+		foreach ( $presenter_adds as $column => $sql ) {
+			if ( ! in_array( $column, $presenter_columns, true ) ) {
+				$wpdb->query( $sql );
+			}
+		}
+
+		$event_columns = $wpdb->get_col( "DESC {$events_table}", 0 );
+
+		$event_adds = array(
+			'calendar_id'    => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
+			'proctor_email'  => "ALTER TABLE {$events_table} ADD proctor_email VARCHAR(191) NULL",
+			'cohost_note'    => "ALTER TABLE {$events_table} ADD cohost_note TEXT NULL",
+		);
+
+		foreach ( $event_adds as $column => $sql ) {
+			if ( ! in_array( $column, $event_columns, true ) ) {
+				$wpdb->query( $sql );
+			}
+		}
+
+		$ledger_columns = $wpdb->get_col( "DESC {$ledger_table}", 0 );
+
+		$ledger_adds = array(
+			'paid_out_at'        => "ALTER TABLE {$ledger_table} ADD paid_out_at DATETIME NULL",
+			'payout_batch_id'    => "ALTER TABLE {$ledger_table} ADD payout_batch_id VARCHAR(64) NULL",
+			'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
+		);
+
+		foreach ( $ledger_adds as $column => $sql ) {
+			if ( ! in_array( $column, $ledger_columns, true ) ) {
+				$wpdb->query( $sql );
+			}
+		}
+
 		update_option('mrm_masterclass_db_version', self::DB_VERSION);
 	}
 	public function add_cron_schedule($s){$s['mrm_masterclass_15min']=array('interval'=>900,'display'=>'Every 15 Minutes'); return $s;}
@@ -217,23 +273,14 @@ private function admin_card_close() {
 		'MRM Masterclass',
 		'MRM Masterclass',
 		'manage_options',
-		'mrm-masterclass',
-		array( $this, 'render_dashboard_page' ),
-		'dashicons-groups',
+		'mrm-masterclass-events',
+		array( $this, 'render_events_page' ),
+		'dashicons-welcome-learn-more',
 		56
 	);
 
 	add_submenu_page(
-		'mrm-masterclass',
-		'Dashboard',
-		'Dashboard',
-		'manage_options',
-		'mrm-masterclass',
-		array( $this, 'render_dashboard_page' )
-	);
-
-	add_submenu_page(
-		'mrm-masterclass',
+		'mrm-masterclass-events',
 		'Events',
 		'Events',
 		'manage_options',
@@ -242,7 +289,7 @@ private function admin_card_close() {
 	);
 
 	add_submenu_page(
-		'mrm-masterclass',
+		'mrm-masterclass-events',
 		'Presenters',
 		'Presenters',
 		'manage_options',
@@ -251,25 +298,16 @@ private function admin_card_close() {
 	);
 
 	add_submenu_page(
-		'mrm-masterclass',
-		'Registrations',
-		'Registrations',
+		'mrm-masterclass-events',
+		'Registrations / Payments',
+		'Registrations / Payments',
 		'manage_options',
-		'mrm-masterclass-registrations',
-		array( $this, 'render_registrations_page' )
+		'mrm-masterclass-registrations-payments',
+		array( $this, 'render_registrations_payments_page' )
 	);
 
 	add_submenu_page(
-		'mrm-masterclass',
-		'Payments',
-		'Payments',
-		'manage_options',
-		'mrm-masterclass-payments',
-		array( $this, 'render_payments_page' )
-	);
-
-	add_submenu_page(
-		'mrm-masterclass',
+		'mrm-masterclass-events',
 		'Presenter Payouts',
 		'Presenter Payouts',
 		'manage_options',
@@ -278,41 +316,15 @@ private function admin_card_close() {
 	);
 
 	add_submenu_page(
-		'mrm-masterclass',
-		'1099 Documents',
-		'1099 Documents',
-		'manage_options',
-		'mrm-masterclass-1099',
-		array( $this, 'render_1099_page' )
-	);
-
-	add_submenu_page(
-		'mrm-masterclass',
-		'Presenter Tax Profiles',
-		'Presenter Tax Profiles',
+		'mrm-masterclass-events',
+		'Tax Profiles',
+		'Tax Profiles',
 		'manage_options',
 		'mrm-masterclass-tax-profiles',
 		array( $this, 'render_tax_profiles_page' )
 	);
-
-	add_submenu_page(
-		'mrm-masterclass',
-		'Email Log',
-		'Email Log',
-		'manage_options',
-		'mrm-masterclass-email-log',
-		array( $this, 'render_email_log_page' )
-	);
-
-	add_submenu_page(
-		'mrm-masterclass',
-		'Settings',
-		'Settings',
-		'manage_options',
-		'mrm-masterclass-settings',
-		array( $this, 'render_settings_page' )
-	);
 }
+
 
 public function render_dashboard_page() {
 	$this->must_admin();
@@ -339,11 +351,56 @@ public function render_settings_page() {
 	<?php
 }
 
-public function render_presenters_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Presenters</h1></div>'; }
-public function render_events_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Events</h1></div>'; }
+public function render_presenters_page() {
+	$this->must_admin();
+
+	global $wpdb;
+
+	$table   = $this->t( 'mrm_masterclass_presenters' );
+	$edit_id = isset( $_GET['edit'] ) ? absint( $_GET['edit'] ) : 0;
+	$editing = $edit_id ? $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $edit_id ), ARRAY_A ) : null;
+	$rows    = $wpdb->get_results( "SELECT * FROM {$table} ORDER BY name ASC", ARRAY_A );
+
+	$instrument_options = array(
+		'trombone'   => 'Trombone',
+		'euphonium' => 'Euphonium',
+		'tuba'      => 'Tuba',
+		'composer'  => 'Composer',
+		'conductor' => 'Conductor',
+		'other'     => 'Other',
+	);
+
+	$selected_instruments = array();
+
+	if ( ! empty( $editing['instruments'] ) ) {
+		$decoded = json_decode( $editing['instruments'], true );
+		if ( is_array( $decoded ) ) {
+			$selected_instruments = $decoded;
+		}
+	}
+	echo '<div class="wrap"><h1>Masterclass Presenters</h1></div>';
+}
+public function render_events_page() {
+	$this->must_admin();
+	echo '<div class="wrap"><h1>Masterclass Events</h1></div>';
+}
 public function render_registrations_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Registrations</h1></div>'; }
 public function render_payments_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass Payments</h1></div>'; }
-public function render_payouts_page() { $this->must_admin(); echo '<div class="wrap"><h1>Presenter Payouts</h1><p>This submenu is reserved for marking presenter payout periods as paid out. It needs the payout-period creation workflow added next.</p></div>'; }
+public function render_registrations_payments_page() {
+	$this->must_admin();
+	global $wpdb;
+	$regs_table       = $this->t( 'mrm_masterclass_registrations' );
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+	$ledger_table     = $this->t( 'mrm_masterclass_payment_ledger' );
+	$rows = $wpdb->get_results( "SELECT r.*, e.title AS event_title, e.start_time, p.name AS presenter_name, l.gross_cents, l.stripe_fee_cents, l.net_cents, l.presenter_share_cents, l.platform_share_cents, l.status AS ledger_status FROM {$regs_table} r LEFT JOIN {$events_table} e ON e.id = r.event_id LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id LEFT JOIN {$ledger_table} l ON l.registration_id = r.id ORDER BY r.created_at DESC LIMIT 500" );
+	echo '<div class="wrap"><h1>Registrations / Payments</h1></div>';
+}
+
+public function render_payouts_page() {
+	$this->must_admin();
+	echo '<div class="wrap"><h1>Presenter Payouts</h1></div>';
+}
 public function render_1099_page() { $this->must_admin(); echo '<div class="wrap"><h1>Masterclass 1099 Documents</h1></div>'; }
 public function render_tax_profiles_page() {
 	$this->must_admin();
@@ -515,18 +572,76 @@ private function send_email($to,$subject,$body,$type,$event_id=0,$registration_i
 	public function handle_save_presenter() {
 	$this->must_admin();
 	check_admin_referer( 'mrm_masterclass_save_presenter' );
+
 	global $wpdb;
-	$name  = sanitize_text_field( wp_unslash( $_POST['name'] ?? '' ) );
-	$email = sanitize_email( wp_unslash( $_POST['email'] ?? '' ) );
-	$bio   = wp_kses_post( wp_unslash( $_POST['bio'] ?? '' ) );
-	if ( ! $name || ! is_email( $email ) ) {
-		wp_die( 'Presenter name and a valid email are required.' );
+
+	$id      = absint( $_POST['id'] ?? 0 );
+	$name    = sanitize_text_field( wp_unslash( $_POST['name'] ?? '' ) );
+	$email   = sanitize_email( wp_unslash( $_POST['email'] ?? '' ) );
+	$city    = sanitize_text_field( wp_unslash( $_POST['city'] ?? '' ) );
+	$state   = strtoupper( sanitize_text_field( wp_unslash( $_POST['state'] ?? '' ) ) );
+	$state   = substr( preg_replace( '/[^A-Z]/', '', $state ), 0, 2 );
+	$address = sanitize_text_field( wp_unslash( $_POST['address'] ?? '' ) );
+	$zip     = sanitize_text_field( wp_unslash( $_POST['zip_code'] ?? '' ) );
+
+	$timezone = sanitize_text_field( wp_unslash( $_POST['timezone'] ?? 'America/Phoenix' ) );
+	$stripe_connected_account_id = sanitize_text_field( wp_unslash( $_POST['stripe_connected_account_id'] ?? '' ) );
+	$hire_date = sanitize_text_field( wp_unslash( $_POST['hire_date'] ?? '' ) );
+
+	$profile_image_url = esc_url_raw( wp_unslash( $_POST['profile_image_url'] ?? '' ) );
+	$short_description = sanitize_textarea_field( wp_unslash( $_POST['short_description'] ?? '' ) );
+	$long_description  = wp_kses_post( wp_unslash( $_POST['long_description'] ?? '' ) );
+	$bio               = wp_kses_post( wp_unslash( $_POST['bio'] ?? '' ) );
+
+	$instruments = isset( $_POST['instruments'] ) && is_array( $_POST['instruments'] )
+		? array_map( 'sanitize_text_field', wp_unslash( $_POST['instruments'] ) )
+		: array();
+
+	$instruments_json = $instruments ? wp_json_encode( array_values( $instruments ) ) : '';
+
+	if ( ! $name ) {
+		wp_die( 'Presenter name is required.' );
 	}
+
+	if ( ! is_email( $email ) ) {
+		wp_die( 'A valid presenter email is required.' );
+	}
+
+	if ( $stripe_connected_account_id && ! preg_match( '/^acct_[A-Za-z0-9]+$/', $stripe_connected_account_id ) ) {
+		wp_die( 'Stripe Connected Account ID must start with acct_.' );
+	}
+
 	$now = $this->now();
-	$wpdb->insert( $this->t( 'mrm_masterclass_presenters' ), array( 'name'=>$name,'email'=>$email,'bio'=>$bio,'created_at'=>$now,'updated_at'=>$now ) );
-	wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-presenters&created=1' ) );
+
+	$data = array(
+		'name'                        => $name,
+		'email'                       => $email,
+		'city'                        => $city,
+		'state'                       => $state,
+		'address'                     => $address,
+		'zip_code'                    => $zip,
+		'timezone'                    => $timezone,
+		'stripe_connected_account_id' => $stripe_connected_account_id ?: null,
+		'hire_date'                   => $hire_date ?: null,
+		'profile_image_url'           => $profile_image_url ?: null,
+		'short_description'           => $short_description ?: null,
+		'long_description'            => $long_description ?: null,
+		'instruments'                 => $instruments_json ?: null,
+		'bio'                         => $bio ?: null,
+		'updated_at'                  => $now,
+	);
+
+	if ( $id ) {
+		$wpdb->update( $this->t( 'mrm_masterclass_presenters' ), $data, array( 'id' => $id ) );
+	} else {
+		$data['created_at'] = $now;
+		$wpdb->insert( $this->t( 'mrm_masterclass_presenters' ), $data );
+	}
+
+	wp_safe_redirect( admin_url( 'admin.php?page=mrm-masterclass-presenters&saved=1' ) );
 	exit;
 }
+
 	public function handle_delete_presenter() {
 	$this->must_admin();
 
