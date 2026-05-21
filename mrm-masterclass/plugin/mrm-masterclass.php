@@ -132,9 +132,9 @@ mrm_lowbrass_masterclass_emergency_file_log(
 	)
 );
 
-if ( ! class_exists( 'MRM_Masterclass_Plugin', false ) ) {
+if ( ! class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 
-class MRM_Masterclass_Plugin {
+class LowBrass_MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
 	const DB_VERSION = '1.2.4';
@@ -2933,28 +2933,28 @@ public function render_activation_diagnostic_notice() {
 
 }
 
-} // End class_exists guard for MRM_Masterclass_Plugin.
+} // End class_exists guard for LowBrass_MRM_Masterclass_Plugin.
 
 if ( ! function_exists( 'mrm_lowbrass_masterclass_plugin_instance' ) ) {
 	function mrm_lowbrass_masterclass_plugin_instance() {
 		static $instance = null;
 
-		if ( null === $instance && class_exists( 'MRM_Masterclass_Plugin', false ) ) {
-			$instance = new MRM_Masterclass_Plugin();
+		if ( null === $instance && class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
+			$instance = new LowBrass_MRM_Masterclass_Plugin();
 		}
 
 		return $instance;
 	}
 }
 
-if ( class_exists( 'MRM_Masterclass_Plugin', false ) ) {
-	register_activation_hook( __FILE__, array( 'MRM_Masterclass_Plugin', 'activate' ) );
-	register_deactivation_hook( __FILE__, array( 'MRM_Masterclass_Plugin', 'deactivate' ) );
+if ( class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
+	register_activation_hook( __FILE__, array( 'LowBrass_MRM_Masterclass_Plugin', 'activate' ) );
+	register_deactivation_hook( __FILE__, array( 'LowBrass_MRM_Masterclass_Plugin', 'deactivate' ) );
 
 	try {
-		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
-			mrm_lowbrass_masterclass_emergency_file_log(
-				'Attempting to instantiate MRM_Masterclass_Plugin through isolated Masterclass bootstrap.',
+		if ( function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
+			mrm_masterclass_emergency_file_log(
+				'Attempting to instantiate LowBrass_MRM_Masterclass_Plugin through isolated Masterclass bootstrap.',
 				array(
 					'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
 					'is_admin'    => is_admin() ? 1 : 0,
@@ -2964,9 +2964,9 @@ if ( class_exists( 'MRM_Masterclass_Plugin', false ) ) {
 
 		mrm_lowbrass_masterclass_plugin_instance();
 
-		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
-			mrm_lowbrass_masterclass_emergency_file_log(
-				'MRM_Masterclass_Plugin instantiated successfully through isolated Masterclass bootstrap.',
+		if ( function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
+			mrm_masterclass_emergency_file_log(
+				'LowBrass_MRM_Masterclass_Plugin instantiated successfully through isolated Masterclass bootstrap.',
 				array(
 					'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
 					'is_admin'    => is_admin() ? 1 : 0,
@@ -2974,9 +2974,9 @@ if ( class_exists( 'MRM_Masterclass_Plugin', false ) ) {
 			);
 		}
 	} catch ( Throwable $e ) {
-		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
-			mrm_lowbrass_masterclass_emergency_file_log(
-				'MRM_Masterclass_Plugin instantiation failed safely.',
+		if ( function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
+			mrm_masterclass_emergency_file_log(
+				'LowBrass_MRM_Masterclass_Plugin instantiation failed safely.',
 				array(
 					'message'     => $e->getMessage(),
 					'file'        => $e->getFile(),
