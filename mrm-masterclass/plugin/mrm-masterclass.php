@@ -174,6 +174,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
+	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_admin_visibility_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'mrm_mc_log_init_checkpoint', 0, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_loaded', 'mrm_mc_log_wp_loaded_checkpoint', 999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'mrm_mc_log_template_redirect_checkpoint', 0, 0 );
@@ -2011,6 +2012,35 @@ public function maybe_render_masterclass_gate_page() {
 			'response' => 503,
 		)
 	);
+}
+
+public function mrm_mc_admin_visibility_css() {
+	if ( ! is_admin() ) {
+		return;
+	}
+
+	$page = isset( $_GET['page'] ) ? sanitize_text_field( wp_unslash( $_GET['page'] ) ) : '';
+
+	if ( 0 !== strpos( $page, 'mrm-masterclass' ) ) {
+		return;
+	}
+
+	echo '<style id="mrm-masterclass-admin-visibility-css">
+		.mrm-masterclass-admin-hidden {
+			display: none !important;
+		}
+		.mrm-masterclass-admin-card {
+			background: #fff;
+			border: 1px solid #dcdcde;
+			border-radius: 12px;
+			padding: 16px;
+			margin: 16px 0;
+			box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+		}
+		.mrm-masterclass-admin-muted {
+			color: #646970;
+		}
+	</style>';
 }
 
 	public function register_admin_menu() {
