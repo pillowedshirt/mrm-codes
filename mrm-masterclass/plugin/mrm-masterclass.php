@@ -70,8 +70,8 @@ if ( ! defined( 'MRM_MASTERCLASS_FRONTEND_URL' ) ) {
 	define( 'MRM_MASTERCLASS_FRONTEND_URL', trailingslashit( MRM_MASTERCLASS_URL . 'frontend' ) );
 }
 
-if ( ! function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
-	function mrm_masterclass_emergency_file_log( $message, $context = array() ) {
+if ( ! function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+	function mrm_lowbrass_masterclass_emergency_file_log( $message, $context = array() ) {
 		if ( ! defined( 'WP_CONTENT_DIR' ) ) {
 			return;
 		}
@@ -123,7 +123,7 @@ if ( ! function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
 	}
 }
 
-mrm_masterclass_emergency_file_log(
+mrm_lowbrass_masterclass_emergency_file_log(
 	'Masterclass PHP file loaded before class instantiation.',
 	array(
 		'plugin_file' => defined( 'MRM_MASTERCLASS_FILE' ) ? MRM_MASTERCLASS_FILE : __FILE__,
@@ -561,8 +561,8 @@ public function mrm_mc_shutdown_fatal_error_logger() {
 		$record
 	);
 
-	if ( function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
-		mrm_masterclass_emergency_file_log(
+	if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+		mrm_lowbrass_masterclass_emergency_file_log(
 			'CRITICAL PHP ERROR detected by emergency shutdown logger.',
 			$record
 		);
@@ -2935,11 +2935,11 @@ public function render_activation_diagnostic_notice() {
 
 } // End class_exists guard for MRM_Masterclass_Plugin.
 
-if ( ! function_exists( 'mrm_masterclass_plugin' ) ) {
-	function mrm_masterclass_plugin() {
+if ( ! function_exists( 'mrm_lowbrass_masterclass_plugin_instance' ) ) {
+	function mrm_lowbrass_masterclass_plugin_instance() {
 		static $instance = null;
 
-		if ( ! $instance && class_exists( 'MRM_Masterclass_Plugin', false ) ) {
+		if ( null === $instance && class_exists( 'MRM_Masterclass_Plugin', false ) ) {
 			$instance = new MRM_Masterclass_Plugin();
 		}
 
@@ -2952,34 +2952,40 @@ if ( class_exists( 'MRM_Masterclass_Plugin', false ) ) {
 	register_deactivation_hook( __FILE__, array( 'MRM_Masterclass_Plugin', 'deactivate' ) );
 
 	try {
-		mrm_masterclass_emergency_file_log(
-			'Attempting to instantiate MRM_Masterclass_Plugin.',
-			array(
-				'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-				'is_admin' => is_admin() ? 1 : 0,
-			)
-		);
+		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+			mrm_lowbrass_masterclass_emergency_file_log(
+				'Attempting to instantiate MRM_Masterclass_Plugin through isolated Masterclass bootstrap.',
+				array(
+					'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+					'is_admin'    => is_admin() ? 1 : 0,
+				)
+			);
+		}
 
-		mrm_masterclass_plugin();
+		mrm_lowbrass_masterclass_plugin_instance();
 
-		mrm_masterclass_emergency_file_log(
-			'MRM_Masterclass_Plugin instantiated successfully.',
-			array(
-				'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-				'is_admin' => is_admin() ? 1 : 0,
-			)
-		);
+		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+			mrm_lowbrass_masterclass_emergency_file_log(
+				'MRM_Masterclass_Plugin instantiated successfully through isolated Masterclass bootstrap.',
+				array(
+					'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+					'is_admin'    => is_admin() ? 1 : 0,
+				)
+			);
+		}
 	} catch ( Throwable $e ) {
-		mrm_masterclass_emergency_file_log(
-			'MRM_Masterclass_Plugin instantiation failed safely.',
-			array(
-				'message' => $e->getMessage(),
-				'file' => $e->getFile(),
-				'line' => $e->getLine(),
-				'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-				'is_admin' => is_admin() ? 1 : 0,
-			)
-		);
+		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+			mrm_lowbrass_masterclass_emergency_file_log(
+				'MRM_Masterclass_Plugin instantiation failed safely.',
+				array(
+					'message'     => $e->getMessage(),
+					'file'        => $e->getFile(),
+					'line'        => $e->getLine(),
+					'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+					'is_admin'    => is_admin() ? 1 : 0,
+				)
+			);
+		}
 
 		if ( is_admin() && current_user_can( 'manage_options' ) ) {
 			add_action(
