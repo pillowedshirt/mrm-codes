@@ -184,6 +184,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 	if ( method_exists( $this, 'mrm_mc_render_critical_error_notice' ) ) {
 		$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'mrm_mc_render_critical_error_notice' );
+		$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_maybe_clear_stored_critical_error', 1, 0 );
 	}
 
 	if ( method_exists( $this, 'add_cron_schedule' ) ) {
@@ -636,6 +637,34 @@ public function mrm_mc_shutdown_fatal_error_logger() {
 }
 
 
+public function mrm_mc_maybe_clear_stored_critical_error() {
+	if ( ! is_admin() || ! current_user_can( 'manage_options' ) ) {
+		return;
+	}
+
+	$action = isset( $_GET['mrm_masterclass_action'] )
+		? sanitize_key( wp_unslash( $_GET['mrm_masterclass_action'] ) )
+		: '';
+
+	if ( 'clear_last_critical_error' !== $action ) {
+		return;
+	}
+
+	check_admin_referer( 'mrm_masterclass_clear_last_critical_error' );
+
+	delete_option( 'mrm_masterclass_last_critical_error' );
+
+	$redirect = remove_query_arg(
+		array(
+			'mrm_masterclass_action',
+			'_wpnonce',
+		)
+	);
+
+	wp_safe_redirect( $redirect );
+	exit;
+}
+
 public function mrm_mc_render_critical_error_notice() {
 	if ( ! is_admin() || ! current_user_can( 'manage_options' ) ) {
 		return;
@@ -647,23 +676,35 @@ public function mrm_mc_render_critical_error_notice() {
 		return;
 	}
 
-	echo '<div class="notice notice-error">';
-	echo '<p><strong>MRM Masterclass recorded a recent critical PHP error.</strong></p>';
-	echo '<p><strong>Message:</strong> ' . esc_html( $error['message'] ) . '</p>';
+	$timestamp = isset( $error['timestamp'] ) ? sanitize_text_field( (string) $error['timestamp'] ) : '';
+	$clear_url = wp_nonce_url(
+		add_query_arg(
+			array(
+				'mrm_masterclass_action' => 'clear_last_critical_error',
+			)
+		),
+		'mrm_masterclass_clear_last_critical_error'
+	);
+
+	echo '<div class="notice notice-warning">';
+	echo '<p><strong>MRM Masterclass has a stored critical PHP error notice.</strong></p>';
+	echo '<p>This notice may be from an earlier failed request. If the site/admin now loads and the newest <code>wp-content/masterclass-debug.log</code> entries do not show a new <code>CRITICAL PHP ERROR</code>, clear this stored notice.</p>';
+
+	echo '<p><strong>Stored message:</strong> ' . esc_html( $error['message'] ) . '</p>';
 
 	if ( ! empty( $error['file'] ) || ! empty( $error['line'] ) ) {
-		echo '<p><strong>Location:</strong> <code>' . esc_html( ( $error['file'] ?? '' ) . ':' . ( $error['line'] ?? '' ) ) . '</code></p>';
+		echo '<p><strong>Stored location:</strong> <code>' . esc_html( ( $error['file'] ?? '' ) . ':' . ( $error['line'] ?? '' ) ) . '</code></p>';
 	}
 
 	if ( ! empty( $error['request_uri'] ) ) {
-		echo '<p><strong>Request:</strong> <code>' . esc_html( $error['request_uri'] ) . '</code></p>';
+		echo '<p><strong>Stored request:</strong> <code>' . esc_html( $error['request_uri'] ) . '</code></p>';
 	}
 
-	if ( ! empty( $error['timestamp'] ) ) {
-		echo '<p><strong>Time:</strong> ' . esc_html( $error['timestamp'] ) . '</p>';
+	if ( '' !== $timestamp ) {
+		echo '<p><strong>Stored time:</strong> ' . esc_html( $timestamp ) . '</p>';
 	}
 
-	echo '<p>Check <code>wp-content/masterclass-debug.log</code> for the full diagnostic entry.</p>';
+	echo '<p><a class="button button-secondary" href="' . esc_url( $clear_url ) . '">Clear stored Masterclass critical error notice</a></p>';
 	echo '</div>';
 }
 
