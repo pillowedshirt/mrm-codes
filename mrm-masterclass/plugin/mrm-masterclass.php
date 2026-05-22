@@ -174,8 +174,8 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
-	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_remove_stale_admin_visibility_css_hooks', 1, 0 );
-	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_remove_stale_admin_visibility_css_hooks', 1, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_admin_visibility_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'mrm_mc_log_init_checkpoint', 0, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_loaded', 'mrm_mc_log_wp_loaded_checkpoint', 999, 0 );
@@ -2017,26 +2017,78 @@ public function maybe_render_masterclass_gate_page() {
 }
 
 public function mrm_mc_remove_stale_admin_visibility_css_hooks() {
-	/*
-	 * Emergency cleanup:
-	 * Older versions of this plugin registered admin_head using the old class
-	 * name MRM_Masterclass_Plugin. If that callback points to a private method,
-	 * WordPress fatals during admin-header.php.
-	 *
-	 * This cleanup is Masterclass-only and removes stale callbacks before
-	 * admin_head runs.
-	 */
-	$old_class_callback = array( 'MRM_Masterclass_Plugin', 'mrm_mc_admin_visibility_css' );
-	$new_class_callback = array( 'LowBrass_MRM_Masterclass_Plugin', 'mrm_mc_admin_visibility_css' );
+	global $wp_filter;
 
-	for ( $priority = 0; $priority <= 999; $priority++ ) {
-		remove_action( 'admin_head', $old_class_callback, $priority );
-		remove_action( 'admin_head', $new_class_callback, $priority );
+	$removed = 0;
+
+	/*
+	 * Remove known stale callback forms first.
+	 */
+	$known_callbacks = array(
+		array( 'MRM_Masterclass_Plugin', 'mrm_mc_admin_visibility_css' ),
+		array( 'LowBrass_MRM_Masterclass_Plugin', 'mrm_mc_admin_visibility_css' ),
+	);
+
+	foreach ( $known_callbacks as $callback ) {
+		for ( $priority = -999999; $priority <= 999999; $priority++ ) {
+			if ( remove_action( 'admin_head', $callback, $priority ) ) {
+				$removed++;
+			}
+		}
+	}
+
+	/*
+	 * Strong cleanup:
+	 * Some stale callbacks may have been registered at unusual priorities or
+	 * with class/object callback shapes. Walk the WP_Hook structure directly
+	 * and remove any admin_head callback that targets mrm_mc_admin_visibility_css
+	 * unless it is this exact current object instance.
+	 */
+	if ( isset( $wp_filter['admin_head'] ) && $wp_filter['admin_head'] instanceof WP_Hook ) {
+		foreach ( $wp_filter['admin_head']->callbacks as $priority => $callbacks ) {
+			if ( ! is_array( $callbacks ) ) {
+				continue;
+			}
+
+			foreach ( $callbacks as $callback_id => $callback_data ) {
+				if ( empty( $callback_data['function'] ) ) {
+					continue;
+				}
+
+				$function = $callback_data['function'];
+				$remove   = false;
+
+				if ( is_array( $function ) && isset( $function[0], $function[1] ) ) {
+					$target = $function[0];
+					$method = (string) $function[1];
+
+					if ( 'mrm_mc_admin_visibility_css' === $method ) {
+						if ( is_string( $target ) ) {
+							$remove = true;
+						} elseif ( is_object( $target ) && $target !== $this ) {
+							$remove = true;
+						}
+					}
+				} elseif ( is_string( $function ) && false !== strpos( $function, 'mrm_mc_admin_visibility_css' ) ) {
+					$remove = true;
+				}
+
+				if ( $remove ) {
+					unset( $wp_filter['admin_head']->callbacks[ $priority ][ $callback_id ] );
+					$removed++;
+				}
+			}
+
+			if ( empty( $wp_filter['admin_head']->callbacks[ $priority ] ) ) {
+				unset( $wp_filter['admin_head']->callbacks[ $priority ] );
+			}
+		}
 	}
 
 	$this->mrm_mc_debug_log(
 		'Removed stale Masterclass admin_head visibility CSS callbacks.',
 		array(
+			'removed'     => $removed,
 			'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
 			'is_admin'    => is_admin() ? 1 : 0,
 		)
@@ -3046,13 +3098,52 @@ if ( ! function_exists( 'mrm_lowbrass_masterclass_plugin_instance' ) ) {
 	}
 }
 
+if ( is_admin() ) {
+	add_action(
+		'admin_head',
+		function() {
+			global $wp_filter;
+
+			if ( ! isset( $wp_filter['admin_head'] ) || ! $wp_filter['admin_head'] instanceof WP_Hook ) {
+				return;
+			}
+
+			foreach ( $wp_filter['admin_head']->callbacks as $priority => $callbacks ) {
+				if ( ! is_array( $callbacks ) ) {
+					continue;
+				}
+
+				foreach ( $callbacks as $callback_id => $callback_data ) {
+					if ( empty( $callback_data['function'] ) ) {
+						continue;
+					}
+
+					$function = $callback_data['function'];
+
+					if ( is_array( $function ) && isset( $function[1] ) && 'mrm_mc_admin_visibility_css' === (string) $function[1] ) {
+						if ( is_string( $function[0] ) && in_array( $function[0], array( 'MRM_Masterclass_Plugin', 'LowBrass_MRM_Masterclass_Plugin' ), true ) ) {
+							unset( $wp_filter['admin_head']->callbacks[ $priority ][ $callback_id ] );
+						}
+					}
+				}
+
+				if ( empty( $wp_filter['admin_head']->callbacks[ $priority ] ) ) {
+					unset( $wp_filter['admin_head']->callbacks[ $priority ] );
+				}
+			}
+		},
+		-1000000,
+		0
+	);
+}
+
 if ( class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 	register_activation_hook( __FILE__, array( 'LowBrass_MRM_Masterclass_Plugin', 'activate' ) );
 	register_deactivation_hook( __FILE__, array( 'LowBrass_MRM_Masterclass_Plugin', 'deactivate' ) );
 
 	try {
-		if ( function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
-			mrm_masterclass_emergency_file_log(
+		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+			mrm_lowbrass_masterclass_emergency_file_log(
 				'Attempting to instantiate LowBrass_MRM_Masterclass_Plugin through isolated Masterclass bootstrap.',
 				array(
 					'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
@@ -3063,8 +3154,8 @@ if ( class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 
 		mrm_lowbrass_masterclass_plugin_instance();
 
-		if ( function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
-			mrm_masterclass_emergency_file_log(
+		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+			mrm_lowbrass_masterclass_emergency_file_log(
 				'LowBrass_MRM_Masterclass_Plugin instantiated successfully through isolated Masterclass bootstrap.',
 				array(
 					'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
@@ -3073,8 +3164,8 @@ if ( class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 			);
 		}
 	} catch ( Throwable $e ) {
-		if ( function_exists( 'mrm_masterclass_emergency_file_log' ) ) {
-			mrm_masterclass_emergency_file_log(
+		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+			mrm_lowbrass_masterclass_emergency_file_log(
 				'LowBrass_MRM_Masterclass_Plugin instantiation failed safely.',
 				array(
 					'message'     => $e->getMessage(),
