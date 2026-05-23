@@ -2008,14 +2008,35 @@ private function mrm_mc_google_patch_event_attendees( $event, $emails ) {
 }
 
 private function mrm_mc_google_cancel_event( $google_event_id ) {
-	$this->mrm_mc_debug_log(
-		'Google event cancellation safely skipped during stabilization.',
-		array(
-			'google_event_id' => $google_event_id ? '[present]' : '[missing]',
-		)
-	);
+	$settings    = $this->settings();
+	$calendar_id = sanitize_text_field( $settings['masterclass_calendar_id'] ?? '' );
 
-	return false;
+	$google_event_id = sanitize_text_field( $google_event_id );
+
+	if ( '' === $calendar_id || '' === $google_event_id ) {
+		return new WP_Error(
+			'google_cancel_missing_data',
+			'Google Calendar cancellation skipped because the calendar ID or Google event ID is missing.'
+		);
+	}
+
+	$url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( $calendar_id ) . '/events/' . rawurlencode( $google_event_id ) . '?sendUpdates=all';
+
+	$result = $this->mrm_mc_google_calendar_request( 'DELETE', $url, null );
+
+	if ( is_wp_error( $result ) ) {
+		$this->mrm_mc_debug_log(
+			'Google Calendar cancellation failed.',
+			array(
+				'google_event_id' => '[present]',
+				'error'           => $result->get_error_message(),
+			)
+		);
+
+		return $result;
+	}
+
+	return true;
 }
 private function mrm_mc_stripe_request( $method, $endpoint, $body = array() ) {
 	$sk = $this->mrm_mc_get_stripe_secret_key();
@@ -2412,13 +2433,106 @@ public function handle_save_event() {
 		)
 	);
 
-	/*
-	 * Google Calendar creation is added in Section 6.
-	 * For now, local database save is complete.
-	 */
+	$event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$events_table} WHERE id = %d",
+			$event_id
+		)
+	);
+
+	if ( ! $event ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass event saved locally but could not be reloaded for Google creation.',
+			array( 'event_id' => $event_id )
+		);
+
+		$this->mrm_mc_admin_notice_redirect(
+			'mrm-masterclass-events',
+			'event_saved_google_reload_failed',
+			array( 'event_id' => $event_id )
+		);
+	}
+
+	$settings    = $this->settings();
+	$calendar_id = sanitize_text_field( $settings['masterclass_calendar_id'] ?? '' );
+
+	if ( '' === $calendar_id ) {
+		$wpdb->update(
+			$events_table,
+			array(
+				'google_last_error' => 'Masterclass Google Calendar ID is missing.',
+				'updated_at'        => $this->now(),
+			),
+			array( 'id' => $event_id )
+		);
+
+		$this->mrm_mc_debug_log(
+			'Masterclass event saved locally but Google Calendar ID is missing.',
+			array( 'event_id' => $event_id )
+		);
+
+		$this->mrm_mc_admin_notice_redirect(
+			'mrm-masterclass-events',
+			'event_saved_google_missing_calendar',
+			array( 'event_id' => $event_id )
+		);
+	}
+
+	$google_result = $this->mrm_mc_google_insert_event( $event, sanitize_email( $presenter->email ?? '' ) );
+
+	if ( is_wp_error( $google_result ) ) {
+		$error_message = $google_result->get_error_message();
+
+		$wpdb->update(
+			$events_table,
+			array(
+				'google_last_error' => $error_message,
+				'updated_at'        => $this->now(),
+			),
+			array( 'id' => $event_id )
+		);
+
+		$this->mrm_mc_debug_log(
+			'Masterclass event saved locally but Google Calendar creation failed.',
+			array(
+				'event_id' => $event_id,
+				'error'    => $error_message,
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect(
+			'mrm-masterclass-events',
+			'event_saved_google_failed',
+			array( 'event_id' => $event_id )
+		);
+	}
+
+	$google_event_id = sanitize_text_field( $google_result['id'] ?? '' );
+	$google_meet_url = esc_url_raw( $google_result['meet_url'] ?? '' );
+
+	$wpdb->update(
+		$events_table,
+		array(
+			'google_event_id'   => $google_event_id,
+			'google_meet_url'   => $google_meet_url,
+			'google_last_error' => '',
+			'updated_at'        => $this->now(),
+		),
+		array( 'id' => $event_id )
+	);
+
+	$this->mrm_mc_debug_log(
+		'Masterclass event saved locally and Google Calendar event created.',
+		array(
+			'event_id'        => $event_id,
+			'google_event_id' => $google_event_id ? '[present]' : '[missing]',
+			'google_meet_url' => $google_meet_url ? '[present]' : '[missing]',
+		)
+	);
+
 	$this->mrm_mc_admin_notice_redirect(
 		'mrm-masterclass-events',
-		'event_saved_local',
+		'event_saved_google_success',
 		array( 'event_id' => $event_id )
 	);
 }
@@ -3214,7 +3328,11 @@ public function render_events_page() {
 		'event_price_invalid'     => array( 'error', 'Masterclass event could not be saved because the price must be greater than zero.' ),
 		'event_presenter_missing' => array( 'error', 'Masterclass event could not be saved because the selected presenter could not be found.' ),
 		'event_save_failed'       => array( 'error', 'Masterclass event could not be saved because of a database error. Check wp-content/masterclass-debug.log.' ),
-		'event_saved_local'       => array( 'success', 'Masterclass event saved locally.' ),
+		'event_saved_local'                  => array( 'success', 'Masterclass event saved locally.' ),
+		'event_saved_google_reload_failed'    => array( 'warning', 'Masterclass event saved locally, but it could not be reloaded for Google Calendar creation. Check wp-content/masterclass-debug.log.' ),
+		'event_saved_google_missing_calendar' => array( 'warning', 'Masterclass event saved locally, but no Masterclass Google Calendar ID is configured.' ),
+		'event_saved_google_failed'           => array( 'warning', 'Masterclass event saved locally, but Google Calendar / Google Meet creation needs attention. Check wp-content/masterclass-debug.log.' ),
+		'event_saved_google_success'          => array( 'success', 'Masterclass event saved and Google Calendar / Google Meet creation succeeded.' ),
 		'settings_saved'          => array( 'success', 'Calendar settings saved.' ),
 	);
 
