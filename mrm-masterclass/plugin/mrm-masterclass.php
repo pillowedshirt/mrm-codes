@@ -1060,6 +1060,350 @@ public function mrm_mc_render_critical_error_notice() {
 	public function add_cron_schedule($s){$s['mrm_masterclass_15min']=array('interval'=>900,'display'=>'Every 15 Minutes'); return $s;}
 	private function now(){return gmdate('Y-m-d H:i:s');}
 
+/**
+ * Masterclass production helper layer.
+ * Add this block inside LowBrass_MRM_Masterclass_Plugin, immediately after private function now().
+ */
+private function mrm_mc_admin_notice_redirect( $page, $code, $extra = array() ) {
+	$args = array_merge(
+		array( 'mrm_mc_notice' => sanitize_key( $code ) ),
+		is_array( $extra ) ? $extra : array()
+	);
+
+	$this->mrm_mc_safe_admin_redirect( $page, $args );
+}
+
+private function mrm_mc_clean_text( $value ) {
+	return sanitize_text_field( wp_unslash( $value ?? '' ) );
+}
+
+private function mrm_mc_clean_email( $value ) {
+	return sanitize_email( wp_unslash( $value ?? '' ) );
+}
+
+private function mrm_mc_clean_html( $value ) {
+	return wp_kses_post( wp_unslash( $value ?? '' ) );
+}
+
+private function mrm_mc_bool_post( $key ) {
+	return ! empty( $_POST[ $key ] ) ? 1 : 0;
+}
+
+private function mrm_mc_selected_instruments_from_post() {
+	$raw = isset( $_POST['instruments'] ) && is_array( $_POST['instruments'] )
+		? wp_unslash( $_POST['instruments'] )
+		: array();
+
+	$out = array();
+
+	foreach ( $raw as $item ) {
+		$item = sanitize_key( $item );
+
+		if ( '' !== $item ) {
+			$out[] = $item;
+		}
+	}
+
+	return wp_json_encode( array_values( array_unique( $out ) ) );
+}
+
+private function mrm_mc_datetime_from_local( $value ) {
+	$value = sanitize_text_field( wp_unslash( $value ?? '' ) );
+
+	if ( '' === $value ) {
+		return '';
+	}
+
+	$value = str_replace( 'T', ' ', $value );
+
+	if ( preg_match( '/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/', $value ) ) {
+		$value .= ':00';
+	}
+
+	return $value;
+}
+
+private function mrm_mc_get_presenter( $presenter_id ) {
+	global $wpdb;
+
+	$table = $this->t( 'mrm_masterclass_presenters' );
+
+	if ( ! $this->mrm_mc_table_exists( $table ) ) {
+		return null;
+	}
+
+	return $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$table} WHERE id = %d",
+			absint( $presenter_id )
+		)
+	);
+}
+
+private function mrm_mc_get_event( $event_id ) {
+	global $wpdb;
+
+	$table = $this->t( 'mrm_masterclass_events' );
+
+	if ( ! $this->mrm_mc_table_exists( $table ) ) {
+		return null;
+	}
+
+	return $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$table} WHERE id = %d",
+			absint( $event_id )
+		)
+	);
+}
+
+private function mrm_mc_paid_count_for_event( $event_id ) {
+	global $wpdb;
+
+	$table = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( ! $this->mrm_mc_table_exists( $table ) ) {
+		return 0;
+	}
+
+	return absint(
+		$wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$table} WHERE event_id = %d AND payment_status = 'paid'",
+				absint( $event_id )
+			)
+		)
+	);
+}
+
+private function mrm_mc_available_seats_for_event( $event ) {
+	if ( ! is_object( $event ) ) {
+		return 0;
+	}
+
+	return max( 0, absint( $event->capacity ) - $this->mrm_mc_paid_count_for_event( $event->id ) );
+}
+
+private function mrm_mc_gate_url_for_token( $token ) {
+	return home_url( '/?mrm_masterclass_gate=' . rawurlencode( $token ) );
+}
+
+private function mrm_mc_make_gate_token_pair() {
+	$token = wp_generate_password( 48, false, false );
+
+	return array(
+		'token' => $token,
+		'hash'  => hash( 'sha256', $token ),
+		'url'   => $this->mrm_mc_gate_url_for_token( $token ),
+	);
+}
+
+private function mrm_mc_estimated_stripe_fee_cents( $amount_cents ) {
+	$settings = $this->settings();
+
+	$percent = isset( $settings['stripe_fee_estimate_percent'] )
+		? (float) $settings['stripe_fee_estimate_percent']
+		: 2.9;
+
+	$fixed = isset( $settings['stripe_fee_estimate_fixed'] )
+		? absint( $settings['stripe_fee_estimate_fixed'] )
+		: 30;
+
+	return max( 0, (int) round( ( absint( $amount_cents ) * ( $percent / 100 ) ) + $fixed ) );
+}
+
+private function mrm_mc_terms_snapshot() {
+	$settings = $this->settings();
+
+	return array(
+		'version'  => sanitize_text_field( $settings['terms_version'] ?? 'v1' ),
+		'accepted' => true,
+		'text'     => 'Masterclass purchase terms accepted at checkout. Access is provided through a protected gate link. Cancellation/refund policy follows the event cancellation rules stored in the Masterclass plugin.',
+		'time'     => gmdate( 'c' ),
+	);
+}
+
+private function mrm_mc_public_presenter_page_url( $presenter_page_id ) {
+	$presenter_page_id = absint( $presenter_page_id );
+
+	return $presenter_page_id > 0 ? get_permalink( $presenter_page_id ) : '';
+}
+
+private function mrm_mc_email_template( $heading, $content_html ) {
+	return '<div style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;color:#111;">'
+		. '<div style="max-width:680px;margin:0 auto;padding:28px 16px;">'
+		. '<div style="background:#fff;border:1px solid #ddd;border-radius:18px;padding:28px;box-shadow:0 8px 28px rgba(0,0,0,.08);">'
+		. '<div style="text-align:center;margin-bottom:22px;"><strong style="font-size:20px;letter-spacing:.04em;">Low Brass Lessons</strong></div>'
+		. '<h1 style="font-family:Georgia,serif;font-size:30px;line-height:1.1;margin:0 0 18px;">' . esc_html( $heading ) . '</h1>'
+		. $content_html
+		. '</div></div></div>';
+}
+
+private function mrm_mc_send_email_recorded( $type, $to, $subject, $body, $event_id = null, $registration_id = null ) {
+	global $wpdb;
+
+	$table    = $this->t( 'mrm_masterclass_email_log' );
+	$settings = $this->settings();
+
+	$headers = array(
+		'Content-Type: text/html; charset=UTF-8',
+		'From: Low Brass Lessons <' . sanitize_email( $settings['from_email'] ?? 'no-reply@lowbrass-lessons.com' ) . '>',
+	);
+
+	$status = 'sent';
+	$error  = '';
+
+	try {
+		$sent = wp_mail(
+			sanitize_email( $to ),
+			sanitize_text_field( $subject ),
+			$body,
+			$headers
+		);
+
+		if ( ! $sent ) {
+			$status = 'failed';
+			$error  = 'wp_mail returned false.';
+		}
+	} catch ( \Throwable $e ) {
+		$status = 'failed';
+		$error  = $e->getMessage();
+	}
+
+	if ( $this->mrm_mc_table_exists( $table ) ) {
+		$wpdb->insert(
+			$table,
+			array(
+				'event_id'        => $event_id ? absint( $event_id ) : null,
+				'registration_id' => $registration_id ? absint( $registration_id ) : null,
+				'recipient_email' => sanitize_email( $to ),
+				'email_type'      => sanitize_key( $type ),
+				'subject'         => sanitize_text_field( $subject ),
+				'status'          => $status,
+				'error_message'   => $error,
+				'sent_at'         => $this->now(),
+			)
+		);
+	}
+
+	if ( 'failed' === $status ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass email failed.',
+			array(
+				'type'            => $type,
+				'event_id'        => $event_id,
+				'registration_id' => $registration_id,
+				'error'           => $error,
+			)
+		);
+	}
+
+	return 'sent' === $status;
+}
+
+private function mrm_mc_confirmation_email_body( $event, $presenter, $registration ) {
+	$gate = esc_url( $registration->gate_url ?? '' );
+
+	$content = '<p>Your masterclass registration is confirmed.</p>'
+		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '<br>'
+		. '<strong>Date/time:</strong> ' . esc_html( $event->start_time . ' ' . $event->timezone ) . '<br>'
+		. '<strong>Presenter:</strong> ' . esc_html( $presenter->name ?? 'To be announced' ) . '</p>'
+		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open protected access link</a></p>'
+		. '<p>This gate link reveals the Google Meet link only during the allowed event access window.</p>';
+
+	return $this->mrm_mc_email_template( 'Masterclass Registration Confirmed', $content );
+}
+
+private function mrm_mc_send_confirmation_for_registration( $registration_id ) {
+	global $wpdb;
+
+	$regs       = $this->t( 'mrm_masterclass_registrations' );
+	$events     = $this->t( 'mrm_masterclass_events' );
+	$presenters = $this->t( 'mrm_masterclass_presenters' );
+
+	$row = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$regs} WHERE id = %d",
+			absint( $registration_id )
+		)
+	);
+
+	if ( ! $row ) {
+		return false;
+	}
+
+	$event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$events} WHERE id = %d",
+			absint( $row->event_id )
+		)
+	);
+
+	$presenter = $event
+		? $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT * FROM {$presenters} WHERE id = %d",
+				absint( $event->presenter_id )
+			)
+		)
+		: null;
+
+	if ( ! $event ) {
+		return false;
+	}
+
+	$subject = 'Purchase Confirmation — ' . $event->title;
+	$body    = $this->mrm_mc_confirmation_email_body( $event, $presenter, $row );
+
+	$sent = $this->mrm_mc_send_email_recorded(
+		'confirmation',
+		$row->email,
+		$subject,
+		$body,
+		$event->id,
+		$row->id
+	);
+
+	if ( $sent ) {
+		$wpdb->update(
+			$regs,
+			array(
+				'confirmation_sent'    => 1,
+				'confirmation_sent_at' => $this->now(),
+				'updated_at'           => $this->now(),
+			),
+			array( 'id' => $row->id )
+		);
+	}
+
+	return $sent;
+}
+
+private function mrm_mc_public_event_payload( $row ) {
+	if ( ! is_object( $row ) ) {
+		return array();
+	}
+
+	return array(
+		'id'                 => absint( $row->id ),
+		'title'              => sanitize_text_field( $row->title ),
+		'description_html'   => wp_kses_post( $row->description ?? '' ),
+		'presenter_name'     => sanitize_text_field( $row->presenter_name ?? '' ),
+		'presenter_page_url' => esc_url_raw( $row->presenter_page_url ?? '' ),
+		'start_time'         => sanitize_text_field( $row->start_time ),
+		'end_time'           => sanitize_text_field( $row->end_time ),
+		'timezone'           => sanitize_text_field( $row->timezone ),
+		'price_cents'        => absint( $row->price_cents ),
+		'capacity'           => absint( $row->capacity ),
+		'available_seats'    => isset( $row->available_seats )
+			? max( 0, (int) $row->available_seats )
+			: $this->mrm_mc_available_seats_for_event( $row ),
+		'registration_open'  => ! empty( $row->registration_open ) ? 1 : 0,
+		'status'             => sanitize_key( $row->status ),
+	);
+}
+
+
 
 private function mrm_mc_debug_log( $message, $context = array() ) {
 	if ( ! defined( 'WP_CONTENT_DIR' ) ) {
