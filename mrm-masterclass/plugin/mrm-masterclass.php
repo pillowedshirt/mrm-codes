@@ -2151,21 +2151,85 @@ public function handle_save_presenter() {
 	$this->must_admin();
 	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_save_presenter' );
 
-	$this->mrm_mc_debug_log(
-		'Safe presenter save fallback reached. Full presenter save implementation is not installed yet.',
-		array(
-			'action'      => 'mrm_masterclass_save_presenter',
-			'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-		)
+	global $wpdb;
+
+	$table = $this->t( 'mrm_masterclass_presenters' );
+
+	if ( ! $this->mrm_mc_table_exists( $table ) ) {
+		$this->mrm_mc_debug_log(
+			'Presenter save failed because table is missing.',
+			array( 'table' => $table )
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_table_missing' );
+	}
+
+	$id    = absint( $_POST['id'] ?? 0 );
+	$name  = $this->mrm_mc_clean_text( $_POST['name'] ?? '' );
+	$email = $this->mrm_mc_clean_email( $_POST['email'] ?? '' );
+
+	if ( '' === $name || ! is_email( $email ) ) {
+		$this->mrm_mc_admin_notice_redirect(
+			'mrm-masterclass-presenters',
+			'presenter_validation_failed',
+			$id ? array( 'edit' => $id ) : array()
+		);
+	}
+
+	$data = array(
+		'name'                        => $name,
+		'email'                       => $email,
+		'city'                        => $this->mrm_mc_clean_text( $_POST['city'] ?? '' ),
+		'state'                       => strtoupper( substr( $this->mrm_mc_clean_text( $_POST['state'] ?? '' ), 0, 2 ) ),
+		'address'                     => $this->mrm_mc_clean_text( $_POST['address'] ?? '' ),
+		'zip_code'                    => $this->mrm_mc_clean_text( $_POST['zip_code'] ?? '' ),
+		'timezone'                    => $this->mrm_mc_clean_text( $_POST['timezone'] ?? 'America/Phoenix' ),
+		'stripe_connected_account_id' => $this->mrm_mc_clean_text( $_POST['stripe_connected_account_id'] ?? '' ),
+		'hire_date'                   => $this->mrm_mc_clean_text( $_POST['hire_date'] ?? '' ),
+		'profile_image_url'           => esc_url_raw( wp_unslash( $_POST['profile_image_url'] ?? '' ) ),
+		'short_description'           => $this->mrm_mc_clean_html( $_POST['short_description'] ?? '' ),
+		'long_description'            => $this->mrm_mc_clean_html( $_POST['long_description'] ?? '' ),
+		'bio'                         => $this->mrm_mc_clean_html( $_POST['bio'] ?? '' ),
+		'instruments'                 => $this->mrm_mc_selected_instruments_from_post(),
+		'updated_at'                  => $this->now(),
 	);
 
-	$this->mrm_mc_safe_admin_redirect(
+	if ( $id > 0 ) {
+		$result = $wpdb->update(
+			$table,
+			$data,
+			array( 'id' => $id )
+		);
+	} else {
+		$data['created_at'] = $this->now();
+
+		$result = $wpdb->insert(
+			$table,
+			$data
+		);
+
+		$id = $result ? absint( $wpdb->insert_id ) : 0;
+	}
+
+	if ( false === $result ) {
+		$this->mrm_mc_debug_log(
+			'Presenter save database error.',
+			array(
+				'presenter_id' => $id,
+				'db_error'     => $wpdb->last_error,
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_save_failed' );
+	}
+
+	$this->mrm_mc_admin_notice_redirect(
 		'mrm-masterclass-presenters',
-		array(
-			'mrm_mc_notice' => 'presenter_save_fallback_reached',
-		)
+		'presenter_saved',
+		array( 'edit' => $id )
 	);
 }
+
 
 public function handle_delete_presenter() {
 	$this->must_admin();
@@ -2766,8 +2830,17 @@ public function render_presenters_page() {
 	echo '<h1>Masterclass Presenters</h1>';
 	echo '<p>Create and manage presenters separately from scheduler instructors. These profiles feed event assignment, payout reporting, and tax profiles.</p>';
 
-	if ( isset( $_GET['saved'] ) ) {
-		echo '<div class="notice notice-success is-dismissible"><p>Presenter saved.</p></div>';
+	$notice = isset( $_GET['mrm_mc_notice'] ) ? sanitize_key( wp_unslash( $_GET['mrm_mc_notice'] ) ) : '';
+	$notice_map = array(
+		'presenter_table_missing'     => array( 'error', 'The presenter table is missing. Reactivate the Masterclass plugin to run the database installer.' ),
+		'presenter_validation_failed' => array( 'error', 'Presenter could not be saved. Please enter a presenter name and valid email address.' ),
+		'presenter_save_failed'       => array( 'error', 'Presenter could not be saved because of a database error. Check wp-content/masterclass-debug.log.' ),
+		'presenter_saved'             => array( 'success', 'Presenter saved successfully.' ),
+	);
+
+	if ( isset( $notice_map[ $notice ] ) ) {
+		list( $level, $message ) = $notice_map[ $notice ];
+		echo '<div class="notice notice-' . esc_attr( $level ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
 	}
 
 	echo '<div style="background:#fff;border:1px solid #d7c7ad;border-radius:16px;padding:20px;margin:18px 0;">';
