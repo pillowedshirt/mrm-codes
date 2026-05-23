@@ -76,7 +76,7 @@ if ( ! function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
 			return;
 		}
 
-		$file = trailingslashit( WP_CONTENT_DIR ) . 'masterclass-emergency.log';
+		$file = trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log';
 
 		$safe_context = array();
 
@@ -177,10 +177,10 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_admin_visibility_css', 20, 0 );
-	$this->mrm_mc_add_action_if_method_exists( 'init', 'mrm_mc_log_init_checkpoint', 0, 0 );
-	$this->mrm_mc_add_action_if_method_exists( 'wp_loaded', 'mrm_mc_log_wp_loaded_checkpoint', 999, 0 );
-	$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'mrm_mc_log_template_redirect_checkpoint', 0, 0 );
-	$this->mrm_mc_add_action_if_method_exists( 'shutdown', 'mrm_mc_log_shutdown_action_checkpoint', 999, 0 );
+	/*
+	 * Launch-mode logging:
+	 * Keep fatal/runtime/admin action logs, but do not log every normal WordPress lifecycle checkpoint.
+	 */
 
 	if ( method_exists( $this, 'mrm_mc_render_critical_error_notice' ) ) {
 		$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'mrm_mc_render_critical_error_notice' );
@@ -1068,29 +1068,64 @@ private function mrm_mc_debug_log( $message, $context = array() ) {
 
 	$file = trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log';
 
+	$message = sanitize_text_field( (string) $message );
+
+	$noise_patterns = array(
+		'/constructor started safely/i',
+		'/diagnostic checkpoint/i',
+		'/wp_loaded/i',
+		'/template_redirect/i',
+		'/wordpress_shutdown_action/i',
+		'/admin diagnostic checkpoint loaded/i',
+	);
+
+	foreach ( $noise_patterns as $pattern ) {
+		if ( preg_match( $pattern, $message ) ) {
+			return;
+		}
+	}
+
 	$safe_context = array();
 
 	if ( is_array( $context ) ) {
 		foreach ( $context as $key => $value ) {
 			$key = sanitize_key( (string) $key );
 
-			if ( preg_match( '/secret|token|password|private|key|tin|ssn|ein/i', $key ) ) {
+			if ( preg_match( '/secret|token|password|private|authorization|cookie|nonce|client_secret|payment_secret|key|tin|ssn|ein/i', $key ) ) {
 				$safe_context[ $key ] = '[redacted]';
 				continue;
 			}
 
 			if ( is_scalar( $value ) || null === $value ) {
+				$value = (string) $value;
+
+				if ( preg_match( '/sk_live_|sk_test_|pk_live_|pk_test_|whsec_|-----BEGIN|Bearer\s+/i', $value ) ) {
+					$safe_context[ $key ] = '[redacted]';
+					continue;
+				}
+
+				if ( strlen( $value ) > 700 ) {
+					$value = substr( $value, 0, 700 ) . '...[truncated]';
+				}
+
 				$safe_context[ $key ] = $value;
+			} elseif ( is_array( $value ) ) {
+				$safe_context[ $key ] = '[array:' . count( $value ) . ']';
+			} elseif ( is_object( $value ) ) {
+				$safe_context[ $key ] = '[object:' . get_class( $value ) . ']';
 			} else {
 				$safe_context[ $key ] = '[non-scalar]';
 			}
 		}
 	}
 
-	$line = '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] ' . sanitize_text_field( (string) $message );
+	$line = '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] ' . $message;
 
-	if ( $safe_context ) {
-		$line .= ' | ' . wp_json_encode( $safe_context );
+	if ( ! empty( $safe_context ) ) {
+		$encoded = wp_json_encode( $safe_context );
+		if ( false !== $encoded ) {
+			$line .= ' | ' . $encoded;
+		}
 	}
 
 	$line .= PHP_EOL;
