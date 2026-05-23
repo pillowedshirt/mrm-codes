@@ -2526,7 +2526,7 @@ public function mrm_mc_admin_visibility_css() {
 		return;
 	}
 
-	echo '<style id="mrm-masterclass-admin-visibility-css">
+echo '<style id="mrm-masterclass-admin-visibility-css">
 		.mrm-masterclass-admin-hidden {
 			display: none !important;
 		}
@@ -2541,6 +2541,43 @@ public function mrm_mc_admin_visibility_css() {
 		.mrm-masterclass-admin-muted {
 			color: #646970;
 		}
+		.mrm-masterclass-admin .description {
+			color: #6b5f4f;
+			max-width: 860px;
+		}
+
+		.mrm-masterclass-card-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+			gap: 18px;
+			margin-top: 22px;
+		}
+
+		.mrm-masterclass-admin .mrm-card,
+		.mrm-masterclass-admin .mrm-masterclass-card {
+			background: #fff;
+			border: 1px solid #d7c7ad;
+			border-radius: 18px;
+			padding: 22px;
+			box-shadow: 0 8px 22px rgba(0,0,0,.06);
+		}
+
+		.mrm-masterclass-admin table.widefat {
+			border-radius: 12px;
+			overflow: hidden;
+		}
+
+		@media (max-width: 782px) {
+			.mrm-masterclass-card-grid {
+				grid-template-columns: 1fr;
+			}
+
+			.mrm-masterclass-admin .button {
+				width: 100%;
+				text-align: center;
+				margin-bottom: 8px;
+			}
+		}
 	</style>';
 }
 
@@ -2551,14 +2588,23 @@ public function mrm_mc_admin_visibility_css() {
 		'MRM Masterclass',
 		'MRM Masterclass',
 		'manage_options',
-		'mrm-masterclass-events',
-		array( $this, 'render_events_page' ),
+		'mrm-masterclass',
+		array( $this, 'render_dashboard_page' ),
 		'dashicons-welcome-learn-more',
 		56
 	);
 
 	add_submenu_page(
-		'mrm-masterclass-events',
+		'mrm-masterclass',
+		'Dashboard',
+		'Dashboard',
+		'manage_options',
+		'mrm-masterclass',
+		array( $this, 'render_dashboard_page' )
+	);
+
+	add_submenu_page(
+		'mrm-masterclass',
 		'Events',
 		'Events',
 		'manage_options',
@@ -2567,7 +2613,7 @@ public function mrm_mc_admin_visibility_css() {
 	);
 
 	add_submenu_page(
-		'mrm-masterclass-events',
+		'mrm-masterclass',
 		'Presenters',
 		'Presenters',
 		'manage_options',
@@ -2576,7 +2622,7 @@ public function mrm_mc_admin_visibility_css() {
 	);
 
 	add_submenu_page(
-		'mrm-masterclass-events',
+		'mrm-masterclass',
 		'Registrations / Payments',
 		'Registrations / Payments',
 		'manage_options',
@@ -2585,7 +2631,7 @@ public function mrm_mc_admin_visibility_css() {
 	);
 
 	add_submenu_page(
-		'mrm-masterclass-events',
+		'mrm-masterclass',
 		'Presenter Payouts',
 		'Presenter Payouts',
 		'manage_options',
@@ -2594,7 +2640,7 @@ public function mrm_mc_admin_visibility_css() {
 	);
 
 	add_submenu_page(
-		'mrm-masterclass-events',
+		'mrm-masterclass',
 		'Tax Profiles',
 		'Tax Profiles',
 		'manage_options',
@@ -2607,11 +2653,57 @@ public function mrm_mc_admin_visibility_css() {
 
 public function render_dashboard_page() {
 	$this->must_admin();
-	$this->mrm_mc_debug_log( 'Legacy Dashboard submenu rendered.' );
 
-	echo '<div class="wrap">';
+	global $wpdb;
+
+	$events_table        = $this->t( 'mrm_masterclass_events' );
+	$presenters_table    = $this->t( 'mrm_masterclass_presenters' );
+	$registrations_table = $this->t( 'mrm_masterclass_registrations' );
+	$ledger_table        = $this->t( 'mrm_masterclass_payment_ledger' );
+
+	$event_count = $this->mrm_mc_table_exists( $events_table )
+		? absint( $wpdb->get_var( "SELECT COUNT(*) FROM {$events_table} WHERE status <> 'deleted'" ) )
+		: 0;
+
+	$presenter_count = $this->mrm_mc_table_exists( $presenters_table )
+		? absint( $wpdb->get_var( "SELECT COUNT(*) FROM {$presenters_table}" ) )
+		: 0;
+
+	$paid_count = $this->mrm_mc_table_exists( $registrations_table )
+		? absint( $wpdb->get_var( "SELECT COUNT(*) FROM {$registrations_table} WHERE payment_status = 'paid'" ) )
+		: 0;
+
+	$payable_cents = $this->mrm_mc_table_exists( $ledger_table )
+		? absint( $wpdb->get_var( "SELECT COALESCE(SUM(presenter_share_cents),0) FROM {$ledger_table} WHERE status = 'payable'" ) )
+		: 0;
+
+	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>MRM Masterclass</h1>';
-	echo '<p>The dashboard has been retired for now. Use Events, Presenters, Registrations / Payments, Presenter Payouts, and Tax Profiles.</p>';
+	echo '<p class="description">Dashboard for masterclass events, presenters, registrations, payments, payouts, tax profiles, reminders, and cancellations.</p>';
+
+	echo '<div class="mrm-masterclass-card-grid">';
+
+	$this->admin_card_open( 'Events', 'Active and historical masterclass sessions.' );
+	echo '<p><strong>' . esc_html( $event_count ) . '</strong> events</p>';
+	echo '<p><a class="button button-primary" href="' . esc_url( admin_url( 'admin.php?page=mrm-masterclass-events' ) ) . '">Manage Events</a></p>';
+	$this->admin_card_close();
+
+	$this->admin_card_open( 'Presenters', 'Presenter profiles and generated public pages.' );
+	echo '<p><strong>' . esc_html( $presenter_count ) . '</strong> presenters</p>';
+	echo '<p><a class="button" href="' . esc_url( admin_url( 'admin.php?page=mrm-masterclass-presenters' ) ) . '">Manage Presenters</a></p>';
+	$this->admin_card_close();
+
+	$this->admin_card_open( 'Registrations / Payments', 'Paid student registrations and Stripe references.' );
+	echo '<p><strong>' . esc_html( $paid_count ) . '</strong> paid registrations</p>';
+	echo '<p><a class="button" href="' . esc_url( admin_url( 'admin.php?page=mrm-masterclass-registrations-payments' ) ) . '">Review Payments</a></p>';
+	$this->admin_card_close();
+
+	$this->admin_card_open( 'Presenter Payouts', 'Payable presenter shares from the ledger.' );
+	echo '<p><strong>' . esc_html( $this->cents_to_dollars( $payable_cents ) ) . '</strong> currently payable</p>';
+	echo '<p><a class="button" href="' . esc_url( admin_url( 'admin.php?page=mrm-masterclass-payouts' ) ) . '">Review Payouts</a></p>';
+	$this->admin_card_close();
+
+	echo '</div>';
 	echo '</div>';
 }
 
