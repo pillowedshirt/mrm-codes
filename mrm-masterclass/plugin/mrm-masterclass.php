@@ -4024,22 +4024,28 @@ public function render_email_log_page() {
 
 	public function register_rest_routes() {
 		register_rest_route(
-			self::REST_NAMESPACE,
+			'mrm-masterclass/v1',
 			'/events',
 			array(
-				'methods'             => 'GET',
-				'callback'            => array( $this, 'rest_events' ),
+				'methods'             => WP_REST_Server::READABLE,
+				'callback'            => array( $this, 'rest_get_events' ),
 				'permission_callback' => '__return_true',
 			)
 		);
 
 		register_rest_route(
-			self::REST_NAMESPACE,
+			'mrm-masterclass/v1',
 			'/event',
 			array(
-				'methods'             => 'GET',
-				'callback'            => array( $this, 'rest_event' ),
+				'methods'             => WP_REST_Server::READABLE,
+				'callback'            => array( $this, 'rest_get_event' ),
 				'permission_callback' => '__return_true',
+				'args'                => array(
+					'id' => array(
+						'required'          => true,
+						'sanitize_callback' => 'absint',
+					),
+				),
 			)
 		);
 
@@ -4123,76 +4129,74 @@ private function mrm_mc_get_rest_json_body() {
 	return $data;
 }
 
-public function rest_event( WP_REST_Request $request ) {
+public function rest_get_event( $request ) {
+	global $wpdb;
+
 	$event_id = absint( $request->get_param( 'id' ) );
-
-	$this->mrm_mc_debug_log(
-		'REST single-event endpoint reached.',
-		array(
-			'event_id' => $event_id,
-		)
-	);
-
-	if ( ! $this->mrm_mc_required_tables_ready() ) {
-		return $this->mrm_mc_rest_tables_error();
-	}
 
 	if ( $event_id <= 0 ) {
 		return new WP_Error(
-			'mrm_masterclass_missing_event_id',
-			'Missing Masterclass event ID.',
-			array(
-				'status' => 400,
-			)
+			'mrm_masterclass_invalid_event_id',
+			'Please select a valid Masterclass event.',
+			array( 'status' => 400 )
 		);
 	}
-
-	global $wpdb;
 
 	$events_table     = $this->t( 'mrm_masterclass_events' );
 	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
 	$regs_table       = $this->t( 'mrm_masterclass_registrations' );
 
 	if (
-		! $this->mrm_mc_table_exists( $events_table ) ||
-		! $this->mrm_mc_table_exists( $presenters_table ) ||
-		! $this->mrm_mc_table_exists( $regs_table )
+		! $this->mrm_mc_table_exists( $events_table )
+		|| ! $this->mrm_mc_table_exists( $presenters_table )
+		|| ! $this->mrm_mc_table_exists( $regs_table )
 	) {
-		return $this->mrm_mc_rest_tables_error();
+		$this->mrm_mc_debug_log(
+			'Single Masterclass event REST request failed because required tables are missing.',
+			array( 'event_id' => $event_id )
+		);
+
+		return new WP_Error(
+			'mrm_masterclass_tables_missing',
+			'This Masterclass event is temporarily unavailable. Please try again later.',
+			array( 'status' => 503 )
+		);
 	}
 
 	$row = $wpdb->get_row(
 		$wpdb->prepare(
-			"SELECT e.id,e.title,e.description,p.name AS presenter_name,p.presenter_page_id,
-			        e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,
-			        (e.capacity-(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id=e.id AND r.payment_status='paid')) AS available_seats
+			"SELECT e.*,
+				p.name AS presenter_name,
+				p.presenter_page_id AS presenter_page_id,
+				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND r.payment_status = 'paid') AS paid_count
 			 FROM {$events_table} e
-			 LEFT JOIN {$presenters_table} p ON p.id=e.presenter_id
-			 WHERE e.id=%d
+			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+			 WHERE e.id = %d
+			   AND e.status = 'scheduled'
+			   AND e.registration_open = 1
+			   AND e.status <> 'deleted'
 			 LIMIT 1",
 			$event_id
-		),
-		ARRAY_A
+		)
 	);
 
-	if ( ! is_array( $row ) || empty( $row ) ) {
+	if ( ! $row ) {
 		return new WP_Error(
-			'mrm_masterclass_event_not_found',
-			'This Masterclass could not be found.',
-			array(
-				'status' => 404,
-			)
+			'mrm_masterclass_event_unavailable',
+			'This Masterclass event is unavailable, closed, sold out, or no longer active.',
+			array( 'status' => 404 )
 		);
 	}
 
-	$page_id = absint( $row['presenter_page_id'] ?? 0 );
+	$row->available_seats    = max( 0, absint( $row->capacity ) - absint( $row->paid_count ) );
+	$row->presenter_page_url = $this->mrm_mc_public_presenter_page_url( $row->presenter_page_id );
 
-	$row['presenter_page_url'] = $page_id ? get_permalink( $page_id ) : '';
-	$row['description_html']   = wp_kses_post( $row['description'] ?? '' );
-	$row['price_cents']        = absint( $row['price_cents'] ?? 0 );
-	$row['available_seats']    = max( 0, absint( $row['available_seats'] ?? 0 ) );
-
-	return rest_ensure_response( $row );
+	return rest_ensure_response(
+		array(
+			'success' => true,
+			'event'   => $this->mrm_mc_public_event_payload( $row ),
+		)
+	);
 }
 
 public function rest_apply_promo( WP_REST_Request $request ) {
@@ -4267,39 +4271,75 @@ public function rest_finalize( WP_REST_Request $request ) {
 		);
 	}
 
-	public function rest_events() {
-		if ( ! $this->mrm_mc_required_tables_ready() ) {
-			return $this->mrm_mc_rest_tables_error();
-		}
-
+	public function rest_get_events( $request ) {
 		global $wpdb;
 
 		$events_table     = $this->t( 'mrm_masterclass_events' );
 		$presenters_table = $this->t( 'mrm_masterclass_presenters' );
 		$regs_table       = $this->t( 'mrm_masterclass_registrations' );
 
+		if (
+			! $this->mrm_mc_table_exists( $events_table )
+			|| ! $this->mrm_mc_table_exists( $presenters_table )
+			|| ! $this->mrm_mc_table_exists( $regs_table )
+		) {
+			$this->mrm_mc_debug_log(
+				'Public Masterclass events REST request failed because required tables are missing.',
+				array(
+					'events_table'     => $events_table,
+					'presenters_table' => $presenters_table,
+					'regs_table'       => $regs_table,
+				)
+			);
+
+			return new WP_Error(
+				'mrm_masterclass_tables_missing',
+				'Masterclass events are temporarily unavailable. Please try again later.',
+				array( 'status' => 503 )
+			);
+		}
+
 		$rows = $wpdb->get_results(
-			"SELECT e.id,e.title,e.description,p.name AS presenter_name,p.presenter_page_id,
-			        e.start_time,e.end_time,e.timezone,e.price_cents,e.capacity,e.status,e.registration_open,
-			        (e.capacity-(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id=e.id AND r.payment_status='paid')) AS available_seats
+			"SELECT e.*,
+				p.name AS presenter_name,
+				p.presenter_page_id AS presenter_page_id,
+				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND r.payment_status = 'paid') AS paid_count
 			 FROM {$events_table} e
-			 LEFT JOIN {$presenters_table} p ON p.id=e.presenter_id
-			 WHERE e.status='scheduled'
+			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+			 WHERE e.status = 'scheduled'
 			   AND e.registration_open = 1
-			 ORDER BY e.start_time ASC",
-			ARRAY_A
+			   AND e.status <> 'deleted'
+			 ORDER BY e.start_time ASC
+			 LIMIT 200"
 		);
 
-		if ( ! is_array( $rows ) ) {
-			$rows = array();
+		if ( null === $rows ) {
+			$this->mrm_mc_debug_log(
+				'Public Masterclass events REST database query failed.',
+				array( 'db_error' => $wpdb->last_error )
+			);
+
+			return new WP_Error(
+				'mrm_masterclass_events_query_failed',
+				'Masterclass events could not be loaded. Please try again later.',
+				array( 'status' => 500 )
+			);
 		}
 
-		foreach ( $rows as &$row ) {
-			$page_id = absint( $row['presenter_page_id'] ?? 0 );
-			$row['presenter_page_url'] = $page_id ? get_permalink( $page_id ) : '';
+		$events = array();
+
+		foreach ( $rows as $row ) {
+			$row->available_seats     = max( 0, absint( $row->capacity ) - absint( $row->paid_count ) );
+			$row->presenter_page_url  = $this->mrm_mc_public_presenter_page_url( $row->presenter_page_id );
+			$events[]                 = $this->mrm_mc_public_event_payload( $row );
 		}
 
-		return rest_ensure_response( $rows );
+		return rest_ensure_response(
+			array(
+				'success' => true,
+				'events'  => $events,
+			)
+		);
 	}
 
 
