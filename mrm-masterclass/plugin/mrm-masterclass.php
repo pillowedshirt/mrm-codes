@@ -2310,21 +2310,119 @@ public function handle_save_event() {
 	$this->must_admin();
 	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_save_event' );
 
-	$this->mrm_mc_debug_log(
-		'Safe event save fallback reached. Full event save implementation is not installed yet.',
-		array(
-			'action'      => 'mrm_masterclass_save_event',
-			'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+	global $wpdb;
+
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+
+	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass event save failed because required tables are missing.',
+			array(
+				'events_table'     => $events_table,
+				'presenters_table' => $presenters_table,
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_table_missing' );
+	}
+
+	$title        = $this->mrm_mc_clean_text( $_POST['title'] ?? '' );
+	$description  = $this->mrm_mc_clean_html( $_POST['description'] ?? '' );
+	$presenter_id = absint( $_POST['presenter_id'] ?? 0 );
+	$proctor      = $this->mrm_mc_clean_email( $_POST['proctor_email'] ?? '' );
+	$start_time   = $this->mrm_mc_datetime_from_local( $_POST['start_time'] ?? '' );
+	$end_time     = $this->mrm_mc_datetime_from_local( $_POST['end_time'] ?? '' );
+	$timezone     = $this->mrm_mc_clean_text( $_POST['timezone'] ?? 'America/Phoenix' );
+	$price_cents  = max( 0, absint( $_POST['price_cents'] ?? 0 ) );
+	$capacity     = max( 1, absint( $_POST['capacity'] ?? 1 ) );
+	$status       = sanitize_key( wp_unslash( $_POST['status'] ?? 'scheduled' ) );
+
+	$allowed_statuses = array( 'draft', 'scheduled', 'cancelled', 'completed', 'archived' );
+
+	if ( ! in_array( $status, $allowed_statuses, true ) ) {
+		$status = 'scheduled';
+	}
+
+	if ( '' === $title || $presenter_id <= 0 || '' === $start_time || '' === $end_time || '' === $timezone ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_validation_failed' );
+	}
+
+	if ( strtotime( $end_time ) <= strtotime( $start_time ) ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_time_invalid' );
+	}
+
+	if ( $price_cents <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_price_invalid' );
+	}
+
+	$presenter = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$presenters_table} WHERE id = %d",
+			$presenter_id
 		)
 	);
 
-	$this->mrm_mc_safe_admin_redirect(
-		'mrm-masterclass-events',
+	if ( ! $presenter ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_presenter_missing' );
+	}
+
+	$data = array(
+		'title'             => $title,
+		'description'       => $description,
+		'presenter_id'      => $presenter_id,
+		'presenter_email'   => sanitize_email( $presenter->email ?? '' ),
+		'proctor_email'     => $proctor,
+		'start_time'        => $start_time,
+		'end_time'          => $end_time,
+		'timezone'          => $timezone,
+		'price_cents'       => $price_cents,
+		'capacity'          => $capacity,
+		'status'            => $status,
+		'registration_open' => $this->mrm_mc_bool_post( 'registration_open' ),
+		'created_at'        => $this->now(),
+		'updated_at'        => $this->now(),
+	);
+
+	$result = $wpdb->insert(
+		$events_table,
+		$data
+	);
+
+	if ( false === $result ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass event local database save failed.',
+			array(
+				'db_error' => $wpdb->last_error,
+				'title'    => $title,
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_save_failed' );
+	}
+
+	$event_id = absint( $wpdb->insert_id );
+
+	$this->mrm_mc_debug_log(
+		'Masterclass event saved locally.',
 		array(
-			'mrm_mc_notice' => 'event_save_fallback_reached',
+			'event_id'     => $event_id,
+			'presenter_id' => $presenter_id,
+			'status'       => $status,
 		)
 	);
+
+	/*
+	 * Google Calendar creation is added in Section 6.
+	 * For now, local database save is complete.
+	 */
+	$this->mrm_mc_admin_notice_redirect(
+		'mrm-masterclass-events',
+		'event_saved_local',
+		array( 'event_id' => $event_id )
+	);
 }
+
 
 public function handle_cancel_event() {
 	$this->must_admin();
@@ -3108,12 +3206,21 @@ public function render_events_page() {
 	echo '<h1>Masterclass Events</h1>';
 	echo '<p>Create masterclass sessions, assign presenter/proctor emails, and store the Google Calendar ID this plugin controls.</p>';
 
-	if ( isset( $_GET['created'] ) ) {
-		echo '<div class="notice notice-success is-dismissible"><p>Masterclass event created.</p></div>';
-	}
+	$notice = isset( $_GET['mrm_mc_notice'] ) ? sanitize_key( wp_unslash( $_GET['mrm_mc_notice'] ) ) : '';
+	$notice_map = array(
+		'event_table_missing'     => array( 'error', 'Masterclass event could not be saved because required database tables are missing. Reactivate the plugin and check wp-content/masterclass-debug.log.' ),
+		'event_validation_failed' => array( 'error', 'Masterclass event could not be saved. Please complete the title, presenter, start time, end time, and timezone.' ),
+		'event_time_invalid'      => array( 'error', 'Masterclass event could not be saved because the end time must be after the start time.' ),
+		'event_price_invalid'     => array( 'error', 'Masterclass event could not be saved because the price must be greater than zero.' ),
+		'event_presenter_missing' => array( 'error', 'Masterclass event could not be saved because the selected presenter could not be found.' ),
+		'event_save_failed'       => array( 'error', 'Masterclass event could not be saved because of a database error. Check wp-content/masterclass-debug.log.' ),
+		'event_saved_local'       => array( 'success', 'Masterclass event saved locally.' ),
+		'settings_saved'          => array( 'success', 'Calendar settings saved.' ),
+	);
 
-	if ( isset( $_GET['settings_updated'] ) ) {
-		echo '<div class="notice notice-success is-dismissible"><p>Calendar settings saved.</p></div>';
+	if ( isset( $notice_map[ $notice ] ) ) {
+		list( $level, $message ) = $notice_map[ $notice ];
+		echo '<div class="notice notice-' . esc_attr( $level ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
 	}
 
 	echo '<div style="background:#fff;border:1px solid #d7c7ad;border-radius:16px;padding:20px;margin:18px 0;">';
