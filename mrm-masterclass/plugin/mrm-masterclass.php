@@ -137,7 +137,7 @@ if ( ! class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 class LowBrass_MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
-	const DB_VERSION = '1.2.4';
+	const DB_VERSION = '1.2.5';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 
@@ -987,6 +987,7 @@ public function mrm_mc_render_critical_error_notice() {
 		'short_description'           => "ALTER TABLE {$presenters_table} ADD short_description TEXT NULL",
 		'long_description'            => "ALTER TABLE {$presenters_table} ADD long_description LONGTEXT NULL",
 		'instruments'                 => "ALTER TABLE {$presenters_table} ADD instruments TEXT NULL",
+		'status'                      => "ALTER TABLE {$presenters_table} ADD status VARCHAR(32) NOT NULL DEFAULT 'active'",
 		'presenter_page_id'           => "ALTER TABLE {$presenters_table} ADD presenter_page_id BIGINT UNSIGNED NULL",
 	);
 
@@ -2234,26 +2235,75 @@ public function handle_save_presenter() {
 public function handle_delete_presenter() {
 	$this->must_admin();
 
+	global $wpdb;
+
 	$presenter_id = absint( $_POST['presenter_id'] ?? $_GET['presenter_id'] ?? 0 );
 
-	if ( $presenter_id > 0 ) {
-		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_delete_presenter_' . $presenter_id );
+	if ( $presenter_id <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_missing_id' );
 	}
 
-	$this->mrm_mc_debug_log(
-		'Safe presenter delete fallback reached. Destructive deletion is disabled in this stabilization patch.',
-		array(
-			'action'       => 'mrm_masterclass_delete_presenter',
-			'presenter_id' => $presenter_id,
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_delete_presenter_' . $presenter_id );
+
+	$presenters = $this->t( 'mrm_masterclass_presenters' );
+	$events     = $this->t( 'mrm_masterclass_events' );
+
+	if ( ! $this->mrm_mc_table_exists( $presenters ) || ! $this->mrm_mc_table_exists( $events ) ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_delete_table_missing' );
+	}
+
+	$linked_events = absint(
+		$wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$events} WHERE presenter_id = %d",
+				$presenter_id
+			)
 		)
 	);
 
-	$this->mrm_mc_safe_admin_redirect(
-		'mrm-masterclass-presenters',
-		array(
-			'mrm_mc_notice' => 'presenter_delete_disabled_safe_patch',
-		)
+	if ( $linked_events > 0 ) {
+		$result = $wpdb->update(
+			$presenters,
+			array(
+				'status'     => 'inactive',
+				'updated_at' => $this->now(),
+			),
+			array( 'id' => $presenter_id )
+		);
+
+		if ( false === $result ) {
+			$this->mrm_mc_debug_log(
+				'Presenter archive failed.',
+				array(
+					'presenter_id' => $presenter_id,
+					'db_error'     => $wpdb->last_error,
+				)
+			);
+
+			$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_archive_failed' );
+		}
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_archived' );
+	}
+
+	$result = $wpdb->delete(
+		$presenters,
+		array( 'id' => $presenter_id )
 	);
+
+	if ( false === $result ) {
+		$this->mrm_mc_debug_log(
+			'Presenter delete failed.',
+			array(
+				'presenter_id' => $presenter_id,
+				'db_error'     => $wpdb->last_error,
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_delete_failed' );
+	}
+
+	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_deleted' );
 }
 
 public function handle_save_event() {
@@ -2836,6 +2886,12 @@ public function render_presenters_page() {
 		'presenter_validation_failed' => array( 'error', 'Presenter could not be saved. Please enter a presenter name and valid email address.' ),
 		'presenter_save_failed'       => array( 'error', 'Presenter could not be saved because of a database error. Check wp-content/masterclass-debug.log.' ),
 		'presenter_saved'             => array( 'success', 'Presenter saved successfully.' ),
+		'presenter_missing_id'           => array( 'error', 'Presenter action failed because the presenter ID was missing.' ),
+		'presenter_delete_table_missing' => array( 'error', 'Presenter could not be removed because one or more Masterclass tables are missing.' ),
+		'presenter_archive_failed'       => array( 'error', 'Presenter could not be archived. Check wp-content/masterclass-debug.log.' ),
+		'presenter_archived'             => array( 'success', 'Presenter has linked event history, so the record was safely archived instead of deleted.' ),
+		'presenter_delete_failed'        => array( 'error', 'Presenter could not be deleted. Check wp-content/masterclass-debug.log.' ),
+		'presenter_deleted'              => array( 'success', 'Presenter deleted because no linked events were found.' ),
 	);
 
 	if ( isset( $notice_map[ $notice ] ) ) {
