@@ -2392,24 +2392,123 @@ public function handle_save_tax_profile() {
 public function handle_create_presenter_page() {
 	$this->must_admin();
 
+	global $wpdb;
+
 	$presenter_id = absint( $_POST['presenter_id'] ?? $_GET['presenter_id'] ?? 0 );
 
-	if ( $presenter_id > 0 ) {
-		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_create_presenter_page_' . $presenter_id );
+	if ( $presenter_id <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_missing_id' );
 	}
 
-	$this->mrm_mc_debug_log(
-		'Safe presenter page generation fallback reached. Full page generation is not installed yet.',
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_create_presenter_page_' . $presenter_id );
+
+	$presenter = $this->mrm_mc_get_presenter( $presenter_id );
+
+	if ( ! $presenter ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_not_found' );
+	}
+
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+
+	$instruments = array();
+
+	if ( ! empty( $presenter->instruments ) ) {
+		$decoded = json_decode( $presenter->instruments, true );
+
+		if ( is_array( $decoded ) ) {
+			$instruments = array_map( 'sanitize_text_field', $decoded );
+		}
+	}
+
+	$content = '<div class="mrm-masterclass-presenter-page">';
+
+	if ( ! empty( $presenter->profile_image_url ) ) {
+		$content .= '<figure class="mrm-masterclass-presenter-image">';
+		$content .= '<img src="' . esc_url( $presenter->profile_image_url ) . '" alt="' . esc_attr( $presenter->name ) . '" />';
+		$content .= '</figure>';
+	}
+
+	$content .= '<h1>' . esc_html( $presenter->name ) . '</h1>';
+
+	if ( ! empty( $presenter->short_description ) ) {
+		$content .= '<div class="mrm-masterclass-presenter-short">';
+		$content .= wp_kses_post( wpautop( $presenter->short_description ) );
+		$content .= '</div>';
+	}
+
+	if ( ! empty( $instruments ) ) {
+		$content .= '<p><strong>Instruments:</strong> ' . esc_html( implode( ', ', $instruments ) ) . '</p>';
+	}
+
+	if ( ! empty( $presenter->long_description ) ) {
+		$content .= '<div class="mrm-masterclass-presenter-long">';
+		$content .= wp_kses_post( wpautop( $presenter->long_description ) );
+		$content .= '</div>';
+	}
+
+	if ( ! empty( $presenter->bio ) ) {
+		$content .= '<div class="mrm-masterclass-presenter-bio">';
+		$content .= wp_kses_post( wpautop( $presenter->bio ) );
+		$content .= '</div>';
+	}
+
+	$content .= '</div>';
+
+	$page_title = $presenter->name . ' — Masterclass Presenter';
+
+	$page_data = array(
+		'post_title'   => $page_title,
+		'post_content' => $content,
+		'post_status'  => 'publish',
+		'post_type'    => 'page',
+	);
+
+	$page_id = absint( $presenter->presenter_page_id ?? 0 );
+
+	if ( $page_id > 0 && get_post( $page_id ) ) {
+		$page_data['ID'] = $page_id;
+		$result = wp_update_post( $page_data, true );
+	} else {
+		$result = wp_insert_post( $page_data, true );
+	}
+
+	if ( is_wp_error( $result ) ) {
+		$this->mrm_mc_debug_log(
+			'Presenter page generation failed.',
+			array(
+				'presenter_id' => $presenter_id,
+				'error'        => $result->get_error_message(),
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_page_failed' );
+	}
+
+	$page_id = absint( $result );
+
+	$wpdb->update(
+		$presenters_table,
 		array(
-			'action'       => 'mrm_masterclass_create_presenter_page',
+			'presenter_page_id' => $page_id,
+			'updated_at'        => $this->now(),
+		),
+		array( 'id' => $presenter_id )
+	);
+
+	$this->mrm_mc_debug_log(
+		'Presenter page generated or updated.',
+		array(
 			'presenter_id' => $presenter_id,
+			'page_id'      => $page_id,
 		)
 	);
 
-	$this->mrm_mc_safe_admin_redirect(
+	$this->mrm_mc_admin_notice_redirect(
 		'mrm-masterclass-presenters',
+		'presenter_page_saved',
 		array(
-			'mrm_mc_notice' => 'presenter_page_generation_fallback_reached',
+			'edit'    => $presenter_id,
+			'page_id' => $page_id,
 		)
 	);
 }
@@ -2887,6 +2986,9 @@ public function render_presenters_page() {
 		'presenter_save_failed'       => array( 'error', 'Presenter could not be saved because of a database error. Check wp-content/masterclass-debug.log.' ),
 		'presenter_saved'             => array( 'success', 'Presenter saved successfully.' ),
 		'presenter_missing_id'           => array( 'error', 'Presenter action failed because the presenter ID was missing.' ),
+		'presenter_not_found'            => array( 'error', 'Presenter could not be found.' ),
+		'presenter_page_failed'          => array( 'error', 'Presenter page could not be created or updated. Check wp-content/masterclass-debug.log.' ),
+		'presenter_page_saved'           => array( 'success', 'Presenter page created or updated successfully.' ),
 		'presenter_delete_table_missing' => array( 'error', 'Presenter could not be removed because one or more Masterclass tables are missing.' ),
 		'presenter_archive_failed'       => array( 'error', 'Presenter could not be archived. Check wp-content/masterclass-debug.log.' ),
 		'presenter_archived'             => array( 'success', 'Presenter has linked event history, so the record was safely archived instead of deleted.' ),
@@ -2945,7 +3047,7 @@ public function render_presenters_page() {
 		echo '<p>No presenters added yet. Use the form above to create the first presenter.</p>';
 	} else {
 		echo '<table class="widefat striped">';
-		echo '<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Location</th><th>Stripe Account</th><th>Timezone</th><th>Actions</th></tr></thead><tbody>';
+		echo '<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Location</th><th>Stripe Account</th><th>Timezone</th><th>Presenter Page</th><th>Actions</th></tr></thead><tbody>';
 
 		foreach ( $rows as $row ) {
 			echo '<tr>';
@@ -2955,6 +3057,15 @@ public function render_presenters_page() {
 			echo '<td>' . esc_html( trim( ( $row['city'] ?? '' ) . ', ' . ( $row['state'] ?? '' ), ', ' ) ) . '</td>';
 			echo '<td><code>' . esc_html( $row['stripe_connected_account_id'] ?? '' ) . '</code></td>';
 			echo '<td><code>' . esc_html( $row['timezone'] ?? '' ) . '</code></td>';
+			echo '<td>';
+
+			if ( ! empty( $row['presenter_page_id'] ) && get_permalink( absint( $row['presenter_page_id'] ) ) ) {
+				echo '<a class="button" href="' . esc_url( get_permalink( absint( $row['presenter_page_id'] ) ) ) . '" target="_blank" rel="noopener">View Page</a>';
+			} else {
+				echo '<span class="description">Not generated</span>';
+			}
+
+			echo '</td>';
 			echo '<td><a class="button button-small" href="' . esc_url( admin_url( 'admin.php?page=mrm-masterclass-presenters&edit=' . absint( $row['id'] ) ) ) . '">Edit</a></td>';
 			echo '</tr>';
 		}
