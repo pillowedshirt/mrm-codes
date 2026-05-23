@@ -1558,6 +1558,28 @@ private function mrm_mc_google_insert_event( $event, $presenter_email ) {
 		return new WP_Error( 'google_calendar_missing', 'Masterclass Google Calendar ID is missing.' );
 	}
 
+	$timezone_string = ! empty( $event->timezone ) ? (string) $event->timezone : 'America/Phoenix';
+
+	try {
+		$timezone = new DateTimeZone( $timezone_string );
+	} catch ( Exception $e ) {
+		$timezone        = new DateTimeZone( 'America/Phoenix' );
+		$timezone_string = 'America/Phoenix';
+	}
+
+	try {
+		$start_dt = new DateTimeImmutable( (string) $event->start_time, $timezone );
+		$end_dt   = new DateTimeImmutable( (string) $event->end_time, $timezone );
+	} catch ( Exception $e ) {
+		return new WP_Error(
+			'google_bad_event_time',
+			'Masterclass start or end time could not be parsed for Google Calendar.',
+			array(
+				'event_id' => absint( $event->id ?? 0 ),
+			)
+		);
+	}
+
 	$attendees = array();
 
 	if ( is_email( $presenter_email ) ) {
@@ -1569,15 +1591,15 @@ private function mrm_mc_google_insert_event( $event, $presenter_email ) {
 	}
 
 	$body = array(
-		'summary'     => $event->title,
-		'description' => wp_strip_all_tags( $event->description ),
+		'summary'     => (string) $event->title,
+		'description' => wp_strip_all_tags( (string) $event->description ),
 		'start'       => array(
-			'dateTime' => gmdate( 'c', strtotime( $event->start_time ) ),
-			'timeZone' => $event->timezone ?: 'America/Phoenix',
+			'dateTime' => $start_dt->format( 'c' ),
+			'timeZone' => $timezone_string,
 		),
 		'end'         => array(
-			'dateTime' => gmdate( 'c', strtotime( $event->end_time ) ),
-			'timeZone' => $event->timezone ?: 'America/Phoenix',
+			'dateTime' => $end_dt->format( 'c' ),
+			'timeZone' => $timezone_string,
 		),
 		'attendees'   => $attendees,
 		'conferenceData' => array(
@@ -1598,7 +1620,7 @@ private function mrm_mc_google_insert_event( $event, $presenter_email ) {
 		$this->mrm_mc_debug_log(
 			'Google event creation failed.',
 			array(
-				'event_id' => absint( $event->id ),
+				'event_id' => absint( $event->id ?? 0 ),
 				'error'    => $result->get_error_message(),
 			)
 		);
@@ -1614,6 +1636,7 @@ private function mrm_mc_google_insert_event( $event, $presenter_email ) {
 		'raw'      => $result,
 	);
 }
+
 
 
 private function mrm_mc_google_patch_event_attendees( $event, $emails ) {
@@ -1811,6 +1834,62 @@ public function handle_delete_presenter() {
 			'mrm_mc_notice' => 'presenter_delete_disabled_safe_patch',
 		)
 	);
+}
+
+private function mrm_mc_parse_event_timestamp( $datetime, $timezone_string = 'America/Phoenix' ) {
+	$datetime = trim( (string) $datetime );
+
+	if ( '' === $datetime ) {
+		return false;
+	}
+
+	try {
+		$timezone = new DateTimeZone( $timezone_string ?: 'America/Phoenix' );
+	} catch ( Exception $e ) {
+		$timezone = new DateTimeZone( 'America/Phoenix' );
+	}
+
+	try {
+		$dt = new DateTimeImmutable( $datetime, $timezone );
+		return $dt->getTimestamp();
+	} catch ( Exception $e ) {
+		return false;
+	}
+}
+
+private function mrm_mc_format_mysql_datetime_from_post( $datetime, $timezone_string = 'America/Phoenix' ) {
+	$datetime = trim( (string) $datetime );
+
+	if ( '' === $datetime ) {
+		return '';
+	}
+
+	try {
+		$timezone = new DateTimeZone( $timezone_string ?: 'America/Phoenix' );
+	} catch ( Exception $e ) {
+		$timezone = new DateTimeZone( 'America/Phoenix' );
+	}
+
+	$formats = array(
+		'Y-m-d\TH:i',
+		'Y-m-d H:i:s',
+		'Y-m-d H:i',
+	);
+
+	foreach ( $formats as $format ) {
+		$dt = DateTimeImmutable::createFromFormat( $format, $datetime, $timezone );
+
+		if ( $dt instanceof DateTimeImmutable ) {
+			return $dt->format( 'Y-m-d H:i:s' );
+		}
+	}
+
+	try {
+		$dt = new DateTimeImmutable( $datetime, $timezone );
+		return $dt->format( 'Y-m-d H:i:s' );
+	} catch ( Exception $e ) {
+		return '';
+	}
 }
 
 public function handle_save_event() {
@@ -2496,7 +2575,38 @@ public function render_events_page() {
 	);
 
 	if ( isset( $_GET['created'] ) ) {
-		echo '<div class="notice notice-success is-dismissible"><p>Masterclass event created.</p></div>';
+		$google_status = isset( $_GET['google_status'] ) ? sanitize_key( wp_unslash( $_GET['google_status'] ) ) : '';
+
+		if ( 'created' === $google_status ) {
+			echo '<div class="notice notice-success is-dismissible"><p>Masterclass event created and Google Calendar event was created.</p></div>';
+		} else {
+			echo '<div class="notice notice-warning is-dismissible"><p>Masterclass event was saved, but Google Calendar/Meet was not created. Check the Google Calendar ID and AWS Google credentials.</p></div>';
+		}
+	}
+
+	if ( isset( $_GET['deleted'] ) ) {
+		$refund_required = ! empty( $_GET['refund_required'] );
+		$refund_count    = absint( $_GET['refund_count'] ?? 0 );
+
+		if ( $refund_required ) {
+			echo '<div class="notice notice-success is-dismissible"><p>Masterclass event removed from the active list. Automatic refunds issued: ' . esc_html( $refund_count ) . '.</p></div>';
+		} else {
+			echo '<div class="notice notice-success is-dismissible"><p>Masterclass event removed from the active list. The one-week post-event refund deadline had passed, so no automatic refunds were issued.</p></div>';
+		}
+	}
+
+	if ( isset( $_GET['delete_error'] ) ) {
+		$error = sanitize_key( wp_unslash( $_GET['delete_error'] ) );
+
+		if ( 'refund_failed' === $error ) {
+			echo '<div class="notice notice-error is-dismissible"><p>Masterclass deletion stopped because one or more required refunds failed. The event was kept active so you can review the issue.</p></div>';
+		} else {
+			echo '<div class="notice notice-error is-dismissible"><p>Masterclass event could not be deleted. Error: ' . esc_html( $error ) . '</p></div>';
+		}
+	}
+
+	if ( isset( $_GET['event_error'] ) ) {
+		echo '<div class="notice notice-error is-dismissible"><p>Masterclass event could not be saved. Error: ' . esc_html( sanitize_key( wp_unslash( $_GET['event_error'] ) ) ) . '</p></div>';
 	}
 
 	if ( isset( $_GET['settings_updated'] ) ) {
@@ -2571,7 +2681,7 @@ public function render_events_page() {
 
 	echo '<h2>Existing Sessions</h2>';
 	echo '<table class="widefat striped">';
-	echo '<thead><tr><th>Title</th><th>Presenter</th><th>Proctor</th><th>Start</th><th>End</th><th>Price</th><th>Capacity</th><th>Paid</th><th>Status</th><th>Google Event</th><th>Meet Link</th></tr></thead><tbody>';
+	echo '<thead><tr><th>Title</th><th>Presenter</th><th>Proctor</th><th>Start</th><th>End</th><th>Price</th><th>Capacity</th><th>Paid</th><th>Status</th><th>Google Event</th><th>Meet Link</th><th>Actions</th></tr></thead><tbody>';
 
 	if ( $events ) {
 		foreach ( $events as $event ) {
@@ -2590,7 +2700,7 @@ public function render_events_page() {
 			echo '</tr>';
 		}
 	} else {
-		echo '<tr><td colspan="11">No masterclass sessions created yet.</td></tr>';
+		echo '<tr><td colspan="12">No masterclass sessions created yet.</td></tr>';
 	}
 
 	echo '</tbody></table>';
@@ -3173,6 +3283,7 @@ public function rest_finalize( WP_REST_Request $request ) {
 			 LEFT JOIN {$presenters_table} p ON p.id=e.presenter_id
 			 WHERE e.status='scheduled'
 			   AND e.registration_open = 1
+				  AND e.status <> 'deleted'
 			 ORDER BY e.start_time ASC",
 			ARRAY_A
 		);
