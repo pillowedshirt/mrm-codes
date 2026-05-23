@@ -3200,6 +3200,24 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 			overflow: hidden;
 		}
 
+		.mrm-masterclass-admin table.widefat td,
+		.mrm-masterclass-admin table.widefat th {
+			vertical-align: top;
+		}
+
+		.mrm-masterclass-admin .widefat code {
+			white-space: normal;
+			word-break: break-word;
+		}
+
+		@media (max-width: 1100px) {
+			.mrm-masterclass-admin .widefat {
+				display: block;
+				overflow-x: auto;
+				white-space: nowrap;
+			}
+		}
+
 		@media (max-width: 782px) {
 			.mrm-masterclass-card-grid {
 				grid-template-columns: 1fr;
@@ -3345,7 +3363,7 @@ public function render_settings_page() {
 	$this->must_admin();
 	$this->mrm_mc_debug_log( 'Legacy Settings submenu rendered.' );
 
-	echo '<div class="wrap">';
+	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>MRM Masterclass Settings</h1>';
 	echo '<p>The separate Settings submenu has been retired. Calendar/default settings now live at the top of <a href="' . esc_url( admin_url( 'admin.php?page=mrm-masterclass-events' ) ) . '">Masterclass Events</a>.</p>';
 	echo '</div>';
@@ -3362,7 +3380,7 @@ public function render_presenters_page() {
 	$table = $this->t( 'mrm_masterclass_presenters' );
 
 	if ( ! $this->mrm_mc_table_exists( $table ) ) {
-		echo '<div class="wrap">';
+		echo '<div class="wrap mrm-masterclass-admin">';
 		echo '<h1>Masterclass Presenters</h1>';
 		echo '<div class="notice notice-error"><p>The presenters table is missing. Reactivate the plugin or check wp-content/masterclass-debug.log.</p></div>';
 		echo '</div>';
@@ -3395,7 +3413,7 @@ public function render_presenters_page() {
 		}
 	}
 
-	echo '<div class="wrap">';
+	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>Masterclass Presenters</h1>';
 	echo '<p>Create and manage presenters separately from scheduler instructors. These profiles feed event assignment, payout reporting, and tax profiles.</p>';
 
@@ -3520,11 +3538,12 @@ public function render_events_page() {
 			(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND r.payment_status = 'paid') AS paid_count
 		 FROM {$events_table} e
 		 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+		 WHERE e.status <> 'deleted'
 		 ORDER BY e.start_time DESC
 		 LIMIT 200"
 	);
 
-	echo '<div class="wrap">';
+	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>Masterclass Events</h1>';
 	echo '<p>Create masterclass sessions, assign presenter/proctor emails, and store the Google Calendar ID this plugin controls.</p>';
 
@@ -3623,26 +3642,60 @@ public function render_events_page() {
 
 	echo '<h2>Existing Sessions</h2>';
 	echo '<table class="widefat striped">';
-	echo '<thead><tr><th>Title</th><th>Presenter</th><th>Proctor</th><th>Start</th><th>End</th><th>Price</th><th>Capacity</th><th>Paid</th><th>Status</th><th>Google Event</th><th>Meet Link</th><th>Actions</th></tr></thead><tbody>';
+	echo '<thead><tr>';
+	echo '<th>Title</th>';
+	echo '<th>Presenter</th>';
+	echo '<th>Proctor</th>';
+	echo '<th>Start</th>';
+	echo '<th>End</th>';
+	echo '<th>Refund Deadline</th>';
+	echo '<th>Price</th>';
+	echo '<th>Capacity</th>';
+	echo '<th>Paid</th>';
+	echo '<th>Available</th>';
+	echo '<th>Status</th>';
+	echo '<th>Registration</th>';
+	echo '<th>Google Event</th>';
+	echo '<th>Meet Link</th>';
+	echo '<th>Google Status</th>';
+	echo '<th>Actions</th>';
+	echo '</tr></thead><tbody>';
 
 	if ( $events ) {
 		foreach ( $events as $event ) {
+			$paid_count      = absint( $event->paid_count ?? 0 );
+			$capacity        = absint( $event->capacity ?? 0 );
+			$available       = max( 0, $capacity - $paid_count );
+			$refund_deadline = gmdate( 'Y-m-d H:i:s', strtotime( $event->start_time . ' UTC' ) + ( 7 * DAY_IN_SECONDS ) );
+			$google_error    = sanitize_text_field( $event->google_last_error ?? '' );
+			$cancel_url      = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_cancel_event&event_id=' . absint( $event->id ) ),
+				'mrm_masterclass_cancel_event_' . absint( $event->id )
+			);
+
 			echo '<tr>';
-			echo '<td><strong>' . esc_html( $event->title ) . '</strong></td>';
+			echo '<td><strong>' . esc_html( $event->title ) . '</strong><br><span class="description">ID: ' . esc_html( absint( $event->id ) ) . '</span></td>';
 			echo '<td>' . esc_html( $event->presenter_name ?: $event->presenter_email ) . '</td>';
 			echo '<td>' . esc_html( $event->proctor_email ?: '—' ) . '</td>';
 			echo '<td>' . esc_html( $event->start_time ) . '</td>';
 			echo '<td>' . esc_html( $event->end_time ) . '</td>';
+			echo '<td>' . esc_html( $refund_deadline ) . '</td>';
 			echo '<td>' . esc_html( $this->cents_to_dollars( $event->price_cents ) ) . '</td>';
-			echo '<td>' . esc_html( $event->capacity ) . '</td>';
-			echo '<td>' . esc_html( $event->paid_count ) . '</td>';
-			echo '<td>' . esc_html( $event->status ) . '</td>';
+			echo '<td>' . esc_html( $capacity ) . '</td>';
+			echo '<td>' . esc_html( $paid_count ) . '</td>';
+			echo '<td>' . esc_html( $available ) . '</td>';
+			echo '<td><code>' . esc_html( $event->status ) . '</code></td>';
+			echo '<td>' . ( ! empty( $event->registration_open ) ? '<span style="color:#116329;font-weight:700;">Open</span>' : '<span style="color:#8a1f11;font-weight:700;">Closed</span>' ) . '</td>';
 			echo '<td><code>' . esc_html( $event->google_event_id ?: 'Not created yet' ) . '</code></td>';
 			echo '<td>' . ( $event->google_meet_url ? '<a href="' . esc_url( $event->google_meet_url ) . '" target="_blank" rel="noopener">Open Meet</a>' : '—' ) . '</td>';
-			$cancel_url = wp_nonce_url(
-				admin_url( 'admin-post.php?action=mrm_masterclass_cancel_event&event_id=' . absint( $event->id ) ),
-				'mrm_masterclass_cancel_event_' . absint( $event->id )
-			);
+
+			if ( '' !== $google_error ) {
+				echo '<td><span style="color:#8a1f11;font-weight:700;">Needs attention</span><br><span class="description">' . esc_html( $google_error ) . '</span></td>';
+			} elseif ( ! empty( $event->google_event_id ) ) {
+				echo '<td><span style="color:#116329;font-weight:700;">Created</span></td>';
+			} else {
+				echo '<td><span class="description">Not created</span></td>';
+			}
 
 			echo '<td>';
 			echo '<a class="button button-small button-link-delete" href="' . esc_url( $cancel_url ) . '" onclick="return confirm(\'Cancel/delete this event? Paid participants may be refunded automatically depending on the refund deadline.\');">Cancel / Delete</a>';
@@ -3650,7 +3703,7 @@ public function render_events_page() {
 			echo '</tr>';
 		}
 	} else {
-		echo '<tr><td colspan="12">No masterclass sessions created yet.</td></tr>';
+		echo '<tr><td colspan="16">No active masterclass sessions created yet.</td></tr>';
 	}
 
 	echo '</tbody></table>';
@@ -3693,7 +3746,7 @@ public function render_registrations_payments_page() {
 		 LIMIT 500"
 	);
 
-	echo '<div class="wrap">';
+	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>Registrations / Payments</h1>';
 	echo '<p>This combines the masterclass registration list and payment ledger into one audit view, similar in purpose to the legal dispute ledger.</p>';
 
@@ -3766,7 +3819,7 @@ public function render_payouts_page() {
 		 ORDER BY p.name ASC, l.created_at ASC"
 	);
 
-	echo '<div class="wrap">';
+	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>Presenter Payouts</h1>';
 
 	if ( isset( $_GET['paid'] ) ) {
@@ -3866,7 +3919,7 @@ public function render_tax_profiles_page() {
 		)
 	);
 
-	echo '<div class="wrap">';
+	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>Tax Profiles</h1>';
 	echo '<p>This combines presenter tax profiles and 1099 paid-out totals. Full TIN values should live in AWS/Stripe, not WordPress.</p>';
 
@@ -3937,7 +3990,7 @@ public function render_email_log_page() {
 		$table = $this->t( 'mrm_masterclass_email_log' );
 		$rows  = $wpdb->get_results( "SELECT * FROM {$table} ORDER BY sent_at DESC LIMIT 300" );
 
-		echo '<div class="wrap">';
+		echo '<div class="wrap mrm-masterclass-admin">';
 		echo '<h1>Masterclass Email Log</h1>';
 
 		$this->admin_card_open( 'Recent Emails', 'This log records masterclass transactional email attempts, including confirmations, reminders, and failure records.' );
