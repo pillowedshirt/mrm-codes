@@ -2541,25 +2541,233 @@ public function handle_save_event() {
 public function handle_cancel_event() {
 	$this->must_admin();
 
+	global $wpdb;
+
 	$event_id = absint( $_POST['event_id'] ?? $_GET['event_id'] ?? 0 );
 
-	if ( $event_id > 0 ) {
-		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_cancel_event_' . $event_id );
+	if ( $event_id <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_missing_id' );
 	}
 
-	$this->mrm_mc_debug_log(
-		'Safe event cancel fallback reached. Cancellation is disabled in this stabilization patch.',
-		array(
-			'action'   => 'mrm_masterclass_cancel_event',
-			'event_id' => $event_id,
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_cancel_event_' . $event_id );
+
+	$events_table  = $this->t( 'mrm_masterclass_events' );
+	$regs_table    = $this->t( 'mrm_masterclass_registrations' );
+	$refunds_table = $this->t( 'mrm_masterclass_refunds' );
+	$ledger_table  = $this->t( 'mrm_masterclass_payment_ledger' );
+
+	if (
+		! $this->mrm_mc_table_exists( $events_table )
+		|| ! $this->mrm_mc_table_exists( $regs_table )
+		|| ! $this->mrm_mc_table_exists( $refunds_table )
+	) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_table_missing' );
+	}
+
+	$event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$events_table} WHERE id = %d",
+			$event_id
 		)
 	);
 
-	$this->mrm_mc_safe_admin_redirect(
-		'mrm-masterclass-events',
+	if ( ! $event ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_not_found' );
+	}
+
+	if ( 'deleted' === sanitize_key( $event->status ) ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_already_deleted' );
+	}
+
+	$now_ts             = time();
+	$event_start_ts     = strtotime( $event->start_time . ' UTC' );
+	$refund_deadline_ts = $event_start_ts + ( 7 * DAY_IN_SECONDS );
+	$should_refund      = $now_ts < $refund_deadline_ts;
+
+	$paid_regs = array();
+
+	if ( $should_refund ) {
+		$paid_regs = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT * FROM {$regs_table} WHERE event_id = %d AND payment_status = 'paid'",
+				$event_id
+			)
+		);
+	}
+
+	$refund_success_count = 0;
+	$refund_failure_count = 0;
+
+	if ( $should_refund && $paid_regs ) {
+		foreach ( $paid_regs as $registration ) {
+			$payment_intent_id = sanitize_text_field( $registration->payment_intent_id ?? '' );
+			$amount_cents      = absint( $registration->amount_cents ?? 0 );
+
+			if ( '' === $payment_intent_id || $amount_cents <= 0 ) {
+				$refund_failure_count++;
+
+				$this->mrm_mc_debug_log(
+					'Masterclass refund skipped because registration payment data is incomplete.',
+					array(
+						'event_id'        => $event_id,
+						'registration_id' => absint( $registration->id ),
+					)
+				);
+
+				continue;
+			}
+
+			$refund_result = $this->mrm_mc_refund_payment_intent( $payment_intent_id, $amount_cents );
+
+			if ( is_wp_error( $refund_result ) ) {
+				$refund_failure_count++;
+
+				$this->mrm_mc_debug_log(
+					'Masterclass Stripe refund failed.',
+					array(
+						'event_id'        => $event_id,
+						'registration_id' => absint( $registration->id ),
+						'error'           => $refund_result->get_error_message(),
+					)
+				);
+
+				$wpdb->insert(
+					$refunds_table,
+					array(
+						'event_id'          => $event_id,
+						'registration_id'   => absint( $registration->id ),
+						'payment_intent_id' => $payment_intent_id,
+						'refund_id'         => '',
+						'amount_cents'      => $amount_cents,
+						'status'            => 'failed',
+						'reason'            => 'event_cancelled',
+						'error_message'     => $refund_result->get_error_message(),
+						'created_at'        => $this->now(),
+						'updated_at'        => $this->now(),
+					)
+				);
+
+				continue;
+			}
+
+			$refund_id = sanitize_text_field( $refund_result['id'] ?? '' );
+
+			$wpdb->insert(
+				$refunds_table,
+				array(
+					'event_id'          => $event_id,
+					'registration_id'   => absint( $registration->id ),
+					'payment_intent_id' => $payment_intent_id,
+					'refund_id'         => $refund_id,
+					'amount_cents'      => $amount_cents,
+					'status'            => sanitize_key( $refund_result['status'] ?? 'succeeded' ),
+					'reason'            => 'event_cancelled',
+					'error_message'     => '',
+					'created_at'        => $this->now(),
+					'updated_at'        => $this->now(),
+				)
+			);
+
+			$wpdb->update(
+				$regs_table,
+				array(
+					'payment_status' => 'refunded',
+					'updated_at'     => $this->now(),
+				),
+				array( 'id' => absint( $registration->id ) )
+			);
+
+			if ( $this->mrm_mc_table_exists( $ledger_table ) ) {
+				$wpdb->update(
+					$ledger_table,
+					array(
+						'status'     => 'refunded',
+						'updated_at' => $this->now(),
+					),
+					array( 'registration_id' => absint( $registration->id ) )
+				);
+			}
+
+			$refund_success_count++;
+		}
+	}
+
+	$google_cancel_status = 'not_attempted';
+	$google_cancel_error  = '';
+
+	if ( ! empty( $event->google_event_id ) ) {
+		$google_cancel = $this->mrm_mc_google_cancel_event( $event->google_event_id );
+
+		if ( is_wp_error( $google_cancel ) ) {
+			$google_cancel_status = 'failed';
+			$google_cancel_error  = $google_cancel->get_error_message();
+
+			$this->mrm_mc_debug_log(
+				'Masterclass Google cancellation failed during event cancellation.',
+				array(
+					'event_id' => $event_id,
+					'error'    => $google_cancel_error,
+				)
+			);
+		} else {
+			$google_cancel_status = 'cancelled';
+		}
+	}
+
+	$cancellation_reason = $should_refund
+		? 'Admin cancelled/deleted event before refund deadline. Automatic refunds attempted.'
+		: 'Admin cancelled/deleted event at or after refund deadline. No automatic refunds issued.';
+
+	$wpdb->update(
+		$events_table,
 		array(
-			'mrm_mc_notice' => 'event_cancel_disabled_safe_patch',
+			'status'              => 'deleted',
+			'registration_open'   => 0,
+			'cancellation_reason' => $cancellation_reason,
+			'google_last_error'   => $google_cancel_error,
+			'updated_at'          => $this->now(),
+		),
+		array( 'id' => $event_id )
+	);
+
+	$this->mrm_mc_debug_log(
+		'Masterclass event cancellation completed.',
+		array(
+			'event_id'             => $event_id,
+			'should_refund'        => $should_refund ? 'yes' : 'no',
+			'refund_success_count' => $refund_success_count,
+			'refund_failure_count' => $refund_failure_count,
+			'google_cancel_status' => $google_cancel_status,
 		)
+	);
+
+	if ( $refund_failure_count > 0 ) {
+		$this->mrm_mc_admin_notice_redirect(
+			'mrm-masterclass-events',
+			'event_cancel_refund_failures',
+			array(
+				'event_id' => $event_id,
+				'success'  => $refund_success_count,
+				'failed'   => $refund_failure_count,
+			)
+		);
+	}
+
+	if ( $should_refund ) {
+		$this->mrm_mc_admin_notice_redirect(
+			'mrm-masterclass-events',
+			'event_cancel_refunds_success',
+			array(
+				'event_id' => $event_id,
+				'refunded' => $refund_success_count,
+			)
+		);
+	}
+
+	$this->mrm_mc_admin_notice_redirect(
+		'mrm-masterclass-events',
+		'event_cancel_no_refunds',
+		array( 'event_id' => $event_id )
 	);
 }
 
@@ -3333,6 +3541,13 @@ public function render_events_page() {
 		'event_saved_google_missing_calendar' => array( 'warning', 'Masterclass event saved locally, but no Masterclass Google Calendar ID is configured.' ),
 		'event_saved_google_failed'           => array( 'warning', 'Masterclass event saved locally, but Google Calendar / Google Meet creation needs attention. Check wp-content/masterclass-debug.log.' ),
 		'event_saved_google_success'          => array( 'success', 'Masterclass event saved and Google Calendar / Google Meet creation succeeded.' ),
+		'event_cancel_missing_id'             => array( 'error', 'Event cancellation failed because the event ID was missing.' ),
+		'event_cancel_table_missing'          => array( 'error', 'Event cancellation failed because one or more Masterclass database tables are missing.' ),
+		'event_cancel_not_found'              => array( 'error', 'Event cancellation failed because the event could not be found.' ),
+		'event_cancel_already_deleted'        => array( 'warning', 'This Masterclass event has already been deleted from active lists.' ),
+		'event_cancel_refund_failures'        => array( 'error', 'Event was removed from active lists, but one or more automatic refunds failed. Check wp-content/masterclass-debug.log and Stripe.' ),
+		'event_cancel_refunds_success'        => array( 'success', 'Event was removed from active lists and automatic refunds were processed for paid participants before the refund deadline.' ),
+		'event_cancel_no_refunds'             => array( 'success', 'Event was removed from active lists. The one-week post-event refund deadline had passed, so no automatic refunds were issued.' ),
 		'settings_saved'          => array( 'success', 'Calendar settings saved.' ),
 	);
 
@@ -3408,7 +3623,7 @@ public function render_events_page() {
 
 	echo '<h2>Existing Sessions</h2>';
 	echo '<table class="widefat striped">';
-	echo '<thead><tr><th>Title</th><th>Presenter</th><th>Proctor</th><th>Start</th><th>End</th><th>Price</th><th>Capacity</th><th>Paid</th><th>Status</th><th>Google Event</th><th>Meet Link</th></tr></thead><tbody>';
+	echo '<thead><tr><th>Title</th><th>Presenter</th><th>Proctor</th><th>Start</th><th>End</th><th>Price</th><th>Capacity</th><th>Paid</th><th>Status</th><th>Google Event</th><th>Meet Link</th><th>Actions</th></tr></thead><tbody>';
 
 	if ( $events ) {
 		foreach ( $events as $event ) {
@@ -3424,10 +3639,18 @@ public function render_events_page() {
 			echo '<td>' . esc_html( $event->status ) . '</td>';
 			echo '<td><code>' . esc_html( $event->google_event_id ?: 'Not created yet' ) . '</code></td>';
 			echo '<td>' . ( $event->google_meet_url ? '<a href="' . esc_url( $event->google_meet_url ) . '" target="_blank" rel="noopener">Open Meet</a>' : '—' ) . '</td>';
+			$cancel_url = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_cancel_event&event_id=' . absint( $event->id ) ),
+				'mrm_masterclass_cancel_event_' . absint( $event->id )
+			);
+
+			echo '<td>';
+			echo '<a class="button button-small button-link-delete" href="' . esc_url( $cancel_url ) . '" onclick="return confirm(\'Cancel/delete this event? Paid participants may be refunded automatically depending on the refund deadline.\');">Cancel / Delete</a>';
+			echo '</td>';
 			echo '</tr>';
 		}
 	} else {
-		echo '<tr><td colspan="11">No masterclass sessions created yet.</td></tr>';
+		echo '<tr><td colspan="12">No masterclass sessions created yet.</td></tr>';
 	}
 
 	echo '</tbody></table>';
