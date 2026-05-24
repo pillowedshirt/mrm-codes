@@ -231,7 +231,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	}
 
 	$this->mrm_mc_add_filter_if_method_exists( 'query_vars', 'register_masterclass_gate_query_vars' );
-	$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'maybe_render_masterclass_gate_page' );
+	$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'mrm_mc_handle_gate_request', 1, 0 );
 
 	$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely in REST-only frontend mode. No shortcode rendering is registered.' );
 }
@@ -3148,30 +3148,166 @@ public function register_masterclass_gate_query_vars( $vars ) {
 	return array_values( array_unique( $vars ) );
 }
 
-public function maybe_render_masterclass_gate_page() {
-	$token = get_query_var( 'mrm_masterclass_gate' );
-
-	if ( empty( $token ) ) {
+public function mrm_mc_handle_gate_request() {
+	if ( empty( $_GET['mrm_masterclass_gate'] ) ) {
 		return;
 	}
 
-	$this->mrm_mc_debug_log(
-		'Masterclass gate placeholder reached. Full gate implementation is not installed yet.',
-		array(
-			'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+	$token = sanitize_text_field( wp_unslash( $_GET['mrm_masterclass_gate'] ) );
+
+	if ( '' === $token || strlen( $token ) < 20 ) {
+		$this->mrm_mc_render_gate_page(
+			'Invalid Masterclass Access Link',
+			'This access link is invalid. Please use the protected link from your confirmation email.'
+		);
+		exit;
+	}
+
+	$hash = hash( 'sha256', $token );
+
+	global $wpdb;
+
+	$regs_table   = $this->t( 'mrm_masterclass_registrations' );
+	$events_table = $this->t( 'mrm_masterclass_events' );
+
+	if ( ! $this->mrm_mc_table_exists( $regs_table ) || ! $this->mrm_mc_table_exists( $events_table ) ) {
+		$this->mrm_mc_debug_log( 'Masterclass gate failed because required tables are missing.' );
+
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Access Temporarily Unavailable',
+			'This access link could not be checked right now. Please contact support if your Masterclass is starting soon.'
+		);
+		exit;
+	}
+
+	$registration = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$regs_table} WHERE gate_token_hash = %s LIMIT 1",
+			$hash
 		)
 	);
 
-	status_header( 503 );
+	if ( ! $registration ) {
+		$this->mrm_mc_debug_log( 'Masterclass gate rejected unknown token hash.' );
+
+		$this->mrm_mc_render_gate_page(
+			'Invalid Masterclass Access Link',
+			'This access link was not found. Please use the protected link from your confirmation email.'
+		);
+		exit;
+	}
+
+	if ( 'paid' !== sanitize_key( $registration->payment_status ) ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass gate rejected unpaid registration.',
+			array( 'registration_id' => absint( $registration->id ) )
+		);
+
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Access Not Available',
+			'This registration is not marked as paid, so the access link cannot be opened.'
+		);
+		exit;
+	}
+
+	$event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$events_table} WHERE id = %d LIMIT 1",
+			absint( $registration->event_id )
+		)
+	);
+
+	if ( ! $event ) {
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Event Not Found',
+			'This registration is valid, but the linked Masterclass event could not be found. Please contact support.'
+		);
+		exit;
+	}
+
+	$start_ts = strtotime( $event->start_time . ' UTC' );
+	$end_ts   = strtotime( $event->end_time . ' UTC' );
+	$now_ts   = time();
+
+	$opens_ts  = $start_ts - ( 15 * MINUTE_IN_SECONDS );
+	$closes_ts = $end_ts + ( 30 * MINUTE_IN_SECONDS );
+
+	if ( $now_ts < $opens_ts ) {
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Access Opens Soon',
+			'Your access link is valid. The meeting link will appear 15 minutes before the Masterclass starts.<br><br><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '<br><strong>Starts:</strong> ' . esc_html( $event->start_time . ' ' . $event->timezone )
+		);
+		exit;
+	}
+
+	if ( $now_ts > $closes_ts ) {
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Access Window Has Closed',
+			'This Masterclass access window has ended. Please contact support if you believe this is an error.'
+		);
+		exit;
+	}
+
+	if ( empty( $event->google_meet_url ) ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass gate opened but Meet link is unavailable.',
+			array(
+				'event_id'        => absint( $event->id ),
+				'registration_id' => absint( $registration->id ),
+			)
+		);
+
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Link Not Available Yet',
+			'Your access window is open, but the Google Meet link is not available yet. Please contact support if the Masterclass is starting now.'
+		);
+		exit;
+	}
+
+	$meet_url = esc_url( $event->google_meet_url );
+
+	$this->mrm_mc_render_gate_page(
+		'Your Masterclass Access Is Open',
+		'<p>Your Masterclass meeting link is available now.</p>'
+		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '</p>'
+		. '<p><a class="mrm-masterclass-gate-button" href="' . $meet_url . '" target="_blank" rel="noopener">Join Google Meet</a></p>'
+	);
+	exit;
+}
+
+private function mrm_mc_render_gate_page( $title, $body_html ) {
+	status_header( 200 );
 	nocache_headers();
 
-	wp_die(
-		esc_html__( 'Masterclass access is not available yet. Please contact Low Brass Lessons support if your event is starting soon.', 'mrm-masterclass' ),
-		esc_html__( 'Masterclass Access Not Ready', 'mrm-masterclass' ),
-		array(
-			'response' => 503,
-		)
-	);
+	$title     = sanitize_text_field( $title );
+	$body_html = wp_kses_post( $body_html );
+
+	echo '<!doctype html>';
+	echo '<html lang="en">';
+	echo '<head>';
+	echo '<meta charset="utf-8">';
+	echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
+	echo '<title>' . esc_html( $title ) . '</title>';
+	echo '<style>';
+	echo 'body{margin:0;background:#f6f1ea;color:#20170f;font-family:Arial,sans-serif;}';
+	echo '.mrm-masterclass-gate-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}';
+	echo '.mrm-masterclass-gate-card{max-width:720px;width:100%;background:#fff;border:1px solid #dccab0;border-radius:28px;padding:34px;box-shadow:0 18px 48px rgba(32,23,15,.12);}';
+	echo '.mrm-masterclass-gate-brand{text-align:center;font-weight:800;letter-spacing:.04em;margin-bottom:22px;}';
+	echo 'h1{font-family:Georgia,serif;font-size:clamp(2rem,5vw,3.25rem);line-height:1;margin:0 0 18px;}';
+	echo 'p{line-height:1.65;color:#5f5242;}';
+	echo '.mrm-masterclass-gate-button{display:inline-block;background:#20170f;color:#fff!important;text-decoration:none;border-radius:999px;padding:14px 22px;font-weight:800;}';
+	echo '</style>';
+	echo '</head>';
+	echo '<body>';
+	echo '<main class="mrm-masterclass-gate-wrap">';
+	echo '<section class="mrm-masterclass-gate-card">';
+	echo '<div class="mrm-masterclass-gate-brand">Low Brass Lessons</div>';
+	echo '<h1>' . esc_html( $title ) . '</h1>';
+	echo '<div>' . $body_html . '</div>';
+	echo '</section>';
+	echo '</main>';
+	echo '</body>';
+	echo '</html>';
 }
 
 public function mrm_mc_remove_stale_admin_visibility_css_hooks() {
