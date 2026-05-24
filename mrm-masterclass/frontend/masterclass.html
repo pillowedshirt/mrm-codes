@@ -424,6 +424,123 @@ input[type="checkbox"] {
   }
 }
 
+.mrm-masterclass-calendar-section {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 56px 20px 20px;
+}
+
+.mrm-masterclass-calendar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 22px;
+}
+
+.mrm-masterclass-month {
+  background: #fff;
+  border: 1px solid #dccab0;
+  border-radius: 24px;
+  box-shadow: 0 14px 34px rgba(32, 23, 15, 0.08);
+  overflow: hidden;
+}
+
+.mrm-masterclass-month-title {
+  margin: 0;
+  padding: 16px 18px;
+  background: #20170f;
+  color: #fff;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.25rem;
+}
+
+.mrm-masterclass-weekdays,
+.mrm-masterclass-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.mrm-masterclass-weekday {
+  padding: 9px 4px;
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: #7a6b58;
+  background: #f8f2e9;
+  border-bottom: 1px solid #eadcc8;
+}
+
+.mrm-masterclass-day {
+  min-height: 82px;
+  padding: 7px;
+  border-right: 1px solid #eee2d1;
+  border-bottom: 1px solid #eee2d1;
+  background: #fffdf9;
+}
+
+.mrm-masterclass-day:nth-child(7n) {
+  border-right: 0;
+}
+
+.mrm-masterclass-day.is-empty {
+  background: #faf6ef;
+}
+
+.mrm-masterclass-day-number {
+  display: block;
+  margin-bottom: 5px;
+  color: #493a2b;
+  font-weight: 800;
+  font-size: 0.8rem;
+}
+
+.mrm-masterclass-calendar-event {
+  display: block;
+  width: 100%;
+  margin: 4px 0 0;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 9px;
+  background: #9a6a2f;
+  color: #fff;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.72rem;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
+.mrm-masterclass-calendar-event:hover,
+.mrm-masterclass-calendar-event:focus {
+  background: #6e461c;
+}
+
+.mrm-masterclass-calendar-event-time {
+  display: block;
+  opacity: 0.9;
+  font-weight: 600;
+}
+
+@media (max-width: 1100px) {
+  .mrm-masterclass-calendar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .mrm-masterclass-calendar-section {
+    padding: 42px 14px 16px;
+  }
+
+  .mrm-masterclass-calendar {
+    grid-template-columns: 1fr;
+  }
+
+  .mrm-masterclass-day {
+    min-height: 70px;
+  }
+}
+
 </style>
 </head>
 
@@ -437,6 +554,18 @@ input[type="checkbox"] {
 
     <section class="mc-instructions">
       <strong>How registration works:</strong> choose a masterclass, enter your information, accept the terms, and complete payment. After payment is confirmed, your registration will be recorded.
+    </section>
+
+<section class="mrm-masterclass-calendar-section" id="mrm-masterclass-calendar-section">
+      <div class="mrm-masterclass-section-head">
+        <p class="mrm-masterclass-eyebrow">Calendar View</p>
+        <h2>Masterclass Calendar</h2>
+        <p>
+          Browse the full year at a glance. Click a listed Masterclass on the calendar to jump to its registration card.
+        </p>
+      </div>
+
+      <div id="mrm-masterclass-calendar" class="mrm-masterclass-calendar"></div>
     </section>
 
     <section class="mrm-masterclass-section" id="mrm-masterclass-public-events">
@@ -852,3 +981,171 @@ input[type="checkbox"] {
       loadMasterclassEvents();
     }
   </script>
+<script>
+(function () {
+  const calendarEl = document.getElementById("mrm-masterclass-calendar");
+
+  function eventDateKey(event) {
+    const raw = String(event.start_time || "").replace(" ", "T");
+    const date = new Date(raw);
+
+    if (Number.isNaN(date.getTime())) {
+      return String(event.start_time || "").slice(0, 10);
+    }
+
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+
+    return `${y}-${m}-${d}`;
+  }
+
+  function eventTimeRange(event) {
+    const start = new Date(String(event.start_time || "").replace(" ", "T"));
+    const end = new Date(String(event.end_time || "").replace(" ", "T"));
+
+    if (Number.isNaN(start.getTime())) {
+      return "";
+    }
+
+    const startText = start.toLocaleTimeString(undefined, {
+      hour: "numeric",
+      minute: "2-digit"
+    });
+
+    const endText = Number.isNaN(end.getTime())
+      ? ""
+      : end.toLocaleTimeString(undefined, {
+          hour: "numeric",
+          minute: "2-digit"
+        });
+
+    return endText ? `${startText}–${endText}` : startText;
+  }
+
+  function highlightEventCard(eventId) {
+    const card = document.getElementById(`mrm-masterclass-event-card-${eventId}`);
+
+    if (!card) {
+      return;
+    }
+
+    card.scrollIntoView({
+      behavior: "smooth",
+      block: "center"
+    });
+
+    card.classList.add("mrm-masterclass-card-highlight");
+
+    window.setTimeout(() => {
+      card.classList.remove("mrm-masterclass-card-highlight");
+    }, 2200);
+  }
+
+  function buildEventsByDate(events) {
+    const map = {};
+
+    (Array.isArray(events) ? events : []).forEach((event) => {
+      const key = eventDateKey(event);
+
+      if (!map[key]) {
+        map[key] = [];
+      }
+
+      map[key].push(event);
+    });
+
+    return map;
+  }
+
+  function renderMonth(year, monthIndex, eventsByDate) {
+    const month = document.createElement("section");
+    month.className = "mrm-masterclass-month";
+
+    const monthTitle = document.createElement("h3");
+    monthTitle.className = "mrm-masterclass-month-title";
+    monthTitle.textContent = new Date(year, monthIndex, 1).toLocaleDateString(undefined, {
+      month: "long",
+      year: "numeric"
+    });
+
+    const weekdays = document.createElement("div");
+    weekdays.className = "mrm-masterclass-weekdays";
+
+    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].forEach((label) => {
+      const day = document.createElement("div");
+      day.className = "mrm-masterclass-weekday";
+      day.textContent = label;
+      weekdays.appendChild(day);
+    });
+
+    const days = document.createElement("div");
+    days.className = "mrm-masterclass-days";
+
+    const firstDay = new Date(year, monthIndex, 1);
+    const leadingEmpty = firstDay.getDay();
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+
+    for (let i = 0; i < leadingEmpty; i++) {
+      const empty = document.createElement("div");
+      empty.className = "mrm-masterclass-day is-empty";
+      days.appendChild(empty);
+    }
+
+    for (let dayNumber = 1; dayNumber <= daysInMonth; dayNumber++) {
+      const cell = document.createElement("div");
+      cell.className = "mrm-masterclass-day";
+
+      const dateKey = `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(dayNumber).padStart(2, "0")}`;
+
+      const label = document.createElement("span");
+      label.className = "mrm-masterclass-day-number";
+      label.textContent = String(dayNumber);
+
+      cell.appendChild(label);
+
+      const events = eventsByDate[dateKey] || [];
+
+      events.forEach((event) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mrm-masterclass-calendar-event";
+        button.innerHTML = `
+          <span>${event.title || "Masterclass"}</span>
+          <span class="mrm-masterclass-calendar-event-time">${eventTimeRange(event)}</span>
+        `;
+
+        button.addEventListener("click", function () {
+          highlightEventCard(event.id);
+        });
+
+        cell.appendChild(button);
+      });
+
+      days.appendChild(cell);
+    }
+
+    month.appendChild(monthTitle);
+    month.appendChild(weekdays);
+    month.appendChild(days);
+
+    return month;
+  }
+
+  window.renderMasterclassCalendar = function (events) {
+    if (!calendarEl) {
+      return;
+    }
+
+    const now = new Date();
+    const year = now.getFullYear();
+    const eventsByDate = buildEventsByDate(events);
+
+    calendarEl.innerHTML = "";
+
+    for (let monthIndex = 0; monthIndex < 12; monthIndex++) {
+      calendarEl.appendChild(renderMonth(year, monthIndex, eventsByDate));
+    }
+  };
+})();
+</script>
