@@ -1757,6 +1757,36 @@ private function admin_card_close() {
 private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler'; }
 	private function mrm_mc_get_stripe_secret_id() { return defined( 'MRM_SECRET_STRIPE_KEYS' ) ? MRM_SECRET_STRIPE_KEYS : 'lowbrass/stripe/keys'; }
 	private function mrm_mc_get_tax_secret_id() { return defined( 'MRM_SECRET_MASTERCLASS_TAX_1099_PROFILES' ) ? MRM_SECRET_MASTERCLASS_TAX_1099_PROFILES : 'lowbrass/masterclass/tax/1099-profiles'; }
+	private function mrm_mc_get_stripe_keys() {
+		$settings = $this->settings();
+
+		$keys = array(
+			'publishable_key' => sanitize_text_field( $settings['stripe_publishable_key'] ?? '' ),
+			'secret_key'      => sanitize_text_field( $settings['stripe_secret_key'] ?? '' ),
+			'webhook_secret'  => sanitize_text_field( $settings['stripe_webhook_secret'] ?? '' ),
+		);
+
+		if ( method_exists( $this, 'mrm_mc_get_secret_json' ) ) {
+			$aws = $this->mrm_mc_get_secret_json( 'lowbrass/stripe/keys', 'mrm_masterclass_stripe_secret' );
+
+			if ( is_array( $aws ) ) {
+				foreach ( array( 'publishable_key', 'secret_key', 'webhook_secret' ) as $key ) {
+					if ( ! empty( $aws[ $key ] ) ) {
+						$keys[ $key ] = sanitize_text_field( $aws[ $key ] );
+					}
+				}
+			}
+		}
+
+		if ( empty( $keys['publishable_key'] ) || empty( $keys['secret_key'] ) ) {
+			return new WP_Error(
+				'mrm_masterclass_stripe_keys_missing',
+				'Masterclass payments are temporarily unavailable because Stripe is not fully configured.'
+			);
+		}
+
+		return $keys;
+	}
 	private function mrm_mc_get_google_scheduler_secret_bundle() { return $this->mrm_mc_get_secret_json( $this->mrm_mc_get_google_scheduler_secret_id(), 'mrm_masterclass_google_scheduler_secret' ); }
 	private function mrm_mc_get_google_service_account_json() { $b = $this->mrm_mc_get_google_scheduler_secret_bundle(); if ( ! is_array( $b ) || ! isset( $b['service_account_json'] ) ) { return ''; } if ( is_string( $b['service_account_json'] ) ) { return trim( $b['service_account_json'] ); } if ( is_array( $b['service_account_json'] ) ) { $encoded = wp_json_encode( $b['service_account_json'] ); return is_string( $encoded ) ? $encoded : ''; } return ''; }
 	private function mrm_mc_get_stripe_secret_bundle() { return $this->mrm_mc_get_secret_json( $this->mrm_mc_get_stripe_secret_id(), 'mrm_masterclass_stripe_secret' ); }
@@ -2038,74 +2068,130 @@ private function mrm_mc_google_cancel_event( $google_event_id ) {
 
 	return true;
 }
-private function mrm_mc_stripe_request( $method, $endpoint, $body = array() ) {
-	$sk = $this->mrm_mc_get_stripe_secret_key();
+private function mrm_mc_stripe_request( $method, $path, $body = array() ) {
+	$keys = $this->mrm_mc_get_stripe_keys();
 
-	if ( ! $sk ) {
-		return new WP_Error(
-			'stripe_missing',
-			'Stripe secret key is missing. Configure the Stripe AWS secret before processing payments.',
-			array( 'status' => 503 )
+	if ( is_wp_error( $keys ) ) {
+		$this->mrm_mc_debug_log(
+			'Stripe request blocked because keys are missing.',
+			array( 'path' => $path )
 		);
+
+		return $keys;
 	}
 
+	$url = 'https://api.stripe.com/v1/' . ltrim( $path, '/' );
+
 	$args = array(
-		'method'  => strtoupper( (string) $method ),
-		'timeout' => 20,
+		'method'  => strtoupper( $method ),
+		'timeout' => 25,
 		'headers' => array(
-			'Authorization' => 'Bearer ' . $sk,
-			'Content-Type'  => 'application/x-www-form-urlencoded',
+			'Authorization' => 'Bearer ' . $keys['secret_key'],
 		),
 	);
 
-	if ( is_array( $body ) && ! empty( $body ) ) {
-		$args['body'] = http_build_query( $body );
+	if ( ! empty( $body ) ) {
+		$args['body'] = $body;
 	}
 
-	$response = wp_remote_request( 'https://api.stripe.com/v1/' . ltrim( (string) $endpoint, '/' ), $args );
+	$response = wp_remote_request( $url, $args );
 
 	if ( is_wp_error( $response ) ) {
-		return $response;
-	}
-
-	$status_code = (int) wp_remote_retrieve_response_code( $response );
-	$raw_body    = (string) wp_remote_retrieve_body( $response );
-	$decoded     = json_decode( $raw_body, true );
-
-	if ( ! is_array( $decoded ) ) {
-		return new WP_Error(
-			'stripe_bad_response',
-			'Stripe returned an unreadable response.',
+		$this->mrm_mc_debug_log(
+			'Stripe API request failed at HTTP layer.',
 			array(
-				'status'      => 502,
-				'http_status' => $status_code,
+				'path'  => $path,
+				'error' => $response->get_error_message(),
 			)
+		);
+
+		return new WP_Error(
+			'mrm_masterclass_stripe_http_failed',
+			'Payment setup could not be completed. Please try again.'
 		);
 	}
 
-	if ( $status_code < 200 || $status_code >= 300 ) {
-		$message = 'Stripe request failed.';
+	$code = wp_remote_retrieve_response_code( $response );
+	$json = json_decode( wp_remote_retrieve_body( $response ), true );
 
-		if ( ! empty( $decoded['error']['message'] ) ) {
-			$message = (string) $decoded['error']['message'];
-		}
+	if ( $code < 200 || $code >= 300 ) {
+		$message = is_array( $json ) && ! empty( $json['error']['message'] )
+			? sanitize_text_field( $json['error']['message'] )
+			: 'Stripe returned an error.';
+
+		$this->mrm_mc_debug_log(
+			'Stripe API request returned an error.',
+			array(
+				'path'    => $path,
+				'status'  => $code,
+				'message' => $message,
+			)
+		);
 
 		return new WP_Error(
-			'stripe_api_error',
-			$message,
-			array(
-				'status'      => 502,
-				'http_status' => $status_code,
-				'stripe'      => $decoded,
-			)
+			'mrm_masterclass_stripe_api_error',
+			'Payment setup could not be completed. Please try again.'
 		);
 	}
 
-	return $decoded;
+	if ( ! is_array( $json ) ) {
+		$this->mrm_mc_debug_log(
+			'Stripe API response was not valid JSON.',
+			array( 'path' => $path )
+		);
+
+		return new WP_Error(
+			'mrm_masterclass_stripe_bad_response',
+			'Payment setup could not be completed. Please try again.'
+		);
+	}
+
+	return $json;
 }
 	private function mrm_mc_create_payment_intent($event,$email,$terms){ return $this->mrm_mc_stripe_request('POST','payment_intents',array('amount'=>$event->price_cents,'currency'=>'usd','automatic_payment_methods[enabled]'=>'true','metadata[mrm_masterclass_event_id]'=>$event->id,'metadata[mrm_masterclass_customer_email]'=>$email,'metadata[mrm_product_type]'=>'masterclass','metadata[source_flow]'=>'masterclass_registration','metadata[terms_version]'=>$terms['version'],'metadata[terms_accepted]'=>$terms['accepted']?'1':'0')); }
-	private function mrm_mc_retrieve_payment_intent($id){ return $this->mrm_mc_stripe_request('GET','payment_intents/'.rawurlencode($id)); }
-	private function mrm_mc_refund_payment_intent($pi,$amt){ return $this->mrm_mc_stripe_request('POST','refunds',array('payment_intent'=>$pi,'amount'=>$amt)); }
+	private function mrm_mc_retrieve_payment_intent( $payment_intent_id ) {
+		$payment_intent_id = sanitize_text_field( $payment_intent_id );
+
+		if ( '' === $payment_intent_id || ! preg_match( '/^pi_/', $payment_intent_id ) ) {
+			return new WP_Error(
+				'mrm_masterclass_invalid_payment_intent',
+				'Payment verification failed because the payment reference was invalid.'
+			);
+		}
+
+		return $this->mrm_mc_stripe_request(
+			'GET',
+			'payment_intents/' . rawurlencode( $payment_intent_id )
+		);
+	}
+	private function mrm_mc_refund_payment_intent( $payment_intent_id, $amount_cents ) {
+		$payment_intent_id = sanitize_text_field( $payment_intent_id );
+		$amount_cents      = absint( $amount_cents );
+
+		if ( '' === $payment_intent_id || $amount_cents <= 0 ) {
+			return new WP_Error(
+				'mrm_masterclass_refund_invalid_data',
+				'Refund could not be created because the payment reference or amount was invalid.'
+			);
+		}
+
+		$result = $this->mrm_mc_stripe_request(
+			'POST',
+			'refunds',
+			array(
+				'payment_intent'   => $payment_intent_id,
+				'amount'           => $amount_cents,
+				'reason'           => 'requested_by_customer',
+				'metadata[source]' => 'mrm_masterclass_event_cancellation',
+			)
+		);
+
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+
+		return $result;
+	}
 
 	public function send_reminders() {
 		$this->mrm_mc_debug_log( 'Masterclass reminders cron ran. Reminder sending is not fully implemented yet.' );
@@ -4063,8 +4149,8 @@ public function render_email_log_page() {
 			self::REST_NAMESPACE,
 			'/create-payment-intent',
 			array(
-				'methods'             => 'POST',
-				'callback'            => array( $this, 'rest_create_pi' ),
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( $this, 'rest_create_payment_intent' ),
 				'permission_callback' => '__return_true',
 			)
 		);
@@ -4231,13 +4317,106 @@ public function rest_apply_promo( WP_REST_Request $request ) {
 }
 
 public function rest_create_pi( WP_REST_Request $request ) {
-	$this->mrm_mc_debug_log( 'REST create-payment-intent placeholder endpoint reached.' );
+	return $this->rest_create_payment_intent( $request );
+}
 
-	if ( ! $this->mrm_mc_required_tables_ready() ) {
-		return $this->mrm_mc_rest_tables_error();
+private function mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents ) {
+	$promo_code = trim( sanitize_text_field( $promo_code ) );
+
+	if ( '' === $promo_code ) {
+		return array(
+			'status'         => 'not_applied',
+			'message'        => '',
+			'discount_cents' => 0,
+			'promo_code'     => '',
+			'metadata'       => array(),
+		);
 	}
 
-	return $this->mrm_mc_rest_not_implemented_error( 'payment setup' );
+	return array(
+		'status'         => 'placeholder',
+		'message'        => 'Promo code received. Masterclass promo discounts are not active yet.',
+		'discount_cents' => 0,
+		'promo_code'     => $promo_code,
+		'metadata'       => array(
+			'placeholder' => true,
+		),
+	);
+}
+
+public function rest_create_payment_intent( $request ) {
+	$event_id   = absint( $request->get_param( 'event_id' ) );
+	$promo_code = sanitize_text_field( $request->get_param( 'promo_code' ) ?? '' );
+
+	if ( $event_id <= 0 ) {
+		return new WP_Error( 'mrm_masterclass_invalid_event_id', 'Please select a valid Masterclass event.', array( 'status' => 400 ) );
+	}
+
+	$event = $this->mrm_mc_get_event( $event_id );
+	if ( ! $event ) {
+		return new WP_Error( 'mrm_masterclass_event_missing', 'This Masterclass event could not be found.', array( 'status' => 404 ) );
+	}
+	if ( 'scheduled' !== sanitize_key( $event->status ) || empty( $event->registration_open ) ) {
+		return new WP_Error( 'mrm_masterclass_event_closed', 'Registration is not open for this Masterclass.', array( 'status' => 409 ) );
+	}
+
+	$available = $this->mrm_mc_available_seats_for_event( $event );
+	if ( $available <= 0 ) {
+		return new WP_Error( 'mrm_masterclass_event_sold_out', 'This Masterclass is sold out.', array( 'status' => 409 ) );
+	}
+
+	$base_amount_cents = absint( $event->price_cents );
+	if ( $base_amount_cents <= 0 ) {
+		$this->mrm_mc_debug_log( 'PaymentIntent creation blocked because event amount is invalid.', array( 'event_id' => $event_id ) );
+		return new WP_Error( 'mrm_masterclass_invalid_amount', 'This Masterclass is not configured for payment yet.', array( 'status' => 500 ) );
+	}
+
+	$promo = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
+	if ( is_wp_error( $promo ) ) {
+		return $promo;
+	}
+
+	$discount_cents = absint( $promo['discount_cents'] ?? 0 );
+	$amount_cents   = max( 50, $base_amount_cents - $discount_cents );
+	$keys           = $this->mrm_mc_get_stripe_keys();
+
+	if ( is_wp_error( $keys ) ) {
+		return new WP_Error( 'mrm_masterclass_stripe_unavailable', 'Payments are temporarily unavailable. Please try again later.', array( 'status' => 503 ) );
+	}
+
+	$intent = $this->mrm_mc_stripe_request( 'POST', 'payment_intents', array(
+		'amount'                            => $amount_cents,
+		'currency'                          => 'usd',
+		'automatic_payment_methods[enabled]' => 'true',
+		'description'                       => 'Masterclass registration: ' . sanitize_text_field( $event->title ),
+		'metadata[event_id]'                => (string) $event_id,
+		'metadata[event_title]'             => sanitize_text_field( $event->title ),
+		'metadata[promo_code]'              => $promo_code,
+		'metadata[base_amount]'             => (string) $base_amount_cents,
+		'metadata[discount_amount]'         => (string) $discount_cents,
+		'metadata[source]'                  => 'mrm_masterclass',
+	) );
+
+	if ( is_wp_error( $intent ) ) {
+		return new WP_Error( $intent->get_error_code(), $intent->get_error_message(), array( 'status' => 500 ) );
+	}
+
+	if ( empty( $intent['client_secret'] ) || empty( $intent['id'] ) ) {
+		$this->mrm_mc_debug_log( 'Stripe PaymentIntent response missing expected fields.', array( 'event_id' => $event_id ) );
+		return new WP_Error( 'mrm_masterclass_payment_intent_incomplete', 'Payment setup could not be completed. Please try again.', array( 'status' => 500 ) );
+	}
+
+	return rest_ensure_response( array(
+		'success'           => true,
+		'client_secret'     => sanitize_text_field( $intent['client_secret'] ),
+		'payment_intent_id' => sanitize_text_field( $intent['id'] ),
+		'publishable_key'   => sanitize_text_field( $keys['publishable_key'] ),
+		'amount_cents'      => $amount_cents,
+		'base_amount_cents' => $base_amount_cents,
+		'discount_cents'    => $discount_cents,
+		'promo_status'      => sanitize_key( $promo['status'] ?? 'not_applied' ),
+		'promo_message'     => sanitize_text_field( $promo['message'] ?? '' ),
+	) );
 }
 
 public function rest_verify_pi( WP_REST_Request $request ) {
