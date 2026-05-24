@@ -541,6 +541,45 @@ input[type="checkbox"] {
   }
 }
 
+.mrm-masterclass-field {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 14px;
+}
+
+.mrm-masterclass-field span {
+  font-weight: 800;
+  color: #20170f;
+}
+
+.mrm-masterclass-field input,
+.mrm-masterclass-field textarea,
+.mrm-masterclass-field select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d8c7ad;
+  border-radius: 14px;
+  padding: 12px 13px;
+  font: inherit;
+  background: #fff;
+  color: #20170f;
+}
+
+.mrm-masterclass-field small {
+  color: #756858;
+  line-height: 1.45;
+}
+
+.mrm-masterclass-promo-message {
+  margin: 8px 0 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #fff8ed;
+  border: 1px solid #e4c99e;
+  color: #5e4221;
+  line-height: 1.45;
+}
+
 </style>
 </head>
 
@@ -591,6 +630,14 @@ input[type="checkbox"] {
       <input id="firstName" type="text" placeholder="First name">
       <input id="lastName" type="text" placeholder="Last name">
       <input id="email" type="email" placeholder="Email address">
+
+      <label class="mrm-masterclass-field">
+        <span>Promo code</span>
+        <input type="text" id="mrm-masterclass-promo-code" name="promo_code" autocomplete="off" placeholder="Optional">
+        <small>Masterclass promo codes follow the online-lesson-style promo path. If a code is not active yet, registration will continue without crashing.</small>
+      </label>
+
+      <div id="mrm-masterclass-promo-message" class="mrm-masterclass-promo-message" hidden></div>
 
       <label>
         <input id="termsAccepted" type="checkbox">
@@ -922,16 +969,26 @@ input[type="checkbox"] {
 
       modalMessage.textContent = 'Preparing secure payment...';
 
-      let data;
+      const promoCodeInput = document.getElementById("mrm-masterclass-promo-code");
+      const promoCode = promoCodeInput ? promoCodeInput.value.trim() : "";
+
+      let intentData;
       try {
-        data = await createMasterclassPaymentIntent(selectedEvent.id, '');
+        intentData = await createMasterclassPaymentIntent(selectedEvent.id, promoCode);
       } catch (error) {
         modalMessage.textContent = error && error.message ? error.message : 'Unable to start payment.';
         return;
       }
 
-      paymentIntentClientSecret = data.client_secret;
-      stripe = Stripe(data.publishable_key);
+      const promoMessageEl = document.getElementById("mrm-masterclass-promo-message");
+
+      if (promoMessageEl && intentData.promo_message) {
+        promoMessageEl.textContent = intentData.promo_message;
+        promoMessageEl.hidden = false;
+      }
+
+      paymentIntentClientSecret = intentData.client_secret;
+      stripe = Stripe(intentData.publishable_key);
       elements = stripe.elements({clientSecret: paymentIntentClientSecret});
 
       const payment = elements.create('payment');
@@ -965,7 +1022,8 @@ input[type="checkbox"] {
       const customerName = `${document.getElementById('firstName').value.trim()} ${document.getElementById('lastName').value.trim()}`.trim();
       const customerEmail = document.getElementById('email').value.trim();
       const termsAccepted = document.getElementById('termsAccepted').checked;
-      const promoCode = '';
+      const promoCodeInput = document.getElementById("mrm-masterclass-promo-code");
+      const promoCode = promoCodeInput ? promoCodeInput.value.trim() : "";
 
       let finalResult;
       try {

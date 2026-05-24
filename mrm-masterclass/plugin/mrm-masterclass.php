@@ -4340,7 +4340,8 @@ public function rest_create_pi( WP_REST_Request $request ) {
 }
 
 private function mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents ) {
-	$promo_code = trim( sanitize_text_field( $promo_code ) );
+	$promo_code        = trim( sanitize_text_field( $promo_code ) );
+	$base_amount_cents = absint( $base_amount_cents );
 
 	if ( '' === $promo_code ) {
 		return array(
@@ -4352,17 +4353,64 @@ private function mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $ev
 		);
 	}
 
+	if ( strlen( $promo_code ) > 80 ) {
+		return new WP_Error(
+			'mrm_masterclass_promo_invalid',
+			'Please enter a shorter promo code.',
+			array( 'status' => 400 )
+		);
+	}
+
+	/*
+	 * Future shared promo integration path.
+	 *
+	 * Keep this self-contained for now, but allow safe use of an existing
+	 * shared function if one is later made available globally.
+	 *
+	 * Expected future function shape:
+	 * mrm_validate_online_lesson_style_promo( $promo_code, $context )
+	 */
+	if ( function_exists( 'mrm_validate_online_lesson_style_promo' ) ) {
+		$context = array(
+			'source'            => 'masterclass',
+			'event_id'          => absint( $event->id ?? 0 ),
+			'product_type'      => 'online_lesson_style_masterclass',
+			'base_amount_cents' => $base_amount_cents,
+			'email'             => '',
+		);
+
+		$result = mrm_validate_online_lesson_style_promo( $promo_code, $context );
+
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+
+		if ( is_array( $result ) ) {
+			return array(
+				'status'         => sanitize_key( $result['status'] ?? 'applied' ),
+				'message'        => sanitize_text_field( $result['message'] ?? 'Promo code applied.' ),
+				'discount_cents' => min( $base_amount_cents, absint( $result['discount_cents'] ?? 0 ) ),
+				'promo_code'     => $promo_code,
+				'metadata'       => is_array( $result['metadata'] ?? null ) ? $result['metadata'] : array(),
+			);
+		}
+	}
+
+	/*
+	 * Launch-safe placeholder behavior:
+	 * Accept the code, do not crash, do not discount yet.
+	 */
 	return array(
-		'status'         => 'placeholder',
+		'status'         => 'received_not_active',
 		'message'        => 'Promo code received. Masterclass promo discounts are not active yet.',
 		'discount_cents' => 0,
 		'promo_code'     => $promo_code,
 		'metadata'       => array(
 			'placeholder' => true,
+			'future_path' => 'online_lesson_style',
 		),
 	);
 }
-
 public function rest_create_payment_intent( $request ) {
 	$event_id   = absint( $request->get_param( 'event_id' ) );
 	$promo_code = sanitize_text_field( $request->get_param( 'promo_code' ) ?? '' );
