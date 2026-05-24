@@ -869,6 +869,33 @@ input[type="checkbox"] {
       modal.style.display = 'flex';
     }
 
+    async function createMasterclassPaymentIntent(eventId, promoCode) {
+      const response = await fetch("/wp-json/mrm-masterclass/v1/create-payment-intent", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({
+          event_id: eventId,
+          promo_code: promoCode || ""
+        })
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error((data && data.message) || "Payment could not be started. Please try again.");
+      }
+
+      if (!data || !data.client_secret || !data.publishable_key) {
+        throw new Error("Payment could not be started because the payment response was incomplete.");
+      }
+
+      return data;
+    }
+
     payButton.addEventListener('click', async () => {
       const firstName = document.getElementById('firstName').value.trim();
       const lastName = document.getElementById('lastName').value.trim();
@@ -882,20 +909,11 @@ input[type="checkbox"] {
 
       modalMessage.textContent = 'Preparing secure payment...';
 
-      const response = await fetch(API_BASE + '/create-payment-intent', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          event_id:selectedEvent.id,
-          email:email,
-          terms_accepted:termsAccepted
-        })
-      });
-
-      const data = await response.json();
-
-      if (!response.ok || !data.client_secret || !data.publishable_key) {
-        modalMessage.textContent = data.message || 'Unable to start payment.';
+      let data;
+      try {
+        data = await createMasterclassPaymentIntent(selectedEvent.id, '');
+      } catch (error) {
+        modalMessage.textContent = error && error.message ? error.message : 'Unable to start payment.';
         return;
       }
 
