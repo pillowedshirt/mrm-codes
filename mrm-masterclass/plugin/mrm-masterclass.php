@@ -200,6 +200,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_send_reminders', 'send_reminders' );
 	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_reconcile_events', 'reconcile_events' );
+	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_reminder_cron', 'mrm_mc_run_reminder_cron', 10, 0 );
 
 	$actions = array(
 		'mrm_masterclass_save_settings'            => 'handle_save_settings',
@@ -208,12 +209,14 @@ class LowBrass_MRM_Masterclass_Plugin {
 		'mrm_masterclass_save_event'               => 'handle_save_event',
 		'mrm_masterclass_cancel_event'             => 'handle_cancel_event',
 		'mrm_masterclass_mark_payouts_paid'        => 'handle_mark_payouts_paid',
+		'mrm_masterclass_mark_payout_paid'         => 'handle_mark_payout_paid',
 		'mrm_masterclass_save_tax_profile'         => 'handle_save_tax_profile',
 		'mrm_masterclass_create_presenter_page'    => 'handle_create_presenter_page',
 		'mrm_masterclass_resend_confirmation'      => 'handle_resend_confirmation',
 		'mrm_masterclass_resend_reminder'          => 'handle_resend_reminder',
 		'mrm_masterclass_emergency_cancel_confirm' => 'handle_emergency_cancel_confirm',
 		'mrm_masterclass_emergency_cancel_execute' => 'handle_emergency_cancel_execute',
+		'mrm_masterclass_emergency_cancel_event'   => 'handle_emergency_cancel_event',
 	);
 
 	foreach ( $actions as $action => $method ) {
@@ -339,11 +342,16 @@ class LowBrass_MRM_Masterclass_Plugin {
 		if ( isset( $schedules['hourly'] ) && ! wp_next_scheduled( 'mrm_masterclass_reconcile_events' ) ) {
 			wp_schedule_event( time() + 300, 'hourly', 'mrm_masterclass_reconcile_events' );
 		}
+
+		if ( ! wp_next_scheduled( 'mrm_masterclass_reminder_cron' ) ) {
+			wp_schedule_event( time() + 300, 'hourly', 'mrm_masterclass_reminder_cron' );
+		}
 	}
 
 	public static function deactivate() {
 		wp_clear_scheduled_hook( 'mrm_masterclass_send_reminders' );
 		wp_clear_scheduled_hook( 'mrm_masterclass_reconcile_events' );
+		wp_clear_scheduled_hook( 'mrm_masterclass_reminder_cron' );
 	}
 
 	public function runtime_upgrade() {
@@ -1322,16 +1330,31 @@ private function mrm_mc_send_email_recorded( $type, $to, $subject, $body, $event
 }
 
 private function mrm_mc_confirmation_email_body( $event, $presenter, $registration ) {
-	$gate = esc_url( $registration->gate_url ?? '' );
+	$gate          = esc_url( $registration->gate_url ?? '' );
+	$terms_version = sanitize_text_field( $registration->terms_version ?? 'v1' );
 
 	$content = '<p>Your masterclass registration is confirmed.</p>'
 		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '<br>'
 		. '<strong>Date/time:</strong> ' . esc_html( $event->start_time . ' ' . $event->timezone ) . '<br>'
-		. '<strong>Presenter:</strong> ' . esc_html( $presenter->name ?? 'To be announced' ) . '</p>'
+		. '<strong>Presenter:</strong> ' . esc_html( $presenter->name ?? 'To be announced' ) . '<br>'
+		. '<strong>Terms version:</strong> ' . esc_html( $terms_version ) . '</p>'
 		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open protected access link</a></p>'
-		. '<p>This gate link reveals the Google Meet link only during the allowed event access window.</p>';
+		. '<p>This gate link reveals the Google Meet link only during the allowed access window. Please save this email.</p>';
 
 	return $this->mrm_mc_email_template( 'Masterclass Registration Confirmed', $content );
+}
+
+private function mrm_mc_reminder_email_body( $event, $presenter, $registration, $window_label ) {
+	$gate = esc_url( $registration->gate_url ?? '' );
+
+	$content = '<p>This is your ' . esc_html( $window_label ) . ' reminder for your upcoming Masterclass.</p>'
+		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '<br>'
+		. '<strong>Date/time:</strong> ' . esc_html( $event->start_time . ' ' . $event->timezone ) . '<br>'
+		. '<strong>Presenter:</strong> ' . esc_html( $presenter->name ?? 'To be announced' ) . '</p>'
+		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open protected access link</a></p>'
+		. '<p>The access link will reveal the Google Meet link during the allowed access window.</p>';
+
+	return $this->mrm_mc_email_template( 'Masterclass Reminder', $content );
 }
 
 private function mrm_mc_send_confirmation_for_registration( $registration_id ) {
@@ -2895,23 +2918,44 @@ public function handle_mark_payouts_paid() {
 	);
 }
 
+public function handle_mark_payout_paid() {
+	$this->must_admin();
+	global $wpdb;
+	$ledger_id = absint( $_POST['ledger_id'] ?? $_GET['ledger_id'] ?? 0 );
+	if ( $ledger_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_missing_id' ); }
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_mark_payout_paid_' . $ledger_id );
+	$ledger_table = $this->t( 'mrm_masterclass_payment_ledger' );
+	if ( ! $this->mrm_mc_table_exists( $ledger_table ) ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_table_missing' ); }
+	$result = $wpdb->update( $ledger_table, array( 'status' => 'paid_out', 'paid_at' => $this->now(), 'updated_at' => $this->now() ), array( 'id' => $ledger_id, 'status' => 'payable' ) );
+	if ( false === $result ) { $this->mrm_mc_debug_log( 'Presenter payout mark-paid failed.', array( 'ledger_id' => $ledger_id, 'db_error' => $wpdb->last_error ) ); $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_mark_paid_failed' ); }
+	if ( 0 === $result ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_not_payable' ); }
+	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_marked_paid' );
+}
+
 public function handle_save_tax_profile() {
 	$this->must_admin();
 	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_save_tax_profile' );
+	global $wpdb;
+	$table = $this->t( 'mrm_masterclass_presenter_tax_profiles' );
+	if ( ! $this->mrm_mc_table_exists( $table ) ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_table_missing' ); }
+	$profile_id = absint( $_POST['profile_id'] ?? 0 ); $presenter_id = absint( $_POST['presenter_id'] ?? 0 );
+	if ( $presenter_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_presenter_missing' ); }
+	$data = array( 'presenter_id' => $presenter_id, 'legal_name' => sanitize_text_field( wp_unslash( $_POST['legal_name'] ?? '' ) ), 'business_name' => sanitize_text_field( wp_unslash( $_POST['business_name'] ?? '' ) ), 'tax_classification' => sanitize_text_field( wp_unslash( $_POST['tax_classification'] ?? '' ) ), 'w9_received' => ! empty( $_POST['w9_received'] ) ? 1 : 0, 'w9_received_date' => sanitize_text_field( wp_unslash( $_POST['w9_received_date'] ?? '' ) ), 'is_1099_eligible' => ! empty( $_POST['is_1099_eligible'] ) ? 1 : 0, 'is_employee' => ! empty( $_POST['is_employee'] ) ? 1 : 0, 'exclude_from_1099' => ! empty( $_POST['exclude_from_1099'] ) ? 1 : 0, 'tin_last4' => preg_replace( '/[^0-9]/', '', sanitize_text_field( wp_unslash( $_POST['tin_last4'] ?? '' ) ) ), 'mailing_address' => sanitize_textarea_field( wp_unslash( $_POST['mailing_address'] ?? '' ) ), 'notes' => sanitize_textarea_field( wp_unslash( $_POST['notes'] ?? '' ) ), 'updated_at' => $this->now() );
+	if ( strlen( $data['tin_last4'] ) > 4 ) { $data['tin_last4'] = substr( $data['tin_last4'], -4 ); }
+	if ( $profile_id > 0 ) { $result = $wpdb->update( $table, $data, array( 'id' => $profile_id ) ); } else { $data['created_at'] = $this->now(); $result = $wpdb->insert( $table, $data ); }
+	if ( false === $result ) { $this->mrm_mc_debug_log( 'Masterclass tax profile save failed.', array( 'profile_id' => $profile_id, 'presenter_id' => $presenter_id, 'db_error' => $wpdb->last_error ) ); $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_save_failed' ); }
+	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_saved' );
+}
 
-	$this->mrm_mc_debug_log(
-		'Safe tax profile save fallback reached. Full tax profile save implementation is not installed yet.',
-		array(
-			'action' => 'mrm_masterclass_save_tax_profile',
-		)
-	);
-
-	$this->mrm_mc_safe_admin_redirect(
-		'mrm-masterclass-tax-profiles',
-		array(
-			'mrm_mc_notice' => 'tax_profile_save_fallback_reached',
-		)
-	);
+public function handle_emergency_cancel_event() {
+	$this->must_admin();
+	$event_id = absint( $_POST['event_id'] ?? $_GET['event_id'] ?? 0 );
+	if ( $event_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_missing_id' ); }
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_emergency_cancel_event_' . $event_id );
+	$this->mrm_mc_debug_log( 'Emergency Masterclass cancellation requested.', array( 'event_id' => $event_id ) );
+	$_REQUEST['_wpnonce'] = wp_create_nonce( 'mrm_masterclass_cancel_event_' . $event_id );
+	$_GET['event_id'] = $event_id; $_POST['event_id'] = $event_id;
+	$this->handle_cancel_event();
 }
 
 public function handle_create_presenter_page() {
