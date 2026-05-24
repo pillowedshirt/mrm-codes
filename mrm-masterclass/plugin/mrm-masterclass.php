@@ -89,6 +89,15 @@ if ( ! function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
 					continue;
 				}
 
+				if ( is_scalar( $value ) ) {
+					$string_value = (string) $value;
+
+					if ( preg_match( '/sk_live_|sk_test_|pk_live_|pk_test_|whsec_|-----BEGIN|Bearer\s+/i', $string_value ) ) {
+						$safe_context[ $key ] = '[redacted]';
+						continue;
+					}
+				}
+
 				if ( is_scalar( $value ) || null === $value ) {
 					$value = (string) $value;
 
@@ -137,7 +146,7 @@ if ( ! class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 class LowBrass_MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
-	const DB_VERSION = '1.2.6';
+	const DB_VERSION = '1.2.7';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 
@@ -1064,6 +1073,99 @@ public function mrm_mc_render_critical_error_notice() {
 		}
 	}
 
+
+	/*
+	 * Masterclass launch-readiness compatibility patch.
+	 *
+	 * This block intentionally preserves existing records and adds missing columns
+	 * required by the current registration, refund, reminder, payout, tax, and gate flows.
+	 */
+	$compat_tables = array(
+		'registrations' => $registrations_table,
+		'ledger'        => $ledger_table,
+		'refunds'       => $refunds_table,
+		'tax'           => $tax_table,
+	);
+
+	foreach ( $compat_tables as $compat_table ) {
+		if ( ! $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $compat_table ) ) ) {
+			continue;
+		}
+	}
+
+	$registration_columns = $wpdb->get_col( "DESC {$registrations_table}", 0 );
+	if ( ! is_array( $registration_columns ) ) {
+		$registration_columns = array();
+	}
+
+	$registration_compat_adds = array(
+		'name'                 => "ALTER TABLE {$registrations_table} ADD name VARCHAR(255) NULL",
+		'payment_intent_id'    => "ALTER TABLE {$registrations_table} ADD payment_intent_id VARCHAR(191) NULL",
+		'promo_status'         => "ALTER TABLE {$registrations_table} ADD promo_status VARCHAR(64) NULL",
+		'reminder_24h_sent_at' => "ALTER TABLE {$registrations_table} ADD reminder_24h_sent_at DATETIME NULL",
+		'reminder_1h_sent_at'  => "ALTER TABLE {$registrations_table} ADD reminder_1h_sent_at DATETIME NULL",
+	);
+
+	foreach ( $registration_compat_adds as $column => $sql ) {
+		if ( ! in_array( $column, $registration_columns, true ) ) {
+			$wpdb->query( $sql );
+		}
+	}
+
+	$ledger_columns = $wpdb->get_col( "DESC {$ledger_table}", 0 );
+	if ( ! is_array( $ledger_columns ) ) {
+		$ledger_columns = array();
+	}
+
+	$ledger_compat_adds = array(
+		'payment_intent_id'          => "ALTER TABLE {$ledger_table} ADD payment_intent_id VARCHAR(191) NULL",
+		'discount_cents'             => "ALTER TABLE {$ledger_table} ADD discount_cents INT NOT NULL DEFAULT 0",
+		'estimated_stripe_fee_cents' => "ALTER TABLE {$ledger_table} ADD estimated_stripe_fee_cents INT NOT NULL DEFAULT 0",
+		'paid_at'                    => "ALTER TABLE {$ledger_table} ADD paid_at DATETIME NULL",
+	);
+
+	foreach ( $ledger_compat_adds as $column => $sql ) {
+		if ( ! in_array( $column, $ledger_columns, true ) ) {
+			$wpdb->query( $sql );
+		}
+	}
+
+	$refund_columns = $wpdb->get_col( "DESC {$refunds_table}", 0 );
+	if ( ! is_array( $refund_columns ) ) {
+		$refund_columns = array();
+	}
+
+	$refund_compat_adds = array(
+		'payment_intent_id' => "ALTER TABLE {$refunds_table} ADD payment_intent_id VARCHAR(191) NULL",
+		'refund_id'         => "ALTER TABLE {$refunds_table} ADD refund_id VARCHAR(191) NULL",
+		'reason'            => "ALTER TABLE {$refunds_table} ADD reason VARCHAR(191) NULL",
+		'error_message'     => "ALTER TABLE {$refunds_table} ADD error_message TEXT NULL",
+		'updated_at'        => "ALTER TABLE {$refunds_table} ADD updated_at DATETIME NULL",
+	);
+
+	foreach ( $refund_compat_adds as $column => $sql ) {
+		if ( ! in_array( $column, $refund_columns, true ) ) {
+			$wpdb->query( $sql );
+		}
+	}
+
+	$tax_columns = $wpdb->get_col( "DESC {$tax_table}", 0 );
+	if ( ! is_array( $tax_columns ) ) {
+		$tax_columns = array();
+	}
+
+	$tax_compat_adds = array(
+		'tax_classification' => "ALTER TABLE {$tax_table} ADD tax_classification VARCHAR(100) NULL",
+		'is_employee'        => "ALTER TABLE {$tax_table} ADD is_employee TINYINT(1) NOT NULL DEFAULT 0",
+		'mailing_address'    => "ALTER TABLE {$tax_table} ADD mailing_address TEXT NULL",
+	);
+
+	foreach ( $tax_compat_adds as $column => $sql ) {
+		if ( ! in_array( $column, $tax_columns, true ) ) {
+			$wpdb->query( $sql );
+		}
+	}
+
 	update_option( 'mrm_masterclass_db_version', self::DB_VERSION );
 }
 	public function add_cron_schedule($s){$s['mrm_masterclass_15min']=array('interval'=>900,'display'=>'Every 15 Minutes'); return $s;}
@@ -1577,6 +1679,76 @@ public function mrm_mc_admin_boot_debug() {
 private function mrm_mc_table_exists( $table ) {
 	global $wpdb;
 	return (bool) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+}
+
+private function mrm_mc_table_columns( $table ) {
+	global $wpdb;
+
+	$table = sanitize_text_field( $table );
+
+	if ( '' === $table || ! $this->mrm_mc_table_exists( $table ) ) {
+		return array();
+	}
+
+	$columns = $wpdb->get_col( "DESC {$table}", 0 );
+
+	return is_array( $columns ) ? $columns : array();
+}
+
+private function mrm_mc_column_exists( $table, $column ) {
+	$column  = sanitize_key( $column );
+	$columns = $this->mrm_mc_table_columns( $table );
+
+	return in_array( $column, $columns, true );
+}
+
+private function mrm_mc_filter_data_for_table( $table, $data ) {
+	$columns = $this->mrm_mc_table_columns( $table );
+
+	if ( empty( $columns ) || ! is_array( $data ) ) {
+		return array();
+	}
+
+	$filtered = array();
+
+	foreach ( $data as $key => $value ) {
+		if ( in_array( $key, $columns, true ) ) {
+			$filtered[ $key ] = $value;
+		}
+	}
+
+	return $filtered;
+}
+
+private function mrm_mc_payment_intent_column_for_registrations() {
+	$table = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( $this->mrm_mc_column_exists( $table, 'payment_intent_id' ) ) {
+		return 'payment_intent_id';
+	}
+
+	return 'stripe_payment_intent_id';
+}
+
+private function mrm_mc_render_notice_from_map( $notice_map ) {
+	$notice = isset( $_GET['mrm_mc_notice'] ) ? sanitize_key( wp_unslash( $_GET['mrm_mc_notice'] ) ) : '';
+
+	if ( '' === $notice || ! is_array( $notice_map ) || empty( $notice_map[ $notice ] ) ) {
+		return;
+	}
+
+	$type    = isset( $notice_map[ $notice ][0] ) ? sanitize_html_class( $notice_map[ $notice ][0] ) : 'info';
+	$message = isset( $notice_map[ $notice ][1] ) ? sanitize_text_field( $notice_map[ $notice ][1] ) : '';
+
+	if ( '' === $message ) {
+		return;
+	}
+
+	if ( ! in_array( $type, array( 'success', 'error', 'warning', 'info' ), true ) ) {
+		$type = 'info';
+	}
+
+	echo '<div class="notice notice-' . esc_attr( $type ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
 }
 
 private function mrm_mc_safe_count( $table, $where = '1=1' ) {
@@ -4677,29 +4849,47 @@ public function rest_finalize_registration( $request ) {
 
 	$event_id          = absint( $request->get_param( 'event_id' ) );
 	$payment_intent_id = sanitize_text_field( $request->get_param( 'payment_intent_id' ) ?? '' );
+	$first_name        = sanitize_text_field( $request->get_param( 'first_name' ) ?? '' );
+	$last_name         = sanitize_text_field( $request->get_param( 'last_name' ) ?? '' );
 	$name              = sanitize_text_field( $request->get_param( 'name' ) ?? '' );
 	$email             = sanitize_email( $request->get_param( 'email' ) ?? '' );
 	$terms_accepted    = filter_var( $request->get_param( 'terms_accepted' ), FILTER_VALIDATE_BOOLEAN );
 	$promo_code        = sanitize_text_field( $request->get_param( 'promo_code' ) ?? '' );
 
-	if ( $event_id <= 0 || '' === $payment_intent_id ) { return new WP_Error('mrm_masterclass_finalize_missing_payment','Registration could not be finalized because the event or payment reference was missing.',array('status'=>400)); }
+	if ( '' === $name && ( '' !== $first_name || '' !== $last_name ) ) {
+		$name = trim( $first_name . ' ' . $last_name );
+	}
+
+	if ( '' === $first_name && '' !== $name ) {
+		$parts      = preg_split( '/\s+/', $name );
+		$first_name = sanitize_text_field( $parts[0] ?? '' );
+		$last_name  = sanitize_text_field( trim( substr( $name, strlen( $first_name ) ) ) );
+	}
+
+	if ( '' === $last_name ) {
+		$last_name = '—';
+	}
+
+	if ( $event_id <= 0 || '' === $payment_intent_id ) {
+		return new WP_Error('mrm_masterclass_finalize_missing_payment','Registration could not be finalized because the event or payment reference was missing.',array('status'=>400));
+	}
 	if ( '' === $name || ! is_email( $email ) ) { return new WP_Error('mrm_masterclass_finalize_invalid_customer','Please enter your name and a valid email address.',array('status'=>400)); }
 	if ( ! $terms_accepted ) { return new WP_Error('mrm_masterclass_terms_required','Please accept the Masterclass terms before completing registration.',array('status'=>400)); }
-
 	$events_table = $this->t( 'mrm_masterclass_events' );
 	$regs_table   = $this->t( 'mrm_masterclass_registrations' );
 	$ledger_table = $this->t( 'mrm_masterclass_payment_ledger' );
-	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $regs_table ) || ! $this->mrm_mc_table_exists( $ledger_table ) ) { return new WP_Error('mrm_masterclass_finalize_tables_missing','Registration could not be finalized right now. Please contact support.',array('status'=>503)); }
-
-	$existing = $wpdb->get_row( $wpdb->prepare("SELECT * FROM {$regs_table} WHERE payment_intent_id = %s LIMIT 1", $payment_intent_id ) );
-	if ( $existing ) { return rest_ensure_response(array('success'=>true,'already_finalized'=>true,'registration_id'=>absint($existing->id),'gate_url'=>esc_url_raw($existing->gate_url),'message'=>'This registration was already finalized.')); }
+	if (! $this->mrm_mc_table_exists( $events_table )|| ! $this->mrm_mc_table_exists( $regs_table )|| ! $this->mrm_mc_table_exists( $ledger_table )) { return new WP_Error('mrm_masterclass_finalize_tables_missing','Registration could not be finalized right now. Please contact support.',array('status'=>503)); }
+	$pi_column = $this->mrm_mc_payment_intent_column_for_registrations();
+	$existing = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$regs_table} WHERE {$pi_column} = %s LIMIT 1",$payment_intent_id));
+	if ( $existing ) { return rest_ensure_response(array('success'=>true,'already_finalized'=>true,'registration_id'=>absint($existing->id),'gate_url'=>esc_url_raw($existing->gate_url ?? ''),'message'=>'This registration was already finalized.')); }
 	$event = $this->mrm_mc_get_event( $event_id );
 	if ( ! $event ) { return new WP_Error('mrm_masterclass_event_missing','This Masterclass event could not be found.',array('status'=>404)); }
 	if ( 'scheduled' !== sanitize_key( $event->status ) || empty( $event->registration_open ) ) { return new WP_Error('mrm_masterclass_event_closed','Registration is no longer open for this Masterclass.',array('status'=>409)); }
 	if ( $this->mrm_mc_available_seats_for_event( $event ) <= 0 ) { return new WP_Error('mrm_masterclass_event_sold_out','This Masterclass is sold out.',array('status'=>409)); }
 	$payment_intent = $this->mrm_mc_retrieve_payment_intent( $payment_intent_id );
-	if ( is_wp_error( $payment_intent ) ) { return new WP_Error($payment_intent->get_error_code(),$payment_intent->get_error_message(),array('status'=>400)); }
-	if ( 'succeeded' !== sanitize_key( $payment_intent['status'] ?? '' ) ) { return new WP_Error('mrm_masterclass_payment_not_succeeded','Payment has not been completed yet. Please finish payment before finalizing registration.',array('status'=>409)); }
+	if ( is_wp_error( $payment_intent ) ) { return new WP_Error( $payment_intent->get_error_code(),$payment_intent->get_error_message(),array( 'status' => 400 ) ); }
+	$status = sanitize_key( $payment_intent['status'] ?? '' );
+	if ( 'succeeded' !== $status ) { return new WP_Error('mrm_masterclass_payment_not_succeeded','Payment has not been completed yet. Please finish payment before finalizing registration.',array('status'=>409)); }
 	$amount_received = absint( $payment_intent['amount_received'] ?? $payment_intent['amount'] ?? 0 );
 	$currency        = strtolower( sanitize_text_field( $payment_intent['currency'] ?? 'usd' ) );
 	if ( 'usd' !== $currency || $amount_received <= 0 ) { return new WP_Error('mrm_masterclass_payment_invalid_verified_amount','Payment verification failed. Please contact support.',array('status'=>409)); }
@@ -4707,19 +4897,21 @@ public function rest_finalize_registration( $request ) {
 	$discount_cents    = max( 0, $base_amount_cents - $amount_received );
 	$promo = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
 	$promo_status = is_wp_error( $promo ) ? 'error' : sanitize_key( $promo['status'] ?? 'not_applied' );
-	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair();
-	$email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
-	$stripe_fee = $this->mrm_mc_estimated_stripe_fee_cents( $amount_received );
-	$net_cents = max( 0, $amount_received - $stripe_fee );
-	$presenter_cut = (int) round( $net_cents * ( $this->mrm_mc_presenter_share_percent() / 100 ) );
-	$platform_cut = max( 0, $net_cents - $presenter_cut );
-	$inserted = $wpdb->insert($regs_table,array('event_id'=>$event_id,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>wp_json_encode($terms),'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'created_at'=>$this->now(),'updated_at'=>$this->now()));
+	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair(); $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
+	$stripe_fee = $this->mrm_mc_estimated_stripe_fee_cents( $amount_received ); $net_cents = max( 0, $amount_received - $stripe_fee ); $presenter_pct  = $this->mrm_mc_presenter_share_percent();
+	$presenter_cut  = (int) round( $net_cents * ( $presenter_pct / 100 ) ); $platform_cut   = max( 0, $net_cents - $presenter_cut ); $terms_snapshot = wp_json_encode( $terms );
+	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'created_at'=>$this->now(),'updated_at'=>$this->now());
+	$registration_data = $this->mrm_mc_filter_data_for_table( $regs_table, $registration_data );
+	$inserted = $wpdb->insert( $regs_table, $registration_data );
 	if ( false === $inserted ) { return new WP_Error('mrm_masterclass_registration_insert_failed','Payment succeeded, but registration could not be saved. Please contact support.',array('status'=>500)); }
 	$registration_id = absint( $wpdb->insert_id );
-	$wpdb->insert($ledger_table,array('registration_id'=>$registration_id,'event_id'=>$event_id,'presenter_id'=>absint( $event->presenter_id ),'payment_intent_id'=>$payment_intent_id,'gross_cents'=>$amount_received,'discount_cents'=>$discount_cents,'estimated_stripe_fee_cents'=>$stripe_fee,'net_cents'=>$net_cents,'presenter_share_cents'=>$presenter_cut,'platform_share_cents'=>$platform_cut,'status'=>'payable','created_at'=>$this->now(),'updated_at'=>$this->now()));
+	$ledger_data = array('event_id'=>$event_id,'registration_id'=>$registration_id,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'gross_cents'=>$amount_received,'discount_cents'=>$discount_cents,'stripe_fee_cents'=>$stripe_fee,'estimated_stripe_fee_cents'=>$stripe_fee,'net_cents'=>$net_cents,'presenter_share_cents'=>$presenter_cut,'platform_share_cents'=>$platform_cut,'status'=>'payable','notes'=>'Masterclass registration payment finalized.','created_at'=>$this->now(),'updated_at'=>$this->now());
+	$ledger_data = $this->mrm_mc_filter_data_for_table( $ledger_table, $ledger_data );
+	$wpdb->insert($ledger_table,$ledger_data);
 	$this->mrm_mc_send_confirmation_for_registration( $registration_id );
 	return rest_ensure_response(array('success'=>true,'registration_id'=>$registration_id,'gate_url'=>esc_url_raw( $gate['url'] ),'message'=>'Registration confirmed.'));
 }
+
 
 	public function rest_health() {
 		return rest_ensure_response(
