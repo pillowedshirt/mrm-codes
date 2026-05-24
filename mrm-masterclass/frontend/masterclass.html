@@ -896,6 +896,19 @@ input[type="checkbox"] {
       return data;
     }
 
+    async function finalizeMasterclassRegistration(payload) {
+      const response = await fetch("/wp-json/mrm-masterclass/v1/finalize-registration", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {"Content-Type": "application/json","Accept": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error((data && data.message) || "Registration could not be finalized. Please contact support.");
+      if (!data || !data.success || !data.gate_url) throw new Error("Registration was processed, but the access link was not returned. Please contact support.");
+      return data;
+    }
+
     payButton.addEventListener('click', async () => {
       const firstName = document.getElementById('firstName').value.trim();
       const lastName = document.getElementById('lastName').value.trim();
@@ -949,23 +962,35 @@ input[type="checkbox"] {
         return;
       }
 
-      const finalizeResponse = await fetch(API_BASE + '/finalize-registration', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          event_id:selectedEvent.id,
-          payment_intent_id:paymentIntentId,
-          first_name:document.getElementById('firstName').value.trim(),
-          last_name:document.getElementById('lastName').value.trim(),
-          email:document.getElementById('email').value.trim()
-        })
-      });
+      const customerName = `${document.getElementById('firstName').value.trim()} ${document.getElementById('lastName').value.trim()}`.trim();
+      const customerEmail = document.getElementById('email').value.trim();
+      const termsAccepted = document.getElementById('termsAccepted').checked;
+      const promoCode = '';
 
-      const finalizeData = await finalizeResponse.json();
-
-      if (!finalizeResponse.ok || !finalizeData.ok) {
-        modalMessage.textContent = finalizeData.message || 'Payment succeeded, but registration could not be finalized. Please contact support.';
+      let finalResult;
+      try {
+        finalResult = await finalizeMasterclassRegistration({
+          event_id: selectedEvent.id,
+          payment_intent_id: paymentIntentId,
+          name: customerName,
+          email: customerEmail,
+          terms_accepted: termsAccepted,
+          promo_code: promoCode
+        });
+      } catch (error) {
+        modalMessage.textContent = error && error.message ? error.message : 'Payment succeeded, but registration could not be finalized. Please contact support.';
         return;
+      }
+
+      const successBox = document.getElementById("mrm-masterclass-success");
+      if (successBox) {
+        successBox.innerHTML = `
+          <strong>Registration confirmed.</strong><br>
+          Your protected access link is ready:
+          <br>
+          <a href="${finalResult.gate_url}" target="_blank" rel="noopener">Open Masterclass Access Link</a>
+        `;
+        successBox.hidden = false;
       }
 
       modalMessage.textContent = 'Registration confirmed. Thank you!';

@@ -137,7 +137,7 @@ if ( ! class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 class LowBrass_MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
-	const DB_VERSION = '1.2.5';
+	const DB_VERSION = '1.2.6';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 
@@ -1211,6 +1211,25 @@ private function mrm_mc_estimated_stripe_fee_cents( $amount_cents ) {
 		: 30;
 
 	return max( 0, (int) round( ( absint( $amount_cents ) * ( $percent / 100 ) ) + $fixed ) );
+}
+
+
+private function mrm_mc_presenter_share_percent() {
+	$settings = $this->settings();
+
+	$percent = isset( $settings['presenter_share_percent'] )
+		? (float) $settings['presenter_share_percent']
+		: 70.0;
+
+	if ( $percent < 0 ) {
+		$percent = 0;
+	}
+
+	if ( $percent > 100 ) {
+		$percent = 100;
+	}
+
+	return $percent;
 }
 
 private function mrm_mc_terms_snapshot() {
@@ -4170,7 +4189,7 @@ public function render_email_log_page() {
 			'/finalize-registration',
 			array(
 				'methods'             => 'POST',
-				'callback'            => array( $this, 'rest_finalize' ),
+				'callback'            => array( $this, 'rest_finalize_registration' ),
 				'permission_callback' => '__return_true',
 			)
 		);
@@ -4425,14 +4444,53 @@ public function rest_verify_pi( WP_REST_Request $request ) {
 	return $this->mrm_mc_rest_not_implemented_error( 'payment verification' );
 }
 
-public function rest_finalize( WP_REST_Request $request ) {
-	$this->mrm_mc_debug_log( 'REST finalize-registration placeholder endpoint reached.' );
+public function rest_finalize_registration( $request ) {
+	global $wpdb;
 
-	if ( ! $this->mrm_mc_required_tables_ready() ) {
-		return $this->mrm_mc_rest_tables_error();
-	}
+	$event_id          = absint( $request->get_param( 'event_id' ) );
+	$payment_intent_id = sanitize_text_field( $request->get_param( 'payment_intent_id' ) ?? '' );
+	$name              = sanitize_text_field( $request->get_param( 'name' ) ?? '' );
+	$email             = sanitize_email( $request->get_param( 'email' ) ?? '' );
+	$terms_accepted    = filter_var( $request->get_param( 'terms_accepted' ), FILTER_VALIDATE_BOOLEAN );
+	$promo_code        = sanitize_text_field( $request->get_param( 'promo_code' ) ?? '' );
 
-	return $this->mrm_mc_rest_not_implemented_error( 'registration finalization' );
+	if ( $event_id <= 0 || '' === $payment_intent_id ) { return new WP_Error('mrm_masterclass_finalize_missing_payment','Registration could not be finalized because the event or payment reference was missing.',array('status'=>400)); }
+	if ( '' === $name || ! is_email( $email ) ) { return new WP_Error('mrm_masterclass_finalize_invalid_customer','Please enter your name and a valid email address.',array('status'=>400)); }
+	if ( ! $terms_accepted ) { return new WP_Error('mrm_masterclass_terms_required','Please accept the Masterclass terms before completing registration.',array('status'=>400)); }
+
+	$events_table = $this->t( 'mrm_masterclass_events' );
+	$regs_table   = $this->t( 'mrm_masterclass_registrations' );
+	$ledger_table = $this->t( 'mrm_masterclass_payment_ledger' );
+	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $regs_table ) || ! $this->mrm_mc_table_exists( $ledger_table ) ) { return new WP_Error('mrm_masterclass_finalize_tables_missing','Registration could not be finalized right now. Please contact support.',array('status'=>503)); }
+
+	$existing = $wpdb->get_row( $wpdb->prepare("SELECT * FROM {$regs_table} WHERE payment_intent_id = %s LIMIT 1", $payment_intent_id ) );
+	if ( $existing ) { return rest_ensure_response(array('success'=>true,'already_finalized'=>true,'registration_id'=>absint($existing->id),'gate_url'=>esc_url_raw($existing->gate_url),'message'=>'This registration was already finalized.')); }
+	$event = $this->mrm_mc_get_event( $event_id );
+	if ( ! $event ) { return new WP_Error('mrm_masterclass_event_missing','This Masterclass event could not be found.',array('status'=>404)); }
+	if ( 'scheduled' !== sanitize_key( $event->status ) || empty( $event->registration_open ) ) { return new WP_Error('mrm_masterclass_event_closed','Registration is no longer open for this Masterclass.',array('status'=>409)); }
+	if ( $this->mrm_mc_available_seats_for_event( $event ) <= 0 ) { return new WP_Error('mrm_masterclass_event_sold_out','This Masterclass is sold out.',array('status'=>409)); }
+	$payment_intent = $this->mrm_mc_retrieve_payment_intent( $payment_intent_id );
+	if ( is_wp_error( $payment_intent ) ) { return new WP_Error($payment_intent->get_error_code(),$payment_intent->get_error_message(),array('status'=>400)); }
+	if ( 'succeeded' !== sanitize_key( $payment_intent['status'] ?? '' ) ) { return new WP_Error('mrm_masterclass_payment_not_succeeded','Payment has not been completed yet. Please finish payment before finalizing registration.',array('status'=>409)); }
+	$amount_received = absint( $payment_intent['amount_received'] ?? $payment_intent['amount'] ?? 0 );
+	$currency        = strtolower( sanitize_text_field( $payment_intent['currency'] ?? 'usd' ) );
+	if ( 'usd' !== $currency || $amount_received <= 0 ) { return new WP_Error('mrm_masterclass_payment_invalid_verified_amount','Payment verification failed. Please contact support.',array('status'=>409)); }
+	$base_amount_cents = absint( $event->price_cents );
+	$discount_cents    = max( 0, $base_amount_cents - $amount_received );
+	$promo = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
+	$promo_status = is_wp_error( $promo ) ? 'error' : sanitize_key( $promo['status'] ?? 'not_applied' );
+	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair();
+	$email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
+	$stripe_fee = $this->mrm_mc_estimated_stripe_fee_cents( $amount_received );
+	$net_cents = max( 0, $amount_received - $stripe_fee );
+	$presenter_cut = (int) round( $net_cents * ( $this->mrm_mc_presenter_share_percent() / 100 ) );
+	$platform_cut = max( 0, $net_cents - $presenter_cut );
+	$inserted = $wpdb->insert($regs_table,array('event_id'=>$event_id,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>wp_json_encode($terms),'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'created_at'=>$this->now(),'updated_at'=>$this->now()));
+	if ( false === $inserted ) { return new WP_Error('mrm_masterclass_registration_insert_failed','Payment succeeded, but registration could not be saved. Please contact support.',array('status'=>500)); }
+	$registration_id = absint( $wpdb->insert_id );
+	$wpdb->insert($ledger_table,array('registration_id'=>$registration_id,'event_id'=>$event_id,'presenter_id'=>absint( $event->presenter_id ),'payment_intent_id'=>$payment_intent_id,'gross_cents'=>$amount_received,'discount_cents'=>$discount_cents,'estimated_stripe_fee_cents'=>$stripe_fee,'net_cents'=>$net_cents,'presenter_share_cents'=>$presenter_cut,'platform_share_cents'=>$platform_cut,'status'=>'payable','created_at'=>$this->now(),'updated_at'=>$this->now()));
+	$this->mrm_mc_send_confirmation_for_registration( $registration_id );
+	return rest_ensure_response(array('success'=>true,'registration_id'=>$registration_id,'gate_url'=>esc_url_raw( $gate['url'] ),'message'=>'Registration confirmed.'));
 }
 
 	public function rest_health() {
