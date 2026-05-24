@@ -903,12 +903,40 @@ input[type="checkbox"] {
       submitPayment.style.display = 'none';
       payButton.style.display = 'block';
 
-      const response = await fetch(API_BASE + '/event?id=' + encodeURIComponent(eventId));
-      selectedEvent = await response.json();
+      let data;
 
-      modalTitle.textContent = selectedEvent.title;
+      try {
+        const response = await fetch(API_BASE + '/event?id=' + encodeURIComponent(eventId), {
+          method: 'GET',
+          credentials: 'same-origin',
+          headers: {
+            'Accept': 'application/json'
+          }
+        });
+
+        data = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error((data && data.message) || 'This Masterclass could not be loaded.');
+        }
+      } catch (error) {
+        modalMessage.textContent = error && error.message ? error.message : 'This Masterclass could not be loaded.';
+        modal.style.display = 'flex';
+        return;
+      }
+
+      selectedEvent = data && data.event ? data.event : data;
+
+      if (!selectedEvent || !selectedEvent.id) {
+        modalMessage.textContent = 'This Masterclass could not be loaded.';
+        modal.style.display = 'flex';
+        return;
+      }
+
+      modalTitle.textContent = selectedEvent.title || 'Masterclass';
+
       modalMeta.innerHTML = `
-        ${escapeHtml(formatDate(selectedEvent.start_time))}<br>
+        ${escapeHtml(formatDate(selectedEvent.start_time, selectedEvent.end_time, selectedEvent.timezone))}<br>
         Presenter: ${escapeHtml(selectedEvent.presenter_name || 'To be announced')}<br>
         Price: ${escapeHtml(centsToDollars(selectedEvent.price_cents))}
       `;
@@ -1030,7 +1058,9 @@ input[type="checkbox"] {
         finalResult = await finalizeMasterclassRegistration({
           event_id: selectedEvent.id,
           payment_intent_id: paymentIntentId,
-          name: customerName,
+          first_name: document.getElementById('firstName').value.trim(),
+          last_name: document.getElementById('lastName').value.trim(),
+          name: `${document.getElementById('firstName').value.trim()} ${document.getElementById('lastName').value.trim()}`.trim(),
           email: customerEmail,
           terms_accepted: termsAccepted,
           promo_code: promoCode
