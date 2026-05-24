@@ -2411,6 +2411,138 @@ private function mrm_mc_stripe_request( $method, $path, $body = array() ) {
 	$this->mrm_mc_run_reminder_cron();
 }
 
+public function mrm_mc_run_reminder_cron() {
+	global $wpdb;
+
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$regs_table       = $this->t( 'mrm_masterclass_registrations' );
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+
+	if (
+		! $this->mrm_mc_table_exists( $events_table )
+		|| ! $this->mrm_mc_table_exists( $regs_table )
+		|| ! $this->mrm_mc_table_exists( $presenters_table )
+	) {
+		$this->mrm_mc_debug_log( 'Masterclass reminder cron skipped because required tables are missing.' );
+		return;
+	}
+
+	$now      = time();
+	$from_24h = gmdate( 'Y-m-d H:i:s', $now + ( 23 * HOUR_IN_SECONDS ) );
+	$to_24h   = gmdate( 'Y-m-d H:i:s', $now + ( 25 * HOUR_IN_SECONDS ) );
+	$from_1h  = gmdate( 'Y-m-d H:i:s', $now + ( 45 * MINUTE_IN_SECONDS ) );
+	$to_1h    = gmdate( 'Y-m-d H:i:s', $now + ( 75 * MINUTE_IN_SECONDS ) );
+
+	$has_24h_col = method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_24h_sent_at' );
+	$has_1h_col  = method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_1h_sent_at' );
+
+	$col_24 = $has_24h_col ? 'reminder_24h_sent_at' : 'reminder_24_sent_at';
+	$col_1  = $has_1h_col ? 'reminder_1h_sent_at' : 'reminder_1_sent_at';
+
+	$rows = $wpdb->get_results(
+		$wpdb->prepare(
+			"SELECT r.*, e.title, e.start_time, e.end_time, e.timezone, e.presenter_id, p.name AS presenter_name
+			 FROM {$regs_table} r
+			 INNER JOIN {$events_table} e ON e.id = r.event_id
+			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+			 WHERE r.payment_status = 'paid'
+			   AND e.status = 'scheduled'
+			   AND (
+					(e.start_time BETWEEN %s AND %s AND r.{$col_24} IS NULL)
+					OR
+					(e.start_time BETWEEN %s AND %s AND r.{$col_1} IS NULL)
+			   )
+			 LIMIT 200",
+			$from_24h,
+			$to_24h,
+			$from_1h,
+			$to_1h
+		)
+	);
+
+	if ( ! $rows ) {
+		return;
+	}
+
+	foreach ( $rows as $row ) {
+		$event = (object) array(
+			'id'         => absint( $row->event_id ),
+			'title'      => $row->title,
+			'start_time' => $row->start_time,
+			'end_time'   => $row->end_time,
+			'timezone'   => $row->timezone,
+		);
+
+		$presenter = (object) array(
+			'name' => $row->presenter_name,
+		);
+
+		$registration = (object) $row;
+		$start_ts     = strtotime( $row->start_time . ' UTC' );
+		$seconds_out  = $start_ts - $now;
+
+		if ( $seconds_out >= 23 * HOUR_IN_SECONDS && $seconds_out <= 25 * HOUR_IN_SECONDS && empty( $row->{$col_24} ) ) {
+			$body = $this->mrm_mc_reminder_email_body( $event, $presenter, $registration, '24-hour' );
+
+			$sent = $this->mrm_mc_send_email_recorded(
+				'reminder_24h',
+				$row->email,
+				'Masterclass Reminder — ' . $row->title,
+				$body,
+				$row->event_id,
+				$row->id
+			);
+
+			if ( $sent ) {
+				$update = array(
+					$col_24      => $this->now(),
+					'updated_at' => $this->now(),
+				);
+
+				if ( method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_24_sent' ) ) {
+					$update['reminder_24_sent'] = 1;
+				}
+
+				$wpdb->update(
+					$regs_table,
+					$update,
+					array( 'id' => absint( $row->id ) )
+				);
+			}
+		}
+
+		if ( $seconds_out >= 45 * MINUTE_IN_SECONDS && $seconds_out <= 75 * MINUTE_IN_SECONDS && empty( $row->{$col_1} ) ) {
+			$body = $this->mrm_mc_reminder_email_body( $event, $presenter, $registration, '1-hour' );
+
+			$sent = $this->mrm_mc_send_email_recorded(
+				'reminder_1h',
+				$row->email,
+				'Masterclass Reminder — ' . $row->title,
+				$body,
+				$row->event_id,
+				$row->id
+			);
+
+			if ( $sent ) {
+				$update = array(
+					$col_1       => $this->now(),
+					'updated_at' => $this->now(),
+				);
+
+				if ( method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_1_sent' ) ) {
+					$update['reminder_1_sent'] = 1;
+				}
+
+				$wpdb->update(
+					$regs_table,
+					$update,
+					array( 'id' => absint( $row->id ) )
+				);
+			}
+		}
+	}
+}
+
 	public function reconcile_events() {
 		$this->mrm_mc_debug_log( 'Masterclass reconcile cron ran. Google reconciliation is not fully implemented yet.' );
 	}
@@ -2900,7 +3032,13 @@ public function handle_cancel_event() {
 
 	if ( $should_refund && $paid_regs ) {
 		foreach ( $paid_regs as $registration ) {
-			$payment_intent_id = sanitize_text_field( $registration->payment_intent_id ?? '' );
+			$payment_intent_id = '';
+
+			if ( ! empty( $registration->payment_intent_id ) ) {
+				$payment_intent_id = sanitize_text_field( $registration->payment_intent_id );
+			} elseif ( ! empty( $registration->stripe_payment_intent_id ) ) {
+				$payment_intent_id = sanitize_text_field( $registration->stripe_payment_intent_id );
+			}
 			$amount_cents      = absint( $registration->amount_cents ?? 0 );
 
 			if ( '' === $payment_intent_id || $amount_cents <= 0 ) {
@@ -3198,16 +3336,119 @@ public function handle_mark_payout_paid() {
 
 public function handle_save_tax_profile() {
 	$this->must_admin();
-	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_save_tax_profile' );
+
 	global $wpdb;
+
 	$table = $this->t( 'mrm_masterclass_presenter_tax_profiles' );
-	if ( ! $this->mrm_mc_table_exists( $table ) ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_table_missing' ); }
-	$profile_id = absint( $_POST['profile_id'] ?? 0 ); $presenter_id = absint( $_POST['presenter_id'] ?? 0 );
-	if ( $presenter_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_presenter_missing' ); }
-	$data = array( 'presenter_id' => $presenter_id, 'legal_name' => sanitize_text_field( wp_unslash( $_POST['legal_name'] ?? '' ) ), 'business_name' => sanitize_text_field( wp_unslash( $_POST['business_name'] ?? '' ) ), 'tax_classification' => sanitize_text_field( wp_unslash( $_POST['tax_classification'] ?? '' ) ), 'w9_received' => ! empty( $_POST['w9_received'] ) ? 1 : 0, 'w9_received_date' => sanitize_text_field( wp_unslash( $_POST['w9_received_date'] ?? '' ) ), 'is_1099_eligible' => ! empty( $_POST['is_1099_eligible'] ) ? 1 : 0, 'is_employee' => ! empty( $_POST['is_employee'] ) ? 1 : 0, 'exclude_from_1099' => ! empty( $_POST['exclude_from_1099'] ) ? 1 : 0, 'tin_last4' => preg_replace( '/[^0-9]/', '', sanitize_text_field( wp_unslash( $_POST['tin_last4'] ?? '' ) ) ), 'mailing_address' => sanitize_textarea_field( wp_unslash( $_POST['mailing_address'] ?? '' ) ), 'notes' => sanitize_textarea_field( wp_unslash( $_POST['notes'] ?? '' ) ), 'updated_at' => $this->now() );
-	if ( strlen( $data['tin_last4'] ) > 4 ) { $data['tin_last4'] = substr( $data['tin_last4'], -4 ); }
-	if ( $profile_id > 0 ) { $result = $wpdb->update( $table, $data, array( 'id' => $profile_id ) ); } else { $data['created_at'] = $this->now(); $result = $wpdb->insert( $table, $data ); }
-	if ( false === $result ) { $this->mrm_mc_debug_log( 'Masterclass tax profile save failed.', array( 'profile_id' => $profile_id, 'presenter_id' => $presenter_id, 'db_error' => $wpdb->last_error ) ); $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_save_failed' ); }
+
+	if ( ! $this->mrm_mc_table_exists( $table ) ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_table_missing' );
+	}
+
+	$profile_id   = absint( $_POST['profile_id'] ?? 0 );
+	$presenter_id = absint( $_POST['presenter_id'] ?? 0 );
+	$nonce        = sanitize_text_field( wp_unslash( $_REQUEST['_wpnonce'] ?? '' ) );
+
+	$valid_nonce = false;
+
+	if ( wp_verify_nonce( $nonce, 'mrm_masterclass_save_tax_profile' ) ) {
+		$valid_nonce = true;
+	}
+
+	if ( $presenter_id > 0 && wp_verify_nonce( $nonce, 'mrm_masterclass_save_tax_profile_' . $presenter_id ) ) {
+		$valid_nonce = true;
+	}
+
+	if ( ! $valid_nonce ) {
+		wp_die( esc_html__( 'Security check failed. Please go back and try again.', 'mrm-masterclass' ) );
+	}
+
+	if ( $presenter_id <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_presenter_missing' );
+	}
+
+	$tin_last4 = preg_replace(
+		'/[^0-9]/',
+		'',
+		sanitize_text_field( wp_unslash( $_POST['tin_last4'] ?? '' ) )
+	);
+
+	if ( strlen( $tin_last4 ) > 4 ) {
+		$tin_last4 = substr( $tin_last4, -4 );
+	}
+
+	$data = array(
+		'presenter_id'       => $presenter_id,
+		'legal_name'         => sanitize_text_field( wp_unslash( $_POST['legal_name'] ?? '' ) ),
+		'business_name'      => sanitize_text_field( wp_unslash( $_POST['business_name'] ?? '' ) ),
+		'email'              => sanitize_email( wp_unslash( $_POST['email'] ?? '' ) ),
+		'tin_last4'          => $tin_last4,
+		'tin_type'           => sanitize_text_field( wp_unslash( $_POST['tin_type'] ?? '' ) ),
+		'tax_classification' => sanitize_text_field( wp_unslash( $_POST['tax_classification'] ?? '' ) ),
+		'w9_received'        => ! empty( $_POST['w9_received'] ) ? 1 : 0,
+		'w9_received_date'   => sanitize_text_field( wp_unslash( $_POST['w9_received_date'] ?? '' ) ),
+		'address_line1'      => sanitize_text_field( wp_unslash( $_POST['address_line1'] ?? '' ) ),
+		'address_line2'      => sanitize_text_field( wp_unslash( $_POST['address_line2'] ?? '' ) ),
+		'city'               => sanitize_text_field( wp_unslash( $_POST['city'] ?? '' ) ),
+		'state'              => sanitize_text_field( wp_unslash( $_POST['state'] ?? '' ) ),
+		'zip'                => sanitize_text_field( wp_unslash( $_POST['zip'] ?? '' ) ),
+		'mailing_address'    => sanitize_textarea_field( wp_unslash( $_POST['mailing_address'] ?? '' ) ),
+		'is_1099_eligible'   => ! empty( $_POST['is_1099_eligible'] ) ? 1 : 0,
+		'is_employee'        => ! empty( $_POST['is_employee'] ) ? 1 : 0,
+		'exclude_from_1099'  => ! empty( $_POST['exclude_from_1099'] ) ? 1 : 0,
+		'notes'              => sanitize_textarea_field( wp_unslash( $_POST['notes'] ?? '' ) ),
+		'updated_at'         => $this->now(),
+	);
+
+	if ( method_exists( $this, 'mrm_mc_filter_data_for_table' ) ) {
+		$data = $this->mrm_mc_filter_data_for_table( $table, $data );
+	}
+
+	$existing_id = absint(
+		$wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM {$table} WHERE presenter_id = %d LIMIT 1",
+				$presenter_id
+			)
+		)
+	);
+
+	if ( $profile_id <= 0 && $existing_id > 0 ) {
+		$profile_id = $existing_id;
+	}
+
+	if ( $profile_id > 0 ) {
+		$result = $wpdb->update(
+			$table,
+			$data,
+			array( 'id' => $profile_id )
+		);
+	} else {
+		$data['created_at'] = $this->now();
+
+		if ( method_exists( $this, 'mrm_mc_filter_data_for_table' ) ) {
+			$data = $this->mrm_mc_filter_data_for_table( $table, $data );
+		}
+
+		$result = $wpdb->insert(
+			$table,
+			$data
+		);
+	}
+
+	if ( false === $result ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass tax profile save failed.',
+			array(
+				'profile_id'   => $profile_id,
+				'presenter_id' => $presenter_id,
+				'db_error'     => $wpdb->last_error,
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_save_failed' );
+	}
+
 	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-tax-profiles', 'tax_saved' );
 }
 
@@ -4248,6 +4489,13 @@ public function render_events_page() {
 
 			echo '<td>';
 			echo '<a class="button button-small button-link-delete" href="' . esc_url( $cancel_url ) . '" onclick="return confirm(\'Cancel/delete this event? Paid participants may be refunded automatically depending on the refund deadline.\');">Cancel / Delete</a>';
+
+			$emergency_url = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_emergency_cancel_event&event_id=' . absint( $event->id ) ),
+				'mrm_masterclass_emergency_cancel_event_' . absint( $event->id )
+			);
+
+			echo ' <a class="button button-small" href="' . esc_url( $emergency_url ) . '" onclick="return confirm(\'Emergency cancel this event? This uses the same refund policy logic and attempts Google cancellation.\');">Emergency Cancel</a>';
 			echo '</td>';
 			echo '</tr>';
 		}
@@ -4343,13 +4591,32 @@ public function render_payouts_page() {
 	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
 
 	if ( ! $this->mrm_mc_table_exists( $ledger_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
-		echo '<div class="wrap"><h1>Presenter Payouts</h1><div class="notice notice-error"><p>Required payout tables are missing. Reactivate the plugin and check wp-content/masterclass-debug.log.</p></div></div>';
+		echo '<div class="wrap mrm-masterclass-admin"><h1>Presenter Payouts</h1><div class="notice notice-error"><p>Required payout tables are missing. Reactivate the plugin and check the Masterclass debug log.</p></div></div>';
 		return;
+	}
+
+	$notice_map = array(
+		'payout_missing_id'       => array( 'error', 'Payout action failed because the ledger ID was missing.' ),
+		'payout_table_missing'    => array( 'error', 'Payout action failed because the payment ledger table is missing.' ),
+		'payout_mark_paid_failed' => array( 'error', 'Payout could not be marked paid. Check the Masterclass debug log.' ),
+		'payout_not_payable'      => array( 'warning', 'This payout was not marked paid because it is no longer payable.' ),
+		'payout_marked_paid'      => array( 'success', 'Presenter payout marked paid and preserved in the ledger audit trail.' ),
+		'payout_batch_empty'      => array( 'warning', 'No payout rows were selected.' ),
+		'payout_batch_paid'       => array( 'success', 'Selected payout rows were marked paid and preserved in the ledger audit trail.' ),
+		'payout_batch_failed'     => array( 'error', 'The payout batch could not be marked paid. Check the Masterclass debug log.' ),
+	);
+
+	echo '<div class="wrap mrm-masterclass-admin">';
+	echo '<h1>Presenter Payouts</h1>';
+	echo '<p>Presenter payouts are based on payment ledger rows. Mark rows paid only after the presenter has actually been paid.</p>';
+
+	if ( method_exists( $this, 'mrm_mc_render_notice_from_map' ) ) {
+		$this->mrm_mc_render_notice_from_map( $notice_map );
 	}
 
 	$summary = $wpdb->get_results(
 		"SELECT p.id, p.name, p.email, p.stripe_connected_account_id,
-		        COALESCE(SUM(CASE WHEN l.status = 'recorded' THEN l.presenter_share_cents ELSE 0 END),0) AS unpaid_cents,
+		        COALESCE(SUM(CASE WHEN l.status = 'payable' THEN l.presenter_share_cents ELSE 0 END),0) AS unpaid_cents,
 		        COALESCE(SUM(CASE WHEN l.status = 'paid_out' THEN l.presenter_share_cents ELSE 0 END),0) AS paid_out_cents
 		 FROM {$presenters_table} p
 		 LEFT JOIN {$ledger_table} l ON l.presenter_id = p.id AND l.ledger_type = 'registration_payment'
@@ -4363,21 +4630,14 @@ public function render_payouts_page() {
 		 LEFT JOIN {$events_table} e ON e.id = l.event_id
 		 LEFT JOIN {$presenters_table} p ON p.id = l.presenter_id
 		 WHERE l.ledger_type = 'registration_payment'
-		   AND l.status = 'recorded'
+		   AND l.status = 'payable'
 		   AND l.presenter_share_cents > 0
 		 ORDER BY p.name ASC, l.created_at ASC"
 	);
 
-	echo '<div class="wrap mrm-masterclass-admin">';
-	echo '<h1>Presenter Payouts</h1>';
-
-	if ( isset( $_GET['paid'] ) ) {
-		echo '<div class="notice notice-success is-dismissible"><p>Selected presenter payout rows were marked paid out.</p></div>';
-	}
-
 	echo '<h2>Presenter Balances</h2>';
 	echo '<table class="widefat striped">';
-	echo '<thead><tr><th>Presenter</th><th>Email</th><th>Stripe Account</th><th>Unpaid</th><th>Paid Out</th></tr></thead><tbody>';
+	echo '<thead><tr><th>Presenter</th><th>Email</th><th>Stripe Account</th><th>Payable</th><th>Paid Out</th></tr></thead><tbody>';
 
 	if ( $summary ) {
 		foreach ( $summary as $row ) {
@@ -4395,34 +4655,40 @@ public function render_payouts_page() {
 
 	echo '</tbody></table>';
 
-	echo '<h2 style="margin-top:28px;">Run Payout Batch</h2>';
-	echo '<p>Select rows that have actually been paid. Marking rows paid out is what makes them count toward 1099 totals.</p>';
+	echo '<h2 style="margin-top:28px;">Payable Ledger Rows</h2>';
+	echo '<p>Select rows that have actually been paid. Marking rows paid out is what makes them count toward paid-out presenter totals.</p>';
 
 	echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '">';
 	echo '<input type="hidden" name="action" value="mrm_masterclass_mark_payouts_paid">';
 	wp_nonce_field( 'mrm_masterclass_mark_payouts_paid' );
 
 	echo '<table class="widefat striped">';
-	echo '<thead><tr><th>Select</th><th>Presenter</th><th>Event</th><th>Presenter Share</th><th>Created</th></tr></thead><tbody>';
+	echo '<thead><tr><th>Select</th><th>Presenter</th><th>Event</th><th>Presenter Share</th><th>Created</th><th>Single Action</th></tr></thead><tbody>';
 
 	if ( $rows ) {
 		foreach ( $rows as $row ) {
+			$single_paid_url = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_mark_payout_paid&ledger_id=' . absint( $row->id ) ),
+				'mrm_masterclass_mark_payout_paid_' . absint( $row->id )
+			);
+
 			echo '<tr>';
 			echo '<td><input type="checkbox" name="ledger_ids[]" value="' . esc_attr( $row->id ) . '"></td>';
 			echo '<td>' . esc_html( $row->presenter_name ?: '—' ) . '<br><small>' . esc_html( $row->presenter_email ?: '' ) . '</small></td>';
 			echo '<td>' . esc_html( $row->event_title ?: '—' ) . '</td>';
 			echo '<td>' . esc_html( $this->cents_to_dollars( $row->presenter_share_cents ) ) . '</td>';
 			echo '<td>' . esc_html( $row->created_at ) . '</td>';
+			echo '<td><a class="button button-small" href="' . esc_url( $single_paid_url ) . '" onclick="return confirm(\'Mark this presenter payout as paid?\');">Mark Paid</a></td>';
 			echo '</tr>';
 		}
 	} else {
-		echo '<tr><td colspan="5">No unpaid presenter payout rows found.</td></tr>';
+		echo '<tr><td colspan="6">No payable presenter payout rows found.</td></tr>';
 	}
 
 	echo '</tbody></table>';
 
 	if ( $rows ) {
-		submit_button( 'Run Payout Batch Now / Mark Selected Paid Out' );
+		submit_button( 'Mark Selected Paid Out' );
 	}
 
 	echo '</form>';
@@ -4470,6 +4736,18 @@ public function render_tax_profiles_page() {
 
 	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>Tax Profiles</h1>';
+
+	$notice_map = array(
+		'tax_table_missing'     => array( 'error', 'Tax profile could not be saved because the tax profile table is missing.' ),
+		'tax_presenter_missing' => array( 'error', 'Tax profile could not be saved because a presenter was not selected.' ),
+		'tax_save_failed'       => array( 'error', 'Tax profile could not be saved. Check the Masterclass debug log.' ),
+		'tax_saved'             => array( 'success', 'Tax profile saved successfully.' ),
+	);
+
+	if ( method_exists( $this, 'mrm_mc_render_notice_from_map' ) ) {
+		$this->mrm_mc_render_notice_from_map( $notice_map );
+	}
+
 	echo '<p>This combines presenter tax profiles and 1099 paid-out totals. Full TIN values should live in AWS/Stripe, not WordPress.</p>';
 
 	echo '<form method="get" style="margin:16px 0;">';
