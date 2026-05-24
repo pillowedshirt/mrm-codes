@@ -2408,8 +2408,8 @@ private function mrm_mc_stripe_request( $method, $path, $body = array() ) {
 	}
 
 	public function send_reminders() {
-		$this->mrm_mc_debug_log( 'Masterclass reminders cron ran. Reminder sending is not fully implemented yet.' );
-	}
+	$this->mrm_mc_run_reminder_cron();
+}
 
 	public function reconcile_events() {
 		$this->mrm_mc_debug_log( 'Masterclass reconcile cron ran. Google reconciliation is not fully implemented yet.' );
@@ -3075,32 +3075,124 @@ public function handle_mark_payouts_paid() {
 	$this->must_admin();
 	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_mark_payouts_paid' );
 
-	$this->mrm_mc_debug_log(
-		'Safe mark-payouts-paid fallback reached. Payout mutation is disabled in this stabilization patch.',
-		array(
-			'action' => 'mrm_masterclass_mark_payouts_paid',
+	global $wpdb;
+
+	$ledger_table = $this->t( 'mrm_masterclass_payment_ledger' );
+
+	if ( ! $this->mrm_mc_table_exists( $ledger_table ) ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_table_missing' );
+	}
+
+	$ledger_ids = isset( $_POST['ledger_ids'] ) && is_array( $_POST['ledger_ids'] )
+		? array_map( 'absint', wp_unslash( $_POST['ledger_ids'] ) )
+		: array();
+
+	$ledger_ids = array_values( array_filter( array_unique( $ledger_ids ) ) );
+
+	if ( empty( $ledger_ids ) ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_batch_empty' );
+	}
+
+	$placeholders = implode( ',', array_fill( 0, count( $ledger_ids ), '%d' ) );
+
+	$data = array(
+		'status'      => 'paid_out',
+		'paid_at'     => $this->now(),
+		'paid_out_at' => $this->now(),
+		'updated_at'  => $this->now(),
+	);
+
+	$data = $this->mrm_mc_filter_data_for_table( $ledger_table, $data );
+
+	$set_parts = array();
+
+	foreach ( $data as $column => $value ) {
+		$set_parts[] = "{$column} = %s";
+	}
+
+	$sql_values = array_values( $data );
+
+	foreach ( $ledger_ids as $ledger_id ) {
+		$sql_values[] = $ledger_id;
+	}
+
+	$sql = "UPDATE {$ledger_table} SET " . implode( ', ', $set_parts ) . " WHERE status = 'payable' AND id IN ({$placeholders})";
+
+	$result = $wpdb->query(
+		$wpdb->prepare(
+			$sql,
+			$sql_values
 		)
 	);
 
-	$this->mrm_mc_safe_admin_redirect(
-		'mrm-masterclass-payouts',
-		array(
-			'mrm_mc_notice' => 'payout_mutation_disabled_safe_patch',
-		)
-	);
+	if ( false === $result ) {
+		$this->mrm_mc_debug_log(
+			'Presenter payout batch mark-paid failed.',
+			array(
+				'db_error' => $wpdb->last_error,
+				'count'    => count( $ledger_ids ),
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_batch_failed' );
+	}
+
+	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_batch_paid' );
 }
 
 public function handle_mark_payout_paid() {
 	$this->must_admin();
+
 	global $wpdb;
+
 	$ledger_id = absint( $_POST['ledger_id'] ?? $_GET['ledger_id'] ?? 0 );
-	if ( $ledger_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_missing_id' ); }
+
+	if ( $ledger_id <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_missing_id' );
+	}
+
 	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_mark_payout_paid_' . $ledger_id );
+
 	$ledger_table = $this->t( 'mrm_masterclass_payment_ledger' );
-	if ( ! $this->mrm_mc_table_exists( $ledger_table ) ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_table_missing' ); }
-	$result = $wpdb->update( $ledger_table, array( 'status' => 'paid_out', 'paid_at' => $this->now(), 'updated_at' => $this->now() ), array( 'id' => $ledger_id, 'status' => 'payable' ) );
-	if ( false === $result ) { $this->mrm_mc_debug_log( 'Presenter payout mark-paid failed.', array( 'ledger_id' => $ledger_id, 'db_error' => $wpdb->last_error ) ); $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_mark_paid_failed' ); }
-	if ( 0 === $result ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_not_payable' ); }
+
+	if ( ! $this->mrm_mc_table_exists( $ledger_table ) ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_table_missing' );
+	}
+
+	$data = array(
+		'status'      => 'paid_out',
+		'paid_at'     => $this->now(),
+		'paid_out_at' => $this->now(),
+		'updated_at'  => $this->now(),
+	);
+
+	$data = $this->mrm_mc_filter_data_for_table( $ledger_table, $data );
+
+	$result = $wpdb->update(
+		$ledger_table,
+		$data,
+		array(
+			'id'     => $ledger_id,
+			'status' => 'payable',
+		)
+	);
+
+	if ( false === $result ) {
+		$this->mrm_mc_debug_log(
+			'Presenter payout mark-paid failed.',
+			array(
+				'ledger_id' => $ledger_id,
+				'db_error'  => $wpdb->last_error,
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_mark_paid_failed' );
+	}
+
+	if ( 0 === $result ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_not_payable' );
+	}
+
 	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_marked_paid' );
 }
 
@@ -4366,7 +4458,7 @@ public function render_tax_profiles_page() {
 			        t.w9_received, t.w9_received_date, t.address_line1, t.address_line2,
 			        t.city AS tax_city, t.state AS tax_state, t.zip AS tax_zip,
 			        t.is_1099_eligible, t.exclude_from_1099, t.notes,
-			        COALESCE(SUM(CASE WHEN l.status = 'paid_out' AND YEAR(COALESCE(l.paid_out_at,l.updated_at)) = %d THEN l.presenter_share_cents ELSE 0 END),0) AS box1_cents
+			        COALESCE(SUM(CASE WHEN l.status = 'paid_out' AND YEAR(COALESCE(l.paid_out_at,l.paid_at,l.updated_at)) = %d THEN l.presenter_share_cents ELSE 0 END),0) AS box1_cents
 			 FROM {$presenters_table} p
 			 LEFT JOIN {$profiles_table} t ON t.presenter_id = p.id
 			 LEFT JOIN {$ledger_table} l ON l.presenter_id = p.id AND l.ledger_type = 'registration_payment'
