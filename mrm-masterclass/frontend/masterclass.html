@@ -425,32 +425,91 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-calendar-section {
-  max-width: 1280px;
+  max-width: 1180px;
   margin: 0 auto;
   padding: 56px 20px 20px;
 }
 
-.mrm-masterclass-calendar {
+.mrm-masterclass-calendar-shell {
+  background: #fff;
+  border: 1px solid #dccab0;
+  border-radius: 28px;
+  box-shadow: 0 16px 40px rgba(32, 23, 15, 0.1);
+  overflow: hidden;
+}
+
+.mrm-masterclass-calendar-toolbar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 22px;
+  grid-template-columns: 72px minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  background: #20170f;
+  color: #fff;
+}
+
+.mrm-masterclass-calendar-heading {
+  text-align: center;
+}
+
+.mrm-masterclass-calendar-heading h3 {
+  margin: 0;
+  color: #fff;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.65rem, 3vw, 2.55rem);
+  line-height: 1.05;
+}
+
+.mrm-masterclass-calendar-heading p {
+  margin: 8px 0 0;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.mrm-masterclass-calendar-nav {
+  width: 54px;
+  height: 54px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 2.1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 160ms ease, transform 160ms ease, opacity 160ms ease;
+}
+
+.mrm-masterclass-calendar-nav:hover,
+.mrm-masterclass-calendar-nav:focus {
+  background: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+}
+
+.mrm-masterclass-calendar-nav:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.mrm-masterclass-calendar {
+  display: block;
+  padding: 0;
 }
 
 .mrm-masterclass-month {
   background: #fff;
-  border: 1px solid #dccab0;
-  border-radius: 24px;
-  box-shadow: 0 14px 34px rgba(32, 23, 15, 0.08);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
   overflow: hidden;
 }
 
 .mrm-masterclass-month-title {
-  margin: 0;
-  padding: 16px 18px;
-  background: #20170f;
-  color: #fff;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 1.25rem;
+  display: none;
 }
 
 .mrm-masterclass-weekdays,
@@ -460,22 +519,24 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-weekday {
-  padding: 9px 4px;
+  padding: 14px 6px;
   text-align: center;
-  font-size: 0.72rem;
-  font-weight: 800;
+  font-size: 0.78rem;
+  font-weight: 900;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
   color: #7a6b58;
   background: #f8f2e9;
   border-bottom: 1px solid #eadcc8;
 }
 
 .mrm-masterclass-day {
-  min-height: 82px;
-  padding: 7px;
+  min-height: 150px;
+  padding: 10px;
   border-right: 1px solid #eee2d1;
   border-bottom: 1px solid #eee2d1;
   background: #fffdf9;
+  overflow: hidden;
 }
 
 .mrm-masterclass-day:nth-child(7n) {
@@ -486,44 +547,78 @@ input[type="checkbox"] {
   background: #faf6ef;
 }
 
+.mrm-masterclass-day.is-today {
+  background: #fff8ed;
+  box-shadow: inset 0 0 0 2px rgba(154, 106, 47, 0.22);
+}
+
 .mrm-masterclass-day-number {
-  display: block;
-  margin-bottom: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  margin-bottom: 8px;
   color: #493a2b;
-  font-weight: 800;
-  font-size: 0.8rem;
+  font-weight: 900;
+  font-size: 0.92rem;
+}
+
+.mrm-masterclass-day.is-today .mrm-masterclass-day-number {
+  background: #9a6a2f;
+  color: #fff;
+  border-radius: 999px;
 }
 
 .mrm-masterclass-calendar-event {
   display: block;
   width: 100%;
-  margin: 4px 0 0;
-  padding: 5px 6px;
+  margin: 6px 0 0;
+  padding: 8px 9px;
   border: 0;
-  border-radius: 9px;
+  border-radius: 11px;
   background: #9a6a2f;
   color: #fff;
   cursor: pointer;
   text-align: left;
-  font-size: 0.72rem;
+  font-size: 0.82rem;
   line-height: 1.25;
-  font-weight: 700;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  transition: background 160ms ease, transform 160ms ease;
 }
 
 .mrm-masterclass-calendar-event:hover,
 .mrm-masterclass-calendar-event:focus {
   background: #6e461c;
+  transform: translateY(-1px);
 }
 
 .mrm-masterclass-calendar-event-time {
   display: block;
-  opacity: 0.9;
-  font-weight: 600;
+  margin-top: 3px;
+  opacity: 0.92;
+  font-size: 0.76rem;
+  font-weight: 700;
 }
 
-@media (max-width: 1100px) {
-  .mrm-masterclass-calendar {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+.mrm-masterclass-calendar-empty-month {
+  padding: 28px;
+  text-align: center;
+  color: #6b5f4f;
+  background: #fffdf9;
+  border-top: 1px solid #eee2d1;
+}
+
+@media (max-width: 900px) {
+  .mrm-masterclass-day {
+    min-height: 125px;
+    padding: 8px;
+  }
+
+  .mrm-masterclass-calendar-event {
+    font-size: 0.76rem;
+    padding: 7px 8px;
   }
 }
 
@@ -532,12 +627,66 @@ input[type="checkbox"] {
     padding: 42px 14px 16px;
   }
 
-  .mrm-masterclass-calendar {
-    grid-template-columns: 1fr;
+  .mrm-masterclass-calendar-toolbar {
+    grid-template-columns: 48px minmax(0, 1fr) 48px;
+    gap: 8px;
+    padding: 14px 10px;
+  }
+
+  .mrm-masterclass-calendar-nav {
+    width: 42px;
+    height: 42px;
+    font-size: 1.75rem;
+  }
+
+  .mrm-masterclass-calendar-heading h3 {
+    font-size: 1.45rem;
+  }
+
+  .mrm-masterclass-calendar-heading p {
+    font-size: 0.82rem;
+  }
+
+  .mrm-masterclass-weekday {
+    padding: 10px 2px;
+    font-size: 0.66rem;
   }
 
   .mrm-masterclass-day {
-    min-height: 70px;
+    min-height: 96px;
+    padding: 5px;
+  }
+
+  .mrm-masterclass-day-number {
+    min-width: 23px;
+    height: 23px;
+    margin-bottom: 4px;
+    font-size: 0.76rem;
+  }
+
+  .mrm-masterclass-calendar-event {
+    padding: 5px 6px;
+    border-radius: 8px;
+    font-size: 0.68rem;
+    line-height: 1.18;
+  }
+
+  .mrm-masterclass-calendar-event-time {
+    font-size: 0.63rem;
+  }
+}
+
+@media (max-width: 440px) {
+  .mrm-masterclass-day {
+    min-height: 82px;
+  }
+
+  .mrm-masterclass-calendar-event {
+    font-size: 0.62rem;
+  }
+
+  .mrm-masterclass-calendar-event-time {
+    display: none;
   }
 }
 
@@ -600,11 +749,28 @@ input[type="checkbox"] {
         <p class="mrm-masterclass-eyebrow">Calendar View</p>
         <h2>Masterclass Calendar</h2>
         <p>
-          Browse the full year at a glance. Click a listed Masterclass on the calendar to jump to its registration card.
+          Browse upcoming Masterclasses one month at a time. Use the arrows to look ahead up to one year, then click a listed Masterclass to jump to its registration card.
         </p>
       </div>
 
-      <div id="mrm-masterclass-calendar" class="mrm-masterclass-calendar"></div>
+      <div class="mrm-masterclass-calendar-shell">
+        <div class="mrm-masterclass-calendar-toolbar" aria-label="Masterclass calendar month navigation">
+          <button type="button" id="mrm-masterclass-calendar-prev" class="mrm-masterclass-calendar-nav" aria-label="Previous month">
+            ‹
+          </button>
+
+          <div class="mrm-masterclass-calendar-heading">
+            <h3 id="mrm-masterclass-calendar-current-month">Current Month</h3>
+            <p id="mrm-masterclass-calendar-range-note">Showing the current month. You can browse up to one year ahead.</p>
+          </div>
+
+          <button type="button" id="mrm-masterclass-calendar-next" class="mrm-masterclass-calendar-nav" aria-label="Next month">
+            ›
+          </button>
+        </div>
+
+        <div id="mrm-masterclass-calendar" class="mrm-masterclass-calendar"></div>
+      </div>
     </section>
 
     <section class="mrm-masterclass-section" id="mrm-masterclass-public-events">
@@ -1115,6 +1281,22 @@ input[type="checkbox"] {
 <script>
 (function () {
   const calendarEl = document.getElementById("mrm-masterclass-calendar");
+  const monthTitleEl = document.getElementById("mrm-masterclass-calendar-current-month");
+  const rangeNoteEl = document.getElementById("mrm-masterclass-calendar-range-note");
+  const prevButton = document.getElementById("mrm-masterclass-calendar-prev");
+  const nextButton = document.getElementById("mrm-masterclass-calendar-next");
+
+  const today = new Date();
+  const baseYear = today.getFullYear();
+  const baseMonth = today.getMonth();
+  const maxOffset = 12;
+
+  let currentOffset = 0;
+  let currentEvents = [];
+
+  function monthDateFromOffset(offset) {
+    return new Date(baseYear, baseMonth + offset, 1);
+  }
 
   function eventDateKey(event) {
     const raw = String(event.start_time || "").replace(" ", "T");
@@ -1189,16 +1371,17 @@ input[type="checkbox"] {
     return map;
   }
 
-  function renderMonth(year, monthIndex, eventsByDate) {
+  function isToday(year, monthIndex, dayNumber) {
+    return (
+      year === today.getFullYear()
+      && monthIndex === today.getMonth()
+      && dayNumber === today.getDate()
+    );
+  }
+
+  function renderSingleMonth(year, monthIndex, eventsByDate) {
     const month = document.createElement("section");
     month.className = "mrm-masterclass-month";
-
-    const monthTitle = document.createElement("h3");
-    monthTitle.className = "mrm-masterclass-month-title";
-    monthTitle.textContent = new Date(year, monthIndex, 1).toLocaleDateString(undefined, {
-      month: "long",
-      year: "numeric"
-    });
 
     const weekdays = document.createElement("div");
     weekdays.className = "mrm-masterclass-weekdays";
@@ -1223,9 +1406,15 @@ input[type="checkbox"] {
       days.appendChild(empty);
     }
 
+    let eventCountForMonth = 0;
+
     for (let dayNumber = 1; dayNumber <= daysInMonth; dayNumber++) {
       const cell = document.createElement("div");
       cell.className = "mrm-masterclass-day";
+
+      if (isToday(year, monthIndex, dayNumber)) {
+        cell.classList.add("is-today");
+      }
 
       const dateKey = `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(dayNumber).padStart(2, "0")}`;
 
@@ -1236,6 +1425,7 @@ input[type="checkbox"] {
       cell.appendChild(label);
 
       const events = eventsByDate[dateKey] || [];
+      eventCountForMonth += events.length;
 
       events.forEach((event) => {
         const button = document.createElement("button");
@@ -1256,27 +1446,102 @@ input[type="checkbox"] {
       days.appendChild(cell);
     }
 
-    month.appendChild(monthTitle);
     month.appendChild(weekdays);
     month.appendChild(days);
 
-    return month;
+    return {
+      node: month,
+      eventCount: eventCountForMonth
+    };
   }
 
-  window.renderMasterclassCalendar = function (events) {
+  function updateCalendarControls(displayDate) {
+    if (monthTitleEl) {
+      monthTitleEl.textContent = displayDate.toLocaleDateString(undefined, {
+        month: "long",
+        year: "numeric"
+      });
+    }
+
+    if (rangeNoteEl) {
+      if (currentOffset === 0) {
+        rangeNoteEl.textContent = "Showing the current month. Use the next arrow to browse upcoming months.";
+      } else if (currentOffset === maxOffset) {
+        rangeNoteEl.textContent = "Showing the furthest month currently available.";
+      } else {
+        rangeNoteEl.textContent = "Use the arrows to browse Masterclasses up to one year ahead.";
+      }
+    }
+
+    if (prevButton) {
+      prevButton.disabled = currentOffset <= 0;
+    }
+
+    if (nextButton) {
+      nextButton.disabled = currentOffset >= maxOffset;
+    }
+  }
+
+  function renderCalendarMonth() {
     if (!calendarEl) {
       return;
     }
 
-    const now = new Date();
-    const year = now.getFullYear();
-    const eventsByDate = buildEventsByDate(events);
+    const displayDate = monthDateFromOffset(currentOffset);
+    const year = displayDate.getFullYear();
+    const monthIndex = displayDate.getMonth();
+    const eventsByDate = buildEventsByDate(currentEvents);
+    const rendered = renderSingleMonth(year, monthIndex, eventsByDate);
 
     calendarEl.innerHTML = "";
+    calendarEl.appendChild(rendered.node);
 
-    for (let monthIndex = 0; monthIndex < 12; monthIndex++) {
-      calendarEl.appendChild(renderMonth(year, monthIndex, eventsByDate));
+    if (rendered.eventCount === 0) {
+      const empty = document.createElement("div");
+      empty.className = "mrm-masterclass-calendar-empty-month";
+      empty.textContent = "No Masterclasses are currently listed for this month.";
+      calendarEl.appendChild(empty);
     }
+
+    updateCalendarControls(displayDate);
+  }
+
+  function moveCalendar(offsetDelta) {
+    const nextOffset = currentOffset + offsetDelta;
+
+    if (nextOffset < 0 || nextOffset > maxOffset) {
+      return;
+    }
+
+    currentOffset = nextOffset;
+    renderCalendarMonth();
+  }
+
+  if (prevButton) {
+    prevButton.addEventListener("click", function () {
+      moveCalendar(-1);
+    });
+  }
+
+  if (nextButton) {
+    nextButton.addEventListener("click", function () {
+      moveCalendar(1);
+    });
+  }
+
+  window.renderMasterclassCalendar = function (events) {
+    currentEvents = Array.isArray(events) ? events : [];
+
+    if (currentOffset < 0) {
+      currentOffset = 0;
+    }
+
+    if (currentOffset > maxOffset) {
+      currentOffset = maxOffset;
+    }
+
+    renderCalendarMonth();
   };
 })();
 </script>
+
