@@ -146,7 +146,7 @@ if ( ! class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 class LowBrass_MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
-	const DB_VERSION = '1.2.7';
+	const DB_VERSION = '1.3.0';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 
@@ -210,6 +210,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_send_reminders', 'send_reminders' );
 	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_reconcile_events', 'reconcile_events' );
 	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_reminder_cron', 'mrm_mc_run_reminder_cron', 10, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_payout_cron', 'mrm_mc_run_payout_cron', 10, 0 );
 
 	$actions = array(
 		'mrm_masterclass_save_settings'            => 'handle_save_settings',
@@ -219,6 +220,9 @@ class LowBrass_MRM_Masterclass_Plugin {
 		'mrm_masterclass_cancel_event'             => 'handle_cancel_event',
 		'mrm_masterclass_mark_payouts_paid'        => 'handle_mark_payouts_paid',
 		'mrm_masterclass_mark_payout_paid'         => 'handle_mark_payout_paid',
+		'mrm_masterclass_issue_payout_transfer'    => 'handle_issue_payout_transfer',
+		'mrm_masterclass_recalculate_ledger_shares'=> 'handle_recalculate_ledger_shares',
+		'mrm_masterclass_export_1099_csv'          => 'handle_export_1099_csv',
 		'mrm_masterclass_save_tax_profile'         => 'handle_save_tax_profile',
 		'mrm_masterclass_create_presenter_page'    => 'handle_create_presenter_page',
 		'mrm_masterclass_resend_confirmation'      => 'handle_resend_confirmation',
@@ -355,12 +359,17 @@ class LowBrass_MRM_Masterclass_Plugin {
 		if ( ! wp_next_scheduled( 'mrm_masterclass_reminder_cron' ) ) {
 			wp_schedule_event( time() + 300, 'hourly', 'mrm_masterclass_reminder_cron' );
 		}
+
+		if ( ! wp_next_scheduled( 'mrm_masterclass_payout_cron' ) ) {
+			wp_schedule_event( time() + 600, 'hourly', 'mrm_masterclass_payout_cron' );
+		}
 	}
 
 	public static function deactivate() {
 		wp_clear_scheduled_hook( 'mrm_masterclass_send_reminders' );
 		wp_clear_scheduled_hook( 'mrm_masterclass_reconcile_events' );
 		wp_clear_scheduled_hook( 'mrm_masterclass_reminder_cron' );
+		wp_clear_scheduled_hook( 'mrm_masterclass_payout_cron' );
 	}
 
 	public function runtime_upgrade() {
@@ -993,6 +1002,7 @@ public function mrm_mc_render_critical_error_notice() {
 	}
 
 	$presenter_adds = array(
+		'payout_percent'              => "ALTER TABLE {$presenters_table} ADD payout_percent DECIMAL(5,2) NULL",
 		'city'                        => "ALTER TABLE {$presenters_table} ADD city VARCHAR(100) NULL",
 		'state'                       => "ALTER TABLE {$presenters_table} ADD state VARCHAR(50) NULL",
 		'address'                     => "ALTER TABLE {$presenters_table} ADD address VARCHAR(191) NULL",
@@ -1014,13 +1024,31 @@ public function mrm_mc_render_critical_error_notice() {
 		}
 	}
 
+	$default_percent = 70.00;
+	$saved_settings  = get_option( 'mrm_masterclass_settings', array() );
+
+	if ( is_array( $saved_settings ) && isset( $saved_settings['presenter_default_percent'] ) ) {
+		$default_percent = max( 0, min( 100, (float) $saved_settings['presenter_default_percent'] ) );
+	}
+
+	if ( in_array( 'payout_percent', $wpdb->get_col( "DESC {$presenters_table}", 0 ), true ) ) {
+		$wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$presenters_table} SET payout_percent = %f WHERE payout_percent IS NULL",
+				$default_percent
+			)
+		);
+	}
+
 	$event_columns = $wpdb->get_col( "DESC {$events_table}", 0 );
 	if ( ! is_array( $event_columns ) ) {
 		$event_columns = array();
 	}
 
 	$event_adds = array(
-		'calendar_id'       => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
+		'calendar_id'            => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
+		'refund_request_token'   => "ALTER TABLE {$events_table} ADD refund_request_token VARCHAR(64) NULL",
+		'last_update_notice_at'  => "ALTER TABLE {$events_table} ADD last_update_notice_at DATETIME NULL",
 		'proctor_email'     => "ALTER TABLE {$events_table} ADD proctor_email VARCHAR(191) NULL",
 		'cohost_note'       => "ALTER TABLE {$events_table} ADD cohost_note TEXT NULL",
 		'google_last_error' => "ALTER TABLE {$events_table} ADD google_last_error TEXT NULL",
@@ -1062,6 +1090,9 @@ public function mrm_mc_render_critical_error_notice() {
 	}
 
 	$ledger_adds = array(
+		'payout_eligible_at' => "ALTER TABLE {$ledger_table} ADD payout_eligible_at DATETIME NULL",
+		'payout_attempted_at'=> "ALTER TABLE {$ledger_table} ADD payout_attempted_at DATETIME NULL",
+		'payout_error'       => "ALTER TABLE {$ledger_table} ADD payout_error TEXT NULL",
 		'paid_out_at'        => "ALTER TABLE {$ledger_table} ADD paid_out_at DATETIME NULL",
 		'payout_batch_id'    => "ALTER TABLE {$ledger_table} ADD payout_batch_id VARCHAR(64) NULL",
 		'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
@@ -1324,11 +1355,11 @@ private function mrm_mc_estimated_stripe_fee_cents( $amount_cents ) {
 }
 
 
-private function mrm_mc_presenter_share_percent() {
+private function mrm_mc_presenter_default_percent() {
 	$settings = $this->settings();
 
-	$percent = isset( $settings['presenter_share_percent'] )
-		? (float) $settings['presenter_share_percent']
+	$percent = isset( $settings['presenter_default_percent'] )
+		? (float) $settings['presenter_default_percent']
 		: 70.0;
 
 	if ( $percent < 0 ) {
@@ -1340,6 +1371,68 @@ private function mrm_mc_presenter_share_percent() {
 	}
 
 	return $percent;
+}
+
+private function mrm_mc_presenter_share_percent() {
+	return $this->mrm_mc_presenter_default_percent();
+}
+
+private function mrm_mc_presenter_payout_percent( $presenter_id ) {
+	global $wpdb;
+
+	$presenter_id = absint( $presenter_id );
+	$table        = $this->t( 'mrm_masterclass_presenters' );
+	$default      = $this->mrm_mc_presenter_default_percent();
+
+	if ( $presenter_id <= 0 || ! $this->mrm_mc_table_exists( $table ) ) {
+		return $default;
+	}
+
+	if ( ! method_exists( $this, 'mrm_mc_column_exists' ) || ! $this->mrm_mc_column_exists( $table, 'payout_percent' ) ) {
+		return $default;
+	}
+
+	$value = $wpdb->get_var(
+		$wpdb->prepare(
+			"SELECT payout_percent FROM {$table} WHERE id = %d",
+			$presenter_id
+		)
+	);
+
+	if ( null === $value || '' === $value ) {
+		return $default;
+	}
+
+	$percent = (float) $value;
+
+	if ( $percent < 0 ) {
+		$percent = 0;
+	}
+
+	if ( $percent > 100 ) {
+		$percent = 100;
+	}
+
+	return $percent;
+}
+
+private function mrm_mc_calculate_registration_shares( $gross_cents, $presenter_id ) {
+	$gross_cents = absint( $gross_cents );
+	$stripe_fee  = $this->mrm_mc_estimated_stripe_fee_cents( $gross_cents );
+	$net_cents   = max( 0, $gross_cents - $stripe_fee );
+	$percent     = $this->mrm_mc_presenter_payout_percent( $presenter_id );
+
+	$presenter_share = (int) round( $net_cents * ( $percent / 100 ) );
+	$platform_share  = max( 0, $net_cents - $presenter_share );
+
+	return array(
+		'gross_cents'           => $gross_cents,
+		'stripe_fee_cents'      => $stripe_fee,
+		'net_cents'             => $net_cents,
+		'presenter_percent'     => $percent,
+		'presenter_share_cents' => $presenter_share,
+		'platform_share_cents'  => $platform_share,
+	);
 }
 
 private function mrm_mc_terms_snapshot() {
@@ -2639,6 +2732,7 @@ public function handle_save_presenter() {
 		'zip_code'                    => $this->mrm_mc_clean_text( $_POST['zip_code'] ?? '' ),
 		'timezone'                    => $this->mrm_mc_clean_text( $_POST['timezone'] ?? 'America/Phoenix' ),
 		'stripe_connected_account_id' => $this->mrm_mc_clean_text( $_POST['stripe_connected_account_id'] ?? '' ),
+		'payout_percent'              => max( 0, min( 100, (float) ( $_POST['payout_percent'] ?? $this->mrm_mc_presenter_default_percent() ) ) ),
 		'hire_date'                   => $this->mrm_mc_clean_text( $_POST['hire_date'] ?? '' ),
 		'profile_image_url'           => esc_url_raw( wp_unslash( $_POST['profile_image_url'] ?? '' ) ),
 		'short_description'           => $this->mrm_mc_clean_html( $_POST['short_description'] ?? '' ),
@@ -4022,13 +4116,13 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 	</style>';
 }
 
-	public function register_admin_menu() {
-	$this->mrm_mc_debug_log( 'Registering Masterclass admin menu.' );
+public function register_admin_menu() {
+	$capability = 'manage_options';
 
 	add_menu_page(
 		'MRM Masterclass',
 		'MRM Masterclass',
-		'manage_options',
+		$capability,
 		'mrm-masterclass',
 		array( $this, 'render_dashboard_page' ),
 		'dashicons-welcome-learn-more',
@@ -4039,7 +4133,7 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 		'mrm-masterclass',
 		'Dashboard',
 		'Dashboard',
-		'manage_options',
+		$capability,
 		'mrm-masterclass',
 		array( $this, 'render_dashboard_page' )
 	);
@@ -4048,7 +4142,7 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 		'mrm-masterclass',
 		'Events',
 		'Events',
-		'manage_options',
+		$capability,
 		'mrm-masterclass-events',
 		array( $this, 'render_events_page' )
 	);
@@ -4057,7 +4151,7 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 		'mrm-masterclass',
 		'Presenters',
 		'Presenters',
-		'manage_options',
+		$capability,
 		'mrm-masterclass-presenters',
 		array( $this, 'render_presenters_page' )
 	);
@@ -4066,7 +4160,7 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 		'mrm-masterclass',
 		'Registrations / Payments',
 		'Registrations / Payments',
-		'manage_options',
+		$capability,
 		'mrm-masterclass-registrations-payments',
 		array( $this, 'render_registrations_payments_page' )
 	);
@@ -4075,7 +4169,7 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 		'mrm-masterclass',
 		'Presenter Payouts',
 		'Presenter Payouts',
-		'manage_options',
+		$capability,
 		'mrm-masterclass-payouts',
 		array( $this, 'render_payouts_page' )
 	);
@@ -4084,7 +4178,7 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 		'mrm-masterclass',
 		'Tax Profiles',
 		'Tax Profiles',
-		'manage_options',
+		$capability,
 		'mrm-masterclass-tax-profiles',
 		array( $this, 'render_tax_profiles_page' )
 	);
@@ -4246,6 +4340,7 @@ public function render_presenters_page() {
 	echo '<tr><th>ZIP Code</th><td><input name="zip_code" type="text" class="regular-text" value="' . esc_attr( $editing['zip_code'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Timezone</th><td><input name="timezone" type="text" class="regular-text" value="' . esc_attr( $editing['timezone'] ?? 'America/Phoenix' ) . '"></td></tr>';
 	echo '<tr><th>Stripe Connected Account ID</th><td><input name="stripe_connected_account_id" type="text" class="regular-text" placeholder="acct_..." value="' . esc_attr( $editing['stripe_connected_account_id'] ?? '' ) . '"><p class="description">Use the presenter Stripe Connect account ID. Store full SSN/EIN/TIN outside WordPress.</p></td></tr>';
+	echo '<tr><th>Presenter Payout Percent</th><td><input type="number" step="0.01" min="0" max="100" name="payout_percent" class="regular-text" value="' . esc_attr( $editing['payout_percent'] ?? $this->mrm_mc_presenter_default_percent() ) . '"><p class="description">This presenter-specific percentage is used for Masterclass registration ledger calculations.</p></td></tr>';
 	echo '<tr><th>Start Date</th><td><input name="hire_date" type="date" value="' . esc_attr( $editing['hire_date'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Profile Image URL</th><td><input name="profile_image_url" type="url" class="regular-text" value="' . esc_attr( $editing['profile_image_url'] ?? '' ) . '"></td></tr>';
 
@@ -4275,7 +4370,7 @@ public function render_presenters_page() {
 		echo '<p>No presenters added yet. Use the form above to create the first presenter.</p>';
 	} else {
 		echo '<table class="widefat striped">';
-		echo '<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Location</th><th>Stripe Account</th><th>Timezone</th><th>Presenter Page</th><th>Actions</th></tr></thead><tbody>';
+		echo '<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Location</th><th>Stripe Account</th><th>Payout %</th><th>Timezone</th><th>Presenter Page</th><th>Actions</th></tr></thead><tbody>';
 
 		foreach ( $rows as $row ) {
 			echo '<tr>';
@@ -4284,6 +4379,7 @@ public function render_presenters_page() {
 			echo '<td>' . esc_html( $row['email'] ) . '</td>';
 			echo '<td>' . esc_html( trim( ( $row['city'] ?? '' ) . ', ' . ( $row['state'] ?? '' ), ', ' ) ) . '</td>';
 			echo '<td><code>' . esc_html( $row['stripe_connected_account_id'] ?? '' ) . '</code></td>';
+			echo '<td>' . esc_html( isset( $row['payout_percent'] ) && $row['payout_percent'] !== null ? $row['payout_percent'] . '%' : $this->mrm_mc_presenter_default_percent() . '%' ) . '</td>';
 			echo '<td><code>' . esc_html( $row['timezone'] ?? '' ) . '</code></td>';
 			echo '<td>';
 
