@@ -2556,7 +2556,23 @@ private function mrm_mc_stripe_request( $method, $path, $body = array() ) {
 
 	return $json;
 }
-	private function mrm_mc_create_payment_intent($event,$email,$terms){ return $this->mrm_mc_stripe_request('POST','payment_intents',array('amount'=>$event->price_cents,'currency'=>'usd','automatic_payment_methods[enabled]'=>'true','metadata[mrm_masterclass_event_id]'=>$event->id,'metadata[mrm_masterclass_customer_email]'=>$email,'metadata[mrm_product_type]'=>'masterclass','metadata[source_flow]'=>'masterclass_registration','metadata[terms_version]'=>$terms['version'],'metadata[terms_accepted]'=>$terms['accepted']?'1':'0')); }
+private function mrm_mc_create_payment_intent( $event, $email, $terms ) {
+		return $this->mrm_mc_stripe_request(
+			'POST',
+			'payment_intents',
+			array(
+				'amount'                                  => absint( $event->price_cents ),
+				'currency'                                => 'usd',
+				'payment_method_types[]'                  => 'card',
+				'metadata[mrm_masterclass_event_id]'      => absint( $event->id ),
+				'metadata[mrm_masterclass_customer_email]'=> sanitize_email( $email ),
+				'metadata[mrm_product_type]'              => 'masterclass',
+				'metadata[source_flow]'                   => 'masterclass_registration',
+				'metadata[terms_version]'                 => sanitize_text_field( $terms['version'] ?? 'v1' ),
+				'metadata[terms_accepted]'                => ! empty( $terms['accepted'] ) ? '1' : '0',
+			)
+		);
+	}
 	private function mrm_mc_retrieve_payment_intent( $payment_intent_id ) {
 		$payment_intent_id = sanitize_text_field( $payment_intent_id );
 
@@ -4439,6 +4455,8 @@ public function render_payouts_page() {
 		'payout_batch_empty'      => array( 'warning', 'No payout rows were selected.' ),
 		'payout_batch_paid'       => array( 'success', 'Selected payout rows were marked paid and preserved in the ledger audit trail.' ),
 		'payout_batch_failed'     => array( 'error', 'The payout batch could not be marked paid. Check the Masterclass debug log.' ),
+		'payout_transfer_failed'  => array( 'error', 'Stripe Connect payout transfer could not be issued. The row was preserved for audit review.' ),
+		'payout_transfer_success' => array( 'success', 'Stripe Connect payout transfer issued and the ledger row was marked paid out.' ),
 	);
 
 	echo '<div class="wrap mrm-masterclass-admin">';
@@ -4465,7 +4483,7 @@ public function render_payouts_page() {
 		 LEFT JOIN {$events_table} e ON e.id = l.event_id
 		 LEFT JOIN {$presenters_table} p ON p.id = l.presenter_id
 		 WHERE l.ledger_type = 'registration_payment'
-		   AND l.status = 'payable'
+		   AND l.status IN ('payable','payout_failed')
 		   AND l.presenter_share_cents > 0
 		 ORDER BY p.name ASC, l.created_at ASC"
 	);
@@ -4498,7 +4516,7 @@ public function render_payouts_page() {
 	wp_nonce_field( 'mrm_masterclass_mark_payouts_paid' );
 
 	echo '<table class="widefat striped">';
-	echo '<thead><tr><th>Select</th><th>Presenter</th><th>Event</th><th>Presenter Share</th><th>Created</th><th>Single Action</th></tr></thead><tbody>';
+	echo '<thead><tr><th>Select</th><th>Presenter</th><th>Event</th><th>Presenter Share</th><th>Eligibility</th><th>Status</th><th>Created</th><th>Single Action</th></tr></thead><tbody>';
 
 	if ( $rows ) {
 		foreach ( $rows as $row ) {
@@ -4506,18 +4524,29 @@ public function render_payouts_page() {
 				admin_url( 'admin-post.php?action=mrm_masterclass_mark_payout_paid&ledger_id=' . absint( $row->id ) ),
 				'mrm_masterclass_mark_payout_paid_' . absint( $row->id )
 			);
+			$transfer_url = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_issue_payout_transfer&ledger_id=' . absint( $row->id ) ),
+				'mrm_masterclass_issue_payout_transfer_' . absint( $row->id )
+			);
 
 			echo '<tr>';
 			echo '<td><input type="checkbox" name="ledger_ids[]" value="' . esc_attr( $row->id ) . '"></td>';
 			echo '<td>' . esc_html( $row->presenter_name ?: '—' ) . '<br><small>' . esc_html( $row->presenter_email ?: '' ) . '</small></td>';
 			echo '<td>' . esc_html( $row->event_title ?: '—' ) . '</td>';
 			echo '<td>' . esc_html( $this->cents_to_dollars( $row->presenter_share_cents ) ) . '</td>';
+			$eligible_at = ! empty( $row->payout_eligible_at ) ? $row->payout_eligible_at : gmdate( 'Y-m-d H:i:s', strtotime( $row->created_at . ' UTC' ) + WEEK_IN_SECONDS );
+			$is_eligible = strtotime( $eligible_at . ' UTC' ) <= time();
+			echo '<td>' . esc_html( $eligible_at ) . '<br><small>' . esc_html( $is_eligible ? 'Eligible now' : 'Scheduled' ) . '</small></td>';
+			echo '<td>' . esc_html( $row->status ) . '</td>';
 			echo '<td>' . esc_html( $row->created_at ) . '</td>';
-			echo '<td><a class="button button-small" href="' . esc_url( $single_paid_url ) . '" onclick="return confirm(\'Mark this presenter payout as paid?\');">Mark Paid</a></td>';
+			echo '<td>';
+			echo '<a class="button button-small" href="' . esc_url( $transfer_url ) . '" onclick="return confirm(\'Issue this Stripe Connect payout transfer now?\');">Issue Stripe Transfer</a> ';
+			echo '<a class="button button-small" href="' . esc_url( $single_paid_url ) . '" onclick="return confirm(\'Mark this presenter payout as paid without Stripe transfer?\');">Mark Paid</a>';
+			echo '</td>';
 			echo '</tr>';
 		}
 	} else {
-		echo '<tr><td colspan="6">No payable presenter payout rows found.</td></tr>';
+		echo '<tr><td colspan="8">No payable presenter payout rows found.</td></tr>';
 	}
 
 	echo '</tbody></table>';
@@ -4532,6 +4561,47 @@ public function render_payouts_page() {
 
 public function render_1099_page() {
 	$this->render_tax_profiles_page();
+}
+
+public function handle_export_1099_csv() {
+	$this->must_admin();
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_export_1099_csv' );
+	global $wpdb;
+	$year = absint( $_GET['tax_year'] ?? $_POST['tax_year'] ?? gmdate( 'Y' ) );
+	if ( $year < 2000 || $year > 2100 ) { $year = absint( gmdate( 'Y' ) ); }
+	$ledger_table     = $this->t( 'mrm_masterclass_payment_ledger' );
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+	$tax_table        = $this->t( 'mrm_masterclass_presenter_tax_profiles' );
+	if ( ! $this->mrm_mc_table_exists( $ledger_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) || ! $this->mrm_mc_table_exists( $tax_table ) ) {
+		wp_die( esc_html__( 'Required 1099 export tables are missing.', 'mrm-masterclass' ) );
+	}
+	$start = $year . '-01-01 00:00:00';
+	$end   = ( $year + 1 ) . '-01-01 00:00:00';
+	$rows = $wpdb->get_results( $wpdb->prepare(
+		"SELECT p.id AS presenter_id, p.name AS presenter_name, p.email AS presenter_email, t.legal_name, t.business_name, t.tin_last4, t.w9_received, t.is_1099_eligible, t.exclude_from_1099, t.is_employee, t.address_line1, t.address_line2, t.city, t.state, t.zip, COUNT(DISTINCT l.event_id) AS masterclass_count, COALESCE(SUM(l.presenter_share_cents),0) AS paid_out_cents
+		 FROM {$ledger_table} l
+		 INNER JOIN {$presenters_table} p ON p.id = l.presenter_id
+		 LEFT JOIN {$tax_table} t ON t.presenter_id = p.id
+		 WHERE l.ledger_type = 'registration_payment'
+		   AND l.status = 'paid_out'
+		   AND COALESCE(l.paid_out_at,l.paid_at,l.updated_at,l.created_at) >= %s
+		   AND COALESCE(l.paid_out_at,l.paid_at,l.updated_at,l.created_at) < %s
+		 GROUP BY p.id
+		 ORDER BY p.name ASC",
+		$start, $end
+	), ARRAY_A );
+	header( 'Content-Type: text/csv; charset=utf-8' );
+	header( 'Content-Disposition: attachment; filename=masterclass-1099-summary-' . $year . '.csv' );
+	$out = fopen( 'php://output', 'w' );
+	fputcsv( $out, array( 'Tax Year','Presenter ID','Presenter Name','Email','Legal Name','Business Name','Address Line 1','Address Line 2','City','State','ZIP','TIN Last 4','W9 Received','1099 Eligible','Employee Excluded','Excluded From 1099','Masterclass Count','Paid Out Dollars' ) );
+	foreach ( (array) $rows as $row ) {
+		$is_employee = ! empty( $row['is_employee'] );
+		$is_excluded = ! empty( $row['exclude_from_1099'] );
+		fputcsv( $out, array( $year, $row['presenter_id'], $row['presenter_name'], $row['presenter_email'], $row['legal_name'], $row['business_name'], $row['address_line1'], $row['address_line2'], $row['city'], $row['state'], $row['zip'], $row['tin_last4'], ! empty( $row['w9_received'] ) ? 'yes' : 'no', ! empty( $row['is_1099_eligible'] ) ? 'yes' : 'no', $is_employee ? 'yes' : 'no', $is_excluded ? 'yes' : 'no', $row['masterclass_count'], number_format( absint( $row['paid_out_cents'] ) / 100, 2, '.', '' ) ) );
+	}
+	fclose( $out );
+	exit;
 }
 
 public function render_tax_profiles_page() {
@@ -4584,6 +4654,13 @@ public function render_tax_profiles_page() {
 	}
 
 	echo '<p>This combines presenter tax profiles and 1099 paid-out totals. Full TIN values should live in AWS/Stripe, not WordPress.</p>';
+	echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" style="background:#fff;border:1px solid #d7c7ad;border-radius:16px;padding:16px;margin:16px 0;">';
+	echo '<input type="hidden" name="action" value="mrm_masterclass_export_1099_csv">';
+	wp_nonce_field( 'mrm_masterclass_export_1099_csv' );
+	echo '<label><strong>Tax year</strong> <input type="number" name="tax_year" value="' . esc_attr( gmdate( 'Y' ) ) . '" min="2000" max="2100"></label> ';
+	submit_button( 'Export Masterclass 1099 CSV', 'secondary', 'submit', false );
+	echo '<p class="description">Export includes paid-out presenter payout ledger rows only. It excludes pending payable amounts, refunded rows, platform share, Stripe fees, employees, and excluded profiles.</p>';
+	echo '</form>';
 
 	echo '<form method="get" style="margin:16px 0;">';
 	echo '<input type="hidden" name="page" value="mrm-masterclass-tax-profiles">';
@@ -5011,7 +5088,7 @@ public function rest_create_payment_intent( $request ) {
 	$intent = $this->mrm_mc_stripe_request( 'POST', 'payment_intents', array(
 		'amount'                            => $amount_cents,
 		'currency'                          => 'usd',
-		'automatic_payment_methods[enabled]' => 'true',
+		'payment_method_types[]'             => 'card',
 		'description'                       => 'Masterclass registration: ' . sanitize_text_field( $event->title ),
 		'metadata[event_id]'                => (string) $event_id,
 		'metadata[event_title]'             => sanitize_text_field( $event->title ),
@@ -5103,14 +5180,19 @@ public function rest_finalize_registration( $request ) {
 	$promo = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
 	$promo_status = is_wp_error( $promo ) ? 'error' : sanitize_key( $promo['status'] ?? 'not_applied' );
 	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair(); $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
-	$stripe_fee = $this->mrm_mc_estimated_stripe_fee_cents( $amount_received ); $net_cents = max( 0, $amount_received - $stripe_fee ); $presenter_pct  = $this->mrm_mc_presenter_share_percent();
-	$presenter_cut  = (int) round( $net_cents * ( $presenter_pct / 100 ) ); $platform_cut   = max( 0, $net_cents - $presenter_cut ); $terms_snapshot = wp_json_encode( $terms );
+	$share_calc = $this->mrm_mc_calculate_registration_shares( $amount_received, absint( $event->presenter_id ) );
+	$stripe_fee = absint( $share_calc['stripe_fee_cents'] );
+	$net_cents = absint( $share_calc['net_cents'] );
+	$presenter_pct = (float) $share_calc['presenter_percent'];
+	$presenter_cut = absint( $share_calc['presenter_share_cents'] );
+	$platform_cut  = absint( $share_calc['platform_share_cents'] );
+	$terms_snapshot = wp_json_encode( $terms );
 	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'created_at'=>$this->now(),'updated_at'=>$this->now());
 	$registration_data = $this->mrm_mc_filter_data_for_table( $regs_table, $registration_data );
 	$inserted = $wpdb->insert( $regs_table, $registration_data );
 	if ( false === $inserted ) { return new WP_Error('mrm_masterclass_registration_insert_failed','Payment succeeded, but registration could not be saved. Please contact support.',array('status'=>500)); }
 	$registration_id = absint( $wpdb->insert_id );
-	$ledger_data = array('event_id'=>$event_id,'registration_id'=>$registration_id,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'gross_cents'=>$amount_received,'discount_cents'=>$discount_cents,'stripe_fee_cents'=>$stripe_fee,'estimated_stripe_fee_cents'=>$stripe_fee,'net_cents'=>$net_cents,'presenter_share_cents'=>$presenter_cut,'platform_share_cents'=>$platform_cut,'status'=>'payable','notes'=>'Masterclass registration payment finalized.','created_at'=>$this->now(),'updated_at'=>$this->now());
+	$ledger_data = array('event_id'=>$event_id,'registration_id'=>$registration_id,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'gross_cents'=>$amount_received,'discount_cents'=>$discount_cents,'stripe_fee_cents'=>$stripe_fee,'estimated_stripe_fee_cents'=>$stripe_fee,'net_cents'=>$net_cents,'presenter_share_cents'=>$presenter_cut,'platform_share_cents'=>$platform_cut,'status'=>'payable','notes'=>'Masterclass registration payment finalized. Presenter payout percent used: ' . $presenter_pct . '%.','payout_eligible_at'=>gmdate( 'Y-m-d H:i:s', strtotime( $event->end_time . ' UTC' ) + WEEK_IN_SECONDS ),'created_at'=>$this->now(),'updated_at'=>$this->now());
 	$ledger_data = $this->mrm_mc_filter_data_for_table( $ledger_table, $ledger_data );
 	$wpdb->insert($ledger_table,$ledger_data);
 	$this->mrm_mc_send_confirmation_for_registration( $registration_id );
