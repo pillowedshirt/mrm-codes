@@ -146,6 +146,15 @@ if ( ! class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 class LowBrass_MRM_Masterclass_Plugin {
 	protected $mrm_secret_diagnostics = array();
 
+	/**
+	 * Prevent duplicate top-level WordPress admin menu registration.
+	 *
+	 * This protects the admin left panel if WordPress fires the admin_menu
+	 * callback more than once, if the class is instantiated unexpectedly,
+	 * or if a copied/stale Masterclass menu registration is still present.
+	 */
+	protected static $mrm_mc_admin_menu_registered = false;
+
 	const DB_VERSION = '1.3.0';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
@@ -184,6 +193,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'runtime_upgrade' );
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
+	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
@@ -3866,81 +3876,164 @@ echo '<style id="mrm-masterclass-admin-visibility-css">
 }
 
 public function register_admin_menu() {
-	$capability = 'manage_options';
+		$capability = 'manage_options';
 
-	add_menu_page(
-		'MRM Masterclass',
-		'MRM Masterclass',
-		$capability,
-		self::ADMIN_MENU_SLUG,
-		array( $this, 'render_dashboard_page' ),
-		'dashicons-welcome-learn-more',
-		56
-	);
+		/*
+		 * Register the Masterclass top-level menu only once.
+		 *
+		 * The duplicate left-panel issue is caused by the Masterclass admin menu
+		 * being registered more than once in the same WordPress admin load, or by
+		 * a stale/copied Masterclass menu item still being present.
+		 */
+		if ( self::$mrm_mc_admin_menu_registered ) {
+			$this->mrm_mc_remove_duplicate_top_level_menu_items();
+			return;
+		}
 
-	add_submenu_page(
-		'mrm-masterclass',
-		'Dashboard',
-		'Dashboard',
-		$capability,
-		self::ADMIN_MENU_SLUG,
-		array( $this, 'render_dashboard_page' )
-	);
+		self::$mrm_mc_admin_menu_registered = true;
 
-	add_submenu_page(
-		'mrm-masterclass',
-		'Events',
-		'Events',
-		$capability,
-		self::ADMIN_EVENTS_SLUG,
-		array( $this, 'render_events_page' )
-	);
+		$this->mrm_mc_remove_duplicate_top_level_menu_items();
 
-	add_submenu_page(
-		self::ADMIN_MENU_SLUG,
-		'Settings',
-		'Settings',
-		$capability,
-		self::ADMIN_SETTINGS_SLUG,
-		array( $this, 'render_settings_page' )
-	);
+		add_menu_page(
+			'MRM Masterclass',
+			'MRM Masterclass',
+			$capability,
+			self::ADMIN_MENU_SLUG,
+			array( $this, 'render_dashboard_page' ),
+			'dashicons-welcome-learn-more',
+			56
+		);
 
-	add_submenu_page(
-		'mrm-masterclass',
-		'Presenters',
-		'Presenters',
-		$capability,
-		'mrm-masterclass-presenters',
-		array( $this, 'render_presenters_page' )
-	);
+		add_submenu_page(
+			self::ADMIN_MENU_SLUG,
+			'Dashboard',
+			'Dashboard',
+			$capability,
+			self::ADMIN_MENU_SLUG,
+			array( $this, 'render_dashboard_page' )
+		);
 
-	add_submenu_page(
-		'mrm-masterclass',
-		'Registrations / Payments',
-		'Registrations / Payments',
-		$capability,
-		'mrm-masterclass-registrations-payments',
-		array( $this, 'render_registrations_payments_page' )
-	);
+		add_submenu_page(
+			self::ADMIN_MENU_SLUG,
+			'Events',
+			'Events',
+			$capability,
+			self::ADMIN_EVENTS_SLUG,
+			array( $this, 'render_events_page' )
+		);
 
-	add_submenu_page(
-		'mrm-masterclass',
-		'Presenter Payouts',
-		'Presenter Payouts',
-		$capability,
-		'mrm-masterclass-payouts',
-		array( $this, 'render_payouts_page' )
-	);
+		add_submenu_page(
+			self::ADMIN_MENU_SLUG,
+			'Settings',
+			'Settings',
+			$capability,
+			self::ADMIN_SETTINGS_SLUG,
+			array( $this, 'render_settings_page' )
+		);
 
-	add_submenu_page(
-		'mrm-masterclass',
-		'Tax Profiles',
-		'Tax Profiles',
-		$capability,
-		'mrm-masterclass-tax-profiles',
-		array( $this, 'render_tax_profiles_page' )
-	);
-}
+		add_submenu_page(
+			self::ADMIN_MENU_SLUG,
+			'Presenters',
+			'Presenters',
+			$capability,
+			'mrm-masterclass-presenters',
+			array( $this, 'render_presenters_page' )
+		);
+
+		add_submenu_page(
+			self::ADMIN_MENU_SLUG,
+			'Registrations / Payments',
+			'Registrations / Payments',
+			$capability,
+			'mrm-masterclass-registrations-payments',
+			array( $this, 'render_registrations_payments_page' )
+		);
+
+		add_submenu_page(
+			self::ADMIN_MENU_SLUG,
+			'Presenter Payouts',
+			'Presenter Payouts',
+			$capability,
+			'mrm-masterclass-payouts',
+			array( $this, 'render_payouts_page' )
+		);
+
+		add_submenu_page(
+			self::ADMIN_MENU_SLUG,
+			'Tax Profiles',
+			'Tax Profiles',
+			$capability,
+			'mrm-masterclass-tax-profiles',
+			array( $this, 'render_tax_profiles_page' )
+		);
+
+		$this->mrm_mc_remove_duplicate_top_level_menu_items();
+	}
+
+	public function mrm_mc_dedupe_admin_menu_after_registration() {
+		$this->mrm_mc_remove_duplicate_top_level_menu_items();
+	}
+
+	private function mrm_mc_remove_duplicate_top_level_menu_items() {
+		global $menu, $submenu;
+
+		if ( ! is_array( $menu ) ) {
+			return;
+		}
+
+		$kept_masterclass_top_level = false;
+
+		foreach ( $menu as $menu_index => $menu_item ) {
+			if ( ! is_array( $menu_item ) ) {
+				continue;
+			}
+
+			$menu_title = isset( $menu_item[0] ) ? wp_strip_all_tags( (string) $menu_item[0] ) : '';
+			$menu_slug  = isset( $menu_item[2] ) ? (string) $menu_item[2] : '';
+
+			$is_masterclass_menu = (
+				self::ADMIN_MENU_SLUG === $menu_slug
+				|| 'MRM Masterclass' === $menu_title
+			);
+
+			if ( ! $is_masterclass_menu ) {
+				continue;
+			}
+
+			if ( ! $kept_masterclass_top_level ) {
+				$kept_masterclass_top_level = true;
+				continue;
+			}
+
+			unset( $menu[ $menu_index ] );
+		}
+
+		if ( ! isset( $submenu[ self::ADMIN_MENU_SLUG ] ) || ! is_array( $submenu[ self::ADMIN_MENU_SLUG ] ) ) {
+			return;
+		}
+
+		$seen_submenu_slugs = array();
+
+		foreach ( $submenu[ self::ADMIN_MENU_SLUG ] as $submenu_index => $submenu_item ) {
+			if ( ! is_array( $submenu_item ) ) {
+				continue;
+			}
+
+			$submenu_slug = isset( $submenu_item[2] ) ? (string) $submenu_item[2] : '';
+
+			if ( '' === $submenu_slug ) {
+				continue;
+			}
+
+			if ( isset( $seen_submenu_slugs[ $submenu_slug ] ) ) {
+				unset( $submenu[ self::ADMIN_MENU_SLUG ][ $submenu_index ] );
+				continue;
+			}
+
+			$seen_submenu_slugs[ $submenu_slug ] = true;
+		}
+	}
+
 
 
 
