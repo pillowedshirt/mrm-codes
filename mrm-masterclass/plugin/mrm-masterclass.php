@@ -231,6 +231,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		'mrm_masterclass_delete_presenter'         => 'handle_delete_presenter',
 		'mrm_masterclass_save_event'               => 'handle_save_event',
 		'mrm_masterclass_cancel_event'             => 'handle_cancel_event',
+		'mrm_masterclass_sync_google_event'        => 'handle_sync_google_event',
 		'mrm_masterclass_mark_payouts_paid'        => 'handle_mark_payouts_paid',
 		'mrm_masterclass_mark_payout_paid'         => 'handle_mark_payout_paid',
 		'mrm_masterclass_issue_payout_transfer'    => 'handle_issue_payout_transfer',
@@ -2283,57 +2284,25 @@ private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_
 }
 
 
-private function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
+function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
 	$token = $this->mrm_mc_google_get_access_token();
-
-	if ( is_wp_error( $token ) ) {
-		return $token;
-	}
-
-		$args = array(
-		'method'  => strtoupper( $method ),
-		'timeout' => 20,
-		'headers' => array(
-			'Authorization' => 'Bearer ' . $token,
-			'Content-Type'  => 'application/json',
-		),
-	);
-
-	if ( null !== $body ) {
-		$args['body'] = wp_json_encode( $body );
-	}
-
+	if ( is_wp_error( $token ) ) { return $token; }
+	$args = array('method'=>strtoupper($method),'timeout'=>20,'headers'=>array('Authorization'=>'Bearer '.$token,'Content-Type'=>'application/json',),);
+	if ( null !== $body ) { $args['body'] = wp_json_encode( $body ); }
 	$response = wp_remote_request( $url, $args );
-
-	if ( is_wp_error( $response ) ) {
-		return $response;
-	}
-
+	if ( is_wp_error( $response ) ) { return $response; }
 	$status = (int) wp_remote_retrieve_response_code( $response );
 	$raw    = (string) wp_remote_retrieve_body( $response );
-	$data   = json_decode( $raw, true );
-
-	if ( ! is_array( $data ) ) {
-		return new WP_Error(
-			'google_bad_response',
-			'Google Calendar returned an unreadable response.',
-			array( 'status' => 502 )
-		);
+	if ( '' === trim( $raw ) ) {
+		if ( $status >= 200 && $status < 300 ) { return array('success'=>true,'status'=>$status,); }
+		return new WP_Error('google_empty_error_response','Google Calendar returned an empty error response.',array( 'status' => $status ));
 	}
-
-	if ( $status < 200 || $status >= 300 ) {
-		return new WP_Error(
-			'google_api_error',
-			$data['error']['message'] ?? 'Google Calendar request failed.',
-			array(
-				'status' => 502,
-				'google' => $data,
-			)
-		);
-	}
-
+	$data = json_decode( $raw, true );
+	if ( ! is_array( $data ) ) { return new WP_Error('google_bad_response','Google Calendar returned an unreadable response.',array('status'=>$status,'raw'=>$raw,)); }
+	if ( $status < 200 || $status >= 300 ) { return new WP_Error('google_api_error',$data['error']['message'] ?? 'Google Calendar request failed.',array('status'=>$status,'google'=>$data,)); }
 	return $data;
 }
+
 
 private function mrm_mc_extract_meet_url( $event ) {
 	if ( ! is_array( $event ) ) {
@@ -2357,50 +2326,23 @@ private function mrm_mc_extract_meet_url( $event ) {
 	return '';
 }
 
-private function mrm_mc_google_event_body( $event, $presenter_email ) {
+private function mrm_mc_google_event_body( $event, $presenter_email, $include_meet_request = true ) {
 	$settings    = $this->settings();
 	$calendar_id = ! empty( $event->calendar_id ) ? $event->calendar_id : ( $settings['masterclass_calendar_id'] ?? '' );
-
 	$attendees = array();
-
-	if ( is_email( $presenter_email ) ) {
-		$attendees[] = array( 'email' => $presenter_email );
-	}
-
-	if ( ! empty( $event->proctor_email ) && is_email( $event->proctor_email ) ) {
-		$attendees[] = array( 'email' => $event->proctor_email );
-	}
-
+	if ( is_email( $presenter_email ) ) { $attendees[] = array( 'email' => sanitize_email( $presenter_email ) ); }
+	if ( ! empty( $event->proctor_email ) && is_email( $event->proctor_email ) ) { $attendees[] = array( 'email' => sanitize_email( $event->proctor_email ) ); }
 	$description = wp_strip_all_tags( (string) ( $event->description ?? '' ) );
-
-	if ( ! empty( $event->google_meet_url ) ) {
-		$description .= "
-
-Online attendance link: " . esc_url_raw( $event->google_meet_url );
-	}
-
-	return array(
-		'summary'        => sanitize_text_field( $event->title ?? 'Masterclass' ),
-		'description'    => $description,
-		'start'          => array(
-			'dateTime' => gmdate( 'c', strtotime( $event->start_time . ' UTC' ) ),
-			'timeZone' => sanitize_text_field( $event->timezone ?? 'America/Phoenix' ),
-		),
-		'end'            => array(
-			'dateTime' => gmdate( 'c', strtotime( $event->end_time . ' UTC' ) ),
-			'timeZone' => sanitize_text_field( $event->timezone ?? 'America/Phoenix' ),
-		),
-		'attendees'      => $attendees,
-		'conferenceData' => array(
-			'createRequest' => array(
-				'requestId'             => 'mrm-masterclass-' . absint( $event->id ) . '-' . wp_generate_password( 8, false, false ),
-				'conferenceSolutionKey' => array(
-					'type' => 'hangoutsMeet',
-				),
-			),
-		),
-	);
+	if ( ! empty( $event->google_meet_url ) ) { $description .= "\n\nOnline attendance link: " . esc_url_raw( $event->google_meet_url ); }
+	$start_local = str_replace( ' ', 'T', (string) ( $event->start_time ?? '' ) );
+	$end_local   = str_replace( ' ', 'T', (string) ( $event->end_time ?? '' ) );
+	$timezone    = sanitize_text_field( $event->timezone ?? 'America/Phoenix' );
+	$body = array('summary'=>sanitize_text_field( $event->title ?? 'Masterclass' ),'description'=>$description,'start'=>array('dateTime'=>$start_local,'timeZone'=>$timezone,), 'end'=>array('dateTime'=>$end_local,'timeZone'=>$timezone,), 'transparency'=>'opaque','reminders'=>array('useDefault'=>false,'overrides'=>array(),),);
+	if ( ! empty( $attendees ) ) { $body['attendees'] = $attendees; }
+	if ( $include_meet_request ) { $request_id = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : 'mrm-masterclass-' . absint( $event->id ?? 0 ) . '-' . wp_generate_password( 16, false, false ); $body['conferenceData']=array('createRequest'=>array('requestId'=>$request_id,'conferenceSolutionKey'=>array('type'=>'hangoutsMeet',),),); }
+	return $body;
 }
+
 
 private function mrm_mc_google_insert_event( $event, $presenter_email ) {
 	$settings    = $this->settings();
