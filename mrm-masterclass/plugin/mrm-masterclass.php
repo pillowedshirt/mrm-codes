@@ -2300,19 +2300,27 @@ function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
 	$data = json_decode( $raw, true );
 	if ( ! is_array( $data ) ) { return new WP_Error('google_bad_response','Google Calendar returned an unreadable response.',array('status'=>$status,'raw'=>$raw,)); }
 	if ( $status < 200 || $status >= 300 ) {
+		$message = $data['error']['message'] ?? 'Google Calendar request failed.';
+		$reason  = $data['error']['errors'][0]['reason'] ?? '';
+		$friendly_message = $message;
+
+		if ( 404 === $status && 'POST' === strtoupper( $method ) ) {
+			$friendly_message = 'Google Calendar could not find or access the selected Masterclass calendar. Confirm the Masterclass Google Calendar ID is exact and that the service account is shared onto that calendar with permission to make changes.';
+		}
+
 		$this->mrm_mc_debug_log(
 			'Google Calendar API request failed.',
 			array(
 				'method'  => strtoupper( $method ),
 				'status'  => $status,
-				'message' => $data['error']['message'] ?? 'Google Calendar request failed.',
-				'reason'  => $data['error']['errors'][0]['reason'] ?? '',
+				'message' => $message,
+				'reason'  => $reason,
 			)
 		);
 
 		return new WP_Error(
 			'google_api_error',
-			$data['error']['message'] ?? 'Google Calendar request failed.',
+			$friendly_message,
 			array(
 				'status' => $status,
 				'google' => $data,
@@ -2398,9 +2406,7 @@ private function mrm_mc_sync_google_for_event_id( $event_id ) {
 		return new WP_Error( 'event_presenter_missing', 'The selected presenter could not be found.' );
 	}
 
-	$settings    = $this->settings();
-	$calendar_id = ! empty( $event->calendar_id ) ? $event->calendar_id : ( $settings['masterclass_calendar_id'] ?? '' );
-	$calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id( $event );
 
 	if ( '' === $calendar_id ) {
 		$wpdb->update(
@@ -2539,9 +2545,37 @@ private function mrm_mc_extract_meet_url( $event ) {
 	return '';
 }
 
+private function mrm_mc_get_masterclass_calendar_id( $event = null ) {
+	$settings = $this->settings();
+
+	/*
+	 * The Masterclass settings calendar ID is the source of truth.
+	 *
+	 * Do not let an older per-event calendar_id override the current setting,
+	 * because stale event calendar IDs can cause Google POST requests to fail
+	 * with 404 Not Found.
+	 */
+	$calendar_id = sanitize_text_field( $settings['masterclass_calendar_id'] ?? '' );
+	$calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+
+	if ( '' !== $calendar_id ) {
+		return $calendar_id;
+	}
+
+	/*
+	 * Fallback only when the global Masterclass setting is blank.
+	 * This keeps older data from being completely unusable, but the preferred
+	 * fix is always to set the Masterclass Google Calendar ID in the plugin UI.
+	 */
+	if ( is_object( $event ) && ! empty( $event->calendar_id ) ) {
+		return rawurldecode( trim( (string) $event->calendar_id ) );
+	}
+
+	return '';
+}
+
 private function mrm_mc_google_event_body( $event, $presenter_email, $include_meet_request = true ) {
-	$settings    = $this->settings();
-	$calendar_id = ! empty( $event->calendar_id ) ? $event->calendar_id : ( $settings['masterclass_calendar_id'] ?? '' );
+	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id( $event );
 	$attendees = array();
 	if ( is_email( $presenter_email ) ) { $attendees[] = array( 'email' => sanitize_email( $presenter_email ) ); }
 	if ( ! empty( $event->proctor_email ) && is_email( $event->proctor_email ) ) { $attendees[] = array( 'email' => sanitize_email( $event->proctor_email ) ); }
@@ -2558,13 +2592,22 @@ private function mrm_mc_google_event_body( $event, $presenter_email, $include_me
 
 
 private function mrm_mc_google_insert_event( $event, $presenter_email ) {
-	$settings    = $this->settings();
-	$calendar_id = ! empty( $event->calendar_id ) ? $event->calendar_id : ( $settings['masterclass_calendar_id'] ?? '' );
-	$calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id( $event );
 
 	if ( '' === $calendar_id ) {
 		return new WP_Error( 'google_calendar_missing', 'Masterclass Google Calendar ID is missing.' );
 	}
+
+	$this->mrm_mc_debug_log(
+		'Masterclass Google insert using calendar ID source.',
+		array(
+			'event_id'             => absint( $event->id ?? 0 ),
+			'has_calendar_id'      => '' !== $calendar_id ? 'yes' : 'no',
+			'calendar_id_length'   => strlen( $calendar_id ),
+			'calendar_id_has_at'   => false !== strpos( $calendar_id, '@' ) ? 'yes' : 'no',
+			'calendar_id_has_hash' => false !== strpos( $calendar_id, '#' ) ? 'yes' : 'no',
+		)
+	);
 
 	$body = $this->mrm_mc_google_event_body( $event, $presenter_email, true );
 
@@ -2591,13 +2634,23 @@ private function mrm_mc_google_insert_event( $event, $presenter_email ) {
 }
 
 private function mrm_mc_google_update_event( $event, $presenter_email ) {
-	$settings    = $this->settings();
-	$calendar_id = ! empty( $event->calendar_id ) ? $event->calendar_id : ( $settings['masterclass_calendar_id'] ?? '' );
-	$calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id( $event );
 
 	if ( '' === $calendar_id || empty( $event->google_event_id ) ) {
 		return new WP_Error( 'google_update_missing_data', 'Google Calendar update skipped because the calendar ID or Google event ID is missing.' );
 	}
+
+	$this->mrm_mc_debug_log(
+		'Masterclass Google update using calendar ID source.',
+		array(
+			'event_id'             => absint( $event->id ?? 0 ),
+			'has_google_event_id'  => ! empty( $event->google_event_id ) ? 'yes' : 'no',
+			'has_calendar_id'      => '' !== $calendar_id ? 'yes' : 'no',
+			'calendar_id_length'   => strlen( $calendar_id ),
+			'calendar_id_has_at'   => false !== strpos( $calendar_id, '@' ) ? 'yes' : 'no',
+			'calendar_id_has_hash' => false !== strpos( $calendar_id, '#' ) ? 'yes' : 'no',
+		)
+	);
 
 	$needs_meet_request = empty( $event->google_meet_url );
 
@@ -2637,13 +2690,7 @@ private function mrm_mc_google_patch_event_attendees( $event, $emails ) {
 }
 
 private function mrm_mc_google_cancel_event( $google_event_id, $calendar_id = '' ) {
-	$settings = $this->settings();
-
-	$calendar_id = '' !== trim( (string) $calendar_id )
-		? $calendar_id
-		: sanitize_text_field( $settings['masterclass_calendar_id'] ?? '' );
-
-	$calendar_id     = rawurldecode( trim( (string) $calendar_id ) );
+	$calendar_id     = $this->mrm_mc_get_masterclass_calendar_id();
 	$google_event_id = sanitize_text_field( $google_event_id );
 
 	if ( '' === $calendar_id || '' === $google_event_id ) {
@@ -3205,7 +3252,9 @@ public function handle_save_event() {
 	if ( $price_cents <= 0 ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_price_invalid' ); }
 	$presenter = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$presenters_table} WHERE id = %d",$presenter_id));
 	if ( ! $presenter ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_presenter_missing' ); }
+	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id();
 	$data = array('title'=>$title,'description'=>$description,'presenter_id'=>$presenter_id,'presenter_email'=>sanitize_email( $presenter->email ?? '' ),'proctor_email'=>$proctor,'start_time'=>$start_time,'end_time'=>$end_time,'timezone'=>$timezone,'price_cents'=>$price_cents,'capacity'=>$capacity,'status'=>$status,'registration_open'=>$this->mrm_mc_bool_post( 'registration_open' ),'updated_at'=>$this->now());
+	if ( method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $events_table, 'calendar_id' ) ) { $data['calendar_id'] = $calendar_id; }
 	$data = $this->mrm_mc_filter_data_for_table( $events_table, $data );
 	if ( $is_edit ) { $result=$wpdb->update($events_table,$data,array('id'=>$event_id)); } else { $data['created_at']=$this->now(); if ( method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $events_table, 'refund_request_token' ) ) { $data['refund_request_token']=wp_generate_password( 32, false, false ); } $result=$wpdb->insert($events_table,$data); $event_id=$result?absint($wpdb->insert_id):0; }
 	if ( false === $result || $event_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_save_failed' ); }
