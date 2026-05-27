@@ -2299,8 +2299,57 @@ function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
 	}
 	$data = json_decode( $raw, true );
 	if ( ! is_array( $data ) ) { return new WP_Error('google_bad_response','Google Calendar returned an unreadable response.',array('status'=>$status,'raw'=>$raw,)); }
-	if ( $status < 200 || $status >= 300 ) { return new WP_Error('google_api_error',$data['error']['message'] ?? 'Google Calendar request failed.',array('status'=>$status,'google'=>$data,)); }
+	if ( $status < 200 || $status >= 300 ) {
+		$this->mrm_mc_debug_log(
+			'Google Calendar API request failed.',
+			array(
+				'method'  => strtoupper( $method ),
+				'status'  => $status,
+				'message' => $data['error']['message'] ?? 'Google Calendar request failed.',
+				'reason'  => $data['error']['errors'][0]['reason'] ?? '',
+			)
+		);
+
+		return new WP_Error(
+			'google_api_error',
+			$data['error']['message'] ?? 'Google Calendar request failed.',
+			array(
+				'status' => $status,
+				'google' => $data,
+			)
+		);
+	}
 	return $data;
+}
+
+
+private function mrm_mc_google_error_is_not_found( $error ) {
+	if ( ! is_wp_error( $error ) ) {
+		return false;
+	}
+
+	$message = strtolower( (string) $error->get_error_message() );
+	$data    = $error->get_error_data();
+
+	if ( false !== strpos( $message, 'not found' ) ) {
+		return true;
+	}
+
+	if ( is_array( $data ) ) {
+		if ( isset( $data['status'] ) && 404 === absint( $data['status'] ) ) {
+			return true;
+		}
+
+		if ( isset( $data['google']['error']['code'] ) && 404 === absint( $data['google']['error']['code'] ) ) {
+			return true;
+		}
+
+		if ( isset( $data['google']['error']['message'] ) && false !== strpos( strtolower( (string) $data['google']['error']['message'] ), 'not found' ) ) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 
@@ -2369,8 +2418,50 @@ private function mrm_mc_sync_google_for_event_id( $event_id ) {
 		return new WP_Error( 'google_calendar_missing', 'Masterclass Google Calendar ID is missing.' );
 	}
 
+	/*
+	 * First attempt:
+	 * If this Masterclass event already has a Google event ID, try to update
+	 * that existing Google event.
+	 */
 	if ( ! empty( $event->google_event_id ) ) {
 		$google_result = $this->mrm_mc_google_update_event( $event, sanitize_email( $presenter->email ?? '' ) );
+
+		/*
+		 * If Google says “Not Found,” the saved google_event_id is stale.
+		 * Clear it locally and create a brand-new Google Calendar event.
+		 */
+		if ( is_wp_error( $google_result ) && $this->mrm_mc_google_error_is_not_found( $google_result ) ) {
+			$this->mrm_mc_debug_log(
+				'Masterclass Google event ID was stale. Recreating Google event.',
+				array(
+					'event_id' => $event_id,
+					'error'    => $google_result->get_error_message(),
+				)
+			);
+
+			$wpdb->update(
+				$events_table,
+				$this->mrm_mc_filter_data_for_table(
+					$events_table,
+					array(
+						'google_event_id'   => '',
+						'google_meet_url'   => '',
+						'online_link'       => '',
+						'google_last_error' => 'Previous Google event was not found. Recreating Google event.',
+						'updated_at'        => $this->now(),
+					)
+				),
+				array( 'id' => $event_id )
+			);
+
+			$event = $this->mrm_mc_get_event( $event_id );
+
+			if ( ! $event ) {
+				return new WP_Error( 'event_reload_failed', 'Masterclass event could not be reloaded after clearing stale Google data.' );
+			}
+
+			$google_result = $this->mrm_mc_google_insert_event( $event, sanitize_email( $presenter->email ?? '' ) );
+		}
 	} else {
 		$google_result = $this->mrm_mc_google_insert_event( $event, sanitize_email( $presenter->email ?? '' ) );
 	}
