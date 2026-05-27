@@ -149,6 +149,9 @@ class LowBrass_MRM_Masterclass_Plugin {
 	const DB_VERSION = '1.3.0';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
+	const ADMIN_MENU_SLUG = 'mrm-masterclass';
+	const ADMIN_SETTINGS_SLUG = 'mrm-masterclass-settings';
+	const ADMIN_EVENTS_SLUG = 'mrm-masterclass-events';
 
 	public function __construct() {
 	/*
@@ -863,6 +866,7 @@ public function mrm_mc_render_critical_error_notice() {
 			registration_open TINYINT(1) NOT NULL DEFAULT 1,
 			google_event_id VARCHAR(191) NULL,
 			google_meet_url TEXT NULL,
+			online_link TEXT NULL,
 			cancellation_reason TEXT NULL,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
@@ -1701,8 +1705,13 @@ private function mrm_mc_public_event_payload( $row ) {
 		'presenter_page_url' => esc_url_raw( $row->presenter_page_url ?? '' ),
 		'start_time'         => sanitize_text_field( $row->start_time ),
 		'end_time'           => sanitize_text_field( $row->end_time ),
+		'start_time_rfc3339' => ! empty( $row->start_time ) ? mysql_to_rfc3339( $row->start_time ) : '',
+		'end_time_rfc3339'   => ! empty( $row->end_time ) ? mysql_to_rfc3339( $row->end_time ) : '',
 		'timezone'           => sanitize_text_field( $row->timezone ),
 		'price_cents'        => absint( $row->price_cents ),
+		'online_link'        => ! empty( $row->online_link ) ? esc_url_raw( $row->online_link ) : '',
+		'google_meet_url'    => ! empty( $row->google_meet_url ) ? esc_url_raw( $row->google_meet_url ) : '',
+		'google_event_id'    => ! empty( $row->google_event_id ) ? sanitize_text_field( $row->google_event_id ) : '',
 		'capacity'           => absint( $row->capacity ),
 		'available_seats'    => isset( $row->available_seats )
 			? max( 0, (int) $row->available_seats )
@@ -2980,7 +2989,7 @@ public function handle_save_event() {
 	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
 
 	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
-		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_table_missing' );
+		$this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_table_missing' );
 	}
 
 	$event_id  = absint( $_POST['event_id'] ?? 0 );
@@ -2988,7 +2997,7 @@ public function handle_save_event() {
 	$old_event = $is_edit ? $this->mrm_mc_get_event( $event_id ) : null;
 
 	if ( $is_edit && ! $old_event ) {
-		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_not_found' );
+		$this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_not_found' );
 	}
 
 	$title        = $this->mrm_mc_clean_text( $_POST['title'] ?? '' );
@@ -3003,43 +3012,44 @@ public function handle_save_event() {
 	$status       = sanitize_key( wp_unslash( $_POST['status'] ?? 'scheduled' ) );
 	$allowed_statuses = array( 'draft', 'scheduled', 'cancelled', 'completed', 'archived' );
 	if ( ! in_array( $status, $allowed_statuses, true ) ) { $status = 'scheduled'; }
-	if ( '' === $title || $presenter_id <= 0 || '' === $start_time || '' === $end_time || '' === $timezone ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_validation_failed' ); }
-	if ( strtotime( $end_time ) <= strtotime( $start_time ) ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_time_invalid' ); }
-	if ( $price_cents <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_price_invalid' ); }
+	if ( '' === $title || $presenter_id <= 0 || '' === $start_time || '' === $end_time || '' === $timezone ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_validation_failed' ); }
+	if ( strtotime( $end_time ) <= strtotime( $start_time ) ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_time_invalid' ); }
+	if ( $price_cents <= 0 ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_price_invalid' ); }
 	$presenter = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$presenters_table} WHERE id = %d",$presenter_id));
-	if ( ! $presenter ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_presenter_missing' ); }
+	if ( ! $presenter ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_presenter_missing' ); }
 	$data = array('title'=>$title,'description'=>$description,'presenter_id'=>$presenter_id,'presenter_email'=>sanitize_email( $presenter->email ?? '' ),'proctor_email'=>$proctor,'start_time'=>$start_time,'end_time'=>$end_time,'timezone'=>$timezone,'price_cents'=>$price_cents,'capacity'=>$capacity,'status'=>$status,'registration_open'=>$this->mrm_mc_bool_post( 'registration_open' ),'updated_at'=>$this->now());
 	$data = $this->mrm_mc_filter_data_for_table( $events_table, $data );
 	if ( $is_edit ) { $result=$wpdb->update($events_table,$data,array('id'=>$event_id)); } else { $data['created_at']=$this->now(); if ( method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $events_table, 'refund_request_token' ) ) { $data['refund_request_token']=wp_generate_password( 32, false, false ); } $result=$wpdb->insert($events_table,$data); $event_id=$result?absint($wpdb->insert_id):0; }
-	if ( false === $result || $event_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_save_failed' ); }
-	$event = $this->mrm_mc_get_event( $event_id ); if ( ! $event ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_saved_google_reload_failed', array( 'event_id' => $event_id ) ); }
+	if ( false === $result || $event_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_save_failed' ); }
+	$event = $this->mrm_mc_get_event( $event_id ); if ( ! $event ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_saved_google_reload_failed', array( 'event_id' => $event_id ) ); }
 	$settings=$this->settings(); $calendar_id=sanitize_text_field( $settings['masterclass_calendar_id'] ?? '' );
-	if ( '' === $calendar_id ) { $wpdb->update($events_table,array('google_last_error'=>'Masterclass Google Calendar ID is missing.','updated_at'=>$this->now()),array('id'=>$event_id)); if ( $is_edit ) { $this->mrm_mc_send_event_update_notices( $event_id ); } $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_saved_google_missing_calendar', array( 'event_id' => $event_id ) ); }
+	if ( '' === $calendar_id ) { $wpdb->update($events_table,array('google_last_error'=>'Masterclass Google Calendar ID is missing.','updated_at'=>$this->now()),array('id'=>$event_id)); if ( $is_edit ) { $this->mrm_mc_send_event_update_notices( $event_id ); } $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_saved_google_missing_calendar', array( 'event_id' => $event_id ) ); }
 	$google_result = ( $is_edit && ! empty( $event->google_event_id ) && method_exists( $this, 'mrm_mc_google_update_event' ) ) ? $this->mrm_mc_google_update_event( $event, sanitize_email( $presenter->email ?? '' ) ) : $this->mrm_mc_google_insert_event( $event, sanitize_email( $presenter->email ?? '' ) );
-	if ( is_wp_error( $google_result ) ) { $wpdb->update($events_table,array('google_last_error'=>$google_result->get_error_message(),'updated_at'=>$this->now()),array('id'=>$event_id)); if ( $is_edit ) { $this->mrm_mc_send_event_update_notices( $event_id ); } $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_saved_google_failed', array( 'event_id' => $event_id ) ); }
-	$wpdb->update($events_table,array('google_event_id'=>sanitize_text_field( $google_result['id'] ?? ( $event->google_event_id ?? '' ) ),'google_meet_url'=>esc_url_raw( $google_result['meet_url'] ?? ( $event->google_meet_url ?? '' ) ),'google_last_error'=>'','updated_at'=>$this->now()),array('id'=>$event_id));
-	if ( $is_edit ) { $this->mrm_mc_send_event_update_notices( $event_id ); $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_updated_google_success', array( 'event_id' => $event_id ) ); }
-	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_saved_google_success', array( 'event_id' => $event_id ) );
+	if ( is_wp_error( $google_result ) ) { $wpdb->update($events_table,array('google_last_error'=>$google_result->get_error_message(),'updated_at'=>$this->now()),array('id'=>$event_id)); if ( $is_edit ) { $this->mrm_mc_send_event_update_notices( $event_id ); } $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_saved_google_failed', array( 'event_id' => $event_id ) ); }
+	$meet_url = esc_url_raw( $google_result['meet_url'] ?? ( $event->google_meet_url ?? '' ) );
+	$wpdb->update($events_table,array('google_event_id'=>sanitize_text_field( $google_result['id'] ?? ( $event->google_event_id ?? '' ) ),'google_meet_url'=>$meet_url,'online_link'=>$meet_url,'google_last_error'=>'','updated_at'=>$this->now()),array('id'=>$event_id));
+	if ( $is_edit ) { $this->mrm_mc_send_event_update_notices( $event_id ); $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_updated_google_success', array( 'event_id' => $event_id ) ); }
+	$this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_saved_google_success', array( 'event_id' => $event_id ) );
 }
 
 public function handle_cancel_event() {
 	$this->must_admin();
 	global $wpdb;
 	$event_id = absint( $_POST['event_id'] ?? $_GET['event_id'] ?? 0 );
-	if ( $event_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_missing_id' ); }
+	if ( $event_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_missing_id' ); }
 	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_cancel_event_' . $event_id );
 	$events_table  = $this->t( 'mrm_masterclass_events' ); $regs_table=$this->t('mrm_masterclass_registrations'); $refunds_table=$this->t('mrm_masterclass_refunds');
-	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $regs_table ) || ! $this->mrm_mc_table_exists( $refunds_table ) ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_table_missing' ); }
-	$event = $this->mrm_mc_get_event( $event_id ); if ( ! $event ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_not_found' ); }
-	if ( in_array( sanitize_key( $event->status ), array( 'deleted', 'cancelled' ), true ) ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_already_deleted' ); }
+	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $regs_table ) || ! $this->mrm_mc_table_exists( $refunds_table ) ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_table_missing' ); }
+	$event = $this->mrm_mc_get_event( $event_id ); if ( ! $event ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_not_found' ); }
+	if ( in_array( sanitize_key( $event->status ), array( 'deleted', 'cancelled' ), true ) ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_already_deleted' ); }
 	$paid_regs = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$regs_table} WHERE event_id = %d AND payment_status = 'paid'",$event_id));
 	$refund_success_count=0; $refund_failure_count=0;
 	foreach((array)$paid_regs as $registration){$refund_result=$this->mrm_mc_refund_registration($registration,$event,'event_cancelled'); if(is_wp_error($refund_result)){$refund_failure_count++;continue;} $refund_success_count++; $this->mrm_mc_send_email_recorded('event_cancelled',$registration->email,'Masterclass Cancelled — '.sanitize_text_field( $event->title ),$this->mrm_mc_event_cancelled_email_body( $event, $registration, absint( $registration->amount_cents ), 'refunded' ),$event->id,$registration->id);} 
 	$google_cancel_error=''; if(!empty($event->google_event_id)){ $google_cancel=$this->mrm_mc_google_cancel_event($event->google_event_id); if(is_wp_error($google_cancel)){$google_cancel_error=$google_cancel->get_error_message();}}
 	$wpdb->update($events_table,array('status'=>'deleted','registration_open'=>0,'cancellation_reason'=>'Admin cancelled event. Paid registrations were automatically refunded when possible.','google_last_error'=>$google_cancel_error,'updated_at'=>$this->now()),array('id'=>$event_id));
-	if($refund_failure_count>0){$this->mrm_mc_admin_notice_redirect('mrm-masterclass-events','event_cancel_refund_failures',array('event_id'=>$event_id,'success'=>$refund_success_count,'failed'=>$refund_failure_count));}
-	if($refund_success_count>0){$this->mrm_mc_admin_notice_redirect('mrm-masterclass-events','event_cancel_refunds_success',array('event_id'=>$event_id,'refunded'=>$refund_success_count));}
-	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_no_paid_attendees', array( 'event_id' => $event_id ) );
+	if($refund_failure_count>0){$this->mrm_mc_admin_notice_redirect(self::ADMIN_EVENTS_SLUG,'event_cancel_refund_failures',array('event_id'=>$event_id,'success'=>$refund_success_count,'failed'=>$refund_failure_count));}
+	if($refund_success_count>0){$this->mrm_mc_admin_notice_redirect(self::ADMIN_EVENTS_SLUG,'event_cancel_refunds_success',array('event_id'=>$event_id,'refunded'=>$refund_success_count));}
+	$this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_no_paid_attendees', array( 'event_id' => $event_id ) );
 }
 
 public function handle_mark_payouts_paid() {
@@ -3288,7 +3298,7 @@ public function handle_save_tax_profile() {
 public function handle_emergency_cancel_event() {
 	$this->must_admin();
 	$event_id = absint( $_POST['event_id'] ?? $_GET['event_id'] ?? 0 );
-	if ( $event_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-events', 'event_cancel_missing_id' ); }
+	if ( $event_id <= 0 ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_missing_id' ); }
 	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_emergency_cancel_event_' . $event_id );
 	$this->mrm_mc_debug_log( 'Emergency Masterclass cancellation requested.', array( 'event_id' => $event_id ) );
 	$_REQUEST['_wpnonce'] = wp_create_nonce( 'mrm_masterclass_cancel_event_' . $event_id );
@@ -3488,7 +3498,7 @@ public function handle_emergency_cancel_confirm() {
 	);
 
 	$this->mrm_mc_safe_admin_redirect(
-		'mrm-masterclass-events',
+		self::ADMIN_EVENTS_SLUG,
 		array(
 			'mrm_mc_notice' => 'emergency_cancel_disabled_safe_patch',
 		)
@@ -3513,7 +3523,7 @@ public function handle_emergency_cancel_execute() {
 	);
 
 	$this->mrm_mc_safe_admin_redirect(
-		'mrm-masterclass-events',
+		self::ADMIN_EVENTS_SLUG,
 		array(
 			'mrm_mc_notice' => 'emergency_cancel_disabled_safe_patch',
 		)
@@ -3862,7 +3872,7 @@ public function register_admin_menu() {
 		'MRM Masterclass',
 		'MRM Masterclass',
 		$capability,
-		'mrm-masterclass',
+		self::ADMIN_MENU_SLUG,
 		array( $this, 'render_dashboard_page' ),
 		'dashicons-welcome-learn-more',
 		56
@@ -3873,7 +3883,7 @@ public function register_admin_menu() {
 		'Dashboard',
 		'Dashboard',
 		$capability,
-		'mrm-masterclass',
+		self::ADMIN_MENU_SLUG,
 		array( $this, 'render_dashboard_page' )
 	);
 
@@ -3882,8 +3892,17 @@ public function register_admin_menu() {
 		'Events',
 		'Events',
 		$capability,
-		'mrm-masterclass-events',
+		self::ADMIN_EVENTS_SLUG,
 		array( $this, 'render_events_page' )
+	);
+
+	add_submenu_page(
+		self::ADMIN_MENU_SLUG,
+		'Settings',
+		'Settings',
+		$capability,
+		self::ADMIN_SETTINGS_SLUG,
+		array( $this, 'render_settings_page' )
 	);
 
 	add_submenu_page(
