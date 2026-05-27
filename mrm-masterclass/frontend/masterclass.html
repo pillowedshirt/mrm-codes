@@ -110,7 +110,7 @@
   background:var(--mrm-card);
   border:1px solid var(--mrm-border);
   border-radius:22px;
-  padding:20px;
+  padding:24px;
   box-shadow:0 8px 24px rgba(20,52,71,.08);
 }
 
@@ -163,16 +163,19 @@
 .modal {
   position:fixed;
   inset:0;
-  z-index:9999;
-  background:rgba(15,25,35,.62);
+  z-index:999999;
+  background:rgba(17, 24, 39, 0.62);
   display:none;
   align-items:center;
   justify-content:center;
-  padding:20px;
-  backdrop-filter:blur(5px);
+  padding:24px;
+  backdrop-filter:blur(3px);
+  -webkit-backdrop-filter:blur(3px);
 }
 
 .modal-card {
+  width:min(720px,calc(100vw - 32px));
+  max-height:calc(100vh - 48px);
   width:min(700px,95vw);
   position:relative;
   max-height:90vh;
@@ -272,6 +275,8 @@ input[type="checkbox"] {
   .mc-intro,
   .calendar-shell,
   .modal-card {
+  width:min(720px,calc(100vw - 32px));
+  max-height:calc(100vh - 48px);
     border-radius:22px;
   }
 
@@ -284,7 +289,9 @@ input[type="checkbox"] {
   }
 
   .modal-card {
-    padding:20px;
+  width:min(720px,calc(100vw - 32px));
+  max-height:calc(100vh - 48px);
+    padding:24px;
   }
 }
 .mrm-masterclass-section {
@@ -766,6 +773,56 @@ input[type="checkbox"] {
   line-height: 1.45;
 }
 
+
+.modal.is-open {
+  display:flex;
+}
+
+.mrm-masterclass-event-card {
+  position: relative;
+}
+
+.mrm-masterclass-event-card.mrm-masterclass-past {
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+
+.mrm-masterclass-event-card.mrm-masterclass-past::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: rgba(245, 245, 245, 0.78);
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.mrm-masterclass-event-card.mrm-masterclass-past::after {
+  content: "This masterclass event is over";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 6;
+  transform: translate(-50%, -50%);
+  width: calc(100% - 48px);
+  max-width: 320px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: rgba(40, 40, 40, 0.88);
+  color: #ffffff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+
+.mrm-masterclass-event-card.mrm-masterclass-past .mrm-masterclass-register-button,
+.mrm-masterclass-event-card.mrm-masterclass-past button {
+  cursor: not-allowed;
+}
+
 </style>
 </head>
 
@@ -852,8 +909,7 @@ input[type="checkbox"] {
       </label>
 
       <button id="payButton" class="primary-btn">Continue to Payment</button>
-      <button id="closeModal" class="secondary-btn" type="button">Close</button>
-
+      
       <div id="paymentElement" style="margin-top:16px;"></div>
       <button id="submitPayment" class="primary-btn" style="display:none;">Submit Payment</button>
 
@@ -899,6 +955,18 @@ input[type="checkbox"] {
     let elements = null;
     let paymentIntentClientSecret = null;
 
+
+    function mrmMasterclassIsPast(eventData) {
+      if (!eventData) return false;
+      const endValue = [eventData.end, eventData.end_time, eventData.end_datetime, eventData.event_end, eventData.ends_at].find(Boolean);
+      const startValue = [eventData.start, eventData.start_time, eventData.start_datetime, eventData.event_start, eventData.starts_at, eventData.date_time].find(Boolean);
+      const comparisonValue = endValue || startValue;
+      if (!comparisonValue) return false;
+      const eventDate = new Date(comparisonValue);
+      if (Number.isNaN(eventDate.getTime())) return false;
+      return eventDate.getTime() <= Date.now();
+    }
+
     const eventsEl = document.getElementById('mrm-masterclass-events');
     const loadingEl = document.getElementById('mrm-masterclass-loading');
     const errorEl = document.getElementById('mrm-masterclass-error');
@@ -920,13 +988,13 @@ input[type="checkbox"] {
 
     function showModal(modalEl) {
       if (!modalEl) return;
-      modalEl.style.display = 'flex';
+      modalEl.classList.add('is-open');
       modalEl.setAttribute('aria-hidden', 'false');
     }
 
     function hideModal(modalEl) {
       if (!modalEl) return;
-      modalEl.style.display = 'none';
+      modalEl.classList.remove('is-open');
       modalEl.setAttribute('aria-hidden', 'true');
     }
 
@@ -1059,8 +1127,10 @@ input[type="checkbox"] {
       eventsEl.innerHTML = "";
 
       events.forEach((event) => {
+        const isPastMasterclass = mrmMasterclassIsPast(event);
         const card = document.createElement("article");
         card.className = "mrm-masterclass-event-card";
+        card.classList.toggle("mrm-masterclass-past", isPastMasterclass);
         card.id = `mrm-masterclass-event-card-${event.id}`;
         card.dataset.eventId = String(event.id);
 
@@ -1088,10 +1158,22 @@ input[type="checkbox"] {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "mrm-masterclass-register-button";
-        button.textContent = Number(event.available_seats || 0) > 0 ? "Register for this Masterclass" : "Sold Out";
-        button.disabled = Number(event.available_seats || 0) <= 0;
+        if (isPastMasterclass) {
+          button.textContent = "Event Over";
+          button.disabled = true;
+          button.setAttribute("aria-disabled", "true");
+        } else {
+          button.textContent = Number(event.available_seats || 0) > 0 ? "Register for this Masterclass" : "Sold Out";
+          button.disabled = Number(event.available_seats || 0) <= 0;
+          button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
+        }
 
-        button.addEventListener("click", function () {
+        button.addEventListener("click", function (clickEvent) {
+          if (mrmMasterclassIsPast(event)) {
+            clickEvent.preventDefault();
+            clickEvent.stopPropagation();
+            return;
+          }
           if (typeof window.openMasterclassRegistration === "function") {
             window.openMasterclassRegistration(event.id);
           } else {
@@ -1358,9 +1440,7 @@ input[type="checkbox"] {
       confirmFinalPayment.addEventListener('click', completeConfirmedPayment);
     }
 
-    document.getElementById('closeModal').addEventListener('click', closeRegistrationModal);
-
-    if (closeModalX) {
+        if (closeModalX) {
       closeModalX.addEventListener('click', closeRegistrationModal);
     }
 
@@ -1380,7 +1460,9 @@ input[type="checkbox"] {
       if (!modalEl) return;
       modalEl.addEventListener('click', function (event) {
         if (event.target === modalEl) {
-          hideModal(modalEl);
+          event.preventDefault();
+          event.stopPropagation();
+          return false;
         }
       });
     });
