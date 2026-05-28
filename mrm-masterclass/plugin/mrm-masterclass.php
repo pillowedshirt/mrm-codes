@@ -5293,7 +5293,7 @@ public function render_email_log_page() {
 
 	public function register_rest_routes() {
 		register_rest_route(
-			'mrm-masterclass/v1',
+			self::REST_NAMESPACE,
 			'/events',
 			array(
 				'methods'             => WP_REST_Server::READABLE,
@@ -5303,7 +5303,7 @@ public function render_email_log_page() {
 		);
 
 		register_rest_route(
-			'mrm-masterclass/v1',
+			self::REST_NAMESPACE,
 			'/event',
 			array(
 				'methods'             => WP_REST_Server::READABLE,
@@ -6055,9 +6055,27 @@ public function rest_finalize_registration( $request ) {
 		$presenters_table = $this->t( 'mrm_masterclass_presenters' );
 		$regs_table       = $this->t( 'mrm_masterclass_registrations' );
 
+		$debug = array(
+			'endpoint_called'          => true,
+			'events_table'             => $events_table,
+			'presenters_table'         => $presenters_table,
+			'registrations_table'      => $regs_table,
+			'events_table_exists'      => false,
+			'presenters_table_exists'  => false,
+			'registrations_table_exists' => false,
+			'total_events'             => 0,
+			'total_scheduled'          => 0,
+			'total_open'               => 0,
+			'public_rows_found'        => 0,
+			'public_events_sent'       => 0,
+			'query_mode'               => 'scheduled_registration_open_public_events',
+			'timestamp'                => gmdate( 'c' ),
+		);
+
 		$this->mrm_mc_debug_log(
 			'Public Masterclass events REST request started.',
 			array(
+				'endpoint'         => '/wp-json/' . self::REST_NAMESPACE . '/events',
 				'events_table'     => $events_table,
 				'presenters_table' => $presenters_table,
 				'regs_table'       => $regs_table,
@@ -6068,41 +6086,165 @@ public function rest_finalize_registration( $request ) {
 		$presenters_table_exists = $this->mrm_mc_table_exists( $presenters_table );
 		$regs_table_exists       = $this->mrm_mc_table_exists( $regs_table );
 
+		$debug['events_table_exists']        = $events_table_exists ? true : false;
+		$debug['presenters_table_exists']    = $presenters_table_exists ? true : false;
+		$debug['registrations_table_exists'] = $regs_table_exists ? true : false;
+
 		if ( ! $events_table_exists || ! $presenters_table_exists || ! $regs_table_exists ) {
 			$this->mrm_mc_debug_log(
 				'Public Masterclass events REST request failed because required tables are missing.',
 				array(
-					'events_table_exists'     => $events_table_exists ? 'yes' : 'no',
-					'presenters_table_exists' => $presenters_table_exists ? 'yes' : 'no',
-					'regs_table_exists'       => $regs_table_exists ? 'yes' : 'no',
+					'events_table_exists'        => $events_table_exists ? 'yes' : 'no',
+					'presenters_table_exists'    => $presenters_table_exists ? 'yes' : 'no',
+					'registrations_table_exists' => $regs_table_exists ? 'yes' : 'no',
 				)
 			);
 
 			return new WP_Error(
 				'mrm_masterclass_tables_missing',
-				'Masterclass events are temporarily unavailable because the event database tables are missing.',
-				array( 'status' => 503 )
+				'Masterclass events are temporarily unavailable because the required event database tables are missing.',
+				array(
+					'status' => 503,
+					'debug'  => $debug,
+				)
 			);
 		}
+
+		$event_columns = $this->mrm_mc_table_columns( $events_table );
+		$required_event_columns = array(
+			'id',
+			'title',
+			'description',
+			'presenter_id',
+			'start_time',
+			'end_time',
+			'timezone',
+			'price_cents',
+			'capacity',
+			'status',
+			'registration_open',
+		);
+
+		$missing_event_columns = array();
+
+		foreach ( $required_event_columns as $required_column ) {
+			if ( ! in_array( $required_column, $event_columns, true ) ) {
+				$missing_event_columns[] = $required_column;
+			}
+		}
+
+		if ( ! empty( $missing_event_columns ) ) {
+			$this->mrm_mc_debug_log(
+				'Public Masterclass events REST request failed because event table columns are missing.',
+				array(
+					'missing_columns' => implode( ',', $missing_event_columns ),
+				)
+			);
+
+			return new WP_Error(
+				'mrm_masterclass_event_columns_missing',
+				'Masterclass events are temporarily unavailable because the event table is missing required columns.',
+				array(
+					'status' => 503,
+					'debug'  => array_merge(
+						$debug,
+						array(
+							'missing_event_columns' => $missing_event_columns,
+						)
+					),
+				)
+			);
+		}
+
+		$wpdb->last_error = '';
 
 		$total_events = absint(
 			$wpdb->get_var( "SELECT COUNT(*) FROM {$events_table}" )
 		);
 
+		if ( ! empty( $wpdb->last_error ) ) {
+			$this->mrm_mc_debug_log(
+				'Public Masterclass events REST count query failed.',
+				array(
+					'db_error' => $wpdb->last_error,
+					'count'    => 'total_events',
+				)
+			);
+
+			return new WP_Error(
+				'mrm_masterclass_events_count_failed',
+				'Masterclass events could not be counted. Please try again later.',
+				array(
+					'status' => 500,
+					'debug'  => $debug,
+				)
+			);
+		}
+
+		$debug['total_events'] = $total_events;
+
+		$wpdb->last_error = '';
+
 		$total_scheduled = absint(
 			$wpdb->get_var(
 				"SELECT COUNT(*) FROM {$events_table}
-				 WHERE LOWER(status) = 'scheduled'"
+				 WHERE LOWER(TRIM(status)) = 'scheduled'"
 			)
 		);
+
+		if ( ! empty( $wpdb->last_error ) ) {
+			$this->mrm_mc_debug_log(
+				'Public Masterclass scheduled count query failed.',
+				array(
+					'db_error' => $wpdb->last_error,
+					'count'    => 'total_scheduled',
+				)
+			);
+
+			return new WP_Error(
+				'mrm_masterclass_events_scheduled_count_failed',
+				'Masterclass scheduled event count could not be loaded. Please try again later.',
+				array(
+					'status' => 500,
+					'debug'  => $debug,
+				)
+			);
+		}
+
+		$debug['total_scheduled'] = $total_scheduled;
+
+		$wpdb->last_error = '';
 
 		$total_open = absint(
 			$wpdb->get_var(
 				"SELECT COUNT(*) FROM {$events_table}
-				 WHERE LOWER(status) = 'scheduled'
-				   AND registration_open = 1"
+				 WHERE LOWER(TRIM(status)) = 'scheduled'
+				   AND CAST(registration_open AS UNSIGNED) = 1"
 			)
 		);
+
+		if ( ! empty( $wpdb->last_error ) ) {
+			$this->mrm_mc_debug_log(
+				'Public Masterclass open count query failed.',
+				array(
+					'db_error' => $wpdb->last_error,
+					'count'    => 'total_open',
+				)
+			);
+
+			return new WP_Error(
+				'mrm_masterclass_events_open_count_failed',
+				'Masterclass open event count could not be loaded. Please try again later.',
+				array(
+					'status' => 500,
+					'debug'  => $debug,
+				)
+			);
+		}
+
+		$debug['total_open'] = $total_open;
+
+		$wpdb->last_error = '';
 
 		$rows = $wpdb->get_results(
 			"SELECT e.*,
@@ -6111,28 +6253,32 @@ public function rest_finalize_registration( $request ) {
 				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND r.payment_status = 'paid') AS paid_count
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
-			 WHERE LOWER(e.status) = 'scheduled'
-			   AND e.registration_open = 1
-			   AND LOWER(e.status) <> 'deleted'
+			 WHERE LOWER(TRIM(e.status)) = 'scheduled'
+			   AND CAST(e.registration_open AS UNSIGNED) = 1
 			 ORDER BY e.start_time ASC
 			 LIMIT 200"
 		);
 
 		if ( ! empty( $wpdb->last_error ) ) {
+			$debug['db_error_present'] = true;
+
 			$this->mrm_mc_debug_log(
 				'Public Masterclass events REST database query failed.',
 				array(
 					'db_error'        => $wpdb->last_error,
-					'total_events'    => $total_events,
-					'total_scheduled' => $total_scheduled,
-					'total_open'      => $total_open,
+					'total_events'    => $debug['total_events'],
+					'total_scheduled' => $debug['total_scheduled'],
+					'total_open'      => $debug['total_open'],
 				)
 			);
 
 			return new WP_Error(
 				'mrm_masterclass_events_query_failed',
-				'Masterclass events could not be loaded. Please try again later.',
-				array( 'status' => 500 )
+				'Masterclass events could not be loaded because the public event query failed. Please try again later.',
+				array(
+					'status' => 500,
+					'debug'  => $debug,
+				)
 			);
 		}
 
@@ -6144,32 +6290,33 @@ public function rest_finalize_registration( $request ) {
 			$events[]                = $this->mrm_mc_public_event_payload( $row );
 		}
 
+		$debug['public_rows_found']  = count( (array) $rows );
+		$debug['public_events_sent'] = count( $events );
+
 		$this->mrm_mc_debug_log(
 			'Public Masterclass events REST request completed.',
 			array(
-				'total_events'       => $total_events,
-				'total_scheduled'    => $total_scheduled,
-				'total_open'         => $total_open,
-				'public_rows_found'  => count( (array) $rows ),
-				'public_events_sent' => count( $events ),
+				'total_events'       => $debug['total_events'],
+				'total_scheduled'    => $debug['total_scheduled'],
+				'total_open'         => $debug['total_open'],
+				'public_rows_found'  => $debug['public_rows_found'],
+				'public_events_sent' => $debug['public_events_sent'],
 			)
 		);
 
-		return rest_ensure_response(
+		$response = rest_ensure_response(
 			array(
 				'success' => true,
 				'events'  => $events,
-				'debug'   => array(
-					'total_events'       => $total_events,
-					'total_scheduled'    => $total_scheduled,
-					'total_open'         => $total_open,
-					'public_events_sent' => count( $events ),
-				),
+				'debug'   => $debug,
 			)
 		);
+
+		$response->header( 'Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0' );
+		$response->header( 'Pragma', 'no-cache' );
+
+		return $response;
 	}
-
-
 
 public function render_activation_diagnostic_notice() {
 	if ( ! current_user_can( 'manage_options' ) ) {
