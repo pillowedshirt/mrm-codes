@@ -954,6 +954,10 @@ input[type="checkbox"] {
     let stripe = null;
     let elements = null;
     let paymentIntentClientSecret = null;
+    let activeMasterclassPaymentIntentId = '';
+    let activeMasterclassPaymentElement = null;
+    let masterclassPaymentInProgress = false;
+    let masterclassFinalizeInProgress = false;
 
 
     function mrmMasterclassIsPast(eventData) {
@@ -1003,6 +1007,42 @@ input[type="checkbox"] {
       hideModal(finalConfirmationModal);
     }
 
+
+    function mrmBuildMasterclassPaymentElementOptions(allowedMethods) {
+      const methods = Array.isArray(allowedMethods) && allowedMethods.length
+        ? allowedMethods.filter(Boolean)
+        : ['card'];
+
+      return {
+        paymentMethodOrder: methods,
+
+        /*
+         * Disable Link so Stripe does not show:
+         * “Enter email for faster checkout.”
+         *
+         * Disable wallets here so the Masterclass popup is a simple card-only
+         * checkout and does not surface unrelated express options.
+         */
+        wallets: {
+          applePay: 'never',
+          googlePay: 'never',
+          link: 'never'
+        },
+
+        fields: {
+          billingDetails: {
+            name: 'never',
+            email: 'never'
+          }
+        },
+
+        layout: {
+          type: 'accordion',
+          defaultCollapsed: false,
+          visibleAccordionItemsCount: 1
+        }
+      };
+    }
 
     function centsToDollars(cents) {
       const amount = (Number(cents || 0) / 100);
@@ -1224,7 +1264,20 @@ input[type="checkbox"] {
       modalMessage.textContent = '';
       paymentElement.innerHTML = '';
       submitPayment.style.display = 'none';
+      submitPayment.disabled = false;
       payButton.style.display = 'block';
+      payButton.disabled = false;
+      activeMasterclassPaymentIntentId = '';
+      paymentIntentClientSecret = '';
+      masterclassPaymentInProgress = false;
+      masterclassFinalizeInProgress = false;
+
+      if (activeMasterclassPaymentElement) {
+        try {
+          activeMasterclassPaymentElement.unmount();
+        } catch (error) {}
+        activeMasterclassPaymentElement = null;
+      }
 
       let data;
 
@@ -1268,6 +1321,12 @@ input[type="checkbox"] {
     }
 
     async function createMasterclassPaymentIntent(eventId, promoCode) {
+      const firstName = document.getElementById('firstName').value.trim();
+      const lastName = document.getElementById('lastName').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const termsAccepted = document.getElementById('termsAccepted').checked;
+      const name = `${firstName} ${lastName}`.trim();
+
       const response = await fetch("/wp-json/mrm-masterclass/v1/create-payment-intent", {
         method: "POST",
         credentials: "same-origin",
@@ -1277,7 +1336,12 @@ input[type="checkbox"] {
         },
         body: JSON.stringify({
           event_id: eventId,
-          promo_code: promoCode || ""
+          promo_code: promoCode || "",
+          first_name: firstName,
+          last_name: lastName,
+          name: name,
+          email: email,
+          terms_accepted: termsAccepted
         })
       });
 
@@ -1287,7 +1351,7 @@ input[type="checkbox"] {
         throw new Error((data && data.message) || "Payment could not be started. Please try again.");
       }
 
-      if (!data || !data.client_secret || !data.publishable_key) {
+      if (!data || !data.client_secret || !data.publishable_key || !data.payment_intent_id) {
         throw new Error("Payment could not be started because the payment response was incomplete.");
       }
 
@@ -1308,6 +1372,10 @@ input[type="checkbox"] {
     }
 
     payButton.addEventListener('click', async () => {
+      if (masterclassPaymentInProgress) {
+        return;
+      }
+
       const firstName = document.getElementById('firstName').value.trim();
       const lastName = document.getElementById('lastName').value.trim();
       const email = document.getElementById('email').value.trim();
@@ -1318,16 +1386,21 @@ input[type="checkbox"] {
         return;
       }
 
+      masterclassPaymentInProgress = true;
+      payButton.disabled = true;
       modalMessage.textContent = 'Preparing secure payment...';
 
       const promoCodeInput = document.getElementById("mrm-masterclass-promo-code");
       const promoCode = promoCodeInput ? promoCodeInput.value.trim() : "";
 
       let intentData;
+
       try {
         intentData = await createMasterclassPaymentIntent(selectedEvent.id, promoCode);
       } catch (error) {
         modalMessage.textContent = error && error.message ? error.message : 'Unable to start payment.';
+        masterclassPaymentInProgress = false;
+        payButton.disabled = false;
         return;
       }
 
@@ -1339,22 +1412,32 @@ input[type="checkbox"] {
       }
 
       paymentIntentClientSecret = intentData.client_secret;
-      stripe = Stripe(intentData.publishable_key);
-      elements = stripe.elements({clientSecret: paymentIntentClientSecret});
+      activeMasterclassPaymentIntentId = intentData.payment_intent_id;
 
-      const payment = elements.create('payment', {
-        fields: {
-          billingDetails: {
-            name: 'never',
-            email: 'never'
-          }
-        }
-      });
-      payment.mount('#paymentElement');
+      if (activeMasterclassPaymentElement) {
+        try {
+          activeMasterclassPaymentElement.unmount();
+        } catch (error) {}
+      }
+
+      paymentElement.innerHTML = '';
+
+      stripe = Stripe(intentData.publishable_key);
+      elements = stripe.elements({ clientSecret: paymentIntentClientSecret });
+
+      activeMasterclassPaymentElement = elements.create(
+        'payment',
+        mrmBuildMasterclassPaymentElementOptions(intentData.allowed_payment_methods || ['card'])
+      );
+
+      activeMasterclassPaymentElement.mount('#paymentElement');
 
       payButton.style.display = 'none';
       submitPayment.style.display = 'block';
+      submitPayment.disabled = false;
       modalMessage.textContent = '';
+
+      masterclassPaymentInProgress = false;
     });
 
     submitPayment.addEventListener('click', async () => {
@@ -1376,30 +1459,86 @@ input[type="checkbox"] {
     });
 
     async function completeConfirmedPayment() {
+      if (masterclassFinalizeInProgress) {
+        return;
+      }
+
       hideModal(finalConfirmationModal);
-      modalMessage.textContent = 'Processing payment...';
 
-      const result = await stripe.confirmPayment({
-        elements,
-        redirect:'if_required'
-      });
-
-      if (result.error) {
-        modalMessage.textContent = result.error.message || 'Payment failed.';
+      if (!stripe || !elements || !selectedEvent) {
+        modalMessage.textContent = 'Payment confirmation is temporarily unavailable. Please close this window and try again.';
         return;
       }
 
-      const paymentIntentId = result.paymentIntent && result.paymentIntent.id;
-
-      if (!paymentIntentId) {
-        modalMessage.textContent = 'Payment status could not be verified.';
-        return;
-      }
-
+      const firstName = document.getElementById('firstName').value.trim();
+      const lastName = document.getElementById('lastName').value.trim();
       const customerEmail = document.getElementById('email').value.trim();
+      const customerName = `${firstName} ${lastName}`.trim();
       const termsAccepted = document.getElementById('termsAccepted').checked;
       const promoCodeInput = document.getElementById("mrm-masterclass-promo-code");
       const promoCode = promoCodeInput ? promoCodeInput.value.trim() : "";
+
+      if (!firstName || !lastName || !customerEmail || !termsAccepted) {
+        modalMessage.textContent = 'Please complete all fields and accept the terms before submitting payment.';
+        return;
+      }
+
+      masterclassFinalizeInProgress = true;
+      submitPayment.disabled = true;
+      confirmFinalPayment.disabled = true;
+      modalMessage.textContent = 'Processing payment...';
+
+      let result;
+
+      try {
+        result = await stripe.confirmPayment({
+          elements,
+
+          /*
+           * The Payment Element hides billing name/email fields.
+           * Therefore we must pass billing_details here, or Stripe can fail
+           * confirmation or produce an incomplete PaymentIntent.
+           */
+          confirmParams: {
+            return_url: window.location.href,
+            payment_method_data: {
+              billing_details: {
+                name: customerName,
+                email: customerEmail
+              }
+            }
+          },
+
+          redirect: 'if_required'
+        });
+      } catch (error) {
+        modalMessage.textContent = error && error.message ? error.message : 'Payment failed before confirmation could complete.';
+        submitPayment.disabled = false;
+        confirmFinalPayment.disabled = false;
+        masterclassFinalizeInProgress = false;
+        return;
+      }
+
+      if (result.error) {
+        modalMessage.textContent = result.error.message || 'Payment failed.';
+        submitPayment.disabled = false;
+        confirmFinalPayment.disabled = false;
+        masterclassFinalizeInProgress = false;
+        return;
+      }
+
+      const paymentIntentId =
+        (result.paymentIntent && result.paymentIntent.id)
+          ? result.paymentIntent.id
+          : activeMasterclassPaymentIntentId;
+
+      if (!paymentIntentId) {
+        modalMessage.textContent = 'Payment status could not be verified. Please contact support.';
+        submitPayment.disabled = false;
+        confirmFinalPayment.disabled = false;
+        masterclassFinalizeInProgress = false;
+        return;
+      }
 
       let finalResult;
 
@@ -1407,15 +1546,18 @@ input[type="checkbox"] {
         finalResult = await finalizeMasterclassRegistration({
           event_id: selectedEvent.id,
           payment_intent_id: paymentIntentId,
-          first_name: document.getElementById('firstName').value.trim(),
-          last_name: document.getElementById('lastName').value.trim(),
-          name: `${document.getElementById('firstName').value.trim()} ${document.getElementById('lastName').value.trim()}`.trim(),
+          first_name: firstName,
+          last_name: lastName,
+          name: customerName,
           email: customerEmail,
           terms_accepted: termsAccepted,
           promo_code: promoCode
         });
       } catch (error) {
         modalMessage.textContent = error && error.message ? error.message : 'Payment succeeded, but registration could not be finalized. Please contact support.';
+        submitPayment.disabled = false;
+        confirmFinalPayment.disabled = false;
+        masterclassFinalizeInProgress = false;
         return;
       }
 
@@ -1433,6 +1575,10 @@ input[type="checkbox"] {
 
       modalMessage.textContent = 'Registration confirmed. Thank you!';
       submitPayment.style.display = 'none';
+      submitPayment.disabled = false;
+      confirmFinalPayment.disabled = false;
+      masterclassFinalizeInProgress = false;
+
       loadMasterclassEvents();
     }
 
