@@ -1398,10 +1398,21 @@ body.mrm-masterclass-modal-open {
           }, 100);
         }
       } catch (error) {
+        if (loadingEl) {
+          loadingEl.hidden = true;
+        }
+
         showError(error.message || "Masterclasses could not be loaded. Please try again later.");
-        mrmMasterclassPopupDebug('events_load_failed', {
-          error_message: error && error.message ? error.message : 'events could not be loaded'
-        });
+
+        if (typeof window.renderMasterclassCalendar === "function") {
+          window.renderMasterclassCalendar([]);
+        }
+
+        if (typeof mrmMasterclassPopupDebug === 'function') {
+          mrmMasterclassPopupDebug('events_load_failed', {
+            error_message: error && error.message ? error.message : 'events could not be loaded'
+          });
+        }
       }
     }
 
@@ -2065,10 +2076,22 @@ body.mrm-masterclass-modal-open {
 
       window.__mrmMasterclassBooted = true;
 
-      mrmMasterclassPopupDebug('html_loaded');
+      if (typeof mrmMasterclassPopupDebug === 'function') {
+        mrmMasterclassPopupDebug('html_loaded');
+      }
 
       window.setTimeout(function () {
-        loadMasterclassEvents();
+        try {
+          const result = loadMasterclassEvents();
+
+          if (result && typeof result.catch === 'function') {
+            result.catch(function (error) {
+              console.error('Masterclass events failed to load:', error);
+            });
+          }
+        } catch (error) {
+          console.error('Masterclass boot failed:', error);
+        }
       }, 0);
     };
   </script>
@@ -2341,6 +2364,10 @@ body.mrm-masterclass-modal-open {
    * Now that the calendar renderer exists, boot the Masterclass page.
    * This prevents the event list from loading before the calendar script is ready.
    */
+  if (typeof window.renderMasterclassCalendar === "function") {
+    window.renderMasterclassCalendar(window.MRM_MASTERCLASS_EVENTS || []);
+  }
+
   if (typeof window.mrmBootMasterclassPage === "function") {
     window.mrmBootMasterclassPage();
   }
