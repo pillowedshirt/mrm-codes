@@ -977,9 +977,17 @@ body.mrm-masterclass-modal-open {
       return eventDate.getTime() <= Date.now();
     }
 
-    const eventsEl = document.getElementById('mrm-masterclass-events');
-    const loadingEl = document.getElementById('mrm-masterclass-loading');
-    const errorEl = document.getElementById('mrm-masterclass-error');
+    function mrmMasterclassEventsEl() {
+      return document.getElementById('mrm-masterclass-events');
+    }
+
+    function mrmMasterclassLoadingEl() {
+      return document.getElementById('mrm-masterclass-loading');
+    }
+
+    function mrmMasterclassErrorEl() {
+      return document.getElementById('mrm-masterclass-error');
+    }
 
     window.MRM_MASTERCLASS_EVENTS = [];
     const modal = document.getElementById('registrationModal');
@@ -1341,9 +1349,16 @@ body.mrm-masterclass-modal-open {
     }
 
     async function loadMasterclassEvents() {
-      mrmMasterclassPopupDebug('events_load_started');
+      if (typeof mrmMasterclassPopupDebug === 'function') {
+        mrmMasterclassPopupDebug('events_load_started');
+      }
+
+      const eventsEl = mrmMasterclassEventsEl();
+      const loadingEl = mrmMasterclassLoadingEl();
+      const errorEl = mrmMasterclassErrorEl();
 
       if (!eventsEl) {
+        console.error('Masterclass events container was not found.');
         return;
       }
 
@@ -1362,10 +1377,18 @@ body.mrm-masterclass-modal-open {
           credentials: "same-origin",
           headers: {
             "Accept": "application/json"
-          }
+          },
+          cache: "no-store"
         });
 
-        const data = await response.json().catch(() => null);
+        const rawText = await response.text();
+        let data = null;
+
+        try {
+          data = rawText ? JSON.parse(rawText) : null;
+        } catch (parseError) {
+          throw new Error("Masterclasses could not be loaded because the server returned an unreadable response.");
+        }
 
         if (!response.ok) {
           const message = data && data.message
@@ -1382,15 +1405,17 @@ body.mrm-masterclass-modal-open {
         }
 
         renderEvents(events);
-        mrmMasterclassPopupDebug('events_load_succeeded');
+
+        if (typeof mrmMasterclassPopupDebug === 'function') {
+          mrmMasterclassPopupDebug('events_load_succeeded', {
+            response_ok: true,
+            http_status: response.status
+          });
+        }
 
         if (typeof window.renderMasterclassCalendar === "function") {
           window.renderMasterclassCalendar(events);
         } else {
-          /*
-           * The calendar script may not be registered yet if WordPress/Spectra
-           * executes the first script before the second one. Try once more shortly.
-           */
           window.setTimeout(function () {
             if (typeof window.renderMasterclassCalendar === "function") {
               window.renderMasterclassCalendar(window.MRM_MASTERCLASS_EVENTS || []);
@@ -1398,8 +1423,10 @@ body.mrm-masterclass-modal-open {
           }, 100);
         }
       } catch (error) {
-        if (loadingEl) {
-          loadingEl.hidden = true;
+        const latestLoadingEl = mrmMasterclassLoadingEl();
+
+        if (latestLoadingEl) {
+          latestLoadingEl.hidden = true;
         }
 
         showError(error.message || "Masterclasses could not be loaded. Please try again later.");
@@ -1417,6 +1444,9 @@ body.mrm-masterclass-modal-open {
     }
 
     function showError(message) {
+      const loadingEl = mrmMasterclassLoadingEl();
+      const errorEl = mrmMasterclassErrorEl();
+
       if (loadingEl) {
         loadingEl.hidden = true;
       }
@@ -1428,6 +1458,8 @@ body.mrm-masterclass-modal-open {
     }
 
     function renderEmpty() {
+      const eventsEl = mrmMasterclassEventsEl();
+
       if (!eventsEl) {
         return;
       }
@@ -1444,7 +1476,10 @@ body.mrm-masterclass-modal-open {
     }
 
     function renderEvents(events) {
+      const eventsEl = mrmMasterclassEventsEl();
+
       if (!eventsEl) {
+        console.error('Masterclass events container was not found while rendering events.');
         return;
       }
 
@@ -1474,19 +1509,20 @@ body.mrm-masterclass-modal-open {
         meta.className = "mrm-masterclass-event-meta";
 
         const presenterLine = event.presenter_page_url
-          ? `<a class="mrm-masterclass-presenter-link" href="${event.presenter_page_url}" target="_blank" rel="noopener">${event.presenter_name || "Presenter"}</a>`
-          : `${event.presenter_name || "Presenter to be announced"}`;
+          ? `<a class="mrm-masterclass-presenter-link" href="${event.presenter_page_url}" target="_blank" rel="noopener">${escapeHtml(event.presenter_name || "Presenter")}</a>`
+          : `${escapeHtml(event.presenter_name || "Presenter to be announced")}`;
 
         meta.innerHTML = `
-          <div><strong>Date:</strong> ${formatDate(event.start_time, event.end_time, event.timezone)}</div>
+          <div><strong>Date:</strong> ${escapeHtml(formatDate(event.start_time, event.end_time, event.timezone))}</div>
           <div><strong>Presenter:</strong> ${presenterLine}</div>
-          <div><strong>Price:</strong> ${centsToDollars(event.price_cents)}</div>
+          <div><strong>Price:</strong> ${escapeHtml(centsToDollars(event.price_cents))}</div>
           <div><strong>Available seats:</strong> ${Number(event.available_seats || 0)} of ${Number(event.capacity || 0)}</div>
         `;
 
         const button = document.createElement("button");
         button.type = "button";
         button.className = "mrm-masterclass-register-button";
+
         if (isPastMasterclass) {
           button.textContent = "Event Over";
           button.disabled = true;
@@ -1503,6 +1539,7 @@ body.mrm-masterclass-modal-open {
             clickEvent.stopPropagation();
             return;
           }
+
           if (typeof window.openMasterclassRegistration === "function") {
             window.openMasterclassRegistration(event.id);
           } else {
@@ -1521,7 +1558,6 @@ body.mrm-masterclass-modal-open {
         eventsEl.appendChild(card);
       });
     }
-
 
 
     function safeDescriptionHtml(html) {
@@ -2080,19 +2116,51 @@ body.mrm-masterclass-modal-open {
         mrmMasterclassPopupDebug('html_loaded');
       }
 
-      window.setTimeout(function () {
+      let attempts = 0;
+
+      function runWhenDomIsReady() {
+        attempts++;
+
+        const eventsEl = mrmMasterclassEventsEl();
+
+        if (!eventsEl && attempts < 20) {
+          window.setTimeout(runWhenDomIsReady, 100);
+          return;
+        }
+
+        if (!eventsEl) {
+          console.error('Masterclass boot failed because the events container was never found.');
+
+          const loadingEl = mrmMasterclassLoadingEl();
+
+          if (loadingEl) {
+            loadingEl.hidden = true;
+          }
+
+          showError('Masterclass sessions could not be displayed because the page markup did not finish loading. Please refresh the page.');
+          return;
+        }
+
         try {
           const result = loadMasterclassEvents();
 
           if (result && typeof result.catch === 'function') {
             result.catch(function (error) {
               console.error('Masterclass events failed to load:', error);
+              showError(error && error.message ? error.message : 'Masterclasses could not be loaded.');
             });
           }
         } catch (error) {
           console.error('Masterclass boot failed:', error);
+          showError(error && error.message ? error.message : 'Masterclasses could not be loaded.');
         }
-      }, 0);
+      }
+
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", runWhenDomIsReady, { once: true });
+      } else {
+        window.setTimeout(runWhenDomIsReady, 0);
+      }
     };
   </script>
 <script>
@@ -2378,11 +2446,22 @@ body.mrm-masterclass-modal-open {
   function bootWhenReady() {
     if (typeof window.mrmBootMasterclassPage === "function") {
       window.mrmBootMasterclassPage();
+      return;
     }
+
+    /*
+     * Emergency fallback:
+     * If WordPress/Spectra delays the main boot assignment, try again shortly.
+     */
+    window.setTimeout(function () {
+      if (typeof window.mrmBootMasterclassPage === "function") {
+        window.mrmBootMasterclassPage();
+      }
+    }, 250);
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bootWhenReady);
+    document.addEventListener("DOMContentLoaded", bootWhenReady, { once: true });
   } else {
     window.setTimeout(bootWhenReady, 0);
   }
