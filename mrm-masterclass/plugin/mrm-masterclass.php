@@ -6086,22 +6086,20 @@ public function rest_finalize_registration( $request ) {
 		}
 
 		$total_events = absint(
-			$wpdb->get_var(
-				"SELECT COUNT(*) FROM {$events_table}"
-			)
+			$wpdb->get_var( "SELECT COUNT(*) FROM {$events_table}" )
 		);
 
 		$total_scheduled = absint(
 			$wpdb->get_var(
 				"SELECT COUNT(*) FROM {$events_table}
-				 WHERE status = 'scheduled'"
+				 WHERE LOWER(status) = 'scheduled'"
 			)
 		);
 
 		$total_open = absint(
 			$wpdb->get_var(
 				"SELECT COUNT(*) FROM {$events_table}
-				 WHERE status = 'scheduled'
+				 WHERE LOWER(status) = 'scheduled'
 				   AND registration_open = 1"
 			)
 		);
@@ -6113,14 +6111,14 @@ public function rest_finalize_registration( $request ) {
 				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND r.payment_status = 'paid') AS paid_count
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
-			 WHERE e.status = 'scheduled'
+			 WHERE LOWER(e.status) = 'scheduled'
 			   AND e.registration_open = 1
-			   AND e.status <> 'deleted'
+			   AND LOWER(e.status) <> 'deleted'
 			 ORDER BY e.start_time ASC
 			 LIMIT 200"
 		);
 
-		if ( null === $rows ) {
+		if ( ! empty( $wpdb->last_error ) ) {
 			$this->mrm_mc_debug_log(
 				'Public Masterclass events REST database query failed.',
 				array(
@@ -6152,7 +6150,7 @@ public function rest_finalize_registration( $request ) {
 				'total_events'       => $total_events,
 				'total_scheduled'    => $total_scheduled,
 				'total_open'         => $total_open,
-				'public_rows_found'  => count( $rows ),
+				'public_rows_found'  => count( (array) $rows ),
 				'public_events_sent' => count( $events ),
 			)
 		);
