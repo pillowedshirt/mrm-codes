@@ -2152,7 +2152,28 @@ private function admin_card_close() {
 		return null;
 	}
 }
-private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_SECRET_GOOGLE_SCHEDULER' ) ? MRM_SECRET_GOOGLE_SCHEDULER : 'lowbrass/google/scheduler'; }
+	private function mrm_mc_get_scheduler_settings() {
+		$settings = get_option( 'mrm_scheduler_settings', array() );
+
+		return is_array( $settings ) ? $settings : array();
+	}
+
+	private function mrm_mc_get_google_delegated_user() {
+		$scheduler_settings = $this->mrm_mc_get_scheduler_settings();
+
+		$delegated_user = isset( $scheduler_settings['google_delegated_user'] )
+			? sanitize_email( $scheduler_settings['google_delegated_user'] )
+			: '';
+
+		return is_email( $delegated_user ) ? $delegated_user : '';
+	}
+
+	private function mrm_mc_get_google_scheduler_secret_id() {
+		return defined( 'MRM_SECRET_GOOGLE_SCHEDULER' )
+			? MRM_SECRET_GOOGLE_SCHEDULER
+			: 'lowbrass/google/scheduler';
+	}
+
 	private function mrm_mc_get_stripe_secret_id() { return defined( 'MRM_SECRET_STRIPE_KEYS' ) ? MRM_SECRET_STRIPE_KEYS : 'lowbrass/stripe/keys'; }
 	private function mrm_mc_get_tax_secret_id() { return defined( 'MRM_SECRET_MASTERCLASS_TAX_1099_PROFILES' ) ? MRM_SECRET_MASTERCLASS_TAX_1099_PROFILES : 'lowbrass/masterclass/tax/1099-profiles'; }
 	private function mrm_mc_get_stripe_keys() {
@@ -2186,13 +2207,85 @@ private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_
 		return $keys;
 	}
 	private function mrm_mc_get_google_scheduler_secret_bundle() { return $this->mrm_mc_get_secret_json( $this->mrm_mc_get_google_scheduler_secret_id(), 'mrm_masterclass_google_scheduler_secret' ); }
-	private function mrm_mc_get_google_service_account_json() { $b = $this->mrm_mc_get_google_scheduler_secret_bundle(); if ( ! is_array( $b ) || ! isset( $b['service_account_json'] ) ) { return ''; } if ( is_string( $b['service_account_json'] ) ) { return trim( $b['service_account_json'] ); } if ( is_array( $b['service_account_json'] ) ) { $encoded = wp_json_encode( $b['service_account_json'] ); return is_string( $encoded ) ? $encoded : ''; } return ''; }
+	private function mrm_mc_get_google_service_account_json() {
+		$bundle = $this->mrm_mc_get_google_scheduler_secret_bundle();
+
+		if ( ! is_array( $bundle ) ) {
+			$this->mrm_mc_debug_log(
+				'Masterclass missing Google scheduler secret bundle.',
+				array(
+					'expected_secret' => $this->mrm_mc_get_google_scheduler_secret_id(),
+				)
+			);
+
+			return '';
+		}
+
+		if ( array_key_exists( 'service_account_json', $bundle ) ) {
+			if ( is_string( $bundle['service_account_json'] ) && trim( $bundle['service_account_json'] ) !== '' ) {
+				return trim( (string) $bundle['service_account_json'] );
+			}
+
+			if ( is_array( $bundle['service_account_json'] ) && ! empty( $bundle['service_account_json'] ) ) {
+				$encoded = wp_json_encode( $bundle['service_account_json'] );
+				return is_string( $encoded ) ? $encoded : '';
+			}
+		}
+
+		/*
+		 * Match the Scheduler plugin's tolerant behavior:
+		 * allow the AWS secret itself to be the raw Google service account object.
+		 */
+		if ( ! empty( $bundle['client_email'] ) && ! empty( $bundle['private_key'] ) ) {
+			$raw_service_account = $bundle;
+
+			unset(
+				$raw_service_account['sync_secret'],
+				$raw_service_account['google_sync_secret'],
+				$raw_service_account['sync_token'],
+				$raw_service_account['maps_distance_api_key']
+			);
+
+			$encoded = wp_json_encode( $raw_service_account );
+			return is_string( $encoded ) ? $encoded : '';
+		}
+
+		/*
+		 * Match the Scheduler plugin's tolerant nested-object behavior.
+		 */
+		foreach ( array( 'service_account', 'google_service_account', 'google', 'credentials' ) as $nested_key ) {
+			if ( empty( $bundle[ $nested_key ] ) || ! is_array( $bundle[ $nested_key ] ) ) {
+				continue;
+			}
+
+			$candidate = $bundle[ $nested_key ];
+
+			if ( empty( $candidate['client_email'] ) || empty( $candidate['private_key'] ) ) {
+				continue;
+			}
+
+			$encoded = wp_json_encode( $candidate );
+			return is_string( $encoded ) ? $encoded : '';
+		}
+
+		$this->mrm_mc_debug_log(
+			'Masterclass Google scheduler secret loaded but service account JSON was unusable.',
+			array(
+				'secret_id'        => $this->mrm_mc_get_google_scheduler_secret_id(),
+				'top_level_keys'   => array_keys( $bundle ),
+				'has_client_email' => ! empty( $bundle['client_email'] ) ? 'yes' : 'no',
+				'has_private_key'  => ! empty( $bundle['private_key'] ) ? 'yes' : 'no',
+			)
+		);
+
+		return '';
+	}
 	private function mrm_mc_get_stripe_secret_bundle() { return $this->mrm_mc_get_secret_json( $this->mrm_mc_get_stripe_secret_id(), 'mrm_masterclass_stripe_secret' ); }
 	private function mrm_mc_get_stripe_secret_key() { $b = $this->mrm_mc_get_stripe_secret_bundle(); return is_array( $b ) ? trim( (string) ( $b['secret_key'] ?? '' ) ) : ''; }
 	private function mrm_mc_get_stripe_publishable_key() { $b = $this->mrm_mc_get_stripe_secret_bundle(); return is_array( $b ) ? trim( (string) ( $b['publishable_key'] ?? '' ) ) : ''; }
 	private function mrm_mc_parse_service_account_json( $json ) { $json = is_string( $json ) ? trim( $json ) : ''; if ( $json === '' ) { return null; } $data = json_decode( $json, true ); if ( ! is_array( $data ) || empty( $data['client_email'] ) || empty( $data['private_key'] ) ) { return null; } return array('client_email'=>(string)$data['client_email'],'private_key'=>(string)$data['private_key'],'token_uri'=>!empty($data['token_uri'])?(string)$data['token_uri']:'https://oauth2.googleapis.com/token'); }
 	private function mrm_mc_base64url_encode( $data ) { return rtrim( strtr( base64_encode( $data ), '+/', '-_' ), '=' ); }
-	private function mrm_mc_google_make_jwt( $client_email, $private_key, $scope, $token_url ) {
+	private function mrm_mc_google_make_jwt( $client_email, $private_key, $scope, $token_url, $subject = '' ) {
 		if ( ! function_exists( 'openssl_sign' ) ) {
 			return new WP_Error(
 				'openssl_missing',
@@ -2215,6 +2308,15 @@ private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_
 			'exp'   => $now + 3600,
 		);
 
+		/*
+		 * Match the Scheduler plugin behavior:
+		 * if a delegated Google user is configured in Scheduler settings,
+		 * include that user as the JWT subject.
+		 */
+		if ( is_string( $subject ) && '' !== trim( $subject ) ) {
+			$claims['sub'] = trim( $subject );
+		}
+
 		$segments = array(
 			$this->mrm_mc_base64url_encode( wp_json_encode( $header ) ),
 			$this->mrm_mc_base64url_encode( wp_json_encode( $claims ) ),
@@ -2233,55 +2335,83 @@ private function mrm_mc_get_google_scheduler_secret_id() { return defined( 'MRM_
 		return implode( '.', $segments );
 	}
 	private function mrm_mc_google_get_access_token() {
-	$service_account_json = $this->mrm_mc_get_google_service_account_json();
+		$service_account_json = $this->mrm_mc_get_google_service_account_json();
 
-	if ( ! $service_account_json ) {
-		return new WP_Error( 'google_not_configured', 'Google service account JSON is not configured.' );
+		if ( ! $service_account_json ) {
+			return new WP_Error( 'google_not_configured', 'Google service account JSON is not configured.' );
+		}
+
+		$parsed = $this->mrm_mc_parse_service_account_json( $service_account_json );
+
+		if ( ! is_array( $parsed ) ) {
+			return new WP_Error( 'google_bad_service_account', 'Google service account JSON is invalid.' );
+		}
+
+		$scope          = 'https://www.googleapis.com/auth/calendar';
+		$token_url      = $parsed['token_uri'];
+		$delegated_user = $this->mrm_mc_get_google_delegated_user();
+
+		$jwt = $this->mrm_mc_google_make_jwt(
+			$parsed['client_email'],
+			$parsed['private_key'],
+			$scope,
+			$token_url,
+			$delegated_user
+		);
+
+		if ( is_wp_error( $jwt ) ) {
+			return $jwt;
+		}
+
+		$response = wp_remote_post(
+			$token_url,
+			array(
+				'timeout' => 20,
+				'headers' => array(
+					'Content-Type' => 'application/x-www-form-urlencoded',
+				),
+				'body'    => http_build_query(
+					array(
+						'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+						'assertion'  => $jwt,
+					)
+				),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$status = (int) wp_remote_retrieve_response_code( $response );
+		$body   = (string) wp_remote_retrieve_body( $response );
+		$data   = json_decode( $body, true );
+
+		if ( $status < 200 || $status >= 300 || ! is_array( $data ) || empty( $data['access_token'] ) ) {
+			$this->mrm_mc_debug_log(
+				'Masterclass Google access token request failed.',
+				array(
+					'status'               => $status,
+					'has_delegated_user'   => '' !== $delegated_user ? 'yes' : 'no',
+					'client_email_present' => ! empty( $parsed['client_email'] ) ? 'yes' : 'no',
+					'error'                => is_array( $data ) ? ( $data['error'] ?? '' ) : '',
+					'error_description'    => is_array( $data ) ? ( $data['error_description'] ?? '' ) : '',
+				)
+			);
+
+			return new WP_Error( 'google_token_failed', 'Google access token could not be retrieved.' );
+		}
+
+		$this->mrm_mc_debug_log(
+			'Masterclass Google access token retrieved.',
+			array(
+				'has_delegated_user'   => '' !== $delegated_user ? 'yes' : 'no',
+				'client_email_present' => ! empty( $parsed['client_email'] ) ? 'yes' : 'no',
+			)
+		);
+
+		return (string) $data['access_token'];
 	}
-
-	$parsed = $this->mrm_mc_parse_service_account_json( $service_account_json );
-
-	if ( ! is_array( $parsed ) ) {
-		return new WP_Error( 'google_bad_service_account', 'Google service account JSON is invalid.' );
-	}
-
-	$scope     = 'https://www.googleapis.com/auth/calendar';
-	$token_url = $parsed['token_uri'];
-
-	$jwt = $this->mrm_mc_google_make_jwt(
-		$parsed['client_email'],
-		$parsed['private_key'],
-		$scope,
-		$token_url
-	);
-
-	if ( is_wp_error( $jwt ) ) {
-		return $jwt;
-	}
-
-	$response = wp_remote_post(
-		$token_url,
-		array(
-			'timeout' => 20,
-			'body'    => array(
-				'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-				'assertion'  => $jwt,
-			),
-		)
-	);
-
-	if ( is_wp_error( $response ) ) {
-		return $response;
-	}
-
-	$data = json_decode( wp_remote_retrieve_body( $response ), true );
-
-	if ( ! is_array( $data ) || empty( $data['access_token'] ) ) {
-		return new WP_Error( 'google_token_failed', 'Google access token could not be retrieved.' );
-	}
-
-	return (string) $data['access_token'];
-}
 
 
 function mrm_mc_google_calendar_request( $method, $url, $body = null ) {
@@ -2598,16 +2728,20 @@ private function mrm_mc_google_insert_event( $event, $presenter_email ) {
 		return new WP_Error( 'google_calendar_missing', 'Masterclass Google Calendar ID is missing.' );
 	}
 
+		$delegated_user = $this->mrm_mc_get_google_delegated_user();
+
 	$this->mrm_mc_debug_log(
 		'Masterclass Google insert using calendar ID source.',
-		array(
-			'event_id'             => absint( $event->id ?? 0 ),
-			'has_calendar_id'      => '' !== $calendar_id ? 'yes' : 'no',
-			'calendar_id_length'   => strlen( $calendar_id ),
-			'calendar_id_has_at'   => false !== strpos( $calendar_id, '@' ) ? 'yes' : 'no',
-			'calendar_id_has_hash' => false !== strpos( $calendar_id, '#' ) ? 'yes' : 'no',
-		)
-	);
+			array(
+				'event_id'                     => absint( $event->id ?? 0 ),
+				'has_calendar_id'              => '' !== $calendar_id ? 'yes' : 'no',
+				'calendar_id_length'           => strlen( $calendar_id ),
+				'calendar_id_has_at'           => false !== strpos( $calendar_id, '@' ) ? 'yes' : 'no',
+				'calendar_id_has_hash'         => false !== strpos( $calendar_id, '#' ) ? 'yes' : 'no',
+				'using_scheduler_secret_id'    => $this->mrm_mc_get_google_scheduler_secret_id(),
+				'has_scheduler_delegated_user' => '' !== $delegated_user ? 'yes' : 'no',
+			)
+		);
 
 	$body = $this->mrm_mc_google_event_body( $event, $presenter_email, true );
 
