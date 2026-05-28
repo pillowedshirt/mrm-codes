@@ -5576,33 +5576,59 @@ private function mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $ev
 	);
 }
 public function rest_create_payment_intent( $request ) {
-	$event_id   = absint( $request->get_param( 'event_id' ) );
-	$promo_code = sanitize_text_field( $request->get_param( 'promo_code' ) ?? '' );
+	$event_id       = absint( $request->get_param( 'event_id' ) );
+	$promo_code     = sanitize_text_field( $request->get_param( 'promo_code' ) ?? '' );
+	$first_name     = sanitize_text_field( $request->get_param( 'first_name' ) ?? '' );
+	$last_name      = sanitize_text_field( $request->get_param( 'last_name' ) ?? '' );
+	$name           = sanitize_text_field( $request->get_param( 'name' ) ?? '' );
+	$email          = sanitize_email( $request->get_param( 'email' ) ?? '' );
+	$terms_accepted = filter_var( $request->get_param( 'terms_accepted' ), FILTER_VALIDATE_BOOLEAN );
+
+	if ( '' === $name ) {
+		$name = trim( $first_name . ' ' . $last_name );
+	}
 
 	if ( $event_id <= 0 ) {
 		return new WP_Error( 'mrm_masterclass_invalid_event_id', 'Please select a valid Masterclass event.', array( 'status' => 400 ) );
 	}
 
+	if ( '' === trim( $first_name ) || '' === trim( $last_name ) || '' === trim( $name ) || ! is_email( $email ) ) {
+		return new WP_Error( 'mrm_masterclass_customer_required', 'Please enter your first name, last name, and a valid email address before continuing to payment.', array( 'status' => 400 ) );
+	}
+
+	if ( ! $terms_accepted ) {
+		return new WP_Error( 'mrm_masterclass_terms_required', 'Please accept the Masterclass terms before continuing to payment.', array( 'status' => 400 ) );
+	}
+
 	$event = $this->mrm_mc_get_event( $event_id );
+
 	if ( ! $event ) {
 		return new WP_Error( 'mrm_masterclass_event_missing', 'This Masterclass event could not be found.', array( 'status' => 404 ) );
 	}
+
 	if ( 'scheduled' !== sanitize_key( $event->status ) || empty( $event->registration_open ) ) {
 		return new WP_Error( 'mrm_masterclass_event_closed', 'Registration is not open for this Masterclass.', array( 'status' => 409 ) );
 	}
 
 	$available = $this->mrm_mc_available_seats_for_event( $event );
+
 	if ( $available <= 0 ) {
 		return new WP_Error( 'mrm_masterclass_event_sold_out', 'This Masterclass is sold out.', array( 'status' => 409 ) );
 	}
 
 	$base_amount_cents = absint( $event->price_cents );
+
 	if ( $base_amount_cents <= 0 ) {
-		$this->mrm_mc_debug_log( 'PaymentIntent creation blocked because event amount is invalid.', array( 'event_id' => $event_id ) );
+		$this->mrm_mc_debug_log(
+			'PaymentIntent creation blocked because event amount is invalid.',
+			array( 'event_id' => $event_id )
+		);
+
 		return new WP_Error( 'mrm_masterclass_invalid_amount', 'This Masterclass is not configured for payment yet.', array( 'status' => 500 ) );
 	}
 
 	$promo = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
+
 	if ( is_wp_error( $promo ) ) {
 		return $promo;
 	}
@@ -5615,45 +5641,97 @@ public function rest_create_payment_intent( $request ) {
 		return new WP_Error( 'mrm_masterclass_stripe_unavailable', 'Payments are temporarily unavailable. Please try again later.', array( 'status' => 503 ) );
 	}
 
-	$intent = $this->mrm_mc_stripe_request( 'POST', 'payment_intents', array(
-		'amount'                            => $amount_cents,
-		'currency'                          => 'usd',
-		'payment_method_types[]'             => 'card',
-		'description'                       => 'Masterclass registration: ' . sanitize_text_field( $event->title ),
-		'metadata[event_id]'                => (string) $event_id,
-		'metadata[event_title]'             => sanitize_text_field( $event->title ),
-		'metadata[promo_code]'              => $promo_code,
-		'metadata[base_amount]'             => (string) $base_amount_cents,
-		'metadata[discount_amount]'         => (string) $discount_cents,
-		'metadata[source]'                  => 'mrm_masterclass',
-	) );
+	$intent = $this->mrm_mc_stripe_request(
+		'POST',
+		'payment_intents',
+		array(
+			'amount'                              => $amount_cents,
+			'currency'                            => 'usd',
+
+			/*
+			 * Card-only checkout.
+			 * This prevents Klarna, bank redirect, ACH, Afterpay/Clearpay, Cash App,
+			 * and other automatic Stripe payment methods from appearing.
+			 */
+			'payment_method_types[]'               => 'card',
+
+			'description'                         => 'Masterclass registration: ' . sanitize_text_field( $event->title ),
+			'receipt_email'                       => $email,
+
+			'metadata[event_id]'                  => (string) $event_id,
+			'metadata[mrm_masterclass_event_id]'  => (string) $event_id,
+			'metadata[event_title]'               => sanitize_text_field( $event->title ),
+			'metadata[first_name]'                => $first_name,
+			'metadata[last_name]'                 => $last_name,
+			'metadata[name]'                      => $name,
+			'metadata[email]'                     => $email,
+			'metadata[promo_code]'                => $promo_code,
+			'metadata[base_amount]'               => (string) $base_amount_cents,
+			'metadata[discount_amount]'           => (string) $discount_cents,
+			'metadata[source]'                    => 'mrm_masterclass',
+			'metadata[source_flow]'               => 'masterclass_registration',
+			'metadata[terms_accepted]'            => $terms_accepted ? '1' : '0',
+		)
+	);
 
 	if ( is_wp_error( $intent ) ) {
 		return new WP_Error( $intent->get_error_code(), $intent->get_error_message(), array( 'status' => 500 ) );
 	}
 
 	if ( empty( $intent['client_secret'] ) || empty( $intent['id'] ) ) {
-		$this->mrm_mc_debug_log( 'Stripe PaymentIntent response missing expected fields.', array( 'event_id' => $event_id ) );
+		$this->mrm_mc_debug_log(
+			'Stripe PaymentIntent response missing expected fields.',
+			array( 'event_id' => $event_id )
+		);
+
 		return new WP_Error( 'mrm_masterclass_payment_intent_incomplete', 'Payment setup could not be completed. Please try again.', array( 'status' => 500 ) );
 	}
 
-	return rest_ensure_response( array(
-		'success'           => true,
-		'client_secret'     => sanitize_text_field( $intent['client_secret'] ),
-		'payment_intent_id' => sanitize_text_field( $intent['id'] ),
-		'publishable_key'   => sanitize_text_field( $keys['publishable_key'] ),
-		'amount_cents'      => $amount_cents,
-		'base_amount_cents' => $base_amount_cents,
-		'discount_cents'    => $discount_cents,
-		'promo_status'      => sanitize_key( $promo['status'] ?? 'not_applied' ),
-		'promo_message'     => sanitize_text_field( $promo['message'] ?? '' ),
-	) );
+	return rest_ensure_response(
+		array(
+			'success'                 => true,
+			'client_secret'           => sanitize_text_field( $intent['client_secret'] ),
+			'payment_intent_id'       => sanitize_text_field( $intent['id'] ),
+			'publishable_key'         => sanitize_text_field( $keys['publishable_key'] ),
+			'amount_cents'            => $amount_cents,
+			'base_amount_cents'       => $base_amount_cents,
+			'discount_cents'          => $discount_cents,
+			'promo_status'            => sanitize_key( $promo['status'] ?? 'not_applied' ),
+			'promo_message'           => sanitize_text_field( $promo['message'] ?? '' ),
+
+			/*
+			 * Frontend should render the same controlled method list every time.
+			 */
+			'allowed_payment_methods' => array( 'card' ),
+		)
+	);
 }
 
 public function rest_verify_pi( WP_REST_Request $request ) {
 	$this->mrm_mc_debug_log( 'REST verify-payment-intent placeholder endpoint reached.' );
 
 	return $this->mrm_mc_rest_not_implemented_error( 'payment verification' );
+}
+
+
+private function mrm_mc_payment_intent_matches_event( $payment_intent, $event_id ) {
+	$event_id = absint( $event_id );
+
+	if ( $event_id <= 0 || ! is_array( $payment_intent ) ) {
+		return false;
+	}
+
+	$metadata = isset( $payment_intent['metadata'] ) && is_array( $payment_intent['metadata'] )
+		? $payment_intent['metadata']
+		: array();
+
+	$metadata_event_id = absint( $metadata['event_id'] ?? 0 );
+
+	if ( $metadata_event_id <= 0 ) {
+		$metadata_event_id = absint( $metadata['mrm_masterclass_event_id'] ?? 0 );
+	}
+
+	return $metadata_event_id === $event_id;
 }
 
 public function rest_finalize_registration( $request ) {
@@ -5699,16 +5777,77 @@ public function rest_finalize_registration( $request ) {
 	if ( 'scheduled' !== sanitize_key( $event->status ) || empty( $event->registration_open ) ) { return new WP_Error('mrm_masterclass_event_closed','Registration is no longer open for this Masterclass.',array('status'=>409)); }
 	if ( $this->mrm_mc_available_seats_for_event( $event ) <= 0 ) { return new WP_Error('mrm_masterclass_event_sold_out','This Masterclass is sold out.',array('status'=>409)); }
 	$payment_intent = $this->mrm_mc_retrieve_payment_intent( $payment_intent_id );
-	if ( is_wp_error( $payment_intent ) ) { return new WP_Error( $payment_intent->get_error_code(),$payment_intent->get_error_message(),array( 'status' => 400 ) ); }
+
+	if ( is_wp_error( $payment_intent ) ) {
+		return new WP_Error(
+			$payment_intent->get_error_code(),
+			$payment_intent->get_error_message(),
+			array( 'status' => 400 )
+		);
+	}
+
 	$status = sanitize_key( $payment_intent['status'] ?? '' );
-	if ( 'succeeded' !== $status ) { return new WP_Error('mrm_masterclass_payment_not_succeeded','Payment has not been completed yet. Please finish payment before finalizing registration.',array('status'=>409)); }
+
+	if ( 'succeeded' !== $status ) {
+		return new WP_Error(
+			'mrm_masterclass_payment_not_succeeded',
+			'Payment has not been completed yet. Please finish payment before finalizing registration.',
+			array( 'status' => 409 )
+		);
+	}
+
+	if ( ! $this->mrm_mc_payment_intent_matches_event( $payment_intent, $event_id ) ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass finalize blocked because PaymentIntent metadata did not match the selected event.',
+			array(
+				'event_id'          => $event_id,
+				'payment_intent_id' => $payment_intent_id,
+			)
+		);
+
+		return new WP_Error(
+			'mrm_masterclass_payment_event_mismatch',
+			'Payment verification failed because the payment did not match this Masterclass event. Please contact support.',
+			array( 'status' => 409 )
+		);
+	}
+
 	$amount_received = absint( $payment_intent['amount_received'] ?? $payment_intent['amount'] ?? 0 );
 	$currency        = strtolower( sanitize_text_field( $payment_intent['currency'] ?? 'usd' ) );
-	if ( 'usd' !== $currency || $amount_received <= 0 ) { return new WP_Error('mrm_masterclass_payment_invalid_verified_amount','Payment verification failed. Please contact support.',array('status'=>409)); }
+
+	if ( 'usd' !== $currency || $amount_received <= 0 ) {
+		return new WP_Error(
+			'mrm_masterclass_payment_invalid_verified_amount',
+			'Payment verification failed. Please contact support.',
+			array( 'status' => 409 )
+		);
+	}
+
 	$base_amount_cents = absint( $event->price_cents );
-	$discount_cents    = max( 0, $base_amount_cents - $amount_received );
-	$promo = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
-	$promo_status = is_wp_error( $promo ) ? 'error' : sanitize_key( $promo['status'] ?? 'not_applied' );
+	$promo             = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
+	$promo_status      = is_wp_error( $promo ) ? 'error' : sanitize_key( $promo['status'] ?? 'not_applied' );
+	$expected_discount = is_wp_error( $promo ) ? 0 : absint( $promo['discount_cents'] ?? 0 );
+	$expected_amount   = max( 50, $base_amount_cents - $expected_discount );
+
+	if ( $amount_received !== $expected_amount ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass finalize blocked because Stripe amount did not match expected event amount.',
+			array(
+				'event_id'          => $event_id,
+				'payment_intent_id' => $payment_intent_id,
+				'amount_received'   => $amount_received,
+				'expected_amount'   => $expected_amount,
+			)
+		);
+
+		return new WP_Error(
+			'mrm_masterclass_payment_amount_mismatch',
+			'Payment verification failed because the paid amount did not match this Masterclass event. Please contact support.',
+			array( 'status' => 409 )
+		);
+	}
+
+	$discount_cents = max( 0, $base_amount_cents - $amount_received );
 	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair(); $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
 	$share_calc = $this->mrm_mc_calculate_registration_shares( $amount_received, absint( $event->presenter_id ) );
 	$stripe_fee = absint( $share_calc['stripe_fee_cents'] );
