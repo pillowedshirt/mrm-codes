@@ -5575,14 +5575,56 @@ private function mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $ev
 		),
 	);
 }
+private function mrm_mc_get_rest_param_value( $request, $key, $default = '' ) {
+	if ( $request instanceof WP_REST_Request ) {
+		$value = $request->get_param( $key );
+
+		if ( null !== $value ) {
+			return $value;
+		}
+
+		$json = $request->get_json_params();
+
+		if ( is_array( $json ) && array_key_exists( $key, $json ) ) {
+			return $json[ $key ];
+		}
+
+		$body = $request->get_body();
+
+		if ( is_string( $body ) && '' !== trim( $body ) ) {
+			$decoded = json_decode( $body, true );
+
+			if ( is_array( $decoded ) && array_key_exists( $key, $decoded ) ) {
+				return $decoded[ $key ];
+			}
+		}
+	}
+
+	return $default;
+}
+
 public function rest_create_payment_intent( $request ) {
-	$event_id       = absint( $request->get_param( 'event_id' ) );
-	$promo_code     = sanitize_text_field( $request->get_param( 'promo_code' ) ?? '' );
-	$first_name     = sanitize_text_field( $request->get_param( 'first_name' ) ?? '' );
-	$last_name      = sanitize_text_field( $request->get_param( 'last_name' ) ?? '' );
-	$name           = sanitize_text_field( $request->get_param( 'name' ) ?? '' );
-	$email          = sanitize_email( $request->get_param( 'email' ) ?? '' );
-	$terms_accepted = filter_var( $request->get_param( 'terms_accepted' ), FILTER_VALIDATE_BOOLEAN );
+	$event_id       = absint( $this->mrm_mc_get_rest_param_value( $request, 'event_id', 0 ) );
+	$promo_code     = sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'promo_code', '' ) );
+	$first_name     = sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'first_name', '' ) );
+	$last_name      = sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'last_name', '' ) );
+	$name           = sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'name', '' ) );
+	$email          = sanitize_email( $this->mrm_mc_get_rest_param_value( $request, 'email', '' ) );
+	$terms_raw      = $this->mrm_mc_get_rest_param_value( $request, 'terms_accepted', false );
+	$terms_accepted = filter_var( $terms_raw, FILTER_VALIDATE_BOOLEAN );
+
+	$this->mrm_mc_debug_log(
+		'Masterclass create-payment-intent request received.',
+		array(
+			'event_id'           => $event_id,
+			'has_first_name'     => '' !== trim( $first_name ) ? 'yes' : 'no',
+			'has_last_name'      => '' !== trim( $last_name ) ? 'yes' : 'no',
+			'has_name'           => '' !== trim( $name ) ? 'yes' : 'no',
+			'has_email'          => is_email( $email ) ? 'yes' : 'no',
+			'terms_accepted'     => $terms_accepted ? 'yes' : 'no',
+			'has_promo_code'     => '' !== trim( $promo_code ) ? 'yes' : 'no',
+		)
+	);
 
 	if ( '' === $name ) {
 		$name = trim( $first_name . ' ' . $last_name );
@@ -5593,10 +5635,26 @@ public function rest_create_payment_intent( $request ) {
 	}
 
 	if ( '' === trim( $first_name ) || '' === trim( $last_name ) || '' === trim( $name ) || ! is_email( $email ) ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass create-payment-intent blocked by missing customer fields.',
+			array(
+				'event_id'       => $event_id,
+				'has_first_name' => '' !== trim( $first_name ) ? 'yes' : 'no',
+				'has_last_name'  => '' !== trim( $last_name ) ? 'yes' : 'no',
+				'has_name'       => '' !== trim( $name ) ? 'yes' : 'no',
+				'has_email'      => is_email( $email ) ? 'yes' : 'no',
+			)
+		);
+
 		return new WP_Error( 'mrm_masterclass_customer_required', 'Please enter your first name, last name, and a valid email address before continuing to payment.', array( 'status' => 400 ) );
 	}
 
 	if ( ! $terms_accepted ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass create-payment-intent blocked because terms were not accepted.',
+			array( 'event_id' => $event_id )
+		);
+
 		return new WP_Error( 'mrm_masterclass_terms_required', 'Please accept the Masterclass terms before continuing to payment.', array( 'status' => 400 ) );
 	}
 
@@ -5686,6 +5744,19 @@ public function rest_create_payment_intent( $request ) {
 
 		return new WP_Error( 'mrm_masterclass_payment_intent_incomplete', 'Payment setup could not be completed. Please try again.', array( 'status' => 500 ) );
 	}
+
+	$this->mrm_mc_debug_log(
+		'Masterclass Stripe PaymentIntent created successfully.',
+		array(
+			'event_id'          => $event_id,
+			'amount_cents'      => $amount_cents,
+			'base_amount_cents' => $base_amount_cents,
+			'discount_cents'    => $discount_cents,
+			'payment_method'    => 'card',
+			'has_client_secret' => ! empty( $intent['client_secret'] ) ? 'yes' : 'no',
+			'has_intent_id'     => ! empty( $intent['id'] ) ? 'yes' : 'no',
+		)
+	);
 
 	return rest_ensure_response(
 		array(

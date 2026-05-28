@@ -912,10 +912,10 @@ body.mrm-masterclass-modal-open {
         </span>
       </label>
 
-      <button id="payButton" class="primary-btn">Continue to Payment</button>
+      <button id="payButton" class="primary-btn" type="button">Continue to Payment</button>
       
       <div id="paymentElement" style="margin-top:16px;"></div>
-      <button id="submitPayment" class="primary-btn" style="display:none;">Submit Payment</button>
+      <button id="submitPayment" class="primary-btn" type="button" style="display:none;">Submit Payment</button>
 
       <p id="modalMessage" class="message"></p>
     </div>
@@ -1036,7 +1036,13 @@ body.mrm-masterclass-modal-open {
         return null;
       }
 
-      return modal.querySelector('#' + id);
+      const directMatch = modal.querySelector('[id="' + id + '"]');
+
+      if (directMatch) {
+        return directMatch;
+      }
+
+      return null;
     }
 
     function mrmGetMasterclassCheckoutData() {
@@ -1046,11 +1052,26 @@ body.mrm-masterclass-modal-open {
       const termsEl = mrmGetMasterclassModalField('termsAccepted');
       const promoCodeEl = mrmGetMasterclassModalField('mrm-masterclass-promo-code');
 
-      const firstName = firstNameEl ? firstNameEl.value.trim() : '';
-      const lastName = lastNameEl ? lastNameEl.value.trim() : '';
-      const email = emailEl ? emailEl.value.trim() : '';
-      const termsAccepted = termsEl ? Boolean(termsEl.checked) : false;
-      const promoCode = promoCodeEl ? promoCodeEl.value.trim() : '';
+      const firstName = firstNameEl && typeof firstNameEl.value === 'string'
+        ? firstNameEl.value.trim()
+        : '';
+
+      const lastName = lastNameEl && typeof lastNameEl.value === 'string'
+        ? lastNameEl.value.trim()
+        : '';
+
+      const email = emailEl && typeof emailEl.value === 'string'
+        ? emailEl.value.trim()
+        : '';
+
+      const termsAccepted = termsEl
+        ? Boolean(termsEl.checked)
+        : false;
+
+      const promoCode = promoCodeEl && typeof promoCodeEl.value === 'string'
+        ? promoCodeEl.value.trim()
+        : '';
+
       const name = `${firstName} ${lastName}`.trim();
 
       return {
@@ -1059,48 +1080,115 @@ body.mrm-masterclass-modal-open {
         email,
         termsAccepted,
         promoCode,
-        name
+        name,
+        hasFirstNameField: Boolean(firstNameEl),
+        hasLastNameField: Boolean(lastNameEl),
+        hasEmailField: Boolean(emailEl),
+        hasTermsField: Boolean(termsEl)
       };
+    }
+
+    function mrmFocusMasterclassField(id) {
+      const field = mrmGetMasterclassModalField(id);
+
+      if (field && typeof field.focus === 'function') {
+        field.focus();
+      }
     }
 
     function mrmValidateMasterclassCheckoutData(checkoutData) {
       if (!selectedEvent || !selectedEvent.id) {
-        return 'Please select a Masterclass before continuing.';
+        return {
+          valid: false,
+          message: 'Please select a Masterclass before continuing.',
+          field: ''
+        };
       }
 
-      if (!checkoutData.firstName || !checkoutData.lastName || !checkoutData.email) {
-        return 'Please enter your first name, last name, and email address.';
+      if (!checkoutData.hasFirstNameField || !checkoutData.hasLastNameField || !checkoutData.hasEmailField || !checkoutData.hasTermsField) {
+        return {
+          valid: false,
+          message: 'The registration form did not load correctly. Please refresh the page and try again.',
+          field: ''
+        };
+      }
+
+      if (!checkoutData.firstName) {
+        return {
+          valid: false,
+          message: 'Please enter your first name.',
+          field: 'firstName'
+        };
+      }
+
+      if (!checkoutData.lastName) {
+        return {
+          valid: false,
+          message: 'Please enter your last name.',
+          field: 'lastName'
+        };
+      }
+
+      if (!checkoutData.email) {
+        return {
+          valid: false,
+          message: 'Please enter your email address.',
+          field: 'email'
+        };
       }
 
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(checkoutData.email)) {
-        return 'Please enter a valid email address.';
+        return {
+          valid: false,
+          message: 'Please enter a valid email address.',
+          field: 'email'
+        };
       }
 
       if (!checkoutData.termsAccepted) {
-        return 'Please accept the terms before continuing.';
+        return {
+          valid: false,
+          message: 'Please accept the terms before continuing.',
+          field: 'termsAccepted'
+        };
       }
 
-      return '';
+      return {
+        valid: true,
+        message: '',
+        field: ''
+      };
     }
 
     function mrmResetMasterclassPaymentUi() {
       modalMessage.textContent = '';
-      paymentElement.innerHTML = '';
-      submitPayment.style.display = 'none';
-      submitPayment.disabled = false;
-      payButton.style.display = 'block';
-      payButton.disabled = false;
-      activeMasterclassPaymentIntentId = '';
-      paymentIntentClientSecret = '';
-      masterclassPaymentInProgress = false;
-      masterclassFinalizeInProgress = false;
 
       if (activeMasterclassPaymentElement) {
         try {
           activeMasterclassPaymentElement.unmount();
         } catch (error) {}
+
+        try {
+          if (typeof activeMasterclassPaymentElement.destroy === 'function') {
+            activeMasterclassPaymentElement.destroy();
+          }
+        } catch (error) {}
+
         activeMasterclassPaymentElement = null;
       }
+
+      paymentElement.innerHTML = '';
+      submitPayment.style.display = 'none';
+      submitPayment.disabled = false;
+      payButton.style.display = 'block';
+      payButton.disabled = false;
+
+      activeMasterclassPaymentIntentId = '';
+      paymentIntentClientSecret = '';
+      stripe = null;
+      elements = null;
+      masterclassPaymentInProgress = false;
+      masterclassFinalizeInProgress = false;
     }
 
     function mrmBuildMasterclassPaymentElementOptions(allowedMethods) {
@@ -1427,6 +1515,16 @@ body.mrm-masterclass-modal-open {
     }
 
     async function createMasterclassPaymentIntent(eventId, checkoutData) {
+      const payload = {
+        event_id: eventId,
+        promo_code: checkoutData.promoCode || "",
+        first_name: checkoutData.firstName,
+        last_name: checkoutData.lastName,
+        name: checkoutData.name,
+        email: checkoutData.email,
+        terms_accepted: checkoutData.termsAccepted
+      };
+
       const response = await fetch("/wp-json/mrm-masterclass/v1/create-payment-intent", {
         method: "POST",
         credentials: "same-origin",
@@ -1434,15 +1532,7 @@ body.mrm-masterclass-modal-open {
           "Content-Type": "application/json",
           "Accept": "application/json"
         },
-        body: JSON.stringify({
-          event_id: eventId,
-          promo_code: checkoutData.promoCode || "",
-          first_name: checkoutData.firstName,
-          last_name: checkoutData.lastName,
-          name: checkoutData.name,
-          email: checkoutData.email,
-          terms_accepted: checkoutData.termsAccepted
-        })
+        body: JSON.stringify(payload)
       });
 
       const data = await response.json().catch(() => null);
@@ -1471,21 +1561,30 @@ body.mrm-masterclass-modal-open {
       return data;
     }
 
-    payButton.addEventListener('click', async () => {
-      if (masterclassPaymentInProgress) {
+    payButton.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (masterclassPaymentInProgress || masterclassFinalizeInProgress) {
         return;
       }
 
       const checkoutData = mrmGetMasterclassCheckoutData();
-      const validationMessage = mrmValidateMasterclassCheckoutData(checkoutData);
+      const validation = mrmValidateMasterclassCheckoutData(checkoutData);
 
-      if (validationMessage) {
-        modalMessage.textContent = validationMessage;
+      if (!validation.valid) {
+        modalMessage.textContent = validation.message;
+
+        if (validation.field) {
+          mrmFocusMasterclassField(validation.field);
+        }
+
         return;
       }
 
       masterclassPaymentInProgress = true;
       payButton.disabled = true;
+      submitPayment.disabled = true;
       modalMessage.textContent = 'Preparing secure payment...';
 
       let intentData;
@@ -1496,14 +1595,20 @@ body.mrm-masterclass-modal-open {
         modalMessage.textContent = error && error.message ? error.message : 'Unable to start payment.';
         masterclassPaymentInProgress = false;
         payButton.disabled = false;
+        submitPayment.disabled = false;
         return;
       }
 
       const promoMessageEl = mrmGetMasterclassModalField('mrm-masterclass-promo-message');
 
-      if (promoMessageEl && intentData.promo_message) {
-        promoMessageEl.textContent = intentData.promo_message;
-        promoMessageEl.hidden = false;
+      if (promoMessageEl) {
+        if (intentData.promo_message) {
+          promoMessageEl.textContent = intentData.promo_message;
+          promoMessageEl.hidden = false;
+        } else {
+          promoMessageEl.textContent = '';
+          promoMessageEl.hidden = true;
+        }
       }
 
       paymentIntentClientSecret = intentData.client_secret;
@@ -1513,20 +1618,35 @@ body.mrm-masterclass-modal-open {
         try {
           activeMasterclassPaymentElement.unmount();
         } catch (error) {}
+
+        try {
+          if (typeof activeMasterclassPaymentElement.destroy === 'function') {
+            activeMasterclassPaymentElement.destroy();
+          }
+        } catch (error) {}
+
         activeMasterclassPaymentElement = null;
       }
 
       paymentElement.innerHTML = '';
 
-      stripe = Stripe(intentData.publishable_key);
-      elements = stripe.elements({ clientSecret: paymentIntentClientSecret });
+      try {
+        stripe = Stripe(intentData.publishable_key);
+        elements = stripe.elements({ clientSecret: paymentIntentClientSecret });
 
-      activeMasterclassPaymentElement = elements.create(
-        'payment',
-        mrmBuildMasterclassPaymentElementOptions(intentData.allowed_payment_methods || ['card'])
-      );
+        activeMasterclassPaymentElement = elements.create(
+          'payment',
+          mrmBuildMasterclassPaymentElementOptions(intentData.allowed_payment_methods || ['card'])
+        );
 
-      activeMasterclassPaymentElement.mount('#paymentElement');
+        activeMasterclassPaymentElement.mount('#paymentElement');
+      } catch (error) {
+        modalMessage.textContent = error && error.message ? error.message : 'The secure payment form could not be loaded. Please refresh and try again.';
+        masterclassPaymentInProgress = false;
+        payButton.disabled = false;
+        submitPayment.disabled = false;
+        return;
+      }
 
       payButton.style.display = 'none';
       submitPayment.style.display = 'block';
@@ -1536,7 +1656,10 @@ body.mrm-masterclass-modal-open {
       masterclassPaymentInProgress = false;
     });
 
-    submitPayment.addEventListener('click', async () => {
+    submitPayment.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
       if (masterclassFinalizeInProgress) {
         return;
       }
@@ -1546,10 +1669,6 @@ body.mrm-masterclass-modal-open {
         return;
       }
 
-      /*
-       * Do not open a second confirmation popup on top of the registration popup.
-       * The second overlay was causing visual stutter / stacked-modal behavior.
-       */
       completeConfirmedPayment();
     });
 
@@ -1566,10 +1685,15 @@ body.mrm-masterclass-modal-open {
       }
 
       const checkoutData = mrmGetMasterclassCheckoutData();
-      const validationMessage = mrmValidateMasterclassCheckoutData(checkoutData);
+      const validation = mrmValidateMasterclassCheckoutData(checkoutData);
 
-      if (validationMessage) {
-        modalMessage.textContent = validationMessage;
+      if (!validation.valid) {
+        modalMessage.textContent = validation.message;
+
+        if (validation.field) {
+          mrmFocusMasterclassField(validation.field);
+        }
+
         return;
       }
 
