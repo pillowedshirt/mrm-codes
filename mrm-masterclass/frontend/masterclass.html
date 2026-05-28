@@ -1394,6 +1394,26 @@ body.mrm-masterclass-modal-open {
   let data = null;
 
   try {
+    try {
+      const healthEndpoint = `${API_BASE}/health?mrm_no_cache=${Date.now()}`;
+      const healthResponse = await fetch(healthEndpoint, {
+        method: "GET",
+        credentials: "same-origin",
+        headers: {
+          "Accept": "application/json",
+          "Cache-Control": "no-cache"
+        },
+        cache: "no-store"
+      });
+
+      console.log("Masterclass health check result:", {
+        ok: healthResponse.ok,
+        status: healthResponse.status
+      });
+    } catch (healthError) {
+      console.error("Masterclass health check failed before events request:", healthError);
+    }
+
     const endpoint = `${API_BASE}/events?mrm_no_cache=${Date.now()}`;
 
     console.log('Masterclass events request started:', endpoint);
@@ -2592,7 +2612,7 @@ body.mrm-masterclass-modal-open {
 <script>
 (function () {
   let fallbackAttempts = 0;
-  const maxFallbackAttempts = 80;
+  const maxFallbackAttempts = 8;
 
   function bootWhenReady() {
     fallbackAttempts++;
