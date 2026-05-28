@@ -881,7 +881,7 @@ body.mrm-masterclass-modal-open {
       </div>
 
       <div id="mrm-masterclass-error" class="mrm-masterclass-error" hidden></div>
-      <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses…</div>
+      <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses… <small data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2225">(diagnostic build)</small></div>
       <div id="mrm-masterclass-events" class="mrm-masterclass-events-grid"></div>
     </section>
   </main>
@@ -936,6 +936,8 @@ body.mrm-masterclass-modal-open {
 
   <script>
     const API_BASE = '/wp-json/mrm-masterclass/v1';
+    const MRM_MASTERCLASS_FRONTEND_VERSION = 'live-rest-diagnostic-2026-05-28-2225';
+    console.log('MRM Masterclass frontend version:', MRM_MASTERCLASS_FRONTEND_VERSION);
 
     async function checkMasterclassApiHealth() {
       try {
