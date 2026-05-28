@@ -1359,6 +1359,16 @@ body.mrm-masterclass-modal-open {
 
       if (!eventsEl) {
         console.error('Masterclass events container was not found.');
+
+        if (loadingEl) {
+          loadingEl.hidden = true;
+        }
+
+        if (errorEl) {
+          errorEl.textContent = 'Masterclass sessions could not be displayed because the events container is missing from the page HTML.';
+          errorEl.hidden = false;
+        }
+
         return;
       }
 
@@ -1372,7 +1382,7 @@ body.mrm-masterclass-modal-open {
       }
 
       try {
-        const response = await fetch(`${API_BASE}/events`, {
+        const response = await fetch(`${API_BASE}/events?mrm_no_cache=${Date.now()}`, {
           method: "GET",
           credentials: "same-origin",
           headers: {
@@ -1394,6 +1404,7 @@ body.mrm-masterclass-modal-open {
           const message = data && data.message
             ? data.message
             : "Masterclasses could not be loaded. Please try again later.";
+
           throw new Error(message);
         }
 
@@ -1406,13 +1417,6 @@ body.mrm-masterclass-modal-open {
 
         renderEvents(events);
 
-        if (typeof mrmMasterclassPopupDebug === 'function') {
-          mrmMasterclassPopupDebug('events_load_succeeded', {
-            response_ok: true,
-            http_status: response.status
-          });
-        }
-
         if (typeof window.renderMasterclassCalendar === "function") {
           window.renderMasterclassCalendar(events);
         } else {
@@ -1422,14 +1426,31 @@ body.mrm-masterclass-modal-open {
             }
           }, 100);
         }
+
+        if (typeof mrmMasterclassPopupDebug === 'function') {
+          mrmMasterclassPopupDebug('events_load_succeeded', {
+            response_ok: true,
+            http_status: response.status
+          });
+        }
+
+        if (data && data.debug) {
+          console.log('Masterclass events endpoint debug:', data.debug);
+        }
       } catch (error) {
         const latestLoadingEl = mrmMasterclassLoadingEl();
+        const latestErrorEl = mrmMasterclassErrorEl();
 
         if (latestLoadingEl) {
           latestLoadingEl.hidden = true;
         }
 
-        showError(error.message || "Masterclasses could not be loaded. Please try again later.");
+        if (latestErrorEl) {
+          latestErrorEl.textContent = error && error.message
+            ? error.message
+            : "Masterclasses could not be loaded. Please try again later.";
+          latestErrorEl.hidden = false;
+        }
 
         if (typeof window.renderMasterclassCalendar === "function") {
           window.renderMasterclassCalendar([]);
@@ -1442,6 +1463,7 @@ body.mrm-masterclass-modal-open {
         }
       }
     }
+
 
     function showError(message) {
       const loadingEl = mrmMasterclassLoadingEl();
@@ -1467,6 +1489,8 @@ body.mrm-masterclass-modal-open {
       eventsEl.innerHTML = `
         <div class="mrm-masterclass-empty">
           No upcoming masterclasses are open for registration right now. Please check back soon.
+          <br><br>
+          <small>If you expected an event to appear here, confirm the event status is Scheduled and Registration Open is checked in the Masterclass plugin.</small>
         </div>
       `;
 
@@ -1474,6 +1498,7 @@ body.mrm-masterclass-modal-open {
         window.renderMasterclassCalendar([]);
       }
     }
+
 
     function renderEvents(events) {
       const eventsEl = mrmMasterclassEventsEl();
