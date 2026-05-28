@@ -6055,26 +6055,56 @@ public function rest_finalize_registration( $request ) {
 		$presenters_table = $this->t( 'mrm_masterclass_presenters' );
 		$regs_table       = $this->t( 'mrm_masterclass_registrations' );
 
-		if (
-			! $this->mrm_mc_table_exists( $events_table )
-			|| ! $this->mrm_mc_table_exists( $presenters_table )
-			|| ! $this->mrm_mc_table_exists( $regs_table )
-		) {
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST request started.',
+			array(
+				'events_table'     => $events_table,
+				'presenters_table' => $presenters_table,
+				'regs_table'       => $regs_table,
+			)
+		);
+
+		$events_table_exists     = $this->mrm_mc_table_exists( $events_table );
+		$presenters_table_exists = $this->mrm_mc_table_exists( $presenters_table );
+		$regs_table_exists       = $this->mrm_mc_table_exists( $regs_table );
+
+		if ( ! $events_table_exists || ! $presenters_table_exists || ! $regs_table_exists ) {
 			$this->mrm_mc_debug_log(
 				'Public Masterclass events REST request failed because required tables are missing.',
 				array(
-					'events_table'     => $events_table,
-					'presenters_table' => $presenters_table,
-					'regs_table'       => $regs_table,
+					'events_table_exists'     => $events_table_exists ? 'yes' : 'no',
+					'presenters_table_exists' => $presenters_table_exists ? 'yes' : 'no',
+					'regs_table_exists'       => $regs_table_exists ? 'yes' : 'no',
 				)
 			);
 
 			return new WP_Error(
 				'mrm_masterclass_tables_missing',
-				'Masterclass events are temporarily unavailable. Please try again later.',
+				'Masterclass events are temporarily unavailable because the event database tables are missing.',
 				array( 'status' => 503 )
 			);
 		}
+
+		$total_events = absint(
+			$wpdb->get_var(
+				"SELECT COUNT(*) FROM {$events_table}"
+			)
+		);
+
+		$total_scheduled = absint(
+			$wpdb->get_var(
+				"SELECT COUNT(*) FROM {$events_table}
+				 WHERE status = 'scheduled'"
+			)
+		);
+
+		$total_open = absint(
+			$wpdb->get_var(
+				"SELECT COUNT(*) FROM {$events_table}
+				 WHERE status = 'scheduled'
+				   AND registration_open = 1"
+			)
+		);
 
 		$rows = $wpdb->get_results(
 			"SELECT e.*,
@@ -6093,7 +6123,12 @@ public function rest_finalize_registration( $request ) {
 		if ( null === $rows ) {
 			$this->mrm_mc_debug_log(
 				'Public Masterclass events REST database query failed.',
-				array( 'db_error' => $wpdb->last_error )
+				array(
+					'db_error'        => $wpdb->last_error,
+					'total_events'    => $total_events,
+					'total_scheduled' => $total_scheduled,
+					'total_open'      => $total_open,
+				)
 			);
 
 			return new WP_Error(
@@ -6105,19 +6140,37 @@ public function rest_finalize_registration( $request ) {
 
 		$events = array();
 
-		foreach ( $rows as $row ) {
-			$row->available_seats     = max( 0, absint( $row->capacity ) - absint( $row->paid_count ) );
-			$row->presenter_page_url  = $this->mrm_mc_public_presenter_page_url( $row->presenter_page_id );
-			$events[]                 = $this->mrm_mc_public_event_payload( $row );
+		foreach ( (array) $rows as $row ) {
+			$row->available_seats    = max( 0, absint( $row->capacity ) - absint( $row->paid_count ) );
+			$row->presenter_page_url = $this->mrm_mc_public_presenter_page_url( $row->presenter_page_id );
+			$events[]                = $this->mrm_mc_public_event_payload( $row );
 		}
+
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST request completed.',
+			array(
+				'total_events'       => $total_events,
+				'total_scheduled'    => $total_scheduled,
+				'total_open'         => $total_open,
+				'public_rows_found'  => count( $rows ),
+				'public_events_sent' => count( $events ),
+			)
+		);
 
 		return rest_ensure_response(
 			array(
 				'success' => true,
 				'events'  => $events,
+				'debug'   => array(
+					'total_events'       => $total_events,
+					'total_scheduled'    => $total_scheduled,
+					'total_open'         => $total_open,
+					'public_events_sent' => count( $events ),
+				),
 			)
 		);
 	}
+
 
 
 public function render_activation_diagnostic_notice() {
