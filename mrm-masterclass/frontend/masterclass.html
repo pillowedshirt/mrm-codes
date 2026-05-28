@@ -1027,9 +1027,87 @@ body.mrm-masterclass-modal-open {
       hideModal(modal);
       masterclassModalOpeningInProgress = false;
       activeMasterclassEventOpenId = '';
+      mrmMasterclassPopupDebug('popup_closed');
     }
 
 
+
+    function mrmMasterclassEmailDomain(email) {
+      const value = String(email || '').trim();
+      const atIndex = value.lastIndexOf('@');
+
+      if (atIndex === -1) {
+        return '';
+      }
+
+      return value.slice(atIndex + 1).toLowerCase();
+    }
+
+    function mrmMasterclassPopupDebug(stage, details = {}) {
+      try {
+        const checkoutData = typeof mrmGetMasterclassCheckoutData === 'function'
+          ? mrmGetMasterclassCheckoutData()
+          : {
+              firstName: '',
+              lastName: '',
+              email: '',
+              termsAccepted: false,
+              promoCode: ''
+            };
+
+        const payload = {
+          stage: stage,
+          event_id: selectedEvent && selectedEvent.id ? selectedEvent.id : (details.event_id || 0),
+          selected_event_present: Boolean(selectedEvent && selectedEvent.id),
+          modal_open: Boolean(modal && modal.classList.contains('is-open')),
+          has_first_name: Boolean(checkoutData.firstName),
+          has_last_name: Boolean(checkoutData.lastName),
+          has_email: Boolean(checkoutData.email),
+          email_domain: mrmMasterclassEmailDomain(checkoutData.email),
+          terms_accepted: Boolean(checkoutData.termsAccepted),
+          has_promo_code: Boolean(checkoutData.promoCode),
+          payment_in_progress: Boolean(masterclassPaymentInProgress),
+          finalize_in_progress: Boolean(masterclassFinalizeInProgress),
+          has_payment_intent_id: Boolean(activeMasterclassPaymentIntentId),
+          has_client_secret: Boolean(paymentIntentClientSecret),
+          has_stripe_object: Boolean(stripe),
+          has_elements_object: Boolean(elements),
+          has_payment_element: Boolean(activeMasterclassPaymentElement),
+          validation_field: details.validation_field || '',
+          response_ok: Boolean(details.response_ok),
+          http_status: details.http_status || 0,
+          error_code: details.error_code || '',
+          error_message: details.error_message || ''
+        };
+
+        /*
+         * Use sendBeacon so the popup debug watcher does not block checkout.
+         * Fall back to fetch if sendBeacon is unavailable.
+         */
+        const endpoint = "/wp-json/mrm-masterclass/v1/popup-debug";
+        const body = JSON.stringify(payload);
+
+        if (navigator.sendBeacon) {
+          const blob = new Blob([body], { type: "application/json" });
+          navigator.sendBeacon(endpoint, blob);
+          return;
+        }
+
+        fetch(endpoint, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          body
+        }).catch(() => {});
+      } catch (error) {
+        /*
+         * Never let debugging break checkout.
+         */
+      }
+    }
 
     function mrmGetMasterclassModalField(id) {
       if (!modal) {
@@ -1161,6 +1239,7 @@ body.mrm-masterclass-modal-open {
     }
 
     function mrmResetMasterclassPaymentUi() {
+      mrmMasterclassPopupDebug('payment_ui_reset');
       modalMessage.textContent = '';
 
       if (activeMasterclassPaymentElement) {
@@ -1266,6 +1345,8 @@ body.mrm-masterclass-modal-open {
     }
 
     async function loadMasterclassEvents() {
+      mrmMasterclassPopupDebug('events_load_started');
+
       if (!eventsEl) {
         return;
       }
@@ -1305,12 +1386,16 @@ body.mrm-masterclass-modal-open {
         }
 
         renderEvents(events);
+        mrmMasterclassPopupDebug('events_load_succeeded');
 
         if (typeof window.renderMasterclassCalendar === "function") {
           window.renderMasterclassCalendar(events);
         }
       } catch (error) {
         showError(error.message || "Masterclasses could not be loaded. Please try again later.");
+        mrmMasterclassPopupDebug('events_load_failed', {
+          error_message: error && error.message ? error.message : 'events could not be loaded'
+        });
       }
     }
 
@@ -1445,6 +1530,9 @@ body.mrm-masterclass-modal-open {
 
     async function openEvent(eventId) {
       const requestedEventId = String(eventId || '');
+      mrmMasterclassPopupDebug('popup_open_requested', {
+        event_id: requestedEventId
+      });
 
       if (!requestedEventId) {
         modalMessage.textContent = 'This Masterclass could not be loaded.';
@@ -1462,6 +1550,14 @@ body.mrm-masterclass-modal-open {
         modal &&
         modal.classList.contains('is-open')
       ) {
+        mrmMasterclassPopupDebug('popup_open_duplicate_ignored', {
+          event_id: requestedEventId
+        });
+
+        mrmMasterclassPopupDebug('modal_stutter_guard_triggered', {
+          event_id: requestedEventId
+        });
+
         return;
       }
 
@@ -1471,6 +1567,9 @@ body.mrm-masterclass-modal-open {
       mrmResetMasterclassPaymentUi();
 
       let data;
+      mrmMasterclassPopupDebug('event_fetch_started', {
+        event_id: requestedEventId
+      });
 
       try {
         const response = await fetch(API_BASE + '/event?id=' + encodeURIComponent(requestedEventId), {
@@ -1482,11 +1581,21 @@ body.mrm-masterclass-modal-open {
         });
 
         data = await response.json().catch(() => null);
+        mrmMasterclassPopupDebug(response.ok ? 'event_fetch_succeeded' : 'event_fetch_failed', {
+          event_id: requestedEventId,
+          response_ok: response.ok,
+          http_status: response.status,
+          error_message: data && data.message ? data.message : ''
+        });
 
         if (!response.ok) {
           throw new Error((data && data.message) || 'This Masterclass could not be loaded.');
         }
       } catch (error) {
+        mrmMasterclassPopupDebug('event_fetch_failed', {
+          event_id: requestedEventId,
+          error_message: error && error.message ? error.message : 'This Masterclass could not be loaded.'
+        });
         modalMessage.textContent = error && error.message ? error.message : 'This Masterclass could not be loaded.';
         showModal(modal);
         masterclassModalOpeningInProgress = false;
@@ -1494,6 +1603,9 @@ body.mrm-masterclass-modal-open {
       }
 
       selectedEvent = data && data.event ? data.event : data;
+      mrmMasterclassPopupDebug('event_loaded', {
+        event_id: selectedEvent && selectedEvent.id ? selectedEvent.id : requestedEventId
+      });
 
       if (!selectedEvent || !selectedEvent.id) {
         modalMessage.textContent = 'This Masterclass could not be loaded.';
@@ -1511,6 +1623,9 @@ body.mrm-masterclass-modal-open {
       `;
 
       showModal(modal);
+      mrmMasterclassPopupDebug('popup_shown', {
+        event_id: selectedEvent && selectedEvent.id ? selectedEvent.id : requestedEventId
+      });
       masterclassModalOpeningInProgress = false;
     }
 
@@ -1564,8 +1679,10 @@ body.mrm-masterclass-modal-open {
     payButton.addEventListener('click', async (event) => {
       event.preventDefault();
       event.stopPropagation();
+      mrmMasterclassPopupDebug('continue_clicked');
 
       if (masterclassPaymentInProgress || masterclassFinalizeInProgress) {
+        mrmMasterclassPopupDebug('continue_duplicate_ignored');
         return;
       }
 
@@ -1575,6 +1692,11 @@ body.mrm-masterclass-modal-open {
       if (!validation.valid) {
         modalMessage.textContent = validation.message;
 
+        mrmMasterclassPopupDebug('validation_failed', {
+          validation_field: validation.field || '',
+          error_message: validation.message || ''
+        });
+
         if (validation.field) {
           mrmFocusMasterclassField(validation.field);
         }
@@ -1582,10 +1704,13 @@ body.mrm-masterclass-modal-open {
         return;
       }
 
+      mrmMasterclassPopupDebug('validation_passed');
+
       masterclassPaymentInProgress = true;
       payButton.disabled = true;
       submitPayment.disabled = true;
       modalMessage.textContent = 'Preparing secure payment...';
+      mrmMasterclassPopupDebug('payment_intent_request_started');
 
       let intentData;
 
@@ -1593,6 +1718,11 @@ body.mrm-masterclass-modal-open {
         intentData = await createMasterclassPaymentIntent(selectedEvent.id, checkoutData);
       } catch (error) {
         modalMessage.textContent = error && error.message ? error.message : 'Unable to start payment.';
+
+        mrmMasterclassPopupDebug('payment_intent_request_failed', {
+          error_message: error && error.message ? error.message : 'Unable to start payment.'
+        });
+
         masterclassPaymentInProgress = false;
         payButton.disabled = false;
         submitPayment.disabled = false;
@@ -1613,6 +1743,10 @@ body.mrm-masterclass-modal-open {
 
       paymentIntentClientSecret = intentData.client_secret;
       activeMasterclassPaymentIntentId = intentData.payment_intent_id;
+      mrmMasterclassPopupDebug('payment_intent_created', {
+        has_payment_intent_id: Boolean(activeMasterclassPaymentIntentId),
+        has_client_secret: Boolean(paymentIntentClientSecret)
+      });
 
       if (activeMasterclassPaymentElement) {
         try {
@@ -1631,6 +1765,7 @@ body.mrm-masterclass-modal-open {
       paymentElement.innerHTML = '';
 
       try {
+        mrmMasterclassPopupDebug('stripe_element_mount_started');
         stripe = Stripe(intentData.publishable_key);
         elements = stripe.elements({ clientSecret: paymentIntentClientSecret });
 
@@ -1640,8 +1775,12 @@ body.mrm-masterclass-modal-open {
         );
 
         activeMasterclassPaymentElement.mount('#paymentElement');
+        mrmMasterclassPopupDebug('stripe_element_mounted');
       } catch (error) {
         modalMessage.textContent = error && error.message ? error.message : 'The secure payment form could not be loaded. Please refresh and try again.';
+        mrmMasterclassPopupDebug('stripe_element_mount_failed', {
+          error_message: error && error.message ? error.message : 'Stripe element mount failed.'
+        });
         masterclassPaymentInProgress = false;
         payButton.disabled = false;
         submitPayment.disabled = false;
@@ -1659,8 +1798,10 @@ body.mrm-masterclass-modal-open {
     submitPayment.addEventListener('click', async (event) => {
       event.preventDefault();
       event.stopPropagation();
+      mrmMasterclassPopupDebug('submit_payment_clicked');
 
       if (masterclassFinalizeInProgress) {
+        mrmMasterclassPopupDebug('submit_duplicate_ignored');
         return;
       }
 
@@ -1705,6 +1846,7 @@ body.mrm-masterclass-modal-open {
       }
 
       modalMessage.textContent = 'Processing payment...';
+      mrmMasterclassPopupDebug('stripe_confirm_started');
 
       let result;
 
@@ -1724,6 +1866,11 @@ body.mrm-masterclass-modal-open {
         });
       } catch (error) {
         modalMessage.textContent = error && error.message ? error.message : 'Payment failed before confirmation could complete.';
+
+        mrmMasterclassPopupDebug('stripe_confirm_failed', {
+          error_message: error && error.message ? error.message : 'Payment failed before confirmation could complete.'
+        });
+
         submitPayment.disabled = false;
 
         if (confirmFinalPayment) {
@@ -1736,6 +1883,12 @@ body.mrm-masterclass-modal-open {
 
       if (result.error) {
         modalMessage.textContent = result.error.message || 'Payment failed.';
+
+        mrmMasterclassPopupDebug('stripe_confirm_failed', {
+          error_message: result.error.message || 'Payment failed.',
+          error_code: result.error.code || ''
+        });
+
         submitPayment.disabled = false;
 
         if (confirmFinalPayment) {
@@ -1763,6 +1916,14 @@ body.mrm-masterclass-modal-open {
         return;
       }
 
+      mrmMasterclassPopupDebug('stripe_confirm_succeeded', {
+        has_payment_intent_id: Boolean(paymentIntentId)
+      });
+
+      mrmMasterclassPopupDebug('finalize_started', {
+        has_payment_intent_id: Boolean(paymentIntentId)
+      });
+
       let finalResult;
 
       try {
@@ -1778,6 +1939,11 @@ body.mrm-masterclass-modal-open {
         });
       } catch (error) {
         modalMessage.textContent = error && error.message ? error.message : 'Payment succeeded, but registration could not be finalized. Please contact support.';
+
+        mrmMasterclassPopupDebug('finalize_failed', {
+          error_message: error && error.message ? error.message : 'Registration finalization failed.'
+        });
+
         submitPayment.disabled = false;
 
         if (confirmFinalPayment) {
@@ -1801,6 +1967,9 @@ body.mrm-masterclass-modal-open {
       }
 
       modalMessage.textContent = 'Registration confirmed. Thank you!';
+      mrmMasterclassPopupDebug('finalize_succeeded', {
+        has_payment_intent_id: Boolean(activeMasterclassPaymentIntentId)
+      });
       submitPayment.style.display = 'none';
       submitPayment.disabled = false;
 
@@ -1864,6 +2033,8 @@ body.mrm-masterclass-modal-open {
         "'":'&#039;'
       }[char]));
     }
+
+    mrmMasterclassPopupDebug('html_loaded');
 
     window.loadMasterclassEvents = loadMasterclassEvents;
 

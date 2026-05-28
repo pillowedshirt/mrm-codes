@@ -5360,6 +5360,16 @@ public function render_email_log_page() {
 
 		register_rest_route(
 			self::REST_NAMESPACE,
+			'/popup-debug',
+			array(
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( $this, 'rest_popup_debug' ),
+				'permission_callback' => '__return_true',
+			)
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
 			'/health',
 			array(
 				'methods'             => 'GET',
@@ -5939,6 +5949,89 @@ public function rest_finalize_registration( $request ) {
 	return rest_ensure_response(array('success'=>true,'registration_id'=>$registration_id,'gate_url'=>esc_url_raw( $gate['url'] ),'message'=>'Registration confirmed.'));
 }
 
+
+	public function rest_popup_debug( WP_REST_Request $request ) {
+		$stage = sanitize_key( $this->mrm_mc_get_rest_param_value( $request, 'stage', '' ) );
+
+		$allowed_stages = array(
+			'html_loaded',
+			'events_load_started',
+			'events_load_succeeded',
+			'events_load_failed',
+			'popup_open_requested',
+			'popup_open_duplicate_ignored',
+			'event_fetch_started',
+			'event_fetch_succeeded',
+			'event_fetch_failed',
+			'event_loaded',
+			'popup_shown',
+			'popup_closed',
+			'checkout_data_snapshot',
+			'continue_clicked',
+			'continue_duplicate_ignored',
+			'validation_passed',
+			'validation_failed',
+			'payment_intent_request_started',
+			'payment_intent_request_failed',
+			'payment_intent_created',
+			'stripe_element_mount_started',
+			'stripe_element_mount_failed',
+			'stripe_element_mounted',
+			'submit_payment_clicked',
+			'submit_duplicate_ignored',
+			'stripe_confirm_started',
+			'stripe_confirm_failed',
+			'stripe_confirm_succeeded',
+			'finalize_started',
+			'finalize_failed',
+			'finalize_succeeded',
+			'payment_ui_reset',
+			'modal_stutter_guard_triggered',
+			'frontend_exception'
+		);
+
+		if ( ! in_array( $stage, $allowed_stages, true ) ) {
+			$stage = 'frontend_exception';
+		}
+
+		$event_id = absint( $this->mrm_mc_get_rest_param_value( $request, 'event_id', 0 ) );
+
+		$context = array(
+			'stage'                   => $stage,
+			'event_id'                => $event_id,
+			'selected_event_present'  => $this->mrm_mc_get_rest_param_value( $request, 'selected_event_present', '' ) ? 'yes' : 'no',
+			'modal_open'              => $this->mrm_mc_get_rest_param_value( $request, 'modal_open', '' ) ? 'yes' : 'no',
+			'has_first_name'          => $this->mrm_mc_get_rest_param_value( $request, 'has_first_name', '' ) ? 'yes' : 'no',
+			'has_last_name'           => $this->mrm_mc_get_rest_param_value( $request, 'has_last_name', '' ) ? 'yes' : 'no',
+			'has_email'               => $this->mrm_mc_get_rest_param_value( $request, 'has_email', '' ) ? 'yes' : 'no',
+			'email_domain'            => sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'email_domain', '' ) ),
+			'terms_accepted'          => $this->mrm_mc_get_rest_param_value( $request, 'terms_accepted', '' ) ? 'yes' : 'no',
+			'has_promo_code'          => $this->mrm_mc_get_rest_param_value( $request, 'has_promo_code', '' ) ? 'yes' : 'no',
+			'payment_in_progress'     => $this->mrm_mc_get_rest_param_value( $request, 'payment_in_progress', '' ) ? 'yes' : 'no',
+			'finalize_in_progress'    => $this->mrm_mc_get_rest_param_value( $request, 'finalize_in_progress', '' ) ? 'yes' : 'no',
+			'has_payment_intent_id'   => $this->mrm_mc_get_rest_param_value( $request, 'has_payment_intent_id', '' ) ? 'yes' : 'no',
+			'has_client_secret'       => $this->mrm_mc_get_rest_param_value( $request, 'has_client_secret', '' ) ? 'yes' : 'no',
+			'has_stripe_object'       => $this->mrm_mc_get_rest_param_value( $request, 'has_stripe_object', '' ) ? 'yes' : 'no',
+			'has_elements_object'     => $this->mrm_mc_get_rest_param_value( $request, 'has_elements_object', '' ) ? 'yes' : 'no',
+			'has_payment_element'     => $this->mrm_mc_get_rest_param_value( $request, 'has_payment_element', '' ) ? 'yes' : 'no',
+			'validation_field'        => sanitize_key( $this->mrm_mc_get_rest_param_value( $request, 'validation_field', '' ) ),
+			'response_ok'             => $this->mrm_mc_get_rest_param_value( $request, 'response_ok', '' ) ? 'yes' : 'no',
+			'http_status'             => absint( $this->mrm_mc_get_rest_param_value( $request, 'http_status', 0 ) ),
+			'error_code'              => sanitize_key( $this->mrm_mc_get_rest_param_value( $request, 'error_code', '' ) ),
+			'error_message'           => sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'error_message', '' ) ),
+		);
+
+		$this->mrm_mc_debug_log(
+			'Masterclass popup flow: ' . $stage,
+			$context
+		);
+
+		return rest_ensure_response(
+			array(
+				'success' => true,
+			)
+		);
+	}
 
 	public function rest_health() {
 		return rest_ensure_response(
