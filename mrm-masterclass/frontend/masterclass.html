@@ -1045,68 +1045,64 @@ body.mrm-masterclass-modal-open {
 
     function mrmMasterclassPopupDebug(stage, details = {}) {
       try {
-        const checkoutData = typeof mrmGetMasterclassCheckoutData === 'function'
-          ? mrmGetMasterclassCheckoutData()
-          : {
-              firstName: '',
-              lastName: '',
-              email: '',
-              termsAccepted: false,
-              promoCode: ''
+        window.setTimeout(function () {
+          try {
+            const checkoutData = typeof mrmGetMasterclassCheckoutData === 'function'
+              ? mrmGetMasterclassCheckoutData()
+              : {
+                  firstName: '',
+                  lastName: '',
+                  email: '',
+                  termsAccepted: false,
+                  promoCode: ''
+                };
+
+            const payload = {
+              stage: stage,
+              event_id: selectedEvent && selectedEvent.id ? selectedEvent.id : (details.event_id || 0),
+              selected_event_present: Boolean(selectedEvent && selectedEvent.id),
+              modal_open: Boolean(modal && modal.classList.contains('is-open')),
+              has_first_name: Boolean(checkoutData.firstName),
+              has_last_name: Boolean(checkoutData.lastName),
+              has_email: Boolean(checkoutData.email),
+              email_domain: mrmMasterclassEmailDomain(checkoutData.email),
+              terms_accepted: Boolean(checkoutData.termsAccepted),
+              has_promo_code: Boolean(checkoutData.promoCode),
+              payment_in_progress: Boolean(masterclassPaymentInProgress),
+              finalize_in_progress: Boolean(masterclassFinalizeInProgress),
+              has_payment_intent_id: Boolean(activeMasterclassPaymentIntentId),
+              has_client_secret: Boolean(paymentIntentClientSecret),
+              has_stripe_object: Boolean(stripe),
+              has_elements_object: Boolean(elements),
+              has_payment_element: Boolean(activeMasterclassPaymentElement),
+              validation_field: details.validation_field || '',
+              response_ok: Boolean(details.response_ok),
+              http_status: details.http_status || 0,
+              error_code: details.error_code || '',
+              error_message: details.error_message || ''
             };
 
-        const payload = {
-          stage: stage,
-          event_id: selectedEvent && selectedEvent.id ? selectedEvent.id : (details.event_id || 0),
-          selected_event_present: Boolean(selectedEvent && selectedEvent.id),
-          modal_open: Boolean(modal && modal.classList.contains('is-open')),
-          has_first_name: Boolean(checkoutData.firstName),
-          has_last_name: Boolean(checkoutData.lastName),
-          has_email: Boolean(checkoutData.email),
-          email_domain: mrmMasterclassEmailDomain(checkoutData.email),
-          terms_accepted: Boolean(checkoutData.termsAccepted),
-          has_promo_code: Boolean(checkoutData.promoCode),
-          payment_in_progress: Boolean(masterclassPaymentInProgress),
-          finalize_in_progress: Boolean(masterclassFinalizeInProgress),
-          has_payment_intent_id: Boolean(activeMasterclassPaymentIntentId),
-          has_client_secret: Boolean(paymentIntentClientSecret),
-          has_stripe_object: Boolean(stripe),
-          has_elements_object: Boolean(elements),
-          has_payment_element: Boolean(activeMasterclassPaymentElement),
-          validation_field: details.validation_field || '',
-          response_ok: Boolean(details.response_ok),
-          http_status: details.http_status || 0,
-          error_code: details.error_code || '',
-          error_message: details.error_message || ''
-        };
+            const endpoint = "/wp-json/mrm-masterclass/v1/popup-debug";
+            const body = JSON.stringify(payload);
 
-        /*
-         * Use sendBeacon so the popup debug watcher does not block checkout.
-         * Fall back to fetch if sendBeacon is unavailable.
-         */
-        const endpoint = "/wp-json/mrm-masterclass/v1/popup-debug";
-        const body = JSON.stringify(payload);
+            if (navigator.sendBeacon) {
+              const blob = new Blob([body], { type: "application/json" });
+              navigator.sendBeacon(endpoint, blob);
+              return;
+            }
 
-        if (navigator.sendBeacon) {
-          const blob = new Blob([body], { type: "application/json" });
-          navigator.sendBeacon(endpoint, blob);
-          return;
-        }
-
-        fetch(endpoint, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-          },
-          body
-        }).catch(() => {});
-      } catch (error) {
-        /*
-         * Never let debugging break checkout.
-         */
-      }
+            fetch(endpoint, {
+              method: "POST",
+              credentials: "same-origin",
+              headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+              },
+              body
+            }).catch(() => {});
+          } catch (innerError) {}
+        }, 0);
+      } catch (outerError) {}
     }
 
     function mrmGetMasterclassModalField(id) {
@@ -1390,6 +1386,16 @@ body.mrm-masterclass-modal-open {
 
         if (typeof window.renderMasterclassCalendar === "function") {
           window.renderMasterclassCalendar(events);
+        } else {
+          /*
+           * The calendar script may not be registered yet if WordPress/Spectra
+           * executes the first script before the second one. Try once more shortly.
+           */
+          window.setTimeout(function () {
+            if (typeof window.renderMasterclassCalendar === "function") {
+              window.renderMasterclassCalendar(window.MRM_MASTERCLASS_EVENTS || []);
+            }
+          }, 100);
         }
       } catch (error) {
         showError(error.message || "Masterclasses could not be loaded. Please try again later.");
@@ -1420,6 +1426,10 @@ body.mrm-masterclass-modal-open {
           No upcoming masterclasses are open for registration right now. Please check back soon.
         </div>
       `;
+
+      if (typeof window.renderMasterclassCalendar === "function") {
+        window.renderMasterclassCalendar([]);
+      }
     }
 
     function renderEvents(events) {
@@ -2034,19 +2044,33 @@ body.mrm-masterclass-modal-open {
       }[char]));
     }
 
-    mrmMasterclassPopupDebug('html_loaded');
-
     window.loadMasterclassEvents = loadMasterclassEvents;
 
     window.openMasterclassRegistration = window.openMasterclassRegistration || function (eventId) {
       openEvent(eventId);
     };
 
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", loadMasterclassEvents);
-    } else {
-      loadMasterclassEvents();
-    }
+    /*
+     * Do not call loadMasterclassEvents() directly here.
+     * The calendar script appears after this script, so loading immediately can
+     * happen before window.renderMasterclassCalendar exists.
+     *
+     * Instead, expose a stable boot function and call it after all scripts have
+     * been parsed.
+     */
+    window.mrmBootMasterclassPage = function () {
+      if (window.__mrmMasterclassBooted) {
+        return;
+      }
+
+      window.__mrmMasterclassBooted = true;
+
+      mrmMasterclassPopupDebug('html_loaded');
+
+      window.setTimeout(function () {
+        loadMasterclassEvents();
+      }, 0);
+    };
   </script>
 <script>
 (function () {
@@ -2312,5 +2336,28 @@ body.mrm-masterclass-modal-open {
 
     renderCalendarMonth();
   };
+
+  /*
+   * Now that the calendar renderer exists, boot the Masterclass page.
+   * This prevents the event list from loading before the calendar script is ready.
+   */
+  if (typeof window.mrmBootMasterclassPage === "function") {
+    window.mrmBootMasterclassPage();
+  }
+})();
+</script>
+<script>
+(function () {
+  function bootWhenReady() {
+    if (typeof window.mrmBootMasterclassPage === "function") {
+      window.mrmBootMasterclassPage();
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootWhenReady);
+  } else {
+    window.setTimeout(bootWhenReady, 0);
+  }
 })();
 </script>
