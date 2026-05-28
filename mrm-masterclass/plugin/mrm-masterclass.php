@@ -5292,6 +5292,14 @@ public function render_email_log_page() {
 	}
 
 	public function register_rest_routes() {
+		$this->mrm_mc_debug_log(
+			'Masterclass REST routes registration started.',
+			array(
+				'namespace'   => self::REST_NAMESPACE,
+				'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+			)
+		);
+
 		register_rest_route(
 			self::REST_NAMESPACE,
 			'/events',
@@ -5375,6 +5383,14 @@ public function render_email_log_page() {
 				'methods'             => 'GET',
 				'callback'            => array( $this, 'rest_health' ),
 				'permission_callback' => '__return_true',
+			)
+		);
+
+		$this->mrm_mc_debug_log(
+			'Masterclass REST routes registration completed.',
+			array(
+				'namespace' => self::REST_NAMESPACE,
+				'routes'    => 'events,event,apply-promo,create-payment-intent,verify-payment-intent,finalize-registration,popup-debug,health',
 			)
 		);
 	}
@@ -6049,6 +6065,14 @@ public function rest_finalize_registration( $request ) {
 	}
 
 	public function rest_get_events( $request ) {
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST callback entered.',
+			array(
+				'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+				'method'      => isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : '',
+			)
+		);
+
 		global $wpdb;
 
 		$events_table     = $this->t( 'mrm_masterclass_events' );
