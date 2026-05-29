@@ -155,7 +155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.3.1';
+	const DB_VERSION = '1.3.2';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -2177,6 +2177,7 @@ public function mrm_mc_render_critical_error_notice() {
 
 	$presenter_adds = array(
 		'payout_percent'              => "ALTER TABLE {$presenters_table} ADD payout_percent DECIMAL(5,2) NULL",
+		'payout_per_student_cents'    => "ALTER TABLE {$presenters_table} ADD payout_per_student_cents INT NOT NULL DEFAULT 0",
 		'city'                        => "ALTER TABLE {$presenters_table} ADD city VARCHAR(100) NULL",
 		'state'                       => "ALTER TABLE {$presenters_table} ADD state VARCHAR(50) NULL",
 		'address'                     => "ALTER TABLE {$presenters_table} ADD address VARCHAR(191) NULL",
@@ -2211,6 +2212,19 @@ public function mrm_mc_render_critical_error_notice() {
 				"UPDATE {$presenters_table} SET payout_percent = %f WHERE payout_percent IS NULL",
 				$default_percent
 			)
+		);
+	}
+
+	$presenter_columns_after_add = $wpdb->get_col( "DESC {$presenters_table}", 0 );
+
+	if (
+		is_array( $presenter_columns_after_add )
+		&& in_array( 'payout_per_student_cents', $presenter_columns_after_add, true )
+	) {
+		$wpdb->query(
+			"UPDATE {$presenters_table}
+			 SET payout_per_student_cents = 0
+			 WHERE payout_per_student_cents IS NULL"
 		);
 	}
 
@@ -2532,80 +2546,56 @@ private function mrm_mc_estimated_stripe_fee_cents( $amount_cents ) {
 
 
 private function mrm_mc_presenter_default_percent() {
-	$settings = $this->settings();
-
-	$percent = isset( $settings['presenter_default_percent'] )
-		? (float) $settings['presenter_default_percent']
-		: 70.0;
-
-	if ( $percent < 0 ) {
-		$percent = 0;
-	}
-
-	if ( $percent > 100 ) {
-		$percent = 100;
-	}
-
-	return $percent;
+	return 0.0;
 }
 
 private function mrm_mc_presenter_share_percent() {
-	return $this->mrm_mc_presenter_default_percent();
+	return 0.0;
 }
 
 private function mrm_mc_presenter_payout_percent( $presenter_id ) {
+	return 0.0;
+}
+
+private function mrm_mc_presenter_payout_per_student_cents( $presenter_id ) {
 	global $wpdb;
 
 	$presenter_id = absint( $presenter_id );
 	$table        = $this->t( 'mrm_masterclass_presenters' );
-	$default      = $this->mrm_mc_presenter_default_percent();
 
 	if ( $presenter_id <= 0 || ! $this->mrm_mc_table_exists( $table ) ) {
-		return $default;
+		return 0;
 	}
 
-	if ( ! method_exists( $this, 'mrm_mc_column_exists' ) || ! $this->mrm_mc_column_exists( $table, 'payout_percent' ) ) {
-		return $default;
+	if ( ! $this->mrm_mc_column_exists( $table, 'payout_per_student_cents' ) ) {
+		return 0;
 	}
 
 	$value = $wpdb->get_var(
 		$wpdb->prepare(
-			"SELECT payout_percent FROM {$table} WHERE id = %d",
+			"SELECT payout_per_student_cents FROM {$table} WHERE id = %d",
 			$presenter_id
 		)
 	);
 
-	if ( null === $value || '' === $value ) {
-		return $default;
-	}
-
-	$percent = (float) $value;
-
-	if ( $percent < 0 ) {
-		$percent = 0;
-	}
-
-	if ( $percent > 100 ) {
-		$percent = 100;
-	}
-
-	return $percent;
+	return max( 0, absint( $value ) );
 }
 
 private function mrm_mc_calculate_registration_shares( $gross_cents, $presenter_id ) {
 	$gross_cents = absint( $gross_cents );
 	$stripe_fee  = $this->mrm_mc_estimated_stripe_fee_cents( $gross_cents );
 	$net_cents   = max( 0, $gross_cents - $stripe_fee );
-	$percent     = $this->mrm_mc_presenter_payout_percent( $presenter_id );
 
-	$presenter_share = (int) round( $net_cents * ( $percent / 100 ) );
-	$platform_share  = max( 0, $net_cents - $presenter_share );
+	$presenter_share = $this->mrm_mc_presenter_payout_per_student_cents( $presenter_id );
+	$presenter_share = min( $presenter_share, $net_cents );
+
+	$platform_share = max( 0, $net_cents - $presenter_share );
 
 	return array(
 		'gross_cents'           => $gross_cents,
 		'stripe_fee_cents'      => $stripe_fee,
 		'net_cents'             => $net_cents,
-		'presenter_percent'     => $percent,
+		'presenter_percent'     => 0,
 		'presenter_share_cents' => $presenter_share,
 		'platform_share_cents'  => $platform_share,
 	);
@@ -2790,7 +2780,14 @@ private function mrm_mc_send_event_update_notices( $event_id ) {
 	$event = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$events_table} WHERE id = %d", absint( $event_id ) ) );
 	if ( ! $event ) { return 0; }
 	$presenter = $this->mrm_mc_table_exists( $presenters_table ) ? $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$presenters_table} WHERE id = %d", absint( $event->presenter_id ) ) ) : null;
-	$registrations = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$regs_table} WHERE event_id = %d AND payment_status = 'paid'", absint( $event_id ) ) );
+	$registrations = $wpdb->get_results(
+		$wpdb->prepare(
+			"SELECT * FROM {$regs_table}
+			 WHERE event_id = %d
+			   AND LOWER(TRIM(payment_status)) = 'paid'",
+			absint( $event_id )
+		)
+	);
 	$count = 0;
 	foreach ( $registrations as $registration ) {
 		if ( $this->mrm_mc_send_email_recorded( 'event_updated', $registration->email, 'Masterclass Updated — ' . $event->title, $this->mrm_mc_event_update_email_body( $event, $presenter, $registration ), $event->id, $registration->id ) ) { $count++; }
@@ -3945,6 +3942,30 @@ private function mrm_mc_google_insert_event( $event, $presenter_email ) {
 	);
 }
 
+private function mrm_mc_google_get_event( $event ) {
+	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id( $event );
+
+	if ( '' === $calendar_id || empty( $event->google_event_id ) ) {
+		return new WP_Error(
+			'google_get_missing_data',
+			'Google Calendar lookup skipped because the calendar ID or Google event ID is missing.'
+		);
+	}
+
+	$url = 'https://www.googleapis.com/calendar/v3/calendars/'
+		. rawurlencode( $calendar_id )
+		. '/events/'
+		. rawurlencode( $event->google_event_id );
+
+	$result = $this->mrm_mc_google_calendar_request( 'GET', $url, null );
+
+	if ( is_wp_error( $result ) ) {
+		return $result;
+	}
+
+	return $result;
+}
+
 private function mrm_mc_google_update_event( $event, $presenter_email ) {
 	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id( $event );
 
@@ -4445,7 +4466,7 @@ public function mrm_mc_run_reminder_cron() {
 		$settings['default_price_cents']         = max( 0, absint( $_POST['default_price_cents'] ?? self::DEFAULT_PRICE_CENTS ) );
 		$settings['default_capacity']            = max( 1, absint( $_POST['default_capacity'] ?? 100 ) );
 		$settings['default_timezone']            = sanitize_text_field( wp_unslash( $_POST['default_timezone'] ?? 'America/Phoenix' ) );
-		$settings['presenter_default_percent']   = max( 0, min( 100, (float) ( $_POST['presenter_default_percent'] ?? 70 ) ) );
+		$settings['presenter_default_percent']   = 0;
 		$settings['admin_notification_email']    = sanitize_email( wp_unslash( $_POST['admin_notification_email'] ?? get_option( 'admin_email' ) ) );
 		$settings['from_email']                  = sanitize_email( wp_unslash( $_POST['from_email'] ?? 'no-reply@lowbrass-lessons.com' ) );
 		$settings['terms_version']               = sanitize_text_field( wp_unslash( $_POST['terms_version'] ?? 'v1' ) );
@@ -4527,7 +4548,8 @@ public function handle_save_presenter() {
 		'zip_code'                    => $this->mrm_mc_clean_text( $_POST['zip_code'] ?? '' ),
 		'timezone'                    => $this->mrm_mc_clean_text( $_POST['timezone'] ?? 'America/Phoenix' ),
 		'stripe_connected_account_id' => $this->mrm_mc_clean_text( $_POST['stripe_connected_account_id'] ?? '' ),
-		'payout_percent'              => max( 0, min( 100, (float) ( $_POST['payout_percent'] ?? $this->mrm_mc_presenter_default_percent() ) ) ),
+		'payout_percent'              => 0,
+		'payout_per_student_cents'    => max( 0, (int) round( 100 * (float) ( $_POST['payout_per_student_dollars'] ?? 0 ) ) ),
 		'hire_date'                   => $this->mrm_mc_clean_text( $_POST['hire_date'] ?? '' ),
 		'profile_image_url'           => esc_url_raw( wp_unslash( $_POST['profile_image_url'] ?? '' ) ),
 		'short_description'           => $this->mrm_mc_clean_html( $_POST['short_description'] ?? '' ),
@@ -5259,6 +5281,123 @@ public function register_masterclass_gate_query_vars( $vars ) {
 	return array_values( array_unique( $vars ) );
 }
 
+private function mrm_mc_google_datetime_to_timestamp( $value, $timezone = 'UTC' ) {
+	if ( empty( $value ) ) {
+		return 0;
+	}
+
+	try {
+		$tz = new DateTimeZone( $timezone ?: 'UTC' );
+		$dt = new DateTime( (string) $value, $tz );
+		return $dt->getTimestamp();
+	} catch ( Exception $e ) {
+		return 0;
+	}
+}
+
+private function mrm_mc_google_event_start_timestamp( $google_event, $fallback_timezone = 'UTC' ) {
+	if ( ! is_array( $google_event ) || empty( $google_event['start'] ) || ! is_array( $google_event['start'] ) ) {
+		return 0;
+	}
+
+	$start    = $google_event['start'];
+	$value    = $start['dateTime'] ?? ( $start['date'] ?? '' );
+	$timezone = $start['timeZone'] ?? $fallback_timezone;
+
+	return $this->mrm_mc_google_datetime_to_timestamp( $value, $timezone );
+}
+
+private function mrm_mc_google_event_end_timestamp( $google_event, $fallback_timezone = 'UTC' ) {
+	if ( ! is_array( $google_event ) || empty( $google_event['end'] ) || ! is_array( $google_event['end'] ) ) {
+		return 0;
+	}
+
+	$end      = $google_event['end'];
+	$value    = $end['dateTime'] ?? ( $end['date'] ?? '' );
+	$timezone = $end['timeZone'] ?? $fallback_timezone;
+
+	return $this->mrm_mc_google_datetime_to_timestamp( $value, $timezone );
+}
+
+private function mrm_mc_resolve_gate_event_access_source( $event ) {
+	global $wpdb;
+
+	$events_table = $this->t( 'mrm_masterclass_events' );
+
+	$source = array(
+		'source'       => 'local',
+		'start_ts'     => strtotime( $event->start_time . ' UTC' ),
+		'end_ts'       => strtotime( $event->end_time . ' UTC' ),
+		'meet_url'     => esc_url_raw( $event->google_meet_url ?? '' ),
+		'title'        => sanitize_text_field( $event->title ?? 'Masterclass' ),
+		'timezone'     => sanitize_text_field( $event->timezone ?? 'America/Phoenix' ),
+		'start_label'  => sanitize_text_field( ( $event->start_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ),
+		'google_error' => '',
+	);
+
+	if ( empty( $event->google_event_id ) ) {
+		return $source;
+	}
+
+	$google_event = $this->mrm_mc_google_get_event( $event );
+
+	if ( is_wp_error( $google_event ) ) {
+		$source['google_error'] = $google_event->get_error_message();
+
+		$this->mrm_mc_debug_log(
+			'Masterclass access gate Google source unavailable; falling back to local event time.',
+			array(
+				'event_id' => absint( $event->id ?? 0 ),
+				'error'    => $google_event->get_error_message(),
+			)
+		);
+
+		return $source;
+	}
+
+	$google_start_ts = $this->mrm_mc_google_event_start_timestamp( $google_event, $source['timezone'] );
+	$google_end_ts   = $this->mrm_mc_google_event_end_timestamp( $google_event, $source['timezone'] );
+	$google_meet_url = esc_url_raw( $this->mrm_mc_extract_meet_url( $google_event ) );
+
+	if ( $google_start_ts > 0 && $google_end_ts > $google_start_ts ) {
+		$source['source']      = 'google';
+		$source['start_ts']    = $google_start_ts;
+		$source['end_ts']      = $google_end_ts;
+		$source['meet_url']    = $google_meet_url ?: $source['meet_url'];
+		$source['title']       = sanitize_text_field( $google_event['summary'] ?? $source['title'] );
+		$source['start_label'] = gmdate( 'Y-m-d H:i:s', $google_start_ts ) . ' UTC';
+
+		if ( $this->mrm_mc_table_exists( $events_table ) ) {
+			$update_data = array(
+				'start_time' => gmdate( 'Y-m-d H:i:s', $google_start_ts ),
+				'end_time'   => gmdate( 'Y-m-d H:i:s', $google_end_ts ),
+				'updated_at' => $this->now(),
+			);
+
+			if ( $source['meet_url'] ) {
+				$update_data['google_meet_url'] = $source['meet_url'];
+				$update_data['online_link']     = $source['meet_url'];
+			}
+
+			$wpdb->update(
+				$events_table,
+				$this->mrm_mc_filter_data_for_table( $events_table, $update_data ),
+				array( 'id' => absint( $event->id ) )
+			);
+		}
+
+		$this->mrm_mc_debug_log(
+			'Masterclass access gate using Google Calendar event as source of truth.',
+			array(
+				'event_id' => absint( $event->id ?? 0 ),
+				'source'   => 'google',
+			)
+		);
+	}
+
+	return $source;
+}
+
 public function mrm_mc_handle_gate_request() {
 	if ( empty( $_GET['mrm_masterclass_gate'] ) ) {
 		return;
@@ -5336,17 +5475,35 @@ public function mrm_mc_handle_gate_request() {
 		exit;
 	}
 
-	$start_ts = strtotime( $event->start_time . ' UTC' );
-	$end_ts   = strtotime( $event->end_time . ' UTC' );
+	$access_source = $this->mrm_mc_resolve_gate_event_access_source( $event );
+
+	$start_ts = absint( $access_source['start_ts'] ?? 0 );
+	$end_ts   = absint( $access_source['end_ts'] ?? 0 );
 	$now_ts   = time();
 
-	$opens_ts  = $start_ts - ( 15 * MINUTE_IN_SECONDS );
-	$closes_ts = $end_ts + ( 30 * MINUTE_IN_SECONDS );
+	$opens_ts  = $start_ts - ( 10 * MINUTE_IN_SECONDS );
+	$closes_ts = $end_ts + ( 10 * MINUTE_IN_SECONDS );
+
+	if ( $start_ts <= 0 || $end_ts <= $start_ts ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass gate could not resolve a valid access window.',
+			array(
+				'event_id' => absint( $event->id ?? 0 ),
+				'source'   => sanitize_text_field( $access_source['source'] ?? 'unknown' ),
+			)
+		);
+
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Access Temporarily Unavailable',
+			'This access link could not verify the Masterclass time right now. Please contact support if your Masterclass is starting soon.'
+		);
+		exit;
+	}
 
 	if ( $now_ts < $opens_ts ) {
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Access Opens Soon',
-			'Your access link is valid. The meeting link will appear 15 minutes before the Masterclass starts.<br><br><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '<br><strong>Starts:</strong> ' . esc_html( $event->start_time . ' ' . $event->timezone )
+			'Your access link is valid. The meeting link will appear 10 minutes before the Masterclass starts.<br><br><strong>Masterclass:</strong> ' . esc_html( $access_source['title'] ?? $event->title ) . '<br><strong>Starts:</strong> ' . esc_html( $access_source['start_label'] ?? ( $event->start_time . ' ' . $event->timezone ) )
 		);
 		exit;
 	}
@@ -5359,7 +5516,7 @@ public function mrm_mc_handle_gate_request() {
 		exit;
 	}
 
-	if ( empty( $event->google_meet_url ) ) {
+	if ( empty( $access_source['meet_url'] ) ) {
 		$this->mrm_mc_debug_log(
 			'Masterclass gate opened but Meet link is unavailable.',
 			array(
@@ -5375,12 +5532,12 @@ public function mrm_mc_handle_gate_request() {
 		exit;
 	}
 
-	$meet_url = esc_url( $event->google_meet_url );
+	$meet_url = esc_url( $access_source['meet_url'] );
 
 	$this->mrm_mc_render_gate_page(
 		'Your Masterclass Access Is Open',
 		'<p>Your Masterclass meeting link is available now.</p>'
-		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '</p>'
+		. '<p><strong>Masterclass:</strong> ' . esc_html( $access_source['title'] ?? $event->title ) . '</p>'
 		. '<p><a class="mrm-masterclass-gate-button" href="' . $meet_url . '" target="_blank" rel="noopener">Join Google Meet</a></p>'
 	);
 	exit;
@@ -5631,14 +5788,6 @@ public function register_admin_menu() {
 			array( $this, 'render_events_page' )
 		);
 
-		add_submenu_page(
-			self::ADMIN_MENU_SLUG,
-			'Settings',
-			'Settings',
-			$capability,
-			self::ADMIN_SETTINGS_SLUG,
-			array( $this, 'render_settings_page' )
-		);
 
 		add_submenu_page(
 			self::ADMIN_MENU_SLUG,
@@ -5805,13 +5954,11 @@ public function render_dashboard_page() {
 
 public function render_settings_page() {
 	$this->must_admin();
-	$this->mrm_mc_debug_log( 'Legacy Settings submenu rendered.' );
 
-	echo '<div class="wrap mrm-masterclass-admin">';
-	echo '<h1>MRM Masterclass Settings</h1>';
-	echo '<p>The separate Settings submenu has been retired. Calendar/default settings now live at the top of <a href="' . esc_url( admin_url( 'admin.php?page=mrm-masterclass-events' ) ) . '">Masterclass Events</a>.</p>';
-	echo '</div>';
+	wp_safe_redirect( admin_url( 'admin.php?page=' . self::ADMIN_EVENTS_SLUG ) );
+	exit;
 }
+
 
 
 public function render_presenters_page() {
@@ -5900,7 +6047,11 @@ public function render_presenters_page() {
 	echo '<tr><th>ZIP Code</th><td><input name="zip_code" type="text" class="regular-text" value="' . esc_attr( $editing['zip_code'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Timezone</th><td><input name="timezone" type="text" class="regular-text" value="' . esc_attr( $editing['timezone'] ?? 'America/Phoenix' ) . '"></td></tr>';
 	echo '<tr><th>Stripe Connected Account ID</th><td><input name="stripe_connected_account_id" type="text" class="regular-text" placeholder="acct_..." value="' . esc_attr( $editing['stripe_connected_account_id'] ?? '' ) . '"><p class="description">Use the presenter Stripe Connect account ID. Store full SSN/EIN/TIN outside WordPress.</p></td></tr>';
-	echo '<tr><th>Presenter Payout Percent</th><td><input type="number" step="0.01" min="0" max="100" name="payout_percent" class="regular-text" value="' . esc_attr( $editing['payout_percent'] ?? $this->mrm_mc_presenter_default_percent() ) . '"><p class="description">This presenter-specific percentage is used for Masterclass registration ledger calculations.</p></td></tr>';
+	$payout_per_student_dollars = isset( $editing['payout_per_student_cents'] )
+		? number_format( absint( $editing['payout_per_student_cents'] ) / 100, 2, '.', '' )
+		: '0.00';
+
+	echo '<tr><th>Presenter Payout Per Student</th><td><input type="number" step="0.01" min="0" name="payout_per_student_dollars" class="regular-text" value="' . esc_attr( $payout_per_student_dollars ) . '"><p class="description">Fixed dollar amount paid to this presenter for each paid student enrollment. Example: 10.00 means the presenter earns $10.00 per paid registration.</p></td></tr>';
 	echo '<tr><th>Start Date</th><td><input name="hire_date" type="date" value="' . esc_attr( $editing['hire_date'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Profile Image URL</th><td><input name="profile_image_url" type="url" class="regular-text" value="' . esc_attr( $editing['profile_image_url'] ?? '' ) . '"></td></tr>';
 
@@ -5930,7 +6081,7 @@ public function render_presenters_page() {
 		echo '<p>No presenters added yet. Use the form above to create the first presenter.</p>';
 	} else {
 		echo '<table class="widefat striped">';
-		echo '<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Location</th><th>Stripe Account</th><th>Payout %</th><th>Timezone</th><th>Presenter Page</th><th>Actions</th></tr></thead><tbody>';
+		echo '<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Location</th><th>Stripe Account</th><th>Payout / Student</th><th>Timezone</th><th>Presenter Page</th><th>Actions</th></tr></thead><tbody>';
 
 		foreach ( $rows as $row ) {
 			echo '<tr>';
@@ -5939,7 +6090,11 @@ public function render_presenters_page() {
 			echo '<td>' . esc_html( $row['email'] ) . '</td>';
 			echo '<td>' . esc_html( trim( ( $row['city'] ?? '' ) . ', ' . ( $row['state'] ?? '' ), ', ' ) ) . '</td>';
 			echo '<td><code>' . esc_html( $row['stripe_connected_account_id'] ?? '' ) . '</code></td>';
-			echo '<td>' . esc_html( isset( $row['payout_percent'] ) && $row['payout_percent'] !== null ? $row['payout_percent'] . '%' : $this->mrm_mc_presenter_default_percent() . '%' ) . '</td>';
+			$payout_per_student_display = isset( $row['payout_per_student_cents'] )
+				? '$' . number_format( absint( $row['payout_per_student_cents'] ) / 100, 2 )
+				: '$0.00';
+
+			echo '<td>' . esc_html( $payout_per_student_display ) . '</td>';
 			echo '<td><code>' . esc_html( $row['timezone'] ?? '' ) . '</code></td>';
 			echo '<td>';
 
@@ -6049,12 +6204,12 @@ public function render_events_page() {
 	echo '<tr><th>Default Price</th><td><input type="number" name="default_price_cents" class="regular-text" value="' . esc_attr( $settings['default_price_cents'] ?? self::DEFAULT_PRICE_CENTS ) . '"><p class="description">Cents. Example: 2500 = $25.00.</p></td></tr>';
 	echo '<tr><th>Default Capacity</th><td><input type="number" name="default_capacity" class="regular-text" value="' . esc_attr( $settings['default_capacity'] ?? 100 ) . '"></td></tr>';
 	echo '<tr><th>Default Timezone</th><td><input type="text" name="default_timezone" class="regular-text" value="' . esc_attr( $settings['default_timezone'] ?? 'America/Phoenix' ) . '"></td></tr>';
-	echo '<tr><th>Presenter Default Percent</th><td><input type="number" step="0.01" min="0" max="100" name="presenter_default_percent" class="regular-text" value="' . esc_attr( $settings['presenter_default_percent'] ?? 70 ) . '"></td></tr>';
 	echo '<input type="hidden" name="admin_notification_email" value="' . esc_attr( $settings['admin_notification_email'] ?? get_option( 'admin_email' ) ) . '">';
 	echo '<input type="hidden" name="from_email" value="' . esc_attr( $settings['from_email'] ?? 'no-reply@lowbrass-lessons.com' ) . '">';
 	echo '<input type="hidden" name="terms_version" value="' . esc_attr( $settings['terms_version'] ?? 'v1' ) . '">';
 	echo '<input type="hidden" name="stripe_fee_estimate_percent" value="' . esc_attr( $settings['stripe_fee_estimate_percent'] ?? 2.9 ) . '">';
 	echo '<input type="hidden" name="stripe_fee_estimate_fixed" value="' . esc_attr( $settings['stripe_fee_estimate_fixed'] ?? 30 ) . '">';
+	echo '<input type="hidden" name="presenter_default_percent" value="0">';
 	echo '</tbody></table>';
 
 	submit_button( 'Save Calendar / Defaults' );
