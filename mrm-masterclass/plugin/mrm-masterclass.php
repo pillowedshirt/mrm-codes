@@ -817,6 +817,11 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      return;
 		    }
 
+		    if (anyMasterclassModalOpen() && window.__mrmMasterclassBootComplete) {
+		      console.log('MRM Masterclass event reload skipped while a modal is open.');
+		      return;
+		    }
+
 		    window.__mrmMasterclassPluginEventsLoading = true;
 
 		    const loading = byId('mrm-masterclass-loading');
@@ -896,6 +901,31 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    }
 		  }
 
+		  function openModal(id) {
+		    const modal = byId(id);
+
+		    if (!modal) {
+		      return;
+		    }
+
+		    modal.classList.add('is-open');
+		    modal.setAttribute('aria-hidden', 'false');
+		    document.body.classList.add('mrm-masterclass-modal-open');
+		  }
+
+		  function anyMasterclassModalOpen() {
+		    return Boolean(document.querySelector('.modal.is-open'));
+		  }
+
+		  function closeAllMasterclassModals() {
+		    document.querySelectorAll('.modal.is-open').forEach(function (modal) {
+		      modal.classList.remove('is-open');
+		      modal.setAttribute('aria-hidden', 'true');
+		    });
+
+		    document.body.classList.remove('mrm-masterclass-modal-open');
+		  }
+
 		  function openRegistration(event) {
 		    const modal = byId('registrationModal');
 		    const title = byId('modalTitle');
@@ -941,8 +971,8 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      submitPayment.textContent = 'Submit Payment';
 		    }
 
-		    modal.classList.add('is-open');
-		    modal.setAttribute('aria-hidden', 'false');
+		    closeAllMasterclassModals();
+		    openModal('registrationModal');
 		  }
 
 		  function closeModal(id) {
@@ -954,6 +984,10 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		    modal.classList.remove('is-open');
 		    modal.setAttribute('aria-hidden', 'true');
+
+		    if (!anyMasterclassModalOpen()) {
+		      document.body.classList.remove('mrm-masterclass-modal-open');
+		    }
 		  }
 
 		  function checkoutData() {
@@ -1055,11 +1089,40 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      }
 
 		      const stripe = window.Stripe(payload.publishable_key);
+
 		      const elements = stripe.elements({
-		        clientSecret: payload.client_secret
+		        clientSecret: payload.client_secret,
+		        appearance: {
+		          theme: 'stripe',
+		          variables: {
+		            borderRadius: '14px',
+		            colorPrimary: '#2f2f2f'
+		          }
+		        }
 		      });
 
-		      const paymentElement = elements.create('payment');
+		      const paymentElement = elements.create('payment', {
+		        layout: {
+		          type: 'tabs',
+		          defaultCollapsed: false
+		        },
+		        paymentMethodOrder: ['card'],
+		        fields: {
+		          billingDetails: {
+		            name: 'never',
+		            email: 'never'
+		          }
+		        },
+		        terms: {
+		          card: 'never'
+		        },
+		        wallets: {
+		          applePay: 'never',
+		          googlePay: 'never',
+		          link: 'never'
+		        }
+		      });
+
 		      paymentElement.mount('#paymentElement');
 
 		      window.MRM_MASTERCLASS_PAYMENT_STATE = {
@@ -1096,6 +1159,35 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    }
 		  }
 
+		  function openSuccessPopup(finalData, state) {
+		    const successModal = byId('masterclassSuccessModal');
+		    const successMessage = byId('masterclassSuccessMessage');
+		    const accessLink = byId('masterclassSuccessAccessLink');
+
+		    const eventTitle = state && state.event && state.event.title ? state.event.title : 'your Masterclass';
+		    const gateUrl = finalData && finalData.gate_url ? finalData.gate_url : '';
+
+		    if (successMessage) {
+		      successMessage.textContent = 'Your registration for ' + eventTitle + ' is complete. Please check your email for your confirmation and protected access link.';
+		    }
+
+		    if (accessLink) {
+		      if (gateUrl) {
+		        accessLink.href = gateUrl;
+		        accessLink.style.display = 'inline-flex';
+		      } else {
+		        accessLink.href = '#';
+		        accessLink.style.display = 'none';
+		      }
+		    }
+
+		    closeAllMasterclassModals();
+
+		    if (successModal) {
+		      openModal('masterclassSuccessModal');
+		    }
+		  }
+
 		  function openFinalConfirmation() {
 		    const state = window.MRM_MASTERCLASS_PAYMENT_STATE;
 		    const message = byId('modalMessage');
@@ -1115,8 +1207,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    }
 
 		    if (finalModal) {
-		      finalModal.classList.add('is-open');
-		      finalModal.setAttribute('aria-hidden', 'false');
+		      openModal('finalConfirmationModal');
 		    } else {
 		      confirmFinalPayment();
 		    }
@@ -1142,6 +1233,14 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    try {
 		      const confirmResult = await state.stripe.confirmPayment({
 		        elements: state.elements,
+		        confirmParams: {
+		          payment_method_data: {
+		            billing_details: {
+		              name: state.checkout && state.checkout.name ? state.checkout.name : '',
+		              email: state.checkout && state.checkout.email ? state.checkout.email : ''
+		            }
+		          }
+		        },
 		        redirect: 'if_required'
 		      });
 
@@ -1172,14 +1271,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		        })
 		      });
 
-		      closeModal('finalConfirmationModal');
-
-		      if (message) {
-		        const gateUrl = finalResult.data && finalResult.data.gate_url ? finalResult.data.gate_url : '';
-		        message.innerHTML = gateUrl
-		          ? 'Registration complete. <a href="' + escapeHtml(gateUrl) + '">Open your Masterclass access page</a>.'
-		          : 'Registration complete. Please check your email for access details.';
-		      }
+		      openSuccessPopup(finalResult.data, state);
 
 		      const submitPayment = byId('submitPayment');
 		      if (submitPayment) {
@@ -1187,7 +1279,14 @@ class LowBrass_MRM_Masterclass_Plugin {
 		        submitPayment.textContent = 'Registration Complete';
 		      }
 
-		      window.setTimeout(loadEvents, 1000);
+		      window.MRM_MASTERCLASS_PAYMENT_STATE = null;
+		      window.MRM_SELECTED_MASTERCLASS_EVENT = null;
+
+		      window.setTimeout(function () {
+		        if (!anyMasterclassModalOpen()) {
+		          loadEvents();
+		        }
+		      }, 1000);
 		    } catch (error) {
 		      console.error('Masterclass final payment failed:', error);
 
@@ -1209,6 +1308,8 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    const closeFinalX = byId('closeFinalConfirmationX');
 		    const cancelFinal = byId('cancelFinalPayment');
 		    const confirmFinal = byId('confirmFinalPayment');
+		    const closeSuccessX = byId('closeMasterclassSuccessX');
+		    const closeSuccessButton = byId('closeMasterclassSuccessButton');
 
 		    if (closeX && !closeX.dataset.mrmBound) {
 		      closeX.dataset.mrmBound = '1';
@@ -1252,6 +1353,20 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      confirmFinal.addEventListener('click', function (event) {
 		        event.preventDefault();
 		        confirmFinalPayment();
+		      });
+		    }
+
+		    if (closeSuccessX && !closeSuccessX.dataset.mrmBound) {
+		      closeSuccessX.dataset.mrmBound = '1';
+		      closeSuccessX.addEventListener('click', function () {
+		        closeModal('masterclassSuccessModal');
+		      });
+		    }
+
+		    if (closeSuccessButton && !closeSuccessButton.dataset.mrmBound) {
+		      closeSuccessButton.dataset.mrmBound = '1';
+		      closeSuccessButton.addEventListener('click', function () {
+		        closeModal('masterclassSuccessModal');
 		      });
 		    }
 		  }
