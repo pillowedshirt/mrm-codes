@@ -382,6 +382,20 @@ input[type="checkbox"] {
   transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
 }
 
+.mrm-masterclass-event-card-highlight {
+  outline: 3px solid rgba(154, 106, 47, 0.42);
+  box-shadow:
+    0 0 0 7px rgba(154, 106, 47, 0.12),
+    0 22px 54px rgba(32, 23, 15, 0.16) !important;
+  transform: translateY(-2px);
+  transition: outline 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.mrm-masterclass-event-card:focus {
+  outline: 3px solid rgba(154, 106, 47, 0.42);
+  outline-offset: 4px;
+}
+
 .mrm-masterclass-event-card.mrm-masterclass-card-highlight {
   border-color: #9a6a2f;
   box-shadow: 0 0 0 4px rgba(154, 106, 47, 0.18), 0 16px 40px rgba(32, 23, 15, 0.14);
