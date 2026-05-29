@@ -6050,18 +6050,41 @@ public function rest_finalize_registration( $request ) {
 	}
 
 	public function rest_health() {
-		return rest_ensure_response(
+		$this->mrm_mc_debug_log(
+			'Masterclass REST health callback entered.',
 			array(
-				'ok'              => true,
-				'plugin'          => 'mrm-masterclass',
-				'mode'            => 'rest-only-frontend',
-				'db_version'      => get_option( 'mrm_masterclass_db_version', '' ),
-				'code_db_version' => self::DB_VERSION,
-				'tables_ready'    => $this->mrm_mc_required_tables_ready(),
-				'missing_tables'  => $this->mrm_mc_missing_tables(),
-				'timestamp'       => gmdate( 'c' ),
+				'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+				'method'      => isset( $_SERVER['REQUEST_METHOD'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) : '',
+				'namespace'   => self::REST_NAMESPACE,
 			)
 		);
+
+		$payload = array(
+			'ok'              => true,
+			'success'         => true,
+			'plugin'          => 'mrm-masterclass',
+			'mode'            => 'rest-only-frontend',
+			'namespace'       => self::REST_NAMESPACE,
+			'db_version'      => get_option( 'mrm_masterclass_db_version', '' ),
+			'code_db_version' => self::DB_VERSION,
+			'tables_ready'    => $this->mrm_mc_required_tables_ready(),
+			'missing_tables'  => $this->mrm_mc_missing_tables(),
+			'timestamp'       => gmdate( 'c' ),
+		);
+
+		$response = rest_ensure_response( $payload );
+		$response->header( 'Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0' );
+		$response->header( 'Pragma', 'no-cache' );
+
+		$this->mrm_mc_debug_log(
+			'Masterclass REST health callback completed.',
+			array(
+				'tables_ready'         => ! empty( $payload['tables_ready'] ) ? 'yes' : 'no',
+				'missing_tables_count' => is_array( $payload['missing_tables'] ) ? count( $payload['missing_tables'] ) : 0,
+			)
+		);
+
+		return $response;
 	}
 
 	public function rest_get_events( $request ) {
@@ -6106,6 +6129,15 @@ public function rest_finalize_registration( $request ) {
 			)
 		);
 
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST table checks starting.',
+			array(
+				'events_table'        => $events_table,
+				'presenters_table'    => $presenters_table,
+				'registrations_table' => $regs_table,
+			)
+		);
+
 		$events_table_exists     = $this->mrm_mc_table_exists( $events_table );
 		$presenters_table_exists = $this->mrm_mc_table_exists( $presenters_table );
 		$regs_table_exists       = $this->mrm_mc_table_exists( $regs_table );
@@ -6113,6 +6145,15 @@ public function rest_finalize_registration( $request ) {
 		$debug['events_table_exists']        = $events_table_exists ? true : false;
 		$debug['presenters_table_exists']    = $presenters_table_exists ? true : false;
 		$debug['registrations_table_exists'] = $regs_table_exists ? true : false;
+
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST table checks completed.',
+			array(
+				'events_table_exists'        => $events_table_exists ? 'yes' : 'no',
+				'presenters_table_exists'    => $presenters_table_exists ? 'yes' : 'no',
+				'registrations_table_exists' => $regs_table_exists ? 'yes' : 'no',
+			)
+		);
 
 		if ( ! $events_table_exists || ! $presenters_table_exists || ! $regs_table_exists ) {
 			$this->mrm_mc_debug_log(
@@ -6156,6 +6197,14 @@ public function rest_finalize_registration( $request ) {
 				$missing_event_columns[] = $required_column;
 			}
 		}
+
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST required column check completed.',
+			array(
+				'missing_event_columns_count' => count( $missing_event_columns ),
+				'missing_event_columns'       => ! empty( $missing_event_columns ) ? implode( ',', $missing_event_columns ) : '',
+			)
+		);
 
 		if ( ! empty( $missing_event_columns ) ) {
 			$this->mrm_mc_debug_log(
@@ -6207,6 +6256,13 @@ public function rest_finalize_registration( $request ) {
 
 		$debug['total_events'] = $total_events;
 
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST total event count completed.',
+			array(
+				'total_events' => $total_events,
+			)
+		);
+
 		$wpdb->last_error = '';
 
 		$total_scheduled = absint(
@@ -6236,6 +6292,13 @@ public function rest_finalize_registration( $request ) {
 		}
 
 		$debug['total_scheduled'] = $total_scheduled;
+
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST scheduled event count completed.',
+			array(
+				'total_scheduled' => $total_scheduled,
+			)
+		);
 
 		$wpdb->last_error = '';
 
@@ -6267,6 +6330,13 @@ public function rest_finalize_registration( $request ) {
 		}
 
 		$debug['total_open'] = $total_open;
+
+		$this->mrm_mc_debug_log(
+			'Public Masterclass events REST open registration count completed.',
+			array(
+				'total_open' => $total_open,
+			)
+		);
 
 		$wpdb->last_error = '';
 

@@ -827,10 +827,31 @@ body.mrm-masterclass-modal-open {
   cursor: not-allowed;
 }
 
-</style>
-</head>
 
-<body>
+.mrm-masterclass-live-diagnostic {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid rgba(159, 29, 29, 0.28);
+  border-radius: 14px;
+  background: rgba(255, 248, 220, 0.92);
+  color: #1f1f1f;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.mrm-masterclass-live-diagnostic strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.mrm-masterclass-live-diagnostic code {
+  font-size: 12px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+</style>
+  <div id="mrm-masterclass-root" class="mrm-masterclass-root" data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305">
   <main class="mc-wrap">
     <section class="mc-intro">
       <p class="mc-eyebrow">Low Brass Lessons</p>
@@ -880,11 +901,22 @@ body.mrm-masterclass-modal-open {
         </p>
       </div>
 
+      <div id="mrm-masterclass-live-diagnostic" class="mrm-masterclass-live-diagnostic" data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305">
+        <strong>Masterclass live diagnostic</strong>
+        <div>Frontend version: <code id="mrm-masterclass-diag-version">live-rest-diagnostic-2026-05-28-2305</code></div>
+        <div>Boot status: <code id="mrm-masterclass-diag-boot">not started</code></div>
+        <div>Health: <code id="mrm-masterclass-diag-health">not checked</code></div>
+        <div>Events: <code id="mrm-masterclass-diag-events">not checked</code></div>
+        <div>Event count: <code id="mrm-masterclass-diag-count">0</code></div>
+        <div>Last error: <code id="mrm-masterclass-diag-error">none</code></div>
+      </div>
+
       <div id="mrm-masterclass-error" class="mrm-masterclass-error" hidden></div>
-      <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses… <small data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2225">(diagnostic build)</small></div>
+      <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses… <small data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305">(diagnostic build live-rest-diagnostic-2026-05-28-2305)</small></div>
       <div id="mrm-masterclass-events" class="mrm-masterclass-events-grid"></div>
     </section>
   </main>
+  </div>
 
   <div id="registrationModal" class="modal" aria-hidden="true">
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
@@ -935,24 +967,82 @@ body.mrm-masterclass-modal-open {
   </div>
 
   <script>
-    const API_BASE = '/wp-json/mrm-masterclass/v1';
-    const MRM_MASTERCLASS_FRONTEND_VERSION = 'live-rest-diagnostic-2026-05-28-2225';
+    const MRM_MASTERCLASS_FRONTEND_VERSION = 'live-rest-diagnostic-2026-05-28-2305';
+    const MRM_MASTERCLASS_REST_NAMESPACE = 'mrm-masterclass/v1';
+
+    function mrmMasterclassOrigin() {
+      return window.location && window.location.origin
+        ? window.location.origin
+        : '';
+    }
+
+    function mrmMasterclassRestUrl(route) {
+      const cleanRoute = String(route || '').replace(/^\/+/, '');
+      const base = mrmMasterclassOrigin().replace(/\/+$/, '');
+      return `${base}/wp-json/${MRM_MASTERCLASS_REST_NAMESPACE}/${cleanRoute}`;
+    }
+
+    function mrmMasterclassRestUrlNoCache(route) {
+      const separator = String(route || '').indexOf('?') === -1 ? '?' : '&';
+      return `${mrmMasterclassRestUrl(route)}${separator}mrm_no_cache=${Date.now()}`;
+    }
+
+    function mrmMasterclassDiag(id, value) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.textContent = String(value);
+      }
+    }
+
+    function mrmMasterclassSetDiag(updates) {
+      if (!updates || typeof updates !== 'object') {
+        return;
+      }
+
+      Object.keys(updates).forEach(function (key) {
+        mrmMasterclassDiag(key, updates[key]);
+      });
+    }
+
     console.log('MRM Masterclass frontend version:', MRM_MASTERCLASS_FRONTEND_VERSION);
+    console.log('MRM Masterclass REST base:', mrmMasterclassRestUrl('health'));
 
     async function checkMasterclassApiHealth() {
       try {
-        const response = await fetch(API_BASE + '/health');
-        const data = await response.json();
+        const response = await fetch(mrmMasterclassRestUrlNoCache('health'), {
+          method: 'GET',
+          credentials: 'same-origin',
+          headers: {
+            'Accept': 'application/json',
+            'Cache-Control': 'no-cache'
+          },
+          cache: 'no-store'
+        });
 
-        if (!response.ok || !data.ok) {
+        const data = await response.json().catch(function () {
+          return null;
+        });
+
+        if (!response.ok || !data || !data.ok) {
           console.warn('Masterclass API health check failed:', data);
+          mrmMasterclassSetDiag({
+            'mrm-masterclass-diag-health': `failed HTTP ${response.status}`,
+            'mrm-masterclass-diag-error': data && data.message ? data.message : 'Health check failed'
+          });
           return false;
         }
 
         console.log('Masterclass API connected:', data);
+        mrmMasterclassSetDiag({
+          'mrm-masterclass-diag-health': `ok HTTP ${response.status}`
+        });
         return true;
       } catch (error) {
         console.warn('Masterclass API health check error:', error);
+        mrmMasterclassSetDiag({
+          'mrm-masterclass-diag-health': 'failed before response',
+          'mrm-masterclass-diag-error': error && error.message ? error.message : 'Health fetch failed'
+        });
         return false;
       }
     }
@@ -1096,7 +1186,9 @@ body.mrm-masterclass-modal-open {
               error_message: safeDetails.error_message || ''
             };
 
-            const endpoint = "/wp-json/mrm-masterclass/v1/popup-debug";
+            const endpoint = typeof mrmMasterclassRestUrl === 'function'
+              ? mrmMasterclassRestUrl('popup-debug')
+              : "/wp-json/mrm-masterclass/v1/popup-debug";
             const body = JSON.stringify(payload);
 
             if (navigator.sendBeacon) {
@@ -1357,7 +1449,23 @@ body.mrm-masterclass-modal-open {
     }
 
     async function loadMasterclassEvents() {
-  if (typeof mrmMasterclassPopupDebug === 'function') {
+  if (window.__mrmMasterclassEventsLoading) {
+    console.warn('Masterclass event load skipped because a load is already running.');
+    return window.MRM_MASTERCLASS_EVENTS || [];
+  }
+
+  window.__mrmMasterclassEventsLoading = true;
+
+  mrmMasterclassSetDiag({
+    'mrm-masterclass-diag-version': MRM_MASTERCLASS_FRONTEND_VERSION,
+    'mrm-masterclass-diag-boot': 'loading events',
+    'mrm-masterclass-diag-health': 'checking',
+    'mrm-masterclass-diag-events': 'not checked',
+    'mrm-masterclass-diag-error': 'none'
+  });
+
+  if (typeof mrmMasterclassPopupDebug === 'function' && !window.__mrmMasterclassEventsLoadStartedLogged) {
+    window.__mrmMasterclassEventsLoadStartedLogged = true;
     mrmMasterclassPopupDebug('events_load_started');
   }
 
@@ -1366,6 +1474,8 @@ body.mrm-masterclass-modal-open {
   const errorEl = mrmMasterclassErrorEl();
 
   if (!eventsEl) {
+    window.__mrmMasterclassEventsLoading = false;
+
     if (loadingEl) {
       loadingEl.hidden = true;
     }
@@ -1375,7 +1485,12 @@ body.mrm-masterclass-modal-open {
       errorEl.hidden = false;
     }
 
-    if (typeof window.renderMasterclassCalendar === "function") {
+    mrmMasterclassSetDiag({
+      'mrm-masterclass-diag-boot': 'failed',
+      'mrm-masterclass-diag-error': 'events container missing'
+    });
+
+    if (typeof window.renderMasterclassCalendar === 'function') {
       window.renderMasterclassCalendar([]);
     }
 
@@ -1384,7 +1499,7 @@ body.mrm-masterclass-modal-open {
 
   if (errorEl) {
     errorEl.hidden = true;
-    errorEl.textContent = "";
+    errorEl.textContent = '';
   }
 
   if (loadingEl) {
@@ -1396,38 +1511,59 @@ body.mrm-masterclass-modal-open {
   let data = null;
 
   try {
-    try {
-      const healthEndpoint = `${API_BASE}/health?mrm_no_cache=${Date.now()}`;
-      const healthResponse = await fetch(healthEndpoint, {
-        method: "GET",
-        credentials: "same-origin",
-        headers: {
-          "Accept": "application/json",
-          "Cache-Control": "no-cache"
-        },
-        cache: "no-store"
-      });
+    const healthEndpoint = mrmMasterclassRestUrlNoCache('health');
 
-      console.log("Masterclass health check result:", {
-        ok: healthResponse.ok,
-        status: healthResponse.status
-      });
-    } catch (healthError) {
-      console.error("Masterclass health check failed before events request:", healthError);
+    console.log('Masterclass health request started:', healthEndpoint);
+
+    const healthResponse = await fetch(healthEndpoint, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: {
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'
+      },
+      cache: 'no-store'
+    });
+
+    const healthText = await healthResponse.text();
+    let healthData = null;
+
+    try {
+      healthData = healthText ? JSON.parse(healthText) : null;
+    } catch (healthParseError) {
+      healthData = null;
     }
 
-    const endpoint = `${API_BASE}/events?mrm_no_cache=${Date.now()}`;
+    console.log('Masterclass health check result:', {
+      ok: healthResponse.ok,
+      status: healthResponse.status,
+      data: healthData
+    });
+
+    mrmMasterclassSetDiag({
+      'mrm-masterclass-diag-health': healthResponse.ok ? `ok HTTP ${healthResponse.status}` : `failed HTTP ${healthResponse.status}`
+    });
+
+    if (!healthResponse.ok) {
+      throw new Error(healthData && healthData.message ? healthData.message : `Masterclass health check failed with HTTP ${healthResponse.status}.`);
+    }
+
+    const endpoint = mrmMasterclassRestUrlNoCache('events');
 
     console.log('Masterclass events request started:', endpoint);
 
+    mrmMasterclassSetDiag({
+      'mrm-masterclass-diag-events': 'requesting'
+    });
+
     response = await fetch(endpoint, {
-      method: "GET",
-      credentials: "same-origin",
+      method: 'GET',
+      credentials: 'same-origin',
       headers: {
-        "Accept": "application/json",
-        "Cache-Control": "no-cache"
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'
       },
-      cache: "no-store"
+      cache: 'no-store'
     });
 
     rawText = await response.text();
@@ -1435,13 +1571,24 @@ body.mrm-masterclass-modal-open {
     try {
       data = rawText ? JSON.parse(rawText) : null;
     } catch (parseError) {
-      throw new Error("Masterclasses could not be loaded because the server returned an unreadable response.");
+      console.error('Masterclass events unreadable JSON:', {
+        status: response.status,
+        rawPreview: String(rawText || '').slice(0, 300)
+      });
+
+      throw new Error('Masterclasses could not be loaded because the server returned an unreadable response.');
     }
+
+    console.log('Masterclass events response received:', {
+      ok: response.ok,
+      status: response.status,
+      data: data
+    });
 
     if (!response.ok) {
       const message = data && data.message
         ? data.message
-        : "Masterclasses could not be loaded. Please try again later.";
+        : `Masterclasses could not be loaded. HTTP ${response.status}.`;
 
       console.error('Masterclass events endpoint failed:', {
         status: response.status,
@@ -1458,13 +1605,21 @@ body.mrm-masterclass-modal-open {
       loadingEl.hidden = true;
     }
 
+    mrmMasterclassSetDiag({
+      'mrm-masterclass-diag-boot': 'events loaded',
+      'mrm-masterclass-diag-events': `ok HTTP ${response.status}`,
+      'mrm-masterclass-diag-count': events.length,
+      'mrm-masterclass-diag-error': 'none'
+    });
+
     renderEvents(events);
 
-    if (typeof window.renderMasterclassCalendar === "function") {
+    if (typeof window.renderMasterclassCalendar === 'function') {
       window.renderMasterclassCalendar(events);
     }
 
-    if (typeof mrmMasterclassPopupDebug === 'function') {
+    if (typeof mrmMasterclassPopupDebug === 'function' && !window.__mrmMasterclassEventsLoadSucceededLogged) {
+      window.__mrmMasterclassEventsLoadSucceededLogged = true;
       mrmMasterclassPopupDebug('events_load_succeeded', {
         response_ok: true,
         http_status: response.status
@@ -1480,33 +1635,47 @@ body.mrm-masterclass-modal-open {
   } catch (error) {
     const latestLoadingEl = mrmMasterclassLoadingEl();
     const latestErrorEl = mrmMasterclassErrorEl();
+    const message = error && error.message
+      ? error.message
+      : 'Masterclasses could not be loaded. Please try again later.';
 
     if (latestLoadingEl) {
       latestLoadingEl.hidden = true;
     }
 
     if (latestErrorEl) {
-      latestErrorEl.textContent = error && error.message
-        ? error.message
-        : "Masterclasses could not be loaded. Please try again later.";
+      latestErrorEl.textContent = message;
       latestErrorEl.hidden = false;
     }
 
-    if (typeof window.renderMasterclassCalendar === "function") {
+    mrmMasterclassSetDiag({
+      'mrm-masterclass-diag-boot': 'failed',
+      'mrm-masterclass-diag-events': response ? `failed HTTP ${response.status}` : 'failed before response',
+      'mrm-masterclass-diag-error': message
+    });
+
+    if (typeof window.renderMasterclassCalendar === 'function') {
       window.renderMasterclassCalendar([]);
     }
 
-    if (typeof mrmMasterclassPopupDebug === 'function') {
+    if (typeof mrmMasterclassPopupDebug === 'function' && !window.__mrmMasterclassEventsLoadFailedLogged) {
+      window.__mrmMasterclassEventsLoadFailedLogged = true;
       mrmMasterclassPopupDebug('events_load_failed', {
         response_ok: response ? response.ok : false,
         http_status: response ? response.status : 0,
-        error_message: error && error.message ? error.message : 'events could not be loaded'
+        error_message: message
       });
     }
 
-    console.error('Masterclass events failed to load:', error);
+    if (String(message).toLowerCase().indexOf('failed to fetch') !== -1) {
+      console.error('Masterclass events failed to fetch. This usually means the browser did not reach WordPress REST, the request was blocked, the URL was wrong, or a network/cache/security layer interrupted it.', error);
+    } else {
+      console.error('Masterclass events failed to load:', error);
+    }
 
     throw error;
+  } finally {
+    window.__mrmMasterclassEventsLoading = false;
   }
 }
 
@@ -1536,11 +1705,18 @@ body.mrm-masterclass-modal-open {
 
   if (errorEl) {
     errorEl.hidden = true;
-    errorEl.textContent = "";
+    errorEl.textContent = '';
   }
+
+  mrmMasterclassSetDiag({
+    'mrm-masterclass-diag-count': '0'
+  });
 
   if (!eventsEl) {
     console.error('Masterclass empty state could not render because the events container is missing.');
+    mrmMasterclassSetDiag({
+      'mrm-masterclass-diag-error': 'events container missing during empty render'
+    });
     return;
   }
 
@@ -1552,7 +1728,7 @@ body.mrm-masterclass-modal-open {
     </div>
   `;
 
-  if (typeof window.renderMasterclassCalendar === "function") {
+  if (typeof window.renderMasterclassCalendar === 'function') {
     window.renderMasterclassCalendar([]);
   }
 }
@@ -1579,11 +1755,18 @@ body.mrm-masterclass-modal-open {
       }
 
       if (!Array.isArray(events) || events.length === 0) {
+        mrmMasterclassSetDiag({
+          'mrm-masterclass-diag-count': '0'
+        });
         renderEmpty();
         return;
       }
 
       eventsEl.innerHTML = "";
+
+      mrmMasterclassSetDiag({
+        'mrm-masterclass-diag-count': events.length
+      });
 
       events.forEach((event) => {
         const isPastMasterclass = mrmMasterclassIsPast(event);
@@ -1724,7 +1907,7 @@ body.mrm-masterclass-modal-open {
       });
 
       try {
-        const response = await fetch(API_BASE + '/event?id=' + encodeURIComponent(requestedEventId), {
+        const response = await fetch(mrmMasterclassRestUrl('event') + '?id=' + encodeURIComponent(requestedEventId), {
           method: 'GET',
           credentials: 'same-origin',
           headers: {
@@ -2201,13 +2384,16 @@ body.mrm-masterclass-modal-open {
      * been parsed.
      */
     window.mrmBootMasterclassPage = function () {
-  if (window.__mrmMasterclassBootComplete) {
-    return;
-  }
-
   if (window.__mrmMasterclassBootRunning) {
     return;
   }
+
+  window.__mrmMasterclassBootRunning = true;
+
+  mrmMasterclassSetDiag({
+    'mrm-masterclass-diag-version': MRM_MASTERCLASS_FRONTEND_VERSION,
+    'mrm-masterclass-diag-boot': 'boot started'
+  });
 
   let attempts = 0;
   const maxAttempts = 120;
@@ -2221,6 +2407,10 @@ body.mrm-masterclass-modal-open {
     const calendarEl = document.getElementById('mrm-masterclass-calendar');
 
     if ((!eventsEl || !calendarEl) && attempts < maxAttempts) {
+      mrmMasterclassSetDiag({
+        'mrm-masterclass-diag-boot': `waiting for containers attempt ${attempts}`,
+        'mrm-masterclass-diag-error': !eventsEl ? 'events container not found yet' : 'calendar container not found yet'
+      });
       window.setTimeout(runWhenDomIsReady, 100);
       return;
     }
@@ -2247,13 +2437,15 @@ body.mrm-masterclass-modal-open {
       return;
     }
 
-    window.__mrmMasterclassBootRunning = true;
-
     if (typeof mrmMasterclassPopupDebug === 'function') {
       mrmMasterclassPopupDebug('html_loaded');
     }
 
     try {
+      mrmMasterclassSetDiag({
+        'mrm-masterclass-diag-boot': 'containers found; loading events'
+      });
+
       const result = loadMasterclassEvents();
 
       if (result && typeof result.then === 'function') {
@@ -2580,10 +2772,21 @@ body.mrm-masterclass-modal-open {
     }
   }
 
-  bindCalendarControls();
+  function safeBindCalendarControls() {
+    try {
+      bindCalendarControls();
+    } catch (error) {
+      console.error('Masterclass calendar controls could not be bound:', error);
+      mrmMasterclassSetDiag({
+        'mrm-masterclass-diag-error': error && error.message ? error.message : 'calendar controls failed'
+      });
+    }
+  }
+
+  safeBindCalendarControls();
 
   window.renderMasterclassCalendar = function (events) {
-    bindCalendarControls();
+    safeBindCalendarControls();
 
     currentEvents = Array.isArray(events) ? events : [];
 
@@ -2595,7 +2798,14 @@ body.mrm-masterclass-modal-open {
       currentOffset = maxOffset;
     }
 
-    renderCalendarMonth();
+    try {
+      renderCalendarMonth();
+    } catch (error) {
+      console.error('Masterclass calendar rendering failed:', error);
+      mrmMasterclassSetDiag({
+        'mrm-masterclass-diag-error': error && error.message ? error.message : 'calendar render failed'
+      });
+    }
   };
 
   /*
