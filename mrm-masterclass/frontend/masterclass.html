@@ -914,6 +914,63 @@ body.mrm-masterclass-modal-open {
       <div id="mrm-masterclass-error" class="mrm-masterclass-error" hidden></div>
       <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses… <small data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305">(diagnostic build live-rest-diagnostic-2026-05-28-2305)</small></div>
       <div id="mrm-masterclass-events" class="mrm-masterclass-events-grid"></div>
+      <script id="mrm-masterclass-early-launch-probe">
+(function () {
+  var launchProbeVersion = 'early-launch-probe-2026-05-29';
+
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function setDiag(id, value) {
+    var el = byId(id);
+    if (el) {
+      el.textContent = String(value);
+    }
+  }
+
+  function setError(value) {
+    setDiag('mrm-masterclass-diag-error', value || 'none');
+  }
+
+  function callBoot(reason) {
+    if (window.__mrmMasterclassBootComplete) {
+      setDiag('mrm-masterclass-diag-boot', 'complete');
+      return true;
+    }
+
+    if (typeof window.mrmBootMasterclassPage === 'function') {
+      if (!window.__mrmMasterclassEarlyProbeBootCalled) {
+        window.__mrmMasterclassEarlyProbeBootCalled = true;
+        console.log('MRM Masterclass early launch probe calling boot:', {
+          version: launchProbeVersion,
+          reason: reason
+        });
+      }
+
+      setDiag('mrm-masterclass-diag-boot', 'early launch probe calling boot');
+      window.mrmBootMasterclassPage();
+      return true;
+    }
+
+    setDiag('mrm-masterclass-diag-boot', 'early script executed; waiting for boot function');
+    setError('early script ran; waiting for the main Masterclass boot function');
+    return false;
+  }
+
+  console.log('MRM Masterclass early launch probe executed:', launchProbeVersion);
+
+  setDiag('mrm-masterclass-diag-boot', 'early inline script executed');
+  setError('none');
+
+  window.__mrmMasterclassEarlyLaunchProbeExecuted = true;
+
+  window.setTimeout(function () { callBoot('early probe 250ms'); }, 250);
+  window.setTimeout(function () { callBoot('early probe 750ms'); }, 750);
+  window.setTimeout(function () { callBoot('early probe 1500ms'); }, 1500);
+  window.setTimeout(function () { callBoot('early probe 3000ms'); }, 3000);
+})();
+</script>
     </section>
   </main>
   </div>
@@ -1006,6 +1063,9 @@ body.mrm-masterclass-modal-open {
 
     console.log('MRM Masterclass frontend version:', MRM_MASTERCLASS_FRONTEND_VERSION);
     console.log('MRM Masterclass REST base:', mrmMasterclassRestUrl('health'));
+    window.MRM_MASTERCLASS_FRONTEND_VERSION = MRM_MASTERCLASS_FRONTEND_VERSION;
+    window.mrmMasterclassRestUrl = mrmMasterclassRestUrl;
+    window.mrmMasterclassRestUrlNoCache = mrmMasterclassRestUrlNoCache;
 
     async function checkMasterclassApiHealth() {
       try {
@@ -1975,7 +2035,7 @@ body.mrm-masterclass-modal-open {
         terms_accepted: checkoutData.termsAccepted
       };
 
-      const response = await fetch("/wp-json/mrm-masterclass/v1/create-payment-intent", {
+      const response = await fetch(mrmMasterclassRestUrl('create-payment-intent'), {
         method: "POST",
         credentials: "same-origin",
         headers: {
@@ -1999,7 +2059,7 @@ body.mrm-masterclass-modal-open {
     }
 
     async function finalizeMasterclassRegistration(payload) {
-      const response = await fetch("/wp-json/mrm-masterclass/v1/finalize-registration", {
+      const response = await fetch(mrmMasterclassRestUrl('finalize-registration'), {
         method: "POST",
         credentials: "same-origin",
         headers: {"Content-Type": "application/json","Accept": "application/json"},
@@ -2821,24 +2881,72 @@ body.mrm-masterclass-modal-open {
   }
 })();
 </script>
-<script>
+<script id="mrm-masterclass-final-launch-boot">
 (function () {
   let fallbackAttempts = 0;
-  const maxFallbackAttempts = 8;
+  const maxFallbackAttempts = 40;
+
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function setDiag(id, value) {
+    var el = byId(id);
+    if (el) {
+      el.textContent = String(value);
+    }
+  }
+
+  function showLaunchError(message) {
+    const loadingEl = byId('mrm-masterclass-loading');
+    const errorEl = byId('mrm-masterclass-error');
+
+    if (loadingEl) {
+      loadingEl.hidden = true;
+    }
+
+    if (errorEl) {
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+    }
+
+    setDiag('mrm-masterclass-diag-error', message);
+  }
 
   function bootWhenReady() {
     fallbackAttempts++;
 
-    if (typeof window.renderMasterclassCalendar === "function") {
-      window.renderMasterclassCalendar(window.MRM_MASTERCLASS_EVENTS || []);
+    if (window.__mrmMasterclassBootComplete) {
+      setDiag('mrm-masterclass-diag-boot', 'complete');
+      return;
     }
 
-    if (typeof window.mrmBootMasterclassPage === "function") {
-      window.mrmBootMasterclassPage();
+    setDiag('mrm-masterclass-diag-boot', 'final boot attempt ' + fallbackAttempts);
 
-      if (window.__mrmMasterclassBootComplete) {
+    if (typeof window.renderMasterclassCalendar === 'function') {
+      try {
+        window.renderMasterclassCalendar(window.MRM_MASTERCLASS_EVENTS || []);
+      } catch (calendarError) {
+        console.error('Masterclass final boot calendar render failed:', calendarError);
+        setDiag('mrm-masterclass-diag-error', calendarError && calendarError.message ? calendarError.message : 'calendar render failed');
+      }
+    }
+
+    if (typeof window.mrmBootMasterclassPage === 'function') {
+      try {
+        window.mrmBootMasterclassPage();
+      } catch (bootError) {
+        console.error('Masterclass final boot call failed:', bootError);
+        showLaunchError(bootError && bootError.message ? bootError.message : 'Masterclass boot failed.');
         return;
       }
+
+      if (window.__mrmMasterclassBootComplete) {
+        setDiag('mrm-masterclass-diag-boot', 'complete');
+        return;
+      }
+    } else {
+      setDiag('mrm-masterclass-diag-error', 'boot function not available yet');
     }
 
     if (fallbackAttempts < maxFallbackAttempts && !window.__mrmMasterclassBootComplete) {
@@ -2847,24 +2955,26 @@ body.mrm-masterclass-modal-open {
     }
 
     if (!window.__mrmMasterclassBootComplete) {
-      const loadingEl = document.getElementById('mrm-masterclass-loading');
-      const errorEl = document.getElementById('mrm-masterclass-error');
-
-      if (loadingEl) {
-        loadingEl.hidden = true;
+      if (typeof window.mrmBootMasterclassPage !== 'function') {
+        showLaunchError('Masterclass sessions could not start because the main Masterclass boot function is missing. The live page is not executing the main pasted JavaScript.');
+      } else {
+        showLaunchError('Masterclass sessions could not complete booting. Check /health, /events, the browser console, and masterclass-debug.log.');
       }
 
-      if (errorEl) {
-        errorEl.textContent = 'Masterclass sessions could not be loaded on the live page. Please check the browser console and the Masterclass debug log.';
-        errorEl.hidden = false;
-      }
-
-      console.error('Masterclass final boot fallback ended before the page completed booting.');
+      console.error('Masterclass final launch boot ended before completion.', {
+        hasBootFunction: typeof window.mrmBootMasterclassPage === 'function',
+        hasCalendarRenderer: typeof window.renderMasterclassCalendar === 'function',
+        bootComplete: Boolean(window.__mrmMasterclassBootComplete),
+        bootRunning: Boolean(window.__mrmMasterclassBootRunning),
+        attempts: fallbackAttempts
+      });
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bootWhenReady, { once: true });
+  console.log('MRM Masterclass final launch boot script loaded.');
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootWhenReady, { once: true });
   } else {
     window.setTimeout(bootWhenReady, 0);
   }

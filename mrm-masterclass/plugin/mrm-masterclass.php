@@ -192,6 +192,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'runtime_upgrade' );
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
+	$this->mrm_mc_add_action_if_method_exists( 'wp_footer', 'mrm_mc_print_frontend_boot_rescue', 9999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
@@ -265,6 +266,133 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 	$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely in REST-only frontend mode. No shortcode rendering is registered.' );
 }
+
+
+	private function mrm_mc_is_public_masterclass_page() {
+		if ( is_admin() || wp_doing_ajax() || wp_doing_cron() ) {
+			return false;
+		}
+
+		$request_uri = isset( $_SERVER['REQUEST_URI'] )
+			? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) )
+			: '';
+
+		if ( '' === $request_uri ) {
+			return false;
+		}
+
+		if ( false !== stripos( $request_uri, '/wp-json/' ) || false !== stripos( $request_uri, 'rest_route=' ) ) {
+			return false;
+		}
+
+		return false !== stripos( $request_uri, '/masterclass' );
+	}
+
+	public function mrm_mc_print_frontend_boot_rescue() {
+		if ( ! $this->mrm_mc_is_public_masterclass_page() ) {
+			return;
+		}
+
+		$this->mrm_mc_debug_log(
+			'Masterclass frontend footer rescue script printed.',
+			array(
+				'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
+			)
+		);
+		?>
+		<script id="mrm-masterclass-plugin-footer-rescue">
+		(function () {
+		  var rescueVersion = 'plugin-footer-rescue-2026-05-29-launch';
+
+		  function byId(id) {
+		    return document.getElementById(id);
+		  }
+
+		  function setDiag(id, value) {
+		    var el = byId(id);
+		    if (el) {
+		      el.textContent = String(value);
+		    }
+		  }
+
+		  function setError(message) {
+		    setDiag('mrm-masterclass-diag-error', message || 'none');
+
+		    var errorBox = byId('mrm-masterclass-error');
+		    if (errorBox && message) {
+		      errorBox.textContent = message;
+		      errorBox.hidden = false;
+		    }
+
+		    var loading = byId('mrm-masterclass-loading');
+		    if (loading && message) {
+		      loading.hidden = true;
+		    }
+		  }
+
+		  function shouldRunOnThisPage() {
+		    return Boolean(byId('mrm-masterclass-root') || byId('mrm-masterclass-events') || byId('mrm-masterclass-calendar'));
+		  }
+
+		  function rescueBoot(reason) {
+		    if (!shouldRunOnThisPage()) {
+		      return;
+		    }
+
+		    if (window.__mrmMasterclassBootComplete) {
+		      setDiag('mrm-masterclass-diag-boot', 'complete');
+		      return;
+		    }
+
+		    console.log('MRM Masterclass plugin footer rescue running:', {
+		      version: rescueVersion,
+		      reason: reason,
+		      hasBootFunction: typeof window.mrmBootMasterclassPage === 'function',
+		      bootComplete: Boolean(window.__mrmMasterclassBootComplete),
+		      bootRunning: Boolean(window.__mrmMasterclassBootRunning)
+		    });
+
+		    if (typeof window.mrmBootMasterclassPage === 'function') {
+		      setDiag('mrm-masterclass-diag-boot', 'plugin footer rescue calling boot');
+
+		      try {
+		        window.mrmBootMasterclassPage();
+		      } catch (error) {
+		        console.error('MRM Masterclass plugin footer rescue boot call failed:', error);
+		        setDiag('mrm-masterclass-diag-boot', 'plugin footer rescue boot failed');
+		        setError(error && error.message ? error.message : 'Plugin footer rescue boot failed.');
+		      }
+
+		      return;
+		    }
+
+		    setDiag('mrm-masterclass-diag-boot', 'plugin footer rescue active; boot function missing');
+		    setError('The Masterclass HTML loaded, but the main Masterclass JavaScript boot function is missing. The pasted inline scripts are being stripped, blocked, or stopped before launch.');
+		  }
+
+		  function scheduleRescue() {
+		    if (!shouldRunOnThisPage()) {
+		      return;
+		    }
+
+		    setDiag('mrm-masterclass-diag-error', 'plugin footer rescue loaded');
+
+		    window.setTimeout(function () { rescueBoot('timeout 0ms'); }, 0);
+		    window.setTimeout(function () { rescueBoot('timeout 500ms'); }, 500);
+		    window.setTimeout(function () { rescueBoot('timeout 1500ms'); }, 1500);
+		    window.setTimeout(function () { rescueBoot('timeout 3000ms'); }, 3000);
+		    window.setTimeout(function () { rescueBoot('timeout 6000ms'); }, 6000);
+		  }
+
+		  if (document.readyState === 'loading') {
+		    document.addEventListener('DOMContentLoaded', scheduleRescue, { once: true });
+		  } else {
+		    scheduleRescue();
+		  }
+		})();
+		</script>
+		<?php
+	}
 
 
 
@@ -5467,9 +5595,9 @@ public function rest_get_event( $request ) {
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
 			 WHERE e.id = %d
-			   AND e.status = 'scheduled'
-			   AND e.registration_open = 1
-			   AND e.status <> 'deleted'
+			   AND LOWER(TRIM(e.status)) = 'scheduled'
+			   AND CAST(e.registration_open AS UNSIGNED) = 1
+			   AND LOWER(TRIM(e.status)) <> 'deleted'
 			 LIMIT 1",
 			$event_id
 		)
