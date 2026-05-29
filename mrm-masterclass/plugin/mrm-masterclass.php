@@ -155,7 +155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.3.2';
+	const DB_VERSION = '1.3.4';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -242,6 +242,9 @@ class LowBrass_MRM_Masterclass_Plugin {
 		'mrm_masterclass_create_presenter_page'    => 'handle_create_presenter_page',
 		'mrm_masterclass_resend_confirmation'      => 'handle_resend_confirmation',
 		'mrm_masterclass_resend_reminder'          => 'handle_resend_reminder',
+		'mrm_masterclass_reset_access_session'     => 'handle_reset_access_session',
+		'mrm_masterclass_revoke_access_link'       => 'handle_revoke_access_link',
+		'mrm_masterclass_regenerate_access_link'   => 'handle_regenerate_access_link',
 		'mrm_masterclass_emergency_cancel_confirm' => 'handle_emergency_cancel_confirm',
 		'mrm_masterclass_emergency_cancel_execute' => 'handle_emergency_cancel_execute',
 		'mrm_masterclass_emergency_cancel_event'   => 'handle_emergency_cancel_event',
@@ -2006,6 +2009,7 @@ public function mrm_mc_render_critical_error_notice() {
 	$unmute_table       = $p . 'mrm_masterclass_unmute_requests';
 	$tax_table          = $p . 'mrm_masterclass_presenter_tax_profiles';
 	$ledger_table       = $p . 'mrm_masterclass_payment_ledger';
+	$access_log_table   = $p . 'mrm_masterclass_access_log';
 
 	dbDelta(
 		"CREATE TABLE {$presenters_table} (
@@ -2170,6 +2174,25 @@ public function mrm_mc_render_critical_error_notice() {
 		) {$c};"
 	);
 
+	dbDelta(
+		"CREATE TABLE {$access_log_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			registration_id BIGINT UNSIGNED NULL,
+			event_id BIGINT UNSIGNED NULL,
+			status VARCHAR(64) NOT NULL,
+			session_id_hash VARCHAR(64) NULL,
+			ip_hash VARCHAR(64) NULL,
+			user_agent_hash VARCHAR(64) NULL,
+			detail TEXT NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY registration_id (registration_id),
+			KEY event_id (event_id),
+			KEY status (status),
+			KEY created_at (created_at)
+		) {$c};"
+	);
+
 	$presenter_columns = $wpdb->get_col( "DESC {$presenters_table}", 0 );
 	if ( ! is_array( $presenter_columns ) ) {
 		$presenter_columns = array();
@@ -2259,6 +2282,14 @@ public function mrm_mc_render_critical_error_notice() {
 		'discount_cents'            => "ALTER TABLE {$registrations_table} ADD discount_cents INT NOT NULL DEFAULT 0",
 		'gate_token_hash'           => "ALTER TABLE {$registrations_table} ADD gate_token_hash VARCHAR(64) NULL",
 		'gate_url'                  => "ALTER TABLE {$registrations_table} ADD gate_url TEXT NULL",
+		'gate_token_revoked'        => "ALTER TABLE {$registrations_table} ADD gate_token_revoked TINYINT(1) NOT NULL DEFAULT 0",
+		'gate_token_regenerated_at' => "ALTER TABLE {$registrations_table} ADD gate_token_regenerated_at DATETIME NULL",
+		'access_session_id_hash'    => "ALTER TABLE {$registrations_table} ADD access_session_id_hash VARCHAR(64) NULL",
+		'access_session_started_at' => "ALTER TABLE {$registrations_table} ADD access_session_started_at DATETIME NULL",
+		'access_session_last_seen'  => "ALTER TABLE {$registrations_table} ADD access_session_last_seen DATETIME NULL",
+		'access_session_user_agent_hash' => "ALTER TABLE {$registrations_table} ADD access_session_user_agent_hash VARCHAR(64) NULL",
+		'access_session_ip_hash'    => "ALTER TABLE {$registrations_table} ADD access_session_ip_hash VARCHAR(64) NULL",
+		'access_last_status'        => "ALTER TABLE {$registrations_table} ADD access_last_status VARCHAR(64) NULL",
 		'terms_snapshot'            => "ALTER TABLE {$registrations_table} ADD terms_snapshot LONGTEXT NULL",
 		'confirmation_sent'         => "ALTER TABLE {$registrations_table} ADD confirmation_sent TINYINT(1) NOT NULL DEFAULT 0",
 		'confirmation_sent_at'      => "ALTER TABLE {$registrations_table} ADD confirmation_sent_at DATETIME NULL",
@@ -2521,7 +2552,10 @@ private function mrm_mc_gate_url_for_token( $token ) {
 }
 
 private function mrm_mc_make_gate_token_pair() {
-	$token = wp_generate_password( 48, false, false );
+	$bytes = function_exists( 'random_bytes' ) ? random_bytes( 32 ) : wp_generate_password( 64, false, false );
+	$token = is_string( $bytes ) && strlen( $bytes ) === 32
+		? rtrim( strtr( base64_encode( $bytes ), '+/', '-_' ), '=' )
+		: wp_generate_password( 64, false, false );
 
 	return array(
 		'token' => $token,
@@ -2699,8 +2733,8 @@ private function mrm_mc_confirmation_email_body( $event, $presenter, $registrati
 		. '<strong>Date/time:</strong> ' . esc_html( $event->start_time . ' ' . $event->timezone ) . '<br>'
 		. '<strong>Presenter:</strong> ' . esc_html( $presenter->name ?? 'To be announced' ) . '<br>'
 		. '<strong>Terms version:</strong> ' . esc_html( $terms_version ) . '</p>'
-		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open your protected access link</a></p>'
-		. '<p>Please save this email. Your protected access page will reveal the Google Meet link during the allowed access window.</p>';
+		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open your protected Masterclass access link</a></p>'
+		. '<p>Please save this email. Your protected access page will reveal the meeting link during the allowed access window.</p>';
 
 	return $this->mrm_mc_email_template( 'Masterclass Purchase Confirmation', $content );
 }
@@ -2712,8 +2746,8 @@ private function mrm_mc_reminder_email_body( $event, $presenter, $registration, 
 		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '<br>'
 		. '<strong>Date/time:</strong> ' . esc_html( $event->start_time . ' ' . $event->timezone ) . '<br>'
 		. '<strong>Presenter:</strong> ' . esc_html( $presenter->name ?? 'To be announced' ) . '</p>'
-		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open your protected access link</a></p>'
-		. '<p>Your protected access page will reveal the Google Meet link during the allowed access window. Please use the link above when it is time to join.</p>';
+		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open your protected Masterclass access link</a></p>'
+		. '<p>Your protected access page will reveal the meeting link during the allowed access window. Please use the link above when it is time to join.</p>';
 
 	return $this->mrm_mc_email_template( 'Masterclass Reminder', $content );
 }
@@ -2729,7 +2763,7 @@ private function mrm_mc_feedback_request_email_body( $event, $presenter, $regist
 		. '<p>You can mention what was helpful, what could be clearer, or what kinds of future Masterclasses you would like to see.</p>';
 
 	if ( '' !== $gate ) {
-		$content .= '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Review your Masterclass access page</a></p>';
+		$content .= '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Review your protected Masterclass access page</a></p>';
 	}
 
 	return $this->mrm_mc_email_template( 'How Was Your Masterclass?', $content );
@@ -2742,7 +2776,7 @@ private function mrm_mc_event_update_email_body( $event, $presenter, $registrati
 		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ) . '<br>'
 		. '<strong>Date/time:</strong> ' . esc_html( $event->start_time . ' ' . $event->timezone ) . '<br>'
 		. '<strong>Presenter:</strong> ' . esc_html( $presenter->name ?? 'To be announced' ) . '</p>'
-		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open protected access link</a></p>'
+		. '<p><a href="' . $gate . '" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;">Open your protected Masterclass access link</a></p>'
 		. '<p>If this update no longer works for you, reply to this email to request assistance with a refund.</p>';
 
 	return $this->mrm_mc_email_template( 'Masterclass Event Updated', $content );
@@ -5178,21 +5212,132 @@ public function handle_resend_confirmation() {
 
 	if ( $registration_id > 0 ) {
 		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_resend_confirmation_' . $registration_id );
-	}
+		$sent = $this->mrm_mc_send_confirmation_for_registration( $registration_id );
 
-	$this->mrm_mc_debug_log(
-		'Safe resend confirmation fallback reached. Resend is disabled in this stabilization patch.',
-		array(
-			'action'          => 'mrm_masterclass_resend_confirmation',
-			'registration_id' => $registration_id,
-		)
-	);
+		$this->mrm_mc_safe_admin_redirect(
+			'mrm-masterclass-registrations-payments',
+			array(
+				'mrm_mc_notice' => $sent ? 'confirmation_resent' : 'confirmation_resend_failed',
+			)
+		);
+	}
 
 	$this->mrm_mc_safe_admin_redirect(
 		'mrm-masterclass-registrations-payments',
-		array(
-			'mrm_mc_notice' => 'resend_confirmation_disabled_safe_patch',
-		)
+		array( 'mrm_mc_notice' => 'missing_registration_id' )
+	);
+}
+
+public function handle_reset_access_session() {
+	$this->must_admin();
+
+	$registration_id = absint( $_POST['registration_id'] ?? $_GET['registration_id'] ?? 0 );
+
+	if ( $registration_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_reset_access_session_' . $registration_id );
+		$this->mrm_mc_reset_access_session( $registration_id, 'admin_reset_session' );
+	}
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-registrations-payments',
+		array( 'mrm_mc_notice' => 'access_session_reset' )
+	);
+}
+
+public function handle_revoke_access_link() {
+	$this->must_admin();
+
+	global $wpdb;
+
+	$registration_id = absint( $_POST['registration_id'] ?? $_GET['registration_id'] ?? 0 );
+	$regs_table      = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( $registration_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_revoke_access_link_' . $registration_id );
+
+		$registration = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT id, event_id FROM {$regs_table} WHERE id = %d LIMIT 1",
+				$registration_id
+			)
+		);
+
+		$wpdb->update(
+			$regs_table,
+			$this->mrm_mc_filter_data_for_table(
+				$regs_table,
+				array(
+					'gate_token_revoked'        => 1,
+					'access_session_id_hash'    => null,
+					'access_session_started_at' => null,
+					'access_session_last_seen'  => null,
+					'access_last_status'        => 'admin_revoked',
+					'updated_at'                => $this->now(),
+				)
+			),
+			array( 'id' => $registration_id )
+		);
+
+		if ( $registration ) {
+			$this->mrm_mc_access_log_event( $registration_id, absint( $registration->event_id ), 'admin_revoked' );
+		}
+	}
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-registrations-payments',
+		array( 'mrm_mc_notice' => 'access_link_revoked' )
+	);
+}
+
+public function handle_regenerate_access_link() {
+	$this->must_admin();
+
+	global $wpdb;
+
+	$registration_id = absint( $_POST['registration_id'] ?? $_GET['registration_id'] ?? 0 );
+	$regs_table      = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( $registration_id > 0 ) {
+		$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_regenerate_access_link_' . $registration_id );
+
+		$registration = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT id, event_id FROM {$regs_table} WHERE id = %d LIMIT 1",
+				$registration_id
+			)
+		);
+
+		$gate = $this->mrm_mc_make_gate_token_pair();
+
+		$wpdb->update(
+			$regs_table,
+			$this->mrm_mc_filter_data_for_table(
+				$regs_table,
+				array(
+					'gate_token_hash'           => $gate['hash'],
+					'gate_url'                  => $gate['url'],
+					'gate_token_revoked'        => 0,
+					'gate_token_regenerated_at' => $this->now(),
+					'access_session_id_hash'    => null,
+					'access_session_started_at' => null,
+					'access_session_last_seen'  => null,
+					'access_last_status'        => 'admin_regenerated',
+					'updated_at'                => $this->now(),
+				)
+			),
+			array( 'id' => $registration_id )
+		);
+
+		if ( $registration ) {
+			$this->mrm_mc_access_log_event( $registration_id, absint( $registration->event_id ), 'admin_regenerated' );
+		}
+
+		$this->mrm_mc_send_confirmation_for_registration( $registration_id );
+	}
+
+	$this->mrm_mc_safe_admin_redirect(
+		'mrm-masterclass-registrations-payments',
+		array( 'mrm_mc_notice' => 'access_link_regenerated' )
 	);
 }
 
@@ -5328,7 +5473,7 @@ private function mrm_mc_resolve_gate_event_access_source( $event ) {
 		'source'       => 'local',
 		'start_ts'     => strtotime( $event->start_time . ' UTC' ),
 		'end_ts'       => strtotime( $event->end_time . ' UTC' ),
-		'meet_url'     => esc_url_raw( $event->google_meet_url ?? '' ),
+		'meet_url'     => esc_url_raw( $event->google_meet_url ?? $event->online_link ?? '' ),
 		'title'        => sanitize_text_field( $event->title ?? 'Masterclass' ),
 		'timezone'     => sanitize_text_field( $event->timezone ?? 'America/Phoenix' ),
 		'start_label'  => sanitize_text_field( ( $event->start_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ),
@@ -5398,6 +5543,202 @@ private function mrm_mc_resolve_gate_event_access_source( $event ) {
 	return $source;
 }
 
+private function mrm_mc_access_hash( $value ) {
+	$value = is_scalar( $value ) ? (string) $value : '';
+	return hash( 'sha256', $value );
+}
+
+private function mrm_mc_access_request_ip_hash() {
+	$ip = '';
+
+	if ( ! empty( $_SERVER['HTTP_CF_CONNECTING_IP'] ) ) {
+		$ip = sanitize_text_field( wp_unslash( $_SERVER['HTTP_CF_CONNECTING_IP'] ) );
+	} elseif ( ! empty( $_SERVER['REMOTE_ADDR'] ) ) {
+		$ip = sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) );
+	}
+
+	return '' !== $ip ? $this->mrm_mc_access_hash( $ip ) : '';
+}
+
+private function mrm_mc_access_user_agent_hash() {
+	$ua = ! empty( $_SERVER['HTTP_USER_AGENT'] )
+		? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) )
+		: '';
+
+	return '' !== $ua ? $this->mrm_mc_access_hash( $ua ) : '';
+}
+
+private function mrm_mc_access_cookie_name( $registration_id ) {
+	return 'mrm_mc_access_' . absint( $registration_id );
+}
+
+private function mrm_mc_get_or_create_access_session_id( $registration_id ) {
+	$cookie_name = $this->mrm_mc_access_cookie_name( $registration_id );
+	$session_id  = '';
+
+	if ( isset( $_COOKIE[ $cookie_name ] ) ) {
+		$session_id = sanitize_text_field( wp_unslash( $_COOKIE[ $cookie_name ] ) );
+	}
+
+	if ( strlen( $session_id ) < 24 || strlen( $session_id ) > 96 ) {
+		$session_id = wp_generate_password( 48, false, false );
+	}
+
+	setcookie(
+		$cookie_name,
+		$session_id,
+		array(
+			'expires'  => time() + DAY_IN_SECONDS,
+			'path'     => COOKIEPATH ? COOKIEPATH : '/',
+			'domain'   => COOKIE_DOMAIN,
+			'secure'   => is_ssl(),
+			'httponly' => true,
+			'samesite' => 'Lax',
+		)
+	);
+
+	$_COOKIE[ $cookie_name ] = $session_id;
+
+	return $session_id;
+}
+
+private function mrm_mc_access_log_event( $registration_id, $event_id, $status, $session_id_hash = '', $detail = '' ) {
+	global $wpdb;
+
+	$table = $this->t( 'mrm_masterclass_access_log' );
+
+	if ( ! $this->mrm_mc_table_exists( $table ) ) {
+		return false;
+	}
+
+	$wpdb->insert(
+		$table,
+		$this->mrm_mc_filter_data_for_table(
+			$table,
+			array(
+				'registration_id'       => $registration_id ? absint( $registration_id ) : null,
+				'event_id'              => $event_id ? absint( $event_id ) : null,
+				'status'                => sanitize_key( $status ),
+				'session_id_hash'       => $session_id_hash ? sanitize_text_field( $session_id_hash ) : null,
+				'ip_hash'               => $this->mrm_mc_access_request_ip_hash(),
+				'user_agent_hash'       => $this->mrm_mc_access_user_agent_hash(),
+				'detail'                => sanitize_text_field( $detail ),
+				'created_at'            => $this->now(),
+			)
+		)
+	);
+
+	return true;
+}
+
+private function mrm_mc_registration_token_is_revoked( $registration ) {
+	return ! empty( $registration->gate_token_revoked );
+}
+
+private function mrm_mc_access_session_is_stale( $registration ) {
+	if ( empty( $registration->access_session_last_seen ) ) {
+		return true;
+	}
+
+	$last_seen = strtotime( $registration->access_session_last_seen . ' UTC' );
+
+	if ( ! $last_seen ) {
+		return true;
+	}
+
+	return $last_seen < ( time() - ( 3 * MINUTE_IN_SECONDS ) );
+}
+
+private function mrm_mc_activate_access_session( $registration_id, $event_id, $session_id_hash, $status = 'approved' ) {
+	global $wpdb;
+
+	$regs_table = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( ! $this->mrm_mc_table_exists( $regs_table ) ) {
+		return false;
+	}
+
+	$wpdb->update(
+		$regs_table,
+		$this->mrm_mc_filter_data_for_table(
+			$regs_table,
+			array(
+				'access_session_id_hash'         => sanitize_text_field( $session_id_hash ),
+				'access_session_started_at'      => $this->now(),
+				'access_session_last_seen'       => $this->now(),
+				'access_session_user_agent_hash' => $this->mrm_mc_access_user_agent_hash(),
+				'access_session_ip_hash'         => $this->mrm_mc_access_request_ip_hash(),
+				'access_last_status'             => sanitize_key( $status ),
+				'updated_at'                     => $this->now(),
+			)
+		),
+		array( 'id' => absint( $registration_id ) )
+	);
+
+	$this->mrm_mc_access_log_event( $registration_id, $event_id, $status, $session_id_hash );
+
+	return true;
+}
+
+private function mrm_mc_reset_access_session( $registration_id, $status = 'session_reset' ) {
+	global $wpdb;
+
+	$regs_table = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( ! $this->mrm_mc_table_exists( $regs_table ) ) {
+		return false;
+	}
+
+	$registration = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT id, event_id FROM {$regs_table} WHERE id = %d LIMIT 1",
+			absint( $registration_id )
+		)
+	);
+
+	$wpdb->update(
+		$regs_table,
+		$this->mrm_mc_filter_data_for_table(
+			$regs_table,
+			array(
+				'access_session_id_hash'         => null,
+				'access_session_started_at'      => null,
+				'access_session_last_seen'       => null,
+				'access_session_user_agent_hash' => null,
+				'access_session_ip_hash'         => null,
+				'access_last_status'             => sanitize_key( $status ),
+				'updated_at'                     => $this->now(),
+			)
+		),
+		array( 'id' => absint( $registration_id ) )
+	);
+
+	if ( $registration ) {
+		$this->mrm_mc_access_log_event( $registration_id, absint( $registration->event_id ), $status, '' );
+	}
+
+	return true;
+}
+
+private function mrm_mc_get_registration_by_gate_token( $token ) {
+	global $wpdb;
+
+	$regs_table = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( ! $this->mrm_mc_table_exists( $regs_table ) ) {
+		return null;
+	}
+
+	$hash = hash( 'sha256', (string) $token );
+
+	return $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$regs_table} WHERE gate_token_hash = %s LIMIT 1",
+			$hash
+		)
+	);
+}
+
 public function mrm_mc_handle_gate_request() {
 	if ( empty( $_GET['mrm_masterclass_gate'] ) ) {
 		return;
@@ -5408,12 +5749,10 @@ public function mrm_mc_handle_gate_request() {
 	if ( '' === $token || strlen( $token ) < 20 ) {
 		$this->mrm_mc_render_gate_page(
 			'Invalid Masterclass Access Link',
-			'This access link is invalid. Please use the protected link from your confirmation email.'
+			'This access link is invalid. Please use the protected link from your Masterclass email.'
 		);
 		exit;
 	}
-
-	$hash = hash( 'sha256', $token );
 
 	global $wpdb;
 
@@ -5421,8 +5760,6 @@ public function mrm_mc_handle_gate_request() {
 	$events_table = $this->t( 'mrm_masterclass_events' );
 
 	if ( ! $this->mrm_mc_table_exists( $regs_table ) || ! $this->mrm_mc_table_exists( $events_table ) ) {
-		$this->mrm_mc_debug_log( 'Masterclass gate failed because required tables are missing.' );
-
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Access Temporarily Unavailable',
 			'This access link could not be checked right now. Please contact support if your Masterclass is starting soon.'
@@ -5430,28 +5767,33 @@ public function mrm_mc_handle_gate_request() {
 		exit;
 	}
 
-	$registration = $wpdb->get_row(
-		$wpdb->prepare(
-			"SELECT * FROM {$regs_table} WHERE gate_token_hash = %s LIMIT 1",
-			$hash
-		)
-	);
+	$registration = $this->mrm_mc_get_registration_by_gate_token( $token );
 
 	if ( ! $registration ) {
-		$this->mrm_mc_debug_log( 'Masterclass gate rejected unknown token hash.' );
+		$this->mrm_mc_access_log_event( null, null, 'invalid_token' );
 
 		$this->mrm_mc_render_gate_page(
 			'Invalid Masterclass Access Link',
-			'This access link was not found. Please use the protected link from your confirmation email.'
+			'This access link was not found. Please use the protected link from your Masterclass email.'
+		);
+		exit;
+	}
+
+	$registration_id = absint( $registration->id );
+	$event_id        = absint( $registration->event_id );
+
+	if ( $this->mrm_mc_registration_token_is_revoked( $registration ) ) {
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'revoked_token' );
+
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Access Link Revoked',
+			'This access link has been revoked. Please contact support if you believe this is an error.'
 		);
 		exit;
 	}
 
 	if ( 'paid' !== sanitize_key( $registration->payment_status ) ) {
-		$this->mrm_mc_debug_log(
-			'Masterclass gate rejected unpaid registration.',
-			array( 'registration_id' => absint( $registration->id ) )
-		);
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'unpaid_registration' );
 
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Access Not Available',
@@ -5463,11 +5805,13 @@ public function mrm_mc_handle_gate_request() {
 	$event = $wpdb->get_row(
 		$wpdb->prepare(
 			"SELECT * FROM {$events_table} WHERE id = %d LIMIT 1",
-			absint( $registration->event_id )
+			$event_id
 		)
 	);
 
 	if ( ! $event ) {
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'event_missing' );
+
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Event Not Found',
 			'This registration is valid, but the linked Masterclass event could not be found. Please contact support.'
@@ -5475,7 +5819,19 @@ public function mrm_mc_handle_gate_request() {
 		exit;
 	}
 
-	$access_source = $this->mrm_mc_resolve_gate_event_access_source( $event );
+	if ( method_exists( $this, 'mrm_mc_resolve_gate_event_access_source' ) ) {
+		$access_source = $this->mrm_mc_resolve_gate_event_access_source( $event );
+	} else {
+		$access_source = array(
+			'source'      => 'local',
+			'start_ts'    => strtotime( $event->start_time . ' UTC' ),
+			'end_ts'      => strtotime( $event->end_time . ' UTC' ),
+			'meet_url'    => esc_url_raw( $event->google_meet_url ?? $event->online_link ?? '' ),
+			'title'       => sanitize_text_field( $event->title ?? 'Masterclass' ),
+			'timezone'    => sanitize_text_field( $event->timezone ?? 'America/Phoenix' ),
+			'start_label' => sanitize_text_field( ( $event->start_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ),
+		);
+	}
 
 	$start_ts = absint( $access_source['start_ts'] ?? 0 );
 	$end_ts   = absint( $access_source['end_ts'] ?? 0 );
@@ -5485,13 +5841,7 @@ public function mrm_mc_handle_gate_request() {
 	$closes_ts = $end_ts + ( 10 * MINUTE_IN_SECONDS );
 
 	if ( $start_ts <= 0 || $end_ts <= $start_ts ) {
-		$this->mrm_mc_debug_log(
-			'Masterclass gate could not resolve a valid access window.',
-			array(
-				'event_id' => absint( $event->id ?? 0 ),
-				'source'   => sanitize_text_field( $access_source['source'] ?? 'unknown' ),
-			)
-		);
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'invalid_access_window' );
 
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Access Temporarily Unavailable',
@@ -5501,14 +5851,18 @@ public function mrm_mc_handle_gate_request() {
 	}
 
 	if ( $now_ts < $opens_ts ) {
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'too_early' );
+
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Access Opens Soon',
-			'Your access link is valid. The meeting link will appear 10 minutes before the Masterclass starts.<br><br><strong>Masterclass:</strong> ' . esc_html( $access_source['title'] ?? $event->title ) . '<br><strong>Starts:</strong> ' . esc_html( $access_source['start_label'] ?? ( $event->start_time . ' ' . $event->timezone ) )
+			'Your protected access link is valid. The meeting link will appear 10 minutes before the Masterclass starts.<br><br><strong>Masterclass:</strong> ' . esc_html( $access_source['title'] ?? $event->title ) . '<br><strong>Starts:</strong> ' . esc_html( $access_source['start_label'] ?? ( $event->start_time . ' ' . $event->timezone ) )
 		);
 		exit;
 	}
 
 	if ( $now_ts > $closes_ts ) {
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'window_closed' );
+
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Access Window Has Closed',
 			'This Masterclass access window has ended. Please contact support if you believe this is an error.'
@@ -5517,33 +5871,75 @@ public function mrm_mc_handle_gate_request() {
 	}
 
 	if ( empty( $access_source['meet_url'] ) ) {
-		$this->mrm_mc_debug_log(
-			'Masterclass gate opened but Meet link is unavailable.',
-			array(
-				'event_id'        => absint( $event->id ),
-				'registration_id' => absint( $registration->id ),
-			)
-		);
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'meeting_url_missing' );
 
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Link Not Available Yet',
-			'Your access window is open, but the Google Meet link is not available yet. Please contact support if the Masterclass is starting now.'
+			'Your access window is open, but the meeting link is not available yet. Please contact support if the Masterclass is starting now.'
 		);
 		exit;
 	}
+
+	$session_id   = $this->mrm_mc_get_or_create_access_session_id( $registration_id );
+	$session_hash = $this->mrm_mc_access_hash( $session_id );
+	$takeover     = ! empty( $_GET['mrm_takeover'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['mrm_takeover'] ) );
+
+	$has_other_active_session = (
+		! empty( $registration->access_session_id_hash )
+		&& ! hash_equals( (string) $registration->access_session_id_hash, (string) $session_hash )
+		&& ! $this->mrm_mc_access_session_is_stale( $registration )
+	);
+
+	if ( $has_other_active_session && ! $takeover ) {
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'session_conflict', $session_hash );
+
+		$continue_url = add_query_arg(
+			array(
+				'mrm_masterclass_gate' => rawurlencode( $token ),
+				'mrm_takeover'         => '1',
+			),
+			home_url( '/' )
+		);
+
+		$this->mrm_mc_render_gate_page(
+			'This Access Link Is Already Open',
+			'<p>This protected Masterclass link appears to be active on another device or browser.</p>'
+			. '<p>If that was you, you can safely continue on this device. This will end the previous session and let this device access the Masterclass.</p>'
+			. '<p><a class="mrm-masterclass-gate-button" href="' . esc_url( $continue_url ) . '">Continue on this device</a></p>'
+		);
+		exit;
+	}
+
+	if ( $takeover && $has_other_active_session ) {
+		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'session_takeover', $session_hash );
+	}
+
+	$this->mrm_mc_activate_access_session(
+		$registration_id,
+		$event_id,
+		$session_hash,
+		$takeover ? 'approved_after_takeover' : 'approved'
+	);
 
 	$meet_url = esc_url( $access_source['meet_url'] );
 
 	$this->mrm_mc_render_gate_page(
 		'Your Masterclass Access Is Open',
-		'<p>Your Masterclass meeting link is available now.</p>'
+		'<p>Your protected Masterclass access has been approved.</p>'
 		. '<p><strong>Masterclass:</strong> ' . esc_html( $access_source['title'] ?? $event->title ) . '</p>'
-		. '<p><a class="mrm-masterclass-gate-button" href="' . $meet_url . '" target="_blank" rel="noopener">Join Google Meet</a></p>'
+		. '<p><a class="mrm-masterclass-gate-button" href="' . $meet_url . '" target="_blank" rel="noopener">Join Masterclass</a></p>'
+		. '<p class="mrm-masterclass-gate-small">Please keep this page open while joining. This page confirms that your protected access session is active.</p>',
+		array(
+			'token'                 => $token,
+			'session_id'            => $session_id,
+			'enable_heartbeat'      => true,
+			'heartbeat_interval_ms' => 45000,
+		)
 	);
 	exit;
 }
 
-private function mrm_mc_render_gate_page( $title, $body_html ) {
+private function mrm_mc_render_gate_page( $title, $body_html, $context = array() ) {
 	status_header( 200 );
 	nocache_headers();
 
@@ -5564,6 +5960,8 @@ private function mrm_mc_render_gate_page( $title, $body_html ) {
 	echo 'h1{font-family:Georgia,serif;font-size:clamp(2rem,5vw,3.25rem);line-height:1;margin:0 0 18px;}';
 	echo 'p{line-height:1.65;color:#5f5242;}';
 	echo '.mrm-masterclass-gate-button{display:inline-block;background:#20170f;color:#fff!important;text-decoration:none;border-radius:999px;padding:14px 22px;font-weight:800;}';
+	echo '.mrm-masterclass-gate-small{font-size:.92rem;color:#7b6a56;}';
+	echo '.mrm-masterclass-gate-status{margin-top:18px;padding:12px 14px;border-radius:14px;background:#f7efe3;color:#5f5242;font-size:.92rem;}';
 	echo '</style>';
 	echo '</head>';
 	echo '<body>';
@@ -5572,8 +5970,38 @@ private function mrm_mc_render_gate_page( $title, $body_html ) {
 	echo '<div class="mrm-masterclass-gate-brand">Low Brass Lessons</div>';
 	echo '<h1>' . esc_html( $title ) . '</h1>';
 	echo '<div>' . $body_html . '</div>';
+
+	if ( ! empty( $context['enable_heartbeat'] ) ) {
+		echo '<div id="mrm-masterclass-gate-status" class="mrm-masterclass-gate-status">Protected access session active.</div>';
+	}
+
 	echo '</section>';
 	echo '</main>';
+
+	if ( ! empty( $context['enable_heartbeat'] ) ) {
+		$token       = sanitize_text_field( $context['token'] ?? '' );
+		$session_id  = sanitize_text_field( $context['session_id'] ?? '' );
+		$interval_ms = absint( $context['heartbeat_interval_ms'] ?? 45000 );
+
+		echo '<script>';
+		echo '(function(){';
+		echo 'var token=' . wp_json_encode( $token ) . ';';
+		echo 'var sessionId=' . wp_json_encode( $session_id ) . ';';
+		echo 'var intervalMs=' . wp_json_encode( max( 30000, min( 60000, $interval_ms ) ) ) . ';';
+		echo 'var statusEl=document.getElementById("mrm-masterclass-gate-status");';
+		echo 'function setStatus(msg){if(statusEl){statusEl.textContent=msg;}}';
+		echo 'function heartbeat(){';
+		echo 'fetch(' . wp_json_encode( home_url( '/wp-json/' . self::REST_NAMESPACE . '/gate-heartbeat' ) ) . ',{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({token:token,session_id:sessionId})})';
+		echo '.then(function(res){if(!res.ok){throw new Error("heartbeat failed");}return res.json();})';
+		echo '.then(function(){setStatus("Protected access session active.");})';
+		echo '.catch(function(){setStatus("This access session could not be refreshed. If you switched devices, reopen your protected access link.");});';
+		echo '}';
+		echo 'heartbeat();';
+		echo 'window.setInterval(heartbeat,intervalMs);';
+		echo '})();';
+		echo '</script>';
+	}
+
 	echo '</body>';
 	echo '</html>';
 }
@@ -6340,6 +6768,7 @@ public function render_events_page() {
 	}
 
 	echo '</tbody></table>';
+
 	echo '</div>';
 }
 
@@ -6384,7 +6813,7 @@ public function render_registrations_payments_page() {
 	echo '<p>This combines the masterclass registration list and payment ledger into one audit view, similar in purpose to the legal dispute ledger.</p>';
 
 	echo '<table class="widefat striped">';
-	echo '<thead><tr><th>ID</th><th>Event</th><th>Presenter</th><th>Customer</th><th>Email</th><th>PaymentIntent</th><th>Paid</th><th>Gross</th><th>Stripe Fee Est.</th><th>Net</th><th>Presenter Share</th><th>Platform Share</th><th>Ledger</th><th>Google Attendee</th><th>Created</th></tr></thead><tbody>';
+	echo '<thead><tr><th>ID</th><th>Event</th><th>Presenter</th><th>Customer</th><th>Email</th><th>PaymentIntent</th><th>Paid</th><th>Access</th><th>Gross</th><th>Stripe Fee Est.</th><th>Net</th><th>Presenter Share</th><th>Platform Share</th><th>Ledger</th><th>Google Attendee</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
 
 	if ( $rows ) {
 		foreach ( $rows as $row ) {
@@ -6396,6 +6825,20 @@ public function render_registrations_payments_page() {
 			echo '<td>' . esc_html( $row->email ) . '</td>';
 			echo '<td><code>' . esc_html( $row->stripe_payment_intent_id ?: '—' ) . '</code></td>';
 			echo '<td>' . esc_html( $row->payment_status ) . '</td>';
+
+			$access_status = ! empty( $row->gate_token_revoked )
+				? 'Revoked'
+				: ( ! empty( $row->access_session_last_seen ) ? 'Active/Recent' : 'Ready' );
+
+			if ( ! empty( $row->access_session_last_seen ) && $this->mrm_mc_access_session_is_stale( $row ) ) {
+				$access_status = 'Stale';
+			}
+
+			echo '<td>'
+				. esc_html( $access_status )
+				. '<br><small>Last: ' . esc_html( $row->access_session_last_seen ?: '—' ) . '</small>'
+				. '<br><small>Status: ' . esc_html( $row->access_last_status ?: '—' ) . '</small>'
+				. '</td>';
 			echo '<td>' . esc_html( $this->cents_to_dollars( $row->gross_cents ) ) . '</td>';
 			echo '<td>' . esc_html( $this->cents_to_dollars( $row->stripe_fee_cents ) ) . '</td>';
 			echo '<td>' . esc_html( $this->cents_to_dollars( $row->net_cents ) ) . '</td>';
@@ -6404,13 +6847,74 @@ public function render_registrations_payments_page() {
 			echo '<td>' . esc_html( $row->ledger_status ?: '—' ) . '</td>';
 			echo '<td>' . ( $row->google_attendee_added ? 'Yes' : 'No' ) . '</td>';
 			echo '<td>' . esc_html( $row->created_at ) . '</td>';
+
+			$reset_url = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_reset_access_session&registration_id=' . absint( $row->id ) ),
+				'mrm_masterclass_reset_access_session_' . absint( $row->id )
+			);
+
+			$revoke_url = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_revoke_access_link&registration_id=' . absint( $row->id ) ),
+				'mrm_masterclass_revoke_access_link_' . absint( $row->id )
+			);
+
+			$regenerate_url = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_regenerate_access_link&registration_id=' . absint( $row->id ) ),
+				'mrm_masterclass_regenerate_access_link_' . absint( $row->id )
+			);
+
+			$resend_url = wp_nonce_url(
+				admin_url( 'admin-post.php?action=mrm_masterclass_resend_confirmation&registration_id=' . absint( $row->id ) ),
+				'mrm_masterclass_resend_confirmation_' . absint( $row->id )
+			);
+
+			echo '<td>';
+			echo '<a class="button button-small" href="' . esc_url( $reset_url ) . '">Reset Session</a> ';
+			echo '<a class="button button-small" href="' . esc_url( $resend_url ) . '">Resend Access Email</a><br><br>';
+			echo '<a class="button button-small" href="' . esc_url( $regenerate_url ) . '">Regenerate Link</a> ';
+			echo '<a class="button button-small" href="' . esc_url( $revoke_url ) . '" onclick="return confirm(\'Revoke this protected access link?\');">Revoke Link</a>';
+			echo '</td>';
 			echo '</tr>';
 		}
 	} else {
-		echo '<tr><td colspan="15">No registrations or payments found yet.</td></tr>';
+		echo '<tr><td colspan="17">No registrations or payments found yet.</td></tr>';
 	}
 
 	echo '</tbody></table>';
+
+	$access_log_table = $this->t( 'mrm_masterclass_access_log' );
+
+	if ( $this->mrm_mc_table_exists( $access_log_table ) ) {
+		$activity_rows = $wpdb->get_results(
+			"SELECT a.*, r.email, e.title AS event_title
+			 FROM {$access_log_table} a
+			 LEFT JOIN {$regs_table} r ON r.id = a.registration_id
+			 LEFT JOIN {$events_table} e ON e.id = a.event_id
+			 ORDER BY a.created_at DESC
+			 LIMIT 50"
+		);
+
+		echo '<h2>Recent Protected Access Activity</h2>';
+		echo '<table class="widefat striped">';
+		echo '<thead><tr><th>Time</th><th>Event</th><th>Registration</th><th>Status</th><th>Detail</th></tr></thead><tbody>';
+
+		if ( $activity_rows ) {
+			foreach ( $activity_rows as $activity ) {
+				echo '<tr>';
+				echo '<td>' . esc_html( $activity->created_at ) . '</td>';
+				echo '<td>' . esc_html( $activity->event_title ?: '—' ) . '</td>';
+				echo '<td>' . esc_html( $activity->registration_id ?: '—' ) . '</td>';
+				echo '<td>' . esc_html( $activity->status ) . '</td>';
+				echo '<td>' . esc_html( $activity->detail ?: '—' ) . '</td>';
+				echo '</tr>';
+			}
+		} else {
+			echo '<tr><td colspan="5">No protected access activity yet.</td></tr>';
+		}
+
+		echo '</tbody></table>';
+	}
+
 	echo '</div>';
 }
 
@@ -6833,6 +7337,16 @@ public function render_email_log_page() {
 
 		register_rest_route(
 			self::REST_NAMESPACE,
+			'/gate-heartbeat',
+			array(
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( $this, 'rest_gate_heartbeat' ),
+				'permission_callback' => '__return_true',
+			)
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
 			'/health',
 			array(
 				'methods'             => 'GET',
@@ -6845,7 +7359,7 @@ public function render_email_log_page() {
 			'Masterclass REST routes registration completed.',
 			array(
 				'namespace' => self::REST_NAMESPACE,
-				'routes'    => 'events,event,apply-promo,create-payment-intent,verify-payment-intent,finalize-registration,popup-debug,health',
+				'routes'    => 'events,event,apply-promo,create-payment-intent,verify-payment-intent,finalize-registration,popup-debug,gate-heartbeat,health',
 			)
 		);
 	}
@@ -7408,7 +7922,7 @@ public function rest_finalize_registration( $request ) {
 	$presenter_cut = absint( $share_calc['presenter_share_cents'] );
 	$platform_cut  = absint( $share_calc['platform_share_cents'] );
 	$terms_snapshot = wp_json_encode( $terms );
-	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'created_at'=>$this->now(),'updated_at'=>$this->now());
+	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
 	$registration_data = $this->mrm_mc_filter_data_for_table( $regs_table, $registration_data );
 	$inserted = $wpdb->insert( $regs_table, $registration_data );
 	if ( false === $inserted ) { return new WP_Error('mrm_masterclass_registration_insert_failed','Payment succeeded, but registration could not be saved. Please contact support.',array('status'=>500)); }
@@ -7523,6 +8037,77 @@ public function rest_finalize_registration( $request ) {
 			array(
 				'success' => true,
 			)
+		);
+	}
+
+	public function rest_gate_heartbeat( WP_REST_Request $request ) {
+		global $wpdb;
+
+		$params     = $request->get_json_params();
+		$token      = sanitize_text_field( $params['token'] ?? '' );
+		$session_id = sanitize_text_field( $params['session_id'] ?? '' );
+
+		if ( '' === $token || strlen( $token ) < 20 || '' === $session_id || strlen( $session_id ) < 20 ) {
+			return new WP_Error(
+				'mrm_masterclass_heartbeat_invalid',
+				'The access heartbeat could not be verified.',
+				array( 'status' => 400 )
+			);
+		}
+
+		$registration = $this->mrm_mc_get_registration_by_gate_token( $token );
+
+		if ( ! $registration ) {
+			return new WP_Error(
+				'mrm_masterclass_heartbeat_unknown_token',
+				'This access link could not be verified.',
+				array( 'status' => 404 )
+			);
+		}
+
+		if ( $this->mrm_mc_registration_token_is_revoked( $registration ) ) {
+			return new WP_Error(
+				'mrm_masterclass_heartbeat_revoked',
+				'This access link has been revoked.',
+				array( 'status' => 403 )
+			);
+		}
+
+		$session_hash = $this->mrm_mc_access_hash( $session_id );
+
+		if (
+			! empty( $registration->access_session_id_hash )
+			&& hash_equals( (string) $registration->access_session_id_hash, (string) $session_hash )
+		) {
+			$regs_table = $this->t( 'mrm_masterclass_registrations' );
+
+			$wpdb->update(
+				$regs_table,
+				$this->mrm_mc_filter_data_for_table(
+					$regs_table,
+					array(
+						'access_session_last_seen'       => $this->now(),
+						'access_session_user_agent_hash' => $this->mrm_mc_access_user_agent_hash(),
+						'access_session_ip_hash'         => $this->mrm_mc_access_request_ip_hash(),
+						'access_last_status'             => 'heartbeat',
+						'updated_at'                     => $this->now(),
+					)
+				),
+				array( 'id' => absint( $registration->id ) )
+			);
+
+			return rest_ensure_response(
+				array(
+					'success' => true,
+					'status'  => 'heartbeat_accepted',
+				)
+			);
+		}
+
+		return new WP_Error(
+			'mrm_masterclass_heartbeat_session_mismatch',
+			'This access session is no longer active.',
+			array( 'status' => 409 )
 		);
 	}
 
