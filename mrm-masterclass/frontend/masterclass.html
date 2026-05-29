@@ -348,9 +348,14 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-error {
-  background: #fff1f0;
-  border: 1px solid #e6a8a1;
-  color: #7d1f17;
+  margin: 18px 0;
+  padding: 16px 18px;
+  border: 1px solid rgba(159, 29, 29, 0.22);
+  border-radius: 16px;
+  background: #fff8f6;
+  color: #7a1f1f;
+  font-weight: 700;
+  line-height: 1.5;
 }
 
 .mrm-masterclass-empty {
@@ -471,54 +476,53 @@ input[type="checkbox"] {
 .mrm-masterclass-calendar-section {
   max-width: 1180px;
   margin: 0 auto;
-  padding: 56px 20px 20px;
+  padding: 56px 20px 22px;
 }
 
 .mrm-masterclass-calendar-shell {
-  background: #fff;
+  background: #fffdf9;
   border: 1px solid #dccab0;
   border-radius: 28px;
-  box-shadow: 0 16px 40px rgba(32, 23, 15, 0.1);
+  box-shadow: 0 18px 46px rgba(32, 23, 15, 0.11);
   overflow: hidden;
 }
 
 .mrm-masterclass-calendar-toolbar {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) 72px;
+  grid-template-columns: 56px minmax(0, 1fr) 56px;
   align-items: center;
   gap: 14px;
-  padding: 18px;
-  background: #20170f;
+  padding: 18px 20px;
+  background: linear-gradient(135deg, #20170f 0%, #3a2a19 100%);
   color: #fff;
 }
 
 .mrm-masterclass-calendar-heading {
   text-align: center;
+  min-width: 0;
 }
 
 .mrm-masterclass-calendar-heading h3 {
   margin: 0;
   color: #fff;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(1.65rem, 3vw, 2.55rem);
+  font-size: clamp(1.55rem, 3vw, 2.25rem);
   line-height: 1.05;
+  letter-spacing: -0.02em;
 }
 
-.mrm-masterclass-calendar-heading p {
-  margin: 8px 0 0;
-  color: rgba(255, 255, 255, 0.78);
-  font-size: 0.95rem;
-  line-height: 1.45;
+#mrm-masterclass-calendar-range-note {
+  display: none !important;
 }
 
 .mrm-masterclass-calendar-nav {
-  width: 54px;
-  height: 54px;
+  width: 46px;
+  height: 46px;
   border: 1px solid rgba(255, 255, 255, 0.32);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
-  font-size: 2.1rem;
+  font-size: 1.9rem;
   line-height: 1;
   cursor: pointer;
   display: inline-flex;
@@ -542,10 +546,11 @@ input[type="checkbox"] {
 .mrm-masterclass-calendar {
   display: block;
   padding: 0;
+  background: #fffdf9;
 }
 
 .mrm-masterclass-month {
-  background: #fff;
+  background: #fffdf9;
   border: 0;
   border-radius: 0;
   box-shadow: none;
@@ -553,7 +558,7 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-month-title {
-  display: none;
+  display: none !important;
 }
 
 .mrm-masterclass-weekdays,
@@ -563,19 +568,24 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-weekday {
-  padding: 14px 6px;
+  min-height: 42px;
+  padding: 13px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   font-weight: 900;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: #7a6b58;
-  background: #f8f2e9;
+  color: #6d5c45;
+  background: #f7efe3;
   border-bottom: 1px solid #eadcc8;
 }
 
 .mrm-masterclass-day {
-  min-height: 150px;
+  position: relative;
+  min-height: 132px;
   padding: 10px;
   border-right: 1px solid #eee2d1;
   border-bottom: 1px solid #eee2d1;
@@ -588,12 +598,12 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-day.is-empty {
-  background: #faf6ef;
+  background: #faf5ec;
 }
 
 .mrm-masterclass-day.is-today {
-  background: #fff8ed;
-  box-shadow: inset 0 0 0 2px rgba(154, 106, 47, 0.22);
+  background: #fff7e8;
+  box-shadow: inset 0 0 0 2px rgba(154, 106, 47, 0.25);
 }
 
 .mrm-masterclass-day-number {
@@ -625,8 +635,8 @@ input[type="checkbox"] {
   color: #fff;
   cursor: pointer;
   text-align: left;
-  font-size: 0.82rem;
-  line-height: 1.25;
+  font-size: 0.78rem;
+  line-height: 1.22;
   font-weight: 800;
   overflow-wrap: anywhere;
   transition: background 160ms ease, transform 160ms ease;
@@ -642,95 +652,101 @@ input[type="checkbox"] {
   display: block;
   margin-top: 3px;
   opacity: 0.92;
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 700;
 }
 
 .mrm-masterclass-calendar-empty-month {
-  padding: 28px;
+  padding: 24px;
   text-align: center;
   color: #6b5f4f;
   background: #fffdf9;
   border-top: 1px solid #eee2d1;
 }
 
-@media (max-width: 900px) {
-  .mrm-masterclass-day {
-    min-height: 125px;
-    padding: 8px;
-  }
-
-  .mrm-masterclass-calendar-event {
-    font-size: 0.76rem;
-    padding: 7px 8px;
-  }
-}
-
 @media (max-width: 720px) {
   .mrm-masterclass-calendar-section {
-    padding: 42px 14px 16px;
+    padding: 42px 12px 18px;
+  }
+
+  .mrm-masterclass-calendar-shell {
+    border-radius: 22px;
   }
 
   .mrm-masterclass-calendar-toolbar {
-    grid-template-columns: 48px minmax(0, 1fr) 48px;
+    grid-template-columns: 42px minmax(0, 1fr) 42px;
     gap: 8px;
     padding: 14px 10px;
   }
 
   .mrm-masterclass-calendar-nav {
-    width: 42px;
-    height: 42px;
-    font-size: 1.75rem;
+    width: 38px;
+    height: 38px;
+    font-size: 1.55rem;
   }
 
   .mrm-masterclass-calendar-heading h3 {
-    font-size: 1.45rem;
-  }
-
-  .mrm-masterclass-calendar-heading p {
-    font-size: 0.82rem;
+    font-size: clamp(1.22rem, 5vw, 1.55rem);
   }
 
   .mrm-masterclass-weekday {
-    padding: 10px 2px;
-    font-size: 0.66rem;
+    min-height: 34px;
+    padding: 9px 2px;
+    font-size: 0.58rem;
+    letter-spacing: 0.04em;
   }
 
   .mrm-masterclass-day {
-    min-height: 96px;
+    min-height: 82px;
     padding: 5px;
   }
 
   .mrm-masterclass-day-number {
-    min-width: 23px;
-    height: 23px;
+    min-width: 22px;
+    height: 22px;
     margin-bottom: 4px;
-    font-size: 0.76rem;
+    font-size: 0.72rem;
   }
 
   .mrm-masterclass-calendar-event {
     padding: 5px 6px;
     border-radius: 8px;
-    font-size: 0.68rem;
-    line-height: 1.18;
-  }
-
-  .mrm-masterclass-calendar-event-time {
-    font-size: 0.63rem;
-  }
-}
-
-@media (max-width: 440px) {
-  .mrm-masterclass-day {
-    min-height: 82px;
-  }
-
-  .mrm-masterclass-calendar-event {
     font-size: 0.62rem;
+    line-height: 1.15;
   }
 
   .mrm-masterclass-calendar-event-time {
     display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .mrm-masterclass-calendar-section {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .mrm-masterclass-calendar-toolbar {
+    grid-template-columns: 36px minmax(0, 1fr) 36px;
+  }
+
+  .mrm-masterclass-calendar-nav {
+    width: 34px;
+    height: 34px;
+  }
+
+  .mrm-masterclass-day {
+    min-height: 72px;
+    padding: 4px;
+  }
+
+  .mrm-masterclass-weekday {
+    font-size: 0.54rem;
+  }
+
+  .mrm-masterclass-calendar-event {
+    font-size: 0.56rem;
+    padding: 4px 5px;
   }
 }
 
@@ -829,25 +845,7 @@ body.mrm-masterclass-modal-open {
 
 
 .mrm-masterclass-live-diagnostic {
-  margin: 0 0 18px;
-  padding: 14px 16px;
-  border: 1px solid rgba(159, 29, 29, 0.28);
-  border-radius: 14px;
-  background: rgba(255, 248, 220, 0.92);
-  color: #1f1f1f;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.mrm-masterclass-live-diagnostic strong {
-  display: block;
-  margin-bottom: 6px;
-}
-
-.mrm-masterclass-live-diagnostic code {
-  font-size: 12px;
-  white-space: normal;
-  word-break: break-word;
+  display: none !important;
 }
 
 </style>
@@ -867,9 +865,6 @@ body.mrm-masterclass-modal-open {
       <div class="mrm-masterclass-section-head">
         <p class="mrm-masterclass-eyebrow">Calendar View</p>
         <h2>Masterclass Calendar</h2>
-        <p>
-          Browse upcoming Masterclasses one month at a time. Use the arrows to look ahead up to one year, then click a listed Masterclass to jump to its registration card.
-        </p>
       </div>
 
       <div class="mrm-masterclass-calendar-shell">
@@ -880,7 +875,7 @@ body.mrm-masterclass-modal-open {
 
           <div class="mrm-masterclass-calendar-heading">
             <h3 id="mrm-masterclass-calendar-current-month">Current Month</h3>
-            <p id="mrm-masterclass-calendar-range-note">Showing the current month. You can browse up to one year ahead.</p>
+            <p id="mrm-masterclass-calendar-range-note" hidden aria-hidden="true"></p>
           </div>
 
           <button type="button" id="mrm-masterclass-calendar-next" class="mrm-masterclass-calendar-nav" aria-label="Next month">
@@ -901,7 +896,7 @@ body.mrm-masterclass-modal-open {
         </p>
       </div>
 
-      <div id="mrm-masterclass-live-diagnostic" class="mrm-masterclass-live-diagnostic" data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305">
+      <div id="mrm-masterclass-live-diagnostic" class="mrm-masterclass-live-diagnostic" data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305" hidden aria-hidden="true">
         <strong>Masterclass live diagnostic</strong>
         <div>Frontend version: <code id="mrm-masterclass-diag-version">live-rest-diagnostic-2026-05-28-2305</code></div>
         <div>Boot status: <code id="mrm-masterclass-diag-boot">not started</code></div>
@@ -912,7 +907,7 @@ body.mrm-masterclass-modal-open {
       </div>
 
       <div id="mrm-masterclass-error" class="mrm-masterclass-error" hidden></div>
-      <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses… <small data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305">(diagnostic build live-rest-diagnostic-2026-05-28-2305)</small></div>
+      <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses…</div>
       <div id="mrm-masterclass-events" class="mrm-masterclass-events-grid"></div>
       <script id="mrm-masterclass-early-launch-probe">
 (function () {

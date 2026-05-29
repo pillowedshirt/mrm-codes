@@ -307,6 +307,9 @@ class LowBrass_MRM_Masterclass_Plugin {
 		  const LAUNCH_VERSION = 'plugin-launch-controller-2026-05-29-public-v1';
 		  const REST_NAMESPACE = 'mrm-masterclass/v1';
 
+		  let mrmCalendarDate = new Date();
+		  let mrmLoadedEvents = [];
+
 		  if (window.__mrmMasterclassPluginLaunchControllerLoaded) {
 		    return;
 		  }
@@ -476,20 +479,40 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		  function renderCalendar(events) {
 		    const calendar = byId('mrm-masterclass-calendar');
+		    const monthTitle = byId('mrm-masterclass-calendar-current-month');
+		    const rangeNote = byId('mrm-masterclass-calendar-range-note');
 
 		    if (!calendar) {
 		      return;
 		    }
 
 		    const safeEvents = Array.isArray(events) ? events : [];
-		    const now = new Date();
-		    const year = now.getFullYear();
-		    const month = now.getMonth();
+		    const displayDate = mrmCalendarDate instanceof Date && !Number.isNaN(mrmCalendarDate.getTime())
+		      ? new Date(mrmCalendarDate.getFullYear(), mrmCalendarDate.getMonth(), 1)
+		      : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+
+		    const year = displayDate.getFullYear();
+		    const month = displayDate.getMonth();
 		    const first = new Date(year, month, 1);
 		    const last = new Date(year, month + 1, 0);
 		    const startDay = first.getDay();
 		    const daysInMonth = last.getDate();
-		    const monthLabel = now.toLocaleString(undefined, { month: 'long', year: 'numeric' });
+		    const today = new Date();
+
+		    const monthLabel = displayDate.toLocaleString(undefined, {
+		      month: 'long',
+		      year: 'numeric'
+		    });
+
+		    if (monthTitle) {
+		      monthTitle.textContent = monthLabel;
+		    }
+
+		    if (rangeNote) {
+		      rangeNote.textContent = '';
+		      rangeNote.hidden = true;
+		      rangeNote.setAttribute('aria-hidden', 'true');
+		    }
 
 		    const eventsByDay = {};
 
@@ -513,26 +536,52 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      eventsByDay[day].push(event);
 		    });
 
-		    let html = '';
-		    html += '<div class="mrm-masterclass-calendar-shell">';
-		    html += '<div class="mrm-masterclass-calendar-header"><strong>' + monthLabel + '</strong></div>';
-		    html += '<div class="mrm-masterclass-calendar-grid">';
-		    ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(function (dayName) {
-		      html += '<div class="mrm-masterclass-calendar-weekday">' + dayName + '</div>';
+		    Object.keys(eventsByDay).forEach(function (day) {
+		      eventsByDay[day].sort(function (a, b) {
+		        return new Date(eventStart(a)).getTime() - new Date(eventStart(b)).getTime();
+		      });
 		    });
 
+		    let html = '';
+		    html += '<div class="mrm-masterclass-month">';
+		    html += '<div class="mrm-masterclass-weekdays">';
+		    ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(function (dayName) {
+		      html += '<div class="mrm-masterclass-weekday">' + dayName + '</div>';
+		    });
+		    html += '</div>';
+
+		    html += '<div class="mrm-masterclass-days">';
+
 		    for (let i = 0; i < startDay; i++) {
-		      html += '<div class="mrm-masterclass-calendar-day mrm-masterclass-calendar-empty"></div>';
+		      html += '<div class="mrm-masterclass-day is-empty" aria-hidden="true"></div>';
 		    }
 
 		    for (let day = 1; day <= daysInMonth; day++) {
 		      const dayEvents = eventsByDay[day] || [];
-		      html += '<div class="mrm-masterclass-calendar-day">';
-		      html += '<div class="mrm-masterclass-calendar-date">' + day + '</div>';
+		      const isToday =
+		        today.getFullYear() === year &&
+		        today.getMonth() === month &&
+		        today.getDate() === day;
+
+		      html += '<div class="mrm-masterclass-day' + (isToday ? ' is-today' : '') + '">';
+		      html += '<div class="mrm-masterclass-day-number">' + day + '</div>';
 
 		      dayEvents.forEach(function (event) {
-		        html += '<button type="button" class="mrm-masterclass-calendar-event" data-event-id="' + String(event.id) + '">';
-		        html += String(event.title || 'Masterclass');
+		        const start = new Date(eventStart(event));
+		        const timeLabel = Number.isNaN(start.getTime())
+		          ? ''
+		          : start.toLocaleTimeString(undefined, {
+		              hour: 'numeric',
+		              minute: '2-digit'
+		            });
+
+		        html += '<button type="button" class="mrm-masterclass-calendar-event" data-event-id="' + escapeHtml(String(event.id || '')) + '">';
+		        html += '<span>' + escapeHtml(event.title || 'Masterclass') + '</span>';
+
+		        if (timeLabel) {
+		          html += '<span class="mrm-masterclass-calendar-event-time">' + escapeHtml(timeLabel) + '</span>';
+		        }
+
 		        html += '</button>';
 		      });
 
@@ -541,6 +590,10 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		    html += '</div>';
 		    html += '</div>';
+
+		    if (!safeEvents.length) {
+		      html += '<div class="mrm-masterclass-calendar-empty-month">No open Masterclasses are scheduled for this month.</div>';
+		    }
 
 		    calendar.innerHTML = html;
 
@@ -556,6 +609,54 @@ class LowBrass_MRM_Masterclass_Plugin {
 		        }
 		      });
 		    });
+
+		    bindCalendarNavigation();
+		  }
+
+		  function bindCalendarNavigation() {
+		    const prev = byId('mrm-masterclass-calendar-prev');
+		    const next = byId('mrm-masterclass-calendar-next');
+
+		    const now = new Date();
+		    const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+		    const maxMonth = new Date(now.getFullYear() + 1, now.getMonth(), 1);
+		    const visibleMonth = new Date(mrmCalendarDate.getFullYear(), mrmCalendarDate.getMonth(), 1);
+
+		    if (prev) {
+		      prev.disabled = visibleMonth.getTime() <= currentMonth.getTime();
+
+		      if (!prev.dataset.mrmPluginCalendarBound) {
+		        prev.dataset.mrmPluginCalendarBound = '1';
+		        prev.addEventListener('click', function () {
+		          const candidate = new Date(mrmCalendarDate.getFullYear(), mrmCalendarDate.getMonth() - 1, 1);
+
+		          if (candidate.getTime() < currentMonth.getTime()) {
+		            return;
+		          }
+
+		          mrmCalendarDate = candidate;
+		          renderCalendar(mrmLoadedEvents);
+		        });
+		      }
+		    }
+
+		    if (next) {
+		      next.disabled = visibleMonth.getTime() >= maxMonth.getTime();
+
+		      if (!next.dataset.mrmPluginCalendarBound) {
+		        next.dataset.mrmPluginCalendarBound = '1';
+		        next.addEventListener('click', function () {
+		          const candidate = new Date(mrmCalendarDate.getFullYear(), mrmCalendarDate.getMonth() + 1, 1);
+
+		          if (candidate.getTime() > maxMonth.getTime()) {
+		            return;
+		          }
+
+		          mrmCalendarDate = candidate;
+		          renderCalendar(mrmLoadedEvents);
+		        });
+		      }
+		    }
 		  }
 
 		  function renderEvents(events) {
@@ -730,6 +831,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      });
 
 		      const events = result.data && Array.isArray(result.data.events) ? result.data.events : [];
+		      mrmLoadedEvents = events;
 
 		      window.MRM_MASTERCLASS_EVENTS = events;
 
@@ -1117,6 +1219,10 @@ class LowBrass_MRM_Masterclass_Plugin {
 		  }
 
 		  window.mrmBootMasterclassPage = function () {
+		    if (window.__mrmMasterclassBootComplete) {
+		      return;
+		    }
+
 		    if (window.__mrmMasterclassBootRunning) {
 		      return;
 		    }
