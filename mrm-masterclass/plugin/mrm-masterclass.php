@@ -155,7 +155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.3.5';
+	const DB_VERSION = '1.3.6';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -225,6 +225,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_reconcile_events', 'reconcile_events' );
 	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_reminder_cron', 'mrm_mc_run_reminder_cron', 10, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'mrm_masterclass_payout_cron', 'mrm_mc_run_payout_cron', 10, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'init', 'mrm_mc_ensure_reminder_cron_scheduled', 20, 0 );
 
 	$actions = array(
 		'mrm_masterclass_save_settings'            => 'handle_save_settings',
@@ -242,6 +243,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		'mrm_masterclass_create_presenter_page'    => 'handle_create_presenter_page',
 		'mrm_masterclass_resend_confirmation'      => 'handle_resend_confirmation',
 		'mrm_masterclass_resend_reminder'          => 'handle_resend_reminder',
+		'mrm_masterclass_run_reminder_cron_now'    => 'handle_run_reminder_cron_now',
 		'mrm_masterclass_reset_access_session'     => 'handle_reset_access_session',
 		'mrm_masterclass_revoke_access_link'       => 'handle_revoke_access_link',
 		'mrm_masterclass_regenerate_access_link'   => 'handle_regenerate_access_link',
@@ -1546,6 +1548,27 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		self::safe_debug_log( 'Masterclass plugin activation routine completed.' );
 
+		add_filter(
+			'cron_schedules',
+			function ( $schedules ) {
+				if ( ! is_array( $schedules ) ) {
+					$schedules = array();
+				}
+
+				$schedules['mrm_every_five_minutes'] = array(
+					'interval' => 5 * MINUTE_IN_SECONDS,
+					'display'  => 'Every 5 Minutes',
+				);
+
+				$schedules['mrm_masterclass_15min'] = array(
+					'interval' => 15 * MINUTE_IN_SECONDS,
+					'display'  => 'Every 15 Minutes',
+				);
+
+				return $schedules;
+			}
+		);
+
 		$schedules = wp_get_schedules();
 
 		if ( isset( $schedules['mrm_masterclass_15min'] ) && ! wp_next_scheduled( 'mrm_masterclass_send_reminders' ) ) {
@@ -2311,6 +2334,8 @@ public function mrm_mc_render_critical_error_notice() {
 		'cohost_note'       => "ALTER TABLE {$events_table} ADD cohost_note TEXT NULL",
 		'google_last_error' => "ALTER TABLE {$events_table} ADD google_last_error TEXT NULL",
 		'confirmation_note' => "ALTER TABLE {$events_table} ADD confirmation_note TEXT NULL",
+		'presenter_confirmation_sent_at' => "ALTER TABLE {$events_table} ADD presenter_confirmation_sent_at DATETIME NULL",
+		'presenter_reminder_1h_sent_at'  => "ALTER TABLE {$events_table} ADD presenter_reminder_1h_sent_at DATETIME NULL",
 	);
 
 	foreach ( $event_adds as $column => $sql ) {
@@ -2472,6 +2497,41 @@ public function mrm_mc_render_critical_error_notice() {
 
 	update_option( 'mrm_masterclass_db_version', self::DB_VERSION );
 }
+	public function mrm_mc_ensure_reminder_cron_scheduled() {
+		if ( wp_doing_ajax() ) {
+			return;
+		}
+
+		$current_schedule = wp_get_schedule( 'mrm_masterclass_reminder_cron' );
+
+		if ( $current_schedule && 'mrm_every_five_minutes' !== $current_schedule ) {
+			wp_clear_scheduled_hook( 'mrm_masterclass_reminder_cron' );
+
+			$this->mrm_mc_debug_log(
+				'Masterclass reminder cron cleared because it was using the wrong schedule.',
+				array(
+					'old_schedule' => sanitize_text_field( $current_schedule ),
+				)
+			);
+		}
+
+		if ( ! wp_next_scheduled( 'mrm_masterclass_reminder_cron' ) ) {
+			$scheduled = wp_schedule_event(
+				time() + 60,
+				'mrm_every_five_minutes',
+				'mrm_masterclass_reminder_cron'
+			);
+
+			$this->mrm_mc_debug_log(
+				'Masterclass reminder cron self-heal attempted.',
+				array(
+					'scheduled' => $scheduled ? 'yes' : 'no',
+					'next_run'  => wp_next_scheduled( 'mrm_masterclass_reminder_cron' ) ? gmdate( 'Y-m-d H:i:s', wp_next_scheduled( 'mrm_masterclass_reminder_cron' ) ) : '',
+				)
+			);
+		}
+	}
+
 	public function add_cron_schedule( $schedules ) {
 		if ( ! is_array( $schedules ) ) {
 			$schedules = array();
@@ -2490,6 +2550,49 @@ public function mrm_mc_render_critical_error_notice() {
 		return $schedules;
 	}
 	private function now(){return gmdate('Y-m-d H:i:s');}
+
+private function mrm_mc_event_timestamp_from_local( $datetime, $timezone = 'America/Phoenix' ) {
+	$datetime = trim( (string) $datetime );
+
+	if ( '' === $datetime ) {
+		return 0;
+	}
+
+	try {
+		$tz = new DateTimeZone( $timezone ?: 'America/Phoenix' );
+		$dt = new DateTime( $datetime, $tz );
+		return $dt->getTimestamp();
+	} catch ( Exception $e ) {
+		return 0;
+	}
+}
+
+private function mrm_mc_event_time_label( $datetime, $timezone = 'America/Phoenix' ) {
+	$timestamp = $this->mrm_mc_event_timestamp_from_local( $datetime, $timezone );
+
+	if ( $timestamp <= 0 ) {
+		return sanitize_text_field( (string) $datetime );
+	}
+
+	try {
+		$tz = new DateTimeZone( $timezone ?: 'America/Phoenix' );
+		$dt = new DateTime( '@' . $timestamp );
+		$dt->setTimezone( $tz );
+
+		return $dt->format( 'F j, Y \a\t g:i A T' );
+	} catch ( Exception $e ) {
+		return sanitize_text_field( (string) $datetime );
+	}
+}
+
+private function mrm_mc_now_utc_timestamp() {
+	return time();
+}
+
+private function mrm_mc_email_safe_event_hash( $event_id, $kind ) {
+	return substr( hash( 'sha256', absint( $event_id ) . '|' . sanitize_key( $kind ) . '|' . wp_salt( 'nonce' ) ), 0, 12 );
+}
+
 
 /**
  * Masterclass production helper layer.
@@ -2853,6 +2956,25 @@ private function mrm_mc_email_event_details_html( $event, $presenter = null, $re
 	return $details;
 }
 
+private function mrm_mc_redacted_email_for_log( $email ) {
+	$email = sanitize_email( $email );
+
+	if ( ! is_email( $email ) ) {
+		return '';
+	}
+
+	$parts = explode( '@', $email );
+
+	if ( count( $parts ) !== 2 ) {
+		return '';
+	}
+
+	$local  = $parts[0];
+	$domain = $parts[1];
+
+	return substr( $local, 0, 1 ) . '***@' . $domain;
+}
+
 private function mrm_mc_send_email_recorded( $type, $to, $subject, $body, $event_id = null, $registration_id = null ) {
 	global $wpdb;
 
@@ -2947,6 +3069,130 @@ private function mrm_mc_reminder_email_body( $event, $presenter, $registration, 
 		. $this->mrm_mc_email_secondary_button_html( $cancel, 'I Can No Longer Attend This Masterclass' );
 
 	return $this->mrm_mc_email_template( 'Masterclass Reminder', $content );
+}
+
+private function mrm_mc_presenter_event_confirmation_email_body( $event, $presenter ) {
+	$event_time = $this->mrm_mc_event_time_label( $event->start_time ?? '', $event->timezone ?? 'America/Phoenix' );
+
+	$presenter_page_url = ! empty( $presenter->presenter_page_id )
+		? $this->mrm_mc_public_presenter_page_url( $presenter->presenter_page_id )
+		: '';
+
+	$content = '<p>You have been scheduled as the presenter for a Masterclass.</p>'
+		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '<br>'
+		. '<strong>Scheduled start:</strong> ' . esc_html( $event_time ) . '<br>'
+		. '<strong>Maximum enrollment:</strong> 100 students</p>'
+		. '<p>Please plan to join the call roughly <strong>30 minutes before the scheduled start time</strong>. Students will be able to join starting <strong>10 minutes before the Masterclass begins</strong>.</p>'
+		. '<p>Your presenter page is designed to be shared on your networks so students can learn more about you and the Masterclass.</p>';
+
+	if ( ! empty( $presenter_page_url ) ) {
+		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open and Share Your Presenter Page' );
+	}
+
+	return $this->mrm_mc_email_template( 'You Have Been Scheduled for a Masterclass', $content );
+}
+
+private function mrm_mc_send_presenter_event_confirmation( $event_id ) {
+	global $wpdb;
+
+	$event_id = absint( $event_id );
+
+	if ( $event_id <= 0 ) {
+		return false;
+	}
+
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+
+	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
+		return false;
+	}
+
+	$event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT e.*, p.name AS presenter_name, p.email AS presenter_email, p.presenter_page_id, p.profile_image_url
+			 FROM {$events_table} e
+			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+			 WHERE e.id = %d
+			 LIMIT 1",
+			$event_id
+		)
+	);
+
+	if ( ! $event || empty( $event->presenter_email ) || ! is_email( $event->presenter_email ) ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass presenter event confirmation skipped because presenter email is missing.',
+			array(
+				'event_id' => $event_id,
+			)
+		);
+		return false;
+	}
+
+	if ( ! empty( $event->presenter_confirmation_sent_at ) ) {
+		return true;
+	}
+
+	$presenter = (object) array(
+		'name'              => $event->presenter_name,
+		'email'             => $event->presenter_email,
+		'presenter_page_id' => $event->presenter_page_id,
+		'profile_image_url' => $event->profile_image_url,
+	);
+
+	$body = $this->mrm_mc_presenter_event_confirmation_email_body( $event, $presenter );
+
+	$sent = $this->mrm_mc_send_email_recorded(
+		'presenter_event_confirmation',
+		$event->presenter_email,
+		'You Have Been Scheduled for a Masterclass — ' . $event->title,
+		$body,
+		$event_id,
+		null
+	);
+
+	if ( $sent ) {
+		$wpdb->update(
+			$events_table,
+			$this->mrm_mc_filter_data_for_table(
+				$events_table,
+				array(
+					'presenter_confirmation_sent_at' => $this->now(),
+					'updated_at'                     => $this->now(),
+				)
+			),
+			array( 'id' => $event_id )
+		);
+	}
+
+	$this->mrm_mc_debug_log(
+		'Masterclass presenter event confirmation attempted.',
+		array(
+			'event_id' => $event_id,
+			'sent'     => $sent ? 'yes' : 'no',
+		)
+	);
+
+	return $sent;
+}
+
+private function mrm_mc_presenter_reminder_email_body( $event ) {
+	$event_time = $this->mrm_mc_event_time_label( $event->start_time ?? '', $event->timezone ?? 'America/Phoenix' );
+	$presenter_page_url = ! empty( $event->presenter_page_id )
+		? $this->mrm_mc_public_presenter_page_url( $event->presenter_page_id )
+		: '';
+
+	$content = '<p>This is your one-hour presenter reminder for the upcoming Masterclass.</p>'
+		. '<p>Please join the call roughly <strong>30 minutes before the scheduled start time</strong>. Students will be able to join starting <strong>10 minutes before the Masterclass begins</strong>.</p>'
+		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '<br>'
+		. '<strong>Scheduled start:</strong> ' . esc_html( $event_time ) . '<br>'
+		. '<strong>Maximum enrollment:</strong> 100 students</p>';
+
+	if ( ! empty( $presenter_page_url ) ) {
+		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open Your Masterclass Presenter Page' );
+	}
+
+	return $this->mrm_mc_email_template( 'Masterclass Presenter Reminder', $content );
 }
 
 private function mrm_mc_feedback_request_email_body( $event, $presenter, $registration ) {
@@ -4557,21 +4803,30 @@ public function mrm_mc_run_reminder_cron() {
 		return;
 	}
 
-	$now = time();
+	$this->mrm_mc_debug_log(
+		'Masterclass reminder cron started.',
+		array(
+			'utc_now'  => gmdate( 'Y-m-d H:i:s' ),
+			'next_run' => wp_next_scheduled( 'mrm_masterclass_reminder_cron' ) ? gmdate( 'Y-m-d H:i:s', wp_next_scheduled( 'mrm_masterclass_reminder_cron' ) ) : '',
+		)
+	);
 
-	/*
-	 * Send one-hour reminders in a tight cron-safe window.
-	 * With wp-cron running every 5 minutes, this sends at approximately one hour before start.
-	 */
-	$reminder_from = gmdate( 'Y-m-d H:i:s', $now + ( 55 * MINUTE_IN_SECONDS ) );
-	$reminder_to   = gmdate( 'Y-m-d H:i:s', $now + ( 65 * MINUTE_IN_SECONDS ) );
+	$now_ts               = $this->mrm_mc_now_utc_timestamp();
+	$lookback_local       = gmdate( 'Y-m-d H:i:s', $now_ts - DAY_IN_SECONDS );
+	$lookahead_local      = gmdate( 'Y-m-d H:i:s', $now_ts + ( 2 * DAY_IN_SECONDS ) );
+	$student_sent_count   = 0;
+	$presenter_sent_count = 0;
 
 	$has_1h_col = method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_1h_sent_at' );
 	$col_1      = $has_1h_col ? 'reminder_1h_sent_at' : 'reminder_1_sent_at';
 
+	/*
+	 * Pull a wider candidate range and calculate the exact one-hour reminder
+	 * window in PHP using the event timezone.
+	 */
 	$rows = $wpdb->get_results(
 		$wpdb->prepare(
-			"SELECT r.*, e.title, e.start_time, e.end_time, e.timezone, e.presenter_id, p.name AS presenter_name
+			"SELECT r.*, e.title, e.start_time, e.end_time, e.timezone, e.presenter_id, p.name AS presenter_name, p.email AS presenter_email
 			 FROM {$regs_table} r
 			 INNER JOIN {$events_table} e ON e.id = r.event_id
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
@@ -4579,16 +4834,35 @@ public function mrm_mc_run_reminder_cron() {
 			   AND LOWER(TRIM(e.status)) = 'scheduled'
 			   AND e.start_time BETWEEN %s AND %s
 			   AND r.{$col_1} IS NULL
-			 LIMIT 200",
-			$reminder_from,
-			$reminder_to
+			 LIMIT 500",
+			$lookback_local,
+			$lookahead_local
 		)
 	);
 
-	$reminder_sent_count = 0;
+	$eligible_student_rows = 0;
 
 	if ( $rows ) {
 		foreach ( $rows as $row ) {
+			$event_start_ts = $this->mrm_mc_event_timestamp_from_local( $row->start_time, $row->timezone );
+
+			if ( $event_start_ts <= 0 ) {
+				continue;
+			}
+
+			$seconds_until_start = $event_start_ts - $now_ts;
+
+			/*
+			 * Cron-safe "exactly one hour" window:
+			 * eligible from 60 minutes before start through 50 minutes before start.
+			 * With a 5-minute cron, this catches the event while avoiding early sends.
+			 */
+			if ( $seconds_until_start > HOUR_IN_SECONDS || $seconds_until_start < ( 50 * MINUTE_IN_SECONDS ) ) {
+				continue;
+			}
+
+			$eligible_student_rows++;
+
 			$event = (object) array(
 				'id'         => absint( $row->event_id ),
 				'title'      => $row->title,
@@ -4598,7 +4872,8 @@ public function mrm_mc_run_reminder_cron() {
 			);
 
 			$presenter = (object) array(
-				'name' => $row->presenter_name,
+				'name'  => $row->presenter_name,
+				'email' => $row->presenter_email,
 			);
 
 			$registration = (object) $row;
@@ -4630,16 +4905,89 @@ public function mrm_mc_run_reminder_cron() {
 					array( 'id' => absint( $row->id ) )
 				);
 
-				$reminder_sent_count++;
+				$student_sent_count++;
+			}
+		}
+	}
+
+	/*
+	 * Presenter one-hour reminders are tracked at event level so the presenter
+	 * gets one email per Masterclass, not one email per student.
+	 */
+	$presenter_events = $wpdb->get_results(
+		$wpdb->prepare(
+			"SELECT e.*, p.name AS presenter_name, p.email AS presenter_email, p.presenter_page_id, p.profile_image_url
+			 FROM {$events_table} e
+			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+			 WHERE LOWER(TRIM(e.status)) = 'scheduled'
+			   AND e.start_time BETWEEN %s AND %s
+			   AND (e.presenter_reminder_1h_sent_at IS NULL OR e.presenter_reminder_1h_sent_at = '')
+			 LIMIT 200",
+			$lookback_local,
+			$lookahead_local
+		)
+	);
+
+	$eligible_presenter_rows = 0;
+
+	if ( $presenter_events ) {
+		foreach ( $presenter_events as $event ) {
+			if ( empty( $event->presenter_email ) || ! is_email( $event->presenter_email ) ) {
+				continue;
+			}
+
+			$event_start_ts = $this->mrm_mc_event_timestamp_from_local( $event->start_time, $event->timezone );
+
+			if ( $event_start_ts <= 0 ) {
+				continue;
+			}
+
+			$seconds_until_start = $event_start_ts - $now_ts;
+
+			if ( $seconds_until_start > HOUR_IN_SECONDS || $seconds_until_start < ( 50 * MINUTE_IN_SECONDS ) ) {
+				continue;
+			}
+
+			$eligible_presenter_rows++;
+
+			$body = $this->mrm_mc_presenter_reminder_email_body( $event );
+
+			$sent = $this->mrm_mc_send_email_recorded(
+				'presenter_reminder_1h',
+				$event->presenter_email,
+				'1-Hour Presenter Reminder — ' . $event->title,
+				$body,
+				$event->id,
+				null
+			);
+
+			if ( $sent ) {
+				$wpdb->update(
+					$events_table,
+					$this->mrm_mc_filter_data_for_table(
+						$events_table,
+						array(
+							'presenter_reminder_1h_sent_at' => $this->now(),
+							'updated_at'                    => $this->now(),
+						)
+					),
+					array( 'id' => absint( $event->id ) )
+				);
+
+				$presenter_sent_count++;
 			}
 		}
 	}
 
 	$this->mrm_mc_debug_log(
-		'Masterclass reminder cron checked one-hour reminder window.',
+		'Masterclass reminder cron completed.',
 		array(
-			'eligible_rows' => is_array( $rows ) ? count( $rows ) : 0,
-			'sent_count'    => $reminder_sent_count,
+			'student_candidate_rows'   => is_array( $rows ) ? count( $rows ) : 0,
+			'student_eligible_rows'    => $eligible_student_rows,
+			'student_sent_count'       => $student_sent_count,
+			'presenter_candidate_rows' => is_array( $presenter_events ) ? count( $presenter_events ) : 0,
+			'presenter_eligible_rows'  => $eligible_presenter_rows,
+			'presenter_sent_count'     => $presenter_sent_count,
 		)
 	);
 
@@ -4780,6 +5128,10 @@ public function handle_save_presenter() {
 		);
 
 		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_save_failed' );
+	}
+
+	if ( $id > 0 && method_exists( $this, 'mrm_mc_generate_presenter_page_for_id' ) ) {
+		$this->mrm_mc_generate_presenter_page_for_id( $id );
 	}
 
 	$this->mrm_mc_admin_notice_redirect(
@@ -4942,6 +5294,8 @@ public function handle_save_event() {
 			array( 'event_id' => $event_id )
 		);
 	}
+
+	$this->mrm_mc_send_presenter_event_confirmation( $event_id );
 
 	$this->mrm_mc_admin_notice_redirect(
 		self::ADMIN_EVENTS_SLUG,
@@ -5252,26 +5606,25 @@ public function handle_emergency_cancel_event() {
 	$this->handle_cancel_event();
 }
 
-public function handle_create_presenter_page() {
-	$this->must_admin();
-
+private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	global $wpdb;
 
-	$presenter_id = absint( $_POST['presenter_id'] ?? $_GET['presenter_id'] ?? 0 );
+	$presenter_id = absint( $presenter_id );
 
 	if ( $presenter_id <= 0 ) {
-		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_missing_id' );
+		return new WP_Error( 'presenter_missing_id', 'Presenter ID is missing.' );
 	}
-
-	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_create_presenter_page_' . $presenter_id );
 
 	$presenter = $this->mrm_mc_get_presenter( $presenter_id );
 
 	if ( ! $presenter ) {
-		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_not_found' );
+		return new WP_Error( 'presenter_not_found', 'Presenter could not be found.' );
 	}
 
 	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+
+	$site_logo = $this->mrm_mc_get_email_logo_url();
+	$profile   = esc_url_raw( $presenter->profile_image_url ?? '' );
 
 	$instruments = array();
 
@@ -5283,37 +5636,52 @@ public function handle_create_presenter_page() {
 		}
 	}
 
-	$content = '<div class="mrm-masterclass-presenter-page">';
+	$content = '<div class="mrm-masterclass-presenter-share-page" style="max-width:980px;margin:0 auto;padding:48px 20px;font-family:Arial,Helvetica,sans-serif;color:#20170f;">';
 
-	if ( ! empty( $presenter->profile_image_url ) ) {
-		$content .= '<figure class="mrm-masterclass-presenter-image">';
-		$content .= '<img src="' . esc_url( $presenter->profile_image_url ) . '" alt="' . esc_attr( $presenter->name ) . '" />';
-		$content .= '</figure>';
+	$content .= '<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:center;margin-bottom:28px;">';
+
+	$content .= '<div style="background:#fff;border:1px solid #dccab0;border-radius:28px;padding:18px;text-align:center;box-shadow:0 18px 46px rgba(32,23,15,.10);">';
+	if ( $profile ) {
+		$content .= '<img src="' . esc_url( $profile ) . '" alt="' . esc_attr( $presenter->name ) . '" style="width:100%;max-width:320px;aspect-ratio:1/1;object-fit:cover;border-radius:24px;display:block;margin:0 auto;">';
+	} else {
+		$content .= '<div style="width:100%;max-width:320px;aspect-ratio:1/1;border-radius:24px;background:#f7efe3;display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:42px;font-weight:900;">' . esc_html( mb_substr( $presenter->name, 0, 1 ) ) . '</div>';
 	}
+	$content .= '</div>';
 
-	$content .= '<h1>' . esc_html( $presenter->name ) . '</h1>';
+	$content .= '<div style="background:#20170f;color:#fff;border-radius:28px;padding:24px;text-align:center;box-shadow:0 18px 46px rgba(32,23,15,.16);">';
+	if ( $site_logo ) {
+		$content .= '<img src="' . esc_url( $site_logo ) . '" alt="' . esc_attr( get_bloginfo( 'name' ) ) . '" style="max-width:240px;height:auto;display:block;margin:0 auto 18px;">';
+	}
+	$content .= '<p style="margin:0;font-size:15px;line-height:1.65;">This presenter page is designed to be shared across your networks. Invite students, colleagues, and followers to learn more about the presenter and upcoming Masterclass opportunities.</p>';
+	$content .= '<p style="margin:18px 0 0;font-weight:900;">Maximum enrollment: 100 students</p>';
+	$content .= '</div>';
+
+	$content .= '</div>';
+
+	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2rem,5vw,3.75rem);line-height:1.05;margin:0 0 16px;text-align:center;">' . esc_html( $presenter->name ) . '</h1>';
 
 	if ( ! empty( $presenter->short_description ) ) {
-		$content .= '<div class="mrm-masterclass-presenter-short">';
-		$content .= wp_kses_post( wpautop( $presenter->short_description ) );
-		$content .= '</div>';
+		$content .= '<div style="font-size:18px;line-height:1.7;text-align:center;max-width:760px;margin:0 auto 24px;">' . wp_kses_post( wpautop( $presenter->short_description ) ) . '</div>';
 	}
 
 	if ( ! empty( $instruments ) ) {
-		$content .= '<p><strong>Instruments:</strong> ' . esc_html( implode( ', ', $instruments ) ) . '</p>';
+		$content .= '<p style="text-align:center;font-weight:800;"><strong>Areas:</strong> ' . esc_html( implode( ', ', $instruments ) ) . '</p>';
 	}
 
 	if ( ! empty( $presenter->long_description ) ) {
-		$content .= '<div class="mrm-masterclass-presenter-long">';
+		$content .= '<section style="background:#fff;border:1px solid #dccab0;border-radius:24px;padding:24px;margin:28px 0;line-height:1.7;">';
 		$content .= wp_kses_post( wpautop( $presenter->long_description ) );
-		$content .= '</div>';
+		$content .= '</section>';
 	}
 
 	if ( ! empty( $presenter->bio ) ) {
-		$content .= '<div class="mrm-masterclass-presenter-bio">';
+		$content .= '<section style="background:#fffdf9;border:1px solid #eadcc8;border-radius:24px;padding:24px;margin:28px 0;line-height:1.7;">';
+		$content .= '<h2 style="margin-top:0;">About the Presenter</h2>';
 		$content .= wp_kses_post( wpautop( $presenter->bio ) );
-		$content .= '</div>';
+		$content .= '</section>';
 	}
+
+	$content .= '<p style="text-align:center;margin-top:30px;color:#6d5c45;">Share this page on any network where your students, colleagues, or community follow your work.</p>';
 
 	$content .= '</div>';
 
@@ -5336,15 +5704,7 @@ public function handle_create_presenter_page() {
 	}
 
 	if ( is_wp_error( $result ) ) {
-		$this->mrm_mc_debug_log(
-			'Presenter page generation failed.',
-			array(
-				'presenter_id' => $presenter_id,
-				'error'        => $result->get_error_message(),
-			)
-		);
-
-		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_page_failed' );
+		return $result;
 	}
 
 	$page_id = absint( $result );
@@ -5358,11 +5718,39 @@ public function handle_create_presenter_page() {
 		array( 'id' => $presenter_id )
 	);
 
+	return $page_id;
+}
+
+public function handle_create_presenter_page() {
+	$this->must_admin();
+
+	$presenter_id = absint( $_POST['presenter_id'] ?? $_GET['presenter_id'] ?? 0 );
+
+	if ( $presenter_id <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_missing_id' );
+	}
+
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_create_presenter_page_' . $presenter_id );
+
+	$result = $this->mrm_mc_generate_presenter_page_for_id( $presenter_id );
+
+	if ( is_wp_error( $result ) ) {
+		$this->mrm_mc_debug_log(
+			'Presenter page generation failed.',
+			array(
+				'presenter_id' => $presenter_id,
+				'error'        => $result->get_error_message(),
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_page_failed' );
+	}
+
 	$this->mrm_mc_debug_log(
 		'Presenter page generated or updated.',
 		array(
 			'presenter_id' => $presenter_id,
-			'page_id'      => $page_id,
+			'page_id'      => absint( $result ),
 		)
 	);
 
@@ -5371,7 +5759,7 @@ public function handle_create_presenter_page() {
 		'presenter_page_saved',
 		array(
 			'edit'    => $presenter_id,
-			'page_id' => $page_id,
+			'page_id' => absint( $result ),
 		)
 	);
 }
@@ -5509,6 +5897,18 @@ public function handle_regenerate_access_link() {
 	$this->mrm_mc_safe_admin_redirect(
 		'mrm-masterclass-registrations-payments',
 		array( 'mrm_mc_notice' => 'access_link_regenerated' )
+	);
+}
+
+public function handle_run_reminder_cron_now() {
+	$this->must_admin();
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_run_reminder_cron_now' );
+
+	$this->mrm_mc_run_reminder_cron();
+
+	$this->mrm_mc_admin_notice_redirect(
+		self::ADMIN_EVENTS_SLUG,
+		'reminder_cron_ran'
 	);
 }
 
@@ -7128,6 +7528,7 @@ public function render_events_page() {
 		'event_cancel_no_paid_attendees'      => array( 'success', 'Event was removed from active lists. No paid attendees were found for automatic refund processing.' ),
 		'event_cancel_no_refunds'             => array( 'success', 'Event was removed from active lists. The one-week post-event refund deadline had passed, so no automatic refunds were issued.' ),
 		'settings_saved'          => array( 'success', 'Calendar settings saved.' ),
+		'reminder_cron_ran'      => array( 'success', 'Masterclass reminder cron ran. Check masterclass-debug.log and the Masterclass email log for eligible rows and sent counts.' ),
 	);
 
 	if ( isset( $notice_map[ $notice ] ) ) {
@@ -7138,6 +7539,13 @@ public function render_events_page() {
 	echo '<div style="background:#fff;border:1px solid #d7c7ad;border-radius:16px;padding:20px;margin:18px 0;">';
 	echo '<h2>Google Calendar Control</h2>';
 	echo '<p>This replaces a separate Settings submenu. Enter the Google Calendar ID that the Masterclass plugin should control.</p>';
+
+	echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" style="margin:14px 0;">';
+	echo '<input type="hidden" name="action" value="mrm_masterclass_run_reminder_cron_now">';
+	wp_nonce_field( 'mrm_masterclass_run_reminder_cron_now' );
+	echo '<button type="submit" class="button">Run Masterclass Reminder Cron Now</button>';
+	echo '<p class="description">Use this to test one-hour reminders, presenter reminders, and 30-minute feedback checks. Emails only send when registrations/events are inside the eligible windows.</p>';
+	echo '</form>';
 
 	echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '">';
 	echo '<input type="hidden" name="action" value="mrm_masterclass_save_settings">';
