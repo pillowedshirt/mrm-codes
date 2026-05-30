@@ -155,7 +155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.3.7';
+	const DB_VERSION = '1.3.8';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -193,6 +193,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'runtime_upgrade' );
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_footer', 'mrm_mc_print_frontend_boot_rescue', 9999, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_share_meta', 5, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
@@ -2892,6 +2893,78 @@ private function mrm_mc_public_session_page_url( $session_page_id ) {
 	$session_page_id = absint( $session_page_id );
 
 	return $session_page_id > 0 ? get_permalink( $session_page_id ) : '';
+}
+
+private function mrm_mc_presenter_share_card_url( $presenter_id ) {
+	$presenter_id = absint( $presenter_id );
+
+	if ( $presenter_id <= 0 ) {
+		return '';
+	}
+
+	return add_query_arg(
+		array(
+			'mrm_masterclass_presenter_card' => $presenter_id,
+		),
+		home_url( '/' )
+	);
+}
+
+private function mrm_mc_handle_presenter_share_card_request() {
+	$presenter_id = absint( $_GET['mrm_masterclass_presenter_card'] ?? 0 );
+
+	if ( $presenter_id <= 0 ) {
+		status_header( 404 );
+		exit;
+	}
+
+	$presenter = $this->mrm_mc_get_presenter( $presenter_id );
+
+	if ( ! $presenter ) {
+		status_header( 404 );
+		exit;
+	}
+
+	$profile = esc_url_raw( $presenter->profile_image_url ?? '' );
+	$logo    = esc_url_raw( $this->mrm_mc_get_email_logo_url() );
+
+	$name = sanitize_text_field( $presenter->name ?? 'Masterclass Presenter' );
+
+	header( 'Content-Type: image/svg+xml; charset=utf-8' );
+	header( 'Cache-Control: public, max-age=3600' );
+
+	echo '<?xml version="1.0" encoding="UTF-8"?>';
+	?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fffdf9"/>
+      <stop offset="100%" stop-color="#f2e4cf"/>
+    </linearGradient>
+    <clipPath id="photoClip">
+      <rect x="95" y="95" width="430" height="430" rx="40" ry="40"/>
+    </clipPath>
+    <clipPath id="logoClip">
+      <rect x="675" y="170" width="330" height="220" rx="28" ry="28"/>
+    </clipPath>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect x="55" y="55" width="1090" height="520" rx="48" fill="#ffffff" stroke="#dccab0" stroke-width="4"/>
+  <rect x="95" y="95" width="430" height="430" rx="40" fill="#f7efe3" stroke="#dccab0" stroke-width="3"/>
+  <?php if ( $profile ) : ?>
+  <image href="<?php echo esc_attr( $profile ); ?>" x="95" y="95" width="430" height="430" preserveAspectRatio="xMidYMid slice" clip-path="url(#photoClip)"/>
+  <?php else : ?>
+  <text x="310" y="335" text-anchor="middle" font-family="Georgia, serif" font-size="120" font-weight="700" fill="#9a6a2f"><?php echo esc_html( mb_substr( $name, 0, 1 ) ); ?></text>
+  <?php endif; ?>
+
+  <rect x="610" y="95" width="495" height="430" rx="40" fill="#20170f"/>
+  <?php if ( $logo ) : ?>
+  <image href="<?php echo esc_attr( $logo ); ?>" x="675" y="170" width="330" height="220" preserveAspectRatio="xMidYMid meet" clip-path="url(#logoClip)"/>
+  <?php endif; ?>
+  <text x="858" y="440" text-anchor="middle" font-family="Georgia, serif" font-size="46" font-weight="700" fill="#ffffff">Masterclass Presenter</text>
+</svg>
+	<?php
+	exit;
 }
 
 private function mrm_mc_public_presenter_page_url( $presenter_page_id ) {
@@ -5938,6 +6011,86 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	return $page_id;
 }
 
+public function mrm_mc_print_presenter_page_share_meta() {
+	if ( ! is_page() ) {
+		return;
+	}
+
+	global $post, $wpdb;
+
+	if ( ! $post || empty( $post->ID ) ) {
+		return;
+	}
+
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+
+	if ( ! $this->mrm_mc_table_exists( $presenters_table ) ) {
+		return;
+	}
+
+	$presenter = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$presenters_table} WHERE presenter_page_id = %d LIMIT 1",
+			absint( $post->ID )
+		)
+	);
+
+	if ( ! $presenter ) {
+		return;
+	}
+
+	$title       = 'Masterclass Presenter — ' . sanitize_text_field( $presenter->name ?? '' );
+	$description = wp_strip_all_tags( $presenter->long_description ?? ( $presenter->bio ?? '' ) );
+	$description = wp_trim_words( $description, 28, '...' );
+	$page_url    = get_permalink( $post->ID );
+	$image_url   = $this->mrm_mc_presenter_share_card_url( $presenter->id );
+
+	echo "\n<!-- MRM Masterclass Presenter Share Meta -->\n";
+	echo '<meta property="og:type" content="website">' . "\n";
+	echo '<meta property="og:title" content="' . esc_attr( $title ) . '">' . "\n";
+	echo '<meta property="og:description" content="' . esc_attr( $description ) . '">' . "\n";
+	echo '<meta property="og:url" content="' . esc_url( $page_url ) . '">' . "\n";
+	echo '<meta property="og:image" content="' . esc_url( $image_url ) . '">' . "\n";
+	echo '<meta property="og:image:width" content="1200">' . "\n";
+	echo '<meta property="og:image:height" content="630">' . "\n";
+	echo '<meta name="twitter:card" content="summary_large_image">' . "\n";
+	echo '<meta name="twitter:title" content="' . esc_attr( $title ) . '">' . "\n";
+	echo '<meta name="twitter:description" content="' . esc_attr( $description ) . '">' . "\n";
+	echo '<meta name="twitter:image" content="' . esc_url( $image_url ) . '">' . "\n";
+	echo "<!-- /MRM Masterclass Presenter Share Meta -->\n";
+}
+
+private function mrm_mc_upcoming_sessions_for_presenter( $presenter_id ) {
+	global $wpdb;
+
+	$presenter_id = absint( $presenter_id );
+
+	if ( $presenter_id <= 0 ) {
+		return array();
+	}
+
+	$events_table = $this->t( 'mrm_masterclass_events' );
+
+	if ( ! $this->mrm_mc_table_exists( $events_table ) ) {
+		return array();
+	}
+
+	return $wpdb->get_results(
+		$wpdb->prepare(
+			"SELECT *
+			 FROM {$events_table}
+			 WHERE presenter_id = %d
+			   AND LOWER(TRIM(status)) = 'scheduled'
+			   AND CAST(registration_open AS UNSIGNED) = 1
+			   AND start_time >= %s
+			 ORDER BY start_time ASC
+			 LIMIT 20",
+			$presenter_id,
+			gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS )
+		)
+	);
+}
+
 private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	global $wpdb;
 
@@ -5958,9 +6111,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	}
 
 	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
-
-	$site_logo = $this->mrm_mc_get_email_logo_url();
-	$profile   = esc_url_raw( $presenter->profile_image_url ?? '' );
+	$profile          = esc_url_raw( $presenter->profile_image_url ?? '' );
 
 	$instruments = array();
 
@@ -5972,56 +6123,96 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 		}
 	}
 
-	$content = '<div class="mrm-masterclass-presenter-share-page" style="max-width:980px;margin:0 auto;padding:48px 20px;font-family:Arial,Helvetica,sans-serif;color:#20170f;">';
+	$upcoming_sessions = $this->mrm_mc_upcoming_sessions_for_presenter( $presenter_id );
 
-	$content .= '<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:center;margin-bottom:28px;">';
+	$content = '<div class="mrm-masterclass-presenter-page" style="max-width:1040px;margin:0 auto;padding:48px 20px;font-family:Arial,Helvetica,sans-serif;color:#20170f;">';
 
-	$content .= '<div style="background:#fff;border:1px solid #dccab0;border-radius:28px;padding:18px;text-align:center;box-shadow:0 18px 46px rgba(32,23,15,.10);">';
+	$content .= '<header style="text-align:center;margin:0 auto 34px;">';
+	$content .= '<p style="margin:0 0 14px;text-transform:uppercase;letter-spacing:.16em;font-weight:900;color:#9a6a2f;">Masterclass Presenter</p>';
+
 	if ( $profile ) {
-		$content .= '<img src="' . esc_url( $profile ) . '" alt="' . esc_attr( $presenter->name ) . '" style="width:100%;max-width:320px;aspect-ratio:1/1;object-fit:cover;border-radius:24px;display:block;margin:0 auto;">';
+		$content .= '<img src="' . esc_url( $profile ) . '" alt="' . esc_attr( $presenter->name ) . '" style="width:min(320px,82vw);aspect-ratio:1/1;object-fit:cover;border-radius:28px;display:block;margin:0 auto 22px;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">';
 	} else {
-		$content .= '<div style="width:100%;max-width:320px;aspect-ratio:1/1;border-radius:24px;background:#f7efe3;display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:42px;font-weight:900;">' . esc_html( mb_substr( $presenter->name, 0, 1 ) ) . '</div>';
+		$content .= '<div style="width:min(320px,82vw);aspect-ratio:1/1;border-radius:28px;background:#f7efe3;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:72px;font-weight:900;color:#9a6a2f;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">' . esc_html( mb_substr( $presenter->name, 0, 1 ) ) . '</div>';
 	}
-	$content .= '</div>';
 
-	$content .= '<div style="background:#20170f;color:#fff;border-radius:28px;padding:24px;text-align:center;box-shadow:0 18px 46px rgba(32,23,15,.16);">';
-	if ( $site_logo ) {
-		$content .= '<img src="' . esc_url( $site_logo ) . '" alt="' . esc_attr( get_bloginfo( 'name' ) ) . '" style="max-width:240px;height:auto;display:block;margin:0 auto 18px;">';
-	}
-	$content .= '<p style="margin:0;font-size:15px;line-height:1.65;">This presenter page is designed to be shared across your networks. Invite students, colleagues, and followers to learn more about the presenter and upcoming Masterclass opportunities.</p>';
-	$content .= '<p style="margin:18px 0 0;font-weight:900;">Maximum enrollment: 100 students</p>';
-	$content .= '</div>';
-
-	$content .= '</div>';
-
-	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2rem,5vw,3.75rem);line-height:1.05;margin:0 0 16px;text-align:center;">' . esc_html( $presenter->name ) . '</h1>';
-
-	if ( ! empty( $presenter->short_description ) ) {
-		$content .= '<div style="font-size:18px;line-height:1.7;text-align:center;max-width:760px;margin:0 auto 24px;">' . wp_kses_post( wpautop( $presenter->short_description ) ) . '</div>';
-	}
+	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;">' . esc_html( $presenter->name ) . '</h1>';
 
 	if ( ! empty( $instruments ) ) {
-		$content .= '<p style="text-align:center;font-weight:800;"><strong>Areas:</strong> ' . esc_html( implode( ', ', $instruments ) ) . '</p>';
+		$content .= '<p style="text-align:center;font-weight:900;margin:10px auto 0;color:#4b3c2d;"><strong>Areas:</strong> ' . esc_html( implode( ', ', $instruments ) ) . '</p>';
 	}
+
+	$content .= '</header>';
 
 	if ( ! empty( $presenter->long_description ) ) {
-		$content .= '<section style="background:#fff;border:1px solid #dccab0;border-radius:24px;padding:24px;margin:28px 0;line-height:1.7;">';
+		$content .= '<section style="background:#fff;border:1px solid #dccab0;border-radius:28px;padding:clamp(22px,4vw,34px);margin:28px 0;line-height:1.75;font-size:16px;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
 		$content .= wp_kses_post( wpautop( $presenter->long_description ) );
 		$content .= '</section>';
-	}
-
-	if ( ! empty( $presenter->bio ) ) {
-		$content .= '<section style="background:#fffdf9;border:1px solid #eadcc8;border-radius:24px;padding:24px;margin:28px 0;line-height:1.7;">';
-		$content .= '<h2 style="margin-top:0;">About the Presenter</h2>';
+	} elseif ( ! empty( $presenter->bio ) ) {
+		$content .= '<section style="background:#fff;border:1px solid #dccab0;border-radius:28px;padding:clamp(22px,4vw,34px);margin:28px 0;line-height:1.75;font-size:16px;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
 		$content .= wp_kses_post( wpautop( $presenter->bio ) );
 		$content .= '</section>';
 	}
 
-	$content .= '<p style="text-align:center;margin-top:30px;color:#6d5c45;">Share this page on any network where your students, colleagues, or community follow your work.</p>';
+	$content .= '<section style="margin-top:40px;">';
+	$content .= '<h2 style="font-family:Georgia,serif;font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;">Upcoming Masterclass Sessions</h2>';
+
+	if ( ! empty( $upcoming_sessions ) ) {
+		foreach ( $upcoming_sessions as $session ) {
+			$session_page_url = ! empty( $session->session_page_id ) ? $this->mrm_mc_public_session_page_url( $session->session_page_id ) : '';
+			$enroll_url       = home_url( '/masterclass/#mrm-masterclass-event-' . absint( $session->id ) );
+			$start_label      = method_exists( $this, 'mrm_mc_event_time_label' )
+				? $this->mrm_mc_event_time_label( $session->start_time, $session->timezone )
+				: sanitize_text_field( $session->start_time . ' ' . $session->timezone );
+			$price_label      = '$' . number_format( absint( $session->price_cents ) / 100, 2 );
+			$capacity_label   = absint( $session->capacity ) . ' students';
+			$description      = ! empty( $session->long_description ) ? $session->long_description : ( $session->short_description ?? $session->description ?? '' );
+
+			$content .= '<article style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center;background:#fffdf9;border:1px solid #eadcc8;border-radius:26px;padding:clamp(20px,4vw,30px);margin:18px 0;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
+			$content .= '<div>';
+			$content .= '<h3 style="font-family:Georgia,serif;font-size:clamp(1.35rem,3vw,2rem);line-height:1.15;margin:0 0 10px;">' . esc_html( $session->title ) . '</h3>';
+
+			if ( ! empty( $description ) ) {
+				$content .= '<div style="line-height:1.7;margin:0 0 14px;">' . wp_kses_post( wpautop( $description ) ) . '</div>';
+			}
+
+			$content .= '<div style="display:flex;flex-wrap:wrap;gap:10px;color:#4b3c2d;font-weight:800;">';
+			$content .= '<span style="background:#fff;border:1px solid #dccab0;border-radius:999px;padding:8px 12px;">' . esc_html( $start_label ) . '</span>';
+			$content .= '<span style="background:#fff;border:1px solid #dccab0;border-radius:999px;padding:8px 12px;">' . esc_html( $price_label ) . '</span>';
+			$content .= '<span style="background:#fff;border:1px solid #dccab0;border-radius:999px;padding:8px 12px;">Capacity: ' . esc_html( $capacity_label ) . '</span>';
+			$content .= '</div>';
+			$content .= '</div>';
+
+			$content .= '<div style="display:flex;flex-direction:column;gap:10px;min-width:190px;">';
+			$content .= '<a href="' . esc_url( $enroll_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:13px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Enroll Now</a>';
+
+			if ( ! empty( $session_page_url ) ) {
+				$content .= '<a href="' . esc_url( $session_page_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Learn More</a>';
+			}
+
+			$content .= '</div>';
+			$content .= '</article>';
+		}
+	} else {
+		$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:24px;padding:24px;text-align:center;color:#6d5c45;">No upcoming Masterclass sessions are currently open for this presenter.</div>';
+	}
+
+	$content .= '</section>';
+
+	$share_url   = '#';
+	$share_title = 'Masterclass Presenter: ' . sanitize_text_field( $presenter->name ?? '' );
+
+	$content .= '<section style="text-align:center;margin-top:38px;padding-top:24px;border-top:1px solid #eadcc8;">';
+	$content .= '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">';
+	$content .= '<a href="mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( $share_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share by Email</a>';
+	$content .= '<a href="https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $share_url ) . '" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share on Facebook</a>';
+	$content .= '<a href="https://www.linkedin.com/sharing/share-offsite/?url=' . rawurlencode( $share_url ) . '" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share on LinkedIn</a>';
+	$content .= '</div>';
+	$content .= '</section>';
 
 	$content .= '</div>';
 
-	$page_title = $presenter->name . ' — Masterclass Presenter';
+	$page_title = 'Masterclass Presenter';
 
 	$page_data = array(
 		'post_title'   => $page_title,
@@ -6059,6 +6250,39 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 			'presenter_page_id_update_failed',
 			'Presenter page was created, but the presenter_page_id could not be saved: ' . $wpdb->last_error
 		);
+	}
+
+	/*
+	 * Regenerate once after the presenter_page_id is known so share buttons
+	 * can use the actual page permalink instead of a placeholder.
+	 */
+	if ( empty( $presenter->presenter_page_id ) || absint( $presenter->presenter_page_id ) !== $page_id ) {
+		$fresh_presenter = $this->mrm_mc_get_presenter( $presenter_id );
+
+		if ( $fresh_presenter ) {
+			$fresh_share_url = get_permalink( $page_id );
+
+			$fresh_content = str_replace(
+				array(
+					'mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( '#' ),
+					'https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( '#' ),
+					'https://www.linkedin.com/sharing/share-offsite/?url=' . rawurlencode( '#' ),
+				),
+				array(
+					'mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( $fresh_share_url ),
+					'https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $fresh_share_url ),
+					'https://www.linkedin.com/sharing/share-offsite/?url=' . rawurlencode( $fresh_share_url ),
+				),
+				$content
+			);
+
+			wp_update_post(
+				array(
+					'ID'           => $page_id,
+					'post_content' => $fresh_content,
+				)
+			);
+		}
 	}
 
 	return $page_id;
@@ -6377,6 +6601,7 @@ public function register_masterclass_gate_query_vars( $vars ) {
 	$vars[] = 'mrm_masterclass_gate';
 	$vars[] = 'mrm_masterclass_cancel';
 	$vars[] = 'mrm_masterclass_feedback';
+	$vars[] = 'mrm_masterclass_presenter_card';
 
 	return array_values( array_unique( $vars ) );
 }
@@ -7028,6 +7253,11 @@ private function mrm_mc_handle_feedback_request() {
 }
 
 public function mrm_mc_handle_gate_request() {
+	if ( ! empty( $_GET['mrm_masterclass_presenter_card'] ) ) {
+		$this->mrm_mc_handle_presenter_share_card_request();
+		exit;
+	}
+
 	if ( ! empty( $_GET['mrm_masterclass_cancel'] ) ) {
 		$this->mrm_mc_handle_cancel_request();
 		exit;
