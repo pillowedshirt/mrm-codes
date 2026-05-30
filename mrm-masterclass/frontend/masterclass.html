@@ -174,7 +174,9 @@
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity 160ms ease, visibility 160ms ease;
+  transition: opacity 180ms ease, visibility 180ms ease;
+  will-change: opacity;
+  transform: translateZ(0);
 }
 
 .modal-card {
@@ -187,13 +189,14 @@
   border-radius: 28px;
   padding: 28px;
   box-shadow: var(--mrm-shadow);
-  transform: translateY(8px) scale(0.985);
-  transition: transform 160ms ease;
+  transform: translateY(8px) scale(0.985) translateZ(0);
+  transition: transform 180ms ease;
   will-change: transform;
+  backface-visibility: hidden;
 }
 
 .modal.is-open .modal-card {
-  transform: translateY(0) scale(1);
+  transform: translateY(0) scale(1) translateZ(0);
 }
 
 .modal-card h2 {
@@ -850,7 +853,7 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-payment-element:not(:empty) {
-  min-height: 180px;
+  min-height: 230px;
 }
 
 .modal.is-open {
