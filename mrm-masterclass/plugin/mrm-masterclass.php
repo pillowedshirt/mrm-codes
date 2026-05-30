@@ -155,7 +155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.3.9';
+	const DB_VERSION = '1.4.0';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -426,20 +426,24 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    return event && (event.end_time_rfc3339 || event.end_time) ? (event.end_time_rfc3339 || event.end_time) : '';
 		  }
 
-		  function isPastEvent(event) {
-		    const end = eventEnd(event) || eventStart(event);
+		  function isEnrollmentClosed(event) {
+		    const start = eventStart(event);
 
-		    if (!end) {
+		    if (!start) {
 		      return false;
 		    }
 
-		    const date = new Date(end);
+		    const date = new Date(start);
 
 		    if (Number.isNaN(date.getTime())) {
 		      return false;
 		    }
 
-		    return date.getTime() < Date.now();
+		    return date.getTime() <= Date.now();
+		  }
+
+		  function isPastEvent(event) {
+		    return isEnrollmentClosed(event);
 		  }
 
 		  function publicEventIsRegisterable(event) {
@@ -783,15 +787,20 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      card.appendChild(title);
 		      card.appendChild(desc);
 		      card.appendChild(meta);
-		      card.appendChild(button);
+
+		      const actions = document.createElement('div');
+		      actions.className = 'mrm-masterclass-card-actions';
+		      actions.appendChild(button);
 
 		      if (event.session_page_url || event.presenter_page_url) {
 		        const learnMore = document.createElement('a');
 		        learnMore.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-learn-more-button';
 		        learnMore.href = event.session_page_url || event.presenter_page_url;
 		        learnMore.textContent = 'Learn More About This Session';
-		        card.appendChild(learnMore);
+		        actions.appendChild(learnMore);
 		      }
+
+		      card.appendChild(actions);
 
 		      eventsEl.appendChild(card);
 		    });
@@ -2896,6 +2905,21 @@ private function mrm_mc_public_session_page_url( $session_page_id ) {
 	return $session_page_id > 0 ? get_permalink( $session_page_id ) : '';
 }
 
+private function mrm_mc_presenter_emergency_url_for_event( $event_id ) {
+	$event_id = absint( $event_id );
+
+	if ( $event_id <= 0 ) {
+		return '';
+	}
+
+	return add_query_arg(
+		array(
+			'mrm_masterclass_presenter_emergency' => $event_id,
+		),
+		home_url( '/' )
+	);
+}
+
 private function mrm_mc_presenter_share_card_url( $presenter_id ) {
 	$presenter_id = absint( $presenter_id );
 
@@ -3175,8 +3199,8 @@ private function mrm_mc_reminder_email_body( $event, $presenter, $registration, 
 	$gate   = esc_url( $registration->gate_url ?? '' );
 	$cancel = esc_url( $registration->cancel_url ?? '' );
 
-	$intro = '<p>This is your one-hour reminder for your upcoming Masterclass.</p>'
-		. '<p>Please use the protected access link below at the scheduled time. The page will reveal the meeting link only during the allowed access window.</p>';
+	$intro = '<p>Your Masterclass starts in one hour.</p>'
+		. '<p>Please use the protected access link below at the scheduled time. The page will reveal the meeting link during the allowed access window.</p>';
 
 	$details = $this->mrm_mc_email_event_details_html( $event, $presenter, $registration );
 
@@ -3195,15 +3219,32 @@ private function mrm_mc_presenter_event_confirmation_email_body( $event, $presen
 		? $this->mrm_mc_public_presenter_page_url( $presenter->presenter_page_id )
 		: '';
 
+	$join_url = ! empty( $event->google_meet_url )
+		? esc_url( $event->google_meet_url )
+		: ( ! empty( $event->online_link ) ? esc_url( $event->online_link ) : '' );
+
+	$emergency_url = $this->mrm_mc_presenter_emergency_url_for_event( absint( $event->id ?? 0 ) );
+
 	$content = '<p>You have been scheduled as the presenter for a Masterclass.</p>'
 		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '<br>'
 		. '<strong>Scheduled start:</strong> ' . esc_html( $event_time ) . '<br>'
-		. '<strong>Maximum enrollment:</strong> 100 students</p>'
+		. '<strong>Available seats:</strong> Up to 100 students may enroll.</p>'
 		. '<p>Please plan to join the call roughly <strong>30 minutes before the scheduled start time</strong>. Students will be able to join starting <strong>10 minutes before the Masterclass begins</strong>.</p>';
+
+	if ( ! empty( $join_url ) ) {
+		$content .= $this->mrm_mc_email_button_html( $join_url, 'Join Your Masterclass Here' );
+	}
+
+	$content .= '<p>Before your session, please prepare your microphone setup, any guest players or collaborators, and the specific topics, examples, materials, and demonstrations you plan to discuss during the Masterclass.</p>';
 
 	if ( ! empty( $presenter_page_url ) ) {
 		$content .= '<p>Your presenter page is ready to share. You are welcome to share this link with your students, colleagues, followers, and professional network so they can learn more about your background and upcoming Masterclass sessions.</p>';
 		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open and Share Your Presenter Page' );
+	}
+
+	if ( ! empty( $emergency_url ) ) {
+		$content .= '<p>If an emergency occurs and you can no longer provide this Masterclass, please notify us immediately using the link below so we can assess the situation and communicate appropriately with enrolled students.</p>';
+		$content .= $this->mrm_mc_email_secondary_button_html( $emergency_url, 'I Can No Longer Provide This Masterclass' );
 	}
 
 	return $this->mrm_mc_email_template( 'You Have Been Scheduled for a Masterclass', $content );
@@ -3308,19 +3349,34 @@ private function mrm_mc_presenter_reminder_email_body( $event ) {
 		? $this->mrm_mc_public_presenter_page_url( $event->presenter_page_id )
 		: '';
 
-	$content = '<p>This is your one-hour presenter reminder for the upcoming Masterclass.</p>'
+	$join_url = ! empty( $event->google_meet_url )
+		? esc_url( $event->google_meet_url )
+		: ( ! empty( $event->online_link ) ? esc_url( $event->online_link ) : '' );
+
+	$emergency_url = $this->mrm_mc_presenter_emergency_url_for_event( absint( $event->id ?? 0 ) );
+
+	$content = '<p>This is a reminder for your upcoming Masterclass presentation.</p>'
 		. '<p>Please join the call roughly <strong>30 minutes before the scheduled start time</strong>. Students will be able to join starting <strong>10 minutes before the Masterclass begins</strong>.</p>'
 		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '<br>'
-		. '<strong>Scheduled start:</strong> ' . esc_html( $event_time ) . '<br>'
-		. '<strong>Maximum enrollment:</strong> 100 students</p>';
+		. '<strong>Scheduled start:</strong> ' . esc_html( $event_time ) . '</p>';
+
+	if ( ! empty( $join_url ) ) {
+		$content .= $this->mrm_mc_email_button_html( $join_url, 'Join Your Masterclass Here' );
+	}
 
 	if ( ! empty( $presenter_page_url ) ) {
 		$content .= '<p>You may continue sharing your presenter page with your network so interested students can review your profile and any open Masterclass sessions.</p>';
 		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open and Share Your Presenter Page' );
 	}
 
+	if ( ! empty( $emergency_url ) ) {
+		$content .= '<p>If an emergency occurs and you can no longer provide this Masterclass, please notify us immediately using the link below.</p>';
+		$content .= $this->mrm_mc_email_secondary_button_html( $emergency_url, 'I Can No Longer Provide This Masterclass' );
+	}
+
 	return $this->mrm_mc_email_template( 'Masterclass Presenter Reminder', $content );
 }
+
 
 private function mrm_mc_feedback_request_email_body( $event, $presenter, $registration ) {
 	$feedback_url = esc_url( $registration->feedback_url ?? '' );
@@ -5012,7 +5068,7 @@ public function mrm_mc_run_reminder_cron() {
 			$sent = $this->mrm_mc_send_email_recorded(
 				'reminder_1h',
 				$row->email,
-				'1-Hour Masterclass Reminder — ' . $row->title,
+				'Your Masterclass Starts in One Hour — ' . $row->title,
 				$body,
 				$row->event_id,
 				$row->id
@@ -5084,7 +5140,7 @@ public function mrm_mc_run_reminder_cron() {
 			$sent = $this->mrm_mc_send_email_recorded(
 				'presenter_reminder_1h',
 				$event->presenter_email,
-				'1-Hour Presenter Reminder — ' . $event->title,
+				'Presenter Reminder: Your Masterclass Starts in One Hour — ' . $event->title,
 				$body,
 				$event->id,
 				null
@@ -5899,7 +5955,7 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	$content .= '</div>';
 
 	$content .= '<div>';
-	$content .= '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Masterclass Presenter</p>';
+	$content .= '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Presenter</p>';
 	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2rem,5vw,3.7rem);line-height:1.05;margin:0 0 14px;">' . esc_html( $event->presenter_name ?: 'Presenter' ) . '</h1>';
 
 	if ( ! empty( $event->presenter_short_description ) ) {
@@ -5911,34 +5967,21 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	}
 
 	if ( ! empty( $presenter_page_url ) ) {
-		$content .= '<p><a href="' . esc_url( $presenter_page_url ) . '" style="display:inline-block;background:#20170f;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">View Full Presenter Page</a></p>';
+		$content .= '<p><a href="' . esc_url( $presenter_page_url ) . '" style="display:inline-block;background:#20170f;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">More About the Presenter</a></p>';
 	}
 
 	if ( ! empty( $contact_bits ) ) {
-		$content .= '<div style="background:#f7efe3;border-radius:18px;padding:18px;margin:22px 0 0;"><strong>Presenter Contact / Location</strong><br>' . implode( '<br>', $contact_bits ) . '</div>';
+		$content .= '<div style="background:#f7efe3;border-radius:18px;padding:18px;margin:22px 0 0;"><strong>Presenter Contact</strong><br>' . implode( '<br>', $contact_bits ) . '</div>';
 	}
 
 	$content .= '</div>';
 	$content .= '</section>';
 
-	if ( ! empty( $event->presenter_long_description ) || ! empty( $event->presenter_bio ) ) {
-		$content .= '<section style="margin-top:30px;background:#fffdf9;border:1px solid #eadcc8;border-radius:28px;padding:30px;line-height:1.75;">';
-		$content .= '<h2 style="margin-top:0;">More About the Presenter</h2>';
-
-		if ( ! empty( $event->presenter_long_description ) ) {
-			$content .= wp_kses_post( wpautop( $event->presenter_long_description ) );
-		}
-
-		if ( ! empty( $event->presenter_bio ) ) {
-			$content .= wp_kses_post( wpautop( $event->presenter_bio ) );
-		}
-
-		$content .= '</section>';
-	}
-
 	$content .= '<section style="margin-top:30px;background:#fff;border:1px solid #eadcc8;border-radius:28px;padding:30px;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
+	$content .= '<div style="text-align:center;margin:0 auto 22px;">';
 	$content .= '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Masterclass Session</p>';
-	$content .= '<h2 style="font-family:Georgia,serif;font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;">' . esc_html( $event->title ) . '</h2>';
+	$content .= '<h2 style="font-family:Georgia,serif;font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;color:#20170f;text-align:center;">' . esc_html( $event->title ) . '</h2>';
+	$content .= '</div>';
 
 	if ( ! empty( $event->short_description ) ) {
 		$content .= '<div style="font-size:18px;line-height:1.65;margin:0 0 22px;">' . wp_kses_post( wpautop( $event->short_description ) ) . '</div>';
@@ -5952,11 +5995,24 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Starts</strong><br>' . esc_html( $start_label ) . '</div>';
 	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Ends</strong><br>' . esc_html( $end_label ) . '</div>';
 	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Price</strong><br>' . esc_html( $price ) . '</div>';
-	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Seats Available</strong><br>' . esc_html( absint( $available_seats ) . ' of ' . absint( $capacity ) . ' spots available' ) . '</div>';
+	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Available Seats</strong><br>' . esc_html( absint( $available_seats ) . ' spots available' ) . '</div>';
 
 	$content .= '</div>';
 
+	$session_share_url   = $this->mrm_mc_public_session_page_url( absint( $event->session_page_id ?? 0 ) );
+	$session_share_url   = $session_share_url ? $session_share_url : home_url( '/' );
+	$session_share_title = 'Masterclass Session: ' . sanitize_text_field( $event->title ?? 'Masterclass' );
+
 	$content .= '<p style="text-align:center;margin:30px 0 0;"><a href="' . esc_url( $enroll_url ) . '#mrm-masterclass-event-' . absint( $event_id ) . '" style="display:inline-block;background:#20170f;color:#fff;padding:14px 22px;border-radius:999px;text-decoration:none;font-weight:900;">Enroll Now</a></p>';
+
+	$content .= '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:18px;">';
+	$content .= '<a href="mailto:?subject=' . rawurlencode( $session_share_title ) . '&body=' . rawurlencode( "I thought you might be interested in this Masterclass session:
+
+" . $session_share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share by Email</a>';
+	$content .= '<a href="https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $session_share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share on Facebook</a>';
+	$content .= '<button type="button" onclick="navigator.clipboard && navigator.clipboard.writeText(window.location.href).then(function(){this.textContent=&quot;Link Copied&quot;}.bind(this)).catch(function(){window.prompt(&quot;Copy this link:&quot;, window.location.href);}.bind(this));" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;cursor:pointer;">Copy Link</button>';
+	$content .= '</div>';
+
 	$content .= '</section>';
 
 	$content .= '</div>';
@@ -6273,7 +6329,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 			$price_label      = '$' . number_format( absint( $session->price_cents ) / 100, 2 );
 			$paid_count       = $this->mrm_mc_paid_registration_count_for_event( absint( $session->id ) );
 			$available_seats  = max( 0, absint( $session->capacity ) - absint( $paid_count ) );
-			$seats_label      = absint( $available_seats ) . ' of ' . absint( $session->capacity ) . ' spots available';
+			$seats_label      = absint( $available_seats ) . ' spots available';
 			$description      = ! empty( $session->long_description ) ? $session->long_description : ( $session->short_description ?? $session->description ?? '' );
 
 			$content .= '<article style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center;background:#fffdf9;border:1px solid #eadcc8;border-radius:26px;padding:clamp(20px,4vw,30px);margin:18px 0;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
@@ -6294,7 +6350,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 			$content .= '<a href="' . esc_url( $enroll_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:13px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Enroll Now</a>';
 
 			if ( ! empty( $session_page_url ) ) {
-				$content .= '<a href="' . esc_url( $session_page_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:13px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Learn More About This Session</a>';
+				$content .= '<a href="' . esc_url( $session_page_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:13px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Learn More About This Masterclass</a>';
 			}
 
 			$content .= '</div>';
@@ -6304,16 +6360,6 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 		$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:24px;padding:24px;text-align:center;color:#6d5c45;">No upcoming Masterclass sessions are currently open for this presenter.</div>';
 	}
 
-	$content .= '</section>';
-
-	$content .= '<section style="text-align:center;margin-top:38px;padding-top:24px;border-top:1px solid #eadcc8;">';
-	$content .= '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">';
-	$content .= '<a href="mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( "I thought you might be interested in this Masterclass presenter page:
-
-" . $share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share by Email</a>';
-	$content .= '<a href="https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share on Facebook</a>';
-	$content .= '<button type="button" onclick="navigator.clipboard && navigator.clipboard.writeText(window.location.href).then(function(){this.textContent=&quot;Link Copied&quot;}.bind(this)).catch(function(){window.prompt(&quot;Copy this link:&quot;, window.location.href);}.bind(this));" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;cursor:pointer;">Copy Link</button>';
-	$content .= '</div>';
 	$content .= '</section>';
 
 	$content .= '</div>';
@@ -6687,6 +6733,7 @@ public function register_masterclass_gate_query_vars( $vars ) {
 	$vars[] = 'mrm_masterclass_cancel';
 	$vars[] = 'mrm_masterclass_feedback';
 	$vars[] = 'mrm_masterclass_presenter_card';
+	$vars[] = 'mrm_masterclass_presenter_emergency';
 
 	return array_values( array_unique( $vars ) );
 }
@@ -7337,9 +7384,127 @@ private function mrm_mc_handle_feedback_request() {
 	exit;
 }
 
+private function mrm_mc_handle_presenter_emergency_request() {
+	global $wpdb;
+
+	$event_id = absint( $_GET['mrm_masterclass_presenter_emergency'] ?? 0 );
+
+	if ( $event_id <= 0 ) {
+		$this->mrm_mc_render_gate_page(
+			'Invalid Masterclass Link',
+			'This presenter assistance link is invalid.'
+		);
+		exit;
+	}
+
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+
+	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Temporarily Unavailable',
+			'This request could not be loaded right now. Please contact support directly.'
+		);
+		exit;
+	}
+
+	$event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT e.*, p.name AS presenter_name, p.email AS presenter_email
+			 FROM {$events_table} e
+			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+			 WHERE e.id = %d
+			 LIMIT 1",
+			$event_id
+		)
+	);
+
+	if ( ! $event ) {
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Not Found',
+			'This Masterclass could not be found.'
+		);
+		exit;
+	}
+
+	if ( 'POST' === strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+		check_admin_referer( 'mrm_masterclass_presenter_emergency_' . $event_id );
+
+		$reason  = sanitize_textarea_field( wp_unslash( $_POST['emergency_reason'] ?? '' ) );
+		$details = sanitize_textarea_field( wp_unslash( $_POST['emergency_details'] ?? '' ) );
+
+		if ( '' === trim( $reason ) && '' === trim( $details ) ) {
+			$reason = 'Presenter reported an emergency but did not provide details.';
+		}
+
+		$owner_email = get_option( 'admin_email' );
+		$subject     = 'Urgent Masterclass Presenter Issue — ' . sanitize_text_field( $event->title ?? 'Masterclass' );
+
+		$body = $this->mrm_mc_email_template(
+			'Urgent Masterclass Presenter Issue',
+			'<p>A presenter has reported that they may no longer be able to provide a scheduled Masterclass.</p>'
+			. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '<br>'
+			. '<strong>Presenter:</strong> ' . esc_html( $event->presenter_name ?? 'Unknown' ) . '<br>'
+			. '<strong>Presenter Email:</strong> ' . esc_html( $event->presenter_email ?? 'Unknown' ) . '<br>'
+			. '<strong>Scheduled Start:</strong> ' . esc_html( ( $event->start_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ) . '</p>'
+			. '<p><strong>Selected Reason:</strong><br>' . nl2br( esc_html( $reason ) ) . '</p>'
+			. '<p><strong>Additional Details:</strong><br>' . nl2br( esc_html( $details ) ) . '</p>'
+		);
+
+		$sent = $this->mrm_mc_send_email_recorded(
+			'presenter_emergency',
+			$owner_email,
+			$subject,
+			$body,
+			$event_id,
+			null
+		);
+
+		$this->mrm_mc_debug_log(
+			'Masterclass presenter emergency request submitted.',
+			array(
+				'event_id' => $event_id,
+				'sent'     => $sent ? 'yes' : 'no',
+			)
+		);
+
+		$this->mrm_mc_render_gate_page(
+			'Request Submitted',
+			'Thank you. Your request has been sent. The site owner will review the situation and follow up as needed.'
+		);
+		exit;
+	}
+
+	$form  = '<p>If an emergency has occurred and you can no longer provide this Masterclass, please submit this form as soon as possible. This does not automatically cancel the event; it alerts the site owner so students can be contacted appropriately.</p>';
+	$form .= '<form method="post">';
+	$form .= wp_nonce_field( 'mrm_masterclass_presenter_emergency_' . $event_id, '_wpnonce', true, false );
+	$form .= '<fieldset style="border:1px solid #dccab0;border-radius:18px;padding:18px;margin:18px 0;">';
+	$form .= '<legend><strong>What happened?</strong></legend>';
+	$form .= '<label style="display:block;margin:10px 0;"><input type="radio" name="emergency_reason" value="I am experiencing an emergency and can no longer provide this Masterclass."> I am experiencing an emergency and can no longer provide this Masterclass.</label>';
+	$form .= '<label style="display:block;margin:10px 0;"><input type="radio" name="emergency_reason" value="I may need to reschedule this Masterclass."> I may need to reschedule this Masterclass.</label>';
+	$form .= '<label style="display:block;margin:10px 0;"><input type="radio" name="emergency_reason" value="I am having a technical or access issue."> I am having a technical or access issue.</label>';
+	$form .= '<label style="display:block;margin:10px 0;"><input type="radio" name="emergency_reason" value="Other"> Other</label>';
+	$form .= '<label style="display:block;margin:14px 0 6px;"><strong>Additional details:</strong></label>';
+	$form .= '<textarea name="emergency_details" rows="6" style="width:100%;box-sizing:border-box;border:1px solid #dccab0;border-radius:12px;padding:12px;"></textarea>';
+	$form .= '</fieldset>';
+	$form .= '<button class="mrm-masterclass-gate-button" type="submit">Send Urgent Request</button>';
+	$form .= '</form>';
+
+	$this->mrm_mc_render_gate_page(
+		'Presenter Assistance Request',
+		$form
+	);
+	exit;
+}
+
 public function mrm_mc_handle_gate_request() {
 	if ( ! empty( $_GET['mrm_masterclass_presenter_card'] ) ) {
 		$this->mrm_mc_handle_presenter_share_card_request();
+		exit;
+	}
+
+	if ( ! empty( $_GET['mrm_masterclass_presenter_emergency'] ) ) {
+		$this->mrm_mc_handle_presenter_emergency_request();
 		exit;
 	}
 
@@ -9273,6 +9438,18 @@ public function rest_create_payment_intent( $request ) {
 
 	if ( 'scheduled' !== sanitize_key( $event->status ) || empty( $event->registration_open ) ) {
 		return new WP_Error( 'mrm_masterclass_event_closed', 'Registration is not open for this Masterclass.', array( 'status' => 409 ) );
+	}
+
+	$event_start_ts = method_exists( $this, 'mrm_mc_event_timestamp_from_local' )
+		? $this->mrm_mc_event_timestamp_from_local( $event->start_time, $event->timezone ?? 'America/Phoenix' )
+		: strtotime( $event->start_time . ' UTC' );
+
+	if ( $event_start_ts > 0 && time() >= $event_start_ts ) {
+		return new WP_Error(
+			'masterclass_enrollment_closed',
+			'Enrollment for this Masterclass has closed because the Masterclass has already started.',
+			array( 'status' => 409 )
+		);
 	}
 
 	$available = $this->mrm_mc_available_seats_for_event( $event );
