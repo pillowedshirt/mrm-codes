@@ -155,7 +155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.3.6';
+	const DB_VERSION = '1.3.7';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -241,6 +241,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		'mrm_masterclass_export_1099_csv'          => 'handle_export_1099_csv',
 		'mrm_masterclass_save_tax_profile'         => 'handle_save_tax_profile',
 		'mrm_masterclass_create_presenter_page'    => 'handle_create_presenter_page',
+		'mrm_masterclass_create_session_page'      => 'handle_create_session_page',
 		'mrm_masterclass_resend_confirmation'      => 'handle_resend_confirmation',
 		'mrm_masterclass_resend_reminder'          => 'handle_resend_reminder',
 		'mrm_masterclass_run_reminder_cron_now'    => 'handle_run_reminder_cron_now',
@@ -741,11 +742,17 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		      const meta = document.createElement('div');
 		      meta.className = 'mrm-masterclass-event-meta';
+		      const presenterName = event.presenter_name || 'TBA';
+		      const presenterHtml = event.presenter_page_url
+		        ? '<a class="mrm-masterclass-presenter-link" href="' + escapeHtml(event.presenter_page_url) + '">' + escapeHtml(presenterName) + '</a>'
+		        : escapeHtml(presenterName);
+
 		      meta.innerHTML =
-		        '<p><strong>Presenter:</strong> ' + escapeHtml(event.presenter_name || 'TBA') + '</p>' +
+		        '<p><strong>Presenter:</strong> ' + presenterHtml + '</p>' +
 		        '<p><strong>Starts:</strong> ' + escapeHtml(formatDateTime(eventStart(event))) + '</p>' +
 		        '<p><strong>Ends:</strong> ' + escapeHtml(formatDateTime(eventEnd(event))) + '</p>' +
 		        '<p><strong>Price:</strong> ' + escapeHtml(money(event.price_cents || 0)) + '</p>' +
+		        '<p><strong>Capacity:</strong> ' + escapeHtml(String(typeof event.capacity !== 'undefined' ? event.capacity : 'TBA')) + '</p>' +
 		        '<p><strong>Seats available:</strong> ' + escapeHtml(String(typeof event.available_seats !== 'undefined' ? event.available_seats : 'TBA')) + '</p>';
 
 		      const button = document.createElement('button');
@@ -776,6 +783,14 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      card.appendChild(desc);
 		      card.appendChild(meta);
 		      card.appendChild(button);
+
+		      if (event.session_page_url || event.presenter_page_url) {
+		        const learnMore = document.createElement('a');
+		        learnMore.className = 'secondary-btn mrm-masterclass-learn-more-button';
+		        learnMore.href = event.session_page_url || event.presenter_page_url;
+		        learnMore.textContent = 'Learn More About This Session';
+		        card.appendChild(learnMore);
+		      }
 
 		      eventsEl.appendChild(card);
 		    });
@@ -891,6 +906,25 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      });
 
 		      renderEvents(events);
+
+		      if (window.location.hash && window.location.hash.indexOf('#mrm-masterclass-event-') === 0) {
+		        window.setTimeout(function () {
+		          const target = document.querySelector(window.location.hash);
+
+		          if (target) {
+		            target.scrollIntoView({
+		              behavior: 'smooth',
+		              block: 'center'
+		            });
+
+		            target.classList.add('mrm-masterclass-event-card-highlight');
+
+		            window.setTimeout(function () {
+		              target.classList.remove('mrm-masterclass-event-card-highlight');
+		            }, 2200);
+		          }
+		        }, 500);
+		      }
 
 		      console.log('MRM Masterclass events loaded:', {
 		        count: events.length,
@@ -2336,6 +2370,9 @@ public function mrm_mc_render_critical_error_notice() {
 		'confirmation_note' => "ALTER TABLE {$events_table} ADD confirmation_note TEXT NULL",
 		'presenter_confirmation_sent_at' => "ALTER TABLE {$events_table} ADD presenter_confirmation_sent_at DATETIME NULL",
 		'presenter_reminder_1h_sent_at'  => "ALTER TABLE {$events_table} ADD presenter_reminder_1h_sent_at DATETIME NULL",
+		'short_description'       => "ALTER TABLE {$events_table} ADD short_description TEXT NULL",
+		'long_description'        => "ALTER TABLE {$events_table} ADD long_description LONGTEXT NULL",
+		'session_page_id'         => "ALTER TABLE {$events_table} ADD session_page_id BIGINT UNSIGNED NULL",
 	);
 
 	foreach ( $event_adds as $column => $sql ) {
@@ -2849,6 +2886,12 @@ private function mrm_mc_terms_snapshot() {
 		'text'     => 'Masterclass purchase terms accepted at checkout. Access is provided through a protected gate link. Cancellation/refund policy follows the event cancellation rules stored in the Masterclass plugin.',
 		'time'     => gmdate( 'c' ),
 	);
+}
+
+private function mrm_mc_public_session_page_url( $session_page_id ) {
+	$session_page_id = absint( $session_page_id );
+
+	return $session_page_id > 0 ? get_permalink( $session_page_id ) : '';
 }
 
 private function mrm_mc_public_presenter_page_url( $presenter_page_id ) {
@@ -3371,9 +3414,11 @@ private function mrm_mc_public_event_payload( $row ) {
 	return array(
 		'id'                 => absint( $row->id ),
 		'title'              => sanitize_text_field( $row->title ),
-		'description_html'   => wp_kses_post( $row->description ?? '' ),
-		'presenter_name'     => sanitize_text_field( $row->presenter_name ?? '' ),
-		'presenter_page_url' => esc_url_raw( $row->presenter_page_url ?? '' ),
+		'description_html'      => wp_kses_post( ! empty( $row->short_description ) ? $row->short_description : ( $row->description ?? '' ) ),
+		'long_description_html' => wp_kses_post( $row->long_description ?? '' ),
+		'presenter_name'        => sanitize_text_field( $row->presenter_name ?? '' ),
+		'presenter_page_url'    => esc_url_raw( $row->presenter_page_url ?? '' ),
+		'session_page_url'      => ! empty( $row->session_page_id ) ? esc_url_raw( $this->mrm_mc_public_session_page_url( $row->session_page_id ) ) : '',
 		'start_time'         => sanitize_text_field( $row->start_time ),
 		'end_time'           => sanitize_text_field( $row->end_time ),
 		'start_time_rfc3339' => ! empty( $row->start_time ) ? mysql_to_rfc3339( $row->start_time ) : '',
@@ -5131,7 +5176,31 @@ public function handle_save_presenter() {
 	}
 
 	if ( $id > 0 && method_exists( $this, 'mrm_mc_generate_presenter_page_for_id' ) ) {
-		$this->mrm_mc_generate_presenter_page_for_id( $id );
+		$page_result = $this->mrm_mc_generate_presenter_page_for_id( $id );
+
+		if ( is_wp_error( $page_result ) ) {
+			$this->mrm_mc_debug_log(
+				'Presenter page auto-generation failed after presenter save.',
+				array(
+					'presenter_id' => $id,
+					'error'        => $page_result->get_error_message(),
+				)
+			);
+
+			$this->mrm_mc_admin_notice_redirect(
+				'mrm-masterclass-presenters',
+				'presenter_page_failed',
+				array( 'edit' => $id )
+			);
+		}
+
+		$this->mrm_mc_debug_log(
+			'Presenter page auto-generated after presenter save.',
+			array(
+				'presenter_id' => $id,
+				'page_id'      => absint( $page_result ),
+			)
+		);
 	}
 
 	$this->mrm_mc_admin_notice_redirect(
@@ -5239,6 +5308,8 @@ public function handle_save_event() {
 
 	$title        = $this->mrm_mc_clean_text( $_POST['title'] ?? '' );
 	$description  = $this->mrm_mc_clean_html( $_POST['description'] ?? '' );
+	$short_description = $this->mrm_mc_clean_html( $_POST['short_description'] ?? '' );
+	$long_description  = $this->mrm_mc_clean_html( $_POST['long_description'] ?? '' );
 	$presenter_id = absint( $_POST['presenter_id'] ?? 0 );
 	$proctor      = $this->mrm_mc_clean_email( $_POST['proctor_email'] ?? '' );
 	$start_time   = $this->mrm_mc_datetime_from_local( $_POST['start_time'] ?? '' );
@@ -5255,7 +5326,23 @@ public function handle_save_event() {
 	$presenter = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$presenters_table} WHERE id = %d",$presenter_id));
 	if ( ! $presenter ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_presenter_missing' ); }
 	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id();
-	$data = array('title'=>$title,'description'=>$description,'presenter_id'=>$presenter_id,'presenter_email'=>sanitize_email( $presenter->email ?? '' ),'proctor_email'=>$proctor,'start_time'=>$start_time,'end_time'=>$end_time,'timezone'=>$timezone,'price_cents'=>$price_cents,'capacity'=>$capacity,'status'=>$status,'registration_open'=>$this->mrm_mc_bool_post( 'registration_open' ),'updated_at'=>$this->now());
+	$data = array(
+		'title'             => $title,
+		'description'       => $description,
+		'short_description' => $short_description,
+		'long_description'  => $long_description,
+		'presenter_id'      => $presenter_id,
+		'presenter_email'   => sanitize_email( $presenter->email ?? '' ),
+		'proctor_email'     => $proctor,
+		'start_time'        => $start_time,
+		'end_time'          => $end_time,
+		'timezone'          => $timezone,
+		'price_cents'       => $price_cents,
+		'capacity'          => $capacity,
+		'status'            => $status,
+		'registration_open' => $this->mrm_mc_bool_post( 'registration_open' ),
+		'updated_at'        => $this->now(),
+	);
 	if ( method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $events_table, 'calendar_id' ) ) { $data['calendar_id'] = $calendar_id; }
 	$data = $this->mrm_mc_filter_data_for_table( $events_table, $data );
 	if ( $is_edit ) { $result=$wpdb->update($events_table,$data,array('id'=>$event_id)); } else { $data['created_at']=$this->now(); if ( method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $events_table, 'refund_request_token' ) ) { $data['refund_request_token']=wp_generate_password( 32, false, false ); } $result=$wpdb->insert($events_table,$data); $event_id=$result?absint($wpdb->insert_id):0; }
@@ -5270,6 +5357,26 @@ public function handle_save_event() {
 			'source'     => 'admin_save',
 		)
 	);
+
+	$session_page_result = $this->mrm_mc_generate_session_page_for_event_id( $event_id );
+
+	if ( is_wp_error( $session_page_result ) ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass session page generation failed after event save.',
+			array(
+				'event_id' => absint( $event_id ),
+				'error'    => $session_page_result->get_error_message(),
+			)
+		);
+	} else {
+		$this->mrm_mc_debug_log(
+			'Masterclass session page generated or updated after event save.',
+			array(
+				'event_id' => absint( $event_id ),
+				'page_id'  => absint( $session_page_result ),
+			)
+		);
+	}
 
 	$google_result = $this->mrm_mc_sync_google_for_event_id( $event_id );
 
@@ -5606,6 +5713,231 @@ public function handle_emergency_cancel_event() {
 	$this->handle_cancel_event();
 }
 
+private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
+	global $wpdb;
+
+	$event_id = absint( $event_id );
+
+	if ( $event_id <= 0 ) {
+		return new WP_Error( 'session_event_missing_id', 'Event ID is missing.' );
+	}
+
+	if ( ! function_exists( 'wp_insert_post' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/post.php';
+	}
+
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+	$regs_table       = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
+		return new WP_Error( 'session_tables_missing', 'Required Masterclass tables are missing.' );
+	}
+
+	$event = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT e.*,
+				p.name AS presenter_name,
+				p.email AS presenter_email,
+				p.bio AS presenter_bio,
+				p.short_description AS presenter_short_description,
+				p.long_description AS presenter_long_description,
+				p.profile_image_url AS presenter_profile_image_url,
+				p.presenter_page_id AS presenter_page_id,
+				p.city AS presenter_city,
+				p.state AS presenter_state,
+				p.instruments AS presenter_instruments
+			 FROM {$events_table} e
+			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+			 WHERE e.id = %d
+			 LIMIT 1",
+			$event_id
+		)
+	);
+
+	if ( ! $event ) {
+		return new WP_Error( 'session_event_not_found', 'Masterclass event could not be found.' );
+	}
+
+	$paid_count = null;
+
+	if ( $this->mrm_mc_table_exists( $regs_table ) ) {
+		$paid_count = absint(
+			$wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT COUNT(*) FROM {$regs_table} WHERE event_id = %d AND LOWER(TRIM(payment_status)) = 'paid'",
+					$event_id
+				)
+			)
+		);
+	}
+
+	$site_logo          = $this->mrm_mc_get_email_logo_url();
+	$presenter_page_url = ! empty( $event->presenter_page_id ) ? $this->mrm_mc_public_presenter_page_url( $event->presenter_page_id ) : '';
+	$profile            = esc_url_raw( $event->presenter_profile_image_url ?? '' );
+	$capacity           = absint( $event->capacity );
+	$available_seats    = null !== $paid_count ? max( 0, $capacity - $paid_count ) : null;
+
+	$price       = '$' . number_format( absint( $event->price_cents ) / 100, 2 );
+	$start_label = method_exists( $this, 'mrm_mc_event_time_label' )
+		? $this->mrm_mc_event_time_label( $event->start_time, $event->timezone )
+		: sanitize_text_field( $event->start_time . ' ' . $event->timezone );
+
+	$end_label = method_exists( $this, 'mrm_mc_event_time_label' )
+		? $this->mrm_mc_event_time_label( $event->end_time, $event->timezone )
+		: sanitize_text_field( $event->end_time . ' ' . $event->timezone );
+
+	$enroll_url = home_url( '/masterclass/' );
+
+	$instruments = array();
+
+	if ( ! empty( $event->presenter_instruments ) ) {
+		$decoded = json_decode( $event->presenter_instruments, true );
+
+		if ( is_array( $decoded ) ) {
+			$instruments = array_map( 'sanitize_text_field', $decoded );
+		}
+	}
+
+	$contact_bits = array();
+
+	if ( ! empty( $event->presenter_email ) ) {
+		$contact_bits[] = '<a href="mailto:' . esc_attr( antispambot( $event->presenter_email ) ) . '">' . esc_html( antispambot( $event->presenter_email ) ) . '</a>';
+	}
+
+	if ( ! empty( $event->presenter_city ) || ! empty( $event->presenter_state ) ) {
+		$contact_bits[] = esc_html( trim( ( $event->presenter_city ?? '' ) . ', ' . ( $event->presenter_state ?? '' ), ' ,' ) );
+	}
+
+	$content = '<div class="mrm-masterclass-session-page" style="max-width:1060px;margin:0 auto;padding:48px 20px;font-family:Arial,Helvetica,sans-serif;color:#20170f;">';
+
+	$content .= '<section style="display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);gap:28px;align-items:center;background:#fffdf9;border:1px solid #dccab0;border-radius:30px;padding:28px;box-shadow:0 18px 46px rgba(32,23,15,.10);">';
+
+	$content .= '<div style="text-align:center;">';
+
+	if ( $profile ) {
+		$content .= '<img src="' . esc_url( $profile ) . '" alt="' . esc_attr( $event->presenter_name ) . '" style="width:100%;max-width:290px;aspect-ratio:1/1;object-fit:cover;border-radius:24px;display:block;margin:0 auto 18px;">';
+	}
+
+	if ( $site_logo ) {
+		$content .= '<img src="' . esc_url( $site_logo ) . '" alt="' . esc_attr( get_bloginfo( 'name' ) ) . '" style="max-width:210px;height:auto;display:block;margin:0 auto;">';
+	}
+
+	$content .= '</div>';
+
+	$content .= '<div>';
+	$content .= '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Masterclass Presenter</p>';
+	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2rem,5vw,3.7rem);line-height:1.05;margin:0 0 14px;">' . esc_html( $event->presenter_name ?: 'Presenter' ) . '</h1>';
+
+	if ( ! empty( $event->presenter_short_description ) ) {
+		$content .= '<div style="font-size:18px;line-height:1.65;margin-bottom:16px;">' . wp_kses_post( wpautop( $event->presenter_short_description ) ) . '</div>';
+	}
+
+	if ( ! empty( $instruments ) ) {
+		$content .= '<p style="font-weight:800;margin:12px 0;"><strong>Areas:</strong> ' . esc_html( implode( ', ', $instruments ) ) . '</p>';
+	}
+
+	if ( ! empty( $presenter_page_url ) ) {
+		$content .= '<p><a href="' . esc_url( $presenter_page_url ) . '" style="display:inline-block;background:#20170f;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">View Full Presenter Page</a></p>';
+	}
+
+	if ( ! empty( $contact_bits ) ) {
+		$content .= '<div style="background:#f7efe3;border-radius:18px;padding:18px;margin:22px 0 0;"><strong>Presenter Contact / Location</strong><br>' . implode( '<br>', $contact_bits ) . '</div>';
+	}
+
+	$content .= '</div>';
+	$content .= '</section>';
+
+	if ( ! empty( $event->presenter_long_description ) || ! empty( $event->presenter_bio ) ) {
+		$content .= '<section style="margin-top:30px;background:#fffdf9;border:1px solid #eadcc8;border-radius:28px;padding:30px;line-height:1.75;">';
+		$content .= '<h2 style="margin-top:0;">More About the Presenter</h2>';
+
+		if ( ! empty( $event->presenter_long_description ) ) {
+			$content .= wp_kses_post( wpautop( $event->presenter_long_description ) );
+		}
+
+		if ( ! empty( $event->presenter_bio ) ) {
+			$content .= wp_kses_post( wpautop( $event->presenter_bio ) );
+		}
+
+		$content .= '</section>';
+	}
+
+	$content .= '<section style="margin-top:30px;background:#fff;border:1px solid #eadcc8;border-radius:28px;padding:30px;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
+	$content .= '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Masterclass Session</p>';
+	$content .= '<h2 style="font-family:Georgia,serif;font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;">' . esc_html( $event->title ) . '</h2>';
+
+	if ( ! empty( $event->short_description ) ) {
+		$content .= '<div style="font-size:18px;line-height:1.65;margin:0 0 22px;">' . wp_kses_post( wpautop( $event->short_description ) ) . '</div>';
+	}
+
+	if ( ! empty( $event->long_description ) ) {
+		$content .= '<div style="font-size:16px;line-height:1.75;margin:0 0 22px;">' . wp_kses_post( wpautop( $event->long_description ) ) . '</div>';
+	}
+
+	$content .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:24px 0;">';
+	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Starts</strong><br>' . esc_html( $start_label ) . '</div>';
+	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Ends</strong><br>' . esc_html( $end_label ) . '</div>';
+	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Price</strong><br>' . esc_html( $price ) . '</div>';
+	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Capacity</strong><br>' . esc_html( $capacity ) . ' students</div>';
+
+	if ( null !== $available_seats ) {
+		$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Available Seats</strong><br>' . esc_html( $available_seats ) . ' seats</div>';
+	}
+
+	$content .= '</div>';
+
+	$content .= '<p style="text-align:center;margin:30px 0 0;"><a href="' . esc_url( $enroll_url ) . '#mrm-masterclass-event-' . absint( $event_id ) . '" style="display:inline-block;background:#20170f;color:#fff;padding:14px 22px;border-radius:999px;text-decoration:none;font-weight:900;">Enroll Now</a></p>';
+	$content .= '</section>';
+
+	$content .= '</div>';
+
+	$page_title = $event->title . ' — Masterclass Session';
+
+	$page_data = array(
+		'post_title'   => $page_title,
+		'post_content' => $content,
+		'post_status'  => 'publish',
+		'post_type'    => 'page',
+	);
+
+	$page_id = absint( $event->session_page_id ?? 0 );
+
+	if ( $page_id > 0 && get_post( $page_id ) ) {
+		$page_data['ID'] = $page_id;
+		$result = wp_update_post( $page_data, true );
+	} else {
+		$result = wp_insert_post( $page_data, true );
+	}
+
+	if ( is_wp_error( $result ) ) {
+		return $result;
+	}
+
+	$page_id = absint( $result );
+
+	$updated = $wpdb->update(
+		$events_table,
+		$this->mrm_mc_filter_data_for_table(
+			$events_table,
+			array(
+				'session_page_id' => $page_id,
+				'updated_at'      => $this->now(),
+			)
+		),
+		array( 'id' => $event_id )
+	);
+
+	if ( false === $updated ) {
+		return new WP_Error(
+			'session_page_id_update_failed',
+			'Session page was created, but session_page_id could not be saved: ' . $wpdb->last_error
+		);
+	}
+
+	return $page_id;
+}
+
 private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	global $wpdb;
 
@@ -5616,6 +5948,10 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	}
 
 	$presenter = $this->mrm_mc_get_presenter( $presenter_id );
+
+	if ( ! function_exists( 'wp_insert_post' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/post.php';
+	}
 
 	if ( ! $presenter ) {
 		return new WP_Error( 'presenter_not_found', 'Presenter could not be found.' );
@@ -5709,7 +6045,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 
 	$page_id = absint( $result );
 
-	$wpdb->update(
+	$updated = $wpdb->update(
 		$presenters_table,
 		array(
 			'presenter_page_id' => $page_id,
@@ -5718,7 +6054,53 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 		array( 'id' => $presenter_id )
 	);
 
+	if ( false === $updated ) {
+		return new WP_Error(
+			'presenter_page_id_update_failed',
+			'Presenter page was created, but the presenter_page_id could not be saved: ' . $wpdb->last_error
+		);
+	}
+
 	return $page_id;
+}
+
+public function handle_create_session_page() {
+	$this->must_admin();
+
+	$event_id = absint( $_POST['event_id'] ?? $_GET['event_id'] ?? 0 );
+
+	if ( $event_id <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_missing_id' );
+	}
+
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_create_session_page_' . $event_id );
+
+	$result = $this->mrm_mc_generate_session_page_for_event_id( $event_id );
+
+	if ( is_wp_error( $result ) ) {
+		$this->mrm_mc_debug_log(
+			'Manual Masterclass session page generation failed.',
+			array(
+				'event_id' => $event_id,
+				'error'    => $result->get_error_message(),
+			)
+		);
+
+		$this->mrm_mc_admin_notice_redirect(
+			self::ADMIN_EVENTS_SLUG,
+			'session_page_failed',
+			array( 'edit' => $event_id )
+		);
+	}
+
+	$this->mrm_mc_admin_notice_redirect(
+		self::ADMIN_EVENTS_SLUG,
+		'session_page_saved',
+		array(
+			'edit'    => $event_id,
+			'page_id' => absint( $result ),
+		)
+	);
 }
 
 public function handle_create_presenter_page() {
@@ -7360,8 +7742,8 @@ public function render_presenters_page() {
 		'presenter_saved'             => array( 'success', 'Presenter saved successfully.' ),
 		'presenter_missing_id'           => array( 'error', 'Presenter action failed because the presenter ID was missing.' ),
 		'presenter_not_found'            => array( 'error', 'Presenter could not be found.' ),
-		'presenter_page_failed'          => array( 'error', 'Presenter page could not be created or updated. Check wp-content/masterclass-debug.log.' ),
-		'presenter_page_saved'           => array( 'success', 'Presenter page created or updated successfully.' ),
+		'presenter_page_failed'          => array( 'error', 'Presenter page could not be generated. Check masterclass-debug.log.' ),
+		'presenter_page_saved'           => array( 'success', 'Presenter page generated or updated.' ),
 		'presenter_delete_table_missing' => array( 'error', 'Presenter could not be removed because one or more Masterclass tables are missing.' ),
 		'presenter_archive_failed'       => array( 'error', 'Presenter could not be archived. Check wp-content/masterclass-debug.log.' ),
 		'presenter_archived'             => array( 'success', 'Presenter has linked event history, so the record was safely archived instead of deleted.' ),
@@ -7490,7 +7872,7 @@ public function render_events_page() {
 
 	$events = $wpdb->get_results(
 		"SELECT e.*, p.name AS presenter_name,
-			(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND r.payment_status = 'paid') AS paid_count
+			(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND LOWER(TRIM(r.payment_status)) = 'paid') AS paid_count
 		 FROM {$events_table} e
 		 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
 		 WHERE e.status <> 'deleted'
@@ -7525,6 +7907,9 @@ public function render_events_page() {
 		'event_sync_google_success'           => array( 'success', 'Masterclass event synced to Google Calendar and Google Meet successfully.' ),
 		'event_sync_google_failed'            => array( 'warning', 'Masterclass event could not be synced to Google Calendar / Google Meet. Check the Google Status column and masterclass-debug.log.' ),
 		'event_sync_missing_id'               => array( 'error', 'Google sync failed because the event ID was missing.' ),
+		'event_missing_id'                    => array( 'error', 'Session page generation failed because the event ID was missing.' ),
+		'session_page_saved'                => array( 'success', 'Masterclass session page generated or updated.' ),
+		'session_page_failed'               => array( 'error', 'Masterclass session page could not be generated. Check masterclass-debug.log.' ),
 		'event_cancel_no_paid_attendees'      => array( 'success', 'Event was removed from active lists. No paid attendees were found for automatic refund processing.' ),
 		'event_cancel_no_refunds'             => array( 'success', 'Event was removed from active lists. The one-week post-event refund deadline had passed, so no automatic refunds were issued.' ),
 		'settings_saved'          => array( 'success', 'Calendar settings saved.' ),
@@ -7584,7 +7969,11 @@ public function render_events_page() {
 
 	echo '<table class="form-table"><tbody>';
 	echo '<tr><th>Title</th><td><input type="text" name="title" class="regular-text" required value="' . esc_attr( $edit_event->title ?? '' ) . '"></td></tr>';
-	echo '<tr><th>Description</th><td><textarea name="description" rows="5" class="large-text">' . esc_textarea( $edit_event->description ?? '' ) . '</textarea></td></tr>';
+	echo '<tr><th>Short Description</th><td><textarea name="short_description" rows="3" class="large-text" placeholder="Brief client-facing summary shown on the public Masterclass page.">' . esc_textarea( $edit_event->short_description ?? ( $edit_event->description ?? '' ) ) . '</textarea><p class="description">This appears on the public Masterclass listing card.</p></td></tr>';
+
+	echo '<tr><th>Long Description</th><td><textarea name="long_description" rows="8" class="large-text" placeholder="Detailed session description shown on the Learn More About This Session page.">' . esc_textarea( $edit_event->long_description ?? ( $edit_event->description ?? '' ) ) . '</textarea><p class="description">This appears on the generated session page.</p></td></tr>';
+
+	echo '<tr><th>Legacy Description</th><td><textarea name="description" rows="4" class="large-text">' . esc_textarea( $edit_event->description ?? '' ) . '</textarea><p class="description">Legacy fallback. You can keep this matching the short description while older code is phased out.</p></td></tr>';
 
 	echo '<tr><th>Presenter</th><td><select name="presenter_id" required>';
 	echo '<option value="">Select presenter</option>';
@@ -7675,6 +8064,12 @@ public function render_events_page() {
 	echo '<input type="hidden" name="event_id" value="' . esc_attr( absint( $event->id ) ) . '">';
 	wp_nonce_field( 'mrm_masterclass_sync_google_event_' . absint( $event->id ) );
 	echo '<button type="submit" class="button button-small">Sync Google / Meet</button>';
+	echo '</form>';
+	echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" style="display:inline-block;margin:0 4px 4px 0;">';
+	echo '<input type="hidden" name="action" value="mrm_masterclass_create_session_page">';
+	echo '<input type="hidden" name="event_id" value="' . esc_attr( $event->id ) . '">';
+	wp_nonce_field( 'mrm_masterclass_create_session_page_' . absint( $event->id ) );
+	echo '<button type="submit" class="button button-small">Create/Update Session Page</button>';
 	echo '</form>';
 			echo '<a class="button button-small button-link-delete" href="' . esc_url( $cancel_url ) . '" onclick="return confirm(\'Cancel/delete this event? Paid participants may be refunded automatically depending on the refund deadline.\');">Cancel / Delete</a>';
 
@@ -8356,7 +8751,7 @@ public function rest_get_event( $request ) {
 			"SELECT e.*,
 				p.name AS presenter_name,
 				p.presenter_page_id AS presenter_page_id,
-				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND r.payment_status = 'paid') AS paid_count
+				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND LOWER(TRIM(r.payment_status)) = 'paid') AS paid_count
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
 			 WHERE e.id = %d
@@ -9330,7 +9725,7 @@ public function rest_finalize_registration( $request ) {
 			"SELECT e.*,
 				p.name AS presenter_name,
 				p.presenter_page_id AS presenter_page_id,
-				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND r.payment_status = 'paid') AS paid_count
+				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND LOWER(TRIM(r.payment_status)) = 'paid') AS paid_count
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
 			 WHERE LOWER(TRIM(e.status)) = 'scheduled'
