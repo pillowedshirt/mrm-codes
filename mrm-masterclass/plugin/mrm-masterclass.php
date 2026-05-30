@@ -155,7 +155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.3.4';
+	const DB_VERSION = '1.3.5';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -1556,8 +1556,14 @@ class LowBrass_MRM_Masterclass_Plugin {
 			wp_schedule_event( time() + 300, 'hourly', 'mrm_masterclass_reconcile_events' );
 		}
 
+		$current_reminder_schedule = wp_get_schedule( 'mrm_masterclass_reminder_cron' );
+
+		if ( $current_reminder_schedule && 'mrm_every_five_minutes' !== $current_reminder_schedule ) {
+			wp_clear_scheduled_hook( 'mrm_masterclass_reminder_cron' );
+		}
+
 		if ( ! wp_next_scheduled( 'mrm_masterclass_reminder_cron' ) ) {
-			wp_schedule_event( time() + 300, 'hourly', 'mrm_masterclass_reminder_cron' );
+			wp_schedule_event( time() + 300, 'mrm_every_five_minutes', 'mrm_masterclass_reminder_cron' );
 		}
 
 		if ( ! wp_next_scheduled( 'mrm_masterclass_payout_cron' ) ) {
@@ -2034,6 +2040,7 @@ public function mrm_mc_render_critical_error_notice() {
 	$tax_table          = $p . 'mrm_masterclass_presenter_tax_profiles';
 	$ledger_table       = $p . 'mrm_masterclass_payment_ledger';
 	$access_log_table   = $p . 'mrm_masterclass_access_log';
+	$feedback_table     = $p . 'mrm_masterclass_feedback';
 
 	dbDelta(
 		"CREATE TABLE {$presenters_table} (
@@ -2217,6 +2224,22 @@ public function mrm_mc_render_critical_error_notice() {
 		) {$c};"
 	);
 
+	dbDelta(
+		"CREATE TABLE {$feedback_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			event_id BIGINT UNSIGNED NOT NULL,
+			registration_id BIGINT UNSIGNED NOT NULL,
+			rating TINYINT UNSIGNED NULL,
+			selected_reasons TEXT NULL,
+			other_reason TEXT NULL,
+			additional_comments TEXT NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY  (id),
+			KEY event_id (event_id),
+			KEY registration_id (registration_id)
+		) {$c};"
+	);
+
 	$presenter_columns = $wpdb->get_col( "DESC {$presenters_table}", 0 );
 	if ( ! is_array( $presenter_columns ) ) {
 		$presenter_columns = array();
@@ -2306,6 +2329,8 @@ public function mrm_mc_render_critical_error_notice() {
 		'discount_cents'            => "ALTER TABLE {$registrations_table} ADD discount_cents INT NOT NULL DEFAULT 0",
 		'gate_token_hash'           => "ALTER TABLE {$registrations_table} ADD gate_token_hash VARCHAR(64) NULL",
 		'gate_url'                  => "ALTER TABLE {$registrations_table} ADD gate_url TEXT NULL",
+		'cancel_url'                => "ALTER TABLE {$registrations_table} ADD cancel_url TEXT NULL",
+		'feedback_url'              => "ALTER TABLE {$registrations_table} ADD feedback_url TEXT NULL",
 		'gate_token_revoked'        => "ALTER TABLE {$registrations_table} ADD gate_token_revoked TINYINT(1) NOT NULL DEFAULT 0",
 		'gate_token_regenerated_at' => "ALTER TABLE {$registrations_table} ADD gate_token_regenerated_at DATETIME NULL",
 		'access_session_id_hash'    => "ALTER TABLE {$registrations_table} ADD access_session_id_hash VARCHAR(64) NULL",
@@ -2321,6 +2346,9 @@ public function mrm_mc_render_critical_error_notice() {
 		'reminder_1_sent_at'        => "ALTER TABLE {$registrations_table} ADD reminder_1_sent_at DATETIME NULL",
 		'feedback_request_sent'     => "ALTER TABLE {$registrations_table} ADD feedback_request_sent TINYINT(1) NOT NULL DEFAULT 0",
 		'feedback_request_sent_at'  => "ALTER TABLE {$registrations_table} ADD feedback_request_sent_at DATETIME NULL",
+		'cancelled_at'              => "ALTER TABLE {$registrations_table} ADD cancelled_at DATETIME NULL",
+		'cancellation_reason'       => "ALTER TABLE {$registrations_table} ADD cancellation_reason TEXT NULL",
+		'feedback_submitted_at'     => "ALTER TABLE {$registrations_table} ADD feedback_submitted_at DATETIME NULL",
 	);
 
 	foreach ( $registration_adds as $column => $sql ) {
@@ -2444,7 +2472,23 @@ public function mrm_mc_render_critical_error_notice() {
 
 	update_option( 'mrm_masterclass_db_version', self::DB_VERSION );
 }
-	public function add_cron_schedule($s){$s['mrm_masterclass_15min']=array('interval'=>900,'display'=>'Every 15 Minutes'); return $s;}
+	public function add_cron_schedule( $schedules ) {
+		if ( ! is_array( $schedules ) ) {
+			$schedules = array();
+		}
+
+		$schedules['mrm_every_five_minutes'] = array(
+			'interval' => 5 * MINUTE_IN_SECONDS,
+			'display'  => 'Every 5 Minutes',
+		);
+
+		$schedules['mrm_masterclass_15min'] = array(
+			'interval' => 15 * MINUTE_IN_SECONDS,
+			'display'  => 'Every 15 Minutes',
+		);
+
+		return $schedules;
+	}
 	private function now(){return gmdate('Y-m-d H:i:s');}
 
 /**
@@ -2573,6 +2617,40 @@ private function mrm_mc_available_seats_for_event( $event ) {
 
 private function mrm_mc_gate_url_for_token( $token ) {
 	return home_url( '/?mrm_masterclass_gate=' . rawurlencode( $token ) );
+}
+
+private function mrm_mc_cancel_url_for_token( $token ) {
+	return add_query_arg(
+		array(
+			'mrm_masterclass_cancel' => rawurlencode( (string) $token ),
+		),
+		home_url( '/' )
+	);
+}
+
+private function mrm_mc_feedback_url_for_token( $token ) {
+	return add_query_arg(
+		array(
+			'mrm_masterclass_feedback' => rawurlencode( (string) $token ),
+		),
+		home_url( '/' )
+	);
+}
+
+private function mrm_mc_gate_url_for_registration( $registration ) {
+	if ( ! empty( $registration->gate_url ) ) {
+		return esc_url_raw( $registration->gate_url );
+	}
+
+	return '';
+}
+
+private function mrm_mc_cancel_url_for_registration( $registration ) {
+	if ( empty( $registration->gate_token_hash ) ) {
+		return '';
+	}
+
+	return '';
 }
 
 private function mrm_mc_make_gate_token_pair() {
@@ -2730,6 +2808,17 @@ private function mrm_mc_email_button_html( $url, $label ) {
 	</div>';
 }
 
+
+private function mrm_mc_email_secondary_button_html( $url, $label ) {
+	$url = esc_url( $url );
+
+	if ( '' === $url ) {
+		return '';
+	}
+
+	return '<p style="margin:18px 0 0;"><a href="' . $url . '" style="display:inline-block;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:800;">' . esc_html( $label ) . '</a></p>';
+}
+
 private function mrm_mc_email_details_box_html( $details_html ) {
 	if ( '' === trim( (string) $details_html ) ) {
 		return '';
@@ -2827,7 +2916,8 @@ private function mrm_mc_send_email_recorded( $type, $to, $subject, $body, $event
 }
 
 private function mrm_mc_confirmation_email_body( $event, $presenter, $registration ) {
-	$gate = esc_url( $registration->gate_url ?? '' );
+	$gate   = esc_url( $registration->gate_url ?? '' );
+	$cancel = esc_url( $registration->cancel_url ?? '' );
 
 	$intro = '<p>Your Masterclass registration has been confirmed.</p>'
 		. '<p>This is an online Masterclass. Please use the protected access link below at the scheduled time. The page will reveal the meeting link only during the allowed access window.</p>';
@@ -2836,37 +2926,40 @@ private function mrm_mc_confirmation_email_body( $event, $presenter, $registrati
 
 	$content = $intro
 		. $this->mrm_mc_email_details_box_html( $details )
-		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass access link' );
+		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass Access Link' )
+		. $this->mrm_mc_email_secondary_button_html( $cancel, 'I Can No Longer Attend This Masterclass' );
 
 	return $this->mrm_mc_email_template( 'Masterclass Confirmation', $content );
 }
 
 private function mrm_mc_reminder_email_body( $event, $presenter, $registration, $window_label ) {
-	$gate = esc_url( $registration->gate_url ?? '' );
+	$gate   = esc_url( $registration->gate_url ?? '' );
+	$cancel = esc_url( $registration->cancel_url ?? '' );
 
-	$intro = '<p>Reminder: you have a Masterclass scheduled ' . esc_html( $window_label ) . '.</p>'
+	$intro = '<p>This is your one-hour reminder for your upcoming Masterclass.</p>'
 		. '<p>Please use the protected access link below at the scheduled time. The page will reveal the meeting link only during the allowed access window.</p>';
 
 	$details = $this->mrm_mc_email_event_details_html( $event, $presenter, $registration );
 
 	$content = $intro
 		. $this->mrm_mc_email_details_box_html( $details )
-		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass access link' );
+		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass Access Link' )
+		. $this->mrm_mc_email_secondary_button_html( $cancel, 'I Can No Longer Attend This Masterclass' );
 
 	return $this->mrm_mc_email_template( 'Masterclass Reminder', $content );
 }
 
 private function mrm_mc_feedback_request_email_body( $event, $presenter, $registration ) {
-	$gate = esc_url( $registration->gate_url ?? '' );
+	$feedback_url = esc_url( $registration->feedback_url ?? '' );
 
 	$intro = '<p>Thank you for attending your Masterclass.</p>'
-		. '<p>If you have a moment, please reply to this email with a quick note about your experience. A sentence or two is enough.</p>';
+		. '<p>If you have a moment, please share quick feedback about your experience. The feedback form stays open for 24 hours after the Masterclass ends.</p>';
 
 	$details = $this->mrm_mc_email_event_details_html( $event, $presenter, $registration );
 
 	$content = $intro
 		. $this->mrm_mc_email_details_box_html( $details )
-		. $this->mrm_mc_email_button_html( $gate, 'Review Masterclass access page' );
+		. $this->mrm_mc_email_button_html( $feedback_url, 'Share Masterclass Feedback' );
 
 	return $this->mrm_mc_email_template( 'How Was Your Masterclass?', $content );
 }
@@ -4368,9 +4461,9 @@ private function mrm_mc_send_feedback_requests() {
 		return 0;
 	}
 
-	$now              = time();
-	$feedback_from    = gmdate( 'Y-m-d H:i:s', $now - ( 14 * DAY_IN_SECONDS ) );
-	$feedback_cutoff  = gmdate( 'Y-m-d H:i:s', $now - HOUR_IN_SECONDS );
+	$now            = time();
+	$feedback_from  = gmdate( 'Y-m-d H:i:s', $now - ( 35 * MINUTE_IN_SECONDS ) );
+	$feedback_to    = gmdate( 'Y-m-d H:i:s', $now - ( 30 * MINUTE_IN_SECONDS ) );
 
 	$rows = $wpdb->get_results(
 		$wpdb->prepare(
@@ -4385,7 +4478,7 @@ private function mrm_mc_send_feedback_requests() {
 			   AND r.feedback_request_sent_at IS NULL
 			 LIMIT 200",
 			$feedback_from,
-			$feedback_cutoff
+			$feedback_to
 		)
 	);
 
@@ -4415,7 +4508,7 @@ private function mrm_mc_send_feedback_requests() {
 		$sent = $this->mrm_mc_send_email_recorded(
 			'feedback_request',
 			$row->email,
-			'How Was Your Masterclass?',
+			'How Was Your Masterclass? — ' . $row->title,
 			$body,
 			$row->event_id,
 			$row->id
@@ -4464,17 +4557,17 @@ public function mrm_mc_run_reminder_cron() {
 		return;
 	}
 
-	$now      = time();
-	$from_24h = gmdate( 'Y-m-d H:i:s', $now + ( 23 * HOUR_IN_SECONDS ) );
-	$to_24h   = gmdate( 'Y-m-d H:i:s', $now + ( 25 * HOUR_IN_SECONDS ) );
-	$from_1h  = gmdate( 'Y-m-d H:i:s', $now + ( 45 * MINUTE_IN_SECONDS ) );
-	$to_1h    = gmdate( 'Y-m-d H:i:s', $now + ( 75 * MINUTE_IN_SECONDS ) );
+	$now = time();
 
-	$has_24h_col = method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_24h_sent_at' );
-	$has_1h_col  = method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_1h_sent_at' );
+	/*
+	 * Send one-hour reminders in a tight cron-safe window.
+	 * With wp-cron running every 5 minutes, this sends at approximately one hour before start.
+	 */
+	$reminder_from = gmdate( 'Y-m-d H:i:s', $now + ( 55 * MINUTE_IN_SECONDS ) );
+	$reminder_to   = gmdate( 'Y-m-d H:i:s', $now + ( 65 * MINUTE_IN_SECONDS ) );
 
-	$col_24 = $has_24h_col ? 'reminder_24h_sent_at' : 'reminder_24_sent_at';
-	$col_1  = $has_1h_col ? 'reminder_1h_sent_at' : 'reminder_1_sent_at';
+	$has_1h_col = method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_1h_sent_at' );
+	$col_1      = $has_1h_col ? 'reminder_1h_sent_at' : 'reminder_1_sent_at';
 
 	$rows = $wpdb->get_results(
 		$wpdb->prepare(
@@ -4484,82 +4577,38 @@ public function mrm_mc_run_reminder_cron() {
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
 			 WHERE LOWER(TRIM(r.payment_status)) = 'paid'
 			   AND LOWER(TRIM(e.status)) = 'scheduled'
-			   AND (
-					(e.start_time BETWEEN %s AND %s AND r.{$col_24} IS NULL)
-					OR
-					(e.start_time BETWEEN %s AND %s AND r.{$col_1} IS NULL)
-			   )
+			   AND e.start_time BETWEEN %s AND %s
+			   AND r.{$col_1} IS NULL
 			 LIMIT 200",
-			$from_24h,
-			$to_24h,
-			$from_1h,
-			$to_1h
+			$reminder_from,
+			$reminder_to
 		)
 	);
 
-	if ( ! $rows ) {
-		$this->mrm_mc_send_feedback_requests();
-		return;
-	}
-
 	$reminder_sent_count = 0;
 
-	foreach ( $rows as $row ) {
-		$event = (object) array(
-			'id'         => absint( $row->event_id ),
-			'title'      => $row->title,
-			'start_time' => $row->start_time,
-			'end_time'   => $row->end_time,
-			'timezone'   => $row->timezone,
-		);
-
-		$presenter = (object) array(
-			'name' => $row->presenter_name,
-		);
-
-		$registration = (object) $row;
-		$start_ts     = strtotime( $row->start_time . ' UTC' );
-		$seconds_out  = $start_ts - $now;
-
-		if ( $seconds_out >= 23 * HOUR_IN_SECONDS && $seconds_out <= 25 * HOUR_IN_SECONDS && empty( $row->{$col_24} ) ) {
-			$body = $this->mrm_mc_reminder_email_body( $event, $presenter, $registration, '24-hour' );
-
-			$sent = $this->mrm_mc_send_email_recorded(
-				'reminder_24h',
-				$row->email,
-				'Masterclass Reminder',
-				$body,
-				$row->event_id,
-				$row->id
+	if ( $rows ) {
+		foreach ( $rows as $row ) {
+			$event = (object) array(
+				'id'         => absint( $row->event_id ),
+				'title'      => $row->title,
+				'start_time' => $row->start_time,
+				'end_time'   => $row->end_time,
+				'timezone'   => $row->timezone,
 			);
 
-			if ( $sent ) {
-				$update = array(
-					$col_24      => $this->now(),
-					'updated_at' => $this->now(),
-				);
+			$presenter = (object) array(
+				'name' => $row->presenter_name,
+			);
 
-				if ( method_exists( $this, 'mrm_mc_column_exists' ) && $this->mrm_mc_column_exists( $regs_table, 'reminder_24_sent' ) ) {
-					$update['reminder_24_sent'] = 1;
-				}
+			$registration = (object) $row;
 
-				$wpdb->update(
-					$regs_table,
-					$update,
-					array( 'id' => absint( $row->id ) )
-				);
-
-				$reminder_sent_count++;
-			}
-		}
-
-		if ( $seconds_out >= 45 * MINUTE_IN_SECONDS && $seconds_out <= 75 * MINUTE_IN_SECONDS && empty( $row->{$col_1} ) ) {
 			$body = $this->mrm_mc_reminder_email_body( $event, $presenter, $registration, '1-hour' );
 
 			$sent = $this->mrm_mc_send_email_recorded(
 				'reminder_1h',
 				$row->email,
-				'Masterclass Reminder',
+				'1-Hour Masterclass Reminder — ' . $row->title,
 				$body,
 				$row->event_id,
 				$row->id
@@ -4577,7 +4626,7 @@ public function mrm_mc_run_reminder_cron() {
 
 				$wpdb->update(
 					$regs_table,
-					$update,
+					$this->mrm_mc_filter_data_for_table( $regs_table, $update ),
 					array( 'id' => absint( $row->id ) )
 				);
 
@@ -4586,14 +4635,13 @@ public function mrm_mc_run_reminder_cron() {
 		}
 	}
 
-	if ( $reminder_sent_count > 0 ) {
-		$this->mrm_mc_debug_log(
-			'Masterclass reminder email pass completed.',
-			array(
-				'sent_count' => $reminder_sent_count,
-			)
-		);
-	}
+	$this->mrm_mc_debug_log(
+		'Masterclass reminder cron checked one-hour reminder window.',
+		array(
+			'eligible_rows' => is_array( $rows ) ? count( $rows ) : 0,
+			'sent_count'    => $reminder_sent_count,
+		)
+	);
 
 	$this->mrm_mc_send_feedback_requests();
 }
@@ -5545,6 +5593,8 @@ public function register_masterclass_gate_query_vars( $vars ) {
 	}
 
 	$vars[] = 'mrm_masterclass_gate';
+	$vars[] = 'mrm_masterclass_cancel';
+	$vars[] = 'mrm_masterclass_feedback';
 
 	return array_values( array_unique( $vars ) );
 }
@@ -5843,7 +5893,369 @@ private function mrm_mc_get_registration_by_gate_token( $token ) {
 	);
 }
 
+private function mrm_mc_get_event_for_registration( $registration ) {
+	global $wpdb;
+
+	$events_table = $this->t( 'mrm_masterclass_events' );
+
+	if ( ! $registration || empty( $registration->event_id ) || ! $this->mrm_mc_table_exists( $events_table ) ) {
+		return null;
+	}
+
+	return $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT * FROM {$events_table} WHERE id = %d LIMIT 1",
+			absint( $registration->event_id )
+		)
+	);
+}
+
+private function mrm_mc_cancel_reason_options() {
+	return array(
+		'schedule_conflict' => 'I have a schedule conflict.',
+		'no_longer_needed'  => 'I no longer need this Masterclass.',
+		'accidental_signup' => 'I registered by mistake.',
+		'technical_issue'   => 'I am concerned about a technical issue.',
+		'other'             => 'Other',
+	);
+}
+
+private function mrm_mc_handle_cancel_request() {
+	$token = sanitize_text_field( wp_unslash( $_GET['mrm_masterclass_cancel'] ?? '' ) );
+
+	if ( '' === $token || strlen( $token ) < 20 ) {
+		$this->mrm_mc_render_gate_page(
+			'Invalid Cancellation Link',
+			'This cancellation link is invalid. Please use the link from your Masterclass email.'
+		);
+		exit;
+	}
+
+	$registration = $this->mrm_mc_get_registration_by_gate_token( $token );
+
+	if ( ! $registration ) {
+		$this->mrm_mc_render_gate_page(
+			'Invalid Cancellation Link',
+			'This cancellation link was not found. Please use the link from your Masterclass email.'
+		);
+		exit;
+	}
+
+	$event = $this->mrm_mc_get_event_for_registration( $registration );
+
+	if ( ! $event ) {
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Not Found',
+			'This registration is valid, but the linked Masterclass could not be found. Please contact support.'
+		);
+		exit;
+	}
+
+	$access_source = method_exists( $this, 'mrm_mc_resolve_gate_event_access_source' )
+		? $this->mrm_mc_resolve_gate_event_access_source( $event )
+		: array(
+			'start_ts' => strtotime( $event->start_time . ' UTC' ),
+			'end_ts'   => strtotime( $event->end_time . ' UTC' ),
+			'title'    => sanitize_text_field( $event->title ?? 'Masterclass' ),
+		);
+
+	$start_ts = absint( $access_source['start_ts'] ?? 0 );
+	$end_ts   = absint( $access_source['end_ts'] ?? 0 );
+	$now_ts   = time();
+
+	if ( $start_ts > 0 && $now_ts >= $start_ts && $now_ts <= max( $start_ts, $end_ts ) ) {
+		$this->mrm_mc_render_gate_page(
+			'Refund Window Has Closed',
+			'This Masterclass has already started, so automatic refunds are no longer issued for this Masterclass.<br><br>If you need additional assistance, please contact support through the contact form on the website.'
+		);
+		exit;
+	}
+
+	if ( $end_ts > 0 && $now_ts > $end_ts ) {
+		$this->mrm_mc_render_gate_page(
+			'Refund Window Has Closed',
+			'This Masterclass has already ended, so automatic refunds are no longer issued for this Masterclass.<br><br>If you need additional assistance, please contact support through the contact form on the website.'
+		);
+		exit;
+	}
+
+	if ( 'refunded' === sanitize_key( $registration->payment_status ) ) {
+		$this->mrm_mc_render_gate_page(
+			'Enrollment Already Cancelled',
+			'This enrollment has already been cancelled and refunded.'
+		);
+		exit;
+	}
+
+	if ( 'POST' === strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+		check_admin_referer( 'mrm_masterclass_cancel_enrollment_' . absint( $registration->id ) );
+
+		global $wpdb;
+
+		$regs_table = $this->t( 'mrm_masterclass_registrations' );
+		$options    = $this->mrm_mc_cancel_reason_options();
+		$selected   = array();
+
+		foreach ( array_keys( $options ) as $key ) {
+			if ( ! empty( $_POST[ 'reason_' . $key ] ) ) {
+				$selected[] = $options[ $key ];
+			}
+		}
+
+		$other       = sanitize_textarea_field( wp_unslash( $_POST['other_reason'] ?? '' ) );
+		$reason_text = implode( '; ', $selected );
+
+		if ( '' !== $other ) {
+			$reason_text .= ( '' !== $reason_text ? '; ' : '' ) . 'Other: ' . $other;
+		}
+
+		if ( '' === trim( $reason_text ) ) {
+			$reason_text = 'No reason provided.';
+		}
+
+		$refund = $this->mrm_mc_refund_registration( $registration, $event, 'customer_cancelled_before_start' );
+
+		if ( is_wp_error( $refund ) ) {
+			$this->mrm_mc_render_gate_page(
+				'Refund Could Not Be Completed',
+				'Your cancellation request was received, but the automatic refund could not be completed. Please contact support through the contact form on the website.'
+			);
+			exit;
+		}
+
+		$wpdb->update(
+			$regs_table,
+			$this->mrm_mc_filter_data_for_table(
+				$regs_table,
+				array(
+					'cancelled_at'        => $this->now(),
+					'cancellation_reason' => $reason_text,
+					'updated_at'          => $this->now(),
+				)
+			),
+			array( 'id' => absint( $registration->id ) )
+		);
+
+		$this->mrm_mc_render_gate_page(
+			'Enrollment Cancelled',
+			'Your enrollment has been cancelled and your refund has been issued. You will also receive a refund confirmation email.'
+		);
+		exit;
+	}
+
+	$options = $this->mrm_mc_cancel_reason_options();
+
+	$form  = '<p>If you can no longer attend this Masterclass, you may cancel your enrollment and receive an automatic refund as long as the Masterclass has not started.</p>';
+	$form .= '<form method="post">';
+	$form .= wp_nonce_field( 'mrm_masterclass_cancel_enrollment_' . absint( $registration->id ), '_wpnonce', true, false );
+	$form .= '<fieldset style="border:1px solid #dccab0;border-radius:18px;padding:18px;margin:18px 0;">';
+	$form .= '<legend><strong>Why can you no longer attend?</strong></legend>';
+
+	foreach ( $options as $key => $label ) {
+		$form .= '<label style="display:block;margin:10px 0;"><input type="checkbox" name="reason_' . esc_attr( $key ) . '" value="1"> ' . esc_html( $label ) . '</label>';
+	}
+
+	$form .= '<label style="display:block;margin:14px 0 6px;"><strong>If other, please explain:</strong></label>';
+	$form .= '<textarea name="other_reason" rows="4" style="width:100%;box-sizing:border-box;border:1px solid #dccab0;border-radius:12px;padding:12px;"></textarea>';
+	$form .= '</fieldset>';
+	$form .= '<button class="mrm-masterclass-gate-button" type="submit">Cancel Enrollment and Request Refund</button>';
+	$form .= '</form>';
+
+	$this->mrm_mc_render_gate_page(
+		'Cancel Masterclass Enrollment',
+		$form
+	);
+	exit;
+}
+
+private function mrm_mc_feedback_reason_options() {
+	return array(
+		'clear_helpful'     => 'The Masterclass was clear and helpful.',
+		'good_pace'         => 'The pacing felt good.',
+		'practical'         => 'The material was practical and useful.',
+		'wanted_more_time'  => 'I would have liked more time on the topic.',
+		'wanted_more_depth' => 'I would have liked more depth or examples.',
+		'technical_issue'   => 'I had a technical issue.',
+		'other'             => 'Other',
+	);
+}
+
+private function mrm_mc_handle_feedback_request() {
+	$token = sanitize_text_field( wp_unslash( $_GET['mrm_masterclass_feedback'] ?? '' ) );
+
+	if ( '' === $token || strlen( $token ) < 20 ) {
+		$this->mrm_mc_render_gate_page(
+			'Invalid Feedback Link',
+			'This feedback link is invalid. Please use the link from your Masterclass email.'
+		);
+		exit;
+	}
+
+	$registration = $this->mrm_mc_get_registration_by_gate_token( $token );
+
+	if ( ! $registration ) {
+		$this->mrm_mc_render_gate_page(
+			'Invalid Feedback Link',
+			'This feedback link was not found. Please use the link from your Masterclass email.'
+		);
+		exit;
+	}
+
+	$event = $this->mrm_mc_get_event_for_registration( $registration );
+
+	if ( ! $event ) {
+		$this->mrm_mc_render_gate_page(
+			'Masterclass Not Found',
+			'This registration is valid, but the linked Masterclass could not be found. Please contact support.'
+		);
+		exit;
+	}
+
+	$access_source = method_exists( $this, 'mrm_mc_resolve_gate_event_access_source' )
+		? $this->mrm_mc_resolve_gate_event_access_source( $event )
+		: array(
+			'end_ts' => strtotime( $event->end_time . ' UTC' ),
+		);
+
+	$end_ts = absint( $access_source['end_ts'] ?? 0 );
+	$now_ts = time();
+
+	if ( $end_ts <= 0 || $now_ts < $end_ts ) {
+		$this->mrm_mc_render_gate_page(
+			'Feedback Opens After the Masterclass',
+			'This feedback form will open after the Masterclass has ended.'
+		);
+		exit;
+	}
+
+	if ( $now_ts > $end_ts + DAY_IN_SECONDS ) {
+		$this->mrm_mc_render_gate_page(
+			'Feedback Form Has Closed',
+			'This feedback form has closed. Thank you for attending the Masterclass.'
+		);
+		exit;
+	}
+
+	global $wpdb;
+
+	$feedback_table = $this->t( 'mrm_masterclass_feedback' );
+	$regs_table     = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( ! $this->mrm_mc_table_exists( $feedback_table ) ) {
+		$this->mrm_mc_render_gate_page(
+			'Feedback Temporarily Unavailable',
+			'The feedback form could not load right now. Please try again later.'
+		);
+		exit;
+	}
+
+	if ( ! empty( $registration->feedback_submitted_at ) ) {
+		$this->mrm_mc_render_gate_page(
+			'Feedback Already Submitted',
+			'Thank you. Your feedback has already been submitted.'
+		);
+		exit;
+	}
+
+	if ( 'POST' === strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+		check_admin_referer( 'mrm_masterclass_feedback_' . absint( $registration->id ) );
+
+		$options  = $this->mrm_mc_feedback_reason_options();
+		$selected = array();
+
+		foreach ( array_keys( $options ) as $key ) {
+			if ( ! empty( $_POST[ 'feedback_' . $key ] ) ) {
+				$selected[] = $options[ $key ];
+			}
+		}
+
+		$rating              = max( 1, min( 5, absint( $_POST['rating'] ?? 0 ) ) );
+		$other_reason        = sanitize_textarea_field( wp_unslash( $_POST['other_reason'] ?? '' ) );
+		$additional_comments = sanitize_textarea_field( wp_unslash( $_POST['additional_comments'] ?? '' ) );
+
+		$wpdb->insert(
+			$feedback_table,
+			array(
+				'event_id'             => absint( $registration->event_id ),
+				'registration_id'      => absint( $registration->id ),
+				'rating'               => $rating,
+				'selected_reasons'     => wp_json_encode( array_values( $selected ) ),
+				'other_reason'         => $other_reason,
+				'additional_comments'  => $additional_comments,
+				'created_at'           => $this->now(),
+			)
+		);
+
+		$wpdb->update(
+			$regs_table,
+			$this->mrm_mc_filter_data_for_table(
+				$regs_table,
+				array(
+					'feedback_submitted_at' => $this->now(),
+					'updated_at'            => $this->now(),
+				)
+			),
+			array( 'id' => absint( $registration->id ) )
+		);
+
+		$this->mrm_mc_render_gate_page(
+			'Thank You for Your Feedback',
+			'Your feedback has been submitted. Thank you for helping us improve future Masterclasses.'
+		);
+		exit;
+	}
+
+	$options = $this->mrm_mc_feedback_reason_options();
+
+	$form  = '<p>Please share quick feedback about your Masterclass experience. This form stays open for 24 hours after the Masterclass ends.</p>';
+	$form .= '<form method="post">';
+	$form .= wp_nonce_field( 'mrm_masterclass_feedback_' . absint( $registration->id ), '_wpnonce', true, false );
+
+	$form .= '<fieldset style="border:1px solid #dccab0;border-radius:18px;padding:18px;margin:18px 0;">';
+	$form .= '<legend><strong>How would you rate this Masterclass?</strong></legend>';
+	$form .= '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
+
+	for ( $i = 1; $i <= 5; $i++ ) {
+		$form .= '<label style="display:inline-flex;align-items:center;gap:6px;"><input type="radio" name="rating" value="' . esc_attr( $i ) . '"' . checked( 5, $i, false ) . '> ' . esc_html( str_repeat( '★', $i ) ) . '</label>';
+	}
+
+	$form .= '</div>';
+	$form .= '</fieldset>';
+
+	$form .= '<fieldset style="border:1px solid #dccab0;border-radius:18px;padding:18px;margin:18px 0;">';
+	$form .= '<legend><strong>What stood out?</strong></legend>';
+
+	foreach ( $options as $key => $label ) {
+		$form .= '<label style="display:block;margin:10px 0;"><input type="checkbox" name="feedback_' . esc_attr( $key ) . '" value="1"> ' . esc_html( $label ) . '</label>';
+	}
+
+	$form .= '<label style="display:block;margin:14px 0 6px;"><strong>If other, please explain:</strong></label>';
+	$form .= '<textarea name="other_reason" rows="3" style="width:100%;box-sizing:border-box;border:1px solid #dccab0;border-radius:12px;padding:12px;"></textarea>';
+	$form .= '<label style="display:block;margin:14px 0 6px;"><strong>Any additional information?</strong></label>';
+	$form .= '<textarea name="additional_comments" rows="5" style="width:100%;box-sizing:border-box;border:1px solid #dccab0;border-radius:12px;padding:12px;"></textarea>';
+	$form .= '</fieldset>';
+
+	$form .= '<button class="mrm-masterclass-gate-button" type="submit">Submit Feedback</button>';
+	$form .= '</form>';
+
+	$this->mrm_mc_render_gate_page(
+		'Masterclass Feedback',
+		$form
+	);
+	exit;
+}
+
 public function mrm_mc_handle_gate_request() {
+	if ( ! empty( $_GET['mrm_masterclass_cancel'] ) ) {
+		$this->mrm_mc_handle_cancel_request();
+		exit;
+	}
+
+	if ( ! empty( $_GET['mrm_masterclass_feedback'] ) ) {
+		$this->mrm_mc_handle_feedback_request();
+		exit;
+	}
+
 	if ( empty( $_GET['mrm_masterclass_gate'] ) ) {
 		return;
 	}
@@ -8026,7 +8438,7 @@ public function rest_finalize_registration( $request ) {
 	$presenter_cut = absint( $share_calc['presenter_share_cents'] );
 	$platform_cut  = absint( $share_calc['platform_share_cents'] );
 	$terms_snapshot = wp_json_encode( $terms );
-	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
+	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'cancel_url'=>esc_url_raw( $this->mrm_mc_cancel_url_for_token( $gate['token'] ) ),'feedback_url'=>esc_url_raw( $this->mrm_mc_feedback_url_for_token( $gate['token'] ) ),'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
 	$registration_data = $this->mrm_mc_filter_data_for_table( $regs_table, $registration_data );
 	$inserted = $wpdb->insert( $regs_table, $registration_data );
 	if ( false === $inserted ) { return new WP_Error('mrm_masterclass_registration_insert_failed','Payment succeeded, but registration could not be saved. Please contact support.',array('status'=>500)); }
