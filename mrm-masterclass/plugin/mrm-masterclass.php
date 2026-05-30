@@ -754,7 +754,6 @@ class LowBrass_MRM_Masterclass_Plugin {
 		        '<p><strong>Starts:</strong> ' + escapeHtml(formatDateTime(eventStart(event))) + '</p>' +
 		        '<p><strong>Ends:</strong> ' + escapeHtml(formatDateTime(eventEnd(event))) + '</p>' +
 		        '<p><strong>Price:</strong> ' + escapeHtml(money(event.price_cents || 0)) + '</p>' +
-		        '<p><strong>Capacity:</strong> ' + escapeHtml(String(typeof event.capacity !== 'undefined' ? event.capacity : 'TBA')) + '</p>' +
 		        '<p><strong>Seats available:</strong> ' + escapeHtml(String(typeof event.available_seats !== 'undefined' ? event.available_seats : 'TBA')) + '</p>';
 
 		      const button = document.createElement('button');
@@ -762,7 +761,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      button.className = 'primary-btn mrm-masterclass-register-button';
 
 		      if (past) {
-		        button.textContent = 'Masterclass Ended';
+		        button.textContent = 'Enrollment Closed';
 		        button.disabled = true;
 		      } else if (!canRegister) {
 		        button.textContent = 'Registration Closed';
@@ -777,7 +776,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      if (past) {
 		        const overlay = document.createElement('div');
 		        overlay.className = 'mrm-masterclass-past-overlay';
-		        overlay.textContent = 'This Masterclass has ended.';
+		        overlay.textContent = 'Enrollment period for this event is over.';
 		        card.appendChild(overlay);
 		      }
 
@@ -788,7 +787,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		      if (event.session_page_url || event.presenter_page_url) {
 		        const learnMore = document.createElement('a');
-		        learnMore.className = 'secondary-btn mrm-masterclass-learn-more-button';
+		        learnMore.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-learn-more-button';
 		        learnMore.href = event.session_page_url || event.presenter_page_url;
 		        learnMore.textContent = 'Learn More About This Session';
 		        card.appendChild(learnMore);
@@ -5814,7 +5813,6 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 
 	$events_table     = $this->t( 'mrm_masterclass_events' );
 	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
-	$regs_table       = $this->t( 'mrm_masterclass_registrations' );
 
 	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
 		return new WP_Error( 'session_tables_missing', 'Required Masterclass tables are missing.' );
@@ -5845,24 +5843,13 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 		return new WP_Error( 'session_event_not_found', 'Masterclass event could not be found.' );
 	}
 
-	$paid_count = null;
-
-	if ( $this->mrm_mc_table_exists( $regs_table ) ) {
-		$paid_count = absint(
-			$wpdb->get_var(
-				$wpdb->prepare(
-					"SELECT COUNT(*) FROM {$regs_table} WHERE event_id = %d AND LOWER(TRIM(payment_status)) = 'paid'",
-					$event_id
-				)
-			)
-		);
-	}
+	$paid_count = $this->mrm_mc_paid_registration_count_for_event( absint( $event_id ) );
 
 	$site_logo          = $this->mrm_mc_get_email_logo_url();
 	$presenter_page_url = ! empty( $event->presenter_page_id ) ? $this->mrm_mc_public_presenter_page_url( $event->presenter_page_id ) : '';
 	$profile            = esc_url_raw( $event->presenter_profile_image_url ?? '' );
 	$capacity           = absint( $event->capacity );
-	$available_seats    = null !== $paid_count ? max( 0, $capacity - $paid_count ) : null;
+	$available_seats    = max( 0, $capacity - absint( $paid_count ) );
 
 	$price       = '$' . number_format( absint( $event->price_cents ) / 100, 2 );
 	$start_label = method_exists( $this, 'mrm_mc_event_time_label' )
@@ -5965,11 +5952,7 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Starts</strong><br>' . esc_html( $start_label ) . '</div>';
 	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Ends</strong><br>' . esc_html( $end_label ) . '</div>';
 	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Price</strong><br>' . esc_html( $price ) . '</div>';
-	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Capacity</strong><br>' . esc_html( $capacity ) . ' students</div>';
-
-	if ( null !== $available_seats ) {
-		$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Available Seats</strong><br>' . esc_html( $available_seats ) . ' seats</div>';
-	}
+	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;"><strong>Seats Available</strong><br>' . esc_html( absint( $available_seats ) . ' of ' . absint( $capacity ) . ' spots available' ) . '</div>';
 
 	$content .= '</div>';
 
@@ -6111,6 +6094,34 @@ public function mrm_mc_print_presenter_page_share_meta() {
 	echo '<meta name="twitter:description" content="' . esc_attr( $description ) . '">' . "\n";
 	echo '<meta name="twitter:image" content="' . esc_url( $image_url ) . '">' . "\n";
 	echo "<!-- /MRM Masterclass Presenter Share Meta -->\n";
+}
+
+private function mrm_mc_paid_registration_count_for_event( $event_id ) {
+	global $wpdb;
+
+	$event_id = absint( $event_id );
+
+	if ( $event_id <= 0 ) {
+		return 0;
+	}
+
+	$regs_table = $this->t( 'mrm_masterclass_registrations' );
+
+	if ( ! $this->mrm_mc_table_exists( $regs_table ) ) {
+		return 0;
+	}
+
+	return absint(
+		$wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*)
+				 FROM {$regs_table}
+				 WHERE event_id = %d
+				   AND LOWER(TRIM(payment_status)) = 'paid'",
+				$event_id
+			)
+		)
+	);
 }
 
 private function mrm_mc_upcoming_sessions_for_presenter( $presenter_id ) {
@@ -6260,7 +6271,9 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 				? $this->mrm_mc_event_time_label( $session->start_time, $session->timezone )
 				: sanitize_text_field( $session->start_time . ' ' . $session->timezone );
 			$price_label      = '$' . number_format( absint( $session->price_cents ) / 100, 2 );
-			$capacity_label   = absint( $session->capacity ) . ' students';
+			$paid_count       = $this->mrm_mc_paid_registration_count_for_event( absint( $session->id ) );
+			$available_seats  = max( 0, absint( $session->capacity ) - absint( $paid_count ) );
+			$seats_label      = absint( $available_seats ) . ' of ' . absint( $session->capacity ) . ' spots available';
 			$description      = ! empty( $session->long_description ) ? $session->long_description : ( $session->short_description ?? $session->description ?? '' );
 
 			$content .= '<article style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center;background:#fffdf9;border:1px solid #eadcc8;border-radius:26px;padding:clamp(20px,4vw,30px);margin:18px 0;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
@@ -6271,10 +6284,9 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 				$content .= '<div style="line-height:1.7;margin:0 0 14px;">' . wp_kses_post( wpautop( $description ) ) . '</div>';
 			}
 
-			$content .= '<div style="display:flex;flex-wrap:wrap;gap:10px;color:#4b3c2d;font-weight:800;">';
-			$content .= '<span style="background:#fff;border:1px solid #dccab0;border-radius:999px;padding:8px 12px;">' . esc_html( $start_label ) . '</span>';
-			$content .= '<span style="background:#fff;border:1px solid #dccab0;border-radius:999px;padding:8px 12px;">' . esc_html( $price_label ) . '</span>';
-			$content .= '<span style="background:#fff;border:1px solid #dccab0;border-radius:999px;padding:8px 12px;">Capacity: ' . esc_html( $capacity_label ) . '</span>';
+			$content .= '<div style="display:flex;flex-direction:column;gap:8px;color:#4b3c2d;font-weight:800;">';
+			$content .= '<div style="background:#fff;border:1px solid #dccab0;border-radius:18px;padding:10px 14px;display:inline-block;width:max-content;max-width:100%;">' . esc_html( $start_label ) . '<br><span style="font-size:.92em;color:#6d5c45;">Seats Available: ' . esc_html( $seats_label ) . '</span></div>';
+			$content .= '<div style="background:#fff;border:1px solid #dccab0;border-radius:18px;padding:10px 14px;display:inline-block;width:max-content;max-width:100%;">' . esc_html( $price_label ) . '</div>';
 			$content .= '</div>';
 			$content .= '</div>';
 
@@ -6282,7 +6294,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 			$content .= '<a href="' . esc_url( $enroll_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:13px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Enroll Now</a>';
 
 			if ( ! empty( $session_page_url ) ) {
-				$content .= '<a href="' . esc_url( $session_page_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Learn More</a>';
+				$content .= '<a href="' . esc_url( $session_page_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:13px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Learn More About This Session</a>';
 			}
 
 			$content .= '</div>';
@@ -6296,8 +6308,11 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 
 	$content .= '<section style="text-align:center;margin-top:38px;padding-top:24px;border-top:1px solid #eadcc8;">';
 	$content .= '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">';
-	$content .= '<a href="mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( $share_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share by Email</a>';
+	$content .= '<a href="mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( "I thought you might be interested in this Masterclass presenter page:
+
+" . $share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share by Email</a>';
 	$content .= '<a href="https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share on Facebook</a>';
+	$content .= '<button type="button" onclick="navigator.clipboard && navigator.clipboard.writeText(window.location.href).then(function(){this.textContent=&quot;Link Copied&quot;}.bind(this)).catch(function(){window.prompt(&quot;Copy this link:&quot;, window.location.href);}.bind(this));" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;cursor:pointer;">Copy Link</button>';
 	$content .= '</div>';
 	$content .= '</section>';
 
