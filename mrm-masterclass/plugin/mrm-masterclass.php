@@ -155,7 +155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.3.8';
+	const DB_VERSION = '1.3.9';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -194,6 +194,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_footer', 'mrm_mc_print_frontend_boot_rescue', 9999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_share_meta', 5, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_title_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
@@ -2317,6 +2318,7 @@ public function mrm_mc_render_critical_error_notice() {
 		'short_description'           => "ALTER TABLE {$presenters_table} ADD short_description TEXT NULL",
 		'long_description'            => "ALTER TABLE {$presenters_table} ADD long_description LONGTEXT NULL",
 		'instruments'                 => "ALTER TABLE {$presenters_table} ADD instruments TEXT NULL",
+		'presenter_title'             => "ALTER TABLE {$presenters_table} ADD presenter_title VARCHAR(191) NULL",
 		'status'                      => "ALTER TABLE {$presenters_table} ADD status VARCHAR(32) NOT NULL DEFAULT 'active'",
 		'presenter_page_id'           => "ALTER TABLE {$presenters_table} ADD presenter_page_id BIGINT UNSIGNED NULL",
 	);
@@ -3198,15 +3200,16 @@ private function mrm_mc_presenter_event_confirmation_email_body( $event, $presen
 		. '<p><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '<br>'
 		. '<strong>Scheduled start:</strong> ' . esc_html( $event_time ) . '<br>'
 		. '<strong>Maximum enrollment:</strong> 100 students</p>'
-		. '<p>Please plan to join the call roughly <strong>30 minutes before the scheduled start time</strong>. Students will be able to join starting <strong>10 minutes before the Masterclass begins</strong>.</p>'
-		. '<p>Your presenter page is designed to be shared on your networks so students can learn more about you and the Masterclass.</p>';
+		. '<p>Please plan to join the call roughly <strong>30 minutes before the scheduled start time</strong>. Students will be able to join starting <strong>10 minutes before the Masterclass begins</strong>.</p>';
 
 	if ( ! empty( $presenter_page_url ) ) {
+		$content .= '<p>Your presenter page is ready to share. You are welcome to share this link with your students, colleagues, followers, and professional network so they can learn more about your background and upcoming Masterclass sessions.</p>';
 		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open and Share Your Presenter Page' );
 	}
 
 	return $this->mrm_mc_email_template( 'You Have Been Scheduled for a Masterclass', $content );
 }
+
 
 private function mrm_mc_send_presenter_event_confirmation( $event_id ) {
 	global $wpdb;
@@ -3255,6 +3258,14 @@ private function mrm_mc_send_presenter_event_confirmation( $event_id ) {
 		'presenter_page_id' => $event->presenter_page_id,
 		'profile_image_url' => $event->profile_image_url,
 	);
+
+	if ( empty( $presenter->presenter_page_id ) && ! empty( $event->presenter_id ) ) {
+		$page_result = $this->mrm_mc_generate_presenter_page_for_id( absint( $event->presenter_id ) );
+
+		if ( ! is_wp_error( $page_result ) ) {
+			$presenter->presenter_page_id = absint( $page_result );
+		}
+	}
 
 	$body = $this->mrm_mc_presenter_event_confirmation_email_body( $event, $presenter );
 
@@ -3305,7 +3316,8 @@ private function mrm_mc_presenter_reminder_email_body( $event ) {
 		. '<strong>Maximum enrollment:</strong> 100 students</p>';
 
 	if ( ! empty( $presenter_page_url ) ) {
-		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open Your Masterclass Presenter Page' );
+		$content .= '<p>You may continue sharing your presenter page with your network so interested students can review your profile and any open Masterclass sessions.</p>';
+		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open and Share Your Presenter Page' );
 	}
 
 	return $this->mrm_mc_email_template( 'Masterclass Presenter Reminder', $content );
@@ -5215,7 +5227,8 @@ public function handle_save_presenter() {
 		'short_description'           => $this->mrm_mc_clean_html( $_POST['short_description'] ?? '' ),
 		'long_description'            => $this->mrm_mc_clean_html( $_POST['long_description'] ?? '' ),
 		'bio'                         => $this->mrm_mc_clean_html( $_POST['bio'] ?? '' ),
-		'instruments'                 => $this->mrm_mc_selected_instruments_from_post(),
+		'presenter_title'             => $this->mrm_mc_clean_text( $_POST['presenter_title'] ?? '' ),
+		'instruments'                 => wp_json_encode( array() ),
 		'updated_at'                  => $this->now(),
 	);
 
@@ -6011,6 +6024,46 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	return $page_id;
 }
 
+public function mrm_mc_print_presenter_page_title_css() {
+	if ( ! is_page() ) {
+		return;
+	}
+
+	global $post, $wpdb;
+
+	if ( ! $post || empty( $post->ID ) ) {
+		return;
+	}
+
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+
+	if ( ! $this->mrm_mc_table_exists( $presenters_table ) ) {
+		return;
+	}
+
+	$presenter_id = absint(
+		$wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM {$presenters_table} WHERE presenter_page_id = %d LIMIT 1",
+				absint( $post->ID )
+			)
+		)
+	);
+
+	if ( $presenter_id <= 0 ) {
+		return;
+	}
+
+	echo '<style id="mrm-masterclass-presenter-page-title-css">
+		.entry-title,
+		.wp-block-post-title,
+		.ast-single-post .entry-title,
+		.page-title {
+			text-align: center !important;
+		}
+	</style>';
+}
+
 public function mrm_mc_print_presenter_page_share_meta() {
 	if ( ! is_page() ) {
 		return;
@@ -6075,21 +6128,64 @@ private function mrm_mc_upcoming_sessions_for_presenter( $presenter_id ) {
 		return array();
 	}
 
-	return $wpdb->get_results(
+	/*
+	 * Pull scheduled/open sessions for this presenter without relying on SQL UTC
+	 * comparisons. Event start_time is stored as a local event datetime, so the
+	 * final upcoming filter must happen in PHP using the event timezone.
+	 */
+	$rows = $wpdb->get_results(
 		$wpdb->prepare(
 			"SELECT *
 			 FROM {$events_table}
 			 WHERE presenter_id = %d
 			   AND LOWER(TRIM(status)) = 'scheduled'
 			   AND CAST(registration_open AS UNSIGNED) = 1
-			   AND start_time >= %s
 			 ORDER BY start_time ASC
-			 LIMIT 20",
-			$presenter_id,
-			gmdate( 'Y-m-d H:i:s', time() - HOUR_IN_SECONDS )
+			 LIMIT 100",
+			$presenter_id
 		)
 	);
+
+	if ( ! $rows ) {
+		$this->mrm_mc_debug_log(
+			'Presenter page upcoming sessions query found no scheduled/open rows.',
+			array(
+				'presenter_id' => $presenter_id,
+			)
+		);
+
+		return array();
+	}
+
+	$now_ts   = time();
+	$upcoming = array();
+
+	foreach ( $rows as $row ) {
+		$start_ts = method_exists( $this, 'mrm_mc_event_timestamp_from_local' )
+			? $this->mrm_mc_event_timestamp_from_local( $row->start_time, $row->timezone ?? 'America/Phoenix' )
+			: strtotime( $row->start_time . ' UTC' );
+
+		/*
+		 * Keep sessions that have not meaningfully passed. The one-hour grace
+		 * prevents a session from disappearing during the access/start window.
+		 */
+		if ( $start_ts <= 0 || $start_ts >= ( $now_ts - HOUR_IN_SECONDS ) ) {
+			$upcoming[] = $row;
+		}
+	}
+
+	$this->mrm_mc_debug_log(
+		'Presenter page upcoming sessions resolved.',
+		array(
+			'presenter_id'    => $presenter_id,
+			'candidate_count' => count( $rows ),
+			'upcoming_count'  => count( $upcoming ),
+		)
+	);
+
+	return array_slice( $upcoming, 0, 20 );
 }
+
 
 private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	global $wpdb;
@@ -6110,25 +6206,24 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 		return new WP_Error( 'presenter_not_found', 'Presenter could not be found.' );
 	}
 
-	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
-	$profile          = esc_url_raw( $presenter->profile_image_url ?? '' );
+	$presenters_table  = $this->t( 'mrm_masterclass_presenters' );
+	$profile           = esc_url_raw( $presenter->profile_image_url ?? '' );
+	$presenter_title   = sanitize_text_field( $presenter->presenter_title ?? '' );
+	$upcoming_sessions = $this->mrm_mc_upcoming_sessions_for_presenter( $presenter_id );
 
-	$instruments = array();
+	$page_id = absint( $presenter->presenter_page_id ?? 0 );
 
-	if ( ! empty( $presenter->instruments ) ) {
-		$decoded = json_decode( $presenter->instruments, true );
-
-		if ( is_array( $decoded ) ) {
-			$instruments = array_map( 'sanitize_text_field', $decoded );
-		}
+	if ( $page_id > 0 && get_post( $page_id ) ) {
+		$share_url = get_permalink( $page_id );
+	} else {
+		$share_url = home_url( '/' );
 	}
 
-	$upcoming_sessions = $this->mrm_mc_upcoming_sessions_for_presenter( $presenter_id );
+	$share_title = 'Masterclass Presenter: ' . sanitize_text_field( $presenter->name ?? '' );
 
 	$content = '<div class="mrm-masterclass-presenter-page" style="max-width:1040px;margin:0 auto;padding:48px 20px;font-family:Arial,Helvetica,sans-serif;color:#20170f;">';
 
 	$content .= '<header style="text-align:center;margin:0 auto 34px;">';
-	$content .= '<p style="margin:0 0 14px;text-transform:uppercase;letter-spacing:.16em;font-weight:900;color:#9a6a2f;">Masterclass Presenter</p>';
 
 	if ( $profile ) {
 		$content .= '<img src="' . esc_url( $profile ) . '" alt="' . esc_attr( $presenter->name ) . '" style="width:min(320px,82vw);aspect-ratio:1/1;object-fit:cover;border-radius:28px;display:block;margin:0 auto 22px;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">';
@@ -6136,10 +6231,10 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 		$content .= '<div style="width:min(320px,82vw);aspect-ratio:1/1;border-radius:28px;background:#f7efe3;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:72px;font-weight:900;color:#9a6a2f;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">' . esc_html( mb_substr( $presenter->name, 0, 1 ) ) . '</div>';
 	}
 
-	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;">' . esc_html( $presenter->name ) . '</h1>';
+	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;color:#20170f;">' . esc_html( $presenter->name ) . '</h1>';
 
-	if ( ! empty( $instruments ) ) {
-		$content .= '<p style="text-align:center;font-weight:900;margin:10px auto 0;color:#4b3c2d;"><strong>Areas:</strong> ' . esc_html( implode( ', ', $instruments ) ) . '</p>';
+	if ( '' !== $presenter_title ) {
+		$content .= '<p style="text-align:center;font-weight:900;margin:10px auto 0;color:#4b3c2d;font-size:1.05rem;">' . esc_html( $presenter_title ) . '</p>';
 	}
 
 	$content .= '</header>';
@@ -6155,7 +6250,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	}
 
 	$content .= '<section style="margin-top:40px;">';
-	$content .= '<h2 style="font-family:Georgia,serif;font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;">Upcoming Masterclass Sessions</h2>';
+	$content .= '<h2 style="font-family:Georgia,serif;font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;color:#20170f;">Upcoming Masterclass Sessions</h2>';
 
 	if ( ! empty( $upcoming_sessions ) ) {
 		foreach ( $upcoming_sessions as $session ) {
@@ -6170,7 +6265,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 
 			$content .= '<article style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center;background:#fffdf9;border:1px solid #eadcc8;border-radius:26px;padding:clamp(20px,4vw,30px);margin:18px 0;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
 			$content .= '<div>';
-			$content .= '<h3 style="font-family:Georgia,serif;font-size:clamp(1.35rem,3vw,2rem);line-height:1.15;margin:0 0 10px;">' . esc_html( $session->title ) . '</h3>';
+			$content .= '<h3 style="font-family:Georgia,serif;font-size:clamp(1.35rem,3vw,2rem);line-height:1.15;margin:0 0 10px;color:#20170f;">' . esc_html( $session->title ) . '</h3>';
 
 			if ( ! empty( $description ) ) {
 				$content .= '<div style="line-height:1.7;margin:0 0 14px;">' . wp_kses_post( wpautop( $description ) ) . '</div>';
@@ -6199,14 +6294,10 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 
 	$content .= '</section>';
 
-	$share_url   = '#';
-	$share_title = 'Masterclass Presenter: ' . sanitize_text_field( $presenter->name ?? '' );
-
 	$content .= '<section style="text-align:center;margin-top:38px;padding-top:24px;border-top:1px solid #eadcc8;">';
 	$content .= '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;">';
 	$content .= '<a href="mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( $share_url ) . '" style="display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share by Email</a>';
-	$content .= '<a href="https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $share_url ) . '" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share on Facebook</a>';
-	$content .= '<a href="https://www.linkedin.com/sharing/share-offsite/?url=' . rawurlencode( $share_url ) . '" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share on LinkedIn</a>';
+	$content .= '<a href="https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:900;">Share on Facebook</a>';
 	$content .= '</div>';
 	$content .= '</section>';
 
@@ -6220,8 +6311,6 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 		'post_status'  => 'publish',
 		'post_type'    => 'page',
 	);
-
-	$page_id = absint( $presenter->presenter_page_id ?? 0 );
 
 	if ( $page_id > 0 && get_post( $page_id ) ) {
 		$page_data['ID'] = $page_id;
@@ -6253,40 +6342,21 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	}
 
 	/*
-	 * Regenerate once after the presenter_page_id is known so share buttons
-	 * can use the actual page permalink instead of a placeholder.
+	 * If this was the first page creation, regenerate once now that we know
+	 * the real page permalink. This fixes Share by Email and Share on Facebook
+	 * on first generation.
 	 */
 	if ( empty( $presenter->presenter_page_id ) || absint( $presenter->presenter_page_id ) !== $page_id ) {
 		$fresh_presenter = $this->mrm_mc_get_presenter( $presenter_id );
 
 		if ( $fresh_presenter ) {
-			$fresh_share_url = get_permalink( $page_id );
-
-			$fresh_content = str_replace(
-				array(
-					'mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( '#' ),
-					'https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( '#' ),
-					'https://www.linkedin.com/sharing/share-offsite/?url=' . rawurlencode( '#' ),
-				),
-				array(
-					'mailto:?subject=' . rawurlencode( $share_title ) . '&body=' . rawurlencode( $fresh_share_url ),
-					'https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $fresh_share_url ),
-					'https://www.linkedin.com/sharing/share-offsite/?url=' . rawurlencode( $fresh_share_url ),
-				),
-				$content
-			);
-
-			wp_update_post(
-				array(
-					'ID'           => $page_id,
-					'post_content' => $fresh_content,
-				)
-			);
+			return $this->mrm_mc_generate_presenter_page_for_id( $presenter_id );
 		}
 	}
 
 	return $page_id;
 }
+
 
 public function handle_create_session_page() {
 	$this->must_admin();
@@ -7942,24 +8012,6 @@ public function render_presenters_page() {
 		$rows = array();
 	}
 
-	$instrument_options = array(
-		'trombone'   => 'Trombone',
-		'euphonium' => 'Euphonium',
-		'tuba'      => 'Tuba',
-		'composer'  => 'Composer',
-		'conductor' => 'Conductor',
-		'other'     => 'Other',
-	);
-
-	$selected_instruments = array();
-
-	if ( ! empty( $editing['instruments'] ) ) {
-		$decoded = json_decode( $editing['instruments'], true );
-		if ( is_array( $decoded ) ) {
-			$selected_instruments = $decoded;
-		}
-	}
-
 	echo '<div class="wrap mrm-masterclass-admin">';
 	echo '<h1>Masterclass Presenters</h1>';
 	echo '<p>Create and manage presenters separately from scheduler instructors. These profiles feed event assignment, payout reporting, and tax profiles.</p>';
@@ -8011,11 +8063,7 @@ public function render_presenters_page() {
 	echo '<tr><th>Start Date</th><td><input name="hire_date" type="date" value="' . esc_attr( $editing['hire_date'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Profile Image URL</th><td><input name="profile_image_url" type="url" class="regular-text" value="' . esc_attr( $editing['profile_image_url'] ?? '' ) . '"></td></tr>';
 
-	echo '<tr><th>Specialties</th><td>';
-	foreach ( $instrument_options as $key => $label ) {
-		echo '<label style="display:block;margin-bottom:6px;"><input type="checkbox" name="instruments[]" value="' . esc_attr( $key ) . '" ' . checked( in_array( $key, $selected_instruments, true ), true, false ) . '> ' . esc_html( $label ) . '</label>';
-	}
-	echo '</td></tr>';
+	echo '<tr><th>Presenter Title</th><td><input name="presenter_title" type="text" class="regular-text" value="' . esc_attr( $editing['presenter_title'] ?? '' ) . '" placeholder="Example: Professor of Trombone"><p class="description">Enter the presenter title exactly as you want it shown on the public presenter page.</p></td></tr>';
 
 	echo '<tr><th>Short Description</th><td><textarea name="short_description" rows="3" class="large-text">' . esc_textarea( $editing['short_description'] ?? '' ) . '</textarea></td></tr>';
 	echo '<tr><th>Long Description</th><td><textarea name="long_description" rows="7" class="large-text">' . esc_textarea( $editing['long_description'] ?? '' ) . '</textarea></td></tr>';
