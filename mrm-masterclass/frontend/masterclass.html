@@ -525,9 +525,10 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-card-actions {
-  margin-top: auto;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+  margin-top: auto;
 }
 
 .mrm-masterclass-card-actions .mrm-masterclass-register-button {
@@ -945,6 +946,21 @@ body.mrm-masterclass-modal-open {
 
 .mrm-masterclass-live-diagnostic {
   display: none !important;
+}
+
+.mrm-masterclass-dynamic-detail {
+  max-width: 1060px;
+  margin: 0 auto;
+}
+
+.mrm-masterclass-dynamic-detail .secondary-btn {
+  background: #ffffff;
+  color: var(--mrm-text);
+  border: 1px solid var(--mrm-border);
+}
+
+.mrm-masterclass-learn-more-button {
+  text-decoration: none !important;
 }
 
 </style>
