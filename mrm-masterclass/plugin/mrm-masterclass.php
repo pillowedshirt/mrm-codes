@@ -708,6 +708,284 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    }, 2200);
 		  }
 
+		  function currentMasterclassParams() {
+		    return new URLSearchParams(window.location.search || '');
+		  }
+
+		  function masterclassContainerUrl(params) {
+		    const base = window.location.origin + window.location.pathname.replace(/\/?$/, '/');
+		    const query = new URLSearchParams(params || {});
+		    const qs = query.toString();
+
+		    return qs ? base + '?' + qs : base;
+		  }
+
+		  function renderBackToMasterclassesLink() {
+		    return '<p style="margin:0 0 24px;"><a class="secondary-btn" style="display:inline-flex;width:auto;text-decoration:none;" href="' + escapeHtml(masterclassContainerUrl({})) + '">← Back to All Masterclasses</a></p>';
+		  }
+
+		  function renderPresenterDetailView(presenter, sessions) {
+		    const root = byId('mrm-masterclass-public-events');
+		    const loading = byId('mrm-masterclass-loading');
+
+		    if (loading) {
+		      loading.hidden = true;
+		    }
+
+		    if (!root) {
+		      showError('Presenter view could not display because the Masterclass container is missing.');
+		      return;
+		    }
+
+		    const safePresenter = presenter || {};
+		    const safeSessions = Array.isArray(sessions) ? sessions : [];
+		    const profile = safePresenter.profile_image_url || '';
+		    const title = safePresenter.presenter_title || '';
+		    const longDescription = safePresenter.long_description_html || safePresenter.bio_html || '';
+		    const initial = safePresenter.name ? String(safePresenter.name).charAt(0) : 'P';
+
+		    let html = '';
+		    html += renderBackToMasterclassesLink();
+		    html += '<article class="mrm-masterclass-dynamic-detail mrm-masterclass-presenter-detail">';
+		    html += '<header style="text-align:center;margin:0 auto 34px;">';
+
+		    if (profile) {
+		      html += '<img src="' + escapeHtml(profile) + '" alt="' + escapeHtml(safePresenter.name || 'Masterclass Presenter') + '" style="width:min(320px,82vw);aspect-ratio:1/1;object-fit:cover;border-radius:28px;display:block;margin:0 auto 22px;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">';
+		    } else {
+		      html += '<div style="width:min(320px,82vw);aspect-ratio:1/1;border-radius:28px;background:#f7efe3;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:72px;font-weight:900;color:#9a6a2f;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">' + escapeHtml(initial) + '</div>';
+		    }
+
+		    html += '<h2 style="font-family:Georgia,serif;font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;color:#20170f;">' + escapeHtml(safePresenter.name || 'Masterclass Presenter') + '</h2>';
+
+		    if (title) {
+		      html += '<p style="text-align:center;font-weight:900;margin:10px auto 0;color:#4b3c2d;font-size:1.05rem;">' + escapeHtml(title) + '</p>';
+		    }
+
+		    html += '</header>';
+
+		    if (longDescription) {
+		      html += '<section style="background:#fff;border:1px solid #dccab0;border-radius:28px;padding:clamp(22px,4vw,34px);margin:28px 0;line-height:1.75;font-size:16px;box-shadow:0 14px 34px rgba(32,23,15,.08);">' + longDescription + '</section>';
+		    }
+
+		    html += '<section style="margin-top:40px;">';
+		    html += '<h3 style="font-family:Georgia,serif;font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;color:#20170f;">Upcoming Masterclass Sessions</h3>';
+
+		    if (safeSessions.length) {
+		      html += '<div class="mrm-masterclass-events-grid">';
+		      safeSessions.forEach(function (session) {
+		        html += '<article class="mrm-masterclass-event-card">';
+		        html += '<h3>' + escapeHtml(session.title || 'Masterclass') + '</h3>';
+
+		        if (session.long_description_html || session.description_html) {
+		          html += '<div class="mrm-masterclass-event-description">' + (session.long_description_html || session.description_html || '') + '</div>';
+		        }
+
+		        html += '<div class="mrm-masterclass-event-meta">';
+		        html += '<p><strong>Starts:</strong> ' + escapeHtml(formatDateTime(eventStart(session))) + '</p>';
+		        html += '<p><strong>Ends:</strong> ' + escapeHtml(formatDateTime(eventEnd(session))) + '</p>';
+		        html += '<p><strong>Price:</strong> ' + escapeHtml(money(session.price_cents || 0)) + '</p>';
+		        html += '<p><strong>Seats available:</strong> ' + escapeHtml(String(typeof session.available_seats !== 'undefined' ? session.available_seats : 'TBA')) + '</p>';
+		        html += '</div>';
+
+		        html += '<div class="mrm-masterclass-card-actions">';
+		        html += '<button type="button" class="primary-btn mrm-masterclass-register-button" data-register-event-id="' + escapeHtml(String(session.id || '')) + '">Register for this Masterclass</button>';
+		        html += '<a class="primary-btn mrm-masterclass-learn-more-button" href="' + escapeHtml(session.session_page_url || masterclassContainerUrl({ session: session.id })) + '">Learn More About This Masterclass</a>';
+		        html += '</div>';
+
+		        html += '</article>';
+		      });
+		      html += '</div>';
+		    } else {
+		      html += '<div class="mrm-masterclass-empty">No upcoming Masterclass sessions are currently open for this presenter.</div>';
+		    }
+
+		    html += '</section>';
+		    html += '</article>';
+
+		    root.innerHTML = html;
+
+		    root.querySelectorAll('[data-register-event-id]').forEach(function (button) {
+		      button.addEventListener('click', function () {
+		        const eventId = Number(button.getAttribute('data-register-event-id') || 0);
+		        const event = safeSessions.find(function (candidate) {
+		          return Number(candidate.id) === eventId;
+		        });
+
+		        if (event) {
+		          openRegistration(event);
+		        }
+		      });
+		    });
+		  }
+
+		  function renderSessionDetailView(event) {
+		    const root = byId('mrm-masterclass-public-events');
+		    const loading = byId('mrm-masterclass-loading');
+
+		    if (loading) {
+		      loading.hidden = true;
+		    }
+
+		    if (!root) {
+		      showError('Session view could not display because the Masterclass container is missing.');
+		      return;
+		    }
+
+		    const safeEvent = event || {};
+		    const presenterUrl = safeEvent.presenter_page_url || (safeEvent.presenter_id ? masterclassContainerUrl({ presenter: safeEvent.presenter_id }) : '');
+		    const sessionUrl = safeEvent.session_page_url || (safeEvent.id ? masterclassContainerUrl({ session: safeEvent.id }) : window.location.href);
+		    const canRegister = publicEventIsRegisterable(safeEvent);
+
+		    let html = '';
+		    html += renderBackToMasterclassesLink();
+		    html += '<article class="mrm-masterclass-dynamic-detail mrm-masterclass-session-detail">';
+		    html += '<section style="margin-top:0;background:#fff;border:1px solid #eadcc8;border-radius:28px;padding:30px;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
+		    html += '<div style="text-align:center;margin:0 auto 22px;">';
+		    html += '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Masterclass Session</p>';
+		    html += '<h2 style="font-family:Georgia,serif;font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;color:#20170f;text-align:center;">' + escapeHtml(safeEvent.title || 'Masterclass Session') + '</h2>';
+		    html += '</div>';
+
+		    if (safeEvent.long_description_html || safeEvent.description_html) {
+		      html += '<div style="font-size:16px;line-height:1.75;margin:0 0 22px;">' + (safeEvent.long_description_html || safeEvent.description_html || '') + '</div>';
+		    }
+
+		    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin:24px 0;">';
+		    html += '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;text-align:center;"><strong>Presenter</strong><br>';
+
+		    if (presenterUrl) {
+		      html += '<a href="' + escapeHtml(presenterUrl) + '">' + escapeHtml(safeEvent.presenter_name || 'Presenter') + '</a>';
+		    } else {
+		      html += escapeHtml(safeEvent.presenter_name || 'Presenter');
+		    }
+
+		    html += '</div>';
+		    html += '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;text-align:center;"><strong>Starts</strong><br>' + escapeHtml(formatDateTime(eventStart(safeEvent))) + '</div>';
+		    html += '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;text-align:center;"><strong>Ends</strong><br>' + escapeHtml(formatDateTime(eventEnd(safeEvent))) + '</div>';
+		    html += '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;text-align:center;"><strong>Price</strong><br>' + escapeHtml(money(safeEvent.price_cents || 0)) + '</div>';
+		    html += '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;text-align:center;"><strong>Seats Available</strong><br>' + escapeHtml(String(typeof safeEvent.available_seats !== 'undefined' ? safeEvent.available_seats : 'TBA')) + '</div>';
+		    html += '</div>';
+
+		    html += '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:26px;">';
+
+		    if (canRegister) {
+		      html += '<button type="button" id="mrm-masterclass-session-register" class="primary-btn" style="width:auto;">Register for this Masterclass</button>';
+		    } else {
+		      html += '<button type="button" class="primary-btn" style="width:auto;" disabled>Registration Closed</button>';
+		    }
+
+		    if (presenterUrl) {
+		      html += '<a class="secondary-btn" style="width:auto;text-decoration:none;" href="' + escapeHtml(presenterUrl) + '">More About the Presenter</a>';
+		    }
+
+		    html += '</div>';
+
+		    html += '<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:18px;">';
+		    html += '<a href="mailto:?subject=' + encodeURIComponent('Masterclass Session: ' + (safeEvent.title || 'Masterclass')) + '&body=' + encodeURIComponent('I thought you might be interested in this Masterclass session:\n\n' + sessionUrl) + '" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:Arial,Helvetica,sans-serif;">Share by Email</a>';
+		    html += '<a href="https://www.facebook.com/sharer/sharer.php?u=' + encodeURIComponent(sessionUrl) + '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:Arial,Helvetica,sans-serif;">Share on Facebook</a>';
+		    html += '<button type="button" id="mrm-masterclass-copy-session-link" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:Arial,Helvetica,sans-serif;cursor:pointer;">Copy Link</button>';
+		    html += '</div>';
+
+		    html += '</section>';
+		    html += '</article>';
+
+		    root.innerHTML = html;
+
+		    const registerButton = byId('mrm-masterclass-session-register');
+
+		    if (registerButton) {
+		      registerButton.addEventListener('click', function () {
+		        openRegistration(safeEvent);
+		      });
+		    }
+
+		    const copyButton = byId('mrm-masterclass-copy-session-link');
+
+		    if (copyButton) {
+		      copyButton.addEventListener('click', function () {
+		        const original = copyButton.textContent || 'Copy Link';
+		        const done = function () {
+		          copyButton.textContent = 'Link Copied';
+		          window.setTimeout(function () {
+		            copyButton.textContent = original;
+		          }, 2500);
+		        };
+
+		        if (navigator.clipboard) {
+		          navigator.clipboard.writeText(sessionUrl).then(done).catch(function () {
+		            window.prompt('Copy this link:', sessionUrl);
+		            done();
+		          });
+		        } else {
+		          window.prompt('Copy this link:', sessionUrl);
+		          done();
+		        }
+		      });
+		    }
+		  }
+
+		  async function loadPresenterDetail(presenterId) {
+		    clearError();
+
+		    const loading = byId('mrm-masterclass-loading');
+
+		    if (loading) {
+		      loading.hidden = false;
+		      loading.textContent = 'Loading presenter...';
+		    }
+
+		    try {
+		      const result = await fetchJson(restUrlNoCache('presenter?id=' + encodeURIComponent(String(presenterId))), {
+		        method: 'GET',
+		        credentials: 'same-origin',
+		        headers: {
+		          'Accept': 'application/json',
+		          'Cache-Control': 'no-cache'
+		        },
+		        cache: 'no-store'
+		      });
+
+		      const presenter = result.data && result.data.presenter ? result.data.presenter : null;
+		      const sessions = result.data && Array.isArray(result.data.sessions) ? result.data.sessions : [];
+
+		      renderPresenterDetailView(presenter, sessions);
+		      window.__mrmMasterclassBootComplete = true;
+		    } catch (error) {
+		      console.error('MRM Masterclass presenter detail failed:', error);
+		      showError(error && error.message ? error.message : 'Presenter could not be loaded.');
+		    }
+		  }
+
+		  async function loadSessionDetail(sessionId) {
+		    clearError();
+
+		    const loading = byId('mrm-masterclass-loading');
+
+		    if (loading) {
+		      loading.hidden = false;
+		      loading.textContent = 'Loading session...';
+		    }
+
+		    try {
+		      const result = await fetchJson(restUrlNoCache('event?id=' + encodeURIComponent(String(sessionId))), {
+		        method: 'GET',
+		        credentials: 'same-origin',
+		        headers: {
+		          'Accept': 'application/json',
+		          'Cache-Control': 'no-cache'
+		        },
+		        cache: 'no-store'
+		      });
+
+		      const event = result.data && result.data.event ? result.data.event : null;
+
+		      renderSessionDetailView(event);
+		      window.__mrmMasterclassBootComplete = true;
+		    } catch (error) {
+		      console.error('MRM Masterclass session detail failed:', error);
+		      showError(error && error.message ? error.message : 'Session could not be loaded.');
+		    }
+		  }
+
 		  function renderEvents(events) {
 		    const eventsEl = byId('mrm-masterclass-events');
 		    const loading = byId('mrm-masterclass-loading');
@@ -750,8 +1028,10 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      const meta = document.createElement('div');
 		      meta.className = 'mrm-masterclass-event-meta';
 		      const presenterName = event.presenter_name || 'TBA';
-		      const presenterHtml = event.presenter_page_url
-		        ? '<a class="mrm-masterclass-presenter-link" href="' + escapeHtml(event.presenter_page_url) + '">' + escapeHtml(presenterName) + '</a>'
+		      const presenterUrl = event.presenter_page_url || (event.presenter_id ? masterclassContainerUrl({ presenter: event.presenter_id }) : '');
+
+		      const presenterHtml = presenterUrl
+		        ? '<a class="mrm-masterclass-presenter-link" href="' + escapeHtml(presenterUrl) + '">' + escapeHtml(presenterName) + '</a>'
 		        : escapeHtml(presenterName);
 
 		      meta.innerHTML =
@@ -793,13 +1073,11 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      actions.className = 'mrm-masterclass-card-actions';
 		      actions.appendChild(button);
 
-		      if (event.session_page_url || event.presenter_page_url) {
-		        const learnMore = document.createElement('a');
-		        learnMore.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-learn-more-button';
-		        learnMore.href = event.session_page_url || event.presenter_page_url;
-		        learnMore.textContent = 'Learn More About This Session';
-		        actions.appendChild(learnMore);
-		      }
+		      const learnMore = document.createElement('a');
+		      learnMore.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-learn-more-button';
+		      learnMore.href = event.session_page_url || masterclassContainerUrl({ session: event.id });
+		      learnMore.textContent = 'Learn More About This Session';
+		      actions.appendChild(learnMore);
 
 		      card.appendChild(actions);
 
@@ -1464,8 +1742,21 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		    bindModalControls();
 
-		    Promise.resolve()
-		      .then(loadEvents)
+		    const params = currentMasterclassParams();
+		    const presenterId = Number(params.get('presenter') || 0);
+		    const sessionId = Number(params.get('session') || 0);
+
+		    let bootPromise;
+
+		    if (presenterId > 0) {
+		      bootPromise = loadPresenterDetail(presenterId);
+		    } else if (sessionId > 0) {
+		      bootPromise = loadSessionDetail(sessionId);
+		    } else {
+		      bootPromise = loadEvents();
+		    }
+
+		    Promise.resolve(bootPromise)
 		      .finally(function () {
 		        window.__mrmMasterclassBootRunning = false;
 		      });
@@ -2922,10 +3213,19 @@ private function mrm_mc_terms_snapshot() {
 	);
 }
 
-private function mrm_mc_public_session_page_url( $session_page_id ) {
-	$session_page_id = absint( $session_page_id );
+private function mrm_mc_public_session_page_url( $event_id ) {
+	$event_id = absint( $event_id );
 
-	return $session_page_id > 0 ? get_permalink( $session_page_id ) : '';
+	if ( $event_id <= 0 ) {
+		return '';
+	}
+
+	return add_query_arg(
+		array(
+			'session' => $event_id,
+		),
+		home_url( '/masterclass/' )
+	);
 }
 
 private function mrm_mc_presenter_emergency_url_for_event( $event_id ) {
@@ -3015,10 +3315,19 @@ private function mrm_mc_handle_presenter_share_card_request() {
 	exit;
 }
 
-private function mrm_mc_public_presenter_page_url( $presenter_page_id ) {
-	$presenter_page_id = absint( $presenter_page_id );
+private function mrm_mc_public_presenter_page_url( $presenter_id ) {
+	$presenter_id = absint( $presenter_id );
 
-	return $presenter_page_id > 0 ? get_permalink( $presenter_page_id ) : '';
+	if ( $presenter_id <= 0 ) {
+		return '';
+	}
+
+	return add_query_arg(
+		array(
+			'presenter' => $presenter_id,
+		),
+		home_url( '/masterclass/' )
+	);
 }
 
 private function mrm_mc_get_email_logo_url() {
@@ -3247,8 +3556,10 @@ private function mrm_mc_remaining_spots_for_event( $event_id, $capacity ) {
 private function mrm_mc_presenter_event_confirmation_email_body( $event, $presenter ) {
 	$event_time = $this->mrm_mc_event_time_label( $event->start_time ?? '', $event->timezone ?? 'America/Phoenix' );
 
-	$presenter_page_url = ! empty( $presenter->presenter_page_id )
-		? $this->mrm_mc_public_presenter_page_url( $presenter->presenter_page_id )
+	$presenter_id = absint( $presenter->id ?? ( $event->presenter_id ?? 0 ) );
+
+	$presenter_page_url = $presenter_id > 0
+		? $this->mrm_mc_public_presenter_page_url( $presenter_id )
 		: '';
 
 	$join_url = ! empty( $event->google_meet_url )
@@ -3328,19 +3639,11 @@ private function mrm_mc_send_presenter_event_confirmation( $event_id ) {
 	}
 
 	$presenter = (object) array(
+		'id'                => absint( $event->presenter_id ),
 		'name'              => $event->presenter_name,
 		'email'             => $event->presenter_email,
-		'presenter_page_id' => $event->presenter_page_id,
 		'profile_image_url' => $event->profile_image_url,
 	);
-
-	if ( empty( $presenter->presenter_page_id ) && ! empty( $event->presenter_id ) ) {
-		$page_result = $this->mrm_mc_generate_presenter_page_for_id( absint( $event->presenter_id ) );
-
-		if ( ! is_wp_error( $page_result ) ) {
-			$presenter->presenter_page_id = absint( $page_result );
-		}
-	}
 
 	$body = $this->mrm_mc_presenter_event_confirmation_email_body( $event, $presenter );
 
@@ -3380,8 +3683,8 @@ private function mrm_mc_send_presenter_event_confirmation( $event_id ) {
 
 private function mrm_mc_presenter_reminder_email_body( $event ) {
 	$event_time = $this->mrm_mc_event_time_label( $event->start_time ?? '', $event->timezone ?? 'America/Phoenix' );
-	$presenter_page_url = ! empty( $event->presenter_page_id )
-		? $this->mrm_mc_public_presenter_page_url( $event->presenter_page_id )
+	$presenter_page_url = ! empty( $event->presenter_id )
+		? $this->mrm_mc_public_presenter_page_url( $event->presenter_id )
 		: '';
 
 	$join_url = ! empty( $event->google_meet_url )
@@ -3595,8 +3898,9 @@ private function mrm_mc_public_event_payload( $row ) {
 		'description_html'      => wp_kses_post( ! empty( $row->short_description ) ? $row->short_description : ( $row->description ?? '' ) ),
 		'long_description_html' => wp_kses_post( $row->long_description ?? '' ),
 		'presenter_name'        => sanitize_text_field( $row->presenter_name ?? '' ),
-		'presenter_page_url'    => esc_url_raw( $row->presenter_page_url ?? '' ),
-		'session_page_url'      => ! empty( $row->session_page_id ) ? esc_url_raw( $this->mrm_mc_public_session_page_url( $row->session_page_id ) ) : '',
+		'presenter_id'          => absint( $row->presenter_id ?? 0 ),
+		'presenter_page_url'    => ! empty( $row->presenter_id ) ? esc_url_raw( $this->mrm_mc_public_presenter_page_url( $row->presenter_id ) ) : '',
+		'session_page_url'      => ! empty( $row->id ) ? esc_url_raw( $this->mrm_mc_public_session_page_url( $row->id ) ) : '',
 		'start_time'         => sanitize_text_field( $row->start_time ),
 		'end_time'           => sanitize_text_field( $row->end_time ),
 		'start_time_rfc3339' => ! empty( $row->start_time ) ? mysql_to_rfc3339( $row->start_time ) : '',
@@ -5392,30 +5696,12 @@ public function handle_save_presenter() {
 		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-presenters', 'presenter_save_failed' );
 	}
 
-	if ( $id > 0 && method_exists( $this, 'mrm_mc_generate_presenter_page_for_id' ) ) {
-		$page_result = $this->mrm_mc_generate_presenter_page_for_id( $id );
-
-		if ( is_wp_error( $page_result ) ) {
-			$this->mrm_mc_debug_log(
-				'Presenter page auto-generation failed after presenter save.',
-				array(
-					'presenter_id' => $id,
-					'error'        => $page_result->get_error_message(),
-				)
-			);
-
-			$this->mrm_mc_admin_notice_redirect(
-				'mrm-masterclass-presenters',
-				'presenter_page_failed',
-				array( 'edit' => $id )
-			);
-		}
-
+	if ( $id > 0 ) {
 		$this->mrm_mc_debug_log(
-			'Presenter page auto-generated after presenter save.',
+			'Presenter saved. Dynamic presenter URL is available through the Masterclass container page.',
 			array(
 				'presenter_id' => $id,
-				'page_id'      => absint( $page_result ),
+				'url'          => $this->mrm_mc_public_presenter_page_url( $id ),
 			)
 		);
 	}
@@ -5575,22 +5861,12 @@ public function handle_save_event() {
 		)
 	);
 
-	$session_page_result = $this->mrm_mc_generate_session_page_for_event_id( $event_id );
-
-	if ( is_wp_error( $session_page_result ) ) {
+	if ( $event_id > 0 ) {
 		$this->mrm_mc_debug_log(
-			'Masterclass session page generation failed after event save.',
+			'Masterclass event saved. Dynamic session URL is available through the Masterclass container page.',
 			array(
 				'event_id' => absint( $event_id ),
-				'error'    => $session_page_result->get_error_message(),
-			)
-		);
-	} else {
-		$this->mrm_mc_debug_log(
-			'Masterclass session page generated or updated after event save.',
-			array(
-				'event_id' => absint( $event_id ),
-				'page_id'  => absint( $session_page_result ),
+				'url'      => $this->mrm_mc_public_session_page_url( $event_id ),
 			)
 		);
 	}
@@ -5978,7 +6254,7 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	$paid_count = $this->mrm_mc_paid_registration_count_for_event( absint( $event_id ) );
 
 	$site_logo          = $this->mrm_mc_get_email_logo_url();
-	$presenter_page_url = ! empty( $event->presenter_page_id ) ? $this->mrm_mc_public_presenter_page_url( $event->presenter_page_id ) : '';
+	$presenter_page_url = ! empty( $event->presenter_id ) ? $this->mrm_mc_public_presenter_page_url( $event->presenter_id ) : '';
 	$profile            = esc_url_raw( $event->presenter_profile_image_url ?? '' );
 	$price              = '$' . number_format( absint( $event->price_cents ) / 100, 2 );
 
@@ -6068,7 +6344,7 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	$content .= '<div style="background:#fffdf9;border:1px solid #eadcc8;border-radius:18px;padding:16px;text-align:center;"><strong>Available Spots</strong><br>' . esc_html( absint( $available_spots ) ) . '</div>';
 	$content .= '</div>';
 
-	$session_share_url   = ! empty( $event->session_page_id ) ? $this->mrm_mc_public_session_page_url( absint( $event->session_page_id ) ) : '';
+	$session_share_url   = ! empty( $event->id ) ? $this->mrm_mc_public_session_page_url( absint( $event->id ) ) : '';
 	$session_share_url   = $session_share_url ? $session_share_url : '__MRM_SESSION_PAGE_URL__';
 	$session_share_title = 'Masterclass Session: ' . sanitize_text_field( $event->title ?? 'Masterclass' );
 	$gmail_share_url     = 'https://mail.google.com/mail/?view=cm&fs=1&su=' . rawurlencode( $session_share_title ) . '&body=' . rawurlencode( "I thought you might be interested in this Masterclass session:\n\n" . $session_share_url );
@@ -6447,7 +6723,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 
 	if ( ! empty( $upcoming_sessions ) ) {
 		foreach ( $upcoming_sessions as $session ) {
-			$session_page_url = ! empty( $session->session_page_id ) ? $this->mrm_mc_public_session_page_url( $session->session_page_id ) : '';
+			$session_page_url = ! empty( $session->id ) ? $this->mrm_mc_public_session_page_url( $session->id ) : '';
 			$enroll_url       = home_url( '/masterclass/#mrm-masterclass-event-' . absint( $session->id ) );
 			$start_label      = method_exists( $this, 'mrm_mc_event_time_label' )
 				? $this->mrm_mc_event_time_label( $session->start_time, $session->timezone )
@@ -8481,10 +8757,12 @@ public function render_presenters_page() {
 			echo '<td><code>' . esc_html( $row['timezone'] ?? '' ) . '</code></td>';
 			echo '<td>';
 
-			if ( ! empty( $row['presenter_page_id'] ) && get_permalink( absint( $row['presenter_page_id'] ) ) ) {
-				echo '<a class="button" href="' . esc_url( get_permalink( absint( $row['presenter_page_id'] ) ) ) . '" target="_blank" rel="noopener">View Page</a>';
+			$presenter_public_url = $this->mrm_mc_public_presenter_page_url( absint( $row['id'] ) );
+
+			if ( ! empty( $presenter_public_url ) ) {
+				echo '<a class="button" href="' . esc_url( $presenter_public_url ) . '" target="_blank" rel="noopener">View Page</a>';
 			} else {
-				echo '<span class="description">Not generated</span>';
+				echo '<span class="description">Unavailable</span>';
 			}
 
 			echo '</td>';
@@ -8722,12 +9000,7 @@ public function render_events_page() {
 	wp_nonce_field( 'mrm_masterclass_sync_google_event_' . absint( $event->id ) );
 	echo '<button type="submit" class="button button-small">Sync Google / Meet</button>';
 	echo '</form>';
-	echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" style="display:inline-block;margin:0 4px 4px 0;">';
-	echo '<input type="hidden" name="action" value="mrm_masterclass_create_session_page">';
-	echo '<input type="hidden" name="event_id" value="' . esc_attr( $event->id ) . '">';
-	wp_nonce_field( 'mrm_masterclass_create_session_page_' . absint( $event->id ) );
-	echo '<button type="submit" class="button button-small">Create/Update Session Page</button>';
-	echo '</form>';
+	echo '<a class="button button-small" href="' . esc_url( $this->mrm_mc_public_session_page_url( absint( $event->id ) ) ) . '" target="_blank" rel="noopener">View Session Page</a> ';
 			echo '<a class="button button-small button-link-delete" href="' . esc_url( $cancel_url ) . '" onclick="return confirm(\'Cancel/delete this event? Paid participants may be refunded automatically depending on the refund deadline.\');">Cancel / Delete</a>';
 
 			$emergency_url = wp_nonce_url(
@@ -9263,6 +9536,22 @@ public function render_email_log_page() {
 
 		register_rest_route(
 			self::REST_NAMESPACE,
+			'/presenter',
+			array(
+				'methods'             => WP_REST_Server::READABLE,
+				'callback'            => array( $this, 'rest_get_presenter' ),
+				'permission_callback' => '__return_true',
+				'args'                => array(
+					'id' => array(
+						'required'          => true,
+						'sanitize_callback' => 'absint',
+					),
+				),
+			)
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
 			'/apply-promo',
 			array(
 				'methods'             => 'POST',
@@ -9335,7 +9624,7 @@ public function render_email_log_page() {
 			'Masterclass REST routes registration completed.',
 			array(
 				'namespace' => self::REST_NAMESPACE,
-				'routes'    => 'events,event,apply-promo,create-payment-intent,verify-payment-intent,finalize-registration,popup-debug,gate-heartbeat,health',
+				'routes'    => 'events,event,presenter,apply-promo,create-payment-intent,verify-payment-intent,finalize-registration,popup-debug,gate-heartbeat,health',
 			)
 		);
 	}
@@ -9367,6 +9656,110 @@ private function mrm_mc_get_rest_json_body() {
 	}
 
 	return $data;
+}
+
+public function rest_get_presenter( $request ) {
+	global $wpdb;
+
+	$presenter_id = absint( $request->get_param( 'id' ) );
+
+	if ( $presenter_id <= 0 ) {
+		return new WP_Error(
+			'mrm_masterclass_invalid_presenter_id',
+			'Please select a valid Masterclass presenter.',
+			array( 'status' => 400 )
+		);
+	}
+
+	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
+	$events_table     = $this->t( 'mrm_masterclass_events' );
+	$regs_table       = $this->t( 'mrm_masterclass_registrations' );
+
+	if (
+		! $this->mrm_mc_table_exists( $presenters_table )
+		|| ! $this->mrm_mc_table_exists( $events_table )
+		|| ! $this->mrm_mc_table_exists( $regs_table )
+	) {
+		return new WP_Error(
+			'mrm_masterclass_presenter_tables_missing',
+			'This Masterclass presenter is temporarily unavailable. Please try again later.',
+			array( 'status' => 503 )
+		);
+	}
+
+	$presenter = $wpdb->get_row(
+		$wpdb->prepare(
+			"SELECT *
+			 FROM {$presenters_table}
+			 WHERE id = %d
+			 LIMIT 1",
+			$presenter_id
+		)
+	);
+
+	if ( ! $presenter ) {
+		return new WP_Error(
+			'mrm_masterclass_presenter_not_found',
+			'This Masterclass presenter could not be found.',
+			array( 'status' => 404 )
+		);
+	}
+
+	if ( isset( $presenter->status ) && 'inactive' === strtolower( trim( $presenter->status ) ) ) {
+		return new WP_Error(
+			'mrm_masterclass_presenter_inactive',
+			'This Masterclass presenter is no longer active.',
+			array( 'status' => 404 )
+		);
+	}
+
+	$rows = $wpdb->get_results(
+		$wpdb->prepare(
+			"SELECT e.*,
+				p.name AS presenter_name,
+				p.id AS presenter_id,
+				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND LOWER(TRIM(r.payment_status)) = 'paid') AS paid_count
+			 FROM {$events_table} e
+			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
+			 WHERE e.presenter_id = %d
+			   AND LOWER(TRIM(e.status)) = 'scheduled'
+			   AND CAST(e.registration_open AS UNSIGNED) = 1
+			   AND LOWER(TRIM(e.status)) <> 'deleted'
+			 ORDER BY e.start_time ASC
+			 LIMIT 100",
+			$presenter_id
+		)
+	);
+
+	$sessions = array();
+
+	foreach ( (array) $rows as $row ) {
+		$row->available_seats    = max( 0, absint( $row->capacity ) - absint( $row->paid_count ) );
+		$row->presenter_page_url = $this->mrm_mc_public_presenter_page_url( $presenter_id );
+		$sessions[]              = $this->mrm_mc_public_event_payload( $row );
+	}
+
+	$payload = array(
+		'id'                     => absint( $presenter->id ),
+		'name'                   => sanitize_text_field( $presenter->name ?? '' ),
+		'email'                  => sanitize_email( $presenter->email ?? '' ),
+		'city'                   => sanitize_text_field( $presenter->city ?? '' ),
+		'state'                  => sanitize_text_field( $presenter->state ?? '' ),
+		'presenter_title'        => sanitize_text_field( $presenter->presenter_title ?? '' ),
+		'profile_image_url'      => ! empty( $presenter->profile_image_url ) ? esc_url_raw( $presenter->profile_image_url ) : '',
+		'short_description_html' => wp_kses_post( $presenter->short_description ?? '' ),
+		'long_description_html'  => wp_kses_post( $presenter->long_description ?? '' ),
+		'bio_html'               => wp_kses_post( $presenter->bio ?? '' ),
+		'presenter_page_url'     => esc_url_raw( $this->mrm_mc_public_presenter_page_url( $presenter_id ) ),
+	);
+
+	return rest_ensure_response(
+		array(
+			'success'   => true,
+			'presenter' => $payload,
+			'sessions'  => $sessions,
+		)
+	);
 }
 
 public function rest_get_event( $request ) {
@@ -9429,7 +9822,7 @@ public function rest_get_event( $request ) {
 	}
 
 	$row->available_seats    = max( 0, absint( $row->capacity ) - absint( $row->paid_count ) );
-	$row->presenter_page_url = $this->mrm_mc_public_presenter_page_url( $row->presenter_page_id );
+	$row->presenter_page_url = $this->mrm_mc_public_presenter_page_url( $row->presenter_id );
 
 	return rest_ensure_response(
 		array(
@@ -10430,7 +10823,7 @@ public function rest_finalize_registration( $request ) {
 
 		foreach ( (array) $rows as $row ) {
 			$row->available_seats    = max( 0, absint( $row->capacity ) - absint( $row->paid_count ) );
-			$row->presenter_page_url = $this->mrm_mc_public_presenter_page_url( $row->presenter_page_id );
+			$row->presenter_page_url = $this->mrm_mc_public_presenter_page_url( $row->presenter_id );
 			$events[]                = $this->mrm_mc_public_event_payload( $row );
 		}
 
