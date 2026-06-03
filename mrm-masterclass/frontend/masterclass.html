@@ -131,14 +131,25 @@
 
 .event-button,
 .primary-btn,
-.secondary-btn {
-  width:100%;
-  min-height:46px;
-  padding:13px 16px;
-  border-radius:15px;
-  font-weight:800;
-  cursor:pointer;
-  transition:transform .16s ease, box-shadow .16s ease, opacity .16s ease;
+.secondary-btn,
+.mrm-masterclass-action-button {
+  width: 100%;
+  min-height: 46px;
+  padding: 13px 18px;
+  border-radius: 999px;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 15px;
+  line-height: 1.1;
+  font-weight: 800;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  text-decoration: none !important;
+  transition: transform .16s ease, box-shadow .16s ease, opacity .16s ease, background .16s ease, color .16s ease, border-color .16s ease;
 }
 
 .event-button,
@@ -404,8 +415,14 @@ input[type="checkbox"] {
 
 .mrm-masterclass-events-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 22px;
+  width: 100%;
+}
+
+.mrm-masterclass-stacked-list {
+  grid-template-columns: 1fr !important;
+  width: 100%;
 }
 
 .mrm-masterclass-event-card {
@@ -473,6 +490,55 @@ input[type="checkbox"] {
   color: #20170f;
 }
 
+.mrm-masterclass-time-box {
+  display: grid;
+  gap: 4px;
+  background: #fffdf9;
+  border: 1px solid #eadcc8;
+  border-radius: 18px;
+  padding: 15px 16px;
+  text-align: center;
+}
+
+.mrm-masterclass-time-date {
+  color: #20170f;
+  font-weight: 900;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.mrm-masterclass-time-window {
+  color: #4f4438;
+  font-weight: 800;
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.mrm-masterclass-session-info-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  margin: 24px 0;
+}
+
+.mrm-masterclass-info-box {
+  background: #fffdf9;
+  border: 1px solid #eadcc8;
+  border-radius: 18px;
+  padding: 16px;
+  text-align: center;
+  color: #4f4438;
+}
+
+.mrm-masterclass-info-box strong {
+  color: #20170f;
+}
+
+.mrm-masterclass-info-box-time .mrm-masterclass-time-box {
+  margin-top: 10px;
+  background: transparent;
+}
+
 .mrm-masterclass-presenter-link {
   color: #9a6a2f;
   font-weight: 900;
@@ -500,16 +566,26 @@ input[type="checkbox"] {
   text-decoration: none !important;
 }
 
-.mrm-masterclass-register-button {
+.mrm-masterclass-register-button,
+.mrm-masterclass-action-button {
   margin-top: 0;
-  border: 0;
+  border: 1px solid #20170f;
   border-radius: 999px;
   padding: 13px 18px;
+  min-height: 46px;
   background: #20170f;
   color: #fff;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 15px;
+  line-height: 1.1;
   font-weight: 800;
   cursor: pointer;
-  transition: transform 160ms ease, background 160ms ease;
+  text-decoration: none !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  transition: transform 160ms ease, background 160ms ease, color 160ms ease, border-color 160ms ease;
 }
 
 .mrm-masterclass-register-button:hover,
@@ -518,10 +594,55 @@ input[type="checkbox"] {
   transform: translateY(-1px);
 }
 
-.mrm-masterclass-register-button:disabled {
-  background: #9b9389;
-  cursor: not-allowed;
-  transform: none;
+.mrm-masterclass-register-button:disabled,
+.mrm-masterclass-closed-button,
+.mrm-masterclass-closed-button:disabled {
+  background: #ffffff !important;
+  color: #20170f !important;
+  border: 1px solid #20170f !important;
+  box-shadow: none !important;
+  cursor: not-allowed !important;
+  transform: none !important;
+  opacity: 1 !important;
+}
+
+.mrm-masterclass-secondary-action {
+  background: #ffffff !important;
+  color: #20170f !important;
+  border: 1px solid #20170f !important;
+}
+
+.mrm-masterclass-secondary-action:hover,
+.mrm-masterclass-secondary-action:focus {
+  background: #f7f3ed !important;
+  color: #20170f !important;
+}
+
+.mrm-masterclass-share-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-height: 24px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid #20170f;
+  background: #ffffff;
+  color: #20170f;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 800;
+  text-decoration: none !important;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.mrm-masterclass-share-button:hover,
+.mrm-masterclass-share-button:focus {
+  background: #f7f3ed;
+  color: #20170f;
+  text-decoration: none !important;
 }
 
 .mrm-masterclass-card-actions {
@@ -533,12 +654,6 @@ input[type="checkbox"] {
 
 .mrm-masterclass-card-actions .mrm-masterclass-register-button {
   width: 100%;
-}
-
-@media (max-width: 980px) {
-  .mrm-masterclass-events-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 680px) {
@@ -902,40 +1017,29 @@ body.mrm-masterclass-modal-open {
   position: relative;
 }
 
-.mrm-masterclass-event-card.mrm-masterclass-past {
-  cursor: not-allowed;
-  pointer-events: auto;
-}
-
-.mrm-masterclass-event-card.mrm-masterclass-past::before {
-  content: "";
+.mrm-masterclass-past-overlay {
   position: absolute;
   inset: 0;
-  z-index: 5;
-  background: rgba(245, 245, 245, 0.78);
-  border-radius: inherit;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.78);
+  color: #20170f;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: clamp(1rem, 2vw, 1.35rem);
+  font-weight: 900;
+  line-height: 1.25;
+  text-align: center;
   pointer-events: none;
 }
 
-.mrm-masterclass-event-card.mrm-masterclass-past::after {
-  content: "This masterclass event is over";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  z-index: 6;
-  transform: translate(-50%, -50%);
-  width: calc(100% - 48px);
-  max-width: 320px;
-  padding: 14px 18px;
-  border-radius: 14px;
-  background: rgba(40, 40, 40, 0.88);
-  color: #ffffff;
-  font-size: 0.95rem;
-  font-weight: 700;
-  line-height: 1.35;
-  text-align: center;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
-  pointer-events: none;
+.mrm-masterclass-event-card.mrm-masterclass-past {
+  position: relative;
+  opacity: 0.72;
+  filter: grayscale(1);
 }
 
 .mrm-masterclass-event-card.mrm-masterclass-past .mrm-masterclass-register-button,
@@ -943,13 +1047,38 @@ body.mrm-masterclass-modal-open {
   cursor: not-allowed;
 }
 
+.mrm-masterclass-event-card.mrm-masterclass-past a {
+  pointer-events: none;
+  color: #4f4438;
+  text-decoration: none;
+}
+
+.mrm-masterclass-event-card.mrm-masterclass-past .mrm-masterclass-card-actions a {
+  display: none;
+}
+
+.mrm-masterclass-calendar-event-closed,
+.mrm-masterclass-calendar-event-closed:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  filter: grayscale(1);
+}
+
+.mrm-masterclass-root.mrm-masterclass-detail-mode #mrm-masterclass-calendar-section {
+  display: none !important;
+}
+
+.mrm-masterclass-root.mrm-masterclass-detail-mode #mrm-masterclass-public-events {
+  padding-top: 28px;
+}
 
 .mrm-masterclass-live-diagnostic {
   display: none !important;
 }
 
 .mrm-masterclass-dynamic-detail {
-  max-width: 1060px;
+  width: 100%;
+  max-width: 1180px;
   margin: 0 auto;
 }
 
