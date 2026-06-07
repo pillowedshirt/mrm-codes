@@ -415,7 +415,7 @@ input[type="checkbox"] {
 
 .mrm-masterclass-events-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 22px;
   width: 100%;
 }
@@ -493,10 +493,10 @@ input[type="checkbox"] {
 .mrm-masterclass-time-box {
   display: grid;
   gap: 4px;
-  background: #fffdf9;
-  border: 1px solid #eadcc8;
-  border-radius: 18px;
-  padding: 15px 16px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
   text-align: center;
 }
 
@@ -516,18 +516,32 @@ input[type="checkbox"] {
 
 .mrm-masterclass-session-info-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   margin: 24px 0;
+  align-items: stretch;
+}
+
+.mrm-masterclass-presenter-session-info-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 18px 0 4px;
+  align-items: stretch;
 }
 
 .mrm-masterclass-info-box {
   background: #fffdf9;
   border: 1px solid #eadcc8;
-  border-radius: 18px;
-  padding: 16px;
+  border-radius: 10px;
+  padding: 14px 12px;
   text-align: center;
   color: #4f4438;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
 }
 
 .mrm-masterclass-info-box strong {
@@ -656,6 +670,23 @@ input[type="checkbox"] {
   width: 100%;
 }
 
+@media (max-width: 980px) {
+  .mrm-masterclass-events-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mrm-masterclass-stacked-list {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .mrm-masterclass-session-info-grid,
+  .mrm-masterclass-presenter-session-info-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 680px) {
   .mrm-masterclass-section {
     padding: 42px 14px;
@@ -668,6 +699,13 @@ input[type="checkbox"] {
   .mrm-masterclass-event-card {
     border-radius: 20px;
     padding: 20px;
+  }
+}
+
+@media (max-width: 560px) {
+  .mrm-masterclass-session-info-grid,
+  .mrm-masterclass-presenter-session-info-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1064,6 +1102,8 @@ body.mrm-masterclass-modal-open {
   filter: grayscale(1);
 }
 
+.mrm-masterclass-root.mrm-masterclass-detail-mode #mrm-masterclass-intro-section,
+.mrm-masterclass-root.mrm-masterclass-detail-mode #mrm-masterclass-instructions-section,
 .mrm-masterclass-root.mrm-masterclass-detail-mode #mrm-masterclass-calendar-section {
   display: none !important;
 }
@@ -1095,13 +1135,13 @@ body.mrm-masterclass-modal-open {
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root" data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305">
   <main class="mc-wrap">
-    <section class="mc-intro">
+    <section class="mc-intro" id="mrm-masterclass-intro-section">
       <p class="mc-eyebrow">Low Brass Lessons</p>
       <h1>Masterclasses</h1>
       <p>Select an available masterclass below. After choosing a session, you will complete registration and payment in a secure popup.</p>
     </section>
 
-    <section class="mc-instructions">
+    <section class="mc-instructions" id="mrm-masterclass-instructions-section">
       <strong>How registration works:</strong> choose a masterclass, enter your information, accept the terms, and complete payment. After payment is confirmed, your registration will be recorded.
     </section>
 

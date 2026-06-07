@@ -549,6 +549,32 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    return true;
 		  }
 
+		  function eventIsInVisibleCalendarMonth(event) {
+		    const startValue = eventStart(event);
+
+		    if (!startValue) {
+		      return false;
+		    }
+
+		    const start = new Date(startValue);
+
+		    if (Number.isNaN(start.getTime())) {
+		      return false;
+		    }
+
+		    const visible = mrmCalendarDate instanceof Date && !Number.isNaN(mrmCalendarDate.getTime())
+		      ? mrmCalendarDate
+		      : new Date();
+
+		    return start.getFullYear() === visible.getFullYear() && start.getMonth() === visible.getMonth();
+		  }
+
+		  function visibleCalendarMonthEvents(events) {
+		    return (Array.isArray(events) ? events : []).filter(function (event) {
+		      return eventIsInVisibleCalendarMonth(event);
+		    });
+		  }
+
 		  function renderEmpty() {
 		    const loading = byId('mrm-masterclass-loading');
 		    const eventsEl = byId('mrm-masterclass-events');
@@ -727,7 +753,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		          }
 
 		          mrmCalendarDate = candidate;
-		          renderCalendar(mrmLoadedEvents);
+		          renderEvents(mrmLoadedEvents);
 		        });
 		      }
 		    }
@@ -745,7 +771,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		          }
 
 		          mrmCalendarDate = candidate;
-		          renderCalendar(mrmLoadedEvents);
+		          renderEvents(mrmLoadedEvents);
 		        });
 		      }
 		    }
@@ -798,17 +824,23 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		  function applyMasterclassPageMode() {
 		    const root = byId('mrm-masterclass-root');
+		    const introSection = byId('mrm-masterclass-intro-section');
+		    const instructionsSection = byId('mrm-masterclass-instructions-section');
 		    const calendarSection = byId('mrm-masterclass-calendar-section');
+		    const detailMode = isMasterclassDynamicDetailMode();
 
 		    if (root) {
-		      root.classList.toggle('mrm-masterclass-detail-mode', isMasterclassDynamicDetailMode());
+		      root.classList.toggle('mrm-masterclass-detail-mode', detailMode);
 		    }
 
-		    if (calendarSection) {
-		      const detailMode = isMasterclassDynamicDetailMode();
-		      calendarSection.hidden = detailMode;
-		      calendarSection.setAttribute('aria-hidden', detailMode ? 'true' : 'false');
-		    }
+		    [introSection, instructionsSection, calendarSection].forEach(function (section) {
+		      if (!section) {
+		        return;
+		      }
+
+		      section.hidden = detailMode;
+		      section.setAttribute('aria-hidden', detailMode ? 'true' : 'false');
+		    });
 		  }
 
 		  function closedRegistrationButtonHtml(extraClass) {
@@ -882,14 +914,14 @@ class LowBrass_MRM_Masterclass_Plugin {
 		        html += '<article class="mrm-masterclass-event-card' + (sessionPast ? ' mrm-masterclass-past' : '') + '">';
 		        html += '<h3>' + escapeHtml(session.title || 'Masterclass') + '</h3>';
 
-		        if (session.long_description_html || session.description_html) {
-		          html += '<div class="mrm-masterclass-event-description">' + (session.long_description_html || session.description_html || '') + '</div>';
+		        if (session.description_html) {
+		          html += '<div class="mrm-masterclass-event-description">' + session.description_html + '</div>';
 		        }
 
-		        html += '<div class="mrm-masterclass-event-meta">';
-		        html += renderMasterclassTimeBox(session);
-		        html += '<p><strong>Price:</strong> ' + escapeHtml(money(session.price_cents || 0)) + '</p>';
-		        html += '<p><strong>Seats available:</strong> ' + escapeHtml(String(typeof session.available_seats !== 'undefined' ? session.available_seats : 'TBA')) + '</p>';
+		        html += '<div class="mrm-masterclass-presenter-session-info-grid">';
+		        html += '<div class="mrm-masterclass-info-box mrm-masterclass-info-box-time"><strong>Event Time</strong>' + renderMasterclassTimeBox(session) + '</div>';
+		        html += '<div class="mrm-masterclass-info-box"><strong>Price</strong><br>' + escapeHtml(money(session.price_cents || 0)) + '</div>';
+		        html += '<div class="mrm-masterclass-info-box"><strong>Seats Available</strong><br>' + escapeHtml(String(typeof session.available_seats !== 'undefined' ? session.available_seats : 'TBA')) + '</div>';
 		        html += '</div>';
 
 		        html += '<div class="mrm-masterclass-card-actions">';
@@ -1123,6 +1155,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    }
 
 		    const safeEvents = Array.isArray(events) ? events : [];
+		    const visibleEvents = visibleCalendarMonthEvents(safeEvents);
 
 		    if (!safeEvents.length) {
 		      renderEmpty();
@@ -1131,7 +1164,16 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		    eventsEl.innerHTML = '';
 
-		    safeEvents.forEach(function (event) {
+		    if (!visibleEvents.length) {
+		      eventsEl.innerHTML = '<div class="mrm-masterclass-empty">No masterclasses are open for registration in the currently selected month.</div>';
+		      renderCalendar(safeEvents);
+		      setDiag({
+		        'mrm-masterclass-diag-count': String(safeEvents.length)
+		      });
+		      return;
+		    }
+
+		    visibleEvents.forEach(function (event) {
 		      const past = isPastEvent(event);
 		      const canRegister = publicEventIsRegisterable(event);
 
@@ -5933,9 +5975,9 @@ public function handle_save_event() {
 	}
 
 	$title        = $this->mrm_mc_clean_text( $_POST['title'] ?? '' );
-	$description  = $this->mrm_mc_clean_html( $_POST['description'] ?? '' );
 	$short_description = $this->mrm_mc_clean_html( $_POST['short_description'] ?? '' );
 	$long_description  = $this->mrm_mc_clean_html( $_POST['long_description'] ?? '' );
+	$description       = $short_description;
 	$presenter_id = absint( $_POST['presenter_id'] ?? 0 );
 	$proctor      = $this->mrm_mc_clean_email( $_POST['proctor_email'] ?? '' );
 	$start_time   = $this->mrm_mc_datetime_from_local( $_POST['start_time'] ?? '' );
@@ -9027,11 +9069,10 @@ public function render_events_page() {
 
 	echo '<table class="form-table"><tbody>';
 	echo '<tr><th>Title</th><td><input type="text" name="title" class="regular-text" required value="' . esc_attr( $edit_event->title ?? '' ) . '"></td></tr>';
-	echo '<tr><th>Short Description</th><td><textarea name="short_description" rows="3" class="large-text" placeholder="Brief client-facing summary shown on the public Masterclass page.">' . esc_textarea( $edit_event->short_description ?? ( $edit_event->description ?? '' ) ) . '</textarea><p class="description">This appears on the public Masterclass listing card.</p></td></tr>';
+	echo '<tr><th>Short Description</th><td><textarea name="short_description" rows="3" class="large-text" placeholder="Brief client-facing summary shown on the public Masterclass page.">' . esc_textarea( $edit_event->short_description ?? '' ) . '</textarea><p class="description">This appears on the main Masterclass listing card and on the presenter page session card.</p></td></tr>';
 
-	echo '<tr><th>Long Description</th><td><textarea name="long_description" rows="8" class="large-text" placeholder="Detailed session description shown on the Learn More About This Session page.">' . esc_textarea( $edit_event->long_description ?? ( $edit_event->description ?? '' ) ) . '</textarea><p class="description">This appears on the generated session page.</p></td></tr>';
+	echo '<tr><th>Long Description</th><td><textarea name="long_description" rows="8" class="large-text" placeholder="Detailed session description shown on the Learn More About This Session page.">' . esc_textarea( $edit_event->long_description ?? '' ) . '</textarea><p class="description">This appears on the dynamic session page.</p></td></tr>';
 
-	echo '<tr><th>Legacy Description</th><td><textarea name="description" rows="4" class="large-text">' . esc_textarea( $edit_event->description ?? '' ) . '</textarea><p class="description">Legacy fallback. You can keep this matching the short description while older code is phased out.</p></td></tr>';
 
 	echo '<tr><th>Presenter</th><td><select name="presenter_id" required>';
 	echo '<option value="">Select presenter</option>';
