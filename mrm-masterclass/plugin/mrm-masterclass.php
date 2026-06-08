@@ -640,7 +640,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    return true;
 		  }
 
-		  function eventIsInVisibleCalendarMonth(event) {
+		  function eventIsInCurrentMonthOrFuture(event) {
 		    const startValue = eventStart(event);
 
 		    if (!startValue) {
@@ -654,21 +654,15 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    }
 
 		    const now = new Date();
-		    const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-		    const visible = mrmCalendarDate instanceof Date && !Number.isNaN(mrmCalendarDate.getTime())
-		      ? new Date(mrmCalendarDate.getFullYear(), mrmCalendarDate.getMonth(), 1)
-		      : currentMonth;
+		    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+		    const eventMonthStart = new Date(start.getFullYear(), start.getMonth(), 1);
 
-		    if (visible.getTime() < currentMonth.getTime()) {
-		      return false;
-		    }
-
-		    return start.getFullYear() === visible.getFullYear() && start.getMonth() === visible.getMonth();
+		    return eventMonthStart.getTime() >= currentMonthStart.getTime();
 		  }
 
-		  function visibleCalendarMonthEvents(events) {
+		  function currentMonthAndFutureEvents(events) {
 		    return (Array.isArray(events) ? events : []).filter(function (event) {
-		      return eventIsInVisibleCalendarMonth(event);
+		      return eventIsInCurrentMonthOrFuture(event);
 		    });
 		  }
 
@@ -681,7 +675,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    }
 
 		    if (eventsEl) {
-		      eventsEl.innerHTML = '<div class="mrm-masterclass-empty">No upcoming masterclasses are open for registration right now.<br><br><small>If you expected an event to appear here, confirm that the event status is Scheduled and Registration Open is checked.</small></div>';
+		      eventsEl.innerHTML = '<div class="mrm-masterclass-empty mrm-masterclass-empty-full">there are no upcoming masterclasses scheduled please check back another time for future sessions.</div>';
 		    }
 
 		    renderCalendar([]);
@@ -850,7 +844,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		          }
 
 		          mrmCalendarDate = candidate;
-		          renderEvents(mrmLoadedEvents);
+		          renderCalendar(mrmLoadedEvents);
 		        });
 		      }
 		    }
@@ -868,7 +862,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		          }
 
 		          mrmCalendarDate = candidate;
-		          renderEvents(mrmLoadedEvents);
+		          renderCalendar(mrmLoadedEvents);
 		        });
 		      }
 		    }
@@ -915,35 +909,45 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      return;
 		    }
 
-		    const calendarSection = byId('mrm-masterclass-calendar-section');
-		    const calendarButton = byId('mrm-masterclass-calendar-event-' + String(event.id || ''));
+		    const startValue = eventStart(event);
+		    const start = startValue ? new Date(startValue) : null;
 
-		    if (calendarButton) {
-		      calendarButton.scrollIntoView({
-		        behavior: 'smooth',
-		        block: 'center',
-		        inline: 'center'
-		      });
+		    if (start && !Number.isNaN(start.getTime())) {
+		      mrmCalendarDate = new Date(start.getFullYear(), start.getMonth(), 1);
+		      renderCalendar(mrmLoadedEvents);
+		    }
 
-		      if (typeof calendarButton.focus === 'function') {
-		        calendarButton.focus({ preventScroll: true });
+		    window.setTimeout(function () {
+		      const calendarSection = byId('mrm-masterclass-calendar-section');
+		      const calendarButton = byId('mrm-masterclass-calendar-event-' + String(event.id || ''));
+
+		      if (calendarButton) {
+		        calendarButton.scrollIntoView({
+		          behavior: 'smooth',
+		          block: 'center',
+		          inline: 'center'
+		        });
+
+		        if (typeof calendarButton.focus === 'function') {
+		          calendarButton.focus({ preventScroll: true });
+		        }
+
+		        calendarButton.classList.add('mrm-masterclass-calendar-event-highlight');
+
+		        window.setTimeout(function () {
+		          calendarButton.classList.remove('mrm-masterclass-calendar-event-highlight');
+		        }, 2600);
+
+		        return;
 		      }
 
-		      calendarButton.classList.add('mrm-masterclass-calendar-event-highlight');
-
-		      window.setTimeout(function () {
-		        calendarButton.classList.remove('mrm-masterclass-calendar-event-highlight');
-		      }, 2400);
-
-		      return;
-		    }
-
-		    if (calendarSection) {
-		      calendarSection.scrollIntoView({
-		        behavior: 'smooth',
-		        block: 'start'
-		      });
-		    }
+		      if (calendarSection) {
+		        calendarSection.scrollIntoView({
+		          behavior: 'smooth',
+		          block: 'start'
+		        });
+		      }
+		    }, 80);
 		  }
 
 		  function currentMasterclassParams() {
@@ -1288,7 +1292,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    }
 
 		    const safeEvents = Array.isArray(events) ? events : [];
-		    const visibleEvents = visibleCalendarMonthEvents(safeEvents);
+		    const displayEvents = currentMonthAndFutureEvents(safeEvents);
 
 		    if (!safeEvents.length) {
 		      renderEmpty();
@@ -1297,8 +1301,8 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		    eventsEl.innerHTML = '';
 
-		    if (!visibleEvents.length) {
-		      eventsEl.innerHTML = '<div class="mrm-masterclass-empty">No masterclasses are open for registration in the currently selected month.</div>';
+		    if (!displayEvents.length) {
+		      eventsEl.innerHTML = '<div class="mrm-masterclass-empty mrm-masterclass-empty-full">there are no upcoming masterclasses scheduled please check back another time for future sessions.</div>';
 		      renderCalendar(safeEvents);
 		      setDiag({
 		        'mrm-masterclass-diag-count': String(safeEvents.length)
@@ -1306,7 +1310,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      return;
 		    }
 
-		    visibleEvents.forEach(function (event) {
+		    displayEvents.forEach(function (event) {
 		      const past = isPastEvent(event);
 		      const canRegister = publicEventIsRegisterable(event);
 
@@ -1362,14 +1366,9 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      viewCalendarButton.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-view-calendar-button';
 		      viewCalendarButton.textContent = 'View On Calendar';
 
-		      if (past) {
-		        viewCalendarButton.disabled = true;
-		        viewCalendarButton.classList.add('mrm-masterclass-closed-button');
-		      } else {
-		        viewCalendarButton.addEventListener('click', function () {
-		          scrollToCalendarEvent(event);
-		        });
-		      }
+		      viewCalendarButton.addEventListener('click', function () {
+		        scrollToCalendarEvent(event);
+		      });
 
 		      actions.appendChild(viewCalendarButton);
 
