@@ -10407,11 +10407,8 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
           <input type="text" id="mrm_contact_website" name="mrm_contact_website" tabindex="-1" autocomplete="off">
         </div>
 
-        <div class="mrm-contact-human-check">
-          <label>
-            <input type="checkbox" id="mrm_contact_human_confirm" name="mrm_contact_human_confirm" value="1" required>
-            <span>I confirm that I am a real person submitting this message to Low Brass Lessons.</span>
-          </label>
+        <div class="mrm-contact-recaptcha-wrap">
+          <div class="g-recaptcha" data-sitekey="{{mrm_contact_recaptcha_site_key}}"></div>
         </div>
 
         <div class="mrm-contact-actions">
@@ -10629,32 +10626,16 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     overflow: hidden;
   }
 
-  .mrm-contact-human-check {
+  .mrm-contact-recaptcha-wrap {
     border: 1px solid var(--mrm-contact-border);
     border-radius: 14px;
     background: #fafafa;
     padding: 14px 16px;
+    overflow-x: auto;
   }
 
-  .mrm-contact-human-check label {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    margin: 0;
-    color: var(--mrm-contact-text);
-    font-size: 14px;
-    font-weight: 700;
-    line-height: 1.45;
-    cursor: pointer;
-  }
-
-  .mrm-contact-human-check input {
-    width: 18px;
-    height: 18px;
-    min-height: 0;
-    margin-top: 1px;
-    accent-color: var(--mrm-contact-accent);
-    flex: 0 0 auto;
+  .mrm-contact-recaptcha-wrap .g-recaptcha {
+    max-width: 100%;
   }
 
   @media (max-width: 700px) {
@@ -10692,6 +10673,8 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     }
   }
 </style>
+
+<script src="https://www.google.com/recaptcha/api.js" async defer></script>
 
 <script>
   (function () {
@@ -10752,6 +10735,14 @@ public function render_admin_contact_form_page() {
         ? $opts['contact_form_recipient_email']
         : get_option( 'admin_email' );
 
+    $recaptcha_site_key = isset( $opts['contact_form_recaptcha_site_key'] )
+        ? (string) $opts['contact_form_recaptcha_site_key']
+        : '';
+
+    $recaptcha_secret_key = isset( $opts['contact_form_recaptcha_secret_key'] )
+        ? (string) $opts['contact_form_recaptcha_secret_key']
+        : '';
+
     $html = isset( $opts['contact_form_html'] ) && trim( (string) $opts['contact_form_html'] ) !== ''
         ? (string) $opts['contact_form_html']
         : $this->mrm_get_default_contact_form_html();
@@ -10767,8 +10758,8 @@ public function render_admin_contact_form_page() {
         <?php endif; ?>
 
         <p>
-            Use this page to manage the custom contact form displayed by the
-            <code>[mrm_contact_form]</code> shortcode.
+            Use this page to manage the contact form displayed by the
+            <code>[mrm_contact_form]</code> shortcode, including the recipient email and Google reCAPTCHA v2 Checkbox keys.
         </p>
 
         <div class="notice notice-info">
@@ -10780,7 +10771,8 @@ public function render_admin_contact_form_page() {
                 The form HTML supports these required placeholders:
                 <code>{{mrm_contact_action}}</code>,
                 <code>{{mrm_contact_nonce_field}}</code>,
-                and <code>{{mrm_contact_notice}}</code>.
+                <code>{{mrm_contact_notice}}</code>,
+                and <code>{{mrm_contact_recaptcha_site_key}}</code>.
             </p>
         </div>
 
@@ -10804,6 +10796,44 @@ public function render_admin_contact_form_page() {
                         >
                         <p class="description">
                             Contact form submissions will be sent here. The visitor's email will be used as the Reply-To address.
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">
+                        <label for="contact_form_recaptcha_site_key">reCAPTCHA Site Key</label>
+                    </th>
+                    <td>
+                        <input
+                            type="text"
+                            class="regular-text"
+                            id="contact_form_recaptcha_site_key"
+                            name="contact_form_recaptcha_site_key"
+                            value="<?php echo esc_attr( $recaptcha_site_key ); ?>"
+                            autocomplete="off"
+                        >
+                        <p class="description">
+                            Public Google reCAPTCHA v2 Checkbox site key. This key is printed into the contact form page so the visible reCAPTCHA widget can load.
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">
+                        <label for="contact_form_recaptcha_secret_key">reCAPTCHA Secret Key</label>
+                    </th>
+                    <td>
+                        <input
+                            type="password"
+                            class="regular-text"
+                            id="contact_form_recaptcha_secret_key"
+                            name="contact_form_recaptcha_secret_key"
+                            value="<?php echo esc_attr( $recaptcha_secret_key ); ?>"
+                            autocomplete="new-password"
+                        >
+                        <p class="description">
+                            Private Google reCAPTCHA v2 Checkbox secret key. This key is only used server-side to verify contact form submissions with Google.
                         </p>
                     </td>
                 </tr>
@@ -10858,6 +10888,14 @@ public function handle_save_contact_form_settings() {
         $recipient = get_option( 'admin_email' );
     }
 
+    $recaptcha_site_key = isset( $_POST['contact_form_recaptcha_site_key'] )
+        ? sanitize_text_field( wp_unslash( $_POST['contact_form_recaptcha_site_key'] ) )
+        : '';
+
+    $recaptcha_secret_key = isset( $_POST['contact_form_recaptcha_secret_key'] )
+        ? sanitize_text_field( wp_unslash( $_POST['contact_form_recaptcha_secret_key'] ) )
+        : '';
+
     $html = isset( $_POST['contact_form_html'] )
         ? wp_unslash( $_POST['contact_form_html'] )
         : '';
@@ -10868,8 +10906,10 @@ public function handle_save_contact_form_settings() {
         $html = $this->mrm_get_default_contact_form_html();
     }
 
-    $opts['contact_form_recipient_email'] = $recipient;
-    $opts['contact_form_html'] = $html;
+    $opts['contact_form_recipient_email']      = $recipient;
+    $opts['contact_form_recaptcha_site_key']   = $recaptcha_site_key;
+    $opts['contact_form_recaptcha_secret_key'] = $recaptcha_secret_key;
+    $opts['contact_form_html']                 = $html;
 
     update_option( $this->option_key, $opts, 'no' );
     $this->options = $opts;
@@ -10879,7 +10919,23 @@ public function handle_save_contact_form_settings() {
 }
 
 public function render_contact_form_shortcode() {
+    $opts = $this->get_settings();
+
+    $recaptcha_site_key = isset( $opts['contact_form_recaptcha_site_key'] )
+        ? trim( (string) $opts['contact_form_recaptcha_site_key'] )
+        : '';
+
     $html = $this->mrm_get_default_contact_form_html();
+
+    if ( $recaptcha_site_key === '' ) {
+        $html = str_replace(
+            '<div class="mrm-contact-recaptcha-wrap">
+          <div class="g-recaptcha" data-sitekey="{{mrm_contact_recaptcha_site_key}}"></div>
+        </div>',
+            '<div class="mrm-contact-notice mrm-contact-notice-error">Contact form reCAPTCHA is not configured yet.</div>',
+            $html
+        );
+    }
 
     $notice = '';
     $status = isset( $_GET['mrm_contact_status'] ) ? sanitize_key( wp_unslash( $_GET['mrm_contact_status'] ) ) : '';
@@ -10887,16 +10943,61 @@ public function render_contact_form_shortcode() {
     if ( $status === 'sent' ) {
         $notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Thank you. Your message has been sent successfully.</div>';
     } elseif ( $status === 'error' ) {
-        $notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Something went wrong. Please confirm all required fields, complete the human verification, and try again.</div>';
+        $notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Something went wrong. Please confirm all required fields, complete the reCAPTCHA verification, and try again.</div>';
     }
 
     $replacements = array(
-        '{{mrm_contact_action}}'      => esc_url( admin_url( 'admin-post.php' ) ),
-        '{{mrm_contact_nonce_field}}' => wp_nonce_field( 'mrm_scheduler_contact_submit', 'mrm_scheduler_contact_nonce', true, false ),
-        '{{mrm_contact_notice}}'      => $notice,
+        '{{mrm_contact_action}}'             => esc_url( admin_url( 'admin-post.php' ) ),
+        '{{mrm_contact_nonce_field}}'        => wp_nonce_field( 'mrm_scheduler_contact_submit', 'mrm_scheduler_contact_nonce', true, false ),
+        '{{mrm_contact_notice}}'             => $notice,
+        '{{mrm_contact_recaptcha_site_key}}' => esc_attr( $recaptcha_site_key ),
     );
 
     return strtr( $html, $replacements );
+}
+
+protected function mrm_verify_contact_recaptcha( $token ) {
+    $opts = $this->get_settings();
+
+    $secret_key = isset( $opts['contact_form_recaptcha_secret_key'] )
+        ? trim( (string) $opts['contact_form_recaptcha_secret_key'] )
+        : '';
+
+    if ( $secret_key === '' || $token === '' ) {
+        return false;
+    }
+
+    $response = wp_remote_post(
+        'https://www.google.com/recaptcha/api/siteverify',
+        array(
+            'timeout' => 12,
+            'body'    => array(
+                'secret'   => $secret_key,
+                'response' => $token,
+                'remoteip' => isset( $_SERVER['REMOTE_ADDR'] )
+                    ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) )
+                    : '',
+            ),
+        )
+    );
+
+    if ( is_wp_error( $response ) ) {
+        return false;
+    }
+
+    $body = wp_remote_retrieve_body( $response );
+
+    if ( ! is_string( $body ) || trim( $body ) === '' ) {
+        return false;
+    }
+
+    $data = json_decode( $body, true );
+
+    if ( ! is_array( $data ) ) {
+        return false;
+    }
+
+    return ! empty( $data['success'] );
 }
 
 protected function mrm_get_contact_represents_label( $value ) {
@@ -10947,11 +11048,11 @@ public function handle_contact_form_submit() {
         $this->mrm_contact_redirect_back( 'error' );
     }
 
-    $human_confirm = isset( $_POST['mrm_contact_human_confirm'] )
-        ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_human_confirm'] ) )
+    $recaptcha_token = isset( $_POST['g-recaptcha-response'] )
+        ? sanitize_text_field( wp_unslash( $_POST['g-recaptcha-response'] ) )
         : '';
 
-    if ( $human_confirm !== '1' ) {
+    if ( ! $this->mrm_verify_contact_recaptcha( $recaptcha_token ) ) {
         $this->mrm_contact_redirect_back( 'error' );
     }
 
