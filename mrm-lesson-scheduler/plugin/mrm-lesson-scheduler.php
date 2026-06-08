@@ -10516,6 +10516,10 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     gap: 7px;
   }
 
+  .mrm-contact-other-wrap[hidden] {
+    display: none !important;
+  }
+
   .mrm-contact-full {
     width: 100%;
   }
@@ -10707,8 +10711,12 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
 
       function syncOtherField() {
         var isOther = select.value === 'other';
+
         otherWrap.hidden = !isOther;
+        otherWrap.style.display = isOther ? 'grid' : 'none';
+
         otherInput.required = isOther;
+        otherInput.disabled = !isOther;
 
         if (!isOther) {
           otherInput.value = '';
