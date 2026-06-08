@@ -555,6 +555,24 @@ input[type="checkbox"] {
   line-height: 1.25;
 }
 
+.mrm-masterclass-presenter-name {
+  display: block;
+  color: #20170f;
+  font-weight: 900;
+  font-size: 0.98rem;
+  line-height: 1.18;
+}
+
+.mrm-masterclass-presenter-title {
+  display: block;
+  margin-top: 3px;
+  color: #6f6254;
+  font-weight: 700;
+  font-size: 0.82rem;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
 .mrm-masterclass-event-facts {
   display: grid;
   grid-template-columns: 1.35fr 0.75fr 0.9fr;
@@ -662,9 +680,15 @@ input[type="checkbox"] {
 .mrm-masterclass-presenter-link {
   color: #20170f;
   font-weight: 900;
+  text-decoration: none;
+  line-height: 1.25;
+  display: inline-block;
+}
+
+.mrm-masterclass-presenter-link:hover .mrm-masterclass-presenter-name,
+.mrm-masterclass-presenter-link:focus .mrm-masterclass-presenter-name {
   text-decoration: underline;
   text-underline-offset: 3px;
-  line-height: 1.25;
 }
 
 .mrm-masterclass-presenter-link:hover,
