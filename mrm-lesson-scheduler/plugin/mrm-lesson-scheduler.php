@@ -10758,8 +10758,8 @@ public function render_admin_contact_form_page() {
         <?php endif; ?>
 
         <p>
-            Use this page to manage the contact form displayed by the
-            <code>[mrm_contact_form]</code> shortcode, including the recipient email and Google reCAPTCHA v2 Checkbox keys.
+            Use this page to manage the saved HTML displayed by the
+            <code>[mrm_contact_form]</code> shortcode. The saved Contact Form HTML textbox is the source of truth for the visible form layout.
         </p>
 
         <div class="notice notice-info">
@@ -10814,7 +10814,7 @@ public function render_admin_contact_form_page() {
                             autocomplete="off"
                         >
                         <p class="description">
-                            Public Google reCAPTCHA v2 Checkbox site key. This key is printed into the contact form page so the visible reCAPTCHA widget can load.
+                            Public Google reCAPTCHA v2 Checkbox site key. This key is printed into the saved contact form HTML through the <code>{{mrm_contact_recaptcha_site_key}}</code> placeholder.
                         </p>
                     </td>
                 </tr>
@@ -10921,21 +10921,13 @@ public function handle_save_contact_form_settings() {
 public function render_contact_form_shortcode() {
     $opts = $this->get_settings();
 
+    $html = isset( $opts['contact_form_html'] ) && trim( (string) $opts['contact_form_html'] ) !== ''
+        ? (string) $opts['contact_form_html']
+        : $this->mrm_get_default_contact_form_html();
+
     $recaptcha_site_key = isset( $opts['contact_form_recaptcha_site_key'] )
         ? trim( (string) $opts['contact_form_recaptcha_site_key'] )
         : '';
-
-    $html = $this->mrm_get_default_contact_form_html();
-
-    if ( $recaptcha_site_key === '' ) {
-        $html = str_replace(
-            '<div class="mrm-contact-recaptcha-wrap">
-          <div class="g-recaptcha" data-sitekey="{{mrm_contact_recaptcha_site_key}}"></div>
-        </div>',
-            '<div class="mrm-contact-notice mrm-contact-notice-error">Contact form reCAPTCHA is not configured yet.</div>',
-            $html
-        );
-    }
 
     $notice = '';
     $status = isset( $_GET['mrm_contact_status'] ) ? sanitize_key( wp_unslash( $_GET['mrm_contact_status'] ) ) : '';
