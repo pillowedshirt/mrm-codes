@@ -497,6 +497,80 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      '</div>';
 		  }
 
+		  function eventPresenterLabel(event) {
+		    const name = event && event.presenter_name ? String(event.presenter_name) : 'TBA';
+		    const title = event && event.presenter_title ? String(event.presenter_title) : '';
+
+		    return title ? name + ' - ' + title : name;
+		  }
+
+		  function presenterInitialsFromName(name) {
+		    const clean = String(name || '').trim();
+
+		    if (!clean) {
+		      return 'P';
+		    }
+
+		    const parts = clean.split(/\s+/).filter(Boolean);
+
+		    if (parts.length === 1) {
+		      return parts[0].charAt(0).toUpperCase();
+		    }
+
+		    return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+		  }
+
+		  function renderEventProfileSummary(event, options) {
+		    const settings = options || {};
+		    const past = !!settings.past;
+		    const presenterName = event && event.presenter_name ? String(event.presenter_name) : 'TBA';
+		    const presenterLabel = eventPresenterLabel(event);
+		    const presenterUrl = event && event.presenter_page_url
+		      ? event.presenter_page_url
+		      : (event && event.presenter_id ? masterclassContainerUrl({ presenter: event.presenter_id }) : '');
+		    const profileImage = event && event.presenter_profile_image_url ? String(event.presenter_profile_image_url) : '';
+		    const availableSeats = typeof event.available_seats !== 'undefined' ? event.available_seats : 'TBA';
+
+		    let html = '';
+		    html += '<div class="mrm-masterclass-event-profile-card">';
+		    html += '<div class="mrm-masterclass-event-presenter-row">';
+
+		    if (profileImage) {
+		      html += '<img class="mrm-masterclass-event-presenter-photo" src="' + escapeHtml(profileImage) + '" alt="' + escapeHtml(presenterName) + '">';
+		    } else {
+		      html += '<div class="mrm-masterclass-event-presenter-photo mrm-masterclass-event-presenter-photo-fallback" aria-hidden="true">' + escapeHtml(presenterInitialsFromName(presenterName)) + '</div>';
+		    }
+
+		    html += '<div class="mrm-masterclass-event-presenter-text">';
+		    html += '<span class="mrm-masterclass-event-profile-label">Presenter</span>';
+
+		    if (!past && presenterUrl) {
+		      html += '<a class="mrm-masterclass-presenter-link" href="' + escapeHtml(presenterUrl) + '">' + escapeHtml(presenterLabel) + '</a>';
+		    } else {
+		      html += '<span class="mrm-masterclass-presenter-static">' + escapeHtml(presenterLabel) + '</span>';
+		    }
+
+		    html += '</div>';
+		    html += '</div>';
+		    html += '<div class="mrm-masterclass-event-facts">';
+		    html += '<div class="mrm-masterclass-event-fact mrm-masterclass-event-fact-time">';
+		    html += '<span class="mrm-masterclass-event-profile-label">Event Time</span>';
+		    html += renderMasterclassTimeBox(event);
+		    html += '</div>';
+		    html += '<div class="mrm-masterclass-event-fact">';
+		    html += '<span class="mrm-masterclass-event-profile-label">Price</span>';
+		    html += '<strong>' + escapeHtml(money(event.price_cents || 0)) + '</strong>';
+		    html += '</div>';
+		    html += '<div class="mrm-masterclass-event-fact">';
+		    html += '<span class="mrm-masterclass-event-profile-label">Seats Available</span>';
+		    html += '<strong>' + escapeHtml(String(availableSeats)) + '</strong>';
+		    html += '</div>';
+		    html += '</div>';
+		    html += '</div>';
+
+		    return html;
+		  }
+
 		  function eventStart(event) {
 		    return event && (event.start_time_rfc3339 || event.start_time) ? (event.start_time_rfc3339 || event.start_time) : '';
 		  }
@@ -562,9 +636,15 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      return false;
 		    }
 
+		    const now = new Date();
+		    const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 		    const visible = mrmCalendarDate instanceof Date && !Number.isNaN(mrmCalendarDate.getTime())
-		      ? mrmCalendarDate
-		      : new Date();
+		      ? new Date(mrmCalendarDate.getFullYear(), mrmCalendarDate.getMonth(), 1)
+		      : currentMonth;
+
+		    if (visible.getTime() < currentMonth.getTime()) {
+		      return false;
+		    }
 
 		    return start.getFullYear() === visible.getFullYear() && start.getMonth() === visible.getMonth();
 		  }
@@ -693,7 +773,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 		            });
 
 		        const calendarPast = isPastEvent(event);
-		        html += '<button type="button" class="mrm-masterclass-calendar-event' + (calendarPast ? ' mrm-masterclass-calendar-event-closed' : '') + '" data-event-id="' + escapeHtml(String(event.id || '')) + '"' + (calendarPast ? ' disabled aria-disabled="true"' : '') + '>';
+		        html += '<button type="button" id="mrm-masterclass-calendar-event-' + escapeHtml(String(event.id || '')) + '" class="mrm-masterclass-calendar-event' + (calendarPast ? ' mrm-masterclass-calendar-event-closed' : '') + '" data-event-id="' + escapeHtml(String(event.id || '')) + '"' + (calendarPast ? ' disabled aria-disabled="true"' : '') + '>';
 		        html += '<span>' + escapeHtml(event.title || 'Masterclass') + '</span>';
 
 		        if (timeLabel) {
@@ -811,6 +891,42 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    window.setTimeout(function () {
 		      card.classList.remove('mrm-masterclass-event-card-highlight');
 		    }, 2200);
+		  }
+
+		  function scrollToCalendarEvent(event) {
+		    if (!event || !event.id) {
+		      return;
+		    }
+
+		    const calendarSection = byId('mrm-masterclass-calendar-section');
+		    const calendarButton = byId('mrm-masterclass-calendar-event-' + String(event.id || ''));
+
+		    if (calendarButton) {
+		      calendarButton.scrollIntoView({
+		        behavior: 'smooth',
+		        block: 'center',
+		        inline: 'center'
+		      });
+
+		      if (typeof calendarButton.focus === 'function') {
+		        calendarButton.focus({ preventScroll: true });
+		      }
+
+		      calendarButton.classList.add('mrm-masterclass-calendar-event-highlight');
+
+		      window.setTimeout(function () {
+		        calendarButton.classList.remove('mrm-masterclass-calendar-event-highlight');
+		      }, 2400);
+
+		      return;
+		    }
+
+		    if (calendarSection) {
+		      calendarSection.scrollIntoView({
+		        behavior: 'smooth',
+		        block: 'start'
+		      });
+		    }
 		  }
 
 		  function currentMasterclassParams() {
@@ -1191,19 +1307,8 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      desc.innerHTML = event.description_html || event.description || '';
 
 		      const meta = document.createElement('div');
-		      meta.className = 'mrm-masterclass-event-meta';
-		      const presenterName = event.presenter_name || 'TBA';
-		      const presenterUrl = event.presenter_page_url || (event.presenter_id ? masterclassContainerUrl({ presenter: event.presenter_id }) : '');
-
-		      const presenterHtml = (!past && presenterUrl)
-		        ? '<a class="mrm-masterclass-presenter-link" href="' + escapeHtml(presenterUrl) + '">' + escapeHtml(presenterName) + '</a>'
-		        : escapeHtml(presenterName);
-
-		      meta.innerHTML =
-		        '<p><strong>Presenter:</strong> ' + presenterHtml + '</p>' +
-		        renderMasterclassTimeBox(event) +
-		        '<p><strong>Price:</strong> ' + escapeHtml(money(event.price_cents || 0)) + '</p>' +
-		        '<p><strong>Seats available:</strong> ' + escapeHtml(String(typeof event.available_seats !== 'undefined' ? event.available_seats : 'TBA')) + '</p>';
+		      meta.className = 'mrm-masterclass-event-meta mrm-masterclass-event-meta-profile';
+		      meta.innerHTML = renderEventProfileSummary(event, { past: past });
 
 		      const button = document.createElement('button');
 		      button.type = 'button';
@@ -1234,6 +1339,22 @@ class LowBrass_MRM_Masterclass_Plugin {
 		      const actions = document.createElement('div');
 		      actions.className = 'mrm-masterclass-card-actions';
 		      actions.appendChild(button);
+
+		      const viewCalendarButton = document.createElement('button');
+		      viewCalendarButton.type = 'button';
+		      viewCalendarButton.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-view-calendar-button';
+		      viewCalendarButton.textContent = 'View On Calendar';
+
+		      if (past) {
+		        viewCalendarButton.disabled = true;
+		        viewCalendarButton.classList.add('mrm-masterclass-closed-button');
+		      } else {
+		        viewCalendarButton.addEventListener('click', function () {
+		          scrollToCalendarEvent(event);
+		        });
+		      }
+
+		      actions.appendChild(viewCalendarButton);
 
 		      if (!past) {
 		        const learnMore = document.createElement('a');
@@ -4062,10 +4183,12 @@ private function mrm_mc_public_event_payload( $row ) {
 		'title'              => sanitize_text_field( $row->title ),
 		'description_html'      => wp_kses_post( ! empty( $row->short_description ) ? $row->short_description : ( $row->description ?? '' ) ),
 		'long_description_html' => wp_kses_post( $row->long_description ?? '' ),
-		'presenter_name'        => sanitize_text_field( $row->presenter_name ?? '' ),
-		'presenter_id'          => absint( $row->presenter_id ?? 0 ),
-		'presenter_page_url'    => ! empty( $row->presenter_id ) ? esc_url_raw( $this->mrm_mc_public_presenter_page_url( $row->presenter_id ) ) : '',
-		'session_page_url'      => ! empty( $row->id ) ? esc_url_raw( $this->mrm_mc_public_session_page_url( $row->id ) ) : '',
+		'presenter_name'              => sanitize_text_field( $row->presenter_name ?? '' ),
+		'presenter_title'             => sanitize_text_field( $row->presenter_title ?? '' ),
+		'presenter_profile_image_url' => ! empty( $row->presenter_profile_image_url ) ? esc_url_raw( $row->presenter_profile_image_url ) : '',
+		'presenter_id'                => absint( $row->presenter_id ?? 0 ),
+		'presenter_page_url'          => ! empty( $row->presenter_id ) ? esc_url_raw( $this->mrm_mc_public_presenter_page_url( $row->presenter_id ) ) : '',
+		'session_page_url'            => ! empty( $row->id ) ? esc_url_raw( $this->mrm_mc_public_session_page_url( $row->id ) ) : '',
 		'start_time'         => sanitize_text_field( $row->start_time ),
 		'end_time'           => sanitize_text_field( $row->end_time ),
 		'start_time_rfc3339' => ! empty( $row->start_time ) ? mysql_to_rfc3339( $row->start_time ) : '',
@@ -9881,6 +10004,8 @@ public function rest_get_presenter( $request ) {
 		$wpdb->prepare(
 			"SELECT e.*,
 				p.name AS presenter_name,
+				p.presenter_title AS presenter_title,
+				p.profile_image_url AS presenter_profile_image_url,
 				p.id AS presenter_id,
 				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND LOWER(TRIM(r.payment_status)) = 'paid') AS paid_count
 			 FROM {$events_table} e
@@ -9964,6 +10089,8 @@ public function rest_get_event( $request ) {
 		$wpdb->prepare(
 			"SELECT e.*,
 				p.name AS presenter_name,
+				p.presenter_title AS presenter_title,
+				p.profile_image_url AS presenter_profile_image_url,
 				p.presenter_page_id AS presenter_page_id,
 				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND LOWER(TRIM(r.payment_status)) = 'paid') AS paid_count
 			 FROM {$events_table} e
@@ -10950,6 +11077,8 @@ public function rest_finalize_registration( $request ) {
 		$rows = $wpdb->get_results(
 			"SELECT e.*,
 				p.name AS presenter_name,
+				p.presenter_title AS presenter_title,
+				p.profile_image_url AS presenter_profile_image_url,
 				p.presenter_page_id AS presenter_page_id,
 				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND LOWER(TRIM(r.payment_status)) = 'paid') AS paid_count
 			 FROM {$events_table} e
