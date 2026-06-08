@@ -10871,11 +10871,7 @@ public function handle_save_contact_form_settings() {
 }
 
 public function render_contact_form_shortcode() {
-    $opts = $this->get_settings();
-
-    $html = isset( $opts['contact_form_html'] ) && trim( (string) $opts['contact_form_html'] ) !== ''
-        ? (string) $opts['contact_form_html']
-        : $this->mrm_get_default_contact_form_html();
+    $html = $this->mrm_get_default_contact_form_html();
 
     $notice = '';
     $status = isset( $_GET['mrm_contact_status'] ) ? sanitize_key( wp_unslash( $_GET['mrm_contact_status'] ) ) : '';
