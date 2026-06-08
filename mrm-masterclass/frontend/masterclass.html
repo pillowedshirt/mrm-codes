@@ -462,7 +462,7 @@ input[type="checkbox"] {
   font-family: Georgia, "Times New Roman", serif;
   font-size: 1.55rem;
   line-height: 1.1;
-  color: #20170f;
+  color: #000000 !important;
 }
 
 .mrm-masterclass-event-description {
@@ -488,6 +488,112 @@ input[type="checkbox"] {
 
 .mrm-masterclass-event-meta strong {
   color: #20170f;
+}
+
+.mrm-masterclass-event-meta-profile {
+  margin-top: 2px;
+}
+
+.mrm-masterclass-event-profile-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid #eadcc8;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top left, rgba(154, 106, 47, 0.11), transparent 42%),
+    linear-gradient(135deg, #fffdf9 0%, #ffffff 58%, #f8efe2 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.72);
+}
+
+.mrm-masterclass-event-presenter-row {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.mrm-masterclass-event-presenter-photo {
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  object-fit: cover;
+  border: 1px solid #dccab0;
+  box-shadow: 0 10px 22px rgba(32, 23, 15, 0.12);
+  background: #f7efe3;
+}
+
+.mrm-masterclass-event-presenter-photo-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9a6a2f;
+  font-weight: 900;
+  font-size: 17px;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.mrm-masterclass-event-presenter-text {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.mrm-masterclass-event-profile-label {
+  display: block;
+  color: #7a6a58;
+  font-size: 0.72rem;
+  line-height: 1.1;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mrm-masterclass-presenter-static {
+  color: #20170f;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.mrm-masterclass-event-facts {
+  display: grid;
+  grid-template-columns: 1.35fr 0.75fr 0.9fr;
+  gap: 10px;
+}
+
+.mrm-masterclass-event-fact {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  padding: 12px 10px;
+  border: 1px solid rgba(220, 202, 176, 0.82);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  text-align: center;
+}
+
+.mrm-masterclass-event-fact strong {
+  color: #20170f;
+  font-weight: 900;
+  font-size: 0.96rem;
+  line-height: 1.2;
+}
+
+.mrm-masterclass-event-fact-time {
+  text-align: center;
+}
+
+.mrm-masterclass-event-fact-time .mrm-masterclass-time-box {
+  margin-top: 2px;
+}
+
+.mrm-masterclass-event-fact-time .mrm-masterclass-time-date {
+  font-size: 0.9rem;
+}
+
+.mrm-masterclass-event-fact-time .mrm-masterclass-time-window {
+  font-size: 0.86rem;
 }
 
 .mrm-masterclass-time-box {
@@ -554,10 +660,11 @@ input[type="checkbox"] {
 }
 
 .mrm-masterclass-presenter-link {
-  color: #9a6a2f;
+  color: #20170f;
   font-weight: 900;
   text-decoration: underline;
   text-underline-offset: 3px;
+  line-height: 1.25;
 }
 
 .mrm-masterclass-presenter-link:hover,
@@ -632,6 +739,18 @@ input[type="checkbox"] {
   color: #20170f !important;
 }
 
+.mrm-masterclass-view-calendar-button {
+  background: #ffffff !important;
+  color: #20170f !important;
+  border: 1px solid #20170f !important;
+}
+
+.mrm-masterclass-view-calendar-button:hover,
+.mrm-masterclass-view-calendar-button:focus {
+  background: #f7f3ed !important;
+  color: #20170f !important;
+}
+
 .mrm-masterclass-share-button {
   display: inline-flex;
   align-items: center;
@@ -684,6 +803,22 @@ input[type="checkbox"] {
   .mrm-masterclass-session-info-grid,
   .mrm-masterclass-presenter-session-info-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .mrm-masterclass-event-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .mrm-masterclass-event-presenter-row {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .mrm-masterclass-event-presenter-photo {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
   }
 }
 
@@ -882,6 +1017,12 @@ input[type="checkbox"] {
 .mrm-masterclass-calendar-event:focus {
   background: #6e461c;
   transform: translateY(-1px);
+}
+
+.mrm-masterclass-calendar-event-highlight {
+  outline: 3px solid rgba(154, 106, 47, 0.5) !important;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px rgba(154, 106, 47, 0.14) !important;
 }
 
 .mrm-masterclass-calendar-event-time {
