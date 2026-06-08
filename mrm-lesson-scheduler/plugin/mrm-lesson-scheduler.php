@@ -10354,30 +10354,29 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
       <form class="mrm-contact-form" method="post" action="{{mrm_contact_action}}">
         {{mrm_contact_nonce_field}}
         <input type="hidden" name="action" value="mrm_scheduler_contact_submit">
+        <input type="hidden" id="mrm_contact_loaded_at" name="mrm_contact_loaded_at" value="">
 
         <div class="mrm-contact-field mrm-contact-full">
           <label for="mrm_contact_represents">Which best represents you? <span>*</span></label>
           <select id="mrm_contact_represents" name="mrm_contact_represents" required>
             <option value="">Please select one</option>
-            <option value="potential_student">Potential student</option>
-            <option value="parent_guardian">Parent or guardian of a potential student</option>
-            <option value="current_student_family">Current student or family</option>
+            <option value="incoming_student">Incoming student</option>
+            <option value="currently_enrolled_student">Currently enrolled student</option>
             <option value="interested_instructor">Interested instructor</option>
-            <option value="composer_arranger">Composer or arranger</option>
-            <option value="school_band_director">School band director / music educator</option>
-            <option value="film_media_collaborator">Film, media, or creative collaborator</option>
-            <option value="general_question">General question</option>
+            <option value="composer_arranger">Composer/arranger</option>
+            <option value="school_band_director_music_educator">School band director/music educator</option>
+            <option value="film_media_creative_collaborator">Film, media, or creative collaborator</option>
             <option value="other">Other</option>
           </select>
         </div>
 
         <div class="mrm-contact-field mrm-contact-full mrm-contact-other-wrap" hidden>
-          <label for="mrm_contact_represents_other">Please tell us who you are <span>*</span></label>
+          <label for="mrm_contact_represents_other">Tell us what best describes you <span>*</span></label>
           <input
             type="text"
             id="mrm_contact_represents_other"
             name="mrm_contact_represents_other"
-            placeholder="Example: arts administrator, community partner, returning visitor"
+            placeholder="Example: community arts organizer, producer, arts administrator, returning visitor, parent, or someone with a unique music-related question"
           >
         </div>
 
@@ -10408,6 +10407,13 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
           <input type="text" id="mrm_contact_website" name="mrm_contact_website" tabindex="-1" autocomplete="off">
         </div>
 
+        <div class="mrm-contact-human-check">
+          <label>
+            <input type="checkbox" id="mrm_contact_human_confirm" name="mrm_contact_human_confirm" value="1" required>
+            <span>I confirm that I am a real person submitting this message to Low Brass Lessons.</span>
+          </label>
+        </div>
+
         <div class="mrm-contact-actions">
           <button type="submit">Send Message</button>
           <p>Messages are sent securely through the Low Brass Lessons website.</p>
@@ -10419,7 +10425,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
 
 <style>
   .mrm-contact-section {
-    --mrm-contact-bg: #f5f5f5;
+    --mrm-contact-bg: transparent;
     --mrm-contact-surface: #ffffff;
     --mrm-contact-accent: #2f2f2f;
     --mrm-contact-gold: #c9a227;
@@ -10431,9 +10437,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     width: 100%;
     box-sizing: border-box;
     padding: clamp(42px, 6vw, 78px) 18px;
-    background:
-      radial-gradient(circle at top left, rgba(201, 162, 39, 0.10), transparent 32%),
-      var(--mrm-contact-bg);
+    background: transparent;
     color: var(--mrm-contact-text);
     font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
@@ -10621,6 +10625,34 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     overflow: hidden;
   }
 
+  .mrm-contact-human-check {
+    border: 1px solid var(--mrm-contact-border);
+    border-radius: 14px;
+    background: #fafafa;
+    padding: 14px 16px;
+  }
+
+  .mrm-contact-human-check label {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0;
+    color: var(--mrm-contact-text);
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.45;
+    cursor: pointer;
+  }
+
+  .mrm-contact-human-check input {
+    width: 18px;
+    height: 18px;
+    min-height: 0;
+    margin-top: 1px;
+    accent-color: var(--mrm-contact-accent);
+    flex: 0 0 auto;
+  }
+
   @media (max-width: 700px) {
     .mrm-contact-section {
       padding: 38px 14px;
@@ -10663,6 +10695,11 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
       var select = root.querySelector('#mrm_contact_represents');
       var otherWrap = root.querySelector('.mrm-contact-other-wrap');
       var otherInput = root.querySelector('#mrm_contact_represents_other');
+      var loadedAt = root.querySelector('#mrm_contact_loaded_at');
+
+      if (loadedAt) {
+        loadedAt.value = String(Date.now());
+      }
 
       if (!select || !otherWrap || !otherInput) {
         return;
@@ -10846,7 +10883,7 @@ public function render_contact_form_shortcode() {
     if ( $status === 'sent' ) {
         $notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Thank you. Your message has been sent successfully.</div>';
     } elseif ( $status === 'error' ) {
-        $notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Something went wrong. Please check the form and try again.</div>';
+        $notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Something went wrong. Please confirm all required fields, complete the human verification, and try again.</div>';
     }
 
     $replacements = array(
@@ -10862,15 +10899,13 @@ protected function mrm_get_contact_represents_label( $value ) {
     $value = sanitize_key( (string) $value );
 
     $labels = array(
-        'potential_student'        => 'Potential student',
-        'parent_guardian'          => 'Parent or guardian of a potential student',
-        'current_student_family'   => 'Current student or family',
-        'interested_instructor'    => 'Interested instructor',
-        'composer_arranger'        => 'Composer or arranger',
-        'school_band_director'     => 'School band director / music educator',
-        'film_media_collaborator'  => 'Film, media, or creative collaborator',
-        'general_question'         => 'General question',
-        'other'                    => 'Other',
+        'incoming_student'                    => 'Incoming student',
+        'currently_enrolled_student'          => 'Currently enrolled student',
+        'interested_instructor'               => 'Interested instructor',
+        'composer_arranger'                   => 'Composer/arranger',
+        'school_band_director_music_educator' => 'School band director/music educator',
+        'film_media_creative_collaborator'    => 'Film, media, or creative collaborator',
+        'other'                               => 'Other',
     );
 
     return isset( $labels[ $value ] ) ? $labels[ $value ] : '';
@@ -10908,6 +10943,30 @@ public function handle_contact_form_submit() {
         $this->mrm_contact_redirect_back( 'error' );
     }
 
+    $human_confirm = isset( $_POST['mrm_contact_human_confirm'] )
+        ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_human_confirm'] ) )
+        : '';
+
+    if ( $human_confirm !== '1' ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $loaded_at_ms = isset( $_POST['mrm_contact_loaded_at'] )
+        ? absint( wp_unslash( $_POST['mrm_contact_loaded_at'] ) )
+        : 0;
+
+    $now_ms     = (int) round( microtime( true ) * 1000 );
+    $elapsed_ms = $loaded_at_ms > 0 ? ( $now_ms - $loaded_at_ms ) : 0;
+
+    /*
+     * Anti-bot timing check:
+     * - Rejects instant submissions faster than 3 seconds.
+     * - Rejects stale form submissions older than 2 hours.
+     */
+    if ( $loaded_at_ms <= 0 || $elapsed_ms < 3000 || $elapsed_ms > 7200000 ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
     $first_name = isset( $_POST['mrm_contact_first_name'] )
         ? sanitize_text_field( wp_unslash( $_POST['mrm_contact_first_name'] ) )
         : '';
@@ -10942,6 +11001,40 @@ public function handle_contact_form_submit() {
         $message === ''
     ) {
         $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $combined_submission_text = strtolower(
+        $first_name . ' ' .
+        $last_name . ' ' .
+        $email . ' ' .
+        $represents_other . ' ' .
+        $message
+    );
+
+    $url_count = preg_match_all( '/https?:\/\//i', $combined_submission_text, $url_matches );
+
+    if ( $url_count > 2 ) {
+        $this->mrm_contact_redirect_back( 'error' );
+    }
+
+    $blocked_contact_terms = array(
+        'crypto',
+        'bitcoin',
+        'forex',
+        'loan offer',
+        'casino',
+        'viagra',
+        'seo backlink',
+        'rank your website',
+        'guest post',
+        'telegram',
+        'whatsapp me',
+    );
+
+    foreach ( $blocked_contact_terms as $blocked_contact_term ) {
+        if ( strpos( $combined_submission_text, $blocked_contact_term ) !== false ) {
+            $this->mrm_contact_redirect_back( 'error' );
+        }
     }
 
     if ( $represents === 'other' && $represents_other === '' ) {
