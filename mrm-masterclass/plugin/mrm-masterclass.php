@@ -501,7 +501,10 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    const name = event && event.presenter_name ? String(event.presenter_name) : 'TBA';
 		    const title = event && event.presenter_title ? String(event.presenter_title) : '';
 
-		    return title ? name + ' - ' + title : name;
+		    return {
+		      name: name,
+		      title: title
+		    };
 		  }
 
 		  function presenterInitialsFromName(name) {
@@ -545,9 +548,23 @@ class LowBrass_MRM_Masterclass_Plugin {
 		    html += '<span class="mrm-masterclass-event-profile-label">Presenter</span>';
 
 		    if (!past && presenterUrl) {
-		      html += '<a class="mrm-masterclass-presenter-link" href="' + escapeHtml(presenterUrl) + '">' + escapeHtml(presenterLabel) + '</a>';
+		      html += '<a class="mrm-masterclass-presenter-link" href="' + escapeHtml(presenterUrl) + '">';
+		      html += '<span class="mrm-masterclass-presenter-name">' + escapeHtml(presenterLabel.name) + '</span>';
+
+		      if (presenterLabel.title) {
+		        html += '<span class="mrm-masterclass-presenter-title">' + escapeHtml(presenterLabel.title) + '</span>';
+		      }
+
+		      html += '</a>';
 		    } else {
-		      html += '<span class="mrm-masterclass-presenter-static">' + escapeHtml(presenterLabel) + '</span>';
+		      html += '<span class="mrm-masterclass-presenter-static">';
+		      html += '<span class="mrm-masterclass-presenter-name">' + escapeHtml(presenterLabel.name) + '</span>';
+
+		      if (presenterLabel.title) {
+		        html += '<span class="mrm-masterclass-presenter-title">' + escapeHtml(presenterLabel.title) + '</span>';
+		      }
+
+		      html += '</span>';
 		    }
 
 		    html += '</div>';
