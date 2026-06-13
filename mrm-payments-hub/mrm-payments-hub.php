@@ -42,7 +42,7 @@ class MRM_Payments_Hub_Single {
      */
     add_action('admin_post_mrm_marketing_email_save_lists', array($this, 'handle_marketing_email_save_lists'));
     add_action('admin_post_mrm_marketing_email_send', array($this, 'handle_marketing_email_send'));
-    add_action('admin_post_mrm_email_testing_send', array($this, 'handle_email_testing_send'));
+    add_action('admin_post_mrm_pay_hub_send_email_tests', array($this, 'handle_email_testing_send'));
     add_action('admin_post_mrm_marketing_resubscribe', array($this, 'handle_marketing_resubscribe'));
     add_action('admin_post_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
@@ -11069,213 +11069,189 @@ public function handle_marketing_resubscribe() {
 
 
 
-  private function mrm_get_email_testing_templates() {
-    $contact_url = $this->mrm_get_contact_url();
-    $access_url = home_url('/sheet-music/');
-
-    $templates = array(
-      'purchase_confirmation' => array(
-        'label' => 'Purchase Confirmation',
-        'description' => 'Sample customer receipt for a completed private lesson purchase.',
-        'subject' => 'Purchase Confirmation - 60-Minute Online Lesson',
-        'title' => 'Purchase Confirmation',
-        'intro' => '<p>Thank you for your purchase. Your payment was completed successfully.</p>',
-        'details' => '<div><strong>Purchase:</strong> 60-Minute Online Lesson</div><div><strong>Amount Paid:</strong> $75.00</div><div><strong>Status:</strong> Paid</div><div><strong>Confirmation:</strong> TEST-PI-123456</div>',
-        'cta_url' => $contact_url,
-        'cta_label' => 'Contact Support',
-      ),
-      'subscription_enrollment' => array(
-        'label' => 'Sheet Music Subscription Enrollment',
-        'description' => 'Sample welcome email for a new monthly sheet music subscriber.',
-        'subject' => 'Subscription Confirmation - Sheet Music Access',
-        'title' => 'Sheet Music Subscription Confirmed',
-        'intro' => '<p>Your monthly sheet music subscription is active.</p>',
-        'details' => '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div><div><strong>Amount:</strong> $9.99 per month</div><div><strong>Status:</strong> Active</div><div><strong>Next billing date:</strong> July 13, 2026</div>',
-        'cta_url' => $access_url,
-        'cta_label' => 'View Sheet Music',
-      ),
-      'subscription_renewal' => array(
-        'label' => 'Sheet Music Subscription Renewal',
-        'description' => 'Sample successful monthly renewal receipt.',
-        'subject' => 'Subscription Renewal - Sheet Music Access',
-        'title' => 'Subscription Renewal - Sheet Music Access',
-        'intro' => '<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>',
-        'details' => '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div><div><strong>Amount Charged:</strong> $9.99</div><div><strong>Status:</strong> Active</div><div><strong>Invoice ID:</strong> TEST-INVOICE-123456</div><div style="margin-top:12px;">Your next monthly billing date will be on or about <strong>July 13, 2026</strong>.</div>',
-        'cta_url' => $contact_url,
-        'cta_label' => 'Contact Support',
-      ),
-      'subscription_cancelled' => array(
-        'label' => 'Sheet Music Subscription Cancelled',
-        'description' => 'Sample confirmation that future subscription billing has stopped.',
-        'subject' => 'Subscription Update - Sheet Music Access Cancelled',
-        'title' => 'Subscription Cancelled',
-        'intro' => '<p>Your sheet music subscription has been cancelled.</p>',
-        'details' => '<div><strong>Subscription:</strong> Monthly sheet music access</div><div><strong>Status:</strong> Cancelled</div><div><strong>Cancellation date:</strong> June 13, 2026</div><div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future.</div>',
-        'cta_url' => $contact_url,
-        'cta_label' => 'Contact Support',
-      ),
-      'lesson_refund' => array(
-        'label' => 'Lesson Cancellation and Refund',
-        'description' => 'Sample student notice for a cancelled lesson and issued refund.',
-        'subject' => 'Lesson update — Cancellation and refund issued',
-        'title' => 'Lesson cancelled and refund issued',
-        'intro' => '<p>Your lesson has been cancelled and a refund has been issued.</p>',
-        'details' => '<div><strong>Cancelled lesson:</strong> June 20, 2026 at 3:00 PM</div><div><strong>Refund amount:</strong> $75.00</div><div style="margin-top:12px;">You can expect the refunded amount to appear back in your account in approximately 3 to 5 business days, depending on your bank and card issuer.</div>',
-        'cta_url' => $contact_url,
-        'cta_label' => 'Contact Support',
-      ),
-      'payment_method_student' => array(
-        'label' => 'Payment Method Attention — Student',
-        'description' => 'Sample student action-required notice before an upcoming lesson.',
-        'subject' => 'Action required: update your payment method before your lesson',
-        'title' => 'Payment method confirmation needed',
-        'intro' => '<p>We could not confirm the saved payment method for your upcoming lesson.</p>',
-        'details' => '<div><strong>Student:</strong> Test Student</div><div><strong>Lesson:</strong> June 20, 2026 at 3:00 PM</div><div><strong>Action:</strong> Please contact support before the lesson so payment can be confirmed.</div>',
-        'cta_url' => $contact_url,
-        'cta_label' => 'Contact Support',
-      ),
-      'payment_method_instructor' => array(
-        'label' => 'Payment Method Attention — Instructor',
-        'description' => 'Sample instructor notice to withhold an upcoming lesson.',
-        'subject' => 'Payment method not confirmed — please withhold upcoming lesson',
-        'title' => 'Instructor action required',
-        'intro' => '<p>A student payment method could not be confirmed for an upcoming lesson.</p>',
-        'details' => '<div><strong>Student:</strong> Test Student</div><div><strong>Lesson:</strong> June 20, 2026 at 3:00 PM</div><div><strong>Action:</strong> Please do not deliver this lesson unless an administrator confirms that payment is resolved.</div>',
-        'cta_url' => $contact_url,
-        'cta_label' => 'Contact Support',
-      ),
-      'payment_method_admin' => array(
-        'label' => 'Payment Method Attention — Admin',
-        'description' => 'Sample internal awareness notice about an unresolved payment method.',
-        'subject' => 'AutoPay payment method attention needed for upcoming lesson',
-        'title' => 'Admin awareness',
-        'intro' => '<p>An upcoming lesson requires payment-method review.</p>',
-        'details' => '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Lesson:</strong> June 20, 2026 at 3:00 PM</div><div><strong>Reason:</strong> The saved payment method could not be confirmed.</div>',
-        'cta_url' => $contact_url,
-        'cta_label' => 'Contact Support',
-      ),
+  private function mrm_email_testing_catalog() {
+    return array(
+      'marketing_custom_email' => array('label' => 'Marketing email list message', 'description' => 'Normally triggered manually from the Marketing Email Lists submenu when you send a custom marketing email to selected lists.', 'plugin' => 'payments'),
+      'payment_method_attention_student' => array('label' => 'Payment method confirmation needed — student', 'description' => 'Normally triggered when an upcoming AutoPay lesson requires the student to confirm or update their saved payment method before the lesson.', 'plugin' => 'payments'),
+      'payment_method_attention_instructor' => array('label' => 'Payment method attention — instructor', 'description' => 'Normally triggered when an upcoming AutoPay lesson should be withheld until the student payment method is confirmed.', 'plugin' => 'payments'),
+      'payment_method_attention_admin' => array('label' => 'Payment method attention — admin', 'description' => 'Normally triggered when the system detects an upcoming AutoPay lesson with a payment method issue requiring administrative awareness.', 'plugin' => 'payments'),
+      'purchase_receipt' => array('label' => 'Purchase confirmation receipt', 'description' => 'Normally triggered after a successful Stripe payment for sheet music, packages, prepaid lessons, or other paid products.', 'plugin' => 'payments'),
+      'sheet_music_subscription_enrollment' => array('label' => 'Sheet music subscription enrollment confirmation', 'description' => 'Normally triggered when a customer successfully enrolls in the monthly sheet music subscription.', 'plugin' => 'payments'),
+      'sheet_music_subscription_renewal' => array('label' => 'Sheet music subscription renewal receipt', 'description' => 'Normally triggered after a successful recurring monthly sheet music subscription charge.', 'plugin' => 'payments'),
+      'sheet_music_subscription_cancelled' => array('label' => 'Sheet music subscription cancelled', 'description' => 'Normally triggered when a sheet music subscription is cancelled.', 'plugin' => 'payments'),
+      'lesson_cancellation_refund' => array('label' => 'Lesson cancellation refund', 'description' => 'Normally triggered when a lesson is cancelled and a refund is issued.', 'plugin' => 'payments'),
+      'meeting_confirmation' => array('label' => 'Meeting Scheduler confirmation', 'description' => 'Normally triggered immediately after a Meeting Scheduler event is created and invitation emails are sent.', 'plugin' => 'scheduler'),
+      'meeting_reminder' => array('label' => 'Meeting Scheduler reminder', 'description' => 'Normally triggered by cron approximately 1 hour before a scheduled Meeting Scheduler event.', 'plugin' => 'scheduler'),
+      'private_lesson_reminder_parent' => array('label' => 'Private lesson reminder — parent/student', 'description' => 'Normally triggered by the safety reminder cron before a private lesson; sent to the parent/student.', 'plugin' => 'scheduler'),
+      'private_lesson_reminder_instructor' => array('label' => 'Private lesson reminder — instructor', 'description' => 'Normally triggered by the safety reminder cron before a private lesson; sent to the instructor.', 'plugin' => 'scheduler'),
+      'lesson_feedback_request' => array('label' => 'Lesson feedback request', 'description' => 'Normally triggered after a lesson ends when feedback has not yet been submitted.', 'plugin' => 'scheduler'),
+      'parent_feedback_received' => array('label' => 'Parent lesson feedback received', 'description' => 'Normally triggered after a parent/student submits lesson feedback; sent to admin and/or instructor.', 'plugin' => 'scheduler'),
+      'consultation_confirmation' => array('label' => 'Consultation confirmation', 'description' => 'Normally triggered after an online consultation is scheduled successfully.', 'plugin' => 'scheduler'),
+      'contact_form_notification' => array('label' => 'Contact form notification', 'description' => 'Normally triggered when someone submits the [mrm_contact_form] contact form successfully.', 'plugin' => 'scheduler'),
+      'safety_no_show_alert' => array('label' => 'Safety alert — parent reported no-show', 'description' => 'Normally triggered when a parent reports that an instructor did not arrive for a scheduled lesson.', 'plugin' => 'scheduler'),
+      'safety_emergency_notice' => array('label' => 'Safety emergency notice', 'description' => 'Normally triggered when an instructor uses the emergency action during an in-person lesson.', 'plugin' => 'scheduler'),
+      'contractor_agreement_confirmation' => array('label' => 'Contractor agreement confirmation', 'description' => 'Normally triggered when a contractor agreement/signature flow is completed or recorded in the Scheduler agreement system.', 'plugin' => 'scheduler'),
+      'masterclass_registration_confirmation' => array('label' => 'Masterclass registration confirmation', 'description' => 'Normally triggered after a student/client successfully registers and pays for a masterclass.', 'plugin' => 'masterclass'),
+      'masterclass_student_reminder' => array('label' => 'Masterclass student reminder', 'description' => 'Normally triggered by the Masterclass reminder cron before a masterclass begins.', 'plugin' => 'masterclass'),
+      'masterclass_presenter_confirmation' => array('label' => 'Masterclass presenter confirmation', 'description' => 'Normally triggered when a masterclass event is created and assigned to a presenter.', 'plugin' => 'masterclass'),
+      'masterclass_presenter_reminder' => array('label' => 'Masterclass presenter reminder', 'description' => 'Normally triggered by the Masterclass reminder cron before a presenter’s masterclass begins.', 'plugin' => 'masterclass'),
+      'masterclass_feedback_request' => array('label' => 'Masterclass feedback request', 'description' => 'Normally triggered after a masterclass ends to request student/client feedback.', 'plugin' => 'masterclass'),
+      'masterclass_event_updated' => array('label' => 'Masterclass event updated', 'description' => 'Normally triggered when a masterclass event is edited after registrations already exist.', 'plugin' => 'masterclass'),
+      'masterclass_refund_completed' => array('label' => 'Masterclass refund completed', 'description' => 'Normally triggered when a masterclass registration refund is completed.', 'plugin' => 'masterclass'),
+      'masterclass_event_cancelled' => array('label' => 'Masterclass event cancelled', 'description' => 'Normally triggered when a masterclass event is cancelled and registrants are notified.', 'plugin' => 'masterclass'),
+      'product_access_otp' => array('label' => 'Sheet music/product access OTP', 'description' => 'Normally triggered when a purchaser requests a one-time access code for protected product access.', 'plugin' => 'product-access'),
     );
+  }
 
-    return apply_filters('mrm_payments_hub_email_testing_templates', $templates);
+  public function render_email_testing_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die(esc_html('You do not have permission to view this page.'));
+    }
+
+    $catalog = $this->mrm_email_testing_catalog();
+    $sent = isset($_GET['mrm_email_tests_sent']) ? absint(wp_unslash($_GET['mrm_email_tests_sent'])) : null;
+    $failed = isset($_GET['mrm_email_tests_failed']) ? absint(wp_unslash($_GET['mrm_email_tests_failed'])) : 0;
+    $error = isset($_GET['mrm_email_tests_error']) ? sanitize_text_field(wp_unslash($_GET['mrm_email_tests_error'])) : '';
+    ?>
+    <div class="wrap">
+      <h1>Email Testing</h1>
+      <p>Use this page to send test versions of site emails to a single inbox. This page is for visual review only and never looks up real recipients.</p>
+
+      <?php if ($sent !== null) : ?>
+        <div class="notice notice-success"><p><?php echo esc_html(sprintf('Email test send complete. Sent: %d. Failed: %d.', $sent, $failed)); ?></p></div>
+      <?php endif; ?>
+      <?php if ($error !== '') : ?>
+        <div class="notice notice-error"><p><?php echo esc_html($error); ?></p></div>
+      <?php endif; ?>
+
+      <div class="notice notice-warning inline" style="max-width:1100px;"><p><strong>Testing safety:</strong> Every selected message is sent only to the destination inbox entered below. Production email triggers are not invoked.</p></div>
+
+      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="max-width:1100px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin-top:18px;">
+        <?php wp_nonce_field('mrm_pay_hub_send_email_tests', 'mrm_pay_hub_email_tests_nonce'); ?>
+        <input type="hidden" name="action" value="mrm_pay_hub_send_email_tests">
+
+        <h2>Destination Inbox</h2>
+        <p><input type="email" class="regular-text" name="mrm_email_testing_to" required autocomplete="off" placeholder="your-test-inbox@example.com"></p>
+
+        <h2>Email Types</h2>
+        <p>Select every email you want to send. Each selected test goes only to the destination inbox above.</p>
+        <p>
+          <button type="button" class="button" id="mrm-email-testing-select-all">Select all</button>
+          <button type="button" class="button" id="mrm-email-testing-clear-all">Clear all</button>
+        </p>
+
+        <table class="widefat striped">
+          <thead><tr><th style="width:60px;">Send</th><th style="width:320px;">Email</th><th>Normally Triggered By</th><th style="width:150px;">Plugin</th></tr></thead>
+          <tbody>
+            <?php foreach ($catalog as $key => $item) : ?>
+              <tr>
+                <td><input class="mrm-email-test-checkbox" type="checkbox" name="mrm_email_tests[]" value="<?php echo esc_attr($key); ?>"></td>
+                <td><strong><?php echo esc_html($item['label']); ?></strong></td>
+                <td><?php echo esc_html($item['description']); ?></td>
+                <td><code><?php echo esc_html($item['plugin']); ?></code></td>
+              </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+        <?php submit_button('Send Selected Test Emails'); ?>
+      </form>
+    </div>
+    <script>
+      (function() {
+        function setAll(checked) {
+          document.querySelectorAll('.mrm-email-test-checkbox').forEach(function(box) { box.checked = checked; });
+        }
+        document.getElementById('mrm-email-testing-select-all').addEventListener('click', function() { setAll(true); });
+        document.getElementById('mrm-email-testing-clear-all').addEventListener('click', function() { setAll(false); });
+      })();
+    </script>
+    <?php
   }
 
   public function handle_email_testing_send() {
     if (!current_user_can('manage_options')) {
-      wp_die(esc_html('You do not have permission to send test emails.'));
+      wp_die(esc_html('Not allowed.'));
     }
 
-    check_admin_referer('mrm_email_testing_send', 'mrm_email_testing_nonce');
+    check_admin_referer('mrm_pay_hub_send_email_tests', 'mrm_pay_hub_email_tests_nonce');
 
-    $destination = sanitize_email((string)($_POST['mrm_email_testing_destination'] ?? ''));
-    $selected = isset($_POST['mrm_email_testing_templates']) && is_array($_POST['mrm_email_testing_templates'])
-      ? array_map('sanitize_key', wp_unslash($_POST['mrm_email_testing_templates']))
+    $to = isset($_POST['mrm_email_testing_to']) ? sanitize_email(wp_unslash($_POST['mrm_email_testing_to'])) : '';
+    $selected = isset($_POST['mrm_email_tests']) && is_array($_POST['mrm_email_tests'])
+      ? array_map('sanitize_key', wp_unslash($_POST['mrm_email_tests']))
       : array();
-    $templates = $this->mrm_get_email_testing_templates();
-    $selected = array_values(array_intersect($selected, array_keys($templates)));
-
+    $catalog = $this->mrm_email_testing_catalog();
+    $selected = array_values(array_unique(array_intersect($selected, array_keys($catalog))));
     $redirect_args = array('page' => 'mrm-pay-hub-email-testing');
 
-    if (!$destination || !is_email($destination)) {
-      $redirect_args['mrm_email_testing_error'] = 'Enter a valid destination inbox.';
+    if (!$to || !is_email($to)) {
+      $redirect_args['mrm_email_tests_error'] = 'Please enter a valid destination inbox.';
       wp_safe_redirect(add_query_arg($redirect_args, admin_url('admin.php')));
       exit;
     }
 
     if (empty($selected)) {
-      $redirect_args['mrm_email_testing_error'] = 'Select at least one test email.';
+      $redirect_args['mrm_email_tests_error'] = 'Please select at least one email to test.';
       wp_safe_redirect(add_query_arg($redirect_args, admin_url('admin.php')));
       exit;
     }
 
-    $headers = array(
-      'Content-Type: text/html; charset=UTF-8',
-      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
-    );
     $sent = 0;
     $failed = 0;
-
-    foreach ($selected as $template_key) {
-      $template = $templates[$template_key];
-      $html = !empty($template['html'])
-        ? (string)$template['html']
-        : $this->mrm_email_wrap_html(
-          $template['title'],
-          $template['intro'],
-          $template['details'],
-          $template['cta_url'],
-          $template['cta_label']
-        );
-
-      if (wp_mail($destination, '[TEST] ' . $template['subject'], $html, $headers)) {
+    foreach ($selected as $slug) {
+      if ($this->mrm_send_single_email_test($slug, $to)) {
         $sent++;
       } else {
         $failed++;
       }
     }
 
-    $redirect_args['mrm_email_testing_sent'] = $sent;
-    if ($failed > 0) {
-      $redirect_args['mrm_email_testing_failed'] = $failed;
-    }
-
+    $redirect_args['mrm_email_tests_sent'] = $sent;
+    $redirect_args['mrm_email_tests_failed'] = $failed;
     wp_safe_redirect(add_query_arg($redirect_args, admin_url('admin.php')));
     exit;
   }
 
-  public function render_email_testing_page() {
-    if (!current_user_can('manage_options')) {
-      wp_die(esc_html('You do not have permission to access this page.'));
+  private function mrm_send_single_email_test($slug, $to) {
+    $slug = sanitize_key((string)$slug);
+    $to = sanitize_email((string)$to);
+    if (!$to || !is_email($to)) {
+      return false;
     }
 
-    $templates = $this->mrm_get_email_testing_templates();
-    $sent = isset($_GET['mrm_email_testing_sent']) ? absint(wp_unslash($_GET['mrm_email_testing_sent'])) : 0;
-    $failed = isset($_GET['mrm_email_testing_failed']) ? absint(wp_unslash($_GET['mrm_email_testing_failed'])) : 0;
-    $error = isset($_GET['mrm_email_testing_error']) ? sanitize_text_field(wp_unslash($_GET['mrm_email_testing_error'])) : '';
-    ?>
-    <div class="wrap">
-      <h1>Email Testing</h1>
+    $headers = array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>');
+    $contact_url = $this->mrm_get_contact_url();
+    $samples = array(
+      'marketing_custom_email' => array('Marketing Email Test', '<p>This is a test of the custom marketing email layout.</p>', '<div><strong>Audience:</strong> Test Marketing List</div><div><strong>Purpose:</strong> Visual review of the marketing email template.</div>', 'Contact Low Brass Lessons'),
+      'payment_method_attention_student' => array('Payment method confirmation needed', '<p>This is a test of the student payment-method attention email.</p>', '<div><strong>Lesson:</strong> Test Low Brass Lesson</div><div><strong>Scheduled time:</strong> January 15, 2027 at 4:00 PM</div><div><strong>Action needed:</strong> Please confirm or update your saved payment method before the lesson.</div>', 'Contact Support'),
+      'payment_method_attention_instructor' => array('Instructor action required', '<p>This is a test of the instructor payment-method attention email.</p>', '<div><strong>Lesson:</strong> Test Low Brass Lesson</div><div><strong>Student:</strong> Test Student</div><div><strong>Instruction:</strong> Please withhold the lesson until the payment method has been updated and confirmed.</div>', 'Contact Support'),
+      'payment_method_attention_admin' => array('Admin awareness', '<p>This is a test of the admin payment-method attention email.</p>', '<div><strong>Lesson ID:</strong> 12345</div><div><strong>Issue:</strong> Upcoming AutoPay lesson requires payment-method attention.</div>', 'Contact Support'),
+      'purchase_receipt' => array('Purchase Confirmation - Test Product', '<p>Thank you for your purchase. This is a test purchase confirmation email.</p>', '<div><strong>Item:</strong> Test Product</div><div><strong>Amount:</strong> $25.00</div><div><strong>Status:</strong> Paid</div>', 'Contact Support'),
+    );
 
-      <?php if ($sent > 0) : ?>
-        <div class="notice notice-success"><p><?php echo esc_html(sprintf('%d test email%s sent to the destination inbox.', $sent, $sent === 1 ? '' : 's')); ?></p></div>
-      <?php endif; ?>
-      <?php if ($failed > 0) : ?>
-        <div class="notice notice-error"><p><?php echo esc_html(sprintf('%d test email%s could not be sent.', $failed, $failed === 1 ? '' : 's')); ?></p></div>
-      <?php endif; ?>
-      <?php if ($error !== '') : ?>
-        <div class="notice notice-error"><p><?php echo esc_html($error); ?></p></div>
-      <?php endif; ?>
+    if (isset($samples[$slug])) {
+      list($title, $intro, $details, $cta_label) = $samples[$slug];
+      return wp_mail($to, '[TEST] ' . $title, $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, $cta_label), $headers);
+    }
 
-      <div class="notice notice-warning inline" style="max-width:920px;">
-        <p><strong>Testing safety:</strong> Every selected message is sent only to the destination inbox entered below. This page does not query customer, student, or instructor email addresses and does not invoke production email triggers.</p>
-      </div>
+    if ($slug === 'sheet_music_subscription_enrollment') {
+      return $this->mrm_send_sheet_music_subscription_enrollment_email(array('email_plain' => $to, 'stripe_status' => 'active', 'portal_token' => 'test-token'), strtotime('+1 month'));
+    }
+    if ($slug === 'sheet_music_subscription_renewal') {
+      $invoice = array('amount_paid' => 500, 'id' => 'in_test_123', 'lines' => array('data' => array(array('period' => array('end' => strtotime('+1 month'))))));
+      return $this->mrm_send_sheet_music_subscription_charge_email(array('email_plain' => $to, 'portal_token' => 'test-token'), $invoice);
+    }
+    if ($slug === 'sheet_music_subscription_cancelled') {
+      return $this->mrm_send_sheet_music_subscription_cancelled_email(array('email_plain' => $to), array('ended_at' => time()));
+    }
+    if ($slug === 'lesson_cancellation_refund') {
+      return $this->mrm_send_lesson_cancellation_refund_email(array('student_email' => $to, 'start_time' => gmdate('Y-m-d H:i:s', strtotime('+1 week'))), 7500);
+    }
 
-      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="max-width:920px;background:#fff;border:1px solid #ccd0d4;padding:20px;margin-top:18px;">
-        <input type="hidden" name="action" value="mrm_email_testing_send">
-        <?php wp_nonce_field('mrm_email_testing_send', 'mrm_email_testing_nonce'); ?>
-
-        <h2 style="margin-top:0;">Destination Inbox</h2>
-        <p>
-          <label for="mrm_email_testing_destination"><strong>Email address</strong></label><br>
-          <input type="email" class="regular-text" id="mrm_email_testing_destination" name="mrm_email_testing_destination" required autocomplete="off" placeholder="review@example.com">
-        </p>
-
-        <h2>Select Test Emails</h2>
-        <fieldset>
-          <legend class="screen-reader-text">Select test email templates</legend>
-          <?php foreach ($templates as $key => $template) : ?>
-            <label style="display:block;border:1px solid #dcdcde;border-radius:4px;padding:12px 14px;margin:0 0 10px;">
-              <input type="checkbox" name="mrm_email_testing_templates[]" value="<?php echo esc_attr($key); ?>">
-              <strong><?php echo esc_html($template['label']); ?></strong><br>
-              <span class="description" style="margin-left:24px;"><?php echo esc_html($template['description']); ?></span>
-            </label>
-          <?php endforeach; ?>
-        </fieldset>
-
-        <?php submit_button('Send Selected Test Emails'); ?>
-      </form>
-    </div>
-    <?php
+    $results = array();
+    do_action_ref_array('mrm_send_cross_plugin_email_test', array($slug, $to, &$results));
+    return !empty($results[$slug]);
   }
+
 
 public function render_promo_codes_page() {
   if (!current_user_can('manage_options')) {

@@ -78,6 +78,7 @@ class MRM_Product_Access {
 
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_action( 'admin_menu', array( $this, 'admin_menu' ) );
+        add_action( 'mrm_send_cross_plugin_email_test', array( $this, 'handle_cross_plugin_email_test' ), 10, 3 );
         add_action( 'admin_notices', array( $this, 'admin_quality_checks' ) );
         add_action( 'plugins_loaded', array( $this, 'load_textdomain' ) );
 
@@ -2978,6 +2979,34 @@ function offerRowTemplate(pieceIndex){
             </div>
         </div>
     </body></html>';
+    }
+
+    public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
+        $slug = sanitize_key( (string) $slug );
+        $to = sanitize_email( (string) $to );
+        if ( $slug !== 'product_access_otp' || ! is_email( $to ) ) {
+            return;
+        }
+
+        $options = $this->get_options();
+        $subject = isset( $options['email_subject'] ) && trim( (string) $options['email_subject'] ) !== ''
+            ? (string) $options['email_subject']
+            : __( 'Sheet Music Access Code', 'mrm-product-access' );
+        $custom_body = str_replace( '{{OTP}}', '', (string) ( $options['email_body'] ?? '' ) );
+        $custom_body = trim( (string) preg_replace( '/\n{2,}/', "\n\n", $custom_body ) );
+
+        $intro_html = '<p>This is a test of the protected product access code email.</p>';
+        $intro_html .= '<p>Your one-time passcode for accessing your purchased piece is below.</p>';
+        if ( $custom_body !== '' ) {
+            $intro_html .= '<div style="margin-top:10px;">' . nl2br( esc_html( $custom_body ) ) . '</div>';
+        }
+
+        $html = $this->mrm_pa_wrap_otp_email_html( $subject, $intro_html, '123456' );
+        $headers = array(
+            'Content-Type: text/html; charset=UTF-8',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        );
+        $results[ $slug ] = wp_mail( $to, '[TEST] ' . $subject, $html, $headers );
     }
 
     /**

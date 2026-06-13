@@ -2104,7 +2104,7 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
         add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
         add_action( 'admin_notices', array( $this, 'maybe_show_schema_notice' ) );
-        add_filter( 'mrm_payments_hub_email_testing_templates', array( $this, 'add_meeting_email_testing_templates' ) );
+        add_action( 'mrm_send_cross_plugin_email_test', array( $this, 'handle_cross_plugin_email_test' ), 10, 3 );
 
         add_action( 'admin_post_mrm_scheduler_run_upgrade', array( $this, 'handle_run_upgrade' ) );
         add_action( 'admin_post_mrm_scheduler_save_google', array( $this, 'handle_save_google_settings' ) );
@@ -10900,43 +10900,6 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         );
     }
 
-    public function add_meeting_email_testing_templates( $templates ) {
-        if ( ! is_array( $templates ) ) {
-            $templates = array();
-        }
-
-        $gate_url = home_url( '/?mrm_email_test=meeting-room' );
-        $meeting_title = 'Test Instructor Team Meeting';
-        $time_label = 'Saturday, June 20, 2026 at 3:00 PM MST';
-        $details = '<p><strong>' . esc_html( $meeting_title ) . '</strong><br>' . esc_html( $time_label ) . '</p>';
-
-        $invitation_body = '<p>Hello,</p>';
-        $invitation_body .= '<p>You are invited to the following Low Brass Lessons meeting:</p>';
-        $invitation_body .= $details;
-        $invitation_body .= '<p>Please use the button below to join the meeting at the scheduled time.</p>';
-        $invitation_body .= '<p>Thank you,<br>Low Brass Lessons</p>';
-
-        $reminder_body = '<p>Hello,</p>';
-        $reminder_body .= '<p>This is a reminder for your upcoming Low Brass Lessons meeting.</p>';
-        $reminder_body .= $details;
-        $reminder_body .= '<p>Please use the button below to join the meeting at the scheduled time.</p>';
-
-        $templates['meeting_invitation'] = array(
-            'label' => 'Meeting Scheduler Invitation',
-            'description' => 'Sample meeting confirmation with the Join Meeting button and no raw gated URL.',
-            'subject' => $meeting_title,
-            'html' => $this->mrm_meeting_wrap_email( $meeting_title, $invitation_body, $gate_url ),
-        );
-        $templates['meeting_reminder'] = array(
-            'label' => 'Meeting Scheduler Reminder',
-            'description' => 'Sample one-hour meeting reminder using the private-lesson email wrapper.',
-            'subject' => 'Reminder: ' . $meeting_title,
-            'html' => $this->mrm_meeting_wrap_email( $meeting_title, $reminder_body, $gate_url ),
-        );
-
-        return $templates;
-    }
-
     protected function mrm_meeting_send_email( $to, $subject, $body_html ) {
         $to = sanitize_email( (string) $to );
         if ( $to === '' || ! is_email( $to ) ) {
@@ -11025,6 +10988,53 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         }
 
         return $sent_any;
+    }
+
+    public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
+        $slug = sanitize_key( (string) $slug );
+        $to = sanitize_email( (string) $to );
+        if ( ! is_email( $to ) ) {
+            return;
+        }
+
+        $headers = array(
+            'Content-Type: text/html; charset=UTF-8',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        );
+        $time = 'January 15, 2027 at 4:00 PM MST';
+
+        if ( $slug === 'meeting_confirmation' || $slug === 'meeting_reminder' ) {
+            $meeting_title = 'Test Meeting Scheduler Event';
+            $body = '<p>Hello,</p><p>' . ( $slug === 'meeting_reminder' ? 'This is a reminder for your upcoming Low Brass Lessons meeting.' : 'You are invited to the following Low Brass Lessons meeting:' ) . '</p>';
+            $body .= '<p><strong>' . esc_html( $meeting_title ) . '</strong><br>' . esc_html( $time ) . '</p><p>Please use the button below to join the meeting at the scheduled time.</p>';
+            $subject = $slug === 'meeting_reminder' ? 'Reminder: ' . $meeting_title : $meeting_title;
+            $results[ $slug ] = wp_mail( $to, '[TEST] ' . $subject, $this->mrm_meeting_wrap_email( $meeting_title, $body, home_url( '/test-meeting-gate/' ) ), $headers );
+            return;
+        }
+
+        $tests = array(
+            'private_lesson_reminder_parent' => array('Upcoming Lesson Reminder', '<p>This is a test of the parent/student private lesson reminder email.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/join-online/test/' ), 'Open Join Page'),
+            'private_lesson_reminder_instructor' => array('Instructor Lesson Reminder', '<p>This is a test of the instructor private lesson reminder email.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/wp-admin/admin-post.php?action=test-instructor-arrival' ), 'Mark Arrival'),
+            'lesson_feedback_request' => array('How was your lesson?', '<p>Please rate the lesson and share any comments you would like us to see.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Lesson:</strong> ' . esc_html( $time ) . '</div>', home_url( '/wp-admin/admin-post.php?action=test-feedback' ), 'Rate your lesson'),
+            'parent_feedback_received' => array('Parent Lesson Feedback', '<p>This is a test of the parent feedback received notification.</p>', '<div><strong>Rating:</strong> 5/5</div><div><strong>Comment:</strong> This is a test feedback comment.</div>', '', ''),
+        );
+        if ( isset( $tests[ $slug ] ) ) {
+            list( $title, $intro, $details, $url, $label ) = $tests[ $slug ];
+            $results[ $slug ] = wp_mail( $to, '[TEST] ' . $title, $this->mrm_safety_email_wrap_html( $title, $intro, $details, $url, $label ), $headers );
+            return;
+        }
+
+        $block_tests = array(
+            'consultation_confirmation' => array('Consultation Confirmation', '<p>Your consultation has been scheduled successfully.</p><p>This is an online consultation. Please use the consultation link at the scheduled time.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div><div><strong>Type:</strong> Consultation</div>'),
+            'contact_form_notification' => array('New Contact Form Submission', '<p>This is a test of the contact form notification email.</p>', '<div><strong>Name:</strong> Test Contact</div><div><strong>Email:</strong> test@example.com</div><div><strong>Represents:</strong> Incoming student</div><div><strong>Message:</strong> This is a test contact form message.</div>'),
+            'safety_no_show_alert' => array('Safety alert — parent reported instructor did not arrive', '<p>A parent has reported that the instructor did not arrive for the scheduled lesson.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Start:</strong> ' . esc_html( $time ) . '</div>'),
+            'safety_emergency_notice' => array('Lesson emergency notice', '<p>This is a test of the lesson emergency notice email.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Emergency message:</strong> Test emergency message.</div>'),
+            'contractor_agreement_confirmation' => array('Contractor Agreement Recorded', '<p>This is a test of the contractor agreement/signature confirmation email.</p>', '<div><strong>Contractor:</strong> Test Contractor</div><div><strong>Agreement Version:</strong> Test Version</div><div><strong>Status:</strong> Completed</div>'),
+        );
+        if ( isset( $block_tests[ $slug ] ) ) {
+            list( $title, $intro, $details ) = $block_tests[ $slug ];
+            $results[ $slug ] = wp_mail( $to, '[TEST] ' . $title, $this->mrm_safety_email_wrap_html_blocks( $title, $intro, $details, '' ), $headers );
+        }
     }
 
     /* =========================================================
