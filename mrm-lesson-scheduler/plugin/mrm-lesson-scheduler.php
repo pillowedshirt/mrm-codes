@@ -35,7 +35,7 @@ class MRM_Lesson_Scheduler {
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
     protected $mrm_secret_diagnostics = array();
-    const DB_VERSION = '1.5.8';
+    const DB_VERSION = '1.5.9';
     const CAPABILITY = 'manage_options';
     const TERMS_VERSION = '2026-04-25';
     // Google endpoints
@@ -579,6 +579,11 @@ protected function mrm_get_google_service_account_json() {
                 'hook'     => 'mrm_scheduler_send_feedback_requests',
                 'schedule' => 'mrm_5min',
                 'offset'   => 150,
+            ),
+            array(
+                'hook'     => 'mrm_scheduler_send_meeting_reminders',
+                'schedule' => 'mrm_5min',
+                'offset'   => 180,
             ),
         );
 
@@ -2107,6 +2112,9 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_post_mrm_scheduler_save_contact_form', array( $this, 'handle_save_contact_form_settings' ) );
         add_action( 'admin_post_mrm_scheduler_contact_submit', array( $this, 'handle_contact_form_submit' ) );
         add_action( 'admin_post_nopriv_mrm_scheduler_contact_submit', array( $this, 'handle_contact_form_submit' ) );
+        add_action( 'admin_post_mrm_meeting_scheduler_create', array( $this, 'handle_meeting_scheduler_create' ) );
+        add_action( 'admin_post_mrm_meeting_scheduler_gate', array( $this, 'handle_meeting_scheduler_gate' ) );
+        add_action( 'admin_post_nopriv_mrm_meeting_scheduler_gate', array( $this, 'handle_meeting_scheduler_gate' ) );
         add_action( 'admin_post_mrm_finalize_old_lessons_now', array( $this, 'admin_finalize_old_lessons_now' ) );
         add_action( 'admin_post_nopriv_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
 
@@ -2144,6 +2152,7 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'mrm_scheduler_send_safety_reminders', array( $this, 'cron_send_safety_reminders' ) );
         add_action( 'mrm_scheduler_check_safety_exceptions', array( $this, 'cron_check_safety_exceptions' ) );
         add_action( 'mrm_scheduler_send_feedback_requests', array( $this, 'cron_send_feedback_requests' ) );
+        add_action( 'mrm_scheduler_send_meeting_reminders', array( $this, 'cron_send_meeting_reminders' ) );
 
         $this->maybe_log_safety_boot( 'safety_system_constructor_loaded', array(
             'file' => __FILE__,
@@ -2185,6 +2194,7 @@ protected function mrm_get_google_service_account_json() {
             'mrm_scheduler_send_safety_reminders',
             'mrm_scheduler_check_safety_exceptions',
             'mrm_scheduler_send_feedback_requests',
+            'mrm_scheduler_send_meeting_reminders',
         );
 
         foreach ( $hooks as $hook ) {
@@ -2218,6 +2228,7 @@ protected function mrm_get_google_service_account_json() {
         wp_clear_scheduled_hook( 'mrm_scheduler_send_safety_reminders' );
         wp_clear_scheduled_hook( 'mrm_scheduler_check_safety_exceptions' );
         wp_clear_scheduled_hook( 'mrm_scheduler_send_feedback_requests' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_send_meeting_reminders' );
     }
 
     public static function install_or_upgrade() {
@@ -2370,7 +2381,34 @@ protected function mrm_get_google_service_account_json() {
     KEY related_order_idx (related_order_id),
     KEY related_sku_idx (related_sku)
 ) {$charset_collate};";
+        $meeting_table = $wpdb->prefix . 'mrm_meetings';
+        $sql_meetings = "CREATE TABLE {$meeting_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    title VARCHAR(255) NOT NULL,
+    audience_type VARCHAR(60) NOT NULL DEFAULT 'manual',
+    audience_state VARCHAR(50) NOT NULL DEFAULT '',
+    recipient_emails LONGTEXT NULL,
+    calendar_id VARCHAR(255) NOT NULL DEFAULT '',
+    timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
+    start_time DATETIME NOT NULL,
+    end_time DATETIME NOT NULL,
+    google_event_id VARCHAR(255) NULL,
+    google_meet_url TEXT NULL,
+    gate_token_hash CHAR(64) NOT NULL,
+    gate_url TEXT NULL,
+    reminder_sent_at DATETIME NULL,
+    created_by BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY start_time (start_time),
+    KEY gate_token_hash (gate_token_hash),
+    KEY audience_type (audience_type),
+    KEY audience_state (audience_state)
+) {$charset_collate};";
+
         dbDelta( $sql1 );
+        dbDelta( $sql_meetings );
         dbDelta( $sql2 );
         // Ensure lesson address columns exist for Calculations mileage support.
         $lesson_required_columns = array(
@@ -2528,6 +2566,22 @@ protected function mrm_get_google_service_account_json() {
         foreach ( $need_instructors as $col ) {
             if ( ! in_array( $col, $instructor_cols, true ) ) {
                 return array( 'ok' => false, 'reason' => 'missing_column', 'table' => 'mrm_instructors', 'column' => $col );
+            }
+        }
+
+        $meetings = $wpdb->prefix . 'mrm_meetings';
+        $exists_meetings = ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $meetings ) ) === $meetings );
+        if ( ! $exists_meetings ) {
+            return array( 'ok' => false, 'reason' => 'missing_table', 'table' => 'mrm_meetings' );
+        }
+
+        $meeting_cols = $wpdb->get_col( "DESC {$meetings}", 0 );
+        $need_meetings = array(
+            'title', 'audience_type', 'audience_state', 'recipient_emails', 'calendar_id', 'timezone', 'start_time', 'end_time', 'google_event_id', 'google_meet_url', 'gate_token_hash', 'gate_url', 'reminder_sent_at', 'created_by', 'created_at', 'updated_at',
+        );
+        foreach ( $need_meetings as $col ) {
+            if ( ! in_array( $col, $meeting_cols, true ) ) {
+                return array( 'ok' => false, 'reason' => 'missing_column', 'table' => 'mrm_meetings', 'column' => $col );
             }
         }
 
@@ -7950,6 +8004,282 @@ protected function mrm_get_google_service_account_json() {
         exit;
     }
 
+    public function render_admin_meeting_scheduler_page() {
+        if ( ! current_user_can( self::CAPABILITY ) ) {
+            wp_die( 'You do not have permission to access this page.' );
+        }
+
+        global $wpdb;
+        $opts = $this->get_settings();
+        $default_calendar_id = isset( $opts['meeting_scheduler_calendar_id'] ) ? (string) $opts['meeting_scheduler_calendar_id'] : '';
+        $default_timezone = isset( $opts['meeting_scheduler_timezone'] ) ? (string) $opts['meeting_scheduler_timezone'] : 'America/Phoenix';
+        $states = $this->mrm_meeting_get_state_choices();
+        $table = $this->mrm_meeting_table_name();
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        $recent = $exists === $table
+            ? $wpdb->get_results( "SELECT * FROM {$table} ORDER BY start_time DESC LIMIT 20", ARRAY_A )
+            : array();
+        ?>
+        <div class="wrap">
+            <h1>Meeting Scheduler</h1>
+            <?php if ( isset( $_GET['mrm_meeting_created'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['mrm_meeting_created'] ) ) ) : ?>
+                <div class="notice notice-success"><p>Meeting created and invitation emails were sent.</p></div>
+            <?php endif; ?>
+            <?php if ( isset( $_GET['mrm_meeting_error'] ) ) : ?>
+                <div class="notice notice-error"><p><?php echo esc_html( sanitize_text_field( wp_unslash( $_GET['mrm_meeting_error'] ) ) ); ?></p></div>
+            <?php endif; ?>
+
+            <p style="max-width:900px;">Create a Google Calendar event with a Google Meet room and email only the secure gated link. The gate opens 10 minutes before the meeting and closes 10 minutes after it ends.</p>
+
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="max-width:960px;background:#fff;border:1px solid #ccd0d4;padding:18px;border-radius:10px;">
+                <?php wp_nonce_field( 'mrm_meeting_scheduler_create', 'mrm_meeting_scheduler_nonce' ); ?>
+                <input type="hidden" name="action" value="mrm_meeting_scheduler_create">
+                <h2>Create Meeting</h2>
+                <table class="form-table" role="presentation">
+                    <tr><th scope="row"><label for="mrm_meeting_title">Meeting Title</label></th><td><input type="text" class="regular-text" id="mrm_meeting_title" name="mrm_meeting_title" required placeholder="Example: Arizona Instructor Team Meeting"><p class="description">Used for the Calendar event and email subject.</p></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_calendar_id">Google Calendar ID</label></th><td><input type="text" class="regular-text" id="mrm_meeting_calendar_id" name="mrm_meeting_calendar_id" value="<?php echo esc_attr( $default_calendar_id ); ?>" required><p class="description">The Scheduler service account must be able to edit this calendar.</p></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_timezone">Timezone</label></th><td><input type="text" class="regular-text" id="mrm_meeting_timezone" name="mrm_meeting_timezone" value="<?php echo esc_attr( $default_timezone ); ?>" required><p class="description">Example: America/Phoenix</p></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_date">Date</label></th><td><input type="date" id="mrm_meeting_date" name="mrm_meeting_date" required></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_time">Start Time</label></th><td><input type="time" id="mrm_meeting_time" name="mrm_meeting_time" required></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_duration">Duration</label></th><td><select id="mrm_meeting_duration" name="mrm_meeting_duration" required><option value="30">30 minutes</option><option value="45">45 minutes</option><option value="60" selected>60 minutes</option><option value="90">90 minutes</option><option value="120">120 minutes</option></select></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_audience_type">Instructor List</label></th><td><select id="mrm_meeting_audience_type" name="mrm_meeting_audience_type"><option value="manual">Manual emails only</option><option value="all_instructors">All instructors</option><option value="state_instructors">Statewide instructors</option></select><p class="description">Manual emails below are added to the selected instructor list.</p></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_audience_state">State</label></th><td><select id="mrm_meeting_audience_state" name="mrm_meeting_audience_state"><option value="">Select state</option><?php foreach ( $states as $state ) : ?><option value="<?php echo esc_attr( $state ); ?>"><?php echo esc_html( $state ); ?></option><?php endforeach; ?></select><p class="description">Generated from states assigned to instructors.</p></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_manual_emails">Manual Emails</label></th><td><textarea id="mrm_meeting_manual_emails" name="mrm_meeting_manual_emails" rows="5" class="large-text" placeholder="name@example.com, another@example.com"></textarea><p class="description">Separate addresses with commas, spaces, semicolons, or new lines.</p></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_notes">Internal Notes</label></th><td><textarea id="mrm_meeting_notes" name="mrm_meeting_notes" rows="4" class="large-text" placeholder="Optional internal note. This is not emailed to recipients."></textarea></td></tr>
+                </table>
+                <?php submit_button( 'Create Meeting and Send Invitations' ); ?>
+            </form>
+
+            <hr><h2>Recent Meetings</h2>
+            <?php if ( empty( $recent ) ) : ?><p>No meetings have been created yet.</p><?php else : ?>
+                <table class="widefat striped"><thead><tr><th>Title</th><th>Start</th><th>Audience</th><th>Recipients</th><th>Google Event</th><th>Reminder</th></tr></thead><tbody>
+                <?php foreach ( $recent as $row ) : $emails = json_decode( (string) $row['recipient_emails'], true ); ?>
+                    <tr><td><?php echo esc_html( $row['title'] ); ?></td><td><?php echo esc_html( $this->mrm_meeting_format_datetime_label( $row['start_time'], $row['timezone'] ) ); ?></td><td><?php echo esc_html( $row['audience_type'] ); ?><?php if ( ! empty( $row['audience_state'] ) ) : ?><br><code><?php echo esc_html( $row['audience_state'] ); ?></code><?php endif; ?></td><td><?php echo esc_html( (string) ( is_array( $emails ) ? count( $emails ) : 0 ) ); ?></td><td><code><?php echo esc_html( (string) $row['google_event_id'] ); ?></code></td><td><?php echo ! empty( $row['reminder_sent_at'] ) ? esc_html( $row['reminder_sent_at'] ) : 'Pending'; ?></td></tr>
+                <?php endforeach; ?>
+                </tbody></table>
+            <?php endif; ?>
+        </div>
+        <script>
+        (function () {
+            var audience = document.getElementById('mrm_meeting_audience_type');
+            var state = document.getElementById('mrm_meeting_audience_state');
+            function syncStateField() { if (audience && state) state.disabled = audience.value !== 'state_instructors'; }
+            if (audience) audience.addEventListener('change', syncStateField);
+            syncStateField();
+        }());
+        </script>
+        <?php
+    }
+
+    protected function mrm_meeting_admin_redirect( $args = array() ) {
+        wp_safe_redirect( add_query_arg( $args, admin_url( 'admin.php?page=mrm-scheduler-meeting-scheduler' ) ) );
+        exit;
+    }
+
+    public function handle_meeting_scheduler_create() {
+        if ( ! current_user_can( self::CAPABILITY ) ) {
+            wp_die( 'Not allowed.' );
+        }
+        check_admin_referer( 'mrm_meeting_scheduler_create', 'mrm_meeting_scheduler_nonce' );
+
+        global $wpdb;
+        $table = $this->mrm_meeting_table_name();
+        if ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) ) !== $table ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Meeting database table is missing. Run the Scheduler installer/upgrade.' ) );
+        }
+
+        $title = isset( $_POST['mrm_meeting_title'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_title'] ) ) : '';
+        $calendar_id = isset( $_POST['mrm_meeting_calendar_id'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_calendar_id'] ) ) : '';
+        $timezone = isset( $_POST['mrm_meeting_timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_timezone'] ) ) : 'America/Phoenix';
+        $date = isset( $_POST['mrm_meeting_date'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_date'] ) ) : '';
+        $time = isset( $_POST['mrm_meeting_time'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_time'] ) ) : '';
+        $duration = isset( $_POST['mrm_meeting_duration'] ) ? absint( wp_unslash( $_POST['mrm_meeting_duration'] ) ) : 60;
+        $audience_type = isset( $_POST['mrm_meeting_audience_type'] ) ? sanitize_key( wp_unslash( $_POST['mrm_meeting_audience_type'] ) ) : 'manual';
+        $audience_state = isset( $_POST['mrm_meeting_audience_state'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_audience_state'] ) ) : '';
+        $manual_emails_raw = isset( $_POST['mrm_meeting_manual_emails'] ) ? sanitize_textarea_field( wp_unslash( $_POST['mrm_meeting_manual_emails'] ) ) : '';
+        $notes = isset( $_POST['mrm_meeting_notes'] ) ? sanitize_textarea_field( wp_unslash( $_POST['mrm_meeting_notes'] ) ) : '';
+        $allowed_audiences = array( 'manual', 'all_instructors', 'state_instructors' );
+        $allowed_durations = array( 30, 45, 60, 90, 120 );
+
+        if ( $title === '' || $calendar_id === '' || $date === '' || $time === '' ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Missing required meeting details.' ) );
+        }
+        if ( ! in_array( $audience_type, $allowed_audiences, true ) ) {
+            $audience_type = 'manual';
+        }
+        if ( ! in_array( $duration, $allowed_durations, true ) ) {
+            $duration = 60;
+        }
+        if ( $audience_type === 'state_instructors' && $audience_state === '' ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Select a state for statewide instructors.' ) );
+        }
+
+        try {
+            $tz = new DateTimeZone( $timezone );
+        } catch ( Exception $e ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Invalid timezone.' ) );
+        }
+
+        $start_local = DateTime::createFromFormat( '!Y-m-d H:i', $date . ' ' . $time, $tz );
+        $date_errors = DateTime::getLastErrors();
+        if ( ! $start_local || ( is_array( $date_errors ) && ( $date_errors['warning_count'] || $date_errors['error_count'] ) ) || $start_local->format( 'Y-m-d H:i' ) !== $date . ' ' . $time ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Invalid meeting date/time.' ) );
+        }
+
+        $end_local = clone $start_local;
+        $end_local->modify( '+' . $duration . ' minutes' );
+        $start_utc = clone $start_local;
+        $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+        $end_utc = clone $end_local;
+        $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+        $recipients = $this->mrm_meeting_get_recipients( $audience_type, $audience_state, $manual_emails_raw );
+
+        if ( empty( $recipients ) ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'No valid recipient emails were found.' ) );
+        }
+        if ( ! $this->google_is_configured() ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Google Calendar is not configured.' ) );
+        }
+
+        try {
+            $token = bin2hex( random_bytes( 24 ) );
+        } catch ( Exception $e ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'A secure meeting link could not be generated.' ) );
+        }
+        $token_hash = hash( 'sha256', $token );
+        $gate_url = $this->mrm_meeting_gate_url( $token );
+        $description = "Low Brass Lessons meeting.\n\nSecure access link:\n{$gate_url}\n\nThis gated link opens 10 minutes before the meeting and closes 10 minutes after the meeting.";
+        if ( $notes !== '' ) {
+            $description .= "\n\nInternal notes:\n{$notes}";
+        }
+
+        // Deliberately omit attendees: Google invitations could expose the raw Meet URL and bypass the gate.
+        $inserted = $this->google_insert_event(
+            $calendar_id,
+            $title,
+            $description,
+            '',
+            $start_local->format( DateTimeInterface::RFC3339 ),
+            $end_local->format( DateTimeInterface::RFC3339 ),
+            $timezone,
+            array( 'mrm_type' => 'meeting_scheduler', 'audience_type' => $audience_type, 'audience_state' => $audience_state ),
+            array(),
+            true,
+            array()
+        );
+
+        if ( is_wp_error( $inserted ) ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => $inserted->get_error_message() ) );
+        }
+        $google_event_id = is_array( $inserted ) && ! empty( $inserted['id'] ) ? (string) $inserted['id'] : '';
+        $google_meet_url = is_array( $inserted ) && ! empty( $inserted['meet_url'] ) ? esc_url_raw( (string) $inserted['meet_url'] ) : '';
+        $meet_host = wp_parse_url( $google_meet_url, PHP_URL_HOST );
+        if ( $google_event_id === '' || $google_meet_url === '' || ! in_array( strtolower( (string) $meet_host ), array( 'meet.google.com', 'hangouts.google.com' ), true ) ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Google event was created, but a valid Meet link was not returned.' ) );
+        }
+
+        $now = current_time( 'mysql' );
+        $ok = $wpdb->insert(
+            $table,
+            array(
+                'title' => $title, 'audience_type' => $audience_type, 'audience_state' => $audience_state,
+                'recipient_emails' => wp_json_encode( $recipients ), 'calendar_id' => $calendar_id, 'timezone' => $timezone,
+                'start_time' => $start_utc->format( 'Y-m-d H:i:s' ), 'end_time' => $end_utc->format( 'Y-m-d H:i:s' ),
+                'google_event_id' => $google_event_id, 'google_meet_url' => $google_meet_url,
+                'gate_token_hash' => $token_hash, 'gate_url' => $gate_url, 'reminder_sent_at' => null,
+                'created_by' => get_current_user_id(), 'created_at' => $now, 'updated_at' => $now,
+            ),
+            array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+        );
+        if ( ! $ok ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Meeting database record could not be created.' ) );
+        }
+
+        $opts = $this->get_settings();
+        $opts['meeting_scheduler_calendar_id'] = $calendar_id;
+        $opts['meeting_scheduler_timezone'] = $timezone;
+        update_option( $this->option_key, $opts, 'no' );
+        $this->options = $opts;
+        $this->mrm_meeting_send_invitation_emails( (int) $wpdb->insert_id, $recipients, $gate_url );
+        $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_created' => 1 ) );
+    }
+
+    public function handle_meeting_scheduler_gate() {
+        global $wpdb;
+        $token = isset( $_GET['token'] ) ? sanitize_text_field( wp_unslash( $_GET['token'] ) ) : '';
+        if ( $token === '' || ! preg_match( '/^[a-f0-9]{48}$/', $token ) ) {
+            wp_die( 'This meeting link is invalid.', 'Invalid Meeting Link', array( 'response' => 404 ) );
+        }
+
+        $table = $this->mrm_meeting_table_name();
+        $meeting = $wpdb->get_row(
+            $wpdb->prepare( "SELECT * FROM {$table} WHERE gate_token_hash = %s LIMIT 1", hash( 'sha256', $token ) ),
+            ARRAY_A
+        );
+        if ( ! is_array( $meeting ) ) {
+            wp_die( 'This meeting link is invalid.', 'Invalid Meeting Link', array( 'response' => 404 ) );
+        }
+
+        $now = time();
+        $start_ts = strtotime( (string) $meeting['start_time'] . ' UTC' );
+        $end_ts = strtotime( (string) $meeting['end_time'] . ' UTC' );
+        if ( ! $start_ts || ! $end_ts ) {
+            wp_die( 'This meeting link could not be validated.', 'Meeting Link Error', array( 'response' => 500 ) );
+        }
+        if ( $now < $start_ts - ( 10 * MINUTE_IN_SECONDS ) ) {
+            $label = $this->mrm_meeting_format_datetime_label( $meeting['start_time'], $meeting['timezone'] );
+            wp_die( '<h1>Meeting Room Not Open Yet</h1><p>This meeting room opens 10 minutes before the scheduled start time.</p><p><strong>Scheduled time:</strong> ' . esc_html( $label ) . '</p>', 'Meeting Room Not Open Yet', array( 'response' => 403 ) );
+        }
+        if ( $now > $end_ts + ( 10 * MINUTE_IN_SECONDS ) ) {
+            wp_die( '<h1>Meeting Room Has Closed</h1><p>This meeting room closed 10 minutes after the scheduled end time.</p>', 'Meeting Room Has Closed', array( 'response' => 403 ) );
+        }
+
+        $meet_url = isset( $meeting['google_meet_url'] ) ? esc_url_raw( trim( (string) $meeting['google_meet_url'] ) ) : '';
+        $host = strtolower( (string) wp_parse_url( $meet_url, PHP_URL_HOST ) );
+        if ( $meet_url === '' || ! in_array( $host, array( 'meet.google.com', 'hangouts.google.com' ), true ) ) {
+            wp_die( 'The meeting room is not available.', 'Meeting Room Unavailable', array( 'response' => 503 ) );
+        }
+
+        wp_redirect( $meet_url, 302, 'MRM Meeting Scheduler' );
+        exit;
+    }
+
+    public function cron_send_meeting_reminders() {
+        global $wpdb;
+        $table = $this->mrm_meeting_table_name();
+        if ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) ) !== $table ) {
+            return;
+        }
+
+        $now = time();
+        $window_start_utc = gmdate( 'Y-m-d H:i:s', $now + ( 55 * MINUTE_IN_SECONDS ) );
+        $window_end_utc = gmdate( 'Y-m-d H:i:s', $now + ( 65 * MINUTE_IN_SECONDS ) );
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT * FROM {$table}
+                 WHERE reminder_sent_at IS NULL
+                   AND start_time >= %s
+                   AND start_time <= %s
+                 ORDER BY start_time ASC LIMIT 25",
+                $window_start_utc,
+                $window_end_utc
+            ),
+            ARRAY_A
+        );
+
+        foreach ( (array) $rows as $row ) {
+            if ( $this->mrm_meeting_send_reminder_email_for_row( $row ) ) {
+                $wpdb->update(
+                    $table,
+                    array( 'reminder_sent_at' => current_time( 'mysql' ), 'updated_at' => current_time( 'mysql' ) ),
+                    array( 'id' => (int) $row['id'], 'reminder_sent_at' => null ),
+                    array( '%s', '%s' ),
+                    array( '%d', '%s' )
+                );
+            }
+        }
+    }
+
     public function render_admin_safety_attendance_page() {
         if ( ! current_user_can( self::CAPABILITY ) ) {
             wp_die( 'You do not have permission to access this page.' );
@@ -10291,6 +10621,216 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
 
 
 
+    protected function mrm_meeting_table_name() {
+        global $wpdb;
+        return $wpdb->prefix . 'mrm_meetings';
+    }
+
+    protected function mrm_meeting_get_state_choices() {
+        global $wpdb;
+
+        $table = $wpdb->prefix . 'mrm_instructors';
+        $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+
+        if ( $exists !== $table ) {
+            return array();
+        }
+
+        $rows = $wpdb->get_col(
+            "SELECT DISTINCT state
+             FROM {$table}
+             WHERE state IS NOT NULL
+               AND state <> ''
+             ORDER BY state ASC"
+        );
+        $states = array();
+
+        foreach ( (array) $rows as $state ) {
+            $state = trim( (string) $state );
+            if ( $state !== '' ) {
+                $states[] = $state;
+            }
+        }
+
+        return array_values( array_unique( $states ) );
+    }
+
+    protected function mrm_meeting_parse_manual_emails( $raw ) {
+        $parts = preg_split( '/[\s,;]+/', (string) $raw );
+        $emails = array();
+
+        foreach ( (array) $parts as $part ) {
+            $email = sanitize_email( trim( (string) $part ) );
+            if ( $email !== '' && is_email( $email ) ) {
+                $emails[] = strtolower( $email );
+            }
+        }
+
+        return array_values( array_unique( $emails ) );
+    }
+
+    protected function mrm_meeting_get_recipients( $audience_type, $audience_state, $manual_emails_raw ) {
+        global $wpdb;
+
+        $emails         = array();
+        $audience_type  = sanitize_key( (string) $audience_type );
+        $audience_state = sanitize_text_field( (string) $audience_state );
+        $table          = $wpdb->prefix . 'mrm_instructors';
+        $exists         = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+
+        if ( $exists === $table ) {
+            if ( $audience_type === 'all_instructors' ) {
+                $rows = $wpdb->get_col(
+                    "SELECT email
+                     FROM {$table}
+                     WHERE email IS NOT NULL
+                       AND email <> ''
+                     ORDER BY name ASC"
+                );
+            } elseif ( $audience_type === 'state_instructors' && $audience_state !== '' ) {
+                $rows = $wpdb->get_col(
+                    $wpdb->prepare(
+                        "SELECT email
+                         FROM {$table}
+                         WHERE state = %s
+                           AND email IS NOT NULL
+                           AND email <> ''
+                         ORDER BY name ASC",
+                        $audience_state
+                    )
+                );
+            } else {
+                $rows = array();
+            }
+
+            foreach ( (array) $rows as $email ) {
+                $email = sanitize_email( (string) $email );
+                if ( $email !== '' && is_email( $email ) ) {
+                    $emails[] = strtolower( $email );
+                }
+            }
+        }
+
+        $emails = array_merge( $emails, $this->mrm_meeting_parse_manual_emails( $manual_emails_raw ) );
+        return array_values( array_unique( $emails ) );
+    }
+
+    protected function mrm_meeting_gate_url( $token ) {
+        return add_query_arg(
+            array(
+                'action' => 'mrm_meeting_scheduler_gate',
+                'token'  => (string) $token,
+            ),
+            admin_url( 'admin-post.php' )
+        );
+    }
+
+    protected function mrm_meeting_wrap_email( $title, $body_html, $gate_url = '' ) {
+        return $this->mrm_safety_email_wrap_html(
+            $title,
+            $body_html,
+            '<p style="margin:0;">The secure link opens 10 minutes before the meeting and closes 10 minutes after it ends.</p>',
+            $gate_url,
+            $gate_url !== '' ? 'Join Meeting' : ''
+        );
+    }
+
+    protected function mrm_meeting_send_email( $to, $subject, $body_html ) {
+        $to = sanitize_email( (string) $to );
+        if ( $to === '' || ! is_email( $to ) ) {
+            return false;
+        }
+
+        return wp_mail(
+            $to,
+            wp_specialchars_decode( (string) $subject, ENT_QUOTES ),
+            $body_html,
+            array( 'Content-Type: text/html; charset=UTF-8' )
+        );
+    }
+
+    protected function mrm_meeting_format_datetime_label( $mysql_utc, $timezone ) {
+        try {
+            $tz = new DateTimeZone( (string) $timezone );
+        } catch ( Exception $e ) {
+            $tz = wp_timezone();
+        }
+
+        $dt = DateTime::createFromFormat( '!Y-m-d H:i:s', (string) $mysql_utc, new DateTimeZone( 'UTC' ) );
+        if ( ! $dt ) {
+            return (string) $mysql_utc;
+        }
+
+        $dt->setTimezone( $tz );
+        return $dt->format( 'l, F j, Y \\a\\t g:i A T' );
+    }
+
+    protected function mrm_meeting_send_invitation_emails( $meeting_id, $recipients, $gate_url ) {
+        global $wpdb;
+
+        $table = $this->mrm_meeting_table_name();
+        $meeting = $wpdb->get_row(
+            $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d LIMIT 1", (int) $meeting_id ),
+            ARRAY_A
+        );
+
+        if ( ! is_array( $meeting ) ) {
+            return;
+        }
+
+        $title = (string) $meeting['title'];
+        $time_label = $this->mrm_meeting_format_datetime_label( $meeting['start_time'], $meeting['timezone'] );
+        $body = '<p>Hello,</p>';
+        $body .= '<p>You are invited to the following Low Brass Lessons meeting:</p>';
+        $body .= '<p><strong>' . esc_html( $title ) . '</strong><br>' . esc_html( $time_label ) . '</p>';
+        $body .= '<p>Please use the secure meeting access button below. The raw Google Meet link is intentionally not included.</p>';
+        $body .= '<p>If the button does not work, copy and paste this secure link into your browser:<br><a href="' . esc_url( $gate_url ) . '">' . esc_html( $gate_url ) . '</a></p>';
+        $body .= '<p>Thank you,<br>Low Brass Lessons</p>';
+        $wrapped = $this->mrm_meeting_wrap_email( $title, $body, $gate_url );
+
+        foreach ( (array) $recipients as $email ) {
+            $this->mrm_meeting_send_email( $email, $title, $wrapped );
+        }
+    }
+
+    protected function mrm_meeting_send_reminder_email_for_row( $meeting ) {
+        if ( ! is_array( $meeting ) ) {
+            return false;
+        }
+
+        $emails = json_decode( (string) $meeting['recipient_emails'], true );
+        if ( ! is_array( $emails ) || empty( $emails ) ) {
+            return false;
+        }
+
+        $gate_url = isset( $meeting['gate_url'] ) ? trim( (string) $meeting['gate_url'] ) : '';
+        $title = (string) $meeting['title'];
+        $time_label = $this->mrm_meeting_format_datetime_label( $meeting['start_time'], $meeting['timezone'] );
+        $subject = 'Reminder: ' . $title;
+        $body = '<p>Hello,</p>';
+        $body .= '<p>This is a reminder for the following Low Brass Lessons meeting:</p>';
+        $body .= '<p><strong>' . esc_html( $title ) . '</strong><br>' . esc_html( $time_label ) . '</p>';
+
+        if ( $gate_url !== '' ) {
+            $body .= '<p>Please use the secure meeting access button below.</p>';
+            $body .= '<p>If the button does not work, copy and paste this secure link into your browser:<br><a href="' . esc_url( $gate_url ) . '">' . esc_html( $gate_url ) . '</a></p>';
+        } else {
+            $body .= '<p>Please use the secure meeting access link from your original invitation email.</p>';
+        }
+
+        $body .= '<p>Thank you,<br>Low Brass Lessons</p>';
+        $wrapped = $this->mrm_meeting_wrap_email( $title, $body, $gate_url );
+        $sent_any = false;
+
+        foreach ( $emails as $email ) {
+            if ( $this->mrm_meeting_send_email( $email, $subject, $wrapped ) ) {
+                $sent_any = true;
+            }
+        }
+
+        return $sent_any;
+    }
+
     /* =========================================================
      * Admin UI
      * ========================================================= */
@@ -10305,6 +10845,14 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
             self::CAPABILITY,
             'mrm-scheduler-safety-attendance',
             array( $this, 'render_admin_safety_attendance_page' )
+        );
+        add_submenu_page(
+            'mrm-scheduler',
+            'Meeting Scheduler',
+            'Meeting Scheduler',
+            self::CAPABILITY,
+            'mrm-scheduler-meeting-scheduler',
+            array( $this, 'render_admin_meeting_scheduler_page' )
         );
         add_submenu_page(
             'mrm-scheduler',
