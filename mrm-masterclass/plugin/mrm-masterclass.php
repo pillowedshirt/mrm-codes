@@ -197,6 +197,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_title_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_session_page_title_css', 21, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
+	add_action( 'mrm_send_cross_plugin_email_test', array( $this, 'handle_cross_plugin_email_test' ), 10, 3 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
@@ -3748,6 +3749,78 @@ private function mrm_mc_redacted_email_for_log( $email ) {
 	$domain = $parts[1];
 
 	return substr( $local, 0, 1 ) . '***@' . $domain;
+}
+
+public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
+	$slug = sanitize_key( (string) $slug );
+	$to = sanitize_email( (string) $to );
+	if ( ! is_email( $to ) ) {
+		return;
+	}
+
+	$event_title = 'Test Masterclass Event';
+	$presenter_name = 'Test Presenter';
+	$student_name = 'Test Student';
+	$time_label = 'January 15, 2027 at 4:00 PM MST';
+	$access_url = home_url( '/test-masterclass-access/' );
+	$cancel_url = home_url( '/test-masterclass-cancel/' );
+	$content = '';
+	$heading = '';
+	$subject = '';
+
+	if ( $slug === 'masterclass_registration_confirmation' ) {
+		$heading = 'Masterclass Confirmation';
+		$subject = $heading;
+		$content = '<p>Your Masterclass registration has been confirmed.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) . '<br><strong>Registrant:</strong> ' . esc_html( $student_name ) );
+		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Link' );
+		$content .= $this->mrm_mc_email_secondary_button_html( $cancel_url, 'I Can No Longer Attend This Masterclass' );
+	} elseif ( $slug === 'masterclass_student_reminder' ) {
+		$heading = 'Masterclass Reminder';
+		$subject = $heading;
+		$content = '<p>Your Masterclass starts in one hour.</p><p>Please use the protected access link below at the scheduled time.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) );
+		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Link' );
+	} elseif ( $slug === 'masterclass_presenter_confirmation' ) {
+		$heading = 'Masterclass Presenter Confirmation';
+		$subject = $heading;
+		$content = '<p>You have been assigned as the presenter for the following Low Brass Lessons Masterclass.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) );
+		$content .= $this->mrm_mc_email_button_html( home_url( '/test-presenter-page/' ), 'View Presenter Page' );
+	} elseif ( $slug === 'masterclass_presenter_reminder' ) {
+		$heading = 'Masterclass Presenter Reminder';
+		$subject = $heading;
+		$content = '<p>This is a reminder that your Masterclass begins soon.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) );
+		$content .= $this->mrm_mc_email_button_html( home_url( '/test-presenter-meet/' ), 'Open Presenter Meeting Link' );
+	} elseif ( $slug === 'masterclass_feedback_request' ) {
+		$heading = 'Masterclass Feedback Request';
+		$subject = $heading;
+		$content = '<p>Thank you for attending. Please share feedback about your Masterclass experience.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) );
+		$content .= $this->mrm_mc_email_button_html( home_url( '/test-masterclass-feedback/' ), 'Share Feedback' );
+	} elseif ( $slug === 'masterclass_event_updated' ) {
+		$heading = 'Masterclass Updated';
+		$subject = $heading;
+		$content = '<p>A Masterclass you registered for has been updated.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Updated time:</strong> ' . esc_html( $time_label ) );
+		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Link' );
+	} elseif ( $slug === 'masterclass_refund_completed' ) {
+		$heading = 'Masterclass Refund Completed';
+		$subject = $heading;
+		$content = '<p>Your Masterclass refund has been completed.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Refund amount:</strong> $25.00' );
+	} elseif ( $slug === 'masterclass_event_cancelled' ) {
+		$heading = 'Masterclass Cancelled';
+		$subject = $heading;
+		$content = '<p>A Masterclass you registered for has been cancelled.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Refund status:</strong> Refunded' );
+	} else {
+		return;
+	}
+
+	$body = $this->mrm_mc_email_template( $heading, $content );
+	$results[ $slug ] = $this->mrm_mc_send_email_recorded( 'email_test_' . $slug, $to, '[TEST] ' . $subject, $body, null, null );
 }
 
 private function mrm_mc_send_email_recorded( $type, $to, $subject, $body, $event_id = null, $registration_id = null ) {
