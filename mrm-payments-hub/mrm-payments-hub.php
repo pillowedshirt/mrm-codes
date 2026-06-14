@@ -765,7 +765,7 @@ private function mrm_scope_allows_promo_for_product($promo, $product_type) {
   $scope = (string)($promo['scope'] ?? 'all');
 
   if ($scope === 'all') return true;
-  if ($scope === 'lesson' && $product_type === 'lesson') return true;
+  if ($scope === 'lesson' && in_array($product_type, array('lesson', 'masterclass'), true)) return true;
   if ($scope === 'sheet_music' && $product_type === 'sheet_music') return true;
 
   return false;
@@ -1033,6 +1033,39 @@ private function mrm_validate_promo_for_purchase($code, $email, $product_type, $
     'eligible_amount_cents' => (int)($calc['eligible_amount_cents'] ?? $base_amount_cents),
     'eligible_occurrences' => (int)($calc['eligible_occurrences'] ?? 1),
   );
+}
+
+public function resolve_promo_discount($promo_code, $amount_cents, $context = array()) {
+  $promo_code = $this->mrm_normalize_promo_code($promo_code);
+  $amount_cents = max(0, absint($amount_cents));
+  $context = is_array($context) ? $context : array();
+  $email = sanitize_email((string)($context['email'] ?? ''));
+  $product_type = sanitize_key((string)($context['product_type'] ?? 'lesson'));
+
+  if ($promo_code === '' || $amount_cents <= 0) {
+    return array('ok'=>false,'discount_cents'=>0,'message'=>'No promotional code was provided.');
+  }
+
+  $result = $this->mrm_validate_promo_for_purchase($promo_code, $email, $product_type, $amount_cents, $context);
+
+  if (empty($result['ok'])) {
+    return $result;
+  }
+
+  $discount_cents = max(0, min($amount_cents, (int)($result['discount_cents'] ?? 0)));
+
+  if ($discount_cents <= 0) {
+    return array('ok'=>false,'discount_cents'=>0,'message'=>'This promotional code does not apply to this purchase.');
+  }
+
+  return array_merge($result, array(
+    'ok' => true,
+    'promo_code' => $promo_code,
+    'discount_cents' => $discount_cents,
+    'discount_label' => '$' . number_format($discount_cents / 100, 2) . ' off',
+    'original_amount_cents' => $amount_cents,
+    'final_amount_cents' => max(0, $amount_cents - $discount_cents),
+  ));
 }
 
 private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '', $customer_email = '', $promo = array()) {
@@ -12777,6 +12810,24 @@ $mrm_pay_hub_singleton = new MRM_Payments_Hub_Single();
 function mrm_pay_hub_singleton() {
   global $mrm_pay_hub_singleton;
   return $mrm_pay_hub_singleton instanceof MRM_Payments_Hub_Single ? $mrm_pay_hub_singleton : null;
+}
+
+if (!function_exists('mrm_payments_hub_resolve_promo_discount')) {
+  function mrm_payments_hub_resolve_promo_discount($promo_code, $amount_cents, $context = array()) {
+    $promo_code = strtoupper(trim(sanitize_text_field((string)$promo_code)));
+    $amount_cents = max(0, absint($amount_cents));
+
+    if ($promo_code === '' || $amount_cents <= 0) {
+      return array('ok'=>false,'discount_cents'=>0,'message'=>'No promotional code was provided.');
+    }
+
+    $hub = mrm_pay_hub_singleton();
+    if (is_object($hub) && method_exists($hub, 'resolve_promo_discount')) {
+      return $hub->resolve_promo_discount($promo_code, $amount_cents, $context);
+    }
+
+    return array('ok'=>false,'discount_cents'=>0,'message'=>'Promotional codes are unavailable right now.');
+  }
 }
 
 register_activation_hook(__FILE__, function() {

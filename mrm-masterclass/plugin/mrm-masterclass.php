@@ -1177,6 +1177,9 @@ public function mrm_mc_render_critical_error_notice() {
 	$registration_adds = array(
 		'promo_code'                => "ALTER TABLE {$registrations_table} ADD promo_code VARCHAR(100) NULL",
 		'discount_cents'            => "ALTER TABLE {$registrations_table} ADD discount_cents INT NOT NULL DEFAULT 0",
+		'promo_discount_cents'      => "ALTER TABLE {$registrations_table} ADD promo_discount_cents INT NOT NULL DEFAULT 0",
+		'original_amount_cents'     => "ALTER TABLE {$registrations_table} ADD original_amount_cents INT NOT NULL DEFAULT 0",
+		'final_amount_cents'        => "ALTER TABLE {$registrations_table} ADD final_amount_cents INT NOT NULL DEFAULT 0",
 		'gate_token_hash'           => "ALTER TABLE {$registrations_table} ADD gate_token_hash VARCHAR(64) NULL",
 		'gate_url'                  => "ALTER TABLE {$registrations_table} ADD gate_url TEXT NULL",
 		'cancel_url'                => "ALTER TABLE {$registrations_table} ADD cancel_url TEXT NULL",
@@ -8395,32 +8398,29 @@ public function rest_get_event( $request ) {
 }
 
 public function rest_apply_promo( WP_REST_Request $request ) {
-	$data       = $this->mrm_mc_get_rest_json_body();
-	$promo_code = strtoupper( sanitize_text_field( $data['promo_code'] ?? '' ) );
+	$event_id   = absint( $this->mrm_mc_get_rest_param_value( $request, 'event_id', 0 ) );
+	$promo_code = sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'promo_code', '' ) );
+	$email      = sanitize_email( $this->mrm_mc_get_rest_param_value( $request, 'email', '' ) );
+	$event      = $this->mrm_mc_get_event( $event_id );
 
-	$this->mrm_mc_debug_log(
-		'REST promo placeholder endpoint reached.',
-		array(
-			'has_promo_code' => '' !== $promo_code ? 1 : 0,
-		)
-	);
-
-	if ( '' === $promo_code ) {
+	if ( ! $event ) {
 		return rest_ensure_response(
 			array(
-				'ok'             => true,
-				'discount_cents' => 0,
-				'message'        => '',
+				'ok'           => false,
+				'promo_status' => 'invalid',
+				'message'      => 'This promotional code is not valid for this Masterclass.',
 			)
 		);
 	}
 
 	return rest_ensure_response(
-		array(
-			'ok'             => true,
-			'discount_cents' => 0,
-			'message'        => 'Promo code support for Masterclasses is being prepared and is not active yet.',
-			'promo_code'     => $promo_code,
+		$this->mrm_mc_resolve_promo_discount(
+			$promo_code,
+			absint( $event->price_cents ),
+			array(
+				'event_id' => $event_id,
+				'email'    => $email,
+			)
 		)
 	);
 }
@@ -8429,77 +8429,57 @@ public function rest_create_pi( WP_REST_Request $request ) {
 	return $this->rest_create_payment_intent( $request );
 }
 
-private function mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents ) {
-	$promo_code        = trim( sanitize_text_field( $promo_code ) );
-	$base_amount_cents = absint( $base_amount_cents );
+private function mrm_mc_resolve_promo_discount( $promo_code, $amount_cents, $context = array() ) {
+	$promo_code   = strtoupper( trim( sanitize_text_field( (string) $promo_code ) ) );
+	$amount_cents = max( 0, absint( $amount_cents ) );
+	$result       = array(
+		'ok'                    => false,
+		'promo_code'            => $promo_code,
+		'promo_status'          => 'none',
+		'discount_cents'        => 0,
+		'discount_label'        => '',
+		'original_amount_cents' => $amount_cents,
+		'final_amount_cents'    => $amount_cents,
+		'message'               => '',
+	);
 
-	if ( '' === $promo_code ) {
-		return array(
-			'status'         => 'not_applied',
-			'message'        => '',
-			'discount_cents' => 0,
-			'promo_code'     => '',
-			'metadata'       => array(),
-		);
+	if ( '' === $promo_code || $amount_cents <= 0 ) {
+		$result['message'] = 'No promotional code was applied.';
+		return $result;
 	}
 
-	if ( strlen( $promo_code ) > 80 ) {
-		return new WP_Error(
-			'mrm_masterclass_promo_invalid',
-			'Please enter a shorter promo code.',
-			array( 'status' => 400 )
-		);
-	}
-
-	/*
-	 * Future shared promo integration path.
-	 *
-	 * Keep this self-contained for now, but allow safe use of an existing
-	 * shared function if one is later made available globally.
-	 *
-	 * Expected future function shape:
-	 * mrm_validate_online_lesson_style_promo( $promo_code, $context )
-	 */
-	if ( function_exists( 'mrm_validate_online_lesson_style_promo' ) ) {
-		$context = array(
-			'source'            => 'masterclass',
-			'event_id'          => absint( $event->id ?? 0 ),
-			'product_type'      => 'online_lesson_style_masterclass',
-			'base_amount_cents' => $base_amount_cents,
-			'email'             => '',
+	if ( function_exists( 'mrm_payments_hub_resolve_promo_discount' ) ) {
+		$hub = mrm_payments_hub_resolve_promo_discount(
+			$promo_code,
+			$amount_cents,
+			array_merge(
+				array( 'source' => 'masterclass', 'product_type' => 'masterclass' ),
+				is_array( $context ) ? $context : array()
+			)
 		);
 
-		$result = mrm_validate_online_lesson_style_promo( $promo_code, $context );
-
-		if ( is_wp_error( $result ) ) {
-			return $result;
-		}
-
-		if ( is_array( $result ) ) {
+		if ( is_array( $hub ) && ! empty( $hub['ok'] ) ) {
+			$discount_cents = max( 0, min( $amount_cents, absint( $hub['discount_cents'] ?? 0 ) ) );
 			return array(
-				'status'         => sanitize_key( $result['status'] ?? 'applied' ),
-				'message'        => sanitize_text_field( $result['message'] ?? 'Promo code applied.' ),
-				'discount_cents' => min( $base_amount_cents, absint( $result['discount_cents'] ?? 0 ) ),
-				'promo_code'     => $promo_code,
-				'metadata'       => is_array( $result['metadata'] ?? null ) ? $result['metadata'] : array(),
+				'ok'                    => $discount_cents > 0,
+				'promo_code'            => $promo_code,
+				'promo_status'          => $discount_cents > 0 ? 'applied' : 'not_applicable',
+				'discount_cents'        => $discount_cents,
+				'discount_label'        => isset( $hub['discount_label'] ) ? sanitize_text_field( (string) $hub['discount_label'] ) : '',
+				'original_amount_cents' => $amount_cents,
+				'final_amount_cents'    => max( 0, $amount_cents - $discount_cents ),
+				'message'               => $discount_cents > 0 ? 'Promotional code applied.' : 'This promotional code does not apply to this Masterclass.',
 			);
 		}
+
+		$result['promo_status'] = 'invalid';
+		$result['message']      = 'This promotional code is not valid for this Masterclass.';
+		return $result;
 	}
 
-	/*
-	 * Launch-safe placeholder behavior:
-	 * Accept the code, do not crash, do not discount yet.
-	 */
-	return array(
-		'status'         => 'received_not_active',
-		'message'        => 'Promo code received. Masterclass promo discounts are not active yet.',
-		'discount_cents' => 0,
-		'promo_code'     => $promo_code,
-		'metadata'       => array(
-			'placeholder' => true,
-			'future_path' => 'online_lesson_style',
-		),
-	);
+	$result['promo_status'] = 'unavailable';
+	$result['message']      = 'Promotional codes are unavailable right now.';
+	return $result;
 }
 private function mrm_mc_get_rest_param_value( $request, $key, $default = '' ) {
 	if ( $request instanceof WP_REST_Request ) {
@@ -8623,14 +8603,22 @@ public function rest_create_payment_intent( $request ) {
 		return new WP_Error( 'mrm_masterclass_invalid_amount', 'This Masterclass is not configured for payment yet.', array( 'status' => 500 ) );
 	}
 
-	$promo = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
+	$promo = $this->mrm_mc_resolve_promo_discount(
+		$promo_code,
+		$base_amount_cents,
+		array( 'event_id' => $event_id, 'email' => $email )
+	);
 
-	if ( is_wp_error( $promo ) ) {
-		return $promo;
+	if ( '' !== trim( $promo_code ) && empty( $promo['ok'] ) ) {
+		return new WP_Error(
+			'mrm_masterclass_promo_invalid',
+			sanitize_text_field( $promo['message'] ?? 'This promotional code is not valid for this Masterclass.' ),
+			array( 'status' => 400 )
+		);
 	}
 
 	$discount_cents = absint( $promo['discount_cents'] ?? 0 );
-	$amount_cents   = max( 50, $base_amount_cents - $discount_cents );
+	$amount_cents   = max( 50, absint( $promo['final_amount_cents'] ?? $base_amount_cents ) );
 	$keys           = $this->mrm_mc_get_stripe_keys();
 
 	if ( is_wp_error( $keys ) ) {
@@ -8655,6 +8643,8 @@ public function rest_create_payment_intent( $request ) {
 			'receipt_email'                       => $email,
 
 			'metadata[event_id]'                  => (string) $event_id,
+			'metadata[mrm_type]'                  => 'masterclass',
+			'metadata[masterclass_event_id]'      => (string) $event_id,
 			'metadata[mrm_masterclass_event_id]'  => (string) $event_id,
 			'metadata[event_title]'               => sanitize_text_field( $event->title ),
 			'metadata[first_name]'                => $first_name,
@@ -8662,6 +8652,10 @@ public function rest_create_payment_intent( $request ) {
 			'metadata[name]'                      => $name,
 			'metadata[email]'                     => $email,
 			'metadata[promo_code]'                => $promo_code,
+			'metadata[promo_status]'              => sanitize_key( $promo['promo_status'] ?? 'none' ),
+			'metadata[promo_discount_cents]'      => (string) $discount_cents,
+			'metadata[original_amount_cents]'     => (string) $base_amount_cents,
+			'metadata[final_amount_cents]'        => (string) $amount_cents,
 			'metadata[base_amount]'               => (string) $base_amount_cents,
 			'metadata[discount_amount]'           => (string) $discount_cents,
 			'metadata[source]'                    => 'mrm_masterclass',
@@ -8705,7 +8699,7 @@ public function rest_create_payment_intent( $request ) {
 			'amount_cents'            => $amount_cents,
 			'base_amount_cents'       => $base_amount_cents,
 			'discount_cents'          => $discount_cents,
-			'promo_status'            => sanitize_key( $promo['status'] ?? 'not_applied' ),
+			'promo_status'            => sanitize_key( $promo['promo_status'] ?? 'none' ),
 			'promo_message'           => sanitize_text_field( $promo['message'] ?? '' ),
 
 			/*
@@ -8832,11 +8826,12 @@ public function rest_finalize_registration( $request ) {
 		);
 	}
 
-	$base_amount_cents = absint( $event->price_cents );
-	$promo             = $this->mrm_mc_validate_masterclass_promo_placeholder( $promo_code, $event, $base_amount_cents );
-	$promo_status      = is_wp_error( $promo ) ? 'error' : sanitize_key( $promo['status'] ?? 'not_applied' );
-	$expected_discount = is_wp_error( $promo ) ? 0 : absint( $promo['discount_cents'] ?? 0 );
-	$expected_amount   = max( 50, $base_amount_cents - $expected_discount );
+	$metadata          = is_array( $payment_intent['metadata'] ?? null ) ? $payment_intent['metadata'] : array();
+	$base_amount_cents = absint( $metadata['original_amount_cents'] ?? $event->price_cents );
+	$promo_code        = strtoupper( sanitize_text_field( $metadata['promo_code'] ?? $promo_code ) );
+	$promo_status      = sanitize_key( $metadata['promo_status'] ?? ( '' === $promo_code ? 'none' : 'invalid' ) );
+	$expected_discount = absint( $metadata['promo_discount_cents'] ?? 0 );
+	$expected_amount   = max( 50, absint( $metadata['final_amount_cents'] ?? ( $base_amount_cents - $expected_discount ) ) );
 
 	if ( $amount_received !== $expected_amount ) {
 		$this->mrm_mc_debug_log(
@@ -8865,7 +8860,7 @@ public function rest_finalize_registration( $request ) {
 	$presenter_cut = absint( $share_calc['presenter_share_cents'] );
 	$platform_cut  = absint( $share_calc['platform_share_cents'] );
 	$terms_snapshot = wp_json_encode( $terms );
-	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'cancel_url'=>esc_url_raw( $this->mrm_mc_cancel_url_for_token( $gate['token'] ) ),'feedback_url'=>esc_url_raw( $this->mrm_mc_feedback_url_for_token( $gate['token'] ) ),'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
+	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'promo_discount_cents'=>$discount_cents,'original_amount_cents'=>$base_amount_cents,'final_amount_cents'=>$amount_received,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'cancel_url'=>esc_url_raw( $this->mrm_mc_cancel_url_for_token( $gate['token'] ) ),'feedback_url'=>esc_url_raw( $this->mrm_mc_feedback_url_for_token( $gate['token'] ) ),'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
 	$registration_data = $this->mrm_mc_filter_data_for_table( $regs_table, $registration_data );
 	$inserted = $wpdb->insert( $regs_table, $registration_data );
 	if ( false === $inserted ) { return new WP_Error('mrm_masterclass_registration_insert_failed','Payment succeeded, but registration could not be saved. Please contact support.',array('status'=>500)); }

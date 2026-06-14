@@ -1376,6 +1376,7 @@ body.mrm-modal-open {
         <input type="text" id="mrm-masterclass-promo-code" name="promo_code" autocomplete="off" placeholder="Optional">
         <small>Enter a promotional code if one was provided to you.</small>
       </label>
+      <button id="mrm-masterclass-apply-promo" class="mrm-secondary-btn" type="button">Apply Promo</button>
 
       <div id="mrm-masterclass-promo-message" class="mrm-masterclass-promo-message" hidden></div>
 
@@ -1445,6 +1446,7 @@ body.mrm-modal-open {
     elements: null,
     paymentElement: null,
     checkout: null,
+    promo: null,
     calendarDate: new Date()
   };
 
@@ -2648,6 +2650,8 @@ body.mrm-modal-open {
     const paymentElement = byId('paymentElement');
     const payButton = byId('payButton');
     const submitPayment = byId('submitPayment');
+    const promoInput = byId('mrm-masterclass-promo-code');
+    const promoMessage = byId('mrm-masterclass-promo-message');
 
     if (!modal) {
       showError('The registration popup could not open because the modal is missing.');
@@ -2657,6 +2661,16 @@ body.mrm-modal-open {
     window.MRM_SELECTED_MASTERCLASS_EVENT = event;
     window.MRM_MASTERCLASS_PAYMENT_STATE = null;
     window.__mrmMasterclassCheckoutInProgress = true;
+    state.promo = null;
+
+    if (promoInput) {
+      promoInput.value = '';
+    }
+
+    if (promoMessage) {
+      promoMessage.textContent = '';
+      promoMessage.hidden = true;
+    }
 
     if (title) {
       title.textContent = 'Register: ' + (event.title || 'Masterclass');
@@ -2723,8 +2737,78 @@ body.mrm-modal-open {
       name: name,
       email: email,
       promoCode: promoCode,
+      promo: state.promo,
       termsAccepted: termsAccepted
     };
+  }
+
+  async function applyPromo() {
+    const event = window.MRM_SELECTED_MASTERCLASS_EVENT;
+    const promoInput = byId('mrm-masterclass-promo-code');
+    const promoMessage = byId('mrm-masterclass-promo-message');
+    const applyButton = byId('mrm-masterclass-apply-promo');
+    const email = byId('email') ? byId('email').value.trim() : '';
+    const promoCode = promoInput ? promoInput.value.trim() : '';
+
+    state.promo = null;
+
+    if (!promoCode) {
+      if (promoMessage) {
+        promoMessage.textContent = '';
+        promoMessage.hidden = true;
+      }
+      return;
+    }
+
+    if (!event || !email || email.indexOf('@') === -1) {
+      if (promoMessage) {
+        promoMessage.textContent = 'Please enter a valid email before applying a promotional code.';
+        promoMessage.hidden = false;
+      }
+      return;
+    }
+
+    if (applyButton) {
+      applyButton.disabled = true;
+      applyButton.textContent = 'Applying...';
+    }
+
+    try {
+      const result = await fetchJson(restUrl('apply-promo'), {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        body: JSON.stringify({event_id: event.id, promo_code: promoCode, email: email})
+      });
+      const promo = result.data || {};
+
+      if (!promo.ok) {
+        throw new Error(promo.message || 'This promotional code is not valid for this Masterclass.');
+      }
+
+      state.promo = promo;
+      promoInput.value = promo.promo_code || promoCode.toUpperCase();
+
+      if (promoMessage) {
+        promoMessage.textContent = 'Promotional code applied. Total: ' + money(promo.final_amount_cents || 0);
+        promoMessage.hidden = false;
+      }
+
+      const meta = byId('modalMeta');
+      if (meta) {
+        meta.textContent = formatDateTime(eventStart(event)) + ' • ' + money(promo.final_amount_cents || 0);
+      }
+    } catch (error) {
+      if (promoMessage) {
+        promoMessage.textContent = error && error.message ? error.message : 'This promotional code is not valid for this Masterclass.';
+        promoMessage.hidden = false;
+      }
+    } finally {
+      if (applyButton) {
+        applyButton.disabled = false;
+        applyButton.textContent = 'Apply Promo';
+      }
+    }
   }
 
   function validateCheckout(data) {
@@ -2853,6 +2937,7 @@ body.mrm-modal-open {
         stripe: stripe,
         elements: elements,
         paymentIntentId: payload.payment_intent_id,
+        amountCents: payload.amount_cents,
         checkout: data,
         event: event
       };
@@ -2926,7 +3011,7 @@ body.mrm-modal-open {
     const details = byId('finalConfirmationDetails');
 
     if (details && state.event) {
-      details.textContent = (state.event.title || 'Masterclass') + ' • ' + formatDateTime(eventStart(state.event)) + ' • ' + money(state.event.price_cents || 0);
+      details.textContent = (state.event.title || 'Masterclass') + ' • ' + formatDateTime(eventStart(state.event)) + ' • ' + money(state.amountCents || state.event.price_cents || 0);
     }
 
     if (finalModal) {
@@ -3029,12 +3114,21 @@ body.mrm-modal-open {
     const submitPayment = byId('submitPayment');
     const cancelFinal = byId('cancelFinalPayment');
     const confirmFinal = byId('confirmFinalPayment');
+    const applyPromoButton = byId('mrm-masterclass-apply-promo');
 
     if (payButton && !payButton.dataset.mrmBound) {
       payButton.dataset.mrmBound = '1';
       payButton.addEventListener('click', function (event) {
         event.preventDefault();
         startPayment();
+      });
+    }
+
+    if (applyPromoButton && !applyPromoButton.dataset.mrmBound) {
+      applyPromoButton.dataset.mrmBound = '1';
+      applyPromoButton.addEventListener('click', function (event) {
+        event.preventDefault();
+        applyPromo();
       });
     }
 
