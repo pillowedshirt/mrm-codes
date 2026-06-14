@@ -3,7 +3,7 @@
 Plugin Name: MRM Product Access
 Description: Provides purchase and access management for single-product pages using Stripe Checkout and Stripe Connect. Handles checkout session creation, webhook processing, OTP issuance and secure downloads without requiring user accounts.
 Author: Your Name
-Version: 1.2.4
+Version: 1.2.5
 */
 
 if ( ! defined( 'MRM_LAUNCH_DEBUG' ) ) {
@@ -58,7 +58,7 @@ class MRM_Product_Access {
      *
      * @var string
      */
-    const VERSION = '1.2.4';
+    const VERSION = '1.2.5';
 
     /**
      * Get singleton instance.
@@ -1914,6 +1914,81 @@ function offerRowTemplate(pieceIndex){
         return $this->payments_hub_has_access( $unsalted_hash, $sku );
     }
 
+    /**
+     * Build the likely Payments Hub SKUs for a Product Access OTP request.
+     *
+     * @param string $product_slug Raw or canonical product slug.
+     * @param string $piece_slug   Piece page slug.
+     * @param string $offer_type   Payments Hub sheet-music offer type.
+     * @return array
+     */
+    private function get_otp_product_slug_candidates( $product_slug, $piece_slug = '', $offer_type = '' ) {
+        global $wpdb;
+
+        $product_slug = $this->sanitize_product_slug( $product_slug );
+        $piece_slug   = sanitize_title( (string) $piece_slug );
+        $offer_type   = sanitize_title( (string) $offer_type );
+        $allowed_types = array( 'fundamentals', 'trombone-euphonium', 'tuba', 'complete-package' );
+        $candidates = array();
+
+        $add_candidate = function( $candidate ) use ( &$candidates ) {
+            $candidate = $this->sanitize_product_slug( $candidate );
+            if ( $candidate !== '' && ! in_array( $candidate, $candidates, true ) ) {
+                $candidates[] = $candidate;
+            }
+        };
+
+        $add_candidate( $product_slug );
+        if ( $product_slug !== '' && strpos( $product_slug, 'piece-' ) !== 0 ) {
+            $add_candidate( 'piece-' . $product_slug );
+        }
+
+        if ( $piece_slug !== '' && in_array( $offer_type, $allowed_types, true ) ) {
+            $add_candidate( 'piece-' . $piece_slug . '-' . $offer_type );
+        }
+
+        // Payments Hub may append a numeric suffix when the base SKU already exists.
+        $table = $wpdb->prefix . 'mrm_sheet_music_access';
+        $table_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+        if ( $table_exists === $table ) {
+            foreach ( $candidates as $base_candidate ) {
+                $suffixed = $wpdb->get_col( $wpdb->prepare(
+                    "SELECT DISTINCT sku
+                     FROM {$table}
+                     WHERE (sku = %s OR sku LIKE %s) AND revoked_at IS NULL
+                     ORDER BY sku ASC",
+                    $base_candidate,
+                    $wpdb->esc_like( $base_candidate ) . '-%'
+                ) );
+
+                foreach ( (array) $suffixed as $candidate ) {
+                    if ( preg_match( '/^' . preg_quote( $base_candidate, '/' ) . '-[0-9]+$/', (string) $candidate ) ) {
+                        $add_candidate( $candidate );
+                    }
+                }
+            }
+        }
+
+        return $candidates;
+    }
+
+    /**
+     * Resolve an OTP request to the first candidate for which the email has Hub access.
+     *
+     * @return string Empty when no candidate grants access.
+     */
+    private function resolve_otp_product_slug_for_email( $email, $product_slug, $piece_slug = '', $offer_type = '' ) {
+        $candidates = $this->get_otp_product_slug_candidates( $product_slug, $piece_slug, $offer_type );
+
+        foreach ( $candidates as $candidate ) {
+            if ( $this->payments_hub_has_access_for_email( $email, $candidate ) ) {
+                return $candidate;
+            }
+        }
+
+        return '';
+    }
+
     private function mrm_pa_log_access_event( $event, $context = array() ) {
         if ( ! is_array( $context ) ) {
             $context = array();
@@ -3067,6 +3142,8 @@ function offerRowTemplate(pieceIndex){
         $params       = $request->get_json_params();
         $email        = isset( $params['email'] ) ? sanitize_email( $params['email'] ) : '';
         $product_slug = isset( $params['product_slug'] ) ? $this->sanitize_product_slug( $params['product_slug'] ) : '';
+        $piece_slug   = isset( $params['piece_slug'] ) ? sanitize_title( (string) $params['piece_slug'] ) : '';
+        $offer_type   = isset( $params['offer_type'] ) ? sanitize_title( (string) $params['offer_type'] ) : '';
         if ( empty( $product_slug ) && ! empty( $params['piece_slug'] ) ) {
             $product_slug = $this->sanitize_product_slug( $params['piece_slug'] );
         }
@@ -3094,7 +3171,13 @@ function offerRowTemplate(pieceIndex){
         $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
 
         // ✅ Hub is the ONLY source of truth for access.
-        $has_access = $this->payments_hub_has_access_for_email( $normalized_email, $product_slug );
+        $resolved_product_slug = $this->resolve_otp_product_slug_for_email(
+            $normalized_email,
+            $product_slug,
+            $piece_slug,
+            $offer_type
+        );
+        $has_access = $resolved_product_slug !== '';
 
         // Privacy-preserving: always return generic success.
         if ( ! $has_access ) {
@@ -3105,6 +3188,8 @@ function offerRowTemplate(pieceIndex){
 
             return new WP_REST_Response( $generic, 200 );
         }
+
+        $product_slug = $resolved_product_slug;
 
         // Limit OTP requests per product, per hour.
         $one_hour_ago   = gmdate( 'Y-m-d H:i:s', time() - 3600 );
@@ -3200,6 +3285,8 @@ function offerRowTemplate(pieceIndex){
         $params       = $request->get_json_params();
         $email        = isset( $params['email'] ) ? sanitize_email( $params['email'] ) : '';
         $product_slug = isset( $params['product_slug'] ) ? $this->sanitize_product_slug( $params['product_slug'] ) : '';
+        $piece_slug   = isset( $params['piece_slug'] ) ? sanitize_title( (string) $params['piece_slug'] ) : '';
+        $offer_type   = isset( $params['offer_type'] ) ? sanitize_title( (string) $params['offer_type'] ) : '';
         if ( empty( $product_slug ) && ! empty( $params['piece_slug'] ) ) {
             $product_slug = $this->sanitize_product_slug( $params['piece_slug'] );
         }
@@ -3216,18 +3303,28 @@ function offerRowTemplate(pieceIndex){
         $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
 
         $now = gmdate( 'Y-m-d H:i:s' );
-        $row = $wpdb->get_row( $wpdb->prepare(
-            "SELECT * FROM $table_otps
-             WHERE product_slug = %s AND email_hash = %s AND expires_at >= %s AND used_at IS NULL
-             ORDER BY id DESC LIMIT 1",
-            $product_slug,
-            $email_hash,
-            $now
-        ) );
+        $candidate_slugs = $this->get_otp_product_slug_candidates( $product_slug, $piece_slug, $offer_type );
+        $row = null;
+
+        foreach ( $candidate_slugs as $candidate_slug ) {
+            $candidate_row = $wpdb->get_row( $wpdb->prepare(
+                "SELECT * FROM $table_otps
+                 WHERE product_slug = %s AND email_hash = %s AND expires_at >= %s AND used_at IS NULL
+                 ORDER BY id DESC LIMIT 1",
+                $candidate_slug,
+                $email_hash,
+                $now
+            ) );
+
+            if ( $candidate_row && ( ! $row || (int) $candidate_row->id > (int) $row->id ) ) {
+                $row = $candidate_row;
+            }
+        }
 
         if ( ! $row ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Invalid or expired code.' ), 400 );
         }
+        $product_slug = $this->sanitize_product_slug( $row->product_slug );
         if ( intval( $row->attempt_count ) >= 5 ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Too many attempts.' ), 429 );
         }
