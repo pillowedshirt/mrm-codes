@@ -198,6 +198,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
 	add_shortcode( 'mrm_masterclass_page', array( $this, 'render_masterclass_page_shortcode' ) );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_public_frontend_config', 1, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'wp_footer', 'mrm_mc_print_public_frontend_config', 1, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_share_meta', 5, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_title_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_session_page_title_css', 21, 0 );
@@ -322,6 +323,12 @@ class LowBrass_MRM_Masterclass_Plugin {
 	}
 
 	public function mrm_mc_print_public_frontend_config() {
+		static $mrm_masterclass_config_printed = false;
+
+		if ( $mrm_masterclass_config_printed ) {
+			return;
+		}
+
 		if ( is_admin() ) {
 			return;
 		}
@@ -351,6 +358,8 @@ class LowBrass_MRM_Masterclass_Plugin {
 		if ( ! $is_masterclass_page ) {
 			return;
 		}
+
+		$mrm_masterclass_config_printed = true;
 
 		$config = array(
 			'restBase'        => esc_url_raw( rest_url( self::REST_NAMESPACE ) ),
