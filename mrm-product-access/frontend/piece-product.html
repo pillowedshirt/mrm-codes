@@ -1392,6 +1392,10 @@ function mrmSavePiecePaymentEmail(email) {
   } catch (e) {}
 }
 
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+}
+
 function mrmGetPiecePaymentEmailValue() {
   const paymentEmail = document.getElementById('mrm-payment-email');
   const modalVal = paymentEmail ? String(paymentEmail.value || '').trim() : '';
