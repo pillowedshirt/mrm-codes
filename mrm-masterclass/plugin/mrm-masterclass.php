@@ -197,7 +197,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'runtime_upgrade' );
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
 	add_shortcode( 'mrm_masterclass_page', array( $this, 'render_masterclass_page_shortcode' ) );
-	$this->mrm_mc_add_filter_if_method_exists( 'the_content', 'mrm_mc_render_masterclass_page_content', 20, 1 );
+	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_public_frontend_config', 1, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_share_meta', 5, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_title_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_session_page_title_css', 21, 0 );
@@ -276,7 +276,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_filter_if_method_exists( 'query_vars', 'register_masterclass_gate_query_vars' );
 	$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'mrm_mc_handle_gate_request', 1, 0 );
 
-	$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely with REST routes and current-file frontend shortcode rendering.' );
+	$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely with REST routes and pasted-page frontend configuration.' );
 }
 
 	public function mrm_mc_render_masterclass_page_content( $content ) {
@@ -317,89 +317,51 @@ class LowBrass_MRM_Masterclass_Plugin {
 		return $this->render_masterclass_page_shortcode();
 	}
 
-	/**
-	 * Render the launch-ready Masterclass frontend from the bundled file.
-	 *
-	 * Styles and scripts are extracted and enqueued through WordPress so page
-	 * builders cannot strip or prevent execution of the frontend controller.
-	 *
-	 * @return string
-	 */
 	public function render_masterclass_page_shortcode() {
-		$file = $this->mrm_mc_get_masterclass_frontend_file();
+		return '';
+	}
 
-		if ( '' === $file ) {
-			return '<div class="mrm-masterclass-error">Masterclass page is temporarily unavailable. Please contact Low Brass Lessons.</div>';
+	public function mrm_mc_print_public_frontend_config() {
+		if ( is_admin() ) {
+			return;
 		}
 
-		$html = file_get_contents( $file );
-
-		if ( ! is_string( $html ) || '' === trim( $html ) ) {
-			return '<div class="mrm-masterclass-error">Masterclass page is temporarily unavailable. Please contact Low Brass Lessons.</div>';
+		if ( function_exists( 'wp_doing_ajax' ) && wp_doing_ajax() ) {
+			return;
 		}
 
-		$version = filemtime( $file );
-		$style   = '';
-		$script  = '';
-
-		if ( preg_match( '/<style\b[^>]*>(.*?)<\/style>/is', $html, $style_match ) ) {
-			$style = (string) $style_match[1];
-			$html  = str_replace( $style_match[0], '', $html );
+		if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+			return;
 		}
 
-		if ( preg_match_all( '/<script\b([^>]*)>(.*?)<\/script>/is', $html, $script_matches, PREG_SET_ORDER ) ) {
-			foreach ( $script_matches as $script_match ) {
-				$attrs   = isset( $script_match[1] ) ? (string) $script_match[1] : '';
-				$content = isset( $script_match[2] ) ? (string) $script_match[2] : '';
+		$is_masterclass_page = false;
 
-				if ( false !== stripos( $attrs, 'src=' ) && false !== stripos( $attrs, 'js.stripe.com/v3' ) ) {
-					$html = str_replace( $script_match[0], '', $html );
-					continue;
-				}
+		if ( function_exists( 'is_page' ) && is_page( 'masterclass' ) ) {
+			$is_masterclass_page = true;
+		}
 
-				if ( '' !== trim( $content ) ) {
-					$script .= "\n" . $content . "\n";
-				}
+		if ( ! $is_masterclass_page && function_exists( 'get_queried_object' ) ) {
+			$queried = get_queried_object();
 
-				$html = str_replace( $script_match[0], '', $html );
+			if ( $queried instanceof WP_Post && 'masterclass' === sanitize_title( $queried->post_name ) ) {
+				$is_masterclass_page = true;
 			}
 		}
 
-		wp_register_style( 'mrm-masterclass-page', false, array(), $version );
-		wp_enqueue_style( 'mrm-masterclass-page' );
-
-		if ( '' !== $style ) {
-			wp_add_inline_style( 'mrm-masterclass-page', $style );
+		if ( ! $is_masterclass_page ) {
+			return;
 		}
 
-		wp_enqueue_script( 'mrm-stripe-js', 'https://js.stripe.com/v3/', array(), null, true );
-
-		wp_register_script(
-			'mrm-masterclass-page',
-			false,
-			array( 'mrm-stripe-js' ),
-			$version,
-			true
+		$config = array(
+			'restBase'        => esc_url_raw( rest_url( self::REST_NAMESPACE ) ),
+			'restFallback'    => esc_url_raw( home_url( '/?rest_route=/' . self::REST_NAMESPACE ) ),
+			'stripePublicKey' => $this->mrm_mc_get_stripe_publishable_key(),
+			'currency'        => 'usd',
 		);
 
-		wp_enqueue_script( 'mrm-masterclass-page' );
-
-		wp_localize_script(
-			'mrm-masterclass-page',
-			'MRM_MASTERCLASS',
-			array(
-				'restBase'        => esc_url_raw( rest_url( self::REST_NAMESPACE ) ),
-				'restFallback'    => esc_url_raw( home_url( '/?rest_route=/' . self::REST_NAMESPACE ) ),
-				'stripePublicKey' => $this->mrm_mc_get_stripe_publishable_key(),
-				'currency'        => 'usd',
-			)
-		);
-
-		if ( '' !== $script ) {
-			wp_add_inline_script( 'mrm-masterclass-page', $script, 'after' );
-		}
-
-		return $html;
+		echo "\n<script id=\"mrm-masterclass-public-config\">\n";
+		echo 'window.MRM_MASTERCLASS = ' . wp_json_encode( $config ) . ";\n";
+		echo "</script>\n";
 	}
 
 
@@ -603,17 +565,21 @@ class LowBrass_MRM_Masterclass_Plugin {
 				false
 			);
 
-			self::safe_debug_log(
-				'Activation database installer failed safely.',
-				array(
-					'error' => $e->getMessage(),
-					'file'  => $e->getFile(),
-					'line'  => $e->getLine(),
-				)
-			);
+			if ( method_exists( __CLASS__, 'safe_debug_log' ) ) {
+				self::safe_debug_log(
+					'Activation database installer failed safely.',
+					array(
+						'error' => $e->getMessage(),
+						'file'  => $e->getFile(),
+						'line'  => $e->getLine(),
+					)
+				);
+			}
 		}
 
-		self::safe_debug_log( 'Masterclass plugin activation routine completed.' );
+		if ( method_exists( __CLASS__, 'safe_debug_log' ) ) {
+			self::safe_debug_log( 'Masterclass plugin activation routine completed.' );
+		}
 
 		add_filter(
 			'cron_schedules',
