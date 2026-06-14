@@ -1481,17 +1481,23 @@ body.mrm-modal-open {
 
 <script id="mrm-masterclass-frontend-controller">
 (function () {
-  'use strict';
+  function mrmMasterclassController() {
+    'use strict';
 
-  window.__mrmMasterclassScriptLoaded = true;
+    const root = document.getElementById('mrm-masterclass-root');
 
-  const root = document.getElementById('mrm-masterclass-root');
+    if (!root) {
+      return false;
+    }
 
-  if (!root) {
-    return;
-  }
+    if (window.__mrmMasterclassControllerInitialized) {
+      return true;
+    }
 
-  const state = {
+    window.__mrmMasterclassControllerInitialized = true;
+    window.__mrmMasterclassScriptLoaded = true;
+
+    const state = {
     events: [],
     selectedEvent: null,
     stripe: null,
@@ -3411,6 +3417,28 @@ body.mrm-modal-open {
     document.addEventListener('DOMContentLoaded', startWhenReady, { once: true });
   } else {
     startWhenReady();
+  }
+
+    return true;
+  }
+
+  function tryStartMasterclassController() {
+    if (window.__mrmMasterclassControllerInitialized) {
+      return;
+    }
+
+    if (mrmMasterclassController()) {
+      return;
+    }
+
+    window.setTimeout(tryStartMasterclassController, 50);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', tryStartMasterclassController, { once: true });
+    window.setTimeout(tryStartMasterclassController, 50);
+  } else {
+    tryStartMasterclassController();
   }
 })();
 </script>
