@@ -6,6 +6,10 @@ Author: Your Name
 Version: 1.2.3
 */
 
+if ( ! defined( 'MRM_LAUNCH_DEBUG' ) ) {
+    define( 'MRM_LAUNCH_DEBUG', false );
+}
+
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
@@ -276,7 +280,7 @@ class MRM_Product_Access {
         // Ensure OTP template contains placeholder.
         $body = isset( $opts['email_body'] ) ? $opts['email_body'] : '';
         if ( stripos( $body, '{{OTP}}' ) === false ) {
-            $notices[] = __( 'The Email Body does not contain the {{OTP}} placeholder, so recipients will not see the code.', 'mrm-product-access' );
+            $notices[] = __( 'The Email Template must include {{OTP}} so recipients receive their one-time access code.', 'mrm-product-access' );
         }
 
         // Check payouts per product.
@@ -553,7 +557,7 @@ class MRM_Product_Access {
                 }
                 $options['verified_emails'] = array_values( array_unique( $verified ) );
             }
-            // Save Tracks Mapping (by Product Slug) to a single option: product_tracks_by_slug.
+            // Save Product Pages to a single option: product_tracks_by_slug.
             // IMPORTANT:
             // Keep this option name and row shape unchanged so existing entered track data persists.
             // Rows are saved in the same order they appear in the admin table.
@@ -614,7 +618,7 @@ class MRM_Product_Access {
                 box-sizing: border-box;
             }
             </style>
-            <h1><?php esc_html_e( 'MRM Product Access Settings', 'mrm-product-access' ); ?></h1>
+            <h1><?php esc_html_e( 'Product Access', 'mrm-product-access' ); ?></h1>
             <form method="post">
                 <?php wp_nonce_field( 'mrm_pa_save_settings' ); ?>
 
@@ -628,7 +632,7 @@ class MRM_Product_Access {
                         <th scope="row"><?php esc_html_e( 'Email Body', 'mrm-product-access' ); ?></th>
                         <td>
                             <textarea name="email_body" rows="5" cols="50" class="large-text code"><?php echo esc_textarea( $options['email_body'] ?? '' ); ?></textarea>
-                            <p class="description"><?php esc_html_e( 'Use {{OTP}} as the placeholder for the one‑time code.', 'mrm-product-access' ); ?></p>
+                            <p class="description"><?php esc_html_e( 'Insert {{OTP}} where the one-time access code should appear.', 'mrm-product-access' ); ?></p>
                         </td>
                     </tr>
                 </table>
@@ -638,7 +642,7 @@ class MRM_Product_Access {
                 // verified_emails option in place but no longer rendering inputs.
                 ?>
 
-                <h2 class="title"><?php esc_html_e( 'Pieces Catalog (Sheet Music Listings)', 'mrm-product-access' ); ?></h2>
+                <h2 class="title"><?php esc_html_e( 'Catalog Display', 'mrm-product-access' ); ?></h2>
                 <p class="description">
                     <?php esc_html_e( 'Enter the piece fields + purchasing options (offers) exactly like the old product HTML. URLs can be full URLs or site-relative paths (e.g. /wp-content/uploads/...). Use the Piece Display Order panel below to control the order used by the sheet music catalog shortcode.', 'mrm-product-access' ); ?>
                 </p>
@@ -1339,7 +1343,7 @@ function offerRowTemplate(pieceIndex){
                 })();
                 </script>
 
-                <h2 class="title">Tracks Mapping (by Product Slug)</h2>
+                <h2 class="title">Product Pages</h2>
 <p>
     Unlimited rows. Empty rows are allowed and ignored at runtime.
     Drag rows to organize track order, or duplicate an existing row to create a similar track quickly.

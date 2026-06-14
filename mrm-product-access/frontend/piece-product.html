@@ -1107,7 +1107,7 @@ body.mrm-piece-no-scroll{
 
               <div style="height:18px;"></div>
 
-              <button id="mrm-pay-btn" class="button-primary" style="width:100%;">Pay</button>
+              <button id="mrm-pay-btn" class="button-primary" style="width:100%;">Continue</button>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
             </div>
           </div>
@@ -1629,11 +1629,7 @@ function mrmGetPiecePromoCodeInputValue() {
   const type = inferSheetMusicTypeFromOfferEl(offerEl);
 
   if (!pieceSlug || !type) {
-    console.warn('[MRM] Could not infer canonical piece SKU type; using configured offer slug:', {
-      rawSku,
-      pieceSlug,
-      type
-    });
+
     return rawSku;
   }
 
@@ -1659,16 +1655,11 @@ function mrmGetPiecePromoCodeInputValue() {
       return resolved || rawSku;
     }
 
-    console.warn('[MRM] Hub SKU resolve failed; falling back to configured offer slug', {
-      rawSku,
-      pieceSlug,
-      type,
-      data
-    });
+
 
     return rawSku;
   } catch (e) {
-    console.warn('[MRM] Hub SKU resolve request error; falling back to configured offer slug', e);
+
     return rawSku;
   }
 }
@@ -1726,10 +1717,7 @@ async function getOfferSkuCandidates(offerEl) {
       selectedSku = canonicalCandidate || candidates[0] || rawSku;
     }
   } catch (err) {
-    console.warn('[MRM] Could not build offer SKU candidates. Falling back to configured product_slug.', {
-      rawSku,
-      err
-    });
+
     selectedSku = rawSku;
   }
 
@@ -2031,7 +2019,7 @@ async function getOfferSkuCandidates(offerEl) {
 
           payBtn.disabled = false;
         } catch (err) {
-          console.error('[MRM] create-payment-intent error:', err);
+
           errorEl.textContent = 'Unable to load payment form.';
           payBtn.disabled = true;
         }
@@ -2145,17 +2133,11 @@ async function getOfferSkuCandidates(offerEl) {
     let gData = {};
     try { gData = await gRes.json(); } catch (e) {}
 
-    console.log('[MRM] grant-sheet-music-access response (post-payment)', {
-      status: gRes.status,
-      data: gData,
-      piId,
-      requestedSku: sku,
-      requestedEmail: email
-    });
+
 
     if (!gRes.ok || !gData.ok) {
-      const msg = (gData && (gData.message || gData.debug))
-        ? (gData.message || gData.debug)
+      const msg = (gData && gData.message)
+        ? gData.message
         : 'Payment succeeded, but access grant failed.';
       throw new Error(msg);
     }
@@ -2181,15 +2163,11 @@ async function getOfferSkuCandidates(offerEl) {
     let gData = {};
     try { gData = await gRes.json(); } catch (e) {}
 
-    console.log('[MRM] grant-sheet-music-access response (PI-only)', {
-      status: gRes.status,
-      data: gData,
-      piId
-    });
+
 
     if (!gRes.ok || !gData.ok) {
-      const msg = (gData && (gData.message || gData.debug))
-        ? (gData.message || gData.debug)
+      const msg = (gData && gData.message)
+        ? gData.message
         : 'Payment returned from Stripe, but access grant failed.';
       throw new Error(msg);
     }
@@ -2213,7 +2191,7 @@ async function getOfferSkuCandidates(offerEl) {
     if (!stored) {
       verifyAndGrantByPiOnly(piId)
         .catch((err) => {
-          console.error('[MRM] Stripe return PI-only finalize failed:', err);
+
           const errorEl = document.getElementById('mrm-payment-error');
           if (errorEl) {
             errorEl.textContent = (err && err.message)
@@ -2235,7 +2213,7 @@ async function getOfferSkuCandidates(offerEl) {
       if (ctx && ctx.email && ctx.sku) {
         verifyAndGrant(piId, ctx.email, ctx.sku)
           .catch((err) => {
-            console.error('[MRM] Stripe return verifyAndGrant failed:', err);
+
             const errorEl = document.getElementById('mrm-payment-error');
             if (errorEl) {
               errorEl.textContent = (err && err.message)
@@ -2652,7 +2630,7 @@ async function getOfferSkuCandidates(offerEl) {
         previewWrap.style.cursor='default';
         previewWrap.innerHTML =
           '<div style="padding:12px;font-size:13px;color:var(--color-text-muted);">PDF preview failed to load.</div>';
-        console.error(err);
+
       }
     })();
   }
@@ -2692,7 +2670,7 @@ async function getOfferSkuCandidates(offerEl) {
           if (audio.paused) await audio.play();
           else audio.pause();
           syncPlayUI();
-        }catch(e){ console.error(e); }
+        }catch(e){  }
       });
 
       audio.addEventListener('play', syncPlayUI);
@@ -2707,7 +2685,7 @@ async function getOfferSkuCandidates(offerEl) {
       try {
         syncOfferAudio(offerEl);
       } catch (err) {
-        console.error('[MRM] Offer audio init failed for one offer:', err, offerEl);
+
       }
     });
 
@@ -2759,7 +2737,7 @@ async function getOfferSkuCandidates(offerEl) {
           });
 
           if (error) {
-            errorEl.textContent = error.message || 'Payment failed.';
+            errorEl.textContent = error.message || 'We could not complete this payment.';
             this.disabled = false;
             return;
           }
@@ -2771,7 +2749,7 @@ async function getOfferSkuCandidates(offerEl) {
               // success popup handles reload
               return;
             } catch (e) {
-              console.error('[MRM] verifyAndGrant failed after successful payment:', e);
+
               errorEl.textContent = (e && e.message)
                 ? e.message
                 : 'Payment succeeded, but access setup did not finish. Please refresh and try Access, or contact support.';
@@ -2783,12 +2761,12 @@ async function getOfferSkuCandidates(offerEl) {
           // If Stripe did not return a terminal status immediately, rely on redirect-return handler.
           // Keep the button enabled so user is not stuck if no redirect occurs.
           if (paymentIntent && paymentIntent.status) {
-            console.warn('[MRM] Non-terminal immediate paymentIntent status:', paymentIntent.status);
+
           }
           this.disabled = false;
 
         } catch (e) {
-          console.error('[MRM] Pay flow error:', e);
+
           errorEl.textContent = (e && e.message) ? e.message : 'Unexpected error while processing payment.';
           this.disabled = false;
         }
@@ -2808,11 +2786,7 @@ async function getOfferSkuCandidates(offerEl) {
           return;
         }
 
-        console.log('[MRM] Purchase SKU resolved', {
-          raw_offer_slug: offerEl ? (offerEl.dataset.productSlug || '').trim() : '',
-          resolved_sku: sku,
-          piece_slug: getPieceSlugFromUrl()
-        });
+
 
         const priceDisplay = offerEl ? (offerEl.dataset.price || '') : '';
         let quoteData = null;
@@ -2833,15 +2807,7 @@ async function getOfferSkuCandidates(offerEl) {
           qData = await qRes.json().catch(() => ({}));
 
           if (!qRes.ok || !qData.ok) {
-            console.warn('[MRM] Payments Hub quote rejected offer', {
-              status: qRes.status,
-              response: qData,
-              requested_sku: sku,
-              raw_offer_slug: offerEl ? (offerEl.dataset.productSlug || '').trim() : '',
-              resolved_sku: offerEl ? (offerEl.dataset.resolvedSku || '').trim() : '',
-              piece_slug: getPieceSlugFromUrl(),
-              type: typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : ''
-            });
+
 
             throw new Error((qData && qData.message) ? qData.message : 'Quote failed.');
           }
@@ -2855,13 +2821,7 @@ async function getOfferSkuCandidates(offerEl) {
             }
           }
         } catch (err) {
-          console.error('[MRM] Quote failed:', {
-            error: err,
-            sku,
-            raw_offer_slug: offerEl ? (offerEl.dataset.productSlug || '').trim() : '',
-            resolved_sku: offerEl ? (offerEl.dataset.resolvedSku || '').trim() : '',
-            piece_slug: getPieceSlugFromUrl()
-          });
+
 
           alert(
             (err && err.message)
@@ -2993,7 +2953,7 @@ async function getOfferSkuCandidates(offerEl) {
         stepEmail.classList.add('hidden');
         stepOtp.classList.remove('hidden');
       })
-      .catch(err=>{ console.error(err); messageDiv.textContent='Error sending code.'; });
+      .catch(err=>{  messageDiv.textContent='Error sending code.'; });
     });
 
     verifyBtn.addEventListener('click', function(){
@@ -3030,7 +2990,7 @@ async function getOfferSkuCandidates(offerEl) {
         }
         messageDiv.textContent = data.message || 'Invalid code.';
       })
-      .catch(err=>{ console.error(err); messageDiv.textContent='Error verifying code.'; });
+      .catch(err=>{  messageDiv.textContent='Error verifying code.'; });
     });
   }
 
