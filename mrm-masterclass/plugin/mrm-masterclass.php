@@ -197,6 +197,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'runtime_upgrade' );
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
 	add_shortcode( 'mrm_masterclass_page', array( $this, 'render_masterclass_page_shortcode' ) );
+	$this->mrm_mc_add_filter_if_method_exists( 'the_content', 'mrm_mc_render_masterclass_page_content', 20, 1 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_share_meta', 5, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_title_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_session_page_title_css', 21, 0 );
@@ -278,6 +279,44 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely with REST routes and current-file frontend shortcode rendering.' );
 }
 
+	public function mrm_mc_render_masterclass_page_content( $content ) {
+		if ( is_admin() ) {
+			return $content;
+		}
+
+		if ( function_exists( 'wp_doing_ajax' ) && wp_doing_ajax() ) {
+			return $content;
+		}
+
+		if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+			return $content;
+		}
+
+		if ( ! function_exists( 'is_singular' ) || ! is_singular( 'page' ) ) {
+			return $content;
+		}
+
+		$is_masterclass_page = false;
+
+		if ( function_exists( 'is_page' ) && is_page( 'masterclass' ) ) {
+			$is_masterclass_page = true;
+		}
+
+		if ( ! $is_masterclass_page && function_exists( 'get_queried_object' ) ) {
+			$queried = get_queried_object();
+
+			if ( $queried instanceof WP_Post && 'masterclass' === sanitize_title( $queried->post_name ) ) {
+				$is_masterclass_page = true;
+			}
+		}
+
+		if ( ! $is_masterclass_page ) {
+			return $content;
+		}
+
+		return $this->render_masterclass_page_shortcode();
+	}
+
 	/**
 	 * Render the launch-ready Masterclass frontend from the bundled file.
 	 *
@@ -287,7 +326,9 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 * @return string
 	 */
 	public function render_masterclass_page_shortcode() {
-		$file = dirname( __DIR__ ) . '/frontend/masterclass.html';
+		$file = defined( 'MRM_MASTERCLASS_FRONTEND_DIR' )
+			? MRM_MASTERCLASS_FRONTEND_DIR . 'masterclass.html'
+			: dirname( __DIR__ ) . '/frontend/masterclass.html';
 
 		if ( ! file_exists( $file ) || ! is_readable( $file ) ) {
 			return '<div class="mrm-masterclass-error">Masterclass page is temporarily unavailable. Please contact Low Brass Lessons.</div>';
@@ -8259,9 +8300,7 @@ public function rest_get_presenter( $request ) {
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
 			 WHERE e.presenter_id = %d
-			   AND LOWER(TRIM(e.status)) = 'scheduled'
-			   AND CAST(e.registration_open AS UNSIGNED) = 1
-			   AND LOWER(TRIM(e.status)) <> 'deleted'
+			   AND LOWER(TRIM(e.status)) IN ('scheduled', 'completed')
 			 ORDER BY e.start_time ASC
 			 LIMIT 100",
 			$presenter_id
@@ -8344,9 +8383,7 @@ public function rest_get_event( $request ) {
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
 			 WHERE e.id = %d
-			   AND LOWER(TRIM(e.status)) = 'scheduled'
-			   AND CAST(e.registration_open AS UNSIGNED) = 1
-			   AND LOWER(TRIM(e.status)) <> 'deleted'
+			   AND LOWER(TRIM(e.status)) IN ('scheduled', 'completed')
 			 LIMIT 1",
 			$event_id
 		)
@@ -9321,7 +9358,7 @@ public function rest_finalize_registration( $request ) {
 				(SELECT COUNT(*) FROM {$regs_table} r WHERE r.event_id = e.id AND LOWER(TRIM(r.payment_status)) = 'paid') AS paid_count
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
-			 WHERE LOWER(TRIM(e.status)) = 'scheduled'
+			 WHERE LOWER(TRIM(e.status)) IN ('scheduled', 'completed')
 			 ORDER BY e.start_time ASC
 			 LIMIT 200"
 		);

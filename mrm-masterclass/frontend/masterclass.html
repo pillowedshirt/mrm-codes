@@ -1388,7 +1388,7 @@ body.mrm-modal-open {
       <div id="mrm-masterclass-error" class="mrm-masterclass-error" hidden></div>
       <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses…</div>
       <div id="mrm-masterclass-script-fail" class="mrm-masterclass-error" hidden>
-        Masterclasses could not load because the page script did not run. Please refresh the page or contact Low Brass Lessons for help.
+        We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.
       </div>
       <noscript>
         <div class="mrm-masterclass-error">
@@ -1817,6 +1817,32 @@ body.mrm-modal-open {
     return true;
   }
 
+  function masterclassUnavailableLabel(event) {
+    const status = String(event && event.status ? event.status : '').trim().toLowerCase();
+
+    if (isPastEvent(event) || status === 'completed') {
+      return 'Event Over';
+    }
+
+    if (event && typeof event.available_seats !== 'undefined') {
+      const availableSeats = Number(event.available_seats);
+
+      if (!Number.isNaN(availableSeats) && availableSeats <= 0) {
+        return 'Sold Out';
+      }
+    }
+
+    if (Number(event && event.registration_open ? event.registration_open : 0) !== 1) {
+      return 'Registration Closed';
+    }
+
+    if (status && status !== 'scheduled') {
+      return 'Registration Closed';
+    }
+
+    return 'Registration Closed';
+  }
+
   function eventIsInCurrentMonthOrFuture(event) {
     const startValue = eventStart(event);
 
@@ -1974,7 +2000,7 @@ body.mrm-modal-open {
     html += '</div>';
 
     if (!safeEvents.length) {
-      html += '<div class="mrm-masterclass-calendar-empty-month">No open Masterclasses are scheduled for this month.</div>';
+      html += '<div class="mrm-masterclass-calendar-empty-month">No Masterclasses are scheduled for this month.</div>';
     }
 
     calendar.innerHTML = html;
@@ -2153,8 +2179,9 @@ body.mrm-modal-open {
     });
   }
 
-  function closedRegistrationButtonHtml(extraClass) {
-    return '<button type="button" class="mrm-primary-btn mrm-masterclass-register-button mrm-masterclass-closed-button ' + escapeHtml(extraClass || '') + '" disabled>Registration Closed</button>';
+  function closedRegistrationButtonHtml(extraClass, label) {
+    const safeLabel = label || 'Registration Closed';
+    return '<button type="button" class="mrm-primary-btn mrm-masterclass-register-button mrm-masterclass-closed-button ' + escapeHtml(extraClass || '') + '" disabled>' + escapeHtml(safeLabel) + '</button>';
   }
 
   function masterclassContainerUrl(params) {
@@ -2240,7 +2267,7 @@ body.mrm-modal-open {
           html += '<button type="button" class="mrm-primary-btn mrm-masterclass-register-button" data-register-event-id="' + escapeHtml(String(session.id || '')) + '">Register For This Masterclass</button>';
           html += '<a class="mrm-primary-btn mrm-masterclass-learn-more-button" href="' + escapeHtml(session.session_page_url || masterclassContainerUrl({ session: session.id })) + '">Learn More About This Masterclass</a>';
         } else {
-          html += closedRegistrationButtonHtml('');
+          html += closedRegistrationButtonHtml('', masterclassUnavailableLabel(session));
         }
 
         html += '</div>';
@@ -2333,7 +2360,7 @@ body.mrm-modal-open {
     if (canRegister) {
       html += '<button type="button" id="mrm-masterclass-session-register" class="mrm-primary-btn mrm-masterclass-register-button mrm-masterclass-action-button">Register For This Masterclass</button>';
     } else {
-      html += closedRegistrationButtonHtml('mrm-masterclass-action-button');
+      html += closedRegistrationButtonHtml('mrm-masterclass-action-button', masterclassUnavailableLabel(safeEvent));
     }
 
     if (presenterUrl) {
@@ -2504,7 +2531,7 @@ body.mrm-modal-open {
       button.className = 'mrm-primary-btn mrm-masterclass-register-button';
 
       if (past || !canRegister) {
-        button.textContent = 'Registration Closed';
+        button.textContent = masterclassUnavailableLabel(event);
         button.disabled = true;
         button.classList.add('mrm-masterclass-closed-button');
       } else {
@@ -2638,6 +2665,7 @@ body.mrm-modal-open {
     }
     if (eventsEl) eventsEl.innerHTML = '';
     clearError();
+    renderCalendar(state.events || []);
     try {
       const result = await fetchMasterclassEventsWithFallback();
       const responseData = result && result.data ? result.data : {};
@@ -2660,9 +2688,11 @@ body.mrm-modal-open {
       }
       window.__mrmMasterclassBootComplete = true;
     } catch (error) {
-      showError('We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.');
+      const publicMessage = 'We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.';
+      renderCalendar(state.events || []);
+      showError(publicMessage);
       if (eventsEl) {
-        eventsEl.innerHTML = '<div class="mrm-masterclass-empty mrm-masterclass-empty-full">Upcoming Masterclasses could not be loaded right now. Please refresh the page or contact Low Brass Lessons for help.</div>';
+        eventsEl.innerHTML = '';
       }
       if (loading) loading.hidden = true;
     } finally {
@@ -3371,6 +3401,7 @@ body.mrm-modal-open {
       const loading = byId('mrm-masterclass-loading');
       const eventsEl = byId('mrm-masterclass-events');
       if (loading && !loading.hidden && !window.__mrmMasterclassBootComplete && eventsEl && !eventsEl.children.length) {
+        renderCalendar(state.events || []);
         showError('We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.');
       }
     }, 8000);
