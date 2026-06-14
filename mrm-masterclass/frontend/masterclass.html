@@ -130,12 +130,11 @@
 }
 
 .event-button,
-.primary-btn,
-.secondary-btn,
+.mrm-primary-btn,
+.mrm-secondary-btn,
 .mrm-masterclass-action-button {
-  width: 100%;
-  min-height: 46px;
-  padding: 13px 18px;
+  min-height: 44px;
+  padding: 12px 18px;
   border-radius: 999px;
   font-family: Arial, Helvetica, sans-serif;
   font-size: 15px;
@@ -153,94 +152,104 @@
 }
 
 .event-button,
-.primary-btn {
+.mrm-primary-btn {
   border:0;
-  background:var(--mrm-accent);
+  background:#7c4a2d;
   color:#fff;
   box-shadow:0 8px 18px rgba(111,67,31,.18);
+}
+
+.mrm-primary-btn:hover,
+.mrm-primary-btn:focus {
+  background:#5f3822;
+  color:#fff;
+  text-decoration:none;
 }
 
 .event-button {
   margin-top:auto;
 }
 
-.secondary-btn {
-  border:1px solid var(--mrm-border);
+.mrm-secondary-btn {
+  border:1px solid rgba(124,74,45,.35);
   background:#fff;
-  color:var(--mrm-accent);
+  color:#5f3822;
   margin-top:10px;
 }
 
-.modal {
+.mrm-secondary-btn:hover,
+.mrm-secondary-btn:focus {
+  background:#f6eadb;
+  color:#3b2618;
+  text-decoration:none;
+}
+
+.mrm-modal[hidden] {
+  display:none !important;
+}
+
+.mrm-modal {
   position: fixed;
   inset: 0;
   z-index: 999999;
-  background: rgba(17, 24, 39, 0.62);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
+}
+
+.mrm-modal-overlay {
+  position:absolute;
+  inset:0;
+  background:rgba(27,20,15,.62);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity 180ms ease, visibility 180ms ease;
-  will-change: opacity;
-  transform: translateZ(0);
 }
 
-.modal-card {
-  width: min(700px, 95vw);
-  max-height: 90vh;
+.mrm-modal-panel {
   position: relative;
+  z-index:1;
+  width:min(720px,100%);
+  max-height:min(86vh,860px);
   overflow: auto;
-  background: var(--mrm-surface);
-  border: 1px solid var(--mrm-border);
-  border-radius: 28px;
+  background:#fffaf3;
+  border:1px solid rgba(124,74,45,.22);
+  border-radius:24px;
   padding: 28px;
-  box-shadow: var(--mrm-shadow);
-  transform: translateY(8px) scale(0.985) translateZ(0);
-  transition: transform 180ms ease;
-  will-change: transform;
-  backface-visibility: hidden;
+  box-shadow:0 24px 70px rgba(27,20,15,.28);
 }
 
-.modal.is-open .modal-card {
-  transform: translateY(0) scale(1) translateZ(0);
-}
-
-.modal-card h2 {
+.mrm-modal-content h2,
+.mrm-modal-content h3 {
   margin:0 0 10px;
-  color:var(--mrm-accent);
+  color:#2f2118;
   font-family:Georgia,"Times New Roman",serif;
   font-size:34px;
   line-height:1.05;
 }
 
-.modal-close-x {
+.mrm-modal-x {
   position:absolute;
   top:14px;
-  right:14px;
+  right:16px;
   width:38px;
   height:38px;
   border-radius:999px;
-  border:1px solid var(--mrm-border);
-  background:#fff;
-  color:var(--mrm-accent);
-  font-size:24px;
+  border:0;
+  background:rgba(124,74,45,.10);
+  color:#3b2618;
+  font-size:26px;
   line-height:1;
   cursor:pointer;
   display:flex;
   align-items:center;
   justify-content:center;
-  box-shadow:var(--mrm-soft-shadow);
 }
 
-.modal-close-x:hover,
-.modal-close-x:focus {
-  transform:translateY(-1px);
-  outline:2px solid rgba(0,0,0,.12);
+.mrm-modal-x:hover,
+.mrm-modal-x:focus {
+  background:rgba(124,74,45,.18);
+  outline:none;
 }
 
 .mrm-masterclass-success-card {
@@ -323,7 +332,7 @@ input[type="checkbox"] {
 
   .mc-intro,
   .calendar-shell,
-  .modal-card {
+    .mrm-modal-panel {
   width:min(720px,calc(100vw - 32px));
   max-height:calc(100vh - 48px);
     border-radius:22px;
@@ -337,7 +346,7 @@ input[type="checkbox"] {
     grid-template-columns:1fr;
   }
 
-  .modal-card {
+  .mrm-modal-panel {
   width:min(720px,calc(100vw - 32px));
   max-height:calc(100vh - 48px);
     padding:24px;
@@ -1211,15 +1220,9 @@ input[type="checkbox"] {
   min-height: 230px;
 }
 
-.modal.is-open {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-}
-
-body.mrm-masterclass-modal-open {
+html.mrm-modal-open,
+body.mrm-modal-open {
   overflow: hidden;
-  touch-action: none;
 }
 
 .mrm-masterclass-event-card {
@@ -1290,7 +1293,7 @@ body.mrm-masterclass-modal-open {
   margin: 0 auto;
 }
 
-.mrm-masterclass-dynamic-detail .secondary-btn {
+.mrm-masterclass-dynamic-detail .mrm-secondary-btn {
   background: #ffffff;
   color: var(--mrm-text);
   border: 1px solid var(--mrm-border);
@@ -1356,9 +1359,11 @@ body.mrm-masterclass-modal-open {
   </main>
   </div>
 
-  <div id="registrationModal" class="modal" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-      <button id="closeModalX" class="modal-close-x" type="button" aria-label="Close registration popup">×</button>
+  <div class="mrm-modal" id="registrationModal" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="mrm-modal-overlay" data-mrm-modal-overlay></div>
+    <div class="mrm-modal-panel" role="document">
+      <button id="closeModalX" type="button" class="mrm-modal-x" data-mrm-modal-close aria-label="Close">×</button>
+      <div class="mrm-modal-content">
       <h2 id="modalTitle">Register</h2>
       <p id="modalMeta" class="modal-meta"></p>
 
@@ -1367,9 +1372,9 @@ body.mrm-masterclass-modal-open {
       <input id="email" type="email" placeholder="Email address">
 
       <label class="mrm-masterclass-field">
-        <span>Promo code</span>
+        <span>Promotional Code</span>
         <input type="text" id="mrm-masterclass-promo-code" name="promo_code" autocomplete="off" placeholder="Optional">
-        <small>Masterclass promo codes follow the online-lesson-style promo path. If a code is not active yet, registration will continue without crashing.</small>
+        <small>Enter a promotional code if one was provided to you.</small>
       </label>
 
       <div id="mrm-masterclass-promo-message" class="mrm-masterclass-promo-message" hidden></div>
@@ -1382,38 +1387,44 @@ body.mrm-masterclass-modal-open {
         </span>
       </label>
 
-      <button id="payButton" class="primary-btn" type="button">Continue to Payment</button>
+      <button id="payButton" class="mrm-primary-btn" type="button">Continue to Payment</button>
 
       <div id="paymentElement" class="mrm-masterclass-payment-element"></div>
-      <button id="submitPayment" class="primary-btn" type="button" style="display:none;">Submit Payment</button>
+      <button id="submitPayment" class="mrm-primary-btn" type="button" style="display:none;">Submit Payment</button>
 
       <p id="modalMessage" class="message"></p>
-    </div>
-  </div>
-
-  <div id="finalConfirmationModal" class="modal" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="finalConfirmationTitle">
-      <button id="closeFinalConfirmationX" class="modal-close-x" type="button" aria-label="Close confirmation popup">×</button>
-      <h2 id="finalConfirmationTitle">Confirm Registration</h2>
-      <p id="finalConfirmationDetails" class="modal-meta"></p>
-      <p>Please confirm that you want to complete this Masterclass registration and submit your card payment.</p>
-      <div class="mrm-confirmation-actions">
-        <button id="confirmFinalPayment" class="primary-btn" type="button">Confirm and Pay</button>
-        <button id="cancelFinalPayment" class="secondary-btn" type="button">Go Back</button>
       </div>
     </div>
   </div>
 
-  <div id="masterclassSuccessModal" class="modal" aria-hidden="true">
-    <div class="modal-card mrm-masterclass-success-card" role="dialog" aria-modal="true" aria-labelledby="masterclassSuccessTitle">
-      <button id="closeMasterclassSuccessX" class="modal-close-x" type="button" aria-label="Close success popup">×</button>
+  <div class="mrm-modal" id="finalConfirmationModal" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="finalConfirmationTitle">
+    <div class="mrm-modal-overlay" data-mrm-modal-overlay></div>
+    <div class="mrm-modal-panel" role="document">
+      <button id="closeFinalConfirmationX" type="button" class="mrm-modal-x" data-mrm-modal-close aria-label="Close">×</button>
+      <div class="mrm-modal-content">
+      <h2 id="finalConfirmationTitle">Confirm Registration</h2>
+      <p id="finalConfirmationDetails" class="modal-meta"></p>
+      <p>Please confirm that you want to complete this Masterclass registration and submit your card payment.</p>
+      <div class="mrm-confirmation-actions">
+        <button id="confirmFinalPayment" class="mrm-primary-btn" type="button">Confirm and Pay</button>
+        <button id="cancelFinalPayment" class="mrm-secondary-btn" type="button">Go Back</button>
+      </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mrm-modal" id="masterclassSuccessModal" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="masterclassSuccessTitle">
+    <div class="mrm-modal-overlay" data-mrm-modal-overlay></div>
+    <div class="mrm-modal-panel mrm-masterclass-success-card" role="document">
+      <button id="closeMasterclassSuccessX" type="button" class="mrm-modal-x" data-mrm-modal-close aria-label="Close">×</button>
+      <div class="mrm-modal-content">
       <div class="mrm-masterclass-success-icon" aria-hidden="true">✓</div>
       <h2 id="masterclassSuccessTitle">Registration Complete</h2>
       <p id="masterclassSuccessMessage" class="modal-meta">
-        Your Masterclass registration is complete. Please check your email for your confirmation and protected access link.
+        Your Masterclass registration is confirmed. A confirmation email with your protected access link has been sent to the email address you provided.
       </p>
-      <a id="masterclassSuccessAccessLink" class="primary-btn mrm-masterclass-success-access" href="#" style="display:none;">Open Your Access Page</a>
-      <button id="closeMasterclassSuccessButton" class="secondary-btn" type="button">Close</button>
+      <a id="masterclassSuccessAccessLink" class="mrm-primary-btn mrm-masterclass-success-access" href="#" style="display:none;">Open Your Access Page</a>
+      </div>
     </div>
   </div>
 
@@ -2072,7 +2083,7 @@ body.mrm-masterclass-modal-open {
   }
 
   function closedRegistrationButtonHtml(extraClass) {
-    return '<button type="button" class="primary-btn mrm-masterclass-register-button mrm-masterclass-closed-button ' + escapeHtml(extraClass || '') + '" disabled>Registration Closed</button>';
+    return '<button type="button" class="mrm-primary-btn mrm-masterclass-register-button mrm-masterclass-closed-button ' + escapeHtml(extraClass || '') + '" disabled>Registration Closed</button>';
   }
 
   function masterclassContainerUrl(params) {
@@ -2084,7 +2095,7 @@ body.mrm-masterclass-modal-open {
   }
 
   function renderBackToMasterclassesLink() {
-    return '<p style="margin:0 0 24px;"><a class="secondary-btn" style="display:inline-flex;width:auto;text-decoration:none;" href="' + escapeHtml(masterclassContainerUrl({})) + '">← Back to All Masterclasses</a></p>';
+    return '<p style="margin:0 0 24px;"><a class="mrm-secondary-btn" style="display:inline-flex;width:auto;text-decoration:none;" href="' + escapeHtml(masterclassContainerUrl({})) + '">← Back to All Masterclasses</a></p>';
   }
 
   function renderPresenterDetailView(presenter, sessions) {
@@ -2155,8 +2166,8 @@ body.mrm-masterclass-modal-open {
         html += '<div class="mrm-masterclass-card-actions">';
 
         if (sessionCanRegister) {
-          html += '<button type="button" class="primary-btn mrm-masterclass-register-button" data-register-event-id="' + escapeHtml(String(session.id || '')) + '">Register For This Masterclass</button>';
-          html += '<a class="primary-btn mrm-masterclass-learn-more-button" href="' + escapeHtml(session.session_page_url || masterclassContainerUrl({ session: session.id })) + '">Learn More About This Masterclass</a>';
+          html += '<button type="button" class="mrm-primary-btn mrm-masterclass-register-button" data-register-event-id="' + escapeHtml(String(session.id || '')) + '">Register For This Masterclass</button>';
+          html += '<a class="mrm-primary-btn mrm-masterclass-learn-more-button" href="' + escapeHtml(session.session_page_url || masterclassContainerUrl({ session: session.id })) + '">Learn More About This Masterclass</a>';
         } else {
           html += closedRegistrationButtonHtml('');
         }
@@ -2249,13 +2260,13 @@ body.mrm-masterclass-modal-open {
     html += '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:26px;">';
 
     if (canRegister) {
-      html += '<button type="button" id="mrm-masterclass-session-register" class="primary-btn mrm-masterclass-register-button mrm-masterclass-action-button">Register For This Masterclass</button>';
+      html += '<button type="button" id="mrm-masterclass-session-register" class="mrm-primary-btn mrm-masterclass-register-button mrm-masterclass-action-button">Register For This Masterclass</button>';
     } else {
       html += closedRegistrationButtonHtml('mrm-masterclass-action-button');
     }
 
     if (presenterUrl) {
-      html += '<a class="primary-btn mrm-masterclass-action-button mrm-masterclass-secondary-action" href="' + escapeHtml(presenterUrl) + '">More About The Presenter</a>';
+      html += '<a class="mrm-primary-btn mrm-masterclass-action-button mrm-masterclass-secondary-action" href="' + escapeHtml(presenterUrl) + '">More About The Presenter</a>';
     }
 
     html += '</div>';
@@ -2419,7 +2430,7 @@ body.mrm-masterclass-modal-open {
 
       const button = document.createElement('button');
       button.type = 'button';
-      button.className = 'primary-btn mrm-masterclass-register-button';
+      button.className = 'mrm-primary-btn mrm-masterclass-register-button';
 
       if (past || !canRegister) {
         button.textContent = 'Registration Closed';
@@ -2449,7 +2460,7 @@ body.mrm-masterclass-modal-open {
 
       const viewCalendarButton = document.createElement('button');
       viewCalendarButton.type = 'button';
-      viewCalendarButton.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-view-calendar-button';
+      viewCalendarButton.className = 'mrm-primary-btn mrm-masterclass-register-button mrm-masterclass-view-calendar-button';
       viewCalendarButton.textContent = 'View On Calendar';
 
       viewCalendarButton.addEventListener('click', function () {
@@ -2460,7 +2471,7 @@ body.mrm-masterclass-modal-open {
 
       if (!past) {
         const learnMore = document.createElement('a');
-        learnMore.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-learn-more-button';
+        learnMore.className = 'mrm-primary-btn mrm-masterclass-register-button mrm-masterclass-learn-more-button';
         learnMore.href = event.session_page_url || masterclassContainerUrl({ session: event.id });
         learnMore.textContent = 'Learn More About This Session';
         actions.appendChild(learnMore);
@@ -2580,45 +2591,51 @@ body.mrm-masterclass-modal-open {
   }
 
   function openModal(id) {
-    const modal = byId(id);
+    const modal = document.getElementById(id);
 
-    if (!modal) {
-      return;
-    }
+    if (!modal) return;
 
-    if (!modal.classList.contains('is-open')) {
-      modal.classList.add('is-open');
-    }
-
+    modal.hidden = false;
     modal.setAttribute('aria-hidden', 'false');
-    document.body.classList.add('mrm-masterclass-modal-open');
+    document.documentElement.classList.add('mrm-modal-open');
+    document.body.classList.add('mrm-modal-open');
+
+    const focusTarget = modal.querySelector('[data-mrm-modal-close], button, input, select, textarea, a[href]');
+    if (focusTarget) {
+      window.setTimeout(function () {
+        focusTarget.focus();
+      }, 25);
+    }
   }
 
   function anyMasterclassModalOpen() {
-    return Boolean(document.querySelector('.modal.is-open'));
+    return Boolean(document.querySelector('.mrm-modal:not([hidden])'));
   }
 
-  function closeAllMasterclassModals() {
-    document.querySelectorAll('.modal.is-open').forEach(function (modal) {
-      modal.classList.remove('is-open');
+  function closeAllModals() {
+    document.querySelectorAll('.mrm-modal').forEach(function (modal) {
+      modal.hidden = true;
       modal.setAttribute('aria-hidden', 'true');
     });
 
-    document.body.classList.remove('mrm-masterclass-modal-open');
+    document.documentElement.classList.remove('mrm-modal-open');
+    document.body.classList.remove('mrm-modal-open');
   }
 
   function closeOtherMasterclassModals(keepId) {
-    document.querySelectorAll('.modal.is-open').forEach(function (modal) {
+    document.querySelectorAll('.mrm-modal:not([hidden])').forEach(function (modal) {
       if (modal && modal.id !== keepId) {
-        modal.classList.remove('is-open');
+        modal.hidden = true;
         modal.setAttribute('aria-hidden', 'true');
       }
     });
 
-    if (document.querySelector('.modal.is-open')) {
-      document.body.classList.add('mrm-masterclass-modal-open');
+    if (document.querySelector('.mrm-modal:not([hidden])')) {
+      document.documentElement.classList.add('mrm-modal-open');
+      document.body.classList.add('mrm-modal-open');
     } else {
-      document.body.classList.remove('mrm-masterclass-modal-open');
+      document.documentElement.classList.remove('mrm-modal-open');
+      document.body.classList.remove('mrm-modal-open');
     }
   }
 
@@ -2674,17 +2691,17 @@ body.mrm-masterclass-modal-open {
   }
 
   function closeModal(id) {
-    const modal = byId(id);
+    const modal = document.getElementById(id);
 
-    if (!modal) {
-      return;
-    }
+    if (!modal) return;
 
-    modal.classList.remove('is-open');
+    modal.hidden = true;
     modal.setAttribute('aria-hidden', 'true');
 
-    if (!anyMasterclassModalOpen()) {
-      document.body.classList.remove('mrm-masterclass-modal-open');
+    const openModals = document.querySelectorAll('.mrm-modal:not([hidden])');
+    if (!openModals.length) {
+      document.documentElement.classList.remove('mrm-modal-open');
+      document.body.classList.remove('mrm-modal-open');
 
       if (id === 'registrationModal' || id === 'finalConfirmationModal' || id === 'masterclassSuccessModal') {
         window.__mrmMasterclassCheckoutInProgress = false;
@@ -2874,7 +2891,7 @@ body.mrm-masterclass-modal-open {
     const gateUrl = finalData && finalData.gate_url ? finalData.gate_url : '';
 
     if (successMessage) {
-      successMessage.textContent = 'Your registration for ' + eventTitle + ' is complete. Please check your email for your confirmation and protected access link.';
+      successMessage.textContent = 'Your Masterclass registration for ' + eventTitle + ' is confirmed. A confirmation email with your protected access link has been sent to the email address you provided.';
     }
 
     if (accessLink) {
@@ -2887,7 +2904,7 @@ body.mrm-masterclass-modal-open {
       }
     }
 
-    closeAllMasterclassModals();
+    closeAllModals();
 
     if (successModal) {
       openModal('masterclassSuccessModal');
@@ -3008,21 +3025,10 @@ body.mrm-masterclass-modal-open {
   }
 
   function bindModalControls() {
-    const closeX = byId('closeModalX');
     const payButton = byId('payButton');
     const submitPayment = byId('submitPayment');
-    const closeFinalX = byId('closeFinalConfirmationX');
     const cancelFinal = byId('cancelFinalPayment');
     const confirmFinal = byId('confirmFinalPayment');
-    const closeSuccessX = byId('closeMasterclassSuccessX');
-    const closeSuccessButton = byId('closeMasterclassSuccessButton');
-
-    if (closeX && !closeX.dataset.mrmBound) {
-      closeX.dataset.mrmBound = '1';
-      closeX.addEventListener('click', function () {
-        closeModal('registrationModal');
-      });
-    }
 
     if (payButton && !payButton.dataset.mrmBound) {
       payButton.dataset.mrmBound = '1';
@@ -3040,17 +3046,12 @@ body.mrm-masterclass-modal-open {
       });
     }
 
-    if (closeFinalX && !closeFinalX.dataset.mrmBound) {
-      closeFinalX.dataset.mrmBound = '1';
-      closeFinalX.addEventListener('click', function () {
-        closeModal('finalConfirmationModal');
-      });
-    }
-
     if (cancelFinal && !cancelFinal.dataset.mrmBound) {
       cancelFinal.dataset.mrmBound = '1';
       cancelFinal.addEventListener('click', function () {
         closeModal('finalConfirmationModal');
+        openModal('registrationModal');
+        window.__mrmMasterclassCheckoutInProgress = true;
       });
     }
 
@@ -3062,20 +3063,28 @@ body.mrm-masterclass-modal-open {
       });
     }
 
-    if (closeSuccessX && !closeSuccessX.dataset.mrmBound) {
-      closeSuccessX.dataset.mrmBound = '1';
-      closeSuccessX.addEventListener('click', function () {
-        closeModal('masterclassSuccessModal');
-      });
-    }
-
-    if (closeSuccessButton && !closeSuccessButton.dataset.mrmBound) {
-      closeSuccessButton.dataset.mrmBound = '1';
-      closeSuccessButton.addEventListener('click', function () {
-        closeModal('masterclassSuccessModal');
-      });
-    }
   }
+
+  document.addEventListener('click', function (event) {
+    const closeButton = event.target.closest('[data-mrm-modal-close]');
+    if (!closeButton) return;
+
+    const modal = closeButton.closest('.mrm-modal');
+    if (modal && modal.id) {
+      closeModal(modal.id);
+    }
+  });
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+
+    const modals = Array.from(document.querySelectorAll('.mrm-modal:not([hidden])'));
+    const topModal = modals.pop();
+
+    if (topModal && topModal.id) {
+      closeModal(topModal.id);
+    }
+  });
 
   function bootMasterclassPage() {
     if (window.__mrmMasterclassBootComplete) {
