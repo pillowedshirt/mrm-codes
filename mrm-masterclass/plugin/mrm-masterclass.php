@@ -410,23 +410,36 @@ class LowBrass_MRM_Masterclass_Plugin {
 			$candidates[] = trailingslashit( MRM_MASTERCLASS_FRONTEND_DIR ) . 'masterclass.html';
 		}
 
+		if ( defined( 'MRM_MASTERCLASS_SOURCE_ROOT_DIR' ) ) {
+			$candidates[] = trailingslashit( MRM_MASTERCLASS_SOURCE_ROOT_DIR ) . 'frontend/masterclass.html';
+			$candidates[] = trailingslashit( MRM_MASTERCLASS_SOURCE_ROOT_DIR ) . 'masterclass.html';
+		}
+
 		if ( defined( 'MRM_MASTERCLASS_DIR' ) ) {
 			$candidates[] = trailingslashit( MRM_MASTERCLASS_DIR ) . 'frontend/masterclass.html';
+			$candidates[] = trailingslashit( MRM_MASTERCLASS_DIR ) . 'masterclass.html';
 			$candidates[] = trailingslashit( dirname( MRM_MASTERCLASS_DIR ) ) . 'frontend/masterclass.html';
+			$candidates[] = trailingslashit( dirname( MRM_MASTERCLASS_DIR ) ) . 'masterclass.html';
 		}
 
 		$candidates[] = trailingslashit( __DIR__ ) . 'frontend/masterclass.html';
+		$candidates[] = trailingslashit( __DIR__ ) . 'masterclass.html';
 		$candidates[] = trailingslashit( dirname( __DIR__ ) ) . 'frontend/masterclass.html';
+		$candidates[] = trailingslashit( dirname( __DIR__ ) ) . 'masterclass.html';
 
 		if ( defined( 'WP_PLUGIN_DIR' ) ) {
 			$candidates[] = trailingslashit( WP_PLUGIN_DIR ) . 'mrm-masterclass/frontend/masterclass.html';
+			$candidates[] = trailingslashit( WP_PLUGIN_DIR ) . 'mrm-masterclass/masterclass.html';
 			$candidates[] = trailingslashit( WP_PLUGIN_DIR ) . 'mrm-masterclass/plugin/frontend/masterclass.html';
+			$candidates[] = trailingslashit( WP_PLUGIN_DIR ) . 'mrm-masterclass/plugin/masterclass.html';
 		}
 
 		$seen = array();
 
 		foreach ( $candidates as $candidate ) {
-			$candidate = wp_normalize_path( (string) $candidate );
+			$candidate = function_exists( 'wp_normalize_path' )
+				? wp_normalize_path( (string) $candidate )
+				: str_replace( '\\', '/', (string) $candidate );
 
 			if ( '' === $candidate || isset( $seen[ $candidate ] ) ) {
 				continue;
@@ -438,6 +451,14 @@ class LowBrass_MRM_Masterclass_Plugin {
 				return $candidate;
 			}
 		}
+
+		self::safe_debug_log(
+			'Masterclass frontend file could not be found.',
+			array(
+				'plugin_file' => defined( 'MRM_MASTERCLASS_FILE' ) ? MRM_MASTERCLASS_FILE : '',
+				'plugin_dir'  => defined( 'MRM_MASTERCLASS_DIR' ) ? MRM_MASTERCLASS_DIR : '',
+			)
+		);
 
 		return '';
 	}
@@ -503,6 +524,65 @@ class LowBrass_MRM_Masterclass_Plugin {
 		add_filter( $hook, array( $this, $method ), absint( $priority ), absint( $accepted_args ) );
 
 		return true;
+	}
+
+	private static function safe_debug_log( $message, $context = array() ) {
+		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
+			mrm_lowbrass_masterclass_emergency_file_log( $message, $context );
+			return;
+		}
+
+		if ( defined( 'WP_CONTENT_DIR' ) ) {
+			$file = trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log';
+
+			$safe_context = array();
+
+			if ( is_array( $context ) ) {
+				foreach ( $context as $key => $value ) {
+					$key = preg_replace( '/[^a-z0-9_\-]/i', '', (string) $key );
+
+					if ( preg_match( '/secret|token|password|private|authorization|cookie|nonce|key|tin|ssn|ein/i', $key ) ) {
+						$safe_context[ $key ] = '[redacted]';
+						continue;
+					}
+
+					if ( is_scalar( $value ) || null === $value ) {
+						$value = (string) $value;
+
+						if ( preg_match( '/sk_live_|sk_test_|pk_live_|pk_test_|whsec_|-----BEGIN|Bearer\s+/i', $value ) ) {
+							$safe_context[ $key ] = '[redacted]';
+							continue;
+						}
+
+						if ( strlen( $value ) > 700 ) {
+							$value = substr( $value, 0, 700 ) . '...[truncated]';
+						}
+
+						$safe_context[ $key ] = $value;
+					} elseif ( is_array( $value ) ) {
+						$safe_context[ $key ] = '[array:' . count( $value ) . ']';
+					} elseif ( is_object( $value ) ) {
+						$safe_context[ $key ] = '[object:' . get_class( $value ) . ']';
+					} else {
+						$safe_context[ $key ] = '[non-scalar]';
+					}
+				}
+			}
+
+			$line = '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] ' . (string) $message;
+
+			if ( ! empty( $safe_context ) ) {
+				$encoded = function_exists( 'wp_json_encode' ) ? wp_json_encode( $safe_context ) : json_encode( $safe_context );
+
+				if ( false !== $encoded ) {
+					$line .= ' | ' . $encoded;
+				}
+			}
+
+			$line .= PHP_EOL;
+
+			@file_put_contents( $file, $line, FILE_APPEND | LOCK_EX );
+		}
 	}
 
 	public static function activate() {
