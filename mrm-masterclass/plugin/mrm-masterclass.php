@@ -279,11 +279,10 @@ class LowBrass_MRM_Masterclass_Plugin {
 }
 
 	/**
-	 * Render the launch-ready Masterclass frontend directly from the bundled file.
+	 * Render the launch-ready Masterclass frontend from the bundled file.
 	 *
-	 * The WordPress Masterclass page can contain only [mrm_masterclass_page], so
-	 * deployments no longer depend on a manually pasted (and potentially stale)
-	 * copy of the frontend HTML stored in page content.
+	 * Styles and scripts are extracted and enqueued through WordPress so page
+	 * builders cannot strip or prevent execution of the frontend controller.
 	 *
 	 * @return string
 	 */
@@ -298,6 +297,67 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 		if ( ! is_string( $html ) || '' === trim( $html ) ) {
 			return '<div class="mrm-masterclass-error">Masterclass page is temporarily unavailable. Please contact Low Brass Lessons.</div>';
+		}
+
+		$version = filemtime( $file );
+		$style   = '';
+		$script  = '';
+
+		if ( preg_match( '/<style\b[^>]*>(.*?)<\/style>/is', $html, $style_match ) ) {
+			$style = (string) $style_match[1];
+			$html  = str_replace( $style_match[0], '', $html );
+		}
+
+		if ( preg_match_all( '/<script\b([^>]*)>(.*?)<\/script>/is', $html, $script_matches, PREG_SET_ORDER ) ) {
+			foreach ( $script_matches as $script_match ) {
+				$attrs   = isset( $script_match[1] ) ? (string) $script_match[1] : '';
+				$content = isset( $script_match[2] ) ? (string) $script_match[2] : '';
+
+				if ( false !== stripos( $attrs, 'src=' ) && false !== stripos( $attrs, 'js.stripe.com/v3' ) ) {
+					$html = str_replace( $script_match[0], '', $html );
+					continue;
+				}
+
+				if ( '' !== trim( $content ) ) {
+					$script .= "\n" . $content . "\n";
+				}
+
+				$html = str_replace( $script_match[0], '', $html );
+			}
+		}
+
+		wp_register_style( 'mrm-masterclass-page', false, array(), $version );
+		wp_enqueue_style( 'mrm-masterclass-page' );
+
+		if ( '' !== $style ) {
+			wp_add_inline_style( 'mrm-masterclass-page', $style );
+		}
+
+		wp_enqueue_script( 'mrm-stripe-js', 'https://js.stripe.com/v3/', array(), null, true );
+
+		wp_register_script(
+			'mrm-masterclass-page',
+			false,
+			array( 'mrm-stripe-js' ),
+			$version,
+			true
+		);
+
+		wp_enqueue_script( 'mrm-masterclass-page' );
+
+		wp_localize_script(
+			'mrm-masterclass-page',
+			'MRM_MASTERCLASS',
+			array(
+				'restBase'        => esc_url_raw( rest_url( self::REST_NAMESPACE ) ),
+				'restFallback'    => esc_url_raw( home_url( '/?rest_route=/' . self::REST_NAMESPACE ) ),
+				'stripePublicKey' => $this->mrm_mc_get_stripe_publishable_key(),
+				'currency'        => 'usd',
+			)
+		);
+
+		if ( '' !== $script ) {
+			wp_add_inline_script( 'mrm-masterclass-page', $script, 'after' );
 		}
 
 		return $html;

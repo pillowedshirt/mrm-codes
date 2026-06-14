@@ -1387,6 +1387,9 @@ body.mrm-modal-open {
 
       <div id="mrm-masterclass-error" class="mrm-masterclass-error" hidden></div>
       <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses…</div>
+      <div id="mrm-masterclass-script-fail" class="mrm-masterclass-error" hidden>
+        Masterclasses could not load because the page script did not run. Please refresh the page or contact Low Brass Lessons for help.
+      </div>
       <noscript>
         <div class="mrm-masterclass-error">
           Masterclasses require JavaScript to display upcoming sessions. Please enable JavaScript or contact Low Brass Lessons for help.
@@ -1480,6 +1483,8 @@ body.mrm-modal-open {
 (function () {
   'use strict';
 
+  window.__mrmMasterclassScriptLoaded = true;
+
   const root = document.getElementById('mrm-masterclass-root');
 
   if (!root) {
@@ -1502,11 +1507,14 @@ body.mrm-modal-open {
     const wpApiRoot = window.wpApiSettings && window.wpApiSettings.root
       ? String(window.wpApiSettings.root).replace(/\/+$/, '')
       : '';
+
     const fallbackRestBase = wpApiRoot
       ? wpApiRoot + '/mrm-masterclass/v1'
       : (window.location.origin + '/wp-json/mrm-masterclass/v1');
+
     return {
       restBase: root.dataset.restBase || globalConfig.restBase || fallbackRestBase,
+      restFallback: root.dataset.restFallback || globalConfig.restFallback || (window.location.origin + '/?rest_route=/mrm-masterclass/v1'),
       stripePublicKey: root.dataset.stripePublicKey || globalConfig.stripePublicKey || '',
       currency: root.dataset.currency || globalConfig.currency || 'usd'
     };
@@ -1550,8 +1558,13 @@ body.mrm-modal-open {
 
   function restRouteFallbackUrl(route) {
     const cleanRoute = String(route || '').replace(/^\/+/, '');
-    const restRoute = '/mrm-masterclass/v1/' + cleanRoute;
-    return window.location.origin + '/?rest_route=' + encodeURIComponent(restRoute) + '&mrm_no_cache=' + Date.now();
+    const fallbackBase = getConfig().restFallback || (window.location.origin + '/?rest_route=/mrm-masterclass/v1');
+
+    if (fallbackBase.indexOf('?rest_route=') !== -1) {
+      return fallbackBase.replace(/\/+$/, '') + '/' + cleanRoute + '&mrm_no_cache=' + Date.now();
+    }
+
+    return fallbackBase.replace(/\/+$/, '') + '/' + cleanRoute + '?mrm_no_cache=' + Date.now();
   }
 
   function money(cents) {
@@ -3293,6 +3306,8 @@ body.mrm-modal-open {
   });
 
   function bootMasterclassPage() {
+    window.__mrmMasterclassBootCalled = true;
+
     if (window.__mrmMasterclassBootComplete) {
       return;
     }
@@ -3327,8 +3342,31 @@ body.mrm-modal-open {
   }
 
   function startWhenReady() {
+    window.__mrmMasterclassStartWhenReady = true;
+
+    const scriptFail = byId('mrm-masterclass-script-fail');
+    if (scriptFail) {
+      scriptFail.hidden = true;
+    }
+
     bindModalControls();
     bootMasterclassPage();
+
+    window.setTimeout(function () {
+      const loading = document.getElementById('mrm-masterclass-loading');
+      const fail = document.getElementById('mrm-masterclass-script-fail');
+
+      if (
+        loading &&
+        fail &&
+        !window.__mrmMasterclassBootComplete &&
+        !window.__mrmMasterclassBootCalled
+      ) {
+        loading.hidden = true;
+        fail.hidden = false;
+      }
+    }, 5000);
+
     window.setTimeout(function () {
       const loading = byId('mrm-masterclass-loading');
       const eventsEl = byId('mrm-masterclass-events');
