@@ -659,7 +659,7 @@ body.mrm-piece-no-scroll{
   justify-content:center;
   padding:18px;
   box-sizing:border-box;
-  z-index:2147483647;
+  z-index:2147483600;
   cursor:zoom-out;
   overscroll-behavior:none;
   overflow:hidden;
@@ -703,7 +703,37 @@ body.mrm-piece-no-scroll{
   background: rgba(0,0,0,0.55);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  z-index:2147483646;
+  z-index:2147483647 !important;
+  pointer-events:auto !important;
+}
+.mrm-otpOverlay.is-open{
+  display:flex !important;
+  pointer-events:auto !important;
+}
+.mrm-otpOverlay .modal{
+  position:relative;
+  z-index:2147483647 !important;
+  pointer-events:auto !important;
+}
+.mrm-otpOverlay .modal *,
+.mrm-otpOverlay button,
+.mrm-otpOverlay input,
+.mrm-otpOverlay label{
+  pointer-events:auto !important;
+}
+.mrm-otpOverlay .mrm-otp-send-btn,
+.mrm-otpOverlay .mrm-otp-verify-btn,
+.mrm-otpOverlay .mrm-sendCodeBtn,
+.mrm-otpOverlay .mrm-verifyBtn{
+  display:inline-flex !important;
+  align-items:center;
+  justify-content:center;
+  min-height:48px;
+  cursor:pointer !important;
+  touch-action:manipulation;
+  user-select:none;
+  -webkit-user-select:none;
+  pointer-events:auto !important;
 }
 /* OTP modal Close button: guarantee visible label */
 .mrm-otpOverlay .mrm-closeBtn{
@@ -1018,13 +1048,25 @@ body.mrm-piece-no-scroll{
             <div class="mrm-stepEmail">
               <label style="display:block;font-weight:800;margin-bottom:8px;">Email address</label>
               <input type="email" class="mrm-email" autocomplete="email" required style="width:100%;padding:14px;border-radius:14px;border:1px solid rgba(0,0,0,0.16);">
-              <button type="button" class="primary mrm-sendCodeBtn" style="margin-top:10px;padding:12px 14px;border-radius:14px;border:none;background:#2f2f2f;color:#fff;font-weight:900;cursor:pointer;text-decoration:none;">Send Code</button>
+              <button
+                type="button"
+                class="primary mrm-otp-send-btn mrm-sendCodeBtn"
+                data-mrm-otp-action="send"
+                aria-label="Send access code"
+                style="margin-top:10px;padding:12px 14px;border-radius:14px;border:none;background:#2f2f2f;color:#fff;font-weight:900;cursor:pointer;text-decoration:none;pointer-events:auto;"
+              >Send Code</button>
             </div>
 
             <div class="mrm-stepOtp hidden" style="margin-top:14px;">
               <label style="display:block;font-weight:800;margin-bottom:8px;">Enter Code</label>
               <input type="text" class="mrm-otp" inputmode="numeric" pattern="\\d*" required style="width:100%;padding:14px;border-radius:14px;border:1px solid rgba(0,0,0,0.16);">
-              <button type="button" class="primary mrm-verifyBtn" style="margin-top:10px;padding:12px 14px;border-radius:14px;border:none;background:#2f2f2f;color:#fff;font-weight:900;cursor:pointer;text-decoration:none;">Verify</button>
+              <button
+                type="button"
+                class="primary mrm-otp-verify-btn mrm-verifyBtn"
+                data-mrm-otp-action="verify"
+                aria-label="Verify access code"
+                style="margin-top:10px;padding:12px 14px;border-radius:14px;border:none;background:#2f2f2f;color:#fff;font-weight:900;cursor:pointer;text-decoration:none;pointer-events:auto;"
+              >Verify</button>
             </div>
 
             <div class="message mrm-message" style="margin-top:12px;min-height:24px;opacity:0.85;"></div>
@@ -2987,6 +3029,27 @@ async function getOfferSkuCandidates(offerEl) {
   }
 
   function openOtpModal(forSlug){
+    const pdfOverlay = document.querySelector('.mrm-pdfOverlay');
+    if (pdfOverlay) {
+      pdfOverlay.classList.remove('is-open');
+      pdfOverlay.setAttribute('aria-hidden', 'true');
+    }
+
+    const sendButton = document.querySelector('.mrm-otp-send-btn, .mrm-sendCodeBtn');
+    const verifyButton = document.querySelector('.mrm-otp-verify-btn, .mrm-verifyBtn');
+    if (sendButton) {
+      sendButton.disabled = false;
+      sendButton.removeAttribute('disabled');
+      sendButton.style.pointerEvents = 'auto';
+      sendButton.style.cursor = 'pointer';
+    }
+    if (verifyButton) {
+      verifyButton.disabled = false;
+      verifyButton.removeAttribute('disabled');
+      verifyButton.style.pointerEvents = 'auto';
+      verifyButton.style.cursor = 'pointer';
+    }
+
     const otpOverlay = document.querySelector('.mrm-otpOverlay');
     const stepEmail = document.querySelector('.mrm-stepEmail');
     const stepOtp = document.querySelector('.mrm-stepOtp');
@@ -3025,6 +3088,80 @@ async function getOfferSkuCandidates(offerEl) {
     verifyBtn.dataset.mrmOtpBound = '1';
     closeBtn.textContent = 'Close';
     closeBtn.setAttribute('aria-label', 'Close');
+
+    if (piece.dataset.mrmOtpDelegatedBound !== '1') {
+      piece.dataset.mrmOtpDelegatedBound = '1';
+      piece.addEventListener('click', async function(event) {
+        const sendClick = event.target.closest('.mrm-otp-send-btn, .mrm-sendCodeBtn');
+        const verifyClick = event.target.closest('.mrm-otp-verify-btn, .mrm-verifyBtn');
+        if (!sendClick && !verifyClick) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+
+        const email = (emailInput.value || '').trim();
+        if (isEmailLike(email)) mrmSavePiecePaymentEmail(email);
+        if (!email) { messageDiv.textContent = 'Please enter your email.'; return; }
+        if (!isEmailLike(email)) { messageDiv.textContent = 'Please enter a valid email address.'; return; }
+        if (!activeProductSlug && (!activePieceSlug || !activeOfferType)) {
+          messageDiv.textContent = 'This access option is temporarily unavailable. Please contact Low Brass Lessons.';
+          return;
+        }
+
+        if (sendClick) {
+          sendClick.disabled = true;
+          sendClick.setAttribute('aria-busy', 'true');
+          messageDiv.textContent = 'Sending code...';
+          try {
+            const response = await fetch(mrmProductAccessApiUrl('request-otp'), {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+              body: JSON.stringify({ email, product_slug: activeProductSlug, raw_offer_slug: activeRawOfferSlug, piece_slug: activePieceSlug, offer_type: activeOfferType })
+            });
+            let data = {};
+            try { data = await response.json(); } catch (jsonError) { data = {}; }
+            if (!response.ok) {
+              messageDiv.textContent = data.message || 'We could not send an access code right now. Please try again or contact Low Brass Lessons.';
+              return;
+            }
+            messageDiv.textContent = data.message || 'If this purchase exists, a code will be sent shortly.';
+            stepEmail.classList.add('hidden');
+            stepOtp.classList.remove('hidden');
+            window.setTimeout(function () { otpInput.focus(); }, 50);
+          } catch (error) {
+            messageDiv.textContent = 'We could not send an access code right now. Please try again or contact Low Brass Lessons.';
+          } finally {
+            sendClick.disabled = false;
+            sendClick.removeAttribute('aria-busy');
+          }
+          return;
+        }
+
+        const otp = (otpInput.value || '').trim();
+        if (!otp) { messageDiv.textContent = 'Enter the code you received.'; return; }
+        verifyClick.disabled = true;
+        verifyClick.setAttribute('aria-busy', 'true');
+        messageDiv.textContent = 'Verifying...';
+        try {
+          const response = await fetch(mrmProductAccessApiUrl('verify-otp'), {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ email, product_slug: activeProductSlug, raw_offer_slug: activeRawOfferSlug, piece_slug: activePieceSlug, offer_type: activeOfferType, otp })
+          });
+          let data = {};
+          try { data = await response.json(); } catch (jsonError) { data = {}; }
+          if (!response.ok) { messageDiv.textContent = data.message || 'We could not verify that code right now. Please try again.'; return; }
+          if (data.ok && data.access_url) { window.location.href = data.access_url; return; }
+          messageDiv.textContent = data.message || 'Verified, but no access link was returned. Please contact Low Brass Lessons.';
+        } catch (error) {
+          messageDiv.textContent = 'We could not verify that code right now. Please try again.';
+        } finally {
+          verifyClick.disabled = false;
+          verifyClick.removeAttribute('aria-busy');
+        }
+      }, true);
+    }
     function closeOtpModal(){
       otpOverlay.classList.remove('is-open'); otpOverlay.setAttribute('aria-hidden','true');
       document.body.classList.remove('mrm-piece-no-scroll');
