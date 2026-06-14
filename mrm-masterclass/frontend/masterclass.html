@@ -1479,22 +1479,25 @@ body.mrm-modal-open {
     </div>
   </div>
 
-<script id="mrm-masterclass-frontend-controller">
+<script id="mrm-masterclass-frontend-controller" data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1">
 (function () {
   function mrmMasterclassController() {
     'use strict';
 
     const root = document.getElementById('mrm-masterclass-root');
+    const calendar = document.getElementById('mrm-masterclass-calendar');
+    const eventsEl = document.getElementById('mrm-masterclass-events');
+    const loadingEl = document.getElementById('mrm-masterclass-loading');
+    const monthTitle = document.getElementById('mrm-masterclass-calendar-current-month');
 
-    if (!root) {
+    if (!root || !calendar || !eventsEl || !loadingEl || !monthTitle) {
       return false;
     }
 
-    if (window.__mrmMasterclassControllerInitialized) {
+    if (window.__mrmMasterclassControllerInitialized && window.__mrmMasterclassBootComplete) {
       return true;
     }
 
-    window.__mrmMasterclassControllerInitialized = true;
     window.__mrmMasterclassScriptLoaded = true;
 
     const state = {
@@ -3413,17 +3416,33 @@ body.mrm-modal-open {
     }, 8000);
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', startWhenReady, { once: true });
-  } else {
-    startWhenReady();
+  function mrmRunMasterclassStart() {
+    try {
+      startWhenReady();
+      window.__mrmMasterclassControllerInitialized = true;
+      return true;
+    } catch (error) {
+      window.__mrmMasterclassControllerInitialized = false;
+      window.__mrmMasterclassBootRunning = false;
+      window.__mrmMasterclassEventsLoading = false;
+
+      try {
+        renderCalendar(state.events || []);
+      } catch (calendarError) {}
+
+      try {
+        showError('We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.');
+      } catch (messageError) {}
+
+      return false;
+    }
   }
 
-    return true;
+  return mrmRunMasterclassStart();
   }
 
   function tryStartMasterclassController() {
-    if (window.__mrmMasterclassControllerInitialized) {
+    if (window.__mrmMasterclassControllerInitialized && window.__mrmMasterclassBootComplete) {
       return;
     }
 
