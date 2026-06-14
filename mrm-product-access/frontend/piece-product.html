@@ -2339,9 +2339,9 @@ async function getOfferSkuCandidates(offerEl) {
       card.className = 'offer-card';
       card.innerHTML = `
         <div style="padding:14px;border:1px solid rgba(0,0,0,0.14);border-radius:16px;background:#fff;">
-          <div style="font-weight:900;">Product misconfigured</div>
+          <div style="font-weight:900;">Option unavailable</div>
           <div style="opacity:0.75;margin-top:6px;">
-            This offer is missing <code>product_slug</code>. Purchasing is disabled.
+            This option is temporarily unavailable. Please contact Low Brass Lessons.
           </div>
         </div>
       `;
@@ -2363,8 +2363,7 @@ async function getOfferSkuCandidates(offerEl) {
         </div>
         <div class="offer-body">
           <div style="grid-column:1 / -1; padding:12px; border:1px solid rgba(255,0,0,0.25); border-radius:14px;">
-            <strong>Configuration error:</strong> This offer is missing a valid <code>product_slug</code>.<br>
-            Fix it in <strong>MRM Access → Purchasing Options (Offers)</strong>.
+            This option is temporarily unavailable. Please contact Low Brass Lessons.
           </div>
         </div>
       `;
@@ -2965,7 +2964,7 @@ async function getOfferSkuCandidates(offerEl) {
       mrmSavePiecePaymentEmail(email);
     }
       if(!email){ messageDiv.textContent='Please enter your email.'; return; }
-      if(!activeProductSlug){ messageDiv.textContent='Missing product selection.'; return; }
+      if(!activeProductSlug){ messageDiv.textContent='This option is temporarily unavailable. Please contact Low Brass Lessons.'; return; }
 
       messageDiv.textContent='Sending code...';
 
@@ -2990,7 +2989,7 @@ async function getOfferSkuCandidates(offerEl) {
         stepEmail.classList.add('hidden');
         stepOtp.classList.remove('hidden');
       })
-      .catch(err=>{  messageDiv.textContent='Error sending code.'; });
+      .catch(()=>{ messageDiv.textContent='We could not send an access code right now. Please try again or contact Low Brass Lessons.'; });
     });
 
     verifyBtn.addEventListener('click', function(){
@@ -3000,7 +2999,7 @@ async function getOfferSkuCandidates(offerEl) {
     }
       const otp = (otpInput.value || '').trim();
       if(!otp){ messageDiv.textContent='Enter the code you received.'; return; }
-      if(!activeProductSlug){ messageDiv.textContent='Missing product selection.'; return; }
+      if(!activeProductSlug){ messageDiv.textContent='This option is temporarily unavailable. Please contact Low Brass Lessons.'; return; }
 
       messageDiv.textContent='Verifying...';
 
@@ -3027,7 +3026,7 @@ async function getOfferSkuCandidates(offerEl) {
         }
         messageDiv.textContent = data.message || 'Invalid code.';
       })
-      .catch(err=>{  messageDiv.textContent='Error verifying code.'; });
+      .catch(()=>{ messageDiv.textContent='We could not verify that code right now. Please try again or contact Low Brass Lessons.'; });
     });
   }
 

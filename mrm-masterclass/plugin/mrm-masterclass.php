@@ -6991,7 +6991,7 @@ public function render_presenters_page() {
 	if ( ! $this->mrm_mc_table_exists( $table ) ) {
 		echo '<div class="wrap mrm-masterclass-admin">';
 		echo '<h1>Masterclass Presenters</h1>';
-		echo '<div class="notice notice-error"><p>The presenters table is missing. Reactivate the plugin or check wp-content/masterclass-debug.log.</p></div>';
+		echo '<div class="notice notice-error"><p>The presenters table is missing. Reactivate the plugin. Open Advanced Tools for technical details.</p></div>';
 		echo '</div>';
 		return;
 	}
@@ -7012,16 +7012,16 @@ public function render_presenters_page() {
 	$notice_map = array(
 		'presenter_table_missing'     => array( 'error', 'The presenter table is missing. Reactivate the Masterclass plugin to run the database installer.' ),
 		'presenter_validation_failed' => array( 'error', 'Presenter could not be saved. Please enter a presenter name and valid email address.' ),
-		'presenter_save_failed'       => array( 'error', 'Presenter could not be saved because of a database error. Check wp-content/masterclass-debug.log.' ),
+		'presenter_save_failed'       => array( 'error', 'Presenter could not be saved. Open Advanced Tools for technical details.' ),
 		'presenter_saved'             => array( 'success', 'Presenter saved successfully.' ),
 		'presenter_missing_id'           => array( 'error', 'Presenter action failed because the presenter ID was missing.' ),
 		'presenter_not_found'            => array( 'error', 'Presenter could not be found.' ),
-		'presenter_page_failed'          => array( 'error', 'Presenter page could not be generated. Check masterclass-debug.log.' ),
+		'presenter_page_failed'          => array( 'error', 'Presenter page could not be generated. Open Advanced Tools for technical details.' ),
 		'presenter_page_saved'           => array( 'success', 'Presenter page generated or updated.' ),
 		'presenter_delete_table_missing' => array( 'error', 'Presenter could not be removed because one or more Masterclass tables are missing.' ),
-		'presenter_archive_failed'       => array( 'error', 'Presenter could not be archived. Check wp-content/masterclass-debug.log.' ),
+		'presenter_archive_failed'       => array( 'error', 'Presenter could not be archived. Open Advanced Tools for technical details.' ),
 		'presenter_archived'             => array( 'success', 'Presenter has linked event history, so the record was safely archived instead of deleted.' ),
-		'presenter_delete_failed'        => array( 'error', 'Presenter could not be deleted. Check wp-content/masterclass-debug.log.' ),
+		'presenter_delete_failed'        => array( 'error', 'Presenter could not be deleted. Open Advanced Tools for technical details.' ),
 		'presenter_deleted'              => array( 'success', 'Presenter deleted because no linked events were found.' ),
 	);
 
@@ -7126,7 +7126,7 @@ public function render_events_page() {
 	$regs_table       = $this->t( 'mrm_masterclass_registrations' );
 
 	if ( ! $this->mrm_mc_table_exists( $events_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
-		echo '<div class="wrap"><h1>Masterclass Events</h1><div class="notice notice-error"><p>Required Masterclass database tables are missing. Reactivate the plugin and check wp-content/masterclass-debug.log.</p></div></div>';
+		echo '<div class="wrap"><h1>Masterclass Events</h1><div class="notice notice-error"><p>Required Masterclass database tables are missing. Reactivate the plugin, then open Advanced Tools for technical details.</p></div></div>';
 		return;
 	}
 
@@ -7158,16 +7158,16 @@ public function render_events_page() {
 
 	$notice = isset( $_GET['mrm_mc_notice'] ) ? sanitize_key( wp_unslash( $_GET['mrm_mc_notice'] ) ) : '';
 	$notice_map = array(
-		'event_table_missing'     => array( 'error', 'Masterclass event could not be saved because required database tables are missing. Reactivate the plugin and check wp-content/masterclass-debug.log.' ),
+		'event_table_missing'     => array( 'error', 'Masterclass event could not be saved because required database tables are missing. Reactivate the plugin, then open Advanced Tools for technical details.' ),
 		'event_validation_failed' => array( 'error', 'Masterclass event could not be saved. Please complete the title, presenter, start time, end time, and timezone.' ),
 		'event_time_invalid'      => array( 'error', 'Masterclass event could not be saved because the end time must be after the start time.' ),
 		'event_price_invalid'     => array( 'error', 'Masterclass event could not be saved because the price must be greater than zero.' ),
 		'event_presenter_missing' => array( 'error', 'Masterclass event could not be saved because the selected presenter could not be found.' ),
-		'event_save_failed'       => array( 'error', 'Masterclass event could not be saved because of a database error. Check wp-content/masterclass-debug.log.' ),
+		'event_save_failed'       => array( 'error', 'Masterclass event could not be saved. Open Advanced Tools for technical details.' ),
 		'event_saved_local'                  => array( 'success', 'Masterclass event saved locally.' ),
-		'event_saved_google_reload_failed'    => array( 'warning', 'Masterclass event saved locally, but it could not be reloaded for Google Calendar creation. Check wp-content/masterclass-debug.log.' ),
+		'event_saved_google_reload_failed'    => array( 'warning', 'Masterclass event saved locally, but Google Calendar creation needs attention. Open Advanced Tools for technical details.' ),
 		'event_saved_google_missing_calendar' => array( 'warning', 'Masterclass event saved locally, but no Masterclass Google Calendar ID is configured.' ),
-		'event_saved_google_failed'           => array( 'warning', 'Masterclass event saved locally, but Google Calendar / Google Meet creation needs attention. Check wp-content/masterclass-debug.log.' ),
+		'event_saved_google_failed'           => array( 'warning', 'Masterclass event saved locally, but Google Calendar / Google Meet creation needs attention. Open Advanced Tools for technical details.' ),
 		'event_saved_google_success'          => array( 'success', 'Masterclass event saved and Google Calendar / Google Meet creation succeeded.' ),
 		'event_cancel_missing_id'             => array( 'error', 'Event cancellation failed because the event ID was missing.' ),
 		'event_cancel_table_missing'          => array( 'error', 'Event cancellation failed because one or more Masterclass database tables are missing.' ),
@@ -7178,11 +7178,11 @@ public function render_events_page() {
 		'event_updated_google_success'        => array( 'success', 'Masterclass event updated, Google Calendar updated, and registered paid attendees were notified.' ),
 		'event_missing_id'                    => array( 'error', 'Session page generation failed because the event ID was missing.' ),
 		'session_page_saved'                => array( 'success', 'Masterclass session page generated or updated.' ),
-		'session_page_failed'               => array( 'error', 'Masterclass session page could not be generated. Check masterclass-debug.log.' ),
+		'session_page_failed'               => array( 'error', 'Masterclass session page could not be generated. Open Advanced Tools for technical details.' ),
 		'event_cancel_no_paid_attendees'      => array( 'success', 'The Masterclass was removed from active listings; no paid registrations required a refund.' ),
 		'event_cancel_no_refunds'             => array( 'success', 'The Masterclass was removed from active listings; no registrations were eligible for automatic refund under the event cancellation policy.' ),
 		'settings_saved'          => array( 'success', 'Calendar settings saved.' ),
-		'reminder_cron_ran'      => array( 'success', 'Masterclass reminder cron ran. Check masterclass-debug.log and the Masterclass email log for eligible rows and sent counts.' ),
+		'reminder_cron_ran'      => array( 'success', 'Masterclass reminder processing completed. Open Advanced Tools for technical details.' ),
 	);
 
 	if ( isset( $notice_map[ $notice ] ) ) {
@@ -7276,7 +7276,7 @@ public function render_events_page() {
 	echo '<th>Proctor</th>';
 	echo '<th>Start</th>';
 	echo '<th>End</th>';
-	echo '<th>Refund Deadline</th>';
+	echo '<th>Auto-Cancel Cutoff</th>';
 	echo '<th>Price</th>';
 	echo '<th>Capacity</th>';
 	echo '<th>Paid</th>';
@@ -7294,7 +7294,7 @@ public function render_events_page() {
 			$paid_count      = absint( $event->paid_count ?? 0 );
 			$capacity        = absint( $event->capacity ?? 0 );
 			$available       = max( 0, $capacity - $paid_count );
-			$refund_deadline = gmdate( 'Y-m-d H:i:s', strtotime( $event->start_time . ' UTC' ) + ( 7 * DAY_IN_SECONDS ) );
+			$auto_cancel_cutoff = ! empty( $event->start_time ) ? (string) $event->start_time : '—';
 			$google_error    = sanitize_text_field( $event->google_last_error ?? '' );
 			$cancel_url      = wp_nonce_url(
 				admin_url( 'admin-post.php?action=mrm_masterclass_cancel_event&event_id=' . absint( $event->id ) ),
@@ -7307,7 +7307,7 @@ public function render_events_page() {
 			echo '<td>' . esc_html( $event->proctor_email ?: '—' ) . '</td>';
 			echo '<td>' . esc_html( $event->start_time ) . '</td>';
 			echo '<td>' . esc_html( $event->end_time ) . '</td>';
-			echo '<td>' . esc_html( $refund_deadline ) . '</td>';
+			echo '<td>' . esc_html( $auto_cancel_cutoff ) . '</td>';
 			echo '<td>' . esc_html( $this->cents_to_dollars( $event->price_cents ) ) . '</td>';
 			echo '<td>' . esc_html( $capacity ) . '</td>';
 			echo '<td>' . esc_html( $paid_count ) . '</td>';
@@ -7370,7 +7370,7 @@ public function render_registrations_payments_page() {
 	$ledger_table     = $this->t( 'mrm_masterclass_payment_ledger' );
 
 	if ( ! $this->mrm_mc_table_exists( $regs_table ) || ! $this->mrm_mc_table_exists( $ledger_table ) ) {
-		echo '<div class="wrap"><h1>Registrations / Payments</h1><div class="notice notice-error"><p>Required registration/payment tables are missing. Reactivate the plugin and check wp-content/masterclass-debug.log.</p></div></div>';
+		echo '<div class="wrap"><h1>Registrations / Payments</h1><div class="notice notice-error"><p>Required registration/payment tables are missing. Reactivate the plugin, then open Advanced Tools for technical details.</p></div></div>';
 		return;
 	}
 
@@ -7508,19 +7508,19 @@ public function render_payouts_page() {
 	$presenters_table = $this->t( 'mrm_masterclass_presenters' );
 
 	if ( ! $this->mrm_mc_table_exists( $ledger_table ) || ! $this->mrm_mc_table_exists( $presenters_table ) ) {
-		echo '<div class="wrap mrm-masterclass-admin"><h1>Presenter Payouts</h1><div class="notice notice-error"><p>Required payout tables are missing. Reactivate the plugin and check the Masterclass debug log.</p></div></div>';
+		echo '<div class="wrap mrm-masterclass-admin"><h1>Presenter Payouts</h1><div class="notice notice-error"><p>Required payout tables are missing. Reactivate the plugin, then open Advanced Tools for technical details.</p></div></div>';
 		return;
 	}
 
 	$notice_map = array(
 		'payout_missing_id'       => array( 'error', 'Payout action failed because the ledger ID was missing.' ),
 		'payout_table_missing'    => array( 'error', 'Payout action failed because the payment ledger table is missing.' ),
-		'payout_mark_paid_failed' => array( 'error', 'Payout could not be marked paid. Check the Masterclass debug log.' ),
+		'payout_mark_paid_failed' => array( 'error', 'Payout could not be marked paid. Open Advanced Tools for technical details.' ),
 		'payout_not_payable'      => array( 'warning', 'This payout was not marked paid because it is no longer payable.' ),
 		'payout_marked_paid'      => array( 'success', 'Presenter payout marked paid and preserved in the ledger audit trail.' ),
 		'payout_batch_empty'      => array( 'warning', 'No payout rows were selected.' ),
 		'payout_batch_paid'       => array( 'success', 'Selected payout rows were marked paid and preserved in the ledger audit trail.' ),
-		'payout_batch_failed'     => array( 'error', 'The payout batch could not be marked paid. Check the Masterclass debug log.' ),
+		'payout_batch_failed'     => array( 'error', 'The payout batch could not be marked paid. Open Advanced Tools for technical details.' ),
 		'payout_transfer_failed'  => array( 'error', 'Stripe Connect payout transfer could not be issued. The row was preserved for audit review.' ),
 		'payout_transfer_success' => array( 'success', 'Stripe Connect payout transfer issued and the ledger row was marked paid out.' ),
 	);
@@ -7684,7 +7684,7 @@ public function render_tax_profiles_page() {
 	$ledger_table     = $this->t( 'mrm_masterclass_payment_ledger' );
 
 	if ( ! $this->mrm_mc_table_exists( $presenters_table ) || ! $this->mrm_mc_table_exists( $profiles_table ) ) {
-		echo '<div class="wrap"><h1>Tax Profiles</h1><div class="notice notice-error"><p>Required tax profile tables are missing. Reactivate the plugin and check wp-content/masterclass-debug.log.</p></div></div>';
+		echo '<div class="wrap"><h1>Tax Profiles</h1><div class="notice notice-error"><p>Required tax profile tables are missing. Reactivate the plugin, then open Advanced Tools for technical details.</p></div></div>';
 		return;
 	}
 
@@ -7713,7 +7713,7 @@ public function render_tax_profiles_page() {
 	$notice_map = array(
 		'tax_table_missing'     => array( 'error', 'Tax profile could not be saved because the tax profile table is missing.' ),
 		'tax_presenter_missing' => array( 'error', 'Tax profile could not be saved because a presenter was not selected.' ),
-		'tax_save_failed'       => array( 'error', 'Tax profile could not be saved. Check the Masterclass debug log.' ),
+		'tax_save_failed'       => array( 'error', 'Tax profile could not be saved. Open Advanced Tools for technical details.' ),
 		'tax_saved'             => array( 'success', 'Tax profile saved successfully.' ),
 	);
 
@@ -7927,7 +7927,9 @@ public function render_email_log_page() {
 			array(
 				'methods'             => WP_REST_Server::CREATABLE,
 				'callback'            => array( $this, 'rest_popup_debug' ),
-				'permission_callback' => '__return_true',
+				'permission_callback' => function() {
+					return current_user_can( 'manage_options' );
+				},
 			)
 		);
 
