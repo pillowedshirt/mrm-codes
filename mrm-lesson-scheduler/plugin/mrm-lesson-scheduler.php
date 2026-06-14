@@ -8193,7 +8193,12 @@ protected function mrm_get_google_service_account_json() {
             <?php endif; ?>
 
             <?php if ( isset( $_GET['mrm_meeting_deleted'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['mrm_meeting_deleted'] ) ) ) : ?>
-                <div class="notice notice-success"><p>Meeting deleted, Google Calendar event removed, and participants were notified.</p></div>
+                <?php $calendar_removed = isset( $_GET['mrm_calendar_removed'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['mrm_calendar_removed'] ) ); ?>
+                <?php if ( $calendar_removed ) : ?>
+                    <div class="notice notice-success"><p>Meeting deleted, the Google Calendar event was removed, and participants were notified.</p></div>
+                <?php else : ?>
+                    <div class="notice notice-warning"><p>Meeting deleted and participants were notified. No connected Google Calendar event was found for this meeting.</p></div>
+                <?php endif; ?>
             <?php endif; ?>
 
             <?php if ( isset( $_GET['mrm_meeting_updated'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['mrm_meeting_updated'] ) ) ) : ?>
@@ -8346,7 +8351,14 @@ protected function mrm_get_google_service_account_json() {
                                 <td><?php echo esc_html( $this->mrm_meeting_format_datetime_label( $row['start_time'], $row['timezone'] ) ); ?></td>
                                 <td><?php echo esc_html( $row['audience_type'] ); ?><?php if ( ! empty( $row['audience_state'] ) ) : ?><br><code><?php echo esc_html( $row['audience_state'] ); ?></code><?php endif; ?></td>
                                 <td><details><summary><?php echo esc_html( (string) $count ); ?> participant<?php echo $count === 1 ? '' : 's'; ?></summary><?php if ( empty( $emails ) ) : ?><p>No participant emails recorded.</p><?php else : ?><ul style="margin:8px 0 0 18px;"><?php foreach ( $emails as $email ) : ?><li><code><?php echo esc_html( (string) $email ); ?></code></li><?php endforeach; ?></ul><?php endif; ?></details></td>
-                                <td><code><?php echo esc_html( (string) $row['google_event_id'] ); ?></code></td>
+                                <td>
+                                    <?php if ( ! empty( $row['google_event_id'] ) ) : ?>
+                                        <code><?php echo esc_html( (string) $row['google_event_id'] ); ?></code>
+                                    <?php else : ?>
+                                        <strong>No connected Google Calendar event</strong><br>
+                                        <span class="description">Older meetings may need to be recreated before launch.</span>
+                                    <?php endif; ?>
+                                </td>
                                 <td><?php echo ! empty( $row['reminder_sent_at'] ) ? esc_html( $row['reminder_sent_at'] ) : 'Pending'; ?></td>
                                 <td><a class="button button-small" href="<?php echo esc_url( $edit_url ); ?>">Edit / Reschedule</a> <a class="button button-small" href="<?php echo esc_url( $manage_url ); ?>">Manage Participants</a> <a class="button button-small" href="<?php echo esc_url( $delete_url ); ?>" onclick="return confirm('Delete this meeting? This will remove the Google Calendar event and notify participants.');">Delete</a></td>
                             </tr>
@@ -8453,12 +8465,23 @@ protected function mrm_get_google_service_account_json() {
 
         $calendar_id = isset( $meeting['calendar_id'] ) ? trim( (string) $meeting['calendar_id'] ) : '';
         $google_event_id = isset( $meeting['google_event_id'] ) ? trim( (string) $meeting['google_event_id'] ) : '';
+        $calendar_removed = false;
 
-        if ( $calendar_id !== '' && $google_event_id !== '' ) {
+        if ( $calendar_id !== '' && $google_event_id !== '' && method_exists( $this, 'google_delete_event' ) ) {
             $deleted = $this->google_delete_event( $calendar_id, $google_event_id );
             if ( is_wp_error( $deleted ) ) {
-                $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Meeting was not deleted because the Google Calendar event could not be removed: ' . $deleted->get_error_message() ) );
+                wp_safe_redirect(
+                    add_query_arg(
+                        array(
+                            'page'              => 'mrm-scheduler-meeting-scheduler',
+                            'mrm_meeting_error' => rawurlencode( 'The meeting was not deleted because the connected Google Calendar event could not be removed.' ),
+                        ),
+                        admin_url( 'admin.php' )
+                    )
+                );
+                exit;
             }
+            $calendar_removed = true;
         }
 
         $this->mrm_meeting_send_deleted_email_for_row( $meeting );
@@ -8472,7 +8495,16 @@ protected function mrm_get_google_service_account_json() {
             $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'The Google Calendar event was removed, but the local meeting record could not be deleted.' ) );
         }
 
-        wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-meeting-scheduler&mrm_meeting_deleted=1' ) );
+        wp_safe_redirect(
+            add_query_arg(
+                array(
+                    'page'                 => 'mrm-scheduler-meeting-scheduler',
+                    'mrm_meeting_deleted'  => '1',
+                    'mrm_calendar_removed' => $calendar_removed ? '1' : '0',
+                ),
+                admin_url( 'admin.php' )
+            )
+        );
         exit;
     }
 
@@ -8571,8 +8603,18 @@ protected function mrm_get_google_service_account_json() {
         }
 
         $updated_meeting = array_merge( $meeting, $update_data );
-        $this->mrm_meeting_send_participant_change_emails( $updated_meeting, $meeting );
-        $this->mrm_meeting_send_updated_email_for_row( $updated_meeting, $meeting );
+        $old_emails = json_decode( (string) $meeting['recipient_emails'], true );
+        $old_emails = is_array( $old_emails ) ? array_filter( array_map( 'strtolower', array_map( 'sanitize_email', $old_emails ) ) ) : array();
+        $new_emails = array_filter( array_map( 'strtolower', array_map( 'sanitize_email', $recipients ) ) );
+        $added_emails = array_values( array_diff( $new_emails, $old_emails ) );
+        $removed_emails = array_values( array_diff( $old_emails, $new_emails ) );
+        $unchanged_emails = array_values( array_intersect( $new_emails, $old_emails ) );
+
+        $this->mrm_meeting_send_participant_change_emails( $updated_meeting, $meeting, $removed_emails );
+        if ( ! empty( $added_emails ) ) {
+            $this->mrm_meeting_send_invitation_emails( $meeting_id, $added_emails, $gate_url, false );
+        }
+        $this->mrm_meeting_send_updated_email_for_row( $updated_meeting, $meeting, $unchanged_emails );
         $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_updated' => 1 ) );
     }
 
@@ -11398,7 +11440,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         return $dt->format( 'l, F j, Y \\a\\t g:i A T' );
     }
 
-    protected function mrm_meeting_send_invitation_emails( $meeting_id, $recipients, $gate_url ) {
+    protected function mrm_meeting_send_invitation_emails( $meeting_id, $recipients, $gate_url, $include_host = true ) {
         global $wpdb;
 
         $table = $this->mrm_meeting_table_name();
@@ -11420,7 +11462,9 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         $body .= '<p>Thank you,<br>Low Brass Lessons</p>';
         $wrapped = $this->mrm_meeting_wrap_email( $title, $body, $gate_url );
 
-        $all_recipients = $this->mrm_meeting_add_host_recipient( (array) $recipients );
+        $all_recipients = $include_host
+            ? $this->mrm_meeting_add_host_recipient( (array) $recipients )
+            : (array) $recipients;
 
         foreach ( $all_recipients as $email ) {
             $this->mrm_meeting_send_email( $email, $title, $wrapped );
@@ -11499,12 +11543,14 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         return $sent_any;
     }
 
-    protected function mrm_meeting_send_updated_email_for_row( $meeting, $old_meeting = array() ) {
+    protected function mrm_meeting_send_updated_email_for_row( $meeting, $old_meeting = array(), $recipient_emails = null ) {
         if ( ! is_array( $meeting ) ) {
             return false;
         }
 
-        $emails = json_decode( (string) $meeting['recipient_emails'], true );
+        $emails = is_array( $recipient_emails )
+            ? $recipient_emails
+            : json_decode( (string) $meeting['recipient_emails'], true );
         $emails = is_array( $emails ) ? $emails : array();
         $emails = $this->mrm_meeting_add_host_recipient( $emails );
         if ( empty( $emails ) ) {
@@ -11532,12 +11578,12 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         return $sent_any;
     }
 
-    protected function mrm_meeting_send_participant_change_emails( $meeting, $old_meeting ) {
+    protected function mrm_meeting_send_participant_change_emails( $meeting, $old_meeting, $removed_emails = null ) {
         $old_emails = json_decode( (string) ( $old_meeting['recipient_emails'] ?? '' ), true );
         $new_emails = json_decode( (string) ( $meeting['recipient_emails'] ?? '' ), true );
         $old_emails = is_array( $old_emails ) ? $old_emails : array();
         $new_emails = is_array( $new_emails ) ? $new_emails : array();
-        $removed = array_diff( $old_emails, $new_emails );
+        $removed = is_array( $removed_emails ) ? $removed_emails : array_diff( $old_emails, $new_emails );
         $title = (string) $meeting['title'];
 
         foreach ( $removed as $email ) {

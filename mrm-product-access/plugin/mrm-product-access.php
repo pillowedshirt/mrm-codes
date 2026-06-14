@@ -1737,6 +1737,11 @@ function offerRowTemplate(pieceIndex){
                 if ( hash_equals( $email_hash, $salted ) ) {
                     return true;
                 }
+
+                $unsalted = hash( 'sha256', strtolower( trim( $email_plain ) ) );
+                if ( hash_equals( $email_hash, $unsalted ) || ( $db_hash !== '' && hash_equals( $db_hash, $unsalted ) ) ) {
+                    return true;
+                }
             }
 
             return false;
@@ -1890,6 +1895,43 @@ function offerRowTemplate(pieceIndex){
         }
 
         return false;
+    }
+
+    private function payments_hub_has_access_for_email( $email, $sku ) {
+        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
+
+        if ( empty( $email ) ) {
+            return false;
+        }
+
+        $salted_hash   = $this->hash_email( $email );
+        $unsalted_hash = hash( 'sha256', $email );
+
+        if ( $this->payments_hub_has_access( $salted_hash, $sku ) ) {
+            return true;
+        }
+
+        return $this->payments_hub_has_access( $unsalted_hash, $sku );
+    }
+
+    private function mrm_pa_log_access_event( $event, $context = array() ) {
+        if ( ! is_array( $context ) ) {
+            $context = array();
+        }
+
+        $safe_context = array();
+
+        foreach ( $context as $key => $value ) {
+            $key = sanitize_key( (string) $key );
+
+            if ( is_scalar( $value ) || $value === null ) {
+                $safe_context[ $key ] = is_bool( $value ) ? $value : sanitize_text_field( (string) $value );
+            }
+        }
+
+        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+            error_log( '[MRM Product Access] ' . sanitize_key( (string) $event ) . ' ' . wp_json_encode( $safe_context ) );
+        }
     }
 
 
@@ -3036,6 +3078,11 @@ function offerRowTemplate(pieceIndex){
         );
 
         if ( empty( $email ) || empty( $product_slug ) ) {
+            $this->mrm_pa_log_access_event( 'otp_missing_request_data', array(
+                'has_email'    => empty( $email ) ? 'no' : 'yes',
+                'product_slug' => $product_slug,
+            ) );
+
             return new WP_REST_Response( $generic, 200 );
         }
 
@@ -3047,10 +3094,15 @@ function offerRowTemplate(pieceIndex){
         $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
 
         // ✅ Hub is the ONLY source of truth for access.
-        $has_access = $this->payments_hub_has_access( $email_hash, $product_slug );
+        $has_access = $this->payments_hub_has_access_for_email( $normalized_email, $product_slug );
 
         // Privacy-preserving: always return generic success.
         if ( ! $has_access ) {
+            $this->mrm_pa_log_access_event( 'otp_no_matching_access', array(
+                'email'        => $normalized_email,
+                'product_slug' => $product_slug,
+            ) );
+
             return new WP_REST_Response( $generic, 200 );
         }
 
@@ -3064,7 +3116,12 @@ function offerRowTemplate(pieceIndex){
             $one_hour_ago
         ) );
         if ( intval( $count_requests ) >= 10 ) {
-            // Lower threshold per product.
+            $this->mrm_pa_log_access_event( 'otp_rate_limited', array(
+                'email'        => $normalized_email,
+                'product_slug' => $product_slug,
+                'ip'           => $ip,
+            ) );
+
             return new WP_REST_Response( $generic, 200 );
         }
 
@@ -3076,7 +3133,7 @@ function offerRowTemplate(pieceIndex){
         $otp_hash   = password_hash( $otp, PASSWORD_DEFAULT );
         $expires_at = gmdate( 'Y-m-d H:i:s', time() + ( 30 * 60 ) );
 
-        $wpdb->insert( $table_otps, array(
+        $inserted = $wpdb->insert( $table_otps, array(
             'product_slug'    => $product_slug,
             'purchaser_email' => $normalized_email,
             'email_hash'      => $email_hash,
@@ -3086,6 +3143,16 @@ function offerRowTemplate(pieceIndex){
             'attempt_count'   => 0,
             'created_at'      => gmdate( 'Y-m-d H:i:s' ),
         ) );
+
+        if ( false === $inserted ) {
+            $this->mrm_pa_log_access_event( 'otp_insert_failed', array(
+                'email'        => $normalized_email,
+                'product_slug' => $product_slug,
+                'db_error'     => $wpdb->last_error,
+            ) );
+
+            return new WP_REST_Response( $generic, 200 );
+        }
 
         $options = $this->get_options();
 
@@ -3114,8 +3181,11 @@ function offerRowTemplate(pieceIndex){
 
         $sent = wp_mail( $normalized_email, $subject, $html, $headers );
 
-        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-        }
+        $this->mrm_pa_log_access_event( $sent ? 'otp_email_sent' : 'otp_email_failed', array(
+            'email'        => $normalized_email,
+            'product_slug' => $product_slug,
+            'subject'      => $subject,
+        ) );
 
         return new WP_REST_Response( $generic, 200 );
     }
@@ -3181,8 +3251,8 @@ function offerRowTemplate(pieceIndex){
         ) );
 
         // ✅ Re-check access in Payments Hub before granting session cookies.
-        if ( ! $this->payments_hub_has_access( $email_hash, $product_slug ) ) {
-            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Unauthorized.' ), 403 );
+        if ( ! $this->payments_hub_has_access_for_email( $normalized_email, $product_slug ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'This access code could not be verified for this purchase.' ), 403 );
         }
 
         // Download auth cookie.
@@ -3568,7 +3638,7 @@ function offerRowTemplate(pieceIndex){
                     $offer_price = (string) ( $offer['price_display'] ?? '' );
                     $offer_slug  = sanitize_title( (string) ( $offer['product_slug'] ?? '' ) );
                   ?>
-                    <div class="offer">
+                    <div class="offer<?php echo $offer_slug === '' ? ' is-unavailable' : ''; ?>">
                       <div class="offer-row">
                         <div>
                           <div class="offer-title"><?php echo esc_html( $offer_title ); ?></div>
@@ -3590,10 +3660,16 @@ function offerRowTemplate(pieceIndex){
                           </label>
                         </div>
 
-                        <button type="button" class="buyBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>">
+                        <button type="button" class="buyBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>"<?php disabled( $offer_slug, '' ); ?>>
                           <?php echo esc_html__( 'Buy', 'mrm-product-access' ); ?>
                         </button>
+                        <button type="button" class="mrmAccessBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>"<?php disabled( $offer_slug, '' ); ?>>
+                          <?php echo esc_html__( 'Access', 'mrm-product-access' ); ?>
+                        </button>
                       </div>
+                      <?php if ( $offer_slug === '' ) : ?>
+                        <p class="mrm-pa-unavailable"><?php echo esc_html__( 'This option is temporarily unavailable. Please contact Low Brass Lessons.', 'mrm-product-access' ); ?></p>
+                      <?php endif; ?>
                     </div>
                   <?php endforeach; ?>
                 <?php endif; ?>
@@ -3608,6 +3684,24 @@ function offerRowTemplate(pieceIndex){
             <div class="mrm-pdfOverlay" aria-hidden="true">
               <div class="mrm-pdfModal" role="dialog" aria-label="PDF Preview">
                 <div class="mrm-pdfScroll"></div>
+              </div>
+            </div>
+
+            <div class="mrm-otpOverlay" aria-hidden="true">
+              <div class="modal" role="dialog" aria-modal="true" aria-label="<?php echo esc_attr__( 'Access purchased product', 'mrm-product-access' ); ?>">
+                <h2><?php echo esc_html__( 'Access Purchased Product', 'mrm-product-access' ); ?></h2>
+                <div class="mrm-stepEmail">
+                  <label><?php echo esc_html__( 'Email address', 'mrm-product-access' ); ?></label>
+                  <input type="email" class="mrm-email" autocomplete="email" required>
+                  <button type="button" class="primary mrm-sendCodeBtn"><?php echo esc_html__( 'Send Code', 'mrm-product-access' ); ?></button>
+                </div>
+                <div class="mrm-stepOtp hidden">
+                  <label><?php echo esc_html__( 'Enter Code', 'mrm-product-access' ); ?></label>
+                  <input type="text" class="mrm-otp" inputmode="numeric" pattern="\d*" required>
+                  <button type="button" class="primary mrm-verifyBtn"><?php echo esc_html__( 'Verify', 'mrm-product-access' ); ?></button>
+                </div>
+                <div class="message mrm-message" aria-live="polite"></div>
+                <div><button type="button" class="secondary mrm-closeBtn"><?php echo esc_html__( 'Close', 'mrm-product-access' ); ?></button></div>
               </div>
             </div>
 
@@ -4194,7 +4288,9 @@ function offerRowTemplate(pieceIndex){
           }
 
           async function initPiece(piece) {
-            const PIECE_SLUG = piece.dataset.productSlug || piece.dataset.pieceSlug || "";
+            const PIECE_SLUG = piece.dataset.pieceSlug || piece.dataset.productSlug || "";
+            const PRODUCT_SLUG = piece.dataset.productSlug || PIECE_SLUG;
+            let selectedProductSlug = "";
             const PDF_URL = piece.dataset.pdfUrl || "";
             const PREVIEW_PAGE = Number(piece.dataset.previewPage || "1");
 
@@ -4333,7 +4429,6 @@ function offerRowTemplate(pieceIndex){
                 previewWrap.style.cursor = 'default';
                 previewWrap.innerHTML =
                   '<div style="padding:12px;font-size:13px;color:#666;">PDF preview failed to load.</div>';
-                console.error(err);
               }
             })();
 
@@ -4365,7 +4460,9 @@ function offerRowTemplate(pieceIndex){
                   if (audio.paused) await audio.play();
                   else audio.pause();
                   syncPlayUI();
-                } catch (e) { console.error(e); }
+                } catch (e) {
+                  alert('We could not play this preview. Please refresh and try again.');
+                }
               });
 
               audio.addEventListener('play', syncPlayUI);
@@ -4409,12 +4506,31 @@ function offerRowTemplate(pieceIndex){
             }
             piece.querySelectorAll('.buyBtn').forEach((buyBtn) => {
               buyBtn.addEventListener('click', function(){
+                selectedProductSlug = buyBtn.getAttribute('data-product-slug') || PRODUCT_SLUG || PIECE_SLUG;
+                if (!selectedProductSlug) {
+                  alert('This purchase option is temporarily unavailable. Please contact Low Brass Lessons.');
+                  return;
+                }
                 const offerBox = buyBtn.closest('.offer, .offer-card, .mrm-pa-offer, .purchase-option') || buyBtn.parentElement;
                 const termsCheck = offerBox ? offerBox.querySelector('.mrm-pa-terms-check') : null;
                 if (!termsCheck || !termsCheck.checked) {
                   alert('Please agree to the Terms of Service before purchasing.');
                   return;
                 }
+                window.dispatchEvent(new CustomEvent('mrm-product-access:purchase', {
+                  detail: { productSlug: selectedProductSlug, trigger: buyBtn }
+                }));
+              });
+            });
+            piece.querySelectorAll('.mrmAccessBtn').forEach((accessBtn) => {
+              accessBtn.addEventListener('click', function(){
+                selectedProductSlug = accessBtn.getAttribute('data-product-slug') || PRODUCT_SLUG || PIECE_SLUG;
+
+                if (!selectedProductSlug) {
+                  alert('This access option is temporarily unavailable. Please contact Low Brass Lessons.');
+                  return;
+                }
+
                 openOtpModal();
               });
             });
@@ -4440,7 +4556,10 @@ function offerRowTemplate(pieceIndex){
               fetch(apiBase + '/request-otp', {
                 method:'POST',
                 headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({ email: email, piece_slug: PIECE_SLUG }),
+                body: JSON.stringify({
+                  email: email,
+                  product_slug: selectedProductSlug || PRODUCT_SLUG || PIECE_SLUG
+                }),
                 credentials: 'same-origin'
               })
               .then(async (r) => {
@@ -4448,8 +4567,7 @@ function offerRowTemplate(pieceIndex){
                 let data = null;
                 try { data = JSON.parse(txt); } catch(e) { data = null; }
                 if (!r.ok) {
-                  console.log('RAW RESPONSE (request-otp):', PIECE_SLUG, r.status, txt);
-                  messageDiv.textContent='Server error. Check Console.';
+                  messageDiv.textContent='We could not send an access code right now. Please try again or contact Low Brass Lessons.';
                   return null;
                 }
                 return data || {};
@@ -4460,7 +4578,7 @@ function offerRowTemplate(pieceIndex){
                 stepEmail.classList.add('hidden');
                 stepOtp.classList.remove('hidden');
               })
-              .catch(err=>{ console.error(err); messageDiv.textContent='Error sending code.'; });
+              .catch(()=>{ messageDiv.textContent='We could not send an access code right now. Please try again or contact Low Brass Lessons.'; });
             });
 
             verifyBtn.addEventListener('click', function(){
@@ -4472,7 +4590,11 @@ function offerRowTemplate(pieceIndex){
               fetch(apiBase + '/verify-otp', {
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({ email: email, piece_slug: PIECE_SLUG, otp: otp }),
+                body: JSON.stringify({
+                  email: email,
+                  product_slug: selectedProductSlug || PRODUCT_SLUG || PIECE_SLUG,
+                  otp: otp
+                }),
                 credentials: 'same-origin'
               })
               .then(async (r) => {
@@ -4480,7 +4602,7 @@ function offerRowTemplate(pieceIndex){
                 let data = null;
                 try { data = JSON.parse(txt); } catch(e) { data = null; }
                 if (!r.ok) {
-                  messageDiv.textContent=(data && data.message) ? data.message : 'Server error. Check Console.';
+                  messageDiv.textContent=(data && data.message) ? data.message : 'We could not verify that code right now. Please try again or contact Low Brass Lessons.';
                   return null;
                 }
                 return data || {};
@@ -4489,7 +4611,7 @@ function offerRowTemplate(pieceIndex){
                 if(!data) return;
                 messageDiv.textContent = data.message || 'Verified.';
               })
-              .catch(err=>{ console.error(err); messageDiv.textContent='Error verifying code.'; });
+              .catch(()=>{ messageDiv.textContent='We could not verify that code right now. Please try again or contact Low Brass Lessons.'; });
             });
           }
 
