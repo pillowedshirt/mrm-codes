@@ -1808,6 +1808,33 @@ h1 {
   color: #666;
 }
 
+
+.mrm-payment-security-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 13px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(124, 74, 45, 0.18);
+  background: rgba(255, 250, 243, 0.86);
+  color: #2f2118;
+}
+.mrm-payment-security-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 999px;
+  background: rgba(124, 74, 45, 0.12);
+  color: #7c4a2d;
+}
+.mrm-payment-security-copy { display: block; line-height: 1.35; }
+.mrm-payment-security-copy strong { display: block; font-size: 0.95rem; font-weight: 800; color: #2f2118; }
+.mrm-payment-security-copy small { display: block; margin-top: 2px; font-size: 0.84rem; line-height: 1.45; color: #62483a; }
+
 </style>
 </head>
 
@@ -2075,7 +2102,7 @@ h1 {
   <div id="mrm-payment-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
-        <h2 class="modal-title">Payment</h2>
+        <h2 class="modal-title">Complete Payment</h2>
         <button class="modal-close" id="mrm-payment-close" aria-label="Close">×</button>
       </div>
       <div class="modal-body">
@@ -2087,8 +2114,13 @@ h1 {
           <div id="mrm-promo-code-message" style="margin-top:8px;font-size:0.92rem;"></div>
         </div>
         <div id="mrm-payment-element"></div>
-        <div class="modal-actions">
-          <button class="modal-submit" id="mrm-pay-btn">Continue</button>
+        <div class="mrm-payment-security-badge" aria-label="Secure payment information">
+          <span class="mrm-payment-security-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" focusable="false"><path fill="currentColor" d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 0 1 4 0v2h-4V7Zm7 12H7v-8h10v8Z"></path></svg></span>
+          <span class="mrm-payment-security-copy"><strong>Secure checkout</strong><small>Payment details are securely processed by Stripe. Low Brass Lessons does not store your full card number.</small></span>
+        </div>
+        <div class="modal-actions" style="display:flex;gap:10px;">
+          <button class="modal-submit" id="mrm-payment-back" type="button" style="background:transparent;border:1px solid rgba(0,0,0,0.18);color:var(--color-text-main);">Go Back</button>
+          <button class="modal-submit" id="mrm-pay-btn">Complete Payment</button>
         </div>
         <div id="mrm-payment-error" class="modal-message" style="color:red;"></div>
       </div>
@@ -2660,7 +2692,7 @@ function mrmRenderLessonPaymentBreakdown(breakdown) {
   }
 
   rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
-  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total Due Today</strong></span><strong>${money(total)}</strong></div>`);
 
   instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
 }
@@ -2697,7 +2729,7 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
   document.body.classList.add('mrm-booking-modal-open');
 
   if (!clientSecret || typeof clientSecret !== 'string') {
-    errorEl.textContent = 'Checkout could not start because Stripe did not return a valid payment session. Please refresh and try again.';
+    errorEl.textContent = 'Some payment details were missing. Please refresh the page and try again.';
     payBtn.disabled = true;
     return { payBtn, errorEl, closeModal };
   }
@@ -2757,6 +2789,8 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
   };
 
   closeBtn.onclick = () => closeModal({ clearSelection: false });
+  const backBtn = document.getElementById('mrm-payment-back');
+  if (backBtn) backBtn.onclick = () => closeModal({ clearSelection: false });
 
   return { payBtn, errorEl, closeModal };
 }
@@ -3887,7 +3921,7 @@ async function submitBooking(payload, setMsg){
   clearSelectedSlots();
   setMsg('');
   closeBookingModal({ clearSelection: true });
-  mrmShowCalendarSuccessPopup('Your lesson has been booked. Please check your email for the confirmation.');
+  mrmShowCalendarSuccessPopup('Your lesson is confirmed. Please check your email for the confirmation.');
 }
 
 function handleExistingSheetMusicSubscriptionGuard(createData, setMsg){
@@ -4257,7 +4291,7 @@ function ensureLegacyBookingHandler(){
 
               if (error) {
                 mrmHidePaymentLoading();
-                errorEl.textContent = error.message || 'We could not complete this payment.';
+                errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
                 payBtn.disabled = false;
                 return;
               }
@@ -4306,7 +4340,7 @@ function ensureLegacyBookingHandler(){
               }
 
               mrmHidePaymentLoading();
-              errorEl.textContent = 'Payment could not be confirmed.';
+              errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
               payBtn.disabled = false;
             } catch (err) {
               mrmHidePaymentLoading();
@@ -4440,7 +4474,7 @@ function ensureLegacyBookingHandler(){
 
             if (error) {
               mrmHidePaymentLoading();
-              errorEl.textContent = error.message || 'We could not complete this payment.';
+              errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
               payBtn.disabled = false;
               return;
             }
@@ -4462,7 +4496,7 @@ function ensureLegacyBookingHandler(){
             }
 
             mrmHidePaymentLoading();
-            errorEl.textContent = 'Payment could not be confirmed.';
+            errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
             payBtn.disabled = false;
           } catch (err) {
             mrmHidePaymentLoading();
