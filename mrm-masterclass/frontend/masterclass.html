@@ -1303,6 +1303,40 @@ body.mrm-modal-open {
   text-decoration: none !important;
 }
 
+
+.mrm-payment-security-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 13px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(124, 74, 45, 0.18);
+  background: rgba(255, 250, 243, 0.86);
+  color: #2f2118;
+}
+.mrm-payment-security-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 999px;
+  background: rgba(124, 74, 45, 0.12);
+  color: #7c4a2d;
+}
+.mrm-payment-security-copy { display: block; line-height: 1.35; }
+.mrm-payment-security-copy strong { display: block; font-size: 0.95rem; font-weight: 800; color: #2f2118; }
+.mrm-payment-security-copy small { display: block; margin-top: 2px; font-size: 0.84rem; line-height: 1.45; color: #62483a; }
+
+
+.mrm-checkout-summary { margin: 14px 0; padding: 12px 14px; border-radius: 14px; background: rgba(0,0,0,.04); }
+.mrm-checkout-summary-row { display:flex; justify-content:space-between; gap:12px; padding:4px 0; }
+.mrm-checkout-summary-total { margin-top:8px; padding-top:8px; border-top:1px solid rgba(0,0,0,.12); font-weight:800; }
+.mrm-payment-actions { display:flex; gap:10px; margin-top:18px; }
+.mrm-payment-actions button { flex:1; }
+
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
@@ -1366,6 +1400,7 @@ body.mrm-modal-open {
       <div class="mrm-modal-content">
       <h2 id="modalTitle">Register</h2>
       <p id="modalMeta" class="modal-meta"></p>
+      <div id="mrm-masterclass-checkout-summary" class="mrm-checkout-summary" hidden></div>
 
       <input id="firstName" type="text" placeholder="First name">
       <input id="lastName" type="text" placeholder="Last name">
@@ -1391,7 +1426,14 @@ body.mrm-modal-open {
       <button id="payButton" class="mrm-primary-btn" type="button">Continue</button>
 
       <div id="paymentElement" class="mrm-masterclass-payment-element"></div>
-      <button id="submitPayment" class="mrm-primary-btn" type="button" style="display:none;">Complete Registration</button>
+      <div id="mrm-masterclass-security-badge" class="mrm-payment-security-badge" aria-label="Secure payment information" hidden>
+        <span class="mrm-payment-security-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" focusable="false"><path fill="currentColor" d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 0 1 4 0v2h-4V7Zm7 12H7v-8h10v8Z"></path></svg></span>
+        <span class="mrm-payment-security-copy"><strong>Secure checkout</strong><small>Payment details are securely processed by Stripe. Low Brass Lessons does not store your full card number.</small></span>
+      </div>
+      <div id="mrm-masterclass-payment-actions" class="mrm-payment-actions" hidden>
+        <button id="mrm-masterclass-payment-back" class="mrm-secondary-btn" type="button">Go Back</button>
+        <button id="submitPayment" class="mrm-primary-btn" type="button">Complete Registration</button>
+      </div>
 
       <p id="modalMessage" class="message"></p>
       </div>
@@ -1420,7 +1462,7 @@ body.mrm-modal-open {
       <button id="closeMasterclassSuccessX" type="button" class="mrm-modal-x" data-mrm-modal-close aria-label="Close">×</button>
       <div class="mrm-modal-content">
       <div class="mrm-masterclass-success-icon" aria-hidden="true">✓</div>
-      <h2 id="masterclassSuccessTitle">Registration Complete</h2>
+      <h2 id="masterclassSuccessTitle">Your Masterclass registration is confirmed.</h2>
       <p id="masterclassSuccessMessage" class="modal-meta">
         Your Masterclass registration is confirmed. A confirmation email with your protected access link has been sent to the email address you provided.
       </p>
@@ -2652,6 +2694,9 @@ body.mrm-modal-open {
     const submitPayment = byId('submitPayment');
     const promoInput = byId('mrm-masterclass-promo-code');
     const promoMessage = byId('mrm-masterclass-promo-message');
+    const checkoutSummary = byId('mrm-masterclass-checkout-summary');
+    const securityBadge = byId('mrm-masterclass-security-badge');
+    const paymentActions = byId('mrm-masterclass-payment-actions');
 
     if (!modal) {
       showError('The registration popup could not open because the modal is missing.');
@@ -2684,9 +2729,10 @@ body.mrm-modal-open {
       message.textContent = '';
     }
 
-    if (paymentElement) {
-      paymentElement.innerHTML = '';
-    }
+    if (paymentElement) { paymentElement.innerHTML = ''; }
+    if (checkoutSummary) { checkoutSummary.innerHTML = ''; checkoutSummary.hidden = true; }
+    if (securityBadge) securityBadge.hidden = true;
+    if (paymentActions) paymentActions.hidden = true;
 
     if (payButton) {
       payButton.disabled = false;
@@ -2697,7 +2743,7 @@ body.mrm-modal-open {
     if (submitPayment) {
       submitPayment.disabled = false;
       submitPayment.style.display = 'none';
-      submitPayment.textContent = 'Submit Payment';
+      submitPayment.textContent = 'Complete Registration';
     }
 
     closeOtherMasterclassModals('registrationModal');
@@ -2831,6 +2877,27 @@ body.mrm-modal-open {
     return '';
   }
 
+  function renderMasterclassCheckoutSummary(event, payload, checkout) {
+    const summary = byId('mrm-masterclass-checkout-summary');
+    if (!summary) return;
+    const presenter = event.presenter_name || event.presenter || 'Low Brass Lessons';
+    const promoCode = (checkout && checkout.promoCode) || '';
+    const original = Number(payload.original_amount_cents || event.price_cents || payload.amount_cents || 0);
+    const discount = Math.max(0, original - Number(payload.amount_cents || 0));
+    const rows = [
+      ['Masterclass', event.title || 'Masterclass'],
+      ['Presenter', presenter],
+      ['Date / Time', formatDateTime(eventStart(event))],
+      ['Registration Price', money(original)]
+    ];
+    if (promoCode) rows.push(['Promotional Code', promoCode]);
+    if (discount > 0) rows.push(['Discount', '-' + money(discount)]);
+    summary.innerHTML = rows.map(function (row) {
+      return '<div class="mrm-checkout-summary-row"><span>' + escapeHtml(row[0]) + '</span><strong>' + escapeHtml(row[1]) + '</strong></div>';
+    }).join('') + '<div class="mrm-checkout-summary-row mrm-checkout-summary-total"><span>Total Due Today</span><strong>' + money(payload.amount_cents || 0) + '</strong></div>';
+    summary.hidden = false;
+  }
+
   async function startPayment() {
     const event = window.MRM_SELECTED_MASTERCLASS_EVENT;
     const message = byId('modalMessage');
@@ -2888,7 +2955,7 @@ body.mrm-modal-open {
       const payload = result.data;
 
       if (!payload || !payload.client_secret || !payload.publishable_key || !payload.payment_intent_id) {
-        throw new Error('Payment could not be started because the payment response was incomplete.');
+        throw new Error('Some payment details were missing. Please refresh the page and try again.');
       }
 
       const stripe = window.Stripe(payload.publishable_key);
@@ -2933,6 +3000,14 @@ body.mrm-modal-open {
       state.paymentElement = paymentElement;
       state.checkout = data;
 
+      renderMasterclassCheckoutSummary(event, payload, data);
+      const modalTitle = byId('modalTitle');
+      const securityBadge = byId('mrm-masterclass-security-badge');
+      const paymentActions = byId('mrm-masterclass-payment-actions');
+      if (modalTitle) modalTitle.textContent = 'Complete Your Masterclass Registration';
+      if (securityBadge) securityBadge.hidden = false;
+      if (paymentActions) paymentActions.hidden = false;
+
       window.MRM_MASTERCLASS_PAYMENT_STATE = {
         stripe: stripe,
         elements: elements,
@@ -2957,7 +3032,7 @@ body.mrm-modal-open {
     } catch (error) {
 
       if (message) {
-        message.textContent = error && error.message ? error.message : 'Payment could not be started.';
+        message.textContent = 'We could not complete this payment. Please review your details and try again.';
       }
 
       if (payButton) {
@@ -3054,7 +3129,7 @@ body.mrm-modal-open {
       });
 
       if (confirmResult.error) {
-        throw new Error(confirmResult.error.message || 'Payment could not be confirmed.');
+        throw new Error(confirmResult.error && confirmResult.error.type === 'card_error' ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.');
       }
 
       const paymentIntentId = confirmResult.paymentIntent && confirmResult.paymentIntent.id
@@ -3099,7 +3174,7 @@ body.mrm-modal-open {
     } catch (error) {
 
       if (message) {
-        message.textContent = error && error.message ? error.message : 'Payment could not be completed.';
+        message.textContent = error && error.message ? error.message : 'We could not complete this payment. Please review your details and try again.';
       }
 
       if (confirmButton) {
@@ -3115,6 +3190,12 @@ body.mrm-modal-open {
     const cancelFinal = byId('cancelFinalPayment');
     const confirmFinal = byId('confirmFinalPayment');
     const applyPromoButton = byId('mrm-masterclass-apply-promo');
+    const paymentBack = byId('mrm-masterclass-payment-back');
+
+    if (paymentBack && !paymentBack.dataset.mrmBound) {
+      paymentBack.dataset.mrmBound = '1';
+      paymentBack.addEventListener('click', function () { closeModal('registrationModal'); });
+    }
 
     if (payButton && !payButton.dataset.mrmBound) {
       payButton.dataset.mrmBound = '1';

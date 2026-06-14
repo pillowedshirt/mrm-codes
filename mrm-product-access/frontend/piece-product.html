@@ -103,7 +103,7 @@ body.mrm-piece-no-scroll{
   inset: 0;
   background: rgba(0,0,0,0.5);
   display: flex;
-  align-items: flex-start;           /* was center */
+  align-items: center;
   justify-content: center;
   padding: 18px 12px;                /* breathing room */
   overflow-y: auto;                  /* allow overlay scroll */
@@ -111,12 +111,12 @@ body.mrm-piece-no-scroll{
   z-index: 9999;
 }
 .modal{
-  background: #fff;
+  background: var(--color-surface, #fff);
+  border: 1px solid rgba(0,0,0,0.14);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
-  width: 100%;
-  max-width: 480px;
-  padding: 18px;
+  box-shadow: 0 22px 60px rgba(0,0,0,0.22);
+  width: min(720px, 100%);
+  padding: 0;
   max-height: calc(100vh - 36px);    /* constrain */
   display: flex;
   flex-direction: column;
@@ -127,11 +127,12 @@ body.mrm-piece-no-scroll{
   justify-content: space-between;
   align-items: center;
   border-bottom: 1px solid rgba(0,0,0,0.1);
-  padding-bottom: 8px;
+  padding: 14px 16px;
 }
 .modal-body{
   flex: 1 1 auto;
-  margin-top: 14px;
+  margin-top: 0;
+  padding: 16px;
   overflow: auto;                    /* internal scroll */
   -webkit-overflow-scrolling: touch;
   padding-right: 2px;                /* prevents scrollbar overlap */
@@ -141,9 +142,9 @@ body.mrm-piece-no-scroll{
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  border: 1px solid #d7d7d7;
-  background: #ffffff;
-  color: #111111;
+  border: 0;
+  background: #000;
+  color: #fff;
   font-size: 22px;
   font-weight: 800;
   line-height: 1;
@@ -883,6 +884,33 @@ body.mrm-piece-no-scroll{
   margin-top: 6px;
 }
 
+
+.mrm-payment-security-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 13px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(124, 74, 45, 0.18);
+  background: rgba(255, 250, 243, 0.86);
+  color: #2f2118;
+}
+.mrm-payment-security-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 999px;
+  background: rgba(124, 74, 45, 0.12);
+  color: #7c4a2d;
+}
+.mrm-payment-security-copy { display: block; line-height: 1.35; }
+.mrm-payment-security-copy strong { display: block; font-size: 0.95rem; font-weight: 800; color: #2f2118; }
+.mrm-payment-security-copy small { display: block; margin-top: 2px; font-size: 0.84rem; line-height: 1.45; color: #62483a; }
+
 </style>
 
 <main class="mrm-piece-product-page page">
@@ -1002,7 +1030,7 @@ body.mrm-piece-no-scroll{
         <div id="mrm-payment-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
           <div class="modal" role="dialog" aria-modal="true">
             <div class="modal-header">
-              <h2>Purchase</h2>
+              <h2>Complete Your Purchase</h2>
               <button id="payment-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
             </div>
             <div class="modal-body">
@@ -1104,10 +1132,14 @@ body.mrm-piece-no-scroll{
               </div>
 
               <div id="mrm-payment-element"></div>
-
-              <div style="height:18px;"></div>
-
-              <button id="mrm-pay-btn" class="button-primary" style="width:100%;">Continue</button>
+              <div class="mrm-payment-security-badge" aria-label="Secure payment information">
+                <span class="mrm-payment-security-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" focusable="false"><path fill="currentColor" d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 0 1 4 0v2h-4V7Zm7 12H7v-8h10v8Z"></path></svg></span>
+                <span class="mrm-payment-security-copy"><strong>Secure checkout</strong><small>Payment details are securely processed by Stripe. Low Brass Lessons does not store your full card number.</small></span>
+              </div>
+              <div style="display:flex;gap:10px;margin-top:18px;">
+                <button id="mrm-payment-back" class="button-secondary" type="button" style="flex:1;">Go Back</button>
+                <button id="mrm-pay-btn" class="button-primary" style="flex:1;">Complete Purchase</button>
+              </div>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
             </div>
           </div>
@@ -1160,9 +1192,9 @@ body.mrm-piece-no-scroll{
               </svg>
             </div>
 
-            <h2 id="mrm-success-title" class="mrm-success-title">Thank you!</h2>
+            <h2 id="mrm-success-title" class="mrm-success-title">Your purchase is complete.</h2>
             <p id="mrm-success-text" class="mrm-success-text">
-              Access has been granted. Check your email for download instructions.
+              Your purchase is complete. Check your email for access instructions.
             </p>
 
             <div class="mrm-success-actions">
@@ -1249,7 +1281,7 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   if (discount > 0) {
     rows.push(`
       <div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;">
-        <span>Promotional discount</span>
+        <span>Discount</span>
         <strong>-${mrmPieceMoney(discount)}</strong>
       </div>
     `);
@@ -1778,7 +1810,7 @@ async function getOfferSkuCandidates(offerEl) {
     const itemLabel = String(breakdown?.label || 'Sheet music');
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
-    rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+    rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total Due Today</strong></span><strong>${money(total)}</strong></div>`);
 
     instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
   }
@@ -1838,12 +1870,14 @@ async function getOfferSkuCandidates(offerEl) {
       };
 
       const rows = [];
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${esc(label)}</span><strong>${money(base)}</strong></div>`);
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Product</span><strong>${esc(label)}</strong></div>`);
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Access Type</span><strong>Sheet Music Download</strong></div>`);
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Purchase Price</span><strong>${money(base)}</strong></div>`);
   if (promoDiscount > 0) {
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Discount</span><strong>-${money(promoDiscount)}</strong></div>`);
   }
       rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
-      rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total due</strong></span><strong>${money(total)}</strong></div>`);
+      rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total Due Today</strong></span><strong>${money(total)}</strong></div>`);
       instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">${rows.join('')}</div>`;
     };
 
@@ -1855,7 +1889,7 @@ async function getOfferSkuCandidates(offerEl) {
 
     errorEl.textContent = '';
     payBtn.disabled = true;
-    payBtn.textContent = 'Pay';
+    payBtn.textContent = 'Complete Purchase';
 
     mrmPieceAppliedPromoCode = '';
     mrmPieceAppliedPromoDiscountCents = 0;
@@ -1901,6 +1935,9 @@ async function getOfferSkuCandidates(offerEl) {
       mrmPieceSchedulePaymentLoad = null;
       errorEl.textContent = '';
     };
+
+    const paymentBack = document.getElementById('mrm-payment-back');
+    if (paymentBack) paymentBack.onclick = function () { document.getElementById('payment-close').click(); };
 
     const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
     const isPostalLike = (v) => String(v || '').trim().length >= 4;
@@ -1983,7 +2020,7 @@ async function getOfferSkuCandidates(offerEl) {
 
           const data = await res.json();
           if (!res.ok || !data.ok) {
-            errorEl.textContent = data.message || 'Error creating payment.';
+            errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
             payBtn.disabled = true;
             return;
           }
@@ -2020,7 +2057,7 @@ async function getOfferSkuCandidates(offerEl) {
           payBtn.disabled = false;
         } catch (err) {
 
-          errorEl.textContent = 'Unable to load payment form.';
+          errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
           payBtn.disabled = true;
         }
       }, 450);
@@ -2054,10 +2091,10 @@ async function getOfferSkuCandidates(offerEl) {
     const itemLabel = String(breakdown?.sku || 'Sheet music');
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
     if (promoDiscount > 0) {
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
+      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Discount</span><strong>-${money(promoDiscount)}</strong></div>`);
     }
     rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
-    rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
+    rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total Due Today</strong></span><strong>${money(total)}</strong></div>`);
     box.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
 
     overlay.style.display = 'flex';
@@ -2143,8 +2180,8 @@ async function getOfferSkuCandidates(offerEl) {
     }
 
     mrmShowPieceSuccessPopup(
-      'Thank you!',
-      'Access has been granted. Check your email for download instructions.'
+      'Your purchase is complete.',
+      'Your purchase is complete. Check your email for access instructions.'
     );
 
     return gData;
@@ -2173,8 +2210,8 @@ async function getOfferSkuCandidates(offerEl) {
     }
 
     mrmShowPieceSuccessPopup(
-      'Thank you!',
-      'Access has been granted. Check your email for download instructions.'
+      'Your purchase is complete.',
+      'Your purchase is complete. Check your email for access instructions.'
     );
 
     return gData;
@@ -2709,7 +2746,7 @@ async function getOfferSkuCandidates(offerEl) {
         }
 
         if (!pendingClientSecret || !activeStripeElements) {
-          errorEl.textContent = 'Payment form is not loaded yet. Please enter your email, ZIP, and agree to the Terms of Service.';
+          errorEl.textContent = 'Some payment details were missing. Please refresh the page and try again.';
           return;
         }
 
@@ -2737,7 +2774,7 @@ async function getOfferSkuCandidates(offerEl) {
           });
 
           if (error) {
-            errorEl.textContent = error.message || 'We could not complete this payment.';
+            errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
             this.disabled = false;
             return;
           }
@@ -2767,7 +2804,7 @@ async function getOfferSkuCandidates(offerEl) {
 
         } catch (e) {
 
-          errorEl.textContent = (e && e.message) ? e.message : 'Unexpected error while processing payment.';
+          errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
           this.disabled = false;
         }
       };
@@ -2997,6 +3034,15 @@ async function getOfferSkuCandidates(offerEl) {
   document.addEventListener('DOMContentLoaded', function(){
     initPiecePage();
   });
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    const paymentOverlay = document.getElementById('mrm-payment-overlay');
+    if (paymentOverlay && paymentOverlay.getAttribute('aria-hidden') === 'false') {
+      const closeButton = document.getElementById('payment-close');
+      if (closeButton) closeButton.click();
+    }
+  });
+
   document.addEventListener('DOMContentLoaded', checkReturnFromStripe);
 })();
 </script>
