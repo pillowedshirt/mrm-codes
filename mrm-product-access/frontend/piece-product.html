@@ -1429,6 +1429,10 @@ function mrmGetPiecePromoCodeInputValue() {
       btn.style.display = input.value.trim() ? 'inline-flex' : 'none';
       mrmResetPiecePaymentElement('Enter your email and ZIP to load the secure payment form.');
 
+      if (typeof mrmPieceSchedulePaymentLoad === 'function') {
+        mrmPieceSchedulePaymentLoad();
+      }
+
       mrmSetPiecePromoMessage('', false);
     });
 
@@ -2015,28 +2019,146 @@ async function getOfferSkuCandidates(offerEl) {
     };
 
     let loadTimer = null;
+    let taxPreviewTimer = null;
+    let taxPreviewSeq = 0;
+    let lastTaxPreviewKey = '';
+
+    const hasFullBillingAddress = (addressPayload) => {
+      return !!(
+        addressPayload &&
+        addressPayload.line1 &&
+        addressPayload.city &&
+        addressPayload.state &&
+        addressPayload.postal_code &&
+        addressPayload.country
+      );
+    };
+
+    const resetLoadedPaymentForBillingChange = (message) => {
+      if (activePaymentElement) {
+        try { activePaymentElement.unmount(); } catch (e) {}
+      }
+
+      activePaymentElement = null;
+      activeStripeElements = null;
+      pendingClientSecret = '';
+      payBtn.disabled = true;
+
+      if (paymentMount) {
+        paymentMount.innerHTML = `
+          <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+            ${message || 'Review the tax breakdown above, then accept the Terms of Service to load the secure payment form.'}
+          </div>
+        `;
+      }
+    };
+
+    const applyServerBreakdown = (data) => {
+      renderBreakdown({
+        label: data.label || labelFromQuote,
+        base_amount_cents: Number(data.base_amount_cents || baseFromQuote || 0),
+        original_base_amount_cents: Number(data.original_base_amount_cents || data.original_amount_cents || data.subtotal_before_discount_cents || 0),
+        promo_discount_cents: Number(data.promo_discount_cents || data.discount_cents || 0),
+        tax_cents: Number(data.tax_cents || 0),
+        amount_cents: Number(data.amount_cents || data.total_cents || 0),
+        tax_message: data.tax_message || '',
+        tax_policy: data.tax_policy || null,
+        promo_code: data.promo_code || mrmPieceAppliedPromoCode || ''
+      });
+    };
+
+    const requestTaxPreview = async () => {
+      if (!pendingSku) return;
+
+      const addressPayload = getAddressPayload();
+      const postal = addressPayload.postal_code || '';
+      const email = (emailInput && emailInput.value) ? String(emailInput.value).trim() : '';
+      const promoCode = mrmPieceAppliedPromoCode || '';
+
+      if (!hasFullBillingAddress(addressPayload) || !isPostalLike(postal)) {
+        return;
+      }
+
+      if (isEmailLike(email)) {
+        mrmSavePiecePaymentEmail(email);
+      }
+
+      if (promoCode && !isEmailLike(email)) {
+        return;
+      }
+
+      const previewKey = JSON.stringify({
+        sku: pendingSku,
+        email: promoCode ? email : '',
+        promo_code: promoCode,
+        address: addressPayload
+      });
+
+      if (previewKey === lastTaxPreviewKey) {
+        return;
+      }
+
+      lastTaxPreviewKey = previewKey;
+      const seq = ++taxPreviewSeq;
+
+      try {
+        const res = await fetch('/wp-json/mrm-pay/v1/tax-preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sku: pendingSku,
+            email: isEmailLike(email) ? email : '',
+            promo_code: promoCode,
+            context: {
+              piece_slug: getPieceSlugFromUrl(),
+              source_flow: 'piece_product_purchase'
+            },
+            address: addressPayload
+          })
+        });
+
+        const data = await res.json();
+
+        if (seq !== taxPreviewSeq) {
+          return;
+        }
+
+        if (res.ok && data && data.ok) {
+          applyServerBreakdown(data);
+        }
+      } catch (err) {
+        // Tax preview should not block normal checkout typing.
+      }
+    };
+
+    const scheduleTaxPreview = () => {
+      clearTimeout(taxPreviewTimer);
+      taxPreviewTimer = setTimeout(requestTaxPreview, 350);
+    };
 
     const scheduleLoad = () => {
       clearTimeout(loadTimer);
+
+      if (pendingClientSecret || activePaymentElement) {
+        resetLoadedPaymentForBillingChange('Billing details changed. Review the updated tax breakdown, then accept the Terms of Service to reload the secure payment form.');
+      }
+
+      scheduleTaxPreview();
+
       loadTimer = setTimeout(async () => {
         const email = (emailInput.value || '').trim();
-    if (isEmailLike(email)) {
-      mrmSavePiecePaymentEmail(email);
-    }
+
+        if (isEmailLike(email)) {
+          mrmSavePiecePaymentEmail(email);
+        }
+
         const postal = (postalInput && postalInput.value) ? String(postalInput.value).trim() : '';
+        const addressPayload = getAddressPayload();
 
         if (!isEmailLike(email) || !isPostalLike(postal)) {
           payBtn.disabled = true;
           return;
         }
-
-        if (!termsCheck || !termsCheck.checked) {
-          payBtn.disabled = true;
-          errorEl.textContent = 'Please agree to the Terms of Service before loading payment.';
-          return;
-        }
-
-        const addressPayload = getAddressPayload();
 
         const missingAddress = [];
         if (!addressPayload.line1) missingAddress.push('street address');
@@ -2047,7 +2169,24 @@ async function getOfferSkuCandidates(offerEl) {
 
         if (missingAddress.length) {
           payBtn.disabled = true;
-          errorEl.textContent = 'Please enter your full billing address: ' + missingAddress.join(', ') + '.';
+          if (termsCheck && termsCheck.checked) {
+            errorEl.textContent = 'Please enter your full billing address: ' + missingAddress.join(', ') + '.';
+          }
+          return;
+        }
+
+        if (!termsCheck || !termsCheck.checked) {
+          payBtn.disabled = true;
+          errorEl.textContent = '';
+
+          if (paymentMount && !pendingClientSecret && !activePaymentElement) {
+            paymentMount.innerHTML = `
+              <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
+                Review the tax breakdown above, then accept the Terms of Service to load the secure payment form.
+              </div>
+            `;
+          }
+
           return;
         }
 
@@ -2068,7 +2207,7 @@ async function getOfferSkuCandidates(offerEl) {
             body: JSON.stringify({
               sku: pendingSku,
               email: email,
-          promo_code: mrmPieceAppliedPromoCode || mrmGetPiecePromoCodeInputValue() || '',
+              promo_code: mrmPieceAppliedPromoCode || mrmGetPiecePromoCodeInputValue() || '',
               context: {
                 piece_slug: getPieceSlugFromUrl(),
                 terms_version: '2026-04-25',
@@ -2080,8 +2219,9 @@ async function getOfferSkuCandidates(offerEl) {
           });
 
           const data = await res.json();
+
           if (!res.ok || !data.ok) {
-            errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
+            errorEl.textContent = data.message || 'We could not complete this payment. Please review your details and try again.';
             payBtn.disabled = true;
             return;
           }
@@ -2098,30 +2238,19 @@ async function getOfferSkuCandidates(offerEl) {
 
           pendingClientSecret = data.client_secret || '';
 
-          // Update breakdown with tax + totals from server
-          renderBreakdown({
-            label: data.label || labelFromQuote,
-            base_amount_cents: Number(data.base_amount_cents || baseFromQuote || 0),
-            original_base_amount_cents: Number(data.original_base_amount_cents || data.original_amount_cents || data.subtotal_before_discount_cents || 0),
-            promo_discount_cents: Number(data.promo_discount_cents || data.discount_cents || 0),
-            tax_cents: Number(data.tax_cents || 0),
-            amount_cents: Number(data.amount_cents || data.total_cents || 0),
-            tax_message: data.tax_message || '',
-            tax_policy: data.tax_policy || null,
-            promo_code: data.promo_code || mrmPieceAppliedPromoCode || ''
-          });
+          applyServerBreakdown(data);
 
           activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
           activePaymentElement = activeStripeElements.create(
             'payment',
             mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card'])
           );
+
           paymentMount.innerHTML = '';
           activePaymentElement.mount('#mrm-payment-element');
 
           payBtn.disabled = false;
         } catch (err) {
-
           errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
           payBtn.disabled = true;
         }
@@ -2130,12 +2259,17 @@ async function getOfferSkuCandidates(offerEl) {
 
     mrmPieceSchedulePaymentLoad = scheduleLoad;
 
-    [emailInput, postalInput, stateInput, line1Input, countrySelect, termsCheck].forEach((el) => {
-      if (el) {
-        el.oninput = scheduleLoad;
-        el.onchange = scheduleLoad;
-      }
+    [emailInput, postalInput, stateInput, line1Input, cityInput, countrySelect, termsCheck].forEach((el) => {
+      if (!el) return;
+
+      ['input', 'change', 'blur', 'keyup', 'paste'].forEach((eventName) => {
+        el.addEventListener(eventName, scheduleLoad);
+      });
     });
+
+    setTimeout(scheduleLoad, 250);
+    setTimeout(scheduleLoad, 1000);
+    setTimeout(scheduleLoad, 2000);
   }
 
 

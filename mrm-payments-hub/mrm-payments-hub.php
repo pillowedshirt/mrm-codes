@@ -4594,6 +4594,53 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return $html;
   }
 
+  private function mrm_receipt_format_money($amount_cents) {
+    return '$' . number_format(max(0, (int)$amount_cents) / 100, 2);
+  }
+
+  private function mrm_purchase_receipt_payment_breakdown_html($meta, $amount_cents, $product_type = '') {
+    $meta = is_array($meta) ? $meta : array();
+
+    $final_cents = max(0, (int)$amount_cents);
+    $addon_cents = max(0, (int)($meta['mrm_addon_amount_cents'] ?? 0));
+    $tax_cents = max(0, (int)($meta['mrm_tax_cents'] ?? ($meta['mrm_addon_tax_cents'] ?? 0)));
+    $discounted_base_cents = max(0, (int)($meta['mrm_base_amount_cents'] ?? 0));
+    $original_base_cents = max(0, (int)($meta['mrm_original_base_amount_cents'] ?? 0));
+    $promo_discount_cents = max(0, (int)($meta['mrm_promo_discount_cents'] ?? 0));
+    $promo_code = $this->mrm_normalize_promo_code($meta['mrm_promo_code'] ?? '');
+
+    if ($original_base_cents <= 0) {
+      if ($discounted_base_cents > 0) {
+        $original_base_cents = $discounted_base_cents + $promo_discount_cents;
+      } else {
+        $paid_base_cents = max(0, $final_cents - $addon_cents - $tax_cents);
+        $original_base_cents = $paid_base_cents + $promo_discount_cents;
+      }
+    }
+
+    $html = '<div style="margin-top:10px;"><strong>Payment breakdown</strong></div>';
+
+    if ($original_base_cents > 0) {
+      $html .= '<div><strong>Base:</strong> ' . esc_html($this->mrm_receipt_format_money($original_base_cents)) . '</div>';
+    }
+
+    if ($promo_discount_cents > 0) {
+      $promo_label = $promo_code !== '' ? 'Promo code (' . $promo_code . ')' : 'Promo discount';
+      $html .= '<div><strong>' . esc_html($promo_label) . ':</strong> -' . esc_html($this->mrm_receipt_format_money($promo_discount_cents)) . '</div>';
+    } elseif ($promo_code !== '') {
+      $html .= '<div><strong>' . esc_html('Promo code (' . $promo_code . ')') . ':</strong> ' . esc_html($this->mrm_receipt_format_money(0)) . '</div>';
+    }
+
+    if ($addon_cents > 0) {
+      $html .= '<div><strong>Sheet music add-on:</strong> ' . esc_html($this->mrm_receipt_format_money($addon_cents)) . '</div>';
+    }
+
+    $html .= '<div><strong>Tax:</strong> ' . esc_html($this->mrm_receipt_format_money($tax_cents)) . '</div>';
+    $html .= '<div><strong>Total paid:</strong> ' . esc_html($this->mrm_receipt_format_money($final_cents)) . '</div>';
+
+    return $html;
+  }
+
   private function mrm_email_wrap_html($title, $intro_html, $details_html, $cta_url = '', $cta_label = '', $after_cta_html = '') {
     $site = esc_html(get_bloginfo('name'));
     $logo_url = $this->mrm_get_site_logo_url();
@@ -5880,19 +5927,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       $details .= '<div><strong>Payment ID:</strong> ' . esc_html($pi_id) . '</div>';
     }
 
-    if ($product_type === 'lesson') {
-      $lesson_amount_cents = ($base_cents > 0) ? $base_cents : $amount_cents;
-      $details .= '<div style="margin-top:10px;"><strong>Lesson payment:</strong> ' . $fmt_money($lesson_amount_cents) . '</div>';
-    } else {
-      if ($base_cents > 0) {
-        $details .= '<div style="margin-top:10px;"><strong>Base:</strong> ' . $fmt_money($base_cents) . '</div>';
-        if ($addon_cents > 0) $details .= '<div><strong>Sheet music add-on:</strong> ' . $fmt_money($addon_cents) . '</div>';
-        if ($tax_cents > 0) $details .= '<div><strong>Add-on tax:</strong> ' . $fmt_money($tax_cents) . '</div>';
-        $details .= '<div><strong>Total:</strong> ' . $fmt_money($amount_cents) . '</div>';
-      } else {
-        $details .= '<div style="margin-top:10px;"><strong>Total:</strong> ' . $fmt_money($amount_cents) . '</div>';
-      }
-    }
+    $details .= $this->mrm_purchase_receipt_payment_breakdown_html($meta, $amount_cents, $product_type);
 
     if ($product_type === 'lesson') {
       $lesson_id = (int)($meta['mrm_lesson_id'] ?? 0);
@@ -7674,6 +7709,7 @@ private function charge_and_unlock_autopay($data) {
     $payment_method_id = (string)$validated_profile['payment_method_id'];
     $amount_cents = (int)$validated_profile['amount_cents'];
     $currency = (string)$validated_profile['currency'];
+    $original_autopay_amount_cents = max(0, (int)$amount_cents);
 
     $autopay_promo = $this->mrm_get_autopay_promo_discount($profile, $lesson, $amount_cents);
     $autopay_promo_code = (string)($autopay_promo['promo_code'] ?? '');
@@ -7705,6 +7741,11 @@ private function charge_and_unlock_autopay($data) {
         'mrm_autopay' => 'yes',
         'mrm_plan_kind' => (string)($profile['plan_kind'] ?? ''),
         'mrm_authorized_lesson_count' => (string)((int)($profile['authorized_lesson_count'] ?? 0)),
+        'mrm_original_base_amount_cents' => (string)$original_autopay_amount_cents,
+        'mrm_base_amount_cents' => (string)$amount_cents,
+        'mrm_addon_amount_cents' => '0',
+        'mrm_tax_cents' => '0',
+        'mrm_addon_tax_cents' => '0',
         'mrm_promo_code' => $autopay_promo_code,
         'mrm_promo_discount_cents' => (string)$autopay_promo_discount_cents,
         'mrm_autopay_occurrence_number' => (string)((int)($autopay_promo['occurrence_number'] ?? 0)),
@@ -7728,6 +7769,11 @@ private function charge_and_unlock_autopay($data) {
         'mrm_autopay' => 'yes',
         'mrm_plan_kind' => (string)($profile['plan_kind'] ?? ''),
         'mrm_authorized_lesson_count' => (string)((int)($profile['authorized_lesson_count'] ?? 0)),
+        'mrm_original_base_amount_cents' => (string)$original_autopay_amount_cents,
+        'mrm_base_amount_cents' => (string)$amount_cents,
+        'mrm_addon_amount_cents' => '0',
+        'mrm_tax_cents' => '0',
+        'mrm_addon_tax_cents' => '0',
         'mrm_promo_code' => $autopay_promo_code,
         'mrm_promo_discount_cents' => (string)$autopay_promo_discount_cents,
         'mrm_autopay_occurrence_number' => (string)((int)($autopay_promo['occurrence_number'] ?? 0)),
@@ -8406,6 +8452,12 @@ private function charge_and_unlock_autopay($data) {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/tax-preview', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_tax_preview'),
+      'permission_callback' => '__return_true',
+    ));
+
     register_rest_route('mrm-pay/v1', '/create-payment-intent', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_create_payment_intent'),
@@ -8967,6 +9019,185 @@ private function charge_and_unlock_autopay($data) {
       'amount_cents' => (int)($p['amount_cents'] ?? 0),
       'currency' => (string)($p['currency'] ?? 'usd'),
       'product_type' => (string)($p['product_type'] ?? 'unknown'),
+    ), 200);
+  }
+
+  public function rest_tax_preview(WP_REST_Request $req) {
+    $data = (array) $req->get_json_params();
+
+    $sku = $this->sanitize_sku($data['sku'] ?? '');
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+
+    if (!$sku) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.',
+      ), 400);
+    }
+
+    $resolved_sku = $this->mrm_resolve_active_product_sku($sku, $context);
+    if ($resolved_sku !== '') {
+      $sku = $resolved_sku;
+    }
+
+    $p = $this->get_product($sku);
+    if (!$p || empty($p['active'])) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.',
+      ), 404);
+    }
+
+    $product_type = (string)($p['product_type'] ?? 'unknown');
+    $amount = (int)($p['amount_cents'] ?? 0);
+    $currency = (string)($p['currency'] ?? 'usd');
+    $base_amount = (int)$amount;
+
+    if ($base_amount <= 0) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'message' => 'Invalid product price.',
+      ), 400);
+    }
+
+    $lesson_count = isset($context['lesson_count']) ? absint($context['lesson_count']) : 0;
+    $prepay_flag = isset($context['prepay']) ? strtolower((string)$context['prepay']) : 'no';
+    $override = isset($data['amount_override_cents']) ? absint($data['amount_override_cents']) : 0;
+
+    if ($prepay_flag === 'yes' && $lesson_count > 1) {
+      $expected = $base_amount * $lesson_count;
+
+      if ($override > 0 && $override !== $expected) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'message' => 'Prepay total mismatch. Please refresh and try again.',
+        ), 400);
+      }
+
+      $amount = $override > 0 ? $override : $expected;
+    } elseif ($override > 0) {
+      $max = $base_amount * 50;
+
+      if ($override >= $base_amount && $override <= $max) {
+        $amount = $override;
+      } else {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'message' => 'Invalid override amount.',
+        ), 400);
+      }
+    }
+
+    $addon_selected = (isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes');
+    $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
+    $address = $this->mrm_normalize_tax_address($address);
+
+    $base_amount_cents = (int)$amount;
+    $original_base_amount_cents = $base_amount_cents;
+    $addon_amount_cents = $addon_selected ? 500 : 0;
+
+    $promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? '');
+    $promo_discount_cents = 0;
+    $promo_validation = null;
+
+    if ($promo_code !== '') {
+      if (!$email || !is_email($email)) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => 'email_required_for_promo_tax_preview',
+          'message' => 'Please enter a valid email address before previewing tax with this promotional code.',
+        ), 400);
+      }
+
+      $promo_validation = $this->mrm_validate_promo_for_purchase(
+        $promo_code,
+        $email,
+        $product_type,
+        $base_amount_cents,
+        $context
+      );
+
+      if (empty($promo_validation['ok'])) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => !empty($promo_validation['code']) ? sanitize_key((string)$promo_validation['code']) : 'invalid_promo_code',
+          'message' => (string)($promo_validation['message'] ?? 'Invalid promotional code.'),
+        ), 400);
+      }
+
+      $promo_discount_cents = max(0, (int)($promo_validation['discount_cents'] ?? 0));
+      $base_amount_cents = max(50, $base_amount_cents - $promo_discount_cents);
+    }
+
+    $tax_policy = $this->mrm_build_tax_policy($address, $product_type, $addon_selected, $p, $context);
+
+    if ($tax_policy instanceof WP_REST_Response) {
+      return $tax_policy;
+    }
+
+    if (is_array($tax_policy) && empty($tax_policy['ok']) && !empty($tax_policy['code'])) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'code' => (string)($tax_policy['code'] ?? 'tax_policy_failed'),
+        'message' => (string)($tax_policy['message'] ?? 'Billing address is required before checkout.'),
+        'missing_address_fields' => (array)($tax_policy['missing_address_fields'] ?? array()),
+      ), 400);
+    }
+
+    if (!is_array($tax_policy)) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'code' => 'tax_policy_invalid_response',
+        'message' => 'Unable to validate tax policy for this checkout.',
+      ), 500);
+    }
+
+    $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
+
+    $tax_result = array(
+      'ok' => true,
+      'tax_cents' => 0,
+      'amount_total_cents' => ($base_amount_cents + $addon_amount_cents),
+      'calculation_id' => '',
+      'line_items' => array(),
+      'taxability_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+    );
+
+    if (!empty($tax_policy['should_collect_tax']) && !empty($taxable_items)) {
+      $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    }
+
+    $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
+    $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
+    $tax_message = $this->mrm_build_tax_display_message($tax_policy, $tax_result, $tax_cents);
+    $final_amount_cents = $base_amount_cents + $addon_amount_cents + $tax_cents;
+
+    return new WP_REST_Response(array(
+      'ok' => true,
+      'sku' => $sku,
+      'label' => (string)($p['label'] ?? $sku),
+      'amount_cents' => $final_amount_cents,
+      'total_cents' => $final_amount_cents,
+      'original_base_amount_cents' => $original_base_amount_cents,
+      'base_amount_cents' => $base_amount_cents,
+      'addon_amount_cents' => $addon_amount_cents,
+      'promo_code' => $promo_code,
+      'promo_discount_cents' => $promo_discount_cents,
+      'tax_cents' => $tax_cents,
+      'tax_message' => (string)$tax_message,
+      'tax_calculation_id' => $tax_calc_id,
+      'tax_calculated' => true,
+      'tax_ready' => true,
+      'currency' => $currency,
+      'product_type' => $product_type,
+      'tax_policy' => array(
+        'policy_reason' => (string)($tax_policy['policy_reason'] ?? ''),
+        'should_collect_tax' => !empty($tax_policy['should_collect_tax']),
+        'state' => (string)($tax_policy['jurisdiction']['state'] ?? ''),
+        'country' => (string)($tax_policy['jurisdiction']['country'] ?? 'US'),
+        'stripe_controls_rollout' => true,
+      ),
     ), 200);
   }
 

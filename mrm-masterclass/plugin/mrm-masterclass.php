@@ -1882,6 +1882,44 @@ private function mrm_mc_email_details_box_html( $details_html ) {
 	</div>';
 }
 
+private function mrm_mc_registration_payment_breakdown_html( $registration, $event = null ) {
+	if ( ! $registration ) {
+		return '';
+	}
+
+	$total_cents    = absint( $registration->final_amount_cents ?? ( $registration->amount_cents ?? 0 ) );
+	$discount_cents = absint( $registration->promo_discount_cents ?? ( $registration->discount_cents ?? 0 ) );
+	$base_cents     = absint( $registration->original_amount_cents ?? 0 );
+	$tax_cents      = absint( $registration->tax_cents ?? 0 );
+	$promo_code     = strtoupper( trim( sanitize_text_field( (string) ( $registration->promo_code ?? '' ) ) ) );
+
+	if ( $base_cents <= 0 && $event && isset( $event->price_cents ) ) {
+		$base_cents = absint( $event->price_cents );
+	}
+
+	if ( $base_cents <= 0 && $total_cents > 0 ) {
+		$base_cents = max( 0, $total_cents + $discount_cents - $tax_cents );
+	}
+
+	$html = '<div style="margin-top:12px;"><strong>Payment breakdown</strong></div>';
+
+	if ( $base_cents > 0 ) {
+		$html .= '<div><strong>Base:</strong> ' . esc_html( $this->cents_to_dollars( $base_cents ) ) . '</div>';
+	}
+
+	if ( $discount_cents > 0 ) {
+		$promo_label = '' !== $promo_code ? 'Promo code (' . $promo_code . ')' : 'Promo discount';
+		$html .= '<div><strong>' . esc_html( $promo_label ) . ':</strong> -' . esc_html( $this->cents_to_dollars( $discount_cents ) ) . '</div>';
+	} elseif ( '' !== $promo_code ) {
+		$html .= '<div><strong>' . esc_html( 'Promo code (' . $promo_code . ')' ) . ':</strong> ' . esc_html( $this->cents_to_dollars( 0 ) ) . '</div>';
+	}
+
+	$html .= '<div><strong>Tax:</strong> ' . esc_html( $this->cents_to_dollars( $tax_cents ) ) . '</div>';
+	$html .= '<div><strong>Total paid:</strong> ' . esc_html( $this->cents_to_dollars( $total_cents ) ) . '</div>';
+
+	return $html;
+}
+
 private function mrm_mc_email_event_details_html( $event, $presenter = null, $registration = null ) {
 	$details = '';
 
@@ -2067,7 +2105,8 @@ private function mrm_mc_confirmation_email_body( $event, $presenter, $registrati
 	$intro = '<p>Your Masterclass registration has been confirmed.</p>'
 		. '<p>This is an online Masterclass. Please use the protected access link below at the scheduled time. The page will reveal the meeting link only during the allowed access window.</p>';
 
-	$details = $this->mrm_mc_email_event_details_html( $event, $presenter, $registration );
+	$details = $this->mrm_mc_email_event_details_html( $event, $presenter, $registration )
+		. $this->mrm_mc_registration_payment_breakdown_html( $registration, $event );
 
 	$content = $intro
 		. $this->mrm_mc_email_details_box_html( $details )
