@@ -199,6 +199,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	add_shortcode( 'mrm_masterclass_page', array( $this, 'render_masterclass_page_shortcode' ) );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_public_frontend_config', 1, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_footer', 'mrm_mc_print_public_frontend_config', 1, 0 );
+	$this->mrm_mc_add_action_if_method_exists( 'wp_footer', 'mrm_mc_print_pasted_masterclass_controller_fallback', 99, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_share_meta', 5, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_title_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_session_page_title_css', 21, 0 );
@@ -322,6 +323,37 @@ class LowBrass_MRM_Masterclass_Plugin {
 		return '';
 	}
 
+	private function mrm_mc_is_public_masterclass_page() {
+		if ( is_admin() ) {
+			return false;
+		}
+
+		if ( function_exists( 'wp_doing_ajax' ) && wp_doing_ajax() ) {
+			return false;
+		}
+
+		if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+			return false;
+		}
+
+		if ( function_exists( 'is_page' ) && is_page( 'masterclass' ) ) {
+			return true;
+		}
+
+		if ( function_exists( 'get_queried_object' ) ) {
+			$queried = get_queried_object();
+
+			if ( $queried instanceof WP_Post && 'masterclass' === sanitize_title( $queried->post_name ) ) {
+				return true;
+			}
+		}
+
+		$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+		$path        = trim( (string) wp_parse_url( $request_uri, PHP_URL_PATH ), '/' );
+
+		return 'masterclass' === $path;
+	}
+
 	public function mrm_mc_print_public_frontend_config() {
 		static $mrm_masterclass_config_printed = false;
 
@@ -329,33 +361,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 			return;
 		}
 
-		if ( is_admin() ) {
-			return;
-		}
-
-		if ( function_exists( 'wp_doing_ajax' ) && wp_doing_ajax() ) {
-			return;
-		}
-
-		if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
-			return;
-		}
-
-		$is_masterclass_page = false;
-
-		if ( function_exists( 'is_page' ) && is_page( 'masterclass' ) ) {
-			$is_masterclass_page = true;
-		}
-
-		if ( ! $is_masterclass_page && function_exists( 'get_queried_object' ) ) {
-			$queried = get_queried_object();
-
-			if ( $queried instanceof WP_Post && 'masterclass' === sanitize_title( $queried->post_name ) ) {
-				$is_masterclass_page = true;
-			}
-		}
-
-		if ( ! $is_masterclass_page ) {
+		if ( ! $this->mrm_mc_is_public_masterclass_page() ) {
 			return;
 		}
 
@@ -368,8 +374,122 @@ class LowBrass_MRM_Masterclass_Plugin {
 			'currency'        => 'usd',
 		);
 
-		echo "\n<script id=\"mrm-masterclass-public-config\">\n";
+		echo "\n<script id=\"mrm-masterclass-public-config\" data-cfasync=\"false\" data-no-optimize=\"1\" data-no-defer=\"1\" data-no-minify=\"1\">\n";
 		echo 'window.MRM_MASTERCLASS = ' . wp_json_encode( $config ) . ";\n";
+		echo "</script>\n";
+	}
+
+	public function mrm_mc_print_pasted_masterclass_controller_fallback() {
+		if ( ! $this->mrm_mc_is_public_masterclass_page() ) {
+			return;
+		}
+
+		$content = '';
+
+		global $post;
+
+		if ( $post instanceof WP_Post && ! empty( $post->post_content ) ) {
+			$content = (string) $post->post_content;
+		}
+
+		if ( '' === trim( $content ) && function_exists( 'get_queried_object' ) ) {
+			$queried = get_queried_object();
+
+			if ( $queried instanceof WP_Post && ! empty( $queried->post_content ) ) {
+				$content = (string) $queried->post_content;
+			}
+		}
+
+		if ( '' === trim( $content ) && function_exists( 'get_page_by_path' ) ) {
+			$page = get_page_by_path( 'masterclass' );
+
+			if ( $page instanceof WP_Post && ! empty( $page->post_content ) ) {
+				$content = (string) $page->post_content;
+			}
+		}
+
+		if ( '' === trim( $content ) ) {
+			if ( method_exists( __CLASS__, 'safe_debug_log' ) ) {
+				self::safe_debug_log( 'Masterclass pasted controller fallback could not read page content.' );
+			}
+
+			return;
+		}
+
+		$controller = '';
+
+		if ( preg_match( '/<script\b(?=[^>]*\bid=["\']mrm-masterclass-frontend-controller["\'])(?:[^>]*)>(.*?)<\/script>/is', $content, $match ) ) {
+			$controller = isset( $match[1] ) ? (string) $match[1] : '';
+		}
+
+		if ( '' === trim( $controller ) ) {
+			if ( method_exists( __CLASS__, 'safe_debug_log' ) ) {
+				self::safe_debug_log( 'Masterclass pasted controller fallback could not find mrm-masterclass-frontend-controller in page content.' );
+			}
+
+			return;
+		}
+
+		$controller = str_replace( '</script', '<\/script', $controller );
+
+		echo "\n<script id=\"mrm-masterclass-controller-footer-fallback\" data-cfasync=\"false\" data-no-optimize=\"1\" data-no-defer=\"1\" data-no-minify=\"1\">\n";
+		?>
+(function () {
+	function mrmMasterclassLooksStuck() {
+		var root = document.getElementById('mrm-masterclass-root');
+		var month = document.getElementById('mrm-masterclass-calendar-current-month');
+		var calendar = document.getElementById('mrm-masterclass-calendar');
+		var events = document.getElementById('mrm-masterclass-events');
+		var loading = document.getElementById('mrm-masterclass-loading');
+
+		if (!root || !month || !calendar || !events || !loading) {
+			return false;
+		}
+
+		if (window.__mrmMasterclassBootComplete) {
+			return false;
+		}
+
+		if ((month.textContent || '').trim() && (month.textContent || '').trim() !== 'Current Month') {
+			return false;
+		}
+
+		return true;
+	}
+
+	function mrmRunPastedMasterclassFallback() {
+		if (!mrmMasterclassLooksStuck()) {
+			return;
+		}
+
+		try {
+<?php
+		echo $controller . "\n";
+?>
+		} catch (error) {
+			var loading = document.getElementById('mrm-masterclass-loading');
+			var errorBox = document.getElementById('mrm-masterclass-error');
+
+			if (loading) {
+				loading.hidden = true;
+			}
+
+			if (errorBox) {
+				errorBox.textContent = 'We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.';
+				errorBox.hidden = false;
+			}
+		}
+	}
+
+	if (document.readyState === 'loading') {
+		document.addEventListener('DOMContentLoaded', function () {
+			window.setTimeout(mrmRunPastedMasterclassFallback, 0);
+		}, { once: true });
+	} else {
+		window.setTimeout(mrmRunPastedMasterclassFallback, 0);
+	}
+})();
+<?php
 		echo "</script>\n";
 	}
 
