@@ -15,6 +15,10 @@
  * Service Account JSON contains a private key. Keep AWS credentials and secret access tightly restricted.
  */
 
+if ( ! defined( 'MRM_LAUNCH_DEBUG' ) ) {
+    define( 'MRM_LAUNCH_DEBUG', false );
+}
+
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
@@ -6851,6 +6855,10 @@ protected function mrm_get_google_service_account_json() {
 
 
     protected function log_safety_cron_diagnostics() {
+        if ( ! defined( 'MRM_LAUNCH_DEBUG' ) || ! MRM_LAUNCH_DEBUG ) {
+            return;
+        }
+
         $hooks = array(
             'mrm_scheduler_send_safety_reminders',
             'mrm_scheduler_check_safety_exceptions',
@@ -8869,11 +8877,16 @@ protected function mrm_get_google_service_account_json() {
 
         echo '<div class="wrap"><h1>Safety Attendance</h1>';
         echo '<p>This chart shows instructor arrival/departure tracking, parent confirmations, feedback, and alert status.</p>';
-        echo '<p style="margin:16px 0 24px 0;">';
-        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_reminder_sweep_now' ), 'mrm_run_safety_reminder_sweep_now' ) ) . '" class="button button-primary" style="margin-right:10px;">Run Safety Reminder Sweep Now</a>';
-        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_exception_check_now' ), 'mrm_run_safety_exception_check_now' ) ) . '" class="button" style="margin-right:10px;">Run Safety Exception Check Now</a>';
-        echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_feedback_request_now' ), 'mrm_run_safety_feedback_request_now' ) ) . '" class="button">Run Safety Feedback Request Now</a>';
-        echo '</p>';
+        if ( isset( $_GET['advanced_tools'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['advanced_tools'] ) ) ) {
+            echo '<div class="card" style="max-width:960px;margin:16px 0 24px;"><h2>Advanced Tools</h2>';
+            echo '<p>Use these manual delivery controls only when reviewing a specific lesson workflow.</p>';
+            echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_reminder_sweep_now' ), 'mrm_run_safety_reminder_sweep_now' ) ) . '" class="button button-primary" style="margin-right:10px;">Send Due Reminders</a>';
+            echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_exception_check_now' ), 'mrm_run_safety_exception_check_now' ) ) . '" class="button" style="margin-right:10px;">Review Attendance Exceptions</a>';
+            echo '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mrm_run_safety_feedback_request_now' ), 'mrm_run_safety_feedback_request_now' ) ) . '" class="button">Send Due Feedback Requests</a>';
+            echo '</div>';
+        } else {
+            echo '<p><a class="button" href="' . esc_url( add_query_arg( 'advanced_tools', '1' ) ) . '">Advanced Tools</a></p>';
+        }
         echo '<table class="widefat striped"><thead><tr>
         <th>Lesson ID</th>
         <th>Lesson Time</th>
@@ -13397,7 +13410,13 @@ public function render_contractor_tax_profiles_page() {
                 <?php submit_button( 'Save Slot Rules' ); ?>
             </form>
             <hr>
-            <h2>3) Test Connection</h2>
+            <?php $show_advanced_tools = isset( $_GET['advanced_tools'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['advanced_tools'] ) ); ?>
+            <?php if ( ! $show_advanced_tools ) : ?>
+                <h2>Advanced Tools</h2>
+                <p>Connection checks and manual calendar maintenance are available to site administrators when needed.</p>
+                <p><a class="button" href="<?php echo esc_url( add_query_arg( 'advanced_tools', '1' ) ); ?>">Open Advanced Tools</a></p>
+            <?php else : ?>
+            <h2>3) Calendar Connection Check</h2>
             <p>
                 <?php if ( $this->mrm_google_service_account_uses_aws() ) : ?>
                     The Google service account JSON is being loaded from AWS Secrets Manager. Click test below to verify the AWS-loaded credentials.
@@ -13408,15 +13427,15 @@ public function render_contractor_tax_profiles_page() {
             <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
                 <?php wp_nonce_field( 'mrm_scheduler_test_google', 'mrm_scheduler_google_test_nonce' ); ?>
                 <input type="hidden" name="action" value="mrm_scheduler_test_google">
-                <?php submit_button( 'Test Google Calendar API', 'secondary' ); ?>
+                <?php submit_button( 'Check Google Calendar Connection', 'secondary' ); ?>
             </form>
             <hr>
-            <h2>4) Direct Google Sync</h2>
-            <p>Use this when you want to force the plugin to pull Google event timing into <code>wp_mrm_lessons</code> immediately instead of waiting for WP-Cron.</p>
+            <h2>4) Refresh Calendar Status</h2>
+            <p>Refresh Google Calendar event timing immediately rather than waiting for the next scheduled update.</p>
             <form method="post" action="<?php echo esc_url( admin_url('admin-post.php') ); ?>">
                 <?php wp_nonce_field( 'mrm_scheduler_google_sync_now', 'mrm_scheduler_google_sync_now_nonce' ); ?>
                 <input type="hidden" name="action" value="mrm_scheduler_google_sync_now">
-                <?php submit_button( 'Run Google Sync Now', 'secondary' ); ?>
+                <?php submit_button( 'Refresh Calendar Status', 'secondary' ); ?>
             </form>
             <p><strong>Direct endpoint for Hostinger cron:</strong></p>
             <p>
@@ -13438,8 +13457,9 @@ public function render_contractor_tax_profiles_page() {
 
 
             <hr>
-            <h2>5) Debug One Google Lesson Row</h2>
-            <p>Use this to run the recurring Google resolver for one lesson row and print the raw result.</p>
+            <h2>5) Review One Google Calendar Event</h2>
+            <p>Review the calendar connection for one lesson when investigating a specific scheduling issue.</p>
+            <?php endif; ?>
             
             <hr>
             <h2>Sharing Calendars (required)</h2>

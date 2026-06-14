@@ -6,6 +6,10 @@
  * Author: Matt Rose
  */
 
+if ( ! defined( 'MRM_LAUNCH_DEBUG' ) ) {
+  define( 'MRM_LAUNCH_DEBUG', false );
+}
+
 if (!defined('ABSPATH')) exit;
 
 $autoload = ABSPATH . 'vendor/autoload.php';
@@ -1629,7 +1633,7 @@ private function get_settings() {
   }
 
   private function mrm_quote_debug_enabled() {
-    return (defined('WP_DEBUG') && WP_DEBUG && current_user_can('manage_options'));
+    return (defined('MRM_LAUNCH_DEBUG') && MRM_LAUNCH_DEBUG && current_user_can('manage_options'));
   }
 
 private function mrm_quote_debug_log($event, $data = array()) {
@@ -8686,8 +8690,7 @@ private function charge_and_unlock_autopay($data) {
 
       return new WP_REST_Response(array(
         'ok' => false,
-        'message' => 'Missing sku.',
-        'debug_request_id' => $request_id,
+        'message' => 'Some payment details were missing. Please refresh and try again.',
       ), 400);
     }
 
@@ -8722,8 +8725,7 @@ private function charge_and_unlock_autopay($data) {
 
       return new WP_REST_Response(array(
         'ok' => false,
-        'message' => 'Unknown sku.',
-        'debug_request_id' => $request_id,
+        'message' => 'This purchase option is not available. Please refresh and try again.',
         'requested_sku' => $this->sanitize_sku($req->get_param('sku')),
         'lookup_sku' => $sku,
       ), 404);
@@ -8738,8 +8740,7 @@ private function charge_and_unlock_autopay($data) {
 
       return new WP_REST_Response(array(
         'ok' => false,
-        'message' => 'Inactive sku.',
-        'debug_request_id' => $request_id,
+        'message' => 'This purchase option is not currently available.',
         'lookup_sku' => $sku,
       ), 404);
     }
@@ -8785,8 +8786,7 @@ private function charge_and_unlock_autopay($data) {
 
       return new WP_REST_Response(array(
         'ok' => false,
-        'message' => 'Pricing is not configured for this sku.',
-        'debug_request_id' => $request_id,
+        'message' => 'Pricing is temporarily unavailable for this purchase option.',
         'lookup_sku' => $sku,
         'amount_cents' => $amount_cents,
       ), 500);
@@ -8802,8 +8802,7 @@ private function charge_and_unlock_autopay($data) {
 
       return new WP_REST_Response(array(
         'ok' => false,
-        'message' => 'Currency is not configured for this sku.',
-        'debug_request_id' => $request_id,
+        'message' => 'Payment settings are temporarily unavailable for this purchase option.',
         'lookup_sku' => $sku,
       ), 500);
     }
@@ -8889,7 +8888,6 @@ private function charge_and_unlock_autopay($data) {
         'country' => (string)($preview_policy['jurisdiction']['country'] ?? 'US'),
       ),
       'price_id' => $price_id ? $price_id : null,
-      'debug_request_id' => $request_id,
     );
 
     $this->mrm_quote_debug_log('quote_success', array(
@@ -8915,8 +8913,7 @@ private function charge_and_unlock_autopay($data) {
 
     return new WP_REST_Response(array(
       'ok' => false,
-      'message' => 'Quote failed because Payments Hub hit a server-side error.',
-      'debug_request_id' => $request_id,
+      'message' => 'We could not prepare this payment. Please refresh and try again.',
     ), 500);
   }
 }
@@ -10351,7 +10348,7 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     // Privacy-safe: do not leak whether access exists unless caller already has context.
     // We still return ok with has_access boolean (needed for internal systems / admin tools).
     if (!$sku) {
-      return new WP_REST_Response(array('ok' => false, 'message' => 'Missing sku.'), 400);
+      return new WP_REST_Response(array('ok' => false, 'message' => 'Some payment details were missing. Please refresh and try again.'), 400);
     }
     if (!$email || !is_email($email)) {
       return new WP_REST_Response(array('ok' => false, 'message' => 'Valid email required.'), 400);

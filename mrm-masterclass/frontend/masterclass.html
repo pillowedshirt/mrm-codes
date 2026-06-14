@@ -1388,10 +1388,10 @@ body.mrm-modal-open {
         </span>
       </label>
 
-      <button id="payButton" class="mrm-primary-btn" type="button">Continue to Payment</button>
+      <button id="payButton" class="mrm-primary-btn" type="button">Continue</button>
 
       <div id="paymentElement" class="mrm-masterclass-payment-element"></div>
-      <button id="submitPayment" class="mrm-primary-btn" type="button" style="display:none;">Submit Payment</button>
+      <button id="submitPayment" class="mrm-primary-btn" type="button" style="display:none;">Complete Registration</button>
 
       <p id="modalMessage" class="message"></p>
       </div>
@@ -1407,7 +1407,7 @@ body.mrm-modal-open {
       <p id="finalConfirmationDetails" class="modal-meta"></p>
       <p>Please confirm that you want to complete this Masterclass registration and submit your card payment.</p>
       <div class="mrm-confirmation-actions">
-        <button id="confirmFinalPayment" class="mrm-primary-btn" type="button">Confirm and Pay</button>
+        <button id="confirmFinalPayment" class="mrm-primary-btn" type="button">Complete Registration</button>
         <button id="cancelFinalPayment" class="mrm-secondary-btn" type="button">Go Back</button>
       </div>
       </div>
@@ -2177,7 +2177,7 @@ body.mrm-modal-open {
         html += '</div>';
 
         if (sessionPast) {
-          html += '<div class="mrm-masterclass-past-overlay">Registration For This Event Closed</div>';
+          html += '<div class="mrm-masterclass-past-overlay">Registration for this Masterclass has closed</div>';
         }
 
         html += '</article>';
@@ -2448,7 +2448,7 @@ body.mrm-modal-open {
       if (past) {
         const overlay = document.createElement('div');
         overlay.className = 'mrm-masterclass-past-overlay';
-        overlay.textContent = 'Registration For This Event Closed';
+        overlay.textContent = 'Registration for this Masterclass has closed';
         card.appendChild(overlay);
       }
 

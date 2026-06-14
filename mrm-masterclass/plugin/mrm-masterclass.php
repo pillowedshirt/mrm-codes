@@ -6,6 +6,10 @@
  * Author: Matt Rose
  */
 
+if ( ! defined( 'MRM_LAUNCH_DEBUG' ) ) {
+    define( 'MRM_LAUNCH_DEBUG', false );
+}
+
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
@@ -561,6 +565,10 @@ private function mrm_mc_should_diagnose_current_request( $file = '' ) {
 }
 
 private function mrm_mc_diagnostic_checkpoint( $phase ) {
+	if ( ! defined( 'MRM_LAUNCH_DEBUG' ) || ! MRM_LAUNCH_DEBUG ) {
+		return;
+	}
+
 	if ( ! $this->mrm_mc_should_diagnose_current_request() ) {
 		return;
 	}
