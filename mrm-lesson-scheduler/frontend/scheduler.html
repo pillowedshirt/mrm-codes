@@ -1835,6 +1835,14 @@ h1 {
 .mrm-payment-security-copy strong { display: block; font-size: 0.95rem; font-weight: 800; color: #2f2118; }
 .mrm-payment-security-copy small { display: block; margin-top: 2px; font-size: 0.84rem; line-height: 1.45; color: #62483a; }
 
+
+.mrm-price-breakdown { background:rgba(0,0,0,.04); padding:13px 15px; border-radius:14px; margin-bottom:12px; }
+.mrm-price-row { display:flex; justify-content:space-between; gap:14px; padding:4px 0; line-height:1.4; }
+.mrm-price-row span { color:#62483a; }
+.mrm-price-row strong { color:#2f2118; text-align:right; }
+.mrm-price-row-discount span,.mrm-price-row-discount strong { color:#1f6f3f; }
+.mrm-price-row-total { margin-top:8px; padding-top:10px; border-top:1px solid rgba(0,0,0,.12); }
+.mrm-price-row-total span,.mrm-price-row-total strong { font-weight:900; color:#2f2118; }
 </style>
 </head>
 
@@ -2141,7 +2149,7 @@ h1 {
       <div id="mrm-confirm-total-breakdown"></div>
       <div class="modal-actions" style="display:flex;gap:10px;">
         <button class="modal-submit" id="mrm-confirm-total-cancel" type="button" style="background:transparent;border:1px solid rgba(0,0,0,0.18);color:var(--color-text-main);">Cancel</button>
-        <button class="modal-submit" id="mrm-confirm-total-confirm" type="button">Complete Registration</button>
+        <button class="modal-submit" id="mrm-confirm-total-confirm" type="button">Confirm and Pay</button>
       </div>
     </div>
   </div>
@@ -2255,7 +2263,7 @@ async function mrmLoadLessonPricing(){
         base_amount_cents: Number(json.base_amount_cents || json.amount_cents || 0),
         travel_amount_cents: Number(json.travel_amount_cents || 0),
         currency: json.currency || 'usd',
-        tax_message: json.tax_message || 'Sales tax is calculated after billing details are entered.'
+        tax_message: json.tax_message || 'Sales tax will update after billing state and ZIP are entered.'
       };
     })
   ).then(() => {
@@ -2649,52 +2657,45 @@ function mrmBuildPaymentElementOptions(allowedMethods){
   };
 }
 
+function mrmNormalizeLessonPaymentBreakdown(raw) {
+  const data = raw || {};
+  const discount = Math.max(0, Number(data.promo_discount_cents || data.discount_cents || 0));
+  const addon = Math.max(0, Number(data.addon_amount_cents || data.sheet_music_amount_cents || 0));
+  const serverBase = Math.max(0, Number(data.base_amount_cents || data.lesson_amount_cents || data.subtotal_cents || 0));
+  const originalBase = Math.max(0, Number(data.original_base_amount_cents || data.original_amount_cents || data.subtotal_before_discount_cents || data.lesson_subtotal_before_discount_cents || (serverBase + discount)));
+  const discountedSubtotal = Math.max(0, Number(data.discounted_subtotal_cents || data.subtotal_after_discount_cents || data.final_base_amount_cents || serverBase));
+  const tax = Math.max(0, Number(data.tax_cents || 0));
+  const total = Math.max(0, Number(data.amount_cents || data.total_cents || data.final_amount_cents || (discountedSubtotal + addon + tax)));
+  return {
+    original_base_amount_cents: originalBase,
+    promo_discount_cents: discount,
+    discounted_subtotal_cents: discountedSubtotal,
+    addon_amount_cents: addon,
+    tax_cents: tax,
+    amount_cents: total,
+    tax_message: String(data.tax_message || (data.tax_policy && data.tax_policy.policy_message) || 'Sales tax will update after billing state and ZIP are entered.').trim()
+  };
+}
+
+function mrmRenderLessonPriceRows(raw) {
+  const b = mrmNormalizeLessonPaymentBreakdown(raw);
+  const money = cents => '$' + (Math.round(Number(cents || 0)) / 100).toFixed(2);
+  const rows = [];
+  rows.push(`<div class="mrm-price-row"><span>Lesson Subtotal</span><strong>${money(b.original_base_amount_cents)}</strong></div>`);
+  if (b.promo_discount_cents > 0) {
+    rows.push(`<div class="mrm-price-row mrm-price-row-discount"><span>Promotional Discount</span><strong>-${money(b.promo_discount_cents)}</strong></div>`);
+    rows.push(`<div class="mrm-price-row"><span>Discounted Subtotal</span><strong>${money(b.discounted_subtotal_cents)}</strong></div>`);
+  }
+  if (b.addon_amount_cents > 0) rows.push(`<div class="mrm-price-row"><span>Sheet Music Access</span><strong>${money(b.addon_amount_cents)}</strong></div>`);
+  rows.push(`<div class="mrm-price-row"><span>Sales Tax</span><strong>${b.tax_cents > 0 ? money(b.tax_cents) : b.tax_message}</strong></div>`);
+  rows.push(`<div class="mrm-price-row mrm-price-row-total"><span>Total Due Today</span><strong>${money(b.amount_cents)}</strong></div>`);
+  return `<div class="mrm-price-breakdown">${rows.join('')}</div>`;
+}
+
 function mrmRenderLessonPaymentBreakdown(breakdown) {
   const instructions = document.getElementById('mrm-payment-instructions');
   if (!instructions) return;
-
-  const money = (cents) => '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
-
-  const discountedBase = Number(breakdown?.base_amount_cents || 0);
-  const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
-
-  /*
-   * Payments Hub currently returns base_amount_cents after promo discount.
-   * Prefer original_base_amount_cents when available; otherwise reconstruct it
-   * so the customer sees the actual subtotal and the promo discount clearly.
-   */
-  const originalBase = Number(
-    breakdown?.original_base_amount_cents ||
-    breakdown?.subtotal_before_discount_cents ||
-    (discountedBase + promoDiscount)
-  );
-
-  const addon = Number(breakdown?.addon_amount_cents || 0);
-  const tax = Number(breakdown?.tax_cents || 0);
-  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (discountedBase + addon + tax);
-
-  const taxMessage = String(
-    breakdown?.tax_message ||
-    breakdown?.tax_policy?.policy_message ||
-    'Sales tax is calculated after billing state and ZIP are entered.'
-  ).trim();
-
-  const rows = [];
-
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson subtotal</span><strong>${money(originalBase)}</strong></div>`);
-
-  if (promoDiscount > 0) {
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
-  }
-
-  if (addon > 0) {
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
-  }
-
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
-  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total Due Today</strong></span><strong>${money(total)}</strong></div>`);
-
-  instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+  instructions.innerHTML = mrmRenderLessonPriceRows(breakdown);
 }
 
 function openPaymentModal(clientSecret, breakdown, allowedMethods){
@@ -2802,30 +2803,7 @@ function showConfirmTotal(breakdown){
   const confirmBtn = document.getElementById('mrm-confirm-total-confirm');
   const box = document.getElementById('mrm-confirm-total-breakdown');
 
-  const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
-  const discountedBase = Number(breakdown?.base_amount_cents || 0);
-  const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
-  const originalBase = Number(
-    breakdown?.original_base_amount_cents ||
-    breakdown?.subtotal_before_discount_cents ||
-    (discountedBase + promoDiscount)
-  );
-
-  const addon = Number(breakdown?.addon_amount_cents || 0);
-  const tax = Number(breakdown?.tax_cents || 0);
-  const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (discountedBase + addon + tax);
-
-  const rows = [];
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Lesson subtotal</span><strong>${money(originalBase)}</strong></div>`);
-
-  if (promoDiscount > 0) {
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Promotional discount</span><strong>-${money(promoDiscount)}</strong></div>`);
-  }
-
-  if (addon > 0) rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sheet music access</span><strong>${money(addon)}</strong></div>`);
-  rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
-  rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total</strong></span><strong>${money(total)}</strong></div>`);
-  box.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+  box.innerHTML = mrmRenderLessonPriceRows(breakdown);
 
   overlay.style.display = 'flex';
   overlay.setAttribute('aria-hidden','false');
@@ -3682,6 +3660,7 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
   try {
     if (payBtn) payBtn.disabled = true;
     if (errorEl) errorEl.textContent = '';
+    if (paymentMount) paymentMount.innerHTML = '<div style="padding:12px">Updating tax and secure payment form…</div>';
 
     const requestBody = JSON.parse(JSON.stringify(mrmLessonPaymentReloadContext.requestBody));
     requestBody.promo_code = promoCode;
