@@ -3,7 +3,7 @@
 Plugin Name: MRM Product Access
 Description: Provides purchase and access management for single-product pages using Stripe Checkout and Stripe Connect. Handles checkout session creation, webhook processing, OTP issuance and secure downloads without requiring user accounts.
 Author: Your Name
-Version: 1.2.5
+Version: 1.2.6
 */
 
 if ( ! defined( 'MRM_LAUNCH_DEBUG' ) ) {
@@ -58,7 +58,7 @@ class MRM_Product_Access {
      *
      * @var string
      */
-    const VERSION = '1.2.5';
+    const VERSION = '1.2.6';
 
     /**
      * Get singleton instance.
@@ -1915,54 +1915,132 @@ function offerRowTemplate(pieceIndex){
     }
 
     /**
-     * Build the likely Payments Hub SKUs for a Product Access OTP request.
+     * Infer the Payments Hub sheet music offer type from Product Access offer data.
      *
-     * @param string $product_slug Raw or canonical product slug.
-     * @param string $piece_slug   Piece page slug.
-     * @param string $offer_type   Payments Hub sheet-music offer type.
+     * @param array  $offer    Product Access offer data.
+     * @param string $raw_slug Raw Product Access offer slug.
+     * @return string
+     */
+    private function mrm_pa_infer_sheet_music_offer_type( $offer, $raw_slug = '' ) {
+        $offer = is_array( $offer ) ? $offer : array();
+
+        $text_parts = array(
+            (string) $raw_slug,
+            (string) ( $offer['product_slug'] ?? '' ),
+            (string) ( $offer['payments_hub_sku'] ?? '' ),
+            (string) ( $offer['sku'] ?? '' ),
+            (string) ( $offer['display_title'] ?? '' ),
+            (string) ( $offer['displayTitle'] ?? '' ),
+            (string) ( $offer['subtitle'] ?? '' ),
+            (string) ( $offer['short_description'] ?? '' ),
+            (string) ( $offer['shortDescription'] ?? '' ),
+        );
+
+        $text = strtolower( implode( ' ', $text_parts ) );
+        $text = str_replace( '_', '-', $text );
+
+        if ( preg_match( '/complete[-\s]*package|complete[-\s]*bundle|all[-\s]*parts|all[-\s]*versions|bundle/', $text ) ) {
+            return 'complete-package';
+        }
+
+        if ( preg_match( '/trombone[-\s]*euphonium/', $text ) || ( preg_match( '/trombone/', $text ) && preg_match( '/euphonium/', $text ) ) ) {
+            return 'trombone-euphonium';
+        }
+
+        if ( preg_match( '/\btuba\b/', $text ) ) {
+            return 'tuba';
+        }
+
+        if ( preg_match( '/fundamental/', $text ) ) {
+            return 'fundamentals';
+        }
+
+        return '';
+    }
+
+    /**
+     * Build likely Payments Hub SKUs for a Product Access OTP request.
+     *
+     * @param string $product_slug   Best available product SKU guess.
+     * @param string $piece_slug     Piece page slug.
+     * @param string $offer_type     Payments Hub sheet-music offer type.
+     * @param string $raw_offer_slug Raw Product Access offer slug.
      * @return array
      */
-    private function get_otp_product_slug_candidates( $product_slug, $piece_slug = '', $offer_type = '' ) {
+    private function get_otp_product_slug_candidates( $product_slug, $piece_slug = '', $offer_type = '', $raw_offer_slug = '' ) {
         global $wpdb;
 
-        $product_slug = $this->sanitize_product_slug( $product_slug );
-        $piece_slug   = sanitize_title( (string) $piece_slug );
-        $offer_type   = sanitize_title( (string) $offer_type );
-        $allowed_types = array( 'fundamentals', 'trombone-euphonium', 'tuba', 'complete-package' );
+        $product_slug   = $this->sanitize_product_slug( $product_slug );
+        $raw_offer_slug = $this->sanitize_product_slug( $raw_offer_slug );
+        $piece_slug     = sanitize_title( (string) $piece_slug );
+        $offer_type     = sanitize_title( (string) $offer_type );
+
+        $allowed_types = array(
+            'fundamentals',
+            'trombone-euphonium',
+            'tuba',
+            'complete-package',
+        );
+
+        if ( ! in_array( $offer_type, $allowed_types, true ) ) {
+            $offer_type = '';
+        }
+
         $candidates = array();
 
         $add_candidate = function( $candidate ) use ( &$candidates ) {
             $candidate = $this->sanitize_product_slug( $candidate );
+
             if ( $candidate !== '' && ! in_array( $candidate, $candidates, true ) ) {
                 $candidates[] = $candidate;
             }
         };
 
         $add_candidate( $product_slug );
+        $add_candidate( $raw_offer_slug );
+
         if ( $product_slug !== '' && strpos( $product_slug, 'piece-' ) !== 0 ) {
             $add_candidate( 'piece-' . $product_slug );
         }
 
-        if ( $piece_slug !== '' && in_array( $offer_type, $allowed_types, true ) ) {
+        if ( $raw_offer_slug !== '' && strpos( $raw_offer_slug, 'piece-' ) !== 0 ) {
+            $add_candidate( 'piece-' . $raw_offer_slug );
+        }
+
+        if ( $piece_slug !== '' && $offer_type !== '' ) {
             $add_candidate( 'piece-' . $piece_slug . '-' . $offer_type );
         }
 
-        // Payments Hub may append a numeric suffix when the base SKU already exists.
+        if ( $piece_slug !== '' ) {
+            $add_candidate( 'piece-' . $piece_slug . '-complete-package' );
+        }
+
         $table = $wpdb->prefix . 'mrm_sheet_music_access';
         $table_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+
         if ( $table_exists === $table ) {
-            foreach ( $candidates as $base_candidate ) {
+            $base_candidates = $candidates;
+
+            foreach ( $base_candidates as $base_candidate ) {
                 $suffixed = $wpdb->get_col( $wpdb->prepare(
                     "SELECT DISTINCT sku
                      FROM {$table}
-                     WHERE (sku = %s OR sku LIKE %s) AND revoked_at IS NULL
+                     WHERE (sku = %s OR sku LIKE %s)
+                       AND revoked_at IS NULL
                      ORDER BY sku ASC",
                     $base_candidate,
                     $wpdb->esc_like( $base_candidate ) . '-%'
                 ) );
 
                 foreach ( (array) $suffixed as $candidate ) {
-                    if ( preg_match( '/^' . preg_quote( $base_candidate, '/' ) . '-[0-9]+$/', (string) $candidate ) ) {
+                    $candidate = $this->sanitize_product_slug( $candidate );
+
+                    if ( $candidate === $base_candidate ) {
+                        $add_candidate( $candidate );
+                        continue;
+                    }
+
+                    if ( preg_match( '/^' . preg_quote( $base_candidate, '/' ) . '-[0-9]+$/', $candidate ) ) {
                         $add_candidate( $candidate );
                     }
                 }
@@ -1977,14 +2055,36 @@ function offerRowTemplate(pieceIndex){
      *
      * @return string Empty when no candidate grants access.
      */
-    private function resolve_otp_product_slug_for_email( $email, $product_slug, $piece_slug = '', $offer_type = '' ) {
-        $candidates = $this->get_otp_product_slug_candidates( $product_slug, $piece_slug, $offer_type );
+    private function resolve_otp_product_slug_for_email( $email, $product_slug, $piece_slug = '', $offer_type = '', $raw_offer_slug = '' ) {
+        $candidates = $this->get_otp_product_slug_candidates(
+            $product_slug,
+            $piece_slug,
+            $offer_type,
+            $raw_offer_slug
+        );
 
         foreach ( $candidates as $candidate ) {
             if ( $this->payments_hub_has_access_for_email( $email, $candidate ) ) {
+                $this->mrm_pa_log_access_event( 'otp_resolved_access_sku', array(
+                    'submitted_product_slug' => $product_slug,
+                    'raw_offer_slug'         => $raw_offer_slug,
+                    'piece_slug'             => $piece_slug,
+                    'offer_type'             => $offer_type,
+                    'resolved_sku'           => $candidate,
+                ) );
+
                 return $candidate;
             }
         }
+
+        $this->mrm_pa_log_access_event( 'otp_no_candidate_matched_access', array(
+            'submitted_product_slug' => $product_slug,
+            'raw_offer_slug'         => $raw_offer_slug,
+            'piece_slug'             => $piece_slug,
+            'offer_type'             => $offer_type,
+            'candidate_count'        => count( $candidates ),
+            'candidate_preview'      => implode( ',', array_slice( $candidates, 0, 12 ) ),
+        ) );
 
         return '';
     }
@@ -3139,13 +3239,19 @@ function offerRowTemplate(pieceIndex){
      * @return WP_REST_Response
      */
     public function api_request_otp( $request ) {
-        $params       = $request->get_json_params();
-        $email        = isset( $params['email'] ) ? sanitize_email( $params['email'] ) : '';
-        $product_slug = isset( $params['product_slug'] ) ? $this->sanitize_product_slug( $params['product_slug'] ) : '';
-        $piece_slug   = isset( $params['piece_slug'] ) ? sanitize_title( (string) $params['piece_slug'] ) : '';
-        $offer_type   = isset( $params['offer_type'] ) ? sanitize_title( (string) $params['offer_type'] ) : '';
-        if ( empty( $product_slug ) && ! empty( $params['piece_slug'] ) ) {
-            $product_slug = $this->sanitize_product_slug( $params['piece_slug'] );
+        $params         = $request->get_json_params();
+        $email          = isset( $params['email'] ) ? sanitize_email( $params['email'] ) : '';
+        $product_slug   = isset( $params['product_slug'] ) ? $this->sanitize_product_slug( $params['product_slug'] ) : '';
+        $raw_offer_slug = isset( $params['raw_offer_slug'] ) ? $this->sanitize_product_slug( $params['raw_offer_slug'] ) : '';
+        $piece_slug     = isset( $params['piece_slug'] ) ? sanitize_title( (string) $params['piece_slug'] ) : '';
+        $offer_type     = isset( $params['offer_type'] ) ? sanitize_title( (string) $params['offer_type'] ) : '';
+
+        if ( empty( $product_slug ) && ! empty( $raw_offer_slug ) ) {
+            $product_slug = $raw_offer_slug;
+        }
+
+        if ( empty( $product_slug ) && ! empty( $piece_slug ) && ! empty( $offer_type ) ) {
+            $product_slug = $this->sanitize_product_slug( 'piece-' . $piece_slug . '-' . $offer_type );
         }
 
         // Generic privacy-preserving response.
@@ -3154,7 +3260,7 @@ function offerRowTemplate(pieceIndex){
             'message' => __( 'If this purchase exists, a code will be sent shortly.', 'mrm-product-access' ),
         );
 
-        if ( empty( $email ) || empty( $product_slug ) ) {
+        if ( empty( $email ) || ( empty( $product_slug ) && ( empty( $piece_slug ) || empty( $offer_type ) ) ) ) {
             $this->mrm_pa_log_access_event( 'otp_missing_request_data', array(
                 'has_email'    => empty( $email ) ? 'no' : 'yes',
                 'product_slug' => $product_slug,
@@ -3175,15 +3281,19 @@ function offerRowTemplate(pieceIndex){
             $normalized_email,
             $product_slug,
             $piece_slug,
-            $offer_type
+            $offer_type,
+            $raw_offer_slug
         );
         $has_access = $resolved_product_slug !== '';
 
         // Privacy-preserving: always return generic success.
         if ( ! $has_access ) {
             $this->mrm_pa_log_access_event( 'otp_no_matching_access', array(
-                'email'        => $normalized_email,
-                'product_slug' => $product_slug,
+                'email'          => $normalized_email,
+                'product_slug'   => $product_slug,
+                'raw_offer_slug' => $raw_offer_slug,
+                'piece_slug'     => $piece_slug,
+                'offer_type'     => $offer_type,
             ) );
 
             return new WP_REST_Response( $generic, 200 );
@@ -3282,17 +3392,23 @@ function offerRowTemplate(pieceIndex){
      * @return WP_REST_Response
      */
     public function api_verify_otp( $request ) {
-        $params       = $request->get_json_params();
-        $email        = isset( $params['email'] ) ? sanitize_email( $params['email'] ) : '';
-        $product_slug = isset( $params['product_slug'] ) ? $this->sanitize_product_slug( $params['product_slug'] ) : '';
-        $piece_slug   = isset( $params['piece_slug'] ) ? sanitize_title( (string) $params['piece_slug'] ) : '';
-        $offer_type   = isset( $params['offer_type'] ) ? sanitize_title( (string) $params['offer_type'] ) : '';
-        if ( empty( $product_slug ) && ! empty( $params['piece_slug'] ) ) {
-            $product_slug = $this->sanitize_product_slug( $params['piece_slug'] );
+        $params         = $request->get_json_params();
+        $email          = isset( $params['email'] ) ? sanitize_email( $params['email'] ) : '';
+        $product_slug   = isset( $params['product_slug'] ) ? $this->sanitize_product_slug( $params['product_slug'] ) : '';
+        $raw_offer_slug = isset( $params['raw_offer_slug'] ) ? $this->sanitize_product_slug( $params['raw_offer_slug'] ) : '';
+        $piece_slug     = isset( $params['piece_slug'] ) ? sanitize_title( (string) $params['piece_slug'] ) : '';
+        $offer_type     = isset( $params['offer_type'] ) ? sanitize_title( (string) $params['offer_type'] ) : '';
+
+        if ( empty( $product_slug ) && ! empty( $raw_offer_slug ) ) {
+            $product_slug = $raw_offer_slug;
+        }
+
+        if ( empty( $product_slug ) && ! empty( $piece_slug ) && ! empty( $offer_type ) ) {
+            $product_slug = $this->sanitize_product_slug( 'piece-' . $piece_slug . '-' . $offer_type );
         }
         $otp          = isset( $params['otp'] ) ? trim( $params['otp'] ) : '';
 
-        if ( empty( $email ) || empty( $product_slug ) || empty( $otp ) ) {
+        if ( empty( $email ) || empty( $otp ) || ( empty( $product_slug ) && ( empty( $piece_slug ) || empty( $offer_type ) ) ) ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Invalid request.' ), 400 );
         }
 
@@ -3303,7 +3419,12 @@ function offerRowTemplate(pieceIndex){
         $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
 
         $now = gmdate( 'Y-m-d H:i:s' );
-        $candidate_slugs = $this->get_otp_product_slug_candidates( $product_slug, $piece_slug, $offer_type );
+        $candidate_slugs = $this->get_otp_product_slug_candidates(
+            $product_slug,
+            $piece_slug,
+            $offer_type,
+            $raw_offer_slug
+        );
         $row = null;
 
         foreach ( $candidate_slugs as $candidate_slug ) {
@@ -3734,6 +3855,13 @@ function offerRowTemplate(pieceIndex){
                     $offer_sub   = (string) ( $offer['subtitle'] ?? '' );
                     $offer_price = (string) ( $offer['price_display'] ?? '' );
                     $offer_slug  = sanitize_title( (string) ( $offer['product_slug'] ?? '' ) );
+                    $offer_type = $this->mrm_pa_infer_sheet_music_offer_type( $offer, $offer_slug );
+                    $otp_piece_slug = sanitize_title( (string) $page_slug );
+                    $otp_product_slug = $offer_slug;
+
+                    if ( $otp_piece_slug !== '' && $offer_type !== '' ) {
+                        $otp_product_slug = sanitize_title( 'piece-' . $otp_piece_slug . '-' . $offer_type );
+                    }
                   ?>
                     <div class="offer<?php echo $offer_slug === '' ? ' is-unavailable' : ''; ?>">
                       <div class="offer-row">
@@ -3760,7 +3888,15 @@ function offerRowTemplate(pieceIndex){
                         <button type="button" class="buyBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>"<?php disabled( $offer_slug, '' ); ?>>
                           <?php echo esc_html__( 'Buy', 'mrm-product-access' ); ?>
                         </button>
-                        <button type="button" class="mrmAccessBtn mrm-accessBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>"<?php disabled( $offer_slug, '' ); ?>>
+                        <button
+                          type="button"
+                          class="mrm-otp-open-btn mrmAccessBtn mrm-accessBtn"
+                          data-product-slug="<?php echo esc_attr( $otp_product_slug ); ?>"
+                          data-raw-offer-slug="<?php echo esc_attr( $offer_slug ); ?>"
+                          data-piece-slug="<?php echo esc_attr( $otp_piece_slug ); ?>"
+                          data-offer-type="<?php echo esc_attr( $offer_type ); ?>"
+                          <?php disabled( $offer_slug, '' ); ?>
+                        >
                           <?php echo esc_html__( 'Access', 'mrm-product-access' ); ?>
                         </button>
                       </div>
@@ -4388,6 +4524,12 @@ function offerRowTemplate(pieceIndex){
             const PIECE_SLUG = piece.dataset.pieceSlug || piece.dataset.productSlug || "";
             const PRODUCT_SLUG = piece.dataset.productSlug || PIECE_SLUG;
             let selectedProductSlug = "";
+            let selectedOtpContext = {
+              productSlug: "",
+              rawOfferSlug: "",
+              pieceSlug: PIECE_SLUG,
+              offerType: ""
+            };
             const PDF_URL = piece.dataset.pdfUrl || "";
             const PREVIEW_PAGE = Number(piece.dataset.previewPage || "1");
 
@@ -4631,21 +4773,46 @@ function offerRowTemplate(pieceIndex){
                 }));
               });
             });
-            piece.querySelectorAll('.mrm-accessBtn, .mrmAccessBtn').forEach((accessBtn) => {
+            piece.querySelectorAll('.mrm-otp-open-btn, .mrm-accessBtn, .mrmAccessBtn').forEach((accessBtn) => {
               if (accessBtn.dataset.mrmOtpBound === '1') return;
               accessBtn.dataset.mrmOtpBound = '1';
 
               accessBtn.addEventListener('click', function(event){
                 event.preventDefault();
 
-                selectedProductSlug = String(
+                const productSlug = String(
                   accessBtn.getAttribute('data-product-slug') ||
                   PRODUCT_SLUG ||
                   PIECE_SLUG ||
                   ''
                 ).trim().toLowerCase();
 
-                if (!selectedProductSlug) {
+                const rawOfferSlug = String(
+                  accessBtn.getAttribute('data-raw-offer-slug') ||
+                  accessBtn.getAttribute('data-product-slug') ||
+                  ''
+                ).trim().toLowerCase();
+
+                const pieceSlug = String(
+                  accessBtn.getAttribute('data-piece-slug') ||
+                  PIECE_SLUG ||
+                  ''
+                ).trim().toLowerCase();
+
+                const offerType = String(
+                  accessBtn.getAttribute('data-offer-type') ||
+                  ''
+                ).trim().toLowerCase();
+
+                selectedProductSlug = productSlug;
+                selectedOtpContext = {
+                  productSlug: productSlug,
+                  rawOfferSlug: rawOfferSlug,
+                  pieceSlug: pieceSlug,
+                  offerType: offerType
+                };
+
+                if (!selectedOtpContext.productSlug && (!selectedOtpContext.pieceSlug || !selectedOtpContext.offerType)) {
                   alert('This access option is temporarily unavailable. Please contact Low Brass Lessons.');
                   return;
                 }
@@ -4701,7 +4868,10 @@ function offerRowTemplate(pieceIndex){
                   },
                   body: JSON.stringify({
                     email: email,
-                    product_slug: productSlug
+                    product_slug: selectedOtpContext.productSlug || productSlug,
+                    raw_offer_slug: selectedOtpContext.rawOfferSlug || productSlug,
+                    piece_slug: selectedOtpContext.pieceSlug || PIECE_SLUG,
+                    offer_type: selectedOtpContext.offerType || ''
                   })
                 });
 
@@ -4769,8 +4939,10 @@ function offerRowTemplate(pieceIndex){
                   },
                   body: JSON.stringify({
                     email: email,
-                    product_slug: productSlug,
-                    piece_slug: PIECE_SLUG,
+                    product_slug: selectedOtpContext.productSlug || productSlug,
+                    raw_offer_slug: selectedOtpContext.rawOfferSlug || productSlug,
+                    piece_slug: selectedOtpContext.pieceSlug || PIECE_SLUG,
+                    offer_type: selectedOtpContext.offerType || '',
                     otp: otp
                   })
                 });

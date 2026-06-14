@@ -1649,21 +1649,28 @@ function mrmGetPiecePromoCodeInputValue() {
 }
 
 
-  function inferSheetMusicTypeFromOfferEl(offerEl){
-    if (!offerEl) return '';
+  function inferSheetMusicTypeFromText(text) {
+    text = String(text || '').toLowerCase().replace(/_/g, '-');
 
-    const rawSlug = String(offerEl.dataset.productSlug || '').toLowerCase();
-    const title = String((offerEl.querySelector('.offer-title') || {}).textContent || '').toLowerCase();
-    const subtitle = String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').toLowerCase();
-    const text = `${rawSlug} ${title} ${subtitle}`;
-
-    if (/complete-package/.test(text)) return 'complete-package';
+    if (/complete[-\s]*package|complete[-\s]*bundle|all[-\s]*parts|all[-\s]*versions|bundle/.test(text)) return 'complete-package';
     if (/trombone[-\s]*euphonium/.test(text) || (/trombone/.test(text) && /euphonium/.test(text))) return 'trombone-euphonium';
     if (/\btuba\b/.test(text)) return 'tuba';
     if (/fundamental/.test(text)) return 'fundamentals';
-    if (/full[\s-]*piece|complete|bundle|all parts|all versions/.test(text)) return 'complete-package';
 
     return '';
+  }
+
+  function inferSheetMusicTypeFromOfferEl(offerEl){
+    if (!offerEl) return '';
+
+    const explicitType = String(offerEl.dataset.offerType || '').trim().toLowerCase();
+    if (explicitType) return explicitType;
+
+    const rawSlug = String(offerEl.dataset.rawOfferSlug || offerEl.dataset.productSlug || '').toLowerCase();
+    const title = String((offerEl.querySelector('.offer-title') || {}).textContent || '').toLowerCase();
+    const subtitle = String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').toLowerCase();
+
+    return inferSheetMusicTypeFromText(`${rawSlug} ${title} ${subtitle}`);
   }
 
   async function resolveCanonicalHubSkuForOffer(offerEl){
@@ -2352,6 +2359,17 @@ async function getOfferSkuCandidates(offerEl) {
     // ✅ Canonical SKU must be provided by Product Access offers.
     productSlug = String(productSlug || '').trim().toLowerCase();
 
+    const pieceSlugForOtp = getPieceSlugFromUrl();
+    const rawOfferSlugForOtp = productSlug;
+    const offerTypeForOtp = inferSheetMusicTypeFromText([
+      productSlug,
+      displayTitle,
+      rawShortSubtitle
+    ].join(' '));
+    const otpProductSlug = pieceSlugForOtp && offerTypeForOtp
+      ? `piece-${pieceSlugForOtp}-${offerTypeForOtp}`
+      : productSlug;
+
     // Allow underscores + hyphens only
     if (!/^[a-z0-9][a-z0-9\-_]{0,199}$/.test(productSlug)) {
       const wrap = document.createElement('div');
@@ -2373,8 +2391,11 @@ async function getOfferSkuCandidates(offerEl) {
 
     const wrap = document.createElement('div');
     wrap.className = 'offer mrm-offer';
-    wrap.dataset.productSlug = productSlug;
-    wrap.dataset.resolvedSku = productSlug;
+    wrap.dataset.productSlug = otpProductSlug;
+    wrap.dataset.rawOfferSlug = rawOfferSlugForOtp;
+    wrap.dataset.pieceSlug = pieceSlugForOtp;
+    wrap.dataset.offerType = offerTypeForOtp;
+    wrap.dataset.resolvedSku = otpProductSlug;
     wrap.dataset.price = priceDisplay;
 
     const audioMarkup = previewAudio
@@ -2429,7 +2450,14 @@ async function getOfferSkuCandidates(offerEl) {
           </div>
         <div class="actions">
           <button type="button" class="button-primary mrm-purchaseBtn">Purchase</button>
-          <button type="button" class="button-secondary mrm-accessBtn mrmAccessBtn" data-product-slug="${escHtml(productSlug)}">Access</button>
+          <button
+            type="button"
+            class="button-secondary mrm-otp-open-btn mrm-accessBtn mrmAccessBtn"
+            data-product-slug="${escHtml(otpProductSlug)}"
+            data-raw-offer-slug="${escHtml(rawOfferSlugForOtp)}"
+            data-piece-slug="${escHtml(pieceSlugForOtp)}"
+            data-offer-type="${escHtml(offerTypeForOtp)}"
+          >Access</button>
         </div>
           <div class="mrm-offerStatus" style="margin-top:10px;font-size:13px;line-height:1.4;color:#8a1f1f;"></div>
         </div>
@@ -2887,32 +2915,67 @@ async function getOfferSkuCandidates(offerEl) {
       });
     });
 
-    piece.querySelectorAll('.mrm-accessBtn, .mrmAccessBtn').forEach(btn => {
+    piece.querySelectorAll('.mrm-otp-open-btn, .mrm-accessBtn, .mrmAccessBtn').forEach(btn => {
       if (btn.dataset.mrmOtpBound === '1') return;
       btn.dataset.mrmOtpBound = '1';
-      btn.addEventListener('click', async function(e){
+
+      btn.addEventListener('click', function(e){
         e.preventDefault();
+
         const offerEl = btn.closest('.mrm-offer');
-        const canonicalSku = await resolveCanonicalHubSkuForOffer(offerEl);
-        const sku = String(canonicalSku || '').trim().toLowerCase() ||
-          String((offerEl && offerEl.dataset.resolvedSku) || '').trim().toLowerCase() ||
-          String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase() ||
-          String(btn.getAttribute('data-product-slug') || '').trim().toLowerCase();
-        if (!sku) {
+        const productSlug = String(
+          btn.getAttribute('data-product-slug') ||
+          (offerEl && offerEl.dataset.productSlug) ||
+          ''
+        ).trim().toLowerCase();
+        const rawOfferSlug = String(
+          btn.getAttribute('data-raw-offer-slug') ||
+          (offerEl && offerEl.dataset.rawOfferSlug) ||
+          btn.getAttribute('data-product-slug') ||
+          ''
+        ).trim().toLowerCase();
+        const pieceSlug = String(
+          btn.getAttribute('data-piece-slug') ||
+          (offerEl && offerEl.dataset.pieceSlug) ||
+          getPieceSlugFromUrl() ||
+          ''
+        ).trim().toLowerCase();
+        const offerType = String(
+          btn.getAttribute('data-offer-type') ||
+          (offerEl && offerEl.dataset.offerType) ||
+          inferSheetMusicTypeFromOfferEl(offerEl) ||
+          ''
+        ).trim().toLowerCase();
+        const fallbackSku = pieceSlug && offerType
+          ? `piece-${pieceSlug}-${offerType}`
+          : rawOfferSlug;
+        const sku = productSlug || fallbackSku;
+
+        if (!sku && (!pieceSlug || !offerType)) {
           alert('This access option is temporarily unavailable. Please contact Low Brass Lessons.');
           return;
         }
-        if (offerEl) offerEl.dataset.resolvedSku = sku;
+
         activeProductSlug = sku;
-        activePieceSlug = getPieceSlugFromUrl();
-        activeOfferType = inferSheetMusicTypeFromOfferEl(offerEl);
+        activeRawOfferSlug = rawOfferSlug || sku;
+        activePieceSlug = pieceSlug;
+        activeOfferType = offerType;
+
+        if (offerEl) {
+          offerEl.dataset.resolvedSku = sku;
+          offerEl.dataset.rawOfferSlug = activeRawOfferSlug;
+          offerEl.dataset.pieceSlug = activePieceSlug;
+          offerEl.dataset.offerType = activeOfferType;
+        }
+
         openOtpModal(sku);
       });
-    });;
+    });
   }
 
   // ---------- OTP ----------
   let activeProductSlug = '';
+  let activeRawOfferSlug = '';
   let activePieceSlug = '';
   let activeOfferType = '';
 
@@ -2979,7 +3042,13 @@ async function getOfferSkuCandidates(offerEl) {
       if (!activeProductSlug) { messageDiv.textContent = 'This access option is temporarily unavailable. Please contact Low Brass Lessons.'; return; }
       sendBtn.disabled = true; messageDiv.textContent = 'Sending code...';
       try {
-        const response = await fetch(mrmProductAccessApiUrl('request-otp'), { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','Accept':'application/json'}, body:JSON.stringify({email, product_slug:activeProductSlug, piece_slug:activePieceSlug, offer_type:activeOfferType}) });
+        const response = await fetch(mrmProductAccessApiUrl('request-otp'), { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','Accept':'application/json'}, body:JSON.stringify({
+          email,
+          product_slug: activeProductSlug,
+          raw_offer_slug: activeRawOfferSlug,
+          piece_slug: activePieceSlug,
+          offer_type: activeOfferType
+        }) });
         let data = {}; try { data = await response.json(); } catch (error) {}
         if (!response.ok) { messageDiv.textContent = 'We could not send an access code right now. Please try again or contact Low Brass Lessons.'; return; }
         messageDiv.textContent = data.message || 'If this purchase exists, a code will be sent shortly.';
@@ -2997,7 +3066,14 @@ async function getOfferSkuCandidates(offerEl) {
       if (!activeProductSlug) { messageDiv.textContent = 'This access option is temporarily unavailable. Please contact Low Brass Lessons.'; return; }
       verifyBtn.disabled = true; messageDiv.textContent = 'Verifying...';
       try {
-        const response = await fetch(mrmProductAccessApiUrl('verify-otp'), { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','Accept':'application/json'}, body:JSON.stringify({email, product_slug:activeProductSlug, piece_slug:activePieceSlug, offer_type:activeOfferType, otp}) });
+        const response = await fetch(mrmProductAccessApiUrl('verify-otp'), { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','Accept':'application/json'}, body:JSON.stringify({
+          email,
+          product_slug: activeProductSlug,
+          raw_offer_slug: activeRawOfferSlug,
+          piece_slug: activePieceSlug,
+          offer_type: activeOfferType,
+          otp
+        }) });
         let data = {}; try { data = await response.json(); } catch (error) {}
         if (!response.ok) { messageDiv.textContent = data.message || 'We could not verify that code right now. Please try again.'; return; }
         if (data.ok && data.access_url) { window.location.href = data.access_url; return; }
