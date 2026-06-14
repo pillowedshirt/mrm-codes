@@ -3,7 +3,7 @@
 Plugin Name: MRM Product Access
 Description: Provides purchase and access management for single-product pages using Stripe Checkout and Stripe Connect. Handles checkout session creation, webhook processing, OTP issuance and secure downloads without requiring user accounts.
 Author: Your Name
-Version: 1.2.6
+Version: 1.2.7
 */
 
 if ( ! defined( 'MRM_LAUNCH_DEBUG' ) ) {
@@ -58,7 +58,7 @@ class MRM_Product_Access {
      *
      * @var string
      */
-    const VERSION = '1.2.6';
+    const VERSION = '1.2.7';
 
     /**
      * Get singleton instance.
@@ -3926,15 +3926,38 @@ function offerRowTemplate(pieceIndex){
                 <div class="mrm-stepEmail">
                   <label><?php echo esc_html__( 'Email address', 'mrm-product-access' ); ?></label>
                   <input type="email" class="mrm-email" autocomplete="email" required>
-                  <button type="button" class="primary mrm-sendCodeBtn"><?php echo esc_html__( 'Send Code', 'mrm-product-access' ); ?></button>
+                  <button
+                    type="button"
+                    class="primary mrm-otp-send-btn mrm-sendCodeBtn"
+                    data-mrm-otp-action="send"
+                    aria-label="<?php echo esc_attr__( 'Send access code', 'mrm-product-access' ); ?>"
+                  >
+                    <?php echo esc_html__( 'Send Code', 'mrm-product-access' ); ?>
+                  </button>
                 </div>
                 <div class="mrm-stepOtp hidden">
                   <label><?php echo esc_html__( 'Enter Code', 'mrm-product-access' ); ?></label>
                   <input type="text" class="mrm-otp" inputmode="numeric" pattern="\d*" required>
-                  <button type="button" class="primary mrm-verifyBtn"><?php echo esc_html__( 'Verify', 'mrm-product-access' ); ?></button>
+                  <button
+                    type="button"
+                    class="primary mrm-otp-verify-btn mrm-verifyBtn"
+                    data-mrm-otp-action="verify"
+                    aria-label="<?php echo esc_attr__( 'Verify access code', 'mrm-product-access' ); ?>"
+                  >
+                    <?php echo esc_html__( 'Verify', 'mrm-product-access' ); ?>
+                  </button>
                 </div>
                 <div class="message mrm-message" aria-live="polite"></div>
-                <div><button type="button" class="secondary mrm-closeBtn"><?php echo esc_html__( 'Close', 'mrm-product-access' ); ?></button></div>
+                <div>
+                  <button
+                    type="button"
+                    class="secondary mrm-otp-close-btn mrm-closeBtn"
+                    data-mrm-otp-action="close"
+                    aria-label="<?php echo esc_attr__( 'Close access code modal', 'mrm-product-access' ); ?>"
+                  >
+                    <?php echo esc_html__( 'Close', 'mrm-product-access' ); ?>
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -4062,7 +4085,7 @@ function offerRowTemplate(pieceIndex){
           justify-content: center;
           padding: 18px;
           box-sizing: border-box;
-          z-index: 2147483647;
+          z-index: 2147483600;
           cursor: zoom-out;
           overscroll-behavior: none;
           overflow: hidden;
@@ -4315,9 +4338,50 @@ function offerRowTemplate(pieceIndex){
           background: rgba(0,0,0,0.55);
           backdrop-filter: blur(6px);
           -webkit-backdrop-filter: blur(6px);
-          z-index: 2147483646;
+          z-index: 2147483647 !important;
+          pointer-events: auto !important;
         }
-        .mrm-otpOverlay.is-open { display: flex; }
+
+        .mrm-otpOverlay.is-open {
+          display: flex !important;
+          pointer-events: auto !important;
+        }
+
+        .mrm-otpOverlay .modal {
+          position: relative;
+          z-index: 2147483647 !important;
+          pointer-events: auto !important;
+        }
+
+        .mrm-otpOverlay .modal *,
+        .mrm-otpOverlay button,
+        .mrm-otpOverlay input,
+        .mrm-otpOverlay label {
+          pointer-events: auto !important;
+        }
+
+        .mrm-otpOverlay .mrm-otp-send-btn,
+        .mrm-otpOverlay .mrm-otp-verify-btn,
+        .mrm-otpOverlay .mrm-sendCodeBtn,
+        .mrm-otpOverlay .mrm-verifyBtn {
+          display: inline-flex !important;
+          align-items: center;
+          justify-content: center;
+          min-height: 48px;
+          cursor: pointer !important;
+          touch-action: manipulation;
+          user-select: none;
+          -webkit-user-select: none;
+          pointer-events: auto !important;
+        }
+
+        .mrm-otpOverlay .mrm-otp-send-btn:disabled,
+        .mrm-otpOverlay .mrm-otp-verify-btn:disabled,
+        .mrm-otpOverlay .mrm-sendCodeBtn:disabled,
+        .mrm-otpOverlay .mrm-verifyBtn:disabled {
+          opacity: 0.62;
+          cursor: wait !important;
+        }
 
         .mrm-otpOverlay .modal,
         .mrm-otpOverlay .modal * {
@@ -4741,7 +4805,122 @@ function offerRowTemplate(pieceIndex){
               closeBtn.setAttribute('aria-label', 'Close');
             }
 
+            /*
+             * OTP button hardening:
+             * This capture-level listener runs before older direct button handlers.
+             * It prevents stale/double-patched handlers from blocking Send Code.
+             */
+            if (piece.dataset.mrmOtpDelegatedBound !== '1') {
+              piece.dataset.mrmOtpDelegatedBound = '1';
+
+              piece.addEventListener('click', async function(event) {
+                const sendClick = event.target.closest('.mrm-otp-send-btn, .mrm-sendCodeBtn');
+                const verifyClick = event.target.closest('.mrm-otp-verify-btn, .mrm-verifyBtn');
+                const closeClick = event.target.closest('.mrm-otp-close-btn, .mrm-closeBtn');
+
+                if (!sendClick && !verifyClick && !closeClick) return;
+
+                event.preventDefault();
+                event.stopPropagation();
+                if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+
+                if (closeClick) {
+                  closeOtpModal();
+                  return;
+                }
+
+                const email = (emailInput.value || '').trim();
+                const productSlug = String(selectedOtpContext.productSlug || selectedProductSlug || PRODUCT_SLUG || PIECE_SLUG || '').trim().toLowerCase();
+                const rawOfferSlug = String(selectedOtpContext.rawOfferSlug || selectedOtpContext.productSlug || productSlug || '').trim().toLowerCase();
+                const pieceSlug = String(selectedOtpContext.pieceSlug || PIECE_SLUG || '').trim().toLowerCase();
+                const offerType = String(selectedOtpContext.offerType || '').trim().toLowerCase();
+
+                if (!email) { messageDiv.textContent = 'Please enter your email.'; return; }
+                if (!mrmPaLooksLikeEmail(email)) { messageDiv.textContent = 'Please enter a valid email address.'; return; }
+                if (!productSlug && (!pieceSlug || !offerType)) {
+                  messageDiv.textContent = 'This access option is temporarily unavailable. Please contact Low Brass Lessons.';
+                  return;
+                }
+
+                if (sendClick) {
+                  sendClick.disabled = true;
+                  sendClick.setAttribute('aria-busy', 'true');
+                  messageDiv.textContent = 'Sending code...';
+                  try {
+                    const response = await fetch(mrmPaApiUrl('request-otp'), {
+                      method: 'POST', credentials: 'same-origin',
+                      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                      body: JSON.stringify({ email, product_slug: productSlug, raw_offer_slug: rawOfferSlug, piece_slug: pieceSlug, offer_type: offerType })
+                    });
+                    let data = {};
+                    try { data = await response.json(); } catch (jsonError) { data = {}; }
+                    if (!response.ok) {
+                      messageDiv.textContent = data.message || 'We could not send an access code right now. Please try again or contact Low Brass Lessons.';
+                      return;
+                    }
+                    messageDiv.textContent = data.message || 'If this purchase exists, a code will be sent shortly.';
+                    stepEmail.classList.add('hidden');
+                    stepOtp.classList.remove('hidden');
+                    window.setTimeout(function () { otpInput.focus(); }, 50);
+                  } catch (error) {
+                    messageDiv.textContent = 'We could not send an access code right now. Please try again or contact Low Brass Lessons.';
+                  } finally {
+                    sendClick.disabled = false;
+                    sendClick.removeAttribute('aria-busy');
+                  }
+                  return;
+                }
+
+                const otp = (otpInput.value || '').trim();
+                if (!otp) { messageDiv.textContent = 'Enter the code you received.'; return; }
+                verifyClick.disabled = true;
+                verifyClick.setAttribute('aria-busy', 'true');
+                messageDiv.textContent = 'Verifying...';
+                try {
+                  const response = await fetch(mrmPaApiUrl('verify-otp'), {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ email, product_slug: productSlug, raw_offer_slug: rawOfferSlug, piece_slug: pieceSlug, offer_type: offerType, otp })
+                  });
+                  let data = {};
+                  try { data = await response.json(); } catch (jsonError) { data = {}; }
+                  if (!response.ok) { messageDiv.textContent = data.message || 'We could not verify that code right now. Please try again.'; return; }
+                  if (data.ok && data.access_url) { window.location.href = data.access_url; return; }
+                  messageDiv.textContent = data.message || 'Verified, but no access link was returned. Please contact Low Brass Lessons.';
+                } catch (error) {
+                  messageDiv.textContent = 'We could not verify that code right now. Please try again.';
+                } finally {
+                  verifyClick.disabled = false;
+                  verifyClick.removeAttribute('aria-busy');
+                }
+              }, true);
+            }
+
             function openOtpModal(){
+              const pdfOverlay = piece.querySelector('.mrm-pdfOverlay');
+              if (pdfOverlay) {
+                pdfOverlay.classList.remove('is-open');
+                pdfOverlay.setAttribute('aria-hidden', 'true');
+              }
+
+              if (typeof overlayOpen !== 'undefined') {
+                overlayOpen = false;
+              }
+
+              if (sendBtn) {
+                sendBtn.disabled = false;
+                sendBtn.removeAttribute('disabled');
+                sendBtn.style.pointerEvents = 'auto';
+                sendBtn.style.cursor = 'pointer';
+              }
+
+              if (verifyBtn) {
+                verifyBtn.disabled = false;
+                verifyBtn.removeAttribute('disabled');
+                verifyBtn.style.pointerEvents = 'auto';
+                verifyBtn.style.cursor = 'pointer';
+              }
+
               otpOverlay.classList.add('is-open');
               otpOverlay.setAttribute('aria-hidden', 'false');
 
