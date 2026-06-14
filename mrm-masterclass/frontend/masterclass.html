@@ -1283,9 +1283,6 @@ body.mrm-masterclass-modal-open {
   padding-top: 28px;
 }
 
-.mrm-masterclass-live-diagnostic {
-  display: none !important;
-}
 
 .mrm-masterclass-dynamic-detail {
   width: 100%;
@@ -1304,7 +1301,7 @@ body.mrm-masterclass-modal-open {
 }
 
 </style>
-  <div id="mrm-masterclass-root" class="mrm-masterclass-root" data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305">
+  <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
     <section class="mc-intro" id="mrm-masterclass-intro-section">
       <p class="mc-eyebrow">Low Brass Lessons</p>
@@ -1349,16 +1346,6 @@ body.mrm-masterclass-modal-open {
         <p>
           Select an available session below. After registration, you will receive a protected access link that opens the online meeting gate during the allowed access window.
         </p>
-      </div>
-
-      <div id="mrm-masterclass-live-diagnostic" class="mrm-masterclass-live-diagnostic" data-mrm-masterclass-version="live-rest-diagnostic-2026-05-28-2305" hidden aria-hidden="true">
-        <strong>Masterclass live diagnostic</strong>
-        <div>Frontend version: <code id="mrm-masterclass-diag-version">live-rest-diagnostic-2026-05-28-2305</code></div>
-        <div>Boot status: <code id="mrm-masterclass-diag-boot">not started</code></div>
-        <div>Health: <code id="mrm-masterclass-diag-health">not checked</code></div>
-        <div>Events: <code id="mrm-masterclass-diag-events">not checked</code></div>
-        <div>Event count: <code id="mrm-masterclass-diag-count">0</code></div>
-        <div>Last error: <code id="mrm-masterclass-diag-error">none</code></div>
       </div>
 
       <div id="mrm-masterclass-error" class="mrm-masterclass-error" hidden></div>
@@ -1429,3 +1416,1710 @@ body.mrm-masterclass-modal-open {
       <button id="closeMasterclassSuccessButton" class="secondary-btn" type="button">Close</button>
     </div>
   </div>
+
+<script id="mrm-masterclass-frontend-controller">
+(function () {
+  'use strict';
+
+  const root = document.getElementById('mrm-masterclass-root');
+
+  if (!root) {
+    return;
+  }
+
+  const state = {
+    events: [],
+    selectedEvent: null,
+    stripe: null,
+    elements: null,
+    paymentElement: null,
+    checkout: null,
+    calendarDate: new Date()
+  };
+
+  function getConfig() {
+    const globalConfig = window.MRM_MASTERCLASS || {};
+
+    return {
+      restBase: root.dataset.restBase || globalConfig.restBase || '/wp-json/mrm-masterclass/v1',
+      stripePublicKey: root.dataset.stripePublicKey || globalConfig.stripePublicKey || '',
+      currency: root.dataset.currency || globalConfig.currency || 'usd'
+    };
+  }
+
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function showError(message) {
+    const msg = message || 'We could not load Masterclass registration right now. Please refresh the page or contact Low Brass Lessons for help.';
+    const loading = byId('mrm-masterclass-loading');
+    const errorBox = byId('mrm-masterclass-error');
+
+    if (loading) {
+      loading.hidden = true;
+    }
+
+    if (errorBox) {
+      errorBox.textContent = msg;
+      errorBox.hidden = false;
+    }
+  }
+
+  function clearError() {
+    const errorBox = byId('mrm-masterclass-error');
+
+    if (errorBox) {
+      errorBox.textContent = '';
+      errorBox.hidden = true;
+    }
+  }
+
+  function restUrl(route) {
+    const cleanRoute = String(route || '').replace(/^\/+/, '');
+    return getConfig().restBase.replace(/\/+$/, '') + '/' + cleanRoute;
+  }
+
+  function restUrlNoCache(route) {
+    const url = restUrl(route);
+    return url + (url.indexOf('?') === -1 ? '?' : '&') + 'mrm_no_cache=' + Date.now();
+  }
+
+  function money(cents) {
+    const amount = Number(cents || 0) / 100;
+    return amount.toLocaleString(undefined, {
+      style: 'currency',
+      currency: getConfig().currency.toUpperCase()
+    });
+  }
+
+  function formatDateTime(value) {
+    if (!value) {
+      return 'Date/time TBA';
+    }
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+
+    return date.toLocaleString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+
+  function mrmOrdinalDay(day) {
+    const value = Number(day || 0);
+
+    if (value >= 11 && value <= 13) {
+      return String(value) + 'th';
+    }
+
+    switch (value % 10) {
+      case 1:
+        return String(value) + 'st';
+      case 2:
+        return String(value) + 'nd';
+      case 3:
+        return String(value) + 'rd';
+      default:
+        return String(value) + 'th';
+    }
+  }
+
+  function formatMasterclassDateLine(value) {
+    if (!value) {
+      return 'Date TBA';
+    }
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+
+    const weekday = date.toLocaleDateString(undefined, { weekday: 'long' });
+    const month = date.toLocaleDateString(undefined, { month: 'long' });
+    const day = mrmOrdinalDay(date.getDate());
+    const year = date.getFullYear();
+
+    return weekday + ', ' + month + ' ' + day + ', ' + year;
+  }
+
+  function formatMasterclassTimeOnly(value) {
+    if (!value) {
+      return 'Time TBA';
+    }
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+
+    return date.toLocaleTimeString(undefined, {
+      hour: 'numeric',
+      minute: '2-digit'
+    }).replace(/\s/g, '').toLowerCase();
+  }
+
+  function formatMasterclassTimeWindow(event) {
+    const start = eventStart(event);
+    const end = eventEnd(event);
+
+    if (!start && !end) {
+      return 'Time TBA';
+    }
+
+    if (start && end) {
+      return formatMasterclassTimeOnly(start) + '-' + formatMasterclassTimeOnly(end);
+    }
+
+    return formatMasterclassTimeOnly(start || end);
+  }
+
+  function renderMasterclassTimeBox(event) {
+    return '' +
+      '<div class="mrm-masterclass-time-box">' +
+        '<div class="mrm-masterclass-time-date">' + escapeHtml(formatMasterclassDateLine(eventStart(event))) + '</div>' +
+        '<div class="mrm-masterclass-time-window">' + escapeHtml(formatMasterclassTimeWindow(event)) + '</div>' +
+      '</div>';
+  }
+
+  function eventPresenterLabel(event) {
+    const name = event && event.presenter_name ? String(event.presenter_name) : 'TBA';
+    const title = event && event.presenter_title ? String(event.presenter_title) : '';
+
+    return {
+      name: name,
+      title: title
+    };
+  }
+
+  function presenterInitialsFromName(name) {
+    const clean = String(name || '').trim();
+
+    if (!clean) {
+      return 'P';
+    }
+
+    const parts = clean.split(/\s+/).filter(Boolean);
+
+    if (parts.length === 1) {
+      return parts[0].charAt(0).toUpperCase();
+    }
+
+    return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+  }
+
+  function renderEventProfileSummary(event, options) {
+    const settings = options || {};
+    const past = !!settings.past;
+    const presenterName = event && event.presenter_name ? String(event.presenter_name) : 'TBA';
+    const presenterLabel = eventPresenterLabel(event);
+    const presenterUrl = event && event.presenter_page_url
+      ? event.presenter_page_url
+      : (event && event.presenter_id ? masterclassContainerUrl({ presenter: event.presenter_id }) : '');
+    const profileImage = event && event.presenter_profile_image_url ? String(event.presenter_profile_image_url) : '';
+    const availableSeats = typeof event.available_seats !== 'undefined' ? event.available_seats : 'TBA';
+
+    let html = '';
+    html += '<div class="mrm-masterclass-event-profile-card">';
+    html += '<div class="mrm-masterclass-event-presenter-row">';
+
+    if (profileImage) {
+      html += '<img class="mrm-masterclass-event-presenter-photo" src="' + escapeHtml(profileImage) + '" alt="' + escapeHtml(presenterName) + '">';
+    } else {
+      html += '<div class="mrm-masterclass-event-presenter-photo mrm-masterclass-event-presenter-photo-fallback" aria-hidden="true">' + escapeHtml(presenterInitialsFromName(presenterName)) + '</div>';
+    }
+
+    html += '<div class="mrm-masterclass-event-presenter-text">';
+    html += '<span class="mrm-masterclass-event-profile-label">Presenter</span>';
+
+    if (!past && presenterUrl) {
+      html += '<a class="mrm-masterclass-presenter-link" href="' + escapeHtml(presenterUrl) + '">';
+      html += '<span class="mrm-masterclass-presenter-name">' + escapeHtml(presenterLabel.name) + '</span>';
+
+      if (presenterLabel.title) {
+        html += '<span class="mrm-masterclass-presenter-title">' + escapeHtml(presenterLabel.title) + '</span>';
+      }
+
+      html += '</a>';
+    } else {
+      html += '<span class="mrm-masterclass-presenter-static">';
+      html += '<span class="mrm-masterclass-presenter-name">' + escapeHtml(presenterLabel.name) + '</span>';
+
+      if (presenterLabel.title) {
+        html += '<span class="mrm-masterclass-presenter-title">' + escapeHtml(presenterLabel.title) + '</span>';
+      }
+
+      html += '</span>';
+    }
+
+    html += '</div>';
+    html += '</div>';
+    html += '<div class="mrm-masterclass-event-facts">';
+    html += '<div class="mrm-masterclass-event-fact mrm-masterclass-event-fact-time">';
+    html += '<span class="mrm-masterclass-event-profile-label">Event Time</span>';
+    html += renderMasterclassTimeBox(event);
+    html += '</div>';
+    html += '<div class="mrm-masterclass-event-fact">';
+    html += '<span class="mrm-masterclass-event-profile-label">Price</span>';
+    html += '<strong>' + escapeHtml(money(event.price_cents || 0)) + '</strong>';
+    html += '</div>';
+    html += '<div class="mrm-masterclass-event-fact">';
+    html += '<span class="mrm-masterclass-event-profile-label">Seats Available</span>';
+    html += '<strong>' + escapeHtml(String(availableSeats)) + '</strong>';
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+
+    return html;
+  }
+
+  function eventStart(event) {
+    return event && (event.start_time_rfc3339 || event.start_time) ? (event.start_time_rfc3339 || event.start_time) : '';
+  }
+
+  function eventEnd(event) {
+    return event && (event.end_time_rfc3339 || event.end_time) ? (event.end_time_rfc3339 || event.end_time) : '';
+  }
+
+  function isEnrollmentClosed(event) {
+    const start = eventStart(event);
+
+    if (!start) {
+      return false;
+    }
+
+    const date = new Date(start);
+
+    if (Number.isNaN(date.getTime())) {
+      return false;
+    }
+
+    return date.getTime() <= Date.now();
+  }
+
+  function isPastEvent(event) {
+    return isEnrollmentClosed(event);
+  }
+
+  function publicEventIsRegisterable(event) {
+    if (!event) {
+      return false;
+    }
+
+    if (isPastEvent(event)) {
+      return false;
+    }
+
+    if (String(event.status || '').trim().toLowerCase() !== 'scheduled') {
+      return false;
+    }
+
+    if (Number(event.registration_open || 0) !== 1) {
+      return false;
+    }
+
+    if (typeof event.available_seats !== 'undefined' && Number(event.available_seats) <= 0) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function eventIsInCurrentMonthOrFuture(event) {
+    const startValue = eventStart(event);
+
+    if (!startValue) {
+      return false;
+    }
+
+    const start = new Date(startValue);
+
+    if (Number.isNaN(start.getTime())) {
+      return false;
+    }
+
+    const now = new Date();
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const eventMonthStart = new Date(start.getFullYear(), start.getMonth(), 1);
+
+    return eventMonthStart.getTime() >= currentMonthStart.getTime();
+  }
+
+  function currentMonthAndFutureEvents(events) {
+    return (Array.isArray(events) ? events : []).filter(function (event) {
+      return eventIsInCurrentMonthOrFuture(event);
+    });
+  }
+
+  function renderEmpty() {
+    const loading = byId('mrm-masterclass-loading');
+    const eventsEl = byId('mrm-masterclass-events');
+
+    if (loading) {
+      loading.hidden = true;
+    }
+
+    if (eventsEl) {
+      eventsEl.innerHTML = '<div class="mrm-masterclass-empty mrm-masterclass-empty-full">There are no upcoming masterclasses scheduled. Please check back another time for future sessions.</div>';
+    }
+
+    renderCalendar([]);
+  }
+
+  function renderCalendar(events) {
+    const calendar = byId('mrm-masterclass-calendar');
+    const monthTitle = byId('mrm-masterclass-calendar-current-month');
+    const rangeNote = byId('mrm-masterclass-calendar-range-note');
+
+    if (!calendar) {
+      return;
+    }
+
+    const safeEvents = Array.isArray(events) ? events : [];
+    const displayDate = state.calendarDate instanceof Date && !Number.isNaN(state.calendarDate.getTime())
+      ? new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth(), 1)
+      : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+
+    const year = displayDate.getFullYear();
+    const month = displayDate.getMonth();
+    const first = new Date(year, month, 1);
+    const last = new Date(year, month + 1, 0);
+    const startDay = first.getDay();
+    const daysInMonth = last.getDate();
+    const today = new Date();
+
+    const monthLabel = displayDate.toLocaleString(undefined, {
+      month: 'long',
+      year: 'numeric'
+    });
+
+    if (monthTitle) {
+      monthTitle.textContent = monthLabel;
+    }
+
+    if (rangeNote) {
+      rangeNote.textContent = '';
+      rangeNote.hidden = true;
+      rangeNote.setAttribute('aria-hidden', 'true');
+    }
+
+    const eventsByDay = {};
+
+    safeEvents.forEach(function (event) {
+      const start = new Date(eventStart(event));
+
+      if (Number.isNaN(start.getTime())) {
+        return;
+      }
+
+      if (start.getFullYear() !== year || start.getMonth() !== month) {
+        return;
+      }
+
+      const day = start.getDate();
+
+      if (!eventsByDay[day]) {
+        eventsByDay[day] = [];
+      }
+
+      eventsByDay[day].push(event);
+    });
+
+    Object.keys(eventsByDay).forEach(function (day) {
+      eventsByDay[day].sort(function (a, b) {
+        return new Date(eventStart(a)).getTime() - new Date(eventStart(b)).getTime();
+      });
+    });
+
+    let html = '';
+    html += '<div class="mrm-masterclass-month">';
+    html += '<div class="mrm-masterclass-weekdays">';
+    ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(function (dayName) {
+      html += '<div class="mrm-masterclass-weekday">' + dayName + '</div>';
+    });
+    html += '</div>';
+
+    html += '<div class="mrm-masterclass-days">';
+
+    for (let i = 0; i < startDay; i++) {
+      html += '<div class="mrm-masterclass-day is-empty" aria-hidden="true"></div>';
+    }
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dayEvents = eventsByDay[day] || [];
+      const isToday =
+        today.getFullYear() === year &&
+        today.getMonth() === month &&
+        today.getDate() === day;
+
+      html += '<div class="mrm-masterclass-day' + (isToday ? ' is-today' : '') + '">';
+      html += '<div class="mrm-masterclass-day-number">' + day + '</div>';
+
+      dayEvents.forEach(function (event) {
+        const start = new Date(eventStart(event));
+        const timeLabel = Number.isNaN(start.getTime())
+          ? ''
+          : start.toLocaleTimeString(undefined, {
+              hour: 'numeric',
+              minute: '2-digit'
+            });
+
+        const calendarPast = isPastEvent(event);
+        html += '<button type="button" id="mrm-masterclass-calendar-event-' + escapeHtml(String(event.id || '')) + '" class="mrm-masterclass-calendar-event' + (calendarPast ? ' mrm-masterclass-calendar-event-closed' : '') + '" data-event-id="' + escapeHtml(String(event.id || '')) + '"' + (calendarPast ? ' disabled aria-disabled="true"' : '') + '>';
+        html += '<span>' + escapeHtml(event.title || 'Masterclass') + '</span>';
+
+        if (timeLabel) {
+          html += '<span class="mrm-masterclass-calendar-event-time">' + escapeHtml(timeLabel) + '</span>';
+        }
+
+        html += '</button>';
+      });
+
+      html += '</div>';
+    }
+
+    html += '</div>';
+    html += '</div>';
+
+    if (!safeEvents.length) {
+      html += '<div class="mrm-masterclass-calendar-empty-month">No open Masterclasses are scheduled for this month.</div>';
+    }
+
+    calendar.innerHTML = html;
+
+    calendar.querySelectorAll('[data-event-id]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        const eventId = Number(button.getAttribute('data-event-id') || 0);
+        const event = safeEvents.find(function (candidate) {
+          return Number(candidate.id) === eventId;
+        });
+
+        if (event && !isPastEvent(event)) {
+          scrollToEventCard(event);
+        }
+      });
+    });
+
+    bindCalendarNavigation();
+  }
+
+  function bindCalendarNavigation() {
+    const prev = byId('mrm-masterclass-calendar-prev');
+    const next = byId('mrm-masterclass-calendar-next');
+
+    const now = new Date();
+    const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const maxMonth = new Date(now.getFullYear() + 1, now.getMonth(), 1);
+    const visibleMonth = new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth(), 1);
+
+    if (prev) {
+      prev.disabled = visibleMonth.getTime() <= currentMonth.getTime();
+
+      if (!prev.dataset.mrmPluginCalendarBound) {
+        prev.dataset.mrmPluginCalendarBound = '1';
+        prev.addEventListener('click', function () {
+          const candidate = new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth() - 1, 1);
+
+          if (candidate.getTime() < currentMonth.getTime()) {
+            return;
+          }
+
+          state.calendarDate = candidate;
+          renderCalendar(state.events);
+        });
+      }
+    }
+
+    if (next) {
+      next.disabled = visibleMonth.getTime() >= maxMonth.getTime();
+
+      if (!next.dataset.mrmPluginCalendarBound) {
+        next.dataset.mrmPluginCalendarBound = '1';
+        next.addEventListener('click', function () {
+          const candidate = new Date(state.calendarDate.getFullYear(), state.calendarDate.getMonth() + 1, 1);
+
+          if (candidate.getTime() > maxMonth.getTime()) {
+            return;
+          }
+
+          state.calendarDate = candidate;
+          renderCalendar(state.events);
+        });
+      }
+    }
+  }
+
+  function scrollToEventCard(event) {
+    if (!event || !event.id) {
+      return;
+    }
+
+    const card = byId('mrm-masterclass-event-' + String(event.id));
+
+    if (!card) {
+      const sessions = byId('mrm-masterclass-events');
+
+      if (sessions) {
+        sessions.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start'
+        });
+      }
+
+      return;
+    }
+
+    card.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center'
+    });
+
+    if (typeof card.focus === 'function') {
+      card.focus({ preventScroll: true });
+    }
+
+    card.classList.add('mrm-masterclass-event-card-highlight');
+
+    window.setTimeout(function () {
+      card.classList.remove('mrm-masterclass-event-card-highlight');
+    }, 2200);
+  }
+
+  function scrollToCalendarEvent(event) {
+    if (!event || !event.id) {
+      return;
+    }
+
+    const startValue = eventStart(event);
+    const start = startValue ? new Date(startValue) : null;
+
+    if (start && !Number.isNaN(start.getTime())) {
+      state.calendarDate = new Date(start.getFullYear(), start.getMonth(), 1);
+      renderCalendar(state.events);
+    }
+
+    window.setTimeout(function () {
+      const calendarSection = byId('mrm-masterclass-calendar-section');
+      const calendarButton = byId('mrm-masterclass-calendar-event-' + String(event.id || ''));
+
+      if (calendarButton) {
+        calendarButton.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+          inline: 'center'
+        });
+
+        if (typeof calendarButton.focus === 'function') {
+          calendarButton.focus({ preventScroll: true });
+        }
+
+        calendarButton.classList.add('mrm-masterclass-calendar-event-highlight');
+
+        window.setTimeout(function () {
+          calendarButton.classList.remove('mrm-masterclass-calendar-event-highlight');
+        }, 2600);
+
+        return;
+      }
+
+      if (calendarSection) {
+        calendarSection.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start'
+        });
+      }
+    }, 80);
+  }
+
+  function currentMasterclassParams() {
+    return new URLSearchParams(window.location.search || '');
+  }
+
+  function isMasterclassDynamicDetailMode() {
+    const params = currentMasterclassParams();
+    return Number(params.get('presenter') || 0) > 0 || Number(params.get('session') || 0) > 0;
+  }
+
+  function applyMasterclassPageMode() {
+    const root = byId('mrm-masterclass-root');
+    const introSection = byId('mrm-masterclass-intro-section');
+    const instructionsSection = byId('mrm-masterclass-instructions-section');
+    const calendarSection = byId('mrm-masterclass-calendar-section');
+    const detailMode = isMasterclassDynamicDetailMode();
+
+    if (root) {
+      root.classList.toggle('mrm-masterclass-detail-mode', detailMode);
+    }
+
+    [introSection, instructionsSection, calendarSection].forEach(function (section) {
+      if (!section) {
+        return;
+      }
+
+      section.hidden = detailMode;
+      section.setAttribute('aria-hidden', detailMode ? 'true' : 'false');
+    });
+  }
+
+  function closedRegistrationButtonHtml(extraClass) {
+    return '<button type="button" class="primary-btn mrm-masterclass-register-button mrm-masterclass-closed-button ' + escapeHtml(extraClass || '') + '" disabled>Registration Closed</button>';
+  }
+
+  function masterclassContainerUrl(params) {
+    const base = window.location.origin + window.location.pathname.replace(/\/?$/, '/');
+    const query = new URLSearchParams(params || {});
+    const qs = query.toString();
+
+    return qs ? base + '?' + qs : base;
+  }
+
+  function renderBackToMasterclassesLink() {
+    return '<p style="margin:0 0 24px;"><a class="secondary-btn" style="display:inline-flex;width:auto;text-decoration:none;" href="' + escapeHtml(masterclassContainerUrl({})) + '">← Back to All Masterclasses</a></p>';
+  }
+
+  function renderPresenterDetailView(presenter, sessions) {
+    const root = byId('mrm-masterclass-public-events');
+    const loading = byId('mrm-masterclass-loading');
+
+    if (loading) {
+      loading.hidden = true;
+    }
+
+    if (!root) {
+      showError('Presenter view could not display because the Masterclass container is missing.');
+      return;
+    }
+
+    const safePresenter = presenter || {};
+    const safeSessions = Array.isArray(sessions) ? sessions : [];
+    const profile = safePresenter.profile_image_url || '';
+    const title = safePresenter.presenter_title || '';
+    const longDescription = safePresenter.long_description_html || safePresenter.bio_html || '';
+    const initial = safePresenter.name ? String(safePresenter.name).charAt(0) : 'P';
+
+    let html = '';
+    html += renderBackToMasterclassesLink();
+    html += '<article class="mrm-masterclass-dynamic-detail mrm-masterclass-presenter-detail">';
+    html += '<header style="text-align:center;margin:0 auto 34px;">';
+
+    if (profile) {
+      html += '<img src="' + escapeHtml(profile) + '" alt="' + escapeHtml(safePresenter.name || 'Masterclass Presenter') + '" style="width:min(320px,82vw);aspect-ratio:1/1;object-fit:cover;border-radius:28px;display:block;margin:0 auto 22px;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">';
+    } else {
+      html += '<div style="width:min(320px,82vw);aspect-ratio:1/1;border-radius:28px;background:#f7efe3;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:72px;font-weight:900;color:#9a6a2f;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">' + escapeHtml(initial) + '</div>';
+    }
+
+    html += '<h2 style="font-family:Georgia,serif;font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;color:#20170f;">' + escapeHtml(safePresenter.name || 'Masterclass Presenter') + '</h2>';
+
+    if (title) {
+      html += '<p style="text-align:center;font-weight:900;margin:10px auto 0;color:#4b3c2d;font-size:1.05rem;">' + escapeHtml(title) + '</p>';
+    }
+
+    html += '</header>';
+
+    if (longDescription) {
+      html += '<section style="background:#fff;border:1px solid #dccab0;border-radius:28px;padding:clamp(22px,4vw,34px);margin:28px 0;line-height:1.75;font-size:16px;box-shadow:0 14px 34px rgba(32,23,15,.08);">' + longDescription + '</section>';
+    }
+
+    html += '<section style="margin-top:40px;">';
+    html += '<h3 style="font-family:Georgia,serif;font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;color:#20170f;">Upcoming Masterclass Sessions</h3>';
+
+    if (safeSessions.length) {
+      html += '<div class="mrm-masterclass-events-grid mrm-masterclass-stacked-list">';
+      safeSessions.forEach(function (session) {
+        const sessionPast = isPastEvent(session);
+        const sessionCanRegister = publicEventIsRegisterable(session);
+
+        html += '<article class="mrm-masterclass-event-card' + (sessionPast ? ' mrm-masterclass-past' : '') + '">';
+        html += '<h3>' + escapeHtml(session.title || 'Masterclass') + '</h3>';
+
+        if (session.description_html) {
+          html += '<div class="mrm-masterclass-event-description">' + session.description_html + '</div>';
+        }
+
+        html += '<div class="mrm-masterclass-presenter-session-info-grid">';
+        html += '<div class="mrm-masterclass-info-box mrm-masterclass-info-box-time"><strong>Event Time</strong>' + renderMasterclassTimeBox(session) + '</div>';
+        html += '<div class="mrm-masterclass-info-box"><strong>Price</strong><br>' + escapeHtml(money(session.price_cents || 0)) + '</div>';
+        html += '<div class="mrm-masterclass-info-box"><strong>Seats Available</strong><br>' + escapeHtml(String(typeof session.available_seats !== 'undefined' ? session.available_seats : 'TBA')) + '</div>';
+        html += '</div>';
+
+        html += '<div class="mrm-masterclass-card-actions">';
+
+        if (sessionCanRegister) {
+          html += '<button type="button" class="primary-btn mrm-masterclass-register-button" data-register-event-id="' + escapeHtml(String(session.id || '')) + '">Register For This Masterclass</button>';
+          html += '<a class="primary-btn mrm-masterclass-learn-more-button" href="' + escapeHtml(session.session_page_url || masterclassContainerUrl({ session: session.id })) + '">Learn More About This Masterclass</a>';
+        } else {
+          html += closedRegistrationButtonHtml('');
+        }
+
+        html += '</div>';
+
+        if (sessionPast) {
+          html += '<div class="mrm-masterclass-past-overlay">Registration For This Event Closed</div>';
+        }
+
+        html += '</article>';
+      });
+      html += '</div>';
+    } else {
+      html += '<div class="mrm-masterclass-empty">No upcoming Masterclass sessions are currently open for this presenter.</div>';
+    }
+
+    html += '</section>';
+    html += '</article>';
+
+    root.innerHTML = html;
+
+    root.querySelectorAll('[data-register-event-id]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        const eventId = Number(button.getAttribute('data-register-event-id') || 0);
+        const event = safeSessions.find(function (candidate) {
+          return Number(candidate.id) === eventId;
+        });
+
+        if (event && publicEventIsRegisterable(event)) {
+          openRegistration(event);
+        }
+      });
+    });
+  }
+
+  function renderSessionDetailView(event) {
+    const root = byId('mrm-masterclass-public-events');
+    const loading = byId('mrm-masterclass-loading');
+
+    if (loading) {
+      loading.hidden = true;
+    }
+
+    if (!root) {
+      showError('Session view could not display because the Masterclass container is missing.');
+      return;
+    }
+
+    const safeEvent = event || {};
+    const presenterUrl = safeEvent.presenter_page_url || (safeEvent.presenter_id ? masterclassContainerUrl({ presenter: safeEvent.presenter_id }) : '');
+    const sessionUrl = safeEvent.session_page_url || (safeEvent.id ? masterclassContainerUrl({ session: safeEvent.id }) : window.location.href);
+    const canRegister = publicEventIsRegisterable(safeEvent);
+    const safeEventPast = isPastEvent(safeEvent);
+
+    let html = '';
+    html += renderBackToMasterclassesLink();
+    html += '<article class="mrm-masterclass-dynamic-detail mrm-masterclass-session-detail">';
+    html += '<section style="margin-top:0;background:#fff;border:1px solid #eadcc8;border-radius:28px;padding:30px;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
+    html += '<div style="text-align:center;margin:0 auto 22px;">';
+    html += '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Masterclass Session</p>';
+    html += '<h2 style="font-family:Georgia,serif;font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;color:#20170f;text-align:center;">' + escapeHtml(safeEvent.title || 'Masterclass Session') + '</h2>';
+    html += '</div>';
+
+    if (safeEvent.long_description_html || safeEvent.description_html) {
+      html += '<div style="font-size:16px;line-height:1.75;margin:0 0 22px;">' + (safeEvent.long_description_html || safeEvent.description_html || '') + '</div>';
+    }
+
+    html += '<div class="mrm-masterclass-session-info-grid">';
+
+    html += '<div class="mrm-masterclass-info-box"><strong>Presenter</strong><br>';
+
+    if (presenterUrl && !safeEventPast) {
+      html += '<a href="' + escapeHtml(presenterUrl) + '">' + escapeHtml(safeEvent.presenter_name || 'Presenter') + '</a>';
+    } else {
+      html += escapeHtml(safeEvent.presenter_name || 'Presenter');
+    }
+
+    html += '</div>';
+
+    html += '<div class="mrm-masterclass-info-box mrm-masterclass-info-box-time"><strong>Event Time</strong>';
+    html += renderMasterclassTimeBox(safeEvent);
+    html += '</div>';
+
+    html += '<div class="mrm-masterclass-info-box"><strong>Price</strong><br>' + escapeHtml(money(safeEvent.price_cents || 0)) + '</div>';
+    html += '<div class="mrm-masterclass-info-box"><strong>Seats Available</strong><br>' + escapeHtml(String(typeof safeEvent.available_seats !== 'undefined' ? safeEvent.available_seats : 'TBA')) + '</div>';
+
+    html += '</div>';
+
+    html += '<div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:26px;">';
+
+    if (canRegister) {
+      html += '<button type="button" id="mrm-masterclass-session-register" class="primary-btn mrm-masterclass-register-button mrm-masterclass-action-button">Register For This Masterclass</button>';
+    } else {
+      html += closedRegistrationButtonHtml('mrm-masterclass-action-button');
+    }
+
+    if (presenterUrl) {
+      html += '<a class="primary-btn mrm-masterclass-action-button mrm-masterclass-secondary-action" href="' + escapeHtml(presenterUrl) + '">More About The Presenter</a>';
+    }
+
+    html += '</div>';
+
+    html += '<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:18px;">';
+    html += '<a class="mrm-masterclass-share-button" href="mailto:?subject=' + encodeURIComponent('Masterclass Session: ' + (safeEvent.title || 'Masterclass')) + '&body=' + encodeURIComponent('I thought you might be interested in this Masterclass session:\n\n' + sessionUrl) + '">Share By Email</a>';
+    html += '<a class="mrm-masterclass-share-button" href="https://www.facebook.com/sharer/sharer.php?u=' + encodeURIComponent(sessionUrl) + '" target="_blank" rel="noopener noreferrer">Share On Facebook</a>';
+    html += '<button type="button" id="mrm-masterclass-copy-session-link" class="mrm-masterclass-share-button">Copy Link</button>';
+    html += '</div>';
+
+    html += '</section>';
+    html += '</article>';
+
+    root.innerHTML = html;
+
+    const registerButton = byId('mrm-masterclass-session-register');
+
+    if (registerButton) {
+      registerButton.addEventListener('click', function () {
+        if (publicEventIsRegisterable(safeEvent)) {
+          openRegistration(safeEvent);
+        }
+      });
+    }
+
+    const copyButton = byId('mrm-masterclass-copy-session-link');
+
+    if (copyButton) {
+      copyButton.addEventListener('click', function () {
+        const original = copyButton.textContent || 'Copy Link';
+        const done = function () {
+          copyButton.textContent = 'Link Copied';
+          window.setTimeout(function () {
+            copyButton.textContent = original;
+          }, 2500);
+        };
+
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(sessionUrl).then(done).catch(function () {
+            window.prompt('Copy this link:', sessionUrl);
+            done();
+          });
+        } else {
+          window.prompt('Copy this link:', sessionUrl);
+          done();
+        }
+      });
+    }
+  }
+
+  async function loadPresenterDetail(presenterId) {
+    clearError();
+
+    const loading = byId('mrm-masterclass-loading');
+
+    if (loading) {
+      loading.hidden = false;
+      loading.textContent = 'Loading presenter...';
+    }
+
+    try {
+      const result = await fetchJson(restUrlNoCache('presenter?id=' + encodeURIComponent(String(presenterId))), {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        },
+        cache: 'no-store'
+      });
+
+      const presenter = result.data && result.data.presenter ? result.data.presenter : null;
+      const sessions = result.data && Array.isArray(result.data.sessions) ? result.data.sessions : [];
+
+      renderPresenterDetailView(presenter, sessions);
+      window.__mrmMasterclassBootComplete = true;
+    } catch (error) {
+      showError(error && error.message ? error.message : 'Presenter could not be loaded.');
+    }
+  }
+
+  async function loadSessionDetail(sessionId) {
+    clearError();
+
+    const loading = byId('mrm-masterclass-loading');
+
+    if (loading) {
+      loading.hidden = false;
+      loading.textContent = 'Loading session...';
+    }
+
+    try {
+      const result = await fetchJson(restUrlNoCache('event?id=' + encodeURIComponent(String(sessionId))), {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        },
+        cache: 'no-store'
+      });
+
+      const event = result.data && result.data.event ? result.data.event : null;
+
+      renderSessionDetailView(event);
+      window.__mrmMasterclassBootComplete = true;
+    } catch (error) {
+      showError(error && error.message ? error.message : 'Session could not be loaded.');
+    }
+  }
+
+  function renderEvents(events) {
+    const eventsEl = byId('mrm-masterclass-events');
+    const loading = byId('mrm-masterclass-loading');
+
+    if (loading) {
+      loading.hidden = true;
+    }
+
+    if (!eventsEl) {
+      showError('Masterclass sessions could not display because the events container is missing.');
+      return;
+    }
+
+    const safeEvents = Array.isArray(events) ? events : [];
+    const displayEvents = currentMonthAndFutureEvents(safeEvents);
+
+    if (!safeEvents.length) {
+      renderEmpty();
+      return;
+    }
+
+    eventsEl.innerHTML = '';
+
+    if (!displayEvents.length) {
+      eventsEl.innerHTML = '<div class="mrm-masterclass-empty mrm-masterclass-empty-full">There are no upcoming masterclasses scheduled. Please check back another time for future sessions.</div>';
+      renderCalendar(safeEvents);
+      return;
+    }
+
+    displayEvents.forEach(function (event) {
+      const past = isPastEvent(event);
+      const canRegister = publicEventIsRegisterable(event);
+
+      const card = document.createElement('article');
+      card.className = 'mrm-masterclass-event-card' + (past ? ' mrm-masterclass-past' : '');
+      card.setAttribute('data-event-id', String(event.id || ''));
+      card.id = 'mrm-masterclass-event-' + String(event.id || '');
+      card.setAttribute('tabindex', '-1');
+
+      const title = document.createElement('h3');
+      title.textContent = event.title || 'Masterclass';
+
+      const desc = document.createElement('div');
+      desc.className = 'mrm-masterclass-event-description';
+      desc.innerHTML = event.description_html || event.description || '';
+
+      const meta = document.createElement('div');
+      meta.className = 'mrm-masterclass-event-meta mrm-masterclass-event-meta-profile';
+      meta.innerHTML = renderEventProfileSummary(event, { past: past });
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'primary-btn mrm-masterclass-register-button';
+
+      if (past || !canRegister) {
+        button.textContent = 'Registration Closed';
+        button.disabled = true;
+        button.classList.add('mrm-masterclass-closed-button');
+      } else {
+        button.textContent = 'Register For This Masterclass';
+        button.addEventListener('click', function () {
+          openRegistration(event);
+        });
+      }
+
+      if (past) {
+        const overlay = document.createElement('div');
+        overlay.className = 'mrm-masterclass-past-overlay';
+        overlay.textContent = 'Registration For This Event Closed';
+        card.appendChild(overlay);
+      }
+
+      card.appendChild(title);
+      card.appendChild(desc);
+      card.appendChild(meta);
+
+      const actions = document.createElement('div');
+      actions.className = 'mrm-masterclass-card-actions';
+      actions.appendChild(button);
+
+      const viewCalendarButton = document.createElement('button');
+      viewCalendarButton.type = 'button';
+      viewCalendarButton.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-view-calendar-button';
+      viewCalendarButton.textContent = 'View On Calendar';
+
+      viewCalendarButton.addEventListener('click', function () {
+        scrollToCalendarEvent(event);
+      });
+
+      actions.appendChild(viewCalendarButton);
+
+      if (!past) {
+        const learnMore = document.createElement('a');
+        learnMore.className = 'primary-btn mrm-masterclass-register-button mrm-masterclass-learn-more-button';
+        learnMore.href = event.session_page_url || masterclassContainerUrl({ session: event.id });
+        learnMore.textContent = 'Learn More About This Session';
+        actions.appendChild(learnMore);
+      }
+
+      card.appendChild(actions);
+
+      eventsEl.appendChild(card);
+    });
+
+    renderCalendar(safeEvents);
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  async function fetchJson(url, options) {
+    const response = await fetch(url, options || {});
+    const text = await response.text();
+    let data = null;
+
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (error) {
+      throw new Error('The server returned an unreadable response.');
+    }
+
+    if (!response.ok) {
+      throw new Error((data && data.message) || ('Request failed with HTTP ' + response.status + '.'));
+    }
+
+    return {
+      response: response,
+      data: data
+    };
+  }
+
+  async function loadEvents() {
+    if (window.__mrmMasterclassEventsLoading) {
+      return;
+    }
+
+    if ((anyMasterclassModalOpen() || window.__mrmMasterclassCheckoutInProgress) && window.__mrmMasterclassBootComplete) {
+      return;
+    }
+
+    window.__mrmMasterclassEventsLoading = true;
+
+    const loading = byId('mrm-masterclass-loading');
+
+    if (loading) {
+      loading.hidden = false;
+    }
+
+    clearError();
+
+    try {
+
+      await fetchJson(restUrlNoCache('health'), {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        },
+        cache: 'no-store'
+      });
+
+      const result = await fetchJson(restUrlNoCache('events'), {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        },
+        cache: 'no-store'
+      });
+
+      const events = result.data && Array.isArray(result.data.events) ? result.data.events : [];
+      state.events = events;
+
+      window.MRM_MASTERCLASS_EVENTS = events;
+
+      renderEvents(events);
+
+      if (window.location.hash && window.location.hash.indexOf('#mrm-masterclass-event-') === 0) {
+        window.setTimeout(function () {
+          const target = document.querySelector(window.location.hash);
+
+          if (target) {
+            target.scrollIntoView({
+              behavior: 'smooth',
+              block: 'center'
+            });
+
+            target.classList.add('mrm-masterclass-event-card-highlight');
+
+            window.setTimeout(function () {
+              target.classList.remove('mrm-masterclass-event-card-highlight');
+            }, 2200);
+          }
+        }, 500);
+      }
+
+      window.__mrmMasterclassBootComplete = true;
+    } catch (error) {
+      showError('We could not load Masterclass registration right now. Please refresh the page or contact Low Brass Lessons for help.');
+    } finally {
+      window.__mrmMasterclassEventsLoading = false;
+    }
+  }
+
+  function openModal(id) {
+    const modal = byId(id);
+
+    if (!modal) {
+      return;
+    }
+
+    if (!modal.classList.contains('is-open')) {
+      modal.classList.add('is-open');
+    }
+
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('mrm-masterclass-modal-open');
+  }
+
+  function anyMasterclassModalOpen() {
+    return Boolean(document.querySelector('.modal.is-open'));
+  }
+
+  function closeAllMasterclassModals() {
+    document.querySelectorAll('.modal.is-open').forEach(function (modal) {
+      modal.classList.remove('is-open');
+      modal.setAttribute('aria-hidden', 'true');
+    });
+
+    document.body.classList.remove('mrm-masterclass-modal-open');
+  }
+
+  function closeOtherMasterclassModals(keepId) {
+    document.querySelectorAll('.modal.is-open').forEach(function (modal) {
+      if (modal && modal.id !== keepId) {
+        modal.classList.remove('is-open');
+        modal.setAttribute('aria-hidden', 'true');
+      }
+    });
+
+    if (document.querySelector('.modal.is-open')) {
+      document.body.classList.add('mrm-masterclass-modal-open');
+    } else {
+      document.body.classList.remove('mrm-masterclass-modal-open');
+    }
+  }
+
+  function openRegistration(event) {
+    state.selectedEvent = event || null;
+    const modal = byId('registrationModal');
+    const title = byId('modalTitle');
+    const meta = byId('modalMeta');
+    const message = byId('modalMessage');
+    const paymentElement = byId('paymentElement');
+    const payButton = byId('payButton');
+    const submitPayment = byId('submitPayment');
+
+    if (!modal) {
+      showError('The registration popup could not open because the modal is missing.');
+      return;
+    }
+
+    window.MRM_SELECTED_MASTERCLASS_EVENT = event;
+    window.MRM_MASTERCLASS_PAYMENT_STATE = null;
+    window.__mrmMasterclassCheckoutInProgress = true;
+
+    if (title) {
+      title.textContent = 'Register: ' + (event.title || 'Masterclass');
+    }
+
+    if (meta) {
+      meta.textContent = formatDateTime(eventStart(event)) + ' • ' + money(event.price_cents || 0);
+    }
+
+    if (message) {
+      message.textContent = '';
+    }
+
+    if (paymentElement) {
+      paymentElement.innerHTML = '';
+    }
+
+    if (payButton) {
+      payButton.disabled = false;
+      payButton.style.display = '';
+      payButton.textContent = 'Continue to Payment';
+    }
+
+    if (submitPayment) {
+      submitPayment.disabled = false;
+      submitPayment.style.display = 'none';
+      submitPayment.textContent = 'Submit Payment';
+    }
+
+    closeOtherMasterclassModals('registrationModal');
+    openModal('registrationModal');
+  }
+
+  function closeModal(id) {
+    const modal = byId(id);
+
+    if (!modal) {
+      return;
+    }
+
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+
+    if (!anyMasterclassModalOpen()) {
+      document.body.classList.remove('mrm-masterclass-modal-open');
+
+      if (id === 'registrationModal' || id === 'finalConfirmationModal' || id === 'masterclassSuccessModal') {
+        window.__mrmMasterclassCheckoutInProgress = false;
+      }
+    }
+  }
+
+  function checkoutData() {
+    const firstName = byId('firstName') ? byId('firstName').value.trim() : '';
+    const lastName = byId('lastName') ? byId('lastName').value.trim() : '';
+    const email = byId('email') ? byId('email').value.trim() : '';
+    const promoCode = byId('mrm-masterclass-promo-code') ? byId('mrm-masterclass-promo-code').value.trim() : '';
+    const termsAccepted = byId('termsAccepted') ? byId('termsAccepted').checked : false;
+    const name = (firstName + ' ' + lastName).trim();
+
+    return {
+      firstName: firstName,
+      lastName: lastName,
+      name: name,
+      email: email,
+      promoCode: promoCode,
+      termsAccepted: termsAccepted
+    };
+  }
+
+  function validateCheckout(data) {
+    if (!data.firstName) {
+      return 'Please enter your first name.';
+    }
+
+    if (!data.lastName) {
+      return 'Please enter your last name.';
+    }
+
+    if (!data.email || data.email.indexOf('@') === -1) {
+      return 'Please enter a valid email address.';
+    }
+
+    if (!data.termsAccepted) {
+      return 'Please accept the Terms of Service before continuing.';
+    }
+
+    return '';
+  }
+
+  async function startPayment() {
+    const event = window.MRM_SELECTED_MASTERCLASS_EVENT;
+    const message = byId('modalMessage');
+    const payButton = byId('payButton');
+    const submitPayment = byId('submitPayment');
+
+    if (!event) {
+      if (message) {
+        message.textContent = 'Please select a Masterclass first.';
+      }
+      return;
+    }
+
+    const data = checkoutData();
+    const validationMessage = validateCheckout(data);
+
+    if (validationMessage) {
+      if (message) {
+        message.textContent = validationMessage;
+      }
+      return;
+    }
+
+    if (!window.Stripe) {
+      if (message) {
+        message.textContent = 'Stripe could not load. Please refresh the page and try again.';
+      }
+      return;
+    }
+
+    if (payButton) {
+      payButton.disabled = true;
+      payButton.textContent = 'Loading payment...';
+    }
+
+    try {
+      const result = await fetchJson(restUrl('create-payment-intent'), {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          event_id: event.id,
+          promo_code: data.promoCode,
+          first_name: data.firstName,
+          last_name: data.lastName,
+          name: data.name,
+          email: data.email,
+          terms_accepted: data.termsAccepted
+        })
+      });
+
+      const payload = result.data;
+
+      if (!payload || !payload.client_secret || !payload.publishable_key || !payload.payment_intent_id) {
+        throw new Error('Payment could not be started because the payment response was incomplete.');
+      }
+
+      const stripe = window.Stripe(payload.publishable_key);
+
+      const elements = stripe.elements({
+        clientSecret: payload.client_secret,
+        appearance: {
+          theme: 'stripe',
+          variables: {
+            borderRadius: '14px',
+            colorPrimary: '#2f2f2f'
+          }
+        }
+      });
+
+      const paymentElement = elements.create('payment', {
+        layout: {
+          type: 'tabs',
+          defaultCollapsed: false
+        },
+        paymentMethodOrder: ['card'],
+        fields: {
+          billingDetails: {
+            name: 'never',
+            email: 'never'
+          }
+        },
+        terms: {
+          card: 'never'
+        },
+        wallets: {
+          applePay: 'never',
+          googlePay: 'never',
+          link: 'never'
+        }
+      });
+
+      paymentElement.mount('#paymentElement');
+
+      state.stripe = stripe;
+      state.elements = elements;
+      state.paymentElement = paymentElement;
+      state.checkout = data;
+
+      window.MRM_MASTERCLASS_PAYMENT_STATE = {
+        stripe: stripe,
+        elements: elements,
+        paymentIntentId: payload.payment_intent_id,
+        checkout: data,
+        event: event
+      };
+
+      if (message) {
+        message.textContent = 'Payment form loaded. Review your card details, then submit payment.';
+      }
+
+      if (payButton) {
+        payButton.style.display = 'none';
+      }
+
+      if (submitPayment) {
+        submitPayment.style.display = '';
+        submitPayment.disabled = false;
+      }
+    } catch (error) {
+
+      if (message) {
+        message.textContent = error && error.message ? error.message : 'Payment could not be started.';
+      }
+
+      if (payButton) {
+        payButton.disabled = false;
+        payButton.textContent = 'Continue to Payment';
+      }
+    }
+  }
+
+  function openSuccessPopup(finalData, state) {
+    const successModal = byId('masterclassSuccessModal');
+    const successMessage = byId('masterclassSuccessMessage');
+    const accessLink = byId('masterclassSuccessAccessLink');
+
+    const eventTitle = state && state.event && state.event.title ? state.event.title : 'your Masterclass';
+    const gateUrl = finalData && finalData.gate_url ? finalData.gate_url : '';
+
+    if (successMessage) {
+      successMessage.textContent = 'Your registration for ' + eventTitle + ' is complete. Please check your email for your confirmation and protected access link.';
+    }
+
+    if (accessLink) {
+      if (gateUrl) {
+        accessLink.href = gateUrl;
+        accessLink.style.display = 'inline-flex';
+      } else {
+        accessLink.href = '#';
+        accessLink.style.display = 'none';
+      }
+    }
+
+    closeAllMasterclassModals();
+
+    if (successModal) {
+      openModal('masterclassSuccessModal');
+    }
+  }
+
+  function openFinalConfirmation() {
+    const state = window.MRM_MASTERCLASS_PAYMENT_STATE;
+    const message = byId('modalMessage');
+
+    if (!state || !state.stripe || !state.elements) {
+      if (message) {
+        message.textContent = 'Please load the payment form first.';
+      }
+      return;
+    }
+
+    const finalModal = byId('finalConfirmationModal');
+    const details = byId('finalConfirmationDetails');
+
+    if (details && state.event) {
+      details.textContent = (state.event.title || 'Masterclass') + ' • ' + formatDateTime(eventStart(state.event)) + ' • ' + money(state.event.price_cents || 0);
+    }
+
+    if (finalModal) {
+      closeOtherMasterclassModals('finalConfirmationModal');
+      openModal('finalConfirmationModal');
+    } else {
+      confirmFinalPayment();
+    }
+  }
+
+  async function confirmFinalPayment() {
+    const state = window.MRM_MASTERCLASS_PAYMENT_STATE;
+    const message = byId('modalMessage');
+    const confirmButton = byId('confirmFinalPayment');
+
+    if (!state || !state.stripe || !state.elements || !state.event || !state.checkout) {
+      if (message) {
+        message.textContent = 'Payment is not ready yet.';
+      }
+      return;
+    }
+
+    if (confirmButton) {
+      confirmButton.disabled = true;
+      confirmButton.textContent = 'Processing...';
+    }
+
+    try {
+      const confirmResult = await state.stripe.confirmPayment({
+        elements: state.elements,
+        confirmParams: {
+          payment_method_data: {
+            billing_details: {
+              name: state.checkout && state.checkout.name ? state.checkout.name : '',
+              email: state.checkout && state.checkout.email ? state.checkout.email : ''
+            }
+          }
+        },
+        redirect: 'if_required'
+      });
+
+      if (confirmResult.error) {
+        throw new Error(confirmResult.error.message || 'Payment could not be confirmed.');
+      }
+
+      const paymentIntentId = confirmResult.paymentIntent && confirmResult.paymentIntent.id
+        ? confirmResult.paymentIntent.id
+        : state.paymentIntentId;
+
+      const finalResult = await fetchJson(restUrl('finalize-registration'), {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          event_id: state.event.id,
+          payment_intent_id: paymentIntentId,
+          first_name: state.checkout.firstName,
+          last_name: state.checkout.lastName,
+          name: state.checkout.name,
+          email: state.checkout.email,
+          terms_accepted: state.checkout.termsAccepted,
+          promo_code: state.checkout.promoCode
+        })
+      });
+
+      openSuccessPopup(finalResult.data, state);
+
+      const submitPayment = byId('submitPayment');
+      if (submitPayment) {
+        submitPayment.disabled = true;
+        submitPayment.textContent = 'Registration Complete';
+      }
+
+      window.MRM_MASTERCLASS_PAYMENT_STATE = null;
+      window.MRM_SELECTED_MASTERCLASS_EVENT = null;
+
+      window.setTimeout(function () {
+        if (!anyMasterclassModalOpen()) {
+          loadEvents();
+        }
+      }, 1000);
+    } catch (error) {
+
+      if (message) {
+        message.textContent = error && error.message ? error.message : 'Payment could not be completed.';
+      }
+
+      if (confirmButton) {
+        confirmButton.disabled = false;
+        confirmButton.textContent = 'Confirm and Pay';
+      }
+    }
+  }
+
+  function bindModalControls() {
+    const closeX = byId('closeModalX');
+    const payButton = byId('payButton');
+    const submitPayment = byId('submitPayment');
+    const closeFinalX = byId('closeFinalConfirmationX');
+    const cancelFinal = byId('cancelFinalPayment');
+    const confirmFinal = byId('confirmFinalPayment');
+    const closeSuccessX = byId('closeMasterclassSuccessX');
+    const closeSuccessButton = byId('closeMasterclassSuccessButton');
+
+    if (closeX && !closeX.dataset.mrmBound) {
+      closeX.dataset.mrmBound = '1';
+      closeX.addEventListener('click', function () {
+        closeModal('registrationModal');
+      });
+    }
+
+    if (payButton && !payButton.dataset.mrmBound) {
+      payButton.dataset.mrmBound = '1';
+      payButton.addEventListener('click', function (event) {
+        event.preventDefault();
+        startPayment();
+      });
+    }
+
+    if (submitPayment && !submitPayment.dataset.mrmBound) {
+      submitPayment.dataset.mrmBound = '1';
+      submitPayment.addEventListener('click', function (event) {
+        event.preventDefault();
+        openFinalConfirmation();
+      });
+    }
+
+    if (closeFinalX && !closeFinalX.dataset.mrmBound) {
+      closeFinalX.dataset.mrmBound = '1';
+      closeFinalX.addEventListener('click', function () {
+        closeModal('finalConfirmationModal');
+      });
+    }
+
+    if (cancelFinal && !cancelFinal.dataset.mrmBound) {
+      cancelFinal.dataset.mrmBound = '1';
+      cancelFinal.addEventListener('click', function () {
+        closeModal('finalConfirmationModal');
+      });
+    }
+
+    if (confirmFinal && !confirmFinal.dataset.mrmBound) {
+      confirmFinal.dataset.mrmBound = '1';
+      confirmFinal.addEventListener('click', function (event) {
+        event.preventDefault();
+        confirmFinalPayment();
+      });
+    }
+
+    if (closeSuccessX && !closeSuccessX.dataset.mrmBound) {
+      closeSuccessX.dataset.mrmBound = '1';
+      closeSuccessX.addEventListener('click', function () {
+        closeModal('masterclassSuccessModal');
+      });
+    }
+
+    if (closeSuccessButton && !closeSuccessButton.dataset.mrmBound) {
+      closeSuccessButton.dataset.mrmBound = '1';
+      closeSuccessButton.addEventListener('click', function () {
+        closeModal('masterclassSuccessModal');
+      });
+    }
+  }
+
+  function bootMasterclassPage() {
+    if (window.__mrmMasterclassBootComplete) {
+      return;
+    }
+
+    if (window.__mrmMasterclassBootRunning) {
+      return;
+    }
+
+    window.__mrmMasterclassBootRunning = true;
+
+    bindModalControls();
+    applyMasterclassPageMode();
+
+    const params = currentMasterclassParams();
+    const presenterId = Number(params.get('presenter') || 0);
+    const sessionId = Number(params.get('session') || 0);
+
+    let bootPromise;
+
+    if (presenterId > 0) {
+      bootPromise = loadPresenterDetail(presenterId);
+    } else if (sessionId > 0) {
+      bootPromise = loadSessionDetail(sessionId);
+    } else {
+      bootPromise = loadEvents();
+    }
+
+    Promise.resolve(bootPromise)
+      .finally(function () {
+        window.__mrmMasterclassBootRunning = false;
+      });
+  }
+
+  function startWhenReady() {
+    bindModalControls();
+    bootMasterclassPage();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startWhenReady, { once: true });
+  } else {
+    startWhenReady();
+  }
+})();
+</script>
