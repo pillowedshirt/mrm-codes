@@ -2109,6 +2109,7 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_menu', array( $this, 'register_admin_menu' ) );
         add_action( 'admin_notices', array( $this, 'maybe_show_schema_notice' ) );
         add_action( 'mrm_send_cross_plugin_email_test', array( $this, 'handle_cross_plugin_email_test' ), 10, 3 );
+        add_filter( 'mrm_cross_plugin_email_preview', array( $this, 'handle_cross_plugin_email_preview' ), 10, 2 );
 
         add_action( 'admin_post_mrm_scheduler_run_upgrade', array( $this, 'handle_run_upgrade' ) );
         add_action( 'admin_post_mrm_scheduler_save_google', array( $this, 'handle_save_google_settings' ) );
@@ -11663,6 +11664,53 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
             list( $title, $intro, $details ) = $block_tests[ $slug ];
             $results[ $slug ] = wp_mail( $to, '[TEST] ' . $title, $this->mrm_safety_email_wrap_html_blocks( $title, $intro, $details, '' ), $headers );
         }
+    }
+
+    public function handle_cross_plugin_email_preview( $preview, $slug ) {
+        $slug = sanitize_key( (string) $slug );
+        $field_note = function( $label, $source ) {
+            return '<span style="display:inline-block;background:#fff3cd;border:1px solid #e0b84f;border-radius:999px;padding:2px 8px;margin:2px;font-size:11px;color:#4d3b00;">' . esc_html( $label ) . ': from ' . esc_html( $source ) . '</span>';
+        };
+        $time = 'January 15, 2027 at 4:00 PM MST';
+
+        if ( $slug === 'meeting_confirmation' || $slug === 'meeting_reminder' ) {
+            $meeting_title = 'Meeting Scheduler Event';
+            $gate_url = home_url( '/meeting-access/' . str_repeat( 'a', 48 ) . '/' );
+            $body = '<p>Hello,</p>';
+            $body .= $slug === 'meeting_reminder'
+                ? '<p>This is a reminder for your upcoming Low Brass Lessons meeting.</p>'
+                : '<p>You are invited to the following Low Brass Lessons meeting:</p>';
+            $body .= '<p><strong>' . esc_html( $meeting_title ) . '</strong><br>' . esc_html( $time ) . '</p>';
+            $body .= '<p>' . $field_note( 'Participant name', 'Meeting Scheduler form / participant list' ) . '</p>';
+            $body .= '<p>Please use the button below to open the meeting gate at the scheduled time.</p>';
+
+            return array(
+                'subject' => $slug === 'meeting_reminder' ? 'Reminder: ' . $meeting_title : $meeting_title,
+                'html'    => $this->mrm_meeting_wrap_email( $meeting_title, $body, $gate_url ),
+            );
+        }
+
+        $tests = array(
+            'private_lesson_reminder_parent' => array( 'Upcoming Lesson Reminder', '<p>This is a preview of the parent/student private lesson reminder email.</p>', '<div><strong>Student:</strong> ' . $field_note( 'Student name', 'lesson booking form' ) . '</div><div><strong>Instructor:</strong> ' . $field_note( 'Instructor name', 'instructor profile' ) . '</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/join-online/test/' ), 'Open Join Page' ),
+            'private_lesson_reminder_instructor' => array( 'Instructor Lesson Reminder', '<p>This is a preview of the instructor private lesson reminder email.</p>', '<div><strong>Student:</strong> ' . $field_note( 'Student name', 'lesson record' ) . '</div><div><strong>Instructor:</strong> ' . $field_note( 'Instructor name', 'instructor profile' ) . '</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/wp-admin/admin-post.php?action=test-instructor-arrival' ), 'Mark Arrival' ),
+            'lesson_feedback_request' => array( 'How was your lesson?', '<p>Please rate the lesson and share any comments you would like us to see.</p>', '<div><strong>Student:</strong> ' . $field_note( 'Student name', 'lesson record' ) . '</div><div><strong>Feedback text:</strong> ' . $field_note( 'Feedback comments', 'feedback text box' ) . '</div>', home_url( '/wp-admin/admin-post.php?action=test-feedback' ), 'Rate your lesson' ),
+            'parent_feedback_received' => array( 'Parent Lesson Feedback', '<p>This is a preview of the parent feedback received notification.</p>', '<div><strong>Rating:</strong> ' . $field_note( 'Rating', 'feedback form selection' ) . '</div><div><strong>Comment:</strong> ' . $field_note( 'Comment', 'feedback text box' ) . '</div>', '', '' ),
+            'consultation_confirmation' => array( 'Consultation Confirmed', '<p>This is a preview of the consultation confirmation email.</p>', '<div><strong>Name:</strong> ' . $field_note( 'Name', 'consultation form text box' ) . '</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/join-online/test/' ), 'Open Join Page' ),
+            'contact_form_notification' => array( 'New Contact Form Submission', '<p>This is a preview of the contact form notification email.</p>', '<div><strong>Name:</strong> ' . $field_note( 'Name', 'contact form text box' ) . '</div><div><strong>Email:</strong> ' . $field_note( 'Email', 'contact form email box' ) . '</div><div><strong>Message:</strong> ' . $field_note( 'Message', 'contact form message box' ) . '</div>', '', '' ),
+            'safety_no_show_alert' => array( 'Safety Alert', '<p>This is a preview of the parent reported no-show safety alert.</p>', '<div><strong>Report:</strong> ' . $field_note( 'Report details', 'safety form text box' ) . '</div>', '', '' ),
+            'safety_emergency_notice' => array( 'Safety Emergency Notice', '<p>This is a preview of the instructor emergency notice.</p>', '<div><strong>Emergency note:</strong> ' . $field_note( 'Emergency note', 'safety/emergency text box' ) . '</div>', '', '' ),
+            'contractor_agreement_confirmation' => array( 'Contractor Agreement Confirmation', '<p>This is a preview of the contractor agreement confirmation email.</p>', '<div><strong>Contractor:</strong> ' . $field_note( 'Contractor name', 'agreement form text box' ) . '</div>', '', '' ),
+        );
+
+        if ( isset( $tests[ $slug ] ) ) {
+            list( $title, $intro, $details, $url, $label ) = $tests[ $slug ];
+            return array(
+                'subject' => $title,
+                'html'    => $this->mrm_safety_email_wrap_html( $title, $intro, $details, $url, $label ),
+            );
+        }
+
+        return $preview;
     }
 
     /* =========================================================

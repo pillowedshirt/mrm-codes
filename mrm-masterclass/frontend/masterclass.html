@@ -1387,6 +1387,11 @@ body.mrm-modal-open {
 
       <div id="mrm-masterclass-error" class="mrm-masterclass-error" hidden></div>
       <div id="mrm-masterclass-loading" class="mrm-masterclass-loading">Loading upcoming masterclasses…</div>
+      <noscript>
+        <div class="mrm-masterclass-error">
+          Masterclasses require JavaScript to display upcoming sessions. Please enable JavaScript or contact Low Brass Lessons for help.
+        </div>
+      </noscript>
       <div id="mrm-masterclass-events" class="mrm-masterclass-events-grid"></div>
 
     </section>
@@ -1541,6 +1546,12 @@ body.mrm-modal-open {
   function restUrlNoCache(route) {
     const url = restUrl(route);
     return url + (url.indexOf('?') === -1 ? '?' : '&') + 'mrm_no_cache=' + Date.now();
+  }
+
+  function restRouteFallbackUrl(route) {
+    const cleanRoute = String(route || '').replace(/^\/+/, '');
+    const restRoute = '/mrm-masterclass/v1/' + cleanRoute;
+    return window.location.origin + '/?rest_route=' + encodeURIComponent(restRoute) + '&mrm_no_cache=' + Date.now();
   }
 
   function money(cents) {
@@ -2542,24 +2553,64 @@ body.mrm-modal-open {
   }
 
   async function fetchJson(url, options) {
-    const response = await fetch(url, options || {});
-    const text = await response.text();
-    let data = null;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(function () {
+      controller.abort();
+    }, 8000);
+
+    const mergedOptions = Object.assign({}, options || {}, {
+      signal: controller.signal
+    });
 
     try {
-      data = text ? JSON.parse(text) : null;
-    } catch (error) {
-      throw new Error('The server returned an unreadable response.');
-    }
+      const response = await fetch(url, mergedOptions);
+      const text = await response.text();
+      let data = null;
 
-    if (!response.ok) {
-      throw new Error((data && data.message) || ('Request failed with HTTP ' + response.status + '.'));
-    }
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (error) {
+        throw new Error('The server returned an unreadable response.');
+      }
 
-    return {
-      response: response,
-      data: data
-    };
+      if (!response.ok) {
+        throw new Error((data && data.message) || ('Request failed with HTTP ' + response.status + '.'));
+      }
+
+      return {
+        response: response,
+        data: data
+      };
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
+
+  async function fetchMasterclassEventsWithFallback() {
+    const primaryUrl = restUrlNoCache('events');
+    const fallbackUrl = restRouteFallbackUrl('events');
+
+    try {
+      return await fetchJson(primaryUrl, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        },
+        cache: 'no-store'
+      });
+    } catch (primaryError) {
+      return await fetchJson(fallbackUrl, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache'
+        },
+        cache: 'no-store'
+      });
+    }
   }
 
   async function loadEvents() {
@@ -2575,11 +2626,11 @@ body.mrm-modal-open {
     if (eventsEl) eventsEl.innerHTML = '';
     clearError();
     try {
-      const result = await fetchJson(restUrlNoCache('events'), {
-        method: 'GET', credentials: 'same-origin',
-        headers: { 'Accept': 'application/json', 'Cache-Control': 'no-cache' }, cache: 'no-store'
-      });
-      const events = result && result.data && Array.isArray(result.data.events) ? result.data.events : [];
+      const result = await fetchMasterclassEventsWithFallback();
+      const responseData = result && result.data ? result.data : {};
+      const events = Array.isArray(responseData.events)
+        ? responseData.events
+        : (responseData.data && Array.isArray(responseData.data.events) ? responseData.data.events : []);
       state.events = events;
       window.MRM_MASTERCLASS_EVENTS = events;
       renderEvents(events);
@@ -2597,6 +2648,10 @@ body.mrm-modal-open {
       window.__mrmMasterclassBootComplete = true;
     } catch (error) {
       showError('We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.');
+      if (eventsEl) {
+        eventsEl.innerHTML = '<div class="mrm-masterclass-empty mrm-masterclass-empty-full">Upcoming Masterclasses could not be loaded right now. Please refresh the page or contact Low Brass Lessons for help.</div>';
+      }
+      if (loading) loading.hidden = true;
     } finally {
       window.__mrmMasterclassEventsLoading = false;
     }

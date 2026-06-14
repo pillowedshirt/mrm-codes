@@ -47,6 +47,7 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_marketing_email_save_lists', array($this, 'handle_marketing_email_save_lists'));
     add_action('admin_post_mrm_marketing_email_send', array($this, 'handle_marketing_email_send'));
     add_action('admin_post_mrm_pay_hub_send_email_tests', array($this, 'handle_email_testing_send'));
+    add_action('admin_post_mrm_pay_hub_preview_email_tests', array($this, 'handle_email_testing_preview'));
     add_action('admin_post_mrm_marketing_resubscribe', array($this, 'handle_marketing_resubscribe'));
     add_action('admin_post_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
@@ -766,13 +767,25 @@ private function mrm_get_active_promo_code($code) {
 }
 
 private function mrm_scope_allows_promo_for_product($promo, $product_type) {
-  $scope = (string)($promo['scope'] ?? 'all');
+  $promo = is_array($promo) ? $promo : array();
+  $product_type = sanitize_key((string)$product_type);
+  $scopes = array();
 
-  if ($scope === 'all') return true;
-  if ($scope === 'lesson' && in_array($product_type, array('lesson', 'masterclass'), true)) return true;
-  if ($scope === 'sheet_music' && $product_type === 'sheet_music') return true;
+  if (isset($promo['scopes']) && is_array($promo['scopes'])) {
+    $scopes = array_values(array_filter(array_map('sanitize_key', $promo['scopes'])));
+  }
 
-  return false;
+  if (empty($scopes)) {
+    $legacy_scope = sanitize_key((string)($promo['scope'] ?? 'all'));
+    if ($legacy_scope === 'all') {
+      $scopes = array('lesson', 'sheet_music', 'masterclass');
+    } elseif (in_array($legacy_scope, array('lesson', 'sheet_music', 'masterclass'), true)) {
+      $scopes = array($legacy_scope);
+    }
+  }
+
+  $scopes = array_values(array_intersect($scopes, array('lesson', 'sheet_music', 'masterclass')));
+  return !empty($scopes) && in_array($product_type, $scopes, true);
 }
 
 private function mrm_customer_has_used_promo($code, $email_hash, $promo = array()) {
@@ -11374,63 +11387,108 @@ public function handle_marketing_resubscribe() {
     }
 
     $catalog = $this->mrm_email_testing_catalog();
-    $sent = isset($_GET['mrm_email_tests_sent']) ? absint(wp_unslash($_GET['mrm_email_tests_sent'])) : null;
-    $failed = isset($_GET['mrm_email_tests_failed']) ? absint(wp_unslash($_GET['mrm_email_tests_failed'])) : 0;
     $error = isset($_GET['mrm_email_tests_error']) ? sanitize_text_field(wp_unslash($_GET['mrm_email_tests_error'])) : '';
+    $preview_requested = isset($_GET['mrm_email_preview']) && '1' === sanitize_text_field(wp_unslash($_GET['mrm_email_preview']));
+    $preview_slugs = $preview_requested ? get_transient('mrm_pay_hub_email_preview_' . get_current_user_id()) : array();
+    if (!is_array($preview_slugs)) {
+      $preview_slugs = array();
+    }
     ?>
     <div class="wrap">
       <h1>Email Testing</h1>
-      <p>Use this page to send test versions of site emails to a single inbox. This page is for visual review only and never looks up real recipients.</p>
-
-      <?php if ($sent !== null) : ?>
-        <div class="notice notice-success"><p><?php echo esc_html(sprintf('Email test send complete. Sent: %d. Failed: %d.', $sent, $failed)); ?></p></div>
-      <?php endif; ?>
+      <p>Use this page to preview the HTML versions of site emails before launch. These previews do not send emails and do not look up real recipients.</p>
       <?php if ($error !== '') : ?>
         <div class="notice notice-error"><p><?php echo esc_html($error); ?></p></div>
       <?php endif; ?>
-
-      <div class="notice notice-warning inline" style="max-width:1100px;"><p><strong>Testing safety:</strong> Every selected message is sent only to the destination inbox entered below. Production email triggers are not invoked.</p></div>
-
       <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="max-width:1100px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin-top:18px;">
         <?php wp_nonce_field('mrm_pay_hub_send_email_tests', 'mrm_pay_hub_email_tests_nonce'); ?>
-        <input type="hidden" name="action" value="mrm_pay_hub_send_email_tests">
-
-        <h2>Destination Inbox</h2>
-        <p><input type="email" class="regular-text" name="mrm_email_testing_to" required autocomplete="off" placeholder="your-test-inbox@example.com"></p>
-
+        <input type="hidden" name="action" value="mrm_pay_hub_preview_email_tests">
         <h2>Email Types</h2>
-        <p>Select every email you want to send. Each selected test goes only to the destination inbox above.</p>
-        <p>
-          <button type="button" class="button" id="mrm-email-testing-select-all">Select all</button>
-          <button type="button" class="button" id="mrm-email-testing-clear-all">Clear all</button>
-        </p>
-
+        <p>Select every email you want to preview. No email will be sent from this screen.</p>
+        <p><button type="button" class="button" id="mrm-email-testing-select-all">Select all</button> <button type="button" class="button" id="mrm-email-testing-clear-all">Clear all</button></p>
         <table class="widefat striped">
-          <thead><tr><th style="width:60px;">Send</th><th style="width:320px;">Email</th><th>Normally Triggered By</th><th style="width:150px;">Plugin</th></tr></thead>
-          <tbody>
-            <?php foreach ($catalog as $key => $item) : ?>
-              <tr>
-                <td><input class="mrm-email-test-checkbox" type="checkbox" name="mrm_email_tests[]" value="<?php echo esc_attr($key); ?>"></td>
-                <td><strong><?php echo esc_html($item['label']); ?></strong></td>
-                <td><?php echo esc_html($item['description']); ?></td>
-                <td><code><?php echo esc_html($item['plugin']); ?></code></td>
-              </tr>
-            <?php endforeach; ?>
-          </tbody>
+          <thead><tr><th style="width:60px;">Preview</th><th style="width:320px;">Email</th><th>Normally Triggered By</th><th style="width:150px;">Plugin</th></tr></thead>
+          <tbody><?php foreach ($catalog as $key => $item) : ?><tr>
+            <td><input class="mrm-email-test-checkbox" type="checkbox" name="mrm_email_tests[]" value="<?php echo esc_attr($key); ?>"></td>
+            <td><strong><?php echo esc_html($item['label']); ?></strong></td><td><?php echo esc_html($item['description']); ?></td><td><code><?php echo esc_html($item['plugin']); ?></code></td>
+          </tr><?php endforeach; ?></tbody>
         </table>
-        <?php submit_button('Send Selected Test Emails'); ?>
+        <?php submit_button('Preview Selected Emails'); ?>
       </form>
+      <?php if (!empty($preview_slugs)) : ?>
+        <div style="max-width:1100px;margin-top:24px;"><h2>Email Preview</h2>
+          <p class="description">Highlighted yellow labels indicate content that normally comes from a form field, text box, database row, selected product, scheduled lesson, registration, or other live record.</p>
+          <?php foreach ($preview_slugs as $preview_slug) : if (empty($catalog[$preview_slug])) { continue; } $preview = $this->mrm_build_single_email_preview($preview_slug); $subject = sanitize_text_field((string)($preview['subject'] ?? $preview_slug)); $html = (string)($preview['html'] ?? ''); ?>
+            <div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;margin:18px 0;padding:16px;"><h3 style="margin-top:0;"><?php echo esc_html($catalog[$preview_slug]['label']); ?></h3><p><strong>Subject:</strong> <?php echo esc_html($subject); ?></p>
+              <iframe title="<?php echo esc_attr($catalog[$preview_slug]['label']); ?> preview" style="width:100%;min-height:720px;border:1px solid #dcdcde;border-radius:8px;background:#fff;" srcdoc="<?php echo esc_attr($html); ?>"></iframe>
+            </div>
+          <?php endforeach; ?>
+        </div>
+      <?php endif; ?>
     </div>
-    <script>
-      (function() {
-        function setAll(checked) {
-          document.querySelectorAll('.mrm-email-test-checkbox').forEach(function(box) { box.checked = checked; });
-        }
-        document.getElementById('mrm-email-testing-select-all').addEventListener('click', function() { setAll(true); });
-        document.getElementById('mrm-email-testing-clear-all').addEventListener('click', function() { setAll(false); });
-      })();
-    </script>
+    <script>(function(){function setAll(checked){document.querySelectorAll('.mrm-email-test-checkbox').forEach(function(box){box.checked=checked;});}document.getElementById('mrm-email-testing-select-all').addEventListener('click',function(){setAll(true);});document.getElementById('mrm-email-testing-clear-all').addEventListener('click',function(){setAll(false);});})();</script>
     <?php
+  }
+
+  public function handle_email_testing_preview() {
+    if (!current_user_can('manage_options')) {
+      wp_die(esc_html('Not allowed.'));
+    }
+
+    check_admin_referer('mrm_pay_hub_send_email_tests', 'mrm_pay_hub_email_tests_nonce');
+    $selected = isset($_POST['mrm_email_tests']) && is_array($_POST['mrm_email_tests'])
+      ? array_map('sanitize_key', wp_unslash($_POST['mrm_email_tests']))
+      : array();
+    $catalog = $this->mrm_email_testing_catalog();
+    $selected = array_values(array_unique(array_intersect($selected, array_keys($catalog))));
+
+    if (empty($selected)) {
+      wp_safe_redirect(add_query_arg(array(
+        'page' => 'mrm-pay-hub-email-testing',
+        'mrm_email_tests_error' => 'Please select at least one email to preview.',
+      ), admin_url('admin.php')));
+      exit;
+    }
+
+    set_transient('mrm_pay_hub_email_preview_' . get_current_user_id(), $selected, 10 * MINUTE_IN_SECONDS);
+    wp_safe_redirect(add_query_arg(array(
+      'page' => 'mrm-pay-hub-email-testing',
+      'mrm_email_preview' => '1',
+    ), admin_url('admin.php')));
+    exit;
+  }
+
+  private function mrm_build_single_email_preview($slug) {
+    $slug = sanitize_key((string)$slug);
+    $contact_url = $this->mrm_get_contact_url();
+    $field_note = function($label, $source) {
+      return '<span style="display:inline-block;background:#fff3cd;border:1px solid #e0b84f;border-radius:999px;padding:2px 8px;margin:2px;font-size:11px;color:#4d3b00;">' . esc_html($label) . ': from ' . esc_html($source) . '</span>';
+    };
+    $samples = array(
+      'marketing_custom_email' => array('Marketing Email Test', 'Marketing Email Test', '<p>This is a preview of the custom marketing email layout.</p>', '<div><strong>Audience:</strong> ' . $field_note('Audience', 'Marketing Email Lists selection') . '</div><div><strong>Message:</strong> ' . $field_note('Message body', 'Marketing email text box') . '</div>', 'Contact Low Brass Lessons'),
+      'payment_method_attention_student' => array('Payment method confirmation needed', 'Payment method confirmation needed', '<p>This is a preview of the student payment-method attention email.</p>', '<div><strong>Student:</strong> ' . $field_note('Student name', 'lesson record') . '</div><div><strong>Lesson:</strong> Test Low Brass Lesson</div><div><strong>Scheduled time:</strong> January 15, 2027 at 4:00 PM</div>', 'Contact Support'),
+      'payment_method_attention_instructor' => array('Instructor action required', 'Instructor action required', '<p>This is a preview of the instructor payment-method attention email.</p>', '<div><strong>Student:</strong> ' . $field_note('Student name', 'lesson record') . '</div><div><strong>Instructor:</strong> ' . $field_note('Instructor name', 'instructor profile') . '</div>', 'Contact Support'),
+      'payment_method_attention_admin' => array('Admin awareness', 'Admin awareness', '<p>This is a preview of the admin payment-method attention email.</p>', '<div><strong>Lesson ID:</strong> ' . $field_note('Lesson ID', 'lesson database row') . '</div><div><strong>Issue:</strong> Payment method attention required.</div>', 'Contact Support'),
+      'purchase_receipt' => array('Purchase Confirmation', 'Purchase Confirmation', '<p>Thank you for your purchase.</p>', '<div><strong>Item:</strong> ' . $field_note('Purchased item', 'checkout selection') . '</div><div><strong>Amount:</strong> ' . $field_note('Total paid', 'Stripe/payment record') . '</div><div><strong>Status:</strong> Paid</div>', 'Contact Support'),
+    );
+
+    if (isset($samples[$slug])) {
+      list($subject, $title, $intro, $details, $button) = $samples[$slug];
+      return array('subject' => $subject, 'html' => $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, $button));
+    }
+
+    $preview = apply_filters('mrm_cross_plugin_email_preview', array(), $slug);
+    if (is_array($preview) && !empty($preview['html'])) {
+      return array(
+        'subject' => sanitize_text_field((string)($preview['subject'] ?? $slug)),
+        'html' => (string)$preview['html'],
+      );
+    }
+
+    return array(
+      'subject' => 'Preview unavailable',
+      'html' => '<div style="padding:18px;border:1px solid #ccd0d4;background:#fff;"><p>No preview builder is currently available for this email type.</p></div>',
+    );
   }
 
   public function handle_email_testing_send() {
@@ -11530,7 +11588,7 @@ public function render_promo_codes_page() {
     <h1>Promo Codes</h1>
 
     <p>
-      Create promotional codes for lessons, sheet music, prepaid lessons, and autopay lesson charges.
+      Create promotional codes for lessons, sheet music, and Masterclass registrations.
       Rule Mode and Occurrence Count now control all item/occurrence behavior.
     </p>
 
@@ -11561,7 +11619,23 @@ public function render_promo_codes_page() {
       <td><div class="mrm-promo-field"><label>Type</label><select name="promo_discount_type[<?php echo esc_attr($i); ?>]"><option value="percent" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'percent'); ?>>Percentage</option><option value="amount" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'amount'); ?>>Dollar Amount</option></select></div>
       <div class="mrm-promo-field" style="margin-top:6px;"><label>Percent</label><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['percent_off'] ?? 0)); ?>" style="width:80px;" />%</div>
       <div class="mrm-promo-field" style="margin-top:6px;"><label>Amount</label><input type="text" name="promo_amount_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr(number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2)); ?>" style="width:90px;" /></div></td>
-      <td><div class="mrm-promo-field"><label>Purchase Type</label><select name="promo_scope[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected((string)($promo['scope'] ?? 'all'), 'all'); ?>>Lessons + Sheet Music</option><option value="lesson" <?php selected((string)($promo['scope'] ?? 'all'), 'lesson'); ?>>Lessons Only</option><option value="sheet_music" <?php selected((string)($promo['scope'] ?? 'all'), 'sheet_music'); ?>>Sheet Music Only</option></select></div>
+      <td><?php
+      $scope_value = (string)($promo['scope'] ?? 'all');
+      $scope_values = isset($promo['scopes']) && is_array($promo['scopes']) ? $promo['scopes'] : array();
+      if (empty($scope_values)) {
+        if ($scope_value === 'all') {
+          $scope_values = array('lesson', 'sheet_music', 'masterclass');
+        } elseif (in_array($scope_value, array('lesson', 'sheet_music', 'masterclass'), true)) {
+          $scope_values = array($scope_value);
+        }
+      }
+      $scope_values = array_map('sanitize_key', $scope_values);
+      ?>
+      <div class="mrm-promo-field"><label>Purchase Types</label>
+      <label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($i); ?>][]" value="lesson" <?php checked(in_array('lesson', $scope_values, true)); ?> /> Lessons</label>
+      <label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($i); ?>][]" value="sheet_music" <?php checked(in_array('sheet_music', $scope_values, true)); ?> /> Sheet Music</label>
+      <label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($i); ?>][]" value="masterclass" <?php checked(in_array('masterclass', $scope_values, true)); ?> /> Masterclasses</label>
+      <p class="description">Select every purchase type this promo code should apply to.</p></div>
       <input type="hidden" name="promo_applies_to[<?php echo esc_attr($i); ?>]" value="all_items" /></td>
       <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected($rule_mode, 'all'); ?>>All qualifying purchases</option><option value="first_n" <?php selected($rule_mode, 'first_n'); ?>>First N occurrences</option><option value="after_n" <?php selected($rule_mode, 'after_n'); ?>>After N occurrences</option><option value="first_n_months" <?php selected($rule_mode, 'first_n_months'); ?>>First N months</option><option value="date_window" <?php selected($rule_mode, 'date_window'); ?>>Date window</option></select></div>
       <div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)$occurrence_count); ?>" style="width:110px;" /><div class="description">Used by First N occurrences, After N occurrences, and First N months.</div></div>
@@ -11575,7 +11649,7 @@ public function render_promo_codes_page() {
       <?php $i++; endforeach; $new_i = $i; ?>
       <tr><td><input type="text" name="promo_code[<?php echo esc_attr($new_i); ?>]" placeholder="WELCOME10" style="width:120px;" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($new_i); ?>]" placeholder="Welcome discount" style="width:160px;" /></td>
       <td><div class="mrm-promo-field"><label>Type</label><select name="promo_discount_type[<?php echo esc_attr($new_i); ?>]"><option value="percent">Percentage</option><option value="amount">Dollar Amount</option></select></div><div class="mrm-promo-field" style="margin-top:6px;"><label>Percent</label><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($new_i); ?>]" value="0" style="width:80px;" />%</div><div class="mrm-promo-field" style="margin-top:6px;"><label>Amount</label><input type="text" name="promo_amount_off[<?php echo esc_attr($new_i); ?>]" value="0.00" style="width:90px;" /></div></td>
-      <td><div class="mrm-promo-field"><label>Purchase Type</label><select name="promo_scope[<?php echo esc_attr($new_i); ?>]"><option value="all">Lessons + Sheet Music</option><option value="lesson">Lessons Only</option><option value="sheet_music">Sheet Music Only</option></select></div><input type="hidden" name="promo_applies_to[<?php echo esc_attr($new_i); ?>]" value="all_items" /></td>
+      <td><div class="mrm-promo-field"><label>Purchase Types</label><label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($new_i); ?>][]" value="lesson" /> Lessons</label><label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($new_i); ?>][]" value="sheet_music" /> Sheet Music</label><label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($new_i); ?>][]" value="masterclass" /> Masterclasses</label><p class="description">Check all three to apply the promo to all purchases.</p></div><input type="hidden" name="promo_applies_to[<?php echo esc_attr($new_i); ?>]" value="all_items" /></td>
       <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($new_i); ?>]"><option value="all">All qualifying purchases</option><option value="first_n">First N occurrences</option><option value="after_n">After N occurrences</option><option value="first_n_months">First N months</option><option value="date_window">Date window</option></select></div><div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($new_i); ?>]" value="0" style="width:110px;" /></div><div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($new_i); ?>]" /></div><div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($new_i); ?>]" /></div></div><div style="margin-top:10px;"><label><input type="checkbox" name="promo_reusable_per_email[<?php echo esc_attr($new_i); ?>]" value="1" /> Reusable by the same email</label></div></td><td></td></tr>
       </tbody></table>
       <p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>
@@ -12584,7 +12658,9 @@ public function render_access_lists_page() {
   $discount_types = isset($_POST['promo_discount_type']) ? (array)$_POST['promo_discount_type'] : array();
   $percent_offs = isset($_POST['promo_percent_off']) ? (array)$_POST['promo_percent_off'] : array();
   $amount_offs = isset($_POST['promo_amount_off']) ? (array)$_POST['promo_amount_off'] : array();
-  $scopes = isset($_POST['promo_scope']) ? (array)$_POST['promo_scope'] : array();
+  $posted_scopes = isset($_POST['promo_scopes']) && is_array($_POST['promo_scopes'])
+    ? wp_unslash($_POST['promo_scopes'])
+    : array();
   $applies_to = isset($_POST['promo_applies_to']) ? (array)$_POST['promo_applies_to'] : array();
   $rule_modes = isset($_POST['promo_rule_mode']) ? (array)$_POST['promo_rule_mode'] : array();
   $occurrence_counts = isset($_POST['promo_occurrence_count']) ? (array)$_POST['promo_occurrence_count'] : array();
@@ -12609,10 +12685,15 @@ public function render_access_lists_page() {
       $discount_type = 'percent';
     }
 
-    $scope = sanitize_text_field((string)($scopes[$i] ?? 'all'));
-    if (!in_array($scope, array('all', 'lesson', 'sheet_music'), true)) {
-      $scope = 'all';
+    $scope_values = array();
+    if (isset($posted_scopes[$i]) && is_array($posted_scopes[$i])) {
+      $scope_values = array_map('sanitize_key', (array)$posted_scopes[$i]);
     }
+    $scope_values = array_values(array_intersect($scope_values, array('lesson', 'sheet_music', 'masterclass')));
+    if (empty($scope_values)) {
+      $scope_values = array('lesson', 'sheet_music', 'masterclass');
+    }
+    $scope = count($scope_values) === 3 ? 'all' : implode(',', $scope_values);
 
     /*
  * Item Rule has been removed from the admin UI.
@@ -12640,7 +12721,7 @@ public function render_access_lists_page() {
       $expires_at = '';
     }
 
-    $codes[$code] = array( 'code' => $code, 'label' => sanitize_text_field((string)($labels[$i] ?? '')), 'discount_type' => $discount_type, 'percent_off' => $percent, 'amount_off_cents' => max(0, (int)$amount_cents), 'scope' => $scope, 'applies_to' => $apply, 'rule_mode' => $rule_mode, 'occurrence_count' => $occurrence_count, 'after_occurrence' => 0, 'starts_at' => $starts_at, 'expires_at' => $expires_at, 'reusable_per_email' => !empty($reusable_per_email[$i]) ? 1 : 0, 'active' => 1, 'updated_at' => current_time('mysql'), );
+    $codes[$code] = array( 'code' => $code, 'label' => sanitize_text_field((string)($labels[$i] ?? '')), 'discount_type' => $discount_type, 'percent_off' => $percent, 'amount_off_cents' => max(0, (int)$amount_cents), 'scope' => $scope, 'scopes' => $scope_values, 'applies_to' => $apply, 'rule_mode' => $rule_mode, 'occurrence_count' => $occurrence_count, 'after_occurrence' => 0, 'starts_at' => $starts_at, 'expires_at' => $expires_at, 'reusable_per_email' => !empty($reusable_per_email[$i]) ? 1 : 0, 'active' => 1, 'updated_at' => current_time('mysql'), );
   }
 
   $this->mrm_save_promo_codes($codes);

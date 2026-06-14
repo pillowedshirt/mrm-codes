@@ -201,6 +201,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_session_page_title_css', 21, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	add_action( 'mrm_send_cross_plugin_email_test', array( $this, 'handle_cross_plugin_email_test' ), 10, 3 );
+	add_filter( 'mrm_cross_plugin_email_preview', array( $this, 'handle_cross_plugin_email_preview' ), 10, 2 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
@@ -2034,6 +2035,82 @@ public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
 
 	$body = $this->mrm_mc_email_template( $heading, $content );
 	$results[ $slug ] = $this->mrm_mc_send_email_recorded( 'email_test_' . $slug, $to, '[TEST] ' . $subject, $body, null, null );
+}
+
+public function handle_cross_plugin_email_preview( $preview, $slug ) {
+	$slug = sanitize_key( (string) $slug );
+
+	$field_note = function( $label, $source ) {
+		return '<span style="display:inline-block;background:#fff3cd;border:1px solid #e0b84f;border-radius:999px;padding:2px 8px;margin:2px;font-size:11px;color:#4d3b00;">' . esc_html( $label ) . ': from ' . esc_html( $source ) . '</span>';
+	};
+
+	$event_title   = 'Test Masterclass Event';
+	$presenter_name = 'Test Presenter';
+	$student_name  = 'Test Student';
+	$time_label    = 'January 15, 2027 at 4:00 PM MST';
+	$access_url    = home_url( '/masterclass-access/test-token/' );
+	$cancel_url    = home_url( '/masterclass-cancel/test-token/' );
+	$feedback_url  = home_url( '/masterclass-feedback/test-token/' );
+	$content       = '';
+	$heading       = '';
+	$subject       = '';
+
+	if ( $slug === 'masterclass_registration_confirmation' ) {
+		$heading = 'Masterclass Confirmation';
+		$subject = $heading;
+		$content = '<p>Your Masterclass registration has been confirmed.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) . '<br><strong>Registrant:</strong> ' . $field_note( 'Registrant name', 'registration form text boxes' ) );
+		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Page' );
+		$content .= $this->mrm_mc_email_secondary_button_html( $cancel_url, 'Cancel Enrollment' );
+	} elseif ( $slug === 'masterclass_student_reminder' ) {
+		$heading = 'Masterclass Reminder';
+		$subject = $heading;
+		$content = '<p>Your Masterclass starts in one hour.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) );
+		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Page' );
+	} elseif ( $slug === 'masterclass_presenter_confirmation' ) {
+		$heading = 'Masterclass Presenter Confirmation';
+		$subject = $heading;
+		$content = '<p>You have been assigned as the presenter for the following Low Brass Lessons Masterclass.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . $field_note( 'Presenter name', 'presenter profile text box' ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) );
+		$content .= $this->mrm_mc_email_button_html( home_url( '/presenters/test-presenter/' ), 'View Presenter Page' );
+	} elseif ( $slug === 'masterclass_presenter_reminder' ) {
+		$heading = 'Masterclass Presenter Reminder';
+		$subject = $heading;
+		$content = '<p>This is a reminder that your Masterclass begins soon.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) );
+		$content .= $this->mrm_mc_email_button_html( home_url( '/presenters/test-presenter/' ), 'View Presenter Page' );
+	} elseif ( $slug === 'masterclass_feedback_request' ) {
+		$heading = 'Masterclass Feedback Request';
+		$subject = $heading;
+		$content = '<p>Thank you for attending. Please share feedback about your Masterclass experience.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Feedback:</strong> ' . $field_note( 'Feedback fields', 'feedback form text boxes/selections' ) );
+		$content .= $this->mrm_mc_email_button_html( $feedback_url, 'Share Feedback' );
+	} elseif ( $slug === 'masterclass_event_updated' ) {
+		$heading = 'Masterclass Event Updated';
+		$subject = $heading;
+		$content = '<p>A Masterclass you registered for has been updated.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Updated time/details:</strong> ' . $field_note( 'Updated event details', 'Masterclass event form' ) );
+	} elseif ( $slug === 'masterclass_refund_completed' ) {
+		$heading = 'Masterclass Refund Completed';
+		$subject = $heading;
+		$content = '<p>Your Masterclass refund has been completed.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Refund amount:</strong> ' . $field_note( 'Refund amount', 'Stripe refund record' ) );
+	} elseif ( $slug === 'masterclass_event_cancelled' ) {
+		$heading = 'Masterclass Cancelled';
+		$subject = $heading;
+		$content = '<p>This Masterclass has been cancelled.</p>';
+		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Registrant:</strong> ' . esc_html( $student_name ) );
+	}
+
+	if ( $content === '' ) {
+		return $preview;
+	}
+
+	return array(
+		'subject' => $subject,
+		'html'    => $this->mrm_mc_email_template( $heading, $content ),
+	);
 }
 
 private function mrm_mc_send_email_recorded( $type, $to, $subject, $body, $event_id = null, $registration_id = null ) {
@@ -8229,8 +8306,11 @@ public function rest_apply_promo( WP_REST_Request $request ) {
 			$promo_code,
 			absint( $event->price_cents ),
 			array(
-				'event_id' => $event_id,
-				'email'    => $email,
+				'event_id'          => $event_id,
+				'email'             => $email,
+				'product_type'      => 'masterclass',
+				'lesson_count'      => 1,
+				'occurrence_number' => 1,
 			)
 		)
 	);
@@ -8417,7 +8497,13 @@ public function rest_create_payment_intent( $request ) {
 	$promo = $this->mrm_mc_resolve_promo_discount(
 		$promo_code,
 		$base_amount_cents,
-		array( 'event_id' => $event_id, 'email' => $email )
+		array(
+			'event_id'          => $event_id,
+			'email'             => $email,
+			'product_type'      => 'masterclass',
+			'lesson_count'      => 1,
+			'occurrence_number' => 1,
+		)
 	);
 
 	if ( '' !== trim( $promo_code ) && empty( $promo['ok'] ) ) {
@@ -8980,7 +9066,6 @@ public function rest_finalize_registration( $request ) {
 				'Masterclass events are temporarily unavailable because the required event database tables are missing.',
 				array(
 					'status' => 503,
-					'debug'  => $debug,
 				)
 			);
 		}
@@ -9029,12 +9114,6 @@ public function rest_finalize_registration( $request ) {
 				'Masterclass events are temporarily unavailable because the event table is missing required columns.',
 				array(
 					'status' => 503,
-					'debug'  => array_merge(
-						$debug,
-						array(
-							'missing_event_columns' => $missing_event_columns,
-						)
-					),
 				)
 			);
 		}
@@ -9059,7 +9138,6 @@ public function rest_finalize_registration( $request ) {
 				'Masterclass events could not be counted. Please try again later.',
 				array(
 					'status' => 500,
-					'debug'  => $debug,
 				)
 			);
 		}
@@ -9096,7 +9174,6 @@ public function rest_finalize_registration( $request ) {
 				'Masterclass scheduled event count could not be loaded. Please try again later.',
 				array(
 					'status' => 500,
-					'debug'  => $debug,
 				)
 			);
 		}
@@ -9134,7 +9211,6 @@ public function rest_finalize_registration( $request ) {
 				'Masterclass open event count could not be loaded. Please try again later.',
 				array(
 					'status' => 500,
-					'debug'  => $debug,
 				)
 			);
 		}
@@ -9182,7 +9258,6 @@ public function rest_finalize_registration( $request ) {
 				'Masterclass events could not be loaded because the public event query failed. Please try again later.',
 				array(
 					'status' => 500,
-					'debug'  => $debug,
 				)
 			);
 		}
@@ -9211,9 +9286,9 @@ public function rest_finalize_registration( $request ) {
 
 		$response = rest_ensure_response(
 			array(
+				'ok'      => true,
 				'success' => true,
 				'events'  => $events,
-				'debug'   => $debug,
 			)
 		);
 
