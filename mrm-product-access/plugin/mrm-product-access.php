@@ -3,7 +3,7 @@
 Plugin Name: MRM Product Access
 Description: Provides purchase and access management for single-product pages using Stripe Checkout and Stripe Connect. Handles checkout session creation, webhook processing, OTP issuance and secure downloads without requiring user accounts.
 Author: Your Name
-Version: 1.2.3
+Version: 1.2.4
 */
 
 if ( ! defined( 'MRM_LAUNCH_DEBUG' ) ) {
@@ -58,7 +58,7 @@ class MRM_Product_Access {
      *
      * @var string
      */
-    const VERSION = '1.2.3';
+    const VERSION = '1.2.4';
 
     /**
      * Get singleton instance.
@@ -3663,7 +3663,7 @@ function offerRowTemplate(pieceIndex){
                         <button type="button" class="buyBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>"<?php disabled( $offer_slug, '' ); ?>>
                           <?php echo esc_html__( 'Buy', 'mrm-product-access' ); ?>
                         </button>
-                        <button type="button" class="mrmAccessBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>"<?php disabled( $offer_slug, '' ); ?>>
+                        <button type="button" class="mrmAccessBtn mrm-accessBtn" data-product-slug="<?php echo esc_attr( $offer_slug ); ?>"<?php disabled( $offer_slug, '' ); ?>>
                           <?php echo esc_html__( 'Access', 'mrm-product-access' ); ?>
                         </button>
                       </div>
@@ -4298,6 +4298,14 @@ function offerRowTemplate(pieceIndex){
               ? piece.dataset.apiBase.trim()
               : (window.location.origin + (piece.dataset.apiBase || "/wp-json/mrm/v1"));
 
+            function mrmPaApiUrl(path) {
+              return apiBase.replace(/\/+$/, '') + '/' + String(path || '').replace(/^\/+/, '');
+            }
+
+            function mrmPaLooksLikeEmail(value) {
+              return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+            }
+
             const previewWrap = piece.querySelector('.mrm-pdfPreview');
             const previewCanvas = piece.querySelector('.mrm-pdfCanvas');
             const overlay = piece.querySelector('.mrm-pdfOverlay');
@@ -4483,6 +4491,10 @@ function offerRowTemplate(pieceIndex){
             const messageDiv = piece.querySelector('.mrm-message');
             const closeBtn = piece.querySelector('.mrm-closeBtn');
 
+            if (!otpOverlay || !stepEmail || !stepOtp || !emailInput || !otpInput || !sendBtn || !verifyBtn || !messageDiv || !closeBtn) {
+              return;
+            }
+
             // Force a visible, consistent close label (base behavior)
             if (closeBtn) {
               closeBtn.textContent = 'Close';
@@ -4522,9 +4534,19 @@ function offerRowTemplate(pieceIndex){
                 }));
               });
             });
-            piece.querySelectorAll('.mrmAccessBtn').forEach((accessBtn) => {
-              accessBtn.addEventListener('click', function(){
-                selectedProductSlug = accessBtn.getAttribute('data-product-slug') || PRODUCT_SLUG || PIECE_SLUG;
+            piece.querySelectorAll('.mrm-accessBtn, .mrmAccessBtn').forEach((accessBtn) => {
+              if (accessBtn.dataset.mrmOtpBound === '1') return;
+              accessBtn.dataset.mrmOtpBound = '1';
+
+              accessBtn.addEventListener('click', function(event){
+                event.preventDefault();
+
+                selectedProductSlug = String(
+                  accessBtn.getAttribute('data-product-slug') ||
+                  PRODUCT_SLUG ||
+                  PIECE_SLUG ||
+                  ''
+                ).trim().toLowerCase();
 
                 if (!selectedProductSlug) {
                   alert('This access option is temporarily unavailable. Please contact Low Brass Lessons.');
@@ -4548,70 +4570,138 @@ function offerRowTemplate(pieceIndex){
             closeBtn.addEventListener('click', closeOtpModal);
             otpOverlay.addEventListener('click', (e) => { if (e.target === otpOverlay) closeOtpModal(); });
 
-            sendBtn.addEventListener('click', function(){
-              const email = (emailInput.value || '').trim();
-              if(!email){ messageDiv.textContent='Please enter your email.'; return; }
-              messageDiv.textContent='Sending code...';
+            sendBtn.addEventListener('click', async function(event){
+              event.preventDefault();
 
-              fetch(apiBase + '/request-otp', {
-                method:'POST',
-                headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({
-                  email: email,
-                  product_slug: selectedProductSlug || PRODUCT_SLUG || PIECE_SLUG
-                }),
-                credentials: 'same-origin'
-              })
-              .then(async (r) => {
-                const txt = await r.text();
-                let data = null;
-                try { data = JSON.parse(txt); } catch(e) { data = null; }
-                if (!r.ok) {
-                  messageDiv.textContent='We could not send an access code right now. Please try again or contact Low Brass Lessons.';
-                  return null;
+              const email = (emailInput.value || '').trim();
+              const productSlug = String(selectedProductSlug || PRODUCT_SLUG || PIECE_SLUG || '').trim().toLowerCase();
+
+              if (!email) {
+                messageDiv.textContent = 'Please enter your email.';
+                return;
+              }
+
+              if (!mrmPaLooksLikeEmail(email)) {
+                messageDiv.textContent = 'Please enter a valid email address.';
+                return;
+              }
+
+              if (!productSlug) {
+                messageDiv.textContent = 'This access option is temporarily unavailable. Please contact Low Brass Lessons.';
+                return;
+              }
+
+              sendBtn.disabled = true;
+              messageDiv.textContent = 'Sending code...';
+
+              try {
+                const response = await fetch(mrmPaApiUrl('request-otp'), {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                  },
+                  body: JSON.stringify({
+                    email: email,
+                    product_slug: productSlug
+                  })
+                });
+
+                let data = {};
+                try {
+                  data = await response.json();
+                } catch (jsonError) {
+                  data = {};
                 }
-                return data || {};
-              })
-              .then(data=>{
-                if(!data) return;
-                messageDiv.textContent = data.message || 'If access exists, a code will be sent shortly.';
+
+                if (!response.ok) {
+                  messageDiv.textContent = data.message || 'We could not send an access code right now. Please try again or contact Low Brass Lessons.';
+                  return;
+                }
+
+                messageDiv.textContent = data.message || 'If this purchase exists, a code will be sent shortly.';
                 stepEmail.classList.add('hidden');
                 stepOtp.classList.remove('hidden');
-              })
-              .catch(()=>{ messageDiv.textContent='We could not send an access code right now. Please try again or contact Low Brass Lessons.'; });
+
+                window.setTimeout(function () {
+                  otpInput.focus();
+                }, 50);
+
+              } catch (error) {
+                messageDiv.textContent = 'We could not send an access code right now. Please try again or contact Low Brass Lessons.';
+              } finally {
+                sendBtn.disabled = false;
+              }
             });
 
-            verifyBtn.addEventListener('click', function(){
+            verifyBtn.addEventListener('click', async function(event){
+              event.preventDefault();
+
               const email = (emailInput.value || '').trim();
               const otp = (otpInput.value || '').trim();
-              if(!otp){ messageDiv.textContent='Enter the code you received.'; return; }
-              messageDiv.textContent='Verifying...';
+              const productSlug = String(selectedProductSlug || PRODUCT_SLUG || PIECE_SLUG || '').trim().toLowerCase();
 
-              fetch(apiBase + '/verify-otp', {
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({
-                  email: email,
-                  product_slug: selectedProductSlug || PRODUCT_SLUG || PIECE_SLUG,
-                  otp: otp
-                }),
-                credentials: 'same-origin'
-              })
-              .then(async (r) => {
-                const txt = await r.text();
-                let data = null;
-                try { data = JSON.parse(txt); } catch(e) { data = null; }
-                if (!r.ok) {
-                  messageDiv.textContent=(data && data.message) ? data.message : 'We could not verify that code right now. Please try again or contact Low Brass Lessons.';
-                  return null;
+              if (!email || !mrmPaLooksLikeEmail(email)) {
+                messageDiv.textContent = 'Please enter a valid email address.';
+                stepEmail.classList.remove('hidden');
+                stepOtp.classList.add('hidden');
+                return;
+              }
+
+              if (!otp) {
+                messageDiv.textContent = 'Enter the code you received.';
+                return;
+              }
+
+              if (!productSlug) {
+                messageDiv.textContent = 'This access option is temporarily unavailable. Please contact Low Brass Lessons.';
+                return;
+              }
+
+              verifyBtn.disabled = true;
+              messageDiv.textContent = 'Verifying...';
+
+              try {
+                const response = await fetch(mrmPaApiUrl('verify-otp'), {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                  },
+                  body: JSON.stringify({
+                    email: email,
+                    product_slug: productSlug,
+                    piece_slug: PIECE_SLUG,
+                    otp: otp
+                  })
+                });
+
+                let data = {};
+                try {
+                  data = await response.json();
+                } catch (jsonError) {
+                  data = {};
                 }
-                return data || {};
-              })
-              .then(data=>{
-                if(!data) return;
-                messageDiv.textContent = data.message || 'Verified.';
-              })
-              .catch(()=>{ messageDiv.textContent='We could not verify that code right now. Please try again or contact Low Brass Lessons.'; });
+
+                if (!response.ok) {
+                  messageDiv.textContent = data.message || 'We could not verify that code right now. Please try again.';
+                  return;
+                }
+
+                if (data.ok && data.access_url) {
+                  window.location.href = data.access_url;
+                  return;
+                }
+
+                messageDiv.textContent = data.message || 'Verified, but no access link was returned. Please contact Low Brass Lessons.';
+
+              } catch (error) {
+                messageDiv.textContent = 'We could not verify that code right now. Please try again.';
+              } finally {
+                verifyBtn.disabled = false;
+              }
             });
           }
 

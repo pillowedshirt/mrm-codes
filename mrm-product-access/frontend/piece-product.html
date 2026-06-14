@@ -1591,7 +1591,7 @@ function mrmGetPiecePromoCodeInputValue() {
 
   function setOfferButtonsEnabled(offerEl, enabled) {
     if (!offerEl) return;
-    offerEl.querySelectorAll('.mrm-purchaseBtn, .mrm-accessBtn').forEach(btn => {
+    offerEl.querySelectorAll('.mrm-purchaseBtn, .mrm-accessBtn, .mrmAccessBtn').forEach(btn => {
       btn.disabled = !enabled;
       btn.style.opacity = enabled ? '1' : '0.55';
       btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
@@ -2429,7 +2429,7 @@ async function getOfferSkuCandidates(offerEl) {
           </div>
         <div class="actions">
           <button type="button" class="button-primary mrm-purchaseBtn">Purchase</button>
-          <button type="button" class="button-secondary mrm-accessBtn" data-product-slug="${escHtml(productSlug)}">Access</button>
+          <button type="button" class="button-secondary mrm-accessBtn mrmAccessBtn" data-product-slug="${escHtml(productSlug)}">Access</button>
         </div>
           <div class="mrm-offerStatus" style="margin-top:10px;font-size:13px;line-height:1.4;color:#8a1f1f;"></div>
         </div>
@@ -2887,7 +2887,7 @@ async function getOfferSkuCandidates(offerEl) {
       });
     });
 
-    piece.querySelectorAll('.mrm-accessBtn').forEach(btn => {
+    piece.querySelectorAll('.mrm-accessBtn, .mrmAccessBtn').forEach(btn => {
       if (btn.dataset.mrmOtpBound === '1') return;
       btn.dataset.mrmOtpBound = '1';
       btn.addEventListener('click', function(e){
