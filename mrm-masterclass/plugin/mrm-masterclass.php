@@ -1595,11 +1595,11 @@ private function mrm_mc_gate_url_for_registration( $registration ) {
 }
 
 private function mrm_mc_cancel_url_for_registration( $registration ) {
-	if ( empty( $registration->gate_token_hash ) ) {
-		return '';
-	}
+	return ! empty( $registration->cancel_url ) ? esc_url_raw( $registration->cancel_url ) : '';
+}
 
-	return '';
+private function mrm_mc_feedback_url_for_registration( $registration ) {
+	return ! empty( $registration->feedback_url ) ? esc_url_raw( $registration->feedback_url ) : '';
 }
 
 private function mrm_mc_make_gate_token_pair() {
@@ -1918,6 +1918,7 @@ private function mrm_mc_redacted_email_for_log( $email ) {
 }
 
 public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
+	// Sample URLs belong only to this explicitly invoked email-preview/test path.
 	$slug = sanitize_key( (string) $slug );
 	$to = sanitize_email( (string) $to );
 	if ( ! is_email( $to ) ) {
@@ -1939,14 +1940,14 @@ public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
 		$subject = $heading;
 		$content = '<p>Your Masterclass registration has been confirmed.</p>';
 		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) . '<br><strong>Registrant:</strong> ' . esc_html( $student_name ) );
-		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Link' );
-		$content .= $this->mrm_mc_email_secondary_button_html( $cancel_url, 'I Can No Longer Attend This Masterclass' );
+		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Page' );
+		$content .= $this->mrm_mc_email_secondary_button_html( $cancel_url, 'Cancel Enrollment' );
 	} elseif ( $slug === 'masterclass_student_reminder' ) {
 		$heading = 'Masterclass Reminder';
 		$subject = $heading;
 		$content = '<p>Your Masterclass starts in one hour.</p><p>Please use the protected access link below at the scheduled time.</p>';
 		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) );
-		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Link' );
+		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Page' );
 	} elseif ( $slug === 'masterclass_presenter_confirmation' ) {
 		$heading = 'Masterclass Presenter Confirmation';
 		$subject = $heading;
@@ -1958,7 +1959,7 @@ public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
 		$subject = $heading;
 		$content = '<p>This is a reminder that your Masterclass begins soon.</p>';
 		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) );
-		$content .= $this->mrm_mc_email_button_html( home_url( '/test-presenter-meet/' ), 'Open Presenter Meeting Link' );
+		$content .= $this->mrm_mc_email_button_html( home_url( '/test-presenter-page/' ), 'View Presenter Page' );
 	} elseif ( $slug === 'masterclass_feedback_request' ) {
 		$heading = 'Masterclass Feedback Request';
 		$subject = $heading;
@@ -1970,7 +1971,7 @@ public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
 		$subject = $heading;
 		$content = '<p>A Masterclass you registered for has been updated.</p>';
 		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Updated time:</strong> ' . esc_html( $time_label ) );
-		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Link' );
+		$content .= $this->mrm_mc_email_button_html( $access_url, 'Open Masterclass Access Page' );
 	} elseif ( $slug === 'masterclass_refund_completed' ) {
 		$heading = 'Masterclass Refund Completed';
 		$subject = $heading;
@@ -2052,8 +2053,8 @@ private function mrm_mc_send_email_recorded( $type, $to, $subject, $body, $event
 }
 
 private function mrm_mc_confirmation_email_body( $event, $presenter, $registration ) {
-	$gate   = esc_url( $registration->gate_url ?? '' );
-	$cancel = esc_url( $registration->cancel_url ?? '' );
+	$gate   = esc_url( $this->mrm_mc_gate_url_for_registration( $registration ) );
+	$cancel = esc_url( $this->mrm_mc_cancel_url_for_registration( $registration ) );
 
 	$intro = '<p>Your Masterclass registration has been confirmed.</p>'
 		. '<p>This is an online Masterclass. Please use the protected access link below at the scheduled time. The page will reveal the meeting link only during the allowed access window.</p>';
@@ -2062,15 +2063,15 @@ private function mrm_mc_confirmation_email_body( $event, $presenter, $registrati
 
 	$content = $intro
 		. $this->mrm_mc_email_details_box_html( $details )
-		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass Access Link' )
-		. $this->mrm_mc_email_secondary_button_html( $cancel, 'I Can No Longer Attend This Masterclass' );
+		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass Access Page' )
+		. $this->mrm_mc_email_secondary_button_html( $cancel, 'Cancel Enrollment' );
 
 	return $this->mrm_mc_email_template( 'Masterclass Confirmation', $content );
 }
 
 private function mrm_mc_reminder_email_body( $event, $presenter, $registration, $window_label ) {
-	$gate   = esc_url( $registration->gate_url ?? '' );
-	$cancel = esc_url( $registration->cancel_url ?? '' );
+	$gate   = esc_url( $this->mrm_mc_gate_url_for_registration( $registration ) );
+	$cancel = esc_url( $this->mrm_mc_cancel_url_for_registration( $registration ) );
 
 	$intro = '<p>Your Masterclass starts in one hour.</p>'
 		. '<p>Please use the protected access link below at the scheduled time. The page will reveal the meeting link during the allowed access window.</p>';
@@ -2079,8 +2080,8 @@ private function mrm_mc_reminder_email_body( $event, $presenter, $registration, 
 
 	$content = $intro
 		. $this->mrm_mc_email_details_box_html( $details )
-		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass Access Link' )
-		. $this->mrm_mc_email_secondary_button_html( $cancel, 'I Can No Longer Attend This Masterclass' );
+		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass Access Page' )
+		. $this->mrm_mc_email_secondary_button_html( $cancel, 'Cancel Enrollment' );
 
 	return $this->mrm_mc_email_template( 'Masterclass Reminder', $content );
 }
@@ -2103,9 +2104,7 @@ private function mrm_mc_presenter_event_confirmation_email_body( $event, $presen
 		? $this->mrm_mc_public_presenter_page_url( $presenter_id )
 		: '';
 
-	$join_url = ! empty( $event->google_meet_url )
-		? esc_url( $event->google_meet_url )
-		: ( ! empty( $event->online_link ) ? esc_url( $event->online_link ) : '' );
+	$details_url = ! empty( $event->id ) ? $this->mrm_mc_public_session_page_url( $event->id ) : '';
 
 	$remaining_spots = $this->mrm_mc_remaining_spots_for_event( absint( $event->id ?? 0 ), absint( $event->capacity ?? 100 ) );
 
@@ -2115,9 +2114,8 @@ private function mrm_mc_presenter_event_confirmation_email_body( $event, $presen
 		. '<strong>Remaining spots:</strong> ' . esc_html( $remaining_spots ) . '</p>'
 		. '<p>Please plan to join the call roughly <strong>30 minutes before the scheduled start time</strong>. Students will be able to join starting <strong>10 minutes before the Masterclass begins</strong>.</p>';
 
-	if ( ! empty( $join_url ) ) {
-		$content .= '<p><strong>Do not share this direct meeting link.</strong> Students should use their protected access links so the access window and enrollment protections remain active.</p>';
-		$content .= $this->mrm_mc_email_button_html( $join_url, 'Join Your Masterclass Here' );
+	if ( ! empty( $details_url ) ) {
+		$content .= $this->mrm_mc_email_button_html( $details_url, 'View Masterclass Details' );
 	}
 
 	$content .= '<p>Before your session, please prepare your microphone setup, any guest players or collaborators, and the specific topics, examples, materials, and demonstrations you plan to discuss during the Masterclass.</p>';
@@ -2125,7 +2123,7 @@ private function mrm_mc_presenter_event_confirmation_email_body( $event, $presen
 
 	if ( ! empty( $presenter_page_url ) ) {
 		$content .= '<p>Your presenter page is ready to share. You are welcome to share this link with your students, colleagues, followers, and professional network so they can learn more about your background and upcoming Masterclass sessions.</p>';
-		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open and Share Your Presenter Page' );
+		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'View Presenter Page' );
 	}
 
 	return $this->mrm_mc_email_template( 'You Have Been Scheduled for a Masterclass', $content );
@@ -2222,9 +2220,7 @@ private function mrm_mc_presenter_reminder_email_body( $event ) {
 		? $this->mrm_mc_public_presenter_page_url( $event->presenter_id )
 		: '';
 
-	$join_url = ! empty( $event->google_meet_url )
-		? esc_url( $event->google_meet_url )
-		: ( ! empty( $event->online_link ) ? esc_url( $event->online_link ) : '' );
+	$details_url = ! empty( $event->id ) ? $this->mrm_mc_public_session_page_url( $event->id ) : '';
 
 	$remaining_spots = $this->mrm_mc_remaining_spots_for_event( absint( $event->id ?? 0 ), absint( $event->capacity ?? 100 ) );
 
@@ -2234,14 +2230,13 @@ private function mrm_mc_presenter_reminder_email_body( $event ) {
 		. '<strong>Scheduled start:</strong> ' . esc_html( $event_time ) . '<br>'
 		. '<strong>Remaining spots:</strong> ' . esc_html( $remaining_spots ) . '</p>';
 
-	if ( ! empty( $join_url ) ) {
-		$content .= '<p><strong>Do not share this direct meeting link.</strong> Students should use their protected access links so the access window and enrollment protections remain active.</p>';
-		$content .= $this->mrm_mc_email_button_html( $join_url, 'Join Your Masterclass Here' );
+	if ( ! empty( $details_url ) ) {
+		$content .= $this->mrm_mc_email_button_html( $details_url, 'View Masterclass Details' );
 	}
 
 	if ( ! empty( $presenter_page_url ) ) {
 		$content .= '<p>You may continue sharing your presenter page with your network so interested students can review your profile and any open Masterclass sessions.</p>';
-		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'Open and Share Your Presenter Page' );
+		$content .= $this->mrm_mc_email_button_html( $presenter_page_url, 'View Presenter Page' );
 	}
 
 	return $this->mrm_mc_email_template( 'Masterclass Presenter Reminder', $content );
@@ -2249,7 +2244,7 @@ private function mrm_mc_presenter_reminder_email_body( $event ) {
 
 
 private function mrm_mc_feedback_request_email_body( $event, $presenter, $registration ) {
-	$feedback_url = esc_url( $registration->feedback_url ?? '' );
+	$feedback_url = esc_url( $this->mrm_mc_feedback_url_for_registration( $registration ) );
 
 	$intro = '<p>Thank you for attending your Masterclass.</p>'
 		. '<p>If you have a moment, please share quick feedback about your experience. The feedback form stays open for 24 hours after the Masterclass ends.</p>';
@@ -2258,13 +2253,13 @@ private function mrm_mc_feedback_request_email_body( $event, $presenter, $regist
 
 	$content = $intro
 		. $this->mrm_mc_email_details_box_html( $details )
-		. $this->mrm_mc_email_button_html( $feedback_url, 'Share Masterclass Feedback' );
+		. $this->mrm_mc_email_button_html( $feedback_url, 'Share Feedback' );
 
 	return $this->mrm_mc_email_template( 'How Was Your Masterclass?', $content );
 }
 
 private function mrm_mc_event_update_email_body( $event, $presenter, $registration ) {
-	$gate = esc_url( $registration->gate_url ?? '' );
+	$gate = esc_url( $this->mrm_mc_gate_url_for_registration( $registration ) );
 
 	$intro = '<p>A Masterclass you registered for has been updated.</p>'
 		. '<p>Please review the updated details below. Your protected access link remains the same unless you receive a separate message from us.</p>';
@@ -2273,7 +2268,7 @@ private function mrm_mc_event_update_email_body( $event, $presenter, $registrati
 
 	$content = $intro
 		. $this->mrm_mc_email_details_box_html( $details )
-		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass access link' );
+		. $this->mrm_mc_email_button_html( $gate, 'Open Masterclass Access Page' );
 
 	return $this->mrm_mc_email_template( 'Masterclass Updated', $content );
 }
@@ -5894,10 +5889,10 @@ private function mrm_mc_get_event_for_registration( $registration ) {
 
 private function mrm_mc_cancel_reason_options() {
 	return array(
-		'schedule_conflict' => 'I have a schedule conflict.',
-		'no_longer_needed'  => 'I no longer need this Masterclass.',
-		'accidental_signup' => 'I registered by mistake.',
-		'technical_issue'   => 'I am concerned about a technical issue.',
+		'schedule_conflict' => 'Schedule conflict',
+		'technical_issue'   => 'Technical issue',
+		'accidental_signup' => 'Registered by mistake',
+		'no_longer_needed'  => 'No longer able to attend',
 		'other'             => 'Other',
 	);
 }
@@ -5947,16 +5942,16 @@ private function mrm_mc_handle_cancel_request() {
 
 	if ( $start_ts > 0 && $now_ts >= $start_ts && $now_ts <= max( $start_ts, $end_ts ) ) {
 		$this->mrm_mc_render_gate_page(
-			'Refund Window Has Closed',
-			'This Masterclass has already started, so automatic refunds are no longer issued for this Masterclass.<br><br>If you need additional assistance, please contact support through the contact form on the website.'
+			'Automatic Cancellation Is Closed',
+			'<p>This Masterclass has already started, so this registration can no longer be cancelled automatically.</p><p>Please contact Low Brass Lessons if you need help.</p>'
 		);
 		exit;
 	}
 
 	if ( $end_ts > 0 && $now_ts > $end_ts ) {
 		$this->mrm_mc_render_gate_page(
-			'Refund Window Has Closed',
-			'This Masterclass has already ended, so automatic refunds are no longer issued for this Masterclass.<br><br>If you need additional assistance, please contact support through the contact form on the website.'
+			'Automatic Cancellation Is Closed',
+			'<p>This Masterclass has already started, so this registration can no longer be cancelled automatically.</p><p>Please contact Low Brass Lessons if you need help.</p>'
 		);
 		exit;
 	}
@@ -6019,15 +6014,16 @@ private function mrm_mc_handle_cancel_request() {
 		);
 
 		$this->mrm_mc_render_gate_page(
-			'Enrollment Cancelled',
-			'Your enrollment has been cancelled and your refund has been issued. You will also receive a refund confirmation email.'
+			'Registration Cancelled',
+			'<p>Your Masterclass registration has been cancelled.</p><p>If your registration was eligible for automatic refund, the refund has been submitted through Stripe. Refund timing is handled by Stripe and your bank or card issuer.</p>'
 		);
 		exit;
 	}
 
 	$options = $this->mrm_mc_cancel_reason_options();
 
-	$form  = '<p>If you can no longer attend this Masterclass, you may cancel your enrollment and receive an automatic refund as long as the Masterclass has not started.</p>';
+	$form  = '<p>We’re sorry you can’t attend this Masterclass.</p>';
+	$form .= '<p>Submit this form to cancel your registration. If your registration is eligible for automatic refund under the cancellation policy, the refund will be attempted through Stripe after submission.</p>';
 	$form .= '<form method="post">';
 	$form .= wp_nonce_field( 'mrm_masterclass_cancel_enrollment_' . absint( $registration->id ), '_wpnonce', true, false );
 	$form .= '<fieldset style="border:1px solid #dccab0;border-radius:18px;padding:18px;margin:18px 0;">';
@@ -6037,10 +6033,10 @@ private function mrm_mc_handle_cancel_request() {
 		$form .= '<label style="display:block;margin:10px 0;"><input type="checkbox" name="reason_' . esc_attr( $key ) . '" value="1"> ' . esc_html( $label ) . '</label>';
 	}
 
-	$form .= '<label style="display:block;margin:14px 0 6px;"><strong>If other, please explain:</strong></label>';
+	$form .= '<label><strong>If other, please explain</strong></label>';
 	$form .= '<textarea name="other_reason" rows="4" style="width:100%;box-sizing:border-box;border:1px solid #dccab0;border-radius:12px;padding:12px;"></textarea>';
 	$form .= '</fieldset>';
-	$form .= '<button class="mrm-masterclass-gate-button" type="submit">Cancel Enrollment and Request Refund</button>';
+	$form .= '<button class="mrm-masterclass-gate-button" type="submit">Cancel Enrollment</button>';
 	$form .= '</form>';
 
 	$this->mrm_mc_render_gate_page(
@@ -6052,13 +6048,11 @@ private function mrm_mc_handle_cancel_request() {
 
 private function mrm_mc_feedback_reason_options() {
 	return array(
-		'clear_helpful'     => 'The Masterclass was clear and helpful.',
-		'good_pace'         => 'The pacing felt good.',
-		'practical'         => 'The material was practical and useful.',
-		'wanted_more_time'  => 'I would have liked more time on the topic.',
-		'wanted_more_depth' => 'I would have liked more depth or examples.',
-		'technical_issue'   => 'I had a technical issue.',
-		'other'             => 'Other',
+		'valuable'          => 'The session was valuable.',
+		'clear_helpful'     => 'The presenter was clear and helpful.',
+		'good_pace'         => 'The pacing felt appropriate.',
+		'attend_again'      => 'I would attend another Masterclass.',
+		'recommend'         => 'I would recommend this to another musician.',
 	);
 }
 
@@ -6181,15 +6175,16 @@ private function mrm_mc_handle_feedback_request() {
 		);
 
 		$this->mrm_mc_render_gate_page(
-			'Thank You for Your Feedback',
-			'Your feedback has been submitted. Thank you for helping us improve future Masterclasses.'
+			'Feedback Submitted',
+			'<p>Thank you — your feedback has been submitted.</p><p>We appreciate you helping us improve future Low Brass Lessons Masterclasses.</p>'
 		);
 		exit;
 	}
 
 	$options = $this->mrm_mc_feedback_reason_options();
 
-	$form  = '<p>Please share quick feedback about your Masterclass experience. This form stays open for 24 hours after the Masterclass ends.</p>';
+	$form  = '<p>Thank you for attending this Masterclass.</p>';
+	$form .= '<p>Your feedback helps us improve future sessions and support our presenters.</p>';
 	$form .= '<form method="post">';
 	$form .= wp_nonce_field( 'mrm_masterclass_feedback_' . absint( $registration->id ), '_wpnonce', true, false );
 
@@ -6211,9 +6206,7 @@ private function mrm_mc_handle_feedback_request() {
 		$form .= '<label style="display:block;margin:10px 0;"><input type="checkbox" name="feedback_' . esc_attr( $key ) . '" value="1"> ' . esc_html( $label ) . '</label>';
 	}
 
-	$form .= '<label style="display:block;margin:14px 0 6px;"><strong>If other, please explain:</strong></label>';
-	$form .= '<textarea name="other_reason" rows="3" style="width:100%;box-sizing:border-box;border:1px solid #dccab0;border-radius:12px;padding:12px;"></textarea>';
-	$form .= '<label style="display:block;margin:14px 0 6px;"><strong>Any additional information?</strong></label>';
+	$form .= '<label><strong>Additional feedback</strong></label>';
 	$form .= '<textarea name="additional_comments" rows="5" style="width:100%;box-sizing:border-box;border:1px solid #dccab0;border-radius:12px;padding:12px;"></textarea>';
 	$form .= '</fieldset>';
 
@@ -6289,8 +6282,8 @@ public function mrm_mc_handle_gate_request() {
 		$this->mrm_mc_access_log_event( $registration_id, $event_id, 'revoked_token' );
 
 		$this->mrm_mc_render_gate_page(
-			'Masterclass Access Link Revoked',
-			'This access link has been revoked. Please contact support if you believe this is an error.'
+			'Masterclass Access Is No Longer Active',
+			'<p>This Masterclass access link is no longer active.</p><p>If you believe this is a mistake, please contact Low Brass Lessons for help.</p>'
 		);
 		exit;
 	}
@@ -6358,7 +6351,7 @@ public function mrm_mc_handle_gate_request() {
 
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Access Opens Soon',
-			'Your protected access link is valid. The meeting link will appear 10 minutes before the Masterclass starts.<br><br><strong>Masterclass:</strong> ' . esc_html( $access_source['title'] ?? $event->title ) . '<br><strong>Starts:</strong> ' . esc_html( $access_source['start_label'] ?? ( $event->start_time . ' ' . $event->timezone ) )
+			'<p>This Masterclass room opens 10 minutes before the scheduled start time and closes 10 minutes after the scheduled end time.</p><p>If rescheduled, this access window follows the updated Google Calendar event time.</p><p><strong>Masterclass:</strong> ' . esc_html( $access_source['title'] ?? $event->title ) . '<br><strong>Starts:</strong> ' . esc_html( $access_source['start_label'] ?? ( $event->start_time . ' ' . $event->timezone ) ) . '</p>'
 		);
 		exit;
 	}
@@ -6368,7 +6361,7 @@ public function mrm_mc_handle_gate_request() {
 
 		$this->mrm_mc_render_gate_page(
 			'Masterclass Access Window Has Closed',
-			'This Masterclass access window has ended. Please contact support if you believe this is an error.'
+			'<p>This Masterclass room opens 10 minutes before the scheduled start time and closes 10 minutes after the scheduled end time.</p><p>If rescheduled, this access window follows the updated Google Calendar event time.</p>'
 		);
 		exit;
 	}
@@ -6405,10 +6398,12 @@ public function mrm_mc_handle_gate_request() {
 		);
 
 		$this->mrm_mc_render_gate_page(
-			'This Access Link Is Already Open',
-			'<p>This protected Masterclass link appears to be active on another device or browser.</p>'
-			. '<p>If that was you, you can safely continue on this device. This will end the previous session and let this device access the Masterclass.</p>'
-			. '<p><a class="mrm-masterclass-gate-button" href="' . esc_url( $continue_url ) . '">Continue on this device</a></p>'
+			'This Access Link Is Already Active',
+			'<p>This access link is already active on another device.</p>'
+			. '<p>To protect the Masterclass room, each registration can only have one active access session at a time.</p>'
+			. '<p>If you are switching devices, choose “Continue on this device” below.</p>'
+			. '<div class="mrm-public-actions"><a class="mrm-public-btn" href="' . esc_url( $continue_url ) . '">Continue on this device</a></div>'
+			. '<div class="mrm-public-note">Continuing here will close the previous access session for this registration.</div>'
 		);
 		exit;
 	}
@@ -6442,7 +6437,7 @@ public function mrm_mc_handle_gate_request() {
 	exit;
 }
 
-private function mrm_mc_render_gate_page( $title, $body_html, $context = array() ) {
+private function mrm_mc_render_public_page_shell( $title, $body_html, $context = array() ) {
 	status_header( 200 );
 	nocache_headers();
 
@@ -6526,29 +6521,35 @@ private function mrm_mc_render_gate_page( $title, $body_html, $context = array()
 	echo '<head>';
 	echo '<meta charset="utf-8">';
 	echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
-	echo '<title>' . esc_html( $title ) . '</title>';
+	echo '<title>' . esc_html( $title ) . ' | Low Brass Lessons</title>';
 	echo '<style>';
-	echo 'body{margin:0;background:#f6f1ea;color:#20170f;font-family:Arial,sans-serif;}';
-	echo '.mrm-masterclass-gate-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}';
-	echo '.mrm-masterclass-gate-card{max-width:720px;width:100%;background:#fff;border:1px solid #dccab0;border-radius:28px;padding:34px;box-shadow:0 18px 48px rgba(32,23,15,.12);}';
-	echo '.mrm-masterclass-gate-brand{text-align:center;font-weight:800;letter-spacing:.04em;margin-bottom:22px;}';
-	echo 'h1{font-family:Georgia,serif;font-size:clamp(2rem,5vw,3.25rem);line-height:1;margin:0 0 18px;}';
-	echo 'p{line-height:1.65;color:#5f5242;}';
-	echo '.mrm-masterclass-gate-button{display:inline-flex;align-items:center;justify-content:center;background:#20170f;color:#fff!important;text-decoration:none;border-radius:999px;padding:14px 22px;font-weight:800;border:0;cursor:pointer;margin:18px auto 0;}';
-	echo 'form .mrm-masterclass-gate-button{display:flex;}';
+	echo 'body{margin:0;background:#f8efe3;color:#2f2118;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}';
+	echo '.mrm-public-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 18px;box-sizing:border-box;}';
+	echo '.mrm-public-card{width:min(760px,100%);background:#fffaf3;border:1px solid rgba(124,74,45,.20);border-radius:28px;box-shadow:0 24px 70px rgba(47,33,24,.14);padding:34px;box-sizing:border-box;}';
+	echo '.mrm-public-kicker{text-transform:uppercase;letter-spacing:.12em;font-size:.78rem;font-weight:800;color:#7c4a2d;margin:0 0 10px;}';
+	echo '.mrm-public-card h1{margin:0 0 14px;font-size:clamp(1.8rem,4vw,2.6rem);line-height:1.05;}';
+	echo '.mrm-public-card p{font-size:1rem;line-height:1.65;}';
+	echo '.mrm-public-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:22px;}';
+	echo '.mrm-public-btn,.mrm-masterclass-gate-button{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:12px 18px;border-radius:999px;background:#7c4a2d;color:#fff!important;text-decoration:none;font-weight:800;border:0;cursor:pointer;}';
+	echo '.mrm-public-btn:hover,.mrm-public-btn:focus,.mrm-masterclass-gate-button:hover,.mrm-masterclass-gate-button:focus{background:#5f3822;color:#fff;text-decoration:none;}';
+	echo '.mrm-public-secondary{background:#fff;color:#5f3822;border:1px solid rgba(124,74,45,.35);}';
+	echo 'input,textarea,select{width:100%;box-sizing:border-box;border:1px solid rgba(124,74,45,.28);border-radius:14px;padding:12px;background:#fff;color:#2f2118;}';
+	echo 'input[type="checkbox"],input[type="radio"]{width:auto;}';
+	echo 'label{font-weight:750;display:block;margin:14px 0 6px;}';
+	echo '.mrm-public-note{background:#f6eadb;border:1px solid rgba(124,74,45,.18);border-radius:18px;padding:14px;margin:18px 0;}';
 	echo '.mrm-masterclass-gate-small{font-size:.92rem;color:#7b6a56;}';
 	echo '.mrm-masterclass-gate-status{margin-top:18px;padding:12px 14px;border-radius:14px;background:#f7efe3;color:#5f5242;font-size:.92rem;}';
 	echo '</style>';
 	echo '</head>';
 	echo '<body>';
-	echo '<main class="mrm-masterclass-gate-wrap">';
-	echo '<section class="mrm-masterclass-gate-card">';
-	echo '<div class="mrm-masterclass-gate-brand">Low Brass Lessons</div>';
+	echo '<main class="mrm-public-shell">';
+	echo '<section class="mrm-public-card">';
+	echo '<p class="mrm-public-kicker">Low Brass Lessons</p>';
 	echo '<h1>' . esc_html( $title ) . '</h1>';
 	echo '<div>' . $body_html . '</div>';
 
 	if ( ! empty( $context['enable_heartbeat'] ) ) {
-		echo '<div id="mrm-masterclass-gate-status" class="mrm-masterclass-gate-status">Protected access session active.</div>';
+		echo '<div id="mrm-masterclass-gate-status" class="mrm-masterclass-gate-status">Your Masterclass access is active.</div>';
 	}
 
 	echo '</section>';
@@ -6569,8 +6570,8 @@ private function mrm_mc_render_gate_page( $title, $body_html, $context = array()
 		echo 'function heartbeat(){';
 		echo 'fetch(' . wp_json_encode( home_url( '/wp-json/' . self::REST_NAMESPACE . '/gate-heartbeat' ) ) . ',{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({token:token,session_id:sessionId})})';
 		echo '.then(function(res){if(!res.ok){throw new Error("heartbeat failed");}return res.json();})';
-		echo '.then(function(){setStatus("Protected access session active.");})';
-		echo '.catch(function(){setStatus("This access session could not be refreshed. If you switched devices, reopen your protected access link.");});';
+		echo '.then(function(){setStatus("Your Masterclass access is active.");})';
+		echo '.catch(function(){setStatus("Your access could not be refreshed. Please reopen the access link from your Masterclass email.");});';
 		echo '}';
 		echo 'heartbeat();';
 		echo 'window.setInterval(heartbeat,intervalMs);';
@@ -6580,6 +6581,11 @@ private function mrm_mc_render_gate_page( $title, $body_html, $context = array()
 
 	echo '</body>';
 	echo '</html>';
+	exit;
+}
+
+private function mrm_mc_render_gate_page( $title, $body_html, $context = array() ) {
+	$this->mrm_mc_render_public_page_shell( $title, $body_html, $context );
 }
 
 public function mrm_mc_remove_stale_admin_visibility_css_hooks() {
