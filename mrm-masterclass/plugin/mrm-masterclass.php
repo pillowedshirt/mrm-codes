@@ -326,11 +326,9 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 * @return string
 	 */
 	public function render_masterclass_page_shortcode() {
-		$file = defined( 'MRM_MASTERCLASS_FRONTEND_DIR' )
-			? MRM_MASTERCLASS_FRONTEND_DIR . 'masterclass.html'
-			: dirname( __DIR__ ) . '/frontend/masterclass.html';
+		$file = $this->mrm_mc_get_masterclass_frontend_file();
 
-		if ( ! file_exists( $file ) || ! is_readable( $file ) ) {
+		if ( '' === $file ) {
 			return '<div class="mrm-masterclass-error">Masterclass page is temporarily unavailable. Please contact Low Brass Lessons.</div>';
 		}
 
@@ -402,6 +400,46 @@ class LowBrass_MRM_Masterclass_Plugin {
 		}
 
 		return $html;
+	}
+
+
+	private function mrm_mc_get_masterclass_frontend_file() {
+		$candidates = array();
+
+		if ( defined( 'MRM_MASTERCLASS_FRONTEND_DIR' ) ) {
+			$candidates[] = trailingslashit( MRM_MASTERCLASS_FRONTEND_DIR ) . 'masterclass.html';
+		}
+
+		if ( defined( 'MRM_MASTERCLASS_DIR' ) ) {
+			$candidates[] = trailingslashit( MRM_MASTERCLASS_DIR ) . 'frontend/masterclass.html';
+			$candidates[] = trailingslashit( dirname( MRM_MASTERCLASS_DIR ) ) . 'frontend/masterclass.html';
+		}
+
+		$candidates[] = trailingslashit( __DIR__ ) . 'frontend/masterclass.html';
+		$candidates[] = trailingslashit( dirname( __DIR__ ) ) . 'frontend/masterclass.html';
+
+		if ( defined( 'WP_PLUGIN_DIR' ) ) {
+			$candidates[] = trailingslashit( WP_PLUGIN_DIR ) . 'mrm-masterclass/frontend/masterclass.html';
+			$candidates[] = trailingslashit( WP_PLUGIN_DIR ) . 'mrm-masterclass/plugin/frontend/masterclass.html';
+		}
+
+		$seen = array();
+
+		foreach ( $candidates as $candidate ) {
+			$candidate = wp_normalize_path( (string) $candidate );
+
+			if ( '' === $candidate || isset( $seen[ $candidate ] ) ) {
+				continue;
+			}
+
+			$seen[ $candidate ] = true;
+
+			if ( file_exists( $candidate ) && is_readable( $candidate ) ) {
+				return $candidate;
+			}
+		}
+
+		return '';
 	}
 
 
