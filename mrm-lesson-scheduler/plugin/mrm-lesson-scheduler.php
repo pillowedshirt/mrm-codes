@@ -2114,10 +2114,14 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_post_mrm_scheduler_contact_submit', array( $this, 'handle_contact_form_submit' ) );
         add_action( 'admin_post_nopriv_mrm_scheduler_contact_submit', array( $this, 'handle_contact_form_submit' ) );
         add_action( 'admin_post_mrm_meeting_scheduler_create', array( $this, 'handle_meeting_scheduler_create' ) );
+        add_action( 'admin_post_mrm_meeting_scheduler_update', array( $this, 'handle_meeting_scheduler_update' ) );
         add_action( 'admin_post_mrm_meeting_scheduler_gate', array( $this, 'handle_meeting_scheduler_gate' ) );
         add_action( 'admin_post_nopriv_mrm_meeting_scheduler_gate', array( $this, 'handle_meeting_scheduler_gate' ) );
         add_action( 'admin_post_mrm_meeting_scheduler_save_settings', array( $this, 'handle_meeting_scheduler_save_settings' ) );
         add_action( 'admin_post_mrm_meeting_scheduler_delete', array( $this, 'handle_meeting_scheduler_delete' ) );
+        add_action( 'init', array( $this, 'mrm_meeting_register_rewrite_rules' ) );
+        add_filter( 'query_vars', array( $this, 'mrm_meeting_register_query_vars' ) );
+        add_action( 'template_redirect', array( $this, 'mrm_meeting_handle_clean_gate_request' ) );
         add_action( 'admin_post_mrm_finalize_old_lessons_now', array( $this, 'admin_finalize_old_lessons_now' ) );
         add_action( 'admin_post_nopriv_mrm_scheduler_google_sync_now', array( $this, 'handle_google_sync_now_request' ) );
 
@@ -2399,7 +2403,11 @@ protected function mrm_get_google_service_account_json() {
     google_meet_url TEXT NULL,
     gate_token_hash CHAR(64) NOT NULL,
     gate_url TEXT NULL,
+    notes LONGTEXT NULL,
     reminder_sent_at DATETIME NULL,
+    cancelled_at DATETIME NULL,
+    deleted_at DATETIME NULL,
+    last_change_notice_sent_at DATETIME NULL,
     created_by BIGINT UNSIGNED NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
@@ -2413,6 +2421,19 @@ protected function mrm_get_google_service_account_json() {
         dbDelta( $sql1 );
         dbDelta( $sql_meetings );
         dbDelta( $sql2 );
+        $meeting_required_columns = array(
+            'notes'                      => "ALTER TABLE {$meeting_table} ADD COLUMN notes LONGTEXT NULL",
+            'cancelled_at'               => "ALTER TABLE {$meeting_table} ADD COLUMN cancelled_at DATETIME NULL",
+            'deleted_at'                 => "ALTER TABLE {$meeting_table} ADD COLUMN deleted_at DATETIME NULL",
+            'last_change_notice_sent_at' => "ALTER TABLE {$meeting_table} ADD COLUMN last_change_notice_sent_at DATETIME NULL",
+        );
+
+        foreach ( $meeting_required_columns as $col_name => $alter_sql ) {
+            $column_exists = $wpdb->get_var( $wpdb->prepare( "SHOW COLUMNS FROM {$meeting_table} LIKE %s", $col_name ) );
+            if ( empty( $column_exists ) ) {
+                $wpdb->query( $alter_sql );
+            }
+        }
         // Ensure lesson address columns exist for Calculations mileage support.
         $lesson_required_columns = array(
             'address' => "ALTER TABLE {$table_lessons} ADD COLUMN address varchar(255) NOT NULL DEFAULT ''",
@@ -4181,7 +4202,7 @@ protected function mrm_get_google_service_account_json() {
              '<button type="submit" style="margin-top:14px;width:100%;padding:12px 14px;border:0;border-radius:12px;background:#111;color:#fff;font-size:16px;font-weight:700;cursor:pointer;">Join Meeting</button>' .
              '</form>' .
              '<div style="margin-top:12px;color:#777;font-size:13px;line-height:1.4;">' .
-             'This room opens 10 minutes before the meeting start time and closes 10 minutes after the meeting ends.' .
+             'This room opens 10 minutes before the meeting start time and closes 10 minutes after the meeting ends. After you continue, Google Meet may ask the host to admit you into the room.' .
              '</div>' .
              '</div></body></html>';
 
@@ -8141,8 +8162,16 @@ protected function mrm_get_google_service_account_json() {
 
         $states = $this->mrm_meeting_get_state_choices();
         $table = $this->mrm_meeting_table_name();
+        $edit_meeting_id = isset( $_GET['edit_meeting'] ) ? absint( wp_unslash( $_GET['edit_meeting'] ) ) : 0;
+        $manage_meeting_id = isset( $_GET['manage_meeting'] ) ? absint( wp_unslash( $_GET['manage_meeting'] ) ) : 0;
 
         $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+        $edit_meeting = $exists === $table && $edit_meeting_id > 0
+            ? $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d LIMIT 1", $edit_meeting_id ), ARRAY_A )
+            : null;
+        $manage_meeting = $exists === $table && $manage_meeting_id > 0
+            ? $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d LIMIT 1", $manage_meeting_id ), ARRAY_A )
+            : null;
         $recent = $exists === $table
             ? $wpdb->get_results( "SELECT * FROM {$table} ORDER BY start_time ASC LIMIT 100", ARRAY_A )
             : array();
@@ -8156,7 +8185,11 @@ protected function mrm_get_google_service_account_json() {
             <?php endif; ?>
 
             <?php if ( isset( $_GET['mrm_meeting_deleted'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['mrm_meeting_deleted'] ) ) ) : ?>
-                <div class="notice notice-success"><p>Meeting removed from the Scheduled Meetings list.</p></div>
+                <div class="notice notice-success"><p>Meeting deleted, Google Calendar event removed, and participants were notified.</p></div>
+            <?php endif; ?>
+
+            <?php if ( isset( $_GET['mrm_meeting_updated'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['mrm_meeting_updated'] ) ) ) : ?>
+                <div class="notice notice-success"><p>Meeting updated and participants were notified.</p></div>
             <?php endif; ?>
 
             <?php if ( isset( $_GET['mrm_meeting_settings_saved'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['mrm_meeting_settings_saved'] ) ) ) : ?>
@@ -8215,29 +8248,70 @@ protected function mrm_get_google_service_account_json() {
                 </form>
             </div>
 
-            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="max-width:960px;background:#fff;border:1px solid #ccd0d4;padding:18px;border-radius:10px;">
-                <?php wp_nonce_field( 'mrm_meeting_scheduler_create', 'mrm_meeting_scheduler_nonce' ); ?>
-                <input type="hidden" name="action" value="mrm_meeting_scheduler_create">
+            <?php
+            $form_meeting = is_array( $edit_meeting ) ? $edit_meeting : ( is_array( $manage_meeting ) ? $manage_meeting : null );
+            $form_title = '';
+            $form_timezone = $default_timezone;
+            $form_date = '';
+            $form_time = '';
+            $form_duration = 60;
+            $form_emails = '';
+            $form_notes = '';
+            if ( is_array( $form_meeting ) ) {
+                $form_title = (string) $form_meeting['title'];
+                $form_timezone = (string) $form_meeting['timezone'];
+                $local_start = DateTime::createFromFormat( '!Y-m-d H:i:s', (string) $form_meeting['start_time'], new DateTimeZone( 'UTC' ) );
+                $local_end = DateTime::createFromFormat( '!Y-m-d H:i:s', (string) $form_meeting['end_time'], new DateTimeZone( 'UTC' ) );
+                try {
+                    $form_tz = new DateTimeZone( $form_timezone );
+                    if ( $local_start ) {
+                        $local_start->setTimezone( $form_tz );
+                        $form_date = $local_start->format( 'Y-m-d' );
+                        $form_time = $local_start->format( 'H:i' );
+                    }
+                    if ( $local_start && $local_end ) {
+                        $form_duration = max( 1, (int) round( ( $local_end->getTimestamp() - strtotime( (string) $form_meeting['start_time'] . ' UTC' ) ) / MINUTE_IN_SECONDS ) );
+                    }
+                } catch ( Exception $e ) {
+                    $form_timezone = $default_timezone;
+                }
+                $stored_emails = json_decode( (string) $form_meeting['recipient_emails'], true );
+                $form_emails = implode( "\n", is_array( $stored_emails ) ? $stored_emails : array() );
+                $form_notes = isset( $form_meeting['notes'] ) ? (string) $form_meeting['notes'] : '';
+            }
+            ?>
 
-                <h2>Create Meeting</h2>
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="max-width:960px;background:#fff;border:1px solid #ccd0d4;padding:18px;border-radius:10px;">
+                <?php if ( is_array( $form_meeting ) ) : ?>
+                    <?php wp_nonce_field( 'mrm_meeting_scheduler_update_' . (int) $form_meeting['id'], 'mrm_meeting_scheduler_update_nonce' ); ?>
+                    <input type="hidden" name="action" value="mrm_meeting_scheduler_update">
+                    <input type="hidden" name="meeting_id" value="<?php echo esc_attr( (string) $form_meeting['id'] ); ?>">
+                    <h2><?php echo $manage_meeting_id > 0 ? 'Manage Participants' : 'Edit / Reschedule Meeting'; ?></h2>
+                <?php else : ?>
+                    <?php wp_nonce_field( 'mrm_meeting_scheduler_create', 'mrm_meeting_scheduler_nonce' ); ?>
+                    <input type="hidden" name="action" value="mrm_meeting_scheduler_create">
+                    <h2>Create Meeting</h2>
+                <?php endif; ?>
 
                 <?php if ( trim( $default_calendar_id ) === '' ) : ?>
                     <div class="notice notice-warning inline"><p>Please save a Google Calendar ID above before creating meetings.</p></div>
                 <?php endif; ?>
 
                 <table class="form-table" role="presentation">
-                    <tr><th scope="row"><label for="mrm_meeting_title">Meeting Title</label></th><td><input type="text" class="regular-text" id="mrm_meeting_title" name="mrm_meeting_title" required placeholder="Example: Arizona Instructor Team Meeting"><p class="description">Used for the Google Calendar event and email subject.</p></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_timezone">Timezone</label></th><td><input type="text" class="regular-text" id="mrm_meeting_timezone" name="mrm_meeting_timezone" value="<?php echo esc_attr( $default_timezone ); ?>" required></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_date">Date</label></th><td><input type="date" id="mrm_meeting_date" name="mrm_meeting_date" required></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_time">Start Time</label></th><td><input type="time" id="mrm_meeting_time" name="mrm_meeting_time" required></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_duration">Duration</label></th><td><select id="mrm_meeting_duration" name="mrm_meeting_duration" required><option value="30">30 minutes</option><option value="45">45 minutes</option><option value="60" selected>60 minutes</option><option value="90">90 minutes</option><option value="120">120 minutes</option></select></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_audience_type">Instructor List</label></th><td><select id="mrm_meeting_audience_type" name="mrm_meeting_audience_type"><option value="manual">Manual emails only</option><option value="all_instructors">All instructors</option><option value="state_instructors">Statewide instructors</option></select></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_audience_state">State</label></th><td><select id="mrm_meeting_audience_state" name="mrm_meeting_audience_state"><option value="">Select state if using statewide instructors</option><?php foreach ( $states as $state ) : ?><option value="<?php echo esc_attr( $state ); ?>"><?php echo esc_html( $state ); ?></option><?php endforeach; ?></select><p class="description">This list is generated from states currently assigned to instructors.</p></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_manual_emails">Manual Emails</label></th><td><textarea id="mrm_meeting_manual_emails" name="mrm_meeting_manual_emails" rows="5" class="large-text" placeholder="name@example.com, another@example.com"></textarea><p class="description">Use commas, spaces, or new lines. These emails are added to the selected instructor list.</p></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_notes">Internal Notes</label></th><td><textarea id="mrm_meeting_notes" name="mrm_meeting_notes" rows="4" class="large-text" placeholder="Optional internal note. This is not sent to recipients."></textarea></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_title">Meeting Title</label></th><td><input type="text" class="regular-text" id="mrm_meeting_title" name="mrm_meeting_title" value="<?php echo esc_attr( $form_title ); ?>" required></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_timezone">Timezone</label></th><td><input type="text" class="regular-text" id="mrm_meeting_timezone" name="mrm_meeting_timezone" value="<?php echo esc_attr( $form_timezone ); ?>" required></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_date">Date</label></th><td><input type="date" id="mrm_meeting_date" name="mrm_meeting_date" value="<?php echo esc_attr( $form_date ); ?>" required></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_time">Start Time</label></th><td><input type="time" id="mrm_meeting_time" name="mrm_meeting_time" value="<?php echo esc_attr( $form_time ); ?>" required></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_duration">Duration</label></th><td><select id="mrm_meeting_duration" name="mrm_meeting_duration" required><?php foreach ( array( 30, 45, 60, 90, 120 ) as $minutes ) : ?><option value="<?php echo esc_attr( (string) $minutes ); ?>" <?php selected( $form_duration, $minutes ); ?>><?php echo esc_html( (string) $minutes ); ?> minutes</option><?php endforeach; ?></select></td></tr>
+                    <?php if ( ! is_array( $form_meeting ) ) : ?>
+                        <tr><th scope="row"><label for="mrm_meeting_audience_type">Instructor List</label></th><td><select id="mrm_meeting_audience_type" name="mrm_meeting_audience_type"><option value="manual">Manual emails only</option><option value="all_instructors">All instructors</option><option value="state_instructors">Statewide instructors</option></select></td></tr>
+                        <tr><th scope="row"><label for="mrm_meeting_audience_state">State</label></th><td><select id="mrm_meeting_audience_state" name="mrm_meeting_audience_state"><option value="">Select state if using statewide instructors</option><?php foreach ( $states as $state ) : ?><option value="<?php echo esc_attr( $state ); ?>"><?php echo esc_html( $state ); ?></option><?php endforeach; ?></select><p class="description">This list is generated from states currently assigned to instructors.</p></td></tr>
+                    <?php endif; ?>
+                    <tr><th scope="row"><label for="mrm_meeting_manual_emails"><?php echo $manage_meeting_id > 0 ? 'Replacement Participant List' : 'Manual Emails'; ?></label></th><td><textarea id="mrm_meeting_manual_emails" name="mrm_meeting_manual_emails" rows="5" class="large-text"><?php echo esc_textarea( $form_emails ); ?></textarea><?php if ( $manage_meeting_id > 0 ) : ?><p class="description">Current participant emails are shown above. Saving replaces the participant list and notifies added and removed participants of the change.</p><?php endif; ?></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_notes">Internal Notes</label></th><td><textarea id="mrm_meeting_notes" name="mrm_meeting_notes" rows="4" class="large-text"><?php echo esc_textarea( $form_notes ); ?></textarea></td></tr>
                 </table>
 
-                <?php submit_button( 'Create Meeting and Send Invitations' ); ?>
+                <?php submit_button( is_array( $form_meeting ) ? ( $manage_meeting_id > 0 ? 'Save Participant Changes' : 'Update Meeting and Notify Participants' ) : 'Create Meeting and Send Invitations' ); ?>
             </form>
 
             <hr>
@@ -8247,7 +8321,7 @@ protected function mrm_get_google_service_account_json() {
                 <p>No meetings have been scheduled yet.</p>
             <?php else : ?>
                 <table class="widefat striped">
-                    <thead><tr><th>Title</th><th>Start</th><th>Audience</th><th>Participants</th><th>Google Event</th><th>Reminder</th><th>Remove</th></tr></thead>
+                    <thead><tr><th>Title</th><th>Start</th><th>Audience</th><th>Participants</th><th>Google Event</th><th>Reminder</th><th>Actions</th></tr></thead>
                     <tbody>
                         <?php foreach ( $recent as $row ) : ?>
                             <?php
@@ -8255,6 +8329,8 @@ protected function mrm_get_google_service_account_json() {
                             $emails = is_array( $emails ) ? $emails : array();
                             $count = count( $emails );
                             $meeting_id = (int) $row['id'];
+                            $edit_url = add_query_arg( array( 'page' => 'mrm-scheduler-meeting-scheduler', 'edit_meeting' => $meeting_id ), admin_url( 'admin.php' ) );
+                            $manage_url = add_query_arg( array( 'page' => 'mrm-scheduler-meeting-scheduler', 'manage_meeting' => $meeting_id ), admin_url( 'admin.php' ) );
                             $delete_url = wp_nonce_url( admin_url( 'admin-post.php?action=mrm_meeting_scheduler_delete&meeting_id=' . $meeting_id ), 'mrm_meeting_scheduler_delete_' . $meeting_id );
                             ?>
                             <tr>
@@ -8264,7 +8340,7 @@ protected function mrm_get_google_service_account_json() {
                                 <td><details><summary><?php echo esc_html( (string) $count ); ?> participant<?php echo $count === 1 ? '' : 's'; ?></summary><?php if ( empty( $emails ) ) : ?><p>No participant emails recorded.</p><?php else : ?><ul style="margin:8px 0 0 18px;"><?php foreach ( $emails as $email ) : ?><li><code><?php echo esc_html( (string) $email ); ?></code></li><?php endforeach; ?></ul><?php endif; ?></details></td>
                                 <td><code><?php echo esc_html( (string) $row['google_event_id'] ); ?></code></td>
                                 <td><?php echo ! empty( $row['reminder_sent_at'] ) ? esc_html( $row['reminder_sent_at'] ) : 'Pending'; ?></td>
-                                <td><a class="button button-small" href="<?php echo esc_url( $delete_url ); ?>" onclick="return confirm('Remove this meeting from the Scheduled Meetings list? This will not delete the Google Calendar event.');">Remove</a></td>
+                                <td><a class="button button-small" href="<?php echo esc_url( $edit_url ); ?>">Edit / Reschedule</a> <a class="button button-small" href="<?php echo esc_url( $manage_url ); ?>">Manage Participants</a> <a class="button button-small" href="<?php echo esc_url( $delete_url ); ?>" onclick="return confirm('Delete this meeting? This will remove the Google Calendar event and notify participants.');">Delete</a></td>
                             </tr>
                         <?php endforeach; ?>
                     </tbody>
@@ -8367,20 +8443,129 @@ protected function mrm_get_google_service_account_json() {
             exit;
         }
 
-        /*
-         * This removes the meeting from the Scheduler list.
-         * It intentionally does not delete the Google Calendar event yet, to avoid accidentally
-         * removing calendar events while testing. If you later want deletion to also remove the
-         * Google event, add that as a separate explicit update.
-         */
-        $wpdb->delete(
+        $calendar_id = isset( $meeting['calendar_id'] ) ? trim( (string) $meeting['calendar_id'] ) : '';
+        $google_event_id = isset( $meeting['google_event_id'] ) ? trim( (string) $meeting['google_event_id'] ) : '';
+
+        if ( $calendar_id !== '' && $google_event_id !== '' ) {
+            $deleted = $this->google_delete_event( $calendar_id, $google_event_id );
+            if ( is_wp_error( $deleted ) ) {
+                $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Meeting was not deleted because the Google Calendar event could not be removed: ' . $deleted->get_error_message() ) );
+            }
+        }
+
+        $this->mrm_meeting_send_deleted_email_for_row( $meeting );
+
+        $deleted = $wpdb->delete(
             $table,
             array( 'id' => $meeting_id ),
             array( '%d' )
         );
+        if ( false === $deleted ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'The Google Calendar event was removed, but the local meeting record could not be deleted.' ) );
+        }
 
         wp_safe_redirect( admin_url( 'admin.php?page=mrm-scheduler-meeting-scheduler&mrm_meeting_deleted=1' ) );
         exit;
+    }
+
+    public function handle_meeting_scheduler_update() {
+        if ( ! current_user_can( self::CAPABILITY ) ) {
+            wp_die( 'Not allowed.' );
+        }
+
+        $meeting_id = isset( $_POST['meeting_id'] ) ? absint( wp_unslash( $_POST['meeting_id'] ) ) : 0;
+        if ( $meeting_id <= 0 ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Invalid meeting ID.' ) );
+        }
+
+        check_admin_referer( 'mrm_meeting_scheduler_update_' . $meeting_id, 'mrm_meeting_scheduler_update_nonce' );
+
+        global $wpdb;
+        $table = $this->mrm_meeting_table_name();
+        $meeting = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d LIMIT 1", $meeting_id ), ARRAY_A );
+        if ( ! is_array( $meeting ) ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Meeting not found.' ) );
+        }
+
+        $title = isset( $_POST['mrm_meeting_title'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_title'] ) ) : '';
+        $timezone = isset( $_POST['mrm_meeting_timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_timezone'] ) ) : '';
+        $date = isset( $_POST['mrm_meeting_date'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_date'] ) ) : '';
+        $time = isset( $_POST['mrm_meeting_time'] ) ? sanitize_text_field( wp_unslash( $_POST['mrm_meeting_time'] ) ) : '';
+        $duration = isset( $_POST['mrm_meeting_duration'] ) ? absint( wp_unslash( $_POST['mrm_meeting_duration'] ) ) : 60;
+        $manual_emails_raw = isset( $_POST['mrm_meeting_manual_emails'] ) ? sanitize_textarea_field( wp_unslash( $_POST['mrm_meeting_manual_emails'] ) ) : '';
+        $notes = isset( $_POST['mrm_meeting_notes'] ) ? sanitize_textarea_field( wp_unslash( $_POST['mrm_meeting_notes'] ) ) : '';
+
+        if ( $title === '' || $timezone === '' || $date === '' || $time === '' || ! in_array( $duration, array( 30, 45, 60, 90, 120 ), true ) ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Missing or invalid meeting details.' ) );
+        }
+
+        try {
+            $tz = new DateTimeZone( $timezone );
+        } catch ( Exception $e ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Invalid timezone.' ) );
+        }
+
+        $start_local = DateTime::createFromFormat( '!Y-m-d H:i', $date . ' ' . $time, $tz );
+        $date_errors = DateTime::getLastErrors();
+        if ( ! $start_local || ( is_array( $date_errors ) && ( $date_errors['warning_count'] || $date_errors['error_count'] ) ) || $start_local->format( 'Y-m-d H:i' ) !== $date . ' ' . $time ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Invalid meeting date/time.' ) );
+        }
+
+        $recipients = $this->mrm_meeting_parse_manual_emails( $manual_emails_raw );
+        if ( empty( $recipients ) ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'No valid participant emails were found.' ) );
+        }
+
+        $end_local = clone $start_local;
+        $end_local->modify( '+' . $duration . ' minutes' );
+        $start_utc = clone $start_local;
+        $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+        $end_utc = clone $end_local;
+        $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
+
+        $gate_url = isset( $meeting['gate_url'] ) ? trim( (string) $meeting['gate_url'] ) : '';
+        $description = "Low Brass Lessons meeting.\n\nSecure access link:\n{$gate_url}\n\nThis gated link opens 10 minutes before the meeting and closes 10 minutes after the meeting.";
+        if ( $notes !== '' ) {
+            $description .= "\n\nInternal notes:\n{$notes}";
+        }
+
+        $updated_event = $this->google_update_event(
+            (string) $meeting['calendar_id'],
+            (string) $meeting['google_event_id'],
+            $title,
+            $description,
+            $start_local->format( DateTimeInterface::RFC3339 ),
+            $end_local->format( DateTimeInterface::RFC3339 ),
+            $timezone
+        );
+        if ( is_wp_error( $updated_event ) ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => $updated_event->get_error_message() ) );
+        }
+
+        $google_meet_url = ! empty( $updated_event['meet_url'] )
+            ? esc_url_raw( (string) $updated_event['meet_url'] )
+            : (string) $meeting['google_meet_url'];
+        $now = current_time( 'mysql' );
+        $update_data = array(
+            'title'                      => $title,
+            'recipient_emails'           => wp_json_encode( $recipients ),
+            'timezone'                   => $timezone,
+            'start_time'                 => $start_utc->format( 'Y-m-d H:i:s' ),
+            'end_time'                   => $end_utc->format( 'Y-m-d H:i:s' ),
+            'google_meet_url'            => $google_meet_url,
+            'notes'                      => $notes,
+            'last_change_notice_sent_at' => $now,
+            'updated_at'                 => $now,
+        );
+        $ok = $wpdb->update( $table, $update_data, array( 'id' => $meeting_id ) );
+        if ( false === $ok ) {
+            $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Google Calendar was updated, but the local meeting record could not be saved.' ) );
+        }
+
+        $updated_meeting = array_merge( $meeting, $update_data );
+        $this->mrm_meeting_send_participant_change_emails( $updated_meeting, $meeting );
+        $this->mrm_meeting_send_updated_email_for_row( $updated_meeting, $meeting );
+        $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_updated' => 1 ) );
     }
 
     public function handle_meeting_scheduler_create() {
@@ -8489,17 +8674,23 @@ protected function mrm_get_google_service_account_json() {
         }
 
         $now = current_time( 'mysql' );
+        $insert_data = array(
+            'title' => $title, 'audience_type' => $audience_type, 'audience_state' => $audience_state,
+            'recipient_emails' => wp_json_encode( $recipients ), 'calendar_id' => $calendar_id, 'timezone' => $timezone,
+            'start_time' => $start_utc->format( 'Y-m-d H:i:s' ), 'end_time' => $end_utc->format( 'Y-m-d H:i:s' ),
+            'google_event_id' => $google_event_id, 'google_meet_url' => $google_meet_url,
+            'gate_token_hash' => $token_hash, 'gate_url' => $gate_url, 'reminder_sent_at' => null,
+            'created_by' => get_current_user_id(), 'created_at' => $now, 'updated_at' => $now,
+        );
+        $insert_formats = array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' );
+        if ( $wpdb->get_var( $wpdb->prepare( "SHOW COLUMNS FROM {$table} LIKE %s", 'notes' ) ) ) {
+            $insert_data['notes'] = $notes;
+            $insert_formats[] = '%s';
+        }
         $ok = $wpdb->insert(
             $table,
-            array(
-                'title' => $title, 'audience_type' => $audience_type, 'audience_state' => $audience_state,
-                'recipient_emails' => wp_json_encode( $recipients ), 'calendar_id' => $calendar_id, 'timezone' => $timezone,
-                'start_time' => $start_utc->format( 'Y-m-d H:i:s' ), 'end_time' => $end_utc->format( 'Y-m-d H:i:s' ),
-                'google_event_id' => $google_event_id, 'google_meet_url' => $google_meet_url,
-                'gate_token_hash' => $token_hash, 'gate_url' => $gate_url, 'reminder_sent_at' => null,
-                'created_by' => get_current_user_id(), 'created_at' => $now, 'updated_at' => $now,
-            ),
-            array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+            $insert_data,
+            $insert_formats
         );
         if ( ! $ok ) {
             $this->mrm_meeting_admin_redirect( array( 'mrm_meeting_error' => 'Meeting database record could not be created.' ) );
@@ -10985,6 +11176,31 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         return $wpdb->prefix . 'mrm_meetings';
     }
 
+    public function mrm_meeting_register_rewrite_rules() {
+        add_rewrite_rule(
+            '^meeting-access/([a-f0-9]{48})/?$',
+            'index.php?mrm_meeting_gate_token=$matches[1]',
+            'top'
+        );
+    }
+
+    public function mrm_meeting_register_query_vars( $vars ) {
+        $vars[] = 'mrm_meeting_gate_token';
+        return $vars;
+    }
+
+    public function mrm_meeting_handle_clean_gate_request() {
+        $token = get_query_var( 'mrm_meeting_gate_token' );
+
+        if ( empty( $token ) ) {
+            return;
+        }
+
+        $_REQUEST['token'] = sanitize_text_field( (string) $token );
+        $this->handle_meeting_scheduler_gate();
+        exit;
+    }
+
     protected function mrm_meeting_get_state_choices() {
         global $wpdb;
 
@@ -11075,10 +11291,16 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     }
 
     protected function mrm_meeting_gate_url( $token ) {
+        $token = sanitize_text_field( (string) $token );
+
+        if ( preg_match( '/^[a-f0-9]{48}$/', $token ) ) {
+            return home_url( '/meeting-access/' . rawurlencode( $token ) . '/' );
+        }
+
         return add_query_arg(
             array(
                 'action' => 'mrm_meeting_scheduler_gate',
-                'token'  => (string) $token,
+                'token'  => $token,
             ),
             admin_url( 'admin-post.php' )
         );
@@ -11181,7 +11403,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         $body = '<p>Hello,</p>';
         $body .= '<p>You are invited to the following Low Brass Lessons meeting:</p>';
         $body .= '<p><strong>' . esc_html( $title ) . '</strong><br>' . esc_html( $time_label ) . '</p>';
-        $body .= '<p>Please use the button below to open the meeting gate at the scheduled time. You will be asked to enter your name before continuing to Google Meet.</p>';
+        $body .= '<p>Please use the button below to open the meeting gate at the scheduled time. You will be asked to enter your name before continuing to Google Meet. Google Meet may also ask the host to admit you into the room.</p>';
         $body .= '<p>Thank you,<br>Low Brass Lessons</p>';
         $wrapped = $this->mrm_meeting_wrap_email( $title, $body, $gate_url );
 
@@ -11217,7 +11439,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         $body = '<p>Hello,</p>';
         $body .= '<p>This is a reminder for your upcoming Low Brass Lessons meeting.</p>';
         $body .= '<p><strong>' . esc_html( $title ) . '</strong><br>' . esc_html( $time_label ) . '</p>';
-        $body .= '<p>Please use the button below to open the meeting gate at the scheduled time. You will be asked to enter your name before continuing to Google Meet.</p>';
+        $body .= '<p>Please use the button below to open the meeting gate at the scheduled time. You will be asked to enter your name before continuing to Google Meet. Google Meet may also ask the host to admit you into the room.</p>';
 
         $wrapped = $this->mrm_meeting_wrap_email( $title, $body, $gate_url );
 
@@ -11230,6 +11452,86 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         }
 
         return $sent_any;
+    }
+
+    protected function mrm_meeting_send_deleted_email_for_row( $meeting ) {
+        if ( ! is_array( $meeting ) ) {
+            return false;
+        }
+
+        $emails = json_decode( (string) $meeting['recipient_emails'], true );
+        $emails = is_array( $emails ) ? $emails : array();
+        $emails = $this->mrm_meeting_add_host_recipient( $emails );
+        if ( empty( $emails ) ) {
+            return false;
+        }
+
+        $title = (string) $meeting['title'];
+        $time_label = $this->mrm_meeting_format_datetime_label( $meeting['start_time'], $meeting['timezone'] );
+        $subject = 'Cancelled: ' . $title;
+        $body  = '<p>Hello,</p>';
+        $body .= '<p>This Low Brass Lessons meeting has been cancelled:</p>';
+        $body .= '<p><strong>' . esc_html( $title ) . '</strong><br>' . esc_html( $time_label ) . '</p>';
+        $body .= '<p>The Google Calendar event has also been removed.</p>';
+        $body .= '<p>Thank you,<br>Low Brass Lessons</p>';
+        $wrapped = $this->mrm_safety_email_wrap_html( $title, $body, '', '', '' );
+        $sent_any = false;
+
+        foreach ( $emails as $email ) {
+            if ( $this->mrm_meeting_send_email( $email, $subject, $wrapped ) ) {
+                $sent_any = true;
+            }
+        }
+
+        return $sent_any;
+    }
+
+    protected function mrm_meeting_send_updated_email_for_row( $meeting, $old_meeting = array() ) {
+        if ( ! is_array( $meeting ) ) {
+            return false;
+        }
+
+        $emails = json_decode( (string) $meeting['recipient_emails'], true );
+        $emails = is_array( $emails ) ? $emails : array();
+        $emails = $this->mrm_meeting_add_host_recipient( $emails );
+        if ( empty( $emails ) ) {
+            return false;
+        }
+
+        $title = (string) $meeting['title'];
+        $time_label = $this->mrm_meeting_format_datetime_label( $meeting['start_time'], $meeting['timezone'] );
+        $gate_url = isset( $meeting['gate_url'] ) ? trim( (string) $meeting['gate_url'] ) : '';
+        $subject = 'Updated: ' . $title;
+        $body  = '<p>Hello,</p>';
+        $body .= '<p>This Low Brass Lessons meeting has been updated:</p>';
+        $body .= '<p><strong>' . esc_html( $title ) . '</strong><br>' . esc_html( $time_label ) . '</p>';
+        $body .= '<p>Please use the button below to open the meeting gate at the scheduled time.</p>';
+        $body .= '<p>Thank you,<br>Low Brass Lessons</p>';
+        $wrapped = $this->mrm_meeting_wrap_email( $title, $body, $gate_url );
+        $sent_any = false;
+
+        foreach ( $emails as $email ) {
+            if ( $this->mrm_meeting_send_email( $email, $subject, $wrapped ) ) {
+                $sent_any = true;
+            }
+        }
+
+        return $sent_any;
+    }
+
+    protected function mrm_meeting_send_participant_change_emails( $meeting, $old_meeting ) {
+        $old_emails = json_decode( (string) ( $old_meeting['recipient_emails'] ?? '' ), true );
+        $new_emails = json_decode( (string) ( $meeting['recipient_emails'] ?? '' ), true );
+        $old_emails = is_array( $old_emails ) ? $old_emails : array();
+        $new_emails = is_array( $new_emails ) ? $new_emails : array();
+        $removed = array_diff( $old_emails, $new_emails );
+        $title = (string) $meeting['title'];
+
+        foreach ( $removed as $email ) {
+            $body = '<p>Hello,</p><p>You are no longer included in the Low Brass Lessons meeting <strong>' . esc_html( $title ) . '</strong>.</p><p>Thank you,<br>Low Brass Lessons</p>';
+            $this->mrm_meeting_send_email( $email, 'Participant list changed: ' . $title, $this->mrm_safety_email_wrap_html( $title, $body, '', '', '' ) );
+        }
+
     }
 
     public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
@@ -11259,13 +11561,13 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
                 $body = '<p>Hello,</p>';
                 $body .= '<p>This is a reminder for your upcoming Low Brass Lessons meeting.</p>';
                 $body .= '<p><strong>' . esc_html( $meeting_title ) . '</strong><br>' . esc_html( $time ) . '</p>';
-                $body .= '<p>Please use the button below to open the meeting gate at the scheduled time. You will be asked to enter your name before continuing to Google Meet.</p>';
+                $body .= '<p>Please use the button below to open the meeting gate at the scheduled time. You will be asked to enter your name before continuing to Google Meet. Google Meet may also ask the host to admit you into the room.</p>';
                 $subject = 'Reminder: ' . $meeting_title;
             } else {
                 $body = '<p>Hello,</p>';
                 $body .= '<p>You are invited to the following Low Brass Lessons meeting:</p>';
                 $body .= '<p><strong>' . esc_html( $meeting_title ) . '</strong><br>' . esc_html( $time ) . '</p>';
-                $body .= '<p>Please use the button below to open the meeting gate at the scheduled time. You will be asked to enter your name before continuing to Google Meet.</p>';
+                $body .= '<p>Please use the button below to open the meeting gate at the scheduled time. You will be asked to enter your name before continuing to Google Meet. Google Meet may also ask the host to admit you into the room.</p>';
                 $subject = $meeting_title;
             }
 
@@ -14254,6 +14556,76 @@ protected function parse_service_account_json( $json ) {
         return array(
             'RRULE:FREQ=WEEKLY;INTERVAL=' . $interval . ';COUNT=' . $count
         );
+    }
+
+    protected function google_update_event( $calendar_id, $event_id, $title, $description, $start_rfc3339, $end_rfc3339, $timezone ) {
+        $token = $this->google_get_access_token();
+        if ( is_wp_error( $token ) ) {
+            return $token;
+        }
+
+        $calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+        $event_id = trim( (string) $event_id );
+        if ( $calendar_id === '' || $event_id === '' ) {
+            return new WP_Error( 'google_update_event_failed', 'Google update failed: missing calendar or event ID.' );
+        }
+
+        $url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( $calendar_id ) . '/events/' . rawurlencode( $event_id );
+        $url = add_query_arg( 'conferenceDataVersion', 1, $url );
+        $payload = array(
+            'summary' => (string) $title,
+            'description' => (string) $description,
+            'start' => array( 'dateTime' => (string) $start_rfc3339, 'timeZone' => (string) $timezone ),
+            'end' => array( 'dateTime' => (string) $end_rfc3339, 'timeZone' => (string) $timezone ),
+        );
+        $response = wp_remote_request( $url, array(
+            'method' => 'PATCH',
+            'timeout' => 20,
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $token,
+                'Content-Type' => 'application/json',
+            ),
+            'body' => wp_json_encode( $payload ),
+        ) );
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code( $response );
+        $body = wp_remote_retrieve_body( $response );
+        if ( $code < 200 || $code >= 300 ) {
+            return new WP_Error( 'google_update_event_failed', 'Google update failed (' . $code . '): ' . $body );
+        }
+
+        $data = json_decode( $body, true );
+        $meet_url = is_array( $data ) && ! empty( $data['hangoutLink'] ) ? (string) $data['hangoutLink'] : '';
+        return array( 'meet_url' => $meet_url );
+    }
+
+    protected function google_delete_event( $calendar_id, $event_id ) {
+        $token = $this->google_get_access_token();
+        if ( is_wp_error( $token ) ) {
+            return $token;
+        }
+
+        $calendar_id = rawurldecode( trim( (string) $calendar_id ) );
+        $event_id = trim( (string) $event_id );
+        $url = 'https://www.googleapis.com/calendar/v3/calendars/' . rawurlencode( $calendar_id ) . '/events/' . rawurlencode( $event_id );
+        $response = wp_remote_request( $url, array(
+            'method' => 'DELETE',
+            'timeout' => 20,
+            'headers' => array( 'Authorization' => 'Bearer ' . $token ),
+        ) );
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code( $response );
+        if ( 404 === $code || ( $code >= 200 && $code < 300 ) ) {
+            return true;
+        }
+
+        return new WP_Error( 'google_delete_event_failed', 'Google delete failed (' . $code . '): ' . wp_remote_retrieve_body( $response ) );
     }
 
     protected function google_insert_event( $calendar_id, $title, $description, $location, $start_rfc3339, $end_rfc3339, $timezone, $extended_private, $recurrence = array(), $create_meet = false, $attendee_emails = array() ) {
