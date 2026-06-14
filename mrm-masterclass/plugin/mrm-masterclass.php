@@ -196,6 +196,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'runtime_upgrade' );
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
+	add_shortcode( 'mrm_masterclass_page', array( $this, 'render_masterclass_page_shortcode' ) );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_share_meta', 5, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_presenter_page_title_css', 20, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_session_page_title_css', 21, 0 );
@@ -274,8 +275,33 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_filter_if_method_exists( 'query_vars', 'register_masterclass_gate_query_vars' );
 	$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'mrm_mc_handle_gate_request', 1, 0 );
 
-	$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely in REST-only frontend mode. No shortcode rendering is registered.' );
+	$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely with REST routes and current-file frontend shortcode rendering.' );
 }
+
+	/**
+	 * Render the launch-ready Masterclass frontend directly from the bundled file.
+	 *
+	 * The WordPress Masterclass page can contain only [mrm_masterclass_page], so
+	 * deployments no longer depend on a manually pasted (and potentially stale)
+	 * copy of the frontend HTML stored in page content.
+	 *
+	 * @return string
+	 */
+	public function render_masterclass_page_shortcode() {
+		$file = dirname( __DIR__ ) . '/frontend/masterclass.html';
+
+		if ( ! file_exists( $file ) || ! is_readable( $file ) ) {
+			return '<div class="mrm-masterclass-error">Masterclass page is temporarily unavailable. Please contact Low Brass Lessons.</div>';
+		}
+
+		$html = file_get_contents( $file );
+
+		if ( ! is_string( $html ) || '' === trim( $html ) ) {
+			return '<div class="mrm-masterclass-error">Masterclass page is temporarily unavailable. Please contact Low Brass Lessons.</div>';
+		}
+
+		return $html;
+	}
 
 
 	private function mrm_mc_add_action_if_method_exists( $hook, $method, $priority = 10, $accepted_args = 1 ) {
