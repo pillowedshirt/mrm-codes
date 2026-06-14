@@ -8886,7 +8886,7 @@ public function rest_finalize_registration( $request ) {
 			'total_open'               => 0,
 			'public_rows_found'        => 0,
 			'public_events_sent'       => 0,
-			'query_mode'               => 'scheduled_registration_open_public_events',
+			'query_mode'               => 'scheduled_public_events',
 			'timestamp'                => gmdate( 'c' ),
 		);
 
@@ -9121,7 +9121,6 @@ public function rest_finalize_registration( $request ) {
 			 FROM {$events_table} e
 			 LEFT JOIN {$presenters_table} p ON p.id = e.presenter_id
 			 WHERE LOWER(TRIM(e.status)) = 'scheduled'
-			   AND CAST(e.registration_open AS UNSIGNED) = 1
 			 ORDER BY e.start_time ASC
 			 LIMIT 200"
 		);

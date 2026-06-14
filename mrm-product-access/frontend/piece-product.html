@@ -323,12 +323,28 @@ body.mrm-piece-no-scroll{
 /* BODY LAYOUT */
 .offer-body{
   padding: 14px;
-  display:grid;
-  grid-template-columns: 1fr auto;
-  gap: 14px;
-  align-items:stretch;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  gap: 18px;
+  align-items: start;
 }
 
+
+.mrm-offer-description-wrap { margin:14px 14px 0; padding:14px 16px; border-radius:16px; background:rgba(255,250,243,.78); border:1px solid rgba(124,74,45,.16); }
+.mrm-offer-description-wrap summary { cursor:pointer; font-weight:850; color:#2f2118; list-style:none; }
+.mrm-offer-description-wrap summary::-webkit-details-marker { display:none; }
+.mrm-offer-description-wrap summary::after { content:'+'; float:right; font-weight:900; color:#7c4a2d; }
+.mrm-offer-description-wrap[open] summary::after { content:'–'; }
+.mrm-offer-description-text { margin-top:10px; color:#58483c; font-size:.96rem; line-height:1.65; }
+.mrm-offer-description-text p { margin:0 0 10px; }
+.mrm-offer-description-text p:last-child { margin-bottom:0; }
+.mrm-price-breakdown { background:rgba(0,0,0,.04); padding:13px 15px; border-radius:14px; margin-bottom:12px; }
+.mrm-price-row { display:flex; justify-content:space-between; gap:14px; padding:4px 0; line-height:1.4; }
+.mrm-price-row span { color:#62483a; }
+.mrm-price-row strong { color:#2f2118; text-align:right; }
+.mrm-price-row-discount span,.mrm-price-row-discount strong { color:#1f6f3f; }
+.mrm-price-row-total { margin-top:8px; padding-top:10px; border-top:1px solid rgba(0,0,0,.12); }
+.mrm-price-row-total span,.mrm-price-row-total strong { font-weight:900; color:#2f2118; }
 /* audio container: subtitle top, player bottom */
 .audio-stack{
   width:100%;
@@ -428,11 +444,11 @@ body.mrm-piece-no-scroll{
 
 /* RIGHT SIDE: price + buttons */
 .offer-actions{
-  display:grid;
-  gap:10px;
-  justify-items:stretch;
-  min-width: 240px;
-  align-content:center;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: stretch;
+  min-width: 220px;
 }
 
 .mrm-piece-terms-row {
@@ -1253,66 +1269,68 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
     return '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
   }
 
+  function mrmPieceNormalizeBreakdown(raw) {
+    const data = raw || {};
+    const discount = Math.max(0, Number(data.promo_discount_cents || data.discount_cents || 0));
+    const serverBase = Math.max(0, Number(data.base_amount_cents || data.subtotal_cents || 0));
+    const originalBase = Math.max(0, Number(data.original_base_amount_cents || data.original_amount_cents || data.subtotal_before_discount_cents || data.price_before_discount_cents || (serverBase + discount)));
+    const discountedSubtotal = Math.max(0, Number(data.discounted_subtotal_cents || data.subtotal_after_discount_cents || data.final_base_amount_cents || serverBase));
+    const tax = Math.max(0, Number(data.tax_cents || 0));
+    const total = Math.max(0, Number(data.amount_cents || data.total_cents || data.final_amount_cents || (discountedSubtotal + tax)));
+    return {
+      sku: String(data.sku || pendingSku || '').trim(),
+      label: String(data.label || data.product_label || 'Sheet music').trim(),
+      access_type: String(data.access_type || data.accessType || 'Sheet Music Download').trim(),
+      original_base_amount_cents: originalBase,
+      promo_discount_cents: discount,
+      discounted_subtotal_cents: discountedSubtotal,
+      tax_cents: tax,
+      amount_cents: total,
+      tax_message: String(data.tax_message || (data.tax_policy && data.tax_policy.policy_message) || 'Sales tax will update after billing state and ZIP are entered.').trim(),
+      tax_ready: !!data.tax_ready || tax > 0 || !!data.tax_calculated,
+      promo_code: String(data.promo_code || mrmPieceAppliedPromoCode || '').trim()
+    };
+  }
+
+  function mrmPieceRenderPriceRows(raw, options) {
+    const opts = options || {};
+    const b = mrmPieceNormalizeBreakdown(raw);
+    const money = cents => '$' + (Math.round(Number(cents || 0)) / 100).toFixed(2);
+    const esc = value => String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    const rows = [];
+    if (opts.includeProduct !== false) {
+      rows.push(`<div class="mrm-price-row"><span>Product</span><strong>${esc(b.label)}</strong></div>`);
+      rows.push(`<div class="mrm-price-row"><span>Access Type</span><strong>${esc(b.access_type)}</strong></div>`);
+    }
+    rows.push(`<div class="mrm-price-row"><span>Subtotal</span><strong>${money(b.original_base_amount_cents)}</strong></div>`);
+    if (b.promo_discount_cents > 0) {
+      rows.push(`<div class="mrm-price-row mrm-price-row-discount"><span>Promotional Discount</span><strong>-${money(b.promo_discount_cents)}</strong></div>`);
+      rows.push(`<div class="mrm-price-row"><span>Discounted Subtotal</span><strong>${money(b.discounted_subtotal_cents)}</strong></div>`);
+    }
+    rows.push(`<div class="mrm-price-row"><span>Sales Tax</span><strong>${b.tax_cents > 0 ? money(b.tax_cents) : esc(b.tax_message)}</strong></div>`);
+    rows.push(`<div class="mrm-price-row mrm-price-row-total"><span>Total Due Today</span><strong>${money(b.amount_cents)}</strong></div>`);
+    return `<div class="mrm-price-breakdown">${rows.join('')}</div>`;
+  }
+
   function mrmUpdatePiecePromoTopBreakdown() {
     const instructions = document.getElementById('payment-instructions');
     if (!instructions || !mrmPieceCurrentQuoteData) return;
 
-  const label = String(mrmPieceCurrentQuoteData.label || 'Sheet music').trim();
-  const originalBase = Number(mrmPieceCurrentQuoteData.amount_cents || 0);
-  const discount = Number(mrmPieceAppliedPromoDiscountCents || 0);
-  const reducedSubtotal = Math.max(50, originalBase - discount);
+    const originalBase = Number(mrmPieceCurrentQuoteData.amount_cents || 0);
+    const discount = Number(mrmPieceAppliedPromoDiscountCents || 0);
+    const discountedSubtotal = Math.max(0, originalBase - discount);
 
-  const esc = (s) => String(s || '')
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;')
-    .replace(/'/g,'&#39;');
-
-  const rows = [];
-
-  rows.push(`
-    <div style="display:flex;justify-content:space-between;gap:12px;">
-      <span>${esc(label)}</span>
-      <strong>${mrmPieceMoney(originalBase)}</strong>
-    </div>
-  `);
-
-  if (discount > 0) {
-    rows.push(`
-      <div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;">
-        <span>Discount</span>
-        <strong>-${mrmPieceMoney(discount)}</strong>
-      </div>
-    `);
-
-    rows.push(`
-      <div style="display:flex;justify-content:space-between;gap:12px;">
-        <span>Discounted subtotal</span>
-        <strong>${mrmPieceMoney(reducedSubtotal)}</strong>
-      </div>
-    `);
-  }
-
-  rows.push(`
-    <div style="display:flex;justify-content:space-between;gap:12px;">
-      <span>Sales tax</span>
-      <strong>Calculated after ZIP is entered</strong>
-    </div>
-  `);
-
-  rows.push(`
-    <div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;">
-      <span><strong>Estimated total before tax</strong></span>
-      <strong>${mrmPieceMoney(reducedSubtotal)}</strong>
-    </div>
-  `);
-
-    instructions.innerHTML = `
-      <div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">
-        ${rows.join('')}
-      </div>
-    `;
+    instructions.innerHTML = mrmPieceRenderPriceRows({
+      sku: pendingSku,
+      label: mrmPieceCurrentQuoteData.label || 'Sheet music',
+      access_type: 'Sheet Music Download',
+      original_base_amount_cents: originalBase,
+      base_amount_cents: discountedSubtotal,
+      promo_discount_cents: discount,
+      tax_cents: 0,
+      amount_cents: discountedSubtotal,
+      tax_message: 'Sales tax will update after billing state and ZIP are entered.'
+    }, { includeProduct: true });
   }
 
 function mrmGetSavedPiecePaymentEmail() {
@@ -1417,11 +1435,11 @@ function mrmGetPiecePromoCodeInputValue() {
         }
 
         mrmPieceAppliedPromoCode = data.promo_code || code;
-        mrmPieceAppliedPromoDiscountCents = Number(data.discount_cents || 0);
+        mrmPieceAppliedPromoDiscountCents = Number(data.discount_cents || data.promo_discount_cents || 0);
         mrmSetPiecePromoMessage(data.promo_success_message || 'Promotional code applied.', false);
         mrmUpdatePiecePromoTopBreakdown();
 
-        mrmResetPiecePaymentElement('Promotional code applied. Reloading the secure payment form…');
+        mrmResetPiecePaymentElement('Promotional code applied. Enter or confirm your billing ZIP to update tax and reload the secure payment form.');
 
         const paymentEmail = document.getElementById('mrm-payment-email');
         if (paymentEmail && email && !paymentEmail.value) {
@@ -1803,7 +1821,7 @@ async function getOfferSkuCandidates(offerEl) {
     const taxMessage = String(
       breakdown?.tax_message ||
       breakdown?.tax_policy?.policy_message ||
-      'Sales tax is calculated after billing state and ZIP are entered.'
+      'Sales tax will update after billing state and ZIP are entered.'
     ).trim();
 
     const rows = [];
@@ -1846,43 +1864,33 @@ async function getOfferSkuCandidates(offerEl) {
     const labelFromQuote = String((quoteData && quoteData.label) ? quoteData.label : '').trim();
 
     const renderBreakdown = (opts = {}) => {
-      const label = String(opts.label || labelFromQuote || 'Item').trim();
-      const base = Number(opts.base_amount_cents ?? baseFromQuote ?? 0);
-      const tax  = Number(opts.tax_cents ?? 0);
-      const promoDiscount = Number(opts.promo_discount_cents ?? 0);
-      const total = Number(opts.amount_cents ?? (base + tax));
-      const taxMessage = String(
-        opts.tax_message ||
-        opts.tax_policy?.policy_message ||
-        'Sales tax is calculated after billing state and ZIP are entered.'
-      ).trim();
-
-      // ✅ CRITICAL: This feeds the Confirm Total popup
-      pendingBreakdown = {
+      const normalized = mrmPieceNormalizeBreakdown({
         sku: pendingSku,
-        label,
-        base_amount_cents: base,
-        tax_cents: tax,
-        amount_cents: total,
-        promo_discount_cents: promoDiscount,
-        tax_message: taxMessage,
-        tax_policy: opts.tax_policy || null
-      };
-
-      const rows = [];
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Product</span><strong>${esc(label)}</strong></div>`);
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Access Type</span><strong>Sheet Music Download</strong></div>`);
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Purchase Price</span><strong>${money(base)}</strong></div>`);
-  if (promoDiscount > 0) {
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Discount</span><strong>-${money(promoDiscount)}</strong></div>`);
-  }
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${tax ? money(tax) : taxMessage}</strong></div>`);
-      rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total Due Today</strong></span><strong>${money(total)}</strong></div>`);
-      instructions.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;margin-bottom:12px;">${rows.join('')}</div>`;
+        label: opts.label || labelFromQuote || 'Sheet music',
+        access_type: 'Sheet Music Download',
+        base_amount_cents: opts.base_amount_cents ?? baseFromQuote,
+        original_base_amount_cents: opts.original_base_amount_cents,
+        promo_discount_cents: opts.promo_discount_cents,
+        tax_cents: opts.tax_cents,
+        amount_cents: opts.amount_cents,
+        tax_message: opts.tax_message,
+        tax_policy: opts.tax_policy,
+        promo_code: opts.promo_code || mrmPieceAppliedPromoCode
+      });
+      pendingBreakdown = normalized;
+      instructions.innerHTML = mrmPieceRenderPriceRows(normalized, { includeProduct: true });
     };
 
     // Initial breakdown (tax pending)
-    renderBreakdown({ base_amount_cents: baseFromQuote, tax_cents: 0, amount_cents: baseFromQuote });
+    renderBreakdown({
+      label: labelFromQuote || 'Sheet music',
+      base_amount_cents: baseFromQuote,
+      original_base_amount_cents: baseFromQuote,
+      promo_discount_cents: 0,
+      tax_cents: 0,
+      amount_cents: baseFromQuote,
+      tax_message: 'Sales tax will update after billing state and ZIP are entered.'
+    });
 
     overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden', 'false');
@@ -2041,9 +2049,13 @@ async function getOfferSkuCandidates(offerEl) {
           renderBreakdown({
             label: data.label || labelFromQuote,
             base_amount_cents: Number(data.base_amount_cents || baseFromQuote || 0),
+            original_base_amount_cents: Number(data.original_base_amount_cents || data.original_amount_cents || data.subtotal_before_discount_cents || 0),
+            promo_discount_cents: Number(data.promo_discount_cents || data.discount_cents || 0),
             tax_cents: Number(data.tax_cents || 0),
-            amount_cents: Number(data.amount_cents || 0),
-        promo_discount_cents: Number(data.promo_discount_cents || 0)
+            amount_cents: Number(data.amount_cents || data.total_cents || 0),
+            tax_message: data.tax_message || '',
+            tax_policy: data.tax_policy || null,
+            promo_code: data.promo_code || mrmPieceAppliedPromoCode || ''
           });
 
           activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
@@ -2081,21 +2093,8 @@ async function getOfferSkuCandidates(offerEl) {
     const confirmBtn = document.getElementById('mrm-confirm-total-confirm');
     const box = document.getElementById('mrm-confirm-total-breakdown');
 
-    const money = (cents) => '$' + ((Math.round(Number(cents||0)))/100).toFixed(2);
-    const base = Number(breakdown?.base_amount_cents || 0);
-    const tax = Number(breakdown?.tax_cents || 0);
-    const promoDiscount = Number(breakdown?.promo_discount_cents || 0);
-    const total = Number(breakdown?.amount_cents || breakdown?.total_cents || 0) || (base + tax);
-
-    const rows = [];
-    const itemLabel = String(breakdown?.sku || 'Sheet music');
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>${itemLabel}</span><strong>${money(base)}</strong></div>`);
-    if (promoDiscount > 0) {
-      rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;color:#1f6f3f;"><span>Discount</span><strong>-${money(promoDiscount)}</strong></div>`);
-    }
-    rows.push(`<div style="display:flex;justify-content:space-between;gap:12px;"><span>Sales tax</span><strong>${money(tax)}</strong></div>`);
-    rows.push(`<div style="margin-top:8px;border-top:1px solid rgba(0,0,0,0.12);padding-top:8px;display:flex;justify-content:space-between;gap:12px;"><span><strong>Total Due Today</strong></span><strong>${money(total)}</strong></div>`);
-    box.innerHTML = `<div style="background:rgba(0,0,0,0.04);padding:12px 14px;border-radius:14px;">${rows.join('')}</div>`;
+    const normalized = mrmPieceNormalizeBreakdown(breakdown);
+    box.innerHTML = mrmPieceRenderPriceRows(normalized, { includeProduct: true });
 
     overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden','false');
@@ -2327,8 +2326,10 @@ async function getOfferSkuCandidates(offerEl) {
 
   function buildOfferDom(offer){
     const displayTitle = offer.display_title || offer.displayTitle || '';
-    const subtitle     = offer.subtitle || '';
-    const subtitleHtml = multilineTextToHtml(subtitle);
+    const rawDescription = offer.description_html || offer.descriptionHtml || offer.description || offer.long_description || offer.longDescription || '';
+    const descriptionHtml = multilineTextToHtml(String(rawDescription || '').trim());
+    const rawShortSubtitle = offer.subtitle || offer.short_description || offer.shortDescription || '';
+    const shortSubtitleHtml = multilineTextToHtml(String(rawShortSubtitle || '').trim());
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
     const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
     let productSlug = normalizeSkuFromOffer(offer);
@@ -2373,6 +2374,7 @@ async function getOfferSkuCandidates(offerEl) {
     const wrap = document.createElement('div');
     wrap.className = 'offer mrm-offer';
     wrap.dataset.productSlug = productSlug;
+    wrap.dataset.resolvedSku = productSlug;
     wrap.dataset.price = priceDisplay;
 
     const audioMarkup = previewAudio
@@ -2416,7 +2418,7 @@ async function getOfferSkuCandidates(offerEl) {
 
       <div class="offer-body">
         <div class="audio-stack">
-          ${subtitleHtml ? `<div class="audio-subtitle">${subtitleHtml}</div>` : ''}
+          ${shortSubtitleHtml ? `<div class="audio-subtitle">${shortSubtitleHtml}</div>` : ''}
           ${audioMarkup}
         </div>
 
@@ -2427,11 +2429,17 @@ async function getOfferSkuCandidates(offerEl) {
           </div>
         <div class="actions">
           <button type="button" class="button-primary mrm-purchaseBtn">Purchase</button>
-          <button type="button" class="button-secondary mrm-accessBtn">Access</button>
+          <button type="button" class="button-secondary mrm-accessBtn" data-product-slug="${escHtml(productSlug)}">Access</button>
         </div>
           <div class="mrm-offerStatus" style="margin-top:10px;font-size:13px;line-height:1.4;color:#8a1f1f;"></div>
         </div>
       </div>
+      ${descriptionHtml ? `
+        <details class="mrm-offer-description-wrap">
+          <summary>What’s included</summary>
+          <div class="mrm-offer-description-text">${descriptionHtml}</div>
+        </details>
+      ` : ''}
     `;
 
     // set audio only when a preview audio URL exists
@@ -2880,29 +2888,33 @@ async function getOfferSkuCandidates(offerEl) {
     });
 
     piece.querySelectorAll('.mrm-accessBtn').forEach(btn => {
-      btn.addEventListener('click', async function(e){
+      if (btn.dataset.mrmOtpBound === '1') return;
+      btn.dataset.mrmOtpBound = '1';
+      btn.addEventListener('click', function(e){
         e.preventDefault();
-
         const offerEl = btn.closest('.mrm-offer');
-
-        const sku =
-          String((offerEl && offerEl.dataset.resolvedSku) || '').trim().toLowerCase() ||
-          String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase();
-
+        const sku = String((offerEl && offerEl.dataset.resolvedSku) || '').trim().toLowerCase() ||
+          String((offerEl && offerEl.dataset.productSlug) || '').trim().toLowerCase() ||
+          String(btn.getAttribute('data-product-slug') || '').trim().toLowerCase();
         if (!sku) {
-          alert('This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
+          alert('This access option is temporarily unavailable. Please contact Low Brass Lessons.');
           return;
         }
-
-        // Open access modal for the selected offer.
-
+        activeProductSlug = sku;
         openOtpModal(sku);
       });
-    });
+    });;
   }
 
   // ---------- OTP ----------
   let activeProductSlug = '';
+
+  function mrmProductAccessApiUrl(path) {
+    const pieceEl = document.querySelector('.mrm-piece');
+    const rawBase = pieceEl && pieceEl.dataset.apiBase ? String(pieceEl.dataset.apiBase) : '/wp-json/mrm/v1';
+    const base = rawBase.indexOf('http') === 0 ? rawBase : window.location.origin + rawBase;
+    return base.replace(/\/+$/, '') + '/' + String(path || '').replace(/^\/+/, '');
+  }
 
   function openOtpModal(forSlug){
     const otpOverlay = document.querySelector('.mrm-otpOverlay');
@@ -2911,21 +2923,20 @@ async function getOfferSkuCandidates(offerEl) {
     const emailInput = document.querySelector('.mrm-email');
     const otpInput = document.querySelector('.mrm-otp');
     const messageDiv = document.querySelector('.mrm-message');
-
-    activeProductSlug = forSlug || '';
-
+    activeProductSlug = String(forSlug || '').trim().toLowerCase();
+    if (!otpOverlay || !stepEmail || !stepOtp || !emailInput || !otpInput || !messageDiv) { alert('Access-code form is temporarily unavailable. Please contact Low Brass Lessons.'); return; }
+    if (!activeProductSlug) { alert('This access option is temporarily unavailable. Please contact Low Brass Lessons.'); return; }
     otpOverlay.classList.add('is-open');
     otpOverlay.setAttribute('aria-hidden','false');
-
     const y = window.scrollY || window.pageYOffset || 0;
     document.body.style.top = `-${y}px`;
     document.body.classList.add('mrm-piece-no-scroll');
-
     stepEmail.classList.remove('hidden');
     stepOtp.classList.add('hidden');
     messageDiv.textContent = '';
     emailInput.value = mrmGetSavedPiecePaymentEmail();
     otpInput.value = '';
+    window.setTimeout(function () { emailInput.focus(); }, 50);
   }
 
   function initOtp(piece, apiBase){
@@ -2938,95 +2949,54 @@ async function getOfferSkuCandidates(offerEl) {
     const verifyBtn = piece.querySelector('.mrm-verifyBtn');
     const messageDiv = piece.querySelector('.mrm-message');
     const closeBtn = piece.querySelector('.mrm-closeBtn');
-    // Force visible label for the Close button (base behavior)
-    if (closeBtn) {
-      closeBtn.textContent = 'Close';
-      closeBtn.setAttribute('aria-label', 'Close');
-    }
-
+    if (!otpOverlay || !stepEmail || !stepOtp || !emailInput || !otpInput || !sendBtn || !verifyBtn || !messageDiv || !closeBtn) return;
+    if (sendBtn.dataset.mrmOtpBound === '1') return;
+    sendBtn.dataset.mrmOtpBound = '1';
+    verifyBtn.dataset.mrmOtpBound = '1';
+    closeBtn.textContent = 'Close';
+    closeBtn.setAttribute('aria-label', 'Close');
     function closeOtpModal(){
-      otpOverlay.classList.remove('is-open');
-      otpOverlay.setAttribute('aria-hidden','true');
-
+      otpOverlay.classList.remove('is-open'); otpOverlay.setAttribute('aria-hidden','true');
       document.body.classList.remove('mrm-piece-no-scroll');
-      const top = document.body.style.top;
-      document.body.style.top = "";
-      const restoreY = top ? -parseInt(top,10) : 0;
-      window.scrollTo(0, restoreY);
+      const top = document.body.style.top; document.body.style.top = '';
+      window.scrollTo(0, top ? -parseInt(top,10) : 0);
     }
-
     closeBtn.addEventListener('click', closeOtpModal);
-    otpOverlay.addEventListener('click', (e) => { if (e.target === otpOverlay) closeOtpModal(); });
+    otpOverlay.addEventListener('click', e => { if (e.target === otpOverlay) closeOtpModal(); });
 
-    sendBtn.addEventListener('click', function(){
+    sendBtn.addEventListener('click', async function(){
       const email = (emailInput.value || '').trim();
-    if (isEmailLike(email)) {
-      mrmSavePiecePaymentEmail(email);
-    }
-      if(!email){ messageDiv.textContent='Please enter your email.'; return; }
-      if(!activeProductSlug){ messageDiv.textContent='This option is temporarily unavailable. Please contact Low Brass Lessons.'; return; }
-
-      messageDiv.textContent='Sending code...';
-
-      fetch(apiBase.replace(/\/$/,'') + '/request-otp', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ email: email, product_slug: activeProductSlug })
-      })
-      .then(async (r) => {
-        const txt = await r.text();
-        let data=null;
-        try{ data = JSON.parse(txt); }catch(e){ data=null; }
-        if(!r.ok){
-          messageDiv.textContent='We could not send a code right now. Please try again or contact Low Brass Lessons.';
-          return null;
-        }
-        return data || {};
-      })
-      .then(data=>{
-        if(!data) return;
+      if (isEmailLike(email)) mrmSavePiecePaymentEmail(email);
+      if (!email) { messageDiv.textContent = 'Please enter your email.'; return; }
+      if (!isEmailLike(email)) { messageDiv.textContent = 'Please enter a valid email address.'; return; }
+      if (!activeProductSlug) { messageDiv.textContent = 'This access option is temporarily unavailable. Please contact Low Brass Lessons.'; return; }
+      sendBtn.disabled = true; messageDiv.textContent = 'Sending code...';
+      try {
+        const response = await fetch(mrmProductAccessApiUrl('request-otp'), { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','Accept':'application/json'}, body:JSON.stringify({email, product_slug:activeProductSlug}) });
+        let data = {}; try { data = await response.json(); } catch (error) {}
+        if (!response.ok) { messageDiv.textContent = 'We could not send an access code right now. Please try again or contact Low Brass Lessons.'; return; }
         messageDiv.textContent = data.message || 'If this purchase exists, a code will be sent shortly.';
-        stepEmail.classList.add('hidden');
-        stepOtp.classList.remove('hidden');
-      })
-      .catch(()=>{ messageDiv.textContent='We could not send an access code right now. Please try again or contact Low Brass Lessons.'; });
+        stepEmail.classList.add('hidden'); stepOtp.classList.remove('hidden');
+        window.setTimeout(function () { otpInput.focus(); }, 50);
+      } catch (error) { messageDiv.textContent = 'We could not send an access code right now. Please try again or contact Low Brass Lessons.'; }
+      finally { sendBtn.disabled = false; }
     });
 
-    verifyBtn.addEventListener('click', function(){
-      const email = (emailInput.value || '').trim();
-    if (isEmailLike(email)) {
-      mrmSavePiecePaymentEmail(email);
-    }
-      const otp = (otpInput.value || '').trim();
-      if(!otp){ messageDiv.textContent='Enter the code you received.'; return; }
-      if(!activeProductSlug){ messageDiv.textContent='This option is temporarily unavailable. Please contact Low Brass Lessons.'; return; }
-
-      messageDiv.textContent='Verifying...';
-
-      fetch(apiBase.replace(/\/$/,'') + '/verify-otp', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ email: email, product_slug: activeProductSlug, otp: otp })
-      })
-      .then(async (r) => {
-        const txt = await r.text();
-        let data=null;
-        try{ data = JSON.parse(txt); }catch(e){ data=null; }
-        if(!r.ok){
-          messageDiv.textContent=(data && data.message) ? data.message : 'We could not verify that code right now. Please try again.';
-          return null;
-        }
-        return data || {};
-      })
-      .then(data=>{
-        if(!data) return;
-        if(data.ok && data.access_url){
-          window.location.href = data.access_url;
-          return;
-        }
-        messageDiv.textContent = data.message || 'Invalid code.';
-      })
-      .catch(()=>{ messageDiv.textContent='We could not verify that code right now. Please try again or contact Low Brass Lessons.'; });
+    verifyBtn.addEventListener('click', async function(){
+      const email = (emailInput.value || '').trim(); const otp = (otpInput.value || '').trim();
+      if (isEmailLike(email)) mrmSavePiecePaymentEmail(email);
+      if (!email || !isEmailLike(email)) { messageDiv.textContent = 'Please enter a valid email address.'; stepEmail.classList.remove('hidden'); stepOtp.classList.add('hidden'); return; }
+      if (!otp) { messageDiv.textContent = 'Enter the code you received.'; return; }
+      if (!activeProductSlug) { messageDiv.textContent = 'This access option is temporarily unavailable. Please contact Low Brass Lessons.'; return; }
+      verifyBtn.disabled = true; messageDiv.textContent = 'Verifying...';
+      try {
+        const response = await fetch(mrmProductAccessApiUrl('verify-otp'), { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','Accept':'application/json'}, body:JSON.stringify({email, product_slug:activeProductSlug, otp}) });
+        let data = {}; try { data = await response.json(); } catch (error) {}
+        if (!response.ok) { messageDiv.textContent = data.message || 'We could not verify that code right now. Please try again.'; return; }
+        if (data.ok && data.access_url) { window.location.href = data.access_url; return; }
+        messageDiv.textContent = data.message || 'We could not verify that code right now. Please try again.';
+      } catch (error) { messageDiv.textContent = 'We could not verify that code right now. Please try again.'; }
+      finally { verifyBtn.disabled = false; }
     });
   }
 

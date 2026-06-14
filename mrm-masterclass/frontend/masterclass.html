@@ -1494,9 +1494,14 @@ body.mrm-modal-open {
 
   function getConfig() {
     const globalConfig = window.MRM_MASTERCLASS || {};
-
+    const wpApiRoot = window.wpApiSettings && window.wpApiSettings.root
+      ? String(window.wpApiSettings.root).replace(/\/+$/, '')
+      : '';
+    const fallbackRestBase = wpApiRoot
+      ? wpApiRoot + '/mrm-masterclass/v1'
+      : (window.location.origin + '/wp-json/mrm-masterclass/v1');
     return {
-      restBase: root.dataset.restBase || globalConfig.restBase || '/wp-json/mrm-masterclass/v1',
+      restBase: root.dataset.restBase || globalConfig.restBase || fallbackRestBase,
       stripePublicKey: root.dataset.stripePublicKey || globalConfig.stripePublicKey || '',
       currency: root.dataset.currency || globalConfig.currency || 'usd'
     };
@@ -1510,11 +1515,9 @@ body.mrm-modal-open {
     const msg = message || 'We could not load Masterclass registration right now. Please refresh the page or contact Low Brass Lessons for help.';
     const loading = byId('mrm-masterclass-loading');
     const errorBox = byId('mrm-masterclass-error');
-
-    if (loading) {
-      loading.hidden = true;
-    }
-
+    const eventsEl = byId('mrm-masterclass-events');
+    if (loading) loading.hidden = true;
+    if (eventsEl && !eventsEl.children.length) eventsEl.innerHTML = '';
     if (errorBox) {
       errorBox.textContent = msg;
       errorBox.hidden = false;
@@ -2560,75 +2563,40 @@ body.mrm-modal-open {
   }
 
   async function loadEvents() {
-    if (window.__mrmMasterclassEventsLoading) {
-      return;
-    }
-
-    if ((anyMasterclassModalOpen() || window.__mrmMasterclassCheckoutInProgress) && window.__mrmMasterclassBootComplete) {
-      return;
-    }
-
+    if (window.__mrmMasterclassEventsLoading) return;
+    if ((anyMasterclassModalOpen() || window.__mrmMasterclassCheckoutInProgress) && window.__mrmMasterclassBootComplete) return;
     window.__mrmMasterclassEventsLoading = true;
-
     const loading = byId('mrm-masterclass-loading');
-
+    const eventsEl = byId('mrm-masterclass-events');
     if (loading) {
       loading.hidden = false;
+      loading.textContent = 'Loading upcoming masterclasses…';
     }
-
+    if (eventsEl) eventsEl.innerHTML = '';
     clearError();
-
     try {
-
-      await fetchJson(restUrlNoCache('health'), {
-        method: 'GET',
-        credentials: 'same-origin',
-        headers: {
-          'Accept': 'application/json',
-          'Cache-Control': 'no-cache'
-        },
-        cache: 'no-store'
-      });
-
       const result = await fetchJson(restUrlNoCache('events'), {
-        method: 'GET',
-        credentials: 'same-origin',
-        headers: {
-          'Accept': 'application/json',
-          'Cache-Control': 'no-cache'
-        },
-        cache: 'no-store'
+        method: 'GET', credentials: 'same-origin',
+        headers: { 'Accept': 'application/json', 'Cache-Control': 'no-cache' }, cache: 'no-store'
       });
-
-      const events = result.data && Array.isArray(result.data.events) ? result.data.events : [];
+      const events = result && result.data && Array.isArray(result.data.events) ? result.data.events : [];
       state.events = events;
-
       window.MRM_MASTERCLASS_EVENTS = events;
-
       renderEvents(events);
-
+      if (loading) loading.hidden = true;
       if (window.location.hash && window.location.hash.indexOf('#mrm-masterclass-event-') === 0) {
         window.setTimeout(function () {
           const target = document.querySelector(window.location.hash);
-
           if (target) {
-            target.scrollIntoView({
-              behavior: 'smooth',
-              block: 'center'
-            });
-
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
             target.classList.add('mrm-masterclass-event-card-highlight');
-
-            window.setTimeout(function () {
-              target.classList.remove('mrm-masterclass-event-card-highlight');
-            }, 2200);
+            window.setTimeout(function () { target.classList.remove('mrm-masterclass-event-card-highlight'); }, 2200);
           }
         }, 500);
       }
-
       window.__mrmMasterclassBootComplete = true;
     } catch (error) {
-      showError('We could not load Masterclass registration right now. Please refresh the page or contact Low Brass Lessons for help.');
+      showError('We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.');
     } finally {
       window.__mrmMasterclassEventsLoading = false;
     }
@@ -3261,6 +3229,14 @@ body.mrm-modal-open {
     }
   });
 
+  window.addEventListener('error', function () {
+    if (!window.__mrmMasterclassBootComplete) showError('We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.');
+  });
+
+  window.addEventListener('unhandledrejection', function () {
+    if (!window.__mrmMasterclassBootComplete) showError('We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.');
+  });
+
   function bootMasterclassPage() {
     if (window.__mrmMasterclassBootComplete) {
       return;
@@ -3298,6 +3274,13 @@ body.mrm-modal-open {
   function startWhenReady() {
     bindModalControls();
     bootMasterclassPage();
+    window.setTimeout(function () {
+      const loading = byId('mrm-masterclass-loading');
+      const eventsEl = byId('mrm-masterclass-events');
+      if (loading && !loading.hidden && !window.__mrmMasterclassBootComplete && eventsEl && !eventsEl.children.length) {
+        showError('We could not load upcoming Masterclasses right now. Please refresh the page or contact Low Brass Lessons for help.');
+      }
+    }, 8000);
   }
 
   if (document.readyState === 'loading') {
