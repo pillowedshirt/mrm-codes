@@ -193,7 +193,7 @@ class MRM_Lesson_Scheduler {
         return array( 'tin_type' => $tin_type, 'tin' => $tin, 'last4' => $tin !== '' ? substr( $tin, -4 ) : '', 'loaded' => $tin_type !== '' && strlen( $tin ) === 9 );
     }
 
-    protected function mrm_get_1099_tax_secret_record( $payee_type, $related_instructor_id = 0 ) {
+    protected function mrm_get_1099_tax_secret_record( $payee_type, $related_instructor_id = 0, $related_presenter_id = 0 ) {
         $bundle = $this->mrm_get_1099_tax_secret_bundle();
         $payee_type = strtolower( (string) $payee_type );
         if ( $payee_type === 'payer' ) {
@@ -206,6 +206,11 @@ class MRM_Lesson_Scheduler {
             $instructor_id = (string) absint( $related_instructor_id );
             $instructors = isset( $bundle['instructors'] ) && is_array( $bundle['instructors'] ) ? $bundle['instructors'] : array();
             return $this->mrm_normalize_1099_tax_secret_record( $instructors[ $instructor_id ] ?? array() );
+        }
+        if ( $payee_type === 'presenter' ) {
+            $presenter_id = (string) absint( $related_presenter_id );
+            $presenters = isset( $bundle['presenters'] ) && is_array( $bundle['presenters'] ) ? $bundle['presenters'] : array();
+            return $this->mrm_normalize_1099_tax_secret_record( $presenters[ $presenter_id ] ?? array() );
         }
         return $this->mrm_normalize_1099_tax_secret_record( array() );
     }
@@ -226,10 +231,14 @@ class MRM_Lesson_Scheduler {
         $payee = is_array( $payee ) ? $payee : array();
         $payee_type = (string) ( $payee['payee_type'] ?? '' );
         $related_instructor_id = (int) ( $payee['related_instructor_id'] ?? 0 );
+        $related_presenter_id = (int) ( $payee['related_presenter_id'] ?? 0 );
+
         if ( $payee_type === 'composer' ) {
             $secret = $this->mrm_get_1099_tax_secret_record( 'composer' );
         } elseif ( $payee_type === 'instructor' ) {
             $secret = $this->mrm_get_1099_tax_secret_record( 'instructor', $related_instructor_id );
+        } elseif ( $payee_type === 'presenter' ) {
+            $secret = $this->mrm_get_1099_tax_secret_record( 'presenter', 0, $related_presenter_id );
         } else {
             $secret = $this->mrm_normalize_1099_tax_secret_record( array() );
         }
@@ -257,6 +266,14 @@ class MRM_Lesson_Scheduler {
                 $instructor_id = (int) ( $payee['related_instructor_id'] ?? 0 );
                 $secret = $this->mrm_get_1099_tax_secret_record( 'instructor', $instructor_id );
                 if ( empty( $secret['loaded'] ) ) { $name = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? ( 'Instructor ' . $instructor_id ) ) ); $issues[] = 'Instructor TIN is not available from AWS path instructors.' . $instructor_id . '.tin for ' . $name . '.'; }
+            }
+            if ( $payee_type === 'presenter' ) {
+                $presenter_id = (int) ( $payee['related_presenter_id'] ?? 0 );
+                $secret = $this->mrm_get_1099_tax_secret_record( 'presenter', 0, $presenter_id );
+                if ( empty( $secret['loaded'] ) ) {
+                    $name = (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? ( 'Presenter ' . $presenter_id ) ) );
+                    $issues[] = 'Presenter TIN is not available from AWS path presenters.' . $presenter_id . '.tin for ' . $name . '.';
+                }
             }
         }
         return $issues;
@@ -2562,6 +2579,27 @@ protected function mrm_get_google_service_account_json() {
     UNIQUE KEY year_quarter_key (tax_year, tax_quarter, calc_key)
 ) {$charset_collate};";
         dbDelta( $sql_calc_cache );
+
+
+        $payroll_imports_table = $wpdb->prefix . 'mrm_tax_payroll_imports';
+        $sql_payroll_imports = "CREATE TABLE {$payroll_imports_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tax_year INT NOT NULL,
+    tax_quarter TINYINT NOT NULL DEFAULT 0,
+    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
+    payee_label VARCHAR(190) NOT NULL DEFAULT '',
+    gross_wages DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    source_label VARCHAR(190) NOT NULL DEFAULT '',
+    notes TEXT NULL,
+    imported_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY tax_year (tax_year),
+    KEY tax_quarter (tax_quarter),
+    KEY environment_mode (environment_mode)
+) {$charset_collate};";
+        dbDelta( $sql_payroll_imports );
 
         // Backfill recurring anchor for older lesson rows so moved recurring events
         // can still be resolved against Google after reschedules.
@@ -9022,6 +9060,7 @@ protected function mrm_get_google_service_account_json() {
         $overview    = $this->mrm_get_calculations_overview( $selected_year, $selected_quarter, $environment_mode );
         $instructors = $this->mrm_get_calculations_instructor_summary( $selected_year, $selected_quarter, $environment_mode );
         $composer    = $this->mrm_get_calculations_composer_summary( $selected_year, $selected_quarter, $environment_mode );
+        $presenters  = $this->mrm_get_calculations_presenter_summary( $selected_year, $selected_quarter, $environment_mode );
         $mileage     = $this->mrm_get_calculations_mileage_summary( $selected_year, $selected_quarter, $environment_mode );
         $mileage_detail = $this->mrm_get_calculations_mileage_detail( $selected_year, $selected_quarter, $environment_mode );
         $expenses    = $this->mrm_get_calculations_expense_summary( $selected_year, $selected_quarter, $environment_mode );
@@ -9171,6 +9210,7 @@ protected function mrm_get_google_service_account_json() {
                     <tr><td>Estimated Stripe Fees</td><td><?php echo esc_html( number_format( (float) $overview['stripe_fees'], 2 ) ); ?> <small>Calculated from your saved Stripe fee settings, not exact Stripe balance transactions.</small></td></tr>
                     <tr><td>Paid-Out Instructor Wages</td><td><?php echo esc_html( number_format( (float) $overview['instructor_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Paid-Out Composer Wages</td><td><?php echo esc_html( number_format( (float) $overview['composer_wages'], 2 ) ); ?></td></tr>
+                    <tr><td>Paid-Out Masterclass Presenter Wages</td><td><?php echo esc_html( number_format( (float) $overview['presenter_wages'], 2 ) ); ?></td></tr>
                     <tr><td>Manual Expenses</td><td><?php echo esc_html( number_format( (float) $overview['manual_expenses'], 2 ) ); ?></td></tr>
                     <tr><td>Payroll / W-2 Wages</td><td><?php echo esc_html( number_format( (float) $overview['payroll_wages'], 2 ) ); ?></td></tr>
                     
@@ -9184,6 +9224,10 @@ protected function mrm_get_google_service_account_json() {
             <h2 style="margin-top:28px;">Paid-Out Composer Sheet Music Wage Summary</h2>
             <p class="description">This section only includes composer payout ledger rows marked <code>paid_out</code> during the selected period. Pending subscription/add-on obligations are excluded until actually paid out.</p>
             <?php $this->mrm_render_calculations_composer_table( $composer ); ?>
+
+            <h2 style="margin-top:28px;">Paid-Out Masterclass Presenter Wage Summary</h2>
+            <p class="description">This section pulls paid-out presenter rows from the Masterclass payment ledger. Presenter tax profiles remain managed in the Masterclass plugin, but the paid-out 1099 summary appears here so annual calculations can be run once.</p>
+            <?php $this->mrm_render_calculations_presenter_table( $presenters ); ?>
 
             <h2 style="margin-top:28px;">Payroll / Officer Compensation Summary</h2>
             <?php $this->mrm_render_calculations_payroll_table( $payroll ); ?>
@@ -9367,6 +9411,7 @@ protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $
     $stripe_fees         = $this->mrm_calc_estimated_stripe_fees( $tax_year, $tax_quarter, $environment_mode );
     $instructor_wages    = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'instructor' );
     $composer_wages      = $this->mrm_calc_payout_total_by_payee_type( $tax_year, $tax_quarter, $environment_mode, 'composer' );
+    $presenter_wages     = $this->mrm_calc_total_masterclass_presenter_wages( $tax_year, $tax_quarter, $environment_mode );
     $manual_expenses     = $this->mrm_calc_total_manual_expenses( $tax_year, $tax_quarter, $environment_mode );
     $payroll_wages       = $this->mrm_calc_total_payroll_wages( $tax_year, $tax_quarter, $environment_mode );
     $estimated_net_income = $gross_revenue
@@ -9374,6 +9419,7 @@ protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $
         - $stripe_fees
         - $instructor_wages
         - $composer_wages
+        - $presenter_wages
         - $manual_expenses
         - $payroll_wages;
 
@@ -9385,6 +9431,7 @@ protected function mrm_get_calculations_overview( $tax_year, $tax_quarter = 0, $
         'stripe_fees'           => $stripe_fees,
         'instructor_wages'      => $instructor_wages,
         'composer_wages'        => $composer_wages,
+        'presenter_wages'       => $presenter_wages,
         'manual_expenses'       => $manual_expenses,
         'payroll_wages'         => $payroll_wages,
                 'estimated_net_income'  => $estimated_net_income,
@@ -9548,6 +9595,95 @@ protected function mrm_calc_total_manual_expenses( $tax_year, $tax_quarter = 0, 
     }
 
     return round( (float) $wpdb->get_var( $sql ), 2 );
+}
+
+protected function mrm_calc_total_masterclass_presenter_wages( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+    $ledger = $wpdb->prefix . 'mrm_masterclass_payment_ledger';
+
+    if ( ! $this->mrm_table_exists( $ledger ) ) {
+        return 0.0;
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT COALESCE(SUM(presenter_share_cents),0)
+         FROM {$ledger}
+         WHERE ledger_type = 'registration_payment'
+           AND status = 'paid_out'
+           AND presenter_share_cents > 0
+           AND (payout_eligible_at IS NULL OR payout_eligible_at <= %s)
+           AND COALESCE(paid_out_at, paid_at, updated_at, created_at) >= %s
+           AND COALESCE(paid_out_at, paid_at, updated_at, created_at) <= %s",
+        current_time( 'mysql' ),
+        $start,
+        $end
+    );
+
+    return round( (float) $wpdb->get_var( $sql ) / 100, 2 );
+}
+
+protected function mrm_get_calculations_presenter_summary( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+    global $wpdb;
+
+    list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+    $ledger     = $wpdb->prefix . 'mrm_masterclass_payment_ledger';
+    $presenters = $wpdb->prefix . 'mrm_masterclass_presenters';
+    $tax        = $wpdb->prefix . 'mrm_masterclass_presenter_tax_profiles';
+
+    if ( ! $this->mrm_table_exists( $ledger ) || ! $this->mrm_table_exists( $presenters ) ) {
+        return array();
+    }
+
+    $tax_join = '';
+    $tax_select = "
+        '' AS legal_name,
+        '' AS business_name,
+        1 AS is_1099_eligible,
+        0 AS is_employee,
+        0 AS exclude_from_1099
+    ";
+
+    if ( $this->mrm_table_exists( $tax ) ) {
+        $tax_join = "LEFT JOIN {$tax} t ON t.presenter_id = p.id";
+        $tax_select = "
+            COALESCE(MAX(t.legal_name), '') AS legal_name,
+            COALESCE(MAX(t.business_name), '') AS business_name,
+            COALESCE(MAX(t.is_1099_eligible), 1) AS is_1099_eligible,
+            COALESCE(MAX(t.is_employee), 0) AS is_employee,
+            COALESCE(MAX(t.exclude_from_1099), 0) AS exclude_from_1099
+        ";
+    }
+
+    $sql = $wpdb->prepare(
+        "SELECT
+            p.id AS presenter_id,
+            MAX(p.name) AS presenter_name,
+            MAX(p.email) AS presenter_email,
+            {$tax_select},
+            COUNT(*) AS payout_count,
+            COALESCE(SUM(l.gross_cents),0) AS gross_cents,
+            COALESCE(SUM(l.presenter_share_cents),0) AS net_cents,
+            MIN(COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at)) AS first_paid_at,
+            MAX(COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at)) AS last_paid_at
+         FROM {$ledger} l
+         LEFT JOIN {$presenters} p ON p.id = l.presenter_id
+         {$tax_join}
+         WHERE l.ledger_type = 'registration_payment'
+           AND l.status = 'paid_out'
+           AND l.presenter_share_cents > 0
+           AND COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at) >= %s
+           AND COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at) <= %s
+         GROUP BY p.id
+         ORDER BY presenter_name ASC",
+        $start,
+        $end
+    );
+
+    return $wpdb->get_results( $sql, ARRAY_A );
 }
 
 protected function mrm_calc_total_payroll_wages( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
@@ -9984,6 +10120,32 @@ protected function mrm_render_calculations_composer_table( $rows ) {
             echo '<td><strong>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</strong></td>';
             echo '<td>' . esc_html( trim( $first_paid . ( $last_paid && $last_paid !== $first_paid ? ' – ' . $last_paid : '' ) ) ) . '</td>';
             echo '<td>' . esc_html( mb_strimwidth( (string) ( $row['notes'] ?? '' ), 0, 120, '…' ) ) . '</td>';
+            echo '</tr>';
+        }
+    }
+
+    echo '</tbody></table>';
+}
+
+protected function mrm_render_calculations_presenter_table( $rows ) {
+    echo '<table class="widefat striped"><thead><tr><th>Presenter</th><th>Email</th><th>Paid-Out Entries</th><th>Gross Paid</th><th>Presenter 1099 Amount</th><th>1099 Status</th><th>Paid Date Range</th></tr></thead><tbody>';
+
+    if ( empty( $rows ) ) {
+        echo '<tr><td colspan="7">No paid-out masterclass presenter payout data found for the selected period.</td></tr>';
+    } else {
+        foreach ( $rows as $row ) {
+            $first_paid = (string) ( $row['first_paid_at'] ?? '' );
+            $last_paid  = (string) ( $row['last_paid_at'] ?? '' );
+            $eligible   = ! empty( $row['is_1099_eligible'] ) && empty( $row['is_employee'] ) && empty( $row['exclude_from_1099'] );
+
+            echo '<tr>';
+            echo '<td>' . esc_html( (string) ( $row['presenter_name'] ?? 'Unknown presenter' ) ) . '<br><small>ID: ' . esc_html( (string) ( $row['presenter_id'] ?? '' ) ) . '</small></td>';
+            echo '<td>' . esc_html( (string) ( $row['presenter_email'] ?? '' ) ) . '</td>';
+            echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
+            echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
+            echo '<td><strong>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</strong></td>';
+            echo '<td>' . esc_html( $eligible ? 'Eligible' : 'Excluded / employee / not eligible' ) . '</td>';
+            echo '<td>' . esc_html( trim( $first_paid . ( $last_paid && $last_paid !== $first_paid ? ' – ' . $last_paid : '' ) ) ) . '</td>';
             echo '</tr>';
         }
     }
@@ -10758,11 +10920,88 @@ public function handle_mrm_clear_all_mileage_cache() {
             }
         }
 
+        foreach ( $this->mrm_get_paid_out_masterclass_1099_payees( $tax_year, $tax_quarter, $environment_mode ) as $presenter_row ) {
+            $rows[] = $presenter_row;
+        }
+
         foreach ( $rows as $idx => $row ) {
             $rows[ $idx ] = $this->mrm_apply_aws_tax_secret_to_payee( $row );
         }
 
         return $rows;
+    }
+
+    protected function mrm_get_paid_out_masterclass_1099_payees( $tax_year, $tax_quarter = 0, $environment_mode = 'live' ) {
+        global $wpdb;
+
+        list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
+
+        $ledger     = $wpdb->prefix . 'mrm_masterclass_payment_ledger';
+        $presenters = $wpdb->prefix . 'mrm_masterclass_presenters';
+        $tax        = $wpdb->prefix . 'mrm_masterclass_presenter_tax_profiles';
+
+        if ( ! $this->mrm_table_exists( $ledger ) || ! $this->mrm_table_exists( $presenters ) || ! $this->mrm_table_exists( $tax ) ) {
+            return array();
+        }
+
+        $sql = $wpdb->prepare(
+            "SELECT
+                'presenter' AS payee_type,
+                CONCAT('presenter:', p.id) AS payee_key,
+                0 AS related_instructor_id,
+                p.id AS related_presenter_id,
+                '' AS composer_key,
+                COALESCE(NULLIF(MAX(t.legal_name), ''), MAX(p.name), CONCAT('Presenter ', p.id)) AS display_name,
+                COALESCE(NULLIF(MAX(t.legal_name), ''), MAX(p.name), CONCAT('Presenter ', p.id)) AS legal_name,
+                COALESCE(MAX(t.business_name), '') AS business_name,
+                COALESCE(NULLIF(MAX(t.email), ''), MAX(p.email), '') AS email,
+                COALESCE(MAX(t.tax_classification), '') AS tax_classification,
+                '' AS tax_classification_other,
+                COALESCE(MAX(t.address_line1), '') AS mailing_address_1,
+                COALESCE(MAX(t.address_line2), '') AS mailing_address_2,
+                COALESCE(MAX(t.city), '') AS mailing_city,
+                COALESCE(MAX(t.state), '') AS mailing_state,
+                COALESCE(MAX(t.zip), '') AS mailing_postal_code,
+                'US' AS mailing_country,
+                COALESCE(MAX(t.tin_type), '') AS tin_type,
+                COALESCE(MAX(t.tin_last4), '') AS tin_last4,
+                '' AS tin_full_temp,
+                COALESCE(MAX(t.w9_received), 0) AS w9_received,
+                MAX(t.w9_received_date) AS w9_received_date,
+                '' AS w9_file_note,
+                0 AS backup_withholding_required,
+                0 AS backup_withholding_cents,
+                COALESCE(MAX(t.is_1099_eligible), 1) AS is_1099_eligible,
+                COALESCE(MAX(t.is_employee), 0) AS is_employee,
+                COALESCE(MAX(t.exclude_from_1099), 0) AS exclude_from_1099,
+                '' AS connected_account_id,
+                COUNT(*) AS payout_count,
+                COALESCE(SUM(l.gross_cents), 0) AS gross_cents,
+                COALESCE(SUM(l.presenter_share_cents), 0) AS net_cents,
+                MIN(COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at)) AS first_paid_at,
+                MAX(COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at)) AS last_paid_at,
+                GROUP_CONCAT(l.id ORDER BY l.id ASC SEPARATOR ',') AS payout_ledger_ids,
+                GROUP_CONCAT(DISTINCT CONCAT('masterclass_event:', l.event_id) ORDER BY l.event_id ASC SEPARATOR ', ') AS source_refs
+             FROM {$ledger} l
+             INNER JOIN {$presenters} p ON p.id = l.presenter_id
+             LEFT JOIN {$tax} t ON t.presenter_id = p.id
+             WHERE l.ledger_type = 'registration_payment'
+               AND l.status = 'paid_out'
+               AND COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at) >= %s
+               AND COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at) <= %s
+               AND l.presenter_share_cents > 0
+             GROUP BY p.id
+             HAVING net_cents > 0
+                AND is_1099_eligible = 1
+                AND is_employee = 0
+                AND exclude_from_1099 = 0
+             ORDER BY legal_name ASC, display_name ASC",
+            $start,
+            $end
+        );
+
+        $rows = $wpdb->get_results( $sql, ARRAY_A );
+        return is_array( $rows ) ? $rows : array();
     }
 
     protected function mrm_write_1099_summary_csv( $csv_path, $payees, $tax_year, $tax_quarter ) {
@@ -10772,7 +11011,7 @@ public function handle_mrm_clear_all_mileage_cache() {
         }
 
         $this->mrm_write_csv_row( $out, array(
-            'tax_year', 'period', 'payee_type', 'payee_key', 'related_instructor_id', 'composer_key',
+            'tax_year', 'period', 'payee_type', 'payee_key', 'related_instructor_id', 'related_presenter_id', 'composer_key',
             'display_name', 'legal_name', 'business_name', 'email',
             'tax_classification', 'tax_classification_other',
             'mailing_address_1', 'mailing_address_2', 'mailing_city', 'mailing_state', 'mailing_postal_code', 'mailing_country',
@@ -10790,6 +11029,7 @@ public function handle_mrm_clear_all_mileage_cache() {
                 (string) ( $payee['payee_type'] ?? '' ),
                 (string) ( $payee['payee_key'] ?? '' ),
                 (string) ( $payee['related_instructor_id'] ?? '' ),
+                (string) ( $payee['related_presenter_id'] ?? '' ),
                 (string) ( $payee['composer_key'] ?? '' ),
                 (string) ( $payee['display_name'] ?? '' ),
                 (string) ( $payee['legal_name'] ?? ( $payee['display_name'] ?? '' ) ),
@@ -10850,7 +11090,7 @@ public function handle_mrm_clear_all_mileage_cache() {
             'INCLUSION RULES',
             '- Included payout ledger rows with paid-out statuses only.',
             '- Date filter uses payout ledger updated_at timestamps for the selected period.',
-            '- Included payee types: instructor and composer.',
+            '- Included payee types: instructor, composer, and masterclass presenter.',
             '- Box 1 amount is based on net_cents paid to the contractor.',
             '- Backup withholding is shown in Box 4 when present.',
             '',
