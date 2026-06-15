@@ -2167,6 +2167,7 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'admin_post_mrm_clear_all_mileage_cache', array( $this, 'handle_mrm_clear_all_mileage_cache' ) );
 
         add_action( 'admin_init', array( $this, 'register_settings' ) );
+        add_action( 'admin_init', array( $this, 'mrm_maybe_ensure_tax_payroll_imports_table' ) );
         add_shortcode( 'mrm_contact_form', array( $this, 'render_contact_form_shortcode' ) );
 
         // add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
@@ -2258,6 +2259,33 @@ protected function mrm_get_google_service_account_json() {
         wp_clear_scheduled_hook( 'mrm_scheduler_check_safety_exceptions' );
         wp_clear_scheduled_hook( 'mrm_scheduler_send_feedback_requests' );
         wp_clear_scheduled_hook( 'mrm_scheduler_send_meeting_reminders' );
+    }
+
+    public function mrm_maybe_ensure_tax_payroll_imports_table() {
+        if ( ! is_admin() || ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+
+        $already_ready = get_option( 'mrm_tax_payroll_imports_table_ready', '' );
+        if ( '1' === $already_ready ) {
+            return;
+        }
+
+        global $wpdb;
+        $table = $wpdb->prefix . 'mrm_tax_payroll_imports';
+
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+        if ( $exists === $table ) {
+            update_option( 'mrm_tax_payroll_imports_table_ready', '1', false );
+            return;
+        }
+
+        self::mrm_ensure_tax_payroll_imports_table();
+
+        $exists_after = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+        if ( $exists_after === $table ) {
+            update_option( 'mrm_tax_payroll_imports_table_ready', '1', false );
+        }
     }
 
     protected static function mrm_ensure_tax_payroll_imports_table() {
@@ -2613,6 +2641,7 @@ protected function mrm_get_google_service_account_json() {
 
 
         self::mrm_ensure_tax_payroll_imports_table();
+        update_option( 'mrm_tax_payroll_imports_table_ready', '1', false );
 
         // Backfill recurring anchor for older lesson rows so moved recurring events
         // can still be resolved against Google after reschedules.
@@ -9062,6 +9091,7 @@ protected function mrm_get_google_service_account_json() {
         }
 
         self::mrm_ensure_tax_payroll_imports_table();
+        update_option( 'mrm_tax_payroll_imports_table_ready', '1', false );
 
         $settings = get_option( 'mrm_calculations_settings', array(
             'default_tax_year' => (int) gmdate( 'Y' ),
