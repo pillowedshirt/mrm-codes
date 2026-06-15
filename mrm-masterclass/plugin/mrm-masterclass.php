@@ -76,74 +76,9 @@ if ( ! defined( 'MRM_MASTERCLASS_FRONTEND_URL' ) ) {
 
 if ( ! function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
 	function mrm_lowbrass_masterclass_emergency_file_log( $message, $context = array() ) {
-		if ( ! defined( 'WP_CONTENT_DIR' ) ) {
-			return;
-		}
-
-		$file = trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log';
-
-		$safe_context = array();
-
-		if ( is_array( $context ) ) {
-			foreach ( $context as $key => $value ) {
-				$key = function_exists( 'sanitize_key' ) ? sanitize_key( (string) $key ) : preg_replace( '/[^a-z0-9_\-]/i', '', (string) $key );
-
-				if ( preg_match( '/secret|token|password|private|authorization|cookie|nonce|key|tin|ssn|ein/i', $key ) ) {
-					$safe_context[ $key ] = '[redacted]';
-					continue;
-				}
-
-				if ( is_scalar( $value ) ) {
-					$string_value = (string) $value;
-
-					if ( preg_match( '/sk_live_|sk_test_|pk_live_|pk_test_|whsec_|-----BEGIN|Bearer\s+/i', $string_value ) ) {
-						$safe_context[ $key ] = '[redacted]';
-						continue;
-					}
-				}
-
-				if ( is_scalar( $value ) || null === $value ) {
-					$value = (string) $value;
-
-					if ( strlen( $value ) > 700 ) {
-						$value = substr( $value, 0, 700 ) . '...[truncated]';
-					}
-
-					$safe_context[ $key ] = $value;
-				} elseif ( is_array( $value ) ) {
-					$safe_context[ $key ] = '[array:' . count( $value ) . ']';
-				} elseif ( is_object( $value ) ) {
-					$safe_context[ $key ] = '[object:' . get_class( $value ) . ']';
-				} else {
-					$safe_context[ $key ] = '[non-scalar]';
-				}
-			}
-		}
-
-		$line = '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] ' . (string) $message;
-
-		if ( ! empty( $safe_context ) ) {
-			$encoded = function_exists( 'wp_json_encode' ) ? wp_json_encode( $safe_context ) : json_encode( $safe_context );
-
-			if ( false !== $encoded ) {
-				$line .= ' | ' . $encoded;
-			}
-		}
-
-		$line .= PHP_EOL;
-
-		@file_put_contents( $file, $line, FILE_APPEND | LOCK_EX );
+		return;
 	}
 }
-
-mrm_lowbrass_masterclass_emergency_file_log(
-	'Masterclass PHP file loaded before class instantiation.',
-	array(
-		'plugin_file' => defined( 'MRM_MASTERCLASS_FILE' ) ? MRM_MASTERCLASS_FILE : __FILE__,
-		'request_uri' => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-		'is_admin' => is_admin() ? 1 : 0,
-	)
-);
 
 if ( ! class_exists( 'LowBrass_MRM_Masterclass_Plugin', false ) ) {
 
@@ -167,33 +102,6 @@ class LowBrass_MRM_Masterclass_Plugin {
 	const ADMIN_EVENTS_SLUG = 'mrm-masterclass-events';
 
 	public function __construct() {
-	/*
-	 * Critical safety rule:
-	 * Never register a shutdown/error handler unless the callback method exists.
-	 * A missing callback here can fatal before this plugin can write any debug log.
-	 */
-	if ( method_exists( $this, 'mrm_mc_shutdown_fatal_error_logger' ) ) {
-		register_shutdown_function( array( $this, 'mrm_mc_shutdown_fatal_error_logger' ) );
-	}
-
-	if ( method_exists( $this, 'mrm_mc_runtime_error_logger' ) ) {
-		set_error_handler( array( $this, 'mrm_mc_runtime_error_logger' ) );
-	}
-
-	$this->mrm_mc_debug_log(
-		'Masterclass plugin constructor started safely.',
-		array(
-			'php_version'      => PHP_VERSION,
-			'wp_version'       => function_exists( 'get_bloginfo' ) ? get_bloginfo( 'version' ) : '',
-			'is_admin'         => is_admin() ? 1 : 0,
-			'request_uri'      => isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '',
-			'plugin_file'      => defined( 'MRM_MASTERCLASS_FILE' ) ? MRM_MASTERCLASS_FILE : '',
-			'plugin_dir'       => defined( 'MRM_MASTERCLASS_DIR' ) ? MRM_MASTERCLASS_DIR : '',
-			'db_version_code'  => self::DB_VERSION,
-			'db_version_saved' => get_option( 'mrm_masterclass_db_version', '' ),
-		)
-	);
-
 	$this->mrm_mc_add_action_if_method_exists( 'init', 'runtime_upgrade' );
 	$this->mrm_mc_add_action_if_method_exists( 'rest_api_init', 'register_rest_routes' );
 	add_shortcode( 'mrm_masterclass_page', array( $this, 'render_masterclass_page_shortcode' ) );
@@ -207,20 +115,9 @@ class LowBrass_MRM_Masterclass_Plugin {
 	add_action( 'mrm_send_cross_plugin_email_test', array( $this, 'handle_cross_plugin_email_test' ), 10, 3 );
 	add_filter( 'mrm_cross_plugin_email_preview', array( $this, 'handle_cross_plugin_email_preview' ), 10, 2 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
-	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_admin_boot_debug' );
-	$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'render_activation_diagnostic_notice' );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_head', 'mrm_mc_admin_visibility_css', 20, 0 );
-	/*
-	 * Launch-mode logging:
-	 * Keep fatal/runtime/admin action logs, but do not log every normal WordPress lifecycle checkpoint.
-	 */
-
-	if ( method_exists( $this, 'mrm_mc_render_critical_error_notice' ) ) {
-		$this->mrm_mc_add_action_if_method_exists( 'admin_notices', 'mrm_mc_render_critical_error_notice' );
-		$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_maybe_clear_stored_critical_error', 1, 0 );
-	}
 
 	if ( method_exists( $this, 'add_cron_schedule' ) ) {
 		add_filter( 'cron_schedules', array( $this, 'add_cron_schedule' ) );
@@ -277,8 +174,6 @@ class LowBrass_MRM_Masterclass_Plugin {
 
 	$this->mrm_mc_add_filter_if_method_exists( 'query_vars', 'register_masterclass_gate_query_vars' );
 	$this->mrm_mc_add_action_if_method_exists( 'template_redirect', 'mrm_mc_handle_gate_request', 1, 0 );
-
-	$this->mrm_mc_debug_log( 'Masterclass plugin initialized safely with REST routes and pasted-page frontend configuration.' );
 }
 
 	public function mrm_mc_render_masterclass_page_content( $content ) {
@@ -618,62 +513,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	}
 
 	private static function safe_debug_log( $message, $context = array() ) {
-		if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
-			mrm_lowbrass_masterclass_emergency_file_log( $message, $context );
-			return;
-		}
-
-		if ( defined( 'WP_CONTENT_DIR' ) ) {
-			$file = trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log';
-
-			$safe_context = array();
-
-			if ( is_array( $context ) ) {
-				foreach ( $context as $key => $value ) {
-					$key = preg_replace( '/[^a-z0-9_\-]/i', '', (string) $key );
-
-					if ( preg_match( '/secret|token|password|private|authorization|cookie|nonce|key|tin|ssn|ein/i', $key ) ) {
-						$safe_context[ $key ] = '[redacted]';
-						continue;
-					}
-
-					if ( is_scalar( $value ) || null === $value ) {
-						$value = (string) $value;
-
-						if ( preg_match( '/sk_live_|sk_test_|pk_live_|pk_test_|whsec_|-----BEGIN|Bearer\s+/i', $value ) ) {
-							$safe_context[ $key ] = '[redacted]';
-							continue;
-						}
-
-						if ( strlen( $value ) > 700 ) {
-							$value = substr( $value, 0, 700 ) . '...[truncated]';
-						}
-
-						$safe_context[ $key ] = $value;
-					} elseif ( is_array( $value ) ) {
-						$safe_context[ $key ] = '[array:' . count( $value ) . ']';
-					} elseif ( is_object( $value ) ) {
-						$safe_context[ $key ] = '[object:' . get_class( $value ) . ']';
-					} else {
-						$safe_context[ $key ] = '[non-scalar]';
-					}
-				}
-			}
-
-			$line = '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] ' . (string) $message;
-
-			if ( ! empty( $safe_context ) ) {
-				$encoded = function_exists( 'wp_json_encode' ) ? wp_json_encode( $safe_context ) : json_encode( $safe_context );
-
-				if ( false !== $encoded ) {
-					$line .= ' | ' . $encoded;
-				}
-			}
-
-			$line .= PHP_EOL;
-
-			@file_put_contents( $file, $line, FILE_APPEND | LOCK_EX );
-		}
+		return;
 	}
 
 	public static function activate() {
@@ -948,112 +788,11 @@ public function mrm_mc_log_shutdown_action_checkpoint() {
 }
 
 public function mrm_mc_shutdown_fatal_error_logger() {
-	$error = error_get_last();
-
-	if ( ! is_array( $error ) || empty( $error['type'] ) ) {
-		return;
-	}
-
-	$fatal_types = array(
-		E_ERROR,
-		E_PARSE,
-		E_CORE_ERROR,
-		E_COMPILE_ERROR,
-		E_USER_ERROR,
-		E_RECOVERABLE_ERROR,
-	);
-
-	if ( ! in_array( (int) $error['type'], $fatal_types, true ) ) {
-		return;
-	}
-
-	$file        = isset( $error['file'] ) ? (string) $error['file'] : '';
-	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
-
-	/*
-	 * Temporary broad fatal logging:
-	 * While the site/admin are still returning critical errors, log every fatal
-	 * that occurs while this plugin is active. This may catch a fatal caused by
-	 * a theme or another plugin during the /masterclass/ request.
-	 */
-	$record = array(
-		'type'             => (int) $error['type'],
-		'message'          => isset( $error['message'] ) ? (string) $error['message'] : '',
-		'file'             => $file,
-		'line'             => isset( $error['line'] ) ? (int) $error['line'] : 0,
-		'request_uri'      => $request_uri,
-		'wp_page'          => isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '',
-		'is_admin'         => is_admin() ? 1 : 0,
-		'is_rest'          => $this->mrm_mc_is_rest_request() ? 1 : 0,
-		'is_cron'          => ( function_exists( 'wp_doing_cron' ) && wp_doing_cron() ) ? 1 : 0,
-		'is_diagnostic'    => $this->mrm_mc_should_diagnose_current_request( $file ) ? 1 : 0,
-		'db_version_code'  => self::DB_VERSION,
-		'db_version_saved' => get_option( 'mrm_masterclass_db_version', '' ),
-		'timestamp'        => gmdate( 'c' ),
-	);
-
-	update_option( 'mrm_masterclass_last_critical_error', $record, false );
-
-	$this->mrm_mc_debug_log(
-		'CRITICAL PHP ERROR detected during request shutdown.',
-		$record
-	);
-
-	if ( function_exists( 'mrm_lowbrass_masterclass_emergency_file_log' ) ) {
-		mrm_lowbrass_masterclass_emergency_file_log(
-			'CRITICAL PHP ERROR detected by emergency shutdown logger.',
-			$record
-		);
-	}
+	return;
 }
 
 
 	public function mrm_mc_runtime_error_logger( $errno, $errstr, $errfile, $errline ) {
-	$watched_types = array(
-		E_WARNING,
-		E_USER_WARNING,
-		E_RECOVERABLE_ERROR,
-		E_DEPRECATED,
-		E_USER_DEPRECATED,
-		E_NOTICE,
-		E_USER_NOTICE,
-	);
-
-	if ( ! in_array( (int) $errno, $watched_types, true ) ) {
-		return false;
-	}
-
-	$errfile_string = (string) $errfile;
-
-	/*
-	 * Do not flood the Masterclass log with WordPress core dbDelta warnings.
-	 * The fatal we are fixing is plugin-local. Core upgrade.php warnings are
-	 * useful only when debugging schema formatting, not normal page loads.
-	 */
-	if ( false !== strpos( str_replace( '\\', '/', $errfile_string ), '/wp-admin/includes/upgrade.php' ) ) {
-		return false;
-	}
-
-	if ( ! $this->mrm_mc_should_diagnose_current_request( $errfile_string ) ) {
-		return false;
-	}
-
-	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
-
-	$this->mrm_mc_debug_log(
-		'PHP runtime warning/notice detected during watched Masterclass-related request.',
-		array(
-			'type'        => (int) $errno,
-			'message'     => (string) $errstr,
-			'file'        => $errfile_string,
-			'line'        => (int) $errline,
-			'request_uri' => $request_uri,
-			'wp_page'     => isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '',
-			'is_admin'    => is_admin() ? 1 : 0,
-			'is_rest'     => $this->mrm_mc_is_rest_request() ? 1 : 0,
-		)
-	);
-
 	return false;
 }
 
@@ -1087,46 +826,7 @@ public function mrm_mc_maybe_clear_stored_critical_error() {
 }
 
 public function mrm_mc_render_critical_error_notice() {
-	if ( ! is_admin() || ! current_user_can( 'manage_options' ) ) {
-		return;
-	}
-
-	$error = get_option( 'mrm_masterclass_last_critical_error', array() );
-
-	if ( ! is_array( $error ) || empty( $error['message'] ) ) {
-		return;
-	}
-
-	$timestamp = isset( $error['timestamp'] ) ? sanitize_text_field( (string) $error['timestamp'] ) : '';
-	$clear_url = wp_nonce_url(
-		add_query_arg(
-			array(
-				'mrm_masterclass_action' => 'clear_last_critical_error',
-			)
-		),
-		'mrm_masterclass_clear_last_critical_error'
-	);
-
-	echo '<div class="notice notice-warning">';
-	echo '<p><strong>MRM Masterclass has a stored critical PHP error notice.</strong></p>';
-	echo '<p>This notice may be from an earlier failed request. If the site/admin now loads and the newest <code>wp-content/masterclass-debug.log</code> entries do not show a new <code>CRITICAL PHP ERROR</code>, clear this stored notice.</p>';
-
-	echo '<p><strong>Stored message:</strong> ' . esc_html( $error['message'] ) . '</p>';
-
-	if ( ! empty( $error['file'] ) || ! empty( $error['line'] ) ) {
-		echo '<p><strong>Stored location:</strong> <code>' . esc_html( ( $error['file'] ?? '' ) . ':' . ( $error['line'] ?? '' ) ) . '</code></p>';
-	}
-
-	if ( ! empty( $error['request_uri'] ) ) {
-		echo '<p><strong>Stored request:</strong> <code>' . esc_html( $error['request_uri'] ) . '</code></p>';
-	}
-
-	if ( '' !== $timestamp ) {
-		echo '<p><strong>Stored time:</strong> ' . esc_html( $timestamp ) . '</p>';
-	}
-
-	echo '<p><a class="button button-secondary" href="' . esc_url( $clear_url ) . '">Clear stored Masterclass critical error notice</a></p>';
-	echo '</div>';
+	return;
 }
 
 	private function t( $table_name ) {
@@ -2912,129 +2612,11 @@ private function mrm_mc_public_event_payload( $row ) {
 
 
 private function mrm_mc_debug_log( $message, $context = array() ) {
-	if ( ! defined( 'WP_CONTENT_DIR' ) ) {
-		return;
-	}
-
-	$file = trailingslashit( WP_CONTENT_DIR ) . 'masterclass-debug.log';
-
-	$message = sanitize_text_field( (string) $message );
-
-	$noise_patterns = array(
-		'/constructor started safely/i',
-		'/diagnostic checkpoint/i',
-		'/wp_loaded/i',
-		'/template_redirect/i',
-		'/wordpress_shutdown_action/i',
-		'/admin diagnostic checkpoint loaded/i',
-	);
-
-	foreach ( $noise_patterns as $pattern ) {
-		if ( preg_match( $pattern, $message ) ) {
-			return;
-		}
-	}
-
-	$safe_context = array();
-
-	if ( is_array( $context ) ) {
-		foreach ( $context as $key => $value ) {
-			$key = sanitize_key( (string) $key );
-
-			if ( preg_match( '/secret|token|password|private|authorization|cookie|nonce|client_secret|payment_secret|key|tin|ssn|ein/i', $key ) ) {
-				$safe_context[ $key ] = '[redacted]';
-				continue;
-			}
-
-			if ( is_scalar( $value ) || null === $value ) {
-				$value = (string) $value;
-
-				if ( preg_match( '/sk_live_|sk_test_|pk_live_|pk_test_|whsec_|-----BEGIN|Bearer\s+/i', $value ) ) {
-					$safe_context[ $key ] = '[redacted]';
-					continue;
-				}
-
-				if ( strlen( $value ) > 700 ) {
-					$value = substr( $value, 0, 700 ) . '...[truncated]';
-				}
-
-				$safe_context[ $key ] = $value;
-			} elseif ( is_array( $value ) ) {
-				$safe_context[ $key ] = '[array:' . count( $value ) . ']';
-			} elseif ( is_object( $value ) ) {
-				$safe_context[ $key ] = '[object:' . get_class( $value ) . ']';
-			} else {
-				$safe_context[ $key ] = '[non-scalar]';
-			}
-		}
-	}
-
-	$line = '[' . gmdate( 'Y-m-d H:i:s' ) . ' UTC] ' . $message;
-
-	if ( ! empty( $safe_context ) ) {
-		$encoded = wp_json_encode( $safe_context );
-		if ( false !== $encoded ) {
-			$line .= ' | ' . $encoded;
-		}
-	}
-
-	$line .= PHP_EOL;
-
-	@file_put_contents( $file, $line, FILE_APPEND | LOCK_EX );
+	return;
 }
 
 public function mrm_mc_admin_boot_debug() {
-	if ( ! is_admin() || ! current_user_can( 'manage_options' ) ) {
-		return;
-	}
-
-	$page        = isset( $_GET['page'] ) ? sanitize_text_field( wp_unslash( $_GET['page'] ) ) : '';
-	$wp_page     = isset( $GLOBALS['pagenow'] ) ? sanitize_text_field( (string) $GLOBALS['pagenow'] ) : '';
-	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
-
-	$should_log = false;
-
-	if ( 0 === strpos( $page, 'mrm-masterclass' ) ) {
-		$should_log = true;
-	}
-
-	if ( in_array( $wp_page, array( 'admin.php', 'plugins.php', 'options-general.php', 'edit.php' ), true ) ) {
-		$should_log = true;
-	}
-
-	if ( false !== strpos( $request_uri, 'mrm-masterclass' ) ) {
-		$should_log = true;
-	}
-
-	if ( ! $should_log ) {
-		return;
-	}
-
-	global $wpdb;
-
-	$tables = array(
-		'presenters'    => $this->t( 'mrm_masterclass_presenters' ),
-		'events'        => $this->t( 'mrm_masterclass_events' ),
-		'registrations' => $this->t( 'mrm_masterclass_registrations' ),
-		'ledger'        => $this->t( 'mrm_masterclass_payment_ledger' ),
-		'tax_profiles'  => $this->t( 'mrm_masterclass_presenter_tax_profiles' ),
-	);
-
-	$status = array(
-		'wp_page'          => $wp_page,
-		'page'             => $page,
-		'request_uri'      => $request_uri,
-		'db_version_saved' => get_option( 'mrm_masterclass_db_version', '' ),
-		'db_version_code'  => self::DB_VERSION,
-		'tables_ready'     => $this->mrm_mc_required_tables_ready() ? 1 : 0,
-	);
-
-	foreach ( $tables as $label => $table ) {
-		$exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
-		$status[ $label . '_table' ] = $exists ? 'exists' : 'missing';
-	}
-
-	$this->mrm_mc_debug_log( 'Masterclass admin diagnostic checkpoint loaded.', $status );
+	return;
 }
 
 private function mrm_mc_table_exists( $table ) {
@@ -8379,18 +7961,6 @@ public function render_email_log_page() {
 
 		register_rest_route(
 			self::REST_NAMESPACE,
-			'/popup-debug',
-			array(
-				'methods'             => WP_REST_Server::CREATABLE,
-				'callback'            => array( $this, 'rest_popup_debug' ),
-				'permission_callback' => function() {
-					return current_user_can( 'manage_options' );
-				},
-			)
-		);
-
-		register_rest_route(
-			self::REST_NAMESPACE,
 			'/gate-heartbeat',
 			array(
 				'methods'             => WP_REST_Server::CREATABLE,
@@ -8413,7 +7983,7 @@ public function render_email_log_page() {
 			'Masterclass REST routes registration completed.',
 			array(
 				'namespace' => self::REST_NAMESPACE,
-				'routes'    => 'events,event,presenter,apply-promo,create-payment-intent,verify-payment-intent,finalize-registration,popup-debug,gate-heartbeat,health',
+				'routes'    => 'events,event,presenter,apply-promo,create-payment-intent,verify-payment-intent,finalize-registration,gate-heartbeat,health',
 			)
 		);
 	}
@@ -9637,21 +9207,6 @@ public function rest_finalize_registration( $request ) {
 public function render_activation_diagnostic_notice() {
 	if ( ! current_user_can( 'manage_options' ) ) {
 		return;
-	}
-
-	$error = get_option( 'mrm_masterclass_activation_error', array() );
-
-	if ( is_array( $error ) && ! empty( $error['message'] ) ) {
-		echo '<div class="notice notice-error">';
-		echo '<p><strong>MRM Masterclass needs attention.</strong> The database installer or runtime upgrade failed safely instead of crashing the site.</p>';
-		echo '<p><strong>Error:</strong> ' . esc_html( $error['message'] ) . '</p>';
-
-		if ( ! empty( $error['file'] ) || ! empty( $error['line'] ) ) {
-			echo '<p><code>' . esc_html( ( $error['file'] ?? '' ) . ':' . ( $error['line'] ?? '' ) ) . '</code></p>';
-		}
-
-		echo '<p>Reload the affected admin, settings, or frontend page and check <code>wp-content/masterclass-debug.log</code>. If the notice remains, the stored critical-error details below should identify the file and line that failed.</p>';
-		echo '</div>';
 	}
 
 	if ( ! get_transient( 'mrm_masterclass_activation_notice' ) ) {
