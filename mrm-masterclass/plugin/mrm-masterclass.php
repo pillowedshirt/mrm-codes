@@ -4135,6 +4135,42 @@ public function mrm_mc_run_reminder_cron() {
 		$this->mrm_mc_debug_log( 'Masterclass reconcile cron ran. Google reconciliation is not fully implemented yet.' );
 	}
 
+	public function mrm_mc_run_payout_cron() {
+		global $wpdb;
+
+		$ledger_table = $this->t( 'mrm_masterclass_payment_ledger' );
+
+		if ( ! $this->mrm_mc_table_exists( $ledger_table ) ) {
+			return 0;
+		}
+
+		/*
+		 * Safety note:
+		 * This cron callback intentionally does not create Stripe transfers,
+		 * mark payouts paid, send emails, or modify ledger rows.
+		 * Presenter payout rows are created when registrations finalize.
+		 * Admins should still review and record payouts manually from the
+		 * Presenter Payouts page unless a dedicated Stripe Connect transfer
+		 * flow is later implemented and tested.
+		 */
+		$now = $this->now();
+
+		$count = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*)
+				 FROM {$ledger_table}
+				 WHERE ledger_type = %s
+				   AND status IN ('payable','payout_failed')
+				   AND presenter_share_cents > 0
+				   AND (payout_eligible_at IS NULL OR payout_eligible_at <= %s)",
+				'registration_payment',
+				$now
+			)
+		);
+
+		return absint( $count );
+	}
+
 	public function handle_save_settings() {
 		$this->must_admin();
 		check_admin_referer( 'mrm_masterclass_save_settings' );
@@ -4619,6 +4655,26 @@ public function handle_mark_payout_paid() {
 	}
 
 	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_marked_paid' );
+}
+
+public function handle_issue_payout_transfer() {
+	$this->must_admin();
+
+	$ledger_id = absint( $_GET['ledger_id'] ?? $_POST['ledger_id'] ?? 0 );
+
+	if ( $ledger_id <= 0 ) {
+		$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_missing_id' );
+	}
+
+	$this->mrm_mc_verify_admin_post_nonce_or_die( 'mrm_masterclass_issue_payout_transfer_' . $ledger_id );
+
+	/*
+	 * Safety note:
+	 * Stripe Connect transfers should not be created by this temporary fix.
+	 * Until a fully tested transfer flow exists, payouts should be reviewed
+	 * and recorded manually from the Presenter Payouts page.
+	 */
+	$this->mrm_mc_admin_notice_redirect( 'mrm-masterclass-payouts', 'payout_transfer_disabled' );
 }
 
 public function handle_save_tax_profile() {
@@ -7559,6 +7615,7 @@ public function render_payouts_page() {
 		'payout_batch_empty'      => array( 'warning', 'No payout rows were selected.' ),
 		'payout_batch_paid'       => array( 'success', 'Selected payout rows were marked paid and preserved in the ledger audit trail.' ),
 		'payout_batch_failed'     => array( 'error', 'The payout batch could not be marked paid. Open Advanced Tools for technical details.' ),
+		'payout_transfer_disabled'=> array( 'warning', 'Stripe Connect payout transfers are not enabled yet. Record this payout manually after you have paid the presenter outside Stripe.' ),
 		'payout_transfer_failed'  => array( 'error', 'Stripe Connect payout transfer could not be issued. The row was preserved for audit review.' ),
 		'payout_transfer_success' => array( 'success', 'Stripe Connect payout transfer issued and the ledger row was marked paid out.' ),
 	);
