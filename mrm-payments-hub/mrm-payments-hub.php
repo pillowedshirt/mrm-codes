@@ -13466,8 +13466,35 @@ public function render_access_lists_page() {
           }
 
           if ($hook !== '') {
+            /*
+             * Ignore parser/example artifacts from the temporary audit code itself.
+             * These are not real production cron hooks.
+             */
+            $hook_clean = trim((string) $hook);
+
+            if (
+              $hook_clean === '' ||
+              $hook_clean === 'real_hook_name' ||
+              $hook_clean === ',' ||
+              strpos($hook_clean, '$args') !== false ||
+              strpos($hook_clean, ' . ') !== false ||
+              !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $hook_clean)
+            ) {
+              $this->mrm_pay_hub_temp_audit_add_finding(
+                $state,
+                'Cron/timing',
+                'SKIPPED',
+                $rel,
+                'Skip malformed scheduled hook parser artifact.',
+                'Skipped malformed scheduled hook candidate: ' . $hook_clean,
+                'This prevents audit example/parser text from being counted as a real missing cron hook.',
+                'No production code change needed.'
+              );
+              continue;
+            }
+
             $state['scheduled_hooks'][] = array(
-              'hook' => $hook,
+              'hook' => $hook_clean,
               'file' => $rel,
               'statement' => 'wp_schedule_event(' . $args . ');',
             );
