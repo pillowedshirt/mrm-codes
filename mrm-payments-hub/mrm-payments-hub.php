@@ -11473,10 +11473,17 @@ public function handle_marketing_resubscribe() {
 
     $catalog = $this->mrm_email_testing_catalog();
     $error = isset($_GET['mrm_email_tests_error']) ? sanitize_text_field(wp_unslash($_GET['mrm_email_tests_error'])) : '';
-    $preview_requested = isset($_GET['mrm_email_preview']) && '1' === sanitize_text_field(wp_unslash($_GET['mrm_email_preview']));
-    $preview_slugs = $preview_requested ? get_transient('mrm_pay_hub_email_preview_' . get_current_user_id()) : array();
-    if (!is_array($preview_slugs)) {
-      $preview_slugs = array();
+
+    $previews = array();
+    foreach ($catalog as $key => $item) {
+      $preview = $this->mrm_build_single_email_preview($key);
+      $previews[$key] = array(
+        'label' => (string)($item['label'] ?? $key),
+        'description' => (string)($item['description'] ?? ''),
+        'plugin' => (string)($item['plugin'] ?? ''),
+        'subject' => sanitize_text_field((string)($preview['subject'] ?? $key)),
+        'html' => (string)($preview['html'] ?? ''),
+      );
     }
     ?>
     <div class="wrap">
@@ -11485,33 +11492,96 @@ public function handle_marketing_resubscribe() {
       <?php if ($error !== '') : ?>
         <div class="notice notice-error"><p><?php echo esc_html($error); ?></p></div>
       <?php endif; ?>
-      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="max-width:1100px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin-top:18px;">
-        <?php wp_nonce_field('mrm_pay_hub_send_email_tests', 'mrm_pay_hub_email_tests_nonce'); ?>
-        <input type="hidden" name="action" value="mrm_pay_hub_preview_email_tests">
-        <h2>Email Types</h2>
-        <p>Select every email you want to preview. No email will be sent from this screen.</p>
-        <p><button type="button" class="button" id="mrm-email-testing-select-all">Select all</button> <button type="button" class="button" id="mrm-email-testing-clear-all">Clear all</button></p>
-        <table class="widefat striped">
-          <thead><tr><th style="width:60px;">Preview</th><th style="width:320px;">Email</th><th>Normally Triggered By</th><th style="width:150px;">Plugin</th></tr></thead>
-          <tbody><?php foreach ($catalog as $key => $item) : ?><tr>
-            <td><input class="mrm-email-test-checkbox" type="checkbox" name="mrm_email_tests[]" value="<?php echo esc_attr($key); ?>"></td>
-            <td><strong><?php echo esc_html($item['label']); ?></strong></td><td><?php echo esc_html($item['description']); ?></td><td><code><?php echo esc_html($item['plugin']); ?></code></td>
-          </tr><?php endforeach; ?></tbody>
-        </table>
-        <?php submit_button('Preview Selected Emails'); ?>
-      </form>
-      <?php if (!empty($preview_slugs)) : ?>
-        <div style="max-width:1100px;margin-top:24px;"><h2>Email Preview</h2>
-          <p class="description">Highlighted yellow labels indicate content that normally comes from a form field, text box, database row, selected product, scheduled lesson, registration, or other live record.</p>
-          <?php foreach ($preview_slugs as $preview_slug) : if (empty($catalog[$preview_slug])) { continue; } $preview = $this->mrm_build_single_email_preview($preview_slug); $subject = sanitize_text_field((string)($preview['subject'] ?? $preview_slug)); $html = (string)($preview['html'] ?? ''); ?>
-            <div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;margin:18px 0;padding:16px;"><h3 style="margin-top:0;"><?php echo esc_html($catalog[$preview_slug]['label']); ?></h3><p><strong>Subject:</strong> <?php echo esc_html($subject); ?></p>
-              <iframe title="<?php echo esc_attr($catalog[$preview_slug]['label']); ?> preview" style="width:100%;min-height:720px;border:1px solid #dcdcde;border-radius:8px;background:#fff;" srcdoc="<?php echo esc_attr($html); ?>"></iframe>
-            </div>
-          <?php endforeach; ?>
+
+      <div id="mrm-email-testing-preview-card" style="max-width:1100px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin:18px 0;">
+        <h2 style="margin-top:0;">Email Preview</h2>
+        <p class="description">Select the email you want to preview. Only one email can be selected at a time. Uncheck the selected email to clear the preview.</p>
+        <div id="mrm-email-testing-empty-preview" style="padding:18px;border:1px dashed #ccd0d4;border-radius:10px;background:#fafafa;color:#555;">No email selected.</div>
+        <div id="mrm-email-testing-active-preview" style="display:none;">
+          <h3 id="mrm-email-testing-preview-title" style="margin:12px 0 6px;"></h3>
+          <p style="margin:0 0 10px;"><strong>Subject:</strong> <span id="mrm-email-testing-preview-subject"></span></p>
+          <p class="description" id="mrm-email-testing-preview-description"></p>
+          <iframe id="mrm-email-testing-preview-frame" title="Email preview" style="width:100%;min-height:720px;border:1px solid #dcdcde;border-radius:8px;background:#fff;"></iframe>
         </div>
-      <?php endif; ?>
+      </div>
+
+      <div style="max-width:1100px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin-top:18px;">
+        <h2>Select the email you want to preview</h2>
+        <p>Checking a box updates the preview window immediately. No emails are sent from this screen.</p>
+        <table class="widefat striped">
+          <thead>
+            <tr>
+              <th style="width:60px;">Preview</th>
+              <th style="width:320px;">Email</th>
+              <th>Normally Triggered By</th>
+              <th style="width:150px;">Plugin</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($catalog as $key => $item) : ?>
+              <tr>
+                <td><input class="mrm-email-test-checkbox" type="checkbox" value="<?php echo esc_attr($key); ?>"></td>
+                <td><strong><?php echo esc_html($item['label']); ?></strong></td>
+                <td><?php echo esc_html($item['description']); ?></td>
+                <td><code><?php echo esc_html($item['plugin']); ?></code></td>
+              </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
     </div>
-    <script>(function(){function setAll(checked){document.querySelectorAll('.mrm-email-test-checkbox').forEach(function(box){box.checked=checked;});}document.getElementById('mrm-email-testing-select-all').addEventListener('click',function(){setAll(true);});document.getElementById('mrm-email-testing-clear-all').addEventListener('click',function(){setAll(false);});})();</script>
+
+    <script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1">
+    (function(){
+      var previews = <?php echo wp_json_encode($previews); ?>;
+      var boxes = Array.prototype.slice.call(document.querySelectorAll('.mrm-email-test-checkbox'));
+      var empty = document.getElementById('mrm-email-testing-empty-preview');
+      var active = document.getElementById('mrm-email-testing-active-preview');
+      var title = document.getElementById('mrm-email-testing-preview-title');
+      var subject = document.getElementById('mrm-email-testing-preview-subject');
+      var desc = document.getElementById('mrm-email-testing-preview-description');
+      var frame = document.getElementById('mrm-email-testing-preview-frame');
+
+      function clearPreview(){
+        if (empty) empty.style.display = 'block';
+        if (active) active.style.display = 'none';
+        if (title) title.textContent = '';
+        if (subject) subject.textContent = '';
+        if (desc) desc.textContent = '';
+        if (frame) frame.srcdoc = '';
+      }
+
+      function showPreview(slug){
+        var preview = previews[slug];
+        if (!preview) {
+          clearPreview();
+          return;
+        }
+
+        if (empty) empty.style.display = 'none';
+        if (active) active.style.display = 'block';
+        if (title) title.textContent = preview.label || slug;
+        if (subject) subject.textContent = preview.subject || '';
+        if (desc) desc.textContent = preview.description || '';
+        if (frame) frame.srcdoc = preview.html || '<div style="padding:18px;">No preview HTML available.</div>';
+      }
+
+      boxes.forEach(function(box){
+        box.addEventListener('change', function(){
+          if (box.checked) {
+            boxes.forEach(function(other){
+              if (other !== box) other.checked = false;
+            });
+            showPreview(box.value);
+          } else {
+            clearPreview();
+          }
+        });
+      });
+
+      clearPreview();
+    })();
+    </script>
     <?php
   }
 
@@ -11783,8 +11853,22 @@ public function render_marketing_email_lists_page() {
     .mrm-list-count{display:inline-block;background:#f0f0f1;border-radius:999px;padding:2px 8px;margin-left:6px;font-size:12px;}
     textarea.mrm-html-box{font-family:Consolas,Monaco,monospace;width:100%;min-height:320px;}
     textarea.mrm-email-list-box{width:100%;min-height:115px;font-family:Consolas,Monaco,monospace;}
+    .mrm-marketing-live-preview{background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:18px;margin:18px 0;}
+    .mrm-marketing-live-preview h2{margin-top:0;}
+    #mrm-marketing-preview-frame{width:100%;min-height:680px;border:1px solid #dcdcde;border-radius:8px;background:#fff;}
+    #mrm-marketing-preview-empty{padding:18px;border:1px dashed #ccd0d4;border-radius:10px;background:#fafafa;color:#555;}
     @media(max-width:1100px){.mrm-marketing-grid{grid-template-columns:1fr;}}
   </style>';
+
+  echo '<div class="mrm-marketing-live-preview">';
+  echo '<h2>Live Marketing Email Preview</h2>';
+  echo '<p class="description">This preview updates as soon as you type a subject line or HTML email body. It does not send anything.</p>';
+  echo '<div id="mrm-marketing-preview-empty">Start typing a subject line or HTML email body to preview the marketing email.</div>';
+  echo '<div id="mrm-marketing-preview-active" style="display:none;">';
+  echo '<p><strong>Subject:</strong> <span id="mrm-marketing-preview-subject"></span></p>';
+  echo '<iframe id="mrm-marketing-preview-frame" title="Marketing email preview"></iframe>';
+  echo '</div>';
+  echo '</div>';
 
   echo '<div class="mrm-marketing-grid">';
 
@@ -11794,8 +11878,8 @@ public function render_marketing_email_lists_page() {
   echo '<form method="post" enctype="multipart/form-data" action="' . esc_url(admin_url('admin-post.php')) . '">';
   echo '<input type="hidden" name="action" value="mrm_marketing_email_send">';
   wp_nonce_field('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
-  echo '<p><label><strong>Subject line</strong><br><input type="text" name="mrm_marketing_subject" class="large-text" required placeholder="Subject line"></label></p>';
-  echo '<p><label><strong>HTML email body</strong><br><textarea name="mrm_marketing_html" class="mrm-html-box" required placeholder="&lt;h1&gt;Your headline&lt;/h1&gt;&#10;&lt;p&gt;Your email body...&lt;/p&gt;&#10;&lt;p&gt;&lt;a href=&quot;https://lowbrass-lessons.com&quot;&gt;Call to action&lt;/a&gt;&lt;/p&gt;"></textarea></label></p>';
+  echo '<p><label><strong>Subject line</strong><br><input type="text" id="mrm-marketing-subject-input" name="mrm_marketing_subject" class="large-text" required placeholder="Subject line"></label></p>';
+  echo '<p><label><strong>HTML email body</strong><br><textarea id="mrm-marketing-html-input" name="mrm_marketing_html" class="mrm-html-box" required placeholder="&lt;h1&gt;Your headline&lt;/h1&gt;&#10;&lt;p&gt;Your email body...&lt;/p&gt;&#10;&lt;p&gt;&lt;a href=&quot;https://lowbrass-lessons.com&quot;&gt;Call to action&lt;/a&gt;&lt;/p&gt;"></textarea></label></p>';
   echo '<p><label><strong>Add attachments</strong><br><input type="file" name="mrm_marketing_attachments[]" multiple accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"></label><br><small>Optional. Up to 5 files. Allowed: PDF, DOC, DOCX, JPG, PNG. Maximum 10MB per file. Attachments are sent through wp_mail/FluentSMTP and temporarily deleted after the send completes.</small></p>';
 
   echo '<h3>Send to lists</h3>';
@@ -11867,6 +11951,65 @@ public function render_marketing_email_lists_page() {
   }
   echo '</tbody></table>';
   echo '</div>';
+  echo '<script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1">
+  (function(){
+    var subjectInput = document.getElementById("mrm-marketing-subject-input");
+    var htmlInput = document.getElementById("mrm-marketing-html-input");
+    var empty = document.getElementById("mrm-marketing-preview-empty");
+    var active = document.getElementById("mrm-marketing-preview-active");
+    var subjectOut = document.getElementById("mrm-marketing-preview-subject");
+    var frame = document.getElementById("mrm-marketing-preview-frame");
+    var siteName = ' . wp_json_encode(get_bloginfo('name') ? get_bloginfo('name') : 'Low Brass Lessons') . ';
+    var logoUrl = ' . wp_json_encode($this->mrm_get_site_logo_url()) . ';
+    var mailingAddress = ' . wp_json_encode((string)$mailing_address) . ';
+
+    function esc(text){
+      return String(text || "").replace(/[&<>"\']/g, function(ch){
+        return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\'":"&#039;"}[ch];
+      });
+    }
+
+    function nl2br(text){
+      return esc(text).replace(/\n/g, "<br>");
+    }
+
+    function renderPreview(){
+      var subject = subjectInput ? subjectInput.value : "";
+      var body = htmlInput ? htmlInput.value : "";
+      var hasContent = subject.trim() !== "" || body.trim() !== "";
+
+      if (!hasContent) {
+        if (empty) empty.style.display = "block";
+        if (active) active.style.display = "none";
+        if (subjectOut) subjectOut.textContent = "";
+        if (frame) frame.srcdoc = "";
+        return;
+      }
+
+      var logoHtml = logoUrl
+        ? "<div style=\"text-align:center;margin:0 0 22px 0;\"><img src=\"" + esc(logoUrl) + "\" alt=\"" + esc(siteName) + "\" style=\"max-width:220px;height:auto;border:0;display:inline-block;\"></div>"
+        : "";
+
+      var addressHtml = mailingAddress.trim() !== ""
+        ? "<div style=\"margin-top:10px;\">" + nl2br(mailingAddress) + "</div>"
+        : "";
+
+      var footerHtml = "<div style=\"margin-top:22px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;\"><div>You are receiving this marketing email from " + esc(siteName) + ".</div>" + addressHtml + "<div style=\"margin-top:10px;\"><a href=\"#\" style=\"color:#555;text-decoration:underline;\">Remove me from marketing emails</a></div></div>";
+
+      var doc = "<!doctype html><html><body style=\"margin:0;padding:0;background:#f6f6f6;\"><div style=\"max-width:680px;margin:0 auto;padding:24px;\"><div style=\"background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;\">" + logoHtml + "<div style=\"font-size:15px;line-height:1.7;color:#222;text-align:left;\">" + (body || "<p style=\"color:#777;\">HTML email body preview will appear here.</p>") + "</div>" + footerHtml + "</div></div></body></html>";
+
+      if (empty) empty.style.display = "none";
+      if (active) active.style.display = "block";
+      if (subjectOut) subjectOut.textContent = subject || "(no subject yet)";
+      if (frame) frame.srcdoc = doc;
+    }
+
+    if (subjectInput) subjectInput.addEventListener("input", renderPreview);
+    if (htmlInput) htmlInput.addEventListener("input", renderPreview);
+    renderPreview();
+  })();
+  </script>';
+
   echo '</div>';
 }
 
