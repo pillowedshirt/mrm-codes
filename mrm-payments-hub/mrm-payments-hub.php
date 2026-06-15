@@ -40,6 +40,9 @@ class MRM_Payments_Hub_Single {
     add_action('admin_menu', array($this, 'admin_menu'));
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('admin_post_mrm_export_legal_ledger', array($this, 'handle_export_legal_ledger'));
+    // BEGIN TEMP PAYMENT HUB AUDIT
+    add_action('admin_post_mrm_pay_hub_run_temp_audit', array($this, 'handle_temp_payment_hub_audit_run'));
+    // END TEMP PAYMENT HUB AUDIT
 
     /**
      * Marketing Email Lists admin + unsubscribe actions.
@@ -12382,6 +12385,17 @@ public function render_access_lists_page() {
       'mrm-pay-hub-promo-codes',
       array($this, 'render_promo_codes_page')
     );
+
+    // BEGIN TEMP PAYMENT HUB AUDIT
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Payment Hub Audit',
+      'Audit',
+      'manage_options',
+      'mrm-pay-hub-audit',
+      array($this, 'render_temp_payment_hub_audit_page')
+    );
+    // END TEMP PAYMENT HUB AUDIT
 
   }
 
