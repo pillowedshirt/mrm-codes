@@ -11114,7 +11114,7 @@ cliniccontact@example.org",
     return add_query_arg(array('action' => 'mrm_marketing_unsubscribe_confirm', 'token' => $token), admin_url('admin-post.php'));
   }
 
-  // BEGIN TEMP PAYMENT HUB AUDIT FIX - MARKETING UNSUBSCRIBE CALLBACKS
+  // BEGIN PAYMENT HUB MARKETING UNSUBSCRIBE FIX
   public function handle_marketing_unsubscribe_confirm() {
     $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
     $email = $this->mrm_marketing_email_from_token($token);
@@ -11194,7 +11194,7 @@ cliniccontact@example.org",
     echo wp_kses_post($extra_html);
     echo '</main></body></html>';
   }
-  // END TEMP PAYMENT HUB AUDIT FIX - MARKETING UNSUBSCRIBE CALLBACKS
+  // END PAYMENT HUB MARKETING UNSUBSCRIBE FIX
 
   private function mrm_marketing_allowed_html($html) {
     $html = (string)$html;
@@ -13402,10 +13402,10 @@ public function render_access_lists_page() {
         $hook = $this->mrm_pay_hub_temp_audit_first_string_arg($m[2]);
         if ($hook !== '') $state['hooks'][] = array('type' => $m[1], 'hook' => $hook, 'callback' => $this->mrm_pay_hub_temp_audit_extract_callback($stmt), 'file' => $rel, 'statement' => $stmt);
       }
-      if (preg_match_all('/(?:\$this->)?[A-Za-z0-9_]*add_action_if_method_exists\s*\(\s*([\'"])(.*?)\1\s*,\s*([\'"])(.*?)\3(?:\s*,\s*([0-9]+))?(?:\s*,\s*([0-9]+))?\s*\)/s', $content, $matches, PREG_SET_ORDER)) {
+      if (preg_match_all('/(?:\$this->)?[A-Za-z0-9_]*add_action_if_method_exists\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]\s*(?:,\s*-?\d+)?\s*(?:,\s*\d+)?\s*\)/', $content, $matches, PREG_SET_ORDER)) {
         foreach ($matches as $m) {
-          $hook = (string)$m[2];
-          $method = (string)$m[4];
+          $hook = (string) $m[1];
+          $method = (string) $m[2];
 
           if ($hook !== '' && $method !== '') {
             $state['hooks'][] = array(
@@ -13422,9 +13422,57 @@ public function render_access_lists_page() {
         $block = $m[5];
         $state['rest_routes'][] = array('namespace' => $m[2], 'route' => $m[4], 'callback' => $this->mrm_pay_hub_temp_audit_extract_callback($block), 'permission' => $this->mrm_pay_hub_temp_audit_extract_permission_callback($block), 'methods' => $this->mrm_pay_hub_temp_audit_extract_rest_methods($block), 'file' => $rel, 'block' => $block);
       }
-      if (preg_match_all('/wp_(?:schedule_event|schedule_single_event)\s*\((.*?)\);/s', $content, $matches, PREG_SET_ORDER)) foreach ($matches as $m) if (preg_match_all('/[\'\"]([^\'\"]+)[\'\"]/', $m[1], $strings) && !empty($strings[1])) {
-        $hook = end($strings[1]);
-        if ($hook) $state['scheduled_hooks'][] = array('hook' => $hook, 'file' => $rel, 'statement' => 'wp_schedule_event(' . trim($m[1]) . ');');
+      if (preg_match_all('/wp_(?:schedule_event|schedule_single_event)\s*\((.*?)\);/s', $content, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+          $args = trim((string) $m[1]);
+          $hook = '';
+
+          /*
+           * Preferred case:
+           * wp_schedule_event($timestamp, 'daily', 'real_hook_name');
+           * The hook is the third argument, not the recurrence.
+           */
+          if (preg_match('/^[^,]+,\s*[^,]+,\s*[\'"]([^\'"]+)[\'"]/', $args, $hook_match)) {
+            $hook = (string) $hook_match[1];
+          }
+
+          /*
+           * If the third argument is a variable, do not guess from the recurrence.
+           * Example:
+           * wp_schedule_event($timestamp, 'daily', $hook);
+           * In that case, `daily` is not a hook and should not be reported as missing.
+           */
+          if ($hook === '') {
+            if (preg_match('/^[^,]+,\s*[\'"](hourly|twicedaily|daily|weekly|mrm_10min)[\'"]\s*,\s*\$/i', $args)) {
+              $this->mrm_pay_hub_temp_audit_add_finding(
+                $state,
+                'Cron/timing',
+                'SKIPPED',
+                $rel,
+                'Parse scheduled hook with variable hook name.',
+                'Skipped a wp_schedule_event() call that uses a variable hook name.',
+                'This avoids incorrectly treating the recurrence string, such as daily, as the hook name.',
+                'No code change needed if the variable hook is registered elsewhere.'
+              );
+              continue;
+            }
+
+            if (preg_match_all('/[\'"]([^\'"]+)[\'"]/', $args, $strings) && !empty($strings[1])) {
+              $candidate = end($strings[1]);
+              if (!in_array($candidate, array('hourly', 'twicedaily', 'daily', 'weekly', 'mrm_10min'), true)) {
+                $hook = (string) $candidate;
+              }
+            }
+          }
+
+          if ($hook !== '') {
+            $state['scheduled_hooks'][] = array(
+              'hook' => $hook,
+              'file' => $rel,
+              'statement' => 'wp_schedule_event(' . $args . ');',
+            );
+          }
+        }
       }
       if (preg_match_all('/\$wpdb->prefix\s*\.\s*[\'\"]([^\'\"]+)[\'\"]/', $content, $matches)) foreach ($matches[1] as $table_tail) $state['table_names'][$table_tail] = $rel;
       if (in_array($ext, array('html', 'htm'), true)) {
@@ -13441,16 +13489,68 @@ public function render_access_lists_page() {
       if (strtolower(pathinfo($file, PATHINFO_EXTENSION)) !== 'php') continue;
       $php_files++; $rel = $this->mrm_pay_hub_temp_audit_rel($file);
       if (strpos($content, 'Plugin Name:') !== false) { $plugin_headers++; $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', $rel, 'Check WordPress plugin header.', 'Plugin header found.', 'WordPress can identify the plugin bootstrap file.', 'No fix needed.'); }
-      if (strpos($content, "defined('ABSPATH')") === false && strpos($content, 'defined(\'ABSPATH\')') === false && strpos($content, 'defined("ABSPATH")') === false) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'WARNING', $rel, 'Check direct-access guard.', 'No obvious ABSPATH guard was found.', 'Publicly loading PHP plugin files directly can expose unsafe behavior.', 'Add `if (!defined(\'ABSPATH\')) exit;` near the top if this file is directly web-accessible.');
+      if (!preg_match('/defined\s*\(\s*[\'"]ABSPATH[\'"]\s*\)/', $content)) {
+        $this->mrm_pay_hub_temp_audit_add_finding(
+          $state,
+          'Backend/plugin health',
+          'WARNING',
+          $rel,
+          'Check direct-access guard.',
+          'No obvious ABSPATH guard was found.',
+          'Publicly loading PHP plugin files directly can expose unsafe behavior.',
+          'Add `if (!defined(\'ABSPATH\')) exit;` near the top if this file is directly web-accessible.'
+        );
+      }
       if (abs(substr_count($content, '{') - substr_count($content, '}')) > 2) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'WARNING', $rel, 'Check rough brace balance.', 'The file has a suspicious brace count difference.', 'Large brace mismatches can indicate syntax or copy/paste risks.', 'Open the file in an editor with PHP linting and inspect unmatched blocks.');
       else $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', $rel, 'Check rough brace balance.', 'Brace count does not look suspicious.', 'This reduces obvious fatal syntax-risk signals without using shell commands.', 'No fix needed.');
     }
     if ($php_files > 0) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', 'PHP scan', 'Confirm PHP files exist.', 'Found ' . $php_files . ' PHP file(s), including ' . $plugin_headers . ' plugin header file(s).', 'The audit can evaluate plugin registrations and callbacks.', 'No fix needed.');
     foreach ($state['hooks'] as $hook) {
       $cb = $hook['callback'];
-      if (empty($cb['type']) || $cb['type'] === 'closure') continue;
-      if ($cb['type'] === 'method' && empty($state['methods'][$cb['name']])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'ERROR', $hook['file'] . ' / ' . $hook['hook'], 'Confirm registered callback method exists.', 'Missing method callback: ' . $cb['name'], 'A missing callback can cause fatal errors or dead admin/customer flows.', 'Create the method or remove/fix the hook registration.');
-      elseif ($cb['type'] === 'function' && empty($state['functions'][$cb['name']]) && !function_exists($cb['name'])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'WARNING', $hook['file'] . ' / ' . $hook['hook'], 'Confirm registered callback function exists.', 'Function callback was not found in scanned files: ' . $cb['name'], 'If this function is not loaded by WordPress, the hook will fail.', 'Confirm the function is loaded, or change the hook to an existing callback.');
+
+      if (empty($cb['type']) || $cb['type'] === 'closure') {
+        continue;
+      }
+
+      $callback_name = isset($cb['name']) ? (string) $cb['name'] : '';
+
+      if ($callback_name !== '' && !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $callback_name)) {
+        $this->mrm_pay_hub_temp_audit_add_finding(
+          $state,
+          'Backend/plugin health',
+          'WARNING',
+          $hook['file'] . ' / ' . $hook['hook'],
+          'Validate parsed callback name.',
+          'The audit parser produced a malformed callback name: ' . $callback_name,
+          'Malformed callback names usually indicate an audit parser limitation, not necessarily a real WordPress callback.',
+          'Review the nearby hook registration manually. If the real callback exists, no production code change is needed.'
+        );
+        continue;
+      }
+
+      if ($cb['type'] === 'method' && empty($state['methods'][$callback_name])) {
+        $this->mrm_pay_hub_temp_audit_add_finding(
+          $state,
+          'Backend/plugin health',
+          'ERROR',
+          $hook['file'] . ' / ' . $hook['hook'],
+          'Confirm registered callback method exists.',
+          'Missing method callback: ' . $callback_name,
+          'A missing callback can cause fatal errors or dead admin/customer flows.',
+          'Create the method or remove/fix the hook registration.'
+        );
+      } elseif ($cb['type'] === 'function' && empty($state['functions'][$callback_name]) && !function_exists($callback_name)) {
+        $this->mrm_pay_hub_temp_audit_add_finding(
+          $state,
+          'Backend/plugin health',
+          'WARNING',
+          $hook['file'] . ' / ' . $hook['hook'],
+          'Confirm registered callback function exists.',
+          'Function callback was not found in scanned files: ' . $callback_name,
+          'If this function is not loaded by WordPress, the hook will fail.',
+          'Confirm the function is loaded, or change the hook to an existing callback.'
+        );
+      }
     }
   }
 
@@ -13482,7 +13582,23 @@ public function render_access_lists_page() {
       $found++; $cb = $hook['callback'];
       $sensitive = preg_match('/refund|payout|payment|stripe|cancel|delete|save|send|email|calendar|register|access|grant|export/i', $name);
       $content = $this->mrm_pay_hub_temp_audit_file_content_by_rel($state, $hook['file']);
-      if (!empty($cb['type']) && $cb['type'] === 'method' && empty($state['methods'][$cb['name']])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Admin-post/admin-ajax hooks', 'ERROR', $hook['file'] . ' / ' . $name, 'Check callback method exists.', 'Missing callback method: ' . $cb['name'], 'The endpoint can fail when submitted.', 'Create the method or correct the hook registration.');
+      $callback_name = isset($cb['name']) ? (string) $cb['name'] : '';
+
+      if ($callback_name !== '' && !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $callback_name)) {
+        $this->mrm_pay_hub_temp_audit_add_finding(
+          $state,
+          'Admin-post/admin-ajax hooks',
+          'WARNING',
+          $hook['file'] . ' / ' . $name,
+          'Validate parsed admin-post/admin-ajax callback name.',
+          'The audit parser produced a malformed callback name: ' . $callback_name,
+          'Malformed callback names usually indicate an audit parser limitation, not necessarily a real endpoint failure.',
+          'Review the nearby hook registration manually. If the real callback exists, no production code change is needed.'
+        );
+        continue;
+      }
+
+      if (!empty($cb['type']) && $cb['type'] === 'method' && empty($state['methods'][$callback_name])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Admin-post/admin-ajax hooks', 'ERROR', $hook['file'] . ' / ' . $name, 'Check callback method exists.', 'Missing callback method: ' . $callback_name, 'The endpoint can fail when submitted.', 'Create the method or correct the hook registration.');
       else $this->mrm_pay_hub_temp_audit_add_finding($state, 'Admin-post/admin-ajax hooks', 'GOOD', $hook['file'] . ' / ' . $name, 'Check callback exists.', 'Callback appears present or uses a closure/function.', 'Endpoint wiring is structurally complete.', 'No fix needed.');
       $has_security = preg_match('/check_admin_referer|wp_verify_nonce|current_user_can|sanitize_|absint|token|hash_equals|permission|capability/i', $content . ' ' . $hook['statement']);
       if ($sensitive && !$has_security) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Admin-post/admin-ajax hooks', 'WARNING', $hook['file'] . ' / ' . $name, 'Check sensitive endpoint validation hints.', 'No obvious nonce/capability/token/sanitization indicators were found near this hook file.', 'Sensitive post/ajax actions must not be callable without validation.', 'Review the callback body and confirm nonce, capability, token, and sanitized field checks exist.');
@@ -13610,7 +13726,23 @@ public function render_access_lists_page() {
   }
 
   private function mrm_pay_hub_temp_audit_strip_temp_audit_block($content) {
-    return preg_replace('/\/\/ BEGIN TEMP PAYMENT HUB AUDIT.*?\/\/ END TEMP PAYMENT HUB AUDIT/s', '/* temporary audit block omitted from self-scan */', (string)$content);
+    /*
+     * Only strip blocks whose marker is exactly:
+     * // BEGIN TEMP PAYMENT HUB AUDIT
+     * ...
+     * // END TEMP PAYMENT HUB AUDIT
+     *
+     * Do not strip repair blocks such as:
+     * // BEGIN TEMP PAYMENT HUB AUDIT FIX - ...
+     *
+     * This prevents the audit from hiding real repair methods such as
+     * handle_marketing_unsubscribe_confirm() and handle_marketing_unsubscribe_do().
+     */
+    return preg_replace(
+      '/^[ \t]*\/\/ BEGIN TEMP PAYMENT HUB AUDIT[ \t]*\R.*?^[ \t]*\/\/ END TEMP PAYMENT HUB AUDIT[ \t]*$/ms',
+      '/* temporary audit block omitted from self-scan */',
+      (string) $content
+    );
   }
 
   private function mrm_pay_hub_temp_audit_collect_wp_page_html(&$state) {
