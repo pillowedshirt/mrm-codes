@@ -2761,14 +2761,16 @@ protected function mrm_get_google_service_account_json() {
         ) );
         register_rest_route( 'mrm-schedule/v1', '/ping', array(
             'methods' => WP_REST_Server::READABLE,
-            'callback' => function() {
-                return new WP_REST_Response( array(
-                    'ok' => true,
-                    'time' => current_time( 'mysql' ),
-                ), 200 );
-            },
+            'callback' => array( $this, 'rest_ping' ),
             'permission_callback' => '__return_true',
         ) );
+    }
+
+    public function rest_ping() {
+        return new WP_REST_Response( array(
+            'ok'   => true,
+            'time' => current_time( 'mysql' ),
+        ), 200 );
     }
 
 

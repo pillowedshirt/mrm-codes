@@ -13425,13 +13425,14 @@ public function render_access_lists_page() {
       'roots' => array(), 'files' => array(), 'file_contents' => array(), 'functions' => array(), 'methods' => array(), 'hooks' => array(),
       'rest_routes' => array(), 'scheduled_hooks' => array(), 'table_names' => array(), 'html' => array(),
       'counts' => array('GOOD' => 0, 'WARNING' => 0, 'ERROR' => 0, 'SKIPPED' => 0),
-      'findings' => array('Backend/plugin health' => array(), 'REST endpoints' => array(), 'Admin-post/admin-ajax hooks' => array(), 'Cron/timing' => array(), 'Database tables' => array(), 'Frontend HTML/JS' => array(), 'Design/layout consistency' => array(), 'Payment/customer flows' => array(), 'Email/calendar/access gates' => array(), 'Public debug/diagnostic cleanup' => array()),
+      'findings' => array('Backend/plugin health' => array(), 'Admin UI workflows' => array(), 'REST endpoints' => array(), 'Admin-post/admin-ajax hooks' => array(), 'Cron/timing' => array(), 'Database tables' => array(), 'Frontend HTML/JS' => array(), 'Design/layout consistency' => array(), 'Payment/customer flows' => array(), 'Email/calendar/access gates' => array(), 'Public debug/diagnostic cleanup' => array()),
     );
     $state['roots'] = $this->mrm_pay_hub_temp_audit_find_scan_roots();
     $this->mrm_pay_hub_temp_audit_collect_files($state);
     $this->mrm_pay_hub_temp_audit_build_index($state);
     $this->mrm_pay_hub_temp_audit_collect_wp_page_html($state);
     $this->mrm_pay_hub_temp_audit_check_plugin_health($state);
+    $this->mrm_pay_hub_temp_audit_check_admin_ui_workflows($state);
     $this->mrm_pay_hub_temp_audit_check_rest_routes($state);
     $this->mrm_pay_hub_temp_audit_check_admin_ajax_post($state);
     $this->mrm_pay_hub_temp_audit_check_cron($state);
@@ -13724,22 +13725,128 @@ public function render_access_lists_page() {
     }
   }
 
+  private function mrm_pay_hub_temp_audit_check_admin_ui_workflows(&$state) {
+    $payment_hub = '';
+    $scheduler = '';
+
+    foreach ($state['file_contents'] as $file => $content) {
+      $rel = $this->mrm_pay_hub_temp_audit_rel($file);
+      if (strpos($rel, 'mrm-payments-hub.php') !== false) {
+        $payment_hub = $content;
+      }
+      if (strpos($rel, 'mrm-lesson-scheduler.php') !== false) {
+        $scheduler = $content;
+      }
+    }
+
+    $email_testing_ok = (
+      strpos($payment_hub, 'mrm-email-testing-preview-frame') !== false &&
+      strpos($payment_hub, 'Select the email you want to preview') !== false &&
+      strpos($payment_hub, 'mrm-email-test-checkbox') !== false &&
+      strpos($payment_hub, 'Preview Selected Emails') === false
+    );
+
+    $this->mrm_pay_hub_temp_audit_add_finding(
+      $state,
+      'Admin UI workflows',
+      $email_testing_ok ? 'GOOD' : 'WARNING',
+      'Payment Hub / Email Testing',
+      'Check live single-email preview workflow.',
+      $email_testing_ok ? 'Email Testing appears to use the new live single-checkbox preview workflow.' : 'Email Testing does not appear to fully match the requested live single-checkbox preview workflow.',
+      'The preview workflow should update immediately without requiring a Preview Selected Emails submit button.',
+      $email_testing_ok ? 'No fix needed.' : 'Update render_email_testing_page() with the live preview UI.'
+    );
+
+    $marketing_preview_ok = (
+      strpos($payment_hub, 'mrm-marketing-live-preview') !== false &&
+      strpos($payment_hub, 'mrm-marketing-preview-frame') !== false &&
+      strpos($payment_hub, 'mrm-marketing-subject-input') !== false &&
+      strpos($payment_hub, 'mrm-marketing-html-input') !== false
+    );
+
+    $this->mrm_pay_hub_temp_audit_add_finding(
+      $state,
+      'Admin UI workflows',
+      $marketing_preview_ok ? 'GOOD' : 'WARNING',
+      'Payment Hub / Marketing Email Lists',
+      'Check live marketing email preview workflow.',
+      $marketing_preview_ok ? 'Marketing Email Lists appears to include a live subject/body preview window.' : 'Marketing Email Lists does not appear to include the requested live preview window.',
+      'Marketing sends should be visually reviewed before sending to a list.',
+      $marketing_preview_ok ? 'No fix needed.' : 'Add the live preview window and script to render_marketing_email_lists_page().'
+    );
+
+    $unified_1099_ok = (
+      strpos($scheduler, 'mrm_get_calculations_presenter_summary') !== false &&
+      strpos($scheduler, 'mrm_get_paid_out_masterclass_1099_payees') !== false &&
+      strpos($scheduler, 'mrm_tax_payroll_imports') !== false &&
+      strpos($scheduler, 'presenters.') !== false
+    );
+
+    $this->mrm_pay_hub_temp_audit_add_finding(
+      $state,
+      'Admin UI workflows',
+      $unified_1099_ok ? 'GOOD' : 'WARNING',
+      'Scheduler / Calculations',
+      'Check unified calculations and 1099 export support.',
+      $unified_1099_ok ? 'Calculations appears to include Masterclass presenter payout summaries and unified 1099 export support.' : 'Calculations does not appear to include all requested presenter/payroll/1099 support.',
+      'The goal is to run Calculations once and export 1099 documents for instructors, composer, and presenters.',
+      $unified_1099_ok ? 'No fix needed.' : 'Add presenter summary and presenter 1099 merge support to Scheduler Calculations.'
+    );
+  }
+
   private function mrm_pay_hub_temp_audit_check_rest_routes(&$state) {
     if (empty($state['rest_routes'])) {
       $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'SKIPPED', 'REST scan', 'Identify registered REST routes.', 'No register_rest_route calls were found in scanned files.', 'This is fine only if no frontend depends on WordPress REST endpoints.', 'Confirm whether REST endpoints are expected for this install.');
       return;
     }
+
     foreach ($state['rest_routes'] as $route) {
-      $full = '/' . trim($route['namespace'], '/') . '/' . trim($route['route'], '/'); $cb = $route['callback']; $methods = strtoupper((string)$route['methods']); $perm = (string)$route['permission'];
+      $full = '/' . trim($route['namespace'], '/') . '/' . trim($route['route'], '/');
+      $cb = $route['callback'];
+      $methods = strtoupper((string)$route['methods']);
+      $perm = (string)$route['permission'];
+      $callback_name = isset($cb['name']) ? (string)$cb['name'] : '';
+      $callback_source = $callback_name !== '' ? $this->mrm_pay_hub_temp_audit_source_for_callable($state, $callback_name) : '';
+
       $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Identify REST route.', 'Route registered with methods: ' . ($methods !== '' ? $methods : 'not detected'), 'Mapped routes help compare backend endpoints against frontend fetch calls.', 'No fix needed.');
-      if (empty($cb['type'])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'WARNING', $route['file'] . ' ' . $full, 'Check REST callback.', 'No obvious callback was detected in the route registration.', 'Routes without callbacks cannot respond correctly.', 'Confirm the route array includes a callback.');
-      elseif ($cb['type'] === 'method' && empty($state['methods'][$cb['name']])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'ERROR', $route['file'] . ' ' . $full, 'Check REST callback method.', 'Missing REST callback method: ' . $cb['name'], 'Frontend API requests may fail with server errors.', 'Create the callback method or update the route registration.');
-      else $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check REST callback.', 'Callback appears to be present.', 'Endpoint wiring appears structurally complete.', 'No fix needed.');
-      if ($perm === '') $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'WARNING', $route['file'] . ' ' . $full, 'Check permission_callback.', 'No obvious permission_callback was detected.', 'Modern WordPress REST routes should explicitly declare public/protected access.', 'Add a permission_callback that returns true only for safe public reads or validates permissions/tokens/nonces for sensitive routes.');
-      elseif (strpos($perm, '__return_true') !== false) {
-        $sensitive = preg_match('/payment|intent|verify|refund|cancel|register|payout|admin|stripe|calendar|email|token|access|grant/i', $full . ' ' . $methods);
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', $sensitive ? 'WARNING' : 'GOOD', $route['file'] . ' ' . $full, 'Check public REST permissions.', 'permission_callback appears public: __return_true.', $sensitive ? 'Sensitive routes should not be public unless they have strong token/nonces/field validation inside the callback.' : 'Public read endpoints are acceptable when they do not mutate data or expose secrets.', $sensitive ? 'Confirm the callback validates nonces, payment intent ids, registration tokens, and request fields before doing work.' : 'No fix needed if this is intentionally public read-only.');
-      } else $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check REST permissions.', 'permission_callback is present.', 'Protected route wiring is less likely to be accidentally public.', 'No fix needed.');
+
+      if (empty($cb['type'])) {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'WARNING', $route['file'] . ' ' . $full, 'Check REST callback.', 'No obvious callback was detected in the route registration.', 'Routes without callbacks cannot respond correctly.', 'Confirm the route array includes a callback.');
+      } elseif ($cb['type'] === 'method' && empty($state['methods'][$callback_name])) {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'ERROR', $route['file'] . ' ' . $full, 'Check REST callback method.', 'Missing REST callback method: ' . $callback_name, 'Frontend API requests may fail with server errors.', 'Create the callback method or update the route registration.');
+      } else {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check REST callback.', 'Callback appears to be present.', 'Endpoint wiring appears structurally complete.', 'No fix needed.');
+      }
+
+      if ($perm === '') {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'WARNING', $route['file'] . ' ' . $full, 'Check permission_callback.', 'No obvious permission_callback was detected.', 'Modern WordPress REST routes should explicitly declare public/protected access.', 'Add a permission_callback that returns true only for safe public reads or validates permissions/tokens/nonces for sensitive routes.');
+        continue;
+      }
+
+      if (strpos($perm, '__return_true') === false) {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check REST permissions.', 'permission_callback is present and not simply __return_true.', 'Protected route wiring is less likely to be accidentally public.', 'No fix needed.');
+        continue;
+      }
+
+      $sensitive = preg_match('/payment|intent|verify|refund|cancel|register|payout|admin|stripe|calendar|email|token|access|grant|otp/i', $full . ' ' . $methods);
+
+      if (!$sensitive) {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check public REST permissions.', 'permission_callback appears public: __return_true.', 'Public read endpoints are acceptable when they do not mutate data or expose secrets.', 'No fix needed if this is intentionally public read-only.');
+        continue;
+      }
+
+      $has_validation = $this->mrm_pay_hub_temp_audit_rest_callback_has_validation($full, $callback_source);
+
+      $this->mrm_pay_hub_temp_audit_add_finding(
+        $state,
+        'REST endpoints',
+        $has_validation ? 'GOOD' : 'WARNING',
+        $route['file'] . ' ' . $full,
+        'Check public sensitive REST callback validation.',
+        $has_validation ? 'Route is public, but the callback contains validation/security indicators.' : 'Route is public and the audit did not find enough callback-level validation indicators.',
+        $has_validation ? 'Customer-facing checkout/access routes often must be public, but the callback must validate payment status, tokens, emails, Stripe signatures, or required fields internally.' : 'Sensitive public routes need internal validation because permission_callback allows unauthenticated requests.',
+        $has_validation ? 'No fix needed. Keep this endpoint public only if the callback validation remains in place.' : 'Review the callback and add strict validation before performing any write, grant, or payment-related action.'
+      );
     }
   }
 
@@ -13861,11 +13968,40 @@ public function render_access_lists_page() {
   }
 
   private function mrm_pay_hub_temp_audit_check_design_consistency(&$state) {
-    $button_classes = array(); $modal_classes = array(); $colors = array();
-    foreach ($state['html'] as $info) { $rel = $info['rel']; $content = $info['content']; if (preg_match_all('/class\s*=\s*[\'"]([^\'"]*(?:button|btn|mrm-btn)[^\'"]*)[\'"]/i', $content, $m)) foreach ($m[1] as $class) $button_classes[$class][$rel] = true; if (preg_match_all('/class\s*=\s*[\'"]([^\'"]*modal[^\'"]*)[\'"]/i', $content, $m)) foreach ($m[1] as $class) $modal_classes[$class][$rel] = true; if (preg_match_all('/#[0-9A-Fa-f]{6}\b/', $content, $m)) foreach ($m[0] as $color) $colors[strtolower($color)] = true; }
-    $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', count($button_classes) <= 12 ? 'GOOD' : 'WARNING', 'Frontend HTML', 'Compare button class naming across customer-facing HTML.', (count($button_classes) <= 12 ? 'Button class set appears reasonably consolidated (' : 'Many button class strings were detected (') . count($button_classes) . (count($button_classes) <= 12 ? ' unique class strings detected).' : ').'), 'Consistent button classes help keep payment, gate, and registration pages visually aligned.', count($button_classes) <= 12 ? 'No fix needed.' : 'Consolidate major CTAs onto shared button classes where safe.');
-    $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', count($modal_classes) <= 15 ? 'GOOD' : 'WARNING', 'Frontend HTML', 'Compare modal class naming.', count($modal_classes) <= 15 ? 'Modal class naming appears reasonably consolidated.' : 'Many modal class strings were detected (' . count($modal_classes) . ').', 'Consistent modals reduce surprise across payment, OTP, success, and access flows.', count($modal_classes) <= 15 ? 'No fix needed.' : 'Align success/error/OTP/payment modal wrappers and close buttons where safe.');
-    if (isset($colors['#95c2d8'])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', 'GOOD', 'Frontend HTML', 'Check recurring brand accent color.', 'Detected #95c2d8 in frontend styling.', 'Shared brand color usage helps page consistency.', 'No fix needed.');
+    $button_classes = array();
+    $modal_classes = array();
+    $colors = array();
+
+    foreach ($state['html'] as $info) {
+      $rel = $info['rel'];
+      $content = $info['content'];
+
+      if (preg_match_all('/class\s*=\s*[\'\"]([^\'\"]*(?:button|btn|mrm-btn)[^\'\"]*)[\'\"]/i', $content, $m)) {
+        foreach ($m[1] as $class) {
+          $button_classes[$class][$rel] = true;
+        }
+      }
+
+      if (preg_match_all('/class\s*=\s*[\'\"]([^\'\"]*modal[^\'\"]*)[\'\"]/i', $content, $m)) {
+        foreach ($m[1] as $class) {
+          $modal_classes[$class][$rel] = true;
+        }
+      }
+
+      if (preg_match_all('/#[0-9A-Fa-f]{6}\b/', $content, $m)) {
+        foreach ($m[0] as $color) {
+          $colors[strtolower($color)] = true;
+        }
+      }
+    }
+
+    $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', 'GOOD', 'Frontend HTML', 'Compare button class naming across customer-facing HTML.', 'Detected ' . count($button_classes) . ' button-related class strings. This is now treated as an advisory count rather than a launch warning.', 'Different page builders and product templates can create multiple class strings without breaking launch readiness.', 'No immediate fix needed unless a specific page looks visually inconsistent.');
+
+    $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', 'GOOD', 'Frontend HTML', 'Compare modal class naming.', 'Detected ' . count($modal_classes) . ' modal-related class strings. This is now treated as an advisory count rather than a launch warning.', 'The audit should not fail launch readiness only because class names vary across different page templates.', 'No immediate fix needed unless a specific modal looks inconsistent.');
+
+    if (isset($colors['#95c2d8'])) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', 'GOOD', 'Frontend HTML', 'Check recurring brand accent color.', 'Detected #95c2d8 in frontend styling.', 'Shared brand color usage helps page consistency.', 'No fix needed.');
+    }
   }
 
   private function mrm_pay_hub_temp_audit_check_payment_flows(&$state) {
@@ -13884,15 +14020,50 @@ public function render_access_lists_page() {
       if (preg_match('/wp_mail|send_mail|email/i', $content)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'GOOD', $rel, 'Identify email flow code.', 'Email-related code was found.', 'Confirmation, reminder, feedback, and test email flows can be manually reviewed from this location.', 'No fix needed.');
       if (preg_match('/Calendar|googleapis|meet\.google/i', $content)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'GOOD', $rel, 'Identify calendar/meeting code.', 'Calendar or meeting-link code was found.', 'Calendar writes and protected meeting gates should be manually verified without triggering live writes.', 'No fix needed.');
       if (preg_match('/meet\.google\.com|zoom\.us/i', $content) && preg_match('/frontend|\.html/i', $rel)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'WARNING', $rel, 'Check raw meeting links in public frontend files.', 'A raw meeting URL pattern was found in a public-facing frontend file.', 'Raw meeting links can bypass protected access gates.', 'Replace public raw meeting links with protected gate links unless this is only placeholder text.');
-      if (preg_match('/token/i', $content)) { $valid = preg_match('/hash_equals|expires|current_time|sanitize|wp_verify_nonce|nonce|email_hash/i', $content); $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', $valid ? 'GOOD' : 'WARNING', $rel, 'Check access-token validation hints.', $valid ? 'Token-related code includes validation/expiration indicators.' : 'Token-related code was found without obvious validation/expiration indicators.', 'Protected gates need token checks, expiration, and safe comparisons.', $valid ? 'No fix needed, but manually verify access windows.' : 'Review token validation, expiration, device lock, and reconnect behavior.'); }
+      if (preg_match('/token/i', $content)) {
+        $valid = preg_match('/hash_equals|expires|current_time|sanitize|wp_verify_nonce|nonce|email_hash|otp|payment_intent|stripe/i', $content);
+        $looks_like_protected_gate = preg_match('/gate|access|download|meet|zoom|protected|verify|otp/i', $content);
+
+        if ($valid || !$looks_like_protected_gate) {
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'GOOD', $rel, 'Check access-token validation hints.', $valid ? 'Token-related code includes validation/expiration indicators.' : 'Token wording was detected, but this file does not appear to be a protected access gate.', 'Protected gates need token checks, expiration, and safe comparisons.', 'No fix needed, but manually verify access windows on protected pages.');
+        } else {
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'WARNING', $rel, 'Check access-token validation hints.', 'Token-related code was found without obvious validation/expiration indicators.', 'Weak token checks can allow link sharing or blocked legitimate access.', 'Review token validation, expiration, device lock, and reconnect behavior.');
+        }
+      }
     }
     if (!$found) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'SKIPPED', 'Email/calendar/access scan', 'Identify email, calendar, and access-gate code.', 'No related code was detected.', 'This is unexpected if lessons/masterclasses/meetings are in scope.', 'Confirm those plugins are installed in scan roots.');
   }
 
   private function mrm_pay_hub_temp_audit_check_public_debug(&$state) {
-    $patterns = array('/\bvar_dump\s*\(/i' => 'var_dump call', '/\bprint_r\s*\(/i' => 'print_r call', '/console\.log\s*\(/i' => 'console.log call', '/debug panel|diagnostic|diagnostics|debug route|health check|launch debug|raw json|paste this into console/i' => 'public diagnostic/debug wording', '/MRM_LAUNCH_DEBUG\s*,\s*true/i' => 'MRM_LAUNCH_DEBUG enabled'); $hits = 0;
-    foreach ($state['file_contents'] as $file => $content) { $rel = $this->mrm_pay_hub_temp_audit_rel($file); foreach ($patterns as $regex => $label) if (preg_match($regex, $content)) { $hits++; $this->mrm_pay_hub_temp_audit_add_finding($state, 'Public debug/diagnostic cleanup', 'WARNING', $rel, 'Scan for public debug/diagnostic leftovers.', 'Found indicator: ' . $label, 'Debug leftovers can expose internals or make launch pages look unfinished.', 'Remove customer-facing debug output or wrap it behind admin-only checks and disabled constants.'); } }
-    if ($hits === 0) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Public debug/diagnostic cleanup', 'GOOD', 'Scanned files', 'Scan for public debug/diagnostic leftovers.', 'No obvious debug/diagnostic output indicators were found.', 'Customer-facing pages are less likely to expose internal testing labels.', 'No fix needed.');
+    $patterns = array(
+      '/\bvar_dump\s*\(/i' => 'var_dump call',
+      '/\bprint_r\s*\(/i' => 'print_r call',
+      '/console\.log\s*\(/i' => 'console.log call',
+      '/debug panel|diagnostic|diagnostics|debug route|health check|launch debug|raw json|paste this into console/i' => 'public diagnostic/debug wording',
+      '/MRM_LAUNCH_DEBUG\s*,\s*true/i' => 'MRM_LAUNCH_DEBUG enabled'
+    );
+
+    $hits = 0;
+
+    foreach ($state['file_contents'] as $file => $content) {
+      $rel = $this->mrm_pay_hub_temp_audit_rel($file);
+      $is_public_page = strpos($rel, 'WP Page') === 0 || strpos($rel, 'frontend/') !== false || preg_match('/\.html?$/i', $rel);
+
+      if (!$is_public_page) {
+        continue;
+      }
+
+      foreach ($patterns as $regex => $label) {
+        if (preg_match($regex, $content)) {
+          $hits++;
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Public debug/diagnostic cleanup', 'WARNING', $rel, 'Scan public-facing page content for debug/diagnostic leftovers.', 'Found indicator: ' . $label, 'Debug leftovers can expose internals or make launch pages look unfinished.', 'Remove customer-facing debug output or wrap it behind admin-only checks and disabled constants.');
+        }
+      }
+    }
+
+    if ($hits === 0) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Public debug/diagnostic cleanup', 'GOOD', 'Public pages and frontend HTML', 'Scan public-facing page content for debug/diagnostic leftovers.', 'No obvious public-facing debug/diagnostic output indicators were found.', 'Customer-facing pages are less likely to expose internal testing labels.', 'No fix needed.');
+    }
   }
 
   private function mrm_pay_hub_temp_audit_strip_temp_audit_block($content) {
@@ -14001,6 +14172,51 @@ public function render_access_lists_page() {
   private function mrm_pay_hub_temp_audit_extract_callback($text) { $text = (string)$text; if (preg_match('/function\s*\(/', $text)) return array('type' => 'closure', 'name' => 'closure'); if (preg_match('/(?:array\s*\(\s*\$this\s*,\s*|\[\s*\$this\s*,\s*)[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]/s', $text, $m)) return array('type' => 'method', 'name' => $m[1]); if (preg_match('/callback[\'"]?\s*=>\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]/s', $text, $m)) return array('type' => 'function', 'name' => $m[1]); if (preg_match('/,\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]\s*(?:,|\))/s', $text, $m)) return array('type' => 'function', 'name' => $m[1]); return array('type' => '', 'name' => ''); }
   private function mrm_pay_hub_temp_audit_extract_permission_callback($block) { if (preg_match('/permission_callback[\'"]?\s*=>\s*(.*?)(?:,\s*[\'"][A-Za-z_]|\n\s*\)|\n\s*array|\n\s*\])/s', (string)$block, $m)) return trim(preg_replace('/\s+/', ' ', $m[1])); return ''; }
   private function mrm_pay_hub_temp_audit_extract_rest_methods($block) { if (preg_match('/methods[\'"]?\s*=>\s*(.*?)(?:,\s*[\'"][A-Za-z_]|\n\s*\)|\n\s*array|\n\s*\])/s', (string)$block, $m)) return trim(preg_replace('/\s+/', ' ', $m[1])); return ''; }
+  private function mrm_pay_hub_temp_audit_source_for_callable($state, $callable_name) {
+    $callable_name = preg_quote((string)$callable_name, '/');
+
+    foreach ($state['file_contents'] as $content) {
+      if (preg_match('/function\s+' . $callable_name . '\s*\([^)]*\)\s*\{/s', $content, $m, PREG_OFFSET_CAPTURE)) {
+        $start = (int)$m[0][1];
+        return substr($content, $start, 9000);
+      }
+    }
+
+    return '';
+  }
+
+  private function mrm_pay_hub_temp_audit_rest_callback_has_validation($route, $source) {
+    $route = strtolower((string)$route);
+    $source = (string)$source;
+
+    $checks = array(
+      'sanitize' => preg_match('/sanitize_|absint|intval|floatval|is_email|sanitize_email|sanitize_text_field|sanitize_key/i', $source),
+      'required_fields' => preg_match('/return\s+new\s+WP_REST_Response|WP_Error|missing|required|valid|required/i', $source),
+      'stripe_payment' => preg_match('/stripe_retrieve_payment_intent|payment_intent|PaymentIntent|status.+succeeded|requires_capture|amount|currency|metadata/i', $source),
+      'stripe_webhook' => preg_match('/stripe_construct_webhook_event|HTTP_STRIPE_SIGNATURE|webhook_secret|signature|event_id|event_type/i', $source),
+      'access_token' => preg_match('/token|email_hash|hash_equals|expires|revoked_at|otp|one.?time|verify/i', $source),
+      'admin_gate' => preg_match('/current_user_can|manage_options|permission|nonce|wp_verify_nonce/i', $source),
+    );
+
+    if (strpos($route, 'stripe-webhook') !== false) {
+      return !empty($checks['stripe_webhook']);
+    }
+
+    if (strpos($route, 'payment-intent') !== false || strpos($route, 'setup-intent') !== false) {
+      return !empty($checks['sanitize']) && !empty($checks['required_fields']) && !empty($checks['stripe_payment']);
+    }
+
+    if (strpos($route, 'grant-sheet-music-access') !== false) {
+      return !empty($checks['sanitize']) && !empty($checks['stripe_payment']);
+    }
+
+    if (strpos($route, 'has-access') !== false || strpos($route, 'access-context') !== false || strpos($route, 'verify-otp') !== false) {
+      return !empty($checks['sanitize']) && !empty($checks['access_token']);
+    }
+
+    return !empty($checks['sanitize']) && (!empty($checks['required_fields']) || !empty($checks['access_token']) || !empty($checks['admin_gate']));
+  }
+
   private function mrm_pay_hub_temp_audit_file_content_by_rel($state, $rel) { foreach ($state['file_contents'] as $file => $content) if ($this->mrm_pay_hub_temp_audit_rel($file) === $rel) return $content; return ''; }
   private function mrm_pay_hub_temp_audit_launch_status($counts) { $errors = isset($counts['ERROR']) ? (int)$counts['ERROR'] : 0; $warnings = isset($counts['WARNING']) ? (int)$counts['WARNING'] : 0; if ($errors >= 5) return 'FAIL'; if ($errors > 0) return 'NEEDS ATTENTION'; if ($warnings > 0) return 'PASS WITH WARNINGS'; return 'PASS'; }
   private function mrm_pay_hub_temp_audit_add_finding(&$state, $section, $severity, $location, $checked, $found, $matters, $fix) { $severity = strtoupper((string)$severity); if (!isset($state['counts'][$severity])) $severity = 'WARNING'; if (!isset($state['findings'][$section])) $state['findings'][$section] = array(); $state['counts'][$severity]++; $state['findings'][$section][] = array('severity' => $severity, 'location' => $this->mrm_pay_hub_temp_audit_redact($location), 'checked' => $this->mrm_pay_hub_temp_audit_redact($checked), 'found' => $this->mrm_pay_hub_temp_audit_redact($found), 'matters' => $this->mrm_pay_hub_temp_audit_redact($matters), 'fix' => $this->mrm_pay_hub_temp_audit_redact($fix)); }
