@@ -2260,6 +2260,37 @@ protected function mrm_get_google_service_account_json() {
         wp_clear_scheduled_hook( 'mrm_scheduler_send_meeting_reminders' );
     }
 
+    protected static function mrm_ensure_tax_payroll_imports_table() {
+        global $wpdb;
+
+        if ( ! function_exists( 'dbDelta' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        }
+
+        $charset_collate       = $wpdb->get_charset_collate();
+        $payroll_imports_table = $wpdb->prefix . 'mrm_tax_payroll_imports';
+
+        $sql_payroll_imports = "CREATE TABLE {$payroll_imports_table} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tax_year INT NOT NULL,
+    tax_quarter TINYINT NOT NULL DEFAULT 0,
+    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
+    payee_label VARCHAR(190) NOT NULL DEFAULT '',
+    gross_wages DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    source_label VARCHAR(190) NOT NULL DEFAULT '',
+    notes TEXT NULL,
+    imported_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    KEY tax_year (tax_year),
+    KEY tax_quarter (tax_quarter),
+    KEY environment_mode (environment_mode)
+) {$charset_collate};";
+
+        dbDelta( $sql_payroll_imports );
+    }
+
     public static function install_or_upgrade() {
         global $wpdb;
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -2581,25 +2612,7 @@ protected function mrm_get_google_service_account_json() {
         dbDelta( $sql_calc_cache );
 
 
-        $payroll_imports_table = $wpdb->prefix . 'mrm_tax_payroll_imports';
-        $sql_payroll_imports = "CREATE TABLE {$payroll_imports_table} (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    tax_year INT NOT NULL,
-    tax_quarter TINYINT NOT NULL DEFAULT 0,
-    environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
-    payee_label VARCHAR(190) NOT NULL DEFAULT '',
-    gross_wages DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    source_label VARCHAR(190) NOT NULL DEFAULT '',
-    notes TEXT NULL,
-    imported_at DATETIME NOT NULL,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    PRIMARY KEY (id),
-    KEY tax_year (tax_year),
-    KEY tax_quarter (tax_quarter),
-    KEY environment_mode (environment_mode)
-) {$charset_collate};";
-        dbDelta( $sql_payroll_imports );
+        self::mrm_ensure_tax_payroll_imports_table();
 
         // Backfill recurring anchor for older lesson rows so moved recurring events
         // can still be resolved against Google after reschedules.
@@ -9047,6 +9060,8 @@ protected function mrm_get_google_service_account_json() {
         if ( ! current_user_can( 'manage_options' ) ) {
             return;
         }
+
+        self::mrm_ensure_tax_payroll_imports_table();
 
         $settings = get_option( 'mrm_calculations_settings', array(
             'default_tax_year' => (int) gmdate( 'Y' ),

@@ -13731,30 +13731,50 @@ public function render_access_lists_page() {
 
     foreach ($state['file_contents'] as $file => $content) {
       $rel = $this->mrm_pay_hub_temp_audit_rel($file);
+
       if (strpos($rel, 'mrm-payments-hub.php') !== false) {
         $payment_hub = $content;
       }
+
       if (strpos($rel, 'mrm-lesson-scheduler.php') !== false) {
         $scheduler = $content;
       }
     }
 
+    $email_testing_source = $this->mrm_pay_hub_temp_audit_source_for_callable($state, 'render_email_testing_page');
+
+    if ($email_testing_source === '') {
+      $email_testing_source = $payment_hub;
+    }
+
     $email_testing_ok = (
-      strpos($payment_hub, 'mrm-email-testing-preview-frame') !== false &&
-      strpos($payment_hub, 'Select the email you want to preview') !== false &&
-      strpos($payment_hub, 'mrm-email-test-checkbox') !== false &&
-      strpos($payment_hub, 'Preview Selected Emails') === false
+      strpos($email_testing_source, 'mrm-email-testing-preview-frame') !== false &&
+      strpos($email_testing_source, 'Select the email you want to preview') !== false &&
+      strpos($email_testing_source, 'mrm-email-test-checkbox') !== false &&
+      strpos($email_testing_source, 'addEventListener') !== false &&
+      strpos($email_testing_source, 'clearPreview') !== false &&
+      strpos($email_testing_source, 'showPreview') !== false
+    );
+
+    $old_email_testing_submit_ui_present = (
+      strpos($email_testing_source, 'Preview Selected Emails') !== false ||
+      strpos($email_testing_source, 'mrm_pay_hub_preview_email_tests') !== false ||
+      strpos($email_testing_source, 'mrm_email_tests[]') !== false
     );
 
     $this->mrm_pay_hub_temp_audit_add_finding(
       $state,
       'Admin UI workflows',
-      $email_testing_ok ? 'GOOD' : 'WARNING',
+      ($email_testing_ok && !$old_email_testing_submit_ui_present) ? 'GOOD' : 'WARNING',
       'Payment Hub / Email Testing',
       'Check live single-email preview workflow.',
-      $email_testing_ok ? 'Email Testing appears to use the new live single-checkbox preview workflow.' : 'Email Testing does not appear to fully match the requested live single-checkbox preview workflow.',
+      ($email_testing_ok && !$old_email_testing_submit_ui_present)
+        ? 'Email Testing uses the live single-checkbox preview workflow and no old submit-to-preview UI was detected inside render_email_testing_page().'
+        : 'Email Testing does not appear to fully match the requested live single-checkbox preview workflow inside render_email_testing_page().',
       'The preview workflow should update immediately without requiring a Preview Selected Emails submit button.',
-      $email_testing_ok ? 'No fix needed.' : 'Update render_email_testing_page() with the live preview UI.'
+      ($email_testing_ok && !$old_email_testing_submit_ui_present)
+        ? 'No fix needed.'
+        : 'Update render_email_testing_page() so the preview iframe, single-checkbox behavior, and immediate JavaScript preview are all inside that method.'
     );
 
     $marketing_preview_ok = (
@@ -13963,7 +13983,18 @@ public function render_access_lists_page() {
       if ($has_fetch && !$has_catch) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', $rel, 'Check fetch error handling.', 'Fetch calls were found without an obvious catch/try error path.', 'Missing failure paths can leave customers stuck on loading screens.', 'Add catch/error UI handling for REST failures.');
       elseif ($has_fetch) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'GOOD', $rel, 'Check fetch error handling.', 'Fetch calls appear to have an error-handling path.', 'Customers should see clean failures instead of infinite loading.', 'No fix needed.');
       if (!$has_boot && strpos($content, '<script') !== false) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', $rel, 'Check frontend boot signal.', 'Script tags exist but no obvious DOMContentLoaded/load/init/boot/mount signal was found.', 'Without a reliable boot path, frontend code may not initialize after paste/optimization.', 'Confirm the controller runs after the DOM exists.');
-      if (strpos($content, '<script') !== false) { $has_attrs = preg_match('/data-cfasync\s*=|data-no-optimize\s*=|data-no-defer\s*=|data-no-minify\s*=/i', $content); $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', $has_attrs ? 'GOOD' : 'WARNING', $rel, 'Check optimizer-resistant script attributes.', $has_attrs ? 'At least one optimizer-resistant script attribute was found.' : 'No data-cfasync/data-no-optimize/data-no-defer/data-no-minify attributes were detected.', $has_attrs ? 'These attributes help prevent caching/minification/defer tools from breaking pasted page controllers.' : 'Optimizers can defer or rewrite inline controllers and break boot timing.', $has_attrs ? 'No fix needed.' : 'Add these attributes to critical frontend controller script tags where needed.'); }
+      if (strpos($content, '<script') !== false) {
+        $looks_like_custom_controller = preg_match('/fetch\s*\(|addEventListener|getElementById|querySelector|Stripe\s*\(|wp-json|rest_route|mrm-|payment|checkout|otp|access|download|calendar|scheduler|masterclass|sheet/i', $content);
+        $has_attrs = preg_match('/data-cfasync\s*=|data-no-optimize\s*=|data-no-defer\s*=|data-no-minify\s*=/i', $content);
+
+        if (!$looks_like_custom_controller) {
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', $rel, 'Check optimizer-resistant script attributes.', 'Script tags exist, but no custom controller indicators were detected.', 'Theme, builder, analytics, or embed scripts may not need custom optimizer-resistant attributes.', 'No fix needed unless this page contains a custom checkout, access, scheduler, masterclass, or product controller.');
+        } elseif ($has_attrs) {
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'GOOD', $rel, 'Check optimizer-resistant script attributes.', 'At least one optimizer-resistant script attribute was found.', 'These attributes help prevent caching/minification/defer tools from breaking pasted page controllers.', 'No fix needed.');
+        } else {
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', $rel, 'Check optimizer-resistant script attributes.', 'Custom controller indicators were found, but no data-cfasync/data-no-optimize/data-no-defer/data-no-minify attributes were detected.', 'Optimizers can defer or rewrite inline controllers and break boot timing.', 'Add these attributes to critical frontend controller script tags where needed.');
+        }
+      }
     }
   }
 
@@ -14039,7 +14070,7 @@ public function render_access_lists_page() {
       '/\bvar_dump\s*\(/i' => 'var_dump call',
       '/\bprint_r\s*\(/i' => 'print_r call',
       '/console\.log\s*\(/i' => 'console.log call',
-      '/debug panel|diagnostic|diagnostics|debug route|health check|launch debug|raw json|paste this into console/i' => 'public diagnostic/debug wording',
+      '/debug panel|debug route|debug output|health check|launch debug|raw json|paste this into console|diagnostic panel|diagnostic route|diagnostic output|diagnostic log/i' => 'public debug/diagnostic tooling wording',
       '/MRM_LAUNCH_DEBUG\s*,\s*true/i' => 'MRM_LAUNCH_DEBUG enabled'
     );
 
