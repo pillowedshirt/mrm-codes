@@ -13128,7 +13128,251 @@ public function render_access_lists_page() {
     return ob_get_clean();
   }
 
-  
+
+  // BEGIN TEMP PAYMENT HUB AUDIT
+  public function render_temp_payment_hub_audit_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die(esc_html__('You do not have permission to access this page.', 'mrm-payments-hub'));
+    }
+
+    $summary_key = 'mrm_pay_hub_temp_audit_summary_' . get_current_user_id();
+    $summary = get_transient($summary_key);
+    if (isset($_GET['mrm_audit_run'])) {
+      delete_transient($summary_key);
+    }
+
+    $log_file = 'wp-content/mrm-payment-hub-audit.log';
+    ?>
+    <div class="wrap">
+      <h1>Payment Hub Audit</h1>
+      <p>This is a temporary, admin-only pre-launch audit tool. It performs read-only checks across the Low Brass Lessons plugin/frontend files and writes one audit log file.</p>
+      <p><strong>Safety:</strong> this tool does not trigger real payments, refunds, payouts, emails, registrations, cancellations, Google Calendar writes, or other live external side effects.</p>
+
+      <?php if (is_array($summary)) : ?>
+        <div class="notice notice-<?php echo !empty($summary['notice_class']) ? esc_attr($summary['notice_class']) : 'success'; ?> is-dismissible">
+          <p><strong>Audit completed.</strong></p>
+          <p>
+            Overall status: <strong><?php echo esc_html((string)($summary['status'] ?? 'UNKNOWN')); ?></strong><br>
+            Good findings: <?php echo esc_html((string)($summary['good'] ?? 0)); ?> |
+            Warnings: <?php echo esc_html((string)($summary['warning'] ?? 0)); ?> |
+            Errors: <?php echo esc_html((string)($summary['error'] ?? 0)); ?> |
+            Skipped: <?php echo esc_html((string)($summary['skipped'] ?? 0)); ?><br>
+            Log written to <code><?php echo esc_html($log_file); ?></code>
+          </p>
+          <?php if (!empty($summary['message'])) : ?>
+            <p><?php echo esc_html((string)$summary['message']); ?></p>
+          <?php endif; ?>
+        </div>
+      <?php elseif (isset($_GET['mrm_audit_run'])) : ?>
+        <div class="notice notice-error is-dismissible"><p><strong>Audit failed.</strong> No audit summary was available. Check file permissions for <code><?php echo esc_html($log_file); ?></code>.</p></div>
+      <?php endif; ?>
+
+      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+        <input type="hidden" name="action" value="mrm_pay_hub_run_temp_audit" />
+        <?php wp_nonce_field('mrm_pay_hub_run_temp_audit', 'mrm_pay_hub_temp_audit_nonce'); ?>
+        <p><button type="submit" class="button button-primary">Run Audit Now</button></p>
+      </form>
+    </div>
+    <?php
+  }
+
+  public function handle_temp_payment_hub_audit_run() {
+    if (!current_user_can('manage_options')) {
+      wp_die(esc_html__('You do not have permission to run this audit.', 'mrm-payments-hub'));
+    }
+    check_admin_referer('mrm_pay_hub_run_temp_audit', 'mrm_pay_hub_temp_audit_nonce');
+    $summary = array('status' => 'FAIL', 'good' => 0, 'warning' => 0, 'error' => 1, 'skipped' => 0, 'notice_class' => 'error', 'message' => 'The audit did not complete.');
+    try {
+      $result = $this->mrm_pay_hub_temp_audit_run_all_checks();
+      if (is_array($result)) $summary = $result;
+    } catch (Throwable $e) {
+      $summary['message'] = 'Audit stopped because PHP reported: ' . $this->mrm_pay_hub_temp_audit_redact($e->getMessage());
+      $this->mrm_pay_hub_temp_audit_write_emergency_log($summary['message']);
+    }
+    set_transient('mrm_pay_hub_temp_audit_summary_' . get_current_user_id(), $summary, 5 * MINUTE_IN_SECONDS);
+    wp_safe_redirect(add_query_arg(array('page' => 'mrm-pay-hub-audit', 'mrm_audit_run' => '1'), admin_url('admin.php')));
+    exit;
+  }
+
+  private function mrm_pay_hub_temp_audit_run_all_checks() {
+    $state = array(
+      'started_at' => current_time('mysql'), 'site_url' => site_url(), 'active_theme' => $this->mrm_pay_hub_temp_audit_active_theme_name(),
+      'roots' => array(), 'files' => array(), 'file_contents' => array(), 'functions' => array(), 'methods' => array(), 'hooks' => array(),
+      'rest_routes' => array(), 'scheduled_hooks' => array(), 'table_names' => array(), 'html' => array(),
+      'counts' => array('GOOD' => 0, 'WARNING' => 0, 'ERROR' => 0, 'SKIPPED' => 0),
+      'findings' => array('Backend/plugin health' => array(), 'REST endpoints' => array(), 'Admin-post/admin-ajax hooks' => array(), 'Cron/timing' => array(), 'Database tables' => array(), 'Frontend HTML/JS' => array(), 'Design/layout consistency' => array(), 'Payment/customer flows' => array(), 'Email/calendar/access gates' => array(), 'Public debug/diagnostic cleanup' => array()),
+    );
+    $state['roots'] = $this->mrm_pay_hub_temp_audit_find_scan_roots();
+    $this->mrm_pay_hub_temp_audit_collect_files($state);
+    $this->mrm_pay_hub_temp_audit_build_index($state);
+    $this->mrm_pay_hub_temp_audit_check_plugin_health($state);
+    $this->mrm_pay_hub_temp_audit_check_rest_routes($state);
+    $this->mrm_pay_hub_temp_audit_check_admin_ajax_post($state);
+    $this->mrm_pay_hub_temp_audit_check_cron($state);
+    $this->mrm_pay_hub_temp_audit_check_database($state);
+    $this->mrm_pay_hub_temp_audit_check_frontend_html_js($state);
+    $this->mrm_pay_hub_temp_audit_check_design_consistency($state);
+    $this->mrm_pay_hub_temp_audit_check_payment_flows($state);
+    $this->mrm_pay_hub_temp_audit_check_email_calendar_access($state);
+    $this->mrm_pay_hub_temp_audit_check_public_debug($state);
+    $status = $this->mrm_pay_hub_temp_audit_launch_status($state['counts']);
+    $written = $this->mrm_pay_hub_temp_audit_write_log($this->mrm_pay_hub_temp_audit_format_log($state, $status));
+    return array('status' => $status, 'good' => (int)$state['counts']['GOOD'], 'warning' => (int)$state['counts']['WARNING'], 'error' => (int)$state['counts']['ERROR'], 'skipped' => (int)$state['counts']['SKIPPED'], 'notice_class' => $state['counts']['ERROR'] > 0 ? 'error' : ($state['counts']['WARNING'] > 0 ? 'warning' : 'success'), 'message' => $written ? 'Review the structured log before launch.' : 'Audit ran, but the log could not be written.');
+  }
+
+  private function mrm_pay_hub_temp_audit_active_theme_name() {
+    if (function_exists('wp_get_theme')) {
+      $theme = wp_get_theme();
+      if ($theme && is_object($theme)) {
+        $name = trim((string)$theme->get('Name'));
+        if ($name !== '') return $name;
+      }
+    }
+    return 'Unknown';
+  }
+
+  private function mrm_pay_hub_temp_audit_find_scan_roots() {
+    $roots = array();
+    $candidates = array(dirname(__FILE__));
+    if (defined('WP_PLUGIN_DIR') && is_dir(WP_PLUGIN_DIR)) {
+      $known = array('mrm-payments-hub', 'mrm-lesson-scheduler', 'mrm-masterclass', 'mrm-product-access', 'mrm-sheet-music', 'mrm-onboarding', 'mrm-meeting-scheduler', 'mrm-contact-form');
+      foreach ($known as $dir_name) $candidates[] = trailingslashit(WP_PLUGIN_DIR) . $dir_name;
+      $children = @scandir(WP_PLUGIN_DIR);
+      if (is_array($children)) foreach ($children as $child) {
+        if ($child === '.' || $child === '..') continue;
+        $path = trailingslashit(WP_PLUGIN_DIR) . $child;
+        if (!is_dir($path)) continue;
+        $lower = strtolower($child);
+        if (strpos($lower, 'mrm-') === 0 || strpos($lower, 'low-brass') !== false || strpos($lower, 'lowbrass') !== false) $candidates[] = $path;
+      }
+    }
+    foreach ($candidates as $candidate) {
+      $real = realpath($candidate);
+      if (!$real || !is_dir($real) || !is_readable($real) || $this->mrm_pay_hub_temp_audit_path_is_forbidden($real)) continue;
+      $roots[$real] = $real;
+    }
+    return array_values($roots);
+  }
+
+  private function mrm_pay_hub_temp_audit_path_is_forbidden($path) {
+    $path = str_replace('\\', '/', (string)$path);
+    $lower = strtolower($path);
+    $forbidden = array('/wp-admin/', '/wp-includes/', '/uploads/', '/cache/', '/node_modules/', '/vendor/', '/.git/', '/logs/', '/tmp/', '/backup', '/backups/');
+    foreach ($forbidden as $segment) if (strpos($lower, $segment) !== false) return true;
+    return in_array(strtolower(basename($path)), array('wp-config.php', '.env', 'debug.log'), true);
+  }
+
+  private function mrm_pay_hub_temp_audit_collect_files(&$state) {
+    foreach ($state['roots'] as $root) $this->mrm_pay_hub_temp_audit_walk_dir($root, $state, 0);
+    if (empty($state['files'])) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'ERROR', 'File scan', 'Collect PHP, HTML, JS, CSS, and JSON files.', 'No readable code/frontend files were collected.', 'No launch checks can be completed without code files.', 'Confirm the plugin folders are readable by WordPress.');
+    } else {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', 'File scan', 'Collect PHP, HTML, JS, CSS, and JSON files.', 'Collected ' . count($state['files']) . ' readable file(s).', 'The scanner has enough local source files to evaluate wiring and frontend consistency.', 'No fix needed.');
+    }
+  }
+
+  private function mrm_pay_hub_temp_audit_walk_dir($dir, &$state, $depth) {
+    if ($depth > 8) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($dir), 'Recursive scan depth limit.', 'Skipped a deeply nested directory.', 'Depth limits prevent shared hosting timeouts.', 'Move relevant frontend/plugin files closer to the plugin root if they must be audited.');
+      return;
+    }
+    if (count($state['files']) >= 750) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', 'File scan', 'File count safety limit.', 'Stopped after collecting 750 files.', 'Large scans can time out on shared hosting.', 'Temporarily narrow the plugin folders or increase the safety limit only if needed.');
+      return;
+    }
+    $items = @scandir($dir);
+    if (!is_array($items)) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($dir), 'Read directory.', 'Directory could not be read.', 'Unreadable folders may hide launch issues.', 'Check permissions or ignore if the folder is unrelated.');
+      return;
+    }
+    foreach ($items as $item) {
+      if ($item === '.' || $item === '..') continue;
+      $path = $dir . DIRECTORY_SEPARATOR . $item;
+      if ($this->mrm_pay_hub_temp_audit_path_is_forbidden($path)) continue;
+      if (is_dir($path)) { $this->mrm_pay_hub_temp_audit_walk_dir($path, $state, $depth + 1); continue; }
+      if (!is_file($path) || !is_readable($path)) continue;
+      $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+      if (!in_array($ext, array('php', 'html', 'htm', 'js', 'css', 'json'), true)) continue;
+      $size = @filesize($path);
+      if ($size !== false && $size > 2500000) {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($path), 'Read file size.', 'Skipped because the file is larger than 2.5 MB.', 'Large files can cause audit timeouts on shared hosting.', 'Split very large frontend files or inspect them manually.');
+        continue;
+      }
+      $state['files'][] = $path;
+    }
+  }
+
+  private function mrm_pay_hub_temp_audit_build_index(&$state) {
+    foreach ($state['files'] as $file) {
+      $content = @file_get_contents($file, false, null, 0, 1600000);
+      if (!is_string($content)) {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($file), 'Read source file.', 'File could not be read.', 'Unreadable files can hide missing callbacks or frontend issues.', 'Check file permissions.');
+        continue;
+      }
+      $rel = $this->mrm_pay_hub_temp_audit_rel($file);
+      $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+      $state['file_contents'][$file] = $content;
+      if (preg_match_all('/function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/', $content, $matches)) foreach ($matches[1] as $name) { $state['functions'][$name] = $rel; $state['methods'][$name] = $rel; }
+      if (preg_match_all('/add_(action|filter)\s*\((.*?)\);/s', $content, $matches, PREG_SET_ORDER)) foreach ($matches as $m) {
+        $stmt = 'add_' . $m[1] . '(' . $m[2] . ');';
+        $hook = $this->mrm_pay_hub_temp_audit_first_string_arg($m[2]);
+        if ($hook !== '') $state['hooks'][] = array('type' => $m[1], 'hook' => $hook, 'callback' => $this->mrm_pay_hub_temp_audit_extract_callback($stmt), 'file' => $rel, 'statement' => $stmt);
+      }
+      if (preg_match_all('/register_rest_route\s*\(\s*([\'\"])(.*?)\1\s*,\s*([\'\"])(.*?)\3\s*,(.*?)\);/s', $content, $matches, PREG_SET_ORDER)) foreach ($matches as $m) {
+        $block = $m[5];
+        $state['rest_routes'][] = array('namespace' => $m[2], 'route' => $m[4], 'callback' => $this->mrm_pay_hub_temp_audit_extract_callback($block), 'permission' => $this->mrm_pay_hub_temp_audit_extract_permission_callback($block), 'methods' => $this->mrm_pay_hub_temp_audit_extract_rest_methods($block), 'file' => $rel, 'block' => $block);
+      }
+      if (preg_match_all('/wp_(?:schedule_event|schedule_single_event)\s*\((.*?)\);/s', $content, $matches, PREG_SET_ORDER)) foreach ($matches as $m) if (preg_match_all('/[\'\"]([^\'\"]+)[\'\"]/', $m[1], $strings) && !empty($strings[1])) {
+        $hook = end($strings[1]);
+        if ($hook) $state['scheduled_hooks'][] = array('hook' => $hook, 'file' => $rel, 'statement' => 'wp_schedule_event(' . trim($m[1]) . ');');
+      }
+      if (preg_match_all('/\$wpdb->prefix\s*\.\s*[\'\"]([^\'\"]+)[\'\"]/', $content, $matches)) foreach ($matches[1] as $table_tail) $state['table_names'][$table_tail] = $rel;
+      if (in_array($ext, array('html', 'htm'), true)) {
+        $ids = array();
+        if (preg_match_all('/\bid\s*=\s*[\'\"]([^\'\"]+)[\'\"]/i', $content, $id_matches)) foreach ($id_matches[1] as $id) $ids[$id] = true;
+        $state['html'][$file] = array('rel' => $rel, 'ids' => $ids, 'content' => $content);
+      }
+    }
+  }
+
+  private function mrm_pay_hub_temp_audit_check_plugin_health(&$state) {
+    $php_files = 0; $plugin_headers = 0;
+    foreach ($state['file_contents'] as $file => $content) {
+      if (strtolower(pathinfo($file, PATHINFO_EXTENSION)) !== 'php') continue;
+      $php_files++; $rel = $this->mrm_pay_hub_temp_audit_rel($file);
+      if (strpos($content, 'Plugin Name:') !== false) { $plugin_headers++; $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', $rel, 'Check WordPress plugin header.', 'Plugin header found.', 'WordPress can identify the plugin bootstrap file.', 'No fix needed.'); }
+      if (strpos($content, "defined('ABSPATH')") === false && strpos($content, 'defined(\'ABSPATH\')') === false && strpos($content, 'defined("ABSPATH")') === false) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'WARNING', $rel, 'Check direct-access guard.', 'No obvious ABSPATH guard was found.', 'Publicly loading PHP plugin files directly can expose unsafe behavior.', 'Add `if (!defined(\'ABSPATH\')) exit;` near the top if this file is directly web-accessible.');
+      if (abs(substr_count($content, '{') - substr_count($content, '}')) > 2) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'WARNING', $rel, 'Check rough brace balance.', 'The file has a suspicious brace count difference.', 'Large brace mismatches can indicate syntax or copy/paste risks.', 'Open the file in an editor with PHP linting and inspect unmatched blocks.');
+      else $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', $rel, 'Check rough brace balance.', 'Brace count does not look suspicious.', 'This reduces obvious fatal syntax-risk signals without using shell commands.', 'No fix needed.');
+    }
+    if ($php_files > 0) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', 'PHP scan', 'Confirm PHP files exist.', 'Found ' . $php_files . ' PHP file(s), including ' . $plugin_headers . ' plugin header file(s).', 'The audit can evaluate plugin registrations and callbacks.', 'No fix needed.');
+    foreach ($state['hooks'] as $hook) {
+      $cb = $hook['callback'];
+      if (empty($cb['type']) || $cb['type'] === 'closure') continue;
+      if ($cb['type'] === 'method' && empty($state['methods'][$cb['name']])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'ERROR', $hook['file'] . ' / ' . $hook['hook'], 'Confirm registered callback method exists.', 'Missing method callback: ' . $cb['name'], 'A missing callback can cause fatal errors or dead admin/customer flows.', 'Create the method or remove/fix the hook registration.');
+      elseif ($cb['type'] === 'function' && empty($state['functions'][$cb['name']]) && !function_exists($cb['name'])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'WARNING', $hook['file'] . ' / ' . $hook['hook'], 'Confirm registered callback function exists.', 'Function callback was not found in scanned files: ' . $cb['name'], 'If this function is not loaded by WordPress, the hook will fail.', 'Confirm the function is loaded, or change the hook to an existing callback.');
+    }
+  }
+
+  private function mrm_pay_hub_temp_audit_check_rest_routes(&$state) {
+    if (empty($state['rest_routes'])) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'SKIPPED', 'REST scan', 'Identify registered REST routes.', 'No register_rest_route calls were found in scanned files.', 'This is fine only if no frontend depends on WordPress REST endpoints.', 'Confirm whether REST endpoints are expected for this install.');
+      return;
+    }
+    foreach ($state['rest_routes'] as $route) {
+      $full = '/' . trim($route['namespace'], '/') . '/' . trim($route['route'], '/'); $cb = $route['callback']; $methods = strtoupper((string)$route['methods']); $perm = (string)$route['permission'];
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Identify REST route.', 'Route registered with methods: ' . ($methods !== '' ? $methods : 'not detected'), 'Mapped routes help compare backend endpoints against frontend fetch calls.', 'No fix needed.');
+      if (empty($cb['type'])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'WARNING', $route['file'] . ' ' . $full, 'Check REST callback.', 'No obvious callback was detected in the route registration.', 'Routes without callbacks cannot respond correctly.', 'Confirm the route array includes a callback.');
+      elseif ($cb['type'] === 'method' && empty($state['methods'][$cb['name']])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'ERROR', $route['file'] . ' ' . $full, 'Check REST callback method.', 'Missing REST callback method: ' . $cb['name'], 'Frontend API requests may fail with server errors.', 'Create the callback method or update the route registration.');
+      else $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check REST callback.', 'Callback appears to be present.', 'Endpoint wiring appears structurally complete.', 'No fix needed.');
+      if ($perm === '') $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'WARNING', $route['file'] . ' ' . $full, 'Check permission_callback.', 'No obvious permission_callback was detected.', 'Modern WordPress REST routes should explicitly declare public/protected access.', 'Add a permission_callback that returns true only for safe public reads or validates permissions/tokens/nonces for sensitive routes.');
+      elseif (strpos($perm, '__return_true') !== false) {
+        $sensitive = preg_match('/payment|intent|verify|refund|cancel|register|payout|admin|stripe|calendar|email|token|access|grant/i', $full . ' ' . $methods);
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', $sensitive ? 'WARNING' : 'GOOD', $route['file'] . ' ' . $full, 'Check public REST permissions.', 'permission_callback appears public: __return_true.', $sensitive ? 'Sensitive routes should not be public unless they have strong token/nonces/field validation inside the callback.' : 'Public read endpoints are acceptable when they do not mutate data or expose secrets.', $sensitive ? 'Confirm the callback validates nonces, payment intent ids, registration tokens, and request fields before doing work.' : 'No fix needed if this is intentionally public read-only.');
+      } else $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check REST permissions.', 'permission_callback is present.', 'Protected route wiring is less likely to be accidentally public.', 'No fix needed.');
+    }
+  }
+
 }
 
 global $mrm_pay_hub_singleton;
