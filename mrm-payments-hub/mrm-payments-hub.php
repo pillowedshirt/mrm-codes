@@ -11114,6 +11114,88 @@ cliniccontact@example.org",
     return add_query_arg(array('action' => 'mrm_marketing_unsubscribe_confirm', 'token' => $token), admin_url('admin-post.php'));
   }
 
+  // BEGIN TEMP PAYMENT HUB AUDIT FIX - MARKETING UNSUBSCRIBE CALLBACKS
+  public function handle_marketing_unsubscribe_confirm() {
+    $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
+    $email = $this->mrm_marketing_email_from_token($token);
+
+    if (!$email) {
+      $this->mrm_marketing_render_unsubscribe_page(
+        'Invalid unsubscribe link',
+        'This unsubscribe link is invalid or expired. Please contact Low Brass Lessons if you still need help unsubscribing.',
+        ''
+      );
+      exit;
+    }
+
+    $form = '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:20px;">'
+      . '<input type="hidden" name="action" value="mrm_marketing_unsubscribe_do">'
+      . '<input type="hidden" name="token" value="' . esc_attr($token) . '">'
+      . wp_nonce_field('mrm_marketing_unsubscribe_do_' . $email, 'mrm_marketing_unsubscribe_nonce', true, false)
+      . '<button type="submit" style="background:#111;color:#fff;border:0;border-radius:6px;padding:12px 18px;cursor:pointer;">Unsubscribe</button>'
+      . '</form>';
+
+    $this->mrm_marketing_render_unsubscribe_page(
+      'Confirm unsubscribe',
+      'You are unsubscribing ' . esc_html($email) . ' from Low Brass Lessons marketing emails.',
+      $form
+    );
+    exit;
+  }
+
+  public function handle_marketing_unsubscribe_do() {
+    $token = isset($_POST['token']) ? sanitize_text_field(wp_unslash($_POST['token'])) : '';
+    $email = $this->mrm_marketing_email_from_token($token);
+
+    if (!$email) {
+      $this->mrm_marketing_render_unsubscribe_page(
+        'Invalid unsubscribe request',
+        'This unsubscribe request could not be verified. Please contact Low Brass Lessons if you still need help unsubscribing.',
+        ''
+      );
+      exit;
+    }
+
+    $nonce = isset($_POST['mrm_marketing_unsubscribe_nonce'])
+      ? sanitize_text_field(wp_unslash($_POST['mrm_marketing_unsubscribe_nonce']))
+      : '';
+
+    if ($nonce && !wp_verify_nonce($nonce, 'mrm_marketing_unsubscribe_do_' . $email)) {
+      $this->mrm_marketing_render_unsubscribe_page(
+        'Unsubscribe request expired',
+        'Please reopen the unsubscribe link from your email and try again.',
+        ''
+      );
+      exit;
+    }
+
+    $this->mrm_marketing_add_unsubscribe($email);
+
+    $this->mrm_marketing_render_unsubscribe_page(
+      'You are unsubscribed',
+      esc_html($email) . ' has been removed from Low Brass Lessons marketing emails.',
+      '<p style="margin-top:18px;color:#555;">You may still receive transactional emails related to purchases, lessons, masterclasses, access links, receipts, reminders, safety, or legal/account records.</p>'
+    );
+    exit;
+  }
+
+  private function mrm_marketing_render_unsubscribe_page($title, $message, $extra_html = '') {
+    status_header(200);
+    nocache_headers();
+
+    $site_name = get_bloginfo('name') ? get_bloginfo('name') : 'Low Brass Lessons';
+
+    echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">';
+    echo '<title>' . esc_html($title) . ' - ' . esc_html($site_name) . '</title>';
+    echo '</head><body style="margin:0;background:#f6f6f6;color:#111;font-family:Arial,sans-serif;">';
+    echo '<main style="max-width:640px;margin:60px auto;padding:28px;background:#fff;border:1px solid #e5e5e5;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.06);">';
+    echo '<h1 style="margin:0 0 14px;font-size:28px;line-height:1.2;">' . esc_html($title) . '</h1>';
+    echo '<p style="font-size:16px;line-height:1.6;margin:0;">' . wp_kses_post($message) . '</p>';
+    echo wp_kses_post($extra_html);
+    echo '</main></body></html>';
+  }
+  // END TEMP PAYMENT HUB AUDIT FIX - MARKETING UNSUBSCRIBE CALLBACKS
+
   private function mrm_marketing_allowed_html($html) {
     $html = (string)$html;
     if (current_user_can('unfiltered_html')) return $html;
@@ -13205,6 +13287,7 @@ public function render_access_lists_page() {
     $state['roots'] = $this->mrm_pay_hub_temp_audit_find_scan_roots();
     $this->mrm_pay_hub_temp_audit_collect_files($state);
     $this->mrm_pay_hub_temp_audit_build_index($state);
+    $this->mrm_pay_hub_temp_audit_collect_wp_page_html($state);
     $this->mrm_pay_hub_temp_audit_check_plugin_health($state);
     $this->mrm_pay_hub_temp_audit_check_rest_routes($state);
     $this->mrm_pay_hub_temp_audit_check_admin_ajax_post($state);
@@ -13309,6 +13392,7 @@ public function render_access_lists_page() {
         $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($file), 'Read source file.', 'File could not be read.', 'Unreadable files can hide missing callbacks or frontend issues.', 'Check file permissions.');
         continue;
       }
+      $content = $this->mrm_pay_hub_temp_audit_strip_temp_audit_block($content);
       $rel = $this->mrm_pay_hub_temp_audit_rel($file);
       $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
       $state['file_contents'][$file] = $content;
@@ -13317,6 +13401,22 @@ public function render_access_lists_page() {
         $stmt = 'add_' . $m[1] . '(' . $m[2] . ');';
         $hook = $this->mrm_pay_hub_temp_audit_first_string_arg($m[2]);
         if ($hook !== '') $state['hooks'][] = array('type' => $m[1], 'hook' => $hook, 'callback' => $this->mrm_pay_hub_temp_audit_extract_callback($stmt), 'file' => $rel, 'statement' => $stmt);
+      }
+      if (preg_match_all('/(?:\$this->)?[A-Za-z0-9_]*add_action_if_method_exists\s*\(\s*([\'"])(.*?)\1\s*,\s*([\'"])(.*?)\3(?:\s*,\s*([0-9]+))?(?:\s*,\s*([0-9]+))?\s*\)/s', $content, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $m) {
+          $hook = (string)$m[2];
+          $method = (string)$m[4];
+
+          if ($hook !== '' && $method !== '') {
+            $state['hooks'][] = array(
+              'type' => 'action',
+              'hook' => $hook,
+              'callback' => array('type' => 'method', 'name' => $method),
+              'file' => $rel,
+              'statement' => $m[0],
+            );
+          }
+        }
       }
       if (preg_match_all('/register_rest_route\s*\(\s*([\'\"])(.*?)\1\s*,\s*([\'\"])(.*?)\3\s*,(.*?)\);/s', $content, $matches, PREG_SET_ORDER)) foreach ($matches as $m) {
         $block = $m[5];
@@ -13403,12 +13503,57 @@ public function render_access_lists_page() {
 
   private function mrm_pay_hub_temp_audit_check_database(&$state) {
     global $wpdb;
-    if (empty($state['table_names'])) { $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', 'Database scan', 'Identify custom table names.', 'No $wpdb->prefix table references were found.', 'This is fine only if the plugins do not use custom tables.', 'Confirm expected data is stored in options or external systems.'); return; }
+
+    if (empty($state['table_names'])) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', 'Database scan', 'Identify custom table names.', 'No $wpdb->prefix table references were found.', 'This is fine only if the plugins do not use custom tables.', 'Confirm expected data is stored in options or external systems.');
+      return;
+    }
+
     foreach ($state['table_names'] as $tail => $rel) {
-      if (!is_object($wpdb) || empty($wpdb->prefix)) { $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', $rel . ' / ' . $tail, 'Runtime table existence check.', '$wpdb was unavailable.', 'The audit cannot confirm table existence without a database connection.', 'Rerun inside normal WordPress admin.'); continue; }
-      $table = $wpdb->prefix . $tail; $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
-      if ($found === $table) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'GOOD', $rel . ' / ' . $table, 'Check required table exists.', 'Table exists.', 'Existing tables reduce launch risk for orders, access, ledgers, reminders, and registrations.', 'No fix needed.');
-      else $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'ERROR', $rel . ' / ' . $table, 'Check required table exists.', 'Table was not found.', 'Missing tables can break payments, registrations, access gates, payouts, or logs.', 'Deactivate/reactivate the relevant plugin only if safe, or run its install/upgrade routine after backing up the database.');
+      $tail = (string)$tail;
+
+      if ($tail === 'mrm_masterclass_invalid_table') {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', $rel . ' / ' . $tail, 'Classify table reference.', 'This is a defensive sentinel table name returned only when the Masterclass table helper receives an empty table name.', 'This is not a real required database table and should not be created.', 'No database change needed. Investigate only if another audit finding shows a blank table helper call.');
+        continue;
+      }
+
+      if (!is_object($wpdb) || empty($wpdb->prefix)) {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', $rel . ' / ' . $tail, 'Runtime table existence check.', '$wpdb was unavailable.', 'The audit cannot confirm table existence without a database connection.', 'Rerun inside normal WordPress admin.');
+        continue;
+      }
+
+      if ($tail === 'mrm_pay_orders') {
+        $current_orders_table = $wpdb->prefix . 'mrm_orders';
+        $legacy_orders_table = $wpdb->prefix . 'mrm_pay_orders';
+
+        $current_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $current_orders_table));
+        $legacy_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $legacy_orders_table));
+
+        if ($current_exists === $current_orders_table) {
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', $rel . ' / ' . $legacy_orders_table, 'Classify legacy order table fallback.', 'Legacy table wp_mrm_pay_orders is missing, but current table wp_mrm_orders exists.', 'The current legal/payment order record table is wp_mrm_orders. Creating the old fallback table is unnecessary and could create duplicate recordkeeping confusion.', 'No database change needed.');
+        } elseif ($legacy_exists === $legacy_orders_table) {
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'GOOD', $rel . ' / ' . $legacy_orders_table, 'Check legacy order table fallback.', 'Legacy fallback table exists.', 'Older installs may still depend on this fallback.', 'No fix needed.');
+        } else {
+          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'ERROR', $rel . ' / ' . $current_orders_table, 'Check current or legacy order table.', 'Neither wp_mrm_orders nor wp_mrm_pay_orders exists.', 'Payment confirmation and legal order records may fail if no order table exists.', 'Run the Payments Hub installer/upgrade routine after backing up the database.');
+        }
+
+        continue;
+      }
+
+      $table = $wpdb->prefix . $tail;
+      $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+
+      if ($found === $table) {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'GOOD', $rel . ' / ' . $table, 'Check required table exists.', 'Table exists.', 'Existing tables reduce launch risk for orders, access, ledgers, reminders, and registrations.', 'No fix needed.');
+        continue;
+      }
+
+      if ($tail === 'mrm_tax_payroll_imports') {
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'WARNING', $rel . ' / ' . $table, 'Check optional payroll import table.', 'The payroll import table does not exist.', 'This does not appear to block customer payments, bookings, registrations, or access. From a legal/tax perspective, it matters only if you rely on the Calculations page for imported payroll/W-2 officer compensation support.', 'Do not create this table just to satisfy the audit. Create it later only if you intentionally add payroll import functionality.');
+        continue;
+      }
+
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'ERROR', $rel . ' / ' . $table, 'Check required table exists.', 'Table was not found.', 'Missing tables can break payments, registrations, access gates, payouts, or logs.', 'Run the relevant plugin install/upgrade routine after backing up the database.');
     }
   }
 
@@ -13464,6 +13609,92 @@ public function render_access_lists_page() {
     if ($hits === 0) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Public debug/diagnostic cleanup', 'GOOD', 'Scanned files', 'Scan for public debug/diagnostic leftovers.', 'No obvious debug/diagnostic output indicators were found.', 'Customer-facing pages are less likely to expose internal testing labels.', 'No fix needed.');
   }
 
+  private function mrm_pay_hub_temp_audit_strip_temp_audit_block($content) {
+    return preg_replace('/\/\/ BEGIN TEMP PAYMENT HUB AUDIT.*?\/\/ END TEMP PAYMENT HUB AUDIT/s', '/* temporary audit block omitted from self-scan */', (string)$content);
+  }
+
+  private function mrm_pay_hub_temp_audit_collect_wp_page_html(&$state) {
+    if (!function_exists('get_posts')) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', 'WordPress Pages', 'Load WordPress Pages for frontend HTML scanning.', 'get_posts() was unavailable.', 'The audit cannot inspect pasted frontend HTML stored in Pages.', 'Run this audit from normal WordPress admin.');
+      return;
+    }
+
+    $pages = get_posts(array(
+      'post_type' => 'page',
+      'post_status' => array('publish', 'draft', 'private'),
+      'numberposts' => 150,
+      'orderby' => 'modified',
+      'order' => 'DESC',
+      'suppress_filters' => true,
+    ));
+
+    if (empty($pages)) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', 'WordPress Pages', 'Load WordPress Pages for frontend HTML scanning.', 'No WordPress Pages were found.', 'The audit cannot inspect pasted frontend HTML if no pages are returned.', 'Confirm the customer-facing pages are stored as WordPress Pages.');
+      return;
+    }
+
+    $added = 0;
+
+    foreach ($pages as $page) {
+      if (!is_object($page) || empty($page->ID)) {
+        continue;
+      }
+
+      $chunks = array((string)$page->post_content);
+
+      $elementor_data = get_post_meta($page->ID, '_elementor_data', true);
+      if (!empty($elementor_data)) {
+        $chunks[] = is_string($elementor_data) ? $elementor_data : wp_json_encode($elementor_data);
+      }
+
+      $content = implode("\n\n", array_filter($chunks));
+      $content = $this->mrm_pay_hub_temp_audit_redact($content);
+
+      if (trim($content) === '') {
+        continue;
+      }
+
+      if (!preg_match('/<script|<style|<form|<button|<div|mrm-|stripe|masterclass|scheduler|lesson|sheet|otp|payment|access|modal|data-no-|wp-json|rest_route/i', $content)) {
+        continue;
+      }
+
+      if (strlen($content) > 1600000) {
+        $content = substr($content, 0, 1600000);
+        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', 'WP Page #' . absint($page->ID), 'Read WordPress Page HTML size.', 'Page content was truncated for audit safety.', 'Very large builder pages can time out shared hosting scans.', 'Manually inspect the full page if this page contains critical checkout, scheduler, masterclass, or access code.');
+      }
+
+      $ids = array();
+      if (preg_match_all('/\bid\s*=\s*[\'"]([^\'"]+)[\'"]/i', $content, $id_matches)) {
+        foreach ($id_matches[1] as $id) {
+          $ids[$id] = true;
+        }
+      }
+
+      $title = get_the_title($page);
+      $permalink = get_permalink($page);
+      $rel = 'WP Page: ' . ($title ? $title : 'Untitled') . ' (#' . absint($page->ID) . ')';
+      if ($permalink) {
+        $rel .= ' / ' . $permalink;
+      }
+
+      $key = 'wp-page://' . absint($page->ID);
+      $state['file_contents'][$key] = $content;
+      $state['html'][$key] = array(
+        'rel' => $rel,
+        'ids' => $ids,
+        'content' => $content,
+      );
+
+      $added++;
+    }
+
+    if ($added > 0) {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'GOOD', 'WordPress Pages', 'Load WordPress Pages for frontend HTML scanning.', 'Added ' . $added . ' WordPress Page(s) to the frontend HTML audit.', 'This lets the audit inspect pasted customer-facing HTML that lives in the Pages section instead of plugin files.', 'No fix needed.');
+    } else {
+      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', 'WordPress Pages', 'Load WordPress Pages for frontend HTML scanning.', 'Pages were found, but none matched frontend HTML/script markers.', 'The audit may still miss builder-rendered HTML if it is stored in custom builder metadata.', 'Confirm the key customer-facing pages contain pasted HTML or add their builder meta keys to the audit.');
+    }
+  }
+
   private function mrm_pay_hub_temp_audit_first_string_arg($args) { if (preg_match('/^[\s\(]*[\'"]([^\'"]+)[\'"]/', (string)$args, $m)) return $m[1]; return ''; }
   private function mrm_pay_hub_temp_audit_extract_callback($text) { $text = (string)$text; if (preg_match('/function\s*\(/', $text)) return array('type' => 'closure', 'name' => 'closure'); if (preg_match('/(?:array\s*\(\s*\$this\s*,\s*|\[\s*\$this\s*,\s*)[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]/s', $text, $m)) return array('type' => 'method', 'name' => $m[1]); if (preg_match('/callback[\'"]?\s*=>\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]/s', $text, $m)) return array('type' => 'function', 'name' => $m[1]); if (preg_match('/,\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]\s*(?:,|\))/s', $text, $m)) return array('type' => 'function', 'name' => $m[1]); return array('type' => '', 'name' => ''); }
   private function mrm_pay_hub_temp_audit_extract_permission_callback($block) { if (preg_match('/permission_callback[\'"]?\s*=>\s*(.*?)(?:,\s*[\'"][A-Za-z_]|\n\s*\)|\n\s*array|\n\s*\])/s', (string)$block, $m)) return trim(preg_replace('/\s+/', ' ', $m[1])); return ''; }
@@ -13479,7 +13710,7 @@ public function render_access_lists_page() {
   }
   private function mrm_pay_hub_temp_audit_write_log($log) { $path = trailingslashit(WP_CONTENT_DIR) . 'mrm-payment-hub-audit.log'; $bytes = @file_put_contents($path, $log, LOCK_EX); return ($bytes !== false); }
   private function mrm_pay_hub_temp_audit_write_emergency_log($message) { $path = trailingslashit(WP_CONTENT_DIR) . 'mrm-payment-hub-audit.log'; $log = 'LOW BRASS LESSONS / PAYMENT HUB TEMP AUDIT LOG' . "\n"; $log .= 'Timestamp: ' . current_time('mysql') . "\n"; $log .= 'Overall launch readiness: FAIL' . "\n"; $log .= 'Audit failed before completion: ' . $this->mrm_pay_hub_temp_audit_redact($message) . "\n"; @file_put_contents($path, $log, LOCK_EX); }
-  private function mrm_pay_hub_temp_audit_rel($path) { $path = str_replace('\\', '/', (string)$path); $bases = array(); if (defined('WP_CONTENT_DIR')) $bases[] = str_replace('\\', '/', WP_CONTENT_DIR); if (defined('ABSPATH')) $bases[] = str_replace('\\', '/', ABSPATH); foreach ($bases as $base) { $base = rtrim($base, '/'); if ($base !== '' && strpos($path, $base) === 0) return ltrim(substr($path, strlen($base)), '/'); } return basename($path); }
+  private function mrm_pay_hub_temp_audit_rel($path) { $path = str_replace('\\', '/', (string)$path); if (strpos($path, 'wp-page://') === 0) return 'WP Page #' . absint(substr($path, strlen('wp-page://'))); $bases = array(); if (defined('WP_CONTENT_DIR')) $bases[] = str_replace('\\', '/', WP_CONTENT_DIR); if (defined('ABSPATH')) $bases[] = str_replace('\\', '/', ABSPATH); foreach ($bases as $base) { $base = rtrim($base, '/'); if ($base !== '' && strpos($path, $base) === 0) return ltrim(substr($path, strlen($base)), '/'); } return basename($path); }
   private function mrm_pay_hub_temp_audit_redact($value) { $value = (string)$value; $patterns = array('/sk_(?:live|test)_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_SECRET_KEY]', '/rk_(?:live|test)_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_RESTRICTED_KEY]', '/whsec_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_WEBHOOK_SECRET]', '/Bearer\s+[A-Za-z0-9_\.\-]+/i' => 'Bearer [REDACTED_TOKEN]', '/password\s*[=:]\s*[^\s,;]+/i' => 'password=[REDACTED]', '/passwd\s*[=:]\s*[^\s,;]+/i' => 'passwd=[REDACTED]', '/private_key\s*[=:]\s*[^\s,;]+/i' => 'private_key=[REDACTED]', '/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----/s' => '[REDACTED_PRIVATE_KEY]', '/\b\d{3}-\d{2}-\d{4}\b/' => '[REDACTED_SSN]', '/\b\d{2}-\d{7}\b/' => '[REDACTED_TAX_ID]', '/wordpress_logged_in_[^=\s]+=[^\s;]+/i' => 'wordpress_logged_in_[REDACTED_COOKIE]'); foreach ($patterns as $regex => $replacement) $value = preg_replace($regex, $replacement, $value); return $value; }
   // END TEMP PAYMENT HUB AUDIT
 
