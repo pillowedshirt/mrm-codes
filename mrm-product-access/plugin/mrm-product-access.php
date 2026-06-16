@@ -2525,7 +2525,7 @@ function offerRowTemplate(pieceIndex){
     *, *::before, *::after{ box-sizing: border-box; }
     body{
       margin:0;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      font-family: "Source Sans 3", Arial, Helvetica, sans-serif;
       background: var(--mrm-bg);
       color: var(--mrm-text);
     }
@@ -3188,9 +3188,9 @@ function offerRowTemplate(pieceIndex){
 
         return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
         <div style="max-width:640px;margin:0 auto;padding:24px;">
-            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;">
                 ' . $logo_html . '
-                <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
+                <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;">' . esc_html( $title ) . '</h1>
                 <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
                 ' . $code_box . '
                 <div style="margin-top:10px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;text-align:center;">
@@ -4017,6 +4017,9 @@ function offerRowTemplate(pieceIndex){
           --radius-lg: 16px;
           --radius-md: 12px;
           --radius-sm: 8px;
+
+          --mrm-font-heading: "Academico", Georgia, "Times New Roman", serif;
+          --mrm-font-body: "Source Sans 3", Arial, Helvetica, sans-serif;
         }
 
         html, body { height: 100%; }
@@ -4024,7 +4027,7 @@ function offerRowTemplate(pieceIndex){
         body {
           margin: 0;
           background: var(--color-bg);
-          font-family: Inter, system-ui, sans-serif;
+          font-family: "Source Sans 3", Arial, Helvetica, sans-serif;
           color: var(--color-text-main);
         }
 

@@ -4216,9 +4216,9 @@ protected function mrm_get_google_service_account_json() {
              '<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">' .
              '<meta http-equiv="Pragma" content="no-cache">' .
              '<meta http-equiv="Expires" content="0">' .
-             '<title>' . esc_html( $title ) . '</title></head><body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f6f6f6;margin:0;padding:22px;">' .
+             '<title>' . esc_html( $title ) . '</title></head><body style="font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;background:#f6f6f6;margin:0;padding:22px;">' .
              '<div style="max-width:520px;margin:0 auto;background:#fff;border-radius:16px;padding:18px 16px;box-shadow:0 6px 20px rgba(0,0,0,.08);">' .
-             '<h1 style="margin:0 0 6px 0;font-size:22px;">' . esc_html( $title ) . '</h1>' .
+             '<h1 style="margin:0 0 6px 0;font-size:22px;font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;">' . esc_html( $title ) . '</h1>' .
              '<div style="color:#666;margin-bottom:14px;">' . esc_html( $subtitle ) . '</div>' .
              $err_html .
              '<form method="post" action="">' .
@@ -4276,9 +4276,9 @@ protected function mrm_get_google_service_account_json() {
              '<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">' .
              '<meta http-equiv="Pragma" content="no-cache">' .
              '<meta http-equiv="Expires" content="0">' .
-             '<title>' . esc_html( $title ) . '</title></head><body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f6f6f6;margin:0;padding:22px;">' .
+             '<title>' . esc_html( $title ) . '</title></head><body style="font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;background:#f6f6f6;margin:0;padding:22px;">' .
              '<div style="max-width:520px;margin:0 auto;background:#fff;border-radius:16px;padding:18px 16px;box-shadow:0 6px 20px rgba(0,0,0,.08);">' .
-             '<h1 style="margin:0 0 6px 0;font-size:22px;">' . esc_html( $title ) . '</h1>' .
+             '<h1 style="margin:0 0 6px 0;font-size:22px;font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;">' . esc_html( $title ) . '</h1>' .
              '<div style="color:#666;margin-bottom:14px;">' . esc_html( $subtitle ) . '</div>' .
              $err_html .
              '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '">' .
@@ -4413,7 +4413,7 @@ protected function mrm_get_google_service_account_json() {
              '<meta http-equiv="Pragma" content="no-cache">' .
              '<meta http-equiv="Expires" content="0">' .
              '<title>' . esc_html( $title ) . '</title>' .
-             '</head><body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f6f6f6;margin:0;padding:22px;">' .
+             '</head><body style="font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;background:#f6f6f6;margin:0;padding:22px;">' .
              '<div style="max-width:520px;margin:0 auto;background:#fff;border-radius:16px;padding:18px 16px;box-shadow:0 6px 20px rgba(0,0,0,.08);">' .
              '<h1 style="margin:0 0 10px 0;font-size:22px;">' . esc_html( $title ) . '</h1>' .
              '<div style="white-space:pre-line;color:#333;line-height:1.5;">' . esc_html( $message ) . '</div>' .
@@ -6301,7 +6301,7 @@ protected function mrm_get_google_service_account_json() {
                 margin:0;
                 background:linear-gradient(180deg,#f7f4ee 0%,#efe8db 100%);
                 color:var(--text);
-                font-family:Arial,sans-serif;
+                font-family:"Source Sans 3",Arial,Helvetica,sans-serif;
             }
             .mrm-shell{
                 min-height:100vh;
@@ -6463,7 +6463,7 @@ protected function mrm_get_google_service_account_json() {
 
         return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
         <div style="max-width:640px;margin:0 auto;padding:24px;">
-            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;">
                 ' . $logo_html . '
                 <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
                 <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
@@ -6490,7 +6490,7 @@ protected function mrm_get_google_service_account_json() {
 
         return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
         <div style="max-width:640px;margin:0 auto;padding:24px;">
-            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+            <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;">
                 ' . $logo_html . '
                 <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $title ) . '</h1>
                 <div style="font-size:15px;line-height:1.7;color:#222;">' . $intro_html . '</div>
@@ -12153,7 +12153,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     padding: clamp(42px, 6vw, 78px) 18px;
     background: transparent;
     color: var(--mrm-contact-text);
-    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: "Source Sans 3", Arial, Helvetica, sans-serif;
   }
 
   .mrm-contact-section *,
