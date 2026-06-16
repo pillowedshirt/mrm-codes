@@ -3791,7 +3791,7 @@ function offerRowTemplate(pieceIndex){
 
         ob_start();
         ?>
-        <div class="wrapper">
+        <div class="wrapper mrm-piece-details-wrapper">
           <article class="product-card mrm-piece"
             data-product-slug="<?php echo esc_attr( $page_slug ); ?>"
             data-piece-slug="<?php echo esc_attr( $page_slug ); ?>"
@@ -4605,6 +4605,45 @@ function offerRowTemplate(pieceIndex){
 .mrm-otpOverlay .mrm-verifyBtn { background: #20170f !important; color: #ffffff !important; }
 .mrm-otpOverlay button.secondary,
 .mrm-otpOverlay .mrm-closeBtn { background: #ffffff !important; color: #2f2118 !important; border: 1px solid #20170f !important; }
+
+/* =========================================================
+   MRM Warm Product Detail Surface Patch
+   Applies the warm Masterclass palette only to the single
+   piece details shortcode output, not the full catalog listing.
+   ========================================================= */
+
+.mrm-piece-details-wrapper .title-block { background: linear-gradient(135deg, #fffaf3 0%, #f7efe3 100%) !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; border-radius: 24px; padding: 18px 20px; margin-bottom: 22px; box-shadow: 0 14px 34px rgba(32, 23, 15, 0.08); }
+.mrm-piece-details-wrapper .piece-title,
+.mrm-piece-details-wrapper .piece-title a { color: #2f2118 !important; }
+.mrm-piece-details-wrapper .piece-composer,
+.mrm-piece-details-wrapper .piece-composer a { color: #62483a !important; }
+.mrm-piece-details-wrapper .piece-subtitle,
+.mrm-piece-details-wrapper .meta .subtitle { color: #62483a !important; }
+.mrm-piece-details-wrapper .audio-box { background: #fffaf3 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; }
+.mrm-piece-details-wrapper .options-head { background: #fffdf9 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; border-radius: 22px; padding: 16px 18px; margin-bottom: 16px; box-shadow: 0 12px 30px rgba(32, 23, 15, 0.06); }
+.mrm-piece-details-wrapper .options-head h2 { margin: 0; color: #2f2118 !important; }
+.mrm-piece-details-wrapper .offer { background: #fffaf3 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; border-radius: 22px; padding: 14px; box-shadow: 0 18px 46px rgba(32, 23, 15, 0.10); }
+.mrm-piece-details-wrapper .offer + .offer { margin-top: 18px; }
+.mrm-piece-details-wrapper .offer-row { background: linear-gradient(135deg, #fffaf3 0%, #f7efe3 100%) !important; border: 1px solid rgba(124, 74, 45, 0.18) !important; border-radius: 18px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.mrm-piece-details-wrapper .offer-title { color: #2f2118 !important; font-weight: 950; }
+.mrm-piece-details-wrapper .offer-sub { color: #62483a !important; }
+.mrm-piece-details-wrapper .offer-price { background: #f7efe3 !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; border-radius: 999px; padding: 8px 13px; font-weight: 950; white-space: nowrap; }
+.mrm-piece-details-wrapper .mrm-pa-terms-row { color: #62483a !important; }
+.mrm-piece-details-wrapper .buyBtn,
+.mrm-piece-details-wrapper .mrmAccessBtn,
+.mrm-piece-details-wrapper .mrm-accessBtn { background: #20170f !important; border: 1px solid #20170f !important; color: #ffffff !important; border-radius: 14px; padding: 11px 14px; font-weight: 900; cursor: pointer; }
+.mrm-piece-details-wrapper .buyBtn:hover,
+.mrm-piece-details-wrapper .mrmAccessBtn:hover,
+.mrm-piece-details-wrapper .mrm-accessBtn:hover { background: #3a2a19 !important; }
+.mrm-piece-details-wrapper .mrm-preview-more-row .home-btn { display: inline-flex; align-items: center; justify-content: center; background: #fffaf3 !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; border-radius: 999px; padding: 10px 14px; font-weight: 900; text-decoration: none !important; box-shadow: 0 12px 30px rgba(32, 23, 15, 0.08); }
+.mrm-piece-details-wrapper .mrm-preview-more-row .home-btn:hover,
+.mrm-piece-details-wrapper .mrm-preview-more-row .home-btn:focus { background: #f7efe3 !important; color: #2f2118 !important; text-decoration: none !important; }
+
+@media (max-width: 860px) {
+  .mrm-piece-details-wrapper .offer-row { align-items: flex-start; flex-direction: column; }
+  .mrm-piece-details-wrapper .offer-price { white-space: normal; }
+}
+
 </style>
 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
