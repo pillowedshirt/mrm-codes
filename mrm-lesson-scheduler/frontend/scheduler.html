@@ -2029,10 +2029,10 @@ h1 {
 
 /* Instructor cards after state selection */
 .instructor {
-  background: var(--mrm-warm-popup-bg) !important;
-  border: 1px solid var(--mrm-warm-popup-border) !important;
-  color: var(--mrm-warm-popup-text) !important;
-  box-shadow: 0 18px 46px rgba(32, 23, 15, 0.11) !important;
+  background: #ffffff !important;
+  border: 1px solid var(--color-border, rgba(0,0,0,0.10)) !important;
+  color: var(--color-text-main, #111111) !important;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.08) !important;
 }
 
 .instructor-header {
@@ -2058,10 +2058,10 @@ h1 {
 .state-selector-wrap,
 .state-filter-bar,
 .mrm-state-dropdown-panel {
-  background: var(--mrm-warm-popup-bg) !important;
-  border: 1px solid var(--mrm-warm-popup-border) !important;
-  color: var(--mrm-warm-popup-text) !important;
-  box-shadow: 0 18px 46px rgba(32, 23, 15, 0.11) !important;
+  background: #ffffff !important;
+  border: 1px solid var(--color-border, rgba(0,0,0,0.10)) !important;
+  color: var(--color-text-main, #111111) !important;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.08) !important;
 }
 
 .state-map-title,
@@ -2080,77 +2080,11 @@ h1 {
   stroke: var(--mrm-warm-popup-accent) !important;
 }
 
-/* Instructor calendars: Masterclass-inspired color treatment */
-.calendar:not(.is-collapsed) {
-  background: var(--mrm-warm-popup-bg-light) !important;
-  border: 1px solid #dccab0 !important;
-  border-radius: 28px !important;
-  box-shadow: 0 18px 46px rgba(32, 23, 15, 0.11) !important;
-  overflow: hidden !important;
-  margin-top: 14px;
-  padding: 0 !important;
-}
-
-.calendar-body { background: var(--mrm-warm-popup-bg-light) !important; }
-.calendar-header {
-  display: grid !important;
-  grid-template-columns: 56px minmax(0, 1fr) 56px;
-  align-items: center;
-  gap: 14px;
-  padding: 18px 20px !important;
-  background: linear-gradient(135deg, #20170f 0%, #3a2a19 100%) !important;
-  color: #ffffff !important;
-  border-bottom: 0 !important;
-}
-.calendar-header > div {
-  color: #ffffff !important;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(1.35rem, 2.6vw, 2rem) !important;
-  font-weight: 900 !important;
-  line-height: 1.05;
-  letter-spacing: -0.02em;
-}
-.calendar-header button {
-  width: 46px !important;
-  height: 46px !important;
-  border: 1px solid rgba(255, 255, 255, 0.32) !important;
-  border-radius: 999px !important;
-  background: rgba(255, 255, 255, 0.10) !important;
-  color: #ffffff !important;
-  font-size: 1.9rem !important;
-}
-.calendar-header button:hover,
-.calendar-header button:focus { background: rgba(255, 255, 255, 0.20) !important; }
-.calendar-grid { background: var(--mrm-warm-popup-bg-light) !important; }
-.calendar-day {
-  background: var(--mrm-warm-popup-bg-light) !important;
-  border-right: 1px solid #eee2d1 !important;
-  border-bottom: 1px solid #eee2d1 !important;
-  border-radius: 0 !important;
-}
-.calendar-day:nth-child(7n) { border-right: 0 !important; }
-.calendar-day.inactive { background: #faf5ec !important; color: #b8a992 !important; }
-.calendar-day-number { border: 0 !important; background: transparent !important; color: #493a2b !important; font-weight: 900 !important; }
-.calendar-day:not(.has-slots):not(.inactive) .calendar-day-number { border: 0 !important; color: #6d5c45 !important; }
-.calendar-day.has-slots .calendar-day-number { background: var(--mrm-warm-popup-accent) !important; border: 0 !important; border-radius: 999px !important; color: #ffffff !important; }
-.calendar-day.has-selected .calendar-day-number,
-.calendar-day.has-selected.has-slots .calendar-day-number { background: var(--mrm-warm-popup-deep) !important; color: #ffffff !important; }
-.calendar-day.past .calendar-day-number,
-.calendar-day.past.has-selected .calendar-day-number { background: transparent !important; color: rgba(73, 58, 43, 0.42) !important; }
-.day-slots { border-top: 1px solid #eadcc8 !important; }
-.day-slots-summary { color: var(--mrm-warm-popup-muted) !important; }
-.slot { background: var(--mrm-warm-popup-bg) !important; border: 1px solid #dccab0 !important; color: var(--mrm-warm-popup-text) !important; box-shadow: 0 10px 18px rgba(32, 23, 15, 0.06) !important; }
-.slot:hover { border-color: rgba(154, 106, 47, 0.45) !important; box-shadow: 0 12px 22px rgba(32, 23, 15, 0.10) !important; }
-.slot.selected,
-.slot.selected-range.selected { background: var(--mrm-warm-popup-accent) !important; color: #ffffff !important; border-color: var(--mrm-warm-popup-accent) !important; }
-.slot.selected-range { background: var(--mrm-warm-popup-bg-soft) !important; border-color: #dccab0 !important; color: var(--mrm-warm-popup-text) !important; }
-.slot-booked-block,
-.slot-booked-block.is-travel { background: #faf5ec !important; border-color: #eadcc8 !important; color: rgba(73, 58, 43, 0.68) !important; }
-
 /* =========================================================
    MRM Scheduler Intro Patch
-   Adds a compact centered warm title bubble and a full-width
-   enrollment instructions box.
+   Keeps the scheduler title visually aligned with the
+   Masterclasses title bubble, while scaling the longer
+   “Schedule Your Lesson” title more elegantly.
    ========================================================= */
 
 .mrm-scheduler-title-bubble {
@@ -2171,7 +2105,7 @@ h1 {
   padding: 0 !important;
   color: var(--mrm-warm-popup-text, #2f2118) !important;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(38px, 6vw, 66px) !important;
+  font-size: clamp(32px, 4.8vw, 54px) !important;
   font-weight: 900;
   line-height: 0.96;
   letter-spacing: -0.04em;
@@ -2207,7 +2141,7 @@ h1 {
 
   .mrm-scheduler-title-bubble h1 {
     white-space: normal;
-    font-size: clamp(34px, 12vw, 48px) !important;
+    font-size: clamp(30px, 10vw, 42px) !important;
   }
 
   .mrm-scheduler-instructions {
@@ -2226,7 +2160,7 @@ h1 {
   </section>
 
   <section class="mrm-scheduler-instructions" aria-label="How enrollment works">
-    <strong>How enrollment works:</strong> choose your instrument and lesson format, select your state and instructor, pick an available time, and complete the secure booking flow. You may schedule a single private lesson, request a consultation, or begin the recurring-lesson process from the options shown during enrollment.
+    <strong>How enrollment works:</strong> choose your instrument and lesson format, select your state and instructor, pick an available time, and complete the secure booking flow.
   </section>
 
 
