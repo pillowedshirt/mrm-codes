@@ -637,25 +637,56 @@ class MRM_Product_Access {
 
                 <h2 class="title"><?php esc_html_e( 'Timeline Display Settings', 'mrm-product-access' ); ?></h2>
                 <p class="description">
-                    <?php esc_html_e( 'Assign each piece to a timeline level and set its order within that level. This controls the [mrm_sheet_music_timeline] shortcode only. It does not change the catalog display order.', 'mrm-product-access' ); ?>
+                    <?php esc_html_e( 'Drag pieces between levels and reorder pieces within each level. This controls [mrm_sheet_music_timeline] only and does not change the catalog display order.', 'mrm-product-access' ); ?>
                 </p>
                 <p class="description">
-                    <?php esc_html_e( 'Use the piece cards below to set each piece’s Timeline Level and Timeline Order. The timeline settings live directly on each piece so the catalog and timeline stay connected.', 'mrm-product-access' ); ?>
+                    <?php esc_html_e( 'The timeline and catalog are independent systems that reference the same piece titles. Use the Catalog Display section below to control catalog order.', 'mrm-product-access' ); ?>
                 </p>
-                <table class="widefat striped" style="max-width: 980px; margin: 12px 0 24px;">
-                    <thead>
-                        <tr>
-                            <th><?php esc_html_e( 'Timeline shortcode', 'mrm-product-access' ); ?></th>
-                            <th><?php esc_html_e( 'Use this on the Sheet Music page', 'mrm-product-access' ); ?></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><code>[mrm_sheet_music_timeline]</code></td>
-                            <td><?php esc_html_e( 'Place this above [mrm_sheet_music_catalog] to display the level timeline from the plugin.', 'mrm-product-access' ); ?></td>
-                        </tr>
-                    </tbody>
-                </table>
+
+                <div class="mrm-pa-timeline-panel" id="mrm-pa-timeline-panel">
+                    <div class="mrm-pa-timeline-panel-head">
+                        <h3><?php esc_html_e( 'Timeline Piece Order', 'mrm-product-access' ); ?></h3>
+                        <code>[mrm_sheet_music_timeline]</code>
+                    </div>
+
+                    <p class="description">
+                        <?php esc_html_e( 'Drag each piece into Level 1, Level 2, or Level 3. Pieces in Hidden from Timeline will not appear on the timeline shortcode.', 'mrm-product-access' ); ?>
+                    </p>
+
+                    <div class="mrm-pa-timeline-board" id="mrm-pa-timeline-board" aria-label="<?php esc_attr_e( 'Timeline display settings', 'mrm-product-access' ); ?>">
+                        <div class="mrm-pa-timeline-column" data-mrm-timeline-level="level_1">
+                            <div class="mrm-pa-timeline-column-head">
+                                <strong><?php esc_html_e( 'Level 1', 'mrm-product-access' ); ?></strong>
+                            </div>
+                            <ol class="mrm-pa-timeline-list" aria-label="<?php esc_attr_e( 'Level 1 timeline pieces', 'mrm-product-access' ); ?>"></ol>
+                        </div>
+
+                        <div class="mrm-pa-timeline-column" data-mrm-timeline-level="level_2">
+                            <div class="mrm-pa-timeline-column-head">
+                                <strong><?php esc_html_e( 'Level 2', 'mrm-product-access' ); ?></strong>
+                            </div>
+                            <ol class="mrm-pa-timeline-list" aria-label="<?php esc_attr_e( 'Level 2 timeline pieces', 'mrm-product-access' ); ?>"></ol>
+                        </div>
+
+                        <div class="mrm-pa-timeline-column" data-mrm-timeline-level="level_3">
+                            <div class="mrm-pa-timeline-column-head">
+                                <strong><?php esc_html_e( 'Level 3', 'mrm-product-access' ); ?></strong>
+                            </div>
+                            <ol class="mrm-pa-timeline-list" aria-label="<?php esc_attr_e( 'Level 3 timeline pieces', 'mrm-product-access' ); ?>"></ol>
+                        </div>
+
+                        <div class="mrm-pa-timeline-column mrm-pa-timeline-column-hidden" data-mrm-timeline-level="hidden">
+                            <div class="mrm-pa-timeline-column-head">
+                                <strong><?php esc_html_e( 'Hidden from Timeline', 'mrm-product-access' ); ?></strong>
+                            </div>
+                            <ol class="mrm-pa-timeline-list" aria-label="<?php esc_attr_e( 'Hidden timeline pieces', 'mrm-product-access' ); ?>"></ol>
+                        </div>
+                    </div>
+
+                    <p class="mrm-pa-help">
+                        <?php esc_html_e( 'Timeline order is saved independently from the catalog order. Save settings after dragging pieces into place.', 'mrm-product-access' ); ?>
+                    </p>
+                </div>
 
                 <?php
                 // Verified Emails section removed per user request. Keeping the underlying
@@ -789,6 +820,157 @@ class MRM_Product_Access {
                     display: flex;
                     gap: 6px;
                     flex-shrink: 0;
+                }
+                /* Timeline display settings panel */
+                .mrm-pa-timeline-panel{
+                    border: 1px solid #dcdcde;
+                    background: #fff;
+                    border-radius: 12px;
+                    padding: 14px;
+                    margin: 14px 0 18px;
+                    max-width: 1200px;
+                }
+
+                .mrm-pa-timeline-panel-head{
+                    display:flex;
+                    align-items:center;
+                    justify-content:space-between;
+                    gap:12px;
+                    margin-bottom: 6px;
+                }
+
+                .mrm-pa-timeline-panel-head h3{
+                    margin: 0;
+                    font-size: 14px;
+                }
+
+                .mrm-pa-timeline-board{
+                    display:grid;
+                    grid-template-columns: repeat(4, minmax(0, 1fr));
+                    gap: 12px;
+                    margin-top: 12px;
+                }
+
+                .mrm-pa-timeline-column{
+                    border: 1px solid #dcdcde;
+                    background: #f6f7f7;
+                    border-radius: 10px;
+                    padding: 10px;
+                    min-height: 180px;
+                }
+
+                .mrm-pa-timeline-column-hidden{
+                    background: #fbfbfb;
+                }
+
+                .mrm-pa-timeline-column-head{
+                    display:flex;
+                    align-items:center;
+                    justify-content:space-between;
+                    gap:8px;
+                    margin-bottom: 8px;
+                }
+
+                .mrm-pa-timeline-column-head strong{
+                    font-size: 13px;
+                }
+
+                .mrm-pa-timeline-list{
+                    min-height: 126px;
+                    margin: 0;
+                    padding: 0;
+                    list-style: none;
+                }
+
+                .mrm-pa-timeline-list.is-drag-over{
+                    outline: 2px dashed #2271b1;
+                    outline-offset: 4px;
+                    border-radius: 8px;
+                }
+
+                .mrm-pa-timeline-item{
+                    display:flex;
+                    align-items:center;
+                    justify-content:space-between;
+                    gap:8px;
+                    border: 1px solid #c3c4c7;
+                    background: #fff;
+                    border-radius: 8px;
+                    padding: 8px 10px;
+                    margin: 8px 0;
+                    cursor: grab;
+                }
+
+                .mrm-pa-timeline-item.is-dragging{
+                    opacity: .55;
+                }
+
+                .mrm-pa-timeline-item-title{
+                    display:flex;
+                    align-items:center;
+                    gap:8px;
+                    min-width:0;
+                    font-weight:600;
+                }
+
+                .mrm-pa-timeline-handle{
+                    color:#646970;
+                    font-size:16px;
+                    line-height:1;
+                }
+
+                .mrm-pa-timeline-name{
+                    overflow:hidden;
+                    text-overflow:ellipsis;
+                    white-space:nowrap;
+                }
+
+                .mrm-pa-timeline-actions{
+                    display:flex;
+                    gap:4px;
+                    flex-shrink:0;
+                }
+
+                .mrm-pa-timeline-actions .button{
+                    min-height: 26px;
+                    line-height: 1;
+                }
+
+                .mrm-pa-timeline-empty{
+                    margin: 8px 0 0;
+                    padding: 10px;
+                    border: 1px dashed #c3c4c7;
+                    border-radius: 8px;
+                    color: #646970;
+                    background: rgba(255,255,255,.65);
+                    font-size: 12px;
+                }
+
+                @media (max-width: 1100px){
+                    .mrm-pa-timeline-board{
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                    }
+                }
+
+                @media (max-width: 700px){
+                    .mrm-pa-timeline-board{
+                        grid-template-columns: 1fr;
+                    }
+
+                    .mrm-pa-timeline-panel-head{
+                        align-items:flex-start;
+                        flex-direction:column;
+                    }
+
+                    .mrm-pa-timeline-item{
+                        align-items:flex-start;
+                        flex-direction:column;
+                    }
+
+                    .mrm-pa-timeline-actions{
+                        width:100%;
+                        flex-wrap:wrap;
+                    }
                 }
                 @media (max-width: 900px){
                     .mrm-pa-grid{ grid-template-columns: 1fr; }
@@ -928,22 +1110,8 @@ class MRM_Product_Access {
                                 <input type="text" name="piece_year[]" value="<?php echo esc_attr( $yr ); ?>" placeholder="2023">
                             </div>
 
-                            <div class="mrm-pa-field">
-                                <label><?php esc_html_e( 'Timeline Level', 'mrm-product-access' ); ?></label>
-                                <select name="piece_timeline_level[]">
-                                    <option value="hidden" <?php selected( $timeline_level, 'hidden' ); ?>><?php esc_html_e( 'Hidden from timeline', 'mrm-product-access' ); ?></option>
-                                    <option value="level_1" <?php selected( $timeline_level, 'level_1' ); ?>><?php esc_html_e( 'Level 1', 'mrm-product-access' ); ?></option>
-                                    <option value="level_2" <?php selected( $timeline_level, 'level_2' ); ?>><?php esc_html_e( 'Level 2', 'mrm-product-access' ); ?></option>
-                                    <option value="level_3" <?php selected( $timeline_level, 'level_3' ); ?>><?php esc_html_e( 'Level 3', 'mrm-product-access' ); ?></option>
-                                </select>
-                                <div class="mrm-pa-help"><?php esc_html_e( 'Controls where this piece appears in [mrm_sheet_music_timeline].', 'mrm-product-access' ); ?></div>
-                            </div>
-
-                            <div class="mrm-pa-field">
-                                <label><?php esc_html_e( 'Timeline Order', 'mrm-product-access' ); ?></label>
-                                <input type="number" name="piece_timeline_order[]" value="<?php echo esc_attr( $timeline_order ); ?>" min="0" step="1" placeholder="10">
-                                <div class="mrm-pa-help"><?php esc_html_e( 'Lower numbers appear earlier within the selected level.', 'mrm-product-access' ); ?></div>
-                            </div>
+                            <input type="hidden" name="piece_timeline_level[]" class="mrm-pa-timeline-level-input" value="<?php echo esc_attr( $timeline_level ); ?>">
+                            <input type="hidden" name="piece_timeline_order[]" class="mrm-pa-timeline-order-input" value="<?php echo esc_attr( $timeline_order ); ?>">
 
                             <div class="mrm-pa-field mrm-pa-wide">
                                 <label><?php esc_html_e( 'Main Preview PDF URL / Path', 'mrm-product-access' ); ?></label>
@@ -1025,6 +1193,7 @@ class MRM_Product_Access {
                     const wrap = document.getElementById('mrm-pa-pieces-cards');
                     const addPieceBtn = document.getElementById('mrm-pa-add-piece');
                     const orderList = document.getElementById('mrm-pa-piece-order-list');
+                    const timelineBoard = document.getElementById('mrm-pa-timeline-board');
                     const settingsForm = wrap ? wrap.closest('form') : null;
                     if (!wrap || !addPieceBtn) return;
 
@@ -1092,22 +1261,8 @@ class MRM_Product_Access {
                                     <input type="text" name="piece_year[]" value="" placeholder="2023">
                                 </div>
 
-                                <div class="mrm-pa-field">
-                                    <label>Timeline Level</label>
-                                    <select name="piece_timeline_level[]">
-                                        <option value="hidden">Hidden from timeline</option>
-                                        <option value="level_1">Level 1</option>
-                                        <option value="level_2">Level 2</option>
-                                        <option value="level_3">Level 3</option>
-                                    </select>
-                                    <div class="mrm-pa-help">Controls where this piece appears in [mrm_sheet_music_timeline].</div>
-                                </div>
-
-                                <div class="mrm-pa-field">
-                                    <label>Timeline Order</label>
-                                    <input type="number" name="piece_timeline_order[]" value="0" min="0" step="1" placeholder="10">
-                                    <div class="mrm-pa-help">Lower numbers appear earlier within the selected level.</div>
-                                </div>
+                                <input type="hidden" name="piece_timeline_level[]" class="mrm-pa-timeline-level-input" value="hidden">
+                                <input type="hidden" name="piece_timeline_order[]" class="mrm-pa-timeline-order-input" value="0">
 
                                 <div class="mrm-pa-field mrm-pa-wide">
                                     <label>Main Preview PDF URL / Path</label>
@@ -1259,6 +1414,239 @@ function movePieceCard(fromIndex, toIndex){
     }
 
     syncPieceOrderList();
+    syncTimelineBoard();
+}
+
+function getTimelineLevelInput(card){
+    return card ? card.querySelector('input[name="piece_timeline_level[]"], select[name="piece_timeline_level[]"]') : null;
+}
+
+function getTimelineOrderInput(card){
+    return card ? card.querySelector('input[name="piece_timeline_order[]"]') : null;
+}
+
+function normalizeTimelineLevel(level){
+    const allowed = ['level_1', 'level_2', 'level_3', 'hidden'];
+    return allowed.includes(level) ? level : 'hidden';
+}
+
+function ensureTimelineInputs(card){
+    if (!card) return;
+
+    let levelInput = getTimelineLevelInput(card);
+    if (!levelInput) {
+        levelInput = document.createElement('input');
+        levelInput.type = 'hidden';
+        levelInput.name = 'piece_timeline_level[]';
+        levelInput.className = 'mrm-pa-timeline-level-input';
+        levelInput.value = 'hidden';
+        card.appendChild(levelInput);
+    }
+
+    let orderInput = getTimelineOrderInput(card);
+    if (!orderInput) {
+        orderInput = document.createElement('input');
+        orderInput.type = 'hidden';
+        orderInput.name = 'piece_timeline_order[]';
+        orderInput.className = 'mrm-pa-timeline-order-input';
+        orderInput.value = '0';
+        card.appendChild(orderInput);
+    }
+}
+
+function getTimelineLevel(card){
+    ensureTimelineInputs(card);
+    const input = getTimelineLevelInput(card);
+    return normalizeTimelineLevel(input ? input.value : 'hidden');
+}
+
+function getTimelineOrder(card){
+    ensureTimelineInputs(card);
+    const input = getTimelineOrderInput(card);
+    const value = input ? parseInt(input.value || '0', 10) : 0;
+    return Number.isFinite(value) ? value : 0;
+}
+
+function setTimelineValues(card, level, order){
+    ensureTimelineInputs(card);
+
+    const levelInput = getTimelineLevelInput(card);
+    const orderInput = getTimelineOrderInput(card);
+
+    if (levelInput) {
+        levelInput.value = normalizeTimelineLevel(level);
+    }
+
+    if (orderInput) {
+        orderInput.value = String(Math.max(0, parseInt(order || 0, 10) || 0));
+    }
+}
+
+function getTimelineList(level){
+    if (!timelineBoard) return null;
+    const column = timelineBoard.querySelector('[data-mrm-timeline-level="' + level + '"]');
+    return column ? column.querySelector('.mrm-pa-timeline-list') : null;
+}
+
+function getTimelineLevelFromList(list){
+    const column = list ? list.closest('.mrm-pa-timeline-column') : null;
+    return column ? normalizeTimelineLevel(column.getAttribute('data-mrm-timeline-level') || 'hidden') : 'hidden';
+}
+
+function timelineItemTemplate(card, pieceIndex){
+    const level = getTimelineLevel(card);
+    const title = getPieceTitle(card, pieceIndex);
+
+    const item = document.createElement('li');
+    item.className = 'mrm-pa-timeline-item';
+    item.draggable = true;
+    item.setAttribute('data-piece-index', String(pieceIndex));
+
+    item.innerHTML = `
+        <div class="mrm-pa-timeline-item-title">
+            <span class="mrm-pa-timeline-handle" aria-hidden="true">↕</span>
+            <span class="mrm-pa-timeline-name"></span>
+        </div>
+        <div class="mrm-pa-timeline-actions">
+            <button type="button" class="button button-small mrm-pa-timeline-up">Up</button>
+            <button type="button" class="button button-small mrm-pa-timeline-down">Down</button>
+            <button type="button" class="button button-small mrm-pa-timeline-level" data-mrm-target-level="level_1">L1</button>
+            <button type="button" class="button button-small mrm-pa-timeline-level" data-mrm-target-level="level_2">L2</button>
+            <button type="button" class="button button-small mrm-pa-timeline-level" data-mrm-target-level="level_3">L3</button>
+            <button type="button" class="button button-small mrm-pa-timeline-level" data-mrm-target-level="hidden">Hide</button>
+        </div>
+    `;
+
+    const name = item.querySelector('.mrm-pa-timeline-name');
+    if (name) {
+        name.textContent = title;
+    }
+
+    item.querySelectorAll('.mrm-pa-timeline-level').forEach(function(btn){
+        if (normalizeTimelineLevel(btn.getAttribute('data-mrm-target-level')) === level) {
+            btn.disabled = true;
+        }
+    });
+
+    return item;
+}
+
+function clearTimelineEmptyMessages(){
+    if (!timelineBoard) return;
+    timelineBoard.querySelectorAll('.mrm-pa-timeline-empty').forEach(function(empty){
+        empty.remove();
+    });
+}
+
+function addTimelineEmptyMessages(){
+    if (!timelineBoard) return;
+
+    timelineBoard.querySelectorAll('.mrm-pa-timeline-list').forEach(function(list){
+        if (list.children.length) return;
+
+        const column = list.closest('.mrm-pa-timeline-column');
+        const level = column ? normalizeTimelineLevel(column.getAttribute('data-mrm-timeline-level') || 'hidden') : 'hidden';
+
+        const empty = document.createElement('div');
+        empty.className = 'mrm-pa-timeline-empty';
+        empty.textContent = level === 'hidden' ? 'No hidden pieces.' : 'Drag pieces here.';
+
+        list.appendChild(empty);
+    });
+}
+
+function syncTimelineBoard(){
+    if (!timelineBoard) return;
+
+    const cards = getPieceCards();
+
+    timelineBoard.querySelectorAll('.mrm-pa-timeline-list').forEach(function(list){
+        list.innerHTML = '';
+    });
+
+    const grouped = {
+        level_1: [],
+        level_2: [],
+        level_3: [],
+        hidden: []
+    };
+
+    cards.forEach(function(card, index){
+        ensureTimelineInputs(card);
+        const level = getTimelineLevel(card);
+        grouped[level].push({
+            card: card,
+            index: index,
+            order: getTimelineOrder(card),
+            title: getPieceTitle(card, index)
+        });
+    });
+
+    Object.keys(grouped).forEach(function(level){
+        grouped[level].sort(function(a, b){
+            if (a.order === b.order) {
+                return a.index - b.index;
+            }
+            return a.order - b.order;
+        });
+
+        const list = getTimelineList(level);
+        if (!list) return;
+
+        grouped[level].forEach(function(entry){
+            list.appendChild(timelineItemTemplate(entry.card, entry.index));
+        });
+    });
+
+    clearTimelineEmptyMessages();
+    addTimelineEmptyMessages();
+}
+
+function commitTimelineFromBoard(){
+    if (!timelineBoard) return;
+
+    timelineBoard.querySelectorAll('.mrm-pa-timeline-list').forEach(function(list){
+        const level = getTimelineLevelFromList(list);
+        const items = Array.from(list.querySelectorAll('.mrm-pa-timeline-item'));
+
+        items.forEach(function(item, position){
+            const pieceIndex = parseInt(item.getAttribute('data-piece-index') || '-1', 10);
+            const card = getPieceCards()[pieceIndex];
+            if (!card) return;
+
+            setTimelineValues(card, level, (position + 1) * 10);
+        });
+    });
+}
+
+function moveTimelineItem(item, direction){
+    if (!item) return;
+
+    const list = item.closest('.mrm-pa-timeline-list');
+    if (!list) return;
+
+    const sibling = direction < 0 ? item.previousElementSibling : item.nextElementSibling;
+    if (!sibling || sibling.classList.contains('mrm-pa-timeline-empty')) return;
+
+    if (direction < 0) {
+        list.insertBefore(item, sibling);
+    } else {
+        list.insertBefore(sibling, item);
+    }
+
+    commitTimelineFromBoard();
+    syncTimelineBoard();
+}
+
+function moveTimelineItemToLevel(item, targetLevel){
+    if (!item || !timelineBoard) return;
+
+    const targetList = getTimelineList(normalizeTimelineLevel(targetLevel));
+    if (!targetList) return;
+
+    targetList.appendChild(item);
+    commitTimelineFromBoard();
+    syncTimelineBoard();
 }
 
 function offerRowTemplate(pieceIndex){
@@ -1282,6 +1670,7 @@ function offerRowTemplate(pieceIndex){
                         temp.innerHTML = pieceTemplate(nextIndex);
                         wrap.appendChild(temp.firstElementChild);
                         syncPieceOrderList();
+                        syncTimelineBoard();
                     });
 
                     wrap.addEventListener('click', function(e){
@@ -1291,6 +1680,7 @@ function offerRowTemplate(pieceIndex){
                             if (card) {
                                 card.remove();
                                 syncPieceOrderList();
+                                syncTimelineBoard();
                             }
                             return;
                         }
@@ -1321,6 +1711,103 @@ function offerRowTemplate(pieceIndex){
                             return;
                         }
                     });
+
+
+                    if (timelineBoard) {
+                        let draggedTimelineItem = null;
+
+                        timelineBoard.addEventListener('click', function(e){
+                            const item = e.target.closest('.mrm-pa-timeline-item');
+                            if (!item) return;
+
+                            if (e.target.closest('.mrm-pa-timeline-up')) {
+                                moveTimelineItem(item, -1);
+                                return;
+                            }
+
+                            if (e.target.closest('.mrm-pa-timeline-down')) {
+                                moveTimelineItem(item, 1);
+                                return;
+                            }
+
+                            const levelBtn = e.target.closest('.mrm-pa-timeline-level');
+                            if (levelBtn) {
+                                moveTimelineItemToLevel(item, levelBtn.getAttribute('data-mrm-target-level'));
+                                return;
+                            }
+                        });
+
+                        timelineBoard.addEventListener('dragstart', function(e){
+                            const item = e.target.closest('.mrm-pa-timeline-item');
+                            if (!item) return;
+
+                            draggedTimelineItem = item;
+                            item.classList.add('is-dragging');
+
+                            if (e.dataTransfer) {
+                                e.dataTransfer.effectAllowed = 'move';
+                                e.dataTransfer.setData('text/plain', item.getAttribute('data-piece-index') || '');
+                            }
+                        });
+
+                        timelineBoard.addEventListener('dragover', function(e){
+                            const list = e.target.closest('.mrm-pa-timeline-list');
+                            if (!list || !draggedTimelineItem) return;
+
+                            e.preventDefault();
+
+                            timelineBoard.querySelectorAll('.mrm-pa-timeline-list.is-drag-over').forEach(function(activeList){
+                                if (activeList !== list) {
+                                    activeList.classList.remove('is-drag-over');
+                                }
+                            });
+
+                            list.classList.add('is-drag-over');
+
+                            const afterElement = Array.from(list.querySelectorAll('.mrm-pa-timeline-item:not(.is-dragging)')).find(function(child){
+                                const box = child.getBoundingClientRect();
+                                return e.clientY < box.top + box.height / 2;
+                            });
+
+                            if (afterElement) {
+                                list.insertBefore(draggedTimelineItem, afterElement);
+                            } else {
+                                list.appendChild(draggedTimelineItem);
+                            }
+                        });
+
+                        timelineBoard.addEventListener('drop', function(e){
+                            const list = e.target.closest('.mrm-pa-timeline-list');
+                            if (!list || !draggedTimelineItem) return;
+
+                            e.preventDefault();
+
+                            draggedTimelineItem.classList.remove('is-dragging');
+                            draggedTimelineItem = null;
+
+                            timelineBoard.querySelectorAll('.mrm-pa-timeline-list.is-drag-over').forEach(function(activeList){
+                                activeList.classList.remove('is-drag-over');
+                            });
+
+                            commitTimelineFromBoard();
+                            syncTimelineBoard();
+                        });
+
+                        timelineBoard.addEventListener('dragend', function(){
+                            if (draggedTimelineItem) {
+                                draggedTimelineItem.classList.remove('is-dragging');
+                            }
+
+                            draggedTimelineItem = null;
+
+                            timelineBoard.querySelectorAll('.mrm-pa-timeline-list.is-drag-over').forEach(function(activeList){
+                                activeList.classList.remove('is-drag-over');
+                            });
+
+                            commitTimelineFromBoard();
+                            syncTimelineBoard();
+                        });
+                    }
 
                     if (orderList) {
                         let draggedPieceIndex = null;
@@ -1392,16 +1879,19 @@ function offerRowTemplate(pieceIndex){
                     wrap.addEventListener('input', function(e){
                         if (e.target && e.target.matches('input[name="piece_title[]"]')) {
                             syncPieceOrderList();
+                            syncTimelineBoard();
                         }
                     });
 
                     if (settingsForm) {
                         settingsForm.addEventListener('submit', function(){
+                            commitTimelineFromBoard();
                             reindexPiecesAndOffers();
                         });
                     }
 
                     syncPieceOrderList();
+                    syncTimelineBoard();
                 })();
                 </script>
 
