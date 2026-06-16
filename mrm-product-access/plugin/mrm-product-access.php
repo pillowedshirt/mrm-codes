@@ -4680,11 +4680,11 @@ function offerRowTemplate(pieceIndex){
   margin: 0 0 14px;
   color: #171512 !important;
   font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
-  font-size: clamp(38px, 6vw, 66px);
+  font-size: clamp(32px, 4.8vw, 52px);
   font-weight: 600;
   line-height: 0.96;
   letter-spacing: -0.04em;
-  text-align: left;
+  text-align: center;
 }
 
 .mrm-sheet-music-catalog-divider {
@@ -4714,7 +4714,7 @@ function offerRowTemplate(pieceIndex){
   }
 
   .mrm-sheet-music-catalog-heading h2 {
-    font-size: clamp(34px, 11vw, 48px);
+    font-size: clamp(30px, 10vw, 42px);
   }
 
   .mrm-sheet-music-catalog-section .mrm-catalog.wrapper {
