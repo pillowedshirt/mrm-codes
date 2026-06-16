@@ -890,13 +890,14 @@ class MRM_Product_Access {
 
                 .mrm-pa-timeline-item{
                     display:flex;
-                    align-items:center;
-                    justify-content:space-between;
+                    flex-direction:column;
+                    align-items:stretch;
+                    justify-content:flex-start;
                     gap:8px;
                     border: 1px solid #c3c4c7;
                     background: #fff;
                     border-radius: 8px;
-                    padding: 8px 10px;
+                    padding: 9px 10px;
                     margin: 8px 0;
                     cursor: grab;
                 }
@@ -910,7 +911,10 @@ class MRM_Product_Access {
                     align-items:center;
                     gap:8px;
                     min-width:0;
+                    flex: 1 1 auto;
+                    width: 100%;
                     font-weight:600;
+                    color:#1d2327;
                 }
 
                 .mrm-pa-timeline-handle{
@@ -920,15 +924,22 @@ class MRM_Product_Access {
                 }
 
                 .mrm-pa-timeline-name{
+                    display:block;
+                    flex: 1 1 auto;
+                    min-width:0;
+                    max-width:100%;
                     overflow:hidden;
                     text-overflow:ellipsis;
                     white-space:nowrap;
+                    color:#1d2327;
+                    font-weight:700;
                 }
 
                 .mrm-pa-timeline-actions{
                     display:flex;
                     gap:4px;
                     flex-shrink:0;
+                    flex-wrap:wrap;
                 }
 
                 .mrm-pa-timeline-actions .button{
@@ -1317,9 +1328,17 @@ class MRM_Product_Access {
 }
 
 function getPieceTitle(card, index){
+    if (!card) {
+        return `Untitled Piece ${index + 1}`;
+    }
+
     const titleInput = card.querySelector('input[name="piece_title[]"]');
-    const rawTitle = titleInput ? titleInput.value.trim() : '';
-    return rawTitle || `Untitled Piece ${index + 1}`;
+    const heading = card.querySelector('.mrm-pa-piece-card-head h3');
+
+    const rawTitle = titleInput && titleInput.value ? titleInput.value.trim() : '';
+    const headingTitle = heading && heading.textContent ? heading.textContent.trim() : '';
+
+    return rawTitle || headingTitle || `Untitled Piece ${index + 1}`;
 }
 
 function updatePieceCardHeadings(){
@@ -1520,6 +1539,7 @@ function timelineItemTemplate(card, pieceIndex){
     const name = item.querySelector('.mrm-pa-timeline-name');
     if (name) {
         name.textContent = title;
+        name.setAttribute('title', title);
     }
 
     item.querySelectorAll('.mrm-pa-timeline-level').forEach(function(btn){
