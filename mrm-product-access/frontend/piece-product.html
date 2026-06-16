@@ -1168,6 +1168,99 @@ body.mrm-piece-no-scroll{
   color: #171512 !important;
 }
 
+/* =========================================================
+   MRM Piece Product Checkbox Visibility Patch
+   Ensures sheet music terms checkboxes visibly show a selected state.
+   ========================================================= */
+
+.mrm-piece-product-page input[type="checkbox"],
+.mrm-piece-terms-row input[type="checkbox"],
+.mrm-piece-terms-modal-row input[type="checkbox"] {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  min-height: 18px !important;
+  margin: 1px 0 0 0 !important;
+  border: 2px solid #171512 !important;
+  border-radius: 5px !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  display: inline-grid !important;
+  place-content: center !important;
+  cursor: pointer !important;
+  position: relative !important;
+}
+
+.mrm-piece-product-page input[type="checkbox"]::after,
+.mrm-piece-terms-row input[type="checkbox"]::after,
+.mrm-piece-terms-modal-row input[type="checkbox"]::after {
+  content: "" !important;
+  width: 9px !important;
+  height: 5px !important;
+  border-left: 2px solid #ffffff !important;
+  border-bottom: 2px solid #ffffff !important;
+  transform: rotate(-45deg) !important;
+  opacity: 0 !important;
+  margin-top: -1px !important;
+}
+
+.mrm-piece-product-page input[type="checkbox"]:checked,
+.mrm-piece-terms-row input[type="checkbox"]:checked,
+.mrm-piece-terms-modal-row input[type="checkbox"]:checked {
+  background-color: #171512 !important;
+  border-color: #171512 !important;
+}
+
+.mrm-piece-product-page input[type="checkbox"]:checked::after,
+.mrm-piece-terms-row input[type="checkbox"]:checked::after,
+.mrm-piece-terms-modal-row input[type="checkbox"]:checked::after {
+  opacity: 1 !important;
+}
+
+.mrm-piece-product-page input[type="checkbox"]:focus-visible,
+.mrm-piece-terms-row input[type="checkbox"]:focus-visible,
+.mrm-piece-terms-modal-row input[type="checkbox"]:focus-visible {
+  outline: 3px solid rgba(142, 129, 85, 0.35) !important;
+  outline-offset: 2px !important;
+}
+
+/* =========================================================
+   MRM Piece Product Two-Step Payment Flow Patch
+   Details first, card/payment second.
+   ========================================================= */
+
+.mrm-piece-step[hidden] {
+  display: none !important;
+}
+
+.mrm-piece-payment-step-heading {
+  margin: 0 0 14px 0;
+  font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
+  font-size: clamp(26px, 4vw, 38px);
+  line-height: 1;
+  color: #171512;
+}
+
+.mrm-piece-payment-step-note {
+  margin: 0 0 16px 0;
+  color: #5f5851;
+  line-height: 1.55;
+}
+
+#mrm-payment-element {
+  margin-top: 14px;
+}
+
+#mrm-payment-element:empty {
+  min-height: 0;
+}
+
+#mrm-payment-element:not(:empty) {
+  min-height: 230px;
+}
+
 </style>
 
 <main class="mrm-piece-product-page page">
@@ -1303,7 +1396,7 @@ body.mrm-piece-no-scroll{
               <button id="payment-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
             </div>
             <div class="modal-body">
-              <div id="payment-instructions"></div>
+              <div id="mrm-piece-details-step" class="mrm-piece-step">
 
               <input
                 type="email"
@@ -1400,6 +1493,20 @@ body.mrm-piece-no-scroll{
                 </label>
               </div>
 
+              <div style="display:flex;gap:10px;margin-top:18px;">
+                <button id="mrm-piece-continue-to-payment" class="button-primary" type="button" style="flex:1;">
+                  Continue to Payment
+                </button>
+              </div>
+              </div>
+
+              <div id="mrm-piece-card-step" class="mrm-piece-step" hidden>
+                <h3 class="mrm-piece-payment-step-heading">Complete Payment</h3>
+                <p class="mrm-piece-payment-step-note">
+                  Review your total below, enter your card information, and complete secure checkout.
+                </p>
+
+              <div id="payment-instructions"></div>
               <div id="mrm-payment-element"></div>
               <div class="mrm-payment-security-badge" aria-label="Secure payment information">
                 <span class="mrm-payment-security-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" focusable="false"><path fill="currentColor" d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 0 1 4 0v2h-4V7Zm7 12H7v-8h10v8Z"></path></svg></span>
@@ -1410,6 +1517,7 @@ body.mrm-piece-no-scroll{
                 <button id="mrm-pay-btn" class="button-primary" style="flex:1;">Complete Purchase</button>
               </div>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -1497,6 +1605,7 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   let mrmPieceCurrentQuoteData = null;
   let mrmPieceCurrentPriceDisplay = '';
   let mrmPieceSchedulePaymentLoad = null;
+  let mrmPiecePaymentStepRequested = false;
 
   function mrmResetPiecePaymentElement(message) {
     pendingClientSecret = '';
@@ -2110,6 +2219,9 @@ async function getOfferSkuCandidates(offerEl) {
 
     const paymentMount = document.getElementById('mrm-payment-element');
     const termsCheck = document.getElementById('mrm-piece-payment-terms');
+    const detailsStep = document.getElementById('mrm-piece-details-step');
+    const cardStep = document.getElementById('mrm-piece-card-step');
+    const continueToPaymentBtn = document.getElementById('mrm-piece-continue-to-payment');
 
     const money = (cents) => '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
     const esc = (s) => String(s || '')
@@ -2150,6 +2262,16 @@ async function getOfferSkuCandidates(offerEl) {
       amount_cents: baseFromQuote,
       tax_message: 'Sales tax will update after billing state and ZIP are entered.'
     });
+
+    mrmPiecePaymentStepRequested = false;
+
+    if (detailsStep) detailsStep.hidden = false;
+    if (cardStep) cardStep.hidden = true;
+
+    if (continueToPaymentBtn) {
+      continueToPaymentBtn.disabled = false;
+      continueToPaymentBtn.textContent = 'Continue to Payment';
+    }
 
     overlay.style.display = 'flex';
     overlay.setAttribute('aria-hidden', 'false');
@@ -2204,7 +2326,27 @@ async function getOfferSkuCandidates(offerEl) {
     };
 
     const paymentBack = document.getElementById('mrm-payment-back');
-    if (paymentBack) paymentBack.onclick = function () { document.getElementById('payment-close').click(); };
+    if (paymentBack) paymentBack.onclick = () => {
+      mrmPiecePaymentStepRequested = false;
+
+      if (activePaymentElement) {
+        try { activePaymentElement.unmount(); } catch (e) {}
+      }
+
+      activePaymentElement = null;
+      activeStripeElements = null;
+      pendingClientSecret = '';
+
+      if (paymentMount) {
+        paymentMount.innerHTML = '';
+      }
+
+      if (cardStep) cardStep.hidden = true;
+      if (detailsStep) detailsStep.hidden = false;
+
+      payBtn.disabled = true;
+      errorEl.textContent = '';
+    };
 
     const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
     const isPostalLike = (v) => String(v || '').trim().length >= 4;
@@ -2341,6 +2483,11 @@ async function getOfferSkuCandidates(offerEl) {
     const scheduleLoad = () => {
       clearTimeout(loadTimer);
 
+      if (!mrmPiecePaymentStepRequested) {
+        scheduleTaxPreview();
+        return;
+      }
+
       if (pendingClientSecret || activePaymentElement) {
         resetLoadedPaymentForBillingChange('Billing details changed. Review the updated tax breakdown, then accept the Terms of Service to reload the secure payment form.');
       }
@@ -2460,6 +2607,56 @@ async function getOfferSkuCandidates(offerEl) {
     };
 
     mrmPieceSchedulePaymentLoad = scheduleLoad;
+
+    if (continueToPaymentBtn && !continueToPaymentBtn.dataset.mrmBound) {
+      continueToPaymentBtn.dataset.mrmBound = '1';
+
+      continueToPaymentBtn.addEventListener('click', function(event) {
+        event.preventDefault();
+
+        const email = (emailInput && emailInput.value ? emailInput.value : '').trim();
+        const postal = (postalInput && postalInput.value ? postalInput.value : '').trim();
+        const addressPayload = getAddressPayload();
+        const missingAddress = [];
+
+        if (!isEmailLike(email)) {
+          errorEl.textContent = 'Please enter a valid email address before continuing to payment.';
+          return;
+        }
+
+        if (!addressPayload.line1) missingAddress.push('street address');
+        if (!addressPayload.city) missingAddress.push('city');
+        if (!addressPayload.state) missingAddress.push('state');
+        if (!addressPayload.postal_code || !isPostalLike(postal)) missingAddress.push('ZIP code');
+        if (!addressPayload.country) missingAddress.push('country');
+
+        if (missingAddress.length) {
+          errorEl.textContent = 'Please enter your full billing address: ' + missingAddress.join(', ') + '.';
+          return;
+        }
+
+        if (!termsCheck || !termsCheck.checked) {
+          errorEl.textContent = 'Please agree to the Terms of Service before continuing to payment.';
+          return;
+        }
+
+        errorEl.textContent = '';
+        mrmPiecePaymentStepRequested = true;
+
+        if (detailsStep) detailsStep.hidden = true;
+        if (cardStep) cardStep.hidden = false;
+
+        continueToPaymentBtn.disabled = true;
+        continueToPaymentBtn.textContent = 'Loading payment...';
+
+        scheduleLoad();
+
+        window.setTimeout(function() {
+          continueToPaymentBtn.disabled = false;
+          continueToPaymentBtn.textContent = 'Continue to Payment';
+        }, 700);
+      });
+    }
 
     [emailInput, postalInput, stateInput, line1Input, cityInput, countrySelect, termsCheck].forEach((el) => {
       if (!el) return;

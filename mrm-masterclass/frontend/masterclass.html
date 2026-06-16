@@ -1710,6 +1710,54 @@ body,
   }
 }
 
+/* =========================================================
+   MRM Masterclass Checkbox Visibility Patch
+   Ensures Masterclass terms checkbox visibly shows selection.
+   ========================================================= */
+
+#mrm-masterclass-root input[type="checkbox"],
+.mrm-modal input[type="checkbox"] {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  min-height: 18px !important;
+  margin: 1px 7px 0 0 !important;
+  border: 2px solid #171512 !important;
+  border-radius: 5px !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  display: inline-grid !important;
+  place-content: center !important;
+  cursor: pointer !important;
+  position: relative !important;
+  vertical-align: top !important;
+}
+
+#mrm-masterclass-root input[type="checkbox"]::after,
+.mrm-modal input[type="checkbox"]::after {
+  content: "" !important;
+  width: 9px !important;
+  height: 5px !important;
+  border-left: 2px solid #ffffff !important;
+  border-bottom: 2px solid #ffffff !important;
+  transform: rotate(-45deg) !important;
+  opacity: 0 !important;
+  margin-top: -1px !important;
+}
+
+#mrm-masterclass-root input[type="checkbox"]:checked,
+.mrm-modal input[type="checkbox"]:checked {
+  background-color: #171512 !important;
+  border-color: #171512 !important;
+}
+
+#mrm-masterclass-root input[type="checkbox"]:checked::after,
+.mrm-modal input[type="checkbox"]:checked::after {
+  opacity: 1 !important;
+}
+
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
@@ -1779,8 +1827,6 @@ body,
       <div class="mrm-modal-content">
       <h2 id="modalTitle">Register</h2>
       <p id="modalMeta" class="modal-meta"></p>
-      <div id="mrm-masterclass-checkout-summary" class="mrm-checkout-summary" hidden></div>
-
       <input id="firstName" type="text" placeholder="First name">
       <input id="lastName" type="text" placeholder="Last name">
       <input id="email" type="email" placeholder="Email address">
@@ -1804,17 +1850,36 @@ body,
 
       <button id="payButton" class="mrm-primary-btn" type="button">Continue</button>
 
-      <div id="paymentElement" class="mrm-masterclass-payment-element"></div>
-      <div id="mrm-masterclass-security-badge" class="mrm-payment-security-badge" aria-label="Secure payment information" hidden>
-        <span class="mrm-payment-security-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" focusable="false"><path fill="currentColor" d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 0 1 4 0v2h-4V7Zm7 12H7v-8h10v8Z"></path></svg></span>
-        <span class="mrm-payment-security-copy"><strong>Secure checkout</strong><small>Payment details are securely processed by Stripe. Low Brass Lessons does not store your full card number.</small></span>
-      </div>
-      <div id="mrm-masterclass-payment-actions" class="mrm-payment-actions" hidden>
-        <button id="mrm-masterclass-payment-back" class="mrm-secondary-btn" type="button">Go Back</button>
-        <button id="submitPayment" class="mrm-primary-btn" type="button">Complete Registration</button>
-      </div>
 
       <p id="modalMessage" class="message"></p>
+      </div>
+    </div>
+  </div>
+
+
+  <div class="mrm-modal" id="masterclassPaymentModal" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="masterclassPaymentTitle">
+    <div class="mrm-modal-overlay" data-mrm-modal-overlay></div>
+    <div class="mrm-modal-panel" role="document">
+      <button id="closeMasterclassPaymentX" type="button" class="mrm-modal-x" data-mrm-modal-close aria-label="Close">×</button>
+      <div class="mrm-modal-content">
+        <h2 id="masterclassPaymentTitle">Complete Payment</h2>
+        <p class="modal-meta">
+          Review your registration total, enter your card information, and complete secure checkout.
+        </p>
+
+        <div id="mrm-masterclass-checkout-summary" class="mrm-checkout-summary" hidden></div>
+
+        <div id="paymentElement" class="mrm-masterclass-payment-element"></div>
+
+        <div id="mrm-masterclass-security-badge" class="mrm-payment-security-badge" aria-label="Secure payment information" hidden>
+          <span class="mrm-payment-security-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" focusable="false"><path fill="currentColor" d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 0 1 4 0v2h-4V7Zm7 12H7v-8h10v8Z"></path></svg></span>
+          <span class="mrm-payment-security-copy"><strong>Secure checkout</strong><small>Payment details are securely processed by Stripe. Low Brass Lessons does not store your full card number.</small></span>
+        </div>
+
+        <div id="mrm-masterclass-payment-actions" class="mrm-payment-actions" hidden>
+          <button id="mrm-masterclass-payment-back" class="mrm-secondary-btn" type="button">Go Back</button>
+          <button id="submitPayment" class="mrm-primary-btn" type="button">Complete Registration</button>
+        </div>
       </div>
     </div>
   </div>
@@ -3209,7 +3274,7 @@ body,
       document.documentElement.classList.remove('mrm-modal-open');
       document.body.classList.remove('mrm-modal-open');
 
-      if (id === 'registrationModal' || id === 'finalConfirmationModal' || id === 'masterclassSuccessModal') {
+      if (id === 'registrationModal' || id === 'masterclassPaymentModal' || id === 'finalConfirmationModal' || id === 'masterclassSuccessModal') {
         window.__mrmMasterclassCheckoutInProgress = false;
       }
     }
@@ -3447,12 +3512,16 @@ body,
       state.checkout = data;
 
       renderMasterclassCheckoutSummary(event, payload, data);
-      const modalTitle = byId('modalTitle');
+      const paymentTitle = byId('masterclassPaymentTitle');
       const securityBadge = byId('mrm-masterclass-security-badge');
       const paymentActions = byId('mrm-masterclass-payment-actions');
-      if (modalTitle) modalTitle.textContent = 'Complete Your Masterclass Registration';
+
+      if (paymentTitle) paymentTitle.textContent = 'Complete Payment';
       if (securityBadge) securityBadge.hidden = false;
       if (paymentActions) paymentActions.hidden = false;
+
+      closeOtherMasterclassModals('masterclassPaymentModal');
+      openModal('masterclassPaymentModal');
 
       window.MRM_MASTERCLASS_PAYMENT_STATE = {
         stripe: stripe,
@@ -3640,7 +3709,11 @@ body,
 
     if (paymentBack && !paymentBack.dataset.mrmBound) {
       paymentBack.dataset.mrmBound = '1';
-      paymentBack.addEventListener('click', function () { closeModal('registrationModal'); });
+      paymentBack.addEventListener('click', function () {
+        closeModal('masterclassPaymentModal');
+        openModal('registrationModal');
+        window.__mrmMasterclassCheckoutInProgress = true;
+      });
     }
 
     if (payButton && !payButton.dataset.mrmBound) {
@@ -3671,7 +3744,7 @@ body,
       cancelFinal.dataset.mrmBound = '1';
       cancelFinal.addEventListener('click', function () {
         closeModal('finalConfirmationModal');
-        openModal('registrationModal');
+        openModal('masterclassPaymentModal');
         window.__mrmMasterclassCheckoutInProgress = true;
       });
     }
