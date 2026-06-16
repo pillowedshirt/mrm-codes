@@ -1882,9 +1882,9 @@ private function mrm_mc_email_template( $heading, $content_html ) {
 
 	return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
 		<div style="max-width:640px;margin:0 auto;padding:24px;">
-			<div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+			<div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;">
 				' . $logo_html . '
-				<h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html( $heading ) . '</h1>
+				<h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;">' . esc_html( $heading ) . '</h1>
 				<div style="font-size:15px;line-height:1.7;color:#222;">' . $content_html . '</div>
 				<div style="margin-top:22px;font-size:12px;color:#777;text-align:center;">' . $site . '</div>
 			</div>
@@ -4877,7 +4877,7 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 		$contact_bits[] = esc_html( trim( ( $event->presenter_city ?? '' ) . ', ' . ( $event->presenter_state ?? '' ), ' ,' ) );
 	}
 
-	$content = '<div class="mrm-masterclass-session-page" style="max-width:1060px;margin:0 auto;padding:48px 20px;font-family:Arial,Helvetica,sans-serif;color:#20170f;">';
+	$content = '<div class="mrm-masterclass-session-page" style="max-width:1060px;margin:0 auto;padding:48px 20px;font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#20170f;">';
 
 	$content .= '<section style="display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);gap:28px;align-items:center;background:#fffdf9;border:1px solid #dccab0;border-radius:30px;padding:28px;box-shadow:0 18px 46px rgba(32,23,15,.10);">';
 
@@ -4895,7 +4895,7 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 
 	$content .= '<div>';
 	$content .= '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Presenter</p>';
-	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2rem,5vw,3.7rem);line-height:1.05;margin:0 0 14px;">' . esc_html( $event->presenter_name ?: 'Presenter' ) . '</h1>';
+	$content .= '<h1 style="font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;font-size:clamp(2rem,5vw,3.7rem);line-height:1.05;margin:0 0 14px;">' . esc_html( $event->presenter_name ?: 'Presenter' ) . '</h1>';
 
 	if ( ! empty( $event->presenter_short_description ) ) {
 		$content .= '<div style="font-size:18px;line-height:1.65;margin-bottom:16px;">' . wp_kses_post( wpautop( $event->presenter_short_description ) ) . '</div>';
@@ -4919,7 +4919,7 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	$content .= '<section style="margin-top:30px;background:#fff;border:1px solid #eadcc8;border-radius:28px;padding:30px;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
 	$content .= '<div style="text-align:center;margin:0 auto 22px;">';
 	$content .= '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Masterclass Session</p>';
-	$content .= '<h2 style="font-family:Georgia,serif;font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;color:#20170f;text-align:center;">' . esc_html( $event->title ) . '</h2>';
+	$content .= '<h2 style="font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;color:#20170f;text-align:center;">' . esc_html( $event->title ) . '</h2>';
 	$content .= '</div>';
 
 
@@ -4941,9 +4941,9 @@ private function mrm_mc_generate_session_page_for_event_id( $event_id ) {
 	$content .= '<p style="text-align:center;margin:30px 0 0;"><a href="' . esc_url( $enroll_url ) . '#mrm-masterclass-event-' . absint( $event_id ) . '" style="display:inline-block;background:#20170f;color:#fff;padding:14px 22px;border-radius:999px;text-decoration:none;font-weight:900;">Enroll Now</a></p>';
 
 	$content .= '<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:18px;">';
-	$content .= '<a href="' . esc_url( $gmail_share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:Arial,Helvetica,sans-serif;">Share by Email</a>';
-	$content .= '<a href="https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $session_share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:Arial,Helvetica,sans-serif;">Share on Facebook</a>';
-	$content .= '<button type="button" onclick="var b=this;var original=b.getAttribute(&quot;data-original-text&quot;)||&quot;Copy Link&quot;;var done=function(){b.textContent=&quot;Link Copied&quot;;window.setTimeout(function(){b.textContent=original;},3500);};if(navigator.clipboard){navigator.clipboard.writeText(window.location.href).then(done).catch(function(){window.prompt(&quot;Copy this link:&quot;, window.location.href);done();});}else{window.prompt(&quot;Copy this link:&quot;, window.location.href);done();}" data-original-text="Copy Link" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:Arial,Helvetica,sans-serif;cursor:pointer;">Copy Link</button>';
+	$content .= '<a href="' . esc_url( $gmail_share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;">Share by Email</a>';
+	$content .= '<a href="https://www.facebook.com/sharer/sharer.php?u=' . rawurlencode( $session_share_url ) . '" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;">Share on Facebook</a>';
+	$content .= '<button type="button" onclick="var b=this;var original=b.getAttribute(&quot;data-original-text&quot;)||&quot;Copy Link&quot;;var done=function(){b.textContent=&quot;Link Copied&quot;;window.setTimeout(function(){b.textContent=original;},3500);};if(navigator.clipboard){navigator.clipboard.writeText(window.location.href).then(done).catch(function(){window.prompt(&quot;Copy this link:&quot;, window.location.href);done();});}else{window.prompt(&quot;Copy this link:&quot;, window.location.href);done();}" data-original-text="Copy Link" style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#20170f;border:1px solid #20170f;padding:8px 12px;border-radius:999px;text-decoration:none;font-weight:800;font-size:13px;line-height:1.1;font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;cursor:pointer;">Copy Link</button>';
 	$content .= '</div>';
 
 	$content .= '</section>';
@@ -5279,7 +5279,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 
 	$share_title = 'Masterclass Presenter: ' . sanitize_text_field( $presenter->name ?? '' );
 
-	$content = '<div class="mrm-masterclass-presenter-page" style="max-width:1040px;margin:0 auto;padding:48px 20px;font-family:Arial,Helvetica,sans-serif;color:#20170f;">';
+	$content = '<div class="mrm-masterclass-presenter-page" style="max-width:1040px;margin:0 auto;padding:48px 20px;font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#20170f;">';
 
 	$content .= '<header style="text-align:center;margin:0 auto 34px;">';
 
@@ -5289,7 +5289,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 		$content .= '<div style="width:min(320px,82vw);aspect-ratio:1/1;border-radius:28px;background:#f7efe3;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:72px;font-weight:900;color:#9a6a2f;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">' . esc_html( mb_substr( $presenter->name, 0, 1 ) ) . '</div>';
 	}
 
-	$content .= '<h1 style="font-family:Georgia,serif;font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;color:#20170f;">' . esc_html( $presenter->name ) . '</h1>';
+	$content .= '<h1 style="font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;color:#20170f;">' . esc_html( $presenter->name ) . '</h1>';
 
 	if ( '' !== $presenter_title ) {
 		$content .= '<p style="text-align:center;font-weight:900;margin:10px auto 0;color:#4b3c2d;font-size:1.05rem;">' . esc_html( $presenter_title ) . '</p>';
@@ -5308,7 +5308,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 	}
 
 	$content .= '<section style="margin-top:40px;">';
-	$content .= '<h2 style="font-family:Georgia,serif;font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;color:#20170f;">Upcoming Masterclass Sessions</h2>';
+	$content .= '<h2 style="font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;color:#20170f;">Upcoming Masterclass Sessions</h2>';
 
 	if ( ! empty( $upcoming_sessions ) ) {
 		foreach ( $upcoming_sessions as $session ) {
@@ -5325,7 +5325,7 @@ private function mrm_mc_generate_presenter_page_for_id( $presenter_id ) {
 
 			$content .= '<article style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:center;background:#fffdf9;border:1px solid #eadcc8;border-radius:26px;padding:clamp(20px,4vw,30px);margin:18px 0;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
 			$content .= '<div>';
-			$content .= '<h3 style="font-family:Georgia,serif;font-size:clamp(1.35rem,3vw,2rem);line-height:1.15;margin:0 0 10px;color:#20170f;">' . esc_html( $session->title ) . '</h3>';
+			$content .= '<h3 style="font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;font-size:clamp(1.35rem,3vw,2rem);line-height:1.15;margin:0 0 10px;color:#20170f;">' . esc_html( $session->title ) . '</h3>';
 
 			if ( ! empty( $description ) ) {
 				$content .= '<div style="line-height:1.7;margin:0 0 14px;">' . wp_kses_post( wpautop( $description ) ) . '</div>';
@@ -6625,11 +6625,11 @@ private function mrm_mc_render_public_page_shell( $title, $body_html, $context =
 	echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
 	echo '<title>' . esc_html( $title ) . ' | Low Brass Lessons</title>';
 	echo '<style>';
-	echo 'body{margin:0;background:#f8efe3;color:#2f2118;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}';
+	echo 'body{margin:0;background:#f8efe3;color:#2f2118;font-family:"Source Sans 3",Arial,Helvetica,sans-serif;}';
 	echo '.mrm-public-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px 18px;box-sizing:border-box;}';
 	echo '.mrm-public-card{width:min(760px,100%);background:#fffaf3;border:1px solid rgba(124,74,45,.20);border-radius:28px;box-shadow:0 24px 70px rgba(47,33,24,.14);padding:34px;box-sizing:border-box;}';
 	echo '.mrm-public-kicker{text-transform:uppercase;letter-spacing:.12em;font-size:.78rem;font-weight:800;color:#7c4a2d;margin:0 0 10px;}';
-	echo '.mrm-public-card h1{margin:0 0 14px;font-size:clamp(1.8rem,4vw,2.6rem);line-height:1.05;}';
+	echo '.mrm-public-card h1{margin:0 0 14px;font-size:clamp(1.8rem,4vw,2.6rem);line-height:1.05;font-family:"Academico",Georgia,"Times New Roman",serif;}';
 	echo '.mrm-public-card p{font-size:1rem;line-height:1.65;}';
 	echo '.mrm-public-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:22px;}';
 	echo '.mrm-public-btn,.mrm-masterclass-gate-button{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:12px 18px;border-radius:999px;background:#7c4a2d;color:#fff!important;text-decoration:none;font-weight:800;border:0;cursor:pointer;}';
