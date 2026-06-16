@@ -96,6 +96,7 @@ class MRM_Product_Access {
         add_action( 'template_redirect', array( $this, 'maybe_render_access_page' ), 0 );
 
         add_shortcode( 'mrm_sheet_music_catalog', array( $this, 'shortcode_sheet_music_catalog' ) );
+        add_shortcode( 'mrm_sheet_music_timeline', array( $this, 'shortcode_sheet_music_timeline' ) );
         add_shortcode( 'mrm_piece_details', array( $this, 'shortcode_piece_details' ) );
 
         // Hostinger-proof: auto-flush rewrite rules once when plugin version changes.
@@ -278,12 +279,6 @@ class MRM_Product_Access {
         $opts    = $this->get_options();
         $notices = array();
 
-        // Ensure OTP template contains placeholder.
-        $body = isset( $opts['email_body'] ) ? $opts['email_body'] : '';
-        if ( stripos( $body, '{{OTP}}' ) === false ) {
-            $notices[] = __( 'The Email Template must include {{OTP}} so recipients receive their one-time access code.', 'mrm-product-access' );
-        }
-
         // Check payouts per product.
         if ( ! empty( $opts['products'] ) && is_array( $opts['products'] ) ) {
             foreach ( $opts['products'] as $slug => $conf ) {
@@ -383,8 +378,10 @@ class MRM_Product_Access {
         }
 
         if ( isset( $_POST['mrm_pa_save_settings'] ) && check_admin_referer( 'mrm_pa_save_settings' ) ) {
-            $options['email_subject']              = sanitize_text_field( $_POST['email_subject'] );
-            $options['email_body']                 = wp_kses_post( $_POST['email_body'] );
+            // Email template settings are no longer edited from Product Access.
+            // Preserve existing values for backward compatibility with any legacy fallback code.
+            $options['email_subject'] = isset( $options['email_subject'] ) ? (string) $options['email_subject'] : 'Your access code';
+            $options['email_body']    = isset( $options['email_body'] ) ? (string) $options['email_body'] : "Your one-time code is: {{OTP}}\n\nIf you did not request this, ignore this email.";
 
             /**
              * Pieces Catalog (sheet music listings)
@@ -432,6 +429,8 @@ class MRM_Product_Access {
                 $pdf_urls            = isset( $_POST['piece_main_preview_pdf_url'] ) ? (array) $_POST['piece_main_preview_pdf_url'] : array();
                 $preview_pages       = isset( $_POST['piece_preview_page_number'] ) ? (array) $_POST['piece_preview_page_number'] : array();
                 $preview_audio_urls  = isset( $_POST['piece_preview_audio_url'] ) ? (array) $_POST['piece_preview_audio_url'] : array();
+                $timeline_levels     = isset( $_POST['piece_timeline_level'] ) ? (array) $_POST['piece_timeline_level'] : array();
+                $timeline_orders     = isset( $_POST['piece_timeline_order'] ) ? (array) $_POST['piece_timeline_order'] : array();
 
                 // Offers: offer_piece_index[], offer_product_slug[], offer_display_title[], offer_subtitle[], offer_price_display[], offer_preview_audio_url[]
                 $offer_piece_index       = isset( $_POST['offer_piece_index'] ) ? (array) $_POST['offer_piece_index'] : array();
@@ -534,6 +533,19 @@ class MRM_Product_Access {
                     $piece['preview_page_number'] = $ppn;
                     $piece['preview_audio_url']  = $preview_audio;
 
+                    $timeline_level = sanitize_key( (string) ( $timeline_levels[ $i ] ?? '' ) );
+                    if ( ! in_array( $timeline_level, array( 'level_1', 'level_2', 'level_3', 'hidden' ), true ) ) {
+                        $timeline_level = 'hidden';
+                    }
+
+                    $timeline_order = intval( $timeline_orders[ $i ] ?? 0 );
+                    if ( $timeline_order < 0 ) {
+                        $timeline_order = 0;
+                    }
+
+                    $piece['timeline_level'] = $timeline_level;
+                    $piece['timeline_order'] = $timeline_order;
+
                     $piece['offers'] = isset( $offers_by_piece[ $i ] ) && is_array( $offers_by_piece[ $i ] )
                         ? array_values( $offers_by_piece[ $i ] )
                         : array();
@@ -623,19 +635,26 @@ class MRM_Product_Access {
             <form method="post">
                 <?php wp_nonce_field( 'mrm_pa_save_settings' ); ?>
 
-                <h2 class="title"><?php esc_html_e( 'Email Template', 'mrm-product-access' ); ?></h2>
-                <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Email Subject', 'mrm-product-access' ); ?></th>
-                        <td><input type="text" name="email_subject" value="<?php echo esc_attr( $options['email_subject'] ?? '' ); ?>" class="regular-text"></td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e( 'Email Body', 'mrm-product-access' ); ?></th>
-                        <td>
-                            <textarea name="email_body" rows="5" cols="50" class="large-text code"><?php echo esc_textarea( $options['email_body'] ?? '' ); ?></textarea>
-                            <p class="description"><?php esc_html_e( 'Insert {{OTP}} where the one-time access code should appear.', 'mrm-product-access' ); ?></p>
-                        </td>
-                    </tr>
+                <h2 class="title"><?php esc_html_e( 'Timeline Display Settings', 'mrm-product-access' ); ?></h2>
+                <p class="description">
+                    <?php esc_html_e( 'Assign each piece to a timeline level and set its order within that level. This controls the [mrm_sheet_music_timeline] shortcode only. It does not change the catalog display order.', 'mrm-product-access' ); ?>
+                </p>
+                <p class="description">
+                    <?php esc_html_e( 'Use the piece cards below to set each piece’s Timeline Level and Timeline Order. The timeline settings live directly on each piece so the catalog and timeline stay connected.', 'mrm-product-access' ); ?>
+                </p>
+                <table class="widefat striped" style="max-width: 980px; margin: 12px 0 24px;">
+                    <thead>
+                        <tr>
+                            <th><?php esc_html_e( 'Timeline shortcode', 'mrm-product-access' ); ?></th>
+                            <th><?php esc_html_e( 'Use this on the Sheet Music page', 'mrm-product-access' ); ?></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>[mrm_sheet_music_timeline]</code></td>
+                            <td><?php esc_html_e( 'Place this above [mrm_sheet_music_catalog] to display the level timeline from the plugin.', 'mrm-product-access' ); ?></td>
+                        </tr>
+                    </tbody>
                 </table>
 
                 <?php
@@ -837,6 +856,14 @@ class MRM_Product_Access {
                     $ppn    = intval( $piece['preview_page_number'] ?? 1 );
                     if ( $ppn <= 0 ) { $ppn = 1; }
                     $preview_audio_url = $piece['preview_audio_url'] ?? '';
+                    $timeline_level = isset( $piece['timeline_level'] ) ? sanitize_key( (string) $piece['timeline_level'] ) : 'hidden';
+                    if ( ! in_array( $timeline_level, array( 'level_1', 'level_2', 'level_3', 'hidden' ), true ) ) {
+                        $timeline_level = 'hidden';
+                    }
+                    $timeline_order = isset( $piece['timeline_order'] ) ? intval( $piece['timeline_order'] ) : 0;
+                    if ( $timeline_order < 0 ) {
+                        $timeline_order = 0;
+                    }
                     $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
                     ?>
                     <div class="mrm-pa-piece-card" data-piece-index="<?php echo esc_attr( $i ); ?>" data-piece-order-key="<?php echo esc_attr( $slug !== '' ? $slug : 'piece-' . $i ); ?>">
@@ -899,6 +926,23 @@ class MRM_Product_Access {
                             <div class="mrm-pa-field">
                                 <label><?php esc_html_e( 'Year', 'mrm-product-access' ); ?></label>
                                 <input type="text" name="piece_year[]" value="<?php echo esc_attr( $yr ); ?>" placeholder="2023">
+                            </div>
+
+                            <div class="mrm-pa-field">
+                                <label><?php esc_html_e( 'Timeline Level', 'mrm-product-access' ); ?></label>
+                                <select name="piece_timeline_level[]">
+                                    <option value="hidden" <?php selected( $timeline_level, 'hidden' ); ?>><?php esc_html_e( 'Hidden from timeline', 'mrm-product-access' ); ?></option>
+                                    <option value="level_1" <?php selected( $timeline_level, 'level_1' ); ?>><?php esc_html_e( 'Level 1', 'mrm-product-access' ); ?></option>
+                                    <option value="level_2" <?php selected( $timeline_level, 'level_2' ); ?>><?php esc_html_e( 'Level 2', 'mrm-product-access' ); ?></option>
+                                    <option value="level_3" <?php selected( $timeline_level, 'level_3' ); ?>><?php esc_html_e( 'Level 3', 'mrm-product-access' ); ?></option>
+                                </select>
+                                <div class="mrm-pa-help"><?php esc_html_e( 'Controls where this piece appears in [mrm_sheet_music_timeline].', 'mrm-product-access' ); ?></div>
+                            </div>
+
+                            <div class="mrm-pa-field">
+                                <label><?php esc_html_e( 'Timeline Order', 'mrm-product-access' ); ?></label>
+                                <input type="number" name="piece_timeline_order[]" value="<?php echo esc_attr( $timeline_order ); ?>" min="0" step="1" placeholder="10">
+                                <div class="mrm-pa-help"><?php esc_html_e( 'Lower numbers appear earlier within the selected level.', 'mrm-product-access' ); ?></div>
                             </div>
 
                             <div class="mrm-pa-field mrm-pa-wide">
@@ -1046,6 +1090,23 @@ class MRM_Product_Access {
                                 <div class="mrm-pa-field">
                                     <label>Year</label>
                                     <input type="text" name="piece_year[]" value="" placeholder="2023">
+                                </div>
+
+                                <div class="mrm-pa-field">
+                                    <label>Timeline Level</label>
+                                    <select name="piece_timeline_level[]">
+                                        <option value="hidden">Hidden from timeline</option>
+                                        <option value="level_1">Level 1</option>
+                                        <option value="level_2">Level 2</option>
+                                        <option value="level_3">Level 3</option>
+                                    </select>
+                                    <div class="mrm-pa-help">Controls where this piece appears in [mrm_sheet_music_timeline].</div>
+                                </div>
+
+                                <div class="mrm-pa-field">
+                                    <label>Timeline Order</label>
+                                    <input type="number" name="piece_timeline_order[]" value="0" min="0" step="1" placeholder="10">
+                                    <div class="mrm-pa-help">Lower numbers appear earlier within the selected level.</div>
                                 </div>
 
                                 <div class="mrm-pa-field mrm-pa-wide">
@@ -3546,6 +3607,125 @@ function offerRowTemplate(pieceIndex){
     }
 
     /**
+     * Render the sheet music difficulty timeline shortcode.
+     *
+     * Usage:
+     * [mrm_sheet_music_timeline]
+     *
+     * @return string
+     */
+    public function shortcode_sheet_music_timeline() {
+        $opts   = $this->get_options();
+        $pieces = isset( $opts['pieces'] ) && is_array( $opts['pieces'] ) ? $opts['pieces'] : array();
+
+        $levels = array(
+            'level_1' => array(
+                'label'       => 'Level 1',
+                'items'       => array(),
+                'description' => array(
+                    'A great fit for developing players, typically late middle school to early high school.',
+                    'Features a steady beat and moderate speed that are easy to follow.',
+                    'Uses predictable note patterns and achievable jumps between notes.',
+                    'Stays in a more comfortable playing range.',
+                ),
+            ),
+            'level_2' => array(
+                'label'       => 'Level 2',
+                'items'       => array(),
+                'description' => array(
+                    'Best for advancing high school players who are ready for more challenge.',
+                    'Created with faster sections and longer technical passages.',
+                    'Uses more rhythmic variety and asks for stronger counting skills.',
+                    'Includes bigger note jumps and a wider range than Level 1.',
+                ),
+            ),
+            'level_3' => array(
+                'label'       => 'Level 3',
+                'items'       => array(),
+                'description' => array(
+                    'Designed for advanced players, including late high school and college audition preparation.',
+                    'Features quick tempo changes and more independent playing.',
+                    'Uses advanced rhythms and more complex meter changes.',
+                    'Requires the widest range, strongest technique, and greatest musical control.',
+                ),
+            ),
+        );
+
+        foreach ( $pieces as $piece ) {
+            if ( ! is_array( $piece ) ) {
+                continue;
+            }
+
+            $level = sanitize_key( (string) ( $piece['timeline_level'] ?? '' ) );
+            if ( ! isset( $levels[ $level ] ) ) {
+                continue;
+            }
+
+            $title = trim( (string) ( $piece['piece_title'] ?? $piece['title'] ?? '' ) );
+            if ( $title === '' ) {
+                continue;
+            }
+
+            $order = intval( $piece['timeline_order'] ?? 0 );
+
+            $levels[ $level ]['items'][] = array(
+                'title' => $title,
+                'order' => $order,
+            );
+        }
+
+        foreach ( $levels as $level_key => $level_data ) {
+            usort( $levels[ $level_key ]['items'], function( $a, $b ) {
+                $ao = intval( $a['order'] ?? 0 );
+                $bo = intval( $b['order'] ?? 0 );
+
+                if ( $ao === $bo ) {
+                    return strcasecmp( (string) ( $a['title'] ?? '' ), (string) ( $b['title'] ?? '' ) );
+                }
+
+                return $ao <=> $bo;
+            } );
+        }
+
+        ob_start();
+        ?>
+        <div class="lbl-sheet-music-page">
+          <div class="timeline">
+            <?php foreach ( $levels as $level ) : ?>
+              <div class="timeline-section">
+                <div class="timeline-items">
+                  <?php foreach ( $level['items'] as $item ) : ?>
+                    <div class="timeline-item">
+                      <p><?php echo esc_html( $item['title'] ); ?></p>
+                    </div>
+                  <?php endforeach; ?>
+                </div>
+
+                <div class="section-title"><?php echo esc_html( $level['label'] ); ?></div>
+              </div>
+            <?php endforeach; ?>
+          </div>
+
+          <div class="difficulty-columns">
+            <?php foreach ( $levels as $level ) : ?>
+              <div class="difficulty-column">
+                <ul>
+                  <?php foreach ( $level['description'] as $line ) : ?>
+                    <li><?php echo esc_html( $line ); ?></li>
+                  <?php endforeach; ?>
+                </ul>
+              </div>
+            <?php endforeach; ?>
+          </div>
+        </div>
+        <?php
+
+        $this->output_catalog_assets_inline();
+
+        return ob_get_clean();
+    }
+
+    /**
      * Render the sheet music catalog shortcode.
      *
      * @return string
@@ -4724,6 +4904,79 @@ function offerRowTemplate(pieceIndex){
   }
 }
 
+
+
+/* =========================================================
+   MRM Sheet Music Timeline Shortcode
+   Used by [mrm_sheet_music_timeline]
+   ========================================================= */
+
+.lbl-sheet-music-page {
+  font-family: var(--mrm-font-body, "Source Sans 3", Arial, Helvetica, sans-serif);
+  padding: 80px 60px;
+  background: #fbf8f2;
+  overflow-x: hidden;
+  box-sizing: border-box;
+  width: 100%;
+  box-shadow: 0 0 0 100vmax #fbf8f2;
+  clip-path: inset(0 -100vmax);
+}
+
+.lbl-sheet-music-page *,
+.lbl-sheet-music-page *::before,
+.lbl-sheet-music-page *::after { box-sizing: border-box; }
+.lbl-sheet-music-page .timeline { display: flex; width: 100%; max-width: 1000px; margin: 160px auto 0; position: relative; }
+.lbl-sheet-music-page .timeline::before { content: ""; position: absolute; left: -18px; top: -7px; width: 0; height: 0; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-right: 14px solid #171512; }
+.lbl-sheet-music-page .timeline::after { content: ""; position: absolute; right: -18px; top: -7px; width: 0; height: 0; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-left: 14px solid #171512; }
+.lbl-sheet-music-page .timeline-section { flex: 1; position: relative; height: 130px; border-top: 2px solid #171512; overflow: visible; }
+.lbl-sheet-music-page .timeline-section:not(:last-child)::after { content: ""; position: absolute; right: 0; top: -14px; width: 2px; height: 28px; background: #171512; }
+.lbl-sheet-music-page .section-title { position: absolute; top: 30px; left: 50%; transform: translateX(-50%); font-weight: 800; font-size: 24px; white-space: nowrap; text-align: center; color: #171512; z-index: 5; }
+.lbl-sheet-music-page .timeline-items { position: absolute; top: 0; left: 0; width: 100%; display: flex; justify-content: space-evenly; align-items: flex-start; overflow: visible; }
+.lbl-sheet-music-page .timeline-item { position: relative; width: 0; height: 0; overflow: visible; }
+.lbl-sheet-music-page .timeline-item::before { content: ""; position: absolute; left: -4px; top: -5px; width: 8px; height: 8px; background-color: #171512; border-radius: 50%; z-index: 3; }
+.lbl-sheet-music-page .timeline-item p { position: absolute; left: 10px; top: -36px; transform: rotate(-60deg); transform-origin: bottom left; width: 180px; margin: 0; font-size: 13px; white-space: nowrap; text-align: left; color: #171512; z-index: 4; }
+.lbl-sheet-music-page .difficulty-columns { display: flex; width: 100%; max-width: 1000px; margin: 10px auto 0; background: transparent; }
+.lbl-sheet-music-page .difficulty-column { flex: 1; padding: 0 22px; background: transparent; }
+.lbl-sheet-music-page .difficulty-column:not(:last-child) { border-right: 2px solid #171512; }
+.lbl-sheet-music-page .difficulty-column ul { margin: 0; padding-left: 20px; }
+.lbl-sheet-music-page .difficulty-column li { font-size: 15px; line-height: 1.5; margin-bottom: 10px; color: #171512; }
+
+@media (max-width: 850px) {
+  .lbl-sheet-music-page { padding: 36px 8px; overflow-x: hidden; }
+  .lbl-sheet-music-page .timeline { width: calc(100% - 20px); max-width: none; margin: 95px auto 0; }
+  .lbl-sheet-music-page .timeline::before { left: -9px; top: -4px; border-top-width: 5px; border-bottom-width: 5px; border-right-width: 8px; }
+  .lbl-sheet-music-page .timeline::after { right: -9px; top: -4px; border-top-width: 5px; border-bottom-width: 5px; border-left-width: 8px; }
+  .lbl-sheet-music-page .timeline-section { height: 82px; border-top-width: 1.5px; }
+  .lbl-sheet-music-page .timeline-section:not(:last-child)::after { top: -9px; width: 1.5px; height: 18px; }
+  .lbl-sheet-music-page .section-title { top: 20px; font-size: clamp(10px, 3vw, 16px); }
+  .lbl-sheet-music-page .timeline-item::before { left: -3px; top: -4px; width: 6px; height: 6px; }
+  .lbl-sheet-music-page .timeline-item p { left: 6px; top: -25px; width: 105px; font-size: clamp(6px, 2.1vw, 10px); line-height: 1.1; }
+  .lbl-sheet-music-page .difficulty-columns { width: 100%; max-width: none; margin: 4px auto 0; display: flex; }
+  .lbl-sheet-music-page .difficulty-column { flex: 1; padding: 0 5px; }
+  .lbl-sheet-music-page .difficulty-column:not(:last-child) { border-right: 1px solid #171512; }
+  .lbl-sheet-music-page .difficulty-column ul { padding-left: 10px; }
+  .lbl-sheet-music-page .difficulty-column li { font-size: clamp(6px, 1.9vw, 10px); line-height: 1.35; margin-bottom: 5px; }
+}
+
+@media (max-width: 480px) {
+  .lbl-sheet-music-page { padding: 32px 5px; }
+  .lbl-sheet-music-page .timeline { width: calc(100% - 16px); margin-top: 82px; }
+  .lbl-sheet-music-page .timeline-section { height: 72px; }
+  .lbl-sheet-music-page .section-title { top: 17px; font-size: clamp(9px, 3vw, 13px); }
+  .lbl-sheet-music-page .timeline-item p { left: 5px; top: -22px; width: 90px; font-size: clamp(5.5px, 2vw, 8px); }
+  .lbl-sheet-music-page .difficulty-column { padding: 0 3px; }
+  .lbl-sheet-music-page .difficulty-column ul { padding-left: 8px; }
+  .lbl-sheet-music-page .difficulty-column li { font-size: clamp(5.5px, 1.85vw, 8px); line-height: 1.3; margin-bottom: 4px; }
+}
+
+@media (max-width: 380px) {
+  .lbl-sheet-music-page { padding-left: 4px; padding-right: 4px; }
+  .lbl-sheet-music-page .timeline { margin-top: 76px; }
+  .lbl-sheet-music-page .timeline-item p { width: 82px; font-size: 5.5px; }
+  .lbl-sheet-music-page .difficulty-column { padding: 0 2px; }
+  .lbl-sheet-music-page .difficulty-column ul { padding-left: 7px; }
+  .lbl-sheet-music-page .difficulty-column li { font-size: 5.5px; line-height: 1.25; }
+}
 </style>
 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
