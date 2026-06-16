@@ -1073,6 +1073,101 @@ body.mrm-piece-no-scroll{
   font-family: var(--mrm-font-heading) !important;
 }
 
+
+
+/* =========================================================
+   MRM Piece Product Color Cohesion Patch
+   Aligns product detail page with home/about/curriculum palette.
+   ========================================================= */
+
+.mrm-piece-product-page {
+  --color-bg: #fbf8f2;
+  --color-surface: #ffffff;
+  --color-accent: #171512;
+  --color-accent-soft: rgba(23, 21, 18, 0.08);
+  --color-text-main: #171512;
+  --color-text-muted: #5f5851;
+  --color-border: #d9cfbe;
+
+  --mrm-warm-popup-bg: #fbf8f2;
+  --mrm-warm-popup-bg-light: #ffffff;
+  --mrm-warm-popup-bg-soft: #f6f1e7;
+  --mrm-warm-popup-text: #171512;
+  --mrm-warm-popup-muted: #5f5851;
+  --mrm-warm-popup-deep: #171512;
+  --mrm-warm-popup-accent: #8e8155;
+  --mrm-warm-popup-border: #d9cfbe;
+
+  background: #fbf8f2 !important;
+  color: #171512 !important;
+}
+
+.mrm-piece-product-page .card,
+.mrm-piece-product-page .offer,
+.mrm-piece-product-page .meta-panel,
+.mrm-piece-product-page .audio-box,
+.mrm-piece-product-page .modal,
+.mrm-piece-product-page .mrm-success-modal,
+.mrm-piece-product-page .mrm-pdfModal {
+  background: #ffffff !important;
+  border-color: #d9cfbe !important;
+  color: #171512 !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.mrm-piece-product-page .mrm-piece-header,
+.mrm-piece-product-page .offer-head,
+.mrm-piece-product-page .price-box {
+  background: linear-gradient(135deg, #fbf8f2 0%, #f6f1e7 100%) !important;
+  border-color: #d9cfbe !important;
+  color: #171512 !important;
+}
+
+.mrm-piece-product-page .piece-title,
+.mrm-piece-product-page .piece-title a,
+.mrm-piece-product-page .offer-title,
+.mrm-piece-product-page .options-title,
+.mrm-piece-product-page .options-head h2,
+.mrm-piece-product-page .price {
+  color: #171512 !important;
+}
+
+.mrm-piece-product-page .piece-composer,
+.mrm-piece-product-page .piece-composer a,
+.mrm-piece-product-page .options-sub,
+.mrm-piece-product-page .audio-subtitle {
+  color: #5f5851 !important;
+}
+
+.mrm-piece-product-page .meta-k,
+.mrm-piece-product-page .price-label {
+  color: #6e643f !important;
+}
+
+.mrm-piece-product-page .meta-v {
+  color: #171512 !important;
+}
+
+.mrm-piece-product-page .button-primary {
+  background: #171512 !important;
+  border-color: #171512 !important;
+  color: #ffffff !important;
+}
+
+.mrm-piece-product-page .button-secondary,
+.mrm-piece-product-page .preview-more-row a {
+  background: #ffffff !important;
+  border-color: #d9cfbe !important;
+  color: #171512 !important;
+}
+
+.mrm-piece-product-page .button-secondary:hover,
+.mrm-piece-product-page .preview-more-row a:hover,
+.mrm-piece-product-page .preview-more-row a:focus {
+  background: #f6f1e7 !important;
+  color: #171512 !important;
+}
+
 </style>
 
 <main class="mrm-piece-product-page page">

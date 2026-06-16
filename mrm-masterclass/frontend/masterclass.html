@@ -1422,6 +1422,294 @@ body.mrm-modal-open {
   font-family: var(--mrm-font-heading) !important;
 }
 
+
+
+/* =========================================================
+   MRM Masterclass Color Cohesion Patch
+   Brings masterclass.html into the home/about/curriculum palette.
+   ========================================================= */
+
+:root {
+  --mrm-bg: #fbf8f2;
+  --mrm-surface: #ffffff;
+  --mrm-accent: #171512;
+  --mrm-accent-soft: rgba(23, 21, 18, 0.08);
+  --mrm-text: #171512;
+  --mrm-muted: #5f5851;
+  --mrm-card: #ffffff;
+  --mrm-border: #d9cfbe;
+  --mrm-gold: #8e8155;
+  --mrm-danger: #9f1d1d;
+  --mrm-success: #1f6f3f;
+  --mrm-shadow: 0 18px 40px rgba(25, 22, 18, 0.07);
+  --mrm-soft-shadow: 0 18px 40px rgba(25, 22, 18, 0.07);
+}
+
+html,
+body,
+#mrm-masterclass-root,
+.mrm-masterclass-root {
+  background: #fbf8f2 !important;
+  color: #171512 !important;
+}
+
+.mc-wrap {
+  background: #fbf8f2 !important;
+  padding-top: 44px !important;
+  padding-bottom: 76px !important;
+}
+
+/* Masterclasses title bubble */
+.mc-intro {
+  width: fit-content !important;
+  max-width: calc(100% - 24px) !important;
+  margin: 0 auto 18px !important;
+  padding: clamp(18px, 3vw, 28px) clamp(28px, 5vw, 52px) !important;
+  text-align: center !important;
+  background: #fbf8f2 !important;
+  color: #171512 !important;
+  border: 1px solid #d9cfbe !important;
+  border-radius: 30px !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.mc-intro h1 {
+  margin: 0 !important;
+  color: #171512 !important;
+  font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
+  font-size: clamp(38px, 6vw, 66px) !important;
+  font-weight: 600 !important;
+  line-height: 0.96 !important;
+  letter-spacing: -0.04em !important;
+  text-align: center !important;
+  white-space: nowrap;
+}
+
+.mc-intro p,
+.mc-eyebrow {
+  display: none !important;
+}
+
+/* Make How Registration Works identical to scheduler's How Enrollment Works */
+.mc-instructions {
+  width: 100% !important;
+  margin: 20px 0 24px !important;
+  padding: 18px 20px !important;
+  background: #ffffff !important;
+  color: #5f5851 !important;
+  border: 1px solid #d9cfbe !important;
+  border-radius: 24px !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+  line-height: 1.65 !important;
+  font-size: 15px !important;
+}
+
+.mc-instructions strong {
+  color: #171512 !important;
+  font-weight: 800 !important;
+}
+
+/* General masterclass sections/cards */
+.mrm-masterclass-section,
+.calendar-shell,
+.event-card,
+.mrm-masterclass-event-card,
+.mrm-modal-panel {
+  background: #ffffff !important;
+  border-color: #d9cfbe !important;
+  color: #171512 !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.mrm-masterclass-section-head h2,
+.event-card h3,
+.mrm-masterclass-event-card h3,
+.mrm-modal-content h2,
+.mrm-modal-content h3 {
+  color: #171512 !important;
+}
+
+.mrm-masterclass-section-head p,
+.event-meta,
+.mrm-masterclass-event-meta,
+.mrm-modal-content p {
+  color: #5f5851 !important;
+}
+
+/* Buttons */
+.event-button,
+.mrm-primary-btn,
+.mrm-masterclass-action-button {
+  background: #171512 !important;
+  color: #ffffff !important;
+  border-color: #171512 !important;
+  box-shadow: 0 8px 18px rgba(25, 22, 18, 0.16) !important;
+}
+
+.event-button:hover,
+.event-button:focus,
+.mrm-primary-btn:hover,
+.mrm-primary-btn:focus,
+.mrm-masterclass-action-button:hover,
+.mrm-masterclass-action-button:focus {
+  background: #26211c !important;
+  color: #ffffff !important;
+}
+
+.mrm-secondary-btn {
+  background: #ffffff !important;
+  color: #171512 !important;
+  border: 1px solid #d9cfbe !important;
+}
+
+.mrm-secondary-btn:hover,
+.mrm-secondary-btn:focus {
+  background: #f6f1e7 !important;
+  color: #171512 !important;
+}
+
+/* Masterclass calendar: keep the strong calendar look, but align palette */
+.mrm-masterclass-calendar-section {
+  background: transparent !important;
+}
+
+.mrm-masterclass-calendar-shell {
+  background: #ffffff !important;
+  border: 1px solid #d9cfbe !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.mrm-masterclass-calendar-toolbar {
+  background: linear-gradient(135deg, #171512 0%, #26211c 100%) !important;
+  color: #ffffff !important;
+}
+
+.mrm-masterclass-calendar-heading h3 {
+  color: #ffffff !important;
+}
+
+.mrm-masterclass-calendar-nav {
+  border-color: rgba(255, 255, 255, 0.32) !important;
+  background: rgba(255, 255, 255, 0.10) !important;
+  color: #ffffff !important;
+}
+
+.mrm-masterclass-calendar-nav:hover,
+.mrm-masterclass-calendar-nav:focus {
+  background: rgba(255, 255, 255, 0.20) !important;
+}
+
+.mrm-masterclass-calendar,
+.mrm-masterclass-month {
+  background: #ffffff !important;
+}
+
+.mrm-masterclass-weekday {
+  background: #f6f1e7 !important;
+  color: #5f5851 !important;
+  border-bottom: 1px solid #d9cfbe !important;
+}
+
+.mrm-masterclass-day {
+  background: #ffffff !important;
+  border-right: 1px solid #d9cfbe !important;
+  border-bottom: 1px solid #d9cfbe !important;
+}
+
+.mrm-masterclass-day.is-empty {
+  background: #fbf8f2 !important;
+}
+
+.mrm-masterclass-day.is-today {
+  background: #ede5d1 !important;
+  box-shadow: inset 0 0 0 2px rgba(142, 129, 85, 0.26) !important;
+}
+
+.mrm-masterclass-day-number {
+  color: #171512 !important;
+}
+
+.mrm-masterclass-day.is-today .mrm-masterclass-day-number {
+  background: #171512 !important;
+  color: #ffffff !important;
+}
+
+.mrm-masterclass-calendar-event {
+  background: #8e8155 !important;
+  color: #ffffff !important;
+}
+
+.mrm-masterclass-calendar-event:hover,
+.mrm-masterclass-calendar-event:focus {
+  background: #6e643f !important;
+}
+
+.mrm-masterclass-calendar-event-highlight {
+  outline: 3px solid rgba(142, 129, 85, 0.50) !important;
+  box-shadow: 0 0 0 6px rgba(142, 129, 85, 0.14) !important;
+}
+
+.mrm-masterclass-calendar-empty-month {
+  background: #ffffff !important;
+  border-top: 1px solid #d9cfbe !important;
+  color: #5f5851 !important;
+}
+
+/* Form fields and payment surfaces */
+.mrm-masterclass-field span {
+  color: #171512 !important;
+}
+
+.mrm-masterclass-field input,
+.mrm-masterclass-field textarea,
+.mrm-masterclass-field select {
+  background: #ffffff !important;
+  color: #171512 !important;
+  border: 1px solid #d9cfbe !important;
+}
+
+.mrm-masterclass-field small {
+  color: #5f5851 !important;
+}
+
+.mrm-masterclass-promo-message,
+.mrm-payment-security-badge,
+.mrm-checkout-summary {
+  background: #f6f1e7 !important;
+  border-color: #d9cfbe !important;
+  color: #171512 !important;
+}
+
+.mrm-payment-security-copy strong {
+  color: #171512 !important;
+}
+
+.mrm-payment-security-copy small {
+  color: #5f5851 !important;
+}
+
+@media (max-width: 520px) {
+  .mc-wrap {
+    padding-top: 32px !important;
+  }
+
+  .mc-intro {
+    width: fit-content !important;
+    max-width: calc(100% - 18px) !important;
+    padding: 20px 18px !important;
+  }
+
+  .mc-intro h1 {
+    white-space: normal !important;
+    font-size: clamp(34px, 11vw, 48px) !important;
+    font-weight: 600 !important;
+  }
+
+  .mc-instructions {
+    padding: 16px !important;
+  }
+}
+
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">

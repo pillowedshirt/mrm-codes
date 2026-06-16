@@ -2196,6 +2196,358 @@ h1,
   font-family: var(--mrm-font-heading) !important;
 }
 
+
+/* =========================================================
+   MRM Scheduler Color Cohesion Patch
+   Brings scheduler.html into the home/about/curriculum palette.
+   ========================================================= */
+
+:root {
+  --color-bg: #fbf8f2;
+  --color-surface: #ffffff;
+  --color-accent: #171512;
+  --color-accent-soft: rgba(23, 21, 18, 0.08);
+  --color-text-main: #171512;
+  --color-text-muted: #5f5851;
+  --color-border: #d9cfbe;
+  --color-gold: #8e8155;
+
+  --mrm-warm-popup-bg: #fbf8f2;
+  --mrm-warm-popup-bg-light: #ffffff;
+  --mrm-warm-popup-bg-soft: #f6f1e7;
+  --mrm-warm-popup-text: #171512;
+  --mrm-warm-popup-muted: #5f5851;
+  --mrm-warm-popup-deep: #171512;
+  --mrm-warm-popup-accent: #8e8155;
+  --mrm-warm-popup-accent-hover: #6e643f;
+  --mrm-warm-popup-border: #d9cfbe;
+  --mrm-warm-popup-shadow: 0 18px 40px rgba(25, 22, 18, 0.07);
+}
+
+html,
+body {
+  background: #fbf8f2 !important;
+  color: #171512 !important;
+}
+
+.wrapper {
+  background: #fbf8f2 !important;
+  padding-top: 44px !important;
+  padding-bottom: 76px !important;
+}
+
+/* Match the Masterclasses title bubble style */
+.mrm-scheduler-title-bubble {
+  width: fit-content !important;
+  max-width: calc(100% - 24px) !important;
+  margin: 0 auto 18px !important;
+  padding: clamp(18px, 3vw, 28px) clamp(28px, 5vw, 52px) !important;
+  text-align: center !important;
+  background: #fbf8f2 !important;
+  color: #171512 !important;
+  border: 1px solid #d9cfbe !important;
+  border-radius: 30px !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.mrm-scheduler-title-bubble h1 {
+  margin: 0 !important;
+  padding: 0 !important;
+  color: #171512 !important;
+  font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
+  font-size: clamp(38px, 6vw, 66px) !important;
+  font-weight: 600 !important;
+  line-height: 0.96 !important;
+  letter-spacing: -0.04em !important;
+  text-align: center !important;
+  white-space: nowrap;
+}
+
+/* Make How Enrollment Works match the Masterclass instructions box */
+.mrm-scheduler-instructions {
+  width: 100% !important;
+  margin: 20px 0 24px !important;
+  padding: 18px 20px !important;
+  background: #ffffff !important;
+  color: #5f5851 !important;
+  border: 1px solid #d9cfbe !important;
+  border-radius: 24px !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+  line-height: 1.65 !important;
+  font-size: 15px !important;
+}
+
+.mrm-scheduler-instructions strong {
+  color: #171512 !important;
+  font-weight: 800 !important;
+}
+
+/* Dropdowns and form fields should feel clean like the main pages */
+.filters select,
+.filters input,
+.mrm-pref-grid select,
+.modal-form select,
+.modal-form input,
+.state-change-select,
+.mrm-state-dropdown-panel .state-dropdown-select,
+#state-select,
+.modal input,
+.modal select,
+.modal textarea,
+.mrm-pref-grid input,
+.mrm-pref-grid textarea {
+  background: #ffffff !important;
+  color: #171512 !important;
+  border: 1px solid #d9cfbe !important;
+  box-shadow: none !important;
+}
+
+.filters select option,
+.mrm-pref-grid select option,
+.modal-form select option,
+.state-change-select option,
+.mrm-state-dropdown-panel .state-dropdown-select option,
+#state-select option {
+  background: #ffffff !important;
+  color: #171512 !important;
+}
+
+.filters label,
+.mrm-pref-grid label,
+.modal-form label {
+  color: #5f5851 !important;
+}
+
+/* Pricing and small information bubbles */
+.mrm-pricing-summary,
+.mrm-toast {
+  background: #ffffff !important;
+  border: 1px solid #d9cfbe !important;
+  color: #171512 !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.mrm-pricing-summary-title {
+  color: #6e643f !important;
+}
+
+.mrm-pricing-summary-main,
+.mrm-pricing-summary-sub strong,
+.mrm-toast strong {
+  color: #171512 !important;
+}
+
+.mrm-pricing-summary-sub,
+.mrm-pricing-summary-inline-note {
+  color: #5f5851 !important;
+}
+
+/* Popups/modals should feel like the site, not like a separate warm-orange system */
+.modal,
+.mrm-pref-modal,
+.mrm-payment-loading-modal,
+.mrm-success-modal {
+  background: #fbf8f2 !important;
+  color: #171512 !important;
+  border: 1px solid #d9cfbe !important;
+  box-shadow: 0 24px 70px rgba(25, 22, 18, 0.16) !important;
+}
+
+.modal-header,
+.mrm-pref-head {
+  background: linear-gradient(135deg, #fbf8f2 0%, #f6f1e7 100%) !important;
+  border-bottom: 1px solid #d9cfbe !important;
+}
+
+.modal-title,
+.mrm-pref-title,
+.mrm-payment-loading-title,
+.mrm-success-title,
+.modal-section-title {
+  color: #171512 !important;
+}
+
+.modal-body,
+.modal-message,
+.mrm-payment-loading-text,
+.mrm-success-text,
+.mrm-success-note,
+.mrm-pref-note {
+  color: #5f5851 !important;
+}
+
+.modal-close,
+.mrm-pref-close {
+  background: rgba(23, 21, 18, 0.06) !important;
+  color: #171512 !important;
+}
+
+.modal-close:hover,
+.modal-close:focus,
+.mrm-pref-close:hover,
+.mrm-pref-close:focus {
+  background: rgba(23, 21, 18, 0.12) !important;
+}
+
+/* Buttons */
+.modal-submit,
+.mrm-pref-see,
+.confirm-selection,
+.day-slots-booknow {
+  background: #171512 !important;
+  color: #ffffff !important;
+  border-color: #171512 !important;
+}
+
+.modal-submit:hover,
+.mrm-pref-see:hover,
+.confirm-selection:hover,
+.day-slots-booknow:hover {
+  background: #26211c !important;
+  color: #ffffff !important;
+}
+
+/* State selector and instructor card surfaces stay clean white */
+.state-map-wrap,
+.state-selector-wrap,
+.state-filter-bar,
+.mrm-state-dropdown-panel,
+.instructor {
+  background: #ffffff !important;
+  border: 1px solid #d9cfbe !important;
+  color: #171512 !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.state-map-title,
+.state-selector-title,
+.state-filter-pill,
+.instructor-title-line {
+  color: #171512 !important;
+}
+
+.state-map-subtitle,
+.state-selector-sub,
+.instructor-instruments,
+.instructor-shortdesc,
+.instructor-format-label {
+  color: #5f5851 !important;
+}
+
+/* Instructor header: subtle cream, not orange */
+.instructor-header {
+  background: #f6f1e7 !important;
+  border: 1px solid #d9cfbe !important;
+  color: #171512 !important;
+  box-shadow: 0 8px 20px rgba(25, 22, 18, 0.06) !important;
+}
+
+.instructor-header:hover {
+  background: #ede5d1 !important;
+  border-color: #c8b8a4 !important;
+}
+
+/* State map accent */
+.mrm-us-map-svg .mrm-state-shape.is-available:hover,
+.us-map-state:hover,
+.us-map-state.is-selected {
+  fill: #8e8155 !important;
+  stroke: #8e8155 !important;
+}
+
+.state-change {
+  color: #6e643f !important;
+}
+
+.state-change:hover {
+  background: rgba(142, 129, 85, 0.12) !important;
+}
+
+/* Keep the private lesson calendar closer to the reverted/original look */
+.calendar {
+  background: transparent !important;
+}
+
+.calendar-header {
+  background: transparent !important;
+  border-bottom: none !important;
+}
+
+.calendar-header > div {
+  color: #171512 !important;
+  font-family: var(--mrm-font-body, "Source Sans 3", Arial, Helvetica, sans-serif) !important;
+  font-weight: 800 !important;
+}
+
+.calendar-header button {
+  color: #171512 !important;
+}
+
+.calendar-header button:hover {
+  background: rgba(23, 21, 18, 0.08) !important;
+}
+
+.calendar-day {
+  background: transparent !important;
+}
+
+.calendar-day.has-slots .calendar-day-number {
+  border-color: #171512 !important;
+  color: #171512 !important;
+}
+
+.calendar-day.has-selected .calendar-day-number {
+  background: #8e8155 !important;
+  border-color: #8e8155 !important;
+  color: #171512 !important;
+}
+
+.slot {
+  background: #ffffff !important;
+  border: 1px solid #d9cfbe !important;
+  color: #171512 !important;
+}
+
+.slot:hover {
+  border-color: #8e8155 !important;
+}
+
+.slot.selected,
+.slot.selected-range.selected {
+  background: #8e8155 !important;
+  border-color: #8e8155 !important;
+  color: #171512 !important;
+}
+
+.slot.selected-range {
+  background: #ede5d1 !important;
+  border-color: #d9cfbe !important;
+  color: #171512 !important;
+}
+
+/* Mobile title should not look oversized */
+@media (max-width: 520px) {
+  .wrapper {
+    padding-top: 32px !important;
+  }
+
+  .mrm-scheduler-title-bubble {
+    width: fit-content !important;
+    max-width: calc(100% - 18px) !important;
+    padding: 20px 18px !important;
+  }
+
+  .mrm-scheduler-title-bubble h1 {
+    white-space: normal !important;
+    font-size: clamp(34px, 11vw, 48px) !important;
+    font-weight: 600 !important;
+  }
+
+  .mrm-scheduler-instructions {
+    padding: 16px !important;
+  }
+}
+
 </style>
 </head>
 
@@ -6021,7 +6373,9 @@ function loadInstructors(){
      id="defs4">
     <style
        type="text/css"
-       id="style6">path { fill-rule: evenodd; }</style>
+       id="style6">path { fill-rule: evenodd; }
+
+</style>
   </defs>
   <metadata
      id="metadata8">
