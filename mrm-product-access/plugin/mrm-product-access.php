@@ -3556,7 +3556,12 @@ function offerRowTemplate(pieceIndex){
 
         ob_start();
 
-        echo '<div class="mrm-catalog wrapper">';
+        echo '<section class="mrm-sheet-music-catalog-section" aria-label="Sheet music catalog">';
+        echo '  <div class="mrm-sheet-music-catalog-heading">';
+        echo '    <h2>Catalog</h2>';
+        echo '    <div class="mrm-sheet-music-catalog-divider" aria-hidden="true"></div>';
+        echo '  </div>';
+        echo '  <div class="mrm-catalog wrapper">';
 
         foreach ( $pieces as $piece ) {
             $slug = sanitize_title( (string) ( $piece['slug'] ?? '' ) );
@@ -3718,7 +3723,8 @@ function offerRowTemplate(pieceIndex){
             echo '</article>';
         }
 
-        echo '</div>';
+        echo '  </div>';
+        echo '</section>';
 
         $this->output_catalog_assets_inline();
 
@@ -4645,6 +4651,77 @@ function offerRowTemplate(pieceIndex){
 @media (max-width: 860px) {
   .mrm-piece-details-wrapper .offer-row { align-items: flex-start; flex-direction: column; }
   .mrm-piece-details-wrapper .offer-price { white-space: normal; }
+}
+
+
+/* =========================================================
+   MRM Sheet Music Catalog Section Patch
+   Applies the site off-white background directly through
+   the [mrm_sheet_music_catalog] shortcode output.
+   ========================================================= */
+
+.mrm-sheet-music-catalog-section {
+  width: 100%;
+  background: #fbf8f2 !important;
+  color: #171512 !important;
+  padding: 44px 0 76px;
+  box-shadow: 0 0 0 100vmax #fbf8f2;
+  clip-path: inset(0 -100vmax);
+}
+
+.mrm-sheet-music-catalog-heading {
+  max-width: 980px;
+  margin: 0 auto 28px;
+  padding: 0 28px;
+  box-sizing: border-box;
+}
+
+.mrm-sheet-music-catalog-heading h2 {
+  margin: 0 0 14px;
+  color: #171512 !important;
+  font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
+  font-size: clamp(38px, 6vw, 66px);
+  font-weight: 600;
+  line-height: 0.96;
+  letter-spacing: -0.04em;
+  text-align: left;
+}
+
+.mrm-sheet-music-catalog-divider {
+  width: 100%;
+  height: 1px;
+  background: #d9cfbe;
+}
+
+.mrm-sheet-music-catalog-section .mrm-catalog.wrapper {
+  background: transparent !important;
+  padding-top: 0 !important;
+}
+
+.mrm-sheet-music-catalog-section .product-card {
+  background: #ffffff !important;
+  border-color: #d9cfbe !important;
+}
+
+@media (max-width: 860px) {
+  .mrm-sheet-music-catalog-section {
+    padding: 34px 0 58px;
+  }
+
+  .mrm-sheet-music-catalog-heading {
+    padding: 0 14px;
+    margin-bottom: 20px;
+  }
+
+  .mrm-sheet-music-catalog-heading h2 {
+    font-size: clamp(34px, 11vw, 48px);
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-catalog.wrapper {
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+    background: transparent !important;
+  }
 }
 
 </style>
