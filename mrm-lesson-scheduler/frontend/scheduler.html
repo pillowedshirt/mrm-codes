@@ -2548,6 +2548,105 @@ body {
   }
 }
 
+/* =========================================================
+   MRM Checkbox Visibility Patch
+   Ensures scheduler checkboxes visibly show a selected state.
+   ========================================================= */
+
+.terms-row input[type="checkbox"],
+.mrm-check-row input[type="checkbox"],
+.modal input[type="checkbox"],
+.mrm-pref-modal input[type="checkbox"] {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  min-height: 18px !important;
+  margin: 1px 0 0 0 !important;
+  border: 2px solid #171512 !important;
+  border-radius: 5px !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  display: inline-grid !important;
+  place-content: center !important;
+  cursor: pointer !important;
+  position: relative !important;
+}
+
+.terms-row input[type="checkbox"]::after,
+.mrm-check-row input[type="checkbox"]::after,
+.modal input[type="checkbox"]::after,
+.mrm-pref-modal input[type="checkbox"]::after {
+  content: "" !important;
+  width: 9px !important;
+  height: 5px !important;
+  border-left: 2px solid #ffffff !important;
+  border-bottom: 2px solid #ffffff !important;
+  transform: rotate(-45deg) !important;
+  opacity: 0 !important;
+  margin-top: -1px !important;
+}
+
+.terms-row input[type="checkbox"]:checked,
+.mrm-check-row input[type="checkbox"]:checked,
+.modal input[type="checkbox"]:checked,
+.mrm-pref-modal input[type="checkbox"]:checked {
+  background-color: #171512 !important;
+  border-color: #171512 !important;
+}
+
+.terms-row input[type="checkbox"]:checked::after,
+.mrm-check-row input[type="checkbox"]:checked::after,
+.modal input[type="checkbox"]:checked::after,
+.mrm-pref-modal input[type="checkbox"]:checked::after {
+  opacity: 1 !important;
+}
+
+.terms-row input[type="checkbox"]:focus-visible,
+.mrm-check-row input[type="checkbox"]:focus-visible,
+.modal input[type="checkbox"]:focus-visible,
+.mrm-pref-modal input[type="checkbox"]:focus-visible {
+  outline: 3px solid rgba(142, 129, 85, 0.35) !important;
+  outline-offset: 2px !important;
+}
+
+/* =========================================================
+   MRM Scheduler Past Availability Patch
+   Past dates that used to have availability should look
+   unavailable once the day has passed.
+   ========================================================= */
+
+.calendar-day.past,
+.calendar-day.past.has-slots,
+.calendar-day.past.has-selected {
+  cursor: default !important;
+}
+
+.calendar-day.past .calendar-day-number,
+.calendar-day.past.has-slots .calendar-day-number,
+.calendar-day.past.has-selected .calendar-day-number,
+.calendar-day.past.has-slots.has-selected .calendar-day-number {
+  background: transparent !important;
+  border-color: rgba(23, 21, 18, 0.20) !important;
+  border-width: 1px !important;
+  color: rgba(23, 21, 18, 0.38) !important;
+  box-shadow: none !important;
+}
+
+.calendar-day.past.has-slots:hover .calendar-day-number,
+.calendar-day.past:hover .calendar-day-number {
+  background: transparent !important;
+  border-color: rgba(23, 21, 18, 0.20) !important;
+  color: rgba(23, 21, 18, 0.38) !important;
+}
+
+.calendar-day.past::after,
+.calendar-day.past.has-slots::after {
+  content: none !important;
+  display: none !important;
+}
+
 </style>
 </head>
 
