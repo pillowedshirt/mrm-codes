@@ -1341,20 +1341,62 @@ body.mrm-modal-open {
 
 /* =========================================================
    MRM Warm Masterclass Intro Patch
-   Makes the top Masterclass intro section match the popup color.
+   Centers the Masterclasses title inside a compact warm bubble.
+   Keeps the registration instructions box full width.
    ========================================================= */
 
-.mc-intro { background: #fffaf3 !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; box-shadow: 0 24px 70px rgba(27, 20, 15, 0.16) !important; }
-.mc-intro h1 { color: #2f2118 !important; }
-.mc-intro p { color: #62483a !important; }
-.mc-eyebrow { display: none !important; }
-.mc-instructions { background: #fffdf9 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; color: #62483a !important; }
+.mc-intro {
+  width: fit-content !important;
+  max-width: calc(100% - 24px) !important;
+  margin: 0 auto 18px !important;
+  padding: clamp(18px, 3vw, 28px) clamp(28px, 5vw, 52px) !important;
+  text-align: center !important;
+  background: #fffaf3 !important;
+  color: #2f2118 !important;
+  border: 1px solid rgba(124, 74, 45, 0.22) !important;
+  border-radius: 30px !important;
+  box-shadow: 0 24px 70px rgba(27, 20, 15, 0.16) !important;
+}
+
+.mc-intro h1 {
+  margin: 0 !important;
+  color: #2f2118 !important;
+  text-align: center !important;
+  white-space: nowrap;
+}
+
+.mc-intro p {
+  display: none !important;
+}
+
+.mc-eyebrow {
+  display: none !important;
+}
+
+.mc-instructions {
+  width: 100% !important;
+  margin-top: 20px !important;
+  background: #fffdf9 !important;
+  border: 1px solid rgba(124, 74, 45, 0.22) !important;
+  color: #62483a !important;
+}
+
+@media (max-width: 520px) {
+  .mc-intro {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 20px 18px !important;
+  }
+
+  .mc-intro h1 {
+    white-space: normal;
+  }
+}
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
     <section class="mc-intro" id="mrm-masterclass-intro-section">
       <h1>Masterclasses</h1>
-      <p>Select an available masterclass below. After choosing a session, you will complete registration and payment in a secure popup.</p>
     </section>
 
     <section class="mc-instructions" id="mrm-masterclass-instructions-section">
