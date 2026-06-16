@@ -4681,7 +4681,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;">
     <div style="max-width:640px;margin:0 auto;padding:24px;">
-      <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">
+      <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;">
         ' . $logo_html . '
         <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;text-align:center;color:#111;">' . esc_html($title) . '</h1>
         <div style="font-size:15px;line-height:1.7;color:#222;text-align:left;">' . $intro_html . '</div>
@@ -11187,9 +11187,9 @@ cliniccontact@example.org",
 
     echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">';
     echo '<title>' . esc_html($title) . ' - ' . esc_html($site_name) . '</title>';
-    echo '</head><body style="margin:0;background:#f6f6f6;color:#111;font-family:Arial,sans-serif;">';
+    echo '</head><body style="margin:0;background:#f6f6f6;color:#111;font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;">';
     echo '<main style="max-width:640px;margin:60px auto;padding:28px;background:#fff;border:1px solid #e5e5e5;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.06);">';
-    echo '<h1 style="margin:0 0 14px;font-size:28px;line-height:1.2;">' . esc_html($title) . '</h1>';
+    echo '<h1 style="margin:0 0 14px;font-size:28px;line-height:1.2;font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;">' . esc_html($title) . '</h1>';
     echo '<p style="font-size:16px;line-height:1.6;margin:0;">' . wp_kses_post($message) . '</p>';
     echo wp_kses_post($extra_html);
     echo '</main></body></html>';
@@ -11222,7 +11222,7 @@ cliniccontact@example.org",
     $address_html = trim((string)$mailing_address) !== '' ? '<div style="margin-top:10px;">' . nl2br(esc_html((string)$mailing_address)) . '</div>' : '';
     $unsubscribe_html = $unsubscribe_url ? '<div style="margin-top:22px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;"><div>You are receiving this marketing email from ' . $site . '.</div>' . $address_html . '<div style="margin-top:10px;"><a href="' . esc_url($unsubscribe_url) . '" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div></div>' : '';
 
-    return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;"><div style="max-width:680px;margin:0 auto;padding:24px;"><div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;">' . $logo_html . '<div style="font-size:15px;line-height:1.7;color:#222;text-align:left;">' . $body_html . '</div>' . $unsubscribe_html . '</div></div></body></html>';
+    return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;"><div style="max-width:680px;margin:0 auto;padding:24px;"><div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;">' . $logo_html . '<div style="font-size:15px;line-height:1.7;color:#222;text-align:left;">' . $body_html . '</div>' . $unsubscribe_html . '</div></div></body></html>';
   }
 
   private function mrm_marketing_upload_attachments_from_request() {
@@ -11996,7 +11996,7 @@ public function render_marketing_email_lists_page() {
 
       var footerHtml = "<div style=\"margin-top:22px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;\"><div>You are receiving this marketing email from " + esc(siteName) + ".</div>" + addressHtml + "<div style=\"margin-top:10px;\"><a href=\"#\" style=\"color:#555;text-decoration:underline;\">Remove me from marketing emails</a></div></div>";
 
-      var doc = "<!doctype html><html><body style=\"margin:0;padding:0;background:#f6f6f6;\"><div style=\"max-width:680px;margin:0 auto;padding:24px;\"><div style=\"background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:Arial,Helvetica,sans-serif;color:#111;\">" + logoHtml + "<div style=\"font-size:15px;line-height:1.7;color:#222;text-align:left;\">" + (body || "<p style=\"color:#777;\">HTML email body preview will appear here.</p>") + "</div>" + footerHtml + "</div></div></body></html>";
+      var doc = "<!doctype html><html><body style=\"margin:0;padding:0;background:#f6f6f6;\"><div style=\"max-width:680px;margin:0 auto;padding:24px;\"><div style=\"background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;\">" + logoHtml + "<div style=\"font-size:15px;line-height:1.7;color:#222;text-align:left;\">" + (body || "<p style=\"color:#777;\">HTML email body preview will appear here.</p>") + "</div>" + footerHtml + "</div></div></body></html>";
 
       if (empty) empty.style.display = "none";
       if (active) active.style.display = "block";

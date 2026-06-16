@@ -18,13 +18,16 @@
   --radius-md: 12px;
   --radius-sm: 8px;
   --color-gold: #c9a227;
+
+  --mrm-font-heading: "Academico", Georgia, "Times New Roman", serif;
+  --mrm-font-body: "Source Sans 3", Arial, Helvetica, sans-serif;
 }
 
 html, body { height: 100%; }
 
 body {
   margin: 0;
-  font-family: Inter, system-ui, sans-serif;
+  font-family: var(--mrm-font-body);
   background: var(--color-bg);
   color: var(--color-text-main);
 }
@@ -43,6 +46,7 @@ body.mrm-booking-modal-open {
 }
 
 h1 {
+  font-family: var(--mrm-font-heading);
   font-size: 32px;
   margin: 0 0 20px 0;
   text-align: center;
@@ -2104,7 +2108,7 @@ h1 {
   margin: 0 !important;
   padding: 0 !important;
   color: var(--mrm-warm-popup-text, #2f2118) !important;
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: var(--mrm-font-heading);
   font-size: clamp(32px, 4.8vw, 54px) !important;
   font-weight: 900;
   line-height: 0.96;
@@ -2148,6 +2152,48 @@ h1 {
     padding: 16px;
     margin-bottom: 18px;
   }
+}
+
+/* =========================================================
+   MRM Unified Typography Patch
+   Heading: Academico
+   Body/UI: Source Sans 3
+   ========================================================= */
+
+.wrapper,
+.filters,
+.filters *,
+.modal,
+.modal *,
+.mrm-pref-modal,
+.mrm-pref-modal *,
+.mrm-payment-loading-modal,
+.mrm-payment-loading-modal *,
+.mrm-success-modal,
+.mrm-success-modal *,
+.mrm-pricing-summary,
+.mrm-pricing-summary *,
+.instructor,
+.instructor *,
+.calendar,
+.calendar *,
+.day-slots,
+.day-slots *,
+.mrm-toast,
+.mrm-toast * {
+  font-family: var(--mrm-font-body) !important;
+}
+
+h1,
+.mrm-scheduler-title-bubble h1,
+.modal-title,
+.modal-section-title,
+.mrm-pref-title,
+.mrm-payment-loading-title,
+.mrm-success-title,
+.instructor-name,
+.instructor-title-line {
+  font-family: var(--mrm-font-heading) !important;
 }
 
 </style>

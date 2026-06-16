@@ -17,6 +17,8 @@
     --mrm-success:#1f6f3f;
     --mrm-shadow:0 18px 45px rgba(0,0,0,.10);
     --mrm-soft-shadow:0 10px 28px rgba(0,0,0,.08);
+    --mrm-font-heading:"Academico", Georgia, "Times New Roman", serif;
+    --mrm-font-body:"Source Sans 3", Arial, Helvetica, sans-serif;
   }
 
   * {
@@ -27,7 +29,7 @@
     margin:0;
     color:var(--mrm-text);
     background:var(--mrm-bg);
-    font-family:Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family:var(--mrm-font-body);
   }
 
   .mc-wrap {
@@ -63,7 +65,7 @@
 
 .mc-intro h1 {
   margin:0 0 14px;
-  font-family:Georgia,"Times New Roman",serif;
+  font-family:var(--mrm-font-heading);
   font-size:clamp(38px,6vw,66px);
   line-height:.96;
   letter-spacing:-.04em;
@@ -117,7 +119,7 @@
 .event-card h3 {
   margin:0 0 10px;
   color:var(--mrm-accent);
-  font-family:Georgia,"Times New Roman",serif;
+  font-family:var(--mrm-font-heading);
   font-size:25px;
   line-height:1.12;
 }
@@ -136,7 +138,7 @@
   min-height: 44px;
   padding: 12px 18px;
   border-radius: 999px;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--mrm-font-body);
   font-size: 15px;
   line-height: 1.1;
   font-weight: 800;
@@ -223,7 +225,7 @@
 .mrm-modal-content h3 {
   margin:0 0 10px;
   color:#2f2118;
-  font-family:Georgia,"Times New Roman",serif;
+  font-family:var(--mrm-font-heading);
   font-size:34px;
   line-height:1.05;
 }
@@ -375,7 +377,7 @@ input[type="checkbox"] {
 
 .mrm-masterclass-section-head h2 {
   margin: 0 0 14px;
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: var(--mrm-font-heading);
   font-size: clamp(2rem, 4vw, 3.25rem);
   line-height: 1;
   color: #20170f;
@@ -476,7 +478,7 @@ input[type="checkbox"] {
 
 .mrm-masterclass-event-card h3 {
   margin: 0;
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: var(--mrm-font-heading);
   font-size: 1.55rem;
   line-height: 1.1;
   color: #000000 !important;
@@ -547,7 +549,7 @@ input[type="checkbox"] {
   color: #9a6a2f;
   font-weight: 900;
   font-size: 17px;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--mrm-font-body);
 }
 
 .mrm-masterclass-event-presenter-text {
@@ -739,7 +741,7 @@ input[type="checkbox"] {
   min-height: 46px;
   background: #20170f;
   color: #fff;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--mrm-font-body);
   font-size: 15px;
   line-height: 1.1;
   font-weight: 800;
@@ -805,7 +807,7 @@ input[type="checkbox"] {
   border: 1px solid #20170f;
   background: #ffffff;
   color: #20170f;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--mrm-font-body);
   font-size: 11px;
   line-height: 1;
   font-weight: 800;
@@ -915,7 +917,7 @@ input[type="checkbox"] {
 .mrm-masterclass-calendar-heading h3 {
   margin: 0;
   color: #fff;
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: var(--mrm-font-heading);
   font-size: clamp(1.55rem, 3vw, 2.25rem);
   line-height: 1.05;
   letter-spacing: -0.02em;
@@ -1240,7 +1242,7 @@ body.mrm-modal-open {
   border-radius: 24px;
   background: rgba(255, 255, 255, 0.78);
   color: #20170f;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--mrm-font-body);
   font-size: clamp(1rem, 2vw, 1.35rem);
   font-weight: 900;
   line-height: 1.25;
@@ -1392,6 +1394,34 @@ body.mrm-modal-open {
     white-space: normal;
   }
 }
+/* =========================================================
+   MRM Unified Typography Patch
+   Heading: Academico
+   Body/UI: Source Sans 3
+   ========================================================= */
+
+.mc-wrap,
+.mc-wrap *,
+.mrm-masterclass-page,
+.mrm-masterclass-page *,
+.mrm-modal-content,
+.mrm-modal-content *,
+.mrm-masterclass-calendar,
+.mrm-masterclass-calendar *,
+.event-card,
+.event-card * {
+  font-family: var(--mrm-font-body) !important;
+}
+
+.mc-intro h1,
+.event-card h3,
+.mrm-modal-content h2,
+.mrm-modal-content h3,
+.mrm-masterclass-section-head h2,
+.mrm-masterclass-calendar-heading h3 {
+  font-family: var(--mrm-font-heading) !important;
+}
+
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
@@ -2289,7 +2319,7 @@ body.mrm-modal-open {
       html += '<div style="width:min(320px,82vw);aspect-ratio:1/1;border-radius:28px;background:#f7efe3;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:72px;font-weight:900;color:#9a6a2f;box-shadow:0 18px 46px rgba(32,23,15,.14);border:1px solid #dccab0;">' + escapeHtml(initial) + '</div>';
     }
 
-    html += '<h2 style="font-family:Georgia,serif;font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;color:#20170f;">' + escapeHtml(safePresenter.name || 'Masterclass Presenter') + '</h2>';
+    html += '<h2 style="font-family:var(--mrm-font-heading);font-size:clamp(2.1rem,5vw,4rem);line-height:1.05;margin:0 0 12px;text-align:center;color:#20170f;">' + escapeHtml(safePresenter.name || 'Masterclass Presenter') + '</h2>';
 
     if (title) {
       html += '<p style="text-align:center;font-weight:900;margin:10px auto 0;color:#4b3c2d;font-size:1.05rem;">' + escapeHtml(title) + '</p>';
@@ -2302,7 +2332,7 @@ body.mrm-modal-open {
     }
 
     html += '<section style="margin-top:40px;">';
-    html += '<h3 style="font-family:Georgia,serif;font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;color:#20170f;">Upcoming Masterclass Sessions</h3>';
+    html += '<h3 style="font-family:var(--mrm-font-heading);font-size:clamp(1.75rem,4vw,2.75rem);line-height:1.1;text-align:center;margin:0 0 24px;color:#20170f;">Upcoming Masterclass Sessions</h3>';
 
     if (safeSessions.length) {
       html += '<div class="mrm-masterclass-events-grid mrm-masterclass-stacked-list">';
@@ -2389,7 +2419,7 @@ body.mrm-modal-open {
     html += '<section style="margin-top:0;background:#fff;border:1px solid #eadcc8;border-radius:28px;padding:30px;box-shadow:0 14px 34px rgba(32,23,15,.08);">';
     html += '<div style="text-align:center;margin:0 auto 22px;">';
     html += '<p style="margin:0 0 8px;text-transform:uppercase;letter-spacing:.12em;font-weight:900;color:#9a6a2f;">Masterclass Session</p>';
-    html += '<h2 style="font-family:Georgia,serif;font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;color:#20170f;text-align:center;">' + escapeHtml(safeEvent.title || 'Masterclass Session') + '</h2>';
+    html += '<h2 style="font-family:var(--mrm-font-heading);font-size:clamp(1.8rem,4vw,3rem);line-height:1.1;margin:0 0 14px;color:#20170f;text-align:center;">' + escapeHtml(safeEvent.title || 'Masterclass Session') + '</h2>';
     html += '</div>';
 
     if (safeEvent.long_description_html || safeEvent.description_html) {
