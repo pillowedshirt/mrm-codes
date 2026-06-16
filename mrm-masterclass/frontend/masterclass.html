@@ -1337,11 +1337,22 @@ body.mrm-modal-open {
 .mrm-payment-actions { display:flex; gap:10px; margin-top:18px; }
 .mrm-payment-actions button { flex:1; }
 
+
+
+/* =========================================================
+   MRM Warm Masterclass Intro Patch
+   Makes the top Masterclass intro section match the popup color.
+   ========================================================= */
+
+.mc-intro { background: #fffaf3 !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; box-shadow: 0 24px 70px rgba(27, 20, 15, 0.16) !important; }
+.mc-intro h1 { color: #2f2118 !important; }
+.mc-intro p { color: #62483a !important; }
+.mc-eyebrow { display: none !important; }
+.mc-instructions { background: #fffdf9 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; color: #62483a !important; }
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
     <section class="mc-intro" id="mrm-masterclass-intro-section">
-      <p class="mc-eyebrow">Low Brass Lessons</p>
       <h1>Masterclasses</h1>
       <p>Select an available masterclass below. After choosing a session, you will complete registration and payment in a secure popup.</p>
     </section>

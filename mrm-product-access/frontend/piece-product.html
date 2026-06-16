@@ -957,6 +957,49 @@ body.mrm-piece-no-scroll{
 .mrm-payment-security-copy strong { display: block; font-size: 0.95rem; font-weight: 800; color: #2f2118; }
 .mrm-payment-security-copy small { display: block; margin-top: 2px; font-size: 0.84rem; line-height: 1.45; color: #62483a; }
 
+
+
+/* =========================================================
+   MRM Warm Masterclass Popup Patch for Sheet Music Product Page
+   Applies the Masterclass popup palette to payment, OTP, PDF, and success popups.
+   ========================================================= */
+
+.mrm-piece-product-page {
+  --mrm-warm-popup-bg: #fffaf3; --mrm-warm-popup-bg-light: #fffdf9; --mrm-warm-popup-bg-soft: #f7efe3; --mrm-warm-popup-text: #2f2118; --mrm-warm-popup-muted: #62483a; --mrm-warm-popup-deep: #20170f; --mrm-warm-popup-accent: #9a6a2f; --mrm-warm-popup-border: rgba(124, 74, 45, 0.22); --mrm-warm-popup-shadow: 0 24px 70px rgba(27, 20, 15, 0.22);
+}
+.mrm-piece-product-page .modal,
+.mrm-piece-product-page .mrm-success-modal,
+.mrm-piece-product-page .mrm-pdfModal,
+.mrm-piece-product-page .mrm-otpOverlay .modal { background: var(--mrm-warm-popup-bg) !important; color: var(--mrm-warm-popup-text) !important; border: 1px solid var(--mrm-warm-popup-border) !important; box-shadow: var(--mrm-warm-popup-shadow) !important; }
+.mrm-piece-product-page .modal-header { background: linear-gradient(135deg, var(--mrm-warm-popup-bg) 0%, var(--mrm-warm-popup-bg-soft) 100%) !important; border-bottom: 1px solid rgba(124, 74, 45, 0.20) !important; }
+.mrm-piece-product-page .modal-header h2,
+.mrm-piece-product-page .modal h2,
+.mrm-piece-product-page .mrm-success-title,
+.mrm-piece-product-page .mrm-otpOverlay .modal h2 { color: var(--mrm-warm-popup-text) !important; }
+.mrm-piece-product-page .modal-body,
+.mrm-piece-product-page .mrm-success-text,
+.mrm-piece-product-page .mrm-otpOverlay label,
+.mrm-piece-product-page .mrm-otpOverlay .message { color: var(--mrm-warm-popup-muted) !important; }
+.mrm-piece-product-page .modal input,
+.mrm-piece-product-page .modal select,
+.mrm-piece-product-page .mrm-otpOverlay input[type="email"],
+.mrm-piece-product-page .mrm-otpOverlay input[type="text"] { background: var(--mrm-warm-popup-bg-light) !important; color: var(--mrm-warm-popup-text) !important; border: 1px solid var(--mrm-warm-popup-border) !important; }
+.mrm-piece-product-page .mrm-xbtn { background: rgba(124, 74, 45, 0.10) !important; color: #3b2618 !important; border: 0 !important; border-radius: 999px !important; }
+.mrm-piece-product-page .mrm-xbtn:hover,
+.mrm-piece-product-page .mrm-xbtn:focus { background: rgba(124, 74, 45, 0.18) !important; outline: none !important; }
+.mrm-piece-product-page .mrm-success-icon { background: rgba(124, 74, 45, 0.12) !important; color: var(--mrm-warm-popup-accent) !important; }
+.mrm-piece-product-page .mrm-promo-box,
+.mrm-piece-product-page .mrm-payment-security-badge { background: var(--mrm-warm-popup-bg-light) !important; border: 1px solid var(--mrm-warm-popup-border) !important; color: var(--mrm-warm-popup-text) !important; }
+.mrm-piece-product-page .mrm-payment-security-copy strong { color: var(--mrm-warm-popup-text) !important; }
+.mrm-piece-product-page .mrm-payment-security-copy small { color: var(--mrm-warm-popup-muted) !important; }
+.mrm-piece-product-page .mrm-otpOverlay .modal > div:last-child { background: var(--mrm-warm-popup-bg-soft) !important; border-top: 1px solid rgba(124, 74, 45, 0.20) !important; }
+.mrm-piece-product-page .mrm-otpOverlay button.primary,
+.mrm-piece-product-page .mrm-otpOverlay .mrm-otp-send-btn,
+.mrm-piece-product-page .mrm-otpOverlay .mrm-otp-verify-btn,
+.mrm-piece-product-page .mrm-otpOverlay .mrm-sendCodeBtn,
+.mrm-piece-product-page .mrm-otpOverlay .mrm-verifyBtn { background: var(--mrm-warm-popup-deep) !important; color: #ffffff !important; }
+.mrm-piece-product-page .mrm-otpOverlay button.secondary,
+.mrm-piece-product-page .mrm-otpOverlay .mrm-closeBtn { background: #ffffff !important; color: var(--mrm-warm-popup-text) !important; border: 1px solid var(--mrm-warm-popup-deep) !important; }
 </style>
 
 <main class="mrm-piece-product-page page">
