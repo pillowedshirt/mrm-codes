@@ -1843,6 +1843,309 @@ h1 {
 .mrm-price-row-discount span,.mrm-price-row-discount strong { color:#1f6f3f; }
 .mrm-price-row-total { margin-top:8px; padding-top:10px; border-top:1px solid rgba(0,0,0,.12); }
 .mrm-price-row-total span,.mrm-price-row-total strong { font-weight:900; color:#2f2118; }
+
+
+/* =========================================================
+   MRM Warm Masterclass Theme Patch
+   Applies the Masterclass popup palette to scheduler popups,
+   pricing, dropdowns, instructor cards, and calendars.
+   ========================================================= */
+
+:root {
+  --mrm-warm-popup-bg: #fffaf3;
+  --mrm-warm-popup-bg-light: #fffdf9;
+  --mrm-warm-popup-bg-soft: #f7efe3;
+  --mrm-warm-popup-text: #2f2118;
+  --mrm-warm-popup-muted: #62483a;
+  --mrm-warm-popup-deep: #20170f;
+  --mrm-warm-popup-accent: #9a6a2f;
+  --mrm-warm-popup-accent-hover: #6e461c;
+  --mrm-warm-popup-border: rgba(124, 74, 45, 0.22);
+  --mrm-warm-popup-shadow: 0 24px 70px rgba(27, 20, 15, 0.20);
+}
+
+/* Main dropdown menus */
+.filters select,
+.filters input,
+.mrm-pref-grid select,
+.modal-form select,
+.modal-form input,
+.state-change-select,
+.mrm-state-dropdown-panel .state-dropdown-select,
+#state-select {
+  background: var(--mrm-warm-popup-bg) !important;
+  color: var(--mrm-warm-popup-text) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+  box-shadow: 0 8px 20px rgba(32, 23, 15, 0.06);
+}
+
+.filters select option,
+.mrm-pref-grid select option,
+.modal-form select option,
+.state-change-select option,
+.mrm-state-dropdown-panel .state-dropdown-select option,
+#state-select option {
+  background: var(--mrm-warm-popup-bg) !important;
+  color: var(--mrm-warm-popup-text) !important;
+}
+
+.filters label,
+.mrm-pref-grid label,
+.modal-form label {
+  color: var(--mrm-warm-popup-muted) !important;
+  font-weight: 700;
+}
+
+/* Lesson pricing summary */
+.mrm-pricing-summary {
+  background: var(--mrm-warm-popup-bg) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+  color: var(--mrm-warm-popup-text) !important;
+  box-shadow: 0 18px 46px rgba(32, 23, 15, 0.11) !important;
+}
+
+.mrm-pricing-summary-title {
+  color: var(--mrm-warm-popup-accent) !important;
+  font-weight: 900 !important;
+}
+
+.mrm-pricing-summary-main,
+.mrm-pricing-summary-sub strong {
+  color: var(--mrm-warm-popup-text) !important;
+}
+
+.mrm-pricing-summary-sub,
+.mrm-pricing-summary-inline-note {
+  color: var(--mrm-warm-popup-muted) !important;
+}
+
+/* Scheduler popup panels */
+.modal,
+.mrm-pref-modal,
+.mrm-payment-loading-modal,
+.mrm-success-modal {
+  background: var(--mrm-warm-popup-bg) !important;
+  color: var(--mrm-warm-popup-text) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+  box-shadow: var(--mrm-warm-popup-shadow) !important;
+}
+
+.modal-header,
+.mrm-pref-head {
+  background: linear-gradient(135deg, var(--mrm-warm-popup-bg) 0%, var(--mrm-warm-popup-bg-soft) 100%) !important;
+  border-bottom: 1px solid rgba(124, 74, 45, 0.20) !important;
+}
+
+.modal-title,
+.mrm-pref-title,
+.mrm-payment-loading-title,
+.mrm-success-title,
+.modal-section-title {
+  color: var(--mrm-warm-popup-text) !important;
+}
+
+.modal-body,
+.modal-message,
+.mrm-payment-loading-text,
+.mrm-success-text,
+.mrm-success-note,
+.mrm-pref-note {
+  color: var(--mrm-warm-popup-muted) !important;
+}
+
+.modal-close,
+.mrm-pref-close {
+  background: rgba(124, 74, 45, 0.10) !important;
+  color: #3b2618 !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+}
+
+.modal-close:hover,
+.modal-close:focus,
+.mrm-pref-close:hover,
+.mrm-pref-close:focus {
+  background: rgba(124, 74, 45, 0.18) !important;
+  outline: none !important;
+}
+
+/* Buttons inside popups */
+.modal-submit,
+.mrm-pref-see,
+.confirm-selection,
+.day-slots-booknow {
+  background: var(--mrm-warm-popup-deep) !important;
+  color: #ffffff !important;
+  border-color: var(--mrm-warm-popup-deep) !important;
+}
+
+.modal-submit:hover,
+.mrm-pref-see:hover,
+.confirm-selection:hover,
+.day-slots-booknow:hover {
+  background: #3a2a19 !important;
+  color: #ffffff !important;
+}
+
+/* Secondary inline modal buttons that currently use inline styles */
+#mrm-payment-back,
+#mrm-confirm-total-cancel {
+  background: #ffffff !important;
+  color: var(--mrm-warm-popup-text) !important;
+  border: 1px solid var(--mrm-warm-popup-deep) !important;
+}
+
+/* Quick popup / courtesy toast */
+.mrm-toast {
+  background: var(--mrm-warm-popup-bg) !important;
+  color: var(--mrm-warm-popup-text) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+  box-shadow: var(--mrm-warm-popup-shadow) !important;
+  z-index: 100004 !important;
+}
+
+.mrm-toast strong {
+  color: var(--mrm-warm-popup-text) !important;
+}
+
+/* Mobile day popup sheet */
+.day-slots.is-mobile-modal .day-slots-sheet {
+  background: var(--mrm-warm-popup-bg) !important;
+  color: var(--mrm-warm-popup-text) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+}
+
+.day-slots.is-mobile-modal .day-slots-close {
+  background: rgba(124, 74, 45, 0.10) !important;
+  color: #3b2618 !important;
+  border: 0 !important;
+}
+
+.day-slots-error {
+  background: var(--mrm-warm-popup-bg-soft) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+  color: var(--mrm-warm-popup-muted) !important;
+}
+
+/* Instructor cards after state selection */
+.instructor {
+  background: var(--mrm-warm-popup-bg) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+  color: var(--mrm-warm-popup-text) !important;
+  box-shadow: 0 18px 46px rgba(32, 23, 15, 0.11) !important;
+}
+
+.instructor-header {
+  background: linear-gradient(135deg, var(--mrm-warm-popup-bg) 0%, var(--mrm-warm-popup-bg-soft) 100%) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+  color: var(--mrm-warm-popup-text) !important;
+  box-shadow: 0 10px 28px rgba(32, 23, 15, 0.08) !important;
+}
+
+.instructor-header:hover {
+  background: var(--mrm-warm-popup-bg-soft) !important;
+  border-color: rgba(124, 74, 45, 0.35) !important;
+}
+
+.instructor-title-line { color: var(--mrm-warm-popup-text) !important; }
+.instructor-instruments,
+.instructor-shortdesc,
+.instructor-format-label { color: var(--mrm-warm-popup-muted) !important; }
+.instructor-toggle { color: var(--mrm-warm-popup-text) !important; }
+
+/* State selector surfaces */
+.state-map-wrap,
+.state-selector-wrap,
+.state-filter-bar,
+.mrm-state-dropdown-panel {
+  background: var(--mrm-warm-popup-bg) !important;
+  border: 1px solid var(--mrm-warm-popup-border) !important;
+  color: var(--mrm-warm-popup-text) !important;
+  box-shadow: 0 18px 46px rgba(32, 23, 15, 0.11) !important;
+}
+
+.state-map-title,
+.state-selector-title,
+.state-filter-pill { color: var(--mrm-warm-popup-text) !important; }
+.state-map-subtitle,
+.state-selector-sub { color: var(--mrm-warm-popup-muted) !important; }
+.state-change { color: var(--mrm-warm-popup-text) !important; }
+.state-change:hover { background: rgba(124, 74, 45, 0.10) !important; }
+
+/* State map hover/selected color */
+.mrm-us-map-svg .mrm-state-shape.is-available:hover,
+.us-map-state:hover,
+.us-map-state.is-selected {
+  fill: var(--mrm-warm-popup-accent) !important;
+  stroke: var(--mrm-warm-popup-accent) !important;
+}
+
+/* Instructor calendars: Masterclass-inspired color treatment */
+.calendar:not(.is-collapsed) {
+  background: var(--mrm-warm-popup-bg-light) !important;
+  border: 1px solid #dccab0 !important;
+  border-radius: 28px !important;
+  box-shadow: 0 18px 46px rgba(32, 23, 15, 0.11) !important;
+  overflow: hidden !important;
+  margin-top: 14px;
+  padding: 0 !important;
+}
+
+.calendar-body { background: var(--mrm-warm-popup-bg-light) !important; }
+.calendar-header {
+  display: grid !important;
+  grid-template-columns: 56px minmax(0, 1fr) 56px;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 20px !important;
+  background: linear-gradient(135deg, #20170f 0%, #3a2a19 100%) !important;
+  color: #ffffff !important;
+  border-bottom: 0 !important;
+}
+.calendar-header > div {
+  color: #ffffff !important;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.35rem, 2.6vw, 2rem) !important;
+  font-weight: 900 !important;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+.calendar-header button {
+  width: 46px !important;
+  height: 46px !important;
+  border: 1px solid rgba(255, 255, 255, 0.32) !important;
+  border-radius: 999px !important;
+  background: rgba(255, 255, 255, 0.10) !important;
+  color: #ffffff !important;
+  font-size: 1.9rem !important;
+}
+.calendar-header button:hover,
+.calendar-header button:focus { background: rgba(255, 255, 255, 0.20) !important; }
+.calendar-grid { background: var(--mrm-warm-popup-bg-light) !important; }
+.calendar-day {
+  background: var(--mrm-warm-popup-bg-light) !important;
+  border-right: 1px solid #eee2d1 !important;
+  border-bottom: 1px solid #eee2d1 !important;
+  border-radius: 0 !important;
+}
+.calendar-day:nth-child(7n) { border-right: 0 !important; }
+.calendar-day.inactive { background: #faf5ec !important; color: #b8a992 !important; }
+.calendar-day-number { border: 0 !important; background: transparent !important; color: #493a2b !important; font-weight: 900 !important; }
+.calendar-day:not(.has-slots):not(.inactive) .calendar-day-number { border: 0 !important; color: #6d5c45 !important; }
+.calendar-day.has-slots .calendar-day-number { background: var(--mrm-warm-popup-accent) !important; border: 0 !important; border-radius: 999px !important; color: #ffffff !important; }
+.calendar-day.has-selected .calendar-day-number,
+.calendar-day.has-selected.has-slots .calendar-day-number { background: var(--mrm-warm-popup-deep) !important; color: #ffffff !important; }
+.calendar-day.past .calendar-day-number,
+.calendar-day.past.has-selected .calendar-day-number { background: transparent !important; color: rgba(73, 58, 43, 0.42) !important; }
+.day-slots { border-top: 1px solid #eadcc8 !important; }
+.day-slots-summary { color: var(--mrm-warm-popup-muted) !important; }
+.slot { background: var(--mrm-warm-popup-bg) !important; border: 1px solid #dccab0 !important; color: var(--mrm-warm-popup-text) !important; box-shadow: 0 10px 18px rgba(32, 23, 15, 0.06) !important; }
+.slot:hover { border-color: rgba(154, 106, 47, 0.45) !important; box-shadow: 0 12px 22px rgba(32, 23, 15, 0.10) !important; }
+.slot.selected,
+.slot.selected-range.selected { background: var(--mrm-warm-popup-accent) !important; color: #ffffff !important; border-color: var(--mrm-warm-popup-accent) !important; }
+.slot.selected-range { background: var(--mrm-warm-popup-bg-soft) !important; border-color: #dccab0 !important; color: var(--mrm-warm-popup-text) !important; }
+.slot-booked-block,
+.slot-booked-block.is-travel { background: #faf5ec !important; border-color: #eadcc8 !important; color: rgba(73, 58, 43, 0.68) !important; }
 </style>
 </head>
 
@@ -4925,7 +5228,7 @@ function renderCalendar(instr, state, container){
 
             const hasSelection = selectedSlots.some(s => String(s.instructor_id) === String(instr.id));
             if(!hasSelection){
-              alert('Please select a time first.');
+              mrmShowQuickPopup('<strong>Please select a time first.</strong><br>Please choose an available lesson time before booking.');
               return;
             }
 
@@ -5545,6 +5848,38 @@ function getSelectedInstrumentKey(){
   return raw;
 }
 
+function mrmHasSelectedInstrument(){
+  return !!getSelectedInstrumentKey();
+}
+
+function mrmShowQuickPopup(messageHtml){
+  const existing = document.querySelector('.mrm-toast');
+  if(existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'mrm-toast';
+  toast.innerHTML = messageHtml;
+
+  (document.querySelector('.wrapper') || document.body).append(toast);
+
+  requestAnimationFrame(() => toast.classList.add('is-visible'));
+  setTimeout(() => toast.classList.remove('is-visible'), 2200);
+  setTimeout(() => toast.remove(), 3000);
+}
+
+function mrmPromptForInstrumentFirst(){
+  mrmShowQuickPopup('<strong>Please select an instrument first.</strong><br>Please choose your instrument before selecting a state.');
+
+  const instrumentSelect = document.getElementById('instrument-input');
+  if(instrumentSelect){
+    try {
+      instrumentSelect.focus({ preventScroll: true });
+    } catch(e) {
+      instrumentSelect.focus();
+    }
+  }
+}
+
 function instructorSupportsSelectedInstrument(instr, instrumentKey){
   if(!instrumentKey) return true;
   if(!instr || typeof instr !== 'object') return false;
@@ -6036,6 +6371,11 @@ function loadInstructors(){
       }
 
       function selectState(code){
+        if(!mrmHasSelectedInstrument()){
+          mrmPromptForInstrumentFirst();
+          return;
+        }
+
         selectedState = code;
         localStorage.setItem(STORAGE_KEY, selectedState);
         renderInstructorListForState(selectedState);
@@ -6106,8 +6446,13 @@ function loadInstructors(){
 
         // If you have a saved state and it's still available, go straight to it
         if(selectedState && availableStates.has(selectedState)){
-          renderInstructorListForState(selectedState);
-          return;
+          if(mrmHasSelectedInstrument()){
+            renderInstructorListForState(selectedState);
+            return;
+          }
+
+          selectedState = null;
+          try { localStorage.removeItem(STORAGE_KEY); } catch(e) {}
         }
 
         box.appendChild(h);
@@ -6188,6 +6533,13 @@ function loadInstructors(){
           sel.addEventListener('change', ()=>{
             const next = (sel.value || '').toString().trim().toUpperCase();
             if(!next) return;
+
+            if(!mrmHasSelectedInstrument()){
+              mrmPromptForInstrumentFirst();
+              sel.value = stateCode;
+              return;
+            }
+
             selectedState = next;
             localStorage.setItem(STORAGE_KEY, selectedState);
             renderInstructorListForState(selectedState);
@@ -6386,7 +6738,7 @@ function loadInstructors(){
               // Only open booking if user has selected at least one slot for this instructor
               const hasSelection = selectedSlots.some(s => String(s.instructor_id) === String(instr.id));
               if(!hasSelection){
-                alert('Please select a time first.');
+                mrmShowQuickPopup('<strong>Please select a time first.</strong><br>Please choose an available lesson time before booking.');
                 return;
               }
 

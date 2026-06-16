@@ -4580,7 +4580,32 @@ function offerRowTemplate(pieceIndex){
             flex-direction: column;
           }
         }
-        </style>
+
+
+/* =========================================================
+   MRM Warm Masterclass Popup Patch for Product Access Shortcode
+   Applies the Masterclass popup palette to shortcode-generated OTP/PDF popups.
+   ========================================================= */
+
+.mrm-otpOverlay .modal,
+.mrm-pdfModal { background: #fffaf3 !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; box-shadow: 0 24px 70px rgba(27, 20, 15, 0.22) !important; }
+.mrm-otpOverlay .modal,
+.mrm-otpOverlay .modal * { color: #2f2118 !important; }
+.mrm-otpOverlay .modal h2 { background: linear-gradient(135deg, #fffaf3 0%, #f7efe3 100%) !important; color: #2f2118 !important; border-bottom: 1px solid rgba(124, 74, 45, 0.20) !important; }
+.mrm-otpOverlay .modal h2::before { background-color: #9a6a2f !important; }
+.mrm-otpOverlay label,
+.mrm-otpOverlay .message { color: #62483a !important; }
+.mrm-otpOverlay input[type="email"],
+.mrm-otpOverlay input[type="text"] { background: #fffdf9 !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; }
+.mrm-otpOverlay .modal > div:last-child { background: #f7efe3 !important; border-top: 1px solid rgba(124, 74, 45, 0.20) !important; }
+.mrm-otpOverlay button.primary,
+.mrm-otpOverlay .mrm-otp-send-btn,
+.mrm-otpOverlay .mrm-otp-verify-btn,
+.mrm-otpOverlay .mrm-sendCodeBtn,
+.mrm-otpOverlay .mrm-verifyBtn { background: #20170f !important; color: #ffffff !important; }
+.mrm-otpOverlay button.secondary,
+.mrm-otpOverlay .mrm-closeBtn { background: #ffffff !important; color: #2f2118 !important; border: 1px solid #20170f !important; }
+</style>
 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
         <script>
