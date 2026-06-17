@@ -6993,17 +6993,9 @@ public function register_admin_menu() {
 			'Presenter Payouts',
 			$capability,
 			'mrm-masterclass-payouts',
-			array( $this, 'render_payouts_page' )
+			array( $this, 'render_payouts_redirect_page' )
 		);
 
-		add_submenu_page(
-			self::ADMIN_MENU_SLUG,
-			'Tax Profiles',
-			'Tax Profiles',
-			$capability,
-			'mrm-masterclass-tax-profiles',
-			array( $this, 'render_tax_profiles_page' )
-		);
 
 		$this->mrm_mc_remove_duplicate_top_level_menu_items();
 	}
@@ -7662,6 +7654,16 @@ public function render_registrations_payments_page() {
 	echo '</div>';
 }
 
+
+
+public function render_payouts_redirect_page() {
+	$this->must_admin();
+	echo '<div class="wrap mrm-masterclass-admin">';
+	echo '<h1>Presenter Payouts</h1>';
+	echo '<p>Presenter payouts have moved to <strong>Products → Presenter Payouts</strong>.</p>';
+	echo '<p><a class="button button-primary" href="' . esc_url(admin_url('admin.php?page=mrm-pay-hub-presenter-payouts')) . '">Open Presenter Payouts</a></p>';
+	echo '</div>';
+}
 
 public function render_payouts_page() {
 	$this->must_admin();

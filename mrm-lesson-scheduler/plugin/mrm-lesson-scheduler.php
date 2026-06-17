@@ -2613,6 +2613,7 @@ protected function mrm_get_google_service_account_json() {
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     payee_type VARCHAR(30) NOT NULL DEFAULT 'contractor',
     related_instructor_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    related_presenter_id BIGINT UNSIGNED NULL,
     related_user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
     display_name VARCHAR(190) NOT NULL DEFAULT '',
     legal_name VARCHAR(190) NOT NULL DEFAULT '',
@@ -2628,6 +2629,7 @@ protected function mrm_get_google_service_account_json() {
     PRIMARY KEY (id),
     KEY payee_type (payee_type),
     KEY related_instructor_id (related_instructor_id),
+    KEY related_presenter_id_idx (related_presenter_id),
     KEY is_employee (is_employee)
 ) {$charset_collate};";
         dbDelta( $sql_payee );
@@ -9707,7 +9709,7 @@ protected function mrm_get_calculations_presenter_summary( $tax_year, $tax_quart
 
     $ledger     = $wpdb->prefix . 'mrm_masterclass_payment_ledger';
     $presenters = $wpdb->prefix . 'mrm_masterclass_presenters';
-    $tax        = $wpdb->prefix . 'mrm_masterclass_presenter_tax_profiles';
+    $tax        = $wpdb->prefix . 'mrm_tax_payee_profiles';
 
     if ( ! $this->mrm_table_exists( $ledger ) || ! $this->mrm_table_exists( $presenters ) ) {
         return array();
@@ -9723,7 +9725,7 @@ protected function mrm_get_calculations_presenter_summary( $tax_year, $tax_quart
     ";
 
     if ( $this->mrm_table_exists( $tax ) ) {
-        $tax_join = "LEFT JOIN {$tax} t ON t.presenter_id = p.id";
+        $tax_join = "LEFT JOIN {$tax} t ON t.payee_type = 'presenter' AND t.related_presenter_id = p.id";
         $tax_select = "
             COALESCE(MAX(t.legal_name), '') AS legal_name,
             COALESCE(MAX(t.business_name), '') AS business_name,
@@ -10203,10 +10205,10 @@ protected function mrm_render_calculations_composer_table( $rows ) {
 }
 
 protected function mrm_render_calculations_presenter_table( $rows ) {
-    echo '<table class="widefat striped"><thead><tr><th>Presenter</th><th>Email</th><th>Paid-Out Entries</th><th>Gross Paid</th><th>Presenter 1099 Amount</th><th>1099 Status</th><th>Paid Date Range</th></tr></thead><tbody>';
+    echo '<table class="widefat striped"><thead><tr><th>Presenter</th><th>Email</th><th>Events Paid</th><th>Gross Paid</th><th>Net Paid / 1099 Amount</th><th>Tax Profile Status</th><th>Paid Date Range</th><th>Notes</th></tr></thead><tbody>';
 
     if ( empty( $rows ) ) {
-        echo '<tr><td colspan="7">No paid-out masterclass presenter payout data found for the selected period.</td></tr>';
+        echo '<tr><td colspan="8">No paid-out masterclass presenter payout data found for the selected period.</td></tr>';
     } else {
         foreach ( $rows as $row ) {
             $first_paid = (string) ( $row['first_paid_at'] ?? '' );
@@ -10219,8 +10221,9 @@ protected function mrm_render_calculations_presenter_table( $rows ) {
             echo '<td>' . esc_html( (string) ( $row['payout_count'] ?? 0 ) ) . '</td>';
             echo '<td>' . esc_html( number_format( (float) ( (int) ( $row['gross_cents'] ?? 0 ) / 100 ), 2 ) ) . '</td>';
             echo '<td><strong>' . esc_html( number_format( (float) ( (int) ( $row['net_cents'] ?? 0 ) / 100 ), 2 ) ) . '</strong></td>';
-            echo '<td>' . esc_html( $eligible ? 'Eligible' : 'Excluded / employee / not eligible' ) . '</td>';
+            echo '<td>' . esc_html( $eligible ? 'Ready' : 'Excluded / employee / not eligible' ) . '</td>';
             echo '<td>' . esc_html( trim( $first_paid . ( $last_paid && $last_paid !== $first_paid ? ' – ' . $last_paid : '' ) ) ) . '</td>';
+            echo '<td>' . esc_html( ! empty( $row['legal_name'] ) ? 'Tax profile linked' : 'Review presenter tax profile' ) . '</td>';
             echo '</tr>';
         }
     }
@@ -11013,7 +11016,7 @@ public function handle_mrm_clear_all_mileage_cache() {
 
         $ledger     = $wpdb->prefix . 'mrm_masterclass_payment_ledger';
         $presenters = $wpdb->prefix . 'mrm_masterclass_presenters';
-        $tax        = $wpdb->prefix . 'mrm_masterclass_presenter_tax_profiles';
+        $tax        = $wpdb->prefix . 'mrm_tax_payee_profiles';
 
         if ( ! $this->mrm_table_exists( $ledger ) || ! $this->mrm_table_exists( $presenters ) || ! $this->mrm_table_exists( $tax ) ) {
             return array();
@@ -11032,11 +11035,11 @@ public function handle_mrm_clear_all_mileage_cache() {
                 COALESCE(NULLIF(MAX(t.email), ''), MAX(p.email), '') AS email,
                 COALESCE(MAX(t.tax_classification), '') AS tax_classification,
                 '' AS tax_classification_other,
-                COALESCE(MAX(t.address_line1), '') AS mailing_address_1,
-                COALESCE(MAX(t.address_line2), '') AS mailing_address_2,
-                COALESCE(MAX(t.city), '') AS mailing_city,
-                COALESCE(MAX(t.state), '') AS mailing_state,
-                COALESCE(MAX(t.zip), '') AS mailing_postal_code,
+                COALESCE(MAX(t.mailing_address_1), '') AS mailing_address_1,
+                COALESCE(MAX(t.mailing_address_2), '') AS mailing_address_2,
+                COALESCE(MAX(t.mailing_city), '') AS mailing_city,
+                COALESCE(MAX(t.mailing_state), '') AS mailing_state,
+                COALESCE(MAX(t.mailing_postal_code), '') AS mailing_postal_code,
                 'US' AS mailing_country,
                 COALESCE(MAX(t.tin_type), '') AS tin_type,
                 COALESCE(MAX(t.tin_last4), '') AS tin_last4,
@@ -11059,7 +11062,7 @@ public function handle_mrm_clear_all_mileage_cache() {
                 GROUP_CONCAT(DISTINCT CONCAT('masterclass_event:', l.event_id) ORDER BY l.event_id ASC SEPARATOR ', ') AS source_refs
              FROM {$ledger} l
              INNER JOIN {$presenters} p ON p.id = l.presenter_id
-             LEFT JOIN {$tax} t ON t.presenter_id = p.id
+             LEFT JOIN {$tax} t ON t.payee_type = 'presenter' AND t.related_presenter_id = p.id
              WHERE l.ledger_type = 'registration_payment'
                AND l.status = 'paid_out'
                AND COALESCE(l.paid_out_at, l.paid_at, l.updated_at, l.created_at) >= %s
@@ -12997,6 +13000,7 @@ protected function mrm_ensure_contractor_tax_profile_schema() {
         'exclude_from_1099'            => "TINYINT(1) NOT NULL DEFAULT 0",
         'composer_key'                 => "VARCHAR(190) NOT NULL DEFAULT ''",
         'connected_account_id'         => "VARCHAR(190) NOT NULL DEFAULT ''",
+        'related_presenter_id'         => "BIGINT UNSIGNED NULL",
     );
 
     foreach ( $columns as $column => $definition ) {
@@ -13008,6 +13012,7 @@ protected function mrm_ensure_contractor_tax_profile_schema() {
     $indexes = array(
         'composer_key'         => 'composer_key',
         'connected_account_id' => 'connected_account_id',
+        'related_presenter_id_idx' => 'related_presenter_id',
         'exclude_from_1099'    => 'exclude_from_1099',
     );
 
@@ -13149,7 +13154,7 @@ protected function mrm_sanitize_1099_payer_profile( $raw ) {
 
 protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_instructor_id = 0, $existing = array() ) {
     $raw = is_array( $raw ) ? $raw : array();
-    $payee_type = $payee_type === 'composer' ? 'composer' : 'instructor';
+    $payee_type = in_array( $payee_type, array( 'composer', 'instructor', 'presenter' ), true ) ? $payee_type : 'instructor';
     $tax_classification = isset( $raw['tax_classification'] ) ? sanitize_key( wp_unslash( $raw['tax_classification'] ) ) : '';
     $allowed_classifications = array_keys( $this->mrm_1099_tax_classification_options() );
     if ( ! in_array( $tax_classification, $allowed_classifications, true ) ) {
@@ -13159,7 +13164,9 @@ protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_ins
     $existing = is_array( $existing ) ? $existing : array();
     $aws_secret = $payee_type === 'composer'
         ? $this->mrm_get_1099_tax_secret_record( 'composer' )
-        : $this->mrm_get_1099_tax_secret_record( 'instructor', $related_instructor_id );
+        : ( $payee_type === 'presenter'
+            ? $this->mrm_get_1099_tax_secret_record( 'presenter', 0, (int) ( $raw['related_presenter_id'] ?? 0 ) )
+            : $this->mrm_get_1099_tax_secret_record( 'instructor', $related_instructor_id ) );
     if ( ! empty( $aws_secret['loaded'] ) ) {
         $tin_type  = (string) $aws_secret['tin_type'];
         $tin_last4 = (string) $aws_secret['last4'];
@@ -13178,6 +13185,7 @@ protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_ins
     return array(
         'payee_type'                   => $payee_type,
         'related_instructor_id'        => (int) $related_instructor_id,
+        'related_presenter_id'         => isset( $raw['related_presenter_id'] ) ? absint( $raw['related_presenter_id'] ) : 0,
         'related_user_id'              => 0,
         'display_name'                 => isset( $raw['display_name'] ) ? sanitize_text_field( wp_unslash( $raw['display_name'] ) ) : '',
         'legal_name'                   => isset( $raw['legal_name'] ) ? sanitize_text_field( wp_unslash( $raw['legal_name'] ) ) : '',
@@ -13219,6 +13227,8 @@ protected function mrm_upsert_tax_payee_profile( $data ) {
     $existing_id = 0;
     if ( $payee_type === 'instructor' ) {
         $existing_id = (int) $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE payee_type = 'instructor' AND related_instructor_id = %d LIMIT 1", (int) ( $data['related_instructor_id'] ?? 0 ) ) );
+    } elseif ( $payee_type === 'presenter' ) {
+        $existing_id = (int) $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE payee_type = 'presenter' AND related_presenter_id = %d LIMIT 1", (int) ( $data['related_presenter_id'] ?? 0 ) ) );
     } elseif ( $payee_type === 'composer' ) {
         $composer_key = (string) ( $data['composer_key'] ?? 'composer:default' );
         if ( $composer_key === '' ) {
@@ -13241,6 +13251,54 @@ protected function mrm_get_tax_profile_for_instructor( $instructor_id ) {
     }
     $row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE payee_type = 'instructor' AND related_instructor_id = %d LIMIT 1", (int) $instructor_id ), ARRAY_A );
     return is_array( $row ) ? $row : array();
+}
+
+
+protected function mrm_scheduler_masterclass_presenters_table() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_masterclass_presenters';
+}
+
+protected function mrm_scheduler_get_masterclass_presenters_for_tax_profiles() {
+    global $wpdb;
+
+    $table = $this->mrm_scheduler_masterclass_presenters_table();
+
+    if ( $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) ) !== $table ) {
+        return array();
+    }
+
+    return $wpdb->get_results(
+        "SELECT id, name, email, stripe_connected_account_id
+         FROM {$table}
+         ORDER BY name ASC, email ASC",
+        ARRAY_A
+    );
+}
+
+protected function mrm_get_tax_profile_for_presenter( $presenter_id ) {
+    global $wpdb;
+
+    $presenter_id = absint( $presenter_id );
+    $table = $wpdb->prefix . 'mrm_tax_payee_profiles';
+
+    if ( $presenter_id <= 0 || ! $this->mrm_table_exists( $table ) ) {
+        return array();
+    }
+
+    $profile = $wpdb->get_row(
+        $wpdb->prepare(
+            "SELECT * FROM {$table}
+             WHERE payee_type = %s
+             AND related_presenter_id = %d
+             LIMIT 1",
+            'presenter',
+            $presenter_id
+        ),
+        ARRAY_A
+    );
+
+    return is_array( $profile ) ? $profile : array();
 }
 
 protected function mrm_get_composer_connected_account_hint() {
@@ -13287,6 +13345,16 @@ protected function mrm_handle_contractor_tax_profiles_save() {
                     $this->mrm_upsert_tax_payee_profile( $data );
                 }
             }
+            if ( strpos( $key, 'presenter_' ) === 0 ) {
+                $presenter_id = (int) str_replace( 'presenter_', '', $key );
+                if ( $presenter_id > 0 ) {
+                    $existing = $this->mrm_get_tax_profile_for_presenter( $presenter_id );
+                    $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'presenter', 0, $existing );
+                    $data['related_presenter_id'] = $presenter_id;
+                    $data['composer_key'] = '';
+                    $this->mrm_upsert_tax_payee_profile( $data );
+                }
+            }
             if ( $key === 'composer_default' ) {
                 $existing = $this->mrm_get_composer_tax_profile();
                 $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'composer', 0, $existing );
@@ -13309,12 +13377,13 @@ protected function mrm_render_tax_profile_card( $field_key, $profile, $context )
     $readonly_name  = (string) ( $context['readonly_name'] ?? '' );
     $readonly_email = (string) ( $context['readonly_email'] ?? '' );
     $related_id     = (int) ( $context['related_instructor_id'] ?? 0 );
+    $related_presenter_id = (int) ( $context['related_presenter_id'] ?? 0 );
     $prefix = 'mrm_tax_profiles[' . esc_attr( $field_key ) . ']';
     ?>
     <div style="background:#fff; border:1px solid #ccd0d4; padding:18px; margin:20px 0;">
         <h2 style="margin-top:0;"><?php echo esc_html( (string) ( $context['title'] ?? 'Tax Profile' ) ); ?></h2>
         <p class="description">Enter this information only after receiving a completed W-9 from the contractor. Store only the TIN last four here; keep the full TIN on the W-9 or in accountant/tax software.</p>
-        <table class="form-table" role="presentation"><tr><th scope="row">Payee Type</th><td><code><?php echo esc_html( $payee_type ); ?></code><?php if ( $payee_type === 'instructor' ) : ?><br><span class="description">Related instructor ID: <code><?php echo esc_html( (string) $related_id ); ?></code></span><?php endif; ?></td></tr><tr><th scope="row">Current Admin Name / Email</th><td><strong><?php echo esc_html( $readonly_name ); ?></strong><br><code><?php echo esc_html( $readonly_email ); ?></code></td></tr>
+        <table class="form-table" role="presentation"><tr><th scope="row">Payee Type</th><td><code><?php echo esc_html( $payee_type ); ?></code><?php if ( $payee_type === 'instructor' ) : ?><br><span class="description">Related instructor ID: <code><?php echo esc_html( (string) $related_id ); ?></code></span><?php endif; ?><?php if ( $payee_type === 'presenter' ) : ?><br><span class="description">Related presenter ID: <code><?php echo esc_html( (string) $related_presenter_id ); ?></code></span><?php endif; ?></td></tr><tr><th scope="row">Current Admin Name / Email</th><td><strong><?php echo esc_html( $readonly_name ); ?></strong><br><code><?php echo esc_html( $readonly_email ); ?></code></td></tr>
             <tr><th scope="row"><label>1099 Display Name</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[display_name]" value="<?php echo esc_attr( $profile['display_name'] ?? $readonly_name ); ?>"></td></tr>
             <tr><th scope="row"><label>Legal Name from W-9</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[legal_name]" value="<?php echo esc_attr( $profile['legal_name'] ?? '' ); ?>"></td></tr>
             <tr><th scope="row"><label>Business Name / DBA</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[business_name]" value="<?php echo esc_attr( $profile['business_name'] ?? '' ); ?>"></td></tr>
@@ -13328,14 +13397,14 @@ protected function mrm_render_tax_profile_card( $field_key, $profile, $context )
             <tr>
     <th scope="row"><label>AWS Tax ID</label></th>
     <td>
-        <?php echo wp_kses_post( $this->mrm_aws_tax_secret_status_html( $payee_type, $related_id ) ); ?>
+        <?php echo wp_kses_post( $this->mrm_aws_tax_secret_status_html( $payee_type, $related_id, $related_presenter_id ) ); ?>
         <p class="description">Full SSN/EIN/ITIN values are stored only in AWS Secrets Manager. This WordPress page no longer accepts or stores full tax ID numbers.</p>
     </td>
 </tr>
             <tr><th scope="row"><label>W-9 File Reference / Note</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[w9_file_note]" value="<?php echo esc_attr( $profile['w9_file_note'] ?? '' ); ?>" placeholder="Example: W-9 received by email on 2026-01-10"></td></tr>
             <tr><th scope="row"><label>Backup Withholding</label></th><td><label><input type="checkbox" name="<?php echo $prefix; ?>[backup_withholding_required]" value="1" <?php checked( ! empty( $profile['backup_withholding_required'] ) ); ?>>Backup withholding required</label>&nbsp;<input type="text" name="<?php echo $prefix; ?>[backup_withholding_amount]" placeholder="0.00" value="<?php echo esc_attr( number_format( ( (int) ( $profile['backup_withholding_cents'] ?? 0 ) ) / 100, 2, '.', '' ) ); ?>" style="width:100px;"></td></tr>
             <tr><th scope="row"><label>1099 Settings</label></th><td><label style="display:block; margin-bottom:6px;"><input type="checkbox" name="<?php echo $prefix; ?>[is_1099_eligible]" value="1" <?php checked( ! array_key_exists( 'is_1099_eligible', $profile ) || ! empty( $profile['is_1099_eligible'] ) ); ?>>1099 eligible</label><label style="display:block; margin-bottom:6px;"><input type="checkbox" name="<?php echo $prefix; ?>[is_employee]" value="1" <?php checked( ! empty( $profile['is_employee'] ) ); ?>>Employee / W-2 — exclude from contractor 1099 export</label><label style="display:block;"><input type="checkbox" name="<?php echo $prefix; ?>[exclude_from_1099]" value="1" <?php checked( ! empty( $profile['exclude_from_1099'] ) ); ?>>Explicitly exclude from 1099 export</label></td></tr>
-            <?php if ( $payee_type === 'composer' ) : ?><tr><th scope="row"><label>Composer Key</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[composer_key]" value="<?php echo esc_attr( $profile['composer_key'] ?? 'composer:default' ); ?>"><p class="description">Use <code>composer:default</code> unless you later support multiple composers.</p></td></tr><?php else : ?><input type="hidden" name="<?php echo $prefix; ?>[composer_key]" value=""><?php endif; ?>
+            <?php if ( $payee_type === 'presenter' ) : ?><input type="hidden" name="<?php echo $prefix; ?>[related_presenter_id]" value="<?php echo esc_attr( (string) $related_presenter_id ); ?>"><?php endif; ?><?php if ( $payee_type === 'composer' ) : ?><tr><th scope="row"><label>Composer Key</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[composer_key]" value="<?php echo esc_attr( $profile['composer_key'] ?? 'composer:default' ); ?>"><p class="description">Use <code>composer:default</code> unless you later support multiple composers.</p></td></tr><?php else : ?><input type="hidden" name="<?php echo $prefix; ?>[composer_key]" value=""><?php endif; ?>
             <tr><th scope="row"><label>Connected Account ID</label></th><td><input type="text" class="regular-text" name="<?php echo $prefix; ?>[connected_account_id]" value="<?php echo esc_attr( $profile['connected_account_id'] ?? ( $context['connected_account_id'] ?? '' ) ); ?>"></td></tr>
             <tr><th scope="row"><label>Tax Notes</label></th><td><textarea class="large-text" rows="3" name="<?php echo $prefix; ?>[notes]"><?php echo esc_textarea( $profile['notes'] ?? '' ); ?></textarea></td></tr></table>
     </div>
@@ -13362,6 +13431,7 @@ public function render_contractor_tax_profiles_page() {
     $payer = $this->mrm_get_1099_payer_profile();
     $composer_profile = $this->mrm_get_composer_tax_profile();
     $composer_connected_hint = $this->mrm_get_composer_connected_account_hint();
+    $presenters = $this->mrm_scheduler_get_masterclass_presenters_for_tax_profiles();
 
     ?>
     <div class="wrap">
@@ -13411,6 +13481,9 @@ public function render_contractor_tax_profiles_page() {
 
             <h2>Instructor Tax Profiles</h2>
             <?php if ( empty( $instructors ) ) : ?><p>No instructors found.</p><?php else : ?><?php foreach ( $instructors as $instructor ) : ?><?php $profile = $this->mrm_get_tax_profile_for_instructor( (int) $instructor['id'] ); $this->mrm_render_tax_profile_card( 'instructor_' . (int) $instructor['id'], $profile, array( 'title' => 'Instructor Tax Profile #' . (int) $instructor['id'] . ' — ' . (string) $instructor['name'], 'payee_type' => 'instructor', 'related_instructor_id' => (int) $instructor['id'], 'readonly_name' => (string) $instructor['name'], 'readonly_email' => (string) $instructor['email'], 'connected_account_id' => (string) ( $instructor['stripe_connected_account_id'] ?? '' ), ) ); ?><?php endforeach; ?><?php endif; ?>
+
+            <h2>Presenter Tax Profiles</h2>
+            <?php if ( empty( $presenters ) ) : ?><p>No masterclass presenters found.</p><?php else : ?><?php foreach ( $presenters as $presenter ) : ?><?php $profile = $this->mrm_get_tax_profile_for_presenter( (int) $presenter['id'] ); $this->mrm_render_tax_profile_card( 'presenter_' . (int) $presenter['id'], $profile, array( 'title' => 'Presenter Tax Profile #' . (int) $presenter['id'] . ' — ' . (string) $presenter['name'], 'payee_type' => 'presenter', 'related_presenter_id' => (int) $presenter['id'], 'readonly_name' => (string) $presenter['name'], 'readonly_email' => (string) $presenter['email'], 'connected_account_id' => (string) ( $presenter['stripe_connected_account_id'] ?? '' ), ) ); ?><?php endforeach; ?><?php endif; ?>
 
             <?php submit_button( 'Save Contractor Tax Profiles', 'primary large' ); ?>
         </form>
@@ -13506,6 +13579,7 @@ public function render_contractor_tax_profiles_page() {
                         $this->mrm_upsert_tax_payee_profile( array(
                             'payee_type'                   => 'instructor',
                             'related_instructor_id'        => $new_instructor_id,
+                            'related_presenter_id'         => 0,
                             'related_user_id'              => 0,
                             'display_name'                 => $name,
                             'legal_name'                   => '',
