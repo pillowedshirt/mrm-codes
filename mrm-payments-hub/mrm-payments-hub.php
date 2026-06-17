@@ -58,6 +58,7 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
     add_action('admin_post_mrm_profile_card_create_invite', array($this, 'handle_profile_card_create_invite'));
     add_action('admin_post_mrm_profile_card_admin_action', array($this, 'handle_profile_card_admin_action'));
+    add_action('admin_post_mrm_profile_card_download_private_file', array($this, 'handle_profile_card_download_private_file'));
     add_action('admin_post_mrm_profile_card_form', array($this, 'render_profile_card_public_form'));
     add_action('admin_post_nopriv_mrm_profile_card_form', array($this, 'render_profile_card_public_form'));
     add_action('admin_post_mrm_profile_card_submit', array($this, 'handle_profile_card_public_submit'));
@@ -12576,7 +12577,7 @@ public function render_access_lists_page() {
     return $html;
   }
 
-  private function mrm_profile_card_handle_media_upload($field_name) {
+  private function mrm_profile_card_handle_profile_image_upload($field_name) {
     if (empty($_FILES[$field_name]['name'])) {
       return '';
     }
@@ -12587,7 +12588,25 @@ public function render_access_lists_page() {
       require_once ABSPATH . 'wp-admin/includes/image.php';
     }
 
+    $upload_dir_filter = function($dirs) {
+      $subdir = '/profile_images';
+
+      $dirs['subdir'] = $subdir;
+      $dirs['path']   = trailingslashit($dirs['basedir']) . 'profile_images';
+      $dirs['url']    = trailingslashit($dirs['baseurl']) . 'profile_images';
+
+      if (!file_exists($dirs['path'])) {
+        wp_mkdir_p($dirs['path']);
+      }
+
+      return $dirs;
+    };
+
+    add_filter('upload_dir', $upload_dir_filter);
+
     $attachment_id = media_handle_upload($field_name, 0);
+
+    remove_filter('upload_dir', $upload_dir_filter);
 
     if (is_wp_error($attachment_id)) {
       return '';
@@ -12596,6 +12615,111 @@ public function render_access_lists_page() {
     $url = wp_get_attachment_url($attachment_id);
 
     return $url ? esc_url_raw($url) : '';
+  }
+
+  private function mrm_profile_card_private_upload_dir($subfolder = 'fingerprint_clearance_cards') {
+    $upload = wp_upload_dir();
+
+    $base_dir = trailingslashit($upload['basedir']) . 'mrm_private';
+    $dir      = trailingslashit($base_dir) . sanitize_file_name($subfolder);
+
+    if (!file_exists($dir)) {
+      wp_mkdir_p($dir);
+    }
+
+    $index_file = trailingslashit($base_dir) . 'index.php';
+    if (!file_exists($index_file)) {
+      file_put_contents($index_file, "<?php\n// Silence is golden.\n");
+    }
+
+    $sub_index_file = trailingslashit($dir) . 'index.php';
+    if (!file_exists($sub_index_file)) {
+      file_put_contents($sub_index_file, "<?php\n// Silence is golden.\n");
+    }
+
+    $htaccess = trailingslashit($base_dir) . '.htaccess';
+    if (!file_exists($htaccess)) {
+      file_put_contents($htaccess, "Deny from all\n");
+    }
+
+    return $dir;
+  }
+
+  private function mrm_profile_card_handle_private_fingerprint_upload($field_name) {
+    if (empty($_FILES[$field_name]['name'])) {
+      return array();
+    }
+
+    if (!function_exists('wp_handle_upload')) {
+      require_once ABSPATH . 'wp-admin/includes/file.php';
+    }
+
+    $private_dir = $this->mrm_profile_card_private_upload_dir('fingerprint_clearance_cards');
+
+    $upload_dir_filter = function($dirs) use ($private_dir) {
+      $dirs['path']   = $private_dir;
+      $dirs['url']    = '';
+      $dirs['subdir'] = '';
+      return $dirs;
+    };
+
+    add_filter('upload_dir', $upload_dir_filter);
+
+    $file = wp_handle_upload(
+      $_FILES[$field_name],
+      array(
+        'test_form' => false,
+        'mimes' => array(
+          'jpg'  => 'image/jpeg',
+          'jpeg' => 'image/jpeg',
+          'png'  => 'image/png',
+          'gif'  => 'image/gif',
+          'webp' => 'image/webp',
+          'pdf'  => 'application/pdf',
+        ),
+      )
+    );
+
+    remove_filter('upload_dir', $upload_dir_filter);
+
+    if (!empty($file['error']) || empty($file['file'])) {
+      return array();
+    }
+
+    return array(
+      'kind' => 'fingerprint_card',
+      'name' => sanitize_file_name(wp_unslash($_FILES[$field_name]['name'])),
+      'file' => sanitize_text_field($file['file']),
+      'uploaded_at' => current_time('mysql'),
+    );
+  }
+
+  private function mrm_profile_card_table_has_column($table, $column) {
+    global $wpdb;
+
+    $found = $wpdb->get_var(
+      $wpdb->prepare("SHOW COLUMNS FROM {$table} LIKE %s", $column)
+    );
+
+    return !empty($found);
+  }
+
+  private function mrm_profile_card_add_profile_metadata_to_record($table, &$data, $payload) {
+    $optional = array(
+      'first_name' => sanitize_text_field($payload['first_name'] ?? ''),
+      'last_name' => sanitize_text_field($payload['last_name'] ?? ''),
+      'fingerprint_card_file' => sanitize_text_field($payload['fingerprint_card_file'] ?? ''),
+      'fingerprint_card_name' => sanitize_text_field($payload['fingerprint_card_name'] ?? ''),
+      'fingerprint_card_uploaded_at' => sanitize_text_field($payload['fingerprint_card_uploaded_at'] ?? ''),
+      'docusign_completed' => !empty($payload['docusign_completed']) ? 1 : 0,
+      'stripe_onboarding_completed' => !empty($payload['stripe_onboarding_completed']) ? 1 : 0,
+    );
+
+    foreach ($optional as $column => $value) {
+      if ($this->mrm_profile_card_table_has_column($table, $column)) {
+        $data[$column] = $value;
+      }
+    }
   }
 
   private function mrm_profile_card_render_instructor_pay_chart_html() {
@@ -12976,6 +13100,40 @@ public function render_access_lists_page() {
     exit;
   }
 
+
+  public function handle_profile_card_download_private_file() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to access this file.');
+    }
+
+    check_admin_referer('mrm_profile_card_download_private_file');
+
+    $file = isset($_GET['file']) ? sanitize_text_field(wp_unslash($_GET['file'])) : '';
+    $name = isset($_GET['name']) ? sanitize_file_name(wp_unslash($_GET['name'])) : 'fingerprint-proof';
+
+    if ($file === '') {
+      wp_die('Missing file.');
+    }
+
+    $real_file = realpath($file);
+    $private_root = realpath($this->mrm_profile_card_private_upload_dir());
+
+    if (!$real_file || !$private_root || strpos($real_file, dirname($private_root)) !== 0 || !file_exists($real_file)) {
+      wp_die('File not found or not allowed.');
+    }
+
+    nocache_headers();
+
+    $mime = function_exists('mime_content_type') ? mime_content_type($real_file) : 'application/octet-stream';
+
+    header('Content-Type: ' . $mime);
+    header('Content-Disposition: inline; filename="' . $name . '"');
+    header('Content-Length: ' . filesize($real_file));
+
+    readfile($real_file);
+    exit;
+  }
+
   public function render_profile_card_public_form() {
     $token = sanitize_text_field(wp_unslash($_GET['token'] ?? ''));
     $request = $this->mrm_profile_card_get_by_token($token);
@@ -13044,7 +13202,7 @@ public function render_access_lists_page() {
           <div class="pay-box"><p><strong>Student registration price:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['event_price_cents'] ?? 0)); ?></p><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled.</p><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the agreed event price and presenter earnings shown above.</span></label></div>
         <?php else : ?>
           <h2>Profile Information</h2>
-          <div class="grid"><div><label>Name *</label><input type="text" name="name" value="<?php echo esc_attr($submission['name'] ?? ''); ?>" required></div><div><label>Email *</label><input type="email" name="email" value="<?php echo esc_attr($submission['email'] ?? $request['recipient_email']); ?>" required></div></div>
+          <div class="grid"><div><label>First Name *</label><input type="text" name="first_name" value="<?php echo esc_attr($submission['first_name'] ?? ''); ?>" autocomplete="given-name" required></div><div><label>Last Name *</label><input type="text" name="last_name" value="<?php echo esc_attr($submission['last_name'] ?? ''); ?>" autocomplete="family-name" required></div></div><input type="hidden" name="name" value="<?php echo esc_attr($submission['name'] ?? ''); ?>"><div class="grid"><div><label>Email *</label><input type="email" name="email" value="<?php echo esc_attr($submission['email'] ?? $request['recipient_email']); ?>" autocomplete="email" required></div></div>
           <div class="grid"><div><label>City *</label><input type="text" name="city" value="<?php echo esc_attr($submission['city'] ?? ''); ?>" required></div><div><label>State *</label><input type="text" name="state" maxlength="2" value="<?php echo esc_attr($submission['state'] ?? ''); ?>" required></div></div>
           <label>Address *</label><input type="text" name="address" value="<?php echo esc_attr($submission['address'] ?? ''); ?>" required><label>ZIP Code *</label><input type="text" name="zip_code" value="<?php echo esc_attr($submission['zip_code'] ?? ''); ?>" required>
           <?php if ($request_type === 'instructor_profile') : ?>
@@ -13057,12 +13215,12 @@ public function render_access_lists_page() {
           <label>Profile Image Upload</label><p class="mrm-field-help">Upload the photo you would like used on your public profile card. Low Brass Lessons will review and approve the image before publishing.</p><input type="file" name="profile_image_file" accept="image/*"><input type="hidden" name="existing_profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>">
           <?php if (!empty($submission['profile_image_url'])) : ?><p class="mrm-field-help">A profile image has already been uploaded. Upload a new image only if you want to replace it.</p><?php endif; ?>
           <label>Fingerprint Clearance Card Proof *</label><input type="file" name="fingerprint_card" accept="image/*,.pdf">
-          <label class="mrm-ack-row"><input type="checkbox" name="docusign_completed" value="1" required <?php checked(!empty($submission['docusign_completed'])); ?>><span>I confirm that I have completed the required DocuSign agreement and W-9 process.</span></label>
+          <label class="mrm-ack-row"><input type="checkbox" name="docusign_completed" value="1" required <?php checked(!empty($submission['docusign_completed'])); ?>><span>I confirm that I have completed the required DocuSign agreement and W-9 process.</span></label><label class="mrm-ack-row"><input type="checkbox" name="stripe_onboarding_completed" value="1" required <?php checked(!empty($submission['stripe_onboarding_completed'])); ?>><span>I confirm that I have completed the required Stripe account linking/onboarding step provided by Low Brass Lessons.</span></label>
           <?php if ($request_type === 'instructor_profile') : ?><?php echo $this->mrm_profile_card_render_instructor_pay_chart_html(); ?><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the instructor payout chart shown above.</span></label><?php endif; ?>
         <?php endif; ?>
         <p style="margin-top:24px;"><button type="submit">Submit Your Request</button></p>
       </form>
-    </div></div></body></html>
+    </div></div><script>(function(){var form=document.querySelector('form');if(!form)return;var first=form.querySelector('[name="first_name"]');var last=form.querySelector('[name="last_name"]');var full=form.querySelector('[name="name"]');function syncName(){if(!full)return;var f=first?first.value.trim():'';var l=last?last.value.trim():'';full.value=(f+' '+l).trim();}if(first)first.addEventListener('input',syncName);if(last)last.addEventListener('input',syncName);form.addEventListener('submit',syncName);syncName();})();</script></body></html>
     <?php
     exit;
   }
@@ -13093,9 +13251,9 @@ public function render_access_lists_page() {
         $instruments = array_map('sanitize_key', wp_unslash($_POST['instruments']));
       }
 
-      $payload = array('name' => sanitize_text_field(wp_unslash($_POST['name'] ?? '')), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0);
+      $payload = array('first_name' => sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')), 'last_name' => sanitize_text_field(wp_unslash($_POST['last_name'] ?? '')), 'name' => trim(sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')) . ' ' . sanitize_text_field(wp_unslash($_POST['last_name'] ?? ''))), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'stripe_onboarding_completed' => !empty($_POST['stripe_onboarding_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0);
 
-      $profile_image_url = $this->mrm_profile_card_handle_media_upload('profile_image_file');
+      $profile_image_url = $this->mrm_profile_card_handle_profile_image_upload('profile_image_file');
 
       if ($profile_image_url !== '') {
         $payload['profile_image_url'] = $profile_image_url;
@@ -13108,16 +13266,21 @@ public function render_access_lists_page() {
 
     $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
 
+    $fingerprint_upload = array();
+
     if ($request_type !== 'presenter_event' && !empty($_FILES['fingerprint_card']['name'])) {
-      require_once ABSPATH . 'wp-admin/includes/file.php';
-
-      $file = wp_handle_upload($_FILES['fingerprint_card'], array('test_form' => false, 'mimes' => array('jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp', 'pdf' => 'application/pdf')));
-
-      if (empty($file['error'])) {
-        $uploads[] = array('kind' => 'fingerprint_card', 'name' => sanitize_file_name(wp_unslash($_FILES['fingerprint_card']['name'])), 'url' => esc_url_raw($file['url'] ?? ''), 'file' => $file['file'] ?? '');
-        $update_data['uploaded_files'] = $this->mrm_profile_card_encode_json($uploads);
-      }
+      $fingerprint_upload = $this->mrm_profile_card_handle_private_fingerprint_upload('fingerprint_card');
     }
+
+    if (!empty($fingerprint_upload['file'])) {
+      $uploads[] = $fingerprint_upload;
+      $payload['fingerprint_card_file'] = $fingerprint_upload['file'];
+      $payload['fingerprint_card_name'] = $fingerprint_upload['name'];
+      $payload['fingerprint_card_uploaded_at'] = $fingerprint_upload['uploaded_at'];
+      $update_data['submission_payload'] = $this->mrm_profile_card_encode_json($payload);
+      $update_data['uploaded_files'] = $this->mrm_profile_card_encode_json($uploads);
+    }
+
 
     $wpdb->update($table, $update_data, array('id' => absint($request['id'])));
 
@@ -13297,6 +13460,8 @@ public function render_access_lists_page() {
       'hire_date' => current_time('Y-m-d'),
     );
 
+    $this->mrm_profile_card_add_profile_metadata_to_record($table, $data, $payload);
+
     if ($is_profile_update && $existing_target_id > 0) {
       $updated = $wpdb->update($table, $data, array('id' => $existing_target_id));
 
@@ -13365,6 +13530,8 @@ public function render_access_lists_page() {
       'created_at' => current_time('mysql'),
       'updated_at' => current_time('mysql'),
     );
+
+    $this->mrm_profile_card_add_profile_metadata_to_record($table, $data, $payload);
 
     if ($is_profile_update && $existing_target_id > 0) {
       $updated = $wpdb->update($table, $data, array('id' => $existing_target_id));
