@@ -12528,8 +12528,19 @@ public function render_access_lists_page() {
     <div class="wrap"><h1>Profile Card Creation</h1>
       <p class="description">Send private onboarding links to instructors and presenters. Submitted requests appear below for review before anything is created in Scheduler or Masterclass settings.</p>
       <?php if (isset($_GET['error'])) : ?>
+        <?php
+          $profile_card_error = sanitize_text_field(wp_unslash($_GET['error']));
+          $profile_card_error_messages = array(
+            'missing_presenter' => 'Please select an approved presenter profile before sending a Masterclass Event Proposal.',
+            'invalid_presenter' => 'The selected presenter profile is missing a valid email address.',
+            'invalid_recipient' => 'Please enter a valid recipient email address.',
+            'missing_request' => 'The selected request could not be found.',
+            'unknown_action' => 'The selected Profile Card Creation action was not recognized.',
+          );
+          $profile_card_error_message = $profile_card_error_messages[$profile_card_error] ?? $profile_card_error;
+        ?>
         <div class="notice notice-error">
-          <p><?php echo esc_html(sanitize_text_field(wp_unslash($_GET['error']))); ?></p>
+          <p><?php echo esc_html($profile_card_error_message); ?></p>
         </div>
       <?php endif; ?>
 
@@ -12717,6 +12728,12 @@ public function render_access_lists_page() {
       }
 
       $presenters_table = $wpdb->prefix . 'mrm_masterclass_presenters';
+
+      if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $presenters_table)) !== $presenters_table) {
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=invalid_presenter'));
+        exit;
+      }
+
       $presenter = $wpdb->get_row(
         $wpdb->prepare("SELECT id, name, email FROM {$presenters_table} WHERE id = %d LIMIT 1", $selected_presenter_id),
         ARRAY_A
