@@ -935,8 +935,15 @@ public function mrm_mc_render_critical_error_notice() {
 		"CREATE TABLE {$presenters_table} (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			name VARCHAR(191) NOT NULL,
+			first_name VARCHAR(191) NULL,
+			last_name VARCHAR(191) NULL,
 			email VARCHAR(191) NOT NULL,
 			bio TEXT NULL,
+			fingerprint_card_file TEXT NULL,
+			fingerprint_card_name VARCHAR(255) NULL,
+			fingerprint_card_uploaded_at DATETIME NULL,
+			docusign_completed TINYINT(1) NOT NULL DEFAULT 0,
+			stripe_onboarding_completed TINYINT(1) NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			PRIMARY KEY  (id),
@@ -1152,6 +1159,13 @@ public function mrm_mc_render_critical_error_notice() {
 		'presenter_title'             => "ALTER TABLE {$presenters_table} ADD presenter_title VARCHAR(191) NULL",
 		'status'                      => "ALTER TABLE {$presenters_table} ADD status VARCHAR(32) NOT NULL DEFAULT 'active'",
 		'presenter_page_id'           => "ALTER TABLE {$presenters_table} ADD presenter_page_id BIGINT UNSIGNED NULL",
+		'first_name'                  => "ALTER TABLE {$presenters_table} ADD first_name VARCHAR(191) NULL",
+		'last_name'                   => "ALTER TABLE {$presenters_table} ADD last_name VARCHAR(191) NULL",
+		'fingerprint_card_file'       => "ALTER TABLE {$presenters_table} ADD fingerprint_card_file TEXT NULL",
+		'fingerprint_card_name'       => "ALTER TABLE {$presenters_table} ADD fingerprint_card_name VARCHAR(255) NULL",
+		'fingerprint_card_uploaded_at' => "ALTER TABLE {$presenters_table} ADD fingerprint_card_uploaded_at DATETIME NULL",
+		'docusign_completed'          => "ALTER TABLE {$presenters_table} ADD docusign_completed TINYINT(1) NOT NULL DEFAULT 0",
+		'stripe_onboarding_completed' => "ALTER TABLE {$presenters_table} ADD stripe_onboarding_completed TINYINT(1) NOT NULL DEFAULT 0",
 	);
 
 	foreach ( $presenter_adds as $column => $sql ) {
@@ -1704,7 +1718,7 @@ private function mrm_mc_us_timezone_options() {
 
 private function mrm_mc_timezone_select_html( $name, $selected = 'America/Phoenix' ) {
 	$selected = sanitize_text_field( (string) $selected );
-	$html = '<select name="' . esc_attr( $name ) . '" class="regular-text" required>';
+	$html = '<select name="' . esc_attr( $name ) . '" class="regular-text" required style="max-width:420px;">';
 
 	foreach ( $this->mrm_mc_us_timezone_options() as $value => $label ) {
 		$html .= '<option value="' . esc_attr( $value ) . '"' . selected( $selected, $value, false ) . '>' . esc_html( $label ) . '</option>';
@@ -7193,8 +7207,16 @@ public function render_presenters_page() {
 	echo '<tr><th>State</th><td><input name="state" type="text" class="small-text" maxlength="2" value="' . esc_attr( $editing['state'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Address</th><td><input name="address" type="text" class="regular-text" value="' . esc_attr( $editing['address'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>ZIP Code</th><td><input name="zip_code" type="text" class="regular-text" value="' . esc_attr( $editing['zip_code'] ?? '' ) . '"></td></tr>';
-	echo '<tr><th>Timezone</th><td><input name="timezone" type="text" class="regular-text" value="' . esc_attr( $editing['timezone'] ?? 'America/Phoenix' ) . '"></td></tr>';
+	echo '<tr><th>Timezone</th><td>' . $this->mrm_mc_timezone_select_html( 'timezone', $editing['timezone'] ?? 'America/Phoenix' ) . '<p class="description">Presenter’s home timezone.</p></td></tr>';
 	echo '<tr><th>Stripe Connected Account ID</th><td><input name="stripe_connected_account_id" type="text" class="regular-text" placeholder="acct_..." value="' . esc_attr( $editing['stripe_connected_account_id'] ?? '' ) . '"><p class="description">Use the presenter Stripe Connect account ID. Store full SSN/EIN/TIN outside WordPress.</p></td></tr>';
+if ( ! empty( $editing['fingerprint_card_file'] ) ) {
+	$fingerprint_url = wp_nonce_url(
+		admin_url( 'admin-post.php?action=mrm_profile_card_download_private_file&file=' . rawurlencode( $editing['fingerprint_card_file'] ) . '&name=' . rawurlencode( $editing['fingerprint_card_name'] ?? 'fingerprint-proof' ) ),
+		'mrm_profile_card_download_private_file'
+	);
+	echo '<tr><th>Fingerprint Clearance Card Proof</th><td><a class="button" href="' . esc_url( $fingerprint_url ) . '" target="_blank" rel="noopener">View Private Fingerprint Proof</a><p class="description">This private file is available to admins only.</p></td></tr>';
+}
+echo '<tr><th>Onboarding Confirmations</th><td><p><strong>DocuSign / W-9 completed:</strong> ' . ( ! empty( $editing['docusign_completed'] ) ? 'Yes' : 'No' ) . '</p><p><strong>Stripe account linking completed:</strong> ' . ( ! empty( $editing['stripe_onboarding_completed'] ) ? 'Yes' : 'No' ) . '</p></td></tr>';
 	echo '<tr><th>Start Date</th><td><input name="hire_date" type="date" value="' . esc_attr( $editing['hire_date'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Profile Image URL</th><td><input name="profile_image_url" type="url" class="regular-text" value="' . esc_attr( $editing['profile_image_url'] ?? '' ) . '"></td></tr>';
 

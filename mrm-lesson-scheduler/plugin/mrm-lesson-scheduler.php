@@ -2328,6 +2328,8 @@ protected function mrm_get_google_service_account_json() {
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     name VARCHAR(100) NOT NULL,
     email VARCHAR(255) NOT NULL,
+    first_name VARCHAR(191) NULL,
+    last_name VARCHAR(191) NULL,
     city VARCHAR(100) NOT NULL,
     state varchar(50) NOT NULL DEFAULT '',
     address VARCHAR(255) NOT NULL DEFAULT '',
@@ -2342,6 +2344,11 @@ protected function mrm_get_google_service_account_json() {
     longitude DECIMAL(10,6) DEFAULT NULL,
     calendar_id VARCHAR(255) NOT NULL DEFAULT '',
     timezone VARCHAR(64) NOT NULL DEFAULT 'America/Phoenix',
+    fingerprint_card_file TEXT NULL,
+    fingerprint_card_name VARCHAR(255) NULL,
+    fingerprint_card_uploaded_at DATETIME NULL,
+    docusign_completed TINYINT(1) NOT NULL DEFAULT 0,
+    stripe_onboarding_completed TINYINT(1) NOT NULL DEFAULT 0,
     stripe_connected_account_id VARCHAR(255) DEFAULT NULL,
     hire_date DATE DEFAULT NULL,
     PRIMARY KEY (id),
@@ -2652,6 +2659,27 @@ protected function mrm_get_google_service_account_json() {
                 OR google_original_start_time = '0000-00-00 00:00:00'"
         );
 
+        $instructor_columns = $wpdb->get_col( "DESC {$table_instructors}", 0 );
+        if ( ! is_array( $instructor_columns ) ) {
+            $instructor_columns = array();
+        }
+
+        $instructor_adds = array(
+            'first_name' => "ALTER TABLE {$table_instructors} ADD first_name VARCHAR(191) NULL",
+            'last_name' => "ALTER TABLE {$table_instructors} ADD last_name VARCHAR(191) NULL",
+            'fingerprint_card_file' => "ALTER TABLE {$table_instructors} ADD fingerprint_card_file TEXT NULL",
+            'fingerprint_card_name' => "ALTER TABLE {$table_instructors} ADD fingerprint_card_name VARCHAR(255) NULL",
+            'fingerprint_card_uploaded_at' => "ALTER TABLE {$table_instructors} ADD fingerprint_card_uploaded_at DATETIME NULL",
+            'docusign_completed' => "ALTER TABLE {$table_instructors} ADD docusign_completed TINYINT(1) NOT NULL DEFAULT 0",
+            'stripe_onboarding_completed' => "ALTER TABLE {$table_instructors} ADD stripe_onboarding_completed TINYINT(1) NOT NULL DEFAULT 0",
+        );
+
+        foreach ( $instructor_adds as $column => $sql ) {
+            if ( ! in_array( $column, $instructor_columns, true ) ) {
+                $wpdb->query( $sql );
+            }
+        }
+
         update_option( 'mrm_scheduler_db_version', self::DB_VERSION );
         if ( ! get_option( 'mrm_scheduler_settings', false ) ) {
             add_option( 'mrm_scheduler_settings', array(), '', 'no' ); // autoload disabled
@@ -2669,7 +2697,7 @@ protected function mrm_get_google_service_account_json() {
 
         $instructor_cols = $wpdb->get_col( "DESC {$instructors}", 0 );
         $need_instructors = array(
-            'timezone', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state', 'address', 'zip_code', 'offers_in_person', 'offers_online',
+            'timezone', 'first_name', 'last_name', 'fingerprint_card_file', 'fingerprint_card_name', 'fingerprint_card_uploaded_at', 'docusign_completed', 'stripe_onboarding_completed', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state', 'address', 'zip_code', 'offers_in_person', 'offers_online',
         );
 
         foreach ( $need_instructors as $col ) {
@@ -8318,7 +8346,7 @@ protected function mrm_get_google_service_account_json() {
                         <tr>
                             <th scope="row"><label for="meeting_scheduler_timezone">Default Timezone</label></th>
                             <td>
-                                <input type="text" class="regular-text" id="meeting_scheduler_timezone" name="meeting_scheduler_timezone" value="<?php echo esc_attr( $default_timezone ); ?>">
+                                <?php echo $this->mrm_scheduler_timezone_select_html( 'meeting_scheduler_timezone', $default_timezone, 'meeting_scheduler_timezone', true ); ?>
                                 <p class="description">Example: America/Phoenix</p>
                             </td>
                         </tr>
@@ -8395,7 +8423,7 @@ protected function mrm_get_google_service_account_json() {
 
                 <table class="form-table" role="presentation">
                     <tr><th scope="row"><label for="mrm_meeting_title">Meeting Title</label></th><td><input type="text" class="regular-text" id="mrm_meeting_title" name="mrm_meeting_title" value="<?php echo esc_attr( $form_title ); ?>" required></td></tr>
-                    <tr><th scope="row"><label for="mrm_meeting_timezone">Timezone</label></th><td><input type="text" class="regular-text" id="mrm_meeting_timezone" name="mrm_meeting_timezone" value="<?php echo esc_attr( $form_timezone ); ?>" required></td></tr>
+                    <tr><th scope="row"><label for="mrm_meeting_timezone">Timezone</label></th><td><?php echo $this->mrm_scheduler_timezone_select_html( 'mrm_meeting_timezone', $form_timezone, 'mrm_meeting_timezone', true ); ?><p class="description">Choose the timezone for the meeting date/time you are entering. The system will convert it correctly for Google Calendar and recipient emails.</p></td></tr>
                     <tr><th scope="row"><label for="mrm_meeting_date">Date</label></th><td><input type="date" id="mrm_meeting_date" name="mrm_meeting_date" value="<?php echo esc_attr( $form_date ); ?>" required></td></tr>
                     <tr><th scope="row"><label for="mrm_meeting_time">Start Time</label></th><td><input type="time" id="mrm_meeting_time" name="mrm_meeting_time" value="<?php echo esc_attr( $form_time ); ?>" required></td></tr>
                     <tr><th scope="row"><label for="mrm_meeting_duration">Duration</label></th><td><select id="mrm_meeting_duration" name="mrm_meeting_duration" required><?php foreach ( array( 30, 45, 60, 90, 120 ) as $minutes ) : ?><option value="<?php echo esc_attr( (string) $minutes ); ?>" <?php selected( $form_duration, $minutes ); ?>><?php echo esc_html( (string) $minutes ); ?> minutes</option><?php endforeach; ?></select></td></tr>
@@ -11712,6 +11740,36 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         );
     }
 
+
+    protected function mrm_scheduler_us_timezone_options() {
+        return array(
+            'America/New_York'    => 'Eastern Time — America/New_York',
+            'America/Chicago'     => 'Central Time — America/Chicago',
+            'America/Denver'      => 'Mountain Time — America/Denver',
+            'America/Phoenix'     => 'Arizona Time — America/Phoenix',
+            'America/Los_Angeles' => 'Pacific Time — America/Los_Angeles',
+            'America/Anchorage'   => 'Alaska Time — America/Anchorage',
+            'America/Adak'        => 'Hawaii-Aleutian Time — America/Adak',
+            'Pacific/Honolulu'    => 'Hawaii Time — Pacific/Honolulu',
+        );
+    }
+
+    protected function mrm_scheduler_timezone_select_html( $name, $selected = 'America/Phoenix', $id = '', $required = true ) {
+        $selected = sanitize_text_field( (string) $selected );
+        $id_attr = $id !== '' ? ' id="' . esc_attr( $id ) . '"' : '';
+        $required_attr = $required ? ' required' : '';
+
+        $html = '<select name="' . esc_attr( $name ) . '"' . $id_attr . ' class="regular-text"' . $required_attr . ' style="max-width:420px;">';
+
+        foreach ( $this->mrm_scheduler_us_timezone_options() as $value => $label ) {
+            $html .= '<option value="' . esc_attr( $value ) . '"' . selected( $selected, $value, false ) . '>' . esc_html( $label ) . '</option>';
+        }
+
+        $html .= '</select>';
+
+        return $html;
+    }
+
     protected function mrm_meeting_format_datetime_label( $mysql_utc, $timezone ) {
         try {
             $tz = new DateTimeZone( (string) $timezone );
@@ -13501,15 +13559,7 @@ public function render_contractor_tax_profiles_page() {
             $editing = $edit_id ? $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $edit_id ), ARRAY_A ) : null;
         }
         $rows = $wpdb->get_results( "SELECT * FROM {$table} ORDER BY city ASC, name ASC", ARRAY_A );
-        $tz_options = array(
-            'America/New_York'    => 'Eastern (America/New_York)',
-            'America/Chicago'     => 'Central (America/Chicago)',
-            'America/Denver'      => 'Mountain (America/Denver)',
-            'America/Phoenix'     => 'Arizona / Phoenix (America/Phoenix)',
-            'America/Los_Angeles' => 'Pacific (America/Los_Angeles)',
-            'America/Anchorage'   => 'Alaska (America/Anchorage)',
-            'Pacific/Honolulu'    => 'Hawaii (Pacific/Honolulu)',
-        );
+        $tz_options = $this->mrm_scheduler_us_timezone_options();
         $tz_selected = $editing['timezone'] ?? 'America/Phoenix';
         ?>
         <div class="wrap">
@@ -13551,6 +13601,28 @@ public function render_contractor_tax_profiles_page() {
                             <input type="url" class="regular-text" id="profile_image_url" name="profile_image_url"
                                    value="<?php echo esc_attr( $editing['profile_image_url'] ?? '' ); ?>"
                                    placeholder="https://... (upload in Media Library, paste URL)" />
+                        </td>
+                    </tr>
+                    <?php if ( ! empty( $editing['fingerprint_card_file'] ) ) : ?>
+                    <tr>
+                        <th scope="row">Fingerprint Clearance Card Proof</th>
+                        <td>
+                            <?php
+                                $fingerprint_url = wp_nonce_url(
+                                    admin_url( 'admin-post.php?action=mrm_profile_card_download_private_file&file=' . rawurlencode( $editing['fingerprint_card_file'] ) . '&name=' . rawurlencode( $editing['fingerprint_card_name'] ?? 'fingerprint-proof' ) ),
+                                    'mrm_profile_card_download_private_file'
+                                );
+                            ?>
+                            <a class="button" href="<?php echo esc_url( $fingerprint_url ); ?>" target="_blank" rel="noopener">View Private Fingerprint Proof</a>
+                            <p class="description">This private file is available to admins only.</p>
+                        </td>
+                    </tr>
+                    <?php endif; ?>
+                    <tr>
+                        <th scope="row">Onboarding Confirmations</th>
+                        <td>
+                            <p><strong>DocuSign / W-9 completed:</strong> <?php echo ! empty( $editing['docusign_completed'] ) ? 'Yes' : 'No'; ?></p>
+                            <p><strong>Stripe account linking completed:</strong> <?php echo ! empty( $editing['stripe_onboarding_completed'] ) ? 'Yes' : 'No'; ?></p>
                         </td>
                     </tr>
                     <tr>
@@ -13631,11 +13703,7 @@ public function render_contractor_tax_profiles_page() {
                     <tr>
                         <th scope="row"><label for="timezone">Timezone</label></th>
                         <td>
-                            <select name="timezone" id="timezone" class="regular-text" required style="max-width:420px;">
-                                <?php foreach ( $tz_options as $tz_val => $tz_label ) : ?>
-                                <option value="<?php echo esc_attr( $tz_val ); ?>" <?php selected( $tz_selected, $tz_val ); ?>> <?php echo esc_html( $tz_label ); ?> </option>
-                                <?php endforeach; ?>
-                            </select>
+                            <?php echo $this->mrm_scheduler_timezone_select_html( 'timezone', $tz_selected, 'timezone', true ); ?>
                             <p class="description">Instructor’s home timezone. Student-facing times should be converted in frontend.</p>
                         </td>
                     </tr>
