@@ -12458,11 +12458,26 @@ public function render_access_lists_page() {
 
   private function mrm_profile_card_get_by_token($token) {
     global $wpdb;
+
     $token = trim((string)$token);
-    if ($token === '') return null;
+
+    if ($token === '') {
+      return null;
+    }
+
     $table = $this->table_profile_card_requests();
-    $hash = $this->mrm_profile_card_hash_token($token);
-    return $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE token_hash = %s LIMIT 1", $hash), ARRAY_A);
+    $hash  = $this->mrm_profile_card_hash_token($token);
+
+    return $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT * FROM {$table}
+         WHERE token_hash = %s
+         AND status IN ('sent', 'pending_review', 'changes_requested')
+         LIMIT 1",
+        $hash
+      ),
+      ARRAY_A
+    );
   }
 
   private function mrm_profile_card_decode_json($json) {
@@ -12605,7 +12620,13 @@ public function render_access_lists_page() {
     global $wpdb;
     $table = $this->table_profile_card_requests();
     $this->maybe_install_or_upgrade_db();
-    $requests = $wpdb->get_results("SELECT * FROM {$table} ORDER BY updated_at DESC, id DESC LIMIT 100", ARRAY_A);
+    $requests = $wpdb->get_results(
+      "SELECT * FROM {$table}
+       WHERE status IN ('sent', 'pending_review', 'changes_requested')
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 100",
+      ARRAY_A
+    );
 
     $presenters_table = $wpdb->prefix . 'mrm_masterclass_presenters';
     $presenters = array();
@@ -12679,6 +12700,12 @@ public function render_access_lists_page() {
       <?php if (isset($_GET['changes'])) : ?>
         <div class="notice notice-success">
           <p>Change request email sent.</p>
+        </div>
+      <?php endif; ?>
+
+      <?php if (isset($_GET['deleted'])) : ?>
+        <div class="notice notice-success">
+          <p>Profile Card Creation request deleted. The private link has been disabled.</p>
         </div>
       <?php endif; ?>
       <hr>
@@ -12807,13 +12834,14 @@ public function render_access_lists_page() {
         }
       })();
       </script>
-      <hr><h2>Submitted / Active Requests</h2>
+      <hr><h2>Active Profile Card Requests</h2>
+      <p class="description">Requests disappear from this list after they are approved or deleted.</p>
       <table class="widefat striped"><thead><tr><th>ID</th><th>Type</th><th>Recipient</th><th>Status</th><th>Submitted</th><th>Created Target</th><th>Actions</th></tr></thead><tbody>
-      <?php if (empty($requests)) : ?><tr><td colspan="7">No profile card requests yet.</td></tr><?php else : foreach ($requests as $request) : $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? ''); $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? ''); $target = !empty($request['created_target_type']) && !empty($request['created_target_id']) ? $request['created_target_type'] . ' #' . $request['created_target_id'] : '—'; ?>
+      <?php if (empty($requests)) : ?><tr><td colspan="7">No active profile card requests need review.</td></tr><?php else : foreach ($requests as $request) : $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? ''); $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? ''); $target = !empty($request['created_target_type']) && !empty($request['created_target_id']) ? $request['created_target_type'] . ' #' . $request['created_target_id'] : '—'; ?>
         <tr><td><?php echo esc_html($request['id']); ?></td><td><?php echo esc_html($this->mrm_profile_card_request_type_label($request['request_type'])); ?></td><td><strong><?php echo esc_html($request['recipient_name']); ?></strong><br><code><?php echo esc_html($request['recipient_email']); ?></code></td><td><?php echo esc_html($request['status']); ?></td><td><?php echo esc_html($request['submitted_at'] ?: '—'); ?></td><td><?php echo esc_html($target); ?></td><td><details><summary class="button">Preview / Review</summary><div style="margin-top:12px;padding:12px;border:1px solid #dcdcde;background:#fff;"><h3>Submitted Information</h3>
         <?php if (empty($payload)) : ?><p>No submission data yet.</p><?php else : ?><table class="widefat striped"><tbody><?php foreach ($payload as $key => $value) : ?><tr><th style="width:220px;"><?php echo esc_html(ucwords(str_replace('_', ' ', $key))); ?></th><td><?php echo is_array($value) ? '<pre style="white-space:pre-wrap;">' . esc_html(wp_json_encode($value, JSON_PRETTY_PRINT)) . '</pre>' : wp_kses_post(nl2br(esc_html((string)$value))); ?></td></tr><?php endforeach; ?></tbody></table><?php endif; ?>
         <?php if (!empty($uploads)) : ?><h3>Uploaded Files</h3><ul><?php foreach ($uploads as $file) : ?><li><a href="<?php echo esc_url($file['url'] ?? ''); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html($file['name'] ?? 'Uploaded file'); ?></a></li><?php endforeach; ?></ul><?php endif; ?>
-        <h3>Admin Approval Fields</h3><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_profile_card_admin_action', 'mrm_profile_card_admin_nonce'); ?><input type="hidden" name="action" value="mrm_profile_card_admin_action"><input type="hidden" name="request_id" value="<?php echo esc_attr($request['id']); ?>"><p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified DocuSign contract and W-9 completion.</label></p><p><label>Approval note / internal note</label><br><textarea name="admin_review_note" rows="4" class="large-text"></textarea></p><p><label>Change request note to recipient</label><br><textarea name="change_request_note" rows="4" class="large-text" placeholder="Write what you want them to change. This will be emailed if you click Request Changes."></textarea></p><p><button type="submit" name="mrm_profile_card_do" value="approve" class="button button-primary">Approve and Create</button> <button type="submit" name="mrm_profile_card_do" value="changes" class="button">Request Changes</button> <button type="submit" name="mrm_profile_card_do" value="archive" class="button">Archive</button></p></form></div></details></td></tr>
+        <h3>Admin Approval Fields</h3><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_profile_card_admin_action', 'mrm_profile_card_admin_nonce'); ?><input type="hidden" name="action" value="mrm_profile_card_admin_action"><input type="hidden" name="request_id" value="<?php echo esc_attr($request['id']); ?>"><p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified DocuSign contract and W-9 completion.</label></p><p><label>Approval note / internal note</label><br><textarea name="admin_review_note" rows="4" class="large-text"></textarea></p><p><label>Change request note to recipient</label><br><textarea name="change_request_note" rows="4" class="large-text" placeholder="Write what you want them to change. This will be emailed if you click Request Changes."></textarea></p><p><button type="submit" name="mrm_profile_card_do" value="approve" class="button button-primary">Approve and Create</button> <button type="submit" name="mrm_profile_card_do" value="changes" class="button">Request Changes</button> <button type="submit" name="mrm_profile_card_do" value="delete" class="button" onclick="return confirm('Delete this request? The private link will stop working and this request will be removed from the active review list.');">Delete This Request</button></p></form></div></details></td></tr>
       <?php endforeach; endif; ?></tbody></table></div><?php
   }
 
@@ -13119,9 +13147,28 @@ public function render_access_lists_page() {
       exit;
     }
 
-    if ($do === 'archive') {
-      $wpdb->update($table, array('status' => 'archived', 'updated_at' => current_time('mysql')), array('id' => $request_id));
-      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&archived=1'));
+    if ($do === 'delete') {
+      $delete_note = sanitize_textarea_field(wp_unslash($_POST['admin_review_note'] ?? ''));
+
+      $existing_notes = $this->mrm_profile_card_decode_json($request['review_notes'] ?? '');
+
+      $existing_notes['deleted_note'] = $delete_note;
+      $existing_notes['deleted_at'] = current_time('mysql');
+      $existing_notes['deleted_by'] = get_current_user_id();
+
+      $wpdb->update(
+        $table,
+        array(
+          'status' => 'deleted',
+          'token_hash' => $this->mrm_profile_card_hash_token($this->mrm_profile_card_new_token()),
+          'token_expires_at' => current_time('mysql'),
+          'review_notes' => $this->mrm_profile_card_encode_json($existing_notes),
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => $request_id)
+      );
+
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&deleted=1'));
       exit;
     }
 
