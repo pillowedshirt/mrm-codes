@@ -12491,6 +12491,98 @@ public function render_access_lists_page() {
     return 'Instructor Profile Card';
   }
 
+
+
+  private function mrm_profile_card_existing_instructor_by_email($email) {
+    global $wpdb;
+
+    $email = sanitize_email((string)$email);
+    if (!is_email($email)) {
+      return null;
+    }
+
+    $table = $wpdb->prefix . 'mrm_instructors';
+
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) !== $table) {
+      return null;
+    }
+
+    return $wpdb->get_row(
+      $wpdb->prepare("SELECT * FROM {$table} WHERE email = %s ORDER BY id DESC LIMIT 1", $email),
+      ARRAY_A
+    );
+  }
+
+  private function mrm_profile_card_existing_presenter_by_email($email) {
+    global $wpdb;
+
+    $email = sanitize_email((string)$email);
+    if (!is_email($email)) {
+      return null;
+    }
+
+    $table = $wpdb->prefix . 'mrm_masterclass_presenters';
+
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) !== $table) {
+      return null;
+    }
+
+    return $wpdb->get_row(
+      $wpdb->prepare("SELECT * FROM {$table} WHERE email = %s ORDER BY id DESC LIMIT 1", $email),
+      ARRAY_A
+    );
+  }
+
+  private function mrm_profile_card_us_timezones() {
+    return array(
+      'America/New_York'    => 'Eastern Time — America/New_York',
+      'America/Chicago'     => 'Central Time — America/Chicago',
+      'America/Denver'      => 'Mountain Time — America/Denver',
+      'America/Phoenix'     => 'Arizona Time — America/Phoenix',
+      'America/Los_Angeles' => 'Pacific Time — America/Los_Angeles',
+      'America/Anchorage'   => 'Alaska Time — America/Anchorage',
+      'America/Adak'        => 'Hawaii-Aleutian Time — America/Adak',
+      'Pacific/Honolulu'    => 'Hawaii Time — Pacific/Honolulu',
+    );
+  }
+
+  private function mrm_profile_card_timezone_select_html($name, $selected = 'America/Phoenix') {
+    $selected = sanitize_text_field((string)$selected);
+    $zones = $this->mrm_profile_card_us_timezones();
+
+    $html = '<select name="' . esc_attr($name) . '" required>';
+
+    foreach ($zones as $value => $label) {
+      $html .= '<option value="' . esc_attr($value) . '"' . selected($selected, $value, false) . '>' . esc_html($label) . '</option>';
+    }
+
+    $html .= '</select>';
+
+    return $html;
+  }
+
+  private function mrm_profile_card_handle_media_upload($field_name) {
+    if (empty($_FILES[$field_name]['name'])) {
+      return '';
+    }
+
+    if (!function_exists('media_handle_upload')) {
+      require_once ABSPATH . 'wp-admin/includes/file.php';
+      require_once ABSPATH . 'wp-admin/includes/media.php';
+      require_once ABSPATH . 'wp-admin/includes/image.php';
+    }
+
+    $attachment_id = media_handle_upload($field_name, 0);
+
+    if (is_wp_error($attachment_id)) {
+      return '';
+    }
+
+    $url = wp_get_attachment_url($attachment_id);
+
+    return $url ? esc_url_raw($url) : '';
+  }
+
   private function mrm_profile_card_render_instructor_pay_chart_html() {
     $settings = $this->get_settings();
     $rows = $this->mrm_get_instructor_payout_chart_rows();
@@ -12527,6 +12619,34 @@ public function render_access_lists_page() {
     ?>
     <div class="wrap"><h1>Profile Card Creation</h1>
       <p class="description">Send private onboarding links to instructors and presenters. Submitted requests appear below for review before anything is created in Scheduler or Masterclass settings.</p>
+
+      <?php
+      $duplicate_email = isset($_GET['duplicate_email']) ? sanitize_email(wp_unslash($_GET['duplicate_email'])) : '';
+      $duplicate_type  = isset($_GET['duplicate_type']) ? sanitize_key(wp_unslash($_GET['duplicate_type'])) : '';
+      $duplicate_id    = isset($_GET['duplicate_id']) ? absint($_GET['duplicate_id']) : 0;
+      $duplicate_note  = isset($_GET['duplicate_note']) ? sanitize_textarea_field(wp_unslash($_GET['duplicate_note'])) : '';
+      $duplicate_days  = isset($_GET['duplicate_days']) ? absint($_GET['duplicate_days']) : 14;
+
+      if ($duplicate_email && $duplicate_id && in_array($duplicate_type, array('instructor_profile', 'presenter_profile'), true)) :
+        $duplicate_label = $duplicate_type === 'presenter_profile' ? 'presenter' : 'instructor';
+      ?>
+        <div class="notice notice-warning" style="padding:12px 14px;">
+          <p><strong>This email is already in use.</strong> A <?php echo esc_html($duplicate_label); ?> profile already exists for <code><?php echo esc_html($duplicate_email); ?></code>.</p>
+          <p>You can request an update to the existing profile card, or go back and choose a different email.</p>
+          <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;">
+            <?php wp_nonce_field('mrm_profile_card_create_invite', 'mrm_profile_card_nonce'); ?>
+            <input type="hidden" name="action" value="mrm_profile_card_create_invite">
+            <input type="hidden" name="request_type" value="<?php echo esc_attr($duplicate_type); ?>">
+            <input type="hidden" name="recipient_email" value="<?php echo esc_attr($duplicate_email); ?>">
+            <input type="hidden" name="token_days" value="<?php echo esc_attr($duplicate_days ?: 14); ?>">
+            <input type="hidden" name="admin_note" value="<?php echo esc_attr($duplicate_note); ?>">
+            <input type="hidden" name="force_profile_update" value="1">
+            <input type="hidden" name="existing_target_id" value="<?php echo esc_attr($duplicate_id); ?>">
+            <button type="submit" class="button button-primary">Request Update to Existing Profile</button>
+          </form>
+          <a class="button" href="<?php echo esc_url(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation')); ?>">Go Back</a>
+        </div>
+      <?php endif; ?>
       <?php if (isset($_GET['error'])) : ?>
         <?php
           $profile_card_error = sanitize_text_field(wp_unslash($_GET['error']));
@@ -12759,14 +12879,36 @@ public function render_access_lists_page() {
 
     $token = $this->mrm_profile_card_new_token();
     $days = max(1, min(60, absint($_POST['token_days'] ?? 14)));
-
     $admin_note = sanitize_textarea_field(wp_unslash($_POST['admin_note'] ?? ''));
+
+    $force_profile_update = !empty($_POST['force_profile_update']);
+    $existing_target_id   = absint($_POST['existing_target_id'] ?? 0);
+
+    if (!$force_profile_update && $request_type === 'instructor_profile') {
+      $existing = $this->mrm_profile_card_existing_instructor_by_email($recipient_email);
+
+      if ($existing && !empty($existing['id'])) {
+        wp_safe_redirect(add_query_arg(array('page' => 'mrm-pay-hub-profile-card-creation', 'duplicate_email' => rawurlencode($recipient_email), 'duplicate_type' => 'instructor_profile', 'duplicate_id' => absint($existing['id']), 'duplicate_days' => $days, 'duplicate_note' => rawurlencode($admin_note)), admin_url('admin.php')));
+        exit;
+      }
+    }
+
+    if (!$force_profile_update && $request_type === 'presenter_profile') {
+      $existing = $this->mrm_profile_card_existing_presenter_by_email($recipient_email);
+
+      if ($existing && !empty($existing['id'])) {
+        wp_safe_redirect(add_query_arg(array('page' => 'mrm-pay-hub-profile-card-creation', 'duplicate_email' => rawurlencode($recipient_email), 'duplicate_type' => 'presenter_profile', 'duplicate_id' => absint($existing['id']), 'duplicate_days' => $days, 'duplicate_note' => rawurlencode($admin_note)), admin_url('admin.php')));
+        exit;
+      }
+    }
 
     $admin_payload = array(
       'admin_note' => $admin_note,
       'selected_presenter_id' => $selected_presenter_id,
       'presenter_payout_per_student_cents' => 0,
       'event_price_cents' => 0,
+      'is_profile_update' => $force_profile_update ? 1 : 0,
+      'existing_target_id' => $existing_target_id,
     );
 
     if ($request_type === 'presenter_event') {
@@ -12776,75 +12918,132 @@ public function render_access_lists_page() {
 
     $now = current_time('mysql');
 
-    $wpdb->insert(
-      $table,
-      array(
-        'request_type' => $request_type,
-        'status' => 'sent',
-        'recipient_name' => $recipient_name,
-        'recipient_email' => $recipient_email,
-        'token_hash' => $this->mrm_profile_card_hash_token($token),
-        'token_expires_at' => gmdate('Y-m-d H:i:s', time() + ($days * DAY_IN_SECONDS)),
-        'admin_payload' => $this->mrm_profile_card_encode_json($admin_payload),
-        'submission_payload' => $this->mrm_profile_card_encode_json(array()),
-        'review_notes' => $this->mrm_profile_card_encode_json(array()),
-        'uploaded_files' => $this->mrm_profile_card_encode_json(array()),
-        'sent_at' => $now,
-        'created_at' => $now,
-        'updated_at' => $now,
-      )
-    );
+    $wpdb->insert($table, array('request_type' => $request_type, 'status' => 'sent', 'recipient_name' => $recipient_name, 'recipient_email' => $recipient_email, 'token_hash' => $this->mrm_profile_card_hash_token($token), 'token_expires_at' => gmdate('Y-m-d H:i:s', time() + ($days * DAY_IN_SECONDS)), 'admin_payload' => $this->mrm_profile_card_encode_json($admin_payload), 'submission_payload' => $this->mrm_profile_card_encode_json(array()), 'review_notes' => $this->mrm_profile_card_encode_json(array()), 'uploaded_files' => $this->mrm_profile_card_encode_json(array()), 'sent_at' => $now, 'created_at' => $now, 'updated_at' => $now));
 
-    $url = add_query_arg(
-      array(
-        'action' => 'mrm_profile_card_form',
-        'token' => $token,
-      ),
-      admin_url('admin-post.php')
-    );
+    $url = add_query_arg(array('action' => 'mrm_profile_card_form', 'token' => $token), admin_url('admin-post.php'));
 
     $label = $this->mrm_profile_card_request_type_label($request_type);
 
-    $subject = 'Low Brass Lessons ' . strtolower($label);
-
-    $body = '<p>Hello,</p>';
-    $body .= '<p>Low Brass Lessons has invited you to complete a private onboarding form for a <strong>' . esc_html($label) . '</strong>.</p>';
-
-    if ($admin_note !== '') {
-      $body .= '<div style="margin:16px 0;padding:14px 16px;background:#fbf8f2;border:1px solid #d9cfbe;border-radius:14px;color:#171512;">';
-      $body .= '<strong>Note from Low Brass Lessons:</strong><br>';
-      $body .= nl2br(esc_html($admin_note));
-      $body .= '</div>';
+    if ($force_profile_update) {
+      $label .= ' Update';
     }
 
-    $body .= '<p><a href="' . esc_url($url) . '" style="display:inline-block;background:#171512;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:700;">Complete Your Form</a></p>';
-    $body .= '<p>This private link expires in ' . esc_html((string)$days) . ' days.</p>';
+    $subject = 'Low Brass Lessons ' . strtolower($label);
 
-    wp_mail(
-      $recipient_email,
-      $subject,
-      $body,
-      array('Content-Type: text/html; charset=UTF-8')
-    );
+    $intro_html = '<p>Hello,</p>';
+    $intro_html .= '<p>Low Brass Lessons has invited you to complete a private onboarding form for a <strong>' . esc_html($label) . '</strong>.</p>';
+
+    $details_html = '<div><strong>Request type:</strong> ' . esc_html($label) . '</div>';
+    $details_html .= '<div><strong>Private link expiration:</strong> ' . esc_html((string)$days) . ' days</div>';
+
+    if ($admin_note !== '') {
+      $details_html .= '<div style="margin-top:12px;padding-top:12px;border-top:1px solid #d9cfbe;"><strong>Note from Low Brass Lessons:</strong><br>' . nl2br(esc_html($admin_note)) . '</div>';
+    }
+
+    $body = $this->mrm_email_wrap_html($label, $intro_html, $details_html, $url, 'Complete Your Form');
+
+    wp_mail($recipient_email, $subject, $body, array('Content-Type: text/html; charset=UTF-8'));
 
     wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&sent=1'));
     exit;
   }
 
   public function render_profile_card_public_form() {
-    $token = sanitize_text_field(wp_unslash($_GET['token'] ?? '')); $request = $this->mrm_profile_card_get_by_token($token);
-    if (!$request) wp_die('This profile card request link is invalid.');
-    if (!empty($request['token_expires_at']) && strtotime($request['token_expires_at']) < time()) wp_die('This profile card request link has expired. Please contact Low Brass Lessons for a new link.');
-    $request_type = sanitize_key($request['request_type']); $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? ''); $submission = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? ''); nocache_headers(); ?>
-    <!doctype html><html><head><meta charset="utf-8"><title><?php echo esc_html($this->mrm_profile_card_request_type_label($request_type)); ?></title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;background:#fbf8f2;color:#171512;font-family:"Source Sans 3",Arial,Helvetica,sans-serif}.mrm-public-wrap{max-width:860px;margin:0 auto;padding:44px 18px 72px}.mrm-public-card{background:#fff;border:1px solid #d9cfbe;border-radius:24px;padding:clamp(22px,4vw,38px);box-shadow:0 18px 40px rgba(25,22,18,.07)}h1,h2,h3{font-family:"Academico",Georgia,"Times New Roman",serif;font-weight:600;letter-spacing:-.02em}label{display:block;font-weight:800;margin:14px 0 6px}input,select,textarea{width:100%;box-sizing:border-box;border:1px solid #d9cfbe;border-radius:14px;padding:12px 14px;font:inherit}textarea{min-height:120px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.pay-box,.mrm-profile-public-pay-box{background:#f6f1e7;border:1px solid #d9cfbe;border-radius:18px;padding:16px;margin:18px 0}table{width:100%;border-collapse:collapse;background:#fff;margin-top:10px}th,td{border:1px solid #d9cfbe;padding:8px;text-align:left}button{border:0;border-radius:999px;background:#171512;color:#fff;padding:14px 22px;font-weight:900;cursor:pointer}.muted{color:#5f5851}@media(max-width:720px){.grid{grid-template-columns:1fr}}</style></head><body><div class="mrm-public-wrap"><div class="mrm-public-card"><h1><?php echo esc_html($this->mrm_profile_card_request_type_label($request_type)); ?></h1><?php if (!empty($admin_payload['admin_note'])) : ?><p class="muted"><?php echo esc_html($admin_payload['admin_note']); ?></p><?php endif; ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" enctype="multipart/form-data"><?php wp_nonce_field('mrm_profile_card_public_submit', 'mrm_profile_card_public_nonce'); ?><input type="hidden" name="action" value="mrm_profile_card_submit"><input type="hidden" name="token" value="<?php echo esc_attr($token); ?>">
-    <?php if ($request_type === 'presenter_event') : ?><h2>Event Details</h2><label>Masterclass Title *</label><input type="text" name="event_title" value="<?php echo esc_attr($submission['event_title'] ?? ''); ?>" required><label>Short Description *</label><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea><label>Long Description *</label><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea><div class="grid"><div><label>Start Time *</label><input type="datetime-local" name="start_time" value="<?php echo esc_attr($submission['start_time'] ?? ''); ?>" required></div><div><label>End Time *</label><input type="datetime-local" name="end_time" value="<?php echo esc_attr($submission['end_time'] ?? ''); ?>" required></div></div><label>Timezone *</label><input type="text" name="timezone" value="<?php echo esc_attr($submission['timezone'] ?? 'America/Phoenix'); ?>" required><div class="pay-box"><p><strong>Student registration price:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['event_price_cents'] ?? 0)); ?></p><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled.</p><label><input type="checkbox" name="pay_ack" value="1" required> I acknowledge the agreed event price and presenter earnings shown above.</label></div>
-    <?php else : ?><h2>Profile Information</h2><div class="grid"><div><label>Name *</label><input type="text" name="name" value="<?php echo esc_attr($submission['name'] ?? ''); ?>" required></div><div><label>Email *</label><input type="email" name="email" value="<?php echo esc_attr($submission['email'] ?? $request['recipient_email']); ?>" required></div></div><div class="grid"><div><label>City *</label><input type="text" name="city" value="<?php echo esc_attr($submission['city'] ?? ''); ?>" required></div><div><label>State *</label><input type="text" name="state" maxlength="2" value="<?php echo esc_attr($submission['state'] ?? ''); ?>" required></div></div><label>Address *</label><input type="text" name="address" value="<?php echo esc_attr($submission['address'] ?? ''); ?>" required><label>ZIP Code *</label><input type="text" name="zip_code" value="<?php echo esc_attr($submission['zip_code'] ?? ''); ?>" required><?php if ($request_type === 'instructor_profile') : ?><label>Teaching Formats *</label><label><input type="checkbox" name="offers_online" value="1" <?php checked(!empty($submission['offers_online'])); ?>> Online lessons</label><label><input type="checkbox" name="offers_in_person" value="1" <?php checked(!empty($submission['offers_in_person'])); ?>> In-person lessons</label><label>Instruments *</label><label><input type="checkbox" name="instruments[]" value="trombone" <?php checked(in_array('trombone', (array)($submission['instruments'] ?? array()), true)); ?>> Trombone</label><label><input type="checkbox" name="instruments[]" value="euphonium" <?php checked(in_array('euphonium', (array)($submission['instruments'] ?? array()), true)); ?>> Euphonium</label><label><input type="checkbox" name="instruments[]" value="tuba" <?php checked(in_array('tuba', (array)($submission['instruments'] ?? array()), true)); ?>> Tuba</label><?php endif; ?><?php if ($request_type === 'presenter_profile') : ?><label>Presenter Title *</label><input type="text" name="presenter_title" value="<?php echo esc_attr($submission['presenter_title'] ?? ''); ?>" required><?php endif; ?><label>Short Description *</label><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea><label>Long Description *</label><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea><label>Profile Image URL</label><input type="url" name="profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>" placeholder="https://..."><label>Fingerprint Clearance Card Proof *</label><input type="file" name="fingerprint_card" accept="image/*,.pdf"><label><input type="checkbox" name="docusign_completed" value="1" required <?php checked(!empty($submission['docusign_completed'])); ?>> I confirm that I have completed the required DocuSign agreement and W-9 process.</label><?php if ($request_type === 'instructor_profile') : ?><?php echo $this->mrm_profile_card_render_instructor_pay_chart_html(); ?><label><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>> I acknowledge the instructor payout chart shown above.</label><?php endif; ?><?php if ($request_type === 'presenter_profile') : ?><div class="pay-box"><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled in an approved Masterclass.</p><label><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>> I acknowledge the agreed presenter earnings shown above.</label></div><?php endif; ?><?php endif; ?><p style="margin-top:24px;"><button type="submit">Submit Your Request</button></p></form></div></div></body></html><?php exit;
+    $token = sanitize_text_field(wp_unslash($_GET['token'] ?? ''));
+    $request = $this->mrm_profile_card_get_by_token($token);
+
+    if (!$request) {
+      wp_die('This profile card request link is invalid.');
+    }
+
+    if (!empty($request['token_expires_at']) && strtotime($request['token_expires_at']) < time()) {
+      wp_die('This profile card request link has expired. Please contact Low Brass Lessons for a new link.');
+    }
+
+    $request_type = sanitize_key($request['request_type']);
+    $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
+    $submission = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+
+    nocache_headers();
+
+    ?>
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title><?php echo esc_html($this->mrm_profile_card_request_type_label($request_type)); ?></title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body { margin: 0; background: #fbf8f2; color: #171512; font-family: "Source Sans 3", Arial, Helvetica, sans-serif; }
+        .mrm-public-wrap { max-width: 860px; margin: 0 auto; padding: 44px 18px 72px; }
+        .mrm-public-card { background: #fff; border: 1px solid #d9cfbe; border-radius: 24px; padding: clamp(22px, 4vw, 38px); box-shadow: 0 18px 40px rgba(25,22,18,.07); }
+        h1, h2, h3 { font-family: "Academico", Georgia, "Times New Roman", serif; font-weight: 600; letter-spacing: -.02em; }
+        label { display: block; font-weight: 800; margin: 14px 0 6px; }
+        .mrm-field-help { margin: 4px 0 8px; color: #5f5851; font-size: 13px; line-height: 1.45; }
+        input, select, textarea { width: 100%; box-sizing: border-box; border: 1px solid #d9cfbe; border-radius: 14px; padding: 12px 14px; font: inherit; }
+        textarea { min-height: 120px; }
+        input[type="checkbox"] { appearance: none; -webkit-appearance: none; width: 18px; height: 18px; min-width: 18px; min-height: 18px; margin: 1px 10px 0 0; padding: 0; border: 2px solid #171512; border-radius: 5px; background: #ffffff; display: inline-grid; place-content: center; cursor: pointer; vertical-align: top; }
+        input[type="checkbox"]::after { content: ""; width: 9px; height: 5px; border-left: 2px solid #ffffff; border-bottom: 2px solid #ffffff; transform: rotate(-45deg); opacity: 0; margin-top: -1px; }
+        input[type="checkbox"]:checked { background: #171512; border-color: #171512; }
+        input[type="checkbox"]:checked::after { opacity: 1; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        .pay-box, .mrm-profile-public-pay-box, .mrm-check-section { background: #f6f1e7; border: 1px solid #d9cfbe; border-radius: 18px; padding: 16px; margin: 18px 0; }
+        .mrm-check-section h3 { margin: 0 0 10px; }
+        .mrm-check-grid { display: grid; gap: 8px; margin-top: 10px; }
+        .mrm-check-row, .mrm-ack-row { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 10px 12px; border: 1px solid #d9cfbe; border-radius: 14px; background: #ffffff; color: #171512; font-weight: 700; line-height: 1.4; }
+        .mrm-ack-row { margin-top: 14px; }
+        .mrm-check-row input, .mrm-ack-row input { flex: 0 0 auto; }
+        table { width: 100%; border-collapse: collapse; background: #fff; margin-top: 10px; }
+        th, td { border: 1px solid #d9cfbe; padding: 8px; text-align: left; }
+        button { border: 0; border-radius: 999px; background: #171512; color: #fff; padding: 14px 22px; font-weight: 900; cursor: pointer; }
+        .muted { color: #5f5851; }
+        @media(max-width:720px) { .grid { grid-template-columns: 1fr; } }
+      </style>
+    </head>
+    <body><div class="mrm-public-wrap"><div class="mrm-public-card">
+      <h1><?php echo esc_html($this->mrm_profile_card_request_type_label($request_type)); ?></h1>
+      <?php if (!empty($admin_payload['admin_note'])) : ?><p class="muted"><?php echo esc_html($admin_payload['admin_note']); ?></p><?php endif; ?>
+      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" enctype="multipart/form-data">
+        <?php wp_nonce_field('mrm_profile_card_public_submit', 'mrm_profile_card_public_nonce'); ?>
+        <input type="hidden" name="action" value="mrm_profile_card_submit"><input type="hidden" name="token" value="<?php echo esc_attr($token); ?>">
+        <?php if ($request_type === 'presenter_event') : ?>
+          <h2>Event Details</h2>
+          <label>Masterclass Title *</label><input type="text" name="event_title" value="<?php echo esc_attr($submission['event_title'] ?? ''); ?>" required>
+          <label>Short Description *</label><p class="mrm-field-help">One sentence to describe your masterclass.</p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
+          <label>Long Description *</label><p class="mrm-field-help">A longer description of the masterclass content, who it is for, and what students will learn.</p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
+          <div class="grid"><div><label>Start Time *</label><input type="datetime-local" name="start_time" value="<?php echo esc_attr($submission['start_time'] ?? ''); ?>" required></div><div><label>End Time *</label><input type="datetime-local" name="end_time" value="<?php echo esc_attr($submission['end_time'] ?? ''); ?>" required></div></div>
+          <label>Timezone *</label><p class="mrm-field-help">Select the U.S. timezone for this masterclass.</p><?php echo $this->mrm_profile_card_timezone_select_html('timezone', $submission['timezone'] ?? 'America/Phoenix'); ?>
+          <div class="pay-box"><p><strong>Student registration price:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['event_price_cents'] ?? 0)); ?></p><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled.</p><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the agreed event price and presenter earnings shown above.</span></label></div>
+        <?php else : ?>
+          <h2>Profile Information</h2>
+          <div class="grid"><div><label>Name *</label><input type="text" name="name" value="<?php echo esc_attr($submission['name'] ?? ''); ?>" required></div><div><label>Email *</label><input type="email" name="email" value="<?php echo esc_attr($submission['email'] ?? $request['recipient_email']); ?>" required></div></div>
+          <div class="grid"><div><label>City *</label><input type="text" name="city" value="<?php echo esc_attr($submission['city'] ?? ''); ?>" required></div><div><label>State *</label><input type="text" name="state" maxlength="2" value="<?php echo esc_attr($submission['state'] ?? ''); ?>" required></div></div>
+          <label>Address *</label><input type="text" name="address" value="<?php echo esc_attr($submission['address'] ?? ''); ?>" required><label>ZIP Code *</label><input type="text" name="zip_code" value="<?php echo esc_attr($submission['zip_code'] ?? ''); ?>" required>
+          <?php if ($request_type === 'instructor_profile') : ?>
+            <div class="mrm-check-section"><h3>Teaching Formats</h3><p class="mrm-field-help">Select the lesson formats you are available to teach.</p><div class="mrm-check-grid"><label class="mrm-check-row"><input type="checkbox" name="offers_online" value="1" <?php checked(!empty($submission['offers_online'])); ?>><span>Online lessons</span></label><label class="mrm-check-row"><input type="checkbox" name="offers_in_person" value="1" <?php checked(!empty($submission['offers_in_person'])); ?>><span>In-person lessons</span></label></div></div>
+            <div class="mrm-check-section"><h3>Instruments</h3><p class="mrm-field-help">Select each instrument you are available to teach.</p><div class="mrm-check-grid"><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="trombone" <?php checked(in_array('trombone', (array)($submission['instruments'] ?? array()), true)); ?>><span>Trombone</span></label><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="euphonium" <?php checked(in_array('euphonium', (array)($submission['instruments'] ?? array()), true)); ?>><span>Euphonium</span></label><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="tuba" <?php checked(in_array('tuba', (array)($submission['instruments'] ?? array()), true)); ?>><span>Tuba</span></label></div></div>
+          <?php endif; ?>
+          <?php if ($request_type === 'presenter_profile') : ?><label>Presenter Title *</label><p class="mrm-field-help">Example: Professor of Trombone, Low Brass Specialist, Orchestral Tubist, Chamber Music Clinician, or Specialist in Brass Pedagogy.</p><input type="text" name="presenter_title" value="<?php echo esc_attr($submission['presenter_title'] ?? ''); ?>" required><?php endif; ?>
+          <label>Short Description *</label><p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'One sentence to describe your lessons.' : 'One sentence to describe your teaching style or professional focus.'; ?></p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
+          <label>Long Description *</label><p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'A longer description of your lesson approach, teaching background, and what students can expect.' : 'A longer professional description of your background, expertise, teaching style, and artistic work.'; ?></p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
+          <label>Profile Image Upload</label><p class="mrm-field-help">Upload the photo you would like used on your public profile card. Low Brass Lessons will review and approve the image before publishing.</p><input type="file" name="profile_image_file" accept="image/*"><input type="hidden" name="existing_profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>">
+          <?php if (!empty($submission['profile_image_url'])) : ?><p class="mrm-field-help">A profile image has already been uploaded. Upload a new image only if you want to replace it.</p><?php endif; ?>
+          <label>Fingerprint Clearance Card Proof *</label><input type="file" name="fingerprint_card" accept="image/*,.pdf">
+          <label class="mrm-ack-row"><input type="checkbox" name="docusign_completed" value="1" required <?php checked(!empty($submission['docusign_completed'])); ?>><span>I confirm that I have completed the required DocuSign agreement and W-9 process.</span></label>
+          <?php if ($request_type === 'instructor_profile') : ?><?php echo $this->mrm_profile_card_render_instructor_pay_chart_html(); ?><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the instructor payout chart shown above.</span></label><?php endif; ?>
+        <?php endif; ?>
+        <p style="margin-top:24px;"><button type="submit">Submit Your Request</button></p>
+      </form>
+    </div></div></body></html>
+    <?php
+    exit;
   }
 
   public function handle_profile_card_public_submit() {
     check_admin_referer('mrm_profile_card_public_submit', 'mrm_profile_card_public_nonce');
 
     global $wpdb;
+
     $table = $this->table_profile_card_requests();
 
     $token = sanitize_text_field(wp_unslash($_POST['token'] ?? ''));
@@ -12855,57 +13054,37 @@ public function render_access_lists_page() {
     }
 
     $request_type = sanitize_key($request['request_type']);
-
     $payload = array();
 
     if ($request_type === 'presenter_event') {
-      $payload = array(
-        'event_title' => sanitize_text_field(wp_unslash($_POST['event_title'] ?? '')),
-        'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')),
-        'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')),
-        'start_time' => sanitize_text_field(wp_unslash($_POST['start_time'] ?? '')),
-        'end_time' => sanitize_text_field(wp_unslash($_POST['end_time'] ?? '')),
-        'timezone' => sanitize_text_field(wp_unslash($_POST['timezone'] ?? 'America/Phoenix')),
-        'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0,
-      );
+      $payload = array('event_title' => sanitize_text_field(wp_unslash($_POST['event_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'start_time' => sanitize_text_field(wp_unslash($_POST['start_time'] ?? '')), 'end_time' => sanitize_text_field(wp_unslash($_POST['end_time'] ?? '')), 'timezone' => sanitize_text_field(wp_unslash($_POST['timezone'] ?? 'America/Phoenix')), 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0);
     } else {
       $instruments = array();
+
       if (isset($_POST['instruments']) && is_array($_POST['instruments'])) {
         $instruments = array_map('sanitize_key', wp_unslash($_POST['instruments']));
       }
 
-      $payload = array(
-        'name' => sanitize_text_field(wp_unslash($_POST['name'] ?? '')),
-        'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')),
-        'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')),
-        'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)),
-        'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')),
-        'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')),
-        'offers_online' => !empty($_POST['offers_online']) ? 1 : 0,
-        'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0,
-        'instruments' => $instruments,
-        'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')),
-        'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')),
-        'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')),
-        'profile_image_url' => esc_url_raw(wp_unslash($_POST['profile_image_url'] ?? '')),
-        'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0,
-        'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0,
-      );
+      $payload = array('name' => sanitize_text_field(wp_unslash($_POST['name'] ?? '')), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0);
+
+      $profile_image_url = $this->mrm_profile_card_handle_media_upload('profile_image_file');
+
+      if ($profile_image_url !== '') {
+        $payload['profile_image_url'] = $profile_image_url;
+      }
     }
 
     $now = current_time('mysql');
 
-    $update_data = array(
-      'status' => 'pending_review',
-      'submission_payload' => $this->mrm_profile_card_encode_json($payload),
-      'submitted_at' => $now,
-      'updated_at' => $now,
-    );
+    $update_data = array('status' => 'pending_review', 'submission_payload' => $this->mrm_profile_card_encode_json($payload), 'submitted_at' => $now, 'updated_at' => $now);
 
     $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
+
     if ($request_type !== 'presenter_event' && !empty($_FILES['fingerprint_card']['name'])) {
       require_once ABSPATH . 'wp-admin/includes/file.php';
+
       $file = wp_handle_upload($_FILES['fingerprint_card'], array('test_form' => false, 'mimes' => array('jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp', 'pdf' => 'application/pdf')));
+
       if (empty($file['error'])) {
         $uploads[] = array('kind' => 'fingerprint_card', 'name' => sanitize_file_name(wp_unslash($_FILES['fingerprint_card']['name'])), 'url' => esc_url_raw($file['url'] ?? ''), 'file' => $file['file'] ?? '');
         $update_data['uploaded_files'] = $this->mrm_profile_card_encode_json($uploads);
