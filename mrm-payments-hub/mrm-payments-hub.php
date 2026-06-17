@@ -42,6 +42,8 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_export_legal_ledger', array($this, 'handle_export_legal_ledger'));
     add_action('admin_post_mrm_pay_hub_run_selected_payouts', array($this, 'handle_run_selected_payouts'));
     add_action('admin_post_mrm_pay_hub_run_all_payee_payouts', array($this, 'handle_run_all_payee_payouts'));
+    add_action('admin_post_mrm_pay_hub_run_presenter_payout', array($this, 'handle_run_presenter_payout'));
+    add_action('admin_post_mrm_pay_hub_run_all_due_presenter_payouts', array($this, 'handle_run_all_due_presenter_payouts'));
     // BEGIN TEMP PAYMENT HUB AUDIT
     add_action('admin_post_mrm_pay_hub_run_temp_audit', array($this, 'handle_temp_payment_hub_audit_run'));
     // END TEMP PAYMENT HUB AUDIT
@@ -74,6 +76,7 @@ class MRM_Payments_Hub_Single {
 
     add_action('mrm_pay_hub_cleanup_access', array($this, 'cleanup_access'));
     add_action('mrm_pay_hub_daily_payout_check', array($this, 'cron_daily_payout_check'));
+    add_action('mrm_pay_hub_daily_presenter_payout_check', array($this, 'cron_daily_presenter_payout_check'));
     add_action('mrm_pay_hub_retry_autopay_charges', array($this, 'cron_retry_autopay_charges'));
     add_action('mrm_pay_hub_discover_missed_autopay_lessons', array($this, 'cron_discover_missed_autopay_lessons'));
     add_action('mrm_pay_hub_reset_stuck_autopay_lessons', array($this, 'cron_reset_stuck_autopay_lessons'));
@@ -107,6 +110,7 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->mrm_schedule_daily_payout_check();
+    $this->mrm_schedule_daily_presenter_payout_check();
 
     if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
       wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
@@ -146,6 +150,7 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->mrm_schedule_daily_payout_check();
+    $this->mrm_schedule_daily_presenter_payout_check();
 
     if (!wp_next_scheduled('mrm_pay_hub_retry_autopay_charges')) {
       wp_schedule_event(time() + 240, 'mrm_10min', 'mrm_pay_hub_retry_autopay_charges');
@@ -8060,6 +8065,22 @@ private function charge_and_unlock_autopay($data) {
     }
   }
 
+  private function mrm_schedule_daily_presenter_payout_check() {
+    $hook = 'mrm_pay_hub_daily_presenter_payout_check';
+
+    if (!wp_next_scheduled($hook)) {
+      $tz = $this->mrm_payout_timezone();
+      $next = new DateTime('now', $tz);
+      $next->setTime(9, 0, 0);
+
+      if ($next->getTimestamp() <= time()) {
+        $next->modify('+1 day');
+      }
+
+      wp_schedule_event($next->getTimestamp(), 'daily', $hook);
+    }
+  }
+
   public function cron_check_upcoming_payment_methods() {
     global $wpdb;
 
@@ -8230,6 +8251,10 @@ private function charge_and_unlock_autopay($data) {
     if ($this->mrm_is_biweekly_payout_window_open()) {
       $this->mrm_run_payout_batch(false);
     }
+  }
+
+  public function cron_daily_presenter_payout_check() {
+    $this->mrm_run_presenter_payouts(array(), false);
   }
 
   public function mrm_run_payout_batch($force = false, $only_ids = array(), $only_payee_type = '') {
@@ -12604,6 +12629,29 @@ public function render_access_lists_page() {
     );
   }
 
+  private function mrm_profile_card_us_states() {
+    return array(
+      'AL'=>'Alabama','AK'=>'Alaska','AZ'=>'Arizona','AR'=>'Arkansas','CA'=>'California','CO'=>'Colorado','CT'=>'Connecticut','DE'=>'Delaware','FL'=>'Florida','GA'=>'Georgia','HI'=>'Hawaii','ID'=>'Idaho','IL'=>'Illinois','IN'=>'Indiana','IA'=>'Iowa','KS'=>'Kansas','KY'=>'Kentucky','LA'=>'Louisiana','ME'=>'Maine','MD'=>'Maryland','MA'=>'Massachusetts','MI'=>'Michigan','MN'=>'Minnesota','MS'=>'Mississippi','MO'=>'Missouri','MT'=>'Montana','NE'=>'Nebraska','NV'=>'Nevada','NH'=>'New Hampshire','NJ'=>'New Jersey','NM'=>'New Mexico','NY'=>'New York','NC'=>'North Carolina','ND'=>'North Dakota','OH'=>'Ohio','OK'=>'Oklahoma','OR'=>'Oregon','PA'=>'Pennsylvania','RI'=>'Rhode Island','SC'=>'South Carolina','SD'=>'South Dakota','TN'=>'Tennessee','TX'=>'Texas','UT'=>'Utah','VT'=>'Vermont','VA'=>'Virginia','WA'=>'Washington','WV'=>'West Virginia','WI'=>'Wisconsin','WY'=>'Wyoming','DC'=>'District of Columbia'
+    );
+  }
+
+  private function mrm_profile_card_state_select_html($name, $selected = '') {
+    $selected = strtoupper(sanitize_text_field((string)$selected));
+    $html = '<select name="' . esc_attr($name) . '" required>';
+    $html .= '<option value="">Select a state</option>';
+    foreach ($this->mrm_profile_card_us_states() as $abbr => $label) {
+      $html .= '<option value="' . esc_attr($abbr) . '"' . selected($selected, $abbr, false) . '>' . esc_html($label) . '</option>';
+    }
+    $html .= '</select>';
+    return $html;
+  }
+
+  private function mrm_profile_card_availability_guide_image_urls() {
+    return array(
+      // Optional: paste Media Library screenshot URLs here after uploading guide screenshots.
+    );
+  }
+
   private function mrm_profile_card_timezone_select_html($name, $selected = 'America/Phoenix') {
     $selected = sanitize_text_field((string)$selected);
     $zones = $this->mrm_profile_card_us_timezones();
@@ -12755,6 +12803,8 @@ public function render_access_lists_page() {
       'fingerprint_card_uploaded_at' => sanitize_text_field($payload['fingerprint_card_uploaded_at'] ?? ''),
       'docusign_completed' => !empty($payload['docusign_completed']) ? 1 : 0,
       'stripe_onboarding_completed' => !empty($payload['stripe_onboarding_completed']) ? 1 : 0,
+      'profile_social_links_json' => (string)($payload['profile_social_links_json'] ?? ''),
+      'calendar_availability_completed' => !empty($payload['calendar_availability_completed']) ? 1 : 0,
     );
 
     foreach ($optional as $column => $value) {
@@ -12843,6 +12893,7 @@ public function render_access_lists_page() {
             'invalid_recipient' => 'Please enter a valid recipient email address.',
             'missing_request' => 'The selected request could not be found.',
             'unknown_action' => 'The selected Profile Card Creation action was not recognized.',
+            'missing_event_details' => 'Please enter the Masterclass title, start time, and end time before sending an event proposal.',
           );
           $profile_card_error_message = $profile_card_error_messages[$profile_card_error] ?? $profile_card_error;
         ?>
@@ -12904,6 +12955,14 @@ public function render_access_lists_page() {
             </td>
           </tr>
 
+          <tr class="mrm-profile-request-row" data-show-for="instructor_profile">
+            <th scope="row"><label for="instructor_calendar_url">Instructor Google Calendar Link</label></th>
+            <td>
+              <input type="url" id="instructor_calendar_url" name="instructor_calendar_url" class="regular-text" placeholder="https://calendar.google.com/...">
+              <p class="description">Paste the Google Calendar link the instructor should open before submitting this profile card request.</p>
+            </td>
+          </tr>
+
           <tr class="mrm-profile-request-row mrm-profile-row-presenter" data-show-for="presenter_event">
             <th scope="row"><label for="presenter_id">Presenter Profile</label></th>
             <td>
@@ -12934,6 +12993,11 @@ public function render_access_lists_page() {
               <input type="number" id="token_days" name="token_days" min="1" max="60" value="14" class="small-text"> days
             </td>
           </tr>
+
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_title">Masterclass Title</label></th><td><input type="text" id="event_title" name="event_title" class="regular-text"><p class="description">This title is preset by Low Brass Lessons and shown to the presenter on the proposal form.</p></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_start_time">Masterclass Start Time</label></th><td><input type="datetime-local" id="event_start_time" name="event_start_time"><p class="description">Preset start time for the event proposal.</p></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_end_time">Masterclass End Time</label></th><td><input type="datetime-local" id="event_end_time" name="event_end_time"><p class="description">Preset end time for the event proposal.</p></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_timezone">Masterclass Timezone</label></th><td><?php echo $this->mrm_profile_card_timezone_select_html('event_timezone', 'America/Phoenix'); ?><p class="description">Preset event timezone.</p></td></tr>
 
           <tr class="mrm-profile-request-row mrm-profile-row-event-pay" data-show-for="presenter_event">
             <th scope="row"><label for="presenter_payout">Presenter Pay Per Student</label></th>
@@ -13098,6 +13162,11 @@ public function render_access_lists_page() {
 
     $admin_payload = array(
       'admin_note' => $admin_note,
+      'instructor_calendar_url' => esc_url_raw(wp_unslash($_POST['instructor_calendar_url'] ?? '')),
+      'event_title' => sanitize_text_field(wp_unslash($_POST['event_title'] ?? '')),
+      'event_start_time' => sanitize_text_field(wp_unslash($_POST['event_start_time'] ?? '')),
+      'event_end_time' => sanitize_text_field(wp_unslash($_POST['event_end_time'] ?? '')),
+      'event_timezone' => sanitize_text_field(wp_unslash($_POST['event_timezone'] ?? 'America/Phoenix')),
       'selected_presenter_id' => $selected_presenter_id,
       'presenter_payout_per_student_cents' => 0,
       'event_price_cents' => 0,
@@ -13108,6 +13177,10 @@ public function render_access_lists_page() {
     if ($request_type === 'presenter_event') {
       $admin_payload['presenter_payout_per_student_cents'] = $this->mrm_profile_card_money_to_cents($_POST['presenter_payout'] ?? '0');
       $admin_payload['event_price_cents'] = $this->mrm_profile_card_money_to_cents($_POST['event_price'] ?? '0');
+      if (trim((string)$admin_payload['event_title']) === '' || trim((string)$admin_payload['event_start_time']) === '' || trim((string)$admin_payload['event_end_time']) === '') {
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_event_details'));
+        exit;
+      }
     }
 
     $now = current_time('mysql');
@@ -13236,24 +13309,25 @@ public function render_access_lists_page() {
         <input type="hidden" name="action" value="mrm_profile_card_submit"><input type="hidden" name="token" value="<?php echo esc_attr($token); ?>">
         <?php if ($request_type === 'presenter_event') : ?>
           <h2>Event Details</h2>
-          <label>Masterclass Title *</label><input type="text" name="event_title" value="<?php echo esc_attr($submission['event_title'] ?? ''); ?>" required>
+          <div class="pay-box"><p><strong>Masterclass Title:</strong> <?php echo esc_html($admin_payload['event_title'] ?? ''); ?></p><p><strong>Start Time:</strong> <?php echo esc_html($admin_payload['event_start_time'] ?? ''); ?></p><p><strong>End Time:</strong> <?php echo esc_html($admin_payload['event_end_time'] ?? ''); ?></p><p><strong>Timezone:</strong> <?php echo esc_html($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?></p></div>
+          <input type="hidden" name="event_title" value="<?php echo esc_attr($admin_payload['event_title'] ?? ''); ?>"><input type="hidden" name="start_time" value="<?php echo esc_attr($admin_payload['event_start_time'] ?? ''); ?>"><input type="hidden" name="end_time" value="<?php echo esc_attr($admin_payload['event_end_time'] ?? ''); ?>"><input type="hidden" name="timezone" value="<?php echo esc_attr($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?>">
           <label>Short Description *</label><p class="mrm-field-help">One sentence to describe your masterclass.</p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
           <label>Long Description *</label><p class="mrm-field-help">A longer description of the masterclass content, who it is for, and what students will learn.</p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
-          <div class="grid"><div><label>Start Time *</label><input type="datetime-local" name="start_time" value="<?php echo esc_attr($submission['start_time'] ?? ''); ?>" required></div><div><label>End Time *</label><input type="datetime-local" name="end_time" value="<?php echo esc_attr($submission['end_time'] ?? ''); ?>" required></div></div>
-          <label>Timezone *</label><p class="mrm-field-help">Select the U.S. timezone for this masterclass.</p><?php echo $this->mrm_profile_card_timezone_select_html('timezone', $submission['timezone'] ?? 'America/Phoenix'); ?>
           <div class="pay-box"><p><strong>Student registration price:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['event_price_cents'] ?? 0)); ?></p><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled.</p><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the agreed event price and presenter earnings shown above.</span></label></div>
         <?php else : ?>
           <h2>Profile Information</h2>
           <div class="grid"><div><label>First Name *</label><input type="text" name="first_name" value="<?php echo esc_attr($submission['first_name'] ?? ''); ?>" autocomplete="given-name" required></div><div><label>Last Name *</label><input type="text" name="last_name" value="<?php echo esc_attr($submission['last_name'] ?? ''); ?>" autocomplete="family-name" required></div></div><input type="hidden" name="name" value="<?php echo esc_attr($submission['name'] ?? ''); ?>"><div class="grid"><div><label>Email *</label><input type="email" name="email" value="<?php echo esc_attr($submission['email'] ?? $request['recipient_email']); ?>" autocomplete="email" required></div></div>
-          <div class="grid"><div><label>City *</label><input type="text" name="city" value="<?php echo esc_attr($submission['city'] ?? ''); ?>" required></div><div><label>State *</label><input type="text" name="state" maxlength="2" value="<?php echo esc_attr($submission['state'] ?? ''); ?>" required></div></div>
-          <label>Address *</label><input type="text" name="address" value="<?php echo esc_attr($submission['address'] ?? ''); ?>" required><label>ZIP Code *</label><input type="text" name="zip_code" value="<?php echo esc_attr($submission['zip_code'] ?? ''); ?>" required>
+          <div class="grid"><div><label>City *</label><input type="text" name="city" value="<?php echo esc_attr($submission['city'] ?? ''); ?>" required></div><div><label>State *</label><?php echo $this->mrm_profile_card_state_select_html('state', $submission['state'] ?? ''); ?></div></div>
+          <label>Street Address *</label><input type="text" name="address" value="<?php echo esc_attr($submission['address'] ?? ''); ?>" required><label>ZIP Code *</label><input type="text" name="zip_code" value="<?php echo esc_attr($submission['zip_code'] ?? ''); ?>" required>
           <?php if ($request_type === 'instructor_profile') : ?>
             <div class="mrm-check-section"><h3>Teaching Formats</h3><p class="mrm-field-help">Select the lesson formats you are available to teach.</p><div class="mrm-check-grid"><label class="mrm-check-row"><input type="checkbox" name="offers_online" value="1" <?php checked(!empty($submission['offers_online'])); ?>><span>Online lessons</span></label><label class="mrm-check-row"><input type="checkbox" name="offers_in_person" value="1" <?php checked(!empty($submission['offers_in_person'])); ?>><span>In-person lessons</span></label></div></div>
             <div class="mrm-check-section"><h3>Instruments</h3><p class="mrm-field-help">Select each instrument you are available to teach.</p><div class="mrm-check-grid"><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="trombone" <?php checked(in_array('trombone', (array)($submission['instruments'] ?? array()), true)); ?>><span>Trombone</span></label><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="euphonium" <?php checked(in_array('euphonium', (array)($submission['instruments'] ?? array()), true)); ?>><span>Euphonium</span></label><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="tuba" <?php checked(in_array('tuba', (array)($submission['instruments'] ?? array()), true)); ?>><span>Tuba</span></label></div></div>
+            <div class="mrm-check-section"><h3>Google Calendar Availability</h3><?php if (!empty($admin_payload['instructor_calendar_url'])) : ?><p><a class="mrm-btn" href="<?php echo esc_url($admin_payload['instructor_calendar_url']); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open Your Instructor Calendar</a></p><?php endif; ?><p class="mrm-field-help">Before submitting this form, please open your instructor calendar and enter your recurring lesson availability.</p><ol><li>Create a new event during a time you are available to teach.</li><li>Title the event something clear, such as “Lesson Availability,” “Availability,” or a similar title that helps you recognize it.</li><li>Set the event status as free/available so it does not block unrelated personal events.</li><li>Repeat the availability event for any weekly recurring teaching windows.</li><li>When Low Brass Lessons schedules a lesson inside your availability window, lesson events will appear in yellow.</li></ol><?php foreach ($this->mrm_profile_card_availability_guide_image_urls() as $guide_image_url) : ?><p><img src="<?php echo esc_url($guide_image_url); ?>" alt="Google Calendar availability guide screenshot" style="max-width:100%;height:auto;border:1px solid #d9cfbe;border-radius:14px;"></p><?php endforeach; ?><label class="mrm-ack-row"><input type="checkbox" name="calendar_availability_completed" value="1" required <?php checked(!empty($submission['calendar_availability_completed'])); ?>><span>I confirm that I opened my instructor calendar and entered my available teaching times.</span></label></div>
           <?php endif; ?>
           <?php if ($request_type === 'presenter_profile') : ?><label>Presenter Title *</label><p class="mrm-field-help">Example: Professor of Trombone, Low Brass Specialist, Orchestral Tubist, Chamber Music Clinician, or Specialist in Brass Pedagogy.</p><input type="text" name="presenter_title" value="<?php echo esc_attr($submission['presenter_title'] ?? ''); ?>" required><?php endif; ?>
           <label>Short Description *</label><p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'One sentence to describe your lessons.' : 'One sentence to describe your teaching style or professional focus.'; ?></p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
           <label>Long Description *</label><p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'A longer description of your lesson approach, teaching background, and what students can expect.' : 'A longer professional description of your background, expertise, teaching style, and artistic work.'; ?></p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
+          <div class="mrm-check-section"><h3>Optional Social / Professional Links</h3><p class="mrm-field-help">Add any public links you would like Low Brass Lessons to review for your profile. These are optional.</p><label>Website</label><input type="url" name="website_url" value="<?php echo esc_attr($submission['website_url'] ?? ''); ?>" placeholder="https://..."><label>Instagram</label><input type="url" name="instagram_url" value="<?php echo esc_attr($submission['instagram_url'] ?? ''); ?>" placeholder="https://..."><label>Facebook</label><input type="url" name="facebook_url" value="<?php echo esc_attr($submission['facebook_url'] ?? ''); ?>" placeholder="https://..."><label>YouTube</label><input type="url" name="youtube_url" value="<?php echo esc_attr($submission['youtube_url'] ?? ''); ?>" placeholder="https://..."><label>LinkedIn</label><input type="url" name="linkedin_url" value="<?php echo esc_attr($submission['linkedin_url'] ?? ''); ?>" placeholder="https://..."></div>
           <label>Profile Image Upload</label><p class="mrm-field-help">Upload the photo you would like used on your public profile card. Low Brass Lessons will review and approve the image before publishing.</p><input type="file" name="profile_image_file" accept="image/*"><input type="hidden" name="existing_profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>">
           <?php if (!empty($submission['profile_image_url'])) : ?><p class="mrm-field-help">A profile image has already been uploaded. Upload a new image only if you want to replace it.</p><?php endif; ?>
           <label>Fingerprint Clearance Card Proof *</label><input type="file" name="fingerprint_card" accept="image/*,.pdf">
@@ -13293,7 +13367,7 @@ public function render_access_lists_page() {
         $instruments = array_map('sanitize_key', wp_unslash($_POST['instruments']));
       }
 
-      $payload = array('first_name' => sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')), 'last_name' => sanitize_text_field(wp_unslash($_POST['last_name'] ?? '')), 'name' => trim(sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')) . ' ' . sanitize_text_field(wp_unslash($_POST['last_name'] ?? ''))), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'stripe_onboarding_completed' => !empty($_POST['stripe_onboarding_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0);
+      $payload = array('first_name' => sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')), 'last_name' => sanitize_text_field(wp_unslash($_POST['last_name'] ?? '')), 'name' => trim(sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')) . ' ' . sanitize_text_field(wp_unslash($_POST['last_name'] ?? ''))), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'stripe_onboarding_completed' => !empty($_POST['stripe_onboarding_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0, 'calendar_availability_completed' => !empty($_POST['calendar_availability_completed']) ? 1 : 0, 'website_url' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram_url' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook_url' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube_url' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin_url' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')), 'profile_social_links_json' => wp_json_encode(array('website' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')))));
 
       $profile_image_url = $this->mrm_profile_card_handle_profile_image_upload('profile_image_file');
 
@@ -14152,6 +14226,69 @@ public function render_access_lists_page() {
     return $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) === $table;
   }
 
+  private function mrm_run_presenter_payouts($only_ledger_ids = array(), $force = false) {
+    global $wpdb;
+
+    $ledger_table = $this->mrm_pay_table_masterclass_ledger();
+    $presenters_table = $this->mrm_pay_table_masterclass_presenters();
+    $events_table = $this->mrm_pay_table_masterclass_events();
+    $summary = array('paid' => 0, 'errors' => 0, 'last_error' => '');
+
+    if (!$this->mrm_pay_table_exists($ledger_table) || !$this->mrm_pay_table_exists($presenters_table)) {
+      $summary['errors']++;
+      $summary['last_error'] = 'Required Masterclass payout tables are missing.';
+      return $summary;
+    }
+
+    $only_ledger_ids = array_values(array_filter(array_unique(array_map('absint', (array)$only_ledger_ids))));
+    $where = "WHERE l.ledger_type = 'registration_payment'
+      AND l.status IN ('payable','payout_failed')
+      AND l.presenter_share_cents > 0
+      AND p.stripe_connected_account_id IS NOT NULL
+      AND p.stripe_connected_account_id <> ''";
+    $args = array();
+
+    if (!$force) $where .= " AND COALESCE(l.payout_eligible_at, DATE_ADD(l.created_at, INTERVAL 7 DAY)) <= UTC_TIMESTAMP()";
+    if (!empty($only_ledger_ids)) {
+      $where .= " AND l.id IN (" . implode(',', array_fill(0, count($only_ledger_ids), '%d')) . ")";
+      foreach ($only_ledger_ids as $ledger_id) $args[] = $ledger_id;
+    }
+
+    $sql = "SELECT l.*, p.stripe_connected_account_id, p.name AS presenter_name, e.title AS event_title
+      FROM {$ledger_table} l
+      LEFT JOIN {$presenters_table} p ON p.id = l.presenter_id
+      LEFT JOIN {$events_table} e ON e.id = l.event_id
+      {$where}
+      ORDER BY l.id ASC";
+    $rows = !empty($args) ? $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A) : $wpdb->get_results($sql, ARRAY_A);
+
+    foreach ((array)$rows as $row) {
+      $ledger_id = (int)$row['id'];
+      $amount = (int)$row['presenter_share_cents'];
+      $acct = (string)$row['stripe_connected_account_id'];
+      if ($ledger_id <= 0 || $amount <= 0 || $acct === '') continue;
+
+      $transfer = $this->stripe_create_transfer($amount, 'usd', $acct, 'MRM_MC_LEDGER_' . $ledger_id, array(
+        'mrm_masterclass_ledger_id' => (string)$ledger_id,
+        'mrm_event_id' => (string)($row['event_id'] ?? ''),
+        'mrm_presenter_id' => (string)($row['presenter_id'] ?? ''),
+        'mrm_transfer_funding_mode' => 'platform_available_balance_only',
+      ));
+
+      if (is_wp_error($transfer)) {
+        $summary['errors']++;
+        $summary['last_error'] = $transfer->get_error_message();
+        $wpdb->update($ledger_table, array('status' => 'payout_failed', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => $transfer->get_error_message(), 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
+        continue;
+      }
+
+      $wpdb->update($ledger_table, array('status' => 'paid_out', 'stripe_transfer_id' => (string)($transfer['id'] ?? ''), 'paid_at' => current_time('mysql'), 'paid_out_at' => current_time('mysql'), 'payout_attempted_at' => current_time('mysql'), 'payout_error' => '', 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
+      $summary['paid']++;
+    }
+
+    return $summary;
+  }
+
   public function render_presenter_payouts_page() {
     if (!current_user_can('manage_options')) {
       wp_die('You do not have permission.');
@@ -14228,8 +14365,18 @@ public function render_access_lists_page() {
     );
 
     echo '<h2 style="margin-top:28px;">Presenter Event Payout Ledger</h2>';
+    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-bottom:14px;">';
+    wp_nonce_field('mrm_pay_hub_run_all_due_presenter_payouts');
+    echo '<input type="hidden" name="action" value="mrm_pay_hub_run_all_due_presenter_payouts">';
+    echo '<button type="submit" class="button button-primary" onclick="return confirm(\'Run payout processing for all due presenter payouts?\');">Pay All Due Presenter Payouts</button>';
+    echo '</form>';
+
+    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+    wp_nonce_field('mrm_pay_hub_run_presenter_payout');
+    echo '<input type="hidden" name="action" value="mrm_pay_hub_run_presenter_payout">';
     echo '<table class="widefat striped">';
     echo '<thead><tr>';
+    echo '<th>Select</th>';
     echo '<th>Presenter</th>';
     echo '<th>Event</th>';
     echo '<th>Event Date</th>';
@@ -14243,7 +14390,7 @@ public function render_access_lists_page() {
     echo '</tr></thead><tbody>';
 
     if (empty($rows)) {
-      echo '<tr><td colspan="10">No presenter payout ledger rows found.</td></tr>';
+      echo '<tr><td colspan="11">No presenter payout ledger rows found.</td></tr>';
     } else {
       foreach ($rows as $row) {
         $event_end = !empty($row['event_end_time']) ? strtotime($row['event_end_time'] . ' UTC') : strtotime($row['created_at'] . ' UTC');
@@ -14256,6 +14403,14 @@ public function render_access_lists_page() {
           : (int)$row['presenter_share_cents'];
 
         echo '<tr>';
+        $presenter_selectable = in_array((string)$row['status'], array('payable','payout_failed'), true)
+          && !empty($row['stripe_connected_account_id'])
+          && $is_eligible;
+        echo '<td>';
+        if ($presenter_selectable) {
+          echo '<input type="checkbox" name="ledger_ids[]" value="' . esc_attr($row['id']) . '">';
+        }
+        echo '</td>';
         echo '<td>' . esc_html($row['presenter_name'] ?: '—') . '<br><small>' . esc_html($row['presenter_email'] ?: '') . '</small></td>';
         echo '<td>' . esc_html($row['event_title'] ?: '—') . '</td>';
         echo '<td>' . esc_html($row['event_start_time'] ?: '—') . '</td>';
@@ -14279,7 +14434,34 @@ public function render_access_lists_page() {
     }
 
     echo '</tbody></table>';
+    echo '<p><button type="submit" class="button" onclick="return confirm(\'Run payout processing for selected presenter rows?\');">Pay Selected Presenter Rows</button></p>';
+    echo '</form>';
     echo '</div>';
+  }
+
+  public function handle_run_presenter_payout() {
+    if (!current_user_can('manage_options')) wp_die('You do not have permission.');
+    check_admin_referer('mrm_pay_hub_run_presenter_payout');
+    $ledger_ids = isset($_POST['ledger_ids']) && is_array($_POST['ledger_ids'])
+      ? array_values(array_filter(array_unique(array_map('absint', wp_unslash($_POST['ledger_ids'])))))
+      : array();
+    if (empty($ledger_ids)) {
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-presenter-payouts&payout_empty=1'));
+      exit;
+    }
+    $result = $this->mrm_run_presenter_payouts($ledger_ids, true);
+    $flag = empty($result['errors']) ? 'payout_ok=1' : 'payout_error=1';
+    wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-presenter-payouts&' . $flag));
+    exit;
+  }
+
+  public function handle_run_all_due_presenter_payouts() {
+    if (!current_user_can('manage_options')) wp_die('You do not have permission.');
+    check_admin_referer('mrm_pay_hub_run_all_due_presenter_payouts');
+    $result = $this->mrm_run_presenter_payouts(array(), true);
+    $flag = empty($result['errors']) ? 'payout_ok=1' : 'payout_error=1';
+    wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-presenter-payouts&' . $flag));
+    exit;
   }
 
 
@@ -16168,6 +16350,7 @@ register_activation_hook(__FILE__, function() {
 register_deactivation_hook(__FILE__, function() {
   wp_clear_scheduled_hook('mrm_pay_hub_cleanup_access');
   wp_clear_scheduled_hook('mrm_pay_hub_daily_payout_check');
+  wp_clear_scheduled_hook('mrm_pay_hub_daily_presenter_payout_check');
   wp_clear_scheduled_hook('mrm_pay_hub_retry_autopay_charges');
   wp_clear_scheduled_hook('mrm_pay_hub_retry_sheet_music_subscriptions');
 });

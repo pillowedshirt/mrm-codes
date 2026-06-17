@@ -2339,6 +2339,8 @@ protected function mrm_get_google_service_account_json() {
     profile_image_url TEXT NULL,
     short_description TEXT NULL,
     long_description LONGTEXT NULL,
+    profile_social_links_json LONGTEXT NULL,
+    calendar_availability_completed TINYINT(1) NOT NULL DEFAULT 0,
     instruments TEXT NULL,
     latitude DECIMAL(10,6) DEFAULT NULL,
     longitude DECIMAL(10,6) DEFAULT NULL,
@@ -2674,6 +2676,8 @@ protected function mrm_get_google_service_account_json() {
             'fingerprint_card_uploaded_at' => "ALTER TABLE {$table_instructors} ADD fingerprint_card_uploaded_at DATETIME NULL",
             'docusign_completed' => "ALTER TABLE {$table_instructors} ADD docusign_completed TINYINT(1) NOT NULL DEFAULT 0",
             'stripe_onboarding_completed' => "ALTER TABLE {$table_instructors} ADD stripe_onboarding_completed TINYINT(1) NOT NULL DEFAULT 0",
+            'profile_social_links_json' => "ALTER TABLE {$table_instructors} ADD profile_social_links_json LONGTEXT NULL",
+            'calendar_availability_completed' => "ALTER TABLE {$table_instructors} ADD calendar_availability_completed TINYINT(1) NOT NULL DEFAULT 0",
         );
 
         foreach ( $instructor_adds as $column => $sql ) {
