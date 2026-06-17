@@ -12542,37 +12542,351 @@ public function render_access_lists_page() {
 
   public function handle_profile_card_public_submit() {
     check_admin_referer('mrm_profile_card_public_submit', 'mrm_profile_card_public_nonce');
-    $token = sanitize_text_field(wp_unslash($_POST['token'] ?? '')); $request = $this->mrm_profile_card_get_by_token($token);
-    if (!$request) wp_die('This profile card request link is invalid.');
-    if (!empty($request['token_expires_at']) && strtotime($request['token_expires_at']) < time()) wp_die('This profile card request link has expired.');
-    $request_type = sanitize_key($request['request_type']); $payload = array('pay_ack'=>!empty($_POST['pay_ack']) ? 1 : 0);
-    foreach (array('event_title','short_description','long_description','start_time','end_time','timezone','name','email','city','state','address','zip_code','presenter_title','profile_image_url') as $key) { if (isset($_POST[$key])) $payload[$key] = sanitize_text_field(wp_unslash($_POST[$key])); }
-    foreach (array('short_description','long_description') as $key) { if (isset($_POST[$key])) $payload[$key] = sanitize_textarea_field(wp_unslash($_POST[$key])); }
-    if ($request_type === 'instructor_profile') { $payload['offers_online'] = !empty($_POST['offers_online']) ? 1 : 0; $payload['offers_in_person'] = !empty($_POST['offers_in_person']) ? 1 : 0; $payload['instruments'] = array_values(array_intersect(array_map('sanitize_key', (array)($_POST['instruments'] ?? array())), array('trombone','euphonium','tuba'))); }
-    if ($request_type !== 'presenter_event') $payload['docusign_completed'] = !empty($_POST['docusign_completed']) ? 1 : 0;
+
+    global $wpdb;
+    $table = $this->table_profile_card_requests();
+
+    $token = sanitize_text_field(wp_unslash($_POST['token'] ?? ''));
+    $request = $this->mrm_profile_card_get_by_token($token);
+
+    if (!$request) {
+      wp_die('Invalid request link.');
+    }
+
+    $request_type = sanitize_key($request['request_type']);
+
+    $payload = array();
+
+    if ($request_type === 'presenter_event') {
+      $payload = array(
+        'event_title' => sanitize_text_field(wp_unslash($_POST['event_title'] ?? '')),
+        'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')),
+        'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')),
+        'start_time' => sanitize_text_field(wp_unslash($_POST['start_time'] ?? '')),
+        'end_time' => sanitize_text_field(wp_unslash($_POST['end_time'] ?? '')),
+        'timezone' => sanitize_text_field(wp_unslash($_POST['timezone'] ?? 'America/Phoenix')),
+        'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0,
+      );
+    } else {
+      $instruments = array();
+      if (isset($_POST['instruments']) && is_array($_POST['instruments'])) {
+        $instruments = array_map('sanitize_key', wp_unslash($_POST['instruments']));
+      }
+
+      $payload = array(
+        'name' => sanitize_text_field(wp_unslash($_POST['name'] ?? '')),
+        'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')),
+        'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')),
+        'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)),
+        'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')),
+        'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')),
+        'offers_online' => !empty($_POST['offers_online']) ? 1 : 0,
+        'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0,
+        'instruments' => $instruments,
+        'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')),
+        'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')),
+        'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')),
+        'profile_image_url' => esc_url_raw(wp_unslash($_POST['profile_image_url'] ?? '')),
+        'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0,
+        'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0,
+      );
+    }
+
+    $now = current_time('mysql');
+
+    $update_data = array(
+      'status' => 'pending_review',
+      'submission_payload' => $this->mrm_profile_card_encode_json($payload),
+      'submitted_at' => $now,
+      'updated_at' => $now,
+    );
+
     $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
-    if (!empty($_FILES['fingerprint_card']['name'])) { require_once ABSPATH . 'wp-admin/includes/file.php'; $file = wp_handle_upload($_FILES['fingerprint_card'], array('test_form'=>false, 'mimes'=>array('jpg'=>'image/jpeg','jpeg'=>'image/jpeg','png'=>'image/png','gif'=>'image/gif','webp'=>'image/webp','pdf'=>'application/pdf'))); if (empty($file['error'])) $uploads[] = array('kind'=>'fingerprint_card','name'=>sanitize_file_name(wp_unslash($_FILES['fingerprint_card']['name'])),'url'=>esc_url_raw($file['url'] ?? ''),'file'=>$file['file'] ?? ''); }
-    global $wpdb; $wpdb->update($this->table_profile_card_requests(), array('status'=>'pending_review','submission_payload'=>$this->mrm_profile_card_encode_json($payload),'uploaded_files'=>$this->mrm_profile_card_encode_json($uploads),'submitted_at'=>current_time('mysql'),'updated_at'=>current_time('mysql')), array('id'=>(int)$request['id']));
-    wp_die('Thank you. Your request has been submitted for review.');
+    if ($request_type !== 'presenter_event' && !empty($_FILES['fingerprint_card']['name'])) {
+      require_once ABSPATH . 'wp-admin/includes/file.php';
+      $file = wp_handle_upload($_FILES['fingerprint_card'], array('test_form' => false, 'mimes' => array('jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp', 'pdf' => 'application/pdf')));
+      if (empty($file['error'])) {
+        $uploads[] = array('kind' => 'fingerprint_card', 'name' => sanitize_file_name(wp_unslash($_FILES['fingerprint_card']['name'])), 'url' => esc_url_raw($file['url'] ?? ''), 'file' => $file['file'] ?? '');
+        $update_data['uploaded_files'] = $this->mrm_profile_card_encode_json($uploads);
+      }
+    }
+
+    $wpdb->update($table, $update_data, array('id' => absint($request['id'])));
+
+    wp_die('Thank you. Your request has been submitted to Low Brass Lessons for review.');
   }
 
   public function handle_profile_card_admin_action() {
-    if (!current_user_can('manage_options')) wp_die('You do not have permission.');
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission.');
+    }
+
     check_admin_referer('mrm_profile_card_admin_action', 'mrm_profile_card_admin_nonce');
-    global $wpdb; $table = $this->table_profile_card_requests(); $request_id = absint($_POST['request_id'] ?? 0); $do = sanitize_key($_POST['mrm_profile_card_do'] ?? '');
-    $request = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id = %d LIMIT 1", $request_id), ARRAY_A); if (!$request) wp_die('Request not found.');
-    $notes = $this->mrm_profile_card_decode_json($request['review_notes'] ?? ''); $notes[] = array('at'=>current_time('mysql'),'action'=>$do,'docusign_verified'=>!empty($_POST['docusign_verified']) ? 1 : 0,'admin_review_note'=>sanitize_textarea_field(wp_unslash($_POST['admin_review_note'] ?? '')),'change_request_note'=>sanitize_textarea_field(wp_unslash($_POST['change_request_note'] ?? '')));
-    $data = array('review_notes'=>$this->mrm_profile_card_encode_json($notes),'reviewed_at'=>current_time('mysql'),'updated_at'=>current_time('mysql'));
-    if ($do === 'archive') $data['status'] = 'archived';
-    elseif ($do === 'changes') { $data['status'] = 'changes_requested'; $this->mrm_profile_card_send_change_request_email($request, end($notes)); }
-    elseif ($do === 'approve') { $data['status'] = 'approved'; }
-    $wpdb->update($table, $data, array('id'=>$request_id)); wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&updated=1')); exit;
+
+    global $wpdb;
+    $table = $this->table_profile_card_requests();
+
+    $request_id = absint($_POST['request_id'] ?? 0);
+    $do = sanitize_key($_POST['mrm_profile_card_do'] ?? '');
+
+    $request = $wpdb->get_row(
+      $wpdb->prepare("SELECT * FROM {$table} WHERE id = %d", $request_id),
+      ARRAY_A
+    );
+
+    if (!$request) {
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_request'));
+      exit;
+    }
+
+    if ($do === 'archive') {
+      $wpdb->update($table, array('status' => 'archived', 'updated_at' => current_time('mysql')), array('id' => $request_id));
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&archived=1'));
+      exit;
+    }
+
+    if ($do === 'changes') {
+      $note = sanitize_textarea_field(wp_unslash($_POST['change_request_note'] ?? ''));
+
+      $wpdb->update(
+        $table,
+        array(
+          'status' => 'changes_requested',
+          'review_notes' => $this->mrm_profile_card_encode_json(array('change_request_note' => $note)),
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => $request_id)
+      );
+
+      wp_mail(
+        $request['recipient_email'],
+        'Low Brass Lessons requested changes',
+        '<p>Low Brass Lessons has requested changes to your profile card or event request.</p><p>' . esc_html($note) . '</p><p>Please use your original private link to update and resubmit your request.</p>',
+        array('Content-Type: text/html; charset=UTF-8')
+      );
+
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&changes=1'));
+      exit;
+    }
+
+    if ($do === 'approve') {
+      $result = $this->mrm_profile_card_approve_request($request);
+
+      if (is_wp_error($result)) {
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode($result->get_error_message())));
+        exit;
+      }
+
+      $wpdb->update(
+        $table,
+        array(
+          'status' => 'approved',
+          'created_target_type' => $result['target_type'],
+          'created_target_id' => $result['target_id'],
+          'review_notes' => $this->mrm_profile_card_encode_json(array(
+            'admin_review_note' => sanitize_textarea_field(wp_unslash($_POST['admin_review_note'] ?? '')),
+            'docusign_verified' => !empty($_POST['docusign_verified']) ? 1 : 0,
+          )),
+          'reviewed_at' => current_time('mysql'),
+          'updated_at' => current_time('mysql'),
+        ),
+        array('id' => $request_id)
+      );
+
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&approved=1'));
+      exit;
+    }
+
+    wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=unknown_action'));
+    exit;
   }
 
-  private function mrm_profile_card_send_change_request_email($request, $note) {
-    $message = trim((string)($note['change_request_note'] ?? ''));
-    if ($message === '' || empty($request['recipient_email'])) return;
-    wp_mail($request['recipient_email'], 'Low Brass Lessons profile card changes requested', '<p>Hello ' . esc_html($request['recipient_name']) . ',</p><p>We reviewed your profile card submission and need a few updates:</p><p>' . nl2br(esc_html($message)) . '</p><p>Please use your private link again to edit and resubmit.</p>', array('Content-Type: text/html; charset=UTF-8'));
+  private function mrm_profile_card_approve_request($request) {
+    $type = sanitize_key($request['request_type'] ?? '');
+
+    if ($type === 'presenter_profile') {
+      return $this->mrm_profile_card_create_presenter($request);
+    }
+
+    if ($type === 'presenter_event') {
+      return $this->mrm_profile_card_create_masterclass_event($request);
+    }
+
+    return $this->mrm_profile_card_create_instructor($request);
+  }
+
+  private function mrm_profile_card_create_instructor($request) {
+    global $wpdb;
+
+    $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+    $table = $wpdb->prefix . 'mrm_instructors';
+
+    $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($exists !== $table) {
+      return new WP_Error('missing_scheduler_table', 'Scheduler instructor table is missing.');
+    }
+
+    $name = sanitize_text_field($payload['name'] ?? '');
+    $email = sanitize_email($payload['email'] ?? '');
+
+    if ($name === '' || !is_email($email)) {
+      return new WP_Error('invalid_instructor_payload', 'Instructor name or email is missing.');
+    }
+
+    $data = array(
+      'name' => $name,
+      'email' => $email,
+      'city' => sanitize_text_field($payload['city'] ?? ''),
+      'state' => strtoupper(substr(sanitize_text_field($payload['state'] ?? ''), 0, 2)),
+      'address' => sanitize_text_field($payload['address'] ?? ''),
+      'zip_code' => sanitize_text_field($payload['zip_code'] ?? ''),
+      'offers_in_person' => !empty($payload['offers_in_person']) ? 1 : 0,
+      'offers_online' => !empty($payload['offers_online']) ? 1 : 0,
+      'profile_image_url' => esc_url_raw($payload['profile_image_url'] ?? ''),
+      'short_description' => sanitize_text_field($payload['short_description'] ?? ''),
+      'long_description' => wp_kses_post($payload['long_description'] ?? ''),
+      'instruments' => wp_json_encode(array_values((array)($payload['instruments'] ?? array()))),
+      'calendar_id' => $email,
+      'timezone' => 'America/Phoenix',
+      'stripe_connected_account_id' => null,
+      'hire_date' => current_time('Y-m-d'),
+    );
+
+    $inserted = $wpdb->insert($table, $data);
+
+    if (!$inserted) {
+      return new WP_Error('instructor_insert_failed', 'Instructor creation failed: ' . $wpdb->last_error);
+    }
+
+    return array(
+      'target_type' => 'instructor',
+      'target_id' => absint($wpdb->insert_id),
+    );
+  }
+
+  private function mrm_profile_card_create_presenter($request) {
+    global $wpdb;
+
+    $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+    $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
+
+    $table = $wpdb->prefix . 'mrm_masterclass_presenters';
+
+    $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+    if ($exists !== $table) {
+      return new WP_Error('missing_presenter_table', 'Masterclass presenter table is missing.');
+    }
+
+    $name = sanitize_text_field($payload['name'] ?? '');
+    $email = sanitize_email($payload['email'] ?? '');
+
+    if ($name === '' || !is_email($email)) {
+      return new WP_Error('invalid_presenter_payload', 'Presenter name or email is missing.');
+    }
+
+    $data = array(
+      'name' => $name,
+      'email' => $email,
+      'city' => sanitize_text_field($payload['city'] ?? ''),
+      'state' => strtoupper(substr(sanitize_text_field($payload['state'] ?? ''), 0, 2)),
+      'address' => sanitize_text_field($payload['address'] ?? ''),
+      'zip_code' => sanitize_text_field($payload['zip_code'] ?? ''),
+      'timezone' => 'America/Phoenix',
+      'stripe_connected_account_id' => '',
+      'payout_percent' => 0,
+      'payout_per_student_cents' => max(0, absint($admin_payload['presenter_payout_per_student_cents'] ?? 0)),
+      'hire_date' => current_time('Y-m-d'),
+      'profile_image_url' => esc_url_raw($payload['profile_image_url'] ?? ''),
+      'short_description' => wp_kses_post($payload['short_description'] ?? ''),
+      'long_description' => wp_kses_post($payload['long_description'] ?? ''),
+      'bio' => wp_kses_post($payload['long_description'] ?? ''),
+      'presenter_title' => sanitize_text_field($payload['presenter_title'] ?? ''),
+      'instruments' => wp_json_encode(array()),
+      'created_at' => current_time('mysql'),
+      'updated_at' => current_time('mysql'),
+    );
+
+    $inserted = $wpdb->insert($table, $data);
+
+    if (!$inserted) {
+      return new WP_Error('presenter_insert_failed', 'Presenter creation failed: ' . $wpdb->last_error);
+    }
+
+    return array(
+      'target_type' => 'presenter',
+      'target_id' => absint($wpdb->insert_id),
+    );
+  }
+
+  private function mrm_profile_card_create_masterclass_event($request) {
+    global $wpdb;
+
+    $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+    $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
+
+    $events_table = $wpdb->prefix . 'mrm_masterclass_events';
+    $presenters_table = $wpdb->prefix . 'mrm_masterclass_presenters';
+
+    $events_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $events_table));
+    $presenters_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $presenters_table));
+
+    if ($events_exists !== $events_table || $presenters_exists !== $presenters_table) {
+      return new WP_Error('missing_masterclass_tables', 'Masterclass tables are missing.');
+    }
+
+    $presenter = $wpdb->get_row(
+      $wpdb->prepare("SELECT * FROM {$presenters_table} WHERE email = %s ORDER BY id DESC LIMIT 1", sanitize_email($request['recipient_email'])),
+      ARRAY_A
+    );
+
+    if (!$presenter) {
+      return new WP_Error('presenter_not_found', 'No approved presenter was found with this email. Approve the presenter profile first.');
+    }
+
+    $title = sanitize_text_field($payload['event_title'] ?? '');
+    if ($title === '') {
+      return new WP_Error('missing_event_title', 'Event title is missing.');
+    }
+
+    $start_raw = sanitize_text_field($payload['start_time'] ?? '');
+    $end_raw = sanitize_text_field($payload['end_time'] ?? '');
+
+    $start_time = $start_raw ? date('Y-m-d H:i:s', strtotime($start_raw)) : '';
+    $end_time = $end_raw ? date('Y-m-d H:i:s', strtotime($end_raw)) : '';
+
+    if ($start_time === '' || $end_time === '' || strtotime($end_time) <= strtotime($start_time)) {
+      return new WP_Error('invalid_event_time', 'Event start/end time is invalid.');
+    }
+
+    $data = array(
+      'title' => $title,
+      'description' => wp_kses_post($payload['short_description'] ?? ''),
+      'short_description' => wp_kses_post($payload['short_description'] ?? ''),
+      'long_description' => wp_kses_post($payload['long_description'] ?? ''),
+      'presenter_id' => absint($presenter['id']),
+      'presenter_email' => sanitize_email($presenter['email']),
+      'proctor_email' => '',
+      'start_time' => $start_time,
+      'end_time' => $end_time,
+      'timezone' => sanitize_text_field($payload['timezone'] ?? 'America/Phoenix'),
+      'price_cents' => max(0, absint($admin_payload['event_price_cents'] ?? 0)),
+      'capacity' => 50,
+      'status' => 'draft',
+      'registration_open' => 0,
+      'created_at' => current_time('mysql'),
+      'updated_at' => current_time('mysql'),
+    );
+
+    $inserted = $wpdb->insert($events_table, $data);
+
+    if (!$inserted) {
+      return new WP_Error('event_insert_failed', 'Masterclass event creation failed: ' . $wpdb->last_error);
+    }
+
+    return array(
+      'target_type' => 'masterclass_event',
+      'target_id' => absint($wpdb->insert_id),
+    );
   }
 
   public function render_admin_page() {
