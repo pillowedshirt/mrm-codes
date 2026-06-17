@@ -6941,8 +6941,8 @@ public function register_admin_menu() {
 		$this->mrm_mc_remove_duplicate_top_level_menu_items();
 
 		add_menu_page(
-			'MRM Masterclass',
-			'MRM Masterclass',
+			'Masterclass',
+			'Masterclass',
 			$capability,
 			self::ADMIN_MENU_SLUG,
 			array( $this, 'render_dashboard_page' ),
