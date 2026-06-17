@@ -955,6 +955,7 @@ public function mrm_mc_render_critical_error_notice() {
 			end_time DATETIME NOT NULL,
 			timezone VARCHAR(64) NOT NULL DEFAULT 'UTC',
 			price_cents INT NOT NULL DEFAULT 2000,
+			presenter_payout_per_student_cents INT NOT NULL DEFAULT 0,
 			capacity INT NOT NULL DEFAULT 100,
 			status VARCHAR(32) NOT NULL DEFAULT 'scheduled',
 			registration_open TINYINT(1) NOT NULL DEFAULT 1,
@@ -1194,6 +1195,7 @@ public function mrm_mc_render_critical_error_notice() {
 	}
 
 	$event_adds = array(
+		'presenter_payout_per_student_cents' => "ALTER TABLE {$events_table} ADD presenter_payout_per_student_cents INT NOT NULL DEFAULT 0",
 		'calendar_id'            => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
 		'refund_request_token'   => "ALTER TABLE {$events_table} ADD refund_request_token VARCHAR(64) NULL",
 		'last_update_notice_at'  => "ALTER TABLE {$events_table} ADD last_update_notice_at DATETIME NULL",
@@ -1687,6 +1689,32 @@ private function mrm_mc_presenter_share_percent() {
 	return 0.0;
 }
 
+private function mrm_mc_us_timezone_options() {
+	return array(
+		'America/New_York'    => 'Eastern Time — America/New_York',
+		'America/Chicago'     => 'Central Time — America/Chicago',
+		'America/Denver'      => 'Mountain Time — America/Denver',
+		'America/Phoenix'     => 'Arizona Time — America/Phoenix',
+		'America/Los_Angeles' => 'Pacific Time — America/Los_Angeles',
+		'America/Anchorage'   => 'Alaska Time — America/Anchorage',
+		'America/Adak'        => 'Hawaii-Aleutian Time — America/Adak',
+		'Pacific/Honolulu'    => 'Hawaii Time — Pacific/Honolulu',
+	);
+}
+
+private function mrm_mc_timezone_select_html( $name, $selected = 'America/Phoenix' ) {
+	$selected = sanitize_text_field( (string) $selected );
+	$html = '<select name="' . esc_attr( $name ) . '" class="regular-text" required>';
+
+	foreach ( $this->mrm_mc_us_timezone_options() as $value => $label ) {
+		$html .= '<option value="' . esc_attr( $value ) . '"' . selected( $selected, $value, false ) . '>' . esc_html( $label ) . '</option>';
+	}
+
+	$html .= '</select>';
+
+	return $html;
+}
+
 private function mrm_mc_presenter_payout_percent( $presenter_id ) {
 	return 0.0;
 }
@@ -1715,12 +1743,36 @@ private function mrm_mc_presenter_payout_per_student_cents( $presenter_id ) {
 	return max( 0, absint( $value ) );
 }
 
-private function mrm_mc_calculate_registration_shares( $gross_cents, $presenter_id ) {
+private function mrm_mc_event_payout_per_student_cents( $event_id, $fallback_presenter_id = 0 ) {
+	global $wpdb;
+
+	$event_id = absint( $event_id );
+	$table    = $this->t( 'mrm_masterclass_events' );
+
+	if ( $event_id > 0 && $this->mrm_mc_table_exists( $table ) && $this->mrm_mc_column_exists( $table, 'presenter_payout_per_student_cents' ) ) {
+		$value = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT presenter_payout_per_student_cents FROM {$table} WHERE id = %d",
+				$event_id
+			)
+		);
+
+		$value = max( 0, absint( $value ) );
+
+		if ( $value > 0 ) {
+			return $value;
+		}
+	}
+
+	return $this->mrm_mc_presenter_payout_per_student_cents( $fallback_presenter_id );
+}
+
+private function mrm_mc_calculate_registration_shares( $gross_cents, $presenter_id, $event_id = 0 ) {
 	$gross_cents = absint( $gross_cents );
 	$stripe_fee  = $this->mrm_mc_estimated_stripe_fee_cents( $gross_cents );
 	$net_cents   = max( 0, $gross_cents - $stripe_fee );
 
-	$presenter_share = $this->mrm_mc_presenter_payout_per_student_cents( $presenter_id );
+	$presenter_share = $this->mrm_mc_event_payout_per_student_cents( $event_id, $presenter_id );
 	$presenter_share = min( $presenter_share, $net_cents );
 
 	$platform_share = max( 0, $net_cents - $presenter_share );
@@ -4264,7 +4316,7 @@ public function handle_save_presenter() {
 		'timezone'                    => $this->mrm_mc_clean_text( $_POST['timezone'] ?? 'America/Phoenix' ),
 		'stripe_connected_account_id' => $this->mrm_mc_clean_text( $_POST['stripe_connected_account_id'] ?? '' ),
 		'payout_percent'              => 0,
-		'payout_per_student_cents'    => max( 0, (int) round( 100 * (float) ( $_POST['payout_per_student_dollars'] ?? 0 ) ) ),
+		'payout_per_student_cents'    => 0,
 		'hire_date'                   => $this->mrm_mc_clean_text( $_POST['hire_date'] ?? '' ),
 		'profile_image_url'           => esc_url_raw( wp_unslash( $_POST['profile_image_url'] ?? '' ) ),
 		'short_description'           => $this->mrm_mc_clean_html( $_POST['short_description'] ?? '' ),
@@ -4427,6 +4479,7 @@ public function handle_save_event() {
 	$end_time     = $this->mrm_mc_datetime_from_local( $_POST['end_time'] ?? '' );
 	$timezone     = $this->mrm_mc_clean_text( $_POST['timezone'] ?? 'America/Phoenix' );
 	$price_cents  = max( 0, absint( $_POST['price_cents'] ?? 0 ) );
+	$presenter_payout_per_student_cents = max( 0, (int) round( 100 * (float) ( $_POST['presenter_payout_per_student_dollars'] ?? 0 ) ) );
 	$capacity     = max( 1, absint( $_POST['capacity'] ?? 1 ) );
 	$status       = sanitize_key( wp_unslash( $_POST['status'] ?? 'scheduled' ) );
 	$allowed_statuses = array( 'draft', 'scheduled', 'cancelled', 'completed', 'archived' );
@@ -4449,6 +4502,7 @@ public function handle_save_event() {
 		'end_time'          => $end_time,
 		'timezone'          => $timezone,
 		'price_cents'       => $price_cents,
+		'presenter_payout_per_student_cents' => $presenter_payout_per_student_cents,
 		'capacity'          => $capacity,
 		'status'            => $status,
 		'registration_open' => $this->mrm_mc_bool_post( 'registration_open' ),
@@ -4524,7 +4578,7 @@ public function handle_cancel_event() {
 	if ( in_array( sanitize_key( $event->status ), array( 'deleted', 'cancelled' ), true ) ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_already_deleted' ); }
 	$paid_regs = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$regs_table} WHERE event_id = %d AND payment_status = 'paid'",$event_id));
 	$refund_success_count=0; $refund_failure_count=0;
-	foreach((array)$paid_regs as $registration){$refund_result=$this->mrm_mc_refund_registration($registration,$event,'event_cancelled'); if(is_wp_error($refund_result)){$refund_failure_count++;continue;} $refund_success_count++; $this->mrm_mc_send_email_recorded('event_cancelled',$registration->email,'Masterclass Cancelled — '.sanitize_text_field( $event->title ),$this->mrm_mc_event_cancelled_email_body( $event, $registration, absint( $registration->amount_cents ), 'refunded' ),$event->id,$registration->id);} 
+	foreach((array)$paid_regs as $registration){$refund_result=$this->mrm_mc_refund_registration($registration,$event,'event_cancelled'); if(is_wp_error($refund_result)){$refund_failure_count++;continue;} $refund_success_count++; $this->mrm_mc_send_email_recorded('event_cancelled',$registration->email,'Masterclass Cancelled — '.sanitize_text_field( $event->title ),$this->mrm_mc_event_cancelled_email_body( $event, $registration, absint( $registration->amount_cents ), 'refunded' ),$event->id,$registration->id);}
 	$google_cancel_error=''; if(!empty($event->google_event_id)){ $google_cancel=$this->mrm_mc_google_cancel_event( $event->google_event_id, $event->calendar_id ?? '' ); if(is_wp_error($google_cancel)){$google_cancel_error=$google_cancel->get_error_message();}}
 	$wpdb->update($events_table,array('status'=>'deleted','registration_open'=>0,'cancellation_reason'=>'Admin cancelled the Masterclass. If paid registrations were eligible for automatic refund under the event cancellation policy, refunds were attempted immediately through Stripe. If the event was outside the automatic refund window, it was removed from active listings for administrative follow-up.','google_last_error'=>$google_cancel_error,'updated_at'=>$this->now()),array('id'=>$event_id));
 	if($refund_failure_count>0){$this->mrm_mc_admin_notice_redirect(self::ADMIN_EVENTS_SLUG,'event_cancel_refund_failures',array('event_id'=>$event_id,'success'=>$refund_success_count,'failed'=>$refund_failure_count));}
@@ -7141,11 +7195,6 @@ public function render_presenters_page() {
 	echo '<tr><th>ZIP Code</th><td><input name="zip_code" type="text" class="regular-text" value="' . esc_attr( $editing['zip_code'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Timezone</th><td><input name="timezone" type="text" class="regular-text" value="' . esc_attr( $editing['timezone'] ?? 'America/Phoenix' ) . '"></td></tr>';
 	echo '<tr><th>Stripe Connected Account ID</th><td><input name="stripe_connected_account_id" type="text" class="regular-text" placeholder="acct_..." value="' . esc_attr( $editing['stripe_connected_account_id'] ?? '' ) . '"><p class="description">Use the presenter Stripe Connect account ID. Store full SSN/EIN/TIN outside WordPress.</p></td></tr>';
-	$payout_per_student_dollars = isset( $editing['payout_per_student_cents'] )
-		? number_format( absint( $editing['payout_per_student_cents'] ) / 100, 2, '.', '' )
-		: '0.00';
-
-	echo '<tr><th>Presenter Payout Per Student</th><td><input type="number" step="0.01" min="0" name="payout_per_student_dollars" class="regular-text" value="' . esc_attr( $payout_per_student_dollars ) . '"><p class="description">Fixed dollar amount paid to this presenter for each paid student enrollment. Example: 10.00 means the presenter earns $10.00 per paid registration.</p></td></tr>';
 	echo '<tr><th>Start Date</th><td><input name="hire_date" type="date" value="' . esc_attr( $editing['hire_date'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Profile Image URL</th><td><input name="profile_image_url" type="url" class="regular-text" value="' . esc_attr( $editing['profile_image_url'] ?? '' ) . '"></td></tr>';
 
@@ -7171,7 +7220,7 @@ public function render_presenters_page() {
 		echo '<p>No presenters added yet. Use the form above to create the first presenter.</p>';
 	} else {
 		echo '<table class="widefat striped">';
-		echo '<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Location</th><th>Stripe Account</th><th>Payout / Student</th><th>Timezone</th><th>Presenter Page</th><th>Actions</th></tr></thead><tbody>';
+		echo '<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Location</th><th>Stripe Account</th><th>Timezone</th><th>Presenter Page</th><th>Actions</th></tr></thead><tbody>';
 
 		foreach ( $rows as $row ) {
 			echo '<tr>';
@@ -7180,11 +7229,6 @@ public function render_presenters_page() {
 			echo '<td>' . esc_html( $row['email'] ) . '</td>';
 			echo '<td>' . esc_html( trim( ( $row['city'] ?? '' ) . ', ' . ( $row['state'] ?? '' ), ', ' ) ) . '</td>';
 			echo '<td><code>' . esc_html( $row['stripe_connected_account_id'] ?? '' ) . '</code></td>';
-			$payout_per_student_display = isset( $row['payout_per_student_cents'] )
-				? '$' . number_format( absint( $row['payout_per_student_cents'] ) / 100, 2 )
-				: '$0.00';
-
-			echo '<td>' . esc_html( $payout_per_student_display ) . '</td>';
 			echo '<td><code>' . esc_html( $row['timezone'] ?? '' ) . '</code></td>';
 			echo '<td>';
 
@@ -7303,7 +7347,7 @@ public function render_events_page() {
 	echo '<tr><th>Masterclass Google Calendar ID</th><td><input type="text" name="masterclass_calendar_id" class="regular-text" placeholder="...@group.calendar.google.com" value="' . esc_attr( $settings['masterclass_calendar_id'] ?? '' ) . '"></td></tr>';
 	echo '<tr><th>Default Price</th><td><input type="number" name="default_price_cents" class="regular-text" value="' . esc_attr( $settings['default_price_cents'] ?? self::DEFAULT_PRICE_CENTS ) . '"><p class="description">Cents. Example: 2500 = $25.00.</p></td></tr>';
 	echo '<tr><th>Default Capacity</th><td><input type="number" name="default_capacity" class="regular-text" value="' . esc_attr( $settings['default_capacity'] ?? 100 ) . '"></td></tr>';
-	echo '<tr><th>Default Timezone</th><td><input type="text" name="default_timezone" class="regular-text" value="' . esc_attr( $settings['default_timezone'] ?? 'America/Phoenix' ) . '"></td></tr>';
+	echo '<tr><th>Default Timezone</th><td>' . $this->mrm_mc_timezone_select_html( 'default_timezone', $settings['default_timezone'] ?? 'America/Phoenix' ) . '</td></tr>';
 	echo '<input type="hidden" name="admin_notification_email" value="' . esc_attr( $settings['admin_notification_email'] ?? get_option( 'admin_email' ) ) . '">';
 	echo '<input type="hidden" name="from_email" value="' . esc_attr( $settings['from_email'] ?? 'no-reply@lowbrass-lessons.com' ) . '">';
 	echo '<input type="hidden" name="terms_version" value="' . esc_attr( $settings['terms_version'] ?? 'v1' ) . '">';
@@ -7347,8 +7391,13 @@ public function render_events_page() {
 	echo '<tr><th>Optional Proctor Email</th><td><input type="email" name="proctor_email" class="regular-text" placeholder="proctor@example.com" value="' . esc_attr( $edit_event->proctor_email ?? '' ) . '"><p class="description">Added as an event guest. True Google Meet co-host assignment may still require Workspace host controls.</p></td></tr>';
 	echo '<tr><th>Start Time</th><td><input type="datetime-local" name="start_time" required value="' . esc_attr( ! empty( $edit_event->start_time ) ? str_replace( ' ', 'T', substr( $edit_event->start_time, 0, 16 ) ) : '' ) . '"></td></tr>';
 	echo '<tr><th>End Time</th><td><input type="datetime-local" name="end_time" required value="' . esc_attr( ! empty( $edit_event->end_time ) ? str_replace( ' ', 'T', substr( $edit_event->end_time, 0, 16 ) ) : '' ) . '"></td></tr>';
-	echo '<tr><th>Timezone</th><td><input type="text" name="timezone" class="regular-text" value="' . esc_attr( $edit_event->timezone ?? ( $settings['default_timezone'] ?? 'America/Phoenix' ) ) . '"></td></tr>';
+	echo '<tr><th>Timezone</th><td>' . $this->mrm_mc_timezone_select_html( 'timezone', $edit_event->timezone ?? ( $settings['default_timezone'] ?? 'America/Phoenix' ) ) . '<p class="description">Select the U.S. timezone for this Masterclass event.</p></td></tr>';
 	echo '<tr><th>Price</th><td><input type="number" name="price_cents" class="regular-text" value="' . esc_attr( $edit_event->price_cents ?? ( $settings['default_price_cents'] ?? self::DEFAULT_PRICE_CENTS ) ) . '"><p class="description">Cents. Example: 2500 = $25.00.</p></td></tr>';
+	$event_payout_dollars = isset( $edit_event->presenter_payout_per_student_cents )
+		? number_format( absint( $edit_event->presenter_payout_per_student_cents ) / 100, 2, '.', '' )
+		: '0.00';
+
+	echo '<tr><th>Presenter Payout Per Student</th><td><input type="number" step="0.01" min="0" name="presenter_payout_per_student_dollars" class="regular-text" value="' . esc_attr( $event_payout_dollars ) . '"><p class="description">This payout belongs to this specific Masterclass event, not the presenter profile.</p></td></tr>';
 	echo '<tr><th>Capacity</th><td><input type="number" name="capacity" class="regular-text" value="' . esc_attr( $edit_event->capacity ?? ( $settings['default_capacity'] ?? 100 ) ) . '"></td></tr>';
 	echo '<tr><th>Status</th><td><select name="status">';
 	foreach ( array( 'draft', 'scheduled', 'cancelled', 'completed', 'archived' ) as $status ) {
@@ -7372,6 +7421,7 @@ public function render_events_page() {
 	echo '<th>End</th>';
 	echo '<th>Auto-Cancel Cutoff</th>';
 	echo '<th>Price</th>';
+	echo '<th>Presenter Payout</th>';
 	echo '<th>Capacity</th>';
 	echo '<th>Paid</th>';
 	echo '<th>Available</th>';
@@ -7403,6 +7453,7 @@ public function render_events_page() {
 			echo '<td>' . esc_html( $event->end_time ) . '</td>';
 			echo '<td>' . esc_html( $auto_cancel_cutoff ) . '</td>';
 			echo '<td>' . esc_html( $this->cents_to_dollars( $event->price_cents ) ) . '</td>';
+			echo '<td>' . esc_html( $this->cents_to_dollars( $event->presenter_payout_per_student_cents ?? 0 ) ) . '</td>';
 			echo '<td>' . esc_html( $capacity ) . '</td>';
 			echo '<td>' . esc_html( $paid_count ) . '</td>';
 			echo '<td>' . esc_html( $available ) . '</td>';
@@ -7435,7 +7486,7 @@ public function render_events_page() {
 			echo '</tr>';
 		}
 	} else {
-		echo '<tr><td colspan="16">No active masterclass sessions created yet.</td></tr>';
+		echo '<tr><td colspan="17">No active masterclass sessions created yet.</td></tr>';
 	}
 
 	echo '</tbody></table>';
@@ -8713,7 +8764,7 @@ public function rest_finalize_registration( $request ) {
 
 	$discount_cents = max( 0, $base_amount_cents - $amount_received );
 	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair(); $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
-	$share_calc = $this->mrm_mc_calculate_registration_shares( $amount_received, absint( $event->presenter_id ) );
+	$share_calc = $this->mrm_mc_calculate_registration_shares( $amount_received, absint( $event->presenter_id ), absint( $event->id ) );
 	$stripe_fee = absint( $share_calc['stripe_fee_cents'] );
 	$net_cents = absint( $share_calc['net_cents'] );
 	$presenter_cut = absint( $share_calc['presenter_share_cents'] );

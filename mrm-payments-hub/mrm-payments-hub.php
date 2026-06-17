@@ -13138,17 +13138,20 @@ public function render_access_lists_page() {
         array('id' => $request_id)
       );
 
-      $changes_body = '<p>Hello,</p>';
-      $changes_body .= '<p>Low Brass Lessons has reviewed your submitted profile card or event request and requested changes before approval.</p>';
+      $intro_html = '<p>Hello,</p>';
+      $intro_html .= '<p>Low Brass Lessons has reviewed your submitted profile card or event request and requested changes before approval.</p>';
 
-      if ($note !== '') {
-        $changes_body .= '<div style="margin:16px 0;padding:14px 16px;background:#fbf8f2;border:1px solid #d9cfbe;border-radius:14px;color:#171512;">';
-        $changes_body .= '<strong>Requested changes:</strong><br>';
-        $changes_body .= nl2br(esc_html($note));
-        $changes_body .= '</div>';
-      }
+      $details_html = '<div><strong>Requested changes:</strong></div>';
+      $details_html .= '<div>' . ($note !== '' ? nl2br(esc_html($note)) : 'Please review and update the requested form details.') . '</div>';
+      $details_html .= '<div style="margin-top:12px;">Please use your original private link to update and resubmit your request.</div>';
 
-      $changes_body .= '<p>Please use your original private link to update and resubmit your request.</p>';
+      $changes_body = $this->mrm_email_wrap_html(
+        'Profile Card Changes Requested',
+        $intro_html,
+        $details_html,
+        '',
+        ''
+      );
 
       wp_mail(
         $request['recipient_email'],
@@ -13211,6 +13214,9 @@ public function render_access_lists_page() {
     global $wpdb;
 
     $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+    $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
+    $is_profile_update = !empty($admin_payload['is_profile_update']);
+    $existing_target_id = absint($admin_payload['existing_target_id'] ?? 0);
     $table = $wpdb->prefix . 'mrm_instructors';
 
     $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
@@ -13244,6 +13250,19 @@ public function render_access_lists_page() {
       'hire_date' => current_time('Y-m-d'),
     );
 
+    if ($is_profile_update && $existing_target_id > 0) {
+      $updated = $wpdb->update($table, $data, array('id' => $existing_target_id));
+
+      if ($updated === false) {
+        return new WP_Error('instructor_update_failed', 'Instructor update failed: ' . $wpdb->last_error);
+      }
+
+      return array(
+        'target_type' => 'instructor',
+        'target_id' => $existing_target_id,
+      );
+    }
+
     $inserted = $wpdb->insert($table, $data);
 
     if (!$inserted) {
@@ -13261,6 +13280,8 @@ public function render_access_lists_page() {
 
     $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
     $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
+    $is_profile_update = !empty($admin_payload['is_profile_update']);
+    $existing_target_id = absint($admin_payload['existing_target_id'] ?? 0);
 
     $table = $wpdb->prefix . 'mrm_masterclass_presenters';
 
@@ -13286,7 +13307,7 @@ public function render_access_lists_page() {
       'timezone' => 'America/Phoenix',
       'stripe_connected_account_id' => '',
       'payout_percent' => 0,
-      'payout_per_student_cents' => max(0, absint($admin_payload['presenter_payout_per_student_cents'] ?? 0)),
+      'payout_per_student_cents' => 0,
       'hire_date' => current_time('Y-m-d'),
       'profile_image_url' => esc_url_raw($payload['profile_image_url'] ?? ''),
       'short_description' => wp_kses_post($payload['short_description'] ?? ''),
@@ -13297,6 +13318,19 @@ public function render_access_lists_page() {
       'created_at' => current_time('mysql'),
       'updated_at' => current_time('mysql'),
     );
+
+    if ($is_profile_update && $existing_target_id > 0) {
+      $updated = $wpdb->update($table, $data, array('id' => $existing_target_id));
+
+      if ($updated === false) {
+        return new WP_Error('presenter_update_failed', 'Presenter update failed: ' . $wpdb->last_error);
+      }
+
+      return array(
+        'target_type' => 'presenter',
+        'target_id' => $existing_target_id,
+      );
+    }
 
     $inserted = $wpdb->insert($table, $data);
 
@@ -13374,6 +13408,14 @@ public function render_access_lists_page() {
       'created_at' => current_time('mysql'),
       'updated_at' => current_time('mysql'),
     );
+
+    $event_payout_column = $wpdb->get_var(
+      $wpdb->prepare("SHOW COLUMNS FROM {$events_table} LIKE %s", 'presenter_payout_per_student_cents')
+    );
+
+    if ($event_payout_column) {
+      $data['presenter_payout_per_student_cents'] = max(0, absint($admin_payload['presenter_payout_per_student_cents'] ?? 0));
+    }
 
     $inserted = $wpdb->insert($events_table, $data);
 
