@@ -251,12 +251,13 @@ class MRM_Product_Access {
      */
     public function admin_menu() {
         add_menu_page(
-            __( 'MRM Product Access', 'mrm-product-access' ),
-            __( 'MRM Access', 'mrm-product-access' ),
+            __( 'Product Access', 'mrm-product-access' ),
+            __( 'Product Access', 'mrm-product-access' ),
             'manage_options',
             'mrm-pa-settings',
             array( $this, 'render_settings_page' ),
-            'dashicons-lock'
+            'dashicons-lock',
+            59
         );
     }
 

@@ -40,6 +40,8 @@ class MRM_Payments_Hub_Single {
     add_action('admin_menu', array($this, 'admin_menu'));
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('admin_post_mrm_export_legal_ledger', array($this, 'handle_export_legal_ledger'));
+    add_action('admin_post_mrm_pay_hub_run_selected_payouts', array($this, 'handle_run_selected_payouts'));
+    add_action('admin_post_mrm_pay_hub_run_all_payee_payouts', array($this, 'handle_run_all_payee_payouts'));
     // BEGIN TEMP PAYMENT HUB AUDIT
     add_action('admin_post_mrm_pay_hub_run_temp_audit', array($this, 'handle_temp_payment_hub_audit_run'));
     // END TEMP PAYMENT HUB AUDIT
@@ -7889,32 +7891,48 @@ private function charge_and_unlock_autopay($data) {
     $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'Autopay charge not successful: ' . $status);
   }
 
+  private function mrm_payout_timezone() {
+    try {
+      return new DateTimeZone('America/Los_Angeles');
+    } catch (Exception $e) {
+      return $this->mrm_wp_tz();
+    }
+  }
+
   private function mrm_get_completed_payout_period_for_today() {
     $settings = $this->get_settings();
     $anchor = trim((string)($settings['payout_anchor_date'] ?? ''));
-    if ($anchor === '') return null;
+
+    if ($anchor === '') {
+      return null;
+    }
 
     try {
-      $tz = $this->mrm_wp_tz();
+      $tz = $this->mrm_payout_timezone();
       $today = new DateTime('today', $tz);
+
       $period_start = new DateTime($anchor, $tz);
       $period_start->setTime(0, 0, 0);
 
-      if ((int)$period_start->format('N') !== 5) {
+      // Anchor must be a Saturday.
+      if ((int)$period_start->format('N') !== 6) {
         return null;
       }
 
       while (true) {
-        $period_end = clone $period_start;
-        $period_end->modify('+14 days');
+        // Exclusive period end: the Saturday after the two-week period.
+        // This means the paid earning window is Saturday 00:00:00 through Friday 23:59:59.
+        $period_end_exclusive = clone $period_start;
+        $period_end_exclusive->modify('+14 days');
 
-        $payout_day = clone $period_end;
-        $payout_day->modify('+5 days');
+        // Payout is the Wednesday after the two-week period closes.
+        $payout_day = clone $period_end_exclusive;
+        $payout_day->modify('+4 days');
 
         if ($today->format('Y-m-d') === $payout_day->format('Y-m-d')) {
           return array(
             'start_mysql' => $period_start->format('Y-m-d 00:00:00'),
-            'end_mysql'   => $period_end->format('Y-m-d 00:00:00'),
+            'end_mysql'   => $period_end_exclusive->format('Y-m-d 00:00:00'),
             'payout_date' => $payout_day->format('Y-m-d'),
           );
         }
@@ -7933,35 +7951,40 @@ private function charge_and_unlock_autopay($data) {
   private function mrm_is_biweekly_payout_day() {
     $settings = $this->get_settings();
     $anchor = trim((string)($settings['payout_anchor_date'] ?? ''));
-    if ($anchor === '') return false;
+
+    if ($anchor === '') {
+      return false;
+    }
 
     try {
-      $tz = $this->mrm_wp_tz();
+      $tz = $this->mrm_payout_timezone();
       $today = new DateTime('today', $tz);
+
       $period_start = new DateTime($anchor, $tz);
       $period_start->setTime(0, 0, 0);
 
-      if ((int)$period_start->format('N') !== 5) {
-        return false; // anchor must be a Friday
+      // Anchor must be a Saturday.
+      if ((int)$period_start->format('N') !== 6) {
+        return false;
       }
 
       if ($today < $period_start) {
         return false;
       }
 
-      // Payout day is the Wednesday after a completed two-week Friday-to-Friday period.
+      // Payout day is Wednesday.
       if ((int)$today->format('N') !== 3) {
-        return false; // Wednesday
+        return false;
       }
 
       $cursor = clone $period_start;
 
       while (true) {
-        $period_end = clone $cursor;
-        $period_end->modify('+14 days');
+        $period_end_exclusive = clone $cursor;
+        $period_end_exclusive->modify('+14 days');
 
-        $payout_day = clone $period_end;
-        $payout_day->modify('+5 days'); // Friday end -> following Wednesday
+        $payout_day = clone $period_end_exclusive;
+        $payout_day->modify('+4 days');
 
         if ($today->format('Y-m-d') === $payout_day->format('Y-m-d')) {
           return true;
@@ -7980,7 +8003,7 @@ private function charge_and_unlock_autopay($data) {
 
   private function mrm_is_after_payout_cutoff_time($as_of_ts = null) {
     try {
-      $tz = $this->mrm_wp_tz();
+      $tz = $this->mrm_payout_timezone();
 
       if ($as_of_ts !== null && (int)$as_of_ts > 0) {
         $now = new DateTime('@' . (int)$as_of_ts);
@@ -7990,7 +8013,7 @@ private function charge_and_unlock_autopay($data) {
       }
 
       $cutoff = clone $now;
-      $cutoff->setTime(10, 0, 0);
+      $cutoff->setTime(9, 0, 0);
 
       return ($now >= $cutoff);
     } catch (Exception $e) {
@@ -8003,9 +8026,9 @@ private function charge_and_unlock_autopay($data) {
   }
 
   private function mrm_next_daily_payout_check_timestamp() {
-    $tz = $this->mrm_wp_tz();
+    $tz = $this->mrm_payout_timezone();
     $next = new DateTime('now', $tz);
-    $next->setTime(10, 0, 0);
+    $next->setTime(9, 0, 0);
 
     if ($next->getTimestamp() <= time()) {
       $next->modify('+1 day');
@@ -8023,10 +8046,10 @@ private function charge_and_unlock_autopay($data) {
     if (!$next) {
       $needs_reschedule = true;
     } else {
-      $local_hour = (int)wp_date('G', $next, $this->mrm_wp_tz());
-      $local_minute = (int)wp_date('i', $next, $this->mrm_wp_tz());
+      $local_hour = (int)wp_date('G', $next, $this->mrm_payout_timezone());
+      $local_minute = (int)wp_date('i', $next, $this->mrm_payout_timezone());
 
-      if ($local_hour !== 10 || $local_minute !== 0) {
+      if ($local_hour !== 9 || $local_minute !== 0) {
         $needs_reschedule = true;
       }
     }
@@ -8209,7 +8232,7 @@ private function charge_and_unlock_autopay($data) {
     }
   }
 
-  public function mrm_run_payout_batch($force = false) {
+  public function mrm_run_payout_batch($force = false, $only_ids = array(), $only_payee_type = '') {
     $summary = array(
       'transfers_created' => 0,
       'payouts_created' => 0,
@@ -8231,11 +8254,30 @@ private function charge_and_unlock_autopay($data) {
     $table = $this->table_payout_ledger();
     $period = $force ? null : $this->mrm_get_completed_payout_period_for_today();
 
-    $where = "WHERE status IN ('pending','transferred')
+    $payable_statuses = $force
+      ? "'pending','transferred','error','blocked'"
+      : "'pending','transferred'";
+
+    $where = "WHERE status IN ({$payable_statuses})
       AND connected_account_id IS NOT NULL
       AND connected_account_id <> ''";
 
     $args = array();
+
+    $only_ids = array_values(array_filter(array_unique(array_map('absint', (array)$only_ids))));
+    $only_payee_type = sanitize_key((string)$only_payee_type);
+
+    if (!empty($only_ids)) {
+      $where .= " AND id IN (" . implode(',', array_fill(0, count($only_ids), '%d')) . ")";
+      foreach ($only_ids as $only_id) {
+        $args[] = $only_id;
+      }
+    }
+
+    if ($only_payee_type !== '') {
+      $where .= " AND payee_type = %s";
+      $args[] = $only_payee_type;
+    }
 
     if (is_array($period)) {
       $where .= " AND created_at >= %s AND created_at < %s";
@@ -13654,7 +13696,7 @@ public function render_access_lists_page() {
 
     ?>
     <div class="wrap">
-      <h1>Products</h1>
+      <h1>Payment Hub</h1>
 
       <form method="post">
         <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
@@ -13732,7 +13774,8 @@ public function render_access_lists_page() {
     ?>
     <div class="wrap">
       <h1>Composer Payouts</h1>
-      <p>Manage composer payout settings and review sheet music/subscription payout activity.</p>
+      <p>Manage composer payout settings, review sheet music/subscription payout activity, and manually run composer payouts when needed.</p>
+      <?php $this->mrm_render_payout_action_notices(); ?>
 
       <form method="post">
         <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
@@ -13778,20 +13821,16 @@ public function render_access_lists_page() {
   private function render_composer_payout_ledger() {
     global $wpdb;
 
-    $orders_table = $this->table_orders();
+    $table = $this->table_payout_ledger();
 
-    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $orders_table)) !== $orders_table) {
-      return '<h2>Composer Ledger</h2><p>Orders table is missing.</p>';
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) !== $table) {
+      return '<h2>Composer Ledger</h2><p>Payout ledger table is missing.</p>';
     }
 
     $rows = $wpdb->get_results(
-      "SELECT id, product_name, product_sku, amount_cents, currency, status, created_at, stripe_payment_intent_id
-       FROM {$orders_table}
-       WHERE product_sku LIKE '%sheet%'
-          OR product_sku LIKE '%fundamental%'
-          OR product_name LIKE '%sheet%'
-          OR product_name LIKE '%fundamental%'
-          OR product_name LIKE '%subscription%'
+      "SELECT *
+       FROM {$table}
+       WHERE payee_type = 'composer'
        ORDER BY created_at DESC
        LIMIT 250",
       ARRAY_A
@@ -13799,39 +13838,67 @@ public function render_access_lists_page() {
 
     ob_start();
     ?>
-    <h2>Sheet Music / Composer Transaction Ledger</h2>
+    <h2>Composer Transaction / Payout Ledger</h2>
 
-    <table class="widefat striped">
-      <thead>
-        <tr>
-          <th>Order ID</th>
-          <th>Product</th>
-          <th>SKU</th>
-          <th>Gross</th>
-          <th>Status</th>
-          <th>Stripe PaymentIntent</th>
-          <th>Created</th>
-        </tr>
-      </thead>
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-bottom:14px;">
+      <?php wp_nonce_field('mrm_pay_hub_run_all_payee_payouts'); ?>
+      <input type="hidden" name="action" value="mrm_pay_hub_run_all_payee_payouts">
+      <input type="hidden" name="payee_type" value="composer">
+      <input type="hidden" name="return_page" value="mrm-pay-hub-composer-payouts">
+      <button type="submit" class="button button-primary" onclick="return confirm('Run payout processing for all owed composer payout rows?');">
+        Pay All Owed Composer Amounts
+      </button>
+    </form>
 
-      <tbody>
-        <?php if (empty($rows)) : ?>
-          <tr><td colspan="7">No sheet music or subscription transactions found.</td></tr>
-        <?php else : ?>
-          <?php foreach ($rows as $row) : ?>
-            <tr>
-              <td><?php echo esc_html($row['id']); ?></td>
-              <td><?php echo esc_html($row['product_name']); ?></td>
-              <td><code><?php echo esc_html($row['product_sku']); ?></code></td>
-              <td><?php echo esc_html('$' . number_format(((int)$row['amount_cents']) / 100, 2)); ?></td>
-              <td><?php echo esc_html($row['status']); ?></td>
-              <td><code><?php echo esc_html($row['stripe_payment_intent_id']); ?></code></td>
-              <td><?php echo esc_html($row['created_at']); ?></td>
-            </tr>
-          <?php endforeach; ?>
-        <?php endif; ?>
-      </tbody>
-    </table>
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+      <?php wp_nonce_field('mrm_pay_hub_run_selected_payouts'); ?>
+      <input type="hidden" name="action" value="mrm_pay_hub_run_selected_payouts">
+      <input type="hidden" name="return_page" value="mrm-pay-hub-composer-payouts">
+
+      <table class="widefat striped">
+        <thead>
+          <tr>
+            <th>Select</th>
+            <th>Ledger ID</th>
+            <th>Source</th>
+            <th>Gross</th>
+            <th>Owed</th>
+            <th>Status</th>
+            <th>Stripe Account</th>
+            <th>Transfer</th>
+            <th>Payout</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php if (empty($rows)) : ?>
+            <tr><td colspan="10">No composer payout rows found.</td></tr>
+          <?php else : ?>
+            <?php foreach ($rows as $row) : ?>
+              <?php $selectable = in_array((string)$row['status'], array('pending','transferred','error','blocked'), true) && !empty($row['connected_account_id']); ?>
+              <tr>
+                <td><?php if ($selectable) : ?><input type="checkbox" name="ledger_ids[]" value="<?php echo esc_attr($row['id']); ?>"><?php endif; ?></td>
+                <td><?php echo esc_html($row['id']); ?></td>
+                <td><?php echo esc_html($row['payee_ref']); ?></td>
+                <td><?php echo esc_html('$' . number_format(((int)$row['gross_cents']) / 100, 2)); ?></td>
+                <td><?php echo esc_html('$' . number_format(((int)$row['net_cents']) / 100, 2)); ?></td>
+                <td><?php echo esc_html($row['status']); ?></td>
+                <td><code><?php echo esc_html($row['connected_account_id'] ?: 'Missing'); ?></code></td>
+                <td><code><?php echo esc_html($row['transfer_id'] ?: '—'); ?></code></td>
+                <td><code><?php echo esc_html($row['payout_id'] ?: '—'); ?></code></td>
+                <td><?php echo esc_html($row['created_at']); ?></td>
+              </tr>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </tbody>
+      </table>
+
+      <p>
+        <button type="submit" class="button" onclick="return confirm('Run payout processing for selected composer rows?');">
+          Pay Selected Composer Rows
+        </button>
+      </p>
+    </form>
     <?php
     return ob_get_clean();
   }
@@ -13854,7 +13921,8 @@ public function render_access_lists_page() {
     ?>
     <div class="wrap">
       <h1>Instructor Payouts</h1>
-      <p>Manage instructor payout settings, two-week payout cycles, and instructor lesson payout ledgers.</p>
+      <p>Review past instructor lessons, see delivered/canceled lesson status, view the amount owed, and run manual payouts for individual lessons or all owed lessons.</p>
+      <?php $this->mrm_render_payout_action_notices(); ?>
 
       <form method="post">
         <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
@@ -13863,10 +13931,10 @@ public function render_access_lists_page() {
 
         <table class="form-table">
           <tr>
-            <th scope="row"><label for="payout_anchor_date">First Friday of Two-Week Payout Period</label></th>
+            <th scope="row"><label for="payout_anchor_date">First Saturday of Two-Week Earning Period</label></th>
             <td>
               <input type="date" id="payout_anchor_date" name="payout_anchor_date" value="<?php echo $payout_anchor_date; ?>" />
-              <p class="description">Choose the Friday that begins a two-week Friday-to-Friday earning period. The payout becomes eligible the following Wednesday.</p>
+              <p class="description">Choose the Saturday that begins a two-week earning period. The earning period runs Saturday 12:00 AM through Friday 11:59 PM two weeks later. The payout is issued the following Wednesday at 9:00 AM Pacific time.</p>
             </td>
           </tr>
 
@@ -13917,12 +13985,6 @@ public function render_access_lists_page() {
             </td>
           </tr>
 
-          <tr>
-            <th scope="row">Manual Test Button</th>
-            <td>
-              <button type="submit" name="mrm_run_payout_batch" value="1" class="button">Run Payout Batch Now</button>
-            </td>
-          </tr>
         </table>
 
         <p class="submit">
@@ -13936,15 +13998,138 @@ public function render_access_lists_page() {
   }
 
   private function render_instructor_payout_ledger() {
-    if (method_exists($this, 'render_payouts_ledger_table')) {
-      return $this->render_payouts_ledger_table();
+    global $wpdb;
+
+    $lessons = $this->table_lessons();
+    $payouts = $this->table_payout_ledger();
+    $instructors = $wpdb->prefix . 'mrm_instructors';
+
+    if (
+      $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $lessons)) !== $lessons ||
+      $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $payouts)) !== $payouts ||
+      $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $instructors)) !== $instructors
+    ) {
+      return '<h2>Instructor Lessons Given</h2><p>Required lesson, instructor, or payout tables are missing.</p>';
     }
 
-    if (method_exists($this, 'render_payout_ledger_table')) {
-      return $this->render_payout_ledger_table();
-    }
+    $now = current_time('mysql');
 
-    return '<h2>Instructor Payout Ledger</h2><p>The existing instructor payout ledger renderer was not found. Move the existing ledger table from the old Products page into this method.</p>';
+    $rows = $wpdb->get_results(
+      $wpdb->prepare(
+        "SELECT
+            l.id AS lesson_id,
+            l.instructor_id,
+            l.student_name,
+            l.student_email,
+            l.instrument,
+            l.lesson_length,
+            l.is_online,
+            l.start_time,
+            l.end_time,
+            l.status AS lesson_status,
+            l.charge_status,
+            l.payment_mode,
+            i.name AS instructor_name,
+            i.email AS instructor_email,
+            i.stripe_connected_account_id,
+            p.id AS payout_id,
+            p.net_cents AS owed_cents,
+            p.status AS payout_status,
+            p.transfer_id,
+            p.payout_id AS stripe_payout_id,
+            p.notes AS payout_notes
+         FROM {$lessons} l
+         LEFT JOIN {$instructors} i ON i.id = l.instructor_id
+         LEFT JOIN {$payouts} p ON p.payee_type = 'instructor' AND p.payee_ref = CONCAT('lesson:', l.id)
+         WHERE l.end_time < %s
+         ORDER BY l.end_time DESC
+         LIMIT 500",
+        $now
+      ),
+      ARRAY_A
+    );
+
+    ob_start();
+    ?>
+    <h2>Instructor Lessons Given</h2>
+
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-bottom:14px;">
+      <?php wp_nonce_field('mrm_pay_hub_run_all_payee_payouts'); ?>
+      <input type="hidden" name="action" value="mrm_pay_hub_run_all_payee_payouts">
+      <input type="hidden" name="payee_type" value="instructor">
+      <input type="hidden" name="return_page" value="mrm-pay-hub-instructor-payouts">
+      <button type="submit" class="button button-primary" onclick="return confirm('Run payout processing for all owed instructor lesson rows?');">
+        Pay All Owed Instructor Lessons
+      </button>
+    </form>
+
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+      <?php wp_nonce_field('mrm_pay_hub_run_selected_payouts'); ?>
+      <input type="hidden" name="action" value="mrm_pay_hub_run_selected_payouts">
+      <input type="hidden" name="return_page" value="mrm-pay-hub-instructor-payouts">
+
+      <table class="widefat striped">
+        <thead>
+          <tr>
+            <th>Select</th>
+            <th>Instructor</th>
+            <th>Student</th>
+            <th>Lesson</th>
+            <th>Date / Time</th>
+            <th>Lesson Status</th>
+            <th>Charge Status</th>
+            <th>Amount Owed</th>
+            <th>Payout Status</th>
+            <th>Stripe Account</th>
+            <th>Transfer / Payout</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php if (empty($rows)) : ?>
+            <tr><td colspan="11">No past instructor lessons found.</td></tr>
+          <?php else : ?>
+            <?php foreach ($rows as $row) : ?>
+              <?php
+                $owed_cents = isset($row['owed_cents']) ? (int)$row['owed_cents'] : 0;
+                $payout_status = (string)($row['payout_status'] ?? 'not-created');
+                $selectable = !empty($row['payout_id'])
+                  && $owed_cents > 0
+                  && !empty($row['stripe_connected_account_id'])
+                  && in_array($payout_status, array('pending','transferred','error','blocked'), true);
+              ?>
+              <tr>
+                <td><?php if ($selectable) : ?><input type="checkbox" name="ledger_ids[]" value="<?php echo esc_attr($row['payout_id']); ?>"><?php endif; ?></td>
+                <td><?php echo esc_html($row['instructor_name'] ?: '—'); ?><br><small><?php echo esc_html($row['instructor_email'] ?: ''); ?></small></td>
+                <td><?php echo esc_html($row['student_name']); ?><br><small><?php echo esc_html($row['student_email']); ?></small></td>
+                <td><?php echo esc_html($row['instrument']); ?> — <?php echo esc_html((int)$row['lesson_length']); ?> min<br><small><?php echo !empty($row['is_online']) ? 'Online' : 'In person'; ?></small></td>
+                <td><?php echo esc_html($row['start_time']); ?><br><small>Ended: <?php echo esc_html($row['end_time']); ?></small></td>
+                <td><?php echo esc_html($row['lesson_status']); ?></td>
+                <td><?php echo esc_html($row['charge_status']); ?></td>
+                <td><?php echo esc_html('$' . number_format($owed_cents / 100, 2)); ?></td>
+                <td><?php echo esc_html($payout_status); ?></td>
+                <td><code><?php echo esc_html($row['stripe_connected_account_id'] ?: 'Missing'); ?></code></td>
+                <td>
+                  <?php if (!empty($row['transfer_id']) || !empty($row['stripe_payout_id'])) : ?>
+                    Transfer: <code><?php echo esc_html($row['transfer_id'] ?: '—'); ?></code><br>
+                    Payout: <code><?php echo esc_html($row['stripe_payout_id'] ?: '—'); ?></code>
+                  <?php else : ?>
+                    —
+                  <?php endif; ?>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </tbody>
+      </table>
+
+      <p>
+        <button type="submit" class="button" onclick="return confirm('Run payout processing for selected instructor lesson rows?');">
+          Pay Selected Instructor Lessons
+        </button>
+      </p>
+    </form>
+    <?php
+    return ob_get_clean();
   }
 
   private function mrm_pay_table_masterclass_ledger() {
@@ -13981,6 +14166,7 @@ public function render_access_lists_page() {
     echo '<div class="wrap">';
     echo '<h1>Presenter Payouts</h1>';
     echo '<p>Review Masterclass presenter payouts. Presenter payouts become eligible one week after the event ends.</p>';
+    $this->mrm_render_payout_action_notices();
 
     if (!$this->mrm_pay_table_exists($ledger_table) || !$this->mrm_pay_table_exists($events_table) || !$this->mrm_pay_table_exists($presenters_table)) {
       echo '<div class="notice notice-error"><p>Required Masterclass payout tables are missing.</p></div>';
@@ -14096,14 +14282,76 @@ public function render_access_lists_page() {
     echo '</div>';
   }
 
+
+  public function handle_run_selected_payouts() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission.');
+    }
+
+    check_admin_referer('mrm_pay_hub_run_selected_payouts');
+
+    $ledger_ids = isset($_POST['ledger_ids']) && is_array($_POST['ledger_ids'])
+      ? array_values(array_filter(array_unique(array_map('absint', wp_unslash($_POST['ledger_ids'])))))
+      : array();
+
+    $return_page = sanitize_key($_POST['return_page'] ?? 'mrm-pay-hub-instructor-payouts');
+
+    if (empty($ledger_ids)) {
+      wp_safe_redirect(admin_url('admin.php?page=' . $return_page . '&payout_empty=1'));
+      exit;
+    }
+
+    $result = $this->mrm_run_payout_batch(true, $ledger_ids, '');
+
+    $flag = empty($result['errors']) ? 'payout_ok=1' : 'payout_error=1';
+    wp_safe_redirect(admin_url('admin.php?page=' . $return_page . '&' . $flag));
+    exit;
+  }
+
+  public function handle_run_all_payee_payouts() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission.');
+    }
+
+    check_admin_referer('mrm_pay_hub_run_all_payee_payouts');
+
+    $payee_type = sanitize_key($_POST['payee_type'] ?? '');
+    $return_page = sanitize_key($_POST['return_page'] ?? 'mrm-pay-hub-instructor-payouts');
+
+    if (!in_array($payee_type, array('instructor', 'composer'), true)) {
+      wp_safe_redirect(admin_url('admin.php?page=' . $return_page . '&payout_error=1'));
+      exit;
+    }
+
+    $result = $this->mrm_run_payout_batch(true, array(), $payee_type);
+
+    $flag = empty($result['errors']) ? 'payout_ok=1' : 'payout_error=1';
+    wp_safe_redirect(admin_url('admin.php?page=' . $return_page . '&' . $flag));
+    exit;
+  }
+
+  private function mrm_render_payout_action_notices() {
+    if (isset($_GET['payout_ok'])) {
+      echo '<div class="notice notice-success"><p>Payout action completed. Check the ledger status for transfer/payout results.</p></div>';
+    }
+
+    if (isset($_GET['payout_error'])) {
+      echo '<div class="notice notice-error"><p>Payout action completed with one or more errors. Check ledger notes/debug logs.</p></div>';
+    }
+
+    if (isset($_GET['payout_empty'])) {
+      echo '<div class="notice notice-warning"><p>No payout rows were selected.</p></div>';
+    }
+  }
+
   /* =========================================================
    * Admin UI
    * ======================================================= */
 
   public function admin_menu() {
     add_menu_page(
-      'Products',
-      'Products',
+      'Payment Hub',
+      'Payment Hub',
       'manage_options',
       self::MENU_SLUG,
       array($this, 'render_admin_page'),
@@ -14113,8 +14361,8 @@ public function render_access_lists_page() {
 
     add_submenu_page(
       self::MENU_SLUG,
-      'Products',
-      'Products',
+      'Payment Hub',
+      'Payment Hub',
       'manage_options',
       self::MENU_SLUG,
       array($this, 'render_admin_page')
