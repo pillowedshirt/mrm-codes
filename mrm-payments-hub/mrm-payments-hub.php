@@ -13651,17 +13651,10 @@ public function render_access_lists_page() {
     $settings = $this->get_settings();
     $pk_current = esc_attr((string)$this->publishable_key());
     $price_current = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
-    $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
-    $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
-    $in_person_travel_amount = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['in_person_travel_amount_cents'] ?? 500)));
-    $instructor_payout_chart_rows = $this->mrm_get_instructor_payout_chart_rows();
-    $instructor_payout_chart_columns = $this->mrm_get_instructor_payout_chart_columns();
-    $instructor_payout_chart_values = $this->mrm_get_instructor_payout_chart_admin_matrix();
-    $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
 
     ?>
     <div class="wrap">
-      <h1>MRM Payments Hub</h1>
+      <h1>Products</h1>
 
       <form method="post">
         <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
@@ -13698,102 +13691,8 @@ public function render_access_lists_page() {
           </tr>
         </table>
 
-        <h2>Connect / Payout Settings</h2>
-        <p>These settings drive instructor/composer payout math and the biweekly payout batch.</p>
-        <table class="form-table">
-          <tr>
-            <th scope="row"><label for="composer_connected_account_id">Composer Connected Account ID</label></th>
-            <td>
-              <input type="text" id="composer_connected_account_id" name="composer_connected_account_id" value="<?php echo $composer_acct; ?>" class="regular-text" placeholder="acct_..." />
-              <p class="description">Paste the composer’s Stripe Connect account ID here.</p>
-            </td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="one_time_sheet_music_composer_pct">One-Time Sheet Music Composer %</label></th>
-            <td>
-              <input type="number" id="one_time_sheet_music_composer_pct" name="one_time_sheet_music_composer_pct" value="<?php echo $one_time_sheet_music_composer_pct; ?>" class="small-text" min="0" max="100" />
-              <p class="description">This centralized percentage is used for eligible one-time sheet music purchases. Per-product sheet music composer percentages are no longer used.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="in_person_travel_amount">In-Person Travel Add-On</label></th>
-            <td>
-              <input type="number" id="in_person_travel_amount" name="in_person_travel_amount" value="<?php echo $in_person_travel_amount; ?>" class="small-text" min="0" step="0.01" />
-              <p class="description">This amount is added to every in-person instructor payout in all payout paths.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row">Instructor Payout Chart</th>
-            <td>
-              <table class="widefat striped" style="max-width:1000px;">
-                <thead>
-                  <tr>
-                    <th>Lesson Type</th>
-                    <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
-                      <th><?php echo esc_html($year_label); ?></th>
-                    <?php endforeach; ?>
-                  </tr>
-                </thead>
-                <tbody>
-                  <?php foreach ($instructor_payout_chart_rows as $row_key => $row) : ?>
-                    <tr>
-                      <th scope="row"><?php echo esc_html($row['label']); ?></th>
-                      <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
-                        <?php
-                          $field_name = str_replace(
-                            '_cents',
-                            '',
-                            $this->mrm_get_instructor_payout_chart_setting_key(
-                              (int)$row['lesson_length'],
-                              (int)$row['is_online'],
-                              (int)$year_bucket
-                            )
-                          );
-                        ?>
-                        <td>
-                          <input
-                            type="number"
-                            name="<?php echo esc_attr($field_name); ?>"
-                            value="<?php echo esc_attr($instructor_payout_chart_values[$row_key][$year_bucket] ?? '0.00'); ?>"
-                            class="small-text"
-                            min="0"
-                            step="0.01"
-                          />
-                        </td>
-                      <?php endforeach; ?>
-                    </tr>
-                  <?php endforeach; ?>
-                </tbody>
-              </table>
-              <p class="description">
-                The instructor year bucket is resolved from <code>hire_date</code> in the instructors table.
-                Year changes happen at 12:00 AM in the site timezone on each employment anniversary date.
-                Year 3+ is used for year 3 and every later year.
-                The in-person travel add-on below this section is still added separately to all in-person payouts.
-              </p>
-            </td>
-          </tr>
-          <tr>
-            <th scope="row"><label for="payout_anchor_date">First Friday of Two-Week Payout Period</label></th>
-            <td>
-              <input type="date" id="payout_anchor_date" name="payout_anchor_date" value="<?php echo $payout_anchor_date; ?>" />
-              <p class="description">
-                Choose the first Friday that begins a two-week Friday-to-Friday earning period.
-                Example: if the period starts Friday 05/01 and ends Friday 05/15, the payout batch becomes eligible the following Wednesday at 10:00 AM site time.
-                The manual test button still runs immediately for sandbox/admin testing.
-              </p>
-            </td>
-          </tr>
-          <tr>
-            <th scope="row">Manual Test Button</th>
-            <td>
-              <button type="submit" name="mrm_run_payout_batch" value="1" class="button">Run Payout Batch Now</button>
-              <p class="description">Use this in sandbox to test transfers and payouts immediately.</p>
-            </td>
-          </tr>
-        </table>
+        <h2>Product Payment Settings</h2>
+        <p>Product payment settings are managed here. Composer, instructor, and presenter payout settings now live under their dedicated payout submenus.</p>
 
         <p class="submit">
           <button type="submit" class="button button-primary">Save Settings</button>
@@ -13815,19 +13714,437 @@ public function render_access_lists_page() {
     <?php
   }
 
+
+
+  public function render_composer_payouts_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission.');
+    }
+
+    settings_errors('mrm_pay_hub');
+
+    $settings = $this->get_settings();
+
+    $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
+    $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
+    $price_current = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
+
+    ?>
+    <div class="wrap">
+      <h1>Composer Payouts</h1>
+      <p>Manage composer payout settings and review sheet music/subscription payout activity.</p>
+
+      <form method="post">
+        <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
+
+        <h2>Composer Payout Settings</h2>
+
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="composer_connected_account_id">Composer Connected Account ID</label></th>
+            <td>
+              <input type="text" id="composer_connected_account_id" name="composer_connected_account_id" value="<?php echo $composer_acct; ?>" class="regular-text" placeholder="acct_..." />
+              <p class="description">Paste the composer’s Stripe Connect account ID here.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="one_time_sheet_music_composer_pct">One-Time Sheet Music Composer %</label></th>
+            <td>
+              <input type="number" id="one_time_sheet_music_composer_pct" name="one_time_sheet_music_composer_pct" value="<?php echo $one_time_sheet_music_composer_pct; ?>" class="small-text" min="0" max="100" />
+              <p class="description">Used for eligible one-time sheet music purchases.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="stripe_sheet_music_subscription_price_id">Subscription Price ID</label></th>
+            <td>
+              <input type="text" id="stripe_sheet_music_subscription_price_id" name="stripe_sheet_music_subscription_price_id" value="<?php echo $price_current; ?>" class="regular-text" placeholder="price_..." />
+              <p class="description">Used for sheet music subscription access.</p>
+            </td>
+          </tr>
+        </table>
+
+        <p class="submit">
+          <button type="submit" class="button button-primary">Save Composer Payout Settings</button>
+        </p>
+      </form>
+
+      <?php echo $this->render_composer_payout_ledger(); ?>
+    </div>
+    <?php
+  }
+
+  private function render_composer_payout_ledger() {
+    global $wpdb;
+
+    $orders_table = $this->table_orders();
+
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $orders_table)) !== $orders_table) {
+      return '<h2>Composer Ledger</h2><p>Orders table is missing.</p>';
+    }
+
+    $rows = $wpdb->get_results(
+      "SELECT id, product_name, product_sku, amount_cents, currency, status, created_at, stripe_payment_intent_id
+       FROM {$orders_table}
+       WHERE product_sku LIKE '%sheet%'
+          OR product_sku LIKE '%fundamental%'
+          OR product_name LIKE '%sheet%'
+          OR product_name LIKE '%fundamental%'
+          OR product_name LIKE '%subscription%'
+       ORDER BY created_at DESC
+       LIMIT 250",
+      ARRAY_A
+    );
+
+    ob_start();
+    ?>
+    <h2>Sheet Music / Composer Transaction Ledger</h2>
+
+    <table class="widefat striped">
+      <thead>
+        <tr>
+          <th>Order ID</th>
+          <th>Product</th>
+          <th>SKU</th>
+          <th>Gross</th>
+          <th>Status</th>
+          <th>Stripe PaymentIntent</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+
+      <tbody>
+        <?php if (empty($rows)) : ?>
+          <tr><td colspan="7">No sheet music or subscription transactions found.</td></tr>
+        <?php else : ?>
+          <?php foreach ($rows as $row) : ?>
+            <tr>
+              <td><?php echo esc_html($row['id']); ?></td>
+              <td><?php echo esc_html($row['product_name']); ?></td>
+              <td><code><?php echo esc_html($row['product_sku']); ?></code></td>
+              <td><?php echo esc_html('$' . number_format(((int)$row['amount_cents']) / 100, 2)); ?></td>
+              <td><?php echo esc_html($row['status']); ?></td>
+              <td><code><?php echo esc_html($row['stripe_payment_intent_id']); ?></code></td>
+              <td><?php echo esc_html($row['created_at']); ?></td>
+            </tr>
+          <?php endforeach; ?>
+        <?php endif; ?>
+      </tbody>
+    </table>
+    <?php
+    return ob_get_clean();
+  }
+
+  public function render_instructor_payouts_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission.');
+    }
+
+    settings_errors('mrm_pay_hub');
+
+    $settings = $this->get_settings();
+
+    $in_person_travel_amount = esc_attr($this->mrm_format_cents_for_admin_input((int)($settings['in_person_travel_amount_cents'] ?? 500)));
+    $instructor_payout_chart_rows = $this->mrm_get_instructor_payout_chart_rows();
+    $instructor_payout_chart_columns = $this->mrm_get_instructor_payout_chart_columns();
+    $instructor_payout_chart_values = $this->mrm_get_instructor_payout_chart_admin_matrix();
+    $payout_anchor_date = esc_attr((string)($settings['payout_anchor_date'] ?? ''));
+
+    ?>
+    <div class="wrap">
+      <h1>Instructor Payouts</h1>
+      <p>Manage instructor payout settings, two-week payout cycles, and instructor lesson payout ledgers.</p>
+
+      <form method="post">
+        <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
+
+        <h2>Instructor Payout Settings</h2>
+
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="payout_anchor_date">First Friday of Two-Week Payout Period</label></th>
+            <td>
+              <input type="date" id="payout_anchor_date" name="payout_anchor_date" value="<?php echo $payout_anchor_date; ?>" />
+              <p class="description">Choose the Friday that begins a two-week Friday-to-Friday earning period. The payout becomes eligible the following Wednesday.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="in_person_travel_amount">In-Person Travel Add-On</label></th>
+            <td>
+              <input type="number" id="in_person_travel_amount" name="in_person_travel_amount" value="<?php echo $in_person_travel_amount; ?>" class="small-text" min="0" step="0.01" />
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row">Instructor Payout Chart</th>
+            <td>
+              <table class="widefat striped" style="max-width:1000px;">
+                <thead>
+                  <tr>
+                    <th>Lesson Type</th>
+                    <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
+                      <th><?php echo esc_html($year_label); ?></th>
+                    <?php endforeach; ?>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  <?php foreach ($instructor_payout_chart_rows as $row_key => $row) : ?>
+                    <tr>
+                      <th scope="row"><?php echo esc_html($row['label']); ?></th>
+                      <?php foreach ($instructor_payout_chart_columns as $year_bucket => $year_label) : ?>
+                        <?php
+                          $field_name = str_replace(
+                            '_cents',
+                            '',
+                            $this->mrm_get_instructor_payout_chart_setting_key(
+                              (int)$row['lesson_length'],
+                              (int)$row['is_online'],
+                              (int)$year_bucket
+                            )
+                          );
+                        ?>
+                        <td>
+                          <input type="number" name="<?php echo esc_attr($field_name); ?>" value="<?php echo esc_attr($instructor_payout_chart_values[$row_key][$year_bucket] ?? '0.00'); ?>" class="small-text" min="0" step="0.01" />
+                        </td>
+                      <?php endforeach; ?>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row">Manual Test Button</th>
+            <td>
+              <button type="submit" name="mrm_run_payout_batch" value="1" class="button">Run Payout Batch Now</button>
+            </td>
+          </tr>
+        </table>
+
+        <p class="submit">
+          <button type="submit" class="button button-primary">Save Instructor Payout Settings</button>
+        </p>
+      </form>
+
+      <?php echo $this->render_instructor_payout_ledger(); ?>
+    </div>
+    <?php
+  }
+
+  private function render_instructor_payout_ledger() {
+    if (method_exists($this, 'render_payouts_ledger_table')) {
+      return $this->render_payouts_ledger_table();
+    }
+
+    if (method_exists($this, 'render_payout_ledger_table')) {
+      return $this->render_payout_ledger_table();
+    }
+
+    return '<h2>Instructor Payout Ledger</h2><p>The existing instructor payout ledger renderer was not found. Move the existing ledger table from the old Products page into this method.</p>';
+  }
+
+  private function mrm_pay_table_masterclass_ledger() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_masterclass_payment_ledger';
+  }
+
+  private function mrm_pay_table_masterclass_events() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_masterclass_events';
+  }
+
+  private function mrm_pay_table_masterclass_presenters() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_masterclass_presenters';
+  }
+
+  private function mrm_pay_table_exists($table) {
+    global $wpdb;
+    return $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) === $table;
+  }
+
+  public function render_presenter_payouts_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission.');
+    }
+
+    global $wpdb;
+
+    $ledger_table     = $this->mrm_pay_table_masterclass_ledger();
+    $events_table     = $this->mrm_pay_table_masterclass_events();
+    $presenters_table = $this->mrm_pay_table_masterclass_presenters();
+
+    echo '<div class="wrap">';
+    echo '<h1>Presenter Payouts</h1>';
+    echo '<p>Review Masterclass presenter payouts. Presenter payouts become eligible one week after the event ends.</p>';
+
+    if (!$this->mrm_pay_table_exists($ledger_table) || !$this->mrm_pay_table_exists($events_table) || !$this->mrm_pay_table_exists($presenters_table)) {
+      echo '<div class="notice notice-error"><p>Required Masterclass payout tables are missing.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    $summary = $wpdb->get_results(
+      "SELECT p.id, p.name, p.email, p.stripe_connected_account_id,
+              COALESCE(SUM(CASE WHEN l.status IN ('payable','payout_failed') THEN l.presenter_share_cents ELSE 0 END),0) AS unpaid_cents,
+              COALESCE(SUM(CASE WHEN l.status = 'paid_out' THEN l.presenter_share_cents ELSE 0 END),0) AS paid_out_cents,
+              COUNT(DISTINCT l.event_id) AS event_count
+       FROM {$presenters_table} p
+       LEFT JOIN {$ledger_table} l ON l.presenter_id = p.id AND l.ledger_type = 'registration_payment'
+       GROUP BY p.id
+       ORDER BY p.name ASC",
+      ARRAY_A
+    );
+
+    echo '<h2>Presenter Stripe / Balance Overview</h2>';
+    echo '<table class="widefat striped">';
+    echo '<thead><tr><th>Presenter</th><th>Email</th><th>Stripe Connected Account</th><th>Events</th><th>Unpaid</th><th>Paid Out</th></tr></thead><tbody>';
+
+    if (empty($summary)) {
+      echo '<tr><td colspan="6">No presenters found.</td></tr>';
+    } else {
+      foreach ($summary as $row) {
+        echo '<tr>';
+        echo '<td>' . esc_html($row['name']) . '</td>';
+        echo '<td>' . esc_html($row['email']) . '</td>';
+        echo '<td><code>' . esc_html($row['stripe_connected_account_id'] ?: 'Missing') . '</code></td>';
+        echo '<td>' . esc_html($row['event_count']) . '</td>';
+        echo '<td>$' . esc_html(number_format(((int)$row['unpaid_cents']) / 100, 2)) . '</td>';
+        echo '<td>$' . esc_html(number_format(((int)$row['paid_out_cents']) / 100, 2)) . '</td>';
+        echo '</tr>';
+      }
+    }
+
+    echo '</tbody></table>';
+
+    $rows = $wpdb->get_results(
+      "SELECT
+          l.*,
+          e.title AS event_title,
+          e.start_time AS event_start_time,
+          e.end_time AS event_end_time,
+          e.presenter_payout_per_student_cents AS event_payout_per_student_cents,
+          p.name AS presenter_name,
+          p.email AS presenter_email,
+          p.stripe_connected_account_id,
+          COUNT(l.id) OVER (PARTITION BY l.event_id, l.presenter_id) AS ledger_rows_for_event
+       FROM {$ledger_table} l
+       LEFT JOIN {$events_table} e ON e.id = l.event_id
+       LEFT JOIN {$presenters_table} p ON p.id = l.presenter_id
+       WHERE l.ledger_type = 'registration_payment'
+         AND l.presenter_share_cents > 0
+       ORDER BY COALESCE(e.end_time, l.created_at) DESC, p.name ASC",
+      ARRAY_A
+    );
+
+    echo '<h2 style="margin-top:28px;">Presenter Event Payout Ledger</h2>';
+    echo '<table class="widefat striped">';
+    echo '<thead><tr>';
+    echo '<th>Presenter</th>';
+    echo '<th>Event</th>';
+    echo '<th>Event Date</th>';
+    echo '<th>Payout Eligible Date</th>';
+    echo '<th>Students / Rows</th>';
+    echo '<th>Payout Per Student</th>';
+    echo '<th>Total Payout Row</th>';
+    echo '<th>Status</th>';
+    echo '<th>Stripe Account</th>';
+    echo '<th>Actions</th>';
+    echo '</tr></thead><tbody>';
+
+    if (empty($rows)) {
+      echo '<tr><td colspan="10">No presenter payout ledger rows found.</td></tr>';
+    } else {
+      foreach ($rows as $row) {
+        $event_end = !empty($row['event_end_time']) ? strtotime($row['event_end_time'] . ' UTC') : strtotime($row['created_at'] . ' UTC');
+        $eligible_ts = $event_end ? $event_end + WEEK_IN_SECONDS : time() + WEEK_IN_SECONDS;
+        $eligible_label = gmdate('Y-m-d H:i:s', $eligible_ts);
+        $is_eligible = $eligible_ts <= time();
+
+        $per_student = !empty($row['event_payout_per_student_cents'])
+          ? (int)$row['event_payout_per_student_cents']
+          : (int)$row['presenter_share_cents'];
+
+        echo '<tr>';
+        echo '<td>' . esc_html($row['presenter_name'] ?: '—') . '<br><small>' . esc_html($row['presenter_email'] ?: '') . '</small></td>';
+        echo '<td>' . esc_html($row['event_title'] ?: '—') . '</td>';
+        echo '<td>' . esc_html($row['event_start_time'] ?: '—') . '</td>';
+        echo '<td>' . esc_html($eligible_label) . '<br><small>' . esc_html($is_eligible ? 'Eligible now' : 'Scheduled') . '</small></td>';
+        echo '<td>' . esc_html($row['ledger_rows_for_event']) . '</td>';
+        echo '<td>$' . esc_html(number_format($per_student / 100, 2)) . '</td>';
+        echo '<td>$' . esc_html(number_format(((int)$row['presenter_share_cents']) / 100, 2)) . '</td>';
+        echo '<td>' . esc_html($row['status']) . '</td>';
+        echo '<td><code>' . esc_html($row['stripe_connected_account_id'] ?: 'Missing') . '</code></td>';
+        echo '<td>';
+
+        if (!$is_eligible) {
+          echo '<span class="description">Not eligible yet.</span>';
+        } else {
+          echo '<span class="description">Use existing Masterclass payout handlers for transfer/manual payment until those handlers are fully moved into Payment Hub.</span>';
+        }
+
+        echo '</td>';
+        echo '</tr>';
+      }
+    }
+
+    echo '</tbody></table>';
+    echo '</div>';
+  }
+
   /* =========================================================
    * Admin UI
    * ======================================================= */
 
   public function admin_menu() {
     add_menu_page(
-      'MRM Payments Hub',
-      'MRM Payments',
+      'Products',
+      'Products',
       'manage_options',
       self::MENU_SLUG,
       array($this, 'render_admin_page'),
       'dashicons-cart',
       57
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Products',
+      'Products',
+      'manage_options',
+      self::MENU_SLUG,
+      array($this, 'render_admin_page')
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Composer Payouts',
+      'Composer Payouts',
+      'manage_options',
+      'mrm-pay-hub-composer-payouts',
+      array($this, 'render_composer_payouts_page')
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Instructor Payouts',
+      'Instructor Payouts',
+      'manage_options',
+      'mrm-pay-hub-instructor-payouts',
+      array($this, 'render_instructor_payouts_page')
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Presenter Payouts',
+      'Presenter Payouts',
+      'manage_options',
+      'mrm-pay-hub-presenter-payouts',
+      array($this, 'render_presenter_payouts_page')
     );
 
     add_submenu_page(
@@ -13937,11 +14254,22 @@ public function render_access_lists_page() {
       $settings = $this->get_settings();
       // AWS / wp-config managed Stripe credentials are no longer stored in WordPress settings.
 
-      $settings['stripe_sheet_music_subscription_price_id'] = sanitize_text_field((string)($_POST['stripe_sheet_music_subscription_price_id'] ?? ''));
-      $settings['stripe_test_sheet_music_subscription_price_id'] = '';
-      $settings['composer_connected_account_id'] = sanitize_text_field((string)($_POST['composer_connected_account_id'] ?? ''));
-      $settings['one_time_sheet_music_composer_pct'] = $this->mrm_sanitize_percent_setting($_POST['one_time_sheet_music_composer_pct'] ?? 0, 0);
-      $settings['in_person_travel_amount_cents'] = $this->mrm_money_to_cents($_POST['in_person_travel_amount'] ?? '5.00', 500);
+      if (isset($_POST['stripe_sheet_music_subscription_price_id'])) {
+        $settings['stripe_sheet_music_subscription_price_id'] = sanitize_text_field((string)$_POST['stripe_sheet_music_subscription_price_id']);
+        $settings['stripe_test_sheet_music_subscription_price_id'] = '';
+      }
+
+      if (isset($_POST['composer_connected_account_id'])) {
+        $settings['composer_connected_account_id'] = sanitize_text_field((string)$_POST['composer_connected_account_id']);
+      }
+
+      if (isset($_POST['one_time_sheet_music_composer_pct'])) {
+        $settings['one_time_sheet_music_composer_pct'] = $this->mrm_sanitize_percent_setting($_POST['one_time_sheet_music_composer_pct'], 0);
+      }
+
+      if (isset($_POST['in_person_travel_amount'])) {
+        $settings['in_person_travel_amount_cents'] = $this->mrm_money_to_cents($_POST['in_person_travel_amount'], 500);
+      }
 
       foreach ($this->mrm_get_instructor_payout_chart_rows() as $row) {
         foreach (array_keys($this->mrm_get_instructor_payout_chart_columns()) as $year_bucket) {
@@ -13957,14 +14285,18 @@ public function render_access_lists_page() {
 
           $field_name = str_replace('_cents', '', $setting_key);
 
-          $settings[$setting_key] = $this->mrm_money_to_cents(
-            $_POST[$field_name] ?? '0.00',
-            0
-          );
+          if (isset($_POST[$field_name])) {
+            $settings[$setting_key] = $this->mrm_money_to_cents(
+              $_POST[$field_name],
+              0
+            );
+          }
         }
       }
 
-      $settings['payout_anchor_date'] = sanitize_text_field((string)($_POST['payout_anchor_date'] ?? ''));
+      if (isset($_POST['payout_anchor_date'])) {
+        $settings['payout_anchor_date'] = sanitize_text_field((string)$_POST['payout_anchor_date']);
+      }
 
       unset($settings['instructor_tier_rules']);
       unset($settings['instructor_payout_30_online_cents']);
