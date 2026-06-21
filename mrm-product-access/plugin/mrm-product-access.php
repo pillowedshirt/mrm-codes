@@ -3490,7 +3490,7 @@ function initRichTextToolbars(scope) {
       .card{ padding: 14px; }
 
       .pdf{
-        height: 60vh; /* better fit on phones */
+        height: 60vh;
       }
 
       iframe.pdf{
@@ -3498,26 +3498,96 @@ function initRichTextToolbars(scope) {
         max-width: 100%;
       }
 
-      /* Make audio controls stack cleanly on mobile */
+      /* Audio stays in the exact desktop order on mobile.
+         Only the sizing compresses. */
+      .audio-box{
+        padding: 9px !important;
+      }
+
       .audio-controls{
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 10px;
-        justify-items: stretch;
+        display:grid !important;
+        grid-template-columns: auto auto minmax(48px, 1fr) auto auto !important;
+        grid-template-areas: "play current seek duration volume" !important;
+        align-items:center !important;
+        justify-items:stretch !important;
+        gap:6px !important;
       }
 
       .audio-row-top{
-        width: 100%;
-        display: grid;
-        grid-template-columns: 42px 1fr 1fr;
-        align-items: center;
-        column-gap: 10px;
+        display:contents !important;
+        width:auto !important;
       }
 
-      .audio-row-seek{ width: 100%; }
-      .audio-row-vol{ width: 100%; justify-content: flex-start; }
+      .audio-row-top .mrm-play,
+      .audio-controls > .mrm-play{
+        grid-area:play !important;
+      }
 
-      .volume input{ width: min(260px, 72vw); }
+      .audio-row-top .mrm-current,
+      .audio-controls > .mrm-current{
+        grid-area:current !important;
+      }
+
+      .audio-row-top .mrm-duration,
+      .audio-controls > .mrm-duration{
+        grid-area:duration !important;
+      }
+
+      .audio-row-seek{
+        grid-area:seek !important;
+        width:100% !important;
+        min-width:0 !important;
+      }
+
+      .audio-row-vol{
+        grid-area:volume !important;
+        width:auto !important;
+        justify-content:flex-end !important;
+        gap:4px !important;
+      }
+
+      .play-button{
+        width:34px !important;
+        height:34px !important;
+        border-radius:9px !important;
+      }
+
+      .play-button svg{
+        width:14px !important;
+        height:14px !important;
+      }
+
+      .time{
+        font-size:10px !important;
+        min-width:30px !important;
+      }
+
+      .progress,
+      .volume input.mrm-volume{
+        height:7px !important;
+      }
+
+      .progress::-webkit-slider-thumb,
+      .volume input.mrm-volume::-webkit-slider-thumb{
+        width:13px !important;
+        height:13px !important;
+      }
+
+      .progress::-moz-range-thumb,
+      .volume input.mrm-volume::-moz-range-thumb{
+        width:13px !important;
+        height:13px !important;
+      }
+
+      .volume svg{
+        width:14px !important;
+        height:14px !important;
+      }
+
+      .volume input,
+      .volume input.mrm-volume{
+        width:clamp(44px, 15vw, 62px) !important;
+      }
     }
   </style>
 </head>
@@ -5096,40 +5166,87 @@ function initRichTextToolbars(scope) {
             border-radius: 16px;
           }
 
+          /* Audio keeps the desktop visual order on mobile.
+             Only the sizes compress. */
+          .audio-box{
+            padding: 9px !important;
+          }
+
           .audio-controls {
-            grid-template-columns: auto 1fr auto;
-            grid-template-areas:
-              "play current duration"
-              "seek seek seek"
-              "volume volume volume";
-            justify-items: stretch;
-            gap: 12px;
+            display:grid !important;
+            grid-template-columns: auto auto minmax(48px, 1fr) auto auto !important;
+            grid-template-areas: "play current seek duration volume" !important;
+            align-items:center !important;
+            justify-items:stretch !important;
+            gap:6px !important;
           }
 
           .audio-row-top {
-            display: contents;
+            display: contents !important;
           }
 
           .audio-row-top .time {
-            min-width: 0;
+            min-width: 30px !important;
           }
 
           .audio-row-seek {
-            width: 100%;
+            grid-area:seek !important;
+            width: 100% !important;
+            min-width:0 !important;
           }
 
           .audio-row-seek .progress {
-            width: 100%;
-            height: 12px;
+            width: 100% !important;
+            height: 7px !important;
           }
 
           .audio-row-vol {
-            width: 100%;
-            justify-content: center;
+            grid-area:volume !important;
+            width: auto !important;
+            justify-content: flex-end !important;
+            gap:4px !important;
+          }
+
+          .play-button{
+            width:34px !important;
+            height:34px !important;
+            border-radius:9px !important;
+          }
+
+          .play-button svg{
+            width:14px !important;
+            height:14px !important;
+          }
+
+          .time{
+            font-size:10px !important;
+            min-width:30px !important;
+          }
+
+          .progress,
+          .volume input.mrm-volume{
+            height:7px !important;
+          }
+
+          .progress::-webkit-slider-thumb,
+          .volume input.mrm-volume::-webkit-slider-thumb{
+            width:13px !important;
+            height:13px !important;
+          }
+
+          .progress::-moz-range-thumb,
+          .volume input.mrm-volume::-moz-range-thumb{
+            width:13px !important;
+            height:13px !important;
+          }
+
+          .volume svg{
+            width:14px !important;
+            height:14px !important;
           }
 
           .volume input.mrm-volume {
-            width: min(280px, 72vw);
+            width: clamp(44px, 15vw, 62px) !important;
           }
         }
 
@@ -5483,13 +5600,13 @@ audio.mrm-audio {
 }
 
 .mrm-sheet-music-catalog-heading h2 {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   color: #171512 !important;
   font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
-  font-size: clamp(32px, 4.8vw, 52px);
+  font-size: clamp(1.75rem, 3.5vw, 2rem);
   font-weight: 600;
-  line-height: 0.96;
-  letter-spacing: -0.04em;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
   text-align: center;
 }
 
@@ -5605,7 +5722,8 @@ audio.mrm-audio {
   }
 
   .mrm-sheet-music-catalog-heading h2 {
-    font-size: clamp(30px, 10vw, 42px);
+    font-size: clamp(1.55rem, 7vw, 1.9rem);
+    line-height: 1.08;
   }
 
   .mrm-sheet-music-catalog-section .mrm-catalog.wrapper {
@@ -5646,13 +5764,17 @@ audio.mrm-audio {
     text-align: left !important;
   }
 
+  .mrm-sheet-music-catalog-section .audio-box {
+    padding: 9px !important;
+  }
+
   .mrm-sheet-music-catalog-section .audio-controls {
-    grid-template-columns: auto 1fr auto !important;
-    grid-template-areas:
-      "play current duration"
-      "seek seek seek"
-      "volume volume volume" !important;
-    gap: 12px !important;
+    display:grid !important;
+    grid-template-columns: auto auto minmax(48px, 1fr) auto auto !important;
+    grid-template-areas: "play current seek duration volume" !important;
+    align-items:center !important;
+    justify-items:stretch !important;
+    gap:6px !important;
   }
 
   .mrm-sheet-music-catalog-section .audio-row-top {
@@ -5660,16 +5782,58 @@ audio.mrm-audio {
   }
 
   .mrm-sheet-music-catalog-section .audio-row-seek {
+    grid-area:seek !important;
     width: 100% !important;
+    min-width:0 !important;
   }
 
   .mrm-sheet-music-catalog-section .audio-row-vol {
-    width: 100% !important;
-    justify-content: center !important;
+    grid-area:volume !important;
+    width: auto !important;
+    justify-content: flex-end !important;
+    gap:4px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .play-button {
+    width:34px !important;
+    height:34px !important;
+    border-radius:9px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .play-button svg {
+    width:14px !important;
+    height:14px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .time {
+    font-size:10px !important;
+    min-width:30px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .progress,
+  .mrm-sheet-music-catalog-section .volume input.mrm-volume {
+    height:7px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .progress::-webkit-slider-thumb,
+  .mrm-sheet-music-catalog-section .volume input.mrm-volume::-webkit-slider-thumb {
+    width:13px !important;
+    height:13px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .progress::-moz-range-thumb,
+  .mrm-sheet-music-catalog-section .volume input.mrm-volume::-moz-range-thumb {
+    width:13px !important;
+    height:13px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .volume svg {
+    width:14px !important;
+    height:14px !important;
   }
 
   .mrm-sheet-music-catalog-section .volume input.mrm-volume {
-    width: min(280px, 72vw) !important;
+    width:clamp(44px, 15vw, 62px) !important;
   }
 
   .mrm-sheet-music-catalog-section .mrm-view-options-row {
@@ -5697,14 +5861,12 @@ audio.mrm-audio {
   }
 
   .mrm-sheet-music-catalog-section .audio-controls {
-    grid-template-columns: auto auto minmax(90px, 1fr) auto !important;
-    grid-template-areas:
-      "play current seek duration"
-      "volume volume volume volume" !important;
+    grid-template-columns: auto auto minmax(90px, 1fr) auto auto !important;
+    grid-template-areas: "play current seek duration volume" !important;
   }
 
   .mrm-sheet-music-catalog-section .audio-row-vol {
-    width: 100% !important;
+    width: auto !important;
     justify-content: flex-end !important;
   }
 }
@@ -5726,12 +5888,30 @@ audio.mrm-audio {
   }
 
   .mrm-sheet-music-catalog-section .audio-box {
-    padding: 10px !important;
+    padding: 8px !important;
   }
 
   .mrm-sheet-music-catalog-section .play-button {
-    width: 40px !important;
-    height: 40px !important;
+    width: 31px !important;
+    height: 31px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .play-button svg {
+    width: 13px !important;
+    height: 13px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .time {
+    font-size: 9px !important;
+    min-width: 28px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .audio-controls {
+    gap: 5px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .volume input.mrm-volume {
+    width: 42px !important;
   }
 }
 
@@ -5759,32 +5939,38 @@ audio.mrm-audio {
 
 .lbl-sheet-music-page .mrm-timeline-intro {
   max-width: 880px;
-  margin: 0 auto -90px;
+  margin: 0 auto 64px;
   padding: 0 18px;
   text-align: center;
 }
 
 .lbl-sheet-music-page .mrm-timeline-intro h2 {
-  margin: 0 0 12px;
+  margin: 0 0 16px;
   color: #171512 !important;
   font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
-  font-size: clamp(32px, 4.6vw, 52px);
+  font-size: clamp(1.75rem, 3.5vw, 2rem);
   font-weight: 600;
-  line-height: 0.96;
-  letter-spacing: -0.04em;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
 }
 
 .lbl-sheet-music-page .mrm-timeline-intro p {
-  max-width: 760px;
+  max-width: 64ch;
   margin: 0 auto;
   color: #5f5851 !important;
   font-family: var(--mrm-font-body, "Source Sans 3", Arial, Helvetica, sans-serif) !important;
-  font-size: clamp(15px, 1.7vw, 18px);
-  line-height: 1.55;
+  font-size: 1rem;
+  line-height: 1.5;
   font-weight: 400;
 }
 
-.lbl-sheet-music-page .timeline { display: flex; width: 100%; max-width: 1000px; margin: 160px auto 0; position: relative; }
+.lbl-sheet-music-page .timeline {
+  display: flex;
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto 0;
+  position: relative;
+}
 .lbl-sheet-music-page .timeline::before { content: ""; position: absolute; left: -18px; top: -7px; width: 0; height: 0; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-right: 14px solid #171512; }
 .lbl-sheet-music-page .timeline::after { content: ""; position: absolute; right: -18px; top: -7px; width: 0; height: 0; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-left: 14px solid #171512; }
 .lbl-sheet-music-page .timeline-section { flex: 1; position: relative; height: 130px; border-top: 2px solid #171512; overflow: visible; }
@@ -5804,19 +5990,25 @@ audio.mrm-audio {
   .lbl-sheet-music-page { padding: 36px 8px; overflow-x: hidden; }
 
   .lbl-sheet-music-page .mrm-timeline-intro {
-    margin: 0 auto -54px;
+    margin: 0 auto 48px;
     padding: 0 14px;
   }
 
   .lbl-sheet-music-page .mrm-timeline-intro h2 {
-    font-size: clamp(30px, 10vw, 42px);
+    font-size: clamp(1.55rem, 7vw, 1.9rem);
+    line-height: 1.08;
   }
 
   .lbl-sheet-music-page .mrm-timeline-intro p {
-    font-size: clamp(13px, 3.6vw, 16px);
+    font-size: 0.96rem;
     line-height: 1.45;
   }
-  .lbl-sheet-music-page .timeline { width: calc(100% - 20px); max-width: none; margin: 95px auto 0; }
+
+  .lbl-sheet-music-page .timeline {
+    width: calc(100% - 20px);
+    max-width: none;
+    margin: 0 auto 0;
+  }
   .lbl-sheet-music-page .timeline::before { left: -9px; top: -4px; border-top-width: 5px; border-bottom-width: 5px; border-right-width: 8px; }
   .lbl-sheet-music-page .timeline::after { right: -9px; top: -4px; border-top-width: 5px; border-bottom-width: 5px; border-left-width: 8px; }
   .lbl-sheet-music-page .timeline-section { height: 82px; border-top-width: 1.5px; }
@@ -5835,10 +6027,14 @@ audio.mrm-audio {
   .lbl-sheet-music-page { padding: 32px 5px; }
 
   .lbl-sheet-music-page .mrm-timeline-intro {
-    margin-bottom: -46px;
+    margin-bottom: 42px;
     padding: 0 12px;
   }
-  .lbl-sheet-music-page .timeline { width: calc(100% - 16px); margin-top: 82px; }
+
+  .lbl-sheet-music-page .timeline {
+    width: calc(100% - 16px);
+    margin-top: 0;
+  }
   .lbl-sheet-music-page .timeline-section { height: 72px; }
   .lbl-sheet-music-page .section-title { top: 17px; font-size: clamp(9px, 3vw, 13px); }
   .lbl-sheet-music-page .timeline-item p { left: 5px; top: -22px; width: 90px; font-size: clamp(5.5px, 2vw, 8px); }
@@ -5849,11 +6045,129 @@ audio.mrm-audio {
 
 @media (max-width: 380px) {
   .lbl-sheet-music-page { padding-left: 4px; padding-right: 4px; }
-  .lbl-sheet-music-page .timeline { margin-top: 76px; }
+  .lbl-sheet-music-page .timeline { margin-top: 0; }
   .lbl-sheet-music-page .timeline-item p { width: 82px; font-size: 5.5px; }
   .lbl-sheet-music-page .difficulty-column { padding: 0 2px; }
   .lbl-sheet-music-page .difficulty-column ul { padding-left: 7px; }
   .lbl-sheet-music-page .difficulty-column li { font-size: 5.5px; line-height: 1.25; }
+}
+
+/* =========================================================
+   MRM Audio Mobile Layout Lock
+   Keeps every custom Product Access audio player in the same
+   visual order on mobile. Mobile only scales size; it does not
+   rearrange controls into new rows.
+   ========================================================= */
+
+@media (max-width: 860px) {
+  .mrm-product-access-wrapper .audio-controls,
+  .mrm-piece-details-wrapper .audio-controls,
+  .mrm-sheet-music-catalog-section .audio-controls,
+  .audio-box.mrm-audio-box .audio-controls,
+  .mrm-audio-box .audio-controls {
+    display:grid !important;
+    grid-template-columns: auto auto minmax(48px, 1fr) auto auto !important;
+    grid-template-areas: "play current seek duration volume" !important;
+    align-items:center !important;
+    justify-items:stretch !important;
+    gap:6px !important;
+  }
+
+  .mrm-product-access-wrapper .audio-row-top,
+  .mrm-piece-details-wrapper .audio-row-top,
+  .mrm-sheet-music-catalog-section .audio-row-top,
+  .audio-box.mrm-audio-box .audio-row-top,
+  .mrm-audio-box .audio-row-top {
+    display:contents !important;
+    width:auto !important;
+  }
+
+  .mrm-product-access-wrapper .audio-row-seek,
+  .mrm-piece-details-wrapper .audio-row-seek,
+  .mrm-sheet-music-catalog-section .audio-row-seek,
+  .audio-box.mrm-audio-box .audio-row-seek,
+  .mrm-audio-box .audio-row-seek {
+    grid-area:seek !important;
+    width:100% !important;
+    min-width:0 !important;
+  }
+
+  .mrm-product-access-wrapper .audio-row-vol,
+  .mrm-piece-details-wrapper .audio-row-vol,
+  .mrm-sheet-music-catalog-section .audio-row-vol,
+  .audio-box.mrm-audio-box .audio-row-vol,
+  .mrm-audio-box .audio-row-vol {
+    grid-area:volume !important;
+    width:auto !important;
+    justify-content:flex-end !important;
+    gap:4px !important;
+  }
+
+  .mrm-product-access-wrapper .audio-box,
+  .mrm-piece-details-wrapper .audio-box,
+  .mrm-sheet-music-catalog-section .audio-box,
+  .audio-box.mrm-audio-box,
+  .mrm-audio-box {
+    padding:9px !important;
+  }
+
+  .mrm-product-access-wrapper .play-button,
+  .mrm-piece-details-wrapper .play-button,
+  .mrm-sheet-music-catalog-section .play-button,
+  .audio-box.mrm-audio-box .play-button,
+  .mrm-audio-box .play-button {
+    width:34px !important;
+    height:34px !important;
+    border-radius:9px !important;
+  }
+
+  .mrm-product-access-wrapper .play-button svg,
+  .mrm-piece-details-wrapper .play-button svg,
+  .mrm-sheet-music-catalog-section .play-button svg,
+  .audio-box.mrm-audio-box .play-button svg,
+  .mrm-audio-box .play-button svg {
+    width:14px !important;
+    height:14px !important;
+  }
+
+  .mrm-product-access-wrapper .time,
+  .mrm-piece-details-wrapper .time,
+  .mrm-sheet-music-catalog-section .time,
+  .audio-box.mrm-audio-box .time,
+  .mrm-audio-box .time {
+    font-size:10px !important;
+    min-width:30px !important;
+  }
+
+  .mrm-product-access-wrapper .progress,
+  .mrm-product-access-wrapper .volume input.mrm-volume,
+  .mrm-piece-details-wrapper .progress,
+  .mrm-piece-details-wrapper .volume input.mrm-volume,
+  .mrm-sheet-music-catalog-section .progress,
+  .mrm-sheet-music-catalog-section .volume input.mrm-volume,
+  .audio-box.mrm-audio-box .progress,
+  .audio-box.mrm-audio-box .volume input.mrm-volume,
+  .mrm-audio-box .progress,
+  .mrm-audio-box .volume input.mrm-volume {
+    height:7px !important;
+  }
+
+  .mrm-product-access-wrapper .volume input.mrm-volume,
+  .mrm-piece-details-wrapper .volume input.mrm-volume,
+  .mrm-sheet-music-catalog-section .volume input.mrm-volume,
+  .audio-box.mrm-audio-box .volume input.mrm-volume,
+  .mrm-audio-box .volume input.mrm-volume {
+    width:clamp(44px, 15vw, 62px) !important;
+  }
+
+  .mrm-product-access-wrapper .volume svg,
+  .mrm-piece-details-wrapper .volume svg,
+  .mrm-sheet-music-catalog-section .volume svg,
+  .audio-box.mrm-audio-box .volume svg,
+  .mrm-audio-box .volume svg {
+    width:14px !important;
+    height:14px !important;
+  }
 }
 
 /* =========================================================
