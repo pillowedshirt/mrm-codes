@@ -830,7 +830,23 @@ class MRM_Product_Access {
                     white-space:pre-wrap;
                 }
                 textarea[name="piece_long_description[]"].mrm-pa-rich-text{ min-height:180px; }
-                textarea[name="offer_subtitle[]"].mrm-pa-rich-text{ min-height:150px; }
+
+                textarea[name="offer_subtitle[]"].mrm-pa-rich-text{
+                    display:block;
+                    width:100% !important;
+                    max-width:none !important;
+                    min-height:180px;
+                    box-sizing:border-box;
+                }
+
+                .mrm-pa-offer-subtitle-row td{
+                    padding:12px 0 18px !important;
+                }
+
+                .mrm-pa-offer-subtitle-inner{
+                    width:100%;
+                    max-width:none;
+                }
                 .mrm-pa-format-toolbar{
                     display:flex;
                     gap:6px;
@@ -1209,13 +1225,13 @@ class MRM_Product_Access {
                             <div class="mrm-pa-field mrm-pa-wide">
                                 <label><?php esc_html_e( 'Short Description (shows on catalog)', 'mrm-product-access' ); ?></label>
                                 <textarea class="mrm-pa-rich-text" name="piece_short_description[]" rows="5" placeholder="A 1–2 sentence summary shown on the catalog listing."><?php echo esc_textarea( $short_desc ); ?></textarea>
-                                <div class="mrm-pa-help"><?php esc_html_e( 'Supports blank lines and basic formatting: bold, italic, underline.', 'mrm-product-access' ); ?></div>
+                                <div class="mrm-pa-help"><?php esc_html_e( 'Use Enter once for a new line or Enter twice for a blank line/new paragraph. Supports bold, italic, and underline.', 'mrm-product-access' ); ?></div>
                             </div>
 
                             <div class="mrm-pa-field mrm-pa-wide">
                                 <label><?php esc_html_e( 'Long Description (shows on piece page)', 'mrm-product-access' ); ?></label>
                                 <textarea class="mrm-pa-rich-text" name="piece_long_description[]" rows="8" placeholder="Full description shown on the generated piece page."><?php echo esc_textarea( $long_desc !== '' ? $long_desc : $desc ); ?></textarea>
-                                <div class="mrm-pa-help"><?php esc_html_e( 'Supports blank lines and basic formatting: bold, italic, underline.', 'mrm-product-access' ); ?></div>
+                                <div class="mrm-pa-help"><?php esc_html_e( 'Use Enter once for a new line or Enter twice for a blank line/new paragraph. Supports bold, italic, and underline.', 'mrm-product-access' ); ?></div>
                             </div>
 
                             <input type="hidden" name="piece_description[]" value="<?php echo esc_attr( $long_desc !== '' ? $long_desc : $desc ); ?>">
@@ -1299,9 +1315,11 @@ class MRM_Product_Access {
                                     </tr>
                                     <tr class="mrm-pa-offer-subtitle-row">
                                         <td colspan="4">
-                                            <label style="display:block;font-weight:600;margin-bottom:6px;"><?php esc_html_e( 'Purchasing Option Subtitle', 'mrm-product-access' ); ?></label>
-                                            <textarea class="mrm-pa-rich-text" name="offer_subtitle[]" rows="6" placeholder="Includes the Tuba part..."><?php echo esc_textarea( $st ); ?></textarea>
-                                            <div class="mrm-pa-help"><?php esc_html_e( 'This appears as a full-width row under the option title on the piece product page. Supports blank lines, bold, italic, and underline.', 'mrm-product-access' ); ?></div>
+                                            <div class="mrm-pa-offer-subtitle-inner">
+                                                <label style="display:block;font-weight:600;margin-bottom:6px;"><?php esc_html_e( 'Purchasing Option Subtitle', 'mrm-product-access' ); ?></label>
+                                                <textarea class="mrm-pa-rich-text" name="offer_subtitle[]" rows="8" placeholder="Includes the Tuba part..."><?php echo esc_textarea( $st ); ?></textarea>
+                                                <div class="mrm-pa-help"><?php esc_html_e( 'Use Enter once for a new line or Enter twice for a blank line/new paragraph. Supports bold, italic, and underline.', 'mrm-product-access' ); ?></div>
+                                            </div>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -1365,13 +1383,13 @@ class MRM_Product_Access {
                                 <div class="mrm-pa-field mrm-pa-wide">
                                     <label>Short Description (shows on catalog)</label>
                                     <textarea class="mrm-pa-rich-text" name="piece_short_description[]" rows="5" placeholder="A 1–2 sentence summary shown on the catalog listing."></textarea>
-                                    <div class="mrm-pa-help">Supports blank lines and basic formatting: bold, italic, underline.</div>
+                                    <div class="mrm-pa-help">Use Enter once for a new line or Enter twice for a blank line/new paragraph. Supports bold, italic, and underline.</div>
                                 </div>
 
                                 <div class="mrm-pa-field mrm-pa-wide">
                                     <label>Long Description (shows on piece page)</label>
                                     <textarea class="mrm-pa-rich-text" name="piece_long_description[]" rows="8" placeholder="Full description shown on the generated piece page."></textarea>
-                                    <div class="mrm-pa-help">Supports blank lines and basic formatting: bold, italic, underline.</div>
+                                    <div class="mrm-pa-help">Use Enter once for a new line or Enter twice for a blank line/new paragraph. Supports bold, italic, and underline.</div>
                                 </div>
 
                                 <input type="hidden" name="piece_description[]" value="">
@@ -1805,9 +1823,11 @@ function offerRowTemplate(pieceIndex){
     </tr>
     <tr class="mrm-pa-offer-subtitle-row">
         <td colspan="4">
-            <label style="display:block;font-weight:600;margin-bottom:6px;">Purchasing Option Subtitle</label>
-            <textarea class="mrm-pa-rich-text" name="offer_subtitle[]" rows="6" placeholder="Includes the Tuba part..."></textarea>
-            <div class="mrm-pa-help">This appears as a full-width row under the option title on the piece product page. Supports blank lines, bold, italic, and underline.</div>
+            <div class="mrm-pa-offer-subtitle-inner">
+                <label style="display:block;font-weight:600;margin-bottom:6px;">Purchasing Option Subtitle</label>
+                <textarea class="mrm-pa-rich-text" name="offer_subtitle[]" rows="8" placeholder="Includes the Tuba part..."></textarea>
+                <div class="mrm-pa-help">Use Enter once for a new line or Enter twice for a blank line/new paragraph. Supports bold, italic, and underline.</div>
+            </div>
         </td>
     </tr>`;
 }
@@ -1837,7 +1857,6 @@ function initRichTextToolbars(scope) {
             <button type="button" data-before="<strong>" data-after="</strong>">Bold</button>
             <button type="button" data-before="<em>" data-after="</em>">Italic</button>
             <button type="button" data-before="<u>" data-after="</u>">Underline</button>
-            <button type="button" data-before="" data-after="<br>">Line Break</button>
         `;
 
         bar.addEventListener('click', function(e){
@@ -3396,142 +3415,34 @@ function initRichTextToolbars(scope) {
       background: #ffffff;
     }
 
-/* ===== Custom audio player (from your HTML), theme-driven ===== */
+/* ===== Unified Low Brass Lessons audio player ===== */
 .audio-box{
-  border: 1px solid var(--mrm-border);
-  border-radius: var(--mrm-radius);
-  padding: 12px;
-  background: var(--mrm-surface);
-  box-sizing: border-box;
+  --mrm-audio-bg: #fffdf9; --mrm-audio-bg-soft: #fffaf3; --mrm-audio-border: rgba(124, 74, 45, 0.22); --mrm-audio-text: #2f2118; --mrm-audio-muted: #62483a; --mrm-audio-button: #20170f; --mrm-audio-button-text: #fffdf9; --mrm-audio-track: rgba(98, 72, 58, 0.22); --mrm-audio-thumb: #20170f;
+  border: 1px solid var(--mrm-audio-border); border-radius: var(--mrm-radius); padding: 12px; background: var(--mrm-audio-bg); box-sizing: border-box; box-shadow: 0 10px 24px rgba(32, 23, 15, 0.06);
 }
-.audio-controls{
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 12px;
-}
-.audio-row-top{ display:flex; align-items:center; gap:12px; }
-.audio-row-seek{ min-width: 0; }
-.audio-row-vol{ display:flex; align-items:center; justify-content:flex-end; gap:8px; }
-
-.play-button{
-  width: 42px; height: 42px;
-  border-radius: 10px;
-  background: var(--mrm-black);
-  color: #ffffff;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-  flex: 0 0 auto;
-}
-.play-button svg{ width:18px; height:18px; display:block; fill: currentColor; }
-.play-button .icon-pause{ display:none; }
-.play-button.is-playing .icon-play{ display:none; }
-.play-button.is-playing .icon-pause{ display:block; }
-
-.time{ font-size: 13px; color: var(--mrm-muted); min-width: 52px; text-align:center; flex:0 0 auto; }
-
-/* ✅ MATCH piece-product.html: seek + volume sliders */
-.audio-row-seek{
-  min-width: 0;
-  width: 100%;
-}
-.audio-row-seek .progress{
-  display:block;          /* helps ensure full width in grid/flex contexts */
-  width:100%;
-  min-width:0;
-}
-
-/* Seek bar */
-.progress{
-  width:100%;
-  min-width:0;
-  appearance:none;
-  -webkit-appearance:none;
-  height: 10px;
-  border-radius:999px;
-  background: rgba(0,0,0,0.10); /* same intent as piece-product's accent-soft */
-  cursor:pointer;
-}
-.progress::-webkit-slider-thumb{
-  -webkit-appearance:none;
-  appearance:none;
-  width: 18px;
-  height: 18px;
-  border-radius:50%;
-  background: var(--mrm-black); /* ✅ knob color matches piece-product design (accent) */
-  border: none;
-}
-.progress::-moz-range-thumb{
-  width: 18px;
-  height: 18px;
-  border-radius:50%;
-  background: var(--mrm-black); /* ✅ knob color */
-  border:none;
-}
-.progress::-moz-range-track{
-  height: 10px;
-  border-radius:999px;
-  background: rgba(0,0,0,0.10);
-  border:none;
-}
-
-/* Volume row matches piece-product sizing */
-.volume{ display:inline-flex; align-items:center; gap: 8px; color: var(--mrm-black); }
-.volume svg{ width:20px; height:20px; }
-
-/* Volume slider */
-.volume input.mrm-volume{
-  width: 140px;           /* ✅ piece-product default */
-  min-width: 0;
-  appearance:none;
-  -webkit-appearance:none;
-  height: 10px;
-  border-radius:999px;
-  background: rgba(0,0,0,0.10);
-  cursor:pointer;
-}
-.volume input.mrm-volume::-webkit-slider-thumb{
-  -webkit-appearance:none;
-  appearance:none;
-  width: 18px;
-  height: 18px;
-  border-radius:50%;
-  background: var(--mrm-black); /* ✅ knob color matches piece-product design */
-  border: none;
-}
-.volume input.mrm-volume::-moz-range-thumb{
-  width: 18px;
-  height: 18px;
-  border-radius:50%;
-  background: var(--mrm-black);
-  border:none;
-}
-.volume input.mrm-volume::-moz-range-track{
-  height: 10px;
-  border-radius:999px;
-  background: rgba(0,0,0,0.10);
-  border:none;
-}
-
-/* ✅ Mobile behavior (mirrors piece-product.html so bars fill properly) */
+.audio-controls{ display:grid; grid-template-columns: auto auto minmax(140px, 1fr) auto auto; grid-template-areas: "play current seek duration volume"; align-items:center; gap:12px; }
+.audio-row-top{ display:contents; }
+.audio-row-top .mrm-play,.audio-controls > .mrm-play{ grid-area:play; }
+.audio-row-top .mrm-current,.audio-controls > .mrm-current{ grid-area:current; }
+.audio-row-top .mrm-duration,.audio-controls > .mrm-duration{ grid-area:duration; }
+.audio-row-seek{ grid-area:seek; min-width:0; width:100%; }
+.audio-row-seek .progress{ display:block; width:100%; min-width:0; }
+.audio-row-vol{ grid-area:volume; display:flex; align-items:center; justify-content:flex-end; gap:8px; }
+.play-button{ width:42px; height:42px; border-radius:10px; background:var(--mrm-audio-button); color:var(--mrm-audio-button-text); border:1px solid rgba(32, 23, 15, 0.16); cursor:pointer; padding:0; display:inline-flex; align-items:center; justify-content:center; line-height:1; flex:0 0 auto; box-shadow:0 8px 20px rgba(32, 23, 15, 0.15); }
+.play-button svg{ width:18px; height:18px; display:block; fill:currentColor; }
+.play-button .icon-pause{ display:none; }.play-button.is-playing .icon-play{ display:none; }.play-button.is-playing .icon-pause{ display:block; }
+.time{ font-size:13px; color:var(--mrm-audio-muted); min-width:46px; text-align:center; flex:0 0 auto; font-variant-numeric:tabular-nums; line-height:1; }
+.progress,.volume input.mrm-volume{ width:100%; min-width:0; appearance:none; -webkit-appearance:none; height:10px; border-radius:999px; background:var(--mrm-audio-track); cursor:pointer; }
+.progress::-webkit-slider-thumb,.volume input.mrm-volume::-webkit-slider-thumb{ -webkit-appearance:none; appearance:none; width:18px; height:18px; border-radius:50%; background:var(--mrm-audio-thumb); border:2px solid var(--mrm-audio-bg); box-shadow:0 3px 8px rgba(32, 23, 15, 0.18); }
+.progress::-moz-range-thumb,.volume input.mrm-volume::-moz-range-thumb{ width:18px; height:18px; border-radius:50%; background:var(--mrm-audio-thumb); border:2px solid var(--mrm-audio-bg); box-shadow:0 3px 8px rgba(32, 23, 15, 0.18); }
+.progress::-moz-range-track,.volume input.mrm-volume::-moz-range-track{ height:10px; border-radius:999px; background:var(--mrm-audio-track); border:none; }
+.volume{ display:inline-flex; align-items:center; gap:8px; color:var(--mrm-audio-muted); }.volume svg{ width:20px; height:20px; }.volume input.mrm-volume{ width:132px; }
 @media (max-width: 620px){
-  .audio-controls{ grid-template-columns: 1fr; justify-items:center; gap: 10px; }
-  .audio-row-top{
-    width:100%;
-    display:grid;
-    grid-template-columns: 56px 1fr 1fr;
-    align-items:center;
-    column-gap:10px;
-  }
+  .audio-controls{ grid-template-columns:auto 1fr auto; grid-template-areas: "play current duration" "seek seek seek" "volume volume volume"; justify-items:stretch; gap:12px; }
   .audio-row-seek{ width:100%; }
   .audio-row-seek .progress{ height:12px; }
   .audio-row-vol{ width:100%; justify-content:center; }
-  .volume input.mrm-volume{ width: min(280px, 78vw); }
+  .volume input.mrm-volume{ width:min(280px, 72vw); }
 }
     .note{
       color: var(--mrm-muted);
@@ -5067,66 +4978,29 @@ function initRichTextToolbars(scope) {
         .meta .subtitle { font-size: 14px; color: var(--color-text-muted); margin-bottom: 8px; margin-top: 10px; }
 
         .audio-box {
-          border: 1px solid var(--color-border);
-          border-radius: var(--radius-md);
-          padding: 12px;
-          margin-bottom: 20px;
-          background: var(--color-surface);
-          box-sizing: border-box;
+          --mrm-audio-bg: #fffdf9; --mrm-audio-border: rgba(124, 74, 45, 0.22); --mrm-audio-muted: #62483a; --mrm-audio-button: #20170f; --mrm-audio-button-text: #fffdf9; --mrm-audio-track: rgba(98, 72, 58, 0.22); --mrm-audio-thumb: #20170f;
+          border: 1px solid var(--mrm-audio-border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 20px; background: var(--mrm-audio-bg); box-sizing: border-box; box-shadow: 0 10px 24px rgba(32, 23, 15, 0.06);
         }
-
-        .audio-controls {
-          display: grid;
-          grid-template-columns: auto 1fr auto;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .audio-row-top { display: flex; align-items: center; gap: 12px; }
-        .audio-row-seek { min-width: 0; }
-        .audio-row-vol { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-
-        .play-button {
-          width: 42px; height: 42px;
-          border-radius: var(--radius-sm);
-          background: var(--color-accent);
-          color: var(--color-surface);
-          border: none;
-          cursor: pointer;
-          padding: 0;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          line-height: 1;
-          flex: 0 0 auto;
-        }
+        .audio-controls { display: grid; grid-template-columns: auto auto minmax(140px, 1fr) auto auto; grid-template-areas: "play current seek duration volume"; align-items: center; gap: 12px; }
+        .audio-row-top { display: contents; }
+        .audio-row-top .mrm-play, .audio-controls > .mrm-play { grid-area: play; }
+        .audio-row-top .mrm-current, .audio-controls > .mrm-current { grid-area: current; }
+        .audio-row-top .mrm-duration, .audio-controls > .mrm-duration { grid-area: duration; }
+        .audio-row-seek { grid-area: seek; min-width: 0; width: 100%; }
+        .audio-row-vol { grid-area: volume; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+        .play-button { width: 42px; height: 42px; border-radius: var(--radius-sm); background: var(--mrm-audio-button); color: var(--mrm-audio-button-text); border: 1px solid rgba(32, 23, 15, 0.16); cursor: pointer; padding: 0; display: inline-flex; align-items: center; justify-content: center; line-height: 1; flex: 0 0 auto; box-shadow: 0 8px 20px rgba(32, 23, 15, 0.15); }
         .play-button svg { width: 18px; height: 18px; display: block; fill: currentColor; }
         .play-button .icon-pause { display: none; }
         .play-button.is-playing .icon-play { display: none; }
         .play-button.is-playing .icon-pause { display: block; }
-
-        .time { font-size: 13px; color: var(--color-text-muted); min-width: 52px; text-align: center; flex: 0 0 auto; }
-
-        .progress {
-          width: 100%;
-          min-width: 0;
-          appearance: none;
-          height: 8px;
-          border-radius: 999px;
-          background: var(--color-accent-soft);
-          cursor: pointer;
-        }
-        .progress::-webkit-slider-thumb {
-          appearance: none;
-          width: 14px; height: 14px;
-          border-radius: 50%;
-          background: var(--color-accent);
-        }
-
-        .volume { display: inline-flex; align-items: center; gap: 6px; color: var(--color-accent); }
-        .volume svg { width: 18px; height: 18px; }
-        .volume input { width: 110px; }
-
+        .time { font-size: 13px; color: var(--mrm-audio-muted); min-width: 46px; text-align: center; flex: 0 0 auto; font-variant-numeric: tabular-nums; line-height: 1; }
+        .progress, .volume input.mrm-volume { width: 100%; min-width: 0; appearance: none; -webkit-appearance: none; height: 10px; border-radius: 999px; background: var(--mrm-audio-track); cursor: pointer; }
+        .progress::-webkit-slider-thumb, .volume input.mrm-volume::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; border-radius: 50%; background: var(--mrm-audio-thumb); border: 2px solid var(--mrm-audio-bg); box-shadow: 0 3px 8px rgba(32, 23, 15, 0.18); }
+        .progress::-moz-range-thumb, .volume input.mrm-volume::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: var(--mrm-audio-thumb); border: 2px solid var(--mrm-audio-bg); box-shadow: 0 3px 8px rgba(32, 23, 15, 0.18); }
+        .progress::-moz-range-track, .volume input.mrm-volume::-moz-range-track { height: 10px; border-radius: 999px; background: var(--mrm-audio-track); border: none; }
+        .volume { display: inline-flex; align-items: center; gap: 8px; color: var(--mrm-audio-muted); }
+        .volume svg { width: 20px; height: 20px; }
+        .volume input.mrm-volume { width: 132px; }
         .mrm-view-options-row{
           display:flex;
           justify-content:flex-end;
@@ -5211,30 +5085,40 @@ function initRichTextToolbars(scope) {
           }
 
           .audio-controls {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 10px;
-            justify-items: center;
+            grid-template-columns: auto 1fr auto;
+            grid-template-areas:
+              "play current duration"
+              "seek seek seek"
+              "volume volume volume";
+            justify-items: stretch;
+            gap: 12px;
           }
 
           .audio-row-top {
-            width: 100%;
-            display: grid;
-            grid-template-columns: 42px 1fr 1fr;
-            align-items: center;
-            column-gap: 10px;
+            display: contents;
           }
 
           .audio-row-top .time {
             min-width: 0;
-            text-align: center;
           }
 
-          .audio-row-seek { width: 100%; }
-          .audio-row-seek .progress { width: 100%; height: 10px; }
+          .audio-row-seek {
+            width: 100%;
+          }
 
-          .audio-row-vol { width: 100%; justify-content: center; }
-          .volume input { width: min(260px, 72vw); }
+          .audio-row-seek .progress {
+            width: 100%;
+            height: 12px;
+          }
+
+          .audio-row-vol {
+            width: 100%;
+            justify-content: center;
+          }
+
+          .volume input.mrm-volume {
+            width: min(280px, 72vw);
+          }
         }
 
         .mrm-otpOverlay {
@@ -5504,7 +5388,10 @@ function initRichTextToolbars(scope) {
 .mrm-piece-details-wrapper .piece-composer a { color: #62483a !important; }
 .mrm-piece-details-wrapper .piece-subtitle,
 .mrm-piece-details-wrapper .meta .subtitle { color: #62483a !important; }
-.mrm-piece-details-wrapper .audio-box { background: #fffaf3 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; }
+.mrm-piece-details-wrapper .audio-box {
+  background: #fffdf9 !important;
+  border: 1px solid rgba(124, 74, 45, 0.22) !important;
+}
 .mrm-piece-details-wrapper .options-head { background: #fffdf9 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; border-radius: 22px; padding: 16px 18px; margin-bottom: 16px; box-shadow: 0 12px 30px rgba(32, 23, 15, 0.06); }
 .mrm-piece-details-wrapper .options-head h2 { margin: 0; color: #2f2118 !important; }
 .mrm-piece-details-wrapper .offer { background: #fffaf3 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; border-radius: 22px; padding: 14px; box-shadow: 0 18px 46px rgba(32, 23, 15, 0.10); }
