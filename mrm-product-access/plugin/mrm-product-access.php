@@ -4302,6 +4302,13 @@ function initRichTextToolbars(scope) {
         ob_start();
         ?>
         <div class="lbl-sheet-music-page">
+          <div class="mrm-timeline-intro">
+            <h2>Level System</h2>
+            <p>
+              Repertoire is organized by player proficiency so students and families can identify music that is developmentally appropriate, musically rewarding, and appropriately challenging at each stage of growth.
+            </p>
+          </div>
+
           <div class="timeline">
             <?php foreach ( $levels as $level ) : ?>
               <div class="timeline-section">
@@ -5493,18 +5500,103 @@ audio.mrm-audio {
 }
 
 .mrm-sheet-music-catalog-section .mrm-catalog.wrapper {
+  width: min(100%, 1040px) !important;
+  max-width: 1040px !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  padding: 0 28px !important;
   background: transparent !important;
-  padding-top: 0 !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
 }
 
 .mrm-sheet-music-catalog-section .product-card {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
   background: #ffffff !important;
   border-color: #d9cfbe !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  display: grid !important;
+  grid-template-columns: minmax(260px, 420px) minmax(0, 1fr) !important;
+  align-items: start !important;
+}
+
+.mrm-sheet-music-catalog-section .product-card *,
+.mrm-sheet-music-catalog-section .product-card *::before,
+.mrm-sheet-music-catalog-section .product-card *::after {
+  box-sizing: border-box !important;
+}
+
+.mrm-sheet-music-catalog-section .pdf-col,
+.mrm-sheet-music-catalog-section .meta,
+.mrm-sheet-music-catalog-section .title-block,
+.mrm-sheet-music-catalog-section .description,
+.mrm-sheet-music-catalog-section .audio-box,
+.mrm-sheet-music-catalog-section .mrm-view-options-row {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.mrm-sheet-music-catalog-section .pdf-preview {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+.mrm-sheet-music-catalog-section .pdf-preview canvas {
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+.mrm-sheet-music-catalog-section .piece-title,
+.mrm-sheet-music-catalog-section .piece-title a,
+.mrm-sheet-music-catalog-section .piece-composer,
+.mrm-sheet-music-catalog-section .piece-subtitle,
+.mrm-sheet-music-catalog-section .subtitle,
+.mrm-sheet-music-catalog-section .description {
+  max-width: 100% !important;
+  overflow-wrap: anywhere !important;
+  word-break: normal !important;
+}
+
+.mrm-sheet-music-catalog-section .description img,
+.mrm-sheet-music-catalog-section .description iframe,
+.mrm-sheet-music-catalog-section .description video {
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+.mrm-sheet-music-catalog-section .audio-controls {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.mrm-sheet-music-catalog-section .audio-row-seek {
+  min-width: 0 !important;
+}
+
+.mrm-sheet-music-catalog-section .volume input.mrm-volume {
+  width: clamp(76px, 12vw, 132px) !important;
+  max-width: 100% !important;
+}
+
+.mrm-sheet-music-catalog-section .mrm-view-options-row {
+  justify-content: flex-end !important;
+}
+
+.mrm-sheet-music-catalog-section .mrm-view-options-btn {
+  max-width: 100% !important;
+  white-space: normal !important;
+  text-align: center !important;
 }
 
 @media (max-width: 860px) {
   .mrm-sheet-music-catalog-section {
     padding: 34px 0 58px;
+    overflow-x: hidden !important;
   }
 
   .mrm-sheet-music-catalog-heading {
@@ -5517,9 +5609,129 @@ audio.mrm-audio {
   }
 
   .mrm-sheet-music-catalog-section .mrm-catalog.wrapper {
+    width: 100% !important;
+    max-width: 100% !important;
     padding-left: 14px !important;
     padding-right: 14px !important;
     background: transparent !important;
+    overflow: hidden !important;
+  }
+
+  .mrm-sheet-music-catalog-section .product-card {
+    width: 100% !important;
+    max-width: 100% !important;
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 18px !important;
+    padding: 16px !important;
+    overflow: hidden !important;
+  }
+
+  .mrm-sheet-music-catalog-section .pdf-preview {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: clamp(260px, 68vw, 380px) !important;
+  }
+
+  .mrm-sheet-music-catalog-section .title-block,
+  .mrm-sheet-music-catalog-section .meta {
+    text-align: center !important;
+  }
+
+  .mrm-sheet-music-catalog-section .piece-composer {
+    margin-bottom: 1.5em !important;
+  }
+
+  .mrm-sheet-music-catalog-section .description {
+    text-align: left !important;
+  }
+
+  .mrm-sheet-music-catalog-section .audio-controls {
+    grid-template-columns: auto 1fr auto !important;
+    grid-template-areas:
+      "play current duration"
+      "seek seek seek"
+      "volume volume volume" !important;
+    gap: 12px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .audio-row-top {
+    display: contents !important;
+  }
+
+  .mrm-sheet-music-catalog-section .audio-row-seek {
+    width: 100% !important;
+  }
+
+  .mrm-sheet-music-catalog-section .audio-row-vol {
+    width: 100% !important;
+    justify-content: center !important;
+  }
+
+  .mrm-sheet-music-catalog-section .volume input.mrm-volume {
+    width: min(280px, 72vw) !important;
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-view-options-row {
+    justify-content: center !important;
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-view-options-btn {
+    width: 100% !important;
+  }
+}
+
+@media (min-width: 861px) and (max-width: 1040px) {
+  .mrm-sheet-music-catalog-section .mrm-catalog.wrapper {
+    padding-left: 20px !important;
+    padding-right: 20px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .product-card {
+    grid-template-columns: minmax(220px, 36vw) minmax(0, 1fr) !important;
+    gap: 20px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .pdf-preview {
+    height: clamp(320px, 44vw, 430px) !important;
+  }
+
+  .mrm-sheet-music-catalog-section .audio-controls {
+    grid-template-columns: auto auto minmax(90px, 1fr) auto !important;
+    grid-template-areas:
+      "play current seek duration"
+      "volume volume volume volume" !important;
+  }
+
+  .mrm-sheet-music-catalog-section .audio-row-vol {
+    width: 100% !important;
+    justify-content: flex-end !important;
+  }
+}
+
+@media (max-width: 420px) {
+  .mrm-sheet-music-catalog-section .mrm-catalog.wrapper {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .product-card {
+    padding: 12px !important;
+    border-radius: 18px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .piece-title {
+    font-size: clamp(20px, 7vw, 26px) !important;
+    line-height: 1.05 !important;
+  }
+
+  .mrm-sheet-music-catalog-section .audio-box {
+    padding: 10px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .play-button {
+    width: 40px !important;
+    height: 40px !important;
   }
 }
 
@@ -5544,6 +5756,34 @@ audio.mrm-audio {
 .lbl-sheet-music-page *,
 .lbl-sheet-music-page *::before,
 .lbl-sheet-music-page *::after { box-sizing: border-box; }
+
+.lbl-sheet-music-page .mrm-timeline-intro {
+  max-width: 880px;
+  margin: 0 auto -90px;
+  padding: 0 18px;
+  text-align: center;
+}
+
+.lbl-sheet-music-page .mrm-timeline-intro h2 {
+  margin: 0 0 12px;
+  color: #171512 !important;
+  font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
+  font-size: clamp(32px, 4.6vw, 52px);
+  font-weight: 600;
+  line-height: 0.96;
+  letter-spacing: -0.04em;
+}
+
+.lbl-sheet-music-page .mrm-timeline-intro p {
+  max-width: 760px;
+  margin: 0 auto;
+  color: #5f5851 !important;
+  font-family: var(--mrm-font-body, "Source Sans 3", Arial, Helvetica, sans-serif) !important;
+  font-size: clamp(15px, 1.7vw, 18px);
+  line-height: 1.55;
+  font-weight: 400;
+}
+
 .lbl-sheet-music-page .timeline { display: flex; width: 100%; max-width: 1000px; margin: 160px auto 0; position: relative; }
 .lbl-sheet-music-page .timeline::before { content: ""; position: absolute; left: -18px; top: -7px; width: 0; height: 0; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-right: 14px solid #171512; }
 .lbl-sheet-music-page .timeline::after { content: ""; position: absolute; right: -18px; top: -7px; width: 0; height: 0; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-left: 14px solid #171512; }
@@ -5562,6 +5802,20 @@ audio.mrm-audio {
 
 @media (max-width: 850px) {
   .lbl-sheet-music-page { padding: 36px 8px; overflow-x: hidden; }
+
+  .lbl-sheet-music-page .mrm-timeline-intro {
+    margin: 0 auto -54px;
+    padding: 0 14px;
+  }
+
+  .lbl-sheet-music-page .mrm-timeline-intro h2 {
+    font-size: clamp(30px, 10vw, 42px);
+  }
+
+  .lbl-sheet-music-page .mrm-timeline-intro p {
+    font-size: clamp(13px, 3.6vw, 16px);
+    line-height: 1.45;
+  }
   .lbl-sheet-music-page .timeline { width: calc(100% - 20px); max-width: none; margin: 95px auto 0; }
   .lbl-sheet-music-page .timeline::before { left: -9px; top: -4px; border-top-width: 5px; border-bottom-width: 5px; border-right-width: 8px; }
   .lbl-sheet-music-page .timeline::after { right: -9px; top: -4px; border-top-width: 5px; border-bottom-width: 5px; border-left-width: 8px; }
@@ -5579,6 +5833,11 @@ audio.mrm-audio {
 
 @media (max-width: 480px) {
   .lbl-sheet-music-page { padding: 32px 5px; }
+
+  .lbl-sheet-music-page .mrm-timeline-intro {
+    margin-bottom: -46px;
+    padding: 0 12px;
+  }
   .lbl-sheet-music-page .timeline { width: calc(100% - 16px); margin-top: 82px; }
   .lbl-sheet-music-page .timeline-section { height: 72px; }
   .lbl-sheet-music-page .section-title { top: 17px; font-size: clamp(9px, 3vw, 13px); }
@@ -5595,6 +5854,38 @@ audio.mrm-audio {
   .lbl-sheet-music-page .difficulty-column { padding: 0 2px; }
   .lbl-sheet-music-page .difficulty-column ul { padding-left: 7px; }
   .lbl-sheet-music-page .difficulty-column li { font-size: 5.5px; line-height: 1.25; }
+}
+
+/* =========================================================
+   MRM Sheet Music Catalog Containment Lock
+   Prevents shortcode cards from bleeding outside their card
+   at narrow desktop, tablet, and mobile widths.
+   ========================================================= */
+
+.mrm-sheet-music-catalog-section,
+.mrm-sheet-music-catalog-section * {
+  max-width: 100%;
+}
+
+.mrm-sheet-music-catalog-section {
+  overflow-x: hidden !important;
+}
+
+.mrm-sheet-music-catalog-section .product-card {
+  contain: layout paint;
+}
+
+.mrm-sheet-music-catalog-section .pdf-col,
+.mrm-sheet-music-catalog-section .meta {
+  overflow: hidden !important;
+}
+
+.mrm-sheet-music-catalog-section .audio-box {
+  overflow: hidden !important;
+}
+
+.mrm-sheet-music-catalog-section .progress {
+  min-width: 0 !important;
 }
 </style>
 
