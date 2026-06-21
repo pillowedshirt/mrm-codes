@@ -3412,12 +3412,17 @@ function initRichTextToolbars(scope) {
     audio{
       width: 100%;
       display:block;
-      background: #ffffff;
+      background: #fbf8f2;
+    }
+
+    audio.mrm-audio{
+      display:none !important;
+      background:#fbf8f2 !important;
     }
 
 /* ===== Unified Low Brass Lessons audio player ===== */
 .audio-box{
-  --mrm-audio-bg: #fffdf9; --mrm-audio-bg-soft: #fffaf3; --mrm-audio-border: rgba(124, 74, 45, 0.22); --mrm-audio-text: #2f2118; --mrm-audio-muted: #62483a; --mrm-audio-button: #20170f; --mrm-audio-button-text: #fffdf9; --mrm-audio-track: rgba(98, 72, 58, 0.22); --mrm-audio-thumb: #20170f;
+  --mrm-audio-bg: #fbf8f2; --mrm-audio-bg-soft: #fffaf3; --mrm-audio-border: rgba(124, 74, 45, 0.22); --mrm-audio-text: #2f2118; --mrm-audio-muted: #62483a; --mrm-audio-button: #20170f; --mrm-audio-button-text: #fbf8f2; --mrm-audio-track: rgba(98, 72, 58, 0.22); --mrm-audio-thumb: #20170f;
   border: 1px solid var(--mrm-audio-border); border-radius: var(--mrm-radius); padding: 12px; background: var(--mrm-audio-bg); box-sizing: border-box; box-shadow: 0 10px 24px rgba(32, 23, 15, 0.06);
 }
 .audio-controls{ display:grid; grid-template-columns: auto auto minmax(140px, 1fr) auto auto; grid-template-areas: "play current seek duration volume"; align-items:center; gap:12px; }
@@ -4978,7 +4983,7 @@ function initRichTextToolbars(scope) {
         .meta .subtitle { font-size: 14px; color: var(--color-text-muted); margin-bottom: 8px; margin-top: 10px; }
 
         .audio-box {
-          --mrm-audio-bg: #fffdf9; --mrm-audio-border: rgba(124, 74, 45, 0.22); --mrm-audio-muted: #62483a; --mrm-audio-button: #20170f; --mrm-audio-button-text: #fffdf9; --mrm-audio-track: rgba(98, 72, 58, 0.22); --mrm-audio-thumb: #20170f;
+          --mrm-audio-bg: #fbf8f2; --mrm-audio-border: rgba(124, 74, 45, 0.22); --mrm-audio-muted: #62483a; --mrm-audio-button: #20170f; --mrm-audio-button-text: #fbf8f2; --mrm-audio-track: rgba(98, 72, 58, 0.22); --mrm-audio-thumb: #20170f;
           border: 1px solid var(--mrm-audio-border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 20px; background: var(--mrm-audio-bg); box-sizing: border-box; box-shadow: 0 10px 24px rgba(32, 23, 15, 0.06);
         }
         .audio-controls { display: grid; grid-template-columns: auto auto minmax(140px, 1fr) auto auto; grid-template-areas: "play current seek duration volume"; align-items: center; gap: 12px; }
@@ -5389,8 +5394,15 @@ function initRichTextToolbars(scope) {
 .mrm-piece-details-wrapper .piece-subtitle,
 .mrm-piece-details-wrapper .meta .subtitle { color: #62483a !important; }
 .mrm-piece-details-wrapper .audio-box {
-  background: #fffdf9 !important;
+  --mrm-audio-bg: #fbf8f2 !important;
+  --mrm-audio-button-text: #fbf8f2 !important;
+  background: #fbf8f2 !important;
   border: 1px solid rgba(124, 74, 45, 0.22) !important;
+}
+
+.mrm-piece-details-wrapper audio.mrm-audio {
+  display:none !important;
+  background:#fbf8f2 !important;
 }
 .mrm-piece-details-wrapper .options-head { background: #fffdf9 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; border-radius: 22px; padding: 16px 18px; margin-bottom: 16px; box-shadow: 0 12px 30px rgba(32, 23, 15, 0.06); }
 .mrm-piece-details-wrapper .options-head h2 { margin: 0; color: #2f2118 !important; }
@@ -5416,6 +5428,30 @@ function initRichTextToolbars(scope) {
   .mrm-piece-details-wrapper .offer-price { white-space: normal; }
 }
 
+
+/* =========================================================
+   MRM Product Access Audio Final Color Lock
+   Keeps all plugin-rendered audio players off-white instead of white.
+   ========================================================= */
+
+.mrm-product-access-wrapper .audio-box,
+.mrm-piece-details-wrapper .audio-box,
+.mrm-sheet-music-catalog-section .audio-box,
+.mrm-audio-box,
+.audio-box.mrm-audio-box {
+  --mrm-audio-bg: #fbf8f2 !important;
+  --mrm-audio-button-text: #fbf8f2 !important;
+  background: #fbf8f2 !important;
+  border-color: rgba(124, 74, 45, 0.22) !important;
+}
+
+.mrm-product-access-wrapper audio.mrm-audio,
+.mrm-piece-details-wrapper audio.mrm-audio,
+.mrm-sheet-music-catalog-section audio.mrm-audio,
+audio.mrm-audio {
+  display:none !important;
+  background:#fbf8f2 !important;
+}
 
 /* =========================================================
    MRM Sheet Music Catalog Section Patch

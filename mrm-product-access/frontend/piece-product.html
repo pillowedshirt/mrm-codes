@@ -370,13 +370,13 @@ body.mrm-piece-no-scroll{
 
 /* UNIFIED AUDIO PLAYER */
 .audio-box{
-  --mrm-audio-bg: var(--mrm-warm-popup-bg-light, #fffdf9);
+  --mrm-audio-bg: var(--mrm-warm-popup-bg, #fbf8f2);
   --mrm-audio-bg-soft: var(--mrm-warm-popup-bg, #fffaf3);
   --mrm-audio-border: var(--mrm-warm-popup-border, rgba(124, 74, 45, 0.22));
   --mrm-audio-text: var(--mrm-warm-popup-text, #2f2118);
   --mrm-audio-muted: var(--mrm-warm-popup-muted, #62483a);
   --mrm-audio-button: var(--mrm-warm-popup-deep, #20170f);
-  --mrm-audio-button-text: var(--mrm-warm-popup-bg-light, #fffdf9);
+  --mrm-audio-button-text: var(--mrm-warm-popup-bg, #fbf8f2);
   --mrm-audio-track: rgba(98, 72, 58, 0.22);
   --mrm-audio-thumb: var(--mrm-warm-popup-deep, #20170f);
 
@@ -387,6 +387,11 @@ body.mrm-piece-no-scroll{
   background: var(--mrm-audio-bg);
   box-sizing:border-box;
   box-shadow: 0 10px 24px rgba(32, 23, 15, 0.06);
+}
+
+audio.mrm-audio{
+  display:none !important;
+  background: var(--mrm-audio-bg) !important;
 }
 
 /* Desktop order:
@@ -450,44 +455,49 @@ body.mrm-piece-no-scroll{
   display:none !important;
 }
 
-/* Offer subtitle now lives inside the offer body, beside the price/buttons */
+/* Offer subtitle lives inside the same offer body as the price/buttons.
+   No separate bubble. No flex columns. Preserve natural text flow. */
 .offer-subtitle-row{
   display:none;
 }
 
 .offer-subtitle-panel{
-  min-height: 128px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  text-align:center;
-  padding: 18px 22px;
-  border-radius: 18px;
-  background: rgba(255, 253, 249, 0.72);
-  border: 1px solid rgba(124, 74, 45, 0.16);
+  min-height: 0;
+  display:block;
+  align-self:center;
+  width:100%;
+  max-width:100%;
+  padding: 0 8px 0 0;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  box-shadow:none;
   color: var(--mrm-warm-popup-muted, #62483a);
   font-size: 14px;
   line-height: 1.5;
+  text-align:left;
+  white-space: normal;
 }
 
-.offer-subtitle-panel p,
-.mrm-rich-text p{
-  margin: 0 0 1em;
-}
-
-.offer-subtitle-panel p:last-child,
-.mrm-rich-text p:last-child{
-  margin-bottom: 0;
+.offer-subtitle-panel br{
+  display:block;
+  content:"";
 }
 
 .offer-subtitle-panel strong,
-.mrm-rich-text strong{ font-weight: 900; }
+.mrm-rich-text strong{
+  font-weight: 900;
+}
 
 .offer-subtitle-panel em,
-.mrm-rich-text em{ font-style: italic; }
+.mrm-rich-text em{
+  font-style: italic;
+}
 
 .offer-subtitle-panel u,
-.mrm-rich-text u{ text-decoration: underline; }
+.mrm-rich-text u{
+  text-decoration: underline;
+}
 
 /* RIGHT SIDE: price + buttons */
 .offer-actions{
@@ -811,7 +821,7 @@ body.mrm-piece-no-scroll{
 
   .offer-subtitle-panel{
     min-height: 0;
-    padding: 16px;
+    padding: 0;
   }
 }
 
@@ -1088,8 +1098,10 @@ body.mrm-piece-no-scroll{
 .mrm-piece-product-page .offer-body { background: var(--mrm-warm-popup-bg-light, #fffdf9); }
 .mrm-piece-product-page .audio-subtitle { color: var(--mrm-warm-popup-muted, #62483a) !important; }
 .mrm-piece-product-page .audio-box {
-  background: var(--mrm-warm-popup-bg-light, #fffdf9) !important;
-  border: 1px solid var(--mrm-warm-popup-border, rgba(124, 74, 45, 0.22)) !important;
+  --mrm-audio-bg: var(--mrm-warm-popup-bg, #fbf8f2) !important;
+  --mrm-audio-button-text: var(--mrm-warm-popup-bg, #fbf8f2) !important;
+  background: var(--mrm-warm-popup-bg, #fbf8f2) !important;
+  border: 1px solid var(--mrm-warm-popup-border, #d9cfbe) !important;
 }
 .mrm-piece-product-page .price-box { background: var(--mrm-warm-popup-bg-soft, #f7efe3) !important; border: 1px solid var(--mrm-warm-popup-border, rgba(124, 74, 45, 0.22)) !important; color: var(--mrm-warm-popup-text, #2f2118) !important; }
 .mrm-piece-product-page .price-label { color: var(--mrm-warm-popup-accent, #9a6a2f) !important; font-weight: 900; }
@@ -1158,7 +1170,6 @@ body.mrm-piece-no-scroll{
 .mrm-piece-product-page .card,
 .mrm-piece-product-page .offer,
 .mrm-piece-product-page .meta-panel,
-.mrm-piece-product-page .audio-box,
 .mrm-piece-product-page .modal,
 .mrm-piece-product-page .mrm-success-modal,
 .mrm-piece-product-page .mrm-pdfModal {
@@ -1166,6 +1177,21 @@ body.mrm-piece-no-scroll{
   border-color: #d9cfbe !important;
   color: #171512 !important;
   box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.mrm-piece-product-page .audio-box,
+.mrm-piece-product-page .mrm-main-audio-box{
+  --mrm-audio-bg: #fbf8f2 !important;
+  --mrm-audio-button-text: #fbf8f2 !important;
+  background: #fbf8f2 !important;
+  border-color: #d9cfbe !important;
+  color: #171512 !important;
+  box-shadow: 0 18px 40px rgba(25, 22, 18, 0.07) !important;
+}
+
+.mrm-piece-product-page audio.mrm-audio{
+  display:none !important;
+  background: #fbf8f2 !important;
 }
 
 .mrm-piece-product-page .mrm-piece-header,
@@ -1188,7 +1214,8 @@ body.mrm-piece-no-scroll{
 .mrm-piece-product-page .piece-composer,
 .mrm-piece-product-page .piece-composer a,
 .mrm-piece-product-page .options-sub,
-.mrm-piece-product-page .audio-subtitle {
+.mrm-piece-product-page .audio-subtitle,
+.mrm-piece-product-page .offer-subtitle-panel {
   color: #5f5851 !important;
 }
 
@@ -2994,18 +3021,20 @@ async function getOfferSkuCandidates(offerEl) {
       return '';
     }
 
-    return normalized
-      .split(/\n{2,}/)
-      .map(paragraph => {
-        const hasHtml = /<\/?(strong|b|em|i|u|br|p|a)(\s|>|\/)/i.test(paragraph);
-        const safeParagraph = hasHtml
-          ? sanitizeBasicRichText(paragraph.trim()).replace(/\n/g, '<br>')
-          : escHtml(paragraph.trim()).replace(/\n/g, '<br>');
+    const hasHtml = /<\/?(strong|b|em|i|u|br|p|a)(\s|>|\/)/i.test(normalized);
 
-        return safeParagraph ? `<p>${safeParagraph}</p>` : '';
-      })
-      .filter(Boolean)
-      .join('');
+    if (hasHtml) {
+      return sanitizeBasicRichText(normalized)
+        .replace(/<\/p>\s*<p>/gi, '<br><br>')
+        .replace(/^<p>/i, '')
+        .replace(/<\/p>$/i, '')
+        .replace(/\n{2,}/g, '<br><br>')
+        .replace(/\n/g, '<br>');
+    }
+
+    return escHtml(normalized)
+      .replace(/\n{2,}/g, '<br><br>')
+      .replace(/\n/g, '<br>');
   }
 
   function applyAudioUrl(audioEl, url){
