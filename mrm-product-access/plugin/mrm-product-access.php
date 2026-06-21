@@ -4379,6 +4379,8 @@ function initRichTextToolbars(scope) {
             </p>
           </div>
 
+          <div class="mrm-timeline-spacer" aria-hidden="true"></div>
+
           <div class="timeline">
             <?php foreach ( $levels as $level ) : ?>
               <div class="timeline-section">
@@ -5939,7 +5941,7 @@ audio.mrm-audio {
 
 .lbl-sheet-music-page .mrm-timeline-intro {
   max-width: 880px;
-  margin: 0 auto 64px;
+  margin: 0 auto;
   padding: 0 18px;
   text-align: center;
 }
@@ -5962,6 +5964,13 @@ audio.mrm-audio {
   font-size: 1rem;
   line-height: 1.5;
   font-weight: 400;
+}
+
+.lbl-sheet-music-page .mrm-timeline-spacer {
+  display: block;
+  width: 100%;
+  height: 100px;
+  flex: 0 0 auto;
 }
 
 .lbl-sheet-music-page .timeline {
@@ -5990,8 +5999,12 @@ audio.mrm-audio {
   .lbl-sheet-music-page { padding: 36px 8px; overflow-x: hidden; }
 
   .lbl-sheet-music-page .mrm-timeline-intro {
-    margin: 0 auto 48px;
+    margin: 0 auto;
     padding: 0 14px;
+  }
+
+  .lbl-sheet-music-page .mrm-timeline-spacer {
+    height: 100px;
   }
 
   .lbl-sheet-music-page .mrm-timeline-intro h2 {
@@ -6027,8 +6040,12 @@ audio.mrm-audio {
   .lbl-sheet-music-page { padding: 32px 5px; }
 
   .lbl-sheet-music-page .mrm-timeline-intro {
-    margin-bottom: 42px;
+    margin-bottom: 0;
     padding: 0 12px;
+  }
+
+  .lbl-sheet-music-page .mrm-timeline-spacer {
+    height: 100px;
   }
 
   .lbl-sheet-music-page .timeline {
