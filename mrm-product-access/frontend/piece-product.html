@@ -327,10 +327,10 @@ body.mrm-piece-no-scroll{
 /* BODY LAYOUT */
 .offer-body{
   padding: 14px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
-  gap: 18px;
-  align-items: start;
+  display:flex;
+  justify-content:flex-end;
+  gap:18px;
+  align-items:start;
 }
 
 
@@ -378,6 +378,50 @@ body.mrm-piece-no-scroll{
   box-sizing:border-box;
   margin-top:auto;
 }
+
+/* MAIN PREVIEW AUDIO UNDER PDF */
+.mrm-main-audio-section{
+  padding-top: 0 !important;
+}
+.mrm-main-audio-wrap{
+  width: min(860px, 100%);
+  margin: 0 auto;
+}
+.mrm-main-audio-label{
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.mrm-main-audio-empty{
+  display:none !important;
+}
+
+/* Full-width subtitle row for each purchasing option */
+.offer-subtitle-row{
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+  background: rgba(255,255,255,0.58);
+  font-size: 17px;
+  color: var(--color-text-muted);
+  line-height: 1.55;
+}
+.offer-subtitle-row p,
+.mrm-rich-text p{
+  margin: 0 0 1em;
+}
+.offer-subtitle-row p:last-child,
+.mrm-rich-text p:last-child{
+  margin-bottom: 0;
+}
+.offer-subtitle-row strong,
+.mrm-rich-text strong{ font-weight: 900; }
+.offer-subtitle-row em,
+.mrm-rich-text em{ font-style: italic; }
+.offer-subtitle-row u,
+.mrm-rich-text u{ text-decoration: underline; }
 
 /* audio controls layout */
 .audio-controls{
@@ -452,7 +496,9 @@ body.mrm-piece-no-scroll{
   flex-direction: column;
   gap: 12px;
   align-items: stretch;
+  width: min(280px, 100%);
   min-width: 220px;
+  margin-left:auto;
 }
 
 .mrm-piece-terms-row {
@@ -753,7 +799,7 @@ body.mrm-piece-no-scroll{
 
 @media (max-width: 980px){
   .info-grid{ grid-template-columns: 1fr; }
-  .offer-body{ grid-template-columns: 1fr; }
+  .offer-body{ flex-direction: column; }
   .offer-actions{
     min-width: 0;
     grid-template-columns: 1fr;
@@ -1287,6 +1333,40 @@ body.mrm-piece-no-scroll{
             <div class="pdf-preview mrm-pdfPreview" role="button" tabindex="0" aria-label="Open PDF preview">
               <canvas class="mrm-pdfCanvas"></canvas>
               <div class="pdf-hint">Click to enlarge preview</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- MAIN PREVIEW AUDIO -->
+        <section class="section mrm-main-audio-section mrm-main-audio-empty" id="mrmMainPreviewAudioSection" aria-label="Preview audio">
+          <div class="mrm-main-audio-wrap">
+            <div class="mrm-main-audio-label">Preview Audio</div>
+            <div class="audio-box mrm-main-audio-box">
+              <audio class="mrm-audio" preload="metadata" crossorigin="anonymous">
+                <source src="" type="audio/mpeg">
+              </audio>
+
+              <div class="audio-controls">
+                <div class="audio-row-top">
+                  <button class="play-button mrm-play" type="button" aria-label="Play/Pause">
+                    <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>
+                    <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"></path></svg>
+                  </button>
+                  <div class="time mrm-current">0:00</div>
+                  <div class="time mrm-duration">0:00</div>
+                </div>
+
+                <div class="audio-row-seek">
+                  <input class="progress mrm-seek" type="range" min="0" value="0" aria-label="Seek">
+                </div>
+
+                <div class="audio-row-vol">
+                  <div class="volume" aria-label="Volume">
+                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 5L6 9H2v6h4l5 4V5z"/></svg>
+                    <input class="mrm-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume slider">
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -1990,7 +2070,7 @@ function mrmGetPiecePromoCodeInputValue() {
     if (offerEl) {
       params.set('type', typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : '');
       params.set('display_title', String((offerEl.querySelector('.offer-title') || {}).textContent || '').trim());
-      params.set('subtitle', String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').trim());
+      params.set('subtitle', String((offerEl.querySelector('.offer-subtitle-row, .audio-subtitle') || {}).textContent || '').trim());
     }
 
     const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
@@ -2038,7 +2118,7 @@ function mrmGetPiecePromoCodeInputValue() {
 
     const rawSlug = String(offerEl.dataset.rawOfferSlug || offerEl.dataset.productSlug || '').toLowerCase();
     const title = String((offerEl.querySelector('.offer-title') || {}).textContent || '').toLowerCase();
-    const subtitle = String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').toLowerCase();
+    const subtitle = String((offerEl.querySelector('.offer-subtitle-row, .audio-subtitle') || {}).textContent || '').toLowerCase();
 
     return inferSheetMusicTypeFromText(`${rawSlug} ${title} ${subtitle}`);
   }
@@ -2868,8 +2948,37 @@ async function getOfferSkuCandidates(offerEl) {
       .replaceAll("'","&#039;");
   }
 
+  function sanitizeBasicRichText(value){
+    const allowedTags = new Set(['P', 'BR', 'STRONG', 'B', 'EM', 'I', 'U', 'A']);
+    const template = document.createElement('template');
+    template.innerHTML = String(value || '');
+
+    template.content.querySelectorAll('*').forEach(node => {
+      if (!allowedTags.has(node.tagName)) {
+        node.replaceWith(document.createTextNode(node.textContent || ''));
+        return;
+      }
+
+      Array.from(node.attributes).forEach(attr => {
+        const name = attr.name.toLowerCase();
+        if (node.tagName === 'A' && ['href', 'title', 'target', 'rel'].includes(name)) {
+          return;
+        }
+        node.removeAttribute(attr.name);
+      });
+
+      if (node.tagName === 'A' && node.getAttribute('target') === '_blank' && !node.getAttribute('rel')) {
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    });
+
+    return template.innerHTML;
+  }
+
   function multilineTextToHtml(value){
     const normalized = String(value || '')
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"')
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
       .trim();
@@ -2881,7 +2990,11 @@ async function getOfferSkuCandidates(offerEl) {
     return normalized
       .split(/\n{2,}/)
       .map(paragraph => {
-        const safeParagraph = escHtml(paragraph.trim()).replace(/\n/g, '<br>');
+        const hasHtml = /<\/?(strong|b|em|i|u|br|p|a)(\s|>|\/)/i.test(paragraph);
+        const safeParagraph = hasHtml
+          ? sanitizeBasicRichText(paragraph.trim()).replace(/\n/g, '<br>')
+          : escHtml(paragraph.trim()).replace(/\n/g, '<br>');
+
         return safeParagraph ? `<p>${safeParagraph}</p>` : '';
       })
       .filter(Boolean)
@@ -2917,7 +3030,6 @@ async function getOfferSkuCandidates(offerEl) {
     const rawShortSubtitle = offer.subtitle || offer.short_description || offer.shortDescription || '';
     const shortSubtitleHtml = multilineTextToHtml(String(rawShortSubtitle || '').trim());
     const priceDisplay = offer.price_display || offer.priceDisplay || '';
-    const previewAudio = offer.preview_audio_url || offer.previewAudioUrl || '';
     let productSlug = normalizeSkuFromOffer(offer);
 
     if (!productSlug) {
@@ -2977,38 +3089,6 @@ async function getOfferSkuCandidates(offerEl) {
     wrap.dataset.resolvedSku = otpProductSlug;
     wrap.dataset.price = priceDisplay;
 
-    const audioMarkup = previewAudio
-      ? `
-          <div class="audio-box">
-            <audio class="mrm-audio" preload="metadata" crossorigin="anonymous">
-              <source src="" type="audio/mpeg">
-            </audio>
-
-            <div class="audio-controls">
-              <div class="audio-row-top">
-                <button class="play-button mrm-play" type="button" aria-label="Play/Pause">
-                  <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>
-                  <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"></path></svg>
-                </button>
-                <div class="time mrm-current">0:00</div>
-                <div class="time mrm-duration">0:00</div>
-              </div>
-
-              <div class="audio-row-seek">
-                <input class="progress mrm-seek" type="range" min="0" value="0" aria-label="Seek">
-              </div>
-
-              <div class="audio-row-vol">
-                <div class="volume" aria-label="Volume">
-                  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 5L6 9H2v6h4l5 4V5z"/></svg>
-                  <input class="mrm-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume slider">
-                </div>
-              </div>
-            </div>
-          </div>
-        `
-      : '';
-
     wrap.innerHTML = `
       <div class="offer-head">
         <div class="offer-head-left">
@@ -3016,12 +3096,9 @@ async function getOfferSkuCandidates(offerEl) {
         </div>
       </div>
 
-      <div class="offer-body">
-        <div class="audio-stack">
-          ${shortSubtitleHtml ? `<div class="audio-subtitle">${shortSubtitleHtml}</div>` : ''}
-          ${audioMarkup}
-        </div>
+      ${shortSubtitleHtml ? `<div class="offer-subtitle-row mrm-rich-text">${shortSubtitleHtml}</div>` : ''}
 
+      <div class="offer-body">
         <div class="offer-actions">
           <div class="price-box">
             <div class="price-label">Price</div>
@@ -3049,11 +3126,6 @@ async function getOfferSkuCandidates(offerEl) {
       ` : ''}
     `;
 
-    // set audio only when a preview audio URL exists
-    if (previewAudio) {
-      const audioEl = wrap.querySelector('.mrm-audio');
-      applyAudioUrl(audioEl, previewAudio);
-    }
 
     return wrap;
   }
@@ -3086,7 +3158,7 @@ async function getOfferSkuCandidates(offerEl) {
     const catalogUrl = payload.catalog_url || '/sheet-music/';
 
     // Fill top title/composer
-    const title = piece.piece_title || piece.title || '';
+    const title = String(piece.piece_title || piece.title || '').replace(/\\'/g, "'").replace(/\\"/g, '"');
     const composerName = piece.composer_name || piece.composer || '';
     const composerUrl  = piece.composer_url || '#';
 
@@ -3121,6 +3193,20 @@ async function getOfferSkuCandidates(offerEl) {
 
     pieceEl.dataset.pdfUrl = pdfUrl;
     pieceEl.dataset.previewPage = String(previewPage);
+
+    // Main preview audio under the PDF preview.
+    const mainPreviewAudio = String(piece.preview_audio_url || piece.previewAudioUrl || piece.demo_audio_url || '').trim();
+    const mainAudioSection = document.getElementById('mrmMainPreviewAudioSection');
+    if (mainAudioSection) {
+      const mainAudioEl = mainAudioSection.querySelector('.mrm-audio');
+      if (mainPreviewAudio) {
+        applyAudioUrl(mainAudioEl, mainPreviewAudio);
+        mainAudioSection.classList.remove('mrm-main-audio-empty');
+      } else {
+        applyAudioUrl(mainAudioEl, '');
+        mainAudioSection.classList.add('mrm-main-audio-empty');
+      }
+    }
 
     // Preview more link
     const moreLink = document.getElementById('mrmPreviewMoreLink');
@@ -3332,6 +3418,8 @@ async function getOfferSkuCandidates(offerEl) {
       vol.addEventListener('input', () => { audio.volume = Number(vol.value); });
     }
 
+    syncOfferAudio(piece);
+
     piece.querySelectorAll('.mrm-offer').forEach((offerEl) => {
       try {
         syncOfferAudio(offerEl);
@@ -3450,7 +3538,7 @@ async function getOfferSkuCandidates(offerEl) {
           params.set('piece_slug', typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '');
           params.set('type', typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : '');
             params.set('display_title', String((offerEl.querySelector('.offer-title') || {}).textContent || '').trim());
-            params.set('subtitle', String((offerEl.querySelector('.audio-subtitle') || {}).textContent || '').trim());
+            params.set('subtitle', String((offerEl.querySelector('.offer-subtitle-row, .audio-subtitle') || {}).textContent || '').trim());
 
             const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
               method: 'GET'

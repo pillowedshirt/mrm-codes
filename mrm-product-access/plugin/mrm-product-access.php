@@ -200,6 +200,97 @@ class MRM_Product_Access {
     }
 
     /**
+     * Return a stored/post value as a clean string without WordPress magic slashes.
+     */
+    private function mrm_pa_unslash_value( $value ) {
+        if ( is_array( $value ) || is_object( $value ) ) {
+            return '';
+        }
+
+        return wp_unslash( (string) $value );
+    }
+
+    /**
+     * Plain one-line text: titles, display titles, composer, difficulty, price labels.
+     */
+    private function mrm_pa_plain_text( $value ) {
+        return sanitize_text_field( $this->mrm_pa_unslash_value( $value ) );
+    }
+
+    /**
+     * Allowed rich text for admin textareas.
+     * This preserves blank lines plus basic formatting only.
+     */
+    private function mrm_pa_allowed_rich_text_tags() {
+        return array(
+            'p'      => array(),
+            'br'     => array(),
+            'strong' => array(),
+            'b'      => array(),
+            'em'     => array(),
+            'i'      => array(),
+            'u'      => array(),
+            'a'      => array(
+                'href'   => true,
+                'title'  => true,
+                'target' => true,
+                'rel'    => true,
+            ),
+        );
+    }
+
+    /**
+     * Rich multiline text: subtitles, short descriptions, long descriptions.
+     */
+    private function mrm_pa_rich_text( $value ) {
+        $value = $this->mrm_pa_unslash_value( $value );
+        $value = str_replace( array( "\r\n", "\r" ), "\n", $value );
+
+        return wp_kses( $value, $this->mrm_pa_allowed_rich_text_tags() );
+    }
+
+    /**
+     * Normalize a piece before sending it to piece-product.html.
+     * This also cleans legacy values that were previously saved with slashes.
+     */
+    private function mrm_pa_normalize_piece_for_output( $piece ) {
+        if ( ! is_array( $piece ) ) {
+            return array();
+        }
+
+        $piece['piece_title']       = $this->mrm_pa_plain_text( $piece['piece_title'] ?? ( $piece['title'] ?? '' ) );
+        $piece['title']             = $piece['piece_title'];
+        $piece['composer_name']     = $this->mrm_pa_plain_text( $piece['composer_name'] ?? ( $piece['composer'] ?? '' ) );
+        $piece['composer']          = $piece['composer_name'];
+        $piece['short_description'] = $this->mrm_pa_rich_text( $piece['short_description'] ?? '' );
+        $piece['long_description']  = $this->mrm_pa_rich_text( $piece['long_description'] ?? ( $piece['description'] ?? '' ) );
+        $piece['description']       = $piece['long_description'];
+        $piece['difficulty']        = $this->mrm_pa_plain_text( $piece['difficulty'] ?? '' );
+        $piece['instrumentation']   = $this->mrm_pa_plain_text( $piece['instrumentation'] ?? '' );
+        $piece['duration']          = $this->mrm_pa_plain_text( $piece['duration'] ?? '' );
+        $piece['year']              = $this->mrm_pa_plain_text( $piece['year'] ?? '' );
+
+        if ( ! empty( $piece['offers'] ) && is_array( $piece['offers'] ) ) {
+            foreach ( $piece['offers'] as $offer_i => $offer ) {
+                if ( ! is_array( $offer ) ) {
+                    $piece['offers'][ $offer_i ] = array();
+                    continue;
+                }
+
+                $offer['product_slug']      = $this->sanitize_product_slug( (string) ( $offer['product_slug'] ?? '' ) );
+                $offer['display_title']     = $this->mrm_pa_plain_text( $offer['display_title'] ?? '' );
+                $offer['subtitle']          = $this->mrm_pa_rich_text( $offer['subtitle'] ?? '' );
+                $offer['price_display']     = $this->mrm_pa_plain_text( $offer['price_display'] ?? '' );
+                $offer['preview_audio_url'] = trim( $this->mrm_pa_unslash_value( $offer['preview_audio_url'] ?? '' ) );
+
+                $piece['offers'][ $offer_i ] = $offer;
+            }
+        }
+
+        return $piece;
+    }
+
+    /**
      * Register REST API routes.
      */
     public function register_rest_routes() {
@@ -460,10 +551,10 @@ class MRM_Product_Access {
                     $pi = intval( $pi_raw );
 
                     $pslug = $this->sanitize_product_slug( (string) ( $offer_product_slug[ $oi ] ?? '' ) );
-                    $dt    = sanitize_text_field( (string) ( $offer_display_title[ $oi ] ?? '' ) );
-                    $sub   = sanitize_textarea_field( wp_unslash( (string) ( $offer_subtitle[ $oi ] ?? '' ) ) );
-                    $price = sanitize_text_field( (string) ( $offer_price_display[ $oi ] ?? '' ) );
-                    $aud   = trim( (string) ( $offer_preview_audio_url[ $oi ] ?? '' ) );
+                    $dt    = $this->mrm_pa_plain_text( $offer_display_title[ $oi ] ?? '' );
+                    $sub   = $this->mrm_pa_rich_text( $offer_subtitle[ $oi ] ?? '' );
+                    $price = $this->mrm_pa_plain_text( $offer_price_display[ $oi ] ?? '' );
+                    $aud   = trim( $this->mrm_pa_unslash_value( $offer_preview_audio_url[ $oi ] ?? '' ) );
 
                     // Require at least a product slug or display title to keep an offer row.
                     if ( $pslug === '' && $dt === '' ) {
@@ -494,7 +585,7 @@ class MRM_Product_Access {
                 foreach ( $slugs as $i => $raw_slug ) {
 
                     $slug  = sanitize_title( (string) $raw_slug );
-                    $title = sanitize_text_field( (string) ( $titles[ $i ] ?? '' ) );
+                    $title = $this->mrm_pa_plain_text( $titles[ $i ] ?? '' );
 
                     // Require at least a title or slug to keep the row.
                     if ( $slug === '' && $title === '' ) {
@@ -509,23 +600,23 @@ class MRM_Product_Access {
                     $piece                         = array();
                     $piece['slug']                 = $slug;
                     $piece['piece_title']          = $title;
-                    $piece['composer_name']        = sanitize_text_field( (string) ( $composer_names[ $i ] ?? '' ) );
-                    $piece['composer_url']         = esc_url_raw( trim( (string) ( $composer_urls[ $i ] ?? '' ) ) );
-                    $legacy_desc = sanitize_textarea_field( wp_unslash( (string) ( $descs[ $i ] ?? '' ) ) );
+                    $piece['composer_name']        = $this->mrm_pa_plain_text( $composer_names[ $i ] ?? '' );
+                    $piece['composer_url']         = esc_url_raw( trim( $this->mrm_pa_unslash_value( $composer_urls[ $i ] ?? '' ) ) );
+                    $legacy_desc = $this->mrm_pa_rich_text( $descs[ $i ] ?? '' );
 
-                    $piece['short_description'] = sanitize_textarea_field( wp_unslash( (string) ( $short_descs[ $i ] ?? '' ) ) );
+                    $piece['short_description'] = $this->mrm_pa_rich_text( $short_descs[ $i ] ?? '' );
 
-                    $new_long = sanitize_textarea_field( wp_unslash( (string) ( $long_descs[ $i ] ?? '' ) ) );
+                    $new_long = $this->mrm_pa_rich_text( $long_descs[ $i ] ?? '' );
                     $piece['long_description']  = ( $new_long !== '' ) ? $new_long : $legacy_desc;
 
                     $piece['description'] = $piece['long_description'];
-                    $piece['difficulty']           = sanitize_text_field( (string) ( $difficulty[ $i ] ?? '' ) );
-                    $piece['instrumentation']      = sanitize_text_field( (string) ( $instrumentation[ $i ] ?? '' ) );
-                    $piece['duration']             = sanitize_text_field( (string) ( $duration[ $i ] ?? '' ) );
-                    $piece['year']                 = sanitize_text_field( (string) ( $year[ $i ] ?? '' ) );
-                    $piece['main_preview_pdf_url'] = trim( (string) ( $pdf_urls[ $i ] ?? '' ) );
+                    $piece['difficulty']           = $this->mrm_pa_plain_text( $difficulty[ $i ] ?? '' );
+                    $piece['instrumentation']      = $this->mrm_pa_plain_text( $instrumentation[ $i ] ?? '' );
+                    $piece['duration']             = $this->mrm_pa_plain_text( $duration[ $i ] ?? '' );
+                    $piece['year']                 = $this->mrm_pa_plain_text( $year[ $i ] ?? '' );
+                    $piece['main_preview_pdf_url'] = trim( $this->mrm_pa_unslash_value( $pdf_urls[ $i ] ?? '' ) );
 
-                    $preview_audio = trim( (string) ( $preview_audio_urls[ $i ] ?? '' ) );
+                    $preview_audio = trim( $this->mrm_pa_unslash_value( $preview_audio_urls[ $i ] ?? '' ) );
 
                     $ppn = intval( $preview_pages[ $i ] ?? 1 );
                     if ( $ppn <= 0 ) {
@@ -731,6 +822,30 @@ class MRM_Product_Access {
                     width:100%;
                     max-width:100%;
                     box-sizing:border-box;
+                }
+                .mrm-pa-rich-text{
+                    min-height:110px;
+                    resize:vertical;
+                    line-height:1.45;
+                    white-space:pre-wrap;
+                }
+                textarea[name="piece_long_description[]"].mrm-pa-rich-text{ min-height:180px; }
+                textarea[name="offer_subtitle[]"].mrm-pa-rich-text{ min-height:150px; }
+                .mrm-pa-format-toolbar{
+                    display:flex;
+                    gap:6px;
+                    flex-wrap:wrap;
+                    margin:0 0 4px;
+                }
+                .mrm-pa-format-toolbar button{
+                    min-height:28px;
+                    padding:2px 8px;
+                    border:1px solid #c3c4c7;
+                    border-radius:6px;
+                    background:#f6f7f7;
+                    cursor:pointer;
+                    font-size:12px;
+                    font-weight:700;
                 }
                 .mrm-pa-wide{ grid-column: 1 / -1; }
                 .mrm-pa-help{ color:#646970; font-size: 12px; margin-top: 2px; }
@@ -1036,20 +1151,20 @@ class MRM_Product_Access {
 
                 foreach ( $pieces as $i => $piece ) :
                     $slug   = $piece['slug'] ?? '';
-                    $title  = $piece['piece_title'] ?? '';
-                    $cname  = $piece['composer_name'] ?? '';
-                    $curl   = $piece['composer_url'] ?? '';
-                    $desc   = $piece['description'] ?? '';
-                    $short_desc = $piece['short_description'] ?? '';
-                    $long_desc  = $piece['long_description'] ?? '';
-                    $diff   = $piece['difficulty'] ?? '';
-                    $instr  = $piece['instrumentation'] ?? '';
-                    $dur    = $piece['duration'] ?? '';
-                    $yr     = $piece['year'] ?? '';
-                    $pdf    = $piece['main_preview_pdf_url'] ?? '';
+                    $title  = $this->mrm_pa_plain_text( $piece['piece_title'] ?? '' );
+                    $cname  = $this->mrm_pa_plain_text( $piece['composer_name'] ?? '' );
+                    $curl   = $this->mrm_pa_unslash_value( $piece['composer_url'] ?? '' );
+                    $desc   = $this->mrm_pa_rich_text( $piece['description'] ?? '' );
+                    $short_desc = $this->mrm_pa_rich_text( $piece['short_description'] ?? '' );
+                    $long_desc  = $this->mrm_pa_rich_text( $piece['long_description'] ?? '' );
+                    $diff   = $this->mrm_pa_plain_text( $piece['difficulty'] ?? '' );
+                    $instr  = $this->mrm_pa_plain_text( $piece['instrumentation'] ?? '' );
+                    $dur    = $this->mrm_pa_plain_text( $piece['duration'] ?? '' );
+                    $yr     = $this->mrm_pa_plain_text( $piece['year'] ?? '' );
+                    $pdf    = $this->mrm_pa_unslash_value( $piece['main_preview_pdf_url'] ?? '' );
                     $ppn    = intval( $piece['preview_page_number'] ?? 1 );
                     if ( $ppn <= 0 ) { $ppn = 1; }
-                    $preview_audio_url = $piece['preview_audio_url'] ?? '';
+                    $preview_audio_url = $this->mrm_pa_unslash_value( $piece['preview_audio_url'] ?? '' );
                     $timeline_level = isset( $piece['timeline_level'] ) ? sanitize_key( (string) $piece['timeline_level'] ) : 'hidden';
                     if ( ! in_array( $timeline_level, array( 'level_1', 'level_2', 'level_3', 'hidden' ), true ) ) {
                         $timeline_level = 'hidden';
@@ -1070,8 +1185,9 @@ class MRM_Product_Access {
 
                         <div class="mrm-pa-grid">
                             <div class="mrm-pa-field">
-                                <label><?php esc_html_e( 'Piece Title', 'mrm-product-access' ); ?></label>
+                                <label><?php esc_html_e( 'Piece Display Title', 'mrm-product-access' ); ?></label>
                                 <input type="text" name="piece_title[]" value="<?php echo esc_attr( $title ); ?>" placeholder="Blackbeard's Revenge">
+                                <div class="mrm-pa-help"><?php esc_html_e( 'This is the public-facing title. The slug stays separate underneath.', 'mrm-product-access' ); ?></div>
                             </div>
 
                             <div class="mrm-pa-field">
@@ -1092,12 +1208,14 @@ class MRM_Product_Access {
 
                             <div class="mrm-pa-field mrm-pa-wide">
                                 <label><?php esc_html_e( 'Short Description (shows on catalog)', 'mrm-product-access' ); ?></label>
-                                <textarea name="piece_short_description[]" rows="2" placeholder="A 1–2 sentence summary shown on the catalog listing."><?php echo esc_textarea( $short_desc ); ?></textarea>
+                                <textarea class="mrm-pa-rich-text" name="piece_short_description[]" rows="5" placeholder="A 1–2 sentence summary shown on the catalog listing."><?php echo esc_textarea( $short_desc ); ?></textarea>
+                                <div class="mrm-pa-help"><?php esc_html_e( 'Supports blank lines and basic formatting: bold, italic, underline.', 'mrm-product-access' ); ?></div>
                             </div>
 
                             <div class="mrm-pa-field mrm-pa-wide">
                                 <label><?php esc_html_e( 'Long Description (shows on piece page)', 'mrm-product-access' ); ?></label>
-                                <textarea name="piece_long_description[]" rows="5" placeholder="Full description shown on the generated piece page."><?php echo esc_textarea( $long_desc !== '' ? $long_desc : $desc ); ?></textarea>
+                                <textarea class="mrm-pa-rich-text" name="piece_long_description[]" rows="8" placeholder="Full description shown on the generated piece page."><?php echo esc_textarea( $long_desc !== '' ? $long_desc : $desc ); ?></textarea>
+                                <div class="mrm-pa-help"><?php esc_html_e( 'Supports blank lines and basic formatting: bold, italic, underline.', 'mrm-product-access' ); ?></div>
                             </div>
 
                             <input type="hidden" name="piece_description[]" value="<?php echo esc_attr( $long_desc !== '' ? $long_desc : $desc ); ?>">
@@ -1131,9 +1249,9 @@ class MRM_Product_Access {
                             </div>
 
                             <div class="mrm-pa-field mrm-pa-wide">
-                                <label><?php esc_html_e( 'Preview Audio URL / Path (plays on the card)', 'mrm-product-access' ); ?></label>
+                                <label><?php esc_html_e( 'Main Preview Audio URL / Path', 'mrm-product-access' ); ?></label>
                                 <input type="text" name="piece_preview_audio_url[]" value="<?php echo esc_attr( $preview_audio_url ); ?>" placeholder="/wp-content/uploads/2025/12/Blackbeards-Revenge.mp3">
-                                <div class="mrm-pa-help"><?php esc_html_e( 'This is the piece’s main preview audio (separate from offer preview audio).', 'mrm-product-access' ); ?></div>
+                                <div class="mrm-pa-help"><?php esc_html_e( 'This plays once near the top of the piece product page, directly under the PDF preview.', 'mrm-product-access' ); ?></div>
                             </div>
 
                             <div class="mrm-pa-field">
@@ -1151,11 +1269,9 @@ class MRM_Product_Access {
                             <table class="widefat striped">
                                 <thead>
                                     <tr>
-                                        <th style="width:180px;"><?php esc_html_e( 'Product Slug', 'mrm-product-access' ); ?></th>
-                                        <th style="width:220px;"><?php esc_html_e( 'Display Title', 'mrm-product-access' ); ?></th>
-                                        <th><?php esc_html_e( 'Subtitle', 'mrm-product-access' ); ?></th>
-                                        <th style="width:110px;"><?php esc_html_e( 'Price Display', 'mrm-product-access' ); ?></th>
-                                        <th style="width:260px;"><?php esc_html_e( 'Preview Audio URL / Path', 'mrm-product-access' ); ?></th>
+                                        <th style="width:220px;"><?php esc_html_e( 'Product Slug', 'mrm-product-access' ); ?></th>
+                                        <th style="width:240px;"><?php esc_html_e( 'Display Title', 'mrm-product-access' ); ?></th>
+                                        <th style="width:120px;"><?php esc_html_e( 'Price Display', 'mrm-product-access' ); ?></th>
                                         <th style="width:110px;"><?php esc_html_e( 'Actions', 'mrm-product-access' ); ?></th>
                                     </tr>
                                 </thead>
@@ -1166,30 +1282,34 @@ class MRM_Product_Access {
                                 }
                                 foreach ( $offers as $off ) :
                                     $ps = $off['product_slug'] ?? '';
-                                    $dt = $off['display_title'] ?? '';
-                                    $st = $off['subtitle'] ?? '';
-                                    $pr = $off['price_display'] ?? '';
-                                    $au = $off['preview_audio_url'] ?? '';
+                                    $dt = $this->mrm_pa_plain_text( $off['display_title'] ?? '' );
+                                    $st = $this->mrm_pa_rich_text( $off['subtitle'] ?? '' );
+                                    $pr = $this->mrm_pa_plain_text( $off['price_display'] ?? '' );
+                                    $au = $this->mrm_pa_unslash_value( $off['preview_audio_url'] ?? '' );
                                     ?>
                                     <tr class="mrm-pa-offer-row">
                                         <td>
                                             <input type="hidden" name="offer_piece_index[]" value="<?php echo esc_attr( $i ); ?>">
+                                            <input type="hidden" name="offer_preview_audio_url[]" value="<?php echo esc_attr( $au ); ?>">
                                             <input type="text" name="offer_product_slug[]" value="<?php echo esc_attr( $ps ); ?>" placeholder="blackbeards-revenge-tuba-full-piece">
                                         </td>
                                         <td><input type="text" name="offer_display_title[]" value="<?php echo esc_attr( $dt ); ?>" placeholder="Tuba Full Piece"></td>
-                                        <td>
-                                            <textarea name="offer_subtitle[]" rows="3" placeholder="Includes the Tuba part..."><?php echo esc_textarea( $st ); ?></textarea>
-                                        </td>
                                         <td><input type="text" name="offer_price_display[]" value="<?php echo esc_attr( $pr ); ?>" placeholder="$25"></td>
-                                        <td><input type="text" name="offer_preview_audio_url[]" value="<?php echo esc_attr( $au ); ?>" placeholder="/wp-content/uploads/2025/12/Blackbeards-Revenge.mp3"></td>
                                         <td><button type="button" class="button mrm-pa-remove-offer"><?php esc_html_e( 'Remove', 'mrm-product-access' ); ?></button></td>
+                                    </tr>
+                                    <tr class="mrm-pa-offer-subtitle-row">
+                                        <td colspan="4">
+                                            <label style="display:block;font-weight:600;margin-bottom:6px;"><?php esc_html_e( 'Purchasing Option Subtitle', 'mrm-product-access' ); ?></label>
+                                            <textarea class="mrm-pa-rich-text" name="offer_subtitle[]" rows="6" placeholder="Includes the Tuba part..."><?php echo esc_textarea( $st ); ?></textarea>
+                                            <div class="mrm-pa-help"><?php esc_html_e( 'This appears as a full-width row under the option title on the piece product page. Supports blank lines, bold, italic, and underline.', 'mrm-product-access' ); ?></div>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                                 </tbody>
                             </table>
 
                             <div class="mrm-pa-help" style="margin-top:8px;">
-                                <?php esc_html_e( 'These offer fields map 1:1 with the legacy HTML mrmConfig.offers: productSlug, displayTitle, subtitle, priceDisplay, previewAudioUrl.', 'mrm-product-access' ); ?>
+                                <?php esc_html_e( 'These offer fields map to the piece product purchasing options. Offer-level preview audio is preserved if already saved, but the public page now uses the single main preview audio above the details.', 'mrm-product-access' ); ?>
                             </div>
                         </div>
                     </div>
@@ -1221,8 +1341,9 @@ class MRM_Product_Access {
 
                             <div class="mrm-pa-grid">
                                 <div class="mrm-pa-field">
-                                    <label>Piece Title</label>
+                                    <label>Piece Display Title</label>
                                     <input type="text" name="piece_title[]" value="" placeholder="Blackbeard's Revenge">
+                                    <div class="mrm-pa-help">This is the public-facing title. The slug stays separate underneath.</div>
                                 </div>
 
                                 <div class="mrm-pa-field">
@@ -1243,12 +1364,14 @@ class MRM_Product_Access {
 
                                 <div class="mrm-pa-field mrm-pa-wide">
                                     <label>Short Description (shows on catalog)</label>
-                                    <textarea name="piece_short_description[]" rows="2" placeholder="A 1–2 sentence summary shown on the catalog listing."></textarea>
+                                    <textarea class="mrm-pa-rich-text" name="piece_short_description[]" rows="5" placeholder="A 1–2 sentence summary shown on the catalog listing."></textarea>
+                                    <div class="mrm-pa-help">Supports blank lines and basic formatting: bold, italic, underline.</div>
                                 </div>
 
                                 <div class="mrm-pa-field mrm-pa-wide">
                                     <label>Long Description (shows on piece page)</label>
-                                    <textarea name="piece_long_description[]" rows="5" placeholder="Full description shown on the generated piece page."></textarea>
+                                    <textarea class="mrm-pa-rich-text" name="piece_long_description[]" rows="8" placeholder="Full description shown on the generated piece page."></textarea>
+                                    <div class="mrm-pa-help">Supports blank lines and basic formatting: bold, italic, underline.</div>
                                 </div>
 
                                 <input type="hidden" name="piece_description[]" value="">
@@ -1282,9 +1405,9 @@ class MRM_Product_Access {
                                 </div>
 
                                 <div class="mrm-pa-field mrm-pa-wide">
-                                    <label>Preview Audio URL / Path (plays on the card)</label>
+                                    <label>Main Preview Audio URL / Path</label>
                                     <input type="text" name="piece_preview_audio_url[]" value="" placeholder="/wp-content/uploads/2025/12/Blackbeards-Revenge.mp3">
-                                    <div class="mrm-pa-help">This is the piece’s main preview audio (separate from offer preview audio).</div>
+                                    <div class="mrm-pa-help">This plays once near the top of the piece product page, directly under the PDF preview.</div>
                                 </div>
 
                                 <div class="mrm-pa-field">
@@ -1302,11 +1425,9 @@ class MRM_Product_Access {
                                 <table class="widefat striped">
                                     <thead>
                                         <tr>
-                                            <th style="width:180px;">Product Slug</th>
-                                            <th style="width:220px;">Display Title</th>
-                                            <th>Subtitle</th>
-                                            <th style="width:110px;">Price Display</th>
-                                            <th style="width:260px;">Preview Audio URL / Path</th>
+                                            <th style="width:220px;">Product Slug</th>
+                                            <th style="width:240px;">Display Title</th>
+                                            <th style="width:120px;">Price Display</th>
                                             <th style="width:110px;">Actions</th>
                                         </tr>
                                     </thead>
@@ -1316,7 +1437,7 @@ class MRM_Product_Access {
                                 </table>
 
                                 <div class="mrm-pa-help" style="margin-top:8px;">
-                                    These map to legacy HTML mrmConfig.offers: productSlug, displayTitle, subtitle, priceDisplay, previewAudioUrl.
+                                    These map to the piece product purchasing options. Offer-level preview audio is no longer displayed on the public page.
                                 </div>
                             </div>
                         </div>`;
@@ -1671,25 +1792,76 @@ function moveTimelineItemToLevel(item, targetLevel){
 }
 
 function offerRowTemplate(pieceIndex){
-                        return `
-                        <tr class="mrm-pa-offer-row">
-                            <td>
-                                <input type="hidden" name="offer_piece_index[]" value="${pieceIndex}">
-                                <input type="text" name="offer_product_slug[]" value="" placeholder="blackbeards-revenge-tuba-full-piece">
-                            </td>
-                            <td><input type="text" name="offer_display_title[]" value="" placeholder="Tuba Full Piece"></td>
-                            <td><textarea name="offer_subtitle[]" rows="3" placeholder="Includes the Tuba part..."></textarea></td>
-                            <td><input type="text" name="offer_price_display[]" value="" placeholder="$25"></td>
-                            <td><input type="text" name="offer_preview_audio_url[]" value="" placeholder="/wp-content/uploads/.../demo.mp3"></td>
-                            <td><button type="button" class="button mrm-pa-remove-offer">Remove</button></td>
-                        </tr>`;
-                    }
+    return `
+    <tr class="mrm-pa-offer-row">
+        <td>
+            <input type="hidden" name="offer_piece_index[]" value="${pieceIndex}">
+            <input type="hidden" name="offer_preview_audio_url[]" value="">
+            <input type="text" name="offer_product_slug[]" value="" placeholder="blackbeards-revenge-tuba-full-piece">
+        </td>
+        <td><input type="text" name="offer_display_title[]" value="" placeholder="Tuba Full Piece"></td>
+        <td><input type="text" name="offer_price_display[]" value="" placeholder="$25"></td>
+        <td><button type="button" class="button mrm-pa-remove-offer">Remove</button></td>
+    </tr>
+    <tr class="mrm-pa-offer-subtitle-row">
+        <td colspan="4">
+            <label style="display:block;font-weight:600;margin-bottom:6px;">Purchasing Option Subtitle</label>
+            <textarea class="mrm-pa-rich-text" name="offer_subtitle[]" rows="6" placeholder="Includes the Tuba part..."></textarea>
+            <div class="mrm-pa-help">This appears as a full-width row under the option title on the piece product page. Supports blank lines, bold, italic, and underline.</div>
+        </td>
+    </tr>`;
+}
+
+function wrapTextareaSelection(textarea, before, after) {
+    if (!textarea) return;
+
+    const start = textarea.selectionStart || 0;
+    const end = textarea.selectionEnd || 0;
+    const selected = textarea.value.substring(start, end) || 'text';
+
+    textarea.value = textarea.value.substring(0, start) + before + selected + after + textarea.value.substring(end);
+    textarea.focus();
+    textarea.selectionStart = start + before.length;
+    textarea.selectionEnd = start + before.length + selected.length;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function initRichTextToolbars(scope) {
+    (scope || document).querySelectorAll('textarea.mrm-pa-rich-text').forEach(function(textarea){
+        if (textarea.dataset.mrmToolbarReady === '1') return;
+        textarea.dataset.mrmToolbarReady = '1';
+
+        const bar = document.createElement('div');
+        bar.className = 'mrm-pa-format-toolbar';
+        bar.innerHTML = `
+            <button type="button" data-before="<strong>" data-after="</strong>">Bold</button>
+            <button type="button" data-before="<em>" data-after="</em>">Italic</button>
+            <button type="button" data-before="<u>" data-after="</u>">Underline</button>
+            <button type="button" data-before="" data-after="<br>">Line Break</button>
+        `;
+
+        bar.addEventListener('click', function(e){
+            const btn = e.target.closest('button[data-before]');
+            if (!btn) return;
+
+            wrapTextareaSelection(
+                textarea,
+                btn.getAttribute('data-before') || '',
+                btn.getAttribute('data-after') || ''
+            );
+        });
+
+        textarea.parentNode.insertBefore(bar, textarea);
+    });
+}
 
                     addPieceBtn.addEventListener('click', function(){
                         const nextIndex = getPieceCards().length;
                         const temp = document.createElement('div');
                         temp.innerHTML = pieceTemplate(nextIndex);
-                        wrap.appendChild(temp.firstElementChild);
+                        const newCard = temp.firstElementChild;
+                        wrap.appendChild(newCard);
+                        initRichTextToolbars(newCard);
                         syncPieceOrderList();
                         syncTimelineBoard();
                     });
@@ -1719,8 +1891,12 @@ function offerRowTemplate(pieceIndex){
 
                             const temp = document.createElement('tbody');
                             temp.innerHTML = offerRowTemplate(pieceIndex);
-                            tbody.appendChild(temp.firstElementChild);
 
+                            while (temp.firstElementChild) {
+                                tbody.appendChild(temp.firstElementChild);
+                            }
+
+                            initRichTextToolbars(tbody);
                             reindexPiecesAndOffers();
                             return;
                         }
@@ -1728,7 +1904,13 @@ function offerRowTemplate(pieceIndex){
                         const removeOfferBtn = e.target.closest('.mrm-pa-remove-offer');
                         if (removeOfferBtn) {
                             const row = removeOfferBtn.closest('.mrm-pa-offer-row');
-                            if (row) row.remove();
+                            if (row) {
+                                const next = row.nextElementSibling;
+                                row.remove();
+                                if (next && next.classList.contains('mrm-pa-offer-subtitle-row')) {
+                                    next.remove();
+                                }
+                            }
                             return;
                         }
                     });
@@ -1911,6 +2093,7 @@ function offerRowTemplate(pieceIndex){
                         });
                     }
 
+                    initRichTextToolbars(wrap);
                     syncPieceOrderList();
                     syncTimelineBoard();
                 })();
@@ -3717,6 +3900,8 @@ function offerRowTemplate(pieceIndex){
                 'message' => 'Piece not found for slug: ' . $slug,
             ), 404 );
         }
+
+        $found = $this->mrm_pa_normalize_piece_for_output( $found );
 
         // Include catalog URL for "Preview more pieces" button.
         $catalog_url = method_exists( $this, 'get_sheet_music_catalog_url' )
