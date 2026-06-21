@@ -326,11 +326,11 @@ body.mrm-piece-no-scroll{
 
 /* BODY LAYOUT */
 .offer-body{
-  padding: 14px;
-  display:flex;
-  justify-content:flex-end;
+  padding: 16px;
+  display:grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
   gap:18px;
-  align-items:start;
+  align-items:center;
 }
 
 
@@ -368,16 +368,67 @@ body.mrm-piece-no-scroll{
   text-align:left;
 }
 
-/* AUDIO PLAYER BOX */
+/* UNIFIED AUDIO PLAYER */
 .audio-box{
+  --mrm-audio-bg: var(--mrm-warm-popup-bg-light, #fffdf9);
+  --mrm-audio-bg-soft: var(--mrm-warm-popup-bg, #fffaf3);
+  --mrm-audio-border: var(--mrm-warm-popup-border, rgba(124, 74, 45, 0.22));
+  --mrm-audio-text: var(--mrm-warm-popup-text, #2f2118);
+  --mrm-audio-muted: var(--mrm-warm-popup-muted, #62483a);
+  --mrm-audio-button: var(--mrm-warm-popup-deep, #20170f);
+  --mrm-audio-button-text: var(--mrm-warm-popup-bg-light, #fffdf9);
+  --mrm-audio-track: rgba(98, 72, 58, 0.22);
+  --mrm-audio-thumb: var(--mrm-warm-popup-deep, #20170f);
+
   width:100%;
-  border:1px solid rgba(0,0,0,0.12);
+  border:1px solid var(--mrm-audio-border);
   border-radius: var(--radius-lg);
   padding:14px;
-  background: var(--color-surface);
+  background: var(--mrm-audio-bg);
   box-sizing:border-box;
-  margin-top:auto;
+  box-shadow: 0 10px 24px rgba(32, 23, 15, 0.06);
 }
+
+/* Desktop order:
+   play button | 0:00 | seek bar | 1:34 | volume
+*/
+.audio-controls{
+  display:grid;
+  grid-template-columns: auto auto minmax(140px, 1fr) auto auto;
+  grid-template-areas: "play current seek duration volume";
+  align-items:center;
+  gap: 12px;
+}
+
+.audio-row-top{ display:contents; }
+.audio-row-top .mrm-play,
+.audio-controls > .mrm-play{ grid-area: play; }
+.audio-row-top .mrm-current,
+.audio-controls > .mrm-current{ grid-area: current; }
+.audio-row-top .mrm-duration,
+.audio-controls > .mrm-duration{ grid-area: duration; }
+.audio-row-seek{ grid-area: seek; min-width:0; width:100%; }
+.audio-row-vol{ grid-area: volume; display:flex; align-items:center; justify-content:flex-end; gap: 10px; }
+.play-button{ width:52px; height:52px; border-radius: 14px; background: var(--mrm-audio-button); color: var(--mrm-audio-button-text); border:1px solid rgba(32, 23, 15, 0.16); cursor:pointer; padding:0; display:inline-flex; align-items:center; justify-content:center; line-height:1; box-shadow: 0 10px 24px rgba(32, 23, 15, 0.16); transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease; }
+.play-button:hover{ transform: translateY(-1px); box-shadow: 0 14px 30px rgba(32, 23, 15, 0.20); filter: brightness(1.04); }
+.play-button:active{ transform: translateY(0); box-shadow: 0 8px 20px rgba(32, 23, 15, 0.15); }
+.play-button:focus-visible{ outline:none; box-shadow: 0 0 0 3px rgba(124, 74, 45, 0.22), 0 10px 24px rgba(32, 23, 15, 0.16); }
+.play-button svg{ width:22px; height:22px; display:block; fill: currentColor; }
+.play-button .icon-pause{ display:none; }
+.play-button.is-playing .icon-play{ display:none; }
+.play-button.is-playing .icon-pause{ display:block; }
+.time{ font-size:14px; color: var(--mrm-audio-muted); min-width: 46px; text-align:center; font-variant-numeric: tabular-nums; line-height:1; }
+.progress,
+.volume input.mrm-volume{ width:100%; min-width:0; appearance:none; -webkit-appearance:none; height:10px; border-radius:999px; background: var(--mrm-audio-track); cursor:pointer; outline:none; }
+.progress::-webkit-slider-thumb,
+.volume input.mrm-volume::-webkit-slider-thumb{ -webkit-appearance:none; appearance:none; width:18px; height:18px; border-radius:50%; background: var(--mrm-audio-thumb); border:2px solid var(--mrm-audio-bg); box-shadow: 0 3px 8px rgba(32, 23, 15, 0.18); }
+.progress::-moz-range-thumb,
+.volume input.mrm-volume::-moz-range-thumb{ width:18px; height:18px; border-radius:50%; background: var(--mrm-audio-thumb); border:2px solid var(--mrm-audio-bg); box-shadow: 0 3px 8px rgba(32, 23, 15, 0.18); }
+.progress::-moz-range-track,
+.volume input.mrm-volume::-moz-range-track{ height:10px; border-radius:999px; background: var(--mrm-audio-track); border:none; }
+.volume{ display:inline-flex; align-items:center; gap:8px; color: var(--mrm-audio-muted); }
+.volume svg{ width:20px; height:20px; }
+.volume input.mrm-volume{ width: 132px; }
 
 /* MAIN PREVIEW AUDIO UNDER PDF */
 .mrm-main-audio-section{
@@ -399,99 +450,48 @@ body.mrm-piece-no-scroll{
   display:none !important;
 }
 
-/* Full-width subtitle row for each purchasing option */
+/* Offer subtitle now lives inside the offer body, beside the price/buttons */
 .offer-subtitle-row{
-  padding: 16px 18px;
-  border-bottom: 1px solid rgba(0,0,0,0.08);
-  background: rgba(255,255,255,0.58);
-  font-size: 17px;
-  color: var(--color-text-muted);
-  line-height: 1.55;
+  display:none;
 }
-.offer-subtitle-row p,
+
+.offer-subtitle-panel{
+  min-height: 128px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  text-align:center;
+  padding: 18px 22px;
+  border-radius: 18px;
+  background: rgba(255, 253, 249, 0.72);
+  border: 1px solid rgba(124, 74, 45, 0.16);
+  color: var(--mrm-warm-popup-muted, #62483a);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.offer-subtitle-panel p,
 .mrm-rich-text p{
   margin: 0 0 1em;
 }
-.offer-subtitle-row p:last-child,
+
+.offer-subtitle-panel p:last-child,
 .mrm-rich-text p:last-child{
   margin-bottom: 0;
 }
-.offer-subtitle-row strong,
+
+.offer-subtitle-panel strong,
 .mrm-rich-text strong{ font-weight: 900; }
-.offer-subtitle-row em,
+
+.offer-subtitle-panel em,
 .mrm-rich-text em{ font-style: italic; }
-.offer-subtitle-row u,
+
+.offer-subtitle-panel u,
 .mrm-rich-text u{ text-decoration: underline; }
-
-/* audio controls layout */
-.audio-controls{
-  display:grid;
-  grid-template-columns: auto 1fr auto;
-  align-items:center;
-  gap: 14px;
-}
-
-.audio-row-top{ display:flex; align-items:center; gap: 14px; }
-.audio-row-seek{ min-width:0; }
-.audio-row-vol{ display:flex; align-items:center; justify-content:flex-end; gap: 10px; }
-
-.play-button{
-  width:56px; height:56px;
-  border-radius: 14px;
-  background: var(--color-accent);
-  color: var(--color-surface);
-  border:none;
-  cursor:pointer;
-  padding:0;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  line-height:1;
-  box-shadow: 0 10px 26px rgba(0,0,0,0.16);
-  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
-}
-.play-button:hover{ transform: translateY(-1px); box-shadow: 0 14px 34px rgba(0,0,0,0.20); filter: brightness(1.02); }
-.play-button:active{ transform: translateY(0px); box-shadow: 0 10px 26px rgba(0,0,0,0.16); filter: brightness(0.98); }
-.play-button:focus-visible{
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(47,47,47,0.22), 0 10px 26px rgba(0,0,0,0.16);
-}
-
-.play-button svg{ width:22px; height:22px; display:block; fill: currentColor; }
-.play-button .icon-pause{ display:none; }
-.play-button.is-playing .icon-play{ display:none; }
-.play-button.is-playing .icon-pause{ display:block; }
-
-.time{
-  font-size:14px;
-  color: var(--color-text-muted);
-  min-width: 66px;
-  text-align:center;
-  font-variant-numeric: tabular-nums;
-}
-
-.progress{
-  width:100%;
-  min-width:0;
-  appearance:none;
-  height: 10px;
-  border-radius:999px;
-  background: var(--color-accent-soft);
-  cursor:pointer;
-}
-.progress::-webkit-slider-thumb{
-  appearance:none;
-  width: 18px; height:18px;
-  border-radius:50%;
-  background: var(--color-accent);
-}
-
-.volume{ display:inline-flex; align-items:center; gap: 8px; color: var(--color-accent); }
-.volume svg{ width:20px; height:20px; }
-.volume input{ width: 140px; }
 
 /* RIGHT SIDE: price + buttons */
 .offer-actions{
+  grid-column: 2;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -799,12 +799,20 @@ body.mrm-piece-no-scroll{
 
 @media (max-width: 980px){
   .info-grid{ grid-template-columns: 1fr; }
-  .offer-body{ flex-direction: column; }
-  .offer-actions{
-    min-width: 0;
+  .offer-body{
     grid-template-columns: 1fr;
   }
-  .audio-stack{ min-height: 0; }
+
+  .offer-actions{
+    grid-column: 1;
+    width:100%;
+    min-width: 0;
+  }
+
+  .offer-subtitle-panel{
+    min-height: 0;
+    padding: 16px;
+  }
 }
 
 @media (max-width: 700px){
@@ -893,23 +901,19 @@ body.mrm-piece-no-scroll{
 
 @media (max-width: 620px){
   .audio-controls{
-    grid-template-columns: 1fr;
-    justify-items:center;
-    gap: 10px;
-  }
-
-  .audio-row-top{
-    width:100%;
-    display:grid;
-    grid-template-columns: 56px 1fr 1fr;
-    align-items:center;
-    column-gap:10px;
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas:
+      "play current duration"
+      "seek seek seek"
+      "volume volume volume";
+    justify-items:stretch;
+    gap: 12px;
   }
 
   .audio-row-seek{ width:100%; }
   .audio-row-seek .progress{ height:12px; }
   .audio-row-vol{ width:100%; justify-content:center; }
-  .volume input{ width: min(280px, 78vw); }
+  .volume input.mrm-volume{ width: min(280px, 72vw); }
 
   .offer-head{ padding: 10px 12px; min-height: 42px; }
   .offer-title{ font-size: 22px; }
@@ -1083,7 +1087,10 @@ body.mrm-piece-no-scroll{
 .mrm-piece-product-page .offer-title { color: var(--mrm-warm-popup-text, #2f2118) !important; }
 .mrm-piece-product-page .offer-body { background: var(--mrm-warm-popup-bg-light, #fffdf9); }
 .mrm-piece-product-page .audio-subtitle { color: var(--mrm-warm-popup-muted, #62483a) !important; }
-.mrm-piece-product-page .audio-box { background: var(--mrm-warm-popup-bg, #fffaf3) !important; border: 1px solid var(--mrm-warm-popup-border, rgba(124, 74, 45, 0.22)) !important; }
+.mrm-piece-product-page .audio-box {
+  background: var(--mrm-warm-popup-bg-light, #fffdf9) !important;
+  border: 1px solid var(--mrm-warm-popup-border, rgba(124, 74, 45, 0.22)) !important;
+}
 .mrm-piece-product-page .price-box { background: var(--mrm-warm-popup-bg-soft, #f7efe3) !important; border: 1px solid var(--mrm-warm-popup-border, rgba(124, 74, 45, 0.22)) !important; color: var(--mrm-warm-popup-text, #2f2118) !important; }
 .mrm-piece-product-page .price-label { color: var(--mrm-warm-popup-accent, #9a6a2f) !important; font-weight: 900; }
 .mrm-piece-product-page .price { color: var(--mrm-warm-popup-text, #2f2118) !important; }
@@ -2070,7 +2077,7 @@ function mrmGetPiecePromoCodeInputValue() {
     if (offerEl) {
       params.set('type', typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : '');
       params.set('display_title', String((offerEl.querySelector('.offer-title') || {}).textContent || '').trim());
-      params.set('subtitle', String((offerEl.querySelector('.offer-subtitle-row, .audio-subtitle') || {}).textContent || '').trim());
+      params.set('subtitle', String((offerEl.querySelector('.offer-subtitle-panel, .offer-subtitle-row, .audio-subtitle') || {}).textContent || '').trim());
     }
 
     const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
@@ -2118,7 +2125,7 @@ function mrmGetPiecePromoCodeInputValue() {
 
     const rawSlug = String(offerEl.dataset.rawOfferSlug || offerEl.dataset.productSlug || '').toLowerCase();
     const title = String((offerEl.querySelector('.offer-title') || {}).textContent || '').toLowerCase();
-    const subtitle = String((offerEl.querySelector('.offer-subtitle-row, .audio-subtitle') || {}).textContent || '').toLowerCase();
+    const subtitle = String((offerEl.querySelector('.offer-subtitle-panel, .offer-subtitle-row, .audio-subtitle') || {}).textContent || '').toLowerCase();
 
     return inferSheetMusicTypeFromText(`${rawSlug} ${title} ${subtitle}`);
   }
@@ -3096,9 +3103,8 @@ async function getOfferSkuCandidates(offerEl) {
         </div>
       </div>
 
-      ${shortSubtitleHtml ? `<div class="offer-subtitle-row mrm-rich-text">${shortSubtitleHtml}</div>` : ''}
-
       <div class="offer-body">
+        ${shortSubtitleHtml ? `<div class="offer-subtitle-panel mrm-rich-text">${shortSubtitleHtml}</div>` : ''}
         <div class="offer-actions">
           <div class="price-box">
             <div class="price-label">Price</div>
@@ -3538,7 +3544,7 @@ async function getOfferSkuCandidates(offerEl) {
           params.set('piece_slug', typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '');
           params.set('type', typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : '');
             params.set('display_title', String((offerEl.querySelector('.offer-title') || {}).textContent || '').trim());
-            params.set('subtitle', String((offerEl.querySelector('.offer-subtitle-row, .audio-subtitle') || {}).textContent || '').trim());
+            params.set('subtitle', String((offerEl.querySelector('.offer-subtitle-panel, .offer-subtitle-row, .audio-subtitle') || {}).textContent || '').trim());
 
             const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
               method: 'GET'
