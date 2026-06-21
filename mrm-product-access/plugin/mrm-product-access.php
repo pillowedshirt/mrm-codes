@@ -5969,7 +5969,7 @@ audio.mrm-audio {
 .lbl-sheet-music-page .mrm-timeline-spacer {
   display: block;
   width: 100%;
-  height: 100px;
+  height: 200px;
   flex: 0 0 auto;
 }
 
@@ -6004,7 +6004,7 @@ audio.mrm-audio {
   }
 
   .lbl-sheet-music-page .mrm-timeline-spacer {
-    height: 100px;
+    height: 200px;
   }
 
   .lbl-sheet-music-page .mrm-timeline-intro h2 {
@@ -6045,7 +6045,7 @@ audio.mrm-audio {
   }
 
   .lbl-sheet-music-page .mrm-timeline-spacer {
-    height: 100px;
+    height: 200px;
   }
 
   .lbl-sheet-music-page .timeline {
