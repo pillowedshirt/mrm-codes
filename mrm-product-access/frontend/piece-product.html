@@ -910,20 +910,97 @@ audio.mrm-audio{
 }
 
 @media (max-width: 620px){
-  .audio-controls{
-    grid-template-columns: auto 1fr auto;
-    grid-template-areas:
-      "play current duration"
-      "seek seek seek"
-      "volume volume volume";
-    justify-items:stretch;
-    gap: 12px;
+  .audio-box{
+    padding:9px !important;
   }
 
-  .audio-row-seek{ width:100%; }
-  .audio-row-seek .progress{ height:12px; }
-  .audio-row-vol{ width:100%; justify-content:center; }
-  .volume input.mrm-volume{ width: min(280px, 72vw); }
+  .audio-controls{
+    display:grid !important;
+    grid-template-columns: auto auto minmax(48px, 1fr) auto auto !important;
+    grid-template-areas: "play current seek duration volume" !important;
+    align-items:center !important;
+    justify-items:stretch !important;
+    gap:6px !important;
+  }
+
+  .audio-row-top{
+    display:contents !important;
+    width:auto !important;
+  }
+
+  .audio-row-top .mrm-play,
+  .audio-controls > .mrm-play{
+    grid-area:play !important;
+  }
+
+  .audio-row-top .mrm-current,
+  .audio-controls > .mrm-current{
+    grid-area:current !important;
+  }
+
+  .audio-row-top .mrm-duration,
+  .audio-controls > .mrm-duration{
+    grid-area:duration !important;
+  }
+
+  .audio-row-seek{
+    grid-area:seek !important;
+    width:100% !important;
+    min-width:0 !important;
+  }
+
+  .audio-row-seek .progress{
+    height:7px !important;
+  }
+
+  .audio-row-vol{
+    grid-area:volume !important;
+    width:auto !important;
+    justify-content:flex-end !important;
+    gap:4px !important;
+  }
+
+  .play-button{
+    width:34px !important;
+    height:34px !important;
+    border-radius:9px !important;
+  }
+
+  .play-button svg{
+    width:14px !important;
+    height:14px !important;
+  }
+
+  .time{
+    font-size:10px !important;
+    min-width:30px !important;
+  }
+
+  .progress,
+  .volume input.mrm-volume{
+    height:7px !important;
+  }
+
+  .progress::-webkit-slider-thumb,
+  .volume input.mrm-volume::-webkit-slider-thumb{
+    width:13px !important;
+    height:13px !important;
+  }
+
+  .progress::-moz-range-thumb,
+  .volume input.mrm-volume::-moz-range-thumb{
+    width:13px !important;
+    height:13px !important;
+  }
+
+  .volume svg{
+    width:14px !important;
+    height:14px !important;
+  }
+
+  .volume input.mrm-volume{
+    width:clamp(44px, 15vw, 62px) !important;
+  }
 
   .offer-head{ padding: 10px 12px; min-height: 42px; }
   .offer-title{ font-size: 22px; }
@@ -1341,6 +1418,70 @@ audio.mrm-audio{
   min-height: 230px;
 }
 
+
+/* Final audio mobile layout lock for piece-product.html */
+@media (max-width: 620px){
+  .mrm-piece-product-page .audio-controls{
+    display:grid !important;
+    grid-template-columns: auto auto minmax(48px, 1fr) auto auto !important;
+    grid-template-areas: "play current seek duration volume" !important;
+    align-items:center !important;
+    justify-items:stretch !important;
+    gap:6px !important;
+  }
+
+  .mrm-piece-product-page .audio-row-top{
+    display:contents !important;
+    width:auto !important;
+  }
+
+  .mrm-piece-product-page .audio-row-seek{
+    grid-area:seek !important;
+    width:100% !important;
+    min-width:0 !important;
+  }
+
+  .mrm-piece-product-page .audio-row-vol{
+    grid-area:volume !important;
+    width:auto !important;
+    justify-content:flex-end !important;
+    gap:4px !important;
+  }
+
+  .mrm-piece-product-page .audio-box{
+    padding:9px !important;
+  }
+
+  .mrm-piece-product-page .play-button{
+    width:34px !important;
+    height:34px !important;
+    border-radius:9px !important;
+  }
+
+  .mrm-piece-product-page .play-button svg{
+    width:14px !important;
+    height:14px !important;
+  }
+
+  .mrm-piece-product-page .time{
+    font-size:10px !important;
+    min-width:30px !important;
+  }
+
+  .mrm-piece-product-page .progress,
+  .mrm-piece-product-page .volume input.mrm-volume{
+    height:7px !important;
+  }
+
+  .mrm-piece-product-page .volume input.mrm-volume{
+    width:clamp(44px, 15vw, 62px) !important;
+  }
+
+  .mrm-piece-product-page .volume svg{
+    width:14px !important;
+    height:14px !important;
+  }
+}
 </style>
 
 <main class="mrm-piece-product-page page">
