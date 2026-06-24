@@ -12020,20 +12020,16 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
 
     public function handle_cross_plugin_email_preview( $preview, $slug ) {
         $slug = sanitize_key( (string) $slug );
-        $field_note = function( $label, $source ) {
-            return '<span style="display:inline-block;background:#fff3cd;border:1px solid #e0b84f;border-radius:999px;padding:2px 8px;margin:2px;font-size:11px;color:#4d3b00;">' . esc_html( $label ) . ': from ' . esc_html( $source ) . '</span>';
-        };
-        $time = 'January 15, 2027 at 4:00 PM MST';
+        $time = '';
 
         if ( $slug === 'meeting_confirmation' || $slug === 'meeting_reminder' ) {
-            $meeting_title = 'Meeting Scheduler Event';
+            $meeting_title = '';
             $gate_url = home_url( '/meeting-access/' . str_repeat( 'a', 48 ) . '/' );
             $body = '<p>Hello,</p>';
             $body .= $slug === 'meeting_reminder'
                 ? '<p>This is a reminder for your upcoming Low Brass Lessons meeting.</p>'
                 : '<p>You are invited to the following Low Brass Lessons meeting:</p>';
             $body .= '<p><strong>' . esc_html( $meeting_title ) . '</strong><br>' . esc_html( $time ) . '</p>';
-            $body .= '<p>' . $field_note( 'Participant name', 'Meeting Scheduler form / participant list' ) . '</p>';
             $body .= '<p>Please use the button below to open the meeting gate at the scheduled time.</p>';
 
             return array(
@@ -12043,15 +12039,69 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         }
 
         $tests = array(
-            'private_lesson_reminder_parent' => array( 'Upcoming Lesson Reminder', '<p>This is a preview of the parent/student private lesson reminder email.</p>', '<div><strong>Student:</strong> ' . $field_note( 'Student name', 'lesson booking form' ) . '</div><div><strong>Instructor:</strong> ' . $field_note( 'Instructor name', 'instructor profile' ) . '</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/join-online/test/' ), 'Open Join Page' ),
-            'private_lesson_reminder_instructor' => array( 'Instructor Lesson Reminder', '<p>This is a preview of the instructor private lesson reminder email.</p>', '<div><strong>Student:</strong> ' . $field_note( 'Student name', 'lesson record' ) . '</div><div><strong>Instructor:</strong> ' . $field_note( 'Instructor name', 'instructor profile' ) . '</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/wp-admin/admin-post.php?action=test-instructor-arrival' ), 'Mark Arrival' ),
-            'lesson_feedback_request' => array( 'How was your lesson?', '<p>Please rate the lesson and share any comments you would like us to see.</p>', '<div><strong>Student:</strong> ' . $field_note( 'Student name', 'lesson record' ) . '</div><div><strong>Feedback text:</strong> ' . $field_note( 'Feedback comments', 'feedback text box' ) . '</div>', home_url( '/wp-admin/admin-post.php?action=test-feedback' ), 'Rate your lesson' ),
-            'parent_feedback_received' => array( 'Parent Lesson Feedback', '<p>This is a preview of the parent feedback received notification.</p>', '<div><strong>Rating:</strong> ' . $field_note( 'Rating', 'feedback form selection' ) . '</div><div><strong>Comment:</strong> ' . $field_note( 'Comment', 'feedback text box' ) . '</div>', '', '' ),
-            'consultation_confirmation' => array( 'Consultation Confirmed', '<p>This is a preview of the consultation confirmation email.</p>', '<div><strong>Name:</strong> ' . $field_note( 'Name', 'consultation form text box' ) . '</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/join-online/test/' ), 'Open Join Page' ),
-            'contact_form_notification' => array( 'New Contact Form Submission', '<p>This is a preview of the contact form notification email.</p>', '<div><strong>Name:</strong> ' . $field_note( 'Name', 'contact form text box' ) . '</div><div><strong>Email:</strong> ' . $field_note( 'Email', 'contact form email box' ) . '</div><div><strong>Message:</strong> ' . $field_note( 'Message', 'contact form message box' ) . '</div>', '', '' ),
-            'safety_no_show_alert' => array( 'Safety Alert', '<p>This is a preview of the parent reported no-show safety alert.</p>', '<div><strong>Report:</strong> ' . $field_note( 'Report details', 'safety form text box' ) . '</div>', '', '' ),
-            'safety_emergency_notice' => array( 'Safety Emergency Notice', '<p>This is a preview of the instructor emergency notice.</p>', '<div><strong>Emergency note:</strong> ' . $field_note( 'Emergency note', 'safety/emergency text box' ) . '</div>', '', '' ),
-            'contractor_agreement_confirmation' => array( 'Contractor Agreement Confirmation', '<p>This is a preview of the contractor agreement confirmation email.</p>', '<div><strong>Contractor:</strong> ' . $field_note( 'Contractor name', 'agreement form text box' ) . '</div>', '', '' ),
+            'private_lesson_reminder_parent' => array(
+                'Upcoming Lesson Reminder',
+                '<p>This is a reminder for your upcoming Low Brass Lessons private lesson.</p>',
+                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Time:</strong> </div>',
+                home_url( '/join-online/test/' ),
+                'Open Join Page'
+            ),
+            'private_lesson_reminder_instructor' => array(
+                'Instructor Lesson Reminder',
+                '<p>This is a reminder for your upcoming Low Brass Lessons private lesson.</p>',
+                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Time:</strong> </div>',
+                home_url( '/wp-admin/admin-post.php?action=test-instructor-arrival' ),
+                'Mark Arrival'
+            ),
+            'lesson_feedback_request' => array(
+                'How was your lesson?',
+                '<p>Please rate the lesson and share any comments you would like us to see.</p>',
+                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Lesson:</strong> </div><div><strong>Feedback text:</strong> </div>',
+                home_url( '/wp-admin/admin-post.php?action=test-feedback' ),
+                'Rate your lesson'
+            ),
+            'parent_feedback_received' => array(
+                'Parent Lesson Feedback',
+                '<p>Lesson feedback has been submitted.</p>',
+                '<div><strong>Rating:</strong> </div><div><strong>Comment:</strong> </div>',
+                '',
+                ''
+            ),
+            'consultation_confirmation' => array(
+                'Consultation Confirmed',
+                '<p>Your consultation has been scheduled successfully.</p>',
+                '<div><strong>Name:</strong> </div><div><strong>Time:</strong> </div><div><strong>Type:</strong> Consultation</div>',
+                home_url( '/join-online/test/' ),
+                'Open Join Page'
+            ),
+            'contact_form_notification' => array(
+                'New Contact Form Submission',
+                '<p>A new contact form submission has been received.</p>',
+                '<div><strong>Name:</strong> </div><div><strong>Email:</strong> </div><div><strong>Represents:</strong> </div><div><strong>Message:</strong> </div>',
+                '',
+                ''
+            ),
+            'safety_no_show_alert' => array(
+                'Safety Alert',
+                '<p>A parent has reported that the instructor did not arrive for the scheduled lesson.</p>',
+                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Start:</strong> </div><div><strong>Report:</strong> </div>',
+                '',
+                ''
+            ),
+            'safety_emergency_notice' => array(
+                'Safety Emergency Notice',
+                '<p>A lesson emergency notice has been submitted.</p>',
+                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Emergency message:</strong> </div>',
+                '',
+                ''
+            ),
+            'contractor_agreement_confirmation' => array(
+                'Contractor Agreement Confirmation',
+                '<p>Your contractor agreement has been recorded.</p>',
+                '<div><strong>Contractor:</strong> </div><div><strong>Agreement Version:</strong> </div><div><strong>Status:</strong> Completed</div>',
+                '',
+                ''
+            ),
         );
 
         if ( isset( $tests[ $slug ] ) ) {

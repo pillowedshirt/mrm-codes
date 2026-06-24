@@ -11774,7 +11774,7 @@ public function handle_marketing_resubscribe() {
           <h3 id="mrm-email-testing-preview-title" style="margin:12px 0 6px;"></h3>
           <p style="margin:0 0 10px;"><strong>Subject:</strong> <span id="mrm-email-testing-preview-subject"></span></p>
           <p class="description" id="mrm-email-testing-preview-description"></p>
-          <iframe id="mrm-email-testing-preview-frame" title="Email preview" style="width:100%;min-height:720px;border:1px solid #dcdcde;border-radius:8px;background:#fff;"></iframe>
+          <iframe id="mrm-email-testing-preview-frame" title="Email preview" scrolling="no" style="display:block;width:100%;min-height:1200px;height:1200px;border:1px solid #dcdcde;border-radius:8px;background:#fff;overflow:hidden;"></iframe>
         </div>
       </div>
 
@@ -11838,13 +11838,52 @@ public function handle_marketing_resubscribe() {
       var desc = document.getElementById('mrm-email-testing-preview-description');
       var frame = document.getElementById('mrm-email-testing-preview-frame');
 
+      function resizePreviewFrame(){
+        if (!frame) return;
+
+        try {
+          var doc = frame.contentDocument || (frame.contentWindow ? frame.contentWindow.document : null);
+          if (!doc) return;
+
+          var body = doc.body;
+          var html = doc.documentElement;
+          var height = Math.max(
+            body ? body.scrollHeight : 0,
+            body ? body.offsetHeight : 0,
+            html ? html.scrollHeight : 0,
+            html ? html.offsetHeight : 0,
+            1200
+          );
+
+          frame.style.height = (height + 60) + 'px';
+        } catch (e) {
+          frame.style.height = '1600px';
+        }
+      }
+
+      function setFrameHtml(html){
+        if (!frame) return;
+
+        frame.onload = function(){
+          resizePreviewFrame();
+          setTimeout(resizePreviewFrame, 100);
+          setTimeout(resizePreviewFrame, 350);
+          setTimeout(resizePreviewFrame, 800);
+        };
+
+        frame.srcdoc = html;
+      }
+
       function clearPreview(){
         if (empty) empty.style.display = 'block';
         if (active) active.style.display = 'none';
         if (title) title.textContent = '';
         if (subject) subject.textContent = '';
         if (desc) desc.textContent = '';
-        if (frame) frame.srcdoc = '';
+        if (frame) {
+          frame.srcdoc = '';
+          frame.style.height = '1200px';
+        }
       }
 
       function showPreview(slug){
@@ -11859,7 +11898,7 @@ public function handle_marketing_resubscribe() {
         if (title) title.textContent = preview.label || slug;
         if (subject) subject.textContent = preview.subject || '';
         if (desc) desc.textContent = preview.description || '';
-        if (frame) frame.srcdoc = preview.html || '<div style="padding:18px;">No preview HTML available.</div>';
+        if (frame) setFrameHtml(preview.html || '<!doctype html><html><body style="margin:0;padding:18px;">No preview HTML available.</body></html>');
       }
 
       boxes.forEach(function(box){
@@ -11909,6 +11948,10 @@ public function handle_marketing_resubscribe() {
     exit;
   }
 
+  private function mrm_email_preview_blank_value() {
+    return '';
+  }
+
   private function mrm_payout_summary_email_test_samples() {
     $table_style = 'width:100%;border-collapse:collapse;margin-top:14px;';
     $th_style = 'text-align:left;border:1px solid #ddd;padding:8px;';
@@ -11918,29 +11961,29 @@ public function handle_marketing_resubscribe() {
       'payout_summary_instructor' => array(
         'Low Brass Lessons instructor payout summary',
         'Instructor Payout Summary',
-        '<p>Hello Test Instructor,</p><p>Your instructor payout batch has been processed. Here is your payout summary.</p>',
-        '<div><strong>Pay period:</strong> June 1, 2026 through June 14, 2026</div>'
-          . '<div><strong>Batch:</strong> payout_20260614_120000</div>'
+        '<p>Hello ,</p><p>Your instructor payout batch has been processed. Here is your payout summary.</p>',
+        '<div><strong>Pay period:</strong> </div>'
+          . '<div><strong>Batch:</strong> </div>'
           . '<table style="' . esc_attr($table_style) . '">'
           . '<thead><tr>'
           . '<th style="' . esc_attr($th_style) . '">Lesson Type</th>'
           . '<th style="' . esc_attr($th_style) . '">Count</th>'
           . '<th style="' . esc_attr($th_style) . '">Payout</th>'
           . '</tr></thead><tbody>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Online 30-minute lessons</td><td style="' . esc_attr($td_style) . '">3</td><td style="' . esc_attr($td_style) . '">$99.00</td></tr>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Online 60-minute lessons</td><td style="' . esc_attr($td_style) . '">4</td><td style="' . esc_attr($td_style) . '">$264.00</td></tr>'
-          . '<tr><td style="' . esc_attr($td_style) . '">In-person 30-minute lessons</td><td style="' . esc_attr($td_style) . '">2</td><td style="' . esc_attr($td_style) . '">$86.00</td></tr>'
-          . '<tr><td style="' . esc_attr($td_style) . '">In-person 60-minute lessons</td><td style="' . esc_attr($td_style) . '">1</td><td style="' . esc_attr($td_style) . '">$78.00</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Online 30-minute lessons</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Online 60-minute lessons</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">In-person 30-minute lessons</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">In-person 60-minute lessons</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '</tbody></table>'
-          . '<div style="margin-top:14px;font-size:17px;"><strong>Total payout:</strong> $527.00</div>',
+          . '<div style="margin-top:14px;font-size:17px;"><strong>Total payout:</strong> </div>',
         ''
       ),
 
       'payout_summary_presenter' => array(
         'Low Brass Lessons presenter payout summary',
         'Presenter Payout Summary',
-        '<p>Hello Test Presenter,</p><p>Your presenter payout has been processed. Here is your payout summary.</p>',
-        '<div><strong>Batch:</strong> presenter_batch_20260621_120000</div>'
+        '<p>Hello ,</p><p>Your presenter payout has been processed. Here is your payout summary.</p>',
+        '<div><strong>Batch:</strong> </div>'
           . '<table style="' . esc_attr($table_style) . '">'
           . '<thead><tr>'
           . '<th style="' . esc_attr($th_style) . '">Masterclass</th>'
@@ -11948,9 +11991,9 @@ public function handle_marketing_resubscribe() {
           . '<th style="' . esc_attr($th_style) . '">Agreed Pay Per Student</th>'
           . '<th style="' . esc_attr($th_style) . '">Total Payout</th>'
           . '</tr></thead><tbody>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Low Brass Audition Masterclass</td><td style="' . esc_attr($td_style) . '">12</td><td style="' . esc_attr($td_style) . '">$20.00</td><td style="' . esc_attr($td_style) . '">$240.00</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Masterclass</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '</tbody></table>'
-          . '<div style="margin-top:14px;font-size:17px;"><strong>Total presenter payout:</strong> $240.00</div>',
+          . '<div style="margin-top:14px;font-size:17px;"><strong>Total presenter payout:</strong> </div>',
         ''
       ),
 
@@ -11958,9 +12001,9 @@ public function handle_marketing_resubscribe() {
         'Low Brass Lessons composer payout summary',
         'Composer Payout Summary',
         '<p>Your composer payout batch has been processed. Here is your payout summary.</p>',
-        '<div><strong>Pay period:</strong> June 1, 2026 through June 30, 2026</div>'
-          . '<div><strong>Batch:</strong> payout_20260630_120000</div>'
-          . '<div><strong>Subscriptions paid in this window:</strong> 7</div>'
+        '<div><strong>Pay period:</strong> </div>'
+          . '<div><strong>Batch:</strong> </div>'
+          . '<div><strong>Subscriptions paid in this window:</strong> </div>'
           . '<table style="' . esc_attr($table_style) . '">'
           . '<thead><tr>'
           . '<th style="' . esc_attr($th_style) . '">Product</th>'
@@ -11970,11 +12013,11 @@ public function handle_marketing_resubscribe() {
           . '<th style="' . esc_attr($th_style) . '">Promo Reduction</th>'
           . '<th style="' . esc_attr($th_style) . '">Composer Payout</th>'
           . '</tr></thead><tbody>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Etude Pack Vol. 1</td><td style="' . esc_attr($td_style) . '">Piece / product sale</td><td style="' . esc_attr($td_style) . '">5</td><td style="' . esc_attr($td_style) . '">SUMMER10</td><td style="' . esc_attr($td_style) . '">$12.50</td><td style="' . esc_attr($td_style) . '">$87.50</td></tr>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Sheet music subscription</td><td style="' . esc_attr($td_style) . '">Subscription payment</td><td style="' . esc_attr($td_style) . '">7</td><td style="' . esc_attr($td_style) . '">—</td><td style="' . esc_attr($td_style) . '">$0.00</td><td style="' . esc_attr($td_style) . '">$70.00</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Product</td><td style="' . esc_attr($td_style) . '">Piece / product sale</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Sheet music subscription</td><td style="' . esc_attr($td_style) . '">Subscription payment</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '</tbody></table>'
-          . '<div style="margin-top:14px;"><strong>Total promo reduction affecting composer content:</strong> -$12.50</div>'
-          . '<div style="margin-top:8px;font-size:17px;"><strong>Total composer payout:</strong> $157.50</div>',
+          . '<div style="margin-top:14px;"><strong>Total promo reduction affecting composer content:</strong> </div>'
+          . '<div style="margin-top:8px;font-size:17px;"><strong>Total composer payout:</strong> </div>',
         ''
       ),
 
@@ -11982,8 +12025,8 @@ public function handle_marketing_resubscribe() {
         'Low Brass Lessons owner payout batch summary',
         'Owner Payout Batch Summary',
         '<p>A payout batch has been processed. Here is the owner/company summary.</p>',
-        '<div><strong>Batch:</strong> payout_20260630_120000</div>'
-          . '<div><strong>Pay period:</strong> June 1, 2026 through June 30, 2026</div>'
+        '<div><strong>Batch:</strong> </div>'
+          . '<div><strong>Pay period:</strong> </div>'
           . '<table style="' . esc_attr($table_style) . '">'
           . '<thead><tr>'
           . '<th style="' . esc_attr($th_style) . '">Payee Type</th>'
@@ -11992,15 +12035,15 @@ public function handle_marketing_resubscribe() {
           . '<th style="' . esc_attr($th_style) . '">Company Retained</th>'
           . '<th style="' . esc_attr($th_style) . '">Promo Reduction</th>'
           . '</tr></thead><tbody>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Instructor</td><td style="' . esc_attr($td_style) . '">All instructors in batch</td><td style="' . esc_attr($td_style) . '">$2,415.00</td><td style="' . esc_attr($td_style) . '">$1,030.00</td><td style="' . esc_attr($td_style) . '">-$0.00</td></tr>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Presenter</td><td style="' . esc_attr($td_style) . '">All presenters in batch</td><td style="' . esc_attr($td_style) . '">$480.00</td><td style="' . esc_attr($td_style) . '">$320.00</td><td style="' . esc_attr($td_style) . '">-$0.00</td></tr>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Composer</td><td style="' . esc_attr($td_style) . '">Composer</td><td style="' . esc_attr($td_style) . '">$157.50</td><td style="' . esc_attr($td_style) . '">$92.50</td><td style="' . esc_attr($td_style) . '">-$12.50</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Instructor</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Presenter</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Composer</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '</tbody></table>'
-          . '<div style="margin-top:14px;"><strong>Instructor payouts:</strong> $2,415.00</div>'
-          . '<div><strong>Presenter payouts:</strong> $480.00</div>'
-          . '<div><strong>Composer payouts:</strong> $157.50</div>'
-          . '<div><strong>Promo-code reductions:</strong> -$12.50</div>'
-          . '<div style="margin-top:8px;font-size:17px;"><strong>Company retained / netted:</strong> $1,442.50</div>',
+          . '<div style="margin-top:14px;"><strong>Instructor payouts:</strong> </div>'
+          . '<div><strong>Presenter payouts:</strong> </div>'
+          . '<div><strong>Composer payouts:</strong> </div>'
+          . '<div><strong>Promo-code reductions:</strong> </div>'
+          . '<div style="margin-top:8px;font-size:17px;"><strong>Company retained / netted:</strong> </div>',
         ''
       ),
     );
@@ -12009,39 +12052,112 @@ public function handle_marketing_resubscribe() {
   private function mrm_build_single_email_preview($slug) {
     $slug = sanitize_key((string)$slug);
     $contact_url = $this->mrm_get_contact_url();
-    $field_note = function($label, $source) {
-      return '<span style="display:inline-block;background:#fff3cd;border:1px solid #e0b84f;border-radius:999px;padding:2px 8px;margin:2px;font-size:11px;color:#4d3b00;">' . esc_html($label) . ': from ' . esc_html($source) . '</span>';
+    $blank = $this->mrm_email_preview_blank_value();
+
+    $full_width_blank = function() {
+      return '';
     };
-    $samples = array(
+
+    $payment_samples = array(
       'profile_card_request_invite' => array(
-        'Low Brass Lessons profile card request',
-        'Complete Your Profile Card Request',
-        '<p>Low Brass Lessons has invited you to complete a private onboarding form for a profile card or masterclass event proposal.</p>',
-        '<div><strong>Request type:</strong> Instructor Profile Card / Presenter Profile Card / Masterclass Event Proposal</div><div><strong>Note from Low Brass Lessons:</strong> This area previews the optional note to recipient that you enter before sending the request.</div><div><strong>Private link:</strong> Complete Your Form button</div><div><strong>Expiration:</strong> 14 days</div>',
+        'Low Brass Lessons instructor profile card',
+        'Instructor Profile Card',
+        '<p>Hello,</p><p>Low Brass Lessons has invited you to complete a private onboarding form for a <strong>Instructor Profile Card</strong>.</p>',
+        '<div><strong>Request type:</strong> Instructor Profile Card</div>'
+          . '<div><strong>Private link expiration:</strong> </div>'
+          . '<div style="margin-top:12px;padding-top:12px;border-top:1px solid #d9cfbe;"><strong>Note from Low Brass Lessons:</strong><br></div>',
         'Complete Your Form'
       ),
+
       'profile_card_changes_requested' => array(
-        'Low Brass Lessons requested changes',
         'Profile Card Changes Requested',
-        '<p>Low Brass Lessons has reviewed a submitted profile card or event proposal and requested changes.</p>',
-        '<div><strong>Change request note:</strong> This area previews the admin note explaining what should be revised.</div><div><strong>Private link:</strong> The recipient uses their private request link to update and resubmit.</div>',
-        'Update Your Request'
+        'Profile Card Changes Requested',
+        '<p>Hello,</p><p>Low Brass Lessons has reviewed your submitted profile card or event request and requested changes before approval.</p>',
+        '<div><strong>Requested changes:</strong></div>'
+          . '<div></div>'
+          . '<div style="margin-top:12px;">Please use your original private link to update and resubmit your request.</div>',
+        ''
       ),
-      'marketing_custom_email' => array('Marketing Email Test', 'Marketing Email Test', '<p>This is a preview of the custom marketing email layout.</p>', '<div><strong>Audience:</strong> ' . $field_note('Audience', 'Marketing Email Lists selection') . '</div><div><strong>Message:</strong> ' . $field_note('Message body', 'Marketing email text box') . '</div>', 'Contact Low Brass Lessons'),
-      'payment_method_attention_student' => array('Payment method confirmation needed', 'Payment method confirmation needed', '<p>This is a preview of the student payment-method attention email.</p>', '<div><strong>Student:</strong> ' . $field_note('Student name', 'lesson record') . '</div><div><strong>Lesson:</strong> Test Low Brass Lesson</div><div><strong>Scheduled time:</strong> January 15, 2027 at 4:00 PM</div>', 'Contact Support'),
-      'payment_method_attention_instructor' => array('Instructor action required', 'Instructor action required', '<p>This is a preview of the instructor payment-method attention email.</p>', '<div><strong>Student:</strong> ' . $field_note('Student name', 'lesson record') . '</div><div><strong>Instructor:</strong> ' . $field_note('Instructor name', 'instructor profile') . '</div>', 'Contact Support'),
-      'payment_method_attention_admin' => array('Admin awareness', 'Admin awareness', '<p>This is a preview of the admin payment-method attention email.</p>', '<div><strong>Lesson ID:</strong> ' . $field_note('Lesson ID', 'lesson database row') . '</div><div><strong>Issue:</strong> Payment method attention required.</div>', 'Contact Support'),
-      'purchase_receipt' => array('Purchase Confirmation', 'Purchase Confirmation', '<p>Thank you for your purchase.</p>', '<div><strong>Item:</strong> ' . $field_note('Purchased item', 'checkout selection') . '</div><div><strong>Amount:</strong> ' . $field_note('Total paid', 'Stripe/payment record') . '</div><div><strong>Status:</strong> Paid</div>', 'Contact Support'),
+
+      'marketing_custom_email' => array('', '', '', '', ''),
+
+      'payment_method_attention_student' => array(
+        'Payment method confirmation needed',
+        'Payment method confirmation needed',
+        '<p>Your upcoming AutoPay lesson requires payment method confirmation before the lesson can be processed.</p>',
+        '<div><strong>Student:</strong> </div>'
+          . '<div><strong>Lesson:</strong> </div>'
+          . '<div><strong>Scheduled time:</strong> </div>'
+          . '<div style="margin-top:12px;">Please confirm or update your saved payment method before the lesson.</div>',
+        'Contact Support'
+      ),
+
+      'payment_method_attention_instructor' => array(
+        'Instructor action required',
+        'Instructor action required',
+        '<p>An upcoming AutoPay lesson should be withheld until the student payment method is confirmed.</p>',
+        '<div><strong>Student:</strong> </div>'
+          . '<div><strong>Instructor:</strong> </div>'
+          . '<div><strong>Lesson:</strong> </div>'
+          . '<div><strong>Scheduled time:</strong> </div>'
+          . '<div style="margin-top:12px;">Please do not teach this lesson until payment confirmation is resolved.</div>',
+        'Contact Support'
+      ),
+
+      'payment_method_attention_admin' => array(
+        'Admin awareness',
+        'Admin awareness',
+        '<p>The system detected an upcoming AutoPay lesson with a payment method issue requiring administrative awareness.</p>',
+        '<div><strong>Lesson ID:</strong> </div>'
+          . '<div><strong>Student:</strong> </div>'
+          . '<div><strong>Instructor:</strong> </div>'
+          . '<div><strong>Scheduled time:</strong> </div>'
+          . '<div><strong>Issue:</strong> Payment method attention required.</div>',
+        'Contact Support'
+      ),
+
+      'purchase_receipt' => array(
+        'Purchase Confirmation - ',
+        'Purchase Confirmation',
+        '<p>We’ve received your payment successfully.</p>',
+        '<div><strong>Item:</strong> </div>'
+          . '<div><strong>Order #:</strong> </div>'
+          . '<div><strong>Payment ID:</strong> </div>'
+          . '<div><strong>Base:</strong> </div>'
+          . '<div><strong>Promo code:</strong> </div>'
+          . '<div><strong>Sheet music add-on:</strong> </div>'
+          . '<div><strong>Tax:</strong> </div>'
+          . '<div><strong>Total paid:</strong> </div>'
+          . '<div style="margin-top:12px;"><strong>How To Access Your Purchase</strong></div>'
+          . '<ol style="margin:8px 0 0 18px;padding:0;">'
+          . '<li>Return to the piece page on the website.</li>'
+          . '<li>Click the access button for your purchased category.</li>'
+          . '<li>Enter your purchase email address.</li>'
+          . '<li>Request your one-time access code and enter it to open the content.</li>'
+          . '</ol>'
+          . '<div style="margin-top:12px;"><strong>Need assistance or would like to request a refund?</strong></div>',
+        'Contact Support'
+      ),
+
+      'sheet_music_subscription_enrollment' => array('Subscription Confirmation - Sheet Music Access','Subscription Confirmation - Sheet Music Access','<p>You have successfully enrolled in the sheet music subscription service.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Status:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your subscription has been created successfully in our billing system.</div>' . '<div style="margin-top:12px;">You will be billed again on or about <strong></strong>, and then monthly thereafter while the subscription remains active.</div>','Contact Support'),
+      'sheet_music_subscription_renewal' => array('Subscription Renewal - Sheet Music Access','Subscription Renewal - Sheet Music Access','<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount Charged:</strong> </div>' . '<div><strong>Status:</strong> Active</div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your sheet music subscription remains active.</div>' . '<div><strong>Invoice ID:</strong> </div>' . '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong></strong>.</div>','Contact Support'),
+      'sheet_music_subscription_cancelled' => array('Subscription Update - Sheet Music Access Cancelled','Subscription Cancelled','<p>Your sheet music subscription has been cancelled.</p>','<div><strong>Subscription:</strong> Monthly sheet music access</div>' . '<div><strong>Status:</strong> Cancelled</div>' . '<div><strong>Cancellation date:</strong> </div>' . '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future.</div>','Contact Support'),
+      'lesson_cancellation_refund' => array('Lesson update — Cancellation and refund issued','Lesson cancelled and refund issued','<p>Your lesson has been cancelled and a refund has been issued.</p>','<div><strong>Cancelled lesson:</strong> </div>' . '<div><strong>Refund amount:</strong> </div>' . '<div style="margin-top:12px;">You can expect the refunded amount to appear back in your account in approximately 3 to 5 business days, depending on your bank and card issuer.</div>','Contact Support'),
     );
 
-    $samples = array_merge($samples, $this->mrm_payout_summary_email_test_samples());
+    $payment_samples = array_merge($payment_samples, $this->mrm_payout_summary_email_test_samples());
 
-    if (isset($samples[$slug])) {
-      list($subject, $title, $intro, $details, $button) = $samples[$slug];
-      return array('subject' => $subject, 'html' => $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, $button));
+    if (isset($payment_samples[$slug])) {
+      list($subject, $title, $intro, $details, $button) = $payment_samples[$slug];
+
+      return array(
+        'subject' => $subject,
+        'html' => $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, $button),
+      );
     }
 
     $preview = apply_filters('mrm_cross_plugin_email_preview', array(), $slug);
+
     if (is_array($preview) && !empty($preview['html'])) {
       return array(
         'subject' => sanitize_text_field((string)($preview['subject'] ?? $slug)),
@@ -12050,8 +12166,8 @@ public function handle_marketing_resubscribe() {
     }
 
     return array(
-      'subject' => 'Preview unavailable',
-      'html' => '<div style="padding:18px;border:1px solid #ccd0d4;background:#fff;"><p>No preview builder is currently available for this email type.</p></div>',
+      'subject' => '',
+      'html' => $this->mrm_email_wrap_html('', '', '<div>No preview builder is currently available for this email type.</div>', '', ''),
     );
   }
 
@@ -12108,13 +12224,13 @@ public function handle_marketing_resubscribe() {
     $headers = array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>');
     $contact_url = $this->mrm_get_contact_url();
     $samples = array(
-      'profile_card_request_invite' => array('Complete Your Profile Card Request', '<p>Low Brass Lessons has invited you to complete a private onboarding form for a profile card or masterclass event proposal.</p>', '<div><strong>Request type:</strong> Instructor Profile Card / Presenter Profile Card / Masterclass Event Proposal</div><div><strong>Note from Low Brass Lessons:</strong> This area previews the optional note to recipient that you enter before sending the request.</div><div><strong>Private link:</strong> Complete Your Form button</div><div><strong>Expiration:</strong> 14 days</div>', 'Complete Your Form'),
-      'profile_card_changes_requested' => array('Profile Card Changes Requested', '<p>Low Brass Lessons has reviewed a submitted profile card or event proposal and requested changes.</p>', '<div><strong>Change request note:</strong> This area previews the admin note explaining what should be revised.</div><div><strong>Private link:</strong> The recipient uses their private request link to update and resubmit.</div>', 'Update Your Request'),
-      'marketing_custom_email' => array('Marketing Email Test', '<p>This is a test of the custom marketing email layout.</p>', '<div><strong>Audience:</strong> Test Marketing List</div><div><strong>Purpose:</strong> Visual review of the marketing email template.</div>', 'Contact Low Brass Lessons'),
-      'payment_method_attention_student' => array('Payment method confirmation needed', '<p>This is a test of the student payment-method attention email.</p>', '<div><strong>Lesson:</strong> Test Low Brass Lesson</div><div><strong>Scheduled time:</strong> January 15, 2027 at 4:00 PM</div><div><strong>Action needed:</strong> Please confirm or update your saved payment method before the lesson.</div>', 'Contact Support'),
-      'payment_method_attention_instructor' => array('Instructor action required', '<p>This is a test of the instructor payment-method attention email.</p>', '<div><strong>Lesson:</strong> Test Low Brass Lesson</div><div><strong>Student:</strong> Test Student</div><div><strong>Instruction:</strong> Please withhold the lesson until the payment method has been updated and confirmed.</div>', 'Contact Support'),
-      'payment_method_attention_admin' => array('Admin awareness', '<p>This is a test of the admin payment-method attention email.</p>', '<div><strong>Lesson ID:</strong> 12345</div><div><strong>Issue:</strong> Upcoming AutoPay lesson requires payment-method attention.</div>', 'Contact Support'),
-      'purchase_receipt' => array('Purchase Confirmation - Test Product', '<p>Thank you for your purchase. This is a test purchase confirmation email.</p>', '<div><strong>Item:</strong> Test Product</div><div><strong>Amount:</strong> $25.00</div><div><strong>Status:</strong> Paid</div>', 'Contact Support'),
+      'profile_card_request_invite' => array('Instructor Profile Card', '<p>Hello,</p><p>Low Brass Lessons has invited you to complete a private onboarding form for a <strong>Instructor Profile Card</strong>.</p>', '<div><strong>Request type:</strong> Instructor Profile Card</div><div><strong>Private link expiration:</strong> </div><div style="margin-top:12px;padding-top:12px;border-top:1px solid #d9cfbe;"><strong>Note from Low Brass Lessons:</strong><br></div>', 'Complete Your Form'),
+      'profile_card_changes_requested' => array('Profile Card Changes Requested', '<p>Hello,</p><p>Low Brass Lessons has reviewed your submitted profile card or event request and requested changes before approval.</p>', '<div><strong>Requested changes:</strong></div><div></div><div style="margin-top:12px;">Please use your original private link to update and resubmit your request.</div>', ''),
+      'marketing_custom_email' => array('', '', '', ''),
+      'payment_method_attention_student' => array('Payment method confirmation needed', '<p>Your upcoming AutoPay lesson requires payment method confirmation before the lesson can be processed.</p>', '<div><strong>Student:</strong> </div><div><strong>Lesson:</strong> </div><div><strong>Scheduled time:</strong> </div><div style="margin-top:12px;">Please confirm or update your saved payment method before the lesson.</div>', 'Contact Support'),
+      'payment_method_attention_instructor' => array('Instructor action required', '<p>An upcoming AutoPay lesson should be withheld until the student payment method is confirmed.</p>', '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Lesson:</strong> </div><div><strong>Scheduled time:</strong> </div><div style="margin-top:12px;">Please do not teach this lesson until payment confirmation is resolved.</div>', 'Contact Support'),
+      'payment_method_attention_admin' => array('Admin awareness', '<p>The system detected an upcoming AutoPay lesson with a payment method issue requiring administrative awareness.</p>', '<div><strong>Lesson ID:</strong> </div><div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Scheduled time:</strong> </div><div><strong>Issue:</strong> Payment method attention required.</div>', 'Contact Support'),
+      'purchase_receipt' => array('Purchase Confirmation - ', '<p>We’ve received your payment successfully.</p>', '<div><strong>Item:</strong> </div><div><strong>Order #:</strong> </div><div><strong>Payment ID:</strong> </div><div><strong>Base:</strong> </div><div><strong>Promo code:</strong> </div><div><strong>Sheet music add-on:</strong> </div><div><strong>Tax:</strong> </div><div><strong>Total paid:</strong> </div><div style="margin-top:12px;"><strong>How To Access Your Purchase</strong></div><ol style="margin:8px 0 0 18px;padding:0;"><li>Return to the piece page on the website.</li><li>Click the access button for your purchased category.</li><li>Enter your purchase email address.</li><li>Request your one-time access code and enter it to open the content.</li></ol><div style="margin-top:12px;"><strong>Need assistance or would like to request a refund?</strong></div>', 'Contact Support'),
     );
 
     if (isset($samples[$slug])) {

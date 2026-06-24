@@ -3981,18 +3981,15 @@ function initRichTextToolbars(scope) {
             return $preview;
         }
 
-        $field_note = '<span style="display:inline-block;background:#fff3cd;border:1px solid #e0b84f;border-radius:999px;padding:2px 8px;margin:2px;font-size:11px;color:#4d3b00;">Custom email body: from Product Access email body text box</span>';
         $options = $this->get_options();
         $subject = isset( $options['email_subject'] ) && trim( (string) $options['email_subject'] ) !== ''
             ? (string) $options['email_subject']
             : __( 'Sheet Music Access Code', 'mrm-product-access' );
-        $intro_html = '<p>This is a preview of the protected product access code email.</p>';
-        $intro_html .= '<p>Your one-time passcode for accessing your purchased piece is below.</p>';
-        $intro_html .= '<p>' . $field_note . '</p>';
+        $intro_html = '<p>Your one-time passcode for accessing your purchased piece is below.</p>';
 
         return array(
             'subject' => $subject,
-            'html'    => $this->mrm_pa_wrap_otp_email_html( $subject, $intro_html, '123456' ),
+            'html'    => $this->mrm_pa_wrap_otp_email_html( $subject, $intro_html, '' ),
         );
     }
 
