@@ -1323,6 +1323,9 @@ private function get_settings() {
       'payout_anchor_date' => '',
       'composer_connected_account_id' => '',
       'test_composer_connected_account_id' => '',
+      'background_check_docusign_url' => '',
+      'owner_payout_summary_email' => get_option('admin_email', ''),
+      'composer_payout_summary_email' => '',
     ));
   }
 
@@ -6586,6 +6589,113 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
   }
 
+  private function mrm_summary_money($cents) {
+    return '$' . number_format(((int)$cents) / 100, 2);
+  }
+
+  private function mrm_payout_summary_owner_email() {
+    $settings = $this->get_settings();
+    $email = sanitize_email((string)($settings['owner_payout_summary_email'] ?? ''));
+    if (!$email || !is_email($email)) $email = sanitize_email((string)get_option('admin_email', ''));
+    return $email && is_email($email) ? $email : '';
+  }
+
+  private function mrm_payout_summary_composer_email() {
+    $settings = $this->get_settings();
+    $email = sanitize_email((string)($settings['composer_payout_summary_email'] ?? ''));
+    return $email && is_email($email) ? $email : '';
+  }
+
+  private function mrm_payout_period_label_from_rows($rows, $period = null) {
+    if (is_array($period) && !empty($period['start_mysql']) && !empty($period['end_mysql'])) return $period['start_mysql'] . ' through ' . $period['end_mysql'];
+    $min = ''; $max = '';
+    foreach ((array)$rows as $row) { $created = (string)($row['created_at'] ?? ''); if ($created === '') continue; if ($min === '' || strcmp($created, $min) < 0) $min = $created; if ($max === '' || strcmp($created, $max) > 0) $max = $created; }
+    return ($min !== '' && $max !== '') ? ($min . ' through ' . $max) : current_time('mysql');
+  }
+
+  private function mrm_send_wrapped_summary_email($to, $subject, $title, $intro_html, $details_html) {
+    $to = sanitize_email((string)$to);
+    if (!$to || !is_email($to)) return false;
+    $body = $this->mrm_email_wrap_html($title, $intro_html, $details_html, '', '');
+    return wp_mail($to, $subject, $body, array('Content-Type: text/html; charset=UTF-8'));
+  }
+
+  private function mrm_sum_platform_retained_for_order_ids($order_ids) {
+    global $wpdb;
+    $order_ids = array_values(array_filter(array_unique(array_map('absint', (array)$order_ids))));
+    if (empty($order_ids)) return 0;
+    $table = $this->table_payout_ledger();
+    $placeholders = implode(',', array_fill(0, count($order_ids), '%d'));
+    return (int)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(net_cents),0) FROM {$table} WHERE payee_type = 'platform' AND order_id IN ({$placeholders})", $order_ids));
+  }
+
+  private function mrm_send_instructor_payout_summary_for_rows($rows, $payout, $period, $batch_key) {
+    global $wpdb;
+    $lesson_ids = array(); $order_ids = array();
+    foreach ((array)$rows as $row) { if (preg_match('/^lesson:(\d+)$/', (string)($row['payee_ref'] ?? ''), $m)) $lesson_ids[] = absint($m[1]); if (!empty($row['order_id'])) $order_ids[] = (int)$row['order_id']; }
+    $lesson_ids = array_values(array_filter(array_unique($lesson_ids)));
+    if (empty($lesson_ids)) return array();
+    $lessons = $this->table_lessons(); $instructors = $wpdb->prefix . 'mrm_instructors'; $ph = implode(',', array_fill(0, count($lesson_ids), '%d'));
+    $lesson_rows = $wpdb->get_results($wpdb->prepare("SELECT l.id, l.lesson_length, l.is_online, i.name AS instructor_name, i.email AS instructor_email FROM {$lessons} l LEFT JOIN {$instructors} i ON i.id = l.instructor_id WHERE l.id IN ({$ph})", $lesson_ids), ARRAY_A);
+    $lesson_map = array(); foreach ((array)$lesson_rows as $lr) $lesson_map[(int)$lr['id']] = $lr;
+    $summary = array('30_online'=>array('label'=>'Online 30-minute lessons','count'=>0,'cents'=>0),'60_online'=>array('label'=>'Online 60-minute lessons','count'=>0,'cents'=>0),'30_inperson'=>array('label'=>'In-person 30-minute lessons','count'=>0,'cents'=>0),'60_inperson'=>array('label'=>'In-person 60-minute lessons','count'=>0,'cents'=>0));
+    $total = 0; $to = ''; $name = 'Instructor';
+    foreach ((array)$rows as $row) { if (!preg_match('/^lesson:(\d+)$/', (string)($row['payee_ref'] ?? ''), $m)) continue; $lesson = $lesson_map[absint($m[1])] ?? null; if (!$lesson) continue; $key = (int)($lesson['lesson_length'] ?? 0) . '_' . (!empty($lesson['is_online']) ? 'online' : 'inperson'); if (!isset($summary[$key])) continue; $amount = (int)($row['net_cents'] ?? 0); $summary[$key]['count']++; $summary[$key]['cents'] += $amount; $total += $amount; if ($to === '' && !empty($lesson['instructor_email'])) $to = sanitize_email((string)$lesson['instructor_email']); if (!empty($lesson['instructor_name'])) $name = (string)$lesson['instructor_name']; }
+    $details = '<div><strong>Pay period:</strong> ' . esc_html($this->mrm_payout_period_label_from_rows($rows, $period)) . '</div><div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div><div><strong>Stripe payout:</strong> ' . esc_html((string)($payout['id'] ?? '')) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Lesson Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Count</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payout</th></tr></thead><tbody>';
+    foreach ($summary as $row) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($row['label']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$row['count']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($row['cents'])) . '</td></tr>';
+    $details .= '</tbody></table><div style="margin-top:14px;font-size:17px;"><strong>Total payout:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
+    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons instructor payout summary', 'Instructor Payout Summary', '<p>Hello ' . esc_html($name) . ',</p><p>Your instructor payout batch has been processed. Here is your payout summary.</p>', $details);
+    return array('type'=>'instructor','name'=>$name,'email'=>$to,'paid_cents'=>$total,'platform_cents'=>$this->mrm_sum_platform_retained_for_order_ids($order_ids),'promo_loss_cents'=>0);
+  }
+
+  private function mrm_send_composer_payout_summary_for_rows($rows, $payout, $period, $batch_key) {
+    global $wpdb;
+    $to = $this->mrm_payout_summary_composer_email(); $orders_table = $this->table_orders(); $products = $this->all_products(); $order_ids = array();
+    foreach ((array)$rows as $row) if (!empty($row['order_id'])) $order_ids[] = (int)$row['order_id'];
+    $order_ids = array_values(array_filter(array_unique($order_ids))); $orders_by_id = array();
+    if ($order_ids) { $ph = implode(',', array_fill(0, count($order_ids), '%d')); $ors = $wpdb->get_results($wpdb->prepare("SELECT id, sku, metadata_json FROM {$orders_table} WHERE id IN ({$ph})", $order_ids), ARRAY_A); foreach ((array)$ors as $or) $orders_by_id[(int)$or['id']] = $or; }
+    $items = array(); $subscription_count = 0; $total = 0; $promo_loss = 0;
+    foreach ((array)$rows as $row) { $amount = (int)($row['net_cents'] ?? 0); $total += $amount; $order_id = (int)($row['order_id'] ?? 0); $ref = (string)($row['payee_ref'] ?? '');
+      if ($order_id > 0 && isset($orders_by_id[$order_id])) { $order = $orders_by_id[$order_id]; $sku = (string)($order['sku'] ?? ''); $label = $products[$sku]['label'] ?? $sku; $meta = json_decode((string)($order['metadata_json'] ?? ''), true); if (!is_array($meta)) $meta = array(); $promo_code = (string)($meta['mrm_promo_code'] ?? ''); $discount = max(0, (int)($meta['mrm_promo_discount_cents'] ?? 0)); $promo_loss += $discount; $key = 'piece|' . $sku . '|' . $promo_code; if (!isset($items[$key])) $items[$key] = array('label'=>$label,'kind'=>'Piece / product sale','count'=>0,'payout_cents'=>0,'promo_code'=>$promo_code,'promo_loss_cents'=>0); $items[$key]['count']++; $items[$key]['payout_cents'] += $amount; $items[$key]['promo_loss_cents'] += $discount;
+      } elseif (strpos($ref, 'stripe_subscription_invoice:') === 0) { $subscription_count++; $key = 'subscription|sheet_music_subscription'; if (!isset($items[$key])) $items[$key] = array('label'=>'Sheet music subscription','kind'=>'Subscription payment','count'=>0,'payout_cents'=>0,'promo_code'=>'','promo_loss_cents'=>0); $items[$key]['count']++; $items[$key]['payout_cents'] += $amount; }}
+    $details = '<div><strong>Pay period:</strong> ' . esc_html($this->mrm_payout_period_label_from_rows($rows, $period)) . '</div><div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div><div><strong>Stripe payout:</strong> ' . esc_html((string)($payout['id'] ?? '')) . '</div><div><strong>Subscriptions paid in this window:</strong> ' . esc_html((string)$subscription_count) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Product</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Quantity</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo Reduction</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Composer Payout</th></tr></thead><tbody>';
+    foreach ($items as $item) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['label']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['kind']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$item['count']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['promo_code'] !== '' ? $item['promo_code'] : '—') . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($item['promo_loss_cents'])) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($item['payout_cents'])) . '</td></tr>';
+    $details .= '</tbody></table><div style="margin-top:14px;"><strong>Total promo reduction affecting composer content:</strong> -' . esc_html($this->mrm_summary_money($promo_loss)) . '</div><div style="margin-top:8px;font-size:17px;"><strong>Total composer payout:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
+    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons composer payout summary', 'Composer Payout Summary', '<p>Your composer payout batch has been processed. Here is your payout summary.</p>', $details);
+    return array('type'=>'composer','name'=>'Composer','email'=>$to,'paid_cents'=>$total,'platform_cents'=>$this->mrm_sum_platform_retained_for_order_ids($order_ids),'promo_loss_cents'=>$promo_loss);
+  }
+
+  private function mrm_send_standard_payout_summary_for_rows($rows, $payout, $period, $batch_key) {
+    if (empty($rows)) return array(); $payee_type = sanitize_key((string)($rows[0]['payee_type'] ?? ''));
+    if ($payee_type === 'instructor') return $this->mrm_send_instructor_payout_summary_for_rows($rows, $payout, $period, $batch_key);
+    if ($payee_type === 'composer') return $this->mrm_send_composer_payout_summary_for_rows($rows, $payout, $period, $batch_key);
+    return array();
+  }
+
+  private function mrm_send_owner_payout_batch_summary($batch_key, $items, $period_label = '') {
+    $to = $this->mrm_payout_summary_owner_email(); if ($to === '' || empty($items)) return false;
+    $totals = array('instructor'=>0,'composer'=>0,'presenter'=>0,'platform'=>0,'promo_loss'=>0);
+    $details = '<div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div>' . ($period_label !== '' ? '<div><strong>Pay period:</strong> ' . esc_html($period_label) . '</div>' : '') . '<table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payee Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payee</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Paid Out</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Company Retained</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo Reduction</th></tr></thead><tbody>';
+    foreach ((array)$items as $item) { if (empty($item) || !is_array($item)) continue; $type = sanitize_key((string)($item['type'] ?? '')); $paid = (int)($item['paid_cents'] ?? 0); $platform = (int)($item['platform_cents'] ?? 0); $promo_loss = (int)($item['promo_loss_cents'] ?? 0); if (isset($totals[$type])) $totals[$type] += $paid; $totals['platform'] += $platform; $totals['promo_loss'] += $promo_loss; $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html(ucfirst($type)) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)($item['name'] ?? '—')) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($paid)) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($platform)) . '</td><td style="border:1px solid #ddd;padding:8px;">-' . esc_html($this->mrm_summary_money($promo_loss)) . '</td></tr>'; }
+    $details .= '</tbody></table><div style="margin-top:14px;"><strong>Instructor payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['instructor'])) . '</div><div><strong>Presenter payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['presenter'])) . '</div><div><strong>Composer payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['composer'])) . '</div><div><strong>Promo-code reductions:</strong> -' . esc_html($this->mrm_summary_money($totals['promo_loss'])) . '</div><div style="margin-top:8px;font-size:17px;"><strong>Company retained / netted:</strong> ' . esc_html($this->mrm_summary_money($totals['platform'])) . '</div>';
+    return $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons owner payout batch summary', 'Owner Payout Batch Summary', '<p>A payout batch has been processed. Here is the owner/company summary.</p>', $details);
+  }
+
+  private function mrm_send_presenter_payout_summaries_for_rows($rows, $batch_key) {
+    if (empty($rows)) return array(); $groups = array();
+    foreach ((array)$rows as $row) { $presenter_id = (int)($row['presenter_id'] ?? 0); if ($presenter_id <= 0) continue; $groups[$presenter_id][] = $row; }
+    $owner_items = array();
+    foreach ($groups as $presenter_rows) { $first = $presenter_rows[0]; $to = sanitize_email((string)($first['presenter_email'] ?? '')); $name = (string)($first['presenter_name'] ?? 'Presenter'); $event_groups = array(); $total = 0; $platform_total = 0;
+      foreach ($presenter_rows as $row) { $event_id = (int)($row['event_id'] ?? 0); $per_student = (int)($row['event_payout_per_student_cents'] ?? 0); if ($per_student <= 0) $per_student = (int)($row['presenter_share_cents'] ?? 0); if (!isset($event_groups[$event_id])) $event_groups[$event_id] = array('title'=>(string)($row['event_title'] ?? ('Event #' . $event_id)),'students'=>0,'per_student_cents'=>$per_student,'payout_cents'=>0); $event_groups[$event_id]['students']++; $event_groups[$event_id]['payout_cents'] += (int)($row['presenter_share_cents'] ?? 0); $total += (int)($row['presenter_share_cents'] ?? 0); if (isset($row['platform_share_cents'])) $platform_total += max(0, (int)$row['platform_share_cents']); }
+      $details = '<div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Masterclass</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Students</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Agreed Pay Per Student</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Total Payout</th></tr></thead><tbody>';
+      foreach ($event_groups as $event) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($event['title']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$event['students']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($event['per_student_cents'])) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($event['payout_cents'])) . '</td></tr>';
+      $details .= '</tbody></table><div style="margin-top:14px;font-size:17px;"><strong>Total presenter payout:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
+      $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons presenter payout summary', 'Presenter Payout Summary', '<p>Hello ' . esc_html($name) . ',</p><p>Your presenter payout has been processed. Here is your payout summary.</p>', $details);
+      $owner_items[] = array('type'=>'presenter','name'=>$name,'email'=>$to,'paid_cents'=>$total,'platform_cents'=>$platform_total,'promo_loss_cents'=>0);
+    }
+    return $owner_items;
+  }
+
   private function stripe_create_transfer($amount_cents, $currency, $destination_account_id, $transfer_group = '', $metadata = array(), $source_transaction = '') {
     $params = array(
       'amount' => (int)$amount_cents,
@@ -8332,6 +8442,7 @@ private function charge_and_unlock_autopay($data) {
     // should never use source_transaction / pending incoming charge funds.
 
     $batch_key = 'batch_' . gmdate('Ymd_His');
+    $owner_summary_items = array();
 
     $groups = array();
     foreach ($rows as $row) {
@@ -8550,6 +8661,25 @@ private function charge_and_unlock_autopay($data) {
       }
 
       $summary['payouts_created']++;
+
+      $owner_item = $this->mrm_send_standard_payout_summary_for_rows(
+        $payout_candidate_rows,
+        $payout,
+        $period,
+        $batch_key
+      );
+
+      if (!empty($owner_item)) {
+        $owner_summary_items[] = $owner_item;
+      }
+    }
+
+    if (!empty($owner_summary_items)) {
+      $this->mrm_send_owner_payout_batch_summary(
+        $batch_key,
+        $owner_summary_items,
+        is_array($period) ? $this->mrm_payout_period_label_from_rows($rows, $period) : $this->mrm_payout_period_label_from_rows($rows, null)
+      );
     }
 
     return $summary;
@@ -12801,6 +12931,8 @@ public function render_access_lists_page() {
       'fingerprint_card_file' => sanitize_text_field($payload['fingerprint_card_file'] ?? ''),
       'fingerprint_card_name' => sanitize_text_field($payload['fingerprint_card_name'] ?? ''),
       'fingerprint_card_uploaded_at' => sanitize_text_field($payload['fingerprint_card_uploaded_at'] ?? ''),
+      'fingerprint_clearance_status' => sanitize_key($payload['fingerprint_clearance_status'] ?? ''),
+      'background_check_docusign_ack' => !empty($payload['background_check_docusign_ack']) ? 1 : 0,
       'docusign_completed' => !empty($payload['docusign_completed']) ? 1 : 0,
       'stripe_onboarding_completed' => !empty($payload['stripe_onboarding_completed']) ? 1 : 0,
       'profile_social_links_json' => (string)($payload['profile_social_links_json'] ?? ''),
@@ -12853,6 +12985,10 @@ public function render_access_lists_page() {
         ARRAY_A
       );
     }
+
+    $settings = $this->get_settings();
+    $background_check_docusign_url = esc_url((string)($settings['background_check_docusign_url'] ?? ''));
+    $owner_payout_summary_email = esc_attr((string)($settings['owner_payout_summary_email'] ?? get_option('admin_email', '')));
     ?>
     <div class="wrap"><h1>Profile Card Creation</h1>
       <p class="description">Send private onboarding links to instructors and presenters. Submitted requests appear below for review before anything is created in Scheduler or Masterclass settings.</p>
@@ -12925,6 +13061,34 @@ public function render_access_lists_page() {
           <p>Profile Card Creation request deleted. The private link has been disabled.</p>
         </div>
       <?php endif; ?>
+      <form method="post" style="max-width:960px;background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:18px;margin:18px 0;">
+        <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
+
+        <h2>Onboarding / Background Check Settings</h2>
+
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="background_check_docusign_url">Background Check DocuSign Link</label></th>
+            <td>
+              <input type="url" id="background_check_docusign_url" name="background_check_docusign_url" value="<?php echo $background_check_docusign_url; ?>" class="regular-text" placeholder="https://..." />
+              <p class="description">This link appears when an instructor says they do not already have a valid fingerprint clearance for their state.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="owner_payout_summary_email">Owner Payout Summary Email</label></th>
+            <td>
+              <input type="email" id="owner_payout_summary_email" name="owner_payout_summary_email" value="<?php echo $owner_payout_summary_email; ?>" class="regular-text" placeholder="<?php echo esc_attr(get_option('admin_email', '')); ?>" />
+              <p class="description">Owner/company summary emails are sent here after payout batches.</p>
+            </td>
+          </tr>
+        </table>
+
+        <p class="submit">
+          <button type="submit" class="button button-primary">Save Onboarding / Summary Settings</button>
+        </p>
+      </form>
+
       <hr>
       <h2>Create New Request</h2>
 
@@ -13330,13 +13494,49 @@ public function render_access_lists_page() {
           <div class="mrm-check-section"><h3>Optional Social / Professional Links</h3><p class="mrm-field-help">Add any public links you would like Low Brass Lessons to review for your profile. These are optional.</p><label>Website</label><input type="url" name="website_url" value="<?php echo esc_attr($submission['website_url'] ?? ''); ?>" placeholder="https://..."><label>Instagram</label><input type="url" name="instagram_url" value="<?php echo esc_attr($submission['instagram_url'] ?? ''); ?>" placeholder="https://..."><label>Facebook</label><input type="url" name="facebook_url" value="<?php echo esc_attr($submission['facebook_url'] ?? ''); ?>" placeholder="https://..."><label>YouTube</label><input type="url" name="youtube_url" value="<?php echo esc_attr($submission['youtube_url'] ?? ''); ?>" placeholder="https://..."><label>LinkedIn</label><input type="url" name="linkedin_url" value="<?php echo esc_attr($submission['linkedin_url'] ?? ''); ?>" placeholder="https://..."></div>
           <label>Profile Image Upload</label><p class="mrm-field-help">Upload the photo you would like used on your public profile card. Low Brass Lessons will review and approve the image before publishing.</p><input type="file" name="profile_image_file" accept="image/*"><input type="hidden" name="existing_profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>">
           <?php if (!empty($submission['profile_image_url'])) : ?><p class="mrm-field-help">A profile image has already been uploaded. Upload a new image only if you want to replace it.</p><?php endif; ?>
-          <label>Fingerprint Clearance Card Proof *</label><input type="file" name="fingerprint_card" accept="image/*,.pdf">
+          <?php if ($request_type === 'instructor_profile') : ?>
+            <?php
+              $settings = $this->get_settings();
+              $background_check_docusign_url = trim((string)($settings['background_check_docusign_url'] ?? ''));
+              $fingerprint_status = sanitize_key((string)($submission['fingerprint_clearance_status'] ?? ''));
+            ?>
+            <div class="mrm-check-section" id="mrm-fingerprint-clearance-section">
+              <h3>Fingerprint Clearance / Background Check</h3>
+              <p class="mrm-field-help">Do you have a valid fingerprint clearance for your state?</p>
+              <div class="mrm-check-grid"><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="yes" required <?php checked($fingerprint_status, 'yes'); ?>><span>Yes — I have a valid fingerprint clearance for my state.</span></label><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="no" required <?php checked($fingerprint_status, 'no'); ?>><span>No — I need to complete the background-check documents.</span></label></div>
+              <div class="mrm-conditional-panel" data-fingerprint-panel="yes"><label>Fingerprint Clearance Proof *</label><p class="mrm-field-help">Upload a clear photo or PDF of your current fingerprint clearance card/document.</p><input type="file" name="fingerprint_card" accept="image/*,.pdf"><?php if (!empty($submission['fingerprint_card_name'])) : ?><p class="mrm-field-help">Current file on record: <?php echo esc_html($submission['fingerprint_card_name']); ?>. Upload a new file only if you want to replace it.</p><?php endif; ?></div>
+              <div class="mrm-conditional-panel" data-fingerprint-panel="no"><p class="mrm-field-help">Please complete the required background-check authorization documents before approval.</p><?php if ($background_check_docusign_url !== '') : ?><p><a href="<?php echo esc_url($background_check_docusign_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open Background Check Documents</a></p><?php else : ?><p class="mrm-field-help"><strong>Background-check document link has not been configured yet.</strong> Low Brass Lessons will send the document link separately.</p><?php endif; ?><label class="mrm-ack-row"><input type="checkbox" name="background_check_docusign_ack" value="1" <?php checked(!empty($submission['background_check_docusign_ack'])); ?>><span>I understand that Low Brass Lessons requires background-check documentation before my instructor profile can be approved.</span></label></div>
+            </div>
+          <?php endif; ?>
           <label class="mrm-ack-row"><input type="checkbox" name="docusign_completed" value="1" required <?php checked(!empty($submission['docusign_completed'])); ?>><span>I confirm that I have completed the required DocuSign agreement and W-9 process.</span></label><label class="mrm-ack-row"><input type="checkbox" name="stripe_onboarding_completed" value="1" required <?php checked(!empty($submission['stripe_onboarding_completed'])); ?>><span>I confirm that I have completed the required Stripe account linking/onboarding step provided by Low Brass Lessons.</span></label>
           <?php if ($request_type === 'instructor_profile') : ?><?php echo $this->mrm_profile_card_render_instructor_pay_chart_html(); ?><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the instructor payout chart shown above.</span></label><?php endif; ?>
         <?php endif; ?>
         <p style="margin-top:24px;"><button type="submit">Submit Your Request</button></p>
       </form>
-    </div></div><script>(function(){var form=document.querySelector('form');if(!form)return;var first=form.querySelector('[name="first_name"]');var last=form.querySelector('[name="last_name"]');var full=form.querySelector('[name="name"]');function syncName(){if(!full)return;var f=first?first.value.trim():'';var l=last?last.value.trim():'';full.value=(f+' '+l).trim();}if(first)first.addEventListener('input',syncName);if(last)last.addEventListener('input',syncName);form.addEventListener('submit',syncName);syncName();})();</script></body></html>
+    </div></div>
+    <script>
+    (function(){
+      var form = document.querySelector('form');
+      if (!form) return;
+      var first = form.querySelector('[name="first_name"]');
+      var last = form.querySelector('[name="last_name"]');
+      var full = form.querySelector('[name="name"]');
+      function syncName(){ if (!full) return; var f = first ? first.value.trim() : ''; var l = last ? last.value.trim() : ''; full.value = (f + ' ' + l).trim(); }
+      if (first) first.addEventListener('input', syncName);
+      if (last) last.addEventListener('input', syncName);
+      var clearanceRadios = Array.prototype.slice.call(form.querySelectorAll('[name="fingerprint_clearance_status"]'));
+      var panels = Array.prototype.slice.call(form.querySelectorAll('[data-fingerprint-panel]'));
+      var fingerprintFile = form.querySelector('[name="fingerprint_card"]');
+      var backgroundAck = form.querySelector('[name="background_check_docusign_ack"]');
+      function selectedClearanceStatus(){ var selected = clearanceRadios.find(function(radio){ return radio.checked; }); return selected ? selected.value : ''; }
+      function syncFingerprintPanels(){ var status = selectedClearanceStatus(); panels.forEach(function(panel){ var shouldShow = panel.getAttribute('data-fingerprint-panel') === status; panel.style.display = shouldShow ? 'block' : 'none'; }); if (fingerprintFile) { if (status === 'yes') { fingerprintFile.setAttribute('required', 'required'); } else { fingerprintFile.removeAttribute('required'); } } if (backgroundAck) { if (status === 'no') { backgroundAck.setAttribute('required', 'required'); } else { backgroundAck.removeAttribute('required'); } } }
+      clearanceRadios.forEach(function(radio){ radio.addEventListener('change', syncFingerprintPanels); });
+      form.addEventListener('submit', function(){ syncName(); syncFingerprintPanels(); });
+      syncName();
+      syncFingerprintPanels();
+    })();
+    </script>
+    </body></html>
     <?php
     exit;
   }
@@ -13356,6 +13556,7 @@ public function render_access_lists_page() {
     }
 
     $request_type = sanitize_key($request['request_type']);
+    $existing_submission = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
     $payload = array();
 
     if ($request_type === 'presenter_event') {
@@ -13367,12 +13568,25 @@ public function render_access_lists_page() {
         $instruments = array_map('sanitize_key', wp_unslash($_POST['instruments']));
       }
 
-      $payload = array('first_name' => sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')), 'last_name' => sanitize_text_field(wp_unslash($_POST['last_name'] ?? '')), 'name' => trim(sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')) . ' ' . sanitize_text_field(wp_unslash($_POST['last_name'] ?? ''))), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'stripe_onboarding_completed' => !empty($_POST['stripe_onboarding_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0, 'calendar_availability_completed' => !empty($_POST['calendar_availability_completed']) ? 1 : 0, 'website_url' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram_url' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook_url' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube_url' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin_url' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')), 'profile_social_links_json' => wp_json_encode(array('website' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')))));
+      $payload = array('first_name' => sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')), 'last_name' => sanitize_text_field(wp_unslash($_POST['last_name'] ?? '')), 'name' => trim(sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')) . ' ' . sanitize_text_field(wp_unslash($_POST['last_name'] ?? ''))), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'fingerprint_clearance_status' => sanitize_key(wp_unslash($_POST['fingerprint_clearance_status'] ?? '')), 'background_check_docusign_ack' => !empty($_POST['background_check_docusign_ack']) ? 1 : 0, 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'stripe_onboarding_completed' => !empty($_POST['stripe_onboarding_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0, 'calendar_availability_completed' => !empty($_POST['calendar_availability_completed']) ? 1 : 0, 'website_url' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram_url' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook_url' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube_url' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin_url' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')), 'profile_social_links_json' => wp_json_encode(array('website' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')))));
 
       $profile_image_url = $this->mrm_profile_card_handle_profile_image_upload('profile_image_file');
 
       if ($profile_image_url !== '') {
         $payload['profile_image_url'] = $profile_image_url;
+      }
+
+      if ($request_type === 'instructor_profile') {
+        $clearance_status = sanitize_key((string)($payload['fingerprint_clearance_status'] ?? ''));
+        if (!in_array($clearance_status, array('yes', 'no'), true)) { wp_die('Please answer whether you have a valid fingerprint clearance for your state.'); }
+        $has_existing_fingerprint_file = !empty($existing_submission['fingerprint_card_file']);
+        if ($clearance_status === 'yes' && !$has_existing_fingerprint_file && empty($_FILES['fingerprint_card']['name'])) { wp_die('Please upload proof of your fingerprint clearance.'); }
+        if ($clearance_status === 'no' && empty($payload['background_check_docusign_ack'])) { wp_die('Please acknowledge the background-check document requirement.'); }
+        foreach (array('fingerprint_card_file', 'fingerprint_card_name', 'fingerprint_card_uploaded_at') as $existing_file_key) {
+          if (!empty($existing_submission[$existing_file_key]) && empty($payload[$existing_file_key])) {
+            $payload[$existing_file_key] = sanitize_text_field((string)$existing_submission[$existing_file_key]);
+          }
+        }
       }
     }
 
@@ -13384,7 +13598,11 @@ public function render_access_lists_page() {
 
     $fingerprint_upload = array();
 
-    if ($request_type !== 'presenter_event' && !empty($_FILES['fingerprint_card']['name'])) {
+    if (
+      $request_type === 'instructor_profile'
+      && (($payload['fingerprint_clearance_status'] ?? '') === 'yes')
+      && !empty($_FILES['fingerprint_card']['name'])
+    ) {
       $fingerprint_upload = $this->mrm_profile_card_handle_private_fingerprint_upload('fingerprint_card');
     }
 
@@ -13844,6 +14062,7 @@ public function render_access_lists_page() {
     $composer_acct = esc_attr((string)($settings['composer_connected_account_id'] ?? ''));
     $one_time_sheet_music_composer_pct = esc_attr((string)($settings['one_time_sheet_music_composer_pct'] ?? 0));
     $price_current = esc_attr((string)($settings['stripe_sheet_music_subscription_price_id'] ?? ''));
+    $composer_payout_summary_email = esc_attr((string)($settings['composer_payout_summary_email'] ?? ''));
 
     ?>
     <div class="wrap">
@@ -13862,6 +14081,14 @@ public function render_access_lists_page() {
             <td>
               <input type="text" id="composer_connected_account_id" name="composer_connected_account_id" value="<?php echo $composer_acct; ?>" class="regular-text" placeholder="acct_..." />
               <p class="description">Paste the composer’s Stripe Connect account ID here.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="composer_payout_summary_email">Composer Payout Summary Email</label></th>
+            <td>
+              <input type="email" id="composer_payout_summary_email" name="composer_payout_summary_email" value="<?php echo $composer_payout_summary_email; ?>" class="regular-text" placeholder="composer@example.com" />
+              <p class="description">Composer payout summary emails are sent here after composer payouts.</p>
             </td>
           </tr>
 
@@ -14233,6 +14460,8 @@ public function render_access_lists_page() {
     $presenters_table = $this->mrm_pay_table_masterclass_presenters();
     $events_table = $this->mrm_pay_table_masterclass_events();
     $summary = array('paid' => 0, 'errors' => 0, 'last_error' => '');
+    $batch_key = 'presenter_batch_' . gmdate('Ymd_His');
+    $paid_presenter_rows = array();
 
     if (!$this->mrm_pay_table_exists($ledger_table) || !$this->mrm_pay_table_exists($presenters_table)) {
       $summary['errors']++;
@@ -14254,7 +14483,12 @@ public function render_access_lists_page() {
       foreach ($only_ledger_ids as $ledger_id) $args[] = $ledger_id;
     }
 
-    $sql = "SELECT l.*, p.stripe_connected_account_id, p.name AS presenter_name, e.title AS event_title
+    $sql = "SELECT l.*,
+        p.stripe_connected_account_id,
+        p.name AS presenter_name,
+        p.email AS presenter_email,
+        e.title AS event_title,
+        e.presenter_payout_per_student_cents AS event_payout_per_student_cents
       FROM {$ledger_table} l
       LEFT JOIN {$presenters_table} p ON p.id = l.presenter_id
       LEFT JOIN {$events_table} e ON e.id = l.event_id
@@ -14272,6 +14506,7 @@ public function render_access_lists_page() {
         'mrm_masterclass_ledger_id' => (string)$ledger_id,
         'mrm_event_id' => (string)($row['event_id'] ?? ''),
         'mrm_presenter_id' => (string)($row['presenter_id'] ?? ''),
+        'mrm_presenter_batch_key' => $batch_key,
         'mrm_transfer_funding_mode' => 'platform_available_balance_only',
       ));
 
@@ -14283,7 +14518,22 @@ public function render_access_lists_page() {
       }
 
       $wpdb->update($ledger_table, array('status' => 'paid_out', 'stripe_transfer_id' => (string)($transfer['id'] ?? ''), 'paid_at' => current_time('mysql'), 'paid_out_at' => current_time('mysql'), 'payout_attempted_at' => current_time('mysql'), 'payout_error' => '', 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
+      $row['stripe_transfer_id'] = (string)($transfer['id'] ?? '');
+      $row['presenter_batch_key'] = $batch_key;
+      $paid_presenter_rows[] = $row;
       $summary['paid']++;
+    }
+
+    if (!empty($paid_presenter_rows)) {
+      $owner_items = $this->mrm_send_presenter_payout_summaries_for_rows($paid_presenter_rows, $batch_key);
+
+      if (!empty($owner_items)) {
+        $this->mrm_send_owner_payout_batch_summary(
+          $batch_key,
+          $owner_items,
+          $this->mrm_payout_period_label_from_rows($paid_presenter_rows, null)
+        );
+      }
     }
 
     return $summary;
@@ -14691,6 +14941,18 @@ public function render_access_lists_page() {
 
       if (isset($_POST['composer_connected_account_id'])) {
         $settings['composer_connected_account_id'] = sanitize_text_field((string)$_POST['composer_connected_account_id']);
+      }
+
+      if (isset($_POST['composer_payout_summary_email'])) {
+        $settings['composer_payout_summary_email'] = sanitize_email(wp_unslash($_POST['composer_payout_summary_email']));
+      }
+
+      if (isset($_POST['background_check_docusign_url'])) {
+        $settings['background_check_docusign_url'] = esc_url_raw(wp_unslash($_POST['background_check_docusign_url']));
+      }
+
+      if (isset($_POST['owner_payout_summary_email'])) {
+        $settings['owner_payout_summary_email'] = sanitize_email(wp_unslash($_POST['owner_payout_summary_email']));
       }
 
       if (isset($_POST['one_time_sheet_music_composer_pct'])) {
