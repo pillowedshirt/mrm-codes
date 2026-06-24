@@ -11713,6 +11713,26 @@ public function handle_marketing_resubscribe() {
         'description' => 'Normally triggered from Payment Hub → Profile Card Creation when you request changes to a submitted profile card or masterclass event proposal.',
         'plugin' => 'payments',
       ),
+      'payout_summary_instructor' => array(
+        'label' => 'Payout summary — individual instructor',
+        'description' => 'Normally sent to each individual instructor after their instructor payout batch runs.',
+        'plugin' => 'payments',
+      ),
+      'payout_summary_presenter' => array(
+        'label' => 'Payout summary — individual presenter',
+        'description' => 'Normally sent to each individual presenter after their presenter payout runs.',
+        'plugin' => 'payments',
+      ),
+      'payout_summary_composer' => array(
+        'label' => 'Payout summary — composer',
+        'description' => 'Normally sent to the composer after composer payout rows are paid.',
+        'plugin' => 'payments',
+      ),
+      'payout_summary_owner_net' => array(
+        'label' => 'Payout summary — owner/net batch',
+        'description' => 'Normally sent to the owner after each payout batch cycle with contractor payout totals, promo-code reductions, and company retained/netted funds.',
+        'plugin' => 'payments',
+      ),
     );
   }
 
@@ -11723,6 +11743,8 @@ public function handle_marketing_resubscribe() {
 
     $catalog = $this->mrm_email_testing_catalog();
     $error = isset($_GET['mrm_email_tests_error']) ? sanitize_text_field(wp_unslash($_GET['mrm_email_tests_error'])) : '';
+    $settings = $this->get_settings();
+    $owner_payout_summary_email = esc_attr((string)($settings['owner_payout_summary_email'] ?? get_option('admin_email', '')));
 
     $previews = array();
     foreach ($catalog as $key => $item) {
@@ -11742,6 +11764,7 @@ public function handle_marketing_resubscribe() {
       <?php if ($error !== '') : ?>
         <div class="notice notice-error"><p><?php echo esc_html($error); ?></p></div>
       <?php endif; ?>
+      <?php settings_errors('mrm_pay_hub'); ?>
 
       <div id="mrm-email-testing-preview-card" style="max-width:1100px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin:18px 0;">
         <h2 style="margin-top:0;">Email Preview</h2>
@@ -11779,6 +11802,29 @@ public function handle_marketing_resubscribe() {
           </tbody>
         </table>
       </div>
+
+      <form method="post" style="max-width:1100px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin-top:18px;">
+        <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
+
+        <h2>Owner Payout Summary Destination</h2>
+        <p class="description">
+          This controls where the owner/net payout batch summary is sent after every instructor, presenter, or composer payout batch cycle.
+        </p>
+
+        <table class="form-table">
+          <tr>
+            <th scope="row"><label for="owner_payout_summary_email">Owner Payout Summary Email</label></th>
+            <td>
+              <input type="email" id="owner_payout_summary_email" name="owner_payout_summary_email" value="<?php echo $owner_payout_summary_email; ?>" class="regular-text" placeholder="<?php echo esc_attr(get_option('admin_email', '')); ?>" />
+              <p class="description">Leave blank to fall back to the WordPress admin email.</p>
+            </td>
+          </tr>
+        </table>
+
+        <p class="submit">
+          <button type="submit" class="button button-primary">Save Owner Summary Email</button>
+        </p>
+      </form>
     </div>
 
     <script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1">
@@ -11863,6 +11909,103 @@ public function handle_marketing_resubscribe() {
     exit;
   }
 
+  private function mrm_payout_summary_email_test_samples() {
+    $table_style = 'width:100%;border-collapse:collapse;margin-top:14px;';
+    $th_style = 'text-align:left;border:1px solid #ddd;padding:8px;';
+    $td_style = 'border:1px solid #ddd;padding:8px;';
+
+    return array(
+      'payout_summary_instructor' => array(
+        'Low Brass Lessons instructor payout summary',
+        'Instructor Payout Summary',
+        '<p>Hello Test Instructor,</p><p>Your instructor payout batch has been processed. Here is your payout summary.</p>',
+        '<div><strong>Pay period:</strong> June 1, 2026 through June 14, 2026</div>'
+          . '<div><strong>Batch:</strong> payout_20260614_120000</div>'
+          . '<table style="' . esc_attr($table_style) . '">'
+          . '<thead><tr>'
+          . '<th style="' . esc_attr($th_style) . '">Lesson Type</th>'
+          . '<th style="' . esc_attr($th_style) . '">Count</th>'
+          . '<th style="' . esc_attr($th_style) . '">Payout</th>'
+          . '</tr></thead><tbody>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Online 30-minute lessons</td><td style="' . esc_attr($td_style) . '">3</td><td style="' . esc_attr($td_style) . '">$99.00</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Online 60-minute lessons</td><td style="' . esc_attr($td_style) . '">4</td><td style="' . esc_attr($td_style) . '">$264.00</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">In-person 30-minute lessons</td><td style="' . esc_attr($td_style) . '">2</td><td style="' . esc_attr($td_style) . '">$86.00</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">In-person 60-minute lessons</td><td style="' . esc_attr($td_style) . '">1</td><td style="' . esc_attr($td_style) . '">$78.00</td></tr>'
+          . '</tbody></table>'
+          . '<div style="margin-top:14px;font-size:17px;"><strong>Total payout:</strong> $527.00</div>',
+        ''
+      ),
+
+      'payout_summary_presenter' => array(
+        'Low Brass Lessons presenter payout summary',
+        'Presenter Payout Summary',
+        '<p>Hello Test Presenter,</p><p>Your presenter payout has been processed. Here is your payout summary.</p>',
+        '<div><strong>Batch:</strong> presenter_batch_20260621_120000</div>'
+          . '<table style="' . esc_attr($table_style) . '">'
+          . '<thead><tr>'
+          . '<th style="' . esc_attr($th_style) . '">Masterclass</th>'
+          . '<th style="' . esc_attr($th_style) . '">Students</th>'
+          . '<th style="' . esc_attr($th_style) . '">Agreed Pay Per Student</th>'
+          . '<th style="' . esc_attr($th_style) . '">Total Payout</th>'
+          . '</tr></thead><tbody>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Low Brass Audition Masterclass</td><td style="' . esc_attr($td_style) . '">12</td><td style="' . esc_attr($td_style) . '">$20.00</td><td style="' . esc_attr($td_style) . '">$240.00</td></tr>'
+          . '</tbody></table>'
+          . '<div style="margin-top:14px;font-size:17px;"><strong>Total presenter payout:</strong> $240.00</div>',
+        ''
+      ),
+
+      'payout_summary_composer' => array(
+        'Low Brass Lessons composer payout summary',
+        'Composer Payout Summary',
+        '<p>Your composer payout batch has been processed. Here is your payout summary.</p>',
+        '<div><strong>Pay period:</strong> June 1, 2026 through June 30, 2026</div>'
+          . '<div><strong>Batch:</strong> payout_20260630_120000</div>'
+          . '<div><strong>Subscriptions paid in this window:</strong> 7</div>'
+          . '<table style="' . esc_attr($table_style) . '">'
+          . '<thead><tr>'
+          . '<th style="' . esc_attr($th_style) . '">Product</th>'
+          . '<th style="' . esc_attr($th_style) . '">Type</th>'
+          . '<th style="' . esc_attr($th_style) . '">Quantity</th>'
+          . '<th style="' . esc_attr($th_style) . '">Promo</th>'
+          . '<th style="' . esc_attr($th_style) . '">Promo Reduction</th>'
+          . '<th style="' . esc_attr($th_style) . '">Composer Payout</th>'
+          . '</tr></thead><tbody>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Etude Pack Vol. 1</td><td style="' . esc_attr($td_style) . '">Piece / product sale</td><td style="' . esc_attr($td_style) . '">5</td><td style="' . esc_attr($td_style) . '">SUMMER10</td><td style="' . esc_attr($td_style) . '">$12.50</td><td style="' . esc_attr($td_style) . '">$87.50</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Sheet music subscription</td><td style="' . esc_attr($td_style) . '">Subscription payment</td><td style="' . esc_attr($td_style) . '">7</td><td style="' . esc_attr($td_style) . '">—</td><td style="' . esc_attr($td_style) . '">$0.00</td><td style="' . esc_attr($td_style) . '">$70.00</td></tr>'
+          . '</tbody></table>'
+          . '<div style="margin-top:14px;"><strong>Total promo reduction affecting composer content:</strong> -$12.50</div>'
+          . '<div style="margin-top:8px;font-size:17px;"><strong>Total composer payout:</strong> $157.50</div>',
+        ''
+      ),
+
+      'payout_summary_owner_net' => array(
+        'Low Brass Lessons owner payout batch summary',
+        'Owner Payout Batch Summary',
+        '<p>A payout batch has been processed. Here is the owner/company summary.</p>',
+        '<div><strong>Batch:</strong> payout_20260630_120000</div>'
+          . '<div><strong>Pay period:</strong> June 1, 2026 through June 30, 2026</div>'
+          . '<table style="' . esc_attr($table_style) . '">'
+          . '<thead><tr>'
+          . '<th style="' . esc_attr($th_style) . '">Payee Type</th>'
+          . '<th style="' . esc_attr($th_style) . '">Payee</th>'
+          . '<th style="' . esc_attr($th_style) . '">Paid Out</th>'
+          . '<th style="' . esc_attr($th_style) . '">Company Retained</th>'
+          . '<th style="' . esc_attr($th_style) . '">Promo Reduction</th>'
+          . '</tr></thead><tbody>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Instructor</td><td style="' . esc_attr($td_style) . '">All instructors in batch</td><td style="' . esc_attr($td_style) . '">$2,415.00</td><td style="' . esc_attr($td_style) . '">$1,030.00</td><td style="' . esc_attr($td_style) . '">-$0.00</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Presenter</td><td style="' . esc_attr($td_style) . '">All presenters in batch</td><td style="' . esc_attr($td_style) . '">$480.00</td><td style="' . esc_attr($td_style) . '">$320.00</td><td style="' . esc_attr($td_style) . '">-$0.00</td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Composer</td><td style="' . esc_attr($td_style) . '">Composer</td><td style="' . esc_attr($td_style) . '">$157.50</td><td style="' . esc_attr($td_style) . '">$92.50</td><td style="' . esc_attr($td_style) . '">-$12.50</td></tr>'
+          . '</tbody></table>'
+          . '<div style="margin-top:14px;"><strong>Instructor payouts:</strong> $2,415.00</div>'
+          . '<div><strong>Presenter payouts:</strong> $480.00</div>'
+          . '<div><strong>Composer payouts:</strong> $157.50</div>'
+          . '<div><strong>Promo-code reductions:</strong> -$12.50</div>'
+          . '<div style="margin-top:8px;font-size:17px;"><strong>Company retained / netted:</strong> $1,442.50</div>',
+        ''
+      ),
+    );
+  }
+
   private function mrm_build_single_email_preview($slug) {
     $slug = sanitize_key((string)$slug);
     $contact_url = $this->mrm_get_contact_url();
@@ -11890,6 +12033,8 @@ public function handle_marketing_resubscribe() {
       'payment_method_attention_admin' => array('Admin awareness', 'Admin awareness', '<p>This is a preview of the admin payment-method attention email.</p>', '<div><strong>Lesson ID:</strong> ' . $field_note('Lesson ID', 'lesson database row') . '</div><div><strong>Issue:</strong> Payment method attention required.</div>', 'Contact Support'),
       'purchase_receipt' => array('Purchase Confirmation', 'Purchase Confirmation', '<p>Thank you for your purchase.</p>', '<div><strong>Item:</strong> ' . $field_note('Purchased item', 'checkout selection') . '</div><div><strong>Amount:</strong> ' . $field_note('Total paid', 'Stripe/payment record') . '</div><div><strong>Status:</strong> Paid</div>', 'Contact Support'),
     );
+
+    $samples = array_merge($samples, $this->mrm_payout_summary_email_test_samples());
 
     if (isset($samples[$slug])) {
       list($subject, $title, $intro, $details, $button) = $samples[$slug];
@@ -11975,6 +12120,19 @@ public function handle_marketing_resubscribe() {
     if (isset($samples[$slug])) {
       list($title, $intro, $details, $cta_label) = $samples[$slug];
       return wp_mail($to, '[TEST] ' . $title, $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, $cta_label), $headers);
+    }
+
+    $payout_summary_samples = $this->mrm_payout_summary_email_test_samples();
+
+    if (isset($payout_summary_samples[$slug])) {
+      list($subject, $title, $intro, $details, $cta_label) = $payout_summary_samples[$slug];
+
+      return wp_mail(
+        $to,
+        '[TEST] ' . $subject,
+        $this->mrm_email_wrap_html($title, $intro, $details, '', $cta_label),
+        $headers
+      );
     }
 
     if ($slug === 'sheet_music_subscription_enrollment') {
@@ -12988,7 +13146,6 @@ public function render_access_lists_page() {
 
     $settings = $this->get_settings();
     $background_check_docusign_url = esc_url((string)($settings['background_check_docusign_url'] ?? ''));
-    $owner_payout_summary_email = esc_attr((string)($settings['owner_payout_summary_email'] ?? get_option('admin_email', '')));
     ?>
     <div class="wrap"><h1>Profile Card Creation</h1>
       <p class="description">Send private onboarding links to instructors and presenters. Submitted requests appear below for review before anything is created in Scheduler or Masterclass settings.</p>
@@ -13074,18 +13231,10 @@ public function render_access_lists_page() {
               <p class="description">This link appears when an instructor says they do not already have a valid fingerprint clearance for their state.</p>
             </td>
           </tr>
-
-          <tr>
-            <th scope="row"><label for="owner_payout_summary_email">Owner Payout Summary Email</label></th>
-            <td>
-              <input type="email" id="owner_payout_summary_email" name="owner_payout_summary_email" value="<?php echo $owner_payout_summary_email; ?>" class="regular-text" placeholder="<?php echo esc_attr(get_option('admin_email', '')); ?>" />
-              <p class="description">Owner/company summary emails are sent here after payout batches.</p>
-            </td>
-          </tr>
         </table>
 
         <p class="submit">
-          <button type="submit" class="button button-primary">Save Onboarding / Summary Settings</button>
+          <button type="submit" class="button button-primary">Save Background Check Settings</button>
         </p>
       </form>
 
