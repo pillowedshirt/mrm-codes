@@ -11724,7 +11724,21 @@ public function handle_marketing_resubscribe() {
       'masterclass_refund_completed' => array('label' => 'Masterclass refund completed', 'description' => 'Normally triggered when a masterclass registration refund is completed.', 'plugin' => 'masterclass'),
       'masterclass_event_cancelled' => array('label' => 'Masterclass event cancelled', 'description' => 'Normally triggered when a masterclass event is cancelled and registrants are notified.', 'plugin' => 'masterclass'),
       'product_access_otp' => array('label' => 'Sheet music/product access OTP', 'description' => 'Normally triggered when a purchaser requests a one-time access code for protected product access.', 'plugin' => 'product-access'),
-      'profile_card_request_invite' => array('label' => 'Profile Card Creation invite', 'description' => 'Normally triggered from Payment Hub → Profile Card Creation when you send an instructor profile, presenter profile, or masterclass event proposal request.', 'plugin' => 'payments'),
+      'profile_card_invite_instructor' => array(
+        'label' => 'Profile Card Creation invite — instructor profile card',
+        'description' => 'Sent when you request an instructor to complete the instructor onboarding/profile card form.',
+        'plugin' => 'payments',
+      ),
+      'profile_card_invite_presenter' => array(
+        'label' => 'Profile Card Creation invite — presenter profile card',
+        'description' => 'Sent when you request a presenter to complete the presenter profile card form.',
+        'plugin' => 'payments',
+      ),
+      'profile_card_invite_masterclass_event' => array(
+        'label' => 'Profile Card Creation invite — masterclass event submission',
+        'description' => 'Sent when you request a presenter to submit details for a specific masterclass event.',
+        'plugin' => 'payments',
+      ),
       'profile_card_changes_requested' => array('label' => 'Profile Card Creation changes requested', 'description' => 'Normally triggered from Payment Hub → Profile Card Creation when you request changes to a submitted profile card or masterclass event proposal.', 'plugin' => 'payments'),
       'payout_summary_instructor' => array('label' => 'Payout summary — individual instructor', 'description' => 'Normally sent to each individual instructor after their instructor payout batch runs.', 'plugin' => 'payments'),
       'payout_summary_presenter' => array('label' => 'Payout summary — individual presenter', 'description' => 'Normally sent to each individual presenter after their presenter payout runs.', 'plugin' => 'payments'),
@@ -12066,6 +12080,54 @@ public function handle_marketing_resubscribe() {
     );
   }
 
+
+  private function mrm_profile_card_invite_email_parts($request_type, $label = '', $days_label = '', $admin_note = '') {
+    $request_type = sanitize_key((string)$request_type);
+    $label = trim((string)$label);
+    $days_label = trim((string)$days_label);
+    $admin_note = trim((string)$admin_note);
+
+    if ($request_type === 'presenter_profile') {
+      $title = 'Presenter Profile Card';
+      $subject = 'Low Brass Lessons presenter profile card';
+      $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Presenter Profile Card</strong>.</p>';
+      $details = '<p>This form collects the information needed to build or update your presenter page, including your public-facing name, title, biography, presenter photo, payout/tax onboarding information, and any required agreement details.</p>';
+      $details .= '<div><strong>Request type:</strong> Presenter Profile Card</div>';
+    } elseif ($request_type === 'presenter_event') {
+      $title = 'Masterclass Event Submission';
+      $subject = 'Low Brass Lessons masterclass event submission';
+      $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to submit details for an upcoming <strong>Masterclass Event</strong>.</p>';
+      $details = '<p>This form collects the event-specific information needed to create or update the masterclass listing, including the event title, event description, session details, preparation notes, schedule details, presenter payout agreement, student-facing information, and any materials connected to the masterclass.</p>';
+      $details .= '<div><strong>Request type:</strong> Masterclass Event Submission</div>';
+    } else {
+      $title = 'Instructor Profile Card';
+      $subject = 'Low Brass Lessons instructor profile card';
+      $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Instructor Profile Card</strong>.</p>';
+      $details = '<p>This form collects the information needed to build or update your instructor profile, including your public-facing name, teaching title, biography, profile photo, instrument/lesson details, lesson location options, payment onboarding information, and fingerprint clearance/background-check information.</p>';
+      $details .= '<div><strong>Request type:</strong> Instructor Profile Card</div>';
+    }
+
+    if ($label !== '') {
+      $details .= '<div><strong>Form:</strong> ' . esc_html($label) . '</div>';
+    }
+
+    $details .= '<div><strong>Private link expiration:</strong> ' . esc_html($days_label) . '</div>';
+
+    if ($admin_note !== '') {
+      $details .= '<div style="margin-top:12px;padding-top:12px;border-top:1px solid #d9cfbe;"><strong>Note from Low Brass Lessons:</strong><br>' . nl2br(esc_html($admin_note)) . '</div>';
+    } else {
+      $details .= '<div style="margin-top:12px;padding-top:12px;border-top:1px solid #d9cfbe;"><strong>Note from Low Brass Lessons:</strong><br></div>';
+    }
+
+    return array(
+      'subject' => $subject,
+      'title' => $title,
+      'intro' => $intro,
+      'details' => $details,
+      'button_label' => 'Complete Your Form',
+    );
+  }
+
   private function mrm_build_single_email_preview($slug) {
     $slug = sanitize_key((string)$slug);
     $contact_url = $this->mrm_get_contact_url();
@@ -12076,14 +12138,28 @@ public function handle_marketing_resubscribe() {
     };
 
     $payment_samples = array(
-      'profile_card_request_invite' => array(
-        'Low Brass Lessons instructor profile card',
-        'Instructor Profile Card',
-        '<p>Hello,</p><p>Low Brass Lessons has invited you to complete a private onboarding form for a <strong>Instructor Profile Card</strong>.</p>',
-        '<div><strong>Request type:</strong> Instructor Profile Card</div>'
-          . '<div><strong>Private link expiration:</strong> </div>'
-          . '<div style="margin-top:12px;padding-top:12px;border-top:1px solid #d9cfbe;"><strong>Note from Low Brass Lessons:</strong><br></div>',
-        'Complete Your Form'
+      'profile_card_invite_instructor' => array(
+        $this->mrm_profile_card_invite_email_parts('instructor_profile')['subject'],
+        $this->mrm_profile_card_invite_email_parts('instructor_profile')['title'],
+        $this->mrm_profile_card_invite_email_parts('instructor_profile')['intro'],
+        $this->mrm_profile_card_invite_email_parts('instructor_profile')['details'],
+        $this->mrm_profile_card_invite_email_parts('instructor_profile')['button_label']
+      ),
+
+      'profile_card_invite_presenter' => array(
+        $this->mrm_profile_card_invite_email_parts('presenter_profile')['subject'],
+        $this->mrm_profile_card_invite_email_parts('presenter_profile')['title'],
+        $this->mrm_profile_card_invite_email_parts('presenter_profile')['intro'],
+        $this->mrm_profile_card_invite_email_parts('presenter_profile')['details'],
+        $this->mrm_profile_card_invite_email_parts('presenter_profile')['button_label']
+      ),
+
+      'profile_card_invite_masterclass_event' => array(
+        $this->mrm_profile_card_invite_email_parts('presenter_event')['subject'],
+        $this->mrm_profile_card_invite_email_parts('presenter_event')['title'],
+        $this->mrm_profile_card_invite_email_parts('presenter_event')['intro'],
+        $this->mrm_profile_card_invite_email_parts('presenter_event')['details'],
+        $this->mrm_profile_card_invite_email_parts('presenter_event')['button_label']
       ),
 
       'profile_card_changes_requested' => array(
@@ -12603,19 +12679,26 @@ public function handle_marketing_resubscribe() {
       $label .= ' Update';
     }
 
-    $subject = 'Low Brass Lessons ' . strtolower($label);
+    $invite_parts = $this->mrm_profile_card_invite_email_parts(
+      $request_type,
+      $label,
+      (string)$days . ' days',
+      $admin_note
+    );
 
-    $intro_html = '<p>Hello,</p>';
-    $intro_html .= '<p>Low Brass Lessons has invited you to complete a private onboarding form for a <strong>' . esc_html($label) . '</strong>.</p>';
+    $subject = (string)$invite_parts['subject'];
 
-    $details_html = '<div><strong>Request type:</strong> ' . esc_html($label) . '</div>';
-    $details_html .= '<div><strong>Private link expiration:</strong> ' . esc_html((string)$days) . ' days</div>';
-
-    if ($admin_note !== '') {
-      $details_html .= '<div style="margin-top:12px;padding-top:12px;border-top:1px solid #d9cfbe;"><strong>Note from Low Brass Lessons:</strong><br>' . nl2br(esc_html($admin_note)) . '</div>';
+    if ($force_profile_update) {
+      $subject .= ' update';
     }
 
-    $body = $this->mrm_email_wrap_html($label, $intro_html, $details_html, $url, 'Complete Your Form');
+    $body = $this->mrm_email_wrap_html(
+      (string)$invite_parts['title'],
+      (string)$invite_parts['intro'],
+      (string)$invite_parts['details'],
+      $url,
+      (string)$invite_parts['button_label']
+    );
 
     wp_mail($recipient_email, $subject, $body, array('Content-Type: text/html; charset=UTF-8'));
 

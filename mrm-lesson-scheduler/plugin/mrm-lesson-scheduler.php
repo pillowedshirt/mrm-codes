@@ -12152,7 +12152,18 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
             'consultation_confirmation_instructor' => array('You have a new consultation scheduled', '<p>You have a new consultation scheduled.</p>', '<div><strong>Name:</strong> </div><div><strong>Time:</strong> </div><div><strong>Type:</strong> Consultation</div>', array(array('url'=>'#','label'=>'Join Consultation','variant'=>'primary'),array('url'=>'#','label'=>'I Am Unable To Provide This Consultation','variant'=>'secondary'))),
             'contact_form_notification' => array(' - Contact form submission', '<p>A new contact form submission has been received.</p>', '<div><strong>Name:</strong> </div><div><strong>Email:</strong> </div><div><strong>Represents:</strong> </div><div><strong>Message:</strong> </div>', array()),
             'safety_no_show_alert' => array('Safety alert - parent reported no-show', '<p>A parent has reported that the instructor did not arrive for the scheduled lesson.</p>', '<div><strong>Parent name:</strong> </div><div><strong>Parent email:</strong> </div><div><strong>Parent phone:</strong> </div><div><strong>Instructor name:</strong> </div><div><strong>Instructor email:</strong> </div><div><strong>Instructor phone:</strong> </div><div><strong>Lesson time:</strong> </div>', array()),
-            'safety_emergency_notice' => array('Emergency lesson cancellation notice', '<p>An emergency cancellation for the lesson scheduled for  with  has been submitted. If you would like to schedule a lesson with another instructor please select an instructor and reach out via email at lowbrass-lessons.com/calendar/</p><p>If you have any questions please contact support.</p>', '<div><strong>This lesson has been cancelled</strong></div>', array(array('url'=>home_url('/contact/'),'label'=>'Contact Support','variant'=>'primary'))),
+            'safety_emergency_notice' => array(
+                'This lesson has been cancelled',
+                '<p>An emergency cancellation for the lesson scheduled for  with  has been submitted. If you would like to schedule a lesson with another instructor please select an instructor and reach out via email at lowbrass-lessons.com/calendar/</p><p>If you have any questions please contact support.</p>',
+                '<div><strong>Lesson day and time:</strong> </div><div><strong>Instructor:</strong> </div>',
+                array(
+                    array(
+                        'url'     => home_url('/contact/'),
+                        'label'   => 'Contact Support',
+                        'variant' => 'primary',
+                    ),
+                )
+            ),
         );
 
         if ( isset( $tests[ $slug ] ) ) {
@@ -13030,7 +13041,7 @@ public function handle_contact_form_submit() {
 
     $full_name = trim( $first_name . ' ' . $last_name );
 
-    $subject = 'Website contact form — ' . $represents_label . ' — ' . $full_name;
+    $subject = $represents_label . ' - contact form submission';
 
     $details = '';
     $details .= '<div><strong>Name:</strong> ' . esc_html( $full_name ) . '</div>';
