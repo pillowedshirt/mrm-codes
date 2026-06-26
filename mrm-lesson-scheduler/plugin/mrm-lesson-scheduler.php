@@ -6398,7 +6398,7 @@ protected function mrm_get_google_service_account_json() {
                 text-decoration:none;
                 border-radius:12px;
                 border:1px solid #111;
-                padding:14px 18px;
+                padding:13px 20px;
                 font-weight:700;
                 font-size:15px;
                 line-height:1.3;
@@ -7119,14 +7119,15 @@ protected function mrm_get_google_service_account_json() {
 
     protected function mrm_email_button_html( $url, $label, $variant = 'secondary' ) {
         $is_primary = ( $variant === 'primary' );
+        $is_cancel = ( $variant === 'cancel' || $variant === 'secondary' || stripos( (string) $label, 'cancel' ) !== false || stripos( (string) $label, 'unable' ) !== false );
 
-        $bg     = $is_primary ? '#111' : '#fff';
-        $color  = $is_primary ? '#fff' : '#111';
-        $border = $is_primary ? '1px solid #111' : '1px solid #111';
+        $bg     = ( $is_primary && ! $is_cancel ) ? '#111111' : '#ffffff';
+        $color  = ( $is_primary && ! $is_cancel ) ? '#ffffff' : '#111111';
+        $border = '1px solid #111111';
 
         return '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:0 auto; width:auto; max-width:100%;">'
             . '<tr><td align="center" style="border-radius:10px; border:' . esc_attr( $border ) . '; background:' . esc_attr( $bg ) . ';">'
-            . '<a href="' . esc_url( $url ) . '" style="display:block; width:auto; max-width:320px; padding:14px 18px; text-align:center; text-decoration:none; color:' . esc_attr( $color ) . '; font-weight:600; line-height:1.35; font-size:15px; white-space:normal; word-break:break-word;">'
+            . '<a href="' . esc_url( $url ) . '" style="display:block; width:auto; max-width:320px; padding:13px 20px; text-align:center; text-decoration:none; color:' . esc_attr( $color ) . '; font-weight:600; line-height:1.35; font-size:15px; white-space:normal; word-break:break-word;">'
             . esc_html( $label )
             . '</a>'
             . '</td></tr></table>';
@@ -12039,76 +12040,28 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         }
 
         $tests = array(
-            'private_lesson_reminder_parent' => array(
-                'Upcoming Lesson Reminder',
-                '<p>This is a reminder for your upcoming Low Brass Lessons private lesson.</p>',
-                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Time:</strong> </div>',
-                home_url( '/join-online/test/' ),
-                'Open Join Page'
-            ),
-            'private_lesson_reminder_instructor' => array(
-                'Instructor Lesson Reminder',
-                '<p>This is a reminder for your upcoming Low Brass Lessons private lesson.</p>',
-                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Time:</strong> </div>',
-                home_url( '/wp-admin/admin-post.php?action=test-instructor-arrival' ),
-                'Mark Arrival'
-            ),
-            'lesson_feedback_request' => array(
-                'How was your lesson?',
-                '<p>Please rate the lesson and share any comments you would like us to see.</p>',
-                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Lesson:</strong> </div><div><strong>Feedback text:</strong> </div>',
-                home_url( '/wp-admin/admin-post.php?action=test-feedback' ),
-                'Rate your lesson'
-            ),
-            'parent_feedback_received' => array(
-                'Parent Lesson Feedback',
-                '<p>Lesson feedback has been submitted.</p>',
-                '<div><strong>Rating:</strong> </div><div><strong>Comment:</strong> </div>',
-                '',
-                ''
-            ),
-            'consultation_confirmation' => array(
-                'Consultation Confirmed',
-                '<p>Your consultation has been scheduled successfully.</p>',
-                '<div><strong>Name:</strong> </div><div><strong>Time:</strong> </div><div><strong>Type:</strong> Consultation</div>',
-                home_url( '/join-online/test/' ),
-                'Open Join Page'
-            ),
-            'contact_form_notification' => array(
-                'New Contact Form Submission',
-                '<p>A new contact form submission has been received.</p>',
-                '<div><strong>Name:</strong> </div><div><strong>Email:</strong> </div><div><strong>Represents:</strong> </div><div><strong>Message:</strong> </div>',
-                '',
-                ''
-            ),
-            'safety_no_show_alert' => array(
-                'Safety Alert',
-                '<p>A parent has reported that the instructor did not arrive for the scheduled lesson.</p>',
-                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Start:</strong> </div><div><strong>Report:</strong> </div>',
-                '',
-                ''
-            ),
-            'safety_emergency_notice' => array(
-                'Safety Emergency Notice',
-                '<p>A lesson emergency notice has been submitted.</p>',
-                '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Emergency message:</strong> </div>',
-                '',
-                ''
-            ),
-            'contractor_agreement_confirmation' => array(
-                'Contractor Agreement Confirmation',
-                '<p>Your contractor agreement has been recorded.</p>',
-                '<div><strong>Contractor:</strong> </div><div><strong>Agreement Version:</strong> </div><div><strong>Status:</strong> Completed</div>',
-                '',
-                ''
-            ),
+            'private_lesson_reminder_parent_online' => array('Upcoming online lesson with', '<p>This is a reminder for your upcoming online private lesson.</p><p>Your meeting link will become available 10 minutes before your lesson time and will remain available until 10 minutes after your lesson time. Please make sure your camera, microphone, and internet connection are working before joining the call.</p>', '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Time:</strong> </div>', array(array('url'=>home_url('/join-online/test/'),'label'=>'Join Lesson','variant'=>'primary'),array('url'=>'#','label'=>'My Instructor Did Not Arrive','variant'=>'secondary'))),
+            'private_lesson_reminder_parent_in_person' => array('Upcoming in-person lesson with', '<p>This is a reminder for your upcoming in-person private lesson.</p><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible.</p>', '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Time:</strong> </div>', array(array('url'=>'#','label'=>'My Instructor Did Not Arrive','variant'=>'secondary'))),
+            'private_lesson_reminder_instructor_online' => array('Upcoming online lesson with', '<p>This is a reminder for your upcoming online lesson.</p><p>Please prepare your camera, microphone levels, and Wi-Fi connection before joining. The online room will open 10 minutes before the lesson and remain available until 10 minutes after.</p>', '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Time:</strong> </div>', array(array('url'=>home_url('/join-online/test/'),'label'=>'Join Lesson','variant'=>'primary'),array('url'=>'#','label'=>'I Am Unable To Provide This Lesson','variant'=>'secondary'))),
+            'private_lesson_reminder_instructor_in_person' => array('Upcoming in-person lesson with', '<p>This is a reminder for your upcoming in-person lesson.</p><p>Please plan to arrive during the 10-minute window before the lesson to account for setup time, and consider traffic when planning your arrival.</p>', '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Time:</strong> </div>', array(array('url'=>'#','label'=>'Mark Arrival','variant'=>'primary'),array('url'=>'#','label'=>'I Am Unable To Provide This Lesson','variant'=>'secondary'))),
+            'lesson_feedback_request' => array('How was your lesson?', '<p>Please rate the lesson and share any feedback you have for your instructor.</p>', '<div><strong>Lesson date and time:</strong> </div>', array(array('url'=>'#','label'=>'Rate Your Lesson','variant'=>'primary'))),
+            'parent_feedback_received' => array('Parent Lesson Feedback', '<p>Lesson feedback has been submitted.</p>', '<div><strong>Rating:</strong> </div><div><strong>Comment:</strong> </div>', array()),
+            'consultation_confirmation_family' => array('Consultation confirmed', '<p>Your consultation has been scheduled successfully.</p>', '<div><strong>Name:</strong> </div><div><strong>Time:</strong> </div><div><strong>Type:</strong> Consultation</div>', array(array('url'=>'#','label'=>'Join Consultation','variant'=>'primary'),array('url'=>'#','label'=>'Cancel Consultation','variant'=>'cancel'))),
+            'consultation_confirmation_instructor' => array('You have a new consultation scheduled', '<p>You have a new consultation scheduled.</p>', '<div><strong>Name:</strong> </div><div><strong>Time:</strong> </div><div><strong>Type:</strong> Consultation</div>', array(array('url'=>'#','label'=>'Join Consultation','variant'=>'primary'),array('url'=>'#','label'=>'I Am Unable To Provide This Consultation','variant'=>'secondary'))),
+            'contact_form_notification' => array(' - Contact form submission', '<p>A new contact form submission has been received.</p>', '<div><strong>Name:</strong> </div><div><strong>Email:</strong> </div><div><strong>Represents:</strong> </div><div><strong>Message:</strong> </div>', array()),
+            'safety_no_show_alert' => array('Safety alert - parent reported no-show', '<p>A parent has reported that the instructor did not arrive for the scheduled lesson.</p>', '<div><strong>Parent name:</strong> </div><div><strong>Parent email:</strong> </div><div><strong>Parent phone:</strong> </div><div><strong>Instructor name:</strong> </div><div><strong>Instructor email:</strong> </div><div><strong>Instructor phone:</strong> </div><div><strong>Lesson time:</strong> </div>', array()),
+            'safety_emergency_notice' => array('Emergency lesson cancellation notice', '<p>An emergency cancellation for the lesson scheduled for  with  has been submitted. If you would like to schedule a lesson with another instructor please select an instructor and reach out via email at lowbrass-lessons.com/calendar/</p><p>If you have any questions please contact support.</p>', '<div><strong>This lesson has been cancelled</strong></div>', array(array('url'=>home_url('/contact/'),'label'=>'Contact Support','variant'=>'primary'))),
         );
 
         if ( isset( $tests[ $slug ] ) ) {
-            list( $title, $intro, $details, $url, $label ) = $tests[ $slug ];
+            list( $title, $intro, $details, $buttons ) = $tests[ $slug ];
+            $button_html = '';
+            foreach ( (array) $buttons as $button ) {
+                $button_html .= '<div style="margin:0 auto 12px auto;text-align:center;">' . $this->mrm_email_button_html( $button['url'] ?? '', $button['label'] ?? '', $button['variant'] ?? 'primary' ) . '</div>';
+            }
             return array(
                 'subject' => $title,
-                'html'    => $this->mrm_safety_email_wrap_html( $title, $intro, $details, $url, $label ),
+                'html'    => $this->mrm_safety_email_wrap_html_blocks( $title, $intro, $details, $button_html ),
             );
         }
 

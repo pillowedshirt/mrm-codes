@@ -3966,7 +3966,7 @@ function initRichTextToolbars(scope) {
             $intro_html .= '<div style="margin-top:10px;">' . nl2br( esc_html( $custom_body ) ) . '</div>';
         }
 
-        $html = $this->mrm_pa_wrap_otp_email_html( $subject, $intro_html, '123456' );
+        $html = $this->mrm_pa_wrap_otp_email_html( $subject, $intro_html, '' );
         $headers = array(
             'Content-Type: text/html; charset=UTF-8',
             'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
