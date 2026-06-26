@@ -11729,7 +11729,7 @@ public function handle_marketing_resubscribe() {
           <h3 id="mrm-email-testing-preview-title" style="margin:12px 0 6px;"></h3>
           <p style="margin:0 0 10px;"><strong>Subject:</strong> <span id="mrm-email-testing-preview-subject"></span></p>
           <p class="description" id="mrm-email-testing-preview-description"></p>
-          <iframe id="mrm-email-testing-preview-frame" title="Email preview" scrolling="no" style="display:block;width:100%;min-height:1200px;height:1200px;border:1px solid #dcdcde;border-radius:8px;background:#fff;overflow:hidden;"></iframe>
+          <iframe id="mrm-email-testing-preview-frame" title="Email preview" scrolling="auto" style="display:block;width:100%;min-height:420px;height:520px;max-height:900px;border:1px solid #dcdcde;border-radius:8px;background:#fff;overflow:auto;"></iframe>
         </div>
       </div>
 
@@ -11796,23 +11796,40 @@ public function handle_marketing_resubscribe() {
       function resizePreviewFrame(){
         if (!frame) return;
 
+        var minHeight = 420;
+        var maxHeight = 900;
+        var paddingBuffer = 40;
+
         try {
           var doc = frame.contentDocument || (frame.contentWindow ? frame.contentWindow.document : null);
           if (!doc) return;
 
           var body = doc.body;
           var html = doc.documentElement;
-          var height = Math.max(
+
+          var contentHeight = Math.max(
             body ? body.scrollHeight : 0,
             body ? body.offsetHeight : 0,
             html ? html.scrollHeight : 0,
-            html ? html.offsetHeight : 0,
-            1200
+            html ? html.offsetHeight : 0
           );
 
-          frame.style.height = (height + 60) + 'px';
+          var targetHeight = Math.max(minHeight, contentHeight + paddingBuffer);
+          targetHeight = Math.min(maxHeight, targetHeight);
+
+          frame.style.height = targetHeight + 'px';
+
+          if (contentHeight + paddingBuffer > maxHeight) {
+            frame.setAttribute('scrolling', 'auto');
+            frame.style.overflow = 'auto';
+          } else {
+            frame.setAttribute('scrolling', 'no');
+            frame.style.overflow = 'hidden';
+          }
         } catch (e) {
-          frame.style.height = '1600px';
+          frame.style.height = '520px';
+          frame.setAttribute('scrolling', 'auto');
+          frame.style.overflow = 'auto';
         }
       }
 
@@ -11837,7 +11854,9 @@ public function handle_marketing_resubscribe() {
         if (desc) desc.textContent = '';
         if (frame) {
           frame.srcdoc = '';
-          frame.style.height = '1200px';
+          frame.style.height = '520px';
+          frame.setAttribute('scrolling', 'auto');
+          frame.style.overflow = 'auto';
         }
       }
 
