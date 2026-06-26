@@ -6741,37 +6741,129 @@ protected function mrm_get_google_service_account_json() {
     }
 
 
+    protected function mrm_safety_first_available_value( $row, $keys ) {
+        $row = is_array( $row ) ? $row : array();
+
+        foreach ( (array) $keys as $key ) {
+            if ( isset( $row[ $key ] ) && trim( (string) $row[ $key ] ) !== '' ) {
+                return trim( (string) $row[ $key ] );
+            }
+        }
+
+        return '';
+    }
+
+    protected function mrm_safety_phone_from_google_description( $lesson ) {
+        $lesson = is_array( $lesson ) ? $lesson : array();
+
+        $calendar_id = trim( (string) ( $lesson['instructor_calendar_id'] ?? '' ) );
+        $event_id    = trim( (string) ( $lesson['google_event_id'] ?? '' ) );
+
+        if ( $calendar_id === '' || $event_id === '' || ! $this->google_is_configured() ) {
+            return '';
+        }
+
+        $event = $this->google_get_event( $calendar_id, $event_id );
+
+        if ( is_wp_error( $event ) || ! is_array( $event ) ) {
+            return '';
+        }
+
+        $description = (string) ( $event['description'] ?? '' );
+
+        if ( preg_match( '/Phone:\s*([^\r\n<]+)/i', $description, $m ) ) {
+            return trim( wp_strip_all_tags( (string) $m[1] ) );
+        }
+
+        return '';
+    }
+
     protected function send_parent_no_show_alert_for_lesson( $lesson_id, $lesson, $reason = '' ) {
         $admin_email = $this->get_admin_notification_email();
+
         if ( ! is_email( $admin_email ) ) {
             $this->mrm_safety_log( 'parent_no_show_alert_skipped_missing_admin_email', array(
                 'lesson_id' => (int) $lesson_id,
             ) );
+
             return false;
         }
 
+        $lesson = is_array( $lesson ) ? $lesson : array();
         $context = $this->get_safety_lesson_context( $lesson );
+
+        $parent_name = $this->mrm_safety_first_available_value( $lesson, array(
+            'parent_name',
+            'student_name',
+            'client_name',
+            'billing_name',
+        ) );
+
+        $parent_email = sanitize_email(
+            $this->mrm_safety_first_available_value( $lesson, array(
+                'parent_email',
+                'student_email',
+                'client_email',
+                'billing_email',
+            ) )
+        );
+
+        $parent_phone = $this->mrm_safety_first_available_value( $lesson, array(
+            'parent_phone',
+            'student_phone',
+            'client_phone',
+            'billing_phone',
+            'phone',
+        ) );
+
+        if ( $parent_phone === '' ) {
+            $parent_phone = $this->mrm_safety_phone_from_google_description( $lesson );
+        }
+
+        $instructor_name = $this->mrm_safety_first_available_value( $lesson, array(
+            'instructor_name',
+            'teacher_name',
+        ) );
+
+        $instructor_email = sanitize_email(
+            $this->mrm_safety_first_available_value( $lesson, array(
+                'instructor_email',
+                'teacher_email',
+            ) )
+        );
+
+        $instructor_phone = $this->mrm_safety_first_available_value( $lesson, array(
+            'instructor_phone',
+            'teacher_phone',
+            'instructor_mobile',
+        ) );
 
         $details =
             '<div><strong>Lesson ID:</strong> ' . (int) $lesson_id . '</div>' .
-            '<div><strong>Student:</strong> ' . esc_html( (string) ( $lesson['student_name'] ?? '' ) ) . '</div>' .
-            '<div><strong>Instructor:</strong> ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . '</div>' .
-            '<div><strong>Time:</strong> ' . esc_html( (string) $context['start_label'] ) . '</div>' .
-            '<div><strong>Type:</strong> ' . esc_html( (string) $context['lesson_type_label'] ) . '</div>';
+            '<div><strong>Parent name:</strong> ' . esc_html( $parent_name ) . '</div>' .
+            '<div><strong>Parent email:</strong> ' . esc_html( $parent_email ) . '</div>' .
+            '<div><strong>Parent phone:</strong> ' . esc_html( $parent_phone ) . '</div>' .
+            '<div><strong>Instructor name:</strong> ' . esc_html( $instructor_name ) . '</div>' .
+            '<div><strong>Instructor email:</strong> ' . esc_html( $instructor_email ) . '</div>' .
+            '<div><strong>Instructor phone:</strong> ' . esc_html( $instructor_phone ) . '</div>' .
+            '<div><strong>Lesson time:</strong> ' . esc_html( (string) ( $context['start_label'] ?? '' ) ) . '</div>' .
+            '<div><strong>Lesson type:</strong> ' . esc_html( (string) ( $context['lesson_type_label'] ?? '' ) ) . '</div>';
 
         if ( $reason !== '' ) {
             $details .= '<div style="margin-top:12px;"><strong>Parent note:</strong><br>' . nl2br( esc_html( (string) $reason ) ) . '</div>';
         }
 
+        $subject = 'Safety alert - parent reported no-show';
+
         $html = $this->mrm_safety_email_wrap_html_blocks(
-            'Safety alert — parent reported instructor did not arrive',
+            $subject,
             '<p>A parent has reported that the instructor did not arrive for the scheduled lesson.</p>',
             $details
         );
 
         $sent = wp_mail(
             $admin_email,
-            'Safety alert — parent reported instructor did not arrive',
+            $subject,
             $html,
             array(
                 'Content-Type: text/html; charset=UTF-8',

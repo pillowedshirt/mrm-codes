@@ -12081,11 +12081,131 @@ public function handle_marketing_resubscribe() {
   }
 
 
-  private function mrm_profile_card_invite_email_parts($request_type, $label = '', $days_label = '', $admin_note = '') {
+  private function mrm_profile_card_piece_options() {
+    $products = $this->all_products();
+    $pieces = array();
+
+    foreach ((array)$products as $sku => $product) {
+      if (!is_array($product)) {
+        continue;
+      }
+
+      if ((string)($product['product_type'] ?? '') !== 'sheet_music') {
+        continue;
+      }
+
+      $sku = sanitize_text_field((string)$sku);
+
+      if ($sku === '' || $sku === $this->mrm_master_all_sheet_music_sku() || $sku === 'all-sheet-music') {
+        continue;
+      }
+
+      $parsed = $this->mrm_parse_piece_sku_labels($sku);
+
+      if (empty($parsed['is_piece']) || empty($parsed['piece_slug'])) {
+        continue;
+      }
+
+      $piece_slug = sanitize_title((string)$parsed['piece_slug']);
+      $piece_title = sanitize_text_field((string)($parsed['piece_title'] ?? ''));
+
+      if ($piece_slug === '' || $piece_title === '') {
+        continue;
+      }
+
+      $category = sanitize_key((string)($parsed['category'] ?? ''));
+      $url = $this->mrm_get_piece_page_url_from_sku($sku);
+
+      if (!isset($pieces[$piece_slug])) {
+        $pieces[$piece_slug] = array(
+          'sku' => $sku,
+          'title' => $piece_title,
+          'url' => $url,
+          'category' => $category,
+        );
+      }
+
+      if ($category === 'complete-package') {
+        $pieces[$piece_slug]['sku'] = $sku;
+        $pieces[$piece_slug]['url'] = $url;
+        $pieces[$piece_slug]['category'] = $category;
+      }
+    }
+
+    uasort($pieces, function($a, $b) {
+      return strcasecmp((string)($a['title'] ?? ''), (string)($b['title'] ?? ''));
+    });
+
+    return array_values($pieces);
+  }
+
+  private function mrm_profile_card_piece_select_html($selected_sku = '') {
+    $selected_sku = sanitize_text_field((string)$selected_sku);
+    $pieces = $this->mrm_profile_card_piece_options();
+
+    $html = '<select id="masterclass_piece_sku" name="masterclass_piece_sku">';
+    $html .= '<option value="">Select the piece being discussed</option>';
+
+    foreach ($pieces as $piece) {
+      $sku = sanitize_text_field((string)($piece['sku'] ?? ''));
+      $title = sanitize_text_field((string)($piece['title'] ?? ''));
+
+      if ($sku === '' || $title === '') {
+        continue;
+      }
+
+      $html .= '<option value="' . esc_attr($sku) . '"' . selected($selected_sku, $sku, false) . '>';
+      $html .= esc_html($title);
+      $html .= '</option>';
+    }
+
+    $html .= '</select>';
+
+    if (empty($pieces)) {
+      $html .= '<p class="description" style="color:#b32d2e;">No sheet music piece products were found in the Payment Hub product collection.</p>';
+    } else {
+      $html .= '<p class="description">Choose the piece that will be discussed in this masterclass. This will be used in the masterclass registration/reminder emails so students can access the correct piece.</p>';
+    }
+
+    return $html;
+  }
+
+  private function mrm_profile_card_piece_from_sku($sku) {
+    $sku = sanitize_text_field((string)$sku);
+
+    if ($sku === '') {
+      return array(
+        'sku' => '',
+        'title' => '',
+        'url' => '',
+      );
+    }
+
+    foreach ($this->mrm_profile_card_piece_options() as $piece) {
+      if ((string)($piece['sku'] ?? '') === $sku) {
+        return array(
+          'sku' => sanitize_text_field((string)($piece['sku'] ?? '')),
+          'title' => sanitize_text_field((string)($piece['title'] ?? '')),
+          'url' => esc_url_raw((string)($piece['url'] ?? '')),
+        );
+      }
+    }
+
+    return array(
+      'sku' => '',
+      'title' => '',
+      'url' => '',
+    );
+  }
+
+  private function mrm_profile_card_invite_email_parts($request_type, $label = '', $days_label = '', $admin_note = '', $selected_piece = array()) {
     $request_type = sanitize_key((string)$request_type);
     $label = trim((string)$label);
     $days_label = trim((string)$days_label);
     $admin_note = trim((string)$admin_note);
+    $selected_piece = is_array($selected_piece) ? $selected_piece : array();
+    $selected_piece_title = sanitize_text_field((string)($selected_piece['title'] ?? ''));
+    $selected_piece_url = esc_url_raw((string)($selected_piece['url'] ?? ''));
 
     if ($request_type === 'presenter_profile') {
       $title = 'Presenter Profile Card';
@@ -12099,6 +12219,13 @@ public function handle_marketing_resubscribe() {
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to submit details for an upcoming <strong>Masterclass Event</strong>.</p>';
       $details = '<p>This form collects the event-specific information needed to create or update the masterclass listing, including the event title, event description, session details, preparation notes, schedule details, presenter payout agreement, student-facing information, and any materials connected to the masterclass.</p>';
       $details .= '<div><strong>Request type:</strong> Masterclass Event Submission</div>';
+      if ($selected_piece_title !== '') {
+        $details .= '<div><strong>Piece being discussed:</strong> ' . esc_html($selected_piece_title) . '</div>';
+
+        if ($selected_piece_url !== '') {
+          $details .= '<div><strong>Piece page:</strong> <a href= . esc_url($selected_piece_url) . >' . esc_html($selected_piece_url) . '</a></div>';
+        }
+      }
     } else {
       $title = 'Instructor Profile Card';
       $subject = 'Low Brass Lessons instructor profile card';
@@ -12479,6 +12606,10 @@ public function handle_marketing_resubscribe() {
           </tr>
 
           <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_title">Masterclass Title</label></th><td><input type="text" id="event_title" name="event_title" class="regular-text"><p class="description">This title is preset by Low Brass Lessons and shown to the presenter on the proposal form.</p></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event">
+            <th scope="row"><label for="masterclass_piece_sku">Piece Being Discussed</label></th>
+            <td><?php echo $this->mrm_profile_card_piece_select_html(''); ?></td>
+          </tr>
           <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_start_time">Masterclass Start Time</label></th><td><input type="datetime-local" id="event_start_time" name="event_start_time"><p class="description">Preset start time for the event proposal.</p></td></tr>
           <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_end_time">Masterclass End Time</label></th><td><input type="datetime-local" id="event_end_time" name="event_end_time"><p class="description">Preset end time for the event proposal.</p></td></tr>
           <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_timezone">Masterclass Timezone</label></th><td><?php echo $this->mrm_profile_card_timezone_select_html('event_timezone', 'America/Phoenix'); ?><p class="description">Preset event timezone.</p></td></tr>
@@ -12648,6 +12779,9 @@ public function handle_marketing_resubscribe() {
       'admin_note' => $admin_note,
       'instructor_calendar_url' => esc_url_raw(wp_unslash($_POST['instructor_calendar_url'] ?? '')),
       'event_title' => sanitize_text_field(wp_unslash($_POST['event_title'] ?? '')),
+      'masterclass_piece_sku' => '',
+      'masterclass_piece_title' => '',
+      'masterclass_piece_url' => '',
       'event_start_time' => sanitize_text_field(wp_unslash($_POST['event_start_time'] ?? '')),
       'event_end_time' => sanitize_text_field(wp_unslash($_POST['event_end_time'] ?? '')),
       'event_timezone' => sanitize_text_field(wp_unslash($_POST['event_timezone'] ?? 'America/Phoenix')),
@@ -12661,6 +12795,11 @@ public function handle_marketing_resubscribe() {
     if ($request_type === 'presenter_event') {
       $admin_payload['presenter_payout_per_student_cents'] = $this->mrm_profile_card_money_to_cents($_POST['presenter_payout'] ?? '0');
       $admin_payload['event_price_cents'] = $this->mrm_profile_card_money_to_cents($_POST['event_price'] ?? '0');
+      $selected_piece = $this->mrm_profile_card_piece_from_sku(wp_unslash($_POST['masterclass_piece_sku'] ?? ''));
+
+      $admin_payload['masterclass_piece_sku'] = sanitize_text_field((string)($selected_piece['sku'] ?? ''));
+      $admin_payload['masterclass_piece_title'] = sanitize_text_field((string)($selected_piece['title'] ?? ''));
+      $admin_payload['masterclass_piece_url'] = esc_url_raw((string)($selected_piece['url'] ?? ''));
       if (trim((string)$admin_payload['event_title']) === '' || trim((string)$admin_payload['event_start_time']) === '' || trim((string)$admin_payload['event_end_time']) === '') {
         wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_event_details'));
         exit;
@@ -12683,7 +12822,12 @@ public function handle_marketing_resubscribe() {
       $request_type,
       $label,
       (string)$days . ' days',
-      $admin_note
+      $admin_note,
+      array(
+        'sku' => $admin_payload['masterclass_piece_sku'] ?? '',
+        'title' => $admin_payload['masterclass_piece_title'] ?? '',
+        'url' => $admin_payload['masterclass_piece_url'] ?? '',
+      )
     );
 
     $subject = (string)$invite_parts['subject'];
@@ -12800,8 +12944,28 @@ public function handle_marketing_resubscribe() {
         <input type="hidden" name="action" value="mrm_profile_card_submit"><input type="hidden" name="token" value="<?php echo esc_attr($token); ?>">
         <?php if ($request_type === 'presenter_event') : ?>
           <h2>Event Details</h2>
-          <div class="pay-box"><p><strong>Masterclass Title:</strong> <?php echo esc_html($admin_payload['event_title'] ?? ''); ?></p><p><strong>Start Time:</strong> <?php echo esc_html($admin_payload['event_start_time'] ?? ''); ?></p><p><strong>End Time:</strong> <?php echo esc_html($admin_payload['event_end_time'] ?? ''); ?></p><p><strong>Timezone:</strong> <?php echo esc_html($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?></p></div>
-          <input type="hidden" name="event_title" value="<?php echo esc_attr($admin_payload['event_title'] ?? ''); ?>"><input type="hidden" name="start_time" value="<?php echo esc_attr($admin_payload['event_start_time'] ?? ''); ?>"><input type="hidden" name="end_time" value="<?php echo esc_attr($admin_payload['event_end_time'] ?? ''); ?>"><input type="hidden" name="timezone" value="<?php echo esc_attr($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?>">
+          <div class="pay-box">
+            <p><strong>Masterclass Title:</strong> <?php echo esc_html($admin_payload['event_title'] ?? ''); ?></p>
+
+            <?php if (!empty($admin_payload['masterclass_piece_title'])) : ?>
+              <p><strong>Piece Being Discussed:</strong> <?php echo esc_html($admin_payload['masterclass_piece_title']); ?></p>
+              <?php if (!empty($admin_payload['masterclass_piece_url'])) : ?>
+                <p><strong>Piece Page:</strong> <a href="<?php echo esc_url($admin_payload['masterclass_piece_url']); ?>" target="_blank" rel="noopener"><?php echo esc_html($admin_payload['masterclass_piece_url']); ?></a></p>
+              <?php endif; ?>
+            <?php endif; ?>
+
+            <p><strong>Start Time:</strong> <?php echo esc_html($admin_payload['event_start_time'] ?? ''); ?></p>
+            <p><strong>End Time:</strong> <?php echo esc_html($admin_payload['event_end_time'] ?? ''); ?></p>
+            <p><strong>Timezone:</strong> <?php echo esc_html($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?></p>
+          </div>
+
+          <input type="hidden" name="event_title" value="<?php echo esc_attr($admin_payload['event_title'] ?? ''); ?>">
+          <input type="hidden" name="masterclass_piece_sku" value="<?php echo esc_attr($admin_payload['masterclass_piece_sku'] ?? ''); ?>">
+          <input type="hidden" name="masterclass_piece_title" value="<?php echo esc_attr($admin_payload['masterclass_piece_title'] ?? ''); ?>">
+          <input type="hidden" name="masterclass_piece_url" value="<?php echo esc_attr($admin_payload['masterclass_piece_url'] ?? ''); ?>">
+          <input type="hidden" name="start_time" value="<?php echo esc_attr($admin_payload['event_start_time'] ?? ''); ?>">
+          <input type="hidden" name="end_time" value="<?php echo esc_attr($admin_payload['event_end_time'] ?? ''); ?>">
+          <input type="hidden" name="timezone" value="<?php echo esc_attr($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?>">
           <label>Short Description *</label><p class="mrm-field-help">One sentence to describe your masterclass.</p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
           <label>Long Description *</label><p class="mrm-field-help">A longer description of the masterclass content, who it is for, and what students will learn.</p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
           <div class="pay-box"><p><strong>Student registration price:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['event_price_cents'] ?? 0)); ?></p><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled.</p><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the agreed event price and presenter earnings shown above.</span></label></div>
@@ -12887,7 +13051,18 @@ public function handle_marketing_resubscribe() {
     $payload = array();
 
     if ($request_type === 'presenter_event') {
-      $payload = array('event_title' => sanitize_text_field(wp_unslash($_POST['event_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'start_time' => sanitize_text_field(wp_unslash($_POST['start_time'] ?? '')), 'end_time' => sanitize_text_field(wp_unslash($_POST['end_time'] ?? '')), 'timezone' => sanitize_text_field(wp_unslash($_POST['timezone'] ?? 'America/Phoenix')), 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0);
+      $payload = array(
+        'event_title' => sanitize_text_field(wp_unslash($_POST['event_title'] ?? '')),
+        'masterclass_piece_sku' => sanitize_text_field(wp_unslash($_POST['masterclass_piece_sku'] ?? '')),
+        'masterclass_piece_title' => sanitize_text_field(wp_unslash($_POST['masterclass_piece_title'] ?? '')),
+        'masterclass_piece_url' => esc_url_raw(wp_unslash($_POST['masterclass_piece_url'] ?? '')),
+        'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')),
+        'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')),
+        'start_time' => sanitize_text_field(wp_unslash($_POST['start_time'] ?? '')),
+        'end_time' => sanitize_text_field(wp_unslash($_POST['end_time'] ?? '')),
+        'timezone' => sanitize_text_field(wp_unslash($_POST['timezone'] ?? 'America/Phoenix')),
+        'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0,
+      );
     } else {
       $instruments = array();
 
@@ -13267,6 +13442,9 @@ public function handle_marketing_resubscribe() {
 
     $data = array(
       'title' => $title,
+      'piece_sku' => sanitize_text_field($payload['masterclass_piece_sku'] ?? $admin_payload['masterclass_piece_sku'] ?? ''),
+      'piece_title' => sanitize_text_field($payload['masterclass_piece_title'] ?? $admin_payload['masterclass_piece_title'] ?? ''),
+      'piece_page_url' => esc_url_raw($payload['masterclass_piece_url'] ?? $admin_payload['masterclass_piece_url'] ?? ''),
       'description' => wp_kses_post($payload['short_description'] ?? ''),
       'short_description' => wp_kses_post($payload['short_description'] ?? ''),
       'long_description' => wp_kses_post($payload['long_description'] ?? ''),
@@ -13290,6 +13468,17 @@ public function handle_marketing_resubscribe() {
 
     if ($event_payout_column) {
       $data['presenter_payout_per_student_cents'] = max(0, absint($admin_payload['presenter_payout_per_student_cents'] ?? 0));
+    }
+
+    if (method_exists($this, 'mrm_profile_card_filter_data_for_table')) {
+      $data = $this->mrm_profile_card_filter_data_for_table($events_table, $data);
+    } else {
+      foreach (array('piece_sku', 'piece_title', 'piece_page_url') as $piece_column) {
+        $column_exists = $wpdb->get_var($wpdb->prepare("SHOW COLUMNS FROM {$events_table} LIKE %s", $piece_column));
+        if (!$column_exists && isset($data[$piece_column])) {
+          unset($data[$piece_column]);
+        }
+      }
     }
 
     $inserted = $wpdb->insert($events_table, $data);
