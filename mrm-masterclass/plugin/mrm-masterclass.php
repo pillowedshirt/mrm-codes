@@ -1961,24 +1961,26 @@ private function mrm_mc_email_template( $heading, $content_html ) {
 }
 
 private function mrm_mc_email_button_html( $url, $label ) {
-	if ( empty( $url ) || empty( $label ) ) {
-		return '';
-	}
+    $url   = esc_url( $url );
+    $label = trim( (string) $label );
 
-	return '<div style="text-align:center;margin:24px 0 0 0;">
-		<a href="' . esc_url( $url ) . '" style="display:inline-block;background:#111111;color:#ffffff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:10px;">' . esc_html( $label ) . '</a>
-	</div>';
+    if ( '' === $url || '' === $label ) {
+        return '';
+    }
+
+    return '<a href="' . $url . '" style="display:inline-block;background:#111111;color:#ffffff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:10px;border:1px solid #111111;text-align:center;min-width:150px;">' . esc_html( $label ) . '</a>';
 }
 
 
 private function mrm_mc_email_secondary_button_html( $url, $label ) {
-	$url = esc_url( $url );
+    $url   = esc_url( $url );
+    $label = trim( (string) $label );
 
-	if ( '' === $url ) {
-		return '';
-	}
+    if ( '' === $url || '' === $label ) {
+        return '';
+    }
 
-	return '<p style="margin:18px 0 0;"><a href="' . $url . '" style="display:inline-block;background:#ffffff;color:#111111;border:1px solid #111111;padding:13px 20px;border-radius:10px;text-decoration:none;font-weight:700;">' . esc_html( $label ) . '</a></p>';
+    return '<a href="' . $url . '" style="display:inline-block;background:#ffffff;color:#111111;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:10px;border:1px solid #111111;text-align:center;min-width:150px;">' . esc_html( $label ) . '</a>';
 }
 
 
@@ -1987,27 +1989,46 @@ private function mrm_mc_email_button_row_html( $buttons ) {
         return '';
     }
 
-    $html = '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:24px auto 0 auto;text-align:center;"><tr>';
+    $valid_buttons = array();
 
     foreach ( $buttons as $button ) {
         if ( ! is_array( $button ) ) {
             continue;
         }
 
-        $url     = (string) ( $button['url'] ?? '' );
-        $label   = (string) ( $button['label'] ?? '' );
-        $variant = (string) ( $button['variant'] ?? 'primary' );
+        $url     = trim( (string) ( $button['url'] ?? '' ) );
+        $label   = trim( (string) ( $button['label'] ?? '' ) );
+        $variant = trim( (string) ( $button['variant'] ?? 'primary' ) );
 
-        if ( trim( $url ) === '' || trim( $label ) === '' ) {
+        if ( '' === $url || '' === $label ) {
             continue;
         }
 
-        $html .= '<td align="center" valign="middle" style="padding:6px;">';
+        $valid_buttons[] = array(
+            'url'     => $url,
+            'label'   => $label,
+            'variant' => $variant,
+        );
+    }
 
-        if ( $variant === 'cancel' || $variant === 'secondary' || stripos( $label, 'cancel' ) !== false ) {
-            $html .= $this->mrm_mc_email_secondary_button_html( $url, $label );
+    if ( empty( $valid_buttons ) ) {
+        return '';
+    }
+
+    $html = '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:24px auto 0 auto;text-align:center;width:auto;"><tr>';
+
+    foreach ( $valid_buttons as $button ) {
+        $html .= '<td align="center" valign="middle" style="padding:6px;white-space:nowrap;">';
+
+        if (
+            $button['variant'] === 'cancel'
+            || $button['variant'] === 'secondary'
+            || stripos( $button['label'], 'cancel' ) !== false
+            || stripos( $button['label'], 'unable' ) !== false
+        ) {
+            $html .= $this->mrm_mc_email_secondary_button_html( $button['url'], $button['label'] );
         } else {
-            $html .= $this->mrm_mc_email_button_html( $url, $label );
+            $html .= $this->mrm_mc_email_button_html( $button['url'], $button['label'] );
         }
 
         $html .= '</td>';
@@ -2026,6 +2047,85 @@ private function mrm_mc_email_details_box_html( $details_html ) {
 	return '<div style="margin-top:16px;padding:16px;border:1px solid #ededed;border-radius:12px;background:#fafafa;font-size:14px;line-height:1.7;color:#222;">
 		' . $details_html . '
 	</div>';
+}
+
+private function mrm_mc_piece_url_for_event( $event ) {
+    if ( ! is_object( $event ) && ! is_array( $event ) ) {
+        return '';
+    }
+
+    $event_array = is_array( $event ) ? $event : get_object_vars( $event );
+
+    $direct_keys = array(
+        'piece_url',
+        'sheet_music_url',
+        'masterclass_piece_url',
+        'discussion_piece_url',
+        'repertoire_url',
+        'piece_page_url',
+    );
+
+    foreach ( $direct_keys as $key ) {
+        if ( ! empty( $event_array[ $key ] ) ) {
+            $url = esc_url_raw( (string) $event_array[ $key ] );
+            if ( $url !== '' ) {
+                return $url;
+            }
+        }
+    }
+
+    $page_id_keys = array(
+        'piece_page_id',
+        'sheet_music_page_id',
+        'discussion_piece_page_id',
+    );
+
+    foreach ( $page_id_keys as $key ) {
+        if ( ! empty( $event_array[ $key ] ) ) {
+            $permalink = get_permalink( absint( $event_array[ $key ] ) );
+            if ( $permalink ) {
+                return esc_url_raw( $permalink );
+            }
+        }
+    }
+
+    if ( ! empty( $event_array['metadata_json'] ) ) {
+        $meta = json_decode( (string) $event_array['metadata_json'], true );
+
+        if ( is_array( $meta ) ) {
+            foreach ( $direct_keys as $key ) {
+                if ( ! empty( $meta[ $key ] ) ) {
+                    $url = esc_url_raw( (string) $meta[ $key ] );
+                    if ( $url !== '' ) {
+                        return $url;
+                    }
+                }
+            }
+
+            foreach ( $page_id_keys as $key ) {
+                if ( ! empty( $meta[ $key ] ) ) {
+                    $permalink = get_permalink( absint( $meta[ $key ] ) );
+                    if ( $permalink ) {
+                        return esc_url_raw( $permalink );
+                    }
+                }
+            }
+        }
+    }
+
+    return (string) apply_filters( 'mrm_masterclass_piece_url_for_event', '', $event );
+}
+
+private function mrm_mc_piece_preparation_sentence_html( $event ) {
+    $piece_url = $this->mrm_mc_piece_url_for_event( $event );
+
+    $sentence = 'Have your camera and microphone working before the masterclass begins. Please remain muted during the masterclass unless called on by the presenter for questions or demonstration. Make sure you have access to the piece being discussed in the masterclass.';
+
+    if ( '' !== $piece_url ) {
+        $sentence .= ' <a href="' . esc_url( $piece_url ) . '">View the piece</a>.';
+    }
+
+    return '<p>' . $sentence . '</p>';
 }
 
 private function mrm_mc_registration_payment_breakdown_html( $registration, $event = null ) {
@@ -2110,76 +2210,35 @@ private function mrm_mc_redacted_email_for_log( $email ) {
 }
 
 public function handle_cross_plugin_email_test( $slug, $to, &$results ) {
-	// Sample URLs belong only to this explicitly invoked email-preview/test path.
-	$slug = sanitize_key( (string) $slug );
-	$to = sanitize_email( (string) $to );
-	if ( ! is_email( $to ) ) {
-		return;
-	}
+    $slug = sanitize_key( (string) $slug );
+    $to   = sanitize_email( (string) $to );
 
-	$event_title = 'Test Masterclass Event';
-	$presenter_name = 'Test Presenter';
-	$student_name = 'Test Student';
-	$time_label = 'January 15, 2027 at 4:00 PM MST';
-	$access_url = home_url( '/test-masterclass-access/' );
-	$cancel_url = home_url( '/test-masterclass-cancel/' );
-	$content = '';
-	$heading = '';
-	$subject = '';
+    if ( ! $to || ! is_email( $to ) ) {
+        $results[ $slug ] = false;
+        return;
+    }
 
-	if ( $slug === 'masterclass_registration_confirmation' ) {
-		$heading = 'Masterclass Registration Successful';
-		$subject = $heading;
-		$content = '<p>You have successfully registered for the masterclass ' . esc_html( $event->title ?? '' ) . ' with ' . esc_html( $presenter->name ?? ( $presenter->presenter_name ?? '' ) ) . '.</p>';
-		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) . '<br><strong>Registrant:</strong> ' . esc_html( $student_name ) );
-		$content .= $this->mrm_mc_email_button_html( $access_url, 'Join Masterclass' );
-		$content .= $this->mrm_mc_email_secondary_button_html( $cancel_url, 'Cancel Registration' );
-	} elseif ( $slug === 'masterclass_student_reminder' ) {
-		$heading = 'Masterclass Reminder';
-		$subject = 'Masterclass Reminder';
-		$content = '<p>This is a reminder for your upcoming masterclass.</p><p>Please use the protected access link below at the scheduled time.</p>';
-		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) );
-		$content .= $this->mrm_mc_email_button_html( $access_url, 'Join Masterclass' );
-	} elseif ( $slug === 'masterclass_presenter_confirmation' ) {
-		$heading = 'Masterclass Presenter Confirmation';
-		$subject = $heading;
-		$content = '<p>You have been assigned as the presenter for the following Low Brass Lessons Masterclass.</p>';
-		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) );
-		$content .= $this->mrm_mc_email_button_html( home_url( '/test-presenter-page/' ), 'View Presenter Page' );
-	} elseif ( $slug === 'masterclass_presenter_reminder' ) {
-		$heading = 'Masterclass Presenter Reminder';
-		$subject = $heading;
-		$content = '<p>This is a reminder that your Masterclass begins soon.</p>';
-		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Time:</strong> ' . esc_html( $time_label ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) );
-		$content .= $this->mrm_mc_email_button_html( home_url( '/test-presenter-page/' ), 'View Presenter Page' );
-	} elseif ( $slug === 'masterclass_feedback_request' ) {
-		$heading = 'Masterclass Feedback Request';
-		$subject = $heading;
-		$content = '<p>Thank you for attending. Please share feedback about your Masterclass experience.</p>';
-		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Presenter:</strong> ' . esc_html( $presenter_name ) );
-		$content .= $this->mrm_mc_email_button_html( home_url( '/test-masterclass-feedback/' ), 'Rate Your Masterclass' );
-	} elseif ( $slug === 'masterclass_event_updated' ) {
-		$heading = 'Masterclass Updated';
-		$subject = $heading;
-		$content = '<p>A Masterclass you registered for has been updated.</p>';
-		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Updated time:</strong> ' . esc_html( $time_label ) );
-		$content .= $this->mrm_mc_email_button_html( $access_url, 'Join Masterclass' );
-	} elseif ( $slug === 'masterclass_refund_completed' ) {
-		$heading = 'Masterclass Refund Completed';
-		$subject = $heading;
-		$content = '<p>Your masterclass refund has been submitted successfully. It may take 3 to 5 business days for the funds to return to your account.</p>';
-		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Refund amount:</strong> $25.00' );
-	} elseif ( $slug === 'masterclass_event_cancelled' ) {
-		$heading = 'Masterclass Cancelled';
-		$subject = $heading;
-		$content = '<p>A Masterclass you registered for has been cancelled.</p>';
-		$content .= $this->mrm_mc_email_details_box_html( '<strong>Masterclass:</strong> ' . esc_html( $event_title ) . '<br><strong>Refund status:</strong> Refunded' );
-	} else {
-		return;
-	}
+    $preview = $this->handle_cross_plugin_email_preview( array(), $slug );
 
-	$body = $this->mrm_mc_email_template( $heading, $content );
-	$results[ $slug ] = $this->mrm_mc_send_email_recorded( 'email_test_' . $slug, $to, '[TEST] ' . $subject, $body, null, null );
+    if ( ! is_array( $preview ) || empty( $preview['html'] ) ) {
+        $results[ $slug ] = false;
+        return;
+    }
+
+    $subject = sanitize_text_field( (string) ( $preview['subject'] ?? $slug ) );
+
+    if ( '' === $subject ) {
+        $subject = $slug;
+    }
+
+    $results[ $slug ] = $this->mrm_mc_send_email_recorded(
+        'email_test_' . $slug,
+        $to,
+        '[TEST] ' . $subject,
+        (string) $preview['html'],
+        null,
+        null
+    );
 }
 
 public function handle_cross_plugin_email_preview( $preview, $slug ) {
@@ -2189,7 +2248,7 @@ public function handle_cross_plugin_email_preview( $preview, $slug ) {
     $presenter_name = '';
     $student_name   = '';
     $time_label     = '';
-    $piece_url      = '';
+    $piece_url      = '#';
     $access_url     = home_url( '/masterclass-access/test-token/' );
     $cancel_url     = home_url( '/masterclass-cancel/test-token/' );
     $feedback_url   = home_url( '/masterclass-feedback/test-token/' );
@@ -2292,7 +2351,7 @@ private function mrm_mc_confirmation_email_body( $event, $presenter, $registrati
 	$cancel = esc_url( $this->mrm_mc_cancel_url_for_registration( $registration ) );
 
 	$intro = '<p>You have successfully registered for the masterclass ' . esc_html( $event->title ?? '' ) . ' with ' . esc_html( $presenter->name ?? ( $presenter->presenter_name ?? '' ) ) . '.</p>'
-		. '<p>Have your camera and microphone working before the masterclass begins. Please remain muted during the masterclass unless called on by the presenter for questions or demonstration. Make sure you have access to the piece being discussed in the masterclass.</p>';
+		. $this->mrm_mc_piece_preparation_sentence_html( $event );
 
 	$details = $this->mrm_mc_email_event_details_html( $event, $presenter, $registration )
 		. $this->mrm_mc_registration_payment_breakdown_html( $registration, $event );
@@ -2320,7 +2379,8 @@ private function mrm_mc_reminder_email_body( $event, $presenter, $registration, 
 	$cancel = esc_url( $this->mrm_mc_cancel_url_for_registration( $registration ) );
 
 	$intro = '<p>This is a reminder for your upcoming masterclass.</p>'
-		. '<p>Have your camera and microphone working before the masterclass begins. Please remain muted during the masterclass unless called on by the presenter for questions or demonstration. Make sure you have access to the piece being discussed in the masterclass.</p><p><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund.</strong></p>';
+		. $this->mrm_mc_piece_preparation_sentence_html( $event )
+		. '<p><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the masterclass time.</strong></p>';
 
 	$details = $this->mrm_mc_email_event_details_html( $event, $presenter, $registration );
 
@@ -2638,7 +2698,7 @@ private function mrm_mc_refund_registration( $registration, $event, $reason = 'e
 	$refund_status = sanitize_key( $refund_result['status'] ?? 'succeeded' );
 	$wpdb->insert( $refunds_table, $this->mrm_mc_filter_data_for_table( $refunds_table, array( 'event_id' => absint( $event->id ), 'registration_id' => absint( $registration->id ), 'payment_intent_id' => $payment_intent_id, 'refund_id' => $refund_id, 'amount_cents' => $amount_cents, 'status' => $refund_status, 'reason' => sanitize_key( $reason ), 'error_message' => '', 'created_at' => $this->now(), 'updated_at' => $this->now() ) ) );
 	$wpdb->update( $regs_table, array( 'payment_status' => 'refunded', 'updated_at' => $this->now() ), array( 'id' => absint( $registration->id ) ) );
-	$this->mrm_mc_send_email_recorded( 'refund_completed', $registration->email, 'Masterclass Refund Completed — ' . sanitize_text_field( $event->title ?? 'Masterclass' ), $this->mrm_mc_refund_completed_email_body( $event, $registration, $amount_cents ), $event->id, $registration->id );
+	$this->mrm_mc_send_email_recorded( 'refund_completed', $registration->email, 'Masterclass Refund Successful', $this->mrm_mc_refund_completed_email_body( $event, $registration, $amount_cents ), $event->id, $registration->id );
 	return array( 'refund_id' => $refund_id, 'status' => $refund_status, 'amount_cents' => $amount_cents );
 }
 
@@ -4020,7 +4080,7 @@ private function mrm_mc_send_feedback_requests() {
 		$sent = $this->mrm_mc_send_email_recorded(
 			'feedback_request',
 			$row->email,
-			'How Was Your Masterclass? — ' . $row->title,
+			'How was your masterclass?',
 			$body,
 			$row->event_id,
 			$row->id
@@ -4152,7 +4212,7 @@ public function mrm_mc_run_reminder_cron() {
 			$sent = $this->mrm_mc_send_email_recorded(
 				'reminder_1h',
 				$row->email,
-				'Your Masterclass Starts in One Hour — ' . $row->title,
+				'Masterclass Reminder',
 				$body,
 				$row->event_id,
 				$row->id
@@ -4224,7 +4284,7 @@ public function mrm_mc_run_reminder_cron() {
 			$sent = $this->mrm_mc_send_email_recorded(
 				'presenter_reminder_1h',
 				$event->presenter_email,
-				'Presenter Reminder: Your Masterclass Starts in One Hour — ' . $event->title,
+				'Upcoming Masterclass Reminder',
 				$body,
 				$event->id,
 				null
@@ -4658,7 +4718,7 @@ public function handle_cancel_event() {
 	if ( in_array( sanitize_key( $event->status ), array( 'deleted', 'cancelled' ), true ) ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_already_deleted' ); }
 	$paid_regs = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$regs_table} WHERE event_id = %d AND payment_status = 'paid'",$event_id));
 	$refund_success_count=0; $refund_failure_count=0;
-	foreach((array)$paid_regs as $registration){$refund_result=$this->mrm_mc_refund_registration($registration,$event,'event_cancelled'); if(is_wp_error($refund_result)){$refund_failure_count++;continue;} $refund_success_count++; $this->mrm_mc_send_email_recorded('event_cancelled',$registration->email,'Masterclass Cancelled — '.sanitize_text_field( $event->title ),$this->mrm_mc_event_cancelled_email_body( $event, $registration, absint( $registration->amount_cents ), 'refunded' ),$event->id,$registration->id);}
+	foreach((array)$paid_regs as $registration){$refund_result=$this->mrm_mc_refund_registration($registration,$event,'event_cancelled'); if(is_wp_error($refund_result)){$refund_failure_count++;continue;} $refund_success_count++; $this->mrm_mc_send_email_recorded('event_cancelled',$registration->email,'Masterclass Cancelled',$this->mrm_mc_event_cancelled_email_body( $event, $registration, absint( $registration->amount_cents ), 'refunded' ),$event->id,$registration->id);}
 	$google_cancel_error=''; if(!empty($event->google_event_id)){ $google_cancel=$this->mrm_mc_google_cancel_event( $event->google_event_id, $event->calendar_id ?? '' ); if(is_wp_error($google_cancel)){$google_cancel_error=$google_cancel->get_error_message();}}
 	$wpdb->update($events_table,array('status'=>'deleted','registration_open'=>0,'cancellation_reason'=>'Admin cancelled the Masterclass. If paid registrations were eligible for automatic refund under the event cancellation policy, refunds were attempted immediately through Stripe. If the event was outside the automatic refund window, it was removed from active listings for administrative follow-up.','google_last_error'=>$google_cancel_error,'updated_at'=>$this->now()),array('id'=>$event_id));
 	if($refund_failure_count>0){$this->mrm_mc_admin_notice_redirect(self::ADMIN_EVENTS_SLUG,'event_cancel_refund_failures',array('event_id'=>$event_id,'success'=>$refund_success_count,'failed'=>$refund_failure_count));}
