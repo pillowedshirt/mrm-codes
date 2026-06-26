@@ -6708,19 +6708,30 @@ protected function mrm_get_google_service_account_json() {
         return false;
     }
 
-    protected function get_safety_reminder_subject( $lesson ) {
+    protected function get_safety_reminder_subject( $lesson, $recipient_role = 'parent' ) {
         $lesson = is_array( $lesson ) ? $lesson : array();
 
-        $student_name     = trim( (string) ( $lesson['student_name'] ?? '' ) );
-        $instructor_name  = trim( (string) ( $lesson['instructor_name'] ?? '' ) );
-        $is_consultation  = $this->mrm_is_consultation_lesson( $lesson );
-        $context          = $this->get_safety_lesson_context( $lesson );
+        $recipient_role  = ( $recipient_role === 'instructor' ) ? 'instructor' : 'parent';
+        $student_name    = trim( (string) ( $lesson['student_name'] ?? '' ) );
+        $instructor_name = trim( (string) ( $lesson['instructor_name'] ?? '' ) );
+        $is_consultation = $this->mrm_is_consultation_lesson( $lesson );
+        $context         = $this->get_safety_lesson_context( $lesson, $recipient_role );
 
         if ( $is_consultation ) {
-            return 'Consultation confirmed';
+            return ( $recipient_role === 'instructor' )
+                ? 'You have a new consultation scheduled'
+                : 'Consultation confirmed';
         }
 
         $lesson_type = ! empty( $context['join_link'] ) ? 'online' : 'in-person';
+
+        if ( $recipient_role === 'instructor' ) {
+            if ( $student_name === '' ) {
+                $student_name = 'your student';
+            }
+
+            return 'Upcoming ' . $lesson_type . ' lesson with ' . $student_name;
+        }
 
         if ( $instructor_name === '' ) {
             $instructor_name = 'your instructor';
@@ -7324,7 +7335,7 @@ protected function mrm_get_google_service_account_json() {
 
                 $parent_sent = wp_mail(
                     $student_email,
-                    $this->get_safety_reminder_subject( $lesson ),
+                    $this->get_safety_reminder_subject( $lesson, 'parent' ),
                     $parent_html,
                     array(
                         'Content-Type: text/html; charset=UTF-8',
@@ -7422,7 +7433,7 @@ protected function mrm_get_google_service_account_json() {
 
                 $instructor_sent = wp_mail(
                     $instructor_email,
-                    $this->get_safety_reminder_subject( $lesson ),
+                    $this->get_safety_reminder_subject( $lesson, 'instructor' ),
                     $instructor_html,
                     array(
                         'Content-Type: text/html; charset=UTF-8',
