@@ -61,6 +61,12 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
     add_action('admin_post_mrm_profile_card_create_invite', array($this, 'handle_profile_card_create_invite'));
+    add_action('admin_post_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
+    add_action('admin_post_nopriv_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
+    add_action('admin_post_mrm_lesson_cancel_request', array($this, 'render_lesson_cancel_request'));
+    add_action('admin_post_nopriv_mrm_lesson_cancel_request', array($this, 'render_lesson_cancel_request'));
+    add_action('admin_post_mrm_lesson_cancel_submit', array($this, 'handle_lesson_cancel_submit'));
+    add_action('admin_post_nopriv_mrm_lesson_cancel_submit', array($this, 'handle_lesson_cancel_submit'));
     add_action('admin_post_mrm_profile_card_admin_action', array($this, 'handle_profile_card_admin_action'));
     add_action('admin_post_mrm_profile_card_download_private_file', array($this, 'handle_profile_card_download_private_file'));
     add_action('admin_post_mrm_profile_card_form', array($this, 'render_profile_card_public_form'));
@@ -82,6 +88,7 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_reset_stuck_autopay_lessons', array($this, 'cron_reset_stuck_autopay_lessons'));
     add_action('mrm_pay_hub_check_upcoming_payment_methods', array($this, 'cron_check_upcoming_payment_methods'));
     add_action('mrm_pay_hub_retry_sheet_music_subscriptions', array($this, 'cron_retry_sheet_music_subscriptions'));
+    add_action('mrm_sheet_music_subscription_renewal_reminder_cron', array($this, 'cron_send_sheet_music_subscription_renewal_reminders'));
 
     add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
@@ -131,6 +138,10 @@ class MRM_Payments_Hub_Single {
     if (!wp_next_scheduled('mrm_pay_hub_retry_sheet_music_subscriptions')) {
       wp_schedule_event(time() + 210, 'mrm_10min', 'mrm_pay_hub_retry_sheet_music_subscriptions');
     }
+
+    if (!wp_next_scheduled('mrm_sheet_music_subscription_renewal_reminder_cron')) {
+      wp_schedule_event(time() + 360, 'hourly', 'mrm_sheet_music_subscription_renewal_reminder_cron');
+    }
   }
 
   public function mrm_run_instructor_piece_access_sync() {
@@ -170,6 +181,10 @@ class MRM_Payments_Hub_Single {
 
     if (!wp_next_scheduled('mrm_pay_hub_retry_sheet_music_subscriptions')) {
       wp_schedule_event(time() + 210, 'mrm_10min', 'mrm_pay_hub_retry_sheet_music_subscriptions');
+    }
+
+    if (!wp_next_scheduled('mrm_sheet_music_subscription_renewal_reminder_cron')) {
+      wp_schedule_event(time() + 360, 'hourly', 'mrm_sheet_music_subscription_renewal_reminder_cron');
     }
   }
 
@@ -519,6 +534,7 @@ class MRM_Payments_Hub_Single {
       stripe_status VARCHAR(60) NOT NULL DEFAULT 'pending',
       current_period_start DATETIME DEFAULT NULL,
       current_period_end DATETIME DEFAULT NULL,
+      renewal_reminder_24h_sent_at DATETIME NULL,
       cancel_at_period_end TINYINT(1) NOT NULL DEFAULT 0,
       canceled_at DATETIME DEFAULT NULL,
       latest_invoice_id VARCHAR(255) DEFAULT NULL,
@@ -3440,89 +3456,70 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if ($lesson_id <= 0) return false;
 
     $student_email = sanitize_email((string)($lesson_row['student_email'] ?? ''));
+    $student_name = trim((string)($lesson_row['student_name'] ?? $lesson_row['client_name'] ?? ''));
+    $student_phone = trim((string)($lesson_row['student_phone'] ?? $lesson_row['client_phone'] ?? ''));
     $lesson_start = (string)($lesson_row['start_time'] ?? '');
     $lesson_length = (int)($lesson_row['lesson_length'] ?? 0);
     $mode_label = $this->mrm_format_lesson_mode_label((int)($lesson_row['is_online'] ?? 0));
-
     $instructor = $this->mrm_get_instructor_contact_from_id((int)($lesson_row['instructor_id'] ?? 0));
+    $instructor_name = (string)($instructor['name'] ?? '');
+    $instructor_email = (string)($instructor['email'] ?? '');
+    $instructor_phone = (string)($instructor['phone'] ?? '');
     $admin_email = $this->mrm_get_wp_admin_notification_email();
 
     $brand = trim((string)($snapshot['brand'] ?? ''));
     $last4 = trim((string)($snapshot['last4'] ?? ''));
     $exp_month = (int)($snapshot['exp_month'] ?? 0);
     $exp_year = (int)($snapshot['exp_year'] ?? 0);
-
-    $card_line = 'Saved payment method on file';
-    if ($brand !== '' || $last4 !== '') {
-      $card_line = trim($brand . ' ending in ' . $last4);
-    }
-    if ($exp_month > 0 && $exp_year > 0) {
-      $card_line .= sprintf(' (expires %02d/%04d)', $exp_month, $exp_year);
-    }
+    $card_line = ($brand !== '' || $last4 !== '') ? trim($brand . ' ending in ' . $last4) : 'Saved payment method on file';
+    if ($exp_month > 0 && $exp_year > 0) $card_line .= sprintf(' (expires %02d/%04d)', $exp_month, $exp_year);
 
     $lesson_line = trim(($lesson_length > 0 ? $lesson_length . '-minute ' : '') . $mode_label . ' lesson');
     $when_line = ($lesson_start !== '') ? $lesson_start : 'the scheduled lesson time';
+    $autopay_profile_id = (int)($lesson_row['autopay_profile_id'] ?? ($profile['id'] ?? 0));
+    $update_payment_url = $this->mrm_autopay_update_payment_url($lesson_id, $autopay_profile_id);
 
-    $student_subject = 'Action required: update your payment method before your lesson';
-    $student_intro = '<p>We are writing regarding your upcoming lesson.</p>';
-    $student_details =
-      '<p>Before this lesson can proceed, we need a confirmed payment method on file.</p>' .
-      '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' .
-      '<div><strong>Scheduled time:</strong> ' . esc_html($when_line) . '</div>' .
-      '<div><strong>Saved payment method:</strong> ' . esc_html($card_line) . '</div>' .
-      '<div><strong>Reason:</strong> ' . esc_html($reason_text) . '</div>' .
-      '<p style="margin-top:12px;">Please update or reconfirm your payment method as soon as possible. Until that is completed, your instructor has been asked to withhold the lesson.</p>';
+    $student_subject = 'Your Payment Method Requires Attention';
+    $student_intro = '<p>Your payment information is in need of an update. Please use this link to update your payment information for the auto-pay lessons, renewing at <strong>' . esc_html($when_line) . '</strong>.</p>';
+    $student_details = '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' . '<div><strong>Renewing at:</strong> ' . esc_html($when_line) . '</div>' . '<div><strong>Saved payment method:</strong> ' . esc_html($card_line) . '</div>' . '<div><strong>Reason:</strong> ' . esc_html($reason_text) . '</div>';
+    $student_buttons = array(array('url' => $update_payment_url, 'label' => 'Update Payment Information', 'variant' => 'primary'));
+    $student_after = $this->mrm_email_contact_support_html('If you have any questions please fill out our contact form.');
 
-    $instructor_subject = 'Payment method not confirmed — please withhold upcoming lesson';
-    $instructor_intro = '<p>A scheduled AutoPay lesson requires payment-method confirmation before instruction.</p>';
-    $instructor_details =
-      '<div><strong>Lesson ID:</strong> ' . esc_html((string)$lesson_id) . '</div>' .
-      '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' .
-      '<div><strong>Scheduled time:</strong> ' . esc_html($when_line) . '</div>' .
-      '<div><strong>Student email:</strong> ' . esc_html($student_email) . '</div>' .
-      '<div><strong>Issue:</strong> ' . esc_html($reason_text) . '</div>' .
-      '<p style="margin-top:12px;">Please withhold providing this lesson until the payment method has been updated and confirmed.</p>';
+    $instructor_subject = 'Payment method needs attention for ' . $student_name;
+    $instructor_heading = 'Please withhold this lesson ' . $when_line . ' until payment method has been updated';
+    $instructor_intro = '<p>Your upcoming AutoPay lesson with <strong>' . esc_html($student_name) . '</strong> requires an updated payment method before the lesson can be processed. Please withhold lesson services until this has been confirmed.</p>';
+    $instructor_details = '<div><strong>Student:</strong> ' . esc_html($student_name) . '</div>' . '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' . '<div><strong>Scheduled time:</strong> ' . esc_html($when_line) . '</div>' . '<p style="margin-top:12px;">This client has also received a request to update their payment information. Feel free to connect and check in with them.</p>' . '<div><strong>Client email:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Client phone number:</strong> ' . esc_html($student_phone) . '</div>';
 
-    $admin_subject = 'AutoPay payment method attention needed for upcoming lesson';
-    $admin_intro = '<p>An upcoming AutoPay lesson needs payment-method attention.</p>';
-    $admin_details =
-      '<div><strong>Lesson ID:</strong> ' . esc_html((string)$lesson_id) . '</div>' .
-      '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' .
-      '<div><strong>Scheduled time:</strong> ' . esc_html($when_line) . '</div>' .
-      '<div><strong>Student email:</strong> ' . esc_html($student_email) . '</div>' .
-      '<div><strong>Instructor:</strong> ' . esc_html((string)($instructor['name'] ?? '')) . '</div>' .
-      '<div><strong>Instructor email:</strong> ' . esc_html((string)($instructor['email'] ?? '')) . '</div>' .
-      '<div><strong>Saved payment method:</strong> ' . esc_html($card_line) . '</div>' .
-      '<div><strong>Issue:</strong> ' . esc_html($reason_text) . '</div>' .
-      '<p style="margin-top:12px;">Instructor notification has been sent. Please manage any additional communication as needed.</p>';
+    $admin_subject = 'Payment information update required for ' . $student_name;
+    $admin_intro = '<p>The system detected a need for payment information to be updated for <strong>' . esc_html($student_name) . '</strong> before their upcoming lesson time with <strong>' . esc_html($instructor_name) . '</strong> and <strong>' . esc_html($when_line) . '</strong>.</p>';
+    $admin_details = '<div><strong>Student:</strong> ' . esc_html($student_name) . '</div>' . '<div><strong>Student email:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Student phone:</strong> ' . esc_html($student_phone) . '</div>' . '<div><strong>Instructor:</strong> ' . esc_html($instructor_name) . '</div>' . '<div><strong>Instructor email:</strong> ' . esc_html($instructor_email) . '</div>' . '<div><strong>Instructor phone:</strong> ' . esc_html($instructor_phone) . '</div>' . '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' . '<div><strong>Lesson day and time:</strong> ' . esc_html($when_line) . '</div>' . '<div><strong>Stripe customer profile:</strong> <a href="' . esc_url($update_payment_url) . '">' . esc_html($update_payment_url) . '</a></div>' . '<div><strong>Issue:</strong> ' . esc_html($reason_text) . '</div>';
 
-    $headers = array(
-      'Content-Type: text/html; charset=UTF-8',
-      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
-    );
-
-    $contact_url = $this->mrm_get_contact_url();
-
-    $student_sent = false;
-    if ($student_email && is_email($student_email)) {
-      $student_html = $this->mrm_email_wrap_html('Payment method confirmation needed', $student_intro, $student_details, $contact_url, 'Contact Support');
-      $student_sent = wp_mail($student_email, $student_subject, $student_html, $headers);
-    }
-
-    $instructor_sent = false;
-    $instructor_email = sanitize_email((string)($instructor['email'] ?? ''));
-    if ($instructor_email && is_email($instructor_email)) {
-      $instructor_html = $this->mrm_email_wrap_html('Instructor action required', $instructor_intro, $instructor_details, $contact_url, 'Contact Support');
-      $instructor_sent = wp_mail($instructor_email, $instructor_subject, $instructor_html, $headers);
-    }
-
-    $admin_sent = false;
-    if ($admin_email && is_email($admin_email)) {
-      $admin_html = $this->mrm_email_wrap_html('Admin awareness', $admin_intro, $admin_details, $contact_url, 'Contact Support');
-      $admin_sent = wp_mail($admin_email, $admin_subject, $admin_html, $headers);
-    }
-
+    $headers = array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>');
+    $student_sent = ($student_email && is_email($student_email)) ? wp_mail($student_email, $student_subject, $this->mrm_email_wrap_html('Update your payment information', $student_intro, $student_details, $student_buttons, '', $student_after), $headers) : false;
+    $instructor_sent = ($instructor_email && is_email($instructor_email)) ? wp_mail($instructor_email, $instructor_subject, $this->mrm_email_wrap_html($instructor_heading, $instructor_intro, $instructor_details, '', ''), $headers) : false;
+    $admin_sent = ($admin_email && is_email($admin_email)) ? wp_mail($admin_email, $admin_subject, $this->mrm_email_wrap_html('Payment method update needed', $admin_intro, $admin_details, '', ''), $headers) : false;
     return ($student_sent || $instructor_sent || $admin_sent);
+  }
+
+  private function mrm_signed_lesson_action_url($action, $lesson_id, $profile_id = 0) {
+    $lesson_id = absint($lesson_id); $profile_id = absint($profile_id); $expires = time() + (7 * DAY_IN_SECONDS);
+    $payload = $action . '|' . $lesson_id . '|' . $profile_id . '|' . $expires;
+    $sig = hash_hmac('sha256', $payload, wp_salt('auth'));
+    return add_query_arg(array('action'=>$action,'lesson_id'=>$lesson_id,'profile_id'=>$profile_id,'expires'=>$expires,'sig'=>$sig), admin_url('admin-post.php'));
+  }
+  private function mrm_verify_signed_lesson_action($action, $lesson_id, $profile_id, $expires, $sig) {
+    $lesson_id=absint($lesson_id); $profile_id=absint($profile_id); $expires=absint($expires); $sig=(string)$sig;
+    if ($lesson_id <= 0 || $expires < time() || $sig === '') return false;
+    return hash_equals(hash_hmac('sha256', $action . '|' . $lesson_id . '|' . $profile_id . '|' . $expires, wp_salt('auth')), $sig);
+  }
+  private function mrm_autopay_update_payment_url($lesson_id, $profile_id) { return $this->mrm_signed_lesson_action_url('mrm_autopay_update_payment', $lesson_id, $profile_id); }
+  public function handle_autopay_update_payment() {
+    $lesson_id=absint($_GET['lesson_id'] ?? 0); $profile_id=absint($_GET['profile_id'] ?? 0); $expires=absint($_GET['expires'] ?? 0); $sig=sanitize_text_field((string)($_GET['sig'] ?? ''));
+    if (!$this->mrm_verify_signed_lesson_action('mrm_autopay_update_payment',$lesson_id,$profile_id,$expires,$sig)) wp_die('This payment update link is invalid or expired.', 'Payment Update', array('response'=>403));
+    $profile=$this->mrm_get_autopay_profile($profile_id); if (!$profile || empty($profile['customer_id'])) wp_die('Unable to find the AutoPay customer profile.', 'Payment Update', array('response'=>404));
+    $portal=$this->stripe_create_billing_portal_session((string)$profile['customer_id'], home_url('/contact/'));
+    if (is_wp_error($portal) || empty($portal['url'])) wp_die('Unable to open the Stripe payment update page right now.', 'Payment Update', array('response'=>500));
+    wp_redirect((string)$portal['url']); exit;
   }
 
   private function mrm_ensure_customer_payment_method_ready($customer_id, $payment_method_id) {
@@ -4606,14 +4603,37 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   private function mrm_get_contact_url(): string {
-    // Prefer a real Contact page if it exists, otherwise fallback to an on-page anchor.
-    $page = get_page_by_path('contact');
-    $url = ($page && !empty($page->ID)) ? get_permalink($page->ID) : home_url('/#contact');
-
-    // Allow you to override later without editing plugin code:
-    // add_filter('mrm_contact_url', fn($u)=>'https://example.com/contact');
+    $url = home_url('/contact/');
     $url = (string) apply_filters('mrm_contact_url', $url);
     return $url;
+  }
+
+  private function mrm_email_button_html($url, $label, $variant = 'primary') {
+    $url = esc_url((string)$url);
+    $label = trim((string)$label);
+    if ($url === '' || $label === '') return '';
+    $is_cancel = ($variant === 'cancel' || stripos($label, 'cancel') !== false || stripos($label, 'unable') !== false || $variant === 'secondary');
+    $bg = $is_cancel ? '#ffffff' : '#111111';
+    $color = $is_cancel ? '#111111' : '#ffffff';
+    $border = '1px solid #111111';
+    return '<a href="' . $url . '" style="display:inline-block;background:' . esc_attr($bg) . ';color:' . esc_attr($color) . ';border:' . esc_attr($border) . ';text-decoration:none;font-weight:700;padding:13px 20px;border-radius:10px;margin:6px;text-align:center;min-width:150px;">' . esc_html($label) . '</a>';
+  }
+
+  private function mrm_email_button_row_html($buttons) {
+    if (!is_array($buttons) || empty($buttons)) return '';
+    $html = '<div style="text-align:center;margin:24px 0 0 0;">';
+    foreach ($buttons as $button) {
+      if (!is_array($button)) continue;
+      $html .= $this->mrm_email_button_html((string)($button['url'] ?? ''), (string)($button['label'] ?? ''), (string)($button['variant'] ?? 'primary'));
+    }
+    return $html . '</div>';
+  }
+
+  private function mrm_email_contact_support_html($prefix_sentence = '') {
+    $html = '';
+    if (trim((string)$prefix_sentence) !== '') $html .= '<p style="margin-top:18px;text-align:center;">' . esc_html($prefix_sentence) . '</p>';
+    $html .= $this->mrm_email_button_row_html(array(array('url' => $this->mrm_get_contact_url(), 'label' => 'Contact Support', 'variant' => 'primary')));
+    return $html;
   }
 
 
@@ -4658,7 +4678,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $html .= '<li>Use your purchase email address to request your one-time access code if prompted.</li>';
     $html .= '<li>Open the available materials for the pieces included in your subscription.</li>';
     $html .= '</ol>';
-    $html .= '<div style="margin-top:12px;">Subscription access includes downloadable PDF files. Audio files are streaming only. To download audio files, the customer must purchase the piece separately.</div>';
+    $html .= '<div style="margin-top:12px;">Subscription access includes downloadable PDF files. Audio files are streaming only. To download audio files, customers must purchase the piece separately.</div>';
 
     return $html;
   }
@@ -4722,12 +4742,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
 
     $cta_html = '';
-    if ($cta_url && $cta_label) {
-      $cta_html = '<div style="text-align:center;margin:24px 0 0 0;">
-      <a href="' . esc_url($cta_url) . '" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:13px 20px;border-radius:10px;">
-        ' . esc_html($cta_label) . '
-      </a>
-    </div>';
+    if (is_array($cta_url)) {
+      $cta_html = $this->mrm_email_button_row_html($cta_url);
+    } elseif ($cta_url && $cta_label) {
+      $cta_html = $this->mrm_email_button_row_html(array(array('url' => $cta_url, 'label' => $cta_label, 'variant' => (stripos((string)$cta_label, 'cancel') !== false ? 'cancel' : 'primary'))));
     }
 
     $after_cta_html = (string)$after_cta_html;
@@ -5734,7 +5752,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     $table = $wpdb->prefix . 'mrm_instructors';
     $row = $wpdb->get_row($wpdb->prepare(
-      "SELECT name,email FROM {$table} WHERE id=%d LIMIT 1",
+      "SELECT name,email,phone FROM {$table} WHERE id=%d LIMIT 1",
       $iid
     ), ARRAY_A);
 
@@ -5742,6 +5760,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return array(
       'name'  => (string)($row['name'] ?? ''),
       'email' => (string)($row['email'] ?? ''),
+      'phone' => (string)($row['phone'] ?? ''),
     );
   }
 
@@ -5754,7 +5773,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $table = $wpdb->prefix . 'mrm_lessons';
     $row = $wpdb->get_row(
       $wpdb->prepare(
-        "SELECT id, series_id, instructor_id, lesson_length, is_online, autopay_profile_id, payment_mode, start_time
+        "SELECT id, series_id, instructor_id, lesson_length, is_online, autopay_profile_id, payment_mode, start_time, reminder_token, google_meet_url
          FROM {$table}
          WHERE id = %d
          LIMIT 1",
@@ -5977,197 +5996,57 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     $fmt_money = function($c){ return '$' . number_format(((int)$c)/100, 2); };
 
-    $title = 'Purchase Confirmation';
-    $intro = '<p>We’ve received your payment successfully.</p>';
-
-    $details = '';
-    if ($product_type === 'sheet_music' && !empty($piece_labels['is_piece'])) {
-      $details .= '<div><strong>Piece:</strong> ' . esc_html($piece_labels['piece_title']) . '</div>';
-      $details .= '<div><strong>Category:</strong> ' . esc_html($piece_labels['category_label']) . '</div>';
-    } elseif ($sku && $product_type !== 'lesson') {
-      $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
-    } else {
-      $details .= '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
-    }
-    if (!empty($order_row['id'])) {
-      $details .= '<div><strong>Order #:</strong> ' . esc_html((string)$order_row['id']) . '</div>';
-    }
-    if ($pi_id) {
-      $details .= '<div><strong>Payment ID:</strong> ' . esc_html($pi_id) . '</div>';
-    }
-
-    $details .= $this->mrm_purchase_receipt_payment_breakdown_html($meta, $amount_cents, $product_type);
-
-    if ($product_type === 'lesson') {
-      $lesson_id = (int)($meta['mrm_lesson_id'] ?? 0);
-      $lesson_row = $this->mrm_get_lesson_row_for_receipt($lesson_id);
-
-      $autopay_profile_id = (int)($meta['mrm_autopay_profile_id'] ?? 0);
-      if ($autopay_profile_id <= 0) {
-        $autopay_profile_id = (int)($lesson_row['autopay_profile_id'] ?? 0);
-      }
-      $autopay_profile = $autopay_profile_id > 0 ? $this->mrm_get_autopay_profile($autopay_profile_id) : array();
-
-      $iid = (int)($meta['mrm_instructor_id'] ?? 0);
-      if ($iid <= 0) {
-        $iid = (int)($lesson_row['instructor_id'] ?? 0);
-      }
-      $instructor = $iid ? $this->mrm_get_instructor_contact_from_id($iid) : array('name'=>'','email'=>'');
-
-      $len = trim((string)($meta['mrm_lesson_length'] ?? ''));
-      if ($len === '') {
-        $len = (string)($lesson_row['lesson_length'] ?? '');
-      }
-
-      $raw_mode = trim((string)($meta['mrm_lesson_mode'] ?? ''));
-      if ($raw_mode === '') {
-        $is_online = (int)($lesson_row['is_online'] ?? 0);
-        $raw_mode = $is_online ? 'Online' : 'In Person';
-      }
-
-      $mode_lower = strtolower($raw_mode);
-      if (in_array($mode_lower, array('online', 'virtual'), true)) {
-        $mode_label = 'Online';
-      } elseif (in_array($mode_lower, array('in person', 'in-person', 'inperson'), true)) {
-        $mode_label = 'In Person';
-      } else {
-        $mode_label = ucwords(trim($raw_mode));
-      }
-
-      $lesson_count_raw = trim((string)($meta['mrm_lesson_count'] ?? ''));
-      $prepay = trim((string)($meta['mrm_prepay'] ?? ''));
-      $autopay = trim((string)($meta['mrm_autopay'] ?? ''));
-      $repeat_duration = trim((string)($meta['mrm_repeat_duration'] ?? ''));
-      $plan_kind = trim((string)($meta['mrm_plan_kind'] ?? ''));
-      if ($plan_kind === '' && is_array($autopay_profile)) {
-        $plan_kind = (string)($autopay_profile['plan_kind'] ?? '');
-      }
-
-      $authorized_lesson_count = (int)($meta['mrm_authorized_lesson_count'] ?? 0);
-      if ($authorized_lesson_count <= 0 && is_array($autopay_profile)) {
-        $authorized_lesson_count = (int)($autopay_profile['authorized_lesson_count'] ?? 0);
-      }
-
-      $is_autopay_followup_receipt = ($sku === 'autopay_lesson_charge');
-      $is_autopay_initial_receipt = ($autopay === 'yes' && $sku !== 'autopay_lesson_charge');
-      $is_autopay_receipt = ($is_autopay_initial_receipt || $is_autopay_followup_receipt);
-
-      $lesson_sequence = 0;
-      if ($is_autopay_receipt && !empty($lesson_row)) {
-        $lesson_sequence = (int)$this->mrm_get_lesson_sequence_for_receipt($lesson_row);
-      }
-
-      if ($lesson_sequence <= 0 && $is_autopay_initial_receipt) {
-        $lesson_sequence = 1;
-      }
-
-      $count_display = '';
-      if ($is_autopay_receipt) {
-        if ($repeat_duration === 'indefinitely' || $plan_kind === 'indefinite') {
-          $count_display = ($lesson_sequence > 0)
-            ? ($lesson_sequence . ' of Indefinite')
-            : 'Indefinite';
-        } elseif ($authorized_lesson_count > 0) {
-          $current_display = ($lesson_sequence > 0) ? $lesson_sequence : 1;
-          $count_display = $current_display . ' of ' . $authorized_lesson_count;
-        } elseif ($lesson_count_raw !== '') {
-          $current_display = ($lesson_sequence > 0) ? $lesson_sequence : 1;
-          $count_display = $current_display . ' of ' . $lesson_count_raw;
-        }
-      } else {
-        if ($lesson_count_raw !== '') {
-          $count_display = $lesson_count_raw;
-        }
-      }
-
-      $plan_display = 'Prepay';
-      if ($is_autopay_receipt) {
-        $plan_display = 'Auto';
-      } elseif ($prepay === 'yes') {
-        $plan_display = 'Prepay';
-      }
-
-      $lesson_subject_bits = array();
-      if ($len !== '') $lesson_subject_bits[] = $len . '-minute';
-      if ($mode_label !== '') $lesson_subject_bits[] = $mode_label;
-      $lesson_subject_bits[] = 'Lesson';
-      $lesson_subject_label = implode(' ', $lesson_subject_bits);
-
-      $details .= '<div style="margin-top:12px;"><strong>Lesson details</strong></div>';
-      if ($len !== '') {
-        $details .= '<div>Length: ' . esc_html($len) . ' minutes</div>';
-      }
-      if ($mode_label !== '') {
-        $details .= '<div>Mode: ' . esc_html($mode_label) . '</div>';
-      }
-      if ($count_display !== '') {
-        $details .= '<div>Count: ' . esc_html($count_display) . '</div>';
-      }
-      $details .= '<div>Plan: ' . esc_html($plan_display) . '</div>';
-
-      $receipt_lesson_context = $this->mrm_get_receipt_lesson_online_context($lesson_row);
-
-      if (!empty($receipt_lesson_context['join_link'])) {
-        $details .= '<div style="margin-top:12px;"><strong>Lesson Link:</strong> <a href="' . esc_url((string)$receipt_lesson_context['join_link']) . '">' . esc_html((string)$receipt_lesson_context['join_link']) . '</a></div>';
-      }
-
-      if (!empty($receipt_lesson_context['format_note'])) {
-        $details .= '<div style="margin-top:12px;">' . esc_html((string)$receipt_lesson_context['format_note']) . '</div>';
-      }
-
-      if ($is_autopay_initial_receipt) {
-        $details .= '<div style="margin-top:12px;">This message confirms that we have received payment for your first lesson. Any sheet music subscription selected during checkout will be confirmed separately in its own email.</div>';
-      }
-
-      if ($is_autopay_followup_receipt) {
-        $details .= '<div style="margin-top:12px;">This message confirms your automatic payment for this lesson. Subscription billing, if active, is confirmed separately in its own email.</div>';
-      }
-
-      $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel? Contact your instructor.</strong></div>';
-
-      if (!empty($instructor['name'])) {
-        $details .= '<div style="margin-top:6px;">' . esc_html($instructor['name']) . '</div>';
-      }
-      if (!empty($instructor['email'])) {
-        $details .= '<div><a href="mailto:' . esc_attr($instructor['email']) . '">' . esc_html($instructor['email']) . '</a></div>';
-      }
-
-      if ($is_autopay_receipt) {
-        $label = 'AutoPay for ' . $lesson_subject_label;
-      } else {
-        $label = $lesson_subject_label;
-      }
-    }
-
-    if ($product_type === 'sheet_music') {
-      $piece_page_url = $this->mrm_get_piece_page_url_from_sku($sku);
-
-      $details .= '<div style="margin-top:12px;"><strong>How To Access Your Purchase</strong></div>';
-      $details .= '<ol style="margin:8px 0 0 18px;padding:0;">';
-
-      if ($piece_page_url !== '') {
-        $details .= '<li>Go to your purchased piece page here: <a href="' . esc_url($piece_page_url) . '">' . esc_html($piece_page_url) . '</a>.</li>';
-      } else {
-        $details .= '<li>Return to the piece page on the website.</li>';
-      }
-
-      $details .= '<li>Click the access button for your purchased category.</li>';
-      $details .= '<li>Enter your purchase email address.</li>';
-      $details .= '<li>Request your one-time access code and enter it to open the content.</li>';
-      $details .= '</ol>';
-    }
-
     $contact_url = $this->mrm_get_contact_url();
+    $piece_page_url = $product_type === 'sheet_music' ? $this->mrm_get_piece_page_url_from_sku($sku) : '';
+    $lesson_id = (int)($meta['mrm_lesson_id'] ?? 0);
+    $lesson_row = $product_type === 'lesson' ? $this->mrm_get_lesson_row_for_receipt($lesson_id) : array();
+    $iid = (int)($meta['mrm_instructor_id'] ?? 0);
+    if ($iid <= 0 && !empty($lesson_row['instructor_id'])) $iid = (int)$lesson_row['instructor_id'];
+    $instructor = $iid ? $this->mrm_get_instructor_contact_from_id($iid) : array('name' => '', 'email' => '');
+    $instructor_name = trim((string)($instructor['name'] ?? ''));
+    $is_online_lesson = !empty($lesson_row['is_online']);
+    $join_url = '';
+    if (!empty($lesson_row['reminder_token'])) $join_url = add_query_arg(array('token' => (string)$lesson_row['reminder_token']), home_url('/join-online/'));
+    if ($join_url === '' && !empty($lesson_row['google_meet_url'])) $join_url = (string)$lesson_row['google_meet_url'];
+    $cancel_url = $lesson_id > 0 ? $this->mrm_lesson_cancel_url($lesson_id) : '';
+    $has_sheet_music_addon = ((int)($meta['mrm_addon_amount_cents'] ?? 0) > 0);
 
     if ($product_type === 'sheet_music') {
-      $details .= '<div style="margin-top:12px;"><strong>Need assistance or would like to request a refund?</strong></div>';
-    } elseif ($product_type !== 'lesson') {
-      $details .= '<div style="margin-top:12px;"><strong>Need changes or want to cancel?</strong></div>';
+      $title = 'Purchase Confirmation';
+      $subject = 'Purchase Confirmation - ' . $label;
+      $intro = '<p>We’ve received your payment successfully.</p>';
+      $details = '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
+      $details .= $this->mrm_purchase_receipt_payment_breakdown_html($meta, $amount_cents, $product_type);
+      $details .= '<div style="margin-top:12px;"><strong>How to access your sheet music:</strong></div><ol style="margin:8px 0 0 18px;padding:0;"><li>Return to the piece page on the website.</li><li>Click the access button for your purchased category.</li><li>Enter your purchase email address.</li><li>Request your one-time access code and enter it to open the content.</li></ol>';
+      $buttons = array();
+      if ($piece_page_url !== '') $buttons[] = array('url' => $piece_page_url, 'label' => 'View Your Piece', 'variant' => 'primary');
+      $buttons[] = array('url' => $contact_url, 'label' => 'Contact Support', 'variant' => 'primary');
+      $html = $this->mrm_email_wrap_html($title, $intro, $details, $buttons, '');
+    } elseif ($product_type === 'lesson') {
+      $lesson_type_label = $is_online_lesson ? 'online lesson' : 'in-person lesson';
+      $title = 'Purchase Confirmation';
+      $subject = 'Purchase Confirmation - ' . ucwords($lesson_type_label) . ' with ' . $instructor_name;
+      $intro = '<p>We’ve received your payment successfully.</p>';
+      $details = '<div><strong>Item:</strong> ' . esc_html($lesson_type_label . ' with ' . $instructor_name) . '</div>';
+      $details .= $has_sheet_music_addon ? $this->mrm_purchase_receipt_payment_breakdown_html($meta, $amount_cents, $product_type) : '<div><strong>Total paid:</strong> ' . esc_html($this->mrm_receipt_format_money($amount_cents)) . '</div>';
+      if ($is_online_lesson) {
+        $details .= '<div style="margin-top:14px;"><strong>How to access online lessons</strong></div><p>Your meeting link will become available 10 minutes before your lesson time and will remain available until 10 minutes after your lesson time. Please make sure your camera, microphone, and internet connection are working before joining the call.</p>';
+      } else {
+        $details .= '<div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p><div style="margin-top:14px;"><strong>Lessons outside the home</strong></div><p>If the lesson will take place at a school, church, or other community location, please complete the required approval form before the lesson begins.</p><p><a href="https://www.docusign.com/" target="_blank" rel="noopener">Placeholder DocuSign location approval link</a></p>';
+      }
+      $details .= '<p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p>';
+      if ($has_sheet_music_addon) $details .= '<div style="margin-top:14px;"><strong>How to access your sheet music</strong></div><p>Please check your email for the subscription confirmation.</p>';
+      $buttons = array();
+      if ($join_url !== '') $buttons[] = array('url' => $join_url, 'label' => 'Join Lesson', 'variant' => 'primary');
+      if ($cancel_url !== '') $buttons[] = array('url' => $cancel_url, 'label' => 'Cancel Lesson', 'variant' => 'cancel');
+      $html = $this->mrm_email_wrap_html($title, $intro, $details, $buttons, '');
+    } else {
+      $title = 'Purchase Confirmation';
+      $subject = 'Purchase Confirmation - ' . $label;
+      $intro = '<p>We’ve received your payment successfully.</p>';
+      $details = '<div><strong>Item:</strong> ' . esc_html($label) . '</div>' . $this->mrm_purchase_receipt_payment_breakdown_html($meta, $amount_cents, $product_type);
+      $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
     }
-
-    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
-
-    $subject = 'Purchase Confirmation - ' . $label;
 
     $headers = array(
       'Content-Type: text/html; charset=UTF-8',
@@ -6210,7 +6089,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $details =
       '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' .
       '<div><strong>Amount:</strong> $5.00 Per Month</div>' .
-      '<div><strong>Status:</strong> ' . esc_html(ucwords(str_replace('_', ' ', $status_label))) . '</div>' .
+      '<div><strong>Renews on:</strong> ' . esc_html($anchor_label) . '</div>' .
       $this->mrm_get_sheet_music_access_section_html() .
       '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' .
       '<div>Your subscription has been created successfully in our billing system.</div>' .
@@ -6265,7 +6144,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $details =
       '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' .
       '<div><strong>Amount Charged:</strong> $' . number_format($amount_paid / 100, 2) . '</div>' .
-      '<div><strong>Status:</strong> Active</div>' .
+      '<div><strong>Next renewal date:</strong> ' . esc_html($next_label) . '</div>' .
       $this->mrm_get_sheet_music_access_section_html() .
       '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' .
       '<div>Your sheet music subscription remains active.</div>' .
@@ -6311,6 +6190,36 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
      */
     return false;
   }
+
+  private function mrm_send_sheet_music_subscription_renewal_reminder_email($sub_row, $renewal_ts) {
+    if (!is_array($sub_row)) return false;
+    $email = sanitize_email((string)($sub_row['email_plain'] ?? ''));
+    if (!$email || !is_email($email)) return false;
+    $manage_url = $this->mrm_subscription_manage_url((string)($sub_row['portal_token'] ?? ''));
+    $contact_url = $this->mrm_get_contact_url();
+    $renewal_label = $renewal_ts > 0 ? wp_date('F j, Y \a\t g:i A', $renewal_ts, wp_timezone()) : '';
+    $title = 'Subscription Renewal Reminder - Sheet Music Access';
+    $intro = '<p>This is a reminder that your sheet music subscription renewal is scheduled to occur on <strong>' . esc_html($renewal_label) . '</strong>.</p>';
+    $details = '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Renewal date:</strong> ' . esc_html($renewal_label) . '</div>' . $this->mrm_get_sheet_music_access_section_html();
+    $after_cta_html = $manage_url !== '' ? '<div style="margin-top:14px;text-align:right;"><a href="' . esc_url($manage_url) . '" style="color:#111;text-decoration:underline;">Cancel Subscription</a></div>' : '';
+    return wp_mail($email, 'Subscription Renewal Reminder - Sheet Music Access', $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support', $after_cta_html), array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>'));
+  }
+
+  public function cron_send_sheet_music_subscription_renewal_reminders() {
+    global $wpdb;
+    $table = $this->table_sheet_music_subscriptions();
+    $now = time();
+    $window_start = gmdate('Y-m-d H:i:s', $now + DAY_IN_SECONDS - HOUR_IN_SECONDS);
+    $window_end = gmdate('Y-m-d H:i:s', $now + DAY_IN_SECONDS + HOUR_IN_SECONDS);
+    $rows = $wpdb->get_results("SELECT * FROM {$table} WHERE stripe_status = 'active' AND current_period_end >= '" . esc_sql($window_start) . "' AND current_period_end <= '" . esc_sql($window_end) . "' AND (renewal_reminder_24h_sent_at IS NULL OR renewal_reminder_24h_sent_at = '')", ARRAY_A);
+    foreach ((array)$rows as $row) {
+      $renewal_ts = !empty($row['current_period_end']) ? strtotime((string)$row['current_period_end']) : 0;
+      if ($this->mrm_send_sheet_music_subscription_renewal_reminder_email($row, $renewal_ts)) {
+        $wpdb->update($table, array('renewal_reminder_24h_sent_at' => current_time('mysql')), array('id' => absint($row['id'])));
+      }
+    }
+  }
+
   private function mrm_send_sheet_music_subscription_cancelled_email($sub_row, $subscription) {
     if (!is_array($sub_row)) return false;
 
@@ -6327,7 +6236,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       '<div><strong>Subscription:</strong> Monthly sheet music access</div>' .
       '<div><strong>Status:</strong> Cancelled</div>' .
       '<div><strong>Cancellation date:</strong> ' . esc_html($ended_label) . '</div>' .
-      '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future.</div>';
+      '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future. You will have access to sheet music products throughout the remainder of your subscription period which ends on: ' . esc_html($ended_label) . '.</div>';
 
     $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
 
@@ -6377,6 +6286,64 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
       )
     );
+  }
+
+
+  private function mrm_lesson_cancel_url($lesson_id) {
+    return $this->mrm_signed_lesson_action_url('mrm_lesson_cancel_request', absint($lesson_id), 0);
+  }
+
+  private function mrm_get_lesson_for_cancellation($lesson_id) {
+    global $wpdb;
+    $lessons = $this->table_lessons();
+    $instructors = $wpdb->prefix . 'mrm_instructors';
+    $row = $wpdb->get_row($wpdb->prepare("SELECT l.*, i.name AS instructor_name, i.email AS instructor_email, i.phone AS instructor_phone FROM {$lessons} l LEFT JOIN {$instructors} i ON i.id = l.instructor_id WHERE l.id = %d LIMIT 1", absint($lesson_id)), ARRAY_A);
+    return is_array($row) ? $row : array();
+  }
+
+  public function render_lesson_cancel_request() {
+    $lesson_id=absint($_GET['lesson_id'] ?? 0); $expires=absint($_GET['expires'] ?? 0); $sig=sanitize_text_field((string)($_GET['sig'] ?? ''));
+    if (!$this->mrm_verify_signed_lesson_action('mrm_lesson_cancel_request',$lesson_id,0,$expires,$sig)) wp_die('This cancellation link is invalid or expired.', 'Cancel Lesson', array('response'=>403));
+    $lesson=$this->mrm_get_lesson_for_cancellation($lesson_id); if (!$lesson) wp_die('Lesson not found.', 'Cancel Lesson', array('response'=>404));
+    $lesson_time=!empty($lesson['start_time']) ? wp_date('F j, Y \a\t g:i A', strtotime($lesson['start_time']), wp_timezone()) : '';
+    echo '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cancel Lesson</title></head><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#111;"><div style="max-width:720px;margin:0 auto;padding:28px;"><div style="background:#fff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;"><h1>Cancel Lesson</h1><p>Please provide the reason for cancelling your lesson.</p><p><strong>Lesson:</strong> '.esc_html($lesson_time).'</p>';
+    echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" id="mrm-lesson-cancel-form"><input type="hidden" name="action" value="mrm_lesson_cancel_submit"><input type="hidden" name="lesson_id" value="'.esc_attr($lesson_id).'"><input type="hidden" name="expires" value="'.esc_attr($expires).'"><input type="hidden" name="sig" value="'.esc_attr($sig).'">';
+    foreach (array('Scheduling conflict','Illness or emergency','No longer available','Other') as $r) echo '<label><input type="radio" name="cancel_reason" value="'.esc_attr($r).'" required> '.esc_html($r).'</label><br>';
+    echo '<textarea name="cancel_reason_other" placeholder="If other, please explain." style="width:100%;min-height:120px;margin-top:12px;"></textarea><p><button type="submit" style="background:#111;color:#fff;border:1px solid #111;border-radius:10px;padding:13px 20px;font-weight:700;">Submit Cancellation</button></p></form><script>document.getElementById("mrm-lesson-cancel-form").addEventListener("submit",function(e){if(!confirm("Are you sure you want to cancel this lesson?")){e.preventDefault();}});</script></div></div></body></html>'; exit;
+  }
+
+  public function handle_lesson_cancel_submit() {
+    global $wpdb;
+    $lesson_id=absint($_POST['lesson_id'] ?? 0); $expires=absint($_POST['expires'] ?? 0); $sig=sanitize_text_field((string)($_POST['sig'] ?? ''));
+    if (!$this->mrm_verify_signed_lesson_action('mrm_lesson_cancel_request',$lesson_id,0,$expires,$sig)) wp_die('This cancellation request is invalid or expired.', 'Cancel Lesson', array('response'=>403));
+    $lesson=$this->mrm_get_lesson_for_cancellation($lesson_id); if (!$lesson) wp_die('Lesson not found.', 'Cancel Lesson', array('response'=>404));
+    $reason=sanitize_text_field((string)($_POST['cancel_reason'] ?? '')); $other=sanitize_textarea_field((string)($_POST['cancel_reason_other'] ?? '')); if ($reason==='Other' && $other!=='') $reason .= ': '.$other;
+    $start_ts=!empty($lesson['start_time']) ? strtotime((string)$lesson['start_time']) : 0; $more_than_24h=($start_ts>0 && (time() <= ($start_ts - DAY_IN_SECONDS)));
+    $wpdb->update($this->table_lessons(), array('status'=>'cancelled','updated_at'=>current_time('mysql')), array('id'=>$lesson_id));
+    $order_id=absint($lesson['order_id'] ?? 0); $order=$order_id>0 ? $this->mrm_get_order_by_id($order_id) : $this->mrm_find_lesson_charge_order($lesson_id);
+    $refund_sent=false; $refund_amount_cents=0;
+    if ($more_than_24h && is_array($order) && !empty($order['stripe_payment_intent_id'])) { $refund_amount_cents=absint($order['amount_cents'] ?? 0); $refund=$this->stripe_create_refund((string)$order['stripe_payment_intent_id'], null, 'requested_by_customer'); if (!is_wp_error($refund)) { $refund_sent=true; $this->mrm_send_lesson_cancellation_refund_email($lesson,$refund_amount_cents); } }
+    if (!$refund_sent) $this->mrm_send_lesson_cancellation_no_refund_email($lesson, absint($order['amount_cents'] ?? 0));
+    $this->mrm_notify_lesson_cancelled_by_client($lesson,$reason,$refund_sent);
+    echo '<!doctype html><html><body style="font-family:Arial,sans-serif;background:#f6f6f6;margin:0;"><div style="max-width:720px;margin:0 auto;padding:28px;"><div style="background:#fff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;"><h1>Lesson Cancelled</h1>';
+    echo $refund_sent ? '<p>Your lesson has been cancelled and your refund has been submitted. It may take 3 to 5 business days for the funds to return to your account. Please check your email for confirmation.</p>' : '<p>Your lesson has been cancelled. This cancellation does not qualify for a refund because it was submitted without a full 24-hour notice.</p><p>This policy is clearly defined in the terms of service: <a href="'.esc_url(home_url('/terms-of-service/')).'">Terms of Service</a>.</p>';
+    echo '</div></div></body></html>'; exit;
+  }
+
+  private function mrm_send_lesson_cancellation_no_refund_email($lesson, $amount_paid_cents = 0) {
+    if (!is_array($lesson)) return false; $email=sanitize_email((string)($lesson['student_email'] ?? '')); if (!$email || !is_email($email)) return false;
+    $lesson_start=(string)($lesson['start_time'] ?? ''); $lesson_label=$lesson_start!=='' ? wp_date('F j, Y \a\t g:i A', strtotime($lesson_start), wp_timezone()) : 'your scheduled lesson';
+    $amount_label=$amount_paid_cents > 0 ? '$'.number_format($amount_paid_cents/100,2) : 'your lesson payment';
+    $details='<div><strong>Cancelled lesson:</strong> '.esc_html($lesson_label).'</div><div><strong>Amount paid:</strong> '.esc_html($amount_label).'</div><div style="margin-top:12px;">If you believe this to be a mistake please contact support.</div>';
+    return wp_mail($email, 'Lesson update — Cancellation', $this->mrm_email_wrap_html('Lesson cancelled','<p>Your lesson has been cancelled and it does not qualify for a refund as the lesson was not cancelled the minimum 24 hours in advance.</p>',$details,$this->mrm_get_contact_url(),'Contact Support'), array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>'));
+  }
+
+  private function mrm_notify_lesson_cancelled_by_client($lesson, $reason, $refunded) {
+    $admin_email=sanitize_email((string)get_option('admin_email')); $instructor_email=sanitize_email((string)($lesson['instructor_email'] ?? ''));
+    $lesson_time=!empty($lesson['start_time']) ? wp_date('F j, Y \a\t g:i A', strtotime($lesson['start_time']), wp_timezone()) : '';
+    $details='<div><strong>Lesson:</strong> '.esc_html($lesson_time).'</div><div><strong>Instructor:</strong> '.esc_html((string)($lesson['instructor_name'] ?? '')).'</div><div><strong>Student email:</strong> '.esc_html((string)($lesson['student_email'] ?? '')).'</div><div><strong>Cancellation reason:</strong> '.esc_html($reason).'</div><div><strong>Refunded:</strong> '.esc_html($refunded ? 'Yes' : 'No').'</div>';
+    $html=$this->mrm_email_wrap_html('Lesson Cancellation Notice','<p>A client has cancelled a lesson.</p>',$details,'',''); $headers=array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>');
+    if ($admin_email && is_email($admin_email)) wp_mail($admin_email,'Lesson cancellation notice',$html,$headers); if ($instructor_email && is_email($instructor_email)) wp_mail($instructor_email,'Lesson cancellation notice',$html,$headers);
   }
 
   private function build_metadata($sku, $product_type, $email_hash, $context, $product_cfg) {
@@ -6607,16 +6574,22 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   private function mrm_payout_period_label_from_rows($rows, $period = null) {
-    if (is_array($period) && !empty($period['start_mysql']) && !empty($period['end_mysql'])) return $period['start_mysql'] . ' through ' . $period['end_mysql'];
+    if (is_array($period) && !empty($period['start_mysql']) && !empty($period['end_mysql'])) return $this->mrm_format_payout_period_short($period['start_mysql'], $period['end_mysql']);
     $min = ''; $max = '';
     foreach ((array)$rows as $row) { $created = (string)($row['created_at'] ?? ''); if ($created === '') continue; if ($min === '' || strcmp($created, $min) < 0) $min = $created; if ($max === '' || strcmp($created, $max) > 0) $max = $created; }
-    return ($min !== '' && $max !== '') ? ($min . ' through ' . $max) : current_time('mysql');
+    return ($min !== '' && $max !== '') ? $this->mrm_format_payout_period_short($min, $max) : wp_date('m/d/Y', time(), wp_timezone());
   }
 
-  private function mrm_send_wrapped_summary_email($to, $subject, $title, $intro_html, $details_html) {
+  private function mrm_format_payout_period_short($start_mysql, $end_mysql) {
+    $start_ts = strtotime((string)$start_mysql); $end_ts = strtotime((string)$end_mysql);
+    if (!$start_ts || !$end_ts) return '';
+    return wp_date('m/d/Y', $start_ts, wp_timezone()) . ' - ' . wp_date('m/d/Y', $end_ts, wp_timezone());
+  }
+
+  private function mrm_send_wrapped_summary_email($to, $subject, $title, $intro_html, $details_html, $cta_url = '', $cta_label = '') {
     $to = sanitize_email((string)$to);
     if (!$to || !is_email($to)) return false;
-    $body = $this->mrm_email_wrap_html($title, $intro_html, $details_html, '', '');
+    $body = $this->mrm_email_wrap_html($title, $intro_html, $details_html, $cta_url, $cta_label);
     return wp_mail($to, $subject, $body, array('Content-Type: text/html; charset=UTF-8'));
   }
 
@@ -6641,10 +6614,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $summary = array('30_online'=>array('label'=>'Online 30-minute lessons','count'=>0,'cents'=>0),'60_online'=>array('label'=>'Online 60-minute lessons','count'=>0,'cents'=>0),'30_inperson'=>array('label'=>'In-person 30-minute lessons','count'=>0,'cents'=>0),'60_inperson'=>array('label'=>'In-person 60-minute lessons','count'=>0,'cents'=>0));
     $total = 0; $to = ''; $name = 'Instructor';
     foreach ((array)$rows as $row) { if (!preg_match('/^lesson:(\d+)$/', (string)($row['payee_ref'] ?? ''), $m)) continue; $lesson = $lesson_map[absint($m[1])] ?? null; if (!$lesson) continue; $key = (int)($lesson['lesson_length'] ?? 0) . '_' . (!empty($lesson['is_online']) ? 'online' : 'inperson'); if (!isset($summary[$key])) continue; $amount = (int)($row['net_cents'] ?? 0); $summary[$key]['count']++; $summary[$key]['cents'] += $amount; $total += $amount; if ($to === '' && !empty($lesson['instructor_email'])) $to = sanitize_email((string)$lesson['instructor_email']); if (!empty($lesson['instructor_name'])) $name = (string)$lesson['instructor_name']; }
-    $details = '<div><strong>Pay period:</strong> ' . esc_html($this->mrm_payout_period_label_from_rows($rows, $period)) . '</div><div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div><div><strong>Stripe payout:</strong> ' . esc_html((string)($payout['id'] ?? '')) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Lesson Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Count</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payout</th></tr></thead><tbody>';
+    $details = '<div><strong>Pay period:</strong> ' . esc_html($this->mrm_payout_period_label_from_rows($rows, $period)) . '</div><div><strong>Stripe payout:</strong> ' . esc_html((string)($payout['id'] ?? '')) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Lesson Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Count</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payout</th></tr></thead><tbody>';
     foreach ($summary as $row) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($row['label']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$row['count']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($row['cents'])) . '</td></tr>';
     $details .= '</tbody></table><div style="margin-top:14px;font-size:17px;"><strong>Total payout:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
-    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons instructor payout summary', 'Instructor Payout Summary', '<p>Hello ' . esc_html($name) . ',</p><p>Your instructor payout batch has been processed. Here is your payout summary.</p>', $details);
+    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons payout summary ' . $this->mrm_payout_period_label_from_rows($rows, $period), 'Payout Summary', '<p>Your instructor payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support');
     return array('type'=>'instructor','name'=>$name,'email'=>$to,'paid_cents'=>$total,'platform_cents'=>$this->mrm_sum_platform_retained_for_order_ids($order_ids),'promo_loss_cents'=>0);
   }
 
@@ -6658,10 +6631,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     foreach ((array)$rows as $row) { $amount = (int)($row['net_cents'] ?? 0); $total += $amount; $order_id = (int)($row['order_id'] ?? 0); $ref = (string)($row['payee_ref'] ?? '');
       if ($order_id > 0 && isset($orders_by_id[$order_id])) { $order = $orders_by_id[$order_id]; $sku = (string)($order['sku'] ?? ''); $label = $products[$sku]['label'] ?? $sku; $meta = json_decode((string)($order['metadata_json'] ?? ''), true); if (!is_array($meta)) $meta = array(); $promo_code = (string)($meta['mrm_promo_code'] ?? ''); $discount = max(0, (int)($meta['mrm_promo_discount_cents'] ?? 0)); $promo_loss += $discount; $key = 'piece|' . $sku . '|' . $promo_code; if (!isset($items[$key])) $items[$key] = array('label'=>$label,'kind'=>'Piece / product sale','count'=>0,'payout_cents'=>0,'promo_code'=>$promo_code,'promo_loss_cents'=>0); $items[$key]['count']++; $items[$key]['payout_cents'] += $amount; $items[$key]['promo_loss_cents'] += $discount;
       } elseif (strpos($ref, 'stripe_subscription_invoice:') === 0) { $subscription_count++; $key = 'subscription|sheet_music_subscription'; if (!isset($items[$key])) $items[$key] = array('label'=>'Sheet music subscription','kind'=>'Subscription payment','count'=>0,'payout_cents'=>0,'promo_code'=>'','promo_loss_cents'=>0); $items[$key]['count']++; $items[$key]['payout_cents'] += $amount; }}
-    $details = '<div><strong>Pay period:</strong> ' . esc_html($this->mrm_payout_period_label_from_rows($rows, $period)) . '</div><div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div><div><strong>Stripe payout:</strong> ' . esc_html((string)($payout['id'] ?? '')) . '</div><div><strong>Subscriptions paid in this window:</strong> ' . esc_html((string)$subscription_count) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Product</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Quantity</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo Reduction</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Composer Payout</th></tr></thead><tbody>';
-    foreach ($items as $item) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['label']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['kind']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$item['count']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['promo_code'] !== '' ? $item['promo_code'] : '—') . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($item['promo_loss_cents'])) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($item['payout_cents'])) . '</td></tr>';
+    $details = '<div><strong>Pay period:</strong> ' . esc_html($this->mrm_payout_period_label_from_rows($rows, $period)) . '</div><div><strong>Stripe payout:</strong> ' . esc_html((string)($payout['id'] ?? '')) . '</div><div><strong>Subscriptions paid in this window:</strong> ' . esc_html((string)$subscription_count) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Product</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Quantity</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo Reduction</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Composer Payout</th></tr></thead><tbody>';
+    foreach ($items as $item) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['label']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['kind']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$item['count']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($item['promo_loss_cents'])) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($item['payout_cents'])) . '</td></tr>';
     $details .= '</tbody></table><div style="margin-top:14px;"><strong>Total promo reduction affecting composer content:</strong> -' . esc_html($this->mrm_summary_money($promo_loss)) . '</div><div style="margin-top:8px;font-size:17px;"><strong>Total composer payout:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
-    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons composer payout summary', 'Composer Payout Summary', '<p>Your composer payout batch has been processed. Here is your payout summary.</p>', $details);
+    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons payout summary ' . $this->mrm_payout_period_label_from_rows($rows, $period), 'Payout Summary', '<p>Your composer payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support');
     return array('type'=>'composer','name'=>'Composer','email'=>$to,'paid_cents'=>$total,'platform_cents'=>$this->mrm_sum_platform_retained_for_order_ids($order_ids),'promo_loss_cents'=>$promo_loss);
   }
 
@@ -6675,8 +6648,8 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   private function mrm_send_owner_payout_batch_summary($batch_key, $items, $period_label = '') {
     $to = $this->mrm_payout_summary_owner_email(); if ($to === '' || empty($items)) return false;
     $totals = array('instructor'=>0,'composer'=>0,'presenter'=>0,'platform'=>0,'promo_loss'=>0);
-    $details = '<div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div>' . ($period_label !== '' ? '<div><strong>Pay period:</strong> ' . esc_html($period_label) . '</div>' : '') . '<table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payee Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payee</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Paid Out</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Company Retained</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo Reduction</th></tr></thead><tbody>';
-    foreach ((array)$items as $item) { if (empty($item) || !is_array($item)) continue; $type = sanitize_key((string)($item['type'] ?? '')); $paid = (int)($item['paid_cents'] ?? 0); $platform = (int)($item['platform_cents'] ?? 0); $promo_loss = (int)($item['promo_loss_cents'] ?? 0); if (isset($totals[$type])) $totals[$type] += $paid; $totals['platform'] += $platform; $totals['promo_loss'] += $promo_loss; $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html(ucfirst($type)) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)($item['name'] ?? '—')) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($paid)) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($platform)) . '</td><td style="border:1px solid #ddd;padding:8px;">-' . esc_html($this->mrm_summary_money($promo_loss)) . '</td></tr>'; }
+    $details = '<div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div>' . ($period_label !== '' ? '<div><strong>Pay period:</strong> ' . esc_html($period_label) . '</div>' : '') . '<table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payee Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payee</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Paid Out</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo Reduction</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Company Retained</th></tr></thead><tbody>';
+    foreach ((array)$items as $item) { if (empty($item) || !is_array($item)) continue; $type = sanitize_key((string)($item['type'] ?? '')); $paid = (int)($item['paid_cents'] ?? 0); $platform = (int)($item['platform_cents'] ?? 0); $promo_loss = (int)($item['promo_loss_cents'] ?? 0); if (isset($totals[$type])) $totals[$type] += $paid; $totals['platform'] += max(0, $platform - $promo_loss); $totals['promo_loss'] += $promo_loss; $display_platform = max(0, $platform - $promo_loss); $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html(ucfirst($type)) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)($item['name'] ?? '—')) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($paid)) . '</td><td style="border:1px solid #ddd;padding:8px;">-' . esc_html($this->mrm_summary_money($promo_loss)) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($display_platform)) . '</td></tr>'; }
     $details .= '</tbody></table><div style="margin-top:14px;"><strong>Instructor payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['instructor'])) . '</div><div><strong>Presenter payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['presenter'])) . '</div><div><strong>Composer payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['composer'])) . '</div><div><strong>Promo-code reductions:</strong> -' . esc_html($this->mrm_summary_money($totals['promo_loss'])) . '</div><div style="margin-top:8px;font-size:17px;"><strong>Company retained / netted:</strong> ' . esc_html($this->mrm_summary_money($totals['platform'])) . '</div>';
     return $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons owner payout batch summary', 'Owner Payout Batch Summary', '<p>A payout batch has been processed. Here is the owner/company summary.</p>', $details);
   }
@@ -6687,10 +6660,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $owner_items = array();
     foreach ($groups as $presenter_rows) { $first = $presenter_rows[0]; $to = sanitize_email((string)($first['presenter_email'] ?? '')); $name = (string)($first['presenter_name'] ?? 'Presenter'); $event_groups = array(); $total = 0; $platform_total = 0;
       foreach ($presenter_rows as $row) { $event_id = (int)($row['event_id'] ?? 0); $per_student = (int)($row['event_payout_per_student_cents'] ?? 0); if ($per_student <= 0) $per_student = (int)($row['presenter_share_cents'] ?? 0); if (!isset($event_groups[$event_id])) $event_groups[$event_id] = array('title'=>(string)($row['event_title'] ?? ('Event #' . $event_id)),'students'=>0,'per_student_cents'=>$per_student,'payout_cents'=>0); $event_groups[$event_id]['students']++; $event_groups[$event_id]['payout_cents'] += (int)($row['presenter_share_cents'] ?? 0); $total += (int)($row['presenter_share_cents'] ?? 0); if (isset($row['platform_share_cents'])) $platform_total += max(0, (int)$row['platform_share_cents']); }
-      $details = '<div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Masterclass</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Students</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Agreed Pay Per Student</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Total Payout</th></tr></thead><tbody>';
-      foreach ($event_groups as $event) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($event['title']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$event['students']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($event['per_student_cents'])) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($event['payout_cents'])) . '</td></tr>';
-      $details .= '</tbody></table><div style="margin-top:14px;font-size:17px;"><strong>Total presenter payout:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
-      $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons presenter payout summary', 'Presenter Payout Summary', '<p>Hello ' . esc_html($name) . ',</p><p>Your presenter payout has been processed. Here is your payout summary.</p>', $details);
+      $details = '<div><strong>Masterclass:</strong> ' . esc_html((string)($first['event_title'] ?? '')) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payout Per Student</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Number of Students Enrolled</th></tr></thead><tbody>';
+      foreach ($event_groups as $event) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($event['per_student_cents'])) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$event['students']) . '</td></tr>';
+      $details .= '</tbody></table><div style="margin-top:14px;font-size:17px;"><strong>Payout Total:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
+      $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons masterclass payout summary', 'Payout Summary', '<p>Your presenter payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support');
       $owner_items[] = array('type'=>'presenter','name'=>$name,'email'=>$to,'paid_cents'=>$total,'platform_cents'=>$platform_total,'promo_loss_cents'=>0);
     }
     return $owner_items;
@@ -11674,65 +11647,47 @@ public function handle_marketing_resubscribe() {
 
   private function mrm_email_testing_catalog() {
     return array(
-      'marketing_custom_email' => array('label' => 'Marketing email list message', 'description' => 'Normally triggered manually from the Marketing Email Lists submenu when you send a custom marketing email to selected lists.', 'plugin' => 'payments'),
-      'payment_method_attention_student' => array('label' => 'Payment method confirmation needed — student', 'description' => 'Normally triggered when an upcoming AutoPay lesson requires the student to confirm or update their saved payment method before the lesson.', 'plugin' => 'payments'),
-      'payment_method_attention_instructor' => array('label' => 'Payment method attention — instructor', 'description' => 'Normally triggered when an upcoming AutoPay lesson should be withheld until the student payment method is confirmed.', 'plugin' => 'payments'),
-      'payment_method_attention_admin' => array('label' => 'Payment method attention — admin', 'description' => 'Normally triggered when the system detects an upcoming AutoPay lesson with a payment method issue requiring administrative awareness.', 'plugin' => 'payments'),
-      'purchase_receipt' => array('label' => 'Purchase confirmation receipt', 'description' => 'Normally triggered after a successful Stripe payment for sheet music, packages, prepaid lessons, or other paid products.', 'plugin' => 'payments'),
+      'payment_method_attention_student' => array('label' => 'Update payment information — student', 'description' => 'Sent when an AutoPay student needs to update payment information before a renewing lesson.', 'plugin' => 'payments'),
+      'payment_method_attention_instructor' => array('label' => 'Upcoming lesson payment method needs attention — instructor', 'description' => 'Sent when an instructor should withhold an upcoming AutoPay lesson until the student updates payment information.', 'plugin' => 'payments'),
+      'payment_method_attention_admin' => array('label' => 'Payment method update needed — admin', 'description' => 'Sent to admin when a student payment method needs attention before an upcoming AutoPay lesson.', 'plugin' => 'payments'),
+      'purchase_receipt_sheet_music' => array('label' => 'Purchase confirmation — sheet music', 'description' => 'Sent after a sheet music purchase.', 'plugin' => 'payments'),
+      'purchase_receipt_online_lesson' => array('label' => 'Purchase confirmation — online lesson', 'description' => 'Sent after an online lesson purchase.', 'plugin' => 'payments'),
+      'purchase_receipt_in_person_lesson' => array('label' => 'Purchase confirmation — in-person lesson', 'description' => 'Sent after an in-person lesson purchase.', 'plugin' => 'payments'),
       'sheet_music_subscription_enrollment' => array('label' => 'Sheet music subscription enrollment confirmation', 'description' => 'Normally triggered when a customer successfully enrolls in the monthly sheet music subscription.', 'plugin' => 'payments'),
+      'sheet_music_subscription_renewal_reminder' => array('label' => 'Sheet music subscription renewal reminder', 'description' => 'Sent 24 hours before a sheet music subscription renewal.', 'plugin' => 'payments'),
       'sheet_music_subscription_renewal' => array('label' => 'Sheet music subscription renewal receipt', 'description' => 'Normally triggered after a successful recurring monthly sheet music subscription charge.', 'plugin' => 'payments'),
       'sheet_music_subscription_cancelled' => array('label' => 'Sheet music subscription cancelled', 'description' => 'Normally triggered when a sheet music subscription is cancelled.', 'plugin' => 'payments'),
       'lesson_cancellation_refund' => array('label' => 'Lesson cancellation refund', 'description' => 'Normally triggered when a lesson is cancelled and a refund is issued.', 'plugin' => 'payments'),
+      'lesson_cancellation_no_refund' => array('label' => 'Lesson cancellation', 'description' => 'Sent when a lesson is cancelled without qualifying for a refund.', 'plugin' => 'payments'),
       'meeting_confirmation' => array('label' => 'Meeting Scheduler confirmation', 'description' => 'Normally triggered immediately after a Meeting Scheduler event is created and invitation emails are sent.', 'plugin' => 'scheduler'),
       'meeting_reminder' => array('label' => 'Meeting Scheduler reminder', 'description' => 'Normally triggered by cron approximately 1 hour before a scheduled Meeting Scheduler event.', 'plugin' => 'scheduler'),
-      'private_lesson_reminder_parent' => array('label' => 'Private lesson reminder — parent/student', 'description' => 'Normally triggered by the safety reminder cron before a private lesson; sent to the parent/student.', 'plugin' => 'scheduler'),
-      'private_lesson_reminder_instructor' => array('label' => 'Private lesson reminder — instructor', 'description' => 'Normally triggered by the safety reminder cron before a private lesson; sent to the instructor.', 'plugin' => 'scheduler'),
+      'private_lesson_reminder_parent_online' => array('label' => 'Private lesson reminder — parent/student — online', 'description' => 'Sent to the family before an online private lesson.', 'plugin' => 'scheduler'),
+      'private_lesson_reminder_parent_in_person' => array('label' => 'Private lesson reminder — parent/student — in-person', 'description' => 'Sent to the family before an in-person private lesson.', 'plugin' => 'scheduler'),
+      'private_lesson_reminder_instructor_online' => array('label' => 'Private lesson reminder — instructor — online', 'description' => 'Sent to the instructor before an online private lesson.', 'plugin' => 'scheduler'),
+      'private_lesson_reminder_instructor_in_person' => array('label' => 'Private lesson reminder — instructor — in-person', 'description' => 'Sent to the instructor before an in-person private lesson.', 'plugin' => 'scheduler'),
       'lesson_feedback_request' => array('label' => 'Lesson feedback request', 'description' => 'Normally triggered after a lesson ends when feedback has not yet been submitted.', 'plugin' => 'scheduler'),
       'parent_feedback_received' => array('label' => 'Parent lesson feedback received', 'description' => 'Normally triggered after a parent/student submits lesson feedback; sent to admin and/or instructor.', 'plugin' => 'scheduler'),
-      'consultation_confirmation' => array('label' => 'Consultation confirmation', 'description' => 'Normally triggered after an online consultation is scheduled successfully.', 'plugin' => 'scheduler'),
+      'consultation_confirmation_family' => array('label' => 'Consultation confirmation — family', 'description' => 'Sent to the family when a consultation is scheduled.', 'plugin' => 'scheduler'),
+      'consultation_confirmation_instructor' => array('label' => 'Consultation confirmation — instructor', 'description' => 'Sent to the instructor when a consultation is scheduled.', 'plugin' => 'scheduler'),
       'contact_form_notification' => array('label' => 'Contact form notification', 'description' => 'Normally triggered when someone submits the [mrm_contact_form] contact form successfully.', 'plugin' => 'scheduler'),
       'safety_no_show_alert' => array('label' => 'Safety alert — parent reported no-show', 'description' => 'Normally triggered when a parent reports that an instructor did not arrive for a scheduled lesson.', 'plugin' => 'scheduler'),
       'safety_emergency_notice' => array('label' => 'Safety emergency notice', 'description' => 'Normally triggered when an instructor uses the emergency action during an in-person lesson.', 'plugin' => 'scheduler'),
-      'contractor_agreement_confirmation' => array('label' => 'Contractor agreement confirmation', 'description' => 'Normally triggered when a contractor agreement/signature flow is completed or recorded in the Scheduler agreement system.', 'plugin' => 'scheduler'),
       'masterclass_registration_confirmation' => array('label' => 'Masterclass registration confirmation', 'description' => 'Normally triggered after a student/client successfully registers and pays for a masterclass.', 'plugin' => 'masterclass'),
       'masterclass_student_reminder' => array('label' => 'Masterclass student reminder', 'description' => 'Normally triggered by the Masterclass reminder cron before a masterclass begins.', 'plugin' => 'masterclass'),
       'masterclass_presenter_confirmation' => array('label' => 'Masterclass presenter confirmation', 'description' => 'Normally triggered when a masterclass event is created and assigned to a presenter.', 'plugin' => 'masterclass'),
       'masterclass_presenter_reminder' => array('label' => 'Masterclass presenter reminder', 'description' => 'Normally triggered by the Masterclass reminder cron before a presenter’s masterclass begins.', 'plugin' => 'masterclass'),
       'masterclass_feedback_request' => array('label' => 'Masterclass feedback request', 'description' => 'Normally triggered after a masterclass ends to request student/client feedback.', 'plugin' => 'masterclass'),
+      'masterclass_feedback_received' => array('label' => 'Masterclass feedback received', 'description' => 'Sent to presenter/admin after masterclass feedback is submitted.', 'plugin' => 'masterclass'),
       'masterclass_event_updated' => array('label' => 'Masterclass event updated', 'description' => 'Normally triggered when a masterclass event is edited after registrations already exist.', 'plugin' => 'masterclass'),
       'masterclass_refund_completed' => array('label' => 'Masterclass refund completed', 'description' => 'Normally triggered when a masterclass registration refund is completed.', 'plugin' => 'masterclass'),
       'masterclass_event_cancelled' => array('label' => 'Masterclass event cancelled', 'description' => 'Normally triggered when a masterclass event is cancelled and registrants are notified.', 'plugin' => 'masterclass'),
       'product_access_otp' => array('label' => 'Sheet music/product access OTP', 'description' => 'Normally triggered when a purchaser requests a one-time access code for protected product access.', 'plugin' => 'product-access'),
-      'profile_card_request_invite' => array(
-        'label' => 'Profile Card Creation invite',
-        'description' => 'Normally triggered from Payment Hub → Profile Card Creation when you send an instructor profile, presenter profile, or masterclass event proposal request.',
-        'plugin' => 'payments',
-      ),
-      'profile_card_changes_requested' => array(
-        'label' => 'Profile Card Creation changes requested',
-        'description' => 'Normally triggered from Payment Hub → Profile Card Creation when you request changes to a submitted profile card or masterclass event proposal.',
-        'plugin' => 'payments',
-      ),
-      'payout_summary_instructor' => array(
-        'label' => 'Payout summary — individual instructor',
-        'description' => 'Normally sent to each individual instructor after their instructor payout batch runs.',
-        'plugin' => 'payments',
-      ),
-      'payout_summary_presenter' => array(
-        'label' => 'Payout summary — individual presenter',
-        'description' => 'Normally sent to each individual presenter after their presenter payout runs.',
-        'plugin' => 'payments',
-      ),
-      'payout_summary_composer' => array(
-        'label' => 'Payout summary — composer',
-        'description' => 'Normally sent to the composer after composer payout rows are paid.',
-        'plugin' => 'payments',
-      ),
-      'payout_summary_owner_net' => array(
-        'label' => 'Payout summary — owner/net batch',
-        'description' => 'Normally sent to the owner after each payout batch cycle with contractor payout totals, promo-code reductions, and company retained/netted funds.',
-        'plugin' => 'payments',
-      ),
+      'profile_card_request_invite' => array('label' => 'Profile Card Creation invite', 'description' => 'Normally triggered from Payment Hub → Profile Card Creation when you send an instructor profile, presenter profile, or masterclass event proposal request.', 'plugin' => 'payments'),
+      'profile_card_changes_requested' => array('label' => 'Profile Card Creation changes requested', 'description' => 'Normally triggered from Payment Hub → Profile Card Creation when you request changes to a submitted profile card or masterclass event proposal.', 'plugin' => 'payments'),
+      'payout_summary_instructor' => array('label' => 'Payout summary — individual instructor', 'description' => 'Normally sent to each individual instructor after their instructor payout batch runs.', 'plugin' => 'payments'),
+      'payout_summary_presenter' => array('label' => 'Payout summary — individual presenter', 'description' => 'Normally sent to each individual presenter after their presenter payout runs.', 'plugin' => 'payments'),
+      'payout_summary_composer' => array('label' => 'Payout summary — composer', 'description' => 'Normally sent to the composer after composer payout rows are paid.', 'plugin' => 'payments'),
+      'payout_summary_owner_net' => array('label' => 'Payout summary — owner/net batch', 'description' => 'Normally sent to the owner after each payout batch cycle with contractor payout totals, promo-code reductions, and company retained/netted funds.', 'plugin' => 'payments'),
     );
   }
 
@@ -11993,7 +11948,7 @@ public function handle_marketing_resubscribe() {
           . '</tr></thead><tbody>'
           . '<tr><td style="' . esc_attr($td_style) . '">Masterclass</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '</tbody></table>'
-          . '<div style="margin-top:14px;font-size:17px;"><strong>Total presenter payout:</strong> </div>',
+          . '<div style="margin-top:14px;font-size:17px;"><strong>Payout Total:</strong> </div>',
         ''
       ),
 
@@ -12079,69 +12034,19 @@ public function handle_marketing_resubscribe() {
         ''
       ),
 
-      'marketing_custom_email' => array('', '', '', '', ''),
 
-      'payment_method_attention_student' => array(
-        'Payment method confirmation needed',
-        'Payment method confirmation needed',
-        '<p>Your upcoming AutoPay lesson requires payment method confirmation before the lesson can be processed.</p>',
-        '<div><strong>Student:</strong> </div>'
-          . '<div><strong>Lesson:</strong> </div>'
-          . '<div><strong>Scheduled time:</strong> </div>'
-          . '<div style="margin-top:12px;">Please confirm or update your saved payment method before the lesson.</div>',
-        'Contact Support'
-      ),
+      'payment_method_attention_student' => array('Your Payment Method Requires Attention','Update your payment information','<p>Your payment information is in need of an update. Please use this link to update your payment information for the auto-pay lessons, renewing at <strong></strong>.</p>','<div><strong>Lesson:</strong> </div><div><strong>Renewing at:</strong> </div><div><strong>Saved payment method:</strong> </div><div><strong>Reason:</strong> </div>',array(array('url' => '#', 'label' => 'Update Payment Information', 'variant' => 'primary'),array('url' => $contact_url, 'label' => 'Contact Support', 'variant' => 'primary'))),
+      'payment_method_attention_instructor' => array('Payment method needs attention for ','Please withhold this lesson  until payment method has been updated','<p>Your upcoming AutoPay lesson with <strong></strong> requires an updated payment method before the lesson can be processed. Please withhold lesson services until this has been confirmed.</p>','<div><strong>Student:</strong> </div><div><strong>Lesson:</strong> </div><div><strong>Scheduled time:</strong> </div><p style="margin-top:12px;">This client has also received a request to update their payment information. Feel free to connect and check in with them.</p><div><strong>Client email:</strong> </div><div><strong>Client phone number:</strong> </div>',''),
+      'payment_method_attention_admin' => array('Payment information update required for ','Payment method update needed','<p>The system detected a need for payment information to be updated for <strong></strong> before their upcoming lesson time with <strong></strong> and <strong></strong>.</p>','<div><strong>Student:</strong> </div><div><strong>Student email:</strong> </div><div><strong>Student phone:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Instructor email:</strong> </div><div><strong>Instructor phone:</strong> </div><div><strong>Stripe customer profile:</strong> </div>',''),
+      'purchase_receipt_sheet_music' => array('Purchase Confirmation - ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> </div><div><strong>Base:</strong> </div><div><strong>Promo code:</strong> </div><div><strong>Tax:</strong> </div><div><strong>Total paid:</strong> </div><div style="margin-top:12px;"><strong>How to access your sheet music:</strong></div><ol style="margin:8px 0 0 18px;padding:0;"><li>Return to the piece page on the website.</li><li>Click the access button for your purchased category.</li><li>Enter your purchase email address.</li><li>Request your one-time access code and enter it to open the content.</li></ol>',array(array('url'=>'#','label'=>'View Your Piece','variant'=>'primary'),array('url'=>$contact_url,'label'=>'Contact Support','variant'=>'primary'))),
+      'purchase_receipt_online_lesson' => array('Purchase Confirmation - Online Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> Online lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to access online lessons</strong></div><p>Your meeting link will become available 10 minutes before your lesson time and will remain available until 10 minutes after your lesson time. Please make sure your camera, microphone, and internet connection are working before joining the call.</p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p><div style="margin-top:14px;"><strong>How to access your sheet music</strong></div><p>Please check your email for the subscription confirmation.</p>',array(array('url'=>'#','label'=>'Join Lesson','variant'=>'primary'),array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
+      'purchase_receipt_in_person_lesson' => array('Purchase Confirmation - In-Person Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> In-person lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p><div style="margin-top:14px;"><strong>Lessons outside the home</strong></div><p>If the lesson will take place at a school, church, or other community location, please complete the required approval form before the lesson begins.</p><p><a href="https://www.docusign.com/" target="_blank" rel="noopener">Placeholder DocuSign location approval link</a></p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p>',array(array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
 
-      'payment_method_attention_instructor' => array(
-        'Instructor action required',
-        'Instructor action required',
-        '<p>An upcoming AutoPay lesson should be withheld until the student payment method is confirmed.</p>',
-        '<div><strong>Student:</strong> </div>'
-          . '<div><strong>Instructor:</strong> </div>'
-          . '<div><strong>Lesson:</strong> </div>'
-          . '<div><strong>Scheduled time:</strong> </div>'
-          . '<div style="margin-top:12px;">Please do not teach this lesson until payment confirmation is resolved.</div>',
-        'Contact Support'
-      ),
-
-      'payment_method_attention_admin' => array(
-        'Admin awareness',
-        'Admin awareness',
-        '<p>The system detected an upcoming AutoPay lesson with a payment method issue requiring administrative awareness.</p>',
-        '<div><strong>Lesson ID:</strong> </div>'
-          . '<div><strong>Student:</strong> </div>'
-          . '<div><strong>Instructor:</strong> </div>'
-          . '<div><strong>Scheduled time:</strong> </div>'
-          . '<div><strong>Issue:</strong> Payment method attention required.</div>',
-        'Contact Support'
-      ),
-
-      'purchase_receipt' => array(
-        'Purchase Confirmation - ',
-        'Purchase Confirmation',
-        '<p>We’ve received your payment successfully.</p>',
-        '<div><strong>Item:</strong> </div>'
-          . '<div><strong>Order #:</strong> </div>'
-          . '<div><strong>Payment ID:</strong> </div>'
-          . '<div><strong>Base:</strong> </div>'
-          . '<div><strong>Promo code:</strong> </div>'
-          . '<div><strong>Sheet music add-on:</strong> </div>'
-          . '<div><strong>Tax:</strong> </div>'
-          . '<div><strong>Total paid:</strong> </div>'
-          . '<div style="margin-top:12px;"><strong>How To Access Your Purchase</strong></div>'
-          . '<ol style="margin:8px 0 0 18px;padding:0;">'
-          . '<li>Return to the piece page on the website.</li>'
-          . '<li>Click the access button for your purchased category.</li>'
-          . '<li>Enter your purchase email address.</li>'
-          . '<li>Request your one-time access code and enter it to open the content.</li>'
-          . '</ol>'
-          . '<div style="margin-top:12px;"><strong>Need assistance or would like to request a refund?</strong></div>',
-        'Contact Support'
-      ),
-
-      'sheet_music_subscription_enrollment' => array('Subscription Confirmation - Sheet Music Access','Subscription Confirmation - Sheet Music Access','<p>You have successfully enrolled in the sheet music subscription service.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Status:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your subscription has been created successfully in our billing system.</div>' . '<div style="margin-top:12px;">You will be billed again on or about <strong></strong>, and then monthly thereafter while the subscription remains active.</div>','Contact Support'),
-      'sheet_music_subscription_renewal' => array('Subscription Renewal - Sheet Music Access','Subscription Renewal - Sheet Music Access','<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount Charged:</strong> </div>' . '<div><strong>Status:</strong> Active</div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your sheet music subscription remains active.</div>' . '<div><strong>Invoice ID:</strong> </div>' . '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong></strong>.</div>','Contact Support'),
-      'sheet_music_subscription_cancelled' => array('Subscription Update - Sheet Music Access Cancelled','Subscription Cancelled','<p>Your sheet music subscription has been cancelled.</p>','<div><strong>Subscription:</strong> Monthly sheet music access</div>' . '<div><strong>Status:</strong> Cancelled</div>' . '<div><strong>Cancellation date:</strong> </div>' . '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future.</div>','Contact Support'),
+      'sheet_music_subscription_enrollment' => array('Subscription Confirmation - Sheet Music Access','Subscription Confirmation - Sheet Music Access','<p>You have successfully enrolled in the sheet music subscription service.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Renews on:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your subscription has been created successfully in our billing system.</div>' . '<div style="margin-top:12px;">You will be billed again on or about <strong></strong>, and then monthly thereafter while the subscription remains active.</div>','Contact Support'),
+      'sheet_music_subscription_renewal' => array('Subscription Renewal - Sheet Music Access','Subscription Renewal - Sheet Music Access','<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount Charged:</strong> </div>' . '<div><strong>Next renewal date:</strong> ' . esc_html($next_label) . '</div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your sheet music subscription remains active.</div>' . '<div><strong>Invoice ID:</strong> </div>' . '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong></strong>.</div>','Contact Support'),
+      'sheet_music_subscription_cancelled' => array('Subscription Update - Sheet Music Access Cancelled','Subscription Cancelled','<p>Your sheet music subscription has been cancelled.</p>','<div><strong>Subscription:</strong> Monthly sheet music access</div>' . '<div><strong>Status:</strong> Cancelled</div>' . '<div><strong>Cancellation date:</strong> </div>' . '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future. You will have access to sheet music products throughout the remainder of your subscription period which ends on: .</div>','Contact Support'),
+      'sheet_music_subscription_renewal_reminder' => array('Subscription Renewal Reminder - Sheet Music Access','Subscription Renewal Reminder - Sheet Music Access','<p>This is a reminder that your sheet music subscription renewal is scheduled to occur on <strong></strong>.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div><div><strong>Amount:</strong> $5.00 Per Month</div><div><strong>Renewal date:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html(),'Contact Support'),
+      'lesson_cancellation_no_refund' => array('Lesson update — Cancellation','Lesson cancelled','<p>Your lesson has been cancelled and it does not qualify for a refund as the lesson was not cancelled the minimum 24 hours in advance.</p>','<div><strong>Cancelled lesson:</strong> </div><div><strong>Amount paid:</strong> </div><div style="margin-top:12px;">If you believe this to be a mistake please contact support.</div>','Contact Support'),
       'lesson_cancellation_refund' => array('Lesson update — Cancellation and refund issued','Lesson cancelled and refund issued','<p>Your lesson has been cancelled and a refund has been issued.</p>','<div><strong>Cancelled lesson:</strong> </div>' . '<div><strong>Refund amount:</strong> </div>' . '<div style="margin-top:12px;">You can expect the refunded amount to appear back in your account in approximately 3 to 5 business days, depending on your bank and card issuer.</div>','Contact Support'),
     );
 
@@ -12152,7 +12057,7 @@ public function handle_marketing_resubscribe() {
 
       return array(
         'subject' => $subject,
-        'html' => $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, $button),
+        'html' => is_array($button) ? $this->mrm_email_wrap_html($title, $intro, $details, $button, '') : $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, $button),
       );
     }
 
