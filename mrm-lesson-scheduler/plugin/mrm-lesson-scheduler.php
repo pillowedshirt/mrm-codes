@@ -6711,31 +6711,22 @@ protected function mrm_get_google_service_account_json() {
     protected function get_safety_reminder_subject( $lesson ) {
         $lesson = is_array( $lesson ) ? $lesson : array();
 
-        $start_time   = (string) ( $lesson['start_time'] ?? '' );
-        $student_name = trim( (string) ( $lesson['student_name'] ?? '' ) );
-        $is_consultation = $this->mrm_is_consultation_lesson( $lesson );
-
-        $date_part = '';
-        if ( $start_time !== '' ) {
-            $timestamp = strtotime( $start_time );
-            if ( $timestamp ) {
-                $date_part = wp_date( 'm/d', $timestamp, wp_timezone() );
-            }
-        }
-
-        if ( $date_part === '' ) {
-            $date_part = wp_date( 'm/d', current_time( 'timestamp' ), wp_timezone() );
-        }
-
-        if ( $student_name === '' ) {
-            $student_name = 'Student';
-        }
+        $student_name     = trim( (string) ( $lesson['student_name'] ?? '' ) );
+        $instructor_name  = trim( (string) ( $lesson['instructor_name'] ?? '' ) );
+        $is_consultation  = $this->mrm_is_consultation_lesson( $lesson );
+        $context          = $this->get_safety_lesson_context( $lesson );
 
         if ( $is_consultation ) {
-            return $date_part . ' ' . $student_name . ' - Consultation Reminder';
+            return 'Consultation confirmed';
         }
 
-        return $date_part . ' ' . $student_name . ' - Lesson Reminder';
+        $lesson_type = ! empty( $context['join_link'] ) ? 'online' : 'in-person';
+
+        if ( $instructor_name === '' ) {
+            $instructor_name = 'your instructor';
+        }
+
+        return 'Upcoming ' . $lesson_type . ' lesson with ' . $instructor_name;
     }
 
 
@@ -6801,9 +6792,16 @@ protected function mrm_get_google_service_account_json() {
             '<div style="margin-top:12px;"><strong>Instructor message:</strong><br>' . nl2br( esc_html( (string) $message ) ) . '</div>';
 
         $html = $this->mrm_safety_email_wrap_html_blocks(
-            'Lesson emergency notice',
-            '<p>An emergency has been reported by the instructor and they can no longer make the lesson as scheduled.</p>',
-            $details
+            $this->mrm_is_consultation_lesson( $lesson ) ? 'Consultation cancelled' : 'This lesson has been cancelled',
+            '<p>An emergency cancellation for the lesson scheduled for ' . esc_html( (string) $context['start_label'] ) . ' with ' . esc_html( (string) ( $lesson['instructor_name'] ?? '' ) ) . ' has been submitted. If you would like to schedule a lesson with another instructor please select an instructor and reach out via email at lowbrass-lessons.com/calendar/</p><p>If you have any questions please contact support.</p>',
+            $details,
+            $this->mrm_email_button_row_html( array(
+                array(
+                    'url'     => home_url('/contact/'),
+                    'label'   => 'Contact Support',
+                    'variant' => 'primary',
+                ),
+            ) )
         );
 
         $headers = array(
@@ -6815,11 +6813,11 @@ protected function mrm_get_google_service_account_json() {
         $parent_sent = false;
 
         if ( is_email( $admin_email ) ) {
-            $admin_sent = wp_mail( $admin_email, 'Lesson emergency notice', $html, $headers );
+            $admin_sent = wp_mail( $admin_email, 'Emergency lesson cancellation notice', $html, $headers );
         }
 
         if ( is_email( $student_email ) ) {
-            $parent_sent = wp_mail( $student_email, 'Lesson emergency notice', $html, $headers );
+            $parent_sent = wp_mail( $student_email, 'Emergency lesson cancellation notice', $html, $headers );
         }
 
         $this->mrm_safety_log( 'instructor_emergency_notifications_result', array(
@@ -7134,6 +7132,51 @@ protected function mrm_get_google_service_account_json() {
     }
 
 
+
+    protected function mrm_email_button_row_html( $buttons ) {
+        if ( ! is_array( $buttons ) || empty( $buttons ) ) {
+            return '';
+        }
+
+        $valid_buttons = array();
+
+        foreach ( $buttons as $button ) {
+            if ( ! is_array( $button ) ) {
+                continue;
+            }
+
+            $url     = (string) ( $button['url'] ?? '' );
+            $label   = (string) ( $button['label'] ?? '' );
+            $variant = (string) ( $button['variant'] ?? 'primary' );
+
+            if ( trim( $url ) === '' || trim( $label ) === '' ) {
+                continue;
+            }
+
+            $valid_buttons[] = array(
+                'url'     => $url,
+                'label'   => $label,
+                'variant' => $variant,
+            );
+        }
+
+        if ( empty( $valid_buttons ) ) {
+            return '';
+        }
+
+        $html = '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:24px auto 0 auto;text-align:center;"><tr>';
+
+        foreach ( $valid_buttons as $button ) {
+            $html .= '<td align="center" valign="middle" style="padding:6px;">';
+            $html .= $this->mrm_email_button_html( $button['url'], $button['label'], $button['variant'] );
+            $html .= '</td>';
+        }
+
+        $html .= '</tr></table>';
+
+        return $html;
+    }
+
     protected function send_safety_reminders_for_lesson( $lesson_id ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
@@ -7232,25 +7275,44 @@ protected function mrm_get_google_service_account_json() {
                 ) );
             } else {
                 if ( $is_consultation ) {
-                    $parent_buttons =
-                        '<div style="margin-top:24px;">' .
-                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $parent_no_show_url, 'Click here if your instructor did not arrive', 'secondary' ) . '</div>' .
-                        '</div>';
+                    $parent_buttons = $this->mrm_email_button_row_html( array(
+                        array(
+                            'url'     => (string) ( $parent_context['join_link'] ?? '' ),
+                            'label'   => 'Join Consultation',
+                            'variant' => 'primary',
+                        ),
+                        array(
+                            'url'     => $parent_no_show_url,
+                            'label'   => 'Cancel Consultation',
+                            'variant' => 'cancel',
+                        ),
+                    ) );
 
-                    $parent_title = 'Consultation Reminder';
-                    $parent_intro = '<p>Reminder: you have a consultation coming up in one hour.</p>';
+                    $parent_title = 'Consultation confirmed';
+                    $parent_intro = '<p>Your consultation has been scheduled successfully.</p>';
                 } else {
-                    $parent_arrived_token = $this->mrm_safety_sign_token( $lesson_id, 'parent', 'confirm_arrival', $exp );
-                    $parent_arrived_url   = $this->mrm_safety_action_url( $parent_arrived_token );
+                    $is_online_lesson = ! empty( $parent_context['join_link'] );
 
-                    $parent_buttons =
-                        '<div style="margin-top:24px;">' .
-                            '<div style="margin:0 auto 12px auto;text-align:center;">' . $this->mrm_email_button_html( $parent_arrived_url, 'Click here when your instructor arrives', 'primary' ) . '</div>' .
-                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $parent_no_show_url, 'Click here if your instructor did not arrive', 'secondary' ) . '</div>' .
-                        '</div>';
+                    $parent_buttons = $this->mrm_email_button_row_html( array(
+                        array(
+                            'url'     => (string) ( $parent_context['join_link'] ?? '' ),
+                            'label'   => 'Join Lesson',
+                            'variant' => 'primary',
+                        ),
+                        array(
+                            'url'     => $parent_no_show_url,
+                            'label'   => 'My Instructor Did Not Arrive',
+                            'variant' => 'secondary',
+                        ),
+                    ) );
 
-                    $parent_title = 'Lesson reminder';
-                    $parent_intro = '<p>Reminder: you have a lesson coming up in one hour.</p>';
+                    if ( $is_online_lesson ) {
+                        $parent_title = 'Upcoming online lesson with ' . (string) ( $lesson['instructor_name'] ?? '' );
+                        $parent_intro = '<p>This is a reminder for your upcoming online private lesson.</p><p>Your meeting link will become available 10 minutes before your lesson time and will remain available until 10 minutes after your lesson time. Please make sure your camera, microphone, and internet connection are working before joining the call.</p>';
+                    } else {
+                        $parent_title = 'Upcoming in-person lesson with ' . (string) ( $lesson['instructor_name'] ?? '' );
+                        $parent_intro = '<p>This is a reminder for your upcoming in-person private lesson.</p><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible.</p>';
+                    }
                 }
 
                 $parent_html = $this->mrm_safety_email_wrap_html_blocks(
@@ -7298,22 +7360,57 @@ protected function mrm_get_google_service_account_json() {
                 ) );
             } else {
                 if ( $is_consultation ) {
-                    $instructor_buttons =
-                        '<div style="margin-top:24px;">' .
-                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_emergency_url, 'An emergency has arisen and I can no longer make this consultation', 'secondary' ) . '</div>' .
-                        '</div>';
+                    $instructor_buttons = $this->mrm_email_button_row_html( array(
+                        array(
+                            'url'     => (string) ( $instructor_context['join_link'] ?? '' ),
+                            'label'   => 'Join Consultation',
+                            'variant' => 'primary',
+                        ),
+                        array(
+                            'url'     => $instructor_emergency_url,
+                            'label'   => 'I Am Unable To Provide This Consultation',
+                            'variant' => 'secondary',
+                        ),
+                    ) );
 
-                    $instructor_title = 'Consultation Reminder';
-                    $instructor_intro = '<p>Reminder: you have a consultation coming up in one hour.</p>';
+                    $instructor_title = 'You have a new consultation scheduled';
+                    $instructor_intro = '<p>You have a new consultation scheduled.</p>';
                 } else {
-                    $instructor_buttons =
-                        '<div style="margin-top:24px;">' .
-                            '<div style="margin:0 auto 12px auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_arrived_url, 'Click here when you have arrived for your lesson', 'primary' ) . '</div>' .
-                            '<div style="margin:0 auto;text-align:center;">' . $this->mrm_email_button_html( $instructor_emergency_url, 'An emergency has arisen and I can no longer make this lesson', 'secondary' ) . '</div>' .
-                        '</div>';
+                    $is_online_lesson = ! empty( $instructor_context['join_link'] );
 
-                    $instructor_title = 'Instructor lesson reminder';
-                    $instructor_intro = '<p>Reminder: you have a lesson coming up in one hour.</p>';
+                    if ( $is_online_lesson ) {
+                        $instructor_buttons = $this->mrm_email_button_row_html( array(
+                            array(
+                                'url'     => (string) ( $instructor_context['join_link'] ?? '' ),
+                                'label'   => 'Join Lesson',
+                                'variant' => 'primary',
+                            ),
+                            array(
+                                'url'     => $instructor_emergency_url,
+                                'label'   => 'I Am Unable To Provide This Lesson',
+                                'variant' => 'secondary',
+                            ),
+                        ) );
+
+                        $instructor_title = 'Upcoming online lesson with ' . (string) ( $lesson['student_name'] ?? '' );
+                        $instructor_intro = '<p>This is a reminder for your upcoming online lesson.</p><p>Please prepare your camera, microphone levels, and Wi-Fi connection before joining. The online room will open 10 minutes before the lesson and remain available until 10 minutes after.</p>';
+                    } else {
+                        $instructor_buttons = $this->mrm_email_button_row_html( array(
+                            array(
+                                'url'     => $instructor_arrived_url,
+                                'label'   => 'Mark Arrival',
+                                'variant' => 'primary',
+                            ),
+                            array(
+                                'url'     => $instructor_emergency_url,
+                                'label'   => 'I Am Unable To Provide This Lesson',
+                                'variant' => 'secondary',
+                            ),
+                        ) );
+
+                        $instructor_title = 'Upcoming in-person lesson with ' . (string) ( $lesson['student_name'] ?? '' );
+                        $instructor_intro = '<p>This is a reminder for your upcoming in-person lesson.</p><p>Please plan to arrive during the 10-minute window before the lesson to account for setup time, and consider traffic when planning your arrival.</p>';
+                    }
                 }
 
                 $instructor_html = $this->mrm_safety_email_wrap_html_blocks(
@@ -7502,10 +7599,10 @@ protected function mrm_get_google_service_account_json() {
 
         $html = $this->mrm_safety_email_wrap_html(
             'How was your lesson?',
-            '<p>Please rate the lesson and share any comments you would like us to see.</p>',
+            '<p>Please rate the lesson and share any feedback you have for your instructor.</p>',
             $details,
             $feedback_url,
-            'Rate your lesson'
+            'Rate Your Lesson'
         );
 
         $sent = wp_mail(
@@ -7831,7 +7928,7 @@ protected function mrm_get_google_service_account_json() {
 
         $this->render_safety_action_page( array(
             'eyebrow'      => 'Lesson Update',
-            'title'        => $is_consultation ? 'Consultation emergency notice' : 'Lesson emergency notice',
+            'title'        => $is_consultation ? 'Consultation cancelled' : 'This lesson has been cancelled',
             'message_html' => $message_html,
             'card_html'    => $card_html,
         ) );
@@ -7996,7 +8093,7 @@ protected function mrm_get_google_service_account_json() {
         $this->render_safety_action_page( array(
             'eyebrow'      => 'Lesson Feedback',
             'title'        => 'How Was Your Lesson?',
-            'message_html' => '<p>Please rate the lesson and share any comments you would like us to see.</p>',
+            'message_html' => '<p>Please rate the lesson and share any feedback you have for your instructor.</p>',
             'card_html'    => $card_html,
             'footer_html'  => 'Your feedback helps us maintain a high-quality lesson experience.',
         ) );
@@ -8069,8 +8166,8 @@ protected function mrm_get_google_service_account_json() {
 
         $admin_sent = false;
         $instructor_sent = false;
-        if ( is_email( $admin_email ) ) { $admin_sent = wp_mail( $admin_email, 'Parent lesson feedback received', $html, $headers ); }
-        if ( is_email( $instructor_email ) ) { $instructor_sent = wp_mail( $instructor_email, 'Parent lesson feedback received', $html, $headers ); }
+        if ( is_email( $admin_email ) ) { $admin_sent = wp_mail( $admin_email, 'Lesson Feedback Received from ' . $student_name, $html, $headers ); }
+        if ( is_email( $instructor_email ) ) { $instructor_sent = wp_mail( $instructor_email, 'Lesson Feedback Received from ' . $student_name, $html, $headers ); }
 
         $this->mrm_safety_log( 'parent_feedback_notifications_sent', array(
             'lesson_id'         => (int) $lesson_id,
@@ -11994,28 +12091,22 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
             return;
         }
 
-        $tests = array(
-            'private_lesson_reminder_parent' => array('Upcoming Lesson Reminder', '<p>This is a test of the parent/student private lesson reminder email.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/join-online/test/' ), 'Open Join Page'),
-            'private_lesson_reminder_instructor' => array('Instructor Lesson Reminder', '<p>This is a test of the instructor private lesson reminder email.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div>', home_url( '/wp-admin/admin-post.php?action=test-instructor-arrival' ), 'Mark Arrival'),
-            'lesson_feedback_request' => array('How was your lesson?', '<p>Please rate the lesson and share any comments you would like us to see.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Lesson:</strong> ' . esc_html( $time ) . '</div>', home_url( '/wp-admin/admin-post.php?action=test-feedback' ), 'Rate your lesson'),
-            'parent_feedback_received' => array('Parent Lesson Feedback', '<p>This is a test of the parent feedback received notification.</p>', '<div><strong>Rating:</strong> 5/5</div><div><strong>Comment:</strong> This is a test feedback comment.</div>', '', ''),
-        );
-        if ( isset( $tests[ $slug ] ) ) {
-            list( $title, $intro, $details, $url, $label ) = $tests[ $slug ];
-            $results[ $slug ] = wp_mail( $to, '[TEST] ' . $title, $this->mrm_safety_email_wrap_html( $title, $intro, $details, $url, $label ), $headers );
-            return;
-        }
+        $preview = $this->handle_cross_plugin_email_preview( array(), $slug );
 
-        $block_tests = array(
-            'consultation_confirmation' => array('Consultation Confirmation', '<p>Your consultation has been scheduled successfully.</p><p>This is an online consultation. Please use the consultation link at the scheduled time.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Time:</strong> ' . esc_html( $time ) . '</div><div><strong>Type:</strong> Consultation</div>'),
-            'contact_form_notification' => array('New Contact Form Submission', '<p>This is a test of the contact form notification email.</p>', '<div><strong>Name:</strong> Test Contact</div><div><strong>Email:</strong> test@example.com</div><div><strong>Represents:</strong> Incoming student</div><div><strong>Message:</strong> This is a test contact form message.</div>'),
-            'safety_no_show_alert' => array('Safety alert — parent reported instructor did not arrive', '<p>A parent has reported that the instructor did not arrive for the scheduled lesson.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Start:</strong> ' . esc_html( $time ) . '</div>'),
-            'safety_emergency_notice' => array('Lesson emergency notice', '<p>This is a test of the lesson emergency notice email.</p>', '<div><strong>Student:</strong> Test Student</div><div><strong>Instructor:</strong> Test Instructor</div><div><strong>Emergency message:</strong> Test emergency message.</div>'),
-            'contractor_agreement_confirmation' => array('Contractor Agreement Recorded', '<p>This is a test of the contractor agreement/signature confirmation email.</p>', '<div><strong>Contractor:</strong> Test Contractor</div><div><strong>Agreement Version:</strong> Test Version</div><div><strong>Status:</strong> Completed</div>'),
-        );
-        if ( isset( $block_tests[ $slug ] ) ) {
-            list( $title, $intro, $details ) = $block_tests[ $slug ];
-            $results[ $slug ] = wp_mail( $to, '[TEST] ' . $title, $this->mrm_safety_email_wrap_html_blocks( $title, $intro, $details, '' ), $headers );
+        if ( is_array( $preview ) && ! empty( $preview['html'] ) ) {
+            $subject = sanitize_text_field( (string) ( $preview['subject'] ?? $slug ) );
+            if ( $subject === '' ) {
+                $subject = $slug;
+            }
+
+            $results[ $slug ] = wp_mail(
+                $to,
+                '[TEST] ' . $subject,
+                (string) $preview['html'],
+                $headers
+            );
+
+            return;
         }
     }
 
@@ -12055,10 +12146,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
 
         if ( isset( $tests[ $slug ] ) ) {
             list( $title, $intro, $details, $buttons ) = $tests[ $slug ];
-            $button_html = '';
-            foreach ( (array) $buttons as $button ) {
-                $button_html .= '<div style="margin:0 auto 12px auto;text-align:center;">' . $this->mrm_email_button_html( $button['url'] ?? '', $button['label'] ?? '', $button['variant'] ?? 'primary' ) . '</div>';
-            }
+            $button_html = $this->mrm_email_button_row_html( $buttons );
             return array(
                 'subject' => $title,
                 'html'    => $this->mrm_safety_email_wrap_html_blocks( $title, $intro, $details, $button_html ),

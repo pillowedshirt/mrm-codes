@@ -4620,13 +4620,43 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   private function mrm_email_button_row_html($buttons) {
-    if (!is_array($buttons) || empty($buttons)) return '';
-    $html = '<div style="text-align:center;margin:24px 0 0 0;">';
+    if (!is_array($buttons) || empty($buttons)) {
+      return '';
+    }
+
+    $valid_buttons = array();
+
     foreach ($buttons as $button) {
       if (!is_array($button)) continue;
-      $html .= $this->mrm_email_button_html((string)($button['url'] ?? ''), (string)($button['label'] ?? ''), (string)($button['variant'] ?? 'primary'));
+
+      $url = (string)($button['url'] ?? '');
+      $label = (string)($button['label'] ?? '');
+      $variant = (string)($button['variant'] ?? 'primary');
+
+      if (trim($url) === '' || trim($label) === '') continue;
+
+      $valid_buttons[] = array(
+        'url' => $url,
+        'label' => $label,
+        'variant' => $variant,
+      );
     }
-    return $html . '</div>';
+
+    if (empty($valid_buttons)) {
+      return '';
+    }
+
+    $html = '<table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center" style="margin:24px auto 0 auto;text-align:center;"><tr>';
+
+    foreach ($valid_buttons as $button) {
+      $html .= '<td align="center" valign="middle" style="padding:6px;">';
+      $html .= $this->mrm_email_button_html($button['url'], $button['label'], $button['variant']);
+      $html .= '</td>';
+    }
+
+    $html .= '</tr></table>';
+
+    return $html;
   }
 
   private function mrm_email_contact_support_html($prefix_sentence = '') {
@@ -11930,14 +11960,20 @@ public function handle_marketing_resubscribe() {
     $table_style = 'width:100%;border-collapse:collapse;margin-top:14px;';
     $th_style = 'text-align:left;border:1px solid #ddd;padding:8px;';
     $td_style = 'border:1px solid #ddd;padding:8px;';
+    $contact_button = array(
+      array(
+        'url' => $this->mrm_get_contact_url(),
+        'label' => 'Contact Support',
+        'variant' => 'primary',
+      ),
+    );
 
     return array(
       'payout_summary_instructor' => array(
-        'Low Brass Lessons instructor payout summary',
-        'Instructor Payout Summary',
-        '<p>Hello ,</p><p>Your instructor payout batch has been processed. Here is your payout summary.</p>',
+        'Low Brass Lessons payout summary ',
+        'Payout Summary',
+        '<p>Your instructor payout has been processed successfully. Here is the summary:</p>',
         '<div><strong>Pay period:</strong> </div>'
-          . '<div><strong>Batch:</strong> </div>'
           . '<table style="' . esc_attr($table_style) . '">'
           . '<thead><tr>'
           . '<th style="' . esc_attr($th_style) . '">Lesson Type</th>'
@@ -11950,64 +11986,59 @@ public function handle_marketing_resubscribe() {
           . '<tr><td style="' . esc_attr($td_style) . '">In-person 60-minute lessons</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '</tbody></table>'
           . '<div style="margin-top:14px;font-size:17px;"><strong>Total payout:</strong> </div>',
-        ''
+        $contact_button
       ),
 
       'payout_summary_presenter' => array(
-        'Low Brass Lessons presenter payout summary',
-        'Presenter Payout Summary',
-        '<p>Hello ,</p><p>Your presenter payout has been processed. Here is your payout summary.</p>',
-        '<div><strong>Batch:</strong> </div>'
+        'Low Brass Lessons masterclass payout summary',
+        'Payout Summary',
+        '<p>Your presenter payout has been processed successfully. Here is the summary:</p>',
+        '<div><strong>Masterclass:</strong> </div>'
           . '<table style="' . esc_attr($table_style) . '">'
           . '<thead><tr>'
-          . '<th style="' . esc_attr($th_style) . '">Masterclass</th>'
-          . '<th style="' . esc_attr($th_style) . '">Students</th>'
-          . '<th style="' . esc_attr($th_style) . '">Agreed Pay Per Student</th>'
-          . '<th style="' . esc_attr($th_style) . '">Total Payout</th>'
+          . '<th style="' . esc_attr($th_style) . '">Payout Per Student</th>'
+          . '<th style="' . esc_attr($th_style) . '">Number of Students Enrolled</th>'
           . '</tr></thead><tbody>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Masterclass</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '</tbody></table>'
           . '<div style="margin-top:14px;font-size:17px;"><strong>Payout Total:</strong> </div>',
-        ''
+        $contact_button
       ),
 
       'payout_summary_composer' => array(
-        'Low Brass Lessons composer payout summary',
-        'Composer Payout Summary',
-        '<p>Your composer payout batch has been processed. Here is your payout summary.</p>',
+        'Low Brass Lessons payout summary ',
+        'Payout Summary',
+        '<p>Your composer payout has been processed successfully. Here is the summary:</p>',
         '<div><strong>Pay period:</strong> </div>'
-          . '<div><strong>Batch:</strong> </div>'
           . '<div><strong>Subscriptions paid in this window:</strong> </div>'
           . '<table style="' . esc_attr($table_style) . '">'
           . '<thead><tr>'
           . '<th style="' . esc_attr($th_style) . '">Product</th>'
           . '<th style="' . esc_attr($th_style) . '">Type</th>'
           . '<th style="' . esc_attr($th_style) . '">Quantity</th>'
-          . '<th style="' . esc_attr($th_style) . '">Promo</th>'
           . '<th style="' . esc_attr($th_style) . '">Promo Reduction</th>'
           . '<th style="' . esc_attr($th_style) . '">Composer Payout</th>'
           . '</tr></thead><tbody>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Product</td><td style="' . esc_attr($td_style) . '">Piece / product sale</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
-          . '<tr><td style="' . esc_attr($td_style) . '">Sheet music subscription</td><td style="' . esc_attr($td_style) . '">Subscription payment</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Product</td><td style="' . esc_attr($td_style) . '">Piece / product sale</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
+          . '<tr><td style="' . esc_attr($td_style) . '">Sheet music subscription</td><td style="' . esc_attr($td_style) . '">Subscription payment</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '</tbody></table>'
           . '<div style="margin-top:14px;"><strong>Total promo reduction affecting composer content:</strong> </div>'
           . '<div style="margin-top:8px;font-size:17px;"><strong>Total composer payout:</strong> </div>',
-        ''
+        $contact_button
       ),
 
       'payout_summary_owner_net' => array(
         'Low Brass Lessons owner payout batch summary',
         'Owner Payout Batch Summary',
         '<p>A payout batch has been processed. Here is the owner/company summary.</p>',
-        '<div><strong>Batch:</strong> </div>'
-          . '<div><strong>Pay period:</strong> </div>'
+        '<div><strong>Pay period:</strong> </div>'
           . '<table style="' . esc_attr($table_style) . '">'
           . '<thead><tr>'
           . '<th style="' . esc_attr($th_style) . '">Payee Type</th>'
           . '<th style="' . esc_attr($th_style) . '">Payee</th>'
           . '<th style="' . esc_attr($th_style) . '">Paid Out</th>'
-          . '<th style="' . esc_attr($th_style) . '">Company Retained</th>'
           . '<th style="' . esc_attr($th_style) . '">Promo Reduction</th>'
+          . '<th style="' . esc_attr($th_style) . '">Company Retained</th>'
           . '</tr></thead><tbody>'
           . '<tr><td style="' . esc_attr($td_style) . '">Instructor</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
           . '<tr><td style="' . esc_attr($td_style) . '">Presenter</td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td><td style="' . esc_attr($td_style) . '"></td></tr>'
@@ -12062,8 +12093,8 @@ public function handle_marketing_resubscribe() {
       'purchase_receipt_in_person_lesson' => array('Purchase Confirmation - In-Person Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> In-person lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p><div style="margin-top:14px;"><strong>Lessons outside the home</strong></div><p>If the lesson will take place at a school, church, or other community location, please complete the required approval form before the lesson begins.</p><p><a href="https://www.docusign.com/" target="_blank" rel="noopener">Placeholder DocuSign location approval link</a></p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p>',array(array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
 
       'sheet_music_subscription_enrollment' => array('Subscription Confirmation - Sheet Music Access','Subscription Confirmation - Sheet Music Access','<p>You have successfully enrolled in the sheet music subscription service.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Renews on:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your subscription has been created successfully in our billing system.</div>' . '<div style="margin-top:12px;">You will be billed again on or about <strong></strong>, and then monthly thereafter while the subscription remains active.</div>','Contact Support'),
-      'sheet_music_subscription_renewal' => array('Subscription Renewal - Sheet Music Access','Subscription Renewal - Sheet Music Access','<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount Charged:</strong> </div>' . '<div><strong>Next renewal date:</strong> ' . esc_html($next_label) . '</div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your sheet music subscription remains active.</div>' . '<div><strong>Invoice ID:</strong> </div>' . '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong></strong>.</div>','Contact Support'),
-      'sheet_music_subscription_cancelled' => array('Subscription Update - Sheet Music Access Cancelled','Subscription Cancelled','<p>Your sheet music subscription has been cancelled.</p>','<div><strong>Subscription:</strong> Monthly sheet music access</div>' . '<div><strong>Status:</strong> Cancelled</div>' . '<div><strong>Cancellation date:</strong> </div>' . '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future. You will have access to sheet music products throughout the remainder of your subscription period which ends on: .</div>','Contact Support'),
+      'sheet_music_subscription_renewal' => array('Subscription Renewal - Sheet Music Access','Subscription Renewal - Sheet Music Access','<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount Charged:</strong> </div>' . '<div><strong>Next renewal date:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your sheet music subscription remains active.</div>' . '<div><strong>Invoice ID:</strong> </div>' . '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong></strong>.</div>','Contact Support'),
+      'sheet_music_subscription_cancelled' => array('Subscription Update - Sheet Music Access Cancelled','Subscription Cancelled','<p>Your sheet music subscription has been cancelled.</p>','<div><strong>Subscription:</strong> Monthly sheet music access</div>' . '<div><strong>Status:</strong> Cancelled</div>' . '<div><strong>Cancellation date:</strong> </div>' . '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future. You will have access to sheet music products throughout the remainder of your subscription period which ends on: </div>','Contact Support'),
       'sheet_music_subscription_renewal_reminder' => array('Subscription Renewal Reminder - Sheet Music Access','Subscription Renewal Reminder - Sheet Music Access','<p>This is a reminder that your sheet music subscription renewal is scheduled to occur on <strong></strong>.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div><div><strong>Amount:</strong> $5.00 Per Month</div><div><strong>Renewal date:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html(),'Contact Support'),
       'lesson_cancellation_no_refund' => array('Lesson update — Cancellation','Lesson cancelled','<p>Your lesson has been cancelled and it does not qualify for a refund as the lesson was not cancelled the minimum 24 hours in advance.</p>','<div><strong>Cancelled lesson:</strong> </div><div><strong>Amount paid:</strong> </div><div style="margin-top:12px;">If you believe this to be a mistake please contact support.</div>','Contact Support'),
       'lesson_cancellation_refund' => array('Lesson update — Cancellation and refund issued','Lesson cancelled and refund issued','<p>Your lesson has been cancelled and a refund has been issued.</p>','<div><strong>Cancelled lesson:</strong> </div>' . '<div><strong>Refund amount:</strong> </div>' . '<div style="margin-top:12px;">You can expect the refunded amount to appear back in your account in approximately 3 to 5 business days, depending on your bank and card issuer.</div>','Contact Support'),
@@ -12141,1024 +12172,33 @@ public function handle_marketing_resubscribe() {
   private function mrm_send_single_email_test($slug, $to) {
     $slug = sanitize_key((string)$slug);
     $to = sanitize_email((string)$to);
+
     if (!$to || !is_email($to)) {
       return false;
     }
 
-    $headers = array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>');
-    $contact_url = $this->mrm_get_contact_url();
-    $samples = array(
-      'profile_card_request_invite' => array('Instructor Profile Card', '<p>Hello,</p><p>Low Brass Lessons has invited you to complete a private onboarding form for a <strong>Instructor Profile Card</strong>.</p>', '<div><strong>Request type:</strong> Instructor Profile Card</div><div><strong>Private link expiration:</strong> </div><div style="margin-top:12px;padding-top:12px;border-top:1px solid #d9cfbe;"><strong>Note from Low Brass Lessons:</strong><br></div>', 'Complete Your Form'),
-      'profile_card_changes_requested' => array('Profile Card Changes Requested', '<p>Hello,</p><p>Low Brass Lessons has reviewed your submitted profile card or event request and requested changes before approval.</p>', '<div><strong>Requested changes:</strong></div><div></div><div style="margin-top:12px;">Please use your original private link to update and resubmit your request.</div>', ''),
-      'marketing_custom_email' => array('', '', '', ''),
-      'payment_method_attention_student' => array('Payment method confirmation needed', '<p>Your upcoming AutoPay lesson requires payment method confirmation before the lesson can be processed.</p>', '<div><strong>Student:</strong> </div><div><strong>Lesson:</strong> </div><div><strong>Scheduled time:</strong> </div><div style="margin-top:12px;">Please confirm or update your saved payment method before the lesson.</div>', 'Contact Support'),
-      'payment_method_attention_instructor' => array('Instructor action required', '<p>An upcoming AutoPay lesson should be withheld until the student payment method is confirmed.</p>', '<div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Lesson:</strong> </div><div><strong>Scheduled time:</strong> </div><div style="margin-top:12px;">Please do not teach this lesson until payment confirmation is resolved.</div>', 'Contact Support'),
-      'payment_method_attention_admin' => array('Admin awareness', '<p>The system detected an upcoming AutoPay lesson with a payment method issue requiring administrative awareness.</p>', '<div><strong>Lesson ID:</strong> </div><div><strong>Student:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Scheduled time:</strong> </div><div><strong>Issue:</strong> Payment method attention required.</div>', 'Contact Support'),
-      'purchase_receipt' => array('Purchase Confirmation - ', '<p>We’ve received your payment successfully.</p>', '<div><strong>Item:</strong> </div><div><strong>Order #:</strong> </div><div><strong>Payment ID:</strong> </div><div><strong>Base:</strong> </div><div><strong>Promo code:</strong> </div><div><strong>Sheet music add-on:</strong> </div><div><strong>Tax:</strong> </div><div><strong>Total paid:</strong> </div><div style="margin-top:12px;"><strong>How To Access Your Purchase</strong></div><ol style="margin:8px 0 0 18px;padding:0;"><li>Return to the piece page on the website.</li><li>Click the access button for your purchased category.</li><li>Enter your purchase email address.</li><li>Request your one-time access code and enter it to open the content.</li></ol><div style="margin-top:12px;"><strong>Need assistance or would like to request a refund?</strong></div>', 'Contact Support'),
+    $headers = array(
+      'Content-Type: text/html; charset=UTF-8',
+      'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
     );
 
-    if (isset($samples[$slug])) {
-      list($title, $intro, $details, $cta_label) = $samples[$slug];
-      return wp_mail($to, '[TEST] ' . $title, $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, $cta_label), $headers);
+    $preview = $this->mrm_build_single_email_preview($slug);
+
+    if (!is_array($preview) || empty($preview['html'])) {
+      return false;
     }
 
-    $payout_summary_samples = $this->mrm_payout_summary_email_test_samples();
-
-    if (isset($payout_summary_samples[$slug])) {
-      list($subject, $title, $intro, $details, $cta_label) = $payout_summary_samples[$slug];
-
-      return wp_mail(
-        $to,
-        '[TEST] ' . $subject,
-        $this->mrm_email_wrap_html($title, $intro, $details, '', $cta_label),
-        $headers
-      );
+    $subject = sanitize_text_field((string)($preview['subject'] ?? $slug));
+    if ($subject === '') {
+      $subject = $slug;
     }
 
-    if ($slug === 'sheet_music_subscription_enrollment') {
-      return $this->mrm_send_sheet_music_subscription_enrollment_email(array('email_plain' => $to, 'stripe_status' => 'active', 'portal_token' => 'test-token'), strtotime('+1 month'));
-    }
-    if ($slug === 'sheet_music_subscription_renewal') {
-      $invoice = array('amount_paid' => 500, 'id' => 'in_test_123', 'lines' => array('data' => array(array('period' => array('end' => strtotime('+1 month'))))));
-      return $this->mrm_send_sheet_music_subscription_charge_email(array('email_plain' => $to, 'portal_token' => 'test-token'), $invoice);
-    }
-    if ($slug === 'sheet_music_subscription_cancelled') {
-      return $this->mrm_send_sheet_music_subscription_cancelled_email(array('email_plain' => $to), array('ended_at' => time()));
-    }
-    if ($slug === 'lesson_cancellation_refund') {
-      return $this->mrm_send_lesson_cancellation_refund_email(array('student_email' => $to, 'start_time' => gmdate('Y-m-d H:i:s', strtotime('+1 week'))), 7500);
-    }
-
-    $results = array();
-    do_action_ref_array('mrm_send_cross_plugin_email_test', array($slug, $to, &$results));
-    return !empty($results[$slug]);
-  }
-
-
-public function render_promo_codes_page() {
-  if (!current_user_can('manage_options')) {
-    wp_die('You do not have permission to view this page.');
-  }
-
-  $codes = $this->mrm_get_promo_codes();
-
-  ?>
-  <div class="wrap">
-    <h1>Promo Codes</h1>
-
-    <p>
-      Create promotional codes for lessons, sheet music, and Masterclass registrations.
-      Rule Mode and Occurrence Count now control all item/occurrence behavior.
-    </p>
-
-    <style>
-      .mrm-promo-table {
-        width: 100%;
-        border-collapse: collapse;
-        table-layout: auto;
-      }
-      .mrm-promo-table th, .mrm-promo-table td { vertical-align: top; padding: 8px; }
-      .mrm-promo-table input[type="text"], .mrm-promo-table input[type="number"], .mrm-promo-table input[type="date"], .mrm-promo-table select { max-width: 100%; }
-      .mrm-promo-rule-grid { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 10px; align-items: end; }
-      .mrm-promo-field label { display: block; font-size: 11px; font-weight: 600; color: #555; margin-bottom: 3px; }
-      .mrm-promo-field .description { font-size: 11px; color: #777; margin-top: 3px; }
-      .mrm-promo-redemptions { background: #fafafa; border-left: 4px solid #dcdcde; }
-      @media (max-width: 1200px) { .mrm-promo-rule-grid { grid-template-columns: repeat(2, minmax(180px, 1fr)); } }
-      @media (max-width: 782px) { .mrm-promo-rule-grid { grid-template-columns: 1fr; } }
-    </style>
-
-    <form method="post" action="">
-      <?php wp_nonce_field('mrm_pay_hub_save_promo_codes', 'mrm_pay_hub_promo_codes_nonce'); ?>
-      <table class="widefat striped mrm-promo-table"><thead><tr><th style="width:120px;">Code</th><th style="width:160px;">Label</th><th style="width:140px;">Discount</th><th style="width:170px;">Applies To</th><th>Rule / Dates / Reuse</th><th style="width:90px;">Delete</th></tr></thead>
-      <tbody>
-      <?php $i = 0; foreach ($codes as $code => $promo) : if (!is_array($promo)) { continue; }
-      $rule_mode = (string)($promo['rule_mode'] ?? 'all'); $occurrence_count = (int)($promo['occurrence_count'] ?? 0); $after_occurrence = (int)($promo['after_occurrence'] ?? 0); $starts_at = (string)($promo['starts_at'] ?? ''); $expires_at = (string)($promo['expires_at'] ?? ''); $reusable_per_email = !empty($promo['reusable_per_email']); ?>
-      <tr><td><input type="text" name="promo_code[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($code); ?>" style="width:120px;" /></td>
-      <td><input type="text" name="promo_label[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['label'] ?? '')); ?>" style="width:160px;" /></td>
-      <td><div class="mrm-promo-field"><label>Type</label><select name="promo_discount_type[<?php echo esc_attr($i); ?>]"><option value="percent" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'percent'); ?>>Percentage</option><option value="amount" <?php selected((string)($promo['discount_type'] ?? 'percent'), 'amount'); ?>>Dollar Amount</option></select></div>
-      <div class="mrm-promo-field" style="margin-top:6px;"><label>Percent</label><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)($promo['percent_off'] ?? 0)); ?>" style="width:80px;" />%</div>
-      <div class="mrm-promo-field" style="margin-top:6px;"><label>Amount</label><input type="text" name="promo_amount_off[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr(number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2)); ?>" style="width:90px;" /></div></td>
-      <td><?php
-      $scope_value = (string)($promo['scope'] ?? 'all');
-      $scope_values = isset($promo['scopes']) && is_array($promo['scopes']) ? $promo['scopes'] : array();
-      if (empty($scope_values)) {
-        if ($scope_value === 'all') {
-          $scope_values = array('lesson', 'sheet_music', 'masterclass');
-        } elseif (in_array($scope_value, array('lesson', 'sheet_music', 'masterclass'), true)) {
-          $scope_values = array($scope_value);
-        }
-      }
-      $scope_values = array_map('sanitize_key', $scope_values);
-      ?>
-      <div class="mrm-promo-field"><label>Purchase Types</label>
-      <label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($i); ?>][]" value="lesson" <?php checked(in_array('lesson', $scope_values, true)); ?> /> Lessons</label>
-      <label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($i); ?>][]" value="sheet_music" <?php checked(in_array('sheet_music', $scope_values, true)); ?> /> Sheet Music</label>
-      <label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($i); ?>][]" value="masterclass" <?php checked(in_array('masterclass', $scope_values, true)); ?> /> Masterclasses</label>
-      <p class="description">Select every purchase type this promo code should apply to.</p></div>
-      <input type="hidden" name="promo_applies_to[<?php echo esc_attr($i); ?>]" value="all_items" /></td>
-      <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($i); ?>]"><option value="all" <?php selected($rule_mode, 'all'); ?>>All qualifying purchases</option><option value="first_n" <?php selected($rule_mode, 'first_n'); ?>>First N occurrences</option><option value="after_n" <?php selected($rule_mode, 'after_n'); ?>>After N occurrences</option><option value="first_n_months" <?php selected($rule_mode, 'first_n_months'); ?>>First N months</option><option value="date_window" <?php selected($rule_mode, 'date_window'); ?>>Date window</option></select></div>
-      <div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr((string)$occurrence_count); ?>" style="width:110px;" /><div class="description">Used by First N occurrences, After N occurrences, and First N months.</div></div>
-      
-      <div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($starts_at); ?>" /></div>
-      <div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($i); ?>]" value="<?php echo esc_attr($expires_at); ?>" /></div></div>
-      <div style="margin-top:10px;"><label><input type="checkbox" name="promo_reusable_per_email[<?php echo esc_attr($i); ?>]" value="1" <?php checked($reusable_per_email); ?> /> Reusable by the same email</label><p class="description" style="margin-top:3px;">When checked, the same email can redeem this promo more than once. Each paid use is still recorded below.</p></div></td>
-      <td><label><input type="checkbox" name="promo_delete[<?php echo esc_attr($i); ?>]" value="1" /> Delete</label></td></tr>
-      <?php $redemptions = $this->mrm_get_redemptions_for_promo_code($code, 25); ?>
-      <tr><td colspan="6" class="mrm-promo-redemptions"><div style="font-size:11px;line-height:1.45;color:#555;"><strong>Completed redemptions</strong><?php if (empty($redemptions)) : ?><div style="margin-top:4px;">No completed redemptions recorded yet.</div><?php else : ?><ul style="margin:6px 0 0 16px;padding:0;"><?php foreach ($redemptions as $redemption) : $display_email = !empty($redemption['customer_email']) ? sanitize_email($redemption['customer_email']) : '[email not stored before this update]'; $when = !empty($redemption['updated_at']) ? $redemption['updated_at'] : ($redemption['created_at'] ?? ''); $status = sanitize_text_field((string)($redemption['status'] ?? '')); ?><li style="margin-bottom:4px;"><label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" name="promo_redemption_remove[]" value="<?php echo esc_attr((int)($redemption['id'] ?? 0)); ?>" /><span><?php echo esc_html($display_email); ?> — <?php echo esc_html($when); ?><?php if ($status !== '') : ?><span style="opacity:.75;">(<?php echo esc_html($status); ?>)</span><?php endif; ?></span></label></li><?php endforeach; ?></ul><div style="margin-top:6px;color:#777;">Check a redemption above and click <strong>Save Promo Codes</strong> to remove that completed redemption.</div><?php endif; ?></div></td></tr>
-      <?php $i++; endforeach; $new_i = $i; ?>
-      <tr><td><input type="text" name="promo_code[<?php echo esc_attr($new_i); ?>]" placeholder="WELCOME10" style="width:120px;" /></td><td><input type="text" name="promo_label[<?php echo esc_attr($new_i); ?>]" placeholder="Welcome discount" style="width:160px;" /></td>
-      <td><div class="mrm-promo-field"><label>Type</label><select name="promo_discount_type[<?php echo esc_attr($new_i); ?>]"><option value="percent">Percentage</option><option value="amount">Dollar Amount</option></select></div><div class="mrm-promo-field" style="margin-top:6px;"><label>Percent</label><input type="number" min="0" max="100" name="promo_percent_off[<?php echo esc_attr($new_i); ?>]" value="0" style="width:80px;" />%</div><div class="mrm-promo-field" style="margin-top:6px;"><label>Amount</label><input type="text" name="promo_amount_off[<?php echo esc_attr($new_i); ?>]" value="0.00" style="width:90px;" /></div></td>
-      <td><div class="mrm-promo-field"><label>Purchase Types</label><label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($new_i); ?>][]" value="lesson" /> Lessons</label><label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($new_i); ?>][]" value="sheet_music" /> Sheet Music</label><label><input type="checkbox" name="promo_scopes[<?php echo esc_attr($new_i); ?>][]" value="masterclass" /> Masterclasses</label><p class="description">Check all three to apply the promo to all purchases.</p></div><input type="hidden" name="promo_applies_to[<?php echo esc_attr($new_i); ?>]" value="all_items" /></td>
-      <td><div class="mrm-promo-rule-grid"><div class="mrm-promo-field"><label>Rule Mode</label><select name="promo_rule_mode[<?php echo esc_attr($new_i); ?>]"><option value="all">All qualifying purchases</option><option value="first_n">First N occurrences</option><option value="after_n">After N occurrences</option><option value="first_n_months">First N months</option><option value="date_window">Date window</option></select></div><div class="mrm-promo-field"><label>Occurrence Count</label><input type="number" min="0" name="promo_occurrence_count[<?php echo esc_attr($new_i); ?>]" value="0" style="width:110px;" /></div><div class="mrm-promo-field"><label>Start Date</label><input type="date" name="promo_starts_at[<?php echo esc_attr($new_i); ?>]" /></div><div class="mrm-promo-field"><label>End / Expiration</label><input type="date" name="promo_expires_at[<?php echo esc_attr($new_i); ?>]" /></div></div><div style="margin-top:10px;"><label><input type="checkbox" name="promo_reusable_per_email[<?php echo esc_attr($new_i); ?>]" value="1" /> Reusable by the same email</label></div></td><td></td></tr>
-      </tbody></table>
-      <p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>
-    </form>
-  </div>
-  <?php
-}
-
-
-public function render_marketing_email_lists_page() {
-  if (!current_user_can('manage_options')) {
-    wp_die('You do not have permission to view this page.');
-  }
-
-  $defs = $this->mrm_marketing_default_lists();
-  $manual_lists = $this->mrm_marketing_manual_lists();
-  $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
-  $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
-
-  echo '<div class="wrap">';
-  echo '<h1>Marketing Email Lists</h1>';
-  echo '<p>This page is for marketing emails only. It does not control paid sheet music access, lesson records, transactional receipts, or required account notices.</p>';
-
-  if (isset($_GET['mrm_marketing_saved'])) {
-  $extra = '';
-  if (isset($_GET['mrm_marketing_resubscribed'])) {
-    $extra = ' Re-subscribed emails processed: ' . esc_html((string)(int)$_GET['mrm_marketing_resubscribed']) . '.';
-  }
-  echo '<div class="notice notice-success"><p>Marketing email lists saved.' . $extra . '</p></div>';
-}
-  if (isset($_GET['mrm_marketing_sent'])) {
-    $sent = (int)$_GET['mrm_marketing_sent'];
-    $failed = (int)($_GET['mrm_marketing_failed'] ?? 0);
-    echo '<div class="notice notice-success"><p>Marketing send complete. Sent: ' . esc_html((string)$sent) . '. Failed: ' . esc_html((string)$failed) . '.</p></div>';
-  }
-  if (isset($_GET['mrm_marketing_error'])) echo '<div class="notice notice-error"><p>' . esc_html((string)wp_unslash($_GET['mrm_marketing_error'])) . '</p></div>';
-
-  echo '<style>
-    .mrm-marketing-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(320px,.9fr);gap:20px;align-items:start;}
-    .mrm-card{background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:18px;margin:0 0 18px;}
-    .mrm-card h2{margin-top:0;}
-    .mrm-list-row{display:flex;gap:10px;align-items:flex-start;border-bottom:1px solid #eee;padding:10px 0;}
-    .mrm-list-row:last-child{border-bottom:0;}
-    .mrm-list-row input[type=checkbox]{margin-top:3px;}
-    .mrm-list-meta small{color:#666;}
-    .mrm-list-count{display:inline-block;background:#f0f0f1;border-radius:999px;padding:2px 8px;margin-left:6px;font-size:12px;}
-    textarea.mrm-html-box{font-family:Consolas,Monaco,monospace;width:100%;min-height:320px;}
-    textarea.mrm-email-list-box{width:100%;min-height:115px;font-family:Consolas,Monaco,monospace;}
-    .mrm-marketing-live-preview{background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:18px;margin:18px 0;}
-    .mrm-marketing-live-preview h2{margin-top:0;}
-    #mrm-marketing-preview-frame{width:100%;min-height:680px;border:1px solid #dcdcde;border-radius:8px;background:#fff;}
-    #mrm-marketing-preview-empty{padding:18px;border:1px dashed #ccd0d4;border-radius:10px;background:#fafafa;color:#555;}
-    @media(max-width:1100px){.mrm-marketing-grid{grid-template-columns:1fr;}}
-  </style>';
-
-  echo '<div class="mrm-marketing-live-preview">';
-  echo '<h2>Live Marketing Email Preview</h2>';
-  echo '<p class="description">This preview updates as soon as you type a subject line or HTML email body. It does not send anything.</p>';
-  echo '<div id="mrm-marketing-preview-empty">Start typing a subject line or HTML email body to preview the marketing email.</div>';
-  echo '<div id="mrm-marketing-preview-active" style="display:none;">';
-  echo '<p><strong>Subject:</strong> <span id="mrm-marketing-preview-subject"></span></p>';
-  echo '<iframe id="mrm-marketing-preview-frame" title="Marketing email preview"></iframe>';
-  echo '</div>';
-  echo '</div>';
-
-  echo '<div class="mrm-marketing-grid">';
-
-  echo '<div class="mrm-card">';
-  echo '<h2>Draft and Send Marketing Email</h2>';
-  echo '<p>Paste your prepared HTML below. Recipients are deduplicated across selected lists and unsubscribed emails are suppressed.</p>';
-  echo '<form method="post" enctype="multipart/form-data" action="' . esc_url(admin_url('admin-post.php')) . '">';
-  echo '<input type="hidden" name="action" value="mrm_marketing_email_send">';
-  wp_nonce_field('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
-  echo '<p><label><strong>Subject line</strong><br><input type="text" id="mrm-marketing-subject-input" name="mrm_marketing_subject" class="large-text" required placeholder="Subject line"></label></p>';
-  echo '<p><label><strong>HTML email body</strong><br><textarea id="mrm-marketing-html-input" name="mrm_marketing_html" class="mrm-html-box" required placeholder="&lt;h1&gt;Your headline&lt;/h1&gt;&#10;&lt;p&gt;Your email body...&lt;/p&gt;&#10;&lt;p&gt;&lt;a href=&quot;https://lowbrass-lessons.com&quot;&gt;Call to action&lt;/a&gt;&lt;/p&gt;"></textarea></label></p>';
-  echo '<p><label><strong>Add attachments</strong><br><input type="file" name="mrm_marketing_attachments[]" multiple accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"></label><br><small>Optional. Up to 5 files. Allowed: PDF, DOC, DOCX, JPG, PNG. Maximum 10MB per file. Attachments are sent through wp_mail/FluentSMTP and temporarily deleted after the send completes.</small></p>';
-
-  echo '<h3>Send to lists</h3>';
-  echo '<div style="border:1px solid #dcdcde;border-radius:10px;padding:10px;background:#fafafa;">';
-  foreach ($defs as $key => $def) {
-    $count = count($this->mrm_marketing_get_list_recipients($key, true));
-    echo '<label class="mrm-list-row">';
-    echo '<input type="checkbox" name="mrm_marketing_lists[]" value="' . esc_attr($key) . '">';
-    echo '<span class="mrm-list-meta"><strong>' . esc_html((string)$def['label']) . '</strong><span class="mrm-list-count">' . esc_html((string)$count) . ' recipients</span><br><small>' . esc_html((string)$def['desc']) . '</small></span>';
-    echo '</label>';
-  }
-  echo '</div>';
-  echo '<p class="submit"><button type="submit" class="button button-primary" onclick="return confirm(\'Send this marketing email to the selected lists? Recipients will be deduplicated and unsubscribed emails will be suppressed.\');">Send Marketing Email</button></p>';
-  echo '</form>';
-  echo '</div>';
-
-  echo '<div>';
-  echo '<div class="mrm-card">';
-  echo '<h2>Compliance Footer + Manual Lists</h2>';
-  echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
-  echo '<input type="hidden" name="action" value="mrm_marketing_email_save_lists">';
-  wp_nonce_field('mrm_marketing_email_save_lists', 'mrm_marketing_email_lists_nonce');
-  echo '<p><label><strong>Marketing email mailing address</strong><br><textarea name="mrm_marketing_mailing_address" class="large-text" rows="4" placeholder="Low Brass Lessons LLC&#10;Mailing Address&#10;City, State ZIP">' . esc_textarea($mailing_address) . '</textarea></label></p>';
-  echo '<p><small>Marketing emails should include a valid physical postal address and a working unsubscribe link. The unsubscribe link is added automatically.</small></p>';
-
-  foreach ($defs as $key => $def) {
-    if (($def['type'] ?? '') !== 'manual') continue;
-    $emails = isset($manual_lists[$key]) ? (array)$manual_lists[$key] : array();
-    echo '<div style="margin:16px 0;padding:14px;border:1px solid #e5e5e5;border-radius:10px;background:#fff;">';
-    echo '<h3 style="margin-top:0;">' . esc_html((string)$def['label']) . ' <span class="mrm-list-count">' . esc_html((string)count($this->mrm_marketing_get_list_recipients($key, true))) . ' active</span></h3>';
-    echo '<p><small>' . esc_html((string)$def['desc']) . '</small></p>';
-    echo '<textarea class="mrm-email-list-box" name="mrm_marketing_list_' . esc_attr($key) . '">' . esc_textarea(implode("
-", $emails)) . '</textarea>';
-    echo '</div>';
-  }
-  echo '<p class="submit"><button type="submit" class="button button-primary">Save Footer and Manual Lists</button></p>';
-  echo '</form>';
-  echo '</div>';
-
-  echo '<div class="mrm-card">';
-  echo '<h2>Global Marketing Unsubscribes</h2>';
-  echo '<p>These emails are suppressed from all marketing sends. They are not removed from paid access lists, lesson records, or order records.</p>';
-  echo '<p><strong>Total unsubscribed:</strong> ' . esc_html((string)count($unsubscribed)) . '</p>';
-
-  if (!empty($unsubscribed)) {
-    echo '<details><summary>View unsubscribed emails</summary><textarea readonly class="mrm-email-list-box">' . esc_textarea(implode("
-", array_keys($unsubscribed))) . '</textarea></details>';
-  }
-
-  echo '<hr>';
-  echo '<h3>Re-subscribe emails</h3>';
-  echo '<p><small>Use this if someone unsubscribed by mistake or later asks to receive marketing emails again. This only removes the email from the global suppression list. If the person also needs to be added to a manual list, add the email to that manual list above.</small></p>';
-  echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'Are you sure you want to re-subscribe these emails to Low Brass Lessons marketing emails? Only do this if the recipient asked to receive marketing again or if you are undoing your own test unsubscribe.\');">';
-  echo '<input type="hidden" name="action" value="mrm_marketing_resubscribe">';
-  wp_nonce_field('mrm_marketing_resubscribe', 'mrm_marketing_resubscribe_nonce');
-  echo '<textarea name="mrm_marketing_resubscribe_emails" class="mrm-email-list-box" placeholder="your@email.com&#10;another@email.com"></textarea>';
-  echo '<p class="submit"><button type="submit" class="button">Re-subscribe Entered Emails</button></p>';
-  echo '</form>';
-
-  echo '</div>';
-  echo '</div>';
-  echo '</div>';
-
-  echo '<div class="mrm-card">';
-  echo '<h2>All Lists</h2>';
-  echo '<table class="widefat striped"><thead><tr><th>List</th><th>Source</th><th>Active Recipients</th><th>Description</th></tr></thead><tbody>';
-  foreach ($defs as $key => $def) {
-    echo '<tr><td><strong>' . esc_html((string)$def['label']) . '</strong><br><code>' . esc_html($key) . '</code></td><td>' . esc_html((string)$def['type']) . '</td><td>' . esc_html((string)count($this->mrm_marketing_get_list_recipients($key, true))) . '</td><td>' . esc_html((string)$def['desc']) . '</td></tr>';
-  }
-  echo '</tbody></table>';
-  echo '</div>';
-  echo '<script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1">
-  (function(){
-    var subjectInput = document.getElementById("mrm-marketing-subject-input");
-    var htmlInput = document.getElementById("mrm-marketing-html-input");
-    var empty = document.getElementById("mrm-marketing-preview-empty");
-    var active = document.getElementById("mrm-marketing-preview-active");
-    var subjectOut = document.getElementById("mrm-marketing-preview-subject");
-    var frame = document.getElementById("mrm-marketing-preview-frame");
-    var siteName = ' . wp_json_encode(get_bloginfo('name') ? get_bloginfo('name') : 'Low Brass Lessons') . ';
-    var logoUrl = ' . wp_json_encode($this->mrm_get_site_logo_url()) . ';
-    var mailingAddress = ' . wp_json_encode((string)$mailing_address) . ';
-
-    function esc(text){
-      return String(text || "").replace(/[&<>"\']/g, function(ch){
-        return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\'":"&#039;"}[ch];
-      });
-    }
-
-    function nl2br(text){
-      return esc(text).replace(/\n/g, "<br>");
-    }
-
-    function renderPreview(){
-      var subject = subjectInput ? subjectInput.value : "";
-      var body = htmlInput ? htmlInput.value : "";
-      var hasContent = subject.trim() !== "" || body.trim() !== "";
-
-      if (!hasContent) {
-        if (empty) empty.style.display = "block";
-        if (active) active.style.display = "none";
-        if (subjectOut) subjectOut.textContent = "";
-        if (frame) frame.srcdoc = "";
-        return;
-      }
-
-      var logoHtml = logoUrl
-        ? "<div style=\"text-align:center;margin:0 0 22px 0;\"><img src=\"" + esc(logoUrl) + "\" alt=\"" + esc(siteName) + "\" style=\"max-width:220px;height:auto;border:0;display:inline-block;\"></div>"
-        : "";
-
-      var addressHtml = mailingAddress.trim() !== ""
-        ? "<div style=\"margin-top:10px;\">" + nl2br(mailingAddress) + "</div>"
-        : "";
-
-      var footerHtml = "<div style=\"margin-top:22px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;\"><div>You are receiving this marketing email from " + esc(siteName) + ".</div>" + addressHtml + "<div style=\"margin-top:10px;\"><a href=\"#\" style=\"color:#555;text-decoration:underline;\">Remove me from marketing emails</a></div></div>";
-
-      var doc = "<!doctype html><html><body style=\"margin:0;padding:0;background:#f6f6f6;\"><div style=\"max-width:680px;margin:0 auto;padding:24px;\"><div style=\"background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;\">" + logoHtml + "<div style=\"font-size:15px;line-height:1.7;color:#222;text-align:left;\">" + (body || "<p style=\"color:#777;\">HTML email body preview will appear here.</p>") + "</div>" + footerHtml + "</div></div></body></html>";
-
-      if (empty) empty.style.display = "none";
-      if (active) active.style.display = "block";
-      if (subjectOut) subjectOut.textContent = subject || "(no subject yet)";
-      if (frame) frame.srcdoc = doc;
-    }
-
-    if (subjectInput) subjectInput.addEventListener("input", renderPreview);
-    if (htmlInput) htmlInput.addEventListener("input", renderPreview);
-    renderPreview();
-  })();
-  </script>';
-
-  echo '</div>';
-}
-
-public function handle_export_legal_ledger() {
-  if (!current_user_can('manage_options')) {
-    wp_die('You do not have permission to export this ledger.', 'Legal Dispute Ledger', array('response' => 403));
-  }
-
-  check_admin_referer('mrm_export_legal_ledger');
-
-  $rows = $this->mrm_legal_ledger_get_rows(5000);
-
-  $filename = 'mrm-legal-dispute-ledger-' . date_i18n('Y-m-d-His') . '.csv';
-
-  nocache_headers();
-  header('Content-Type: text/csv; charset=utf-8');
-  header('Content-Disposition: attachment; filename="' . $filename . '"');
-
-  $out = fopen('php://output', 'w');
-
-  fputcsv($out, array(
-    'Order ID', 'Created At', 'Updated At', 'Status', 'Stripe Status', 'SKU', 'Product Type', 'Amount', 'Currency', 'Stripe PaymentIntent', 'Customer Email', 'Terms Accepted', 'Terms Version', 'Source Flow', 'Metadata JSON',
-  ));
-
-  foreach ($rows as $row) {
-    $meta = $this->mrm_legal_ledger_meta($row);
-    fputcsv($out, array(
-      (string)($row['id'] ?? ''),(string)($row['created_at'] ?? ''),(string)($row['updated_at'] ?? ''),(string)($row['status'] ?? ''),(string)($row['stripe_status'] ?? ''),(string)($row['sku'] ?? ''),(string)($row['product_type'] ?? ''),
-      $this->mrm_legal_ledger_money((int)($row['amount_cents'] ?? 0), (string)($row['currency'] ?? 'usd')),
-      (string)($row['currency'] ?? 'usd'),(string)($row['stripe_payment_intent_id'] ?? ''),(string)($meta['mrm_customer_email'] ?? $row['customer_email'] ?? ''),
-      ((string)($meta['mrm_terms_accepted'] ?? '') === 'yes') ? 'yes' : 'no',(string)($meta['mrm_terms_version'] ?? ''),(string)($meta['mrm_terms_source_flow'] ?? ''),(string)($row['metadata_json'] ?? ''),
-    ));
-  }
-
-  fclose($out);
-  exit;
-}
-
-private function mrm_legal_ledger_money($amount_cents, $currency = 'usd') {
-  $currency = strtoupper(trim((string)$currency));
-  if ($currency === '') { $currency = 'USD'; }
-  $amount = ((int)$amount_cents) / 100;
-  if ($currency === 'USD') { return '$' . number_format($amount, 2); }
-  return number_format($amount, 2) . ' ' . $currency;
-}
-
-private function mrm_legal_ledger_meta($row) {
-  $raw = '';
-  if (is_array($row)) { $raw = (string)($row['metadata_json'] ?? ''); }
-  elseif (is_object($row)) { $raw = (string)($row->metadata_json ?? ''); }
-  if ($raw === '') { return array(); }
-  $decoded = json_decode($raw, true);
-  return is_array($decoded) ? $decoded : array();
-}
-
-private function mrm_legal_ledger_get_rows($limit = 250) {
-  global $wpdb;
-  $table = $this->table_orders();
-  $limit = (int)$limit;
-  if ($limit <= 0) { $limit = 250; }
-  if ($limit > 5000) { $limit = 5000; }
-  $where = array('1=1'); $params = array();
-  $q = isset($_GET['mrm_legal_q']) ? sanitize_text_field(wp_unslash((string)$_GET['mrm_legal_q'])) : '';
-  $status = isset($_GET['mrm_legal_status']) ? sanitize_text_field(wp_unslash((string)$_GET['mrm_legal_status'])) : '';
-  $start = isset($_GET['mrm_legal_start']) ? sanitize_text_field(wp_unslash((string)$_GET['mrm_legal_start'])) : '';
-  $end = isset($_GET['mrm_legal_end']) ? sanitize_text_field(wp_unslash((string)$_GET['mrm_legal_end'])) : '';
-  $allowed_statuses = array('created', 'processing', 'paid', 'failed', 'refunded');
-  if ($status !== '' && in_array($status, $allowed_statuses, true)) { $where[] = 'status = %s'; $params[] = $status; }
-  if ($start !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $start)) { $where[] = 'created_at >= %s'; $params[] = $start . ' 00:00:00'; }
-  if ($end !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $end)) { $where[] = 'created_at <= %s'; $params[] = $end . ' 23:59:59'; }
-  if ($q !== '') {
-    $like = '%' . $wpdb->esc_like($q) . '%';
-    $search_parts = array('sku LIKE %s','product_type LIKE %s','status LIKE %s','stripe_status LIKE %s','stripe_payment_intent_id LIKE %s','customer_email LIKE %s','metadata_json LIKE %s',);
-    $params=array_merge($params,array($like,$like,$like,$like,$like,$like,$like));
-    if (ctype_digit($q)) { $search_parts[] = 'id = %d'; $params[] = (int)$q; }
-    $where[] = '(' . implode(' OR ', $search_parts) . ')';
-  }
-  $sql = "SELECT * FROM {$table} WHERE " . implode(' AND ', $where) . " ORDER BY created_at DESC, id DESC LIMIT %d";
-  $params[] = $limit;
-  $prepared = $wpdb->prepare($sql, $params);
-  $rows = $wpdb->get_results($prepared, ARRAY_A);
-  return is_array($rows) ? $rows : array();
-}
-
-public function render_legal_ledger_page() {
-  if (!current_user_can('manage_options')) {
-    wp_die('You do not have permission to view this page.');
-  }
-
-  $rows = $this->mrm_legal_ledger_get_rows(0);
-
-  echo '<div class="wrap">';
-  echo '<h1>Legal Dispute Ledger</h1>';
-  echo '<p>This page summarizes transaction records useful for payment disputes, chargebacks, refund questions, Terms acceptance verification, and digital access disputes.</p>';
-
-  echo '<form method="get" style="margin: 12px 0 18px;">';
-  echo '<input type="hidden" name="page" value="mrm-pay-hub-legal-ledger" />';
-  echo '<input type="search" name="mrm_legal_q" value="' . esc_attr((string)($_GET['mrm_legal_q'] ?? '')) . '" class="regular-text" placeholder="Search order, SKU, email metadata, Stripe PI..." /> ';
-  echo '<select name="mrm_legal_status">';
-  $current_status = sanitize_text_field((string)($_GET['mrm_legal_status'] ?? ''));
-  $statuses = array('' => 'All statuses', 'created' => 'Created', 'processing' => 'Processing', 'paid' => 'Paid', 'failed' => 'Failed', 'refunded' => 'Refunded');
-  foreach ($statuses as $value => $label) {
-    echo '<option value="' . esc_attr($value) . '"' . selected($current_status, $value, false) . '>' . esc_html($label) . '</option>';
-  }
-  echo '</select> ';
-  echo '<input type="date" name="mrm_legal_start" value="' . esc_attr((string)($_GET['mrm_legal_start'] ?? '')) . '" /> ';
-  echo '<input type="date" name="mrm_legal_end" value="' . esc_attr((string)($_GET['mrm_legal_end'] ?? '')) . '" /> ';
-  echo '<button class="button">Filter</button> ';
-  $export_url = wp_nonce_url(add_query_arg(array('action' => 'mrm_export_legal_ledger','mrm_legal_q' => (string)($_GET['mrm_legal_q'] ?? ''),'mrm_legal_status' => (string)($_GET['mrm_legal_status'] ?? ''),'mrm_legal_start' => (string)($_GET['mrm_legal_start'] ?? ''),'mrm_legal_end' => (string)($_GET['mrm_legal_end'] ?? ''),), admin_url('admin-post.php')),'mrm_export_legal_ledger');
-  echo '<a class="button button-secondary" href="' . esc_url($export_url) . '">Export Current Selection</a> ';
-  echo '<button type="button" class="button button-secondary" onclick="window.print()">Print</button>';
-  echo '</form>';
-  echo '<style>@media print {#adminmenumain, #wpadminbar, .notice, .update-nag, form, .button { display:none !important; } #wpcontent, #wpbody-content { margin-left:0 !important; padding:0 !important; } table.widefat { font-size:11px; } code { white-space:normal; }}</style>';
-
-  echo '<table class="widefat striped">';
-  echo '<thead><tr>';
-  echo '<th>Order</th>';
-  echo '<th>Created</th>';
-  echo '<th>Status</th>';
-  echo '<th>Product</th>';
-  echo '<th>Amount</th>';
-  echo '<th>Stripe PaymentIntent</th>';
-  echo '<th>Terms</th>';
-  echo '<th>Flow</th>';
-  echo '<th>Customer</th>';
-  echo '</tr></thead><tbody>';
-
-  if (empty($rows)) {
-    echo '<tr><td colspan="13">No matching transactions found.</td></tr>';
-  }
-
-  foreach ($rows as $row) {
-    $meta = $this->mrm_legal_ledger_meta($row);
-
-    $terms_accepted = ((string)($meta['mrm_terms_accepted'] ?? '') === 'yes');
-    $terms_version  = (string)($meta['mrm_terms_version'] ?? '');
-    $source_flow    = (string)($meta['mrm_terms_source_flow'] ?? '');
-    $customer_email = (string)($meta['mrm_customer_email'] ?? '');
-
-    echo '<tr>';
-    echo '<td>#' . esc_html((string)$row['id']) . '</td>';
-    echo '<td>' . esc_html((string)($row['created_at'] ?? '')) . '</td>';
-    echo '<td>' . esc_html((string)$row['status']) . '</td>';
-    echo '<td><code>' . esc_html((string)$row['sku']) . '</code><br><small>' . esc_html((string)$row['product_type']) . '</small></td>';
-    echo '<td>' . esc_html($this->mrm_legal_ledger_money((int)$row['amount_cents'], (string)$row['currency'])) . '</td>';
-    echo '<td><code>' . esc_html((string)($row['stripe_payment_intent_id'] ?? '')) . '</code></td>';
-    echo '<td>' . ($terms_accepted ? '<strong style="color:#008a20;">Accepted</strong>' : '<strong style="color:#b32d2e;">Missing</strong>') . '<br><small>' . esc_html($terms_version) . '</small></td>';
-    echo '<td>' . esc_html($source_flow) . '</td>';
-    echo '<td>' . esc_html($customer_email) . '</td>';
-    echo '</tr>';
-  }
-
-  echo '</tbody></table>';
-  echo '</div>';
-}
-
-public function render_access_lists_page() {
-    if (!current_user_can('manage_options')) return;
-
-    settings_errors('mrm_pay_hub');
-    ?>
-    <div class="wrap">
-      <h1>Sheet Music Access</h1>
-
-      <form method="post">
-        <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
-        <h2>Sheet Music Access Lists (Email-based)</h2>
-        <p>Master list: <code>all-sheet-music</code> grants access to any piece.</p>
-
-        <?php
-        $instructor_rows = $this->mrm_get_piece_product_access_rows_for_admin('all-piece-products-instructors');
-        if (defined('WP_DEBUG') && WP_DEBUG)         ?>
-        <h3 style="margin-top:18px;">Instructor piece access (auto-managed)</h3>
-        <p><small>This list is auto-generated from the instructors table and updates automatically.</small></p>
-
-        <table class="widefat striped" style="max-width: 980px; margin-bottom:18px;">
-          <thead>
-            <tr>
-              <th>Email</th>
-              <th>Validated for all piece products</th>
-              <th>Granted</th>
-            </tr>
-          </thead>
-          <tbody>
-            <?php if (!empty($instructor_rows)) : ?>
-              <?php foreach ($instructor_rows as $row) :
-                $granted = !empty($row['granted_at']) ? date_i18n('Y-m-d g:i A', strtotime($row['granted_at'])) : '';
-              ?>
-                <tr>
-                  <td><?php echo esc_html((string)($row['email_plain'] ?? '')); ?></td>
-                  <td style="text-align:center;">✔</td>
-                  <td><?php echo esc_html($granted); ?></td>
-                </tr>
-              <?php endforeach; ?>
-            <?php else : ?>
-              <tr><td colspan="3"><em>No instructor piece-access rows found.</em></td></tr>
-            <?php endif; ?>
-          </tbody>
-        </table>
-
-        <table class="widefat striped" style="max-width: 980px;">
-          <thead>
-            <tr>
-              <th style="width:220px;">product_slug</th>
-              <th>Approved emails (comma / newline / semicolon separated)</th>
-            </tr>
-          </thead>
-          <tbody>
-            <?php
-              $lists = $this->all_access_lists();
-
-              // Always show master row
-              if (!isset($lists['all-sheet-music']) || !is_array($lists['all-sheet-music'])) {
-                $lists['all-sheet-music'] = array();
-              }
-
-              // Keys from option lists
-              $keys = array_keys($lists);
-
-              // Also include any SKU present in access table
-              global $wpdb;
-              $access_table = $wpdb->prefix . 'mrm_sheet_music_access';
-              $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $access_table));
-              if ($exists === $access_table) {
-                $db_keys = $wpdb->get_col("SELECT DISTINCT sku FROM {$access_table} ORDER BY sku ASC");
-                if (is_array($db_keys)) $keys = array_merge($keys, $db_keys);
-              }
-
-              $keys = array_filter(array_map(array($this, 'sanitize_product_slug'), $keys));
-              sort($keys);
-
-              // Ensure master is first
-              $keys = array_values(array_unique(array_merge(array('all-sheet-music'), $keys)));
-
-              foreach ($keys as $k) {
-                if ($k === 'all-piece-products-instructors') {
-                  continue;
-                }
-
-                $safe_k = esc_attr($k);
-                $results = $wpdb->get_results($wpdb->prepare(
-                  "SELECT id, email_plain, start_at, expires_at FROM {$access_table} WHERE sku = %s AND revoked_at IS NULL ORDER BY start_at DESC",
-                  $k
-                ));
-                if ($k === 'all-sheet-music') {
-                  $subscription_rows = $this->mrm_get_sheet_music_subscription_rows_for_admin();
-                  ?>
-                  <tr>
-                    <td>
-                      <code>all-sheet-music</code>
-                      <p style="margin:8px 0 0;">
-                        <small>This row is Stripe-managed and read-only.</small>
-                      </p>
-                    </td>
-                    <td>
-                      <p style="margin:0 0 8px;">
-                        <small>Customers listed below are derived from the Stripe-synced subscription table. The checkbox is visual only.</small>
-                      </p>
-
-                      <table class="widefat" style="margin-top:8px;">
-                        <thead>
-                          <tr>
-                            <th>Email</th>
-                            <th>Source</th>
-                            <th>Stripe Subscription Status</th>
-                            <th>Access</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <?php if (!empty($subscription_rows)) : ?>
-                            <?php foreach ($subscription_rows as $sub_row) :
-                              $email = sanitize_email((string)($sub_row['email_plain'] ?? ''));
-                              $status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email);
-                              $status_label = ($status['status'] !== '') ? strtoupper((string)$status['status']) : 'NONE';
-                              $access_label = !empty($status['has_access']) ? '✓' : '✕';
-                            ?>
-                              <tr>
-                                <td><?php echo esc_html($email); ?></td>
-                                <td>Stripe Subscription</td>
-                                <td><?php echo esc_html($status_label); ?></td>
-                                <td style="font-weight:700;"><?php echo esc_html($access_label); ?></td>
-                              </tr>
-                            <?php endforeach; ?>
-                          <?php else : ?>
-                            <tr><td colspan="4"><em>No active or paid-through sheet music subscriptions found.</em></td></tr>
-                          <?php endif; ?>
-                        </tbody>
-                      </table>
-                    </td>
-                  </tr>
-                  <?php
-                  continue;
-                }
-                ?>
-                <tr>
-                  <td><input type="text" name="mrm_access_slug[]" value="<?php echo $safe_k; ?>" style="width:100%;" /></td>
-                  <td>
-                    <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-                      <input type="email" name="mrm_access_add_email[]" value="" placeholder="email@example.com" style="flex:1; max-width: 360px;" />
-                      <input type="date" name="mrm_access_add_purchase[]" value="" style="width:160px;" />
-                      <input type="date" name="mrm_access_add_expires[]" value="" style="width:160px;" />
-                      <input type="hidden" name="mrm_access_add_slug[]" value="<?php echo esc_attr($k); ?>" />
-                      <span style="opacity:.75;">(purchase / expires optional)</span>
-                    </div>
-                    <p style="margin:0;">
-                      <small>Add one email at a time to manually validate or credit access for this piece product.</small>
-                    </p>
-                    <?php
-                    $piece_rows = $this->mrm_get_piece_product_access_rows_for_admin($k);
-                    ?>
-                    <table class="widefat" style="margin-top:8px;">
-                      <thead>
-                        <tr><th>Email</th><th>Purchase date</th><th>Delete?</th></tr>
-                      </thead>
-                      <tbody>
-                        <?php if (!empty($piece_rows)) : ?>
-                          <?php foreach ($piece_rows as $row) :
-                            $purchase_date = !empty($row['granted_at']) ? date_i18n('Y-m-d g:i A', strtotime($row['granted_at'])) : '';
-                          ?>
-                            <tr>
-                              <td>
-                                <?php echo esc_html((string)($row['email_plain'] ?? '')); ?>
-                                <input type="hidden" name="mrm_piece_access_row_id[]" value="<?php echo (int)($row['id'] ?? 0); ?>" />
-                              </td>
-                              <td><?php echo esc_html($purchase_date); ?></td>
-                              <td style="text-align:center;">
-                                <label>
-                                  <input type="checkbox" name="mrm_piece_access_delete[]" value="<?php echo (int)($row['id'] ?? 0); ?>" />
-                                </label>
-                              </td>
-                            </tr>
-                          <?php endforeach; ?>
-                        <?php else : ?>
-                          <tr><td colspan="3"><em>No access rows found.</em></td></tr>
-                        <?php endif; ?>
-                      </tbody>
-                    </table>
-                  </td>
-                </tr>
-                <?php
-              }
-            ?>
-            <!-- blank row to add a new slug -->
-            <tr>
-              <td><input type="text" name="mrm_access_slug[]" value="" placeholder="new-product-slug" style="width:100%;" /></td>
-              <td>
-                <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-                  <input type="email" name="mrm_access_add_email[]" value="" placeholder="email@example.com" style="flex:1; max-width: 360px;" />
-                  <input type="date" name="mrm_access_add_purchase[]" value="" style="width:160px;" />
-                  <input type="date" name="mrm_access_add_expires[]" value="" style="width:160px;" />
-                  <input type="hidden" name="mrm_access_add_slug[]" value="" />
-                  <span style="opacity:.75;">(purchase / expires optional)</span>
-                </div>
-                <p style="margin:0;">
-                  <small>Add one email at a time. Leave “expires” blank for never.</small>
-                </p>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-
-        <p class="submit">
-          <button type="submit" class="button button-primary">Save Settings</button>
-        </p>
-      </form>
-    </div>
-    <?php
-  }
-
-
-  private function mrm_profile_card_new_token() {
-    return wp_generate_password(48, false, false);
-  }
-
-  private function mrm_profile_card_hash_token($token) {
-    return hash('sha256', (string)$token);
-  }
-
-  private function mrm_profile_card_get_by_token($token) {
-    global $wpdb;
-
-    $token = trim((string)$token);
-
-    if ($token === '') {
-      return null;
-    }
-
-    $table = $this->table_profile_card_requests();
-    $hash  = $this->mrm_profile_card_hash_token($token);
-
-    return $wpdb->get_row(
-      $wpdb->prepare(
-        "SELECT * FROM {$table}
-         WHERE token_hash = %s
-         AND status IN ('sent', 'pending_review', 'changes_requested')
-         LIMIT 1",
-        $hash
-      ),
-      ARRAY_A
+    return wp_mail(
+      $to,
+      '[TEST] ' . $subject,
+      (string)$preview['html'],
+      $headers
     );
-  }
-
-  private function mrm_profile_card_decode_json($json) {
-    $data = json_decode((string)$json, true);
-    return is_array($data) ? $data : array();
-  }
-
-  private function mrm_profile_card_encode_json($data) {
-    return wp_json_encode(is_array($data) ? $data : array());
-  }
-
-  private function mrm_profile_card_money_to_cents($value) {
-    $value = preg_replace('/[^0-9.]/', '', (string)$value);
-    if ($value === '') return 0;
-    return max(0, (int)round(((float)$value) * 100));
-  }
-
-  private function mrm_profile_card_cents_to_money($cents) {
-    return number_format(((int)$cents) / 100, 2);
-  }
-
-  private function mrm_profile_card_request_type_label($type) {
-    $type = sanitize_key((string)$type);
-    if ($type === 'presenter_profile') return 'Presenter Profile Card';
-    if ($type === 'presenter_event') return 'Masterclass Event Proposal';
-    return 'Instructor Profile Card';
-  }
-
-
-
-  private function mrm_profile_card_existing_instructor_by_email($email) {
-    global $wpdb;
-
-    $email = sanitize_email((string)$email);
-    if (!is_email($email)) {
-      return null;
-    }
-
-    $table = $wpdb->prefix . 'mrm_instructors';
-
-    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) !== $table) {
-      return null;
-    }
-
-    return $wpdb->get_row(
-      $wpdb->prepare("SELECT * FROM {$table} WHERE email = %s ORDER BY id DESC LIMIT 1", $email),
-      ARRAY_A
-    );
-  }
-
-  private function mrm_profile_card_existing_presenter_by_email($email) {
-    global $wpdb;
-
-    $email = sanitize_email((string)$email);
-    if (!is_email($email)) {
-      return null;
-    }
-
-    $table = $wpdb->prefix . 'mrm_masterclass_presenters';
-
-    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) !== $table) {
-      return null;
-    }
-
-    return $wpdb->get_row(
-      $wpdb->prepare("SELECT * FROM {$table} WHERE email = %s ORDER BY id DESC LIMIT 1", $email),
-      ARRAY_A
-    );
-  }
-
-  private function mrm_profile_card_us_timezones() {
-    return array(
-      'America/New_York'    => 'Eastern Time — America/New_York',
-      'America/Chicago'     => 'Central Time — America/Chicago',
-      'America/Denver'      => 'Mountain Time — America/Denver',
-      'America/Phoenix'     => 'Arizona Time — America/Phoenix',
-      'America/Los_Angeles' => 'Pacific Time — America/Los_Angeles',
-      'America/Anchorage'   => 'Alaska Time — America/Anchorage',
-      'America/Adak'        => 'Hawaii-Aleutian Time — America/Adak',
-      'Pacific/Honolulu'    => 'Hawaii Time — Pacific/Honolulu',
-    );
-  }
-
-  private function mrm_profile_card_us_states() {
-    return array(
-      'AL'=>'Alabama','AK'=>'Alaska','AZ'=>'Arizona','AR'=>'Arkansas','CA'=>'California','CO'=>'Colorado','CT'=>'Connecticut','DE'=>'Delaware','FL'=>'Florida','GA'=>'Georgia','HI'=>'Hawaii','ID'=>'Idaho','IL'=>'Illinois','IN'=>'Indiana','IA'=>'Iowa','KS'=>'Kansas','KY'=>'Kentucky','LA'=>'Louisiana','ME'=>'Maine','MD'=>'Maryland','MA'=>'Massachusetts','MI'=>'Michigan','MN'=>'Minnesota','MS'=>'Mississippi','MO'=>'Missouri','MT'=>'Montana','NE'=>'Nebraska','NV'=>'Nevada','NH'=>'New Hampshire','NJ'=>'New Jersey','NM'=>'New Mexico','NY'=>'New York','NC'=>'North Carolina','ND'=>'North Dakota','OH'=>'Ohio','OK'=>'Oklahoma','OR'=>'Oregon','PA'=>'Pennsylvania','RI'=>'Rhode Island','SC'=>'South Carolina','SD'=>'South Dakota','TN'=>'Tennessee','TX'=>'Texas','UT'=>'Utah','VT'=>'Vermont','VA'=>'Virginia','WA'=>'Washington','WV'=>'West Virginia','WI'=>'Wisconsin','WY'=>'Wyoming','DC'=>'District of Columbia'
-    );
-  }
-
-  private function mrm_profile_card_state_select_html($name, $selected = '') {
-    $selected = strtoupper(sanitize_text_field((string)$selected));
-    $html = '<select name="' . esc_attr($name) . '" required>';
-    $html .= '<option value="">Select a state</option>';
-    foreach ($this->mrm_profile_card_us_states() as $abbr => $label) {
-      $html .= '<option value="' . esc_attr($abbr) . '"' . selected($selected, $abbr, false) . '>' . esc_html($label) . '</option>';
-    }
-    $html .= '</select>';
-    return $html;
-  }
-
-  private function mrm_profile_card_availability_guide_image_urls() {
-    return array(
-      // Optional: paste Media Library screenshot URLs here after uploading guide screenshots.
-    );
-  }
-
-  private function mrm_profile_card_timezone_select_html($name, $selected = 'America/Phoenix') {
-    $selected = sanitize_text_field((string)$selected);
-    $zones = $this->mrm_profile_card_us_timezones();
-
-    $html = '<select name="' . esc_attr($name) . '" required>';
-
-    foreach ($zones as $value => $label) {
-      $html .= '<option value="' . esc_attr($value) . '"' . selected($selected, $value, false) . '>' . esc_html($label) . '</option>';
-    }
-
-    $html .= '</select>';
-
-    return $html;
-  }
-
-  private function mrm_profile_card_handle_profile_image_upload($field_name) {
-    if (empty($_FILES[$field_name]['name'])) {
-      return '';
-    }
-
-    if (!function_exists('media_handle_upload')) {
-      require_once ABSPATH . 'wp-admin/includes/file.php';
-      require_once ABSPATH . 'wp-admin/includes/media.php';
-      require_once ABSPATH . 'wp-admin/includes/image.php';
-    }
-
-    $upload_dir_filter = function($dirs) {
-      $subdir = '/profile_images';
-
-      $dirs['subdir'] = $subdir;
-      $dirs['path']   = trailingslashit($dirs['basedir']) . 'profile_images';
-      $dirs['url']    = trailingslashit($dirs['baseurl']) . 'profile_images';
-
-      if (!file_exists($dirs['path'])) {
-        wp_mkdir_p($dirs['path']);
-      }
-
-      return $dirs;
-    };
-
-    add_filter('upload_dir', $upload_dir_filter);
-
-    $attachment_id = media_handle_upload($field_name, 0);
-
-    remove_filter('upload_dir', $upload_dir_filter);
-
-    if (is_wp_error($attachment_id)) {
-      return '';
-    }
-
-    $url = wp_get_attachment_url($attachment_id);
-
-    return $url ? esc_url_raw($url) : '';
-  }
-
-  private function mrm_profile_card_private_upload_dir($subfolder = 'fingerprint_clearance_cards') {
-    $upload = wp_upload_dir();
-
-    $base_dir = trailingslashit($upload['basedir']) . 'mrm_private';
-    $dir      = trailingslashit($base_dir) . sanitize_file_name($subfolder);
-
-    if (!file_exists($dir)) {
-      wp_mkdir_p($dir);
-    }
-
-    $index_file = trailingslashit($base_dir) . 'index.php';
-    if (!file_exists($index_file)) {
-      file_put_contents($index_file, "<?php\n// Silence is golden.\n");
-    }
-
-    $sub_index_file = trailingslashit($dir) . 'index.php';
-    if (!file_exists($sub_index_file)) {
-      file_put_contents($sub_index_file, "<?php\n// Silence is golden.\n");
-    }
-
-    $htaccess = trailingslashit($base_dir) . '.htaccess';
-    if (!file_exists($htaccess)) {
-      file_put_contents($htaccess, "Deny from all\n");
-    }
-
-    return $dir;
-  }
-
-  private function mrm_profile_card_handle_private_fingerprint_upload($field_name) {
-    if (empty($_FILES[$field_name]['name'])) {
-      return array();
-    }
-
-    if (!function_exists('wp_handle_upload')) {
-      require_once ABSPATH . 'wp-admin/includes/file.php';
-    }
-
-    $private_dir = $this->mrm_profile_card_private_upload_dir('fingerprint_clearance_cards');
-
-    $upload_dir_filter = function($dirs) use ($private_dir) {
-      $dirs['path']   = $private_dir;
-      $dirs['url']    = '';
-      $dirs['subdir'] = '';
-      return $dirs;
-    };
-
-    add_filter('upload_dir', $upload_dir_filter);
-
-    $file = wp_handle_upload(
-      $_FILES[$field_name],
-      array(
-        'test_form' => false,
-        'mimes' => array(
-          'jpg'  => 'image/jpeg',
-          'jpeg' => 'image/jpeg',
-          'png'  => 'image/png',
-          'gif'  => 'image/gif',
-          'webp' => 'image/webp',
-          'pdf'  => 'application/pdf',
-        ),
-      )
-    );
-
-    remove_filter('upload_dir', $upload_dir_filter);
-
-    if (!empty($file['error']) || empty($file['file'])) {
-      return array();
-    }
-
-    return array(
-      'kind' => 'fingerprint_card',
-      'name' => sanitize_file_name(wp_unslash($_FILES[$field_name]['name'])),
-      'file' => sanitize_text_field($file['file']),
-      'uploaded_at' => current_time('mysql'),
-    );
-  }
-
-  private function mrm_profile_card_table_has_column($table, $column) {
-    global $wpdb;
-
-    $found = $wpdb->get_var(
-      $wpdb->prepare("SHOW COLUMNS FROM {$table} LIKE %s", $column)
-    );
-
-    return !empty($found);
-  }
-
-  private function mrm_profile_card_add_profile_metadata_to_record($table, &$data, $payload) {
-    $optional = array(
-      'first_name' => sanitize_text_field($payload['first_name'] ?? ''),
-      'last_name' => sanitize_text_field($payload['last_name'] ?? ''),
-      'fingerprint_card_file' => sanitize_text_field($payload['fingerprint_card_file'] ?? ''),
-      'fingerprint_card_name' => sanitize_text_field($payload['fingerprint_card_name'] ?? ''),
-      'fingerprint_card_uploaded_at' => sanitize_text_field($payload['fingerprint_card_uploaded_at'] ?? ''),
-      'fingerprint_clearance_status' => sanitize_key($payload['fingerprint_clearance_status'] ?? ''),
-      'background_check_docusign_ack' => !empty($payload['background_check_docusign_ack']) ? 1 : 0,
-      'docusign_completed' => !empty($payload['docusign_completed']) ? 1 : 0,
-      'stripe_onboarding_completed' => !empty($payload['stripe_onboarding_completed']) ? 1 : 0,
-      'profile_social_links_json' => (string)($payload['profile_social_links_json'] ?? ''),
-      'calendar_availability_completed' => !empty($payload['calendar_availability_completed']) ? 1 : 0,
-    );
-
-    foreach ($optional as $column => $value) {
-      if ($this->mrm_profile_card_table_has_column($table, $column)) {
-        $data[$column] = $value;
-      }
-    }
-  }
-
-  private function mrm_profile_card_render_instructor_pay_chart_html() {
-    $settings = $this->get_settings();
-    $rows = $this->mrm_get_instructor_payout_chart_rows();
-    $cols = $this->mrm_get_instructor_payout_chart_columns();
-    $travel_cents = (int)($settings['in_person_travel_amount_cents'] ?? 500);
-    ob_start(); ?>
-    <div class="mrm-profile-public-pay-box">
-      <h3>Instructor Pay Acknowledgment</h3>
-      <p>The chart below summarizes the current instructor payout schedule. In-person lessons include the additional travel amount shown below.</p>
-      <table><thead><tr><th>Lesson Type</th><?php foreach ($cols as $col_label) : ?><th><?php echo esc_html($col_label); ?></th><?php endforeach; ?></tr></thead><tbody>
-      <?php foreach ($rows as $row) : ?><tr><th><?php echo esc_html($row['label']); ?></th><?php foreach (array_keys($cols) as $year_bucket) : $setting_key = $this->mrm_get_instructor_payout_chart_setting_key((int)$row['lesson_length'], (int)$row['is_online'], (int)$year_bucket); $base_cents = (int)($settings[$setting_key] ?? 0); $display_cents = $base_cents + ((int)$row['is_online'] ? 0 : $travel_cents); ?><td>$<?php echo esc_html($this->mrm_profile_card_cents_to_money($display_cents)); ?></td><?php endforeach; ?></tr><?php endforeach; ?>
-      </tbody></table>
-      <p><strong>In-person travel amount:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($travel_cents)); ?> included in each in-person payout shown above.</p>
-    </div>
-    <?php return ob_get_clean();
   }
 
   public function render_profile_card_creation_page() {
