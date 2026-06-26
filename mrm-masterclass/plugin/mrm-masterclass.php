@@ -956,6 +956,9 @@ public function mrm_mc_render_critical_error_notice() {
 		"CREATE TABLE {$events_table} (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			title VARCHAR(191) NOT NULL,
+			piece_sku VARCHAR(191) NULL,
+			piece_title VARCHAR(191) NULL,
+			piece_page_url TEXT NULL,
 			description LONGTEXT NULL,
 			presenter_id BIGINT UNSIGNED NULL,
 			presenter_email VARCHAR(191) NULL,
@@ -1212,6 +1215,9 @@ public function mrm_mc_render_critical_error_notice() {
 
 	$event_adds = array(
 		'presenter_payout_per_student_cents' => "ALTER TABLE {$events_table} ADD presenter_payout_per_student_cents INT NOT NULL DEFAULT 0",
+		'piece_sku' => "ALTER TABLE {$events_table} ADD piece_sku VARCHAR(191) NULL",
+		'piece_title' => "ALTER TABLE {$events_table} ADD piece_title VARCHAR(191) NULL",
+		'piece_page_url' => "ALTER TABLE {$events_table} ADD piece_page_url TEXT NULL",
 		'calendar_id'            => "ALTER TABLE {$events_table} ADD calendar_id VARCHAR(191) NULL",
 		'refund_request_token'   => "ALTER TABLE {$events_table} ADD refund_request_token VARCHAR(64) NULL",
 		'last_update_notice_at'  => "ALTER TABLE {$events_table} ADD last_update_notice_at DATETIME NULL",
@@ -2049,6 +2055,124 @@ private function mrm_mc_email_details_box_html( $details_html ) {
 	</div>';
 }
 
+private function mrm_mc_sheet_music_piece_options() {
+    $products = get_option( 'mrm_pay_hub_products', array() );
+    $products = is_array( $products ) ? $products : array();
+
+    $pieces = array();
+
+    foreach ( $products as $sku => $product ) {
+        if ( ! is_array( $product ) ) {
+            continue;
+        }
+
+        if ( (string) ( $product['product_type'] ?? '' ) !== 'sheet_music' ) {
+            continue;
+        }
+
+        $sku = sanitize_text_field( (string) $sku );
+
+        if ( $sku === '' || $sku === 'all-sheet-music' || $sku === 'all-piece-products-instructors' ) {
+            continue;
+        }
+
+        if ( ! preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m ) ) {
+            continue;
+        }
+
+        $piece_slug = sanitize_title( (string) $m[1] );
+        $category   = sanitize_key( (string) $m[2] );
+
+        if ( $piece_slug === '' ) {
+            continue;
+        }
+
+        $piece_title = ucwords( str_replace( '-', ' ', $piece_slug ) );
+        $piece_url   = home_url( '/' . $piece_slug . '/' );
+
+        if ( ! isset( $pieces[ $piece_slug ] ) ) {
+            $pieces[ $piece_slug ] = array(
+                'sku'      => $sku,
+                'title'    => $piece_title,
+                'url'      => $piece_url,
+                'category' => $category,
+            );
+        }
+
+        if ( $category === 'complete-package' ) {
+            $pieces[ $piece_slug ]['sku']      = $sku;
+            $pieces[ $piece_slug ]['url']      = $piece_url;
+            $pieces[ $piece_slug ]['category'] = $category;
+        }
+    }
+
+    uasort(
+        $pieces,
+        function( $a, $b ) {
+            return strcasecmp( (string) ( $a['title'] ?? '' ), (string) ( $b['title'] ?? '' ) );
+        }
+    );
+
+    return array_values( $pieces );
+}
+
+private function mrm_mc_piece_from_sku( $sku ) {
+    $sku = sanitize_text_field( (string) $sku );
+
+    if ( $sku === '' ) {
+        return array(
+            'sku'   => '',
+            'title' => '',
+            'url'   => '',
+        );
+    }
+
+    foreach ( $this->mrm_mc_sheet_music_piece_options() as $piece ) {
+        if ( (string) ( $piece['sku'] ?? '' ) === $sku ) {
+            return array(
+                'sku'   => sanitize_text_field( (string) ( $piece['sku'] ?? '' ) ),
+                'title' => sanitize_text_field( (string) ( $piece['title'] ?? '' ) ),
+                'url'   => esc_url_raw( (string) ( $piece['url'] ?? '' ) ),
+            );
+        }
+    }
+
+    return array(
+        'sku'   => '',
+        'title' => '',
+        'url'   => '',
+    );
+}
+
+private function mrm_mc_piece_select_html( $selected_sku = '' ) {
+    $selected_sku = sanitize_text_field( (string) $selected_sku );
+    $pieces = $this->mrm_mc_sheet_music_piece_options();
+
+    $html = '<select name="piece_sku">';
+    $html .= '<option value="">Select the piece being discussed</option>';
+
+    foreach ( $pieces as $piece ) {
+        $sku   = sanitize_text_field( (string) ( $piece['sku'] ?? '' ) );
+        $title = sanitize_text_field( (string) ( $piece['title'] ?? '' ) );
+
+        if ( $sku === '' || $title === '' ) {
+            continue;
+        }
+
+        $html .= '<option value="' . esc_attr( $sku ) . '"' . selected( $selected_sku, $sku, false ) . '>' . esc_html( $title ) . '</option>';
+    }
+
+    $html .= '</select>';
+
+    if ( empty( $pieces ) ) {
+        $html .= '<p class="description" style="color:#b32d2e;">No sheet music piece products were found in Payment Hub.</p>';
+    } else {
+        $html .= '<p class="description">This selected piece will be linked in the student registration and reminder emails.</p>';
+    }
+
+    return $html;
+}
+
 private function mrm_mc_piece_url_for_event( $event ) {
     if ( ! is_object( $event ) && ! is_array( $event ) ) {
         return '';
@@ -2119,10 +2243,20 @@ private function mrm_mc_piece_url_for_event( $event ) {
 private function mrm_mc_piece_preparation_sentence_html( $event ) {
     $piece_url = $this->mrm_mc_piece_url_for_event( $event );
 
+    $event_array = array();
+    if ( is_array( $event ) ) {
+        $event_array = $event;
+    } elseif ( is_object( $event ) ) {
+        $event_array = get_object_vars( $event );
+    }
+
+    $piece_title = sanitize_text_field( (string) ( $event_array['piece_title'] ?? '' ) );
+
     $sentence = 'Have your camera and microphone working before the masterclass begins. Please remain muted during the masterclass unless called on by the presenter for questions or demonstration. Make sure you have access to the piece being discussed in the masterclass.';
 
     if ( '' !== $piece_url ) {
-        $sentence .= ' <a href="' . esc_url( $piece_url ) . '">View the piece</a>.';
+        $link_label = $piece_title !== '' ? 'View ' . $piece_title : 'View the piece';
+        $sentence .= ' <a href="' . esc_url( $piece_url ) . '">' . esc_html( $link_label ) . '</a>.';
     }
 
     return '<p>' . $sentence . '</p>';
@@ -4610,6 +4744,7 @@ public function handle_save_event() {
 	}
 
 	$title        = $this->mrm_mc_clean_text( $_POST['title'] ?? '' );
+	$selected_piece = $this->mrm_mc_piece_from_sku( $_POST['piece_sku'] ?? '' );
 	$short_description = $this->mrm_mc_clean_html( $_POST['short_description'] ?? '' );
 	$long_description  = $this->mrm_mc_clean_html( $_POST['long_description'] ?? '' );
 	$description       = $short_description;
@@ -4632,6 +4767,9 @@ public function handle_save_event() {
 	$calendar_id = $this->mrm_mc_get_masterclass_calendar_id();
 	$data = array(
 		'title'             => $title,
+		'piece_sku'         => sanitize_text_field( (string) ( $selected_piece['sku'] ?? '' ) ),
+		'piece_title'       => sanitize_text_field( (string) ( $selected_piece['title'] ?? '' ) ),
+		'piece_page_url'    => esc_url_raw( (string) ( $selected_piece['url'] ?? '' ) ),
 		'description'       => $description,
 		'short_description' => $short_description,
 		'long_description'  => $long_description,
@@ -7527,6 +7665,7 @@ public function render_events_page() {
 
 	echo '<table class="form-table"><tbody>';
 	echo '<tr><th>Title</th><td><input type="text" name="title" class="regular-text" required value="' . esc_attr( $edit_event->title ?? '' ) . '"></td></tr>';
+	echo '<tr><th>Piece Being Discussed</th><td>' . $this->mrm_mc_piece_select_html( $edit_event->piece_sku ?? '' ) . '</td></tr>';
 	echo '<tr><th>Short Description</th><td><textarea name="short_description" rows="3" class="large-text" placeholder="Brief client-facing summary shown on the public Masterclass page.">' . esc_textarea( $edit_event->short_description ?? '' ) . '</textarea><p class="description">This appears on the main Masterclass listing card and on the presenter page session card.</p></td></tr>';
 
 	echo '<tr><th>Long Description</th><td><textarea name="long_description" rows="8" class="large-text" placeholder="Detailed session description shown on the Learn More About This Session page.">' . esc_textarea( $edit_event->long_description ?? '' ) . '</textarea><p class="description">This appears on the dynamic session page.</p></td></tr>';
