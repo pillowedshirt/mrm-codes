@@ -188,6 +188,38 @@ class MRM_Payments_Hub_Single {
     }
   }
 
+  private function mrm_csv_send($filename, $headers, $rows) {
+    $filename = sanitize_file_name((string)$filename);
+    if ($filename === '') {
+      $filename = 'export.csv';
+    }
+
+    if (!is_array($headers)) {
+      $headers = array();
+    }
+
+    if (!is_array($rows)) {
+      $rows = array();
+    }
+
+    nocache_headers();
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+
+    $out = fopen('php://output', 'w');
+
+    if (!empty($headers)) {
+      fputcsv($out, $headers);
+    }
+
+    foreach ($rows as $row) {
+      fputcsv($out, is_array($row) ? $row : array($row));
+    }
+
+    fclose($out);
+    exit;
+  }
+
   private function table_orders() {
     global $wpdb;
     return $wpdb->prefix . 'mrm_orders';
@@ -3492,7 +3524,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     $admin_subject = 'Payment information update required for ' . $student_name;
     $admin_intro = '<p>The system detected a need for payment information to be updated for <strong>' . esc_html($student_name) . '</strong> before their upcoming lesson time with <strong>' . esc_html($instructor_name) . '</strong> and <strong>' . esc_html($when_line) . '</strong>.</p>';
-    $admin_details = '<div><strong>Student:</strong> ' . esc_html($student_name) . '</div>' . '<div><strong>Student email:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Student phone:</strong> ' . esc_html($student_phone) . '</div>' . '<div><strong>Instructor:</strong> ' . esc_html($instructor_name) . '</div>' . '<div><strong>Instructor email:</strong> ' . esc_html($instructor_email) . '</div>' . '<div><strong>Instructor phone:</strong> ' . esc_html($instructor_phone) . '</div>' . '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' . '<div><strong>Lesson day and time:</strong> ' . esc_html($when_line) . '</div>' . '<div><strong>Stripe customer profile:</strong> <a href="' . esc_url($update_payment_url) . '">' . esc_html($update_payment_url) . '</a></div>' . '<div><strong>Issue:</strong> ' . esc_html($reason_text) . '</div>';
+    $admin_details = '<div><strong>Student:</strong> ' . esc_html($student_name) . '</div>' . '<div><strong>Student email:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Student phone:</strong> ' . esc_html($student_phone) . '</div>' . '<div><strong>Instructor:</strong> ' . esc_html($instructor_name) . '</div>' . '<div><strong>Instructor email:</strong> ' . esc_html($instructor_email) . '</div>' . '<div><strong>Instructor phone:</strong> ' . esc_html($instructor_phone) . '</div>' . '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' . '<div><strong>Lesson day and time:</strong> ' . esc_html($when_line) . '</div>' . '<div><strong>Payment update portal:</strong> <a href="' . esc_url($update_payment_url) . '">' . esc_html($update_payment_url) . '</a></div>' . '<div><strong>Issue:</strong> ' . esc_html($reason_text) . '</div>';
 
     $headers = array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>');
     $student_sent = ($student_email && is_email($student_email)) ? wp_mail($student_email, $student_subject, $this->mrm_email_wrap_html('Update your payment information', $student_intro, $student_details, $student_buttons, '', $student_after), $headers) : false;
@@ -6048,8 +6080,12 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $instructor_name = trim((string)($instructor['name'] ?? ''));
     $is_online_lesson = !empty($lesson_row['is_online']);
     $join_url = '';
-    if (!empty($lesson_row['reminder_token'])) $join_url = add_query_arg(array('token' => (string)$lesson_row['reminder_token']), home_url('/join-online/'));
-    if ($join_url === '' && !empty($lesson_row['google_meet_url'])) $join_url = (string)$lesson_row['google_meet_url'];
+    if (!empty($lesson_row['reminder_token'])) {
+      $join_url = add_query_arg(
+        array('token' => (string)$lesson_row['reminder_token']),
+        home_url('/join-online/')
+      );
+    }
     $cancel_url = $lesson_id > 0 ? $this->mrm_lesson_cancel_url($lesson_id) : '';
     $has_sheet_music_addon = ((int)($meta['mrm_addon_amount_cents'] ?? 0) > 0);
 
@@ -12316,7 +12352,7 @@ public function handle_marketing_resubscribe() {
 
       'payment_method_attention_student' => array('Your Payment Method Requires Attention','Update your payment information','<p>Your payment information is in need of an update. Please use this link to update your payment information for the auto-pay lessons, renewing at <strong></strong>.</p>','<div><strong>Lesson:</strong> </div><div><strong>Renewing at:</strong> </div><div><strong>Saved payment method:</strong> </div><div><strong>Reason:</strong> </div>',array(array('url' => '#', 'label' => 'Update Payment Information', 'variant' => 'primary'),array('url' => $contact_url, 'label' => 'Contact Support', 'variant' => 'primary'))),
       'payment_method_attention_instructor' => array('Payment method needs attention for ','Please withhold this lesson  until payment method has been updated','<p>Your upcoming AutoPay lesson with <strong></strong> requires an updated payment method before the lesson can be processed. Please withhold lesson services until this has been confirmed.</p>','<div><strong>Student:</strong> </div><div><strong>Lesson:</strong> </div><div><strong>Scheduled time:</strong> </div><p style="margin-top:12px;">This client has also received a request to update their payment information. Feel free to connect and check in with them.</p><div><strong>Client email:</strong> </div><div><strong>Client phone number:</strong> </div>',''),
-      'payment_method_attention_admin' => array('Payment information update required for ','Payment method update needed','<p>The system detected a need for payment information to be updated for <strong></strong> before their upcoming lesson time with <strong></strong> and <strong></strong>.</p>','<div><strong>Student:</strong> </div><div><strong>Student email:</strong> </div><div><strong>Student phone:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Instructor email:</strong> </div><div><strong>Instructor phone:</strong> </div><div><strong>Stripe customer profile:</strong> </div>',''),
+      'payment_method_attention_admin' => array('Payment information update required for ','Payment method update needed','<p>The system detected a need for payment information to be updated for <strong></strong> before their upcoming lesson time with <strong></strong> and <strong></strong>.</p>','<div><strong>Student:</strong> </div><div><strong>Student email:</strong> </div><div><strong>Student phone:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Instructor email:</strong> </div><div><strong>Instructor phone:</strong> </div><div><strong>Payment update portal:</strong> </div>',''),
       'purchase_receipt_sheet_music' => array('Purchase Confirmation - ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> </div><div><strong>Base:</strong> </div><div><strong>Promo code:</strong> </div><div><strong>Tax:</strong> </div><div><strong>Total paid:</strong> </div><div style="margin-top:12px;"><strong>How to access your sheet music:</strong></div><ol style="margin:8px 0 0 18px;padding:0;"><li>Return to the piece page on the website.</li><li>Click the access button for your purchased category.</li><li>Enter your purchase email address.</li><li>Request your one-time access code and enter it to open the content.</li></ol>',array(array('url'=>'#','label'=>'View Your Piece','variant'=>'primary'),array('url'=>$contact_url,'label'=>'Contact Support','variant'=>'primary'))),
       'purchase_receipt_online_lesson' => array('Purchase Confirmation - Online Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> Online lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to access online lessons</strong></div><p>Your meeting link will become available 10 minutes before your lesson time and will remain available until 10 minutes after your lesson time. Please make sure your camera, microphone, and internet connection are working before joining the call.</p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p><div style="margin-top:14px;"><strong>How to access your sheet music</strong></div><p>Please check your email for the subscription confirmation.</p>',array(array('url'=>'#','label'=>'Join Lesson','variant'=>'primary'),array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
       'purchase_receipt_in_person_lesson' => array('Purchase Confirmation - In-Person Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> In-person lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p><div style="margin-top:14px;"><strong>Lessons outside the home</strong></div><p>If the lesson will take place at a school, church, or other community location, please complete the required approval form before the lesson begins.</p><p><a href="https://www.docusign.com/" target="_blank" rel="noopener">Placeholder DocuSign location approval link</a></p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p>',array(array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
@@ -14428,6 +14464,163 @@ public function handle_marketing_resubscribe() {
     );
     // END TEMP PAYMENT HUB AUDIT
 
+  }
+
+  public function render_legal_ledger_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to view this page.');
+    }
+
+    global $wpdb;
+
+    $orders = $this->table_orders();
+    $table_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $orders));
+
+    echo '<div class="wrap">';
+    echo '<h1>Legal Dispute Ledger</h1>';
+    echo '<p>This ledger exports payment/order records that may be useful for legal, refund, dispute, or account-history review.</p>';
+
+    echo '<p>';
+    echo '<a class="button button-primary" href="' . esc_url(
+      wp_nonce_url(
+        admin_url('admin-post.php?action=mrm_export_legal_ledger'),
+        'mrm_export_legal_ledger'
+      )
+    ) . '">Export Legal Ledger CSV</a>';
+    echo '</p>';
+
+    if ($table_exists !== $orders) {
+      echo '<div class="notice notice-error"><p>Orders table is missing.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    $rows = $wpdb->get_results(
+      "SELECT id, created_at, customer_email, sku, product_type, amount_cents, currency, status, stripe_payment_intent_id
+       FROM {$orders}
+       ORDER BY created_at DESC, id DESC
+       LIMIT 100",
+      ARRAY_A
+    );
+
+    echo '<h2>Recent Orders</h2>';
+
+    if (empty($rows)) {
+      echo '<p>No order records found.</p>';
+      echo '</div>';
+      return;
+    }
+
+    echo '<table class="widefat striped">';
+    echo '<thead><tr>';
+    echo '<th>Order ID</th>';
+    echo '<th>Created</th>';
+    echo '<th>Email</th>';
+    echo '<th>SKU</th>';
+    echo '<th>Type</th>';
+    echo '<th>Amount</th>';
+    echo '<th>Status</th>';
+    echo '<th>Stripe Payment Intent</th>';
+    echo '</tr></thead><tbody>';
+
+    foreach ($rows as $row) {
+      $amount = '$' . number_format(((int)($row['amount_cents'] ?? 0)) / 100, 2);
+
+      echo '<tr>';
+      echo '<td>' . esc_html((string)($row['id'] ?? '')) . '</td>';
+      echo '<td>' . esc_html((string)($row['created_at'] ?? '')) . '</td>';
+      echo '<td>' . esc_html((string)($row['customer_email'] ?? '')) . '</td>';
+      echo '<td>' . esc_html((string)($row['sku'] ?? '')) . '</td>';
+      echo '<td>' . esc_html((string)($row['product_type'] ?? '')) . '</td>';
+      echo '<td>' . esc_html($amount . ' ' . strtoupper((string)($row['currency'] ?? 'usd'))) . '</td>';
+      echo '<td>' . esc_html((string)($row['status'] ?? '')) . '</td>';
+      echo '<td>' . esc_html((string)($row['stripe_payment_intent_id'] ?? '')) . '</td>';
+      echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+    echo '</div>';
+  }
+
+  public function handle_export_legal_ledger() {
+    if (!is_admin()) {
+      wp_die('Invalid request.', 'Legal Ledger Export', array('response' => 400));
+    }
+
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to export this ledger.', 'Legal Ledger Export', array('response' => 403));
+    }
+
+    check_admin_referer('mrm_export_legal_ledger');
+
+    global $wpdb;
+
+    $orders = $this->table_orders();
+
+    $table_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $orders));
+    if ($table_exists !== $orders) {
+      wp_die('Orders table is missing.', 'Legal Ledger Export', array('response' => 500));
+    }
+
+    $rows = $wpdb->get_results(
+      "SELECT
+         id,
+         created_at,
+         updated_at,
+         customer_email,
+         sku,
+         product_type,
+         amount_cents,
+         currency,
+         environment_mode,
+         status,
+         stripe_payment_intent_id,
+         stripe_status,
+         metadata_json
+       FROM {$orders}
+       ORDER BY created_at DESC, id DESC",
+      ARRAY_A
+    );
+
+    $export_rows = array();
+
+    foreach ((array)$rows as $row) {
+      $export_rows[] = array(
+        (string)($row['id'] ?? ''),
+        (string)($row['created_at'] ?? ''),
+        (string)($row['updated_at'] ?? ''),
+        (string)($row['customer_email'] ?? ''),
+        (string)($row['sku'] ?? ''),
+        (string)($row['product_type'] ?? ''),
+        number_format(((int)($row['amount_cents'] ?? 0)) / 100, 2, '.', ''),
+        (string)($row['currency'] ?? ''),
+        (string)($row['environment_mode'] ?? ''),
+        (string)($row['status'] ?? ''),
+        (string)($row['stripe_payment_intent_id'] ?? ''),
+        (string)($row['stripe_status'] ?? ''),
+        (string)($row['metadata_json'] ?? ''),
+      );
+    }
+
+    $this->mrm_csv_send(
+      'low-brass-lessons-legal-ledger-' . gmdate('Y-m-d') . '.csv',
+      array(
+        'Order ID',
+        'Created At',
+        'Updated At',
+        'Customer Email',
+        'SKU',
+        'Product Type',
+        'Amount',
+        'Currency',
+        'Environment',
+        'Status',
+        'Stripe Payment Intent',
+        'Stripe Status',
+        'Metadata JSON',
+      ),
+      $export_rows
+    );
   }
 
   public function handle_admin_post() {
