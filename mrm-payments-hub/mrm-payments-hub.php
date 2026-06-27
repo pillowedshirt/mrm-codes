@@ -12212,13 +12212,13 @@ public function handle_marketing_resubscribe() {
       $title = 'Presenter Profile Card';
       $subject = 'Low Brass Lessons presenter profile card';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Presenter Profile Card</strong>.</p>';
-      $details = '<p>This form collects the information needed to build your presenter profile, including your public-facing name, presenter title, biography, and profile photo. Please fill it out in its entirety, and we will let you know if we need any updates.</p>';
+      $details = '<p>This form collects the information needed to build your presenter profile, including your public-facing name, presenter title, biography, and profile photo. Please fill it out in its entirety and we will let you know if we need any revisions.</p>';
       $details .= '<div><strong>Request type:</strong> Presenter Profile Card</div>';
     } elseif ($request_type === 'presenter_event') {
       $title = 'Masterclass Event Submission';
       $subject = 'Low Brass Lessons masterclass event submission';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to submit details for an upcoming <strong>Masterclass Event</strong>.</p>';
-      $details = '<p>This form collects the information needed to create your upcoming masterclass listing. Please include the event title, description, and session details in your submission. If you have any questions, please feel free to reach out to support, and we will get back to you as soon as we can.</p>';
+      $details = '<p>This form collects the information needed to create your upcoming masterclass listing. Please include the event title, description, and session details in your submission. Please fill it out in its entirety and we will let you know if we need any revisions.</p>';
       $details .= '<div><strong>Request type:</strong> Masterclass Event Submission</div>';
 
       if ($selected_piece_title !== '') {
@@ -12232,7 +12232,7 @@ public function handle_marketing_resubscribe() {
       $title = 'Instructor Profile Card';
       $subject = 'Low Brass Lessons instructor profile card';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Instructor Profile Card</strong>.</p>';
-      $details = '<p>This form collects the information needed to build your instructor profile, including your public-facing name, teaching title, biography, and profile photo. Please fill it out in its entirety, and we will let you know if we need any updates.</p>';
+      $details = '<p>This form collects the information needed to build your instructor profile, including your public-facing name, teaching title, biography, and profile photo. Please fill it out in its entirety and we will let you know if we need any revisions.</p>';
       $details .= '<div><strong>Request type:</strong> Instructor Profile Card</div>';
     }
 
