@@ -12203,6 +12203,7 @@ public function handle_marketing_resubscribe() {
     $label = trim((string)$label);
     $days_label = trim((string)$days_label);
     $admin_note = trim((string)$admin_note);
+
     $selected_piece = is_array($selected_piece) ? $selected_piece : array();
     $selected_piece_title = sanitize_text_field((string)($selected_piece['title'] ?? ''));
     $selected_piece_url = esc_url_raw((string)($selected_piece['url'] ?? ''));
@@ -12211,26 +12212,27 @@ public function handle_marketing_resubscribe() {
       $title = 'Presenter Profile Card';
       $subject = 'Low Brass Lessons presenter profile card';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Presenter Profile Card</strong>.</p>';
-      $details = '<p>This form collects the information needed to build or update your presenter page, including your public-facing name, title, biography, presenter photo, payout/tax onboarding information, and any required agreement details.</p>';
+      $details = '<p>This form collects the information needed to build your presenter profile, including your public-facing name, presenter title, biography, and profile photo. Please fill it out in its entirety, and we will let you know if we need any updates.</p>';
       $details .= '<div><strong>Request type:</strong> Presenter Profile Card</div>';
     } elseif ($request_type === 'presenter_event') {
       $title = 'Masterclass Event Submission';
       $subject = 'Low Brass Lessons masterclass event submission';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to submit details for an upcoming <strong>Masterclass Event</strong>.</p>';
-      $details = '<p>This form collects the event-specific information needed to create or update the masterclass listing, including the event title, event description, session details, preparation notes, schedule details, presenter payout agreement, student-facing information, and any materials connected to the masterclass.</p>';
+      $details = '<p>This form collects the information needed to create your upcoming masterclass listing. Please include the event title, description, and session details in your submission. If you have any questions, please feel free to reach out to support, and we will get back to you as soon as we can.</p>';
       $details .= '<div><strong>Request type:</strong> Masterclass Event Submission</div>';
+
       if ($selected_piece_title !== '') {
         $details .= '<div><strong>Piece being discussed:</strong> ' . esc_html($selected_piece_title) . '</div>';
 
         if ($selected_piece_url !== '') {
-          $details .= '<div><strong>Piece page:</strong> <a href= . esc_url($selected_piece_url) . >' . esc_html($selected_piece_url) . '</a></div>';
+          $details .= '<div><strong>Piece page:</strong> <a href="' . esc_url($selected_piece_url) . '">' . esc_html($selected_piece_url) . '</a></div>';
         }
       }
     } else {
       $title = 'Instructor Profile Card';
       $subject = 'Low Brass Lessons instructor profile card';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Instructor Profile Card</strong>.</p>';
-      $details = '<p>This form collects the information needed to build or update your instructor profile, including your public-facing name, teaching title, biography, profile photo, instrument/lesson details, lesson location options, payment onboarding information, and fingerprint clearance/background-check information.</p>';
+      $details = '<p>This form collects the information needed to build your instructor profile, including your public-facing name, teaching title, biography, and profile photo. Please fill it out in its entirety, and we will let you know if we need any updates.</p>';
       $details .= '<div><strong>Request type:</strong> Instructor Profile Card</div>';
     }
 
@@ -12252,6 +12254,18 @@ public function handle_marketing_resubscribe() {
       'intro' => $intro,
       'details' => $details,
       'button_label' => 'Complete Your Form',
+      'buttons' => array(
+        array(
+          'url' => '#',
+          'label' => 'Complete Your Form',
+          'variant' => 'primary',
+        ),
+        array(
+          'url' => $this->mrm_get_contact_url(),
+          'label' => 'Contact Support',
+          'variant' => 'primary',
+        ),
+      ),
     );
   }
 
@@ -12270,7 +12284,7 @@ public function handle_marketing_resubscribe() {
         $this->mrm_profile_card_invite_email_parts('instructor_profile')['title'],
         $this->mrm_profile_card_invite_email_parts('instructor_profile')['intro'],
         $this->mrm_profile_card_invite_email_parts('instructor_profile')['details'],
-        $this->mrm_profile_card_invite_email_parts('instructor_profile')['button_label']
+        $this->mrm_profile_card_invite_email_parts('instructor_profile')['buttons']
       ),
 
       'profile_card_invite_presenter' => array(
@@ -12278,7 +12292,7 @@ public function handle_marketing_resubscribe() {
         $this->mrm_profile_card_invite_email_parts('presenter_profile')['title'],
         $this->mrm_profile_card_invite_email_parts('presenter_profile')['intro'],
         $this->mrm_profile_card_invite_email_parts('presenter_profile')['details'],
-        $this->mrm_profile_card_invite_email_parts('presenter_profile')['button_label']
+        $this->mrm_profile_card_invite_email_parts('presenter_profile')['buttons']
       ),
 
       'profile_card_invite_masterclass_event' => array(
@@ -12286,7 +12300,7 @@ public function handle_marketing_resubscribe() {
         $this->mrm_profile_card_invite_email_parts('presenter_event')['title'],
         $this->mrm_profile_card_invite_email_parts('presenter_event')['intro'],
         $this->mrm_profile_card_invite_email_parts('presenter_event')['details'],
-        $this->mrm_profile_card_invite_email_parts('presenter_event')['button_label']
+        $this->mrm_profile_card_invite_email_parts('presenter_event')['buttons']
       ),
 
       'profile_card_changes_requested' => array(
@@ -12836,12 +12850,18 @@ public function handle_marketing_resubscribe() {
       $subject .= ' update';
     }
 
+    $invite_buttons = is_array($invite_parts['buttons'] ?? null) ? $invite_parts['buttons'] : array();
+
+    if (!empty($invite_buttons[0]) && is_array($invite_buttons[0])) {
+      $invite_buttons[0]['url'] = $url;
+    }
+
     $body = $this->mrm_email_wrap_html(
       (string)$invite_parts['title'],
       (string)$invite_parts['intro'],
       (string)$invite_parts['details'],
-      $url,
-      (string)$invite_parts['button_label']
+      $invite_buttons,
+      ''
     );
 
     wp_mail($recipient_email, $subject, $body, array('Content-Type: text/html; charset=UTF-8'));
