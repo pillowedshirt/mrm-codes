@@ -2718,6 +2718,52 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return $out;
   }
 
+  private function mrm_sheet_music_manual_access_label($sku, $product = array()) {
+    $sku = $this->sanitize_sku((string)$sku);
+    $parsed = $this->mrm_parse_piece_sku_labels($sku);
+
+    if (!empty($parsed['is_piece']) && !empty($parsed['display_label'])) {
+      return (string)$parsed['display_label'];
+    }
+
+    $product = is_array($product) ? $product : array();
+
+    $label = trim((string)($product['label'] ?? ''));
+    if ($label === '') {
+      $label = trim((string)($product['title'] ?? ''));
+    }
+    if ($label === '') {
+      $label = trim((string)($product['name'] ?? ''));
+    }
+    if ($label === '') {
+      $label = $sku;
+    }
+
+    return $label;
+  }
+
+  private function mrm_sheet_music_manual_access_sort_key($sku, $label) {
+    $sku = $this->sanitize_sku((string)$sku);
+    $parsed = $this->mrm_parse_piece_sku_labels($sku);
+
+    $category_order = array(
+      'fundamentals' => '1',
+      'trombone-euphonium' => '2',
+      'tuba' => '3',
+      'complete-package' => '4',
+    );
+
+    if (!empty($parsed['is_piece'])) {
+      $piece_title = strtolower((string)($parsed['piece_title'] ?? ''));
+      $category_slug = (string)($parsed['category_slug'] ?? '');
+      $order = $category_order[$category_slug] ?? '9';
+
+      return $piece_title . '|' . $order . '|' . strtolower((string)$label);
+    }
+
+    return strtolower((string)$label);
+  }
+
 
   private function mrm_get_piece_page_url_from_sku($sku) {
     $labels = $this->mrm_parse_piece_sku_labels($sku);
@@ -14496,15 +14542,15 @@ public function handle_marketing_resubscribe() {
         continue;
       }
 
-      $label = trim((string)($product['label'] ?? ''));
-      if ($label === '') $label = trim((string)($product['title'] ?? ''));
-      if ($label === '') $label = trim((string)($product['name'] ?? ''));
-      if ($label === '') $label = $sku;
-
-      $sheet_music_products[$sku] = $label;
+      $sheet_music_products[$sku] = $this->mrm_sheet_music_manual_access_label($sku, $product);
     }
 
-    asort($sheet_music_products, SORT_NATURAL | SORT_FLAG_CASE);
+    uksort($sheet_music_products, function($a, $b) use ($sheet_music_products) {
+      $a_key = $this->mrm_sheet_music_manual_access_sort_key($a, $sheet_music_products[$a] ?? $a);
+      $b_key = $this->mrm_sheet_music_manual_access_sort_key($b, $sheet_music_products[$b] ?? $b);
+
+      return strnatcasecmp($a_key, $b_key);
+    });
 
     $active_rows = array();
 
@@ -14556,7 +14602,7 @@ public function handle_marketing_resubscribe() {
       echo '<select name="mrm_access_add_slug[]" style="min-width:260px;">';
       echo '<option value="">Select a piece/product</option>';
       foreach ($sheet_music_products as $sku => $label) {
-        echo '<option value="' . esc_attr($sku) . '">' . esc_html($label) . '</option>';
+        echo '<option value="' . esc_attr($sku) . '">' . esc_html($label . ' (' . $sku . ')') . '</option>';
       }
       echo '</select>';
       echo '</td>';
@@ -14580,7 +14626,7 @@ public function handle_marketing_resubscribe() {
       foreach ($active_rows as $row) {
         $row_id = absint($row['id'] ?? 0);
         $sku = (string)($row['sku'] ?? '');
-        $label = $sheet_music_products[$sku] ?? $sku;
+        $label = $sheet_music_products[$sku] ?? $this->mrm_sheet_music_manual_access_label($sku, array());
         $start_value = '';
         if (!empty($row['start_at'])) {
           $start_ts = strtotime((string)$row['start_at']);
@@ -14594,7 +14640,7 @@ public function handle_marketing_resubscribe() {
         echo '<tr>';
         echo '<td><input type="hidden" name="mrm_access_row_id[]" value="' . esc_attr($row_id) . '"><label><input type="checkbox" name="mrm_access_row_delete[]" value="' . esc_attr($row_id) . '"> Revoke</label></td>';
         echo '<td><input type="email" name="mrm_access_row_email[]" value="' . esc_attr((string)($row['email_plain'] ?? '')) . '" class="regular-text"></td>';
-        echo '<td>' . esc_html($label) . '<br><code>' . esc_html($sku) . '</code></td>';
+        echo '<td><strong>' . esc_html($label) . '</strong><br><code>' . esc_html($sku) . '</code></td>';
         echo '<td><input type="date" name="mrm_access_row_start[]" value="' . esc_attr($start_value) . '"></td>';
         echo '<td><input type="date" name="mrm_access_row_expires[]" value="' . esc_attr($expires_value) . '"></td>';
         echo '<td>' . esc_html((string)($row['granted_at'] ?? '')) . '</td>';
