@@ -2240,61 +2240,6 @@ function initRichTextToolbars(scope) {
         return $map;
     }
 
-    protected function mrm_pa_piece_for_product_slug( $product_slug ) {
-        $product_slug = $this->sanitize_product_slug( $product_slug );
-
-        if ( $product_slug === '' ) {
-            return array();
-        }
-
-        $options = $this->get_options();
-        $pieces = isset( $options['pieces'] ) && is_array( $options['pieces'] ) ? $options['pieces'] : array();
-
-        foreach ( $pieces as $piece ) {
-            if ( ! is_array( $piece ) ) {
-                continue;
-            }
-
-            $piece_slug = sanitize_title( (string) ( $piece['slug'] ?? $piece['piece_slug'] ?? '' ) );
-
-            if ( $piece_slug === '' ) {
-                continue;
-            }
-
-            if ( preg_match( '/^piece-' . preg_quote( $piece_slug, '/' ) . '-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug ) ) {
-                return $piece;
-            }
-
-            $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
-
-            foreach ( $offers as $offer ) {
-                if ( ! is_array( $offer ) ) {
-                    continue;
-                }
-
-                foreach ( array( 'product_slug', 'payments_hub_sku', 'sku' ) as $key ) {
-                    $offer_slug = $this->sanitize_product_slug( (string) ( $offer[ $key ] ?? '' ) );
-
-                    if ( $offer_slug !== '' && $offer_slug === $product_slug ) {
-                        return $piece;
-                    }
-                }
-            }
-        }
-
-        return array();
-    }
-
-    protected function mrm_pa_offer_type_from_canonical_sku( $product_slug ) {
-        $product_slug = $this->sanitize_product_slug( $product_slug );
-
-        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug, $m ) ) {
-            return sanitize_title( (string) $m[2] );
-        }
-
-        return '';
-    }
-
     protected function mrm_pa_track_slug_aliases_for_product_slug( $product_slug ) {
         $product_slug = $this->sanitize_product_slug( $product_slug );
 
@@ -2314,64 +2259,37 @@ function initRichTextToolbars(scope) {
 
         $add( $product_slug );
 
-        $piece = $this->mrm_pa_piece_for_product_slug( $product_slug );
-        $piece_slug = '';
-
-        if ( ! empty( $piece ) ) {
-            $piece_slug = sanitize_title( (string) ( $piece['slug'] ?? $piece['piece_slug'] ?? '' ) );
-        }
-
-        $type = $this->mrm_pa_offer_type_from_canonical_sku( $product_slug );
-
-        if ( $piece_slug === '' && preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug, $m ) ) {
+        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug, $m ) ) {
             $piece_slug = sanitize_title( (string) $m[1] );
-            $type = sanitize_title( (string) $m[2] );
-        }
+            $type       = sanitize_title( (string) $m[2] );
 
-        if ( $piece_slug !== '' ) {
             $add( $piece_slug );
             $add( 'piece-' . $piece_slug );
+            $add( 'piece-' . $piece_slug . '-' . $type );
+            $add( $piece_slug . '-' . $type );
 
-            if ( $type !== '' ) {
-                $add( 'piece-' . $piece_slug . '-' . $type );
-                $add( $piece_slug . '-' . $type );
+            if ( $type === 'fundamentals' ) {
+                $add( $piece_slug . '-fundamentals-package' );
+                $add( $piece_slug . '-fundamentals-full-piece' );
+            } elseif ( $type === 'trombone-euphonium' ) {
+                $add( $piece_slug . '-trombone-euphonium-full-piece' );
+                $add( $piece_slug . '-trombone-euph' );
+                $add( $piece_slug . '-trombone-euph-full-piece' );
+            } elseif ( $type === 'tuba' ) {
+                $add( $piece_slug . '-tuba-full-piece' );
+            } elseif ( $type === 'complete-package' ) {
+                $add( $piece_slug . '-complete-package' );
+                $add( $piece_slug . '-complete-bundle' );
+                $add( $piece_slug . '-full-piece' );
+                $add( $piece_slug . '-full-package' );
 
-                if ( $type === 'fundamentals' ) {
-                    $add( $piece_slug . '-fundamentals-package' );
-                    $add( $piece_slug . '-fundamentals-full-piece' );
-                } elseif ( $type === 'trombone-euphonium' ) {
-                    $add( $piece_slug . '-trombone-euphonium-full-piece' );
-                    $add( $piece_slug . '-trombone-euph' );
-                    $add( $piece_slug . '-trombone-euph-full-piece' );
-                } elseif ( $type === 'tuba' ) {
-                    $add( $piece_slug . '-tuba-full-piece' );
-                } elseif ( $type === 'complete-package' ) {
-                    $add( $piece_slug . '-complete-package' );
-                    $add( $piece_slug . '-complete-bundle' );
-                    $add( $piece_slug . '-full-piece' );
-                    $add( $piece_slug . '-full-package' );
-                }
-            }
-        }
-
-        if ( ! empty( $piece ) ) {
-            $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
-
-            foreach ( $offers as $offer ) {
-                if ( ! is_array( $offer ) ) {
-                    continue;
-                }
-
-                $offer_slug = $this->sanitize_product_slug( (string) ( $offer['product_slug'] ?? '' ) );
-                $offer_type = $this->mrm_pa_infer_sheet_music_offer_type( $offer, $offer_slug );
-
-                if ( $type !== '' && $offer_type !== '' && $offer_type !== $type ) {
-                    continue;
-                }
-
-                $add( $offer_slug );
-                $add( (string) ( $offer['payments_hub_sku'] ?? '' ) );
-                $add( (string) ( $offer['sku'] ?? '' ) );
+                // Complete package can also fall back to individual package mappings.
+                $add( 'piece-' . $piece_slug . '-fundamentals' );
+                $add( 'piece-' . $piece_slug . '-trombone-euphonium' );
+                $add( 'piece-' . $piece_slug . '-tuba' );
+                $add( $piece_slug . '-fundamentals' );
+                $add( $piece_slug . '-trombone-euphonium' );
+                $add( $piece_slug . '-tuba' );
             }
         }
 
@@ -2439,13 +2357,13 @@ function initRichTextToolbars(scope) {
 
         $out = array();
 
-        foreach ( $items as $it ) {
+        foreach ( (array) $items as $it ) {
             if ( ! is_array( $it ) ) {
                 continue;
             }
 
             $name = sanitize_text_field( (string) ( $it['name'] ?? '' ) );
-            $url = $this->sanitize_track_location( (string) ( $it['url'] ?? '' ) );
+            $url  = $this->sanitize_track_location( (string) ( $it['url'] ?? '' ) );
 
             if ( $url === '' ) {
                 continue;
@@ -2624,252 +2542,6 @@ function initRichTextToolbars(scope) {
     protected function is_valid_product_slug( $slug ) {
         $slug = (string) $slug;
         return ( $slug !== '' && preg_match( '/^[a-z0-9][a-z0-9\-_]{0,199}$/', $slug ) );
-    }
-
-    private function mrm_pa_email_hash_candidates_for_email( $email ) {
-        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
-
-        if ( $email === '' || ! is_email( $email ) ) {
-            return array();
-        }
-
-        return array_values( array_unique( array_filter( array(
-            $this->hash_email( $email ),       // Product Access salted hash.
-            hash( 'sha256', $email ),          // Payments Hub unsalted hash.
-        ) ) ) );
-    }
-
-    private function mrm_pa_access_row_is_active_now( $row ) {
-        $row = is_object( $row ) ? get_object_vars( $row ) : (array) $row;
-
-        if ( ! empty( $row['revoked_at'] ) ) {
-            return false;
-        }
-
-        $now_ts = current_time( 'timestamp' );
-
-        $start_at = trim( (string) ( $row['start_at'] ?? '' ) );
-        if ( $start_at !== '' ) {
-            $start_ts = strtotime( $start_at );
-            if ( $start_ts && $start_ts > $now_ts ) {
-                return false;
-            }
-        }
-
-        $expires_at = trim( (string) ( $row['expires_at'] ?? '' ) );
-        if ( $expires_at !== '' ) {
-            $expires_ts = strtotime( $expires_at );
-            if ( $expires_ts && $expires_ts <= $now_ts ) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private function mrm_pa_access_row_matches_email( $row, $email ) {
-        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
-
-        if ( $email === '' || ! is_email( $email ) ) {
-            return false;
-        }
-
-        $row = is_object( $row ) ? get_object_vars( $row ) : (array) $row;
-
-        $row_email_plain = sanitize_email( strtolower( trim( (string) ( $row['email_plain'] ?? '' ) ) ) );
-        if ( $row_email_plain !== '' && hash_equals( $row_email_plain, $email ) ) {
-            return true;
-        }
-
-        $row_email_hash = trim( (string) ( $row['email_hash'] ?? '' ) );
-        if ( $row_email_hash === '' ) {
-            return false;
-        }
-
-        foreach ( $this->mrm_pa_email_hash_candidates_for_email( $email ) as $hash ) {
-            if ( hash_equals( $row_email_hash, $hash ) ) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function mrm_pa_access_sku_candidates_for_requested_sku( $sku ) {
-        $sku = $this->sanitize_product_slug( $sku );
-
-        if ( $sku === '' ) {
-            return array();
-        }
-
-        $candidates = array( $sku );
-
-        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m ) ) {
-            $piece_slug = (string) $m[1];
-            $package_type = (string) $m[2];
-
-            // Complete Package grants access to each individual package view.
-            if ( $package_type !== 'complete-package' ) {
-                $candidates[] = 'piece-' . $piece_slug . '-complete-package';
-            }
-        }
-
-        // Instructor/admin master access.
-        $candidates[] = 'all-piece-products-instructors';
-
-        return array_values( array_unique( array_filter( $candidates ) ) );
-    }
-
-    private function mrm_pa_email_has_active_subscription_access( $email ) {
-        global $wpdb;
-
-        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
-
-        if ( $email === '' || ! is_email( $email ) ) {
-            return false;
-        }
-
-        $table = $wpdb->prefix . 'mrm_sheet_music_subscriptions';
-        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
-
-        if ( $exists !== $table ) {
-            return false;
-        }
-
-        $hashes = $this->mrm_pa_email_hash_candidates_for_email( $email );
-        if ( empty( $hashes ) ) {
-            return false;
-        }
-
-        $placeholders = implode( ',', array_fill( 0, count( $hashes ), '%s' ) );
-
-        $sql = "SELECT *
-                FROM {$table}
-                WHERE (
-                  LOWER(email_plain) = %s
-                  OR email_hash IN ({$placeholders})
-                )
-                ORDER BY id DESC
-                LIMIT 10";
-
-        $rows = $wpdb->get_results( $wpdb->prepare( $sql, array_merge( array( $email ), $hashes ) ) );
-
-        foreach ( (array) $rows as $row ) {
-            $status = trim( (string) ( $row->stripe_status ?? $row->status ?? '' ) );
-            $period_end = trim( (string) ( $row->current_period_end ?? '' ) );
-            $period_end_ts = $period_end !== '' ? strtotime( $period_end ) : 0;
-
-            if ( in_array( $status, array( 'trialing', 'active' ), true ) ) {
-                return true;
-            }
-
-            if ( $period_end_ts && $period_end_ts > current_time( 'timestamp' ) ) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function mrm_pa_email_has_strict_sheet_music_access( $email, $sku ) {
-        global $wpdb;
-
-        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
-        $sku = $this->sanitize_product_slug( $sku );
-
-        if ( $email === '' || ! is_email( $email ) || $sku === '' ) {
-            return false;
-        }
-
-        // A paid active subscription can access sheet music.
-        if ( $this->mrm_pa_email_has_active_subscription_access( $email ) ) {
-            return true;
-        }
-
-        $table = $wpdb->prefix . 'mrm_sheet_music_access';
-        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
-
-        if ( $exists !== $table ) {
-            return false;
-        }
-
-        $sku_candidates = $this->mrm_pa_access_sku_candidates_for_requested_sku( $sku );
-
-        if ( empty( $sku_candidates ) ) {
-            return false;
-        }
-
-        $placeholders = implode( ',', array_fill( 0, count( $sku_candidates ), '%s' ) );
-
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT *
-                 FROM {$table}
-                 WHERE sku IN ({$placeholders})
-                   AND revoked_at IS NULL
-                 ORDER BY id DESC
-                 LIMIT 50",
-                $sku_candidates
-            )
-        );
-
-        foreach ( (array) $rows as $row ) {
-            if ( ! $this->mrm_pa_access_row_is_active_now( $row ) ) {
-                continue;
-            }
-
-            if ( $this->mrm_pa_access_row_matches_email( $row, $email ) ) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function mrm_pa_strict_resolve_otp_product_slug_for_email( $email, $product_slug, $piece_slug = '', $offer_type = '', $raw_offer_slug = '' ) {
-        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
-
-        if ( $email === '' || ! is_email( $email ) ) {
-            return '';
-        }
-
-        $candidates = $this->get_otp_product_slug_candidates(
-            $product_slug,
-            $piece_slug,
-            $offer_type,
-            $raw_offer_slug
-        );
-
-        foreach ( $candidates as $candidate ) {
-            $candidate = $this->sanitize_product_slug( $candidate );
-
-            if ( $candidate === '' ) {
-                continue;
-            }
-
-            if ( $this->mrm_pa_email_has_strict_sheet_music_access( $email, $candidate ) ) {
-                $this->mrm_pa_log_access_event( 'strict_otp_access_resolved', array(
-                    'submitted_product_slug' => $product_slug,
-                    'raw_offer_slug'         => $raw_offer_slug,
-                    'piece_slug'             => $piece_slug,
-                    'offer_type'             => $offer_type,
-                    'resolved_sku'           => $candidate,
-                ) );
-
-                return $candidate;
-            }
-        }
-
-        $this->mrm_pa_log_access_event( 'strict_otp_access_not_verified', array(
-            'submitted_product_slug' => $product_slug,
-            'raw_offer_slug'         => $raw_offer_slug,
-            'piece_slug'             => $piece_slug,
-            'offer_type'             => $offer_type,
-            'candidate_count'        => count( $candidates ),
-            'candidate_preview'      => implode( ',', array_slice( $candidates, 0, 12 ) ),
-        ) );
-
-        return '';
     }
 
     private function payments_hub_has_access( $email_hash, $sku ) {
@@ -4462,8 +4134,9 @@ function initRichTextToolbars(scope) {
         global $wpdb;
         $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
 
-        // Hub access is the source of truth. Fail closed when no verified purchase/access exists.
-        $resolved_product_slug = $this->mrm_pa_strict_resolve_otp_product_slug_for_email(
+        // Hub is the source of truth for access.
+        // Use the existing resolver for this plugin version, but fail closed when no verified purchase/access exists.
+        $resolved_product_slug = $this->resolve_otp_product_slug_for_email(
             $normalized_email,
             $product_slug,
             $piece_slug,
@@ -4675,8 +4348,8 @@ function initRichTextToolbars(scope) {
             'id' => $row->id,
         ) );
 
-        // Re-check strict verified access before granting session cookies.
-        if ( ! $this->mrm_pa_email_has_strict_sheet_music_access( $normalized_email, $product_slug ) ) {
+        // Re-check access in Payments Hub before granting session cookies.
+        if ( ! $this->payments_hub_has_access_for_email( $normalized_email, $product_slug ) ) {
             return new WP_REST_Response(
                 array(
                     'ok'      => false,
