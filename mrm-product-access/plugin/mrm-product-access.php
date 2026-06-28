@@ -2240,6 +2240,153 @@ function initRichTextToolbars(scope) {
         return $map;
     }
 
+
+    protected function mrm_pa_find_piece_for_product_slug( $product_slug ) {
+        $product_slug = $this->sanitize_product_slug( $product_slug );
+
+        if ( $product_slug === '' ) {
+            return array();
+        }
+
+        $options = $this->get_options();
+        $pieces  = isset( $options['pieces'] ) && is_array( $options['pieces'] ) ? $options['pieces'] : array();
+
+        foreach ( $pieces as $piece ) {
+            if ( ! is_array( $piece ) ) {
+                continue;
+            }
+
+            $piece_slug = sanitize_title( (string) ( $piece['slug'] ?? $piece['piece_slug'] ?? '' ) );
+
+            if ( $piece_slug === '' ) {
+                continue;
+            }
+
+            if ( preg_match( '/^piece-' . preg_quote( $piece_slug, '/' ) . '-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug ) ) {
+                return $piece;
+            }
+
+            $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
+
+            foreach ( $offers as $offer ) {
+                if ( ! is_array( $offer ) ) {
+                    continue;
+                }
+
+                $offer_slugs = array(
+                    $offer['product_slug'] ?? '',
+                    $offer['payments_hub_sku'] ?? '',
+                    $offer['sku'] ?? '',
+                );
+
+                foreach ( $offer_slugs as $offer_slug ) {
+                    $offer_slug = $this->sanitize_product_slug( $offer_slug );
+
+                    if ( $offer_slug !== '' && $offer_slug === $product_slug ) {
+                        return $piece;
+                    }
+                }
+            }
+        }
+
+        return array();
+    }
+
+    protected function mrm_pa_offer_type_from_payment_hub_sku( $product_slug ) {
+        $product_slug = $this->sanitize_product_slug( $product_slug );
+
+        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug, $m ) ) {
+            return sanitize_title( (string) $m[2] );
+        }
+
+        return '';
+    }
+
+    protected function mrm_pa_track_slug_aliases_for_product( $product_slug ) {
+        $product_slug = $this->sanitize_product_slug( $product_slug );
+
+        if ( $product_slug === '' ) {
+            return array();
+        }
+
+        $aliases = array();
+
+        $add = function( $slug ) use ( &$aliases ) {
+            $slug = $this->sanitize_product_slug( $slug );
+
+            if ( $slug !== '' && ! in_array( $slug, $aliases, true ) ) {
+                $aliases[] = $slug;
+            }
+        };
+
+        $add( $product_slug );
+
+        $piece = $this->mrm_pa_find_piece_for_product_slug( $product_slug );
+        $piece_slug = '';
+
+        if ( ! empty( $piece ) ) {
+            $piece_slug = sanitize_title( (string) ( $piece['slug'] ?? $piece['piece_slug'] ?? '' ) );
+        }
+
+        if ( $piece_slug === '' && preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $product_slug, $m ) ) {
+            $piece_slug = sanitize_title( (string) $m[1] );
+        }
+
+        if ( $piece_slug !== '' ) {
+            $type = $this->mrm_pa_offer_type_from_payment_hub_sku( $product_slug );
+
+            $add( $piece_slug );
+            $add( 'piece-' . $piece_slug );
+
+            if ( $type !== '' ) {
+                $add( 'piece-' . $piece_slug . '-' . $type );
+                $add( $piece_slug . '-' . $type );
+
+                if ( $type === 'complete-package' ) {
+                    $add( $piece_slug . '-complete-package' );
+                    $add( $piece_slug . '-complete-bundle' );
+                    $add( $piece_slug . '-full-piece' );
+                    $add( $piece_slug . '-full-package' );
+                } elseif ( $type === 'trombone-euphonium' ) {
+                    $add( $piece_slug . '-trombone-euphonium' );
+                    $add( $piece_slug . '-trombone-euphonium-full-piece' );
+                    $add( $piece_slug . '-trombone-euph' );
+                    $add( $piece_slug . '-trombone-euph-full-piece' );
+                } elseif ( $type === 'tuba' ) {
+                    $add( $piece_slug . '-tuba' );
+                    $add( $piece_slug . '-tuba-full-piece' );
+                } elseif ( $type === 'fundamentals' ) {
+                    $add( $piece_slug . '-fundamentals' );
+                    $add( $piece_slug . '-fundamentals-package' );
+                }
+            }
+        }
+
+        if ( ! empty( $piece ) ) {
+            $offers = isset( $piece['offers'] ) && is_array( $piece['offers'] ) ? $piece['offers'] : array();
+            $requested_type = $this->mrm_pa_offer_type_from_payment_hub_sku( $product_slug );
+
+            foreach ( $offers as $offer ) {
+                if ( ! is_array( $offer ) ) {
+                    continue;
+                }
+
+                $offer_slug = $this->sanitize_product_slug( $offer['product_slug'] ?? '' );
+                $offer_type = $this->mrm_pa_infer_sheet_music_offer_type( $offer, $offer_slug );
+
+                if ( $requested_type !== '' && $offer_type !== '' && $requested_type !== $offer_type ) {
+                    continue;
+                }
+
+                $add( $offer_slug );
+                $add( $offer['payments_hub_sku'] ?? '' );
+                $add( $offer['sku'] ?? '' );
+            }
+        }
+
+        return $aliases;
+    }
+
     protected function mrm_get_private_asset_root() {
         return '/home/u309866334/domains/lowbrass-lessons.com/mrm-private';
     }
@@ -2280,21 +2427,35 @@ function initRichTextToolbars(scope) {
 
     protected function get_tracks_for_slug( $product_slug ) {
         $product_slug = $this->sanitize_product_slug( $product_slug );
+
         if ( $product_slug === '' ) {
             return array();
         }
 
-        $m = $this->get_tracks_mapping();
-        $items = isset( $m[ $product_slug ] ) && is_array( $m[ $product_slug ] ) ? $m[ $product_slug ] : array();
+        $mapping = $this->get_tracks_mapping();
+        $aliases = $this->mrm_pa_track_slug_aliases_for_product( $product_slug );
 
-        // Normalize track mapping.
+        $items = array();
+        $matched_slug = '';
+
+        foreach ( $aliases as $alias ) {
+            if ( isset( $mapping[ $alias ] ) && is_array( $mapping[ $alias ] ) && ! empty( $mapping[ $alias ] ) ) {
+                $items = $mapping[ $alias ];
+                $matched_slug = $alias;
+                break;
+            }
+        }
+
         $out = array();
-        foreach ( $items as $it ) {
+
+        foreach ( (array) $items as $it ) {
             if ( ! is_array( $it ) ) {
                 continue;
             }
+
             $name = sanitize_text_field( (string) ( $it['name'] ?? '' ) );
             $url  = $this->sanitize_track_location( (string) ( $it['url'] ?? '' ) );
+
             if ( $url === '' ) {
                 continue;
             }
@@ -2304,7 +2465,18 @@ function initRichTextToolbars(scope) {
                 'url'  => $url,
             );
         }
-        if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+
+        if ( empty( $out ) ) {
+            $this->mrm_pa_log_access_event( 'access_page_no_tracks_found', array(
+                'requested_product_slug' => $product_slug,
+                'aliases_checked'        => implode( ',', array_slice( $aliases, 0, 20 ) ),
+            ) );
+        } else {
+            $this->mrm_pa_log_access_event( 'access_page_tracks_found', array(
+                'requested_product_slug' => $product_slug,
+                'matched_track_slug'     => $matched_slug,
+                'track_count'            => count( $out ),
+            ) );
         }
 
         return $out;
@@ -2461,6 +2633,247 @@ function initRichTextToolbars(scope) {
     protected function is_valid_product_slug( $slug ) {
         $slug = (string) $slug;
         return ( $slug !== '' && preg_match( '/^[a-z0-9][a-z0-9\-_]{0,199}$/', $slug ) );
+    }
+
+
+    private function mrm_pa_email_hash_candidates_for_email( $email ) {
+        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
+
+        if ( $email === '' || ! is_email( $email ) ) {
+            return array();
+        }
+
+        $candidates = array(
+            hash( 'sha256', $email ),
+            $this->hash_email( $email ),
+        );
+
+        return array_values( array_unique( array_filter( $candidates ) ) );
+    }
+
+    private function mrm_pa_row_email_matches( $row, $email ) {
+        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
+
+        if ( $email === '' || ! is_email( $email ) ) {
+            return false;
+        }
+
+        $row = is_object( $row ) ? get_object_vars( $row ) : (array) $row;
+
+        $email_plain = sanitize_email( strtolower( trim( (string) ( $row['email_plain'] ?? '' ) ) ) );
+        if ( $email_plain !== '' && hash_equals( $email, $email_plain ) ) {
+            return true;
+        }
+
+        $row_hash = trim( (string) ( $row['email_hash'] ?? '' ) );
+        if ( $row_hash === '' ) {
+            return false;
+        }
+
+        foreach ( $this->mrm_pa_email_hash_candidates_for_email( $email ) as $candidate_hash ) {
+            if ( hash_equals( $row_hash, $candidate_hash ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function mrm_pa_access_row_is_active( $row ) {
+        $row = is_object( $row ) ? get_object_vars( $row ) : (array) $row;
+
+        if ( ! empty( $row['revoked_at'] ) ) {
+            return false;
+        }
+
+        $now_ts = current_time( 'timestamp' );
+
+        $start_at = trim( (string) ( $row['start_at'] ?? '' ) );
+        if ( $start_at !== '' ) {
+            $start_ts = strtotime( $start_at );
+            if ( $start_ts && $start_ts > $now_ts ) {
+                return false;
+            }
+        }
+
+        $expires_at = trim( (string) ( $row['expires_at'] ?? '' ) );
+        if ( $expires_at !== '' ) {
+            $expires_ts = strtotime( $expires_at );
+            if ( $expires_ts && $expires_ts <= $now_ts ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function mrm_pa_access_sku_candidates_for_requested_sku( $sku ) {
+        $sku = $this->sanitize_product_slug( $sku );
+        if ( $sku === '' ) {
+            return array();
+        }
+
+        $candidates = array( $sku );
+
+        if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m ) ) {
+            $piece_slug = (string) $m[1];
+            $package_type = (string) $m[2];
+
+            if ( $package_type !== 'complete-package' ) {
+                $candidates[] = 'piece-' . $piece_slug . '-complete-package';
+            }
+        }
+
+        $candidates[] = 'all-piece-products-instructors';
+
+        return array_values( array_unique( array_filter( $candidates ) ) );
+    }
+
+    private function mrm_pa_strict_subscription_access_for_email( $email ) {
+        global $wpdb;
+
+        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
+        if ( $email === '' || ! is_email( $email ) ) {
+            return false;
+        }
+
+        $subs_table = $wpdb->prefix . 'mrm_sheet_music_subscriptions';
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $subs_table ) );
+
+        if ( $exists !== $subs_table ) {
+            return false;
+        }
+
+        $hashes = $this->mrm_pa_email_hash_candidates_for_email( $email );
+        if ( empty( $hashes ) ) {
+            return false;
+        }
+
+        $placeholders = implode( ',', array_fill( 0, count( $hashes ), '%s' ) );
+
+        $sql = "SELECT *
+            FROM {$subs_table}
+            WHERE (
+                LOWER(email_plain) = %s
+                OR email_hash IN ({$placeholders})
+            )
+            ORDER BY id DESC
+            LIMIT 10";
+
+        $params = array_merge( array( $email ), $hashes );
+        $rows = $wpdb->get_results( $wpdb->prepare( $sql, $params ) );
+
+        foreach ( (array) $rows as $row ) {
+            $status = trim( (string) ( $row->stripe_status ?? $row->status ?? '' ) );
+            $period_end = trim( (string) ( $row->current_period_end ?? '' ) );
+            $period_end_ts = $period_end !== '' ? strtotime( $period_end ) : 0;
+
+            if ( in_array( $status, array( 'trialing', 'active' ), true ) ) {
+                return true;
+            }
+
+            if ( $period_end_ts && $period_end_ts > current_time( 'timestamp' ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function mrm_pa_strict_purchased_access_for_email( $email, $sku ) {
+        global $wpdb;
+
+        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
+        $sku = $this->sanitize_product_slug( $sku );
+
+        if ( $email === '' || ! is_email( $email ) || $sku === '' ) {
+            return false;
+        }
+
+        if ( $this->mrm_pa_strict_subscription_access_for_email( $email ) ) {
+            return true;
+        }
+
+        $table = $wpdb->prefix . 'mrm_sheet_music_access';
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) );
+
+        if ( $exists !== $table ) {
+            return false;
+        }
+
+        $sku_candidates = $this->mrm_pa_access_sku_candidates_for_requested_sku( $sku );
+        if ( empty( $sku_candidates ) ) {
+            return false;
+        }
+
+        $sku_placeholders = implode( ',', array_fill( 0, count( $sku_candidates ), '%s' ) );
+
+        $sql = "SELECT *
+            FROM {$table}
+            WHERE sku IN ({$sku_placeholders})
+              AND revoked_at IS NULL
+            ORDER BY id DESC
+            LIMIT 50";
+
+        $rows = $wpdb->get_results( $wpdb->prepare( $sql, $sku_candidates ) );
+
+        foreach ( (array) $rows as $row ) {
+            if ( ! $this->mrm_pa_access_row_is_active( $row ) ) {
+                continue;
+            }
+
+            if ( $this->mrm_pa_row_email_matches( $row, $email ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function mrm_pa_strict_resolve_otp_sku_for_email( $email, $product_slug, $piece_slug = '', $offer_type = '', $raw_offer_slug = '' ) {
+        $email = sanitize_email( strtolower( trim( (string) $email ) ) );
+
+        if ( $email === '' || ! is_email( $email ) ) {
+            return '';
+        }
+
+        $candidates = $this->get_otp_product_slug_candidates(
+            $product_slug,
+            $piece_slug,
+            $offer_type,
+            $raw_offer_slug
+        );
+
+        foreach ( $candidates as $candidate ) {
+            $candidate = $this->sanitize_product_slug( $candidate );
+
+            if ( $candidate === '' ) {
+                continue;
+            }
+
+            if ( $this->mrm_pa_strict_purchased_access_for_email( $email, $candidate ) ) {
+                $this->mrm_pa_log_access_event( 'strict_otp_resolved_access_sku', array(
+                    'submitted_product_slug' => $product_slug,
+                    'raw_offer_slug'         => $raw_offer_slug,
+                    'piece_slug'             => $piece_slug,
+                    'offer_type'             => $offer_type,
+                    'resolved_sku'           => $candidate,
+                ) );
+
+                return $candidate;
+            }
+        }
+
+        $this->mrm_pa_log_access_event( 'strict_otp_no_verified_access', array(
+            'submitted_product_slug' => $product_slug,
+            'raw_offer_slug'         => $raw_offer_slug,
+            'piece_slug'             => $piece_slug,
+            'offer_type'             => $offer_type,
+            'candidate_count'        => count( $candidates ),
+            'candidate_preview'      => implode( ',', array_slice( $candidates, 0, 12 ) ),
+        ) );
+
+        return '';
     }
 
     private function payments_hub_has_access( $email_hash, $sku ) {
@@ -3249,8 +3662,13 @@ function initRichTextToolbars(scope) {
         }
 
         if ( empty( $tracks ) ) {
+            $this->mrm_pa_log_access_event( 'access_page_empty_tracks_blocked', array(
+                'product_slug' => $product_slug,
+                'piece_slug'   => (string) ( $payload['piece_slug'] ?? '' ),
+            ) );
+
             status_header( 404 );
-            echo 'No tracks configured for this product.';
+            echo 'No protected content is currently configured for this piece/package. Please contact Low Brass Lessons.';
             exit;
         }
 
@@ -4039,19 +4457,16 @@ function initRichTextToolbars(scope) {
         global $wpdb;
         $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
 
-        // ✅ Hub is the ONLY source of truth for access.
-        $resolved_product_slug = $this->resolve_otp_product_slug_for_email(
+        $resolved_product_slug = $this->mrm_pa_strict_resolve_otp_sku_for_email(
             $normalized_email,
             $product_slug,
             $piece_slug,
             $offer_type,
             $raw_offer_slug
         );
-        $has_access = $resolved_product_slug !== '';
 
-        // Privacy-preserving: always return generic success.
-        if ( ! $has_access ) {
-            $this->mrm_pa_log_access_event( 'otp_no_matching_access', array(
+        if ( $resolved_product_slug === '' ) {
+            $this->mrm_pa_log_access_event( 'otp_blocked_unverified_email', array(
                 'email'          => $normalized_email,
                 'product_slug'   => $product_slug,
                 'raw_offer_slug' => $raw_offer_slug,
@@ -4059,7 +4474,14 @@ function initRichTextToolbars(scope) {
                 'offer_type'     => $offer_type,
             ) );
 
-            return new WP_REST_Response( $generic, 200 );
+            return new WP_REST_Response(
+                array(
+                    'ok'        => false,
+                    'code_sent' => false,
+                    'message'   => __( 'We could not verify a completed purchase for that email and piece. Please confirm the purchase email and selected access option.', 'mrm-product-access' ),
+                ),
+                403
+            );
         }
 
         $product_slug = $resolved_product_slug;
@@ -4145,7 +4567,16 @@ function initRichTextToolbars(scope) {
             'subject'      => $subject,
         ) );
 
-        return new WP_REST_Response( $generic, 200 );
+        return new WP_REST_Response(
+            array(
+                'ok'        => true,
+                'code_sent' => $sent ? true : false,
+                'message'   => $sent
+                    ? __( 'A one-time access code has been sent to the verified purchase email.', 'mrm-product-access' )
+                    : __( 'We verified the purchase, but the access code email could not be sent. Please contact Low Brass Lessons.', 'mrm-product-access' ),
+            ),
+            $sent ? 200 : 500
+        );
     }
 
     /**
@@ -4231,9 +4662,15 @@ function initRichTextToolbars(scope) {
             'id' => $row->id,
         ) );
 
-        // ✅ Re-check access in Payments Hub before granting session cookies.
-        if ( ! $this->payments_hub_has_access_for_email( $normalized_email, $product_slug ) ) {
-            return new WP_REST_Response( array( 'ok' => false, 'message' => 'This access code could not be verified for this purchase.' ), 403 );
+        // Re-check strict verified access before granting session cookies.
+        if ( ! $this->mrm_pa_strict_purchased_access_for_email( $normalized_email, $product_slug ) ) {
+            return new WP_REST_Response(
+                array(
+                    'ok'      => false,
+                    'message' => 'This access code could not be verified for this purchase.',
+                ),
+                403
+            );
         }
 
         // Download auth cookie.
@@ -6512,11 +6949,12 @@ audio.mrm-audio {
                     });
                     let data = {};
                     try { data = await response.json(); } catch (jsonError) { data = {}; }
-                    if (!response.ok) {
-                      messageDiv.textContent = data.message || 'We could not send an access code right now. Please try again or contact Low Brass Lessons.';
+                    if (!response.ok || !data.ok || data.code_sent !== true) {
+                      messageDiv.textContent = data.message || 'We could not verify a completed purchase for that email and piece.';
                       return;
                     }
-                    messageDiv.textContent = data.message || 'If this purchase exists, a code will be sent shortly.';
+
+                    messageDiv.textContent = data.message || 'A one-time access code has been sent to the verified purchase email.';
                     stepEmail.classList.add('hidden');
                     stepOtp.classList.remove('hidden');
                     window.setTimeout(function () { otpInput.focus(); }, 50);
