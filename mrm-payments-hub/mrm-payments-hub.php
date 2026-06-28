@@ -14466,6 +14466,290 @@ public function handle_marketing_resubscribe() {
 
   }
 
+  public function render_access_lists_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to view this page.');
+    }
+
+    global $wpdb;
+
+    $this->maybe_install_or_upgrade_db();
+
+    $access_table = $this->table_sheet_music_access();
+    $table_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $access_table));
+
+    $products = $this->all_products();
+    $sheet_music_products = array();
+
+    foreach ((array)$products as $sku => $product) {
+      if (!is_array($product)) {
+        continue;
+      }
+
+      $sku = $this->sanitize_product_slug($sku);
+
+      if ($sku === '' || $sku === 'all-sheet-music') {
+        continue;
+      }
+
+      if ((string)($product['product_type'] ?? '') !== 'sheet_music') {
+        continue;
+      }
+
+      $label = trim((string)($product['label'] ?? ''));
+      if ($label === '') $label = trim((string)($product['title'] ?? ''));
+      if ($label === '') $label = trim((string)($product['name'] ?? ''));
+      if ($label === '') $label = $sku;
+
+      $sheet_music_products[$sku] = $label;
+    }
+
+    asort($sheet_music_products, SORT_NATURAL | SORT_FLAG_CASE);
+
+    $active_rows = array();
+
+    if ($table_exists === $access_table) {
+      $active_rows = $wpdb->get_results(
+        "SELECT id, email_plain, sku, start_at, expires_at, granted_at, source, source_id
+         FROM {$access_table}
+         WHERE revoked_at IS NULL
+           AND sku <> 'all-sheet-music'
+         ORDER BY granted_at DESC, id DESC
+         LIMIT 500",
+        ARRAY_A
+      );
+    }
+
+    echo '<div class="wrap">';
+    echo '<h1>Sheet Music Access</h1>';
+    settings_errors('mrm_pay_hub');
+
+    echo '<p>Use this page to manually grant, edit, or revoke access to individual sheet music products. Subscription-based all-access rows are Stripe-managed and intentionally excluded from manual editing here.</p>';
+
+    if ($table_exists !== $access_table) {
+      echo '<div class="notice notice-error"><p>The sheet music access table is missing. The plugin attempted to run the database installer, but the table was not found.</p></div>';
+      echo '</div>';
+      return;
+    }
+
+    echo '<form method="post" action="">';
+    wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce');
+
+    echo '<h2>Add Manual Sheet Music Access</h2>';
+
+    if (empty($sheet_music_products)) {
+      echo '<div class="notice notice-warning inline"><p>No active sheet music products were found. Add sheet music products in Payment Hub → Products before granting manual access.</p></div>';
+    }
+
+    echo '<table class="widefat striped" style="max-width:1100px;">';
+    echo '<thead><tr>';
+    echo '<th>Piece/Product</th>';
+    echo '<th>Email</th>';
+    echo '<th>Purchase/Start Date</th>';
+    echo '<th>Expires Date</th>';
+    echo '</tr></thead>';
+    echo '<tbody>';
+
+    for ($i = 0; $i < 3; $i++) {
+      echo '<tr>';
+      echo '<td>';
+      echo '<select name="mrm_access_add_slug[]" style="min-width:260px;">';
+      echo '<option value="">Select a piece/product</option>';
+      foreach ($sheet_music_products as $sku => $label) {
+        echo '<option value="' . esc_attr($sku) . '">' . esc_html($label) . '</option>';
+      }
+      echo '</select>';
+      echo '</td>';
+      echo '<td><input type="email" name="mrm_access_add_email[]" class="regular-text" placeholder="student@example.com"></td>';
+      echo '<td><input type="date" name="mrm_access_add_purchase[]"></td>';
+      echo '<td><input type="date" name="mrm_access_add_expires[]"></td>';
+      echo '</tr>';
+    }
+
+    echo '</tbody>';
+    echo '</table>';
+    echo '<h2 style="margin-top:28px;">Active Manual Piece Access</h2>';
+
+    if (empty($active_rows)) {
+      echo '<p>No active manual piece access rows were found.</p>';
+    } else {
+      echo '<table class="widefat striped" style="max-width:1200px;">';
+      echo '<thead><tr>';
+      echo '<th>Delete</th><th>Email</th><th>Piece/Product</th><th>Start Date</th><th>Expires Date</th><th>Granted</th><th>Source</th>';
+      echo '</tr></thead><tbody>';
+      foreach ($active_rows as $row) {
+        $row_id = absint($row['id'] ?? 0);
+        $sku = (string)($row['sku'] ?? '');
+        $label = $sheet_music_products[$sku] ?? $sku;
+        $start_value = '';
+        if (!empty($row['start_at'])) {
+          $start_ts = strtotime((string)$row['start_at']);
+          if ($start_ts) $start_value = date('Y-m-d', $start_ts);
+        }
+        $expires_value = '';
+        if (!empty($row['expires_at'])) {
+          $expires_ts = strtotime((string)$row['expires_at']);
+          if ($expires_ts) $expires_value = date('Y-m-d', $expires_ts);
+        }
+        echo '<tr>';
+        echo '<td><input type="hidden" name="mrm_access_row_id[]" value="' . esc_attr($row_id) . '"><label><input type="checkbox" name="mrm_access_row_delete[]" value="' . esc_attr($row_id) . '"> Revoke</label></td>';
+        echo '<td><input type="email" name="mrm_access_row_email[]" value="' . esc_attr((string)($row['email_plain'] ?? '')) . '" class="regular-text"></td>';
+        echo '<td>' . esc_html($label) . '<br><code>' . esc_html($sku) . '</code></td>';
+        echo '<td><input type="date" name="mrm_access_row_start[]" value="' . esc_attr($start_value) . '"></td>';
+        echo '<td><input type="date" name="mrm_access_row_expires[]" value="' . esc_attr($expires_value) . '"></td>';
+        echo '<td>' . esc_html((string)($row['granted_at'] ?? '')) . '</td>';
+        echo '<td>' . esc_html((string)($row['source'] ?? '')) . '</td>';
+        echo '</tr>';
+      }
+      echo '</tbody></table>';
+    }
+    echo '<p class="submit"><button type="submit" class="button button-primary">Save Sheet Music Access</button></p>';
+    echo '</form></div>';
+  }
+
+  public function render_marketing_email_lists_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to view this page.');
+    }
+
+    $defs = $this->mrm_marketing_default_lists();
+    $manual_lists = $this->mrm_marketing_manual_lists();
+    $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
+    $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+
+    echo '<div class="wrap">';
+    echo '<h1>Marketing Email Lists</h1>';
+    if (!empty($_GET['mrm_marketing_saved'])) echo '<div class="notice notice-success"><p>Marketing email lists saved.</p></div>';
+    if (!empty($_GET['mrm_marketing_sent']) || isset($_GET['mrm_marketing_failed'])) echo '<div class="notice notice-success"><p>Marketing email send complete. Sent: ' . esc_html((string)($_GET['mrm_marketing_sent'] ?? '0')) . '. Failed: ' . esc_html((string)($_GET['mrm_marketing_failed'] ?? '0')) . '.</p></div>';
+    if (!empty($_GET['mrm_marketing_resubscribed'])) echo '<div class="notice notice-success"><p>Re-subscribed ' . esc_html((string)$_GET['mrm_marketing_resubscribed']) . ' email(s).</p></div>';
+    if (!empty($_GET['mrm_marketing_error'])) echo '<div class="notice notice-error"><p>' . esc_html(rawurldecode((string)$_GET['mrm_marketing_error'])) . '</p></div>';
+
+    echo '<p>Use this page to manage manual marketing lists, review dynamic list counts, preview marketing emails, and send selected marketing messages.</p>';
+    echo '<div style="display:grid;grid-template-columns:minmax(320px, 1fr) minmax(360px, 1fr);gap:20px;align-items:start;">';
+    echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;">';
+    echo '<h2>Save Manual Lists</h2>';
+    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_email_save_lists">';
+    wp_nonce_field('mrm_marketing_email_save_lists', 'mrm_marketing_email_lists_nonce');
+    foreach ($defs as $key => $def) {
+      $type = (string)($def['type'] ?? '');
+      $label = (string)($def['label'] ?? $key);
+      $desc = (string)($def['desc'] ?? '');
+      echo '<div style="border-top:1px solid #e5e5e5;padding-top:14px;margin-top:14px;"><h3 style="margin-bottom:4px;">' . esc_html($label) . '</h3>';
+      if ($desc !== '') echo '<p class="description">' . esc_html($desc) . '</p>';
+      if ($type === 'manual') {
+        $emails = isset($manual_lists[$key]) ? (array)$manual_lists[$key] : array();
+        echo $this->mrm_marketing_manual_list_example_html($def);
+        echo '<textarea name="mrm_marketing_list_' . esc_attr($key) . '" rows="7" class="large-text code" placeholder="one@example.com&#10;two@example.com">' . esc_textarea(implode("\n", $emails)) . '</textarea>';
+        echo '<p class="description">Current saved emails: ' . esc_html((string)count($emails)) . '</p>';
+      } else {
+        $recipients = $this->mrm_marketing_get_list_recipients($key, true);
+        echo '<p><strong>Dynamic list:</strong> ' . esc_html((string)count($recipients)) . ' active recipient(s) after unsubscribe suppression.</p>';
+      }
+      echo '</div>';
+    }
+    echo '<h3 style="margin-top:20px;">Mailing Address / Footer Text</h3><p class="description">Shown in the footer of marketing emails.</p>';
+    echo '<textarea name="mrm_marketing_mailing_address" rows="4" class="large-text">' . esc_textarea($mailing_address) . '</textarea>';
+    echo '<p class="submit"><button type="submit" class="button button-primary">Save Marketing Lists</button></p></form></div>';
+
+    echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;"><h2>Preview and Send Marketing Email</h2>';
+    echo '<div style="border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;padding:14px;margin-bottom:18px;"><h3 style="margin-top:0;">Live Preview</h3><div><strong id="mrm-marketing-preview-subject">Subject preview will appear here.</strong></div><iframe id="mrm-marketing-preview-frame" title="Marketing email preview" style="display:block;width:100%;height:520px;border:1px solid #dcdcde;border-radius:8px;background:#fff;margin-top:10px;"></iframe></div>';
+    echo '<form method="post" enctype="multipart/form-data" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_email_send">';
+    wp_nonce_field('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
+    echo '<table class="form-table"><tr><th scope="row"><label for="mrm_marketing_subject">Subject</label></th><td><input type="text" id="mrm_marketing_subject" name="mrm_marketing_subject" class="large-text" required></td></tr>';
+    echo '<tr><th scope="row"><label for="mrm_marketing_html">Email Body</label></th><td><textarea id="mrm_marketing_html" name="mrm_marketing_html" rows="12" class="large-text code" required></textarea><p class="description">Basic HTML is allowed. This preview shows the wrapped email layout before sending.</p></td></tr><tr><th scope="row">Send To Lists</th><td>';
+    foreach ($defs as $key => $def) {
+      $label = (string)($def['label'] ?? $key);
+      $count = count($this->mrm_marketing_get_list_recipients($key, true));
+      echo '<label style="display:block;margin:6px 0;"><input type="checkbox" name="mrm_marketing_lists[]" value="' . esc_attr($key) . '"> ' . esc_html($label) . ' <span class="description">(' . esc_html((string)$count) . ' recipient(s))</span></label>';
+    }
+    echo '</td></tr><tr><th scope="row"><label for="mrm_marketing_attachments">Attachments</label></th><td><input type="file" id="mrm_marketing_attachments" name="mrm_marketing_attachments[]" multiple><p class="description">Optional attachments.</p></td></tr></table>';
+    echo '<p class="submit"><button type="submit" class="button button-primary">Send Marketing Email</button></p></form><hr>';
+    echo '<h2>Re-subscribe Emails</h2><p class="description">Use this only when someone asks to be added back after unsubscribing.</p>';
+    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_resubscribe">';
+    wp_nonce_field('mrm_marketing_resubscribe', 'mrm_marketing_resubscribe_nonce');
+    echo '<textarea name="mrm_marketing_resubscribe_emails" rows="4" class="large-text" placeholder="person@example.com"></textarea><p class="submit"><button type="submit" class="button">Re-subscribe</button></p></form>';
+    echo '<p><strong>Currently unsubscribed:</strong> ' . esc_html((string)count($unsubscribed)) . '</p></div></div>';
+    ?>
+    <script>
+    (function(){
+      var subject = document.getElementById('mrm_marketing_subject');
+      var body = document.getElementById('mrm_marketing_html');
+      var subjectPreview = document.getElementById('mrm-marketing-preview-subject');
+      var frame = document.getElementById('mrm-marketing-preview-frame');
+      function escapeHtml(value) { return String(value || '').replace(/[&<>"']/g, function(ch){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]); }); }
+      function updatePreview(){
+        var s = subject ? subject.value : '';
+        var b = body ? body.value : '';
+        if (subjectPreview) subjectPreview.textContent = s || 'Subject preview will appear here.';
+        if (frame) frame.srcdoc = '<!doctype html><html><body style="margin:0;background:#f7f3eb;font-family:Arial,sans-serif;color:#171512;"><div style="max-width:680px;margin:0 auto;padding:24px;"><div style="background:#fff;border:1px solid #d9cfbe;border-radius:16px;padding:24px;"><h1 style="margin-top:0;">' + escapeHtml(s) + '</h1><div>' + (b || '<p>Email body preview will appear here.</p>') + '</div><hr><p style="font-size:12px;color:#666;">Unsubscribe link and mailing address appear in the sent email footer.</p></div></div></body></html>';
+      }
+      if (subject) subject.addEventListener('input', updatePreview);
+      if (body) body.addEventListener('input', updatePreview);
+      updatePreview();
+    })();
+    </script>
+    <?php
+    echo '</div>';
+  }
+
+  public function render_promo_codes_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to view this page.');
+    }
+
+    $codes = $this->mrm_get_promo_codes();
+    ksort($codes);
+    echo '<div class="wrap"><h1>Promo Codes</h1>';
+    settings_errors('mrm_pay_hub');
+    echo '<p>Create and manage promotional codes for lessons, sheet music, and masterclasses.</p><form method="post" action="">';
+    wp_nonce_field('mrm_pay_hub_save_promo_codes', 'mrm_pay_hub_promo_codes_nonce');
+    echo '<table class="widefat striped" style="max-width:1400px;"><thead><tr><th>Delete</th><th>Code</th><th>Label</th><th>Discount</th><th>Applies To</th><th>Rule</th><th>Occurrence / Months</th><th>Start Date</th><th>End Date</th><th>Reusable Per Email</th></tr></thead><tbody>';
+    $rows = array_values($codes);
+    for ($i = 0; $i < 8; $i++) if (!isset($rows[$i])) $rows[$i] = array();
+    foreach ($rows as $i => $promo) {
+      $promo = is_array($promo) ? $promo : array();
+      $code = $this->mrm_normalize_promo_code($promo['code'] ?? '');
+      $label = sanitize_text_field((string)($promo['label'] ?? ''));
+      $discount_type = sanitize_text_field((string)($promo['discount_type'] ?? 'percent'));
+      $percent_off = absint($promo['percent_off'] ?? 0);
+      $amount_off = number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2, '.', '');
+      $scopes = isset($promo['scopes']) && is_array($promo['scopes']) ? array_map('sanitize_key', $promo['scopes']) : array();
+      if (empty($scopes)) {
+        $legacy_scope = sanitize_key((string)($promo['scope'] ?? 'all'));
+        if ($legacy_scope === 'all') $scopes = array('lesson', 'sheet_music', 'masterclass'); elseif ($legacy_scope !== '') $scopes = array($legacy_scope);
+      }
+      $rule_mode = sanitize_text_field((string)($promo['rule_mode'] ?? 'all'));
+      $occurrence_count = absint($promo['occurrence_count'] ?? 0);
+      $starts_at = sanitize_text_field((string)($promo['starts_at'] ?? ''));
+      $expires_at = sanitize_text_field((string)($promo['expires_at'] ?? ''));
+      $reusable = !empty($promo['reusable_per_email']);
+      echo '<tr><td><label><input type="checkbox" name="promo_delete[' . esc_attr((string)$i) . ']" value="1"> Delete</label></td>';
+      echo '<td><input type="text" name="promo_code[]" value="' . esc_attr($code) . '" placeholder="SUMMER10" style="width:120px;text-transform:uppercase;"></td>';
+      echo '<td><input type="text" name="promo_label[]" value="' . esc_attr($label) . '" placeholder="Summer discount" style="width:180px;"></td>';
+      echo '<td><select name="promo_discount_type[]"><option value="percent"' . selected($discount_type, 'percent', false) . '>Percent</option><option value="amount"' . selected($discount_type, 'amount', false) . '>Dollar Amount</option></select><br><input type="number" min="0" max="100" name="promo_percent_off[]" value="' . esc_attr((string)$percent_off) . '" style="width:80px;"> %<br>$ <input type="text" name="promo_amount_off[]" value="' . esc_attr($amount_off) . '" style="width:80px;"></td><td>';
+      foreach (array('lesson' => 'Lessons', 'sheet_music' => 'Sheet Music', 'masterclass' => 'Masterclasses') as $scope_key => $scope_label) echo '<label style="display:block;"><input type="checkbox" name="promo_scopes[' . esc_attr((string)$i) . '][]" value="' . esc_attr($scope_key) . '"' . checked(in_array($scope_key, $scopes, true), true, false) . '> ' . esc_html($scope_label) . '</label>';
+      echo '</td><td><select name="promo_rule_mode[]"><option value="all"' . selected($rule_mode, 'all', false) . '>All eligible purchases</option><option value="first_n"' . selected($rule_mode, 'first_n', false) . '>First N occurrences</option><option value="after_n"' . selected($rule_mode, 'after_n', false) . '>After N occurrences</option><option value="first_n_months"' . selected($rule_mode, 'first_n_months', false) . '>First N months</option><option value="date_window"' . selected($rule_mode, 'date_window', false) . '>Date window only</option></select></td>';
+      echo '<td><input type="number" min="0" name="promo_occurrence_count[]" value="' . esc_attr((string)$occurrence_count) . '" style="width:90px;"></td><td><input type="date" name="promo_starts_at[]" value="' . esc_attr($starts_at) . '"></td><td><input type="date" name="promo_expires_at[]" value="' . esc_attr($expires_at) . '"></td><td><label><input type="checkbox" name="promo_reusable_per_email[' . esc_attr((string)$i) . ']" value="1"' . checked($reusable, true, false) . '> Reusable</label></td></tr>';
+    }
+    echo '</tbody></table><p class="description">Blank rows are ignored. Existing codes are preserved unless deleted. If no scope is selected, the code defaults to all purchase types.</p><p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>';
+    echo '<h2>Completed Promo Redemptions</h2><p class="description">Remove completed redemption rows only when you intentionally want to allow an email to use a single-use promo again.</p>';
+    if (empty($codes)) {
+      echo '<p>No promo codes found.</p>';
+    } else {
+      foreach ($codes as $code => $promo) {
+        $redemptions = $this->mrm_get_redemptions_for_promo_code($code, 25);
+        echo '<h3>' . esc_html($code) . '</h3>';
+        if (empty($redemptions)) { echo '<p>No completed redemptions found.</p>'; continue; }
+        echo '<table class="widefat striped" style="max-width:1000px;"><thead><tr><th>Remove</th><th>Email</th><th>Status</th><th>Created</th><th>Updated</th></tr></thead><tbody>';
+        foreach ($redemptions as $redemption) {
+          echo '<tr><td><label><input type="checkbox" name="promo_redemption_remove[]" value="' . esc_attr((string)absint($redemption['id'] ?? 0)) . '"> Remove</label></td><td>' . esc_html((string)($redemption['customer_email'] ?? '')) . '</td><td>' . esc_html((string)($redemption['status'] ?? '')) . '</td><td>' . esc_html((string)($redemption['created_at'] ?? '')) . '</td><td>' . esc_html((string)($redemption['updated_at'] ?? '')) . '</td></tr>';
+        }
+        echo '</tbody></table>';
+      }
+    }
+    echo '</form></div>';
+  }
+
   public function render_legal_ledger_page() {
     if (!current_user_can('manage_options')) {
       wp_die('You do not have permission to view this page.');
