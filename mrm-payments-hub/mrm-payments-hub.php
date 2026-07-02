@@ -3115,6 +3115,16 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return $this->stripe_api_request('GET', '/v1/payment_intents/' . rawurlencode((string)$pi_id));
   }
 
+  private function stripe_retrieve_charge($charge_id) {
+    $charge_id = sanitize_text_field((string)$charge_id);
+
+    if ($charge_id === '') {
+      return new WP_Error('stripe_missing_charge_id', 'Missing Stripe charge id.');
+    }
+
+    return $this->stripe_api_request('GET', '/v1/charges/' . rawurlencode($charge_id));
+  }
+
 
   private function stripe_create_setup_intent($customer_id, $metadata = array()) {
     $params = array(
@@ -4045,14 +4055,264 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return $summary;
   }
 
+  private function mrm_void_subscription_composer_payout_for_refunded_invoice($invoice_id, $subscription_id = '', $reason = 'subscription_invoice_refunded') {
+    global $wpdb;
+
+    $invoice_id = sanitize_text_field((string)$invoice_id);
+    $subscription_id = sanitize_text_field((string)$subscription_id);
+    $reason = sanitize_key((string)$reason);
+
+    $summary = array(
+      'voided' => 0,
+      'reversed' => 0,
+      'reversal_failed' => 0,
+      'recovery_needed' => 0,
+    );
+
+    if ($invoice_id === '' && $subscription_id === '') {
+      return $summary;
+    }
+
+    $table = $this->table_payout_ledger();
+
+    $where = array();
+    $args = array();
+
+    if ($invoice_id !== '') {
+      $where[] = 'payee_ref = %s';
+      $args[] = 'stripe_subscription_invoice:' . $invoice_id;
+    }
+
+    /*
+     * Subscription ID fallback:
+     * The current composer rows are invoice-based. This fallback catches any future
+     * rows you may create with subscription ID in the payee_ref or notes field.
+     */
+    if ($subscription_id !== '') {
+      $where[] = 'payee_ref = %s';
+      $args[] = 'stripe_subscription:' . $subscription_id;
+      $where[] = 'notes LIKE %s';
+      $args[] = '%' . $wpdb->esc_like($subscription_id) . '%';
+    }
+
+    if (empty($where)) {
+      return $summary;
+    }
+
+    $sql = "SELECT *
+            FROM {$table}
+            WHERE payee_type = %s
+              AND (" . implode(' OR ', $where) . ")
+            ORDER BY id ASC";
+
+    array_unshift($args, 'composer');
+
+    $rows = $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A);
+
+    foreach ((array)$rows as $row) {
+      $ledger_id = absint($row['id'] ?? 0);
+
+      if ($ledger_id <= 0) {
+        continue;
+      }
+
+      $status = sanitize_key((string)($row['status'] ?? ''));
+      $transfer_id = sanitize_text_field((string)($row['transfer_id'] ?? ''));
+      $payout_id = sanitize_text_field((string)($row['payout_id'] ?? ''));
+      $amount = absint($row['net_cents'] ?? 0);
+
+      if (in_array($status, array('pending', 'error', 'blocked'), true)) {
+        $wpdb->update(
+          $table,
+          array(
+            'status' => 'refunded_void',
+            'notes' => 'Composer subscription payout voided because subscription invoice was refunded. Invoice: ' . $invoice_id . '. Reason: ' . $reason,
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => $ledger_id),
+          array('%s', '%s', '%s'),
+          array('%d')
+        );
+
+        $summary['voided']++;
+        continue;
+      }
+
+      if ($status === 'transferred' && $transfer_id !== '' && $payout_id === '') {
+        $reversal = $this->stripe_reverse_transfer(
+          $transfer_id,
+          $amount > 0 ? $amount : null,
+          array(
+            'mrm_payout_ledger_id' => (string)$ledger_id,
+            'mrm_subscription_invoice_id' => $invoice_id,
+            'mrm_subscription_id' => $subscription_id,
+            'mrm_refund_void_reason' => $reason,
+          )
+        );
+
+        if (is_wp_error($reversal)) {
+          $wpdb->update(
+            $table,
+            array(
+              'status' => 'refund_reversal_failed',
+              'notes' => 'Subscription invoice was refunded after transfer. Transfer reversal failed: ' . $reversal->get_error_message(),
+              'updated_at' => current_time('mysql'),
+            ),
+            array('id' => $ledger_id),
+            array('%s', '%s', '%s'),
+            array('%d')
+          );
+
+          $summary['reversal_failed']++;
+        } else {
+          $wpdb->update(
+            $table,
+            array(
+              'status' => 'refunded_reversed',
+              'notes' => 'Composer subscription transfer reversed because invoice was refunded. Stripe reversal: ' . sanitize_text_field((string)($reversal['id'] ?? '')),
+              'updated_at' => current_time('mysql'),
+            ),
+            array('id' => $ledger_id),
+            array('%s', '%s', '%s'),
+            array('%d')
+          );
+
+          $summary['reversed']++;
+        }
+
+        continue;
+      }
+
+      if ($status === 'paid_out' || $payout_id !== '') {
+        $wpdb->update(
+          $table,
+          array(
+            'status' => 'refund_after_payout_needs_recovery',
+            'notes' => 'Subscription invoice was refunded after composer payout was already completed. Manual recovery/adjustment is required. Invoice: ' . $invoice_id,
+            'updated_at' => current_time('mysql'),
+          ),
+          array('id' => $ledger_id),
+          array('%s', '%s', '%s'),
+          array('%d')
+        );
+
+        $summary['recovery_needed']++;
+        continue;
+      }
+    }
+
+    if (method_exists($this, 'stripe_debug_log')) {
+      $this->stripe_debug_log('subscription composer payout rows voided for refunded invoice', array(
+        'invoice_id' => $invoice_id,
+        'subscription_id' => $subscription_id,
+        'reason' => $reason,
+        'summary' => $summary,
+      ));
+    }
+
+    return $summary;
+  }
+
+  private function mrm_void_subscription_composer_payout_from_refunded_charge($charge, $reason = 'stripe_charge_refunded_webhook') {
+    if (!is_array($charge)) {
+      return array(
+        'voided' => 0,
+        'reversed' => 0,
+        'reversal_failed' => 0,
+        'recovery_needed' => 0,
+      );
+    }
+
+    $invoice_id = '';
+
+    if (isset($charge['invoice'])) {
+      if (is_array($charge['invoice'])) {
+        $invoice_id = sanitize_text_field((string)($charge['invoice']['id'] ?? ''));
+      } else {
+        $invoice_id = sanitize_text_field((string)$charge['invoice']);
+      }
+    }
+
+    $subscription_id = '';
+
+    if (isset($charge['metadata']) && is_array($charge['metadata'])) {
+      $subscription_id = sanitize_text_field((string)($charge['metadata']['subscription'] ?? $charge['metadata']['subscription_id'] ?? ''));
+    }
+
+    /*
+     * If Stripe provided an expanded invoice object, try to read the subscription.
+     */
+    if ($subscription_id === '' && isset($charge['invoice']) && is_array($charge['invoice'])) {
+      if (isset($charge['invoice']['subscription'])) {
+        $subscription_id = is_array($charge['invoice']['subscription'])
+          ? sanitize_text_field((string)($charge['invoice']['subscription']['id'] ?? ''))
+          : sanitize_text_field((string)$charge['invoice']['subscription']);
+      }
+    }
+
+    /*
+     * If we only have an invoice ID, try retrieving the invoice to find subscription ID.
+     */
+    if ($invoice_id !== '' && $subscription_id === '') {
+      $invoice = $this->stripe_api_request('GET', '/v1/invoices/' . rawurlencode($invoice_id));
+
+      if (!is_wp_error($invoice) && is_array($invoice)) {
+        $subscription_id = isset($invoice['subscription'])
+          ? (is_array($invoice['subscription'])
+            ? sanitize_text_field((string)($invoice['subscription']['id'] ?? ''))
+            : sanitize_text_field((string)$invoice['subscription']))
+          : '';
+      }
+    }
+
+    if ($invoice_id === '' && $subscription_id === '') {
+      return array(
+        'voided' => 0,
+        'reversed' => 0,
+        'reversal_failed' => 0,
+        'recovery_needed' => 0,
+      );
+    }
+
+    return $this->mrm_void_subscription_composer_payout_for_refunded_invoice(
+      $invoice_id,
+      $subscription_id,
+      $reason
+    );
+  }
+
   private function mrm_handle_charge_refunded_webhook($charge) {
     if (!is_array($charge)) return;
 
     $pi_id = (string)($charge['payment_intent'] ?? '');
-    if ($pi_id === '') return;
+
+    if ($pi_id === '') {
+      /*
+       * Subscription invoice refunds may not map cleanly to a local Payment Hub order.
+       * Still attempt to void composer subscription payout rows by invoice/subscription.
+       */
+      $this->mrm_void_subscription_composer_payout_from_refunded_charge(
+        $charge,
+        'stripe_charge_refunded_webhook_no_payment_intent'
+      );
+
+      return;
+    }
 
     $order = $this->get_order_by_pi($pi_id);
-    if (!$order || empty($order['id'])) return;
+
+    if (!$order || empty($order['id'])) {
+      /*
+       * This is likely a subscription invoice payment. It has no normal Payment Hub order,
+       * so void composer subscription payout rows by invoice/subscription instead.
+       */
+      $this->mrm_void_subscription_composer_payout_from_refunded_charge(
+        $charge,
+        'stripe_charge_refunded_webhook_no_local_order'
+      );
+
+      return;
+    }
 
     $order_id = (int)$order['id'];
     $this->update_order_status_from_pi($pi_id, 'refunded', 'refunded', array(
@@ -4062,6 +4322,15 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $this->mrm_void_standard_payouts_for_refunded_order(
       $order_id,
       $pi_id,
+      'stripe_charge_refunded_webhook'
+    );
+
+    /*
+     * Safe no-op for normal orders, but protects subscription invoice payouts if
+     * the refunded charge includes invoice/subscription data.
+     */
+    $this->mrm_void_subscription_composer_payout_from_refunded_charge(
+      $charge,
       'stripe_charge_refunded_webhook'
     );
 
@@ -4094,6 +4363,50 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         'pi_id' => $pi_id,
         'sku' => $sku,
       ));
+    }
+  }
+
+  private function mrm_handle_refund_created_webhook($refund) {
+    if (!is_array($refund)) {
+      return;
+    }
+
+    $pi_id = sanitize_text_field((string)($refund['payment_intent'] ?? ''));
+    $charge_id = '';
+
+    if (isset($refund['charge'])) {
+      $charge_id = is_array($refund['charge'])
+        ? sanitize_text_field((string)($refund['charge']['id'] ?? ''))
+        : sanitize_text_field((string)$refund['charge']);
+    }
+
+    /*
+     * Normal Payment Hub order protection by PaymentIntent.
+     */
+    if ($pi_id !== '') {
+      $order = $this->get_order_by_pi($pi_id);
+
+      if ($order && !empty($order['id'])) {
+        $this->mrm_void_standard_payouts_for_refunded_order(
+          (int)$order['id'],
+          $pi_id,
+          'stripe_refund_created_webhook'
+        );
+      }
+    }
+
+    /*
+     * Subscription invoice composer payout protection by Charge/Invoice.
+     */
+    if ($charge_id !== '') {
+      $charge = $this->stripe_retrieve_charge($charge_id);
+
+      if (!is_wp_error($charge) && is_array($charge)) {
+        $this->mrm_void_subscription_composer_payout_from_refunded_charge(
+          $charge,
+          'stripe_refund_created_webhook'
+        );
+      }
     }
   }
 
@@ -6589,7 +6902,34 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $wpdb->update($this->table_lessons(), array('status'=>'cancelled','updated_at'=>current_time('mysql')), array('id'=>$lesson_id));
     $order_id=absint($lesson['order_id'] ?? 0); $order=$order_id>0 ? $this->mrm_get_order_by_id($order_id) : $this->mrm_find_lesson_charge_order($lesson_id);
     $refund_sent=false; $refund_amount_cents=0;
-    if ($more_than_24h && is_array($order) && !empty($order['stripe_payment_intent_id'])) { $refund_amount_cents=absint($order['amount_cents'] ?? 0); $refund=$this->stripe_create_refund((string)$order['stripe_payment_intent_id'], null, 'requested_by_customer'); if (!is_wp_error($refund)) { $refund_sent=true; $this->mrm_send_lesson_cancellation_refund_email($lesson,$refund_amount_cents); } }
+    if ($more_than_24h && is_array($order) && !empty($order['stripe_payment_intent_id'])) {
+      $refund_amount_cents = absint($order['amount_cents'] ?? 0);
+      $pi_id = (string)$order['stripe_payment_intent_id'];
+      $order_id = absint($order['id'] ?? 0);
+
+      $refund = $this->stripe_create_refund($pi_id, null, 'requested_by_customer');
+
+      if (!is_wp_error($refund)) {
+        $refund_sent = true;
+
+        /*
+         * Immediately void any unpaid contractor payout rows tied to this lesson/order.
+         * Do not rely only on the later Stripe webhook.
+         */
+        $this->mrm_void_standard_payouts_for_refunded_order(
+          $order_id,
+          $pi_id,
+          'client_lesson_cancellation_refund'
+        );
+
+        $this->update_order_status_from_pi($pi_id, 'refund_pending', 'refund_pending', array(
+          'mrm_refund_requested_at' => current_time('mysql'),
+          'mrm_refund_note' => 'Client lesson cancellation refund requested from cancellation form.',
+        ));
+
+        $this->mrm_send_lesson_cancellation_refund_email($lesson, $refund_amount_cents);
+      }
+    }
     if (!$refund_sent) $this->mrm_send_lesson_cancellation_no_refund_email($lesson, absint($order['amount_cents'] ?? 0));
     $this->mrm_notify_lesson_cancelled_by_client($lesson,$reason,$refund_sent);
     echo '<!doctype html><html><body style="font-family:Arial,sans-serif;background:#f6f6f6;margin:0;"><div style="max-width:720px;margin:0 auto;padding:28px;"><div style="background:#fff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;"><h1>Lesson Cancelled</h1>';
@@ -8652,6 +8992,28 @@ private function charge_and_unlock_autopay($data) {
     global $wpdb;
     $table = $this->table_payout_ledger();
     $orders_table = $this->table_orders();
+
+    /*
+     * Cleanup safety:
+     * If subscription invoice payout rows were marked by refund webhook helpers,
+     * they should no longer be selected. This is intentionally status-based because
+     * subscription composer payout rows do not have a normal order_id.
+     */
+    $wpdb->query(
+      "UPDATE {$table}
+       SET status = 'refunded_void',
+           notes = CONCAT(COALESCE(notes, ''), ' | Payout skipped because subscription invoice refund was already detected.'),
+           updated_at = '" . esc_sql(current_time('mysql')) . "'
+       WHERE payee_type = 'composer'
+         AND payee_ref LIKE 'stripe_subscription_invoice:%'
+         AND status IN ('pending','error','blocked')
+         AND (
+           notes LIKE '%subscription invoice was refunded%'
+           OR notes LIKE '%Subscription invoice was refunded%'
+           OR notes LIKE '%refunded invoice%'
+         )"
+    );
+
     $period = $force ? null : $this->mrm_get_completed_payout_period_for_today();
 
     $payable_statuses = $force
@@ -9097,6 +9459,10 @@ private function charge_and_unlock_autopay($data) {
 
       case 'charge.refunded':
         $this->mrm_handle_charge_refunded_webhook($object);
+        break;
+
+      case 'refund.created':
+        $this->mrm_handle_refund_created_webhook($object);
         break;
 
       case 'customer.subscription.created':
