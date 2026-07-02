@@ -1089,6 +1089,8 @@ public function mrm_mc_render_critical_error_notice() {
 			ledger_type VARCHAR(50) NOT NULL,
 			stripe_payment_intent_id VARCHAR(191) NULL,
 			stripe_refund_id VARCHAR(191) NULL,
+			stripe_transfer_id VARCHAR(191) NULL,
+			stripe_payout_id VARCHAR(191) NULL,
 			gross_cents INT NOT NULL DEFAULT 0,
 			stripe_fee_cents INT NOT NULL DEFAULT 0,
 			net_cents INT NOT NULL DEFAULT 0,
@@ -1291,6 +1293,7 @@ public function mrm_mc_render_critical_error_notice() {
 		'paid_out_at'        => "ALTER TABLE {$ledger_table} ADD paid_out_at DATETIME NULL",
 		'payout_batch_id'    => "ALTER TABLE {$ledger_table} ADD payout_batch_id VARCHAR(64) NULL",
 		'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
+		'stripe_payout_id'   => "ALTER TABLE {$ledger_table} ADD stripe_payout_id VARCHAR(191) NULL",
 	);
 
 	foreach ( $ledger_adds as $column => $sql ) {

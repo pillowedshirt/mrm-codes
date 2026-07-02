@@ -14071,13 +14071,49 @@ public function handle_marketing_resubscribe() {
     return $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) === $table;
   }
 
+  private function mrm_ensure_masterclass_presenter_payout_columns() {
+    global $wpdb;
+
+    $ledger_table = $this->mrm_pay_table_masterclass_ledger();
+
+    if (!$this->mrm_pay_table_exists($ledger_table)) {
+      return;
+    }
+
+    $columns = $wpdb->get_col("DESC {$ledger_table}", 0);
+    $columns = is_array($columns) ? $columns : array();
+
+    $adds = array(
+      'payout_attempted_at' => "ALTER TABLE {$ledger_table} ADD payout_attempted_at DATETIME NULL",
+      'payout_error'       => "ALTER TABLE {$ledger_table} ADD payout_error TEXT NULL",
+      'paid_out_at'        => "ALTER TABLE {$ledger_table} ADD paid_out_at DATETIME NULL",
+      'payout_batch_id'    => "ALTER TABLE {$ledger_table} ADD payout_batch_id VARCHAR(64) NULL",
+      'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
+      'stripe_payout_id'   => "ALTER TABLE {$ledger_table} ADD stripe_payout_id VARCHAR(191) NULL",
+    );
+
+    foreach ($adds as $column => $sql) {
+      if (!in_array($column, $columns, true)) {
+        $wpdb->query($sql);
+      }
+    }
+  }
+
   private function mrm_run_presenter_payouts($only_ledger_ids = array(), $force = false) {
     global $wpdb;
 
     $ledger_table = $this->mrm_pay_table_masterclass_ledger();
     $presenters_table = $this->mrm_pay_table_masterclass_presenters();
     $events_table = $this->mrm_pay_table_masterclass_events();
-    $summary = array('paid' => 0, 'errors' => 0, 'last_error' => '');
+
+    $summary = array(
+      'paid' => 0,
+      'transfers_created' => 0,
+      'payouts_created' => 0,
+      'errors' => 0,
+      'last_error' => '',
+    );
+
     $batch_key = 'presenter_batch_' . gmdate('Ymd_His');
     $paid_presenter_rows = array();
 
@@ -14087,18 +14123,30 @@ public function handle_marketing_resubscribe() {
       return $summary;
     }
 
+    $this->mrm_ensure_masterclass_presenter_payout_columns();
+
     $only_ledger_ids = array_values(array_filter(array_unique(array_map('absint', (array)$only_ledger_ids))));
+
     $where = "WHERE l.ledger_type = 'registration_payment'
-      AND l.status IN ('payable','payout_failed')
+      AND l.status IN ('payable','payout_failed','transferred')
       AND l.presenter_share_cents > 0
       AND p.stripe_connected_account_id IS NOT NULL
       AND p.stripe_connected_account_id <> ''";
+
     $args = array();
 
-    if (!$force) $where .= " AND COALESCE(l.payout_eligible_at, DATE_ADD(l.created_at, INTERVAL 7 DAY)) <= UTC_TIMESTAMP()";
+    if (!$force) {
+      $where .= " AND (
+        l.status = 'transferred'
+        OR COALESCE(l.payout_eligible_at, DATE_ADD(l.created_at, INTERVAL 7 DAY)) <= UTC_TIMESTAMP()
+      )";
+    }
+
     if (!empty($only_ledger_ids)) {
       $where .= " AND l.id IN (" . implode(',', array_fill(0, count($only_ledger_ids), '%d')) . ")";
-      foreach ($only_ledger_ids as $ledger_id) $args[] = $ledger_id;
+      foreach ($only_ledger_ids as $ledger_id) {
+        $args[] = $ledger_id;
+      }
     }
 
     $sql = "SELECT l.*,
@@ -14111,46 +14159,148 @@ public function handle_marketing_resubscribe() {
       LEFT JOIN {$presenters_table} p ON p.id = l.presenter_id
       LEFT JOIN {$events_table} e ON e.id = l.event_id
       {$where}
-      ORDER BY l.id ASC";
-    $rows = !empty($args) ? $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A) : $wpdb->get_results($sql, ARRAY_A);
+      ORDER BY p.stripe_connected_account_id ASC, l.id ASC";
+
+    $rows = !empty($args)
+      ? $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A)
+      : $wpdb->get_results($sql, ARRAY_A);
+
+    if (empty($rows)) {
+      return $summary;
+    }
+
+    $groups = array();
 
     foreach ((array)$rows as $row) {
-      $ledger_id = (int)$row['id'];
-      $amount = (int)$row['presenter_share_cents'];
-      $acct = (string)$row['stripe_connected_account_id'];
-      if ($ledger_id <= 0 || $amount <= 0 || $acct === '') continue;
+      $acct = (string)($row['stripe_connected_account_id'] ?? '');
+      $currency = 'usd';
 
-      $transfer = $this->stripe_create_transfer($amount, 'usd', $acct, 'MRM_MC_LEDGER_' . $ledger_id, array(
-        'mrm_masterclass_ledger_id' => (string)$ledger_id,
-        'mrm_event_id' => (string)($row['event_id'] ?? ''),
-        'mrm_presenter_id' => (string)($row['presenter_id'] ?? ''),
-        'mrm_presenter_batch_key' => $batch_key,
-        'mrm_transfer_funding_mode' => 'platform_available_balance_only',
-      ));
-
-      if (is_wp_error($transfer)) {
-        $summary['errors']++;
-        $summary['last_error'] = $transfer->get_error_message();
-        $wpdb->update($ledger_table, array('status' => 'payout_failed', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => $transfer->get_error_message(), 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
+      if ($acct === '') {
         continue;
       }
 
-      $wpdb->update($ledger_table, array('status' => 'paid_out', 'stripe_transfer_id' => (string)($transfer['id'] ?? ''), 'paid_at' => current_time('mysql'), 'paid_out_at' => current_time('mysql'), 'payout_attempted_at' => current_time('mysql'), 'payout_error' => '', 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
-      $row['stripe_transfer_id'] = (string)($transfer['id'] ?? '');
-      $row['presenter_batch_key'] = $batch_key;
-      $paid_presenter_rows[] = $row;
-      $summary['paid']++;
+      $group_key = $acct . '|' . $currency;
+
+      if (!isset($groups[$group_key])) {
+        $groups[$group_key] = array(
+          'acct' => $acct,
+          'currency' => $currency,
+          'rows' => array(),
+        );
+      }
+
+      $groups[$group_key]['rows'][] = $row;
+    }
+
+    foreach ($groups as $group) {
+      $acct = (string)$group['acct'];
+      $currency = strtolower((string)$group['currency']);
+
+      $payout_candidate_rows = array();
+      $payout_total = 0;
+
+      foreach ((array)$group['rows'] as $row) {
+        $ledger_id = (int)($row['id'] ?? 0);
+        $amount = (int)($row['presenter_share_cents'] ?? 0);
+        $status = (string)($row['status'] ?? '');
+        $existing_transfer_id = (string)($row['stripe_transfer_id'] ?? '');
+
+        if ($ledger_id <= 0 || $amount <= 0 || $acct === '') {
+          continue;
+        }
+
+        if ($status === 'transferred' && $existing_transfer_id !== '') {
+          $payout_candidate_rows[] = $row;
+          $payout_total += $amount;
+          continue;
+        }
+
+        $transfer = $this->stripe_create_transfer($amount, $currency, $acct, 'MRM_MC_LEDGER_' . $ledger_id, array(
+          'mrm_masterclass_ledger_id' => (string)$ledger_id,
+          'mrm_event_id' => (string)($row['event_id'] ?? ''),
+          'mrm_presenter_id' => (string)($row['presenter_id'] ?? ''),
+          'mrm_presenter_batch_key' => $batch_key,
+          'mrm_transfer_funding_mode' => 'platform_available_balance_only',
+        ));
+
+        if (is_wp_error($transfer)) {
+          $summary['errors']++;
+          $summary['last_error'] = $transfer->get_error_message();
+          $wpdb->update($ledger_table, array('status' => 'payout_failed', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => $transfer->get_error_message(), 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
+          continue;
+        }
+
+        $transfer_id = (string)($transfer['id'] ?? '');
+        $wpdb->update($ledger_table, array('status' => 'transferred', 'stripe_transfer_id' => $transfer_id, 'payout_batch_id' => $batch_key, 'payout_attempted_at' => current_time('mysql'), 'payout_error' => '', 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
+
+        $summary['transfers_created']++;
+        $row['status'] = 'transferred';
+        $row['stripe_transfer_id'] = $transfer_id;
+        $row['payout_batch_id'] = $batch_key;
+        $payout_candidate_rows[] = $row;
+        $payout_total += $amount;
+      }
+
+      if ($payout_total <= 0 || empty($payout_candidate_rows)) {
+        continue;
+      }
+
+      $connected_balance = $this->stripe_retrieve_connected_account_balance($acct);
+
+      if (is_wp_error($connected_balance)) {
+        $summary['errors']++;
+        $summary['last_error'] = 'Unable to retrieve presenter connected account balance before payout: ' . $connected_balance->get_error_message();
+        foreach ($payout_candidate_rows as $row) {
+          $wpdb->update($ledger_table, array('status' => 'transferred', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => 'Waiting for presenter connected account balance visibility before payout: ' . $connected_balance->get_error_message(), 'updated_at' => current_time('mysql')), array('id' => (int)$row['id']));
+        }
+        continue;
+      }
+
+      $connected_available = $this->mrm_balance_available_for_currency($connected_balance, $currency);
+
+      if ((int)$connected_available['total'] < $payout_total) {
+        $msg = sprintf('Waiting for presenter connected account available balance. Needed %s %0.2f, but only %s %0.2f is currently available on the connected account.', strtoupper($currency), $payout_total / 100, strtoupper($currency), ((int)$connected_available['total']) / 100);
+        $summary['errors']++;
+        $summary['last_error'] = $msg;
+        foreach ($payout_candidate_rows as $row) {
+          $wpdb->update($ledger_table, array('status' => 'transferred', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => $msg, 'updated_at' => current_time('mysql')), array('id' => (int)$row['id']));
+        }
+        continue;
+      }
+
+      $payout = $this->stripe_create_connected_account_payout($acct, $payout_total, $currency, array('mrm_presenter_batch_key' => $batch_key, 'mrm_payout_type' => 'masterclass_presenter'));
+
+      if (is_wp_error($payout)) {
+        $summary['errors']++;
+        $summary['last_error'] = $payout->get_error_message();
+        foreach ($payout_candidate_rows as $row) {
+          $wpdb->update($ledger_table, array('status' => 'transferred', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => 'Presenter connected-account payout failed and will be retried: ' . $payout->get_error_message(), 'updated_at' => current_time('mysql')), array('id' => (int)$row['id']));
+        }
+        continue;
+      }
+
+      $payout_id = (string)($payout['id'] ?? '');
+
+      foreach ($payout_candidate_rows as $row) {
+        $ledger_id = (int)($row['id'] ?? 0);
+        if ($ledger_id <= 0) {
+          continue;
+        }
+        $wpdb->update($ledger_table, array('status' => 'paid_out', 'stripe_payout_id' => $payout_id, 'paid_at' => current_time('mysql'), 'paid_out_at' => current_time('mysql'), 'payout_attempted_at' => current_time('mysql'), 'payout_error' => '', 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
+        $row['status'] = 'paid_out';
+        $row['stripe_payout_id'] = $payout_id;
+        $row['presenter_batch_key'] = $batch_key;
+        $paid_presenter_rows[] = $row;
+        $summary['paid']++;
+      }
+
+      $summary['payouts_created']++;
     }
 
     if (!empty($paid_presenter_rows)) {
       $owner_items = $this->mrm_send_presenter_payout_summaries_for_rows($paid_presenter_rows, $batch_key);
-
       if (!empty($owner_items)) {
-        $this->mrm_send_owner_payout_batch_summary(
-          $batch_key,
-          $owner_items,
-          $this->mrm_payout_period_label_from_rows($paid_presenter_rows, null)
-        );
+        $this->mrm_send_owner_payout_batch_summary($batch_key, $owner_items, $this->mrm_payout_period_label_from_rows($paid_presenter_rows, null));
       }
     }
 
@@ -14179,9 +14329,11 @@ public function handle_marketing_resubscribe() {
       return;
     }
 
+    $this->mrm_ensure_masterclass_presenter_payout_columns();
+
     $summary = $wpdb->get_results(
       "SELECT p.id, p.name, p.email, p.stripe_connected_account_id,
-              COALESCE(SUM(CASE WHEN l.status IN ('payable','payout_failed') THEN l.presenter_share_cents ELSE 0 END),0) AS unpaid_cents,
+              COALESCE(SUM(CASE WHEN l.status IN ('payable','payout_failed','transferred') THEN l.presenter_share_cents ELSE 0 END),0) AS unpaid_cents,
               COALESCE(SUM(CASE WHEN l.status = 'paid_out' THEN l.presenter_share_cents ELSE 0 END),0) AS paid_out_cents,
               COUNT(DISTINCT l.event_id) AS event_count
        FROM {$presenters_table} p
@@ -14253,12 +14405,14 @@ public function handle_marketing_resubscribe() {
     echo '<th>Payout Per Student</th>';
     echo '<th>Total Payout Row</th>';
     echo '<th>Status</th>';
+    echo '<th>Stripe Transfer</th>';
+    echo '<th>Stripe Payout</th>';
     echo '<th>Stripe Account</th>';
     echo '<th>Actions</th>';
     echo '</tr></thead><tbody>';
 
     if (empty($rows)) {
-      echo '<tr><td colspan="11">No presenter payout ledger rows found.</td></tr>';
+      echo '<tr><td colspan="13">No presenter payout ledger rows found.</td></tr>';
     } else {
       foreach ($rows as $row) {
         $event_end = !empty($row['event_end_time']) ? strtotime($row['event_end_time'] . ' UTC') : strtotime($row['created_at'] . ' UTC');
@@ -14271,9 +14425,9 @@ public function handle_marketing_resubscribe() {
           : (int)$row['presenter_share_cents'];
 
         echo '<tr>';
-        $presenter_selectable = in_array((string)$row['status'], array('payable','payout_failed'), true)
+        $presenter_selectable = in_array((string)$row['status'], array('payable','payout_failed','transferred'), true)
           && !empty($row['stripe_connected_account_id'])
-          && $is_eligible;
+          && ($is_eligible || (string)$row['status'] === 'transferred');
         echo '<td>';
         if ($presenter_selectable) {
           echo '<input type="checkbox" name="ledger_ids[]" value="' . esc_attr($row['id']) . '">';
@@ -14287,6 +14441,8 @@ public function handle_marketing_resubscribe() {
         echo '<td>$' . esc_html(number_format($per_student / 100, 2)) . '</td>';
         echo '<td>$' . esc_html(number_format(((int)$row['presenter_share_cents']) / 100, 2)) . '</td>';
         echo '<td>' . esc_html($row['status']) . '</td>';
+        echo '<td><code>' . esc_html($row['stripe_transfer_id'] ?: '—') . '</code></td>';
+        echo '<td><code>' . esc_html($row['stripe_payout_id'] ?: '—') . '</code></td>';
         echo '<td><code>' . esc_html($row['stripe_connected_account_id'] ?: 'Missing') . '</code></td>';
         echo '<td>';
 
@@ -14326,7 +14482,7 @@ public function handle_marketing_resubscribe() {
   public function handle_run_all_due_presenter_payouts() {
     if (!current_user_can('manage_options')) wp_die('You do not have permission.');
     check_admin_referer('mrm_pay_hub_run_all_due_presenter_payouts');
-    $result = $this->mrm_run_presenter_payouts(array(), true);
+    $result = $this->mrm_run_presenter_payouts(array(), false);
     $flag = empty($result['errors']) ? 'payout_ok=1' : 'payout_error=1';
     wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-presenter-payouts&' . $flag));
     exit;
