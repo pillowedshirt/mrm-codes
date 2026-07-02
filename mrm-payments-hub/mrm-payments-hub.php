@@ -3920,6 +3920,131 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
   }
 
+  private function mrm_void_standard_payouts_for_refunded_order($order_id, $pi_id = '', $reason = 'payment_refunded') {
+    global $wpdb;
+
+    $order_id = absint($order_id);
+    $pi_id = sanitize_text_field((string)$pi_id);
+    $reason = sanitize_key((string)$reason);
+
+    if ($order_id <= 0 && $pi_id === '') {
+      return array('voided' => 0, 'reversed' => 0, 'reversal_failed' => 0, 'recovery_needed' => 0);
+    }
+
+    $table = $this->table_payout_ledger();
+    $where = array();
+    $args = array();
+
+    if ($order_id > 0) {
+      $where[] = 'order_id = %d';
+      $args[] = $order_id;
+    }
+
+    if ($pi_id !== '') {
+      $where[] = 'stripe_payment_intent_id = %s';
+      $args[] = $pi_id;
+    }
+
+    if (empty($where)) {
+      return array('voided' => 0, 'reversed' => 0, 'reversal_failed' => 0, 'recovery_needed' => 0);
+    }
+
+    $sql = "SELECT *
+            FROM {$table}
+            WHERE (" . implode(' OR ', $where) . ")
+              AND payee_type <> 'platform'
+            ORDER BY id ASC";
+
+    $rows = $wpdb->get_results($wpdb->prepare($sql, $args), ARRAY_A);
+
+    $summary = array('voided' => 0, 'reversed' => 0, 'reversal_failed' => 0, 'recovery_needed' => 0);
+
+    foreach ((array)$rows as $row) {
+      $ledger_id = absint($row['id'] ?? 0);
+      if ($ledger_id <= 0) {
+        continue;
+      }
+
+      $status = sanitize_key((string)($row['status'] ?? ''));
+      $transfer_id = sanitize_text_field((string)($row['transfer_id'] ?? ''));
+      $payout_id = sanitize_text_field((string)($row['payout_id'] ?? ''));
+      $amount = absint($row['net_cents'] ?? 0);
+
+      if (in_array($status, array('pending', 'error', 'blocked'), true)) {
+        $wpdb->update($table, array(
+          'status' => 'refunded_void',
+          'notes' => 'Payout voided because associated payment was refunded. Reason: ' . $reason,
+          'updated_at' => current_time('mysql'),
+        ), array('id' => $ledger_id), array('%s', '%s', '%s'), array('%d'));
+
+        $summary['voided']++;
+        continue;
+      }
+
+      if ($status === 'transferred' && $transfer_id !== '' && $payout_id === '') {
+        $reversal = $this->stripe_reverse_transfer($transfer_id, $amount > 0 ? $amount : null, array(
+          'mrm_order_id' => (string)$order_id,
+          'mrm_payout_ledger_id' => (string)$ledger_id,
+          'mrm_refund_void_reason' => $reason,
+        ));
+
+        if (is_wp_error($reversal)) {
+          $wpdb->update($table, array(
+            'status' => 'refund_reversal_failed',
+            'notes' => 'Payment was refunded after transfer. Transfer reversal failed: ' . $reversal->get_error_message(),
+            'updated_at' => current_time('mysql'),
+          ), array('id' => $ledger_id), array('%s', '%s', '%s'), array('%d'));
+
+          $summary['reversal_failed']++;
+        } else {
+          $wpdb->update($table, array(
+            'status' => 'refunded_reversed',
+            'notes' => 'Payout transfer reversed because associated payment was refunded. Stripe reversal: ' . sanitize_text_field((string)($reversal['id'] ?? '')),
+            'updated_at' => current_time('mysql'),
+          ), array('id' => $ledger_id), array('%s', '%s', '%s'), array('%d'));
+
+          $summary['reversed']++;
+        }
+
+        continue;
+      }
+
+      if ($status === 'paid_out' || $payout_id !== '') {
+        $wpdb->update($table, array(
+          'status' => 'refund_after_payout_needs_recovery',
+          'notes' => 'Payment was refunded after contractor payout was already completed. Manual recovery/adjustment is required.',
+          'updated_at' => current_time('mysql'),
+        ), array('id' => $ledger_id), array('%s', '%s', '%s'), array('%d'));
+
+        $summary['recovery_needed']++;
+        continue;
+      }
+    }
+
+    if ($order_id > 0) {
+      $wpdb->update($table, array(
+        'status' => 'retained_refunded',
+        'notes' => 'Platform retained row marked refunded because associated payment was refunded. Reason: ' . $reason,
+        'updated_at' => current_time('mysql'),
+      ), array(
+        'order_id' => $order_id,
+        'payee_type' => 'platform',
+        'status' => 'retained',
+      ), array('%s', '%s', '%s'), array('%d', '%s', '%s'));
+    }
+
+    if (method_exists($this, 'stripe_debug_log')) {
+      $this->stripe_debug_log('standard payout rows voided for refunded order', array(
+        'order_id' => $order_id,
+        'pi_id' => $pi_id,
+        'reason' => $reason,
+        'summary' => $summary,
+      ));
+    }
+
+    return $summary;
+  }
+
   private function mrm_handle_charge_refunded_webhook($charge) {
     if (!is_array($charge)) return;
 
@@ -3933,6 +4058,12 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $this->update_order_status_from_pi($pi_id, 'refunded', 'refunded', array(
       'mrm_refunded_at' => current_time('mysql'),
     ));
+
+    $this->mrm_void_standard_payouts_for_refunded_order(
+      $order_id,
+      $pi_id,
+      'stripe_charge_refunded_webhook'
+    );
 
     $product_type = (string)($order['product_type'] ?? '');
     $sku = (string)($order['sku'] ?? '');
@@ -4602,6 +4733,12 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       return false;
     }
 
+    $this->mrm_void_standard_payouts_for_refunded_order(
+      $order_id,
+      $pi_id,
+      'refund_requested_by_site'
+    );
+
     $this->update_order_status_from_pi($pi_id, 'refund_pending', 'refund_pending', array(
       'mrm_refund_requested_at' => current_time('mysql'),
       'mrm_refund_note' => (string)$note,
@@ -4636,6 +4773,12 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if (is_wp_error($refund)) {
       return false;
     }
+
+    $this->mrm_void_standard_payouts_for_refunded_order(
+      $order_id,
+      $pi_id,
+      'partial_refund_requested_by_site'
+    );
 
     $this->update_order_status_from_pi($pi_id, $status, $status, array(
       'mrm_partial_refund_requested_at' => current_time('mysql'),
@@ -6805,6 +6948,30 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return $this->stripe_api_request('POST', '/v1/transfers', $params);
   }
 
+  private function stripe_reverse_transfer($transfer_id, $amount_cents = null, $metadata = array()) {
+    $transfer_id = sanitize_text_field((string)$transfer_id);
+
+    if ($transfer_id === '') {
+      return new WP_Error('stripe_invalid_args', 'Missing transfer id.');
+    }
+
+    $params = array();
+
+    if ($amount_cents !== null && (int)$amount_cents > 0) {
+      $params['amount'] = (int)$amount_cents;
+    }
+
+    if (!empty($metadata) && is_array($metadata)) {
+      $params['metadata'] = $metadata;
+    }
+
+    return $this->stripe_api_request(
+      'POST',
+      '/v1/transfers/' . rawurlencode($transfer_id) . '/reversals',
+      $params
+    );
+  }
+
   private function stripe_create_connected_account_payout($connected_account_id, $amount_cents, $currency, $metadata = array()) {
     $params = array(
       'amount' => (int)$amount_cents,
@@ -8484,6 +8651,7 @@ private function charge_and_unlock_autopay($data) {
 
     global $wpdb;
     $table = $this->table_payout_ledger();
+    $orders_table = $this->table_orders();
     $period = $force ? null : $this->mrm_get_completed_payout_period_for_today();
 
     $payable_statuses = $force
@@ -8492,7 +8660,13 @@ private function charge_and_unlock_autopay($data) {
 
     $where = "WHERE status IN ({$payable_statuses})
       AND connected_account_id IS NOT NULL
-      AND connected_account_id <> ''";
+      AND connected_account_id <> ''
+      AND NOT EXISTS (
+        SELECT 1
+        FROM {$orders_table} o
+        WHERE o.id = {$table}.order_id
+          AND o.status IN ('refunded', 'refund_pending')
+      )";
 
     $args = array();
 
@@ -14066,6 +14240,11 @@ public function handle_marketing_resubscribe() {
     return $wpdb->prefix . 'mrm_masterclass_presenters';
   }
 
+  private function mrm_pay_table_masterclass_registrations() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_masterclass_registrations';
+  }
+
   private function mrm_pay_table_exists($table) {
     global $wpdb;
     return $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) === $table;
@@ -14105,6 +14284,7 @@ public function handle_marketing_resubscribe() {
     $ledger_table = $this->mrm_pay_table_masterclass_ledger();
     $presenters_table = $this->mrm_pay_table_masterclass_presenters();
     $events_table = $this->mrm_pay_table_masterclass_events();
+    $registrations_table = $this->mrm_pay_table_masterclass_registrations();
 
     $summary = array(
       'paid' => 0,
@@ -14117,13 +14297,25 @@ public function handle_marketing_resubscribe() {
     $batch_key = 'presenter_batch_' . gmdate('Ymd_His');
     $paid_presenter_rows = array();
 
-    if (!$this->mrm_pay_table_exists($ledger_table) || !$this->mrm_pay_table_exists($presenters_table)) {
+    if (!$this->mrm_pay_table_exists($ledger_table) || !$this->mrm_pay_table_exists($presenters_table) || !$this->mrm_pay_table_exists($registrations_table)) {
       $summary['errors']++;
       $summary['last_error'] = 'Required Masterclass payout tables are missing.';
       return $summary;
     }
 
     $this->mrm_ensure_masterclass_presenter_payout_columns();
+
+    $wpdb->query(
+      "UPDATE {$ledger_table} l
+       INNER JOIN {$registrations_table} r ON r.id = l.registration_id
+       SET l.status = 'refunded_void',
+           l.payout_error = '',
+           l.notes = 'Presenter payout voided because registration was refunded before payout.',
+           l.updated_at = UTC_TIMESTAMP()
+       WHERE l.ledger_type = 'registration_payment'
+         AND l.status IN ('payable','payout_failed')
+         AND r.payment_status IN ('refunded','refund_pending')"
+    );
 
     $only_ledger_ids = array_values(array_filter(array_unique(array_map('absint', (array)$only_ledger_ids))));
 
@@ -14154,11 +14346,14 @@ public function handle_marketing_resubscribe() {
         p.name AS presenter_name,
         p.email AS presenter_email,
         e.title AS event_title,
-        e.presenter_payout_per_student_cents AS event_payout_per_student_cents
+        e.presenter_payout_per_student_cents AS event_payout_per_student_cents,
+        r.payment_status AS registration_payment_status
       FROM {$ledger_table} l
       LEFT JOIN {$presenters_table} p ON p.id = l.presenter_id
       LEFT JOIN {$events_table} e ON e.id = l.event_id
+      LEFT JOIN {$registrations_table} r ON r.id = l.registration_id
       {$where}
+        AND COALESCE(r.payment_status, '') NOT IN ('refunded', 'refund_pending')
       ORDER BY p.stripe_connected_account_id ASC, l.id ASC";
 
     $rows = !empty($args)

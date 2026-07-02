@@ -2822,6 +2822,169 @@ private function mrm_mc_send_event_update_notices( $event_id ) {
 	return $count;
 }
 
+private function mrm_mc_reverse_transfer( $transfer_id, $amount_cents = null, $metadata = array() ) {
+	$transfer_id = sanitize_text_field( (string) $transfer_id );
+
+	if ( '' === $transfer_id ) {
+		return new WP_Error( 'mrm_masterclass_missing_transfer_id', 'Missing Stripe transfer id.' );
+	}
+
+	$params = array();
+
+	if ( null !== $amount_cents && absint( $amount_cents ) > 0 ) {
+		$params['amount'] = absint( $amount_cents );
+	}
+
+	if ( ! empty( $metadata ) && is_array( $metadata ) ) {
+		foreach ( $metadata as $key => $value ) {
+			$params[ 'metadata[' . sanitize_key( $key ) . ']' ] = sanitize_text_field( (string) $value );
+		}
+	}
+
+	return $this->mrm_mc_stripe_request(
+		'POST',
+		'transfers/' . rawurlencode( $transfer_id ) . '/reversals',
+		$params
+	);
+}
+
+private function mrm_mc_void_payout_ledger_for_refunded_registration( $registration_id, $refund_id = '', $reason = 'registration_refunded' ) {
+	global $wpdb;
+
+	$registration_id = absint( $registration_id );
+	$refund_id       = sanitize_text_field( (string) $refund_id );
+	$reason          = sanitize_key( (string) $reason );
+
+	$summary = array(
+		'voided'          => 0,
+		'reversed'        => 0,
+		'reversal_failed' => 0,
+		'recovery_needed' => 0,
+	);
+
+	if ( $registration_id <= 0 ) {
+		return $summary;
+	}
+
+	$ledger_table = $this->t( 'mrm_masterclass_payment_ledger' );
+
+	if ( ! $this->mrm_mc_table_exists( $ledger_table ) ) {
+		return $summary;
+	}
+
+	$rows = $wpdb->get_results(
+		$wpdb->prepare(
+			"SELECT *
+			 FROM {$ledger_table}
+			 WHERE registration_id = %d
+			   AND ledger_type = %s
+			 ORDER BY id ASC",
+			$registration_id,
+			'registration_payment'
+		),
+		ARRAY_A
+	);
+
+	foreach ( (array) $rows as $row ) {
+		$ledger_id = absint( $row['id'] ?? 0 );
+		if ( $ledger_id <= 0 ) {
+			continue;
+		}
+
+		$status      = sanitize_key( (string) ( $row['status'] ?? '' ) );
+		$transfer_id = sanitize_text_field( (string) ( $row['stripe_transfer_id'] ?? '' ) );
+		$payout_id   = sanitize_text_field( (string) ( $row['stripe_payout_id'] ?? '' ) );
+		$amount      = absint( $row['presenter_share_cents'] ?? 0 );
+
+		if ( in_array( $status, array( 'payable', 'payout_failed' ), true ) ) {
+			$wpdb->update(
+				$ledger_table,
+				array(
+					'status'           => 'refunded_void',
+					'stripe_refund_id' => $refund_id,
+					'notes'            => 'Presenter payout voided because registration was refunded. Reason: ' . $reason,
+					'updated_at'       => $this->now(),
+				),
+				array( 'id' => $ledger_id )
+			);
+
+			$summary['voided']++;
+			continue;
+		}
+
+		if ( $status === 'transferred' && $transfer_id !== '' && $payout_id === '' ) {
+			$reversal = $this->mrm_mc_reverse_transfer(
+				$transfer_id,
+				$amount > 0 ? $amount : null,
+				array(
+					'mrm_masterclass_ledger_id' => (string) $ledger_id,
+					'mrm_registration_id'       => (string) $registration_id,
+					'mrm_refund_id'             => $refund_id,
+					'mrm_refund_void_reason'    => $reason,
+				)
+			);
+
+			if ( is_wp_error( $reversal ) ) {
+				$wpdb->update(
+					$ledger_table,
+					array(
+						'status'           => 'refund_reversal_failed',
+						'stripe_refund_id' => $refund_id,
+						'notes'            => 'Registration was refunded after transfer. Transfer reversal failed: ' . $reversal->get_error_message(),
+						'updated_at'       => $this->now(),
+					),
+					array( 'id' => $ledger_id )
+				);
+
+				$summary['reversal_failed']++;
+			} else {
+				$wpdb->update(
+					$ledger_table,
+					array(
+						'status'           => 'refunded_reversed',
+						'stripe_refund_id' => $refund_id,
+						'notes'            => 'Presenter transfer reversed because registration was refunded. Stripe reversal: ' . sanitize_text_field( (string) ( $reversal['id'] ?? '' ) ),
+						'updated_at'       => $this->now(),
+					),
+					array( 'id' => $ledger_id )
+				);
+
+				$summary['reversed']++;
+			}
+
+			continue;
+		}
+
+		if ( $status === 'paid_out' || $payout_id !== '' ) {
+			$wpdb->update(
+				$ledger_table,
+				array(
+					'status'           => 'refund_after_payout_needs_recovery',
+					'stripe_refund_id' => $refund_id,
+					'notes'            => 'Registration was refunded after presenter payout was already completed. Manual recovery/adjustment is required.',
+					'updated_at'       => $this->now(),
+				),
+				array( 'id' => $ledger_id )
+			);
+
+			$summary['recovery_needed']++;
+			continue;
+		}
+	}
+
+	$this->mrm_mc_debug_log(
+		'Masterclass presenter payout rows voided for refunded registration.',
+		array(
+			'registration_id' => $registration_id,
+			'refund_id'      => $refund_id,
+			'reason'         => $reason,
+			'summary'        => $summary,
+		)
+	);
+
+	return $summary;
+}
+
 private function mrm_mc_refund_registration( $registration, $event, $reason = 'event_cancelled' ) {
 	global $wpdb;
 	$regs_table    = $this->t( 'mrm_masterclass_registrations' );
@@ -2835,6 +2998,11 @@ private function mrm_mc_refund_registration( $registration, $event, $reason = 'e
 	$refund_status = sanitize_key( $refund_result['status'] ?? 'succeeded' );
 	$wpdb->insert( $refunds_table, $this->mrm_mc_filter_data_for_table( $refunds_table, array( 'event_id' => absint( $event->id ), 'registration_id' => absint( $registration->id ), 'payment_intent_id' => $payment_intent_id, 'refund_id' => $refund_id, 'amount_cents' => $amount_cents, 'status' => $refund_status, 'reason' => sanitize_key( $reason ), 'error_message' => '', 'created_at' => $this->now(), 'updated_at' => $this->now() ) ) );
 	$wpdb->update( $regs_table, array( 'payment_status' => 'refunded', 'updated_at' => $this->now() ), array( 'id' => absint( $registration->id ) ) );
+	$this->mrm_mc_void_payout_ledger_for_refunded_registration(
+		absint( $registration->id ),
+		$refund_id,
+		sanitize_key( $reason )
+	);
 	$this->mrm_mc_send_email_recorded( 'refund_completed', $registration->email, 'Masterclass Refund Successful', $this->mrm_mc_refund_completed_email_body( $event, $registration, $amount_cents ), $event->id, $registration->id );
 	return array( 'refund_id' => $refund_id, 'status' => $refund_status, 'amount_cents' => $amount_cents );
 }
