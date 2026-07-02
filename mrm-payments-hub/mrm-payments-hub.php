@@ -13296,12 +13296,14 @@ public function handle_marketing_resubscribe() {
         <?php
           $profile_card_error = sanitize_text_field(wp_unslash($_GET['error']));
           $profile_card_error_messages = array(
-            'missing_presenter' => 'Please select an approved presenter profile before sending a Masterclass Event Proposal.',
+            'missing_presenter' => 'Please select an approved presenter profile before sending a Masterclass Event Submission request.',
             'invalid_presenter' => 'The selected presenter profile is missing a valid email address.',
             'invalid_recipient' => 'Please enter a valid recipient email address.',
             'missing_request' => 'The selected request could not be found.',
             'unknown_action' => 'The selected Profile Card Creation action was not recognized.',
-            'missing_event_details' => 'Please enter the Masterclass title, start time, and end time before sending an event proposal.',
+            'missing_event_details' => 'Please select the presenter, piece, proposed start time, proposed end time, student price, and presenter payout before sending a Masterclass Event Submission request.',
+            'missing_instructor_calendar' => 'Please add the instructor Google Calendar link before sending an Instructor Profile Card request.',
+            'missing_piece' => 'Please select the piece being discussed before sending a Masterclass Event Submission request.',
           );
           $profile_card_error_message = $profile_card_error_messages[$profile_card_error] ?? $profile_card_error;
         ?>
@@ -13360,99 +13362,60 @@ public function handle_marketing_resubscribe() {
         <?php wp_nonce_field('mrm_profile_card_create_invite', 'mrm_profile_card_nonce'); ?>
         <input type="hidden" name="action" value="mrm_profile_card_create_invite">
 
-        <table class="form-table">
+        <table class="form-table mrm-profile-create-request-table">
           <tr>
             <th scope="row"><label for="request_type">Request Type</label></th>
             <td>
               <select id="request_type" name="request_type" required>
                 <option value="instructor_profile">Instructor Profile Card</option>
                 <option value="presenter_profile">Presenter Profile Card</option>
-                <option value="presenter_event">Masterclass Event Proposal</option>
+                <option value="presenter_event">Masterclass Event Submission</option>
               </select>
-              <p class="description">
-                Choose the type of private onboarding/request form to send. The settings below will update based on this selection.
-              </p>
+              <p class="description">Choose which private request form to send. The fields below will update based on the selected request type.</p>
             </td>
           </tr>
 
-          <tr class="mrm-profile-request-row mrm-profile-row-recipient-email" data-show-for="instructor_profile presenter_profile">
+          <tr class="mrm-profile-request-panel" data-show-for="instructor_profile">
+            <th scope="row">Instructor Profile Request</th>
+            <td><div style="background:#f6f1e7;border:1px solid #d9cfbe;border-radius:12px;padding:14px;"><p style="margin-top:0;"><strong>Use this when:</strong> you need a new instructor to complete their public instructor profile, lesson availability, fingerprint clearance/background-check step, DocuSign/W-9 confirmation, Stripe onboarding confirmation, and instructor payout acknowledgement.</p></div></td>
+          </tr>
+
+          <tr class="mrm-profile-request-panel" data-show-for="presenter_profile">
+            <th scope="row">Presenter Profile Request</th>
+            <td><div style="background:#f6f1e7;border:1px solid #d9cfbe;border-radius:12px;padding:14px;"><p style="margin-top:0;"><strong>Use this when:</strong> you need a presenter to complete their public presenter profile, biography, title, profile photo, DocuSign/W-9 confirmation, and Stripe onboarding confirmation.</p></div></td>
+          </tr>
+
+          <tr class="mrm-profile-request-panel" data-show-for="presenter_event">
+            <th scope="row">Masterclass Event Submission</th>
+            <td><div style="background:#f6f1e7;border:1px solid #d9cfbe;border-radius:12px;padding:14px;"><p style="margin-top:0;"><strong>Use this when:</strong> the presenter already has an approved presenter profile and you need them to submit the details for a specific upcoming masterclass listing.</p></div></td>
+          </tr>
+
+          <tr class="mrm-profile-request-row" data-show-for="instructor_profile presenter_profile">
             <th scope="row"><label for="recipient_email">Recipient Email</label></th>
-            <td>
-              <input type="email" id="recipient_email" name="recipient_email" class="regular-text">
-              <p class="description">Used for instructor and presenter profile card requests.</p>
-            </td>
+            <td><input type="email" id="recipient_email" name="recipient_email" class="regular-text"><p class="description">Used for Instructor Profile Card and Presenter Profile Card requests.</p></td>
           </tr>
 
           <tr class="mrm-profile-request-row" data-show-for="instructor_profile">
             <th scope="row"><label for="instructor_calendar_url">Instructor Google Calendar Link</label></th>
-            <td>
-              <input type="url" id="instructor_calendar_url" name="instructor_calendar_url" class="regular-text" placeholder="https://calendar.google.com/...">
-              <p class="description">Paste the Google Calendar link the instructor should open before submitting this profile card request.</p>
-            </td>
+            <td><input type="url" id="instructor_calendar_url" name="instructor_calendar_url" class="regular-text" placeholder="https://calendar.google.com/..."><p class="description">Required for instructor requests. This is the calendar link they will open before submitting their recurring lesson availability.</p></td>
           </tr>
 
-          <tr class="mrm-profile-request-row mrm-profile-row-presenter" data-show-for="presenter_event">
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event">
             <th scope="row"><label for="presenter_id">Presenter Profile</label></th>
             <td>
-              <select id="presenter_id" name="presenter_id">
-                <option value="">Select an approved presenter profile</option>
-                <?php foreach ($presenters as $presenter) : ?>
-                  <option value="<?php echo esc_attr($presenter['id']); ?>">
-                    <?php echo esc_html(trim(($presenter['name'] ?? '') . ' — ' . ($presenter['email'] ?? ''))); ?>
-                  </option>
-                <?php endforeach; ?>
-              </select>
-
-              <?php if (empty($presenters)) : ?>
-                <p class="description" style="color:#b32d2e;">
-                  No presenter profiles were found. Create and approve a Presenter Profile Card before sending a Masterclass Event Proposal.
-                </p>
-              <?php else : ?>
-                <p class="description">
-                  Masterclass Event Proposal requests must be linked to an already-created presenter profile.
-                </p>
-              <?php endif; ?>
+              <select id="presenter_id" name="presenter_id"><option value="">Select an approved presenter profile</option><?php foreach ($presenters as $presenter) : ?><option value="<?php echo esc_attr($presenter['id']); ?>"><?php echo esc_html(trim(($presenter['name'] ?? '') . ' — ' . ($presenter['email'] ?? ''))); ?></option><?php endforeach; ?></select>
+              <?php if (empty($presenters)) : ?><p class="description" style="color:#b32d2e;">No presenter profiles were found. Create and approve a Presenter Profile Card before sending a Masterclass Event Submission request.</p><?php else : ?><p class="description">Masterclass Event Submission requests must be linked to an approved presenter profile.</p><?php endif; ?>
             </td>
           </tr>
 
-          <tr>
-            <th scope="row"><label for="token_days">Link Expiration</label></th>
-            <td>
-              <input type="number" id="token_days" name="token_days" min="1" max="60" value="14" class="small-text"> days
-            </td>
-          </tr>
-
-          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_title">Masterclass Title</label></th><td><input type="text" id="event_title" name="event_title" class="regular-text"><p class="description">This title is preset by Low Brass Lessons and shown to the presenter on the proposal form.</p></td></tr>
-          <tr class="mrm-profile-request-row" data-show-for="presenter_event">
-            <th scope="row"><label for="masterclass_piece_sku">Piece Being Discussed</label></th>
-            <td><?php echo $this->mrm_profile_card_piece_select_html(''); ?></td>
-          </tr>
-          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_start_time">Masterclass Start Time</label></th><td><input type="datetime-local" id="event_start_time" name="event_start_time"><p class="description">Preset start time for the event proposal.</p></td></tr>
-          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_end_time">Masterclass End Time</label></th><td><input type="datetime-local" id="event_end_time" name="event_end_time"><p class="description">Preset end time for the event proposal.</p></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="masterclass_piece_sku">Piece Being Discussed</label></th><td><?php echo $this->mrm_profile_card_piece_select_html(''); ?></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_price">Masterclass Student Price</label></th><td><input type="number" id="event_price" name="event_price" min="0" step="0.01" value="0.00" class="small-text"><p class="description">The presenter cannot edit this. Set the registration price before sending the event request.</p></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="presenter_payout">Presenter Pay Per Student</label></th><td><input type="number" id="presenter_payout" name="presenter_payout" min="0" step="0.01" value="0.00" class="small-text"><p class="description">Shown to the presenter and saved with the event request.</p></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_start_time">Proposed Masterclass Start Time</label></th><td><input type="datetime-local" id="event_start_time" name="event_start_time"><p class="description">This is the proposed start time shown on the presenter’s event submission form.</p></td></tr>
+          <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_end_time">Proposed Masterclass End Time</label></th><td><input type="datetime-local" id="event_end_time" name="event_end_time"><p class="description">This is the proposed end time shown on the presenter’s event submission form.</p></td></tr>
           <tr class="mrm-profile-request-row" data-show-for="presenter_event"><th scope="row"><label for="event_timezone">Masterclass Timezone</label></th><td><?php echo $this->mrm_profile_card_timezone_select_html('event_timezone', 'America/Phoenix'); ?><p class="description">Preset event timezone.</p></td></tr>
-
-          <tr class="mrm-profile-request-row mrm-profile-row-event-pay" data-show-for="presenter_event">
-            <th scope="row"><label for="presenter_payout">Presenter Pay Per Student</label></th>
-            <td>
-              <input type="number" id="presenter_payout" name="presenter_payout" min="0" step="0.01" value="0.00" class="small-text">
-              <p class="description">Shown to the presenter on the event proposal form and saved with the event request.</p>
-            </td>
-          </tr>
-
-          <tr class="mrm-profile-request-row mrm-profile-row-event-price" data-show-for="presenter_event">
-            <th scope="row"><label for="event_price">Masterclass Student Price</label></th>
-            <td>
-              <input type="number" id="event_price" name="event_price" min="0" step="0.01" value="0.00" class="small-text">
-              <p class="description">The presenter cannot edit this. Set this before sending the event proposal.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="admin_note">Note to Recipient</label></th>
-            <td>
-              <textarea id="admin_note" name="admin_note" rows="4" class="large-text" placeholder="Optional note shown in the invite email and at the top of the private form."></textarea>
-            </td>
-          </tr>
+          <tr><th scope="row"><label for="token_days">Link Expiration</label></th><td><input type="number" id="token_days" name="token_days" min="1" max="60" value="14" class="small-text"> days<p class="description">Applies to all request types.</p></td></tr>
+          <tr><th scope="row"><label for="admin_note">Note to Recipient</label></th><td><textarea id="admin_note" name="admin_note" rows="4" class="large-text" placeholder="Optional note shown in the invite email and at the top of the private form."></textarea><p class="description">Applies to all request types.</p></td></tr>
         </table>
 
         <p>
@@ -13463,37 +13426,35 @@ public function handle_marketing_resubscribe() {
       <script>
       (function(){
         var typeSelect = document.getElementById('request_type');
-        var emailInput = document.getElementById('recipient_email');
-        var presenterSelect = document.getElementById('presenter_id');
-        var rows = Array.prototype.slice.call(document.querySelectorAll('.mrm-profile-request-row'));
-
-        function syncProfileRequestFields(){
-          var selectedType = typeSelect ? typeSelect.value : 'instructor_profile';
-
-          rows.forEach(function(row){
-            var showFor = String(row.getAttribute('data-show-for') || '').split(/\s+/);
+        var scopedRows = Array.prototype.slice.call(document.querySelectorAll('[data-show-for]'));
+        if (!typeSelect || scopedRows.length === 0) return;
+        function fieldName(field) { return field.getAttribute('name') || field.getAttribute('id') || ''; }
+        function syncProfileRequestFields() {
+          var selectedType = typeSelect.value || 'instructor_profile';
+          scopedRows.forEach(function(row){
+            var showFor = String(row.getAttribute('data-show-for') || '').split(/\s+/).filter(Boolean);
             var shouldShow = showFor.indexOf(selectedType) !== -1;
-
-            row.style.display = shouldShow ? '' : 'none';
-
+            row.style.display = shouldShow ? 'table-row' : 'none';
+            row.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
             row.querySelectorAll('input, select, textarea').forEach(function(field){
               field.disabled = !shouldShow;
+              var name = fieldName(field);
+              if (!shouldShow) { field.removeAttribute('required'); return; }
+              if (selectedType === 'instructor_profile' && (name === 'recipient_email' || name === 'instructor_calendar_url')) { field.setAttribute('required', 'required'); }
+              if (selectedType === 'presenter_profile' && name === 'recipient_email') { field.setAttribute('required', 'required'); }
+              if (selectedType === 'presenter_event' && (name === 'presenter_id' || name === 'masterclass_piece_sku' || name === 'event_start_time' || name === 'event_end_time' || name === 'event_price' || name === 'presenter_payout')) { field.setAttribute('required', 'required'); }
             });
           });
-
-          if (emailInput) {
-            emailInput.required = selectedType === 'instructor_profile' || selectedType === 'presenter_profile';
-          }
-
-          if (presenterSelect) {
-            presenterSelect.required = selectedType === 'presenter_event';
+          var submitButton = document.querySelector('button[type="submit"].button-primary');
+          if (submitButton) {
+            if (selectedType === 'instructor_profile') { submitButton.textContent = 'Send Instructor Profile Card Request'; }
+            else if (selectedType === 'presenter_profile') { submitButton.textContent = 'Send Presenter Profile Card Request'; }
+            else { submitButton.textContent = 'Send Masterclass Event Submission Request'; }
           }
         }
-
-        if (typeSelect) {
-          typeSelect.addEventListener('change', syncProfileRequestFields);
-          syncProfileRequestFields();
-        }
+        typeSelect.addEventListener('change', syncProfileRequestFields);
+        document.addEventListener('DOMContentLoaded', syncProfileRequestFields);
+        syncProfileRequestFields();
       })();
       </script>
       <hr><h2>Active Profile Card Requests</h2>
@@ -13592,9 +13553,16 @@ public function handle_marketing_resubscribe() {
       }
     }
 
+    $instructor_calendar_url = esc_url_raw(wp_unslash($_POST['instructor_calendar_url'] ?? ''));
+
+    if ($request_type === 'instructor_profile' && $instructor_calendar_url === '') {
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_instructor_calendar'));
+      exit;
+    }
+
     $admin_payload = array(
       'admin_note' => $admin_note,
-      'instructor_calendar_url' => esc_url_raw(wp_unslash($_POST['instructor_calendar_url'] ?? '')),
+      'instructor_calendar_url' => $instructor_calendar_url,
       'event_title' => sanitize_text_field(wp_unslash($_POST['event_title'] ?? '')),
       'masterclass_piece_sku' => '',
       'masterclass_piece_title' => '',
@@ -13612,12 +13580,24 @@ public function handle_marketing_resubscribe() {
     if ($request_type === 'presenter_event') {
       $admin_payload['presenter_payout_per_student_cents'] = $this->mrm_profile_card_money_to_cents($_POST['presenter_payout'] ?? '0');
       $admin_payload['event_price_cents'] = $this->mrm_profile_card_money_to_cents($_POST['event_price'] ?? '0');
+
       $selected_piece = $this->mrm_profile_card_piece_from_sku(wp_unslash($_POST['masterclass_piece_sku'] ?? ''));
 
       $admin_payload['masterclass_piece_sku'] = sanitize_text_field((string)($selected_piece['sku'] ?? ''));
       $admin_payload['masterclass_piece_title'] = sanitize_text_field((string)($selected_piece['title'] ?? ''));
       $admin_payload['masterclass_piece_url'] = esc_url_raw((string)($selected_piece['url'] ?? ''));
-      if (trim((string)$admin_payload['event_title']) === '' || trim((string)$admin_payload['event_start_time']) === '' || trim((string)$admin_payload['event_end_time']) === '') {
+
+      if ($admin_payload['masterclass_piece_sku'] === '') {
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_piece'));
+        exit;
+      }
+
+      if (
+        trim((string)$admin_payload['event_start_time']) === '' ||
+        trim((string)$admin_payload['event_end_time']) === '' ||
+        (int)$admin_payload['event_price_cents'] <= 0 ||
+        (int)$admin_payload['presenter_payout_per_student_cents'] <= 0
+      ) {
         wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_event_details'));
         exit;
       }
@@ -13766,32 +13746,25 @@ public function handle_marketing_resubscribe() {
         <?php wp_nonce_field('mrm_profile_card_public_submit', 'mrm_profile_card_public_nonce'); ?>
         <input type="hidden" name="action" value="mrm_profile_card_submit"><input type="hidden" name="token" value="<?php echo esc_attr($token); ?>">
         <?php if ($request_type === 'presenter_event') : ?>
-          <h2>Event Details</h2>
+          <h2>Masterclass Event Submission</h2>
           <div class="pay-box">
-            <p><strong>Masterclass Title:</strong> <?php echo esc_html($admin_payload['event_title'] ?? ''); ?></p>
-
-            <?php if (!empty($admin_payload['masterclass_piece_title'])) : ?>
-              <p><strong>Piece Being Discussed:</strong> <?php echo esc_html($admin_payload['masterclass_piece_title']); ?></p>
-              <?php if (!empty($admin_payload['masterclass_piece_url'])) : ?>
-                <p><strong>Piece Page:</strong> <a href="<?php echo esc_url($admin_payload['masterclass_piece_url']); ?>" target="_blank" rel="noopener"><?php echo esc_html($admin_payload['masterclass_piece_url']); ?></a></p>
-              <?php endif; ?>
-            <?php endif; ?>
-
-            <p><strong>Start Time:</strong> <?php echo esc_html($admin_payload['event_start_time'] ?? ''); ?></p>
-            <p><strong>End Time:</strong> <?php echo esc_html($admin_payload['event_end_time'] ?? ''); ?></p>
+            <?php if (!empty($admin_payload['masterclass_piece_title'])) : ?><p><strong>Piece Being Discussed:</strong> <?php echo esc_html($admin_payload['masterclass_piece_title']); ?></p><?php if (!empty($admin_payload['masterclass_piece_url'])) : ?><p><strong>Piece Page:</strong> <a href="<?php echo esc_url($admin_payload['masterclass_piece_url']); ?>" target="_blank" rel="noopener"><?php echo esc_html($admin_payload['masterclass_piece_url']); ?></a></p><?php endif; ?><?php endif; ?>
+            <p><strong>Proposed Start Time:</strong> <?php echo esc_html($admin_payload['event_start_time'] ?? ''); ?></p>
+            <p><strong>Proposed End Time:</strong> <?php echo esc_html($admin_payload['event_end_time'] ?? ''); ?></p>
             <p><strong>Timezone:</strong> <?php echo esc_html($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?></p>
           </div>
-
-          <input type="hidden" name="event_title" value="<?php echo esc_attr($admin_payload['event_title'] ?? ''); ?>">
           <input type="hidden" name="masterclass_piece_sku" value="<?php echo esc_attr($admin_payload['masterclass_piece_sku'] ?? ''); ?>">
           <input type="hidden" name="masterclass_piece_title" value="<?php echo esc_attr($admin_payload['masterclass_piece_title'] ?? ''); ?>">
           <input type="hidden" name="masterclass_piece_url" value="<?php echo esc_attr($admin_payload['masterclass_piece_url'] ?? ''); ?>">
           <input type="hidden" name="start_time" value="<?php echo esc_attr($admin_payload['event_start_time'] ?? ''); ?>">
           <input type="hidden" name="end_time" value="<?php echo esc_attr($admin_payload['event_end_time'] ?? ''); ?>">
           <input type="hidden" name="timezone" value="<?php echo esc_attr($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?>">
-          <label>Short Description *</label><p class="mrm-field-help">One sentence to describe your masterclass.</p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
-          <label>Long Description *</label><p class="mrm-field-help">A longer description of the masterclass content, who it is for, and what students will learn.</p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
-          <div class="pay-box"><p><strong>Student registration price:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['event_price_cents'] ?? 0)); ?></p><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled.</p><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the agreed event price and presenter earnings shown above.</span></label></div>
+          <label>Masterclass Event Title *</label><p class="mrm-field-help">Enter the public title for the masterclass listing.</p><input type="text" name="event_title" value="<?php echo esc_attr($submission['event_title'] ?? ''); ?>" required>
+          <label>Short Listing Description *</label><p class="mrm-field-help">Write one or two sentences that summarize the masterclass for the public listing card.</p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
+          <label>Full Masterclass Description *</label><p class="mrm-field-help">Describe what students will learn, who the class is for, and what makes this masterclass valuable.</p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
+          <label>Session Details *</label><p class="mrm-field-help">Include the format of the session, expected pacing, demonstration details, student participation expectations, guest players if applicable, and anything students should prepare in advance.</p><textarea name="session_details" required><?php echo esc_textarea($submission['session_details'] ?? ''); ?></textarea>
+          <label>Materials / Preparation Notes</label><p class="mrm-field-help">Optional. Add any extra notes about the piece, handouts, equipment, camera/microphone setup, or preparation expectations.</p><textarea name="preparation_notes"><?php echo esc_textarea($submission['preparation_notes'] ?? ''); ?></textarea>
+          <div class="pay-box"><p><strong>Student registration price:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['event_price_cents'] ?? 0)); ?></p><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled.</p><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the masterclass registration price and presenter earnings shown above.</span></label></div>
         <?php else : ?>
           <h2>Profile Information</h2>
           <div class="grid"><div><label>First Name *</label><input type="text" name="first_name" value="<?php echo esc_attr($submission['first_name'] ?? ''); ?>" autocomplete="given-name" required></div><div><label>Last Name *</label><input type="text" name="last_name" value="<?php echo esc_attr($submission['last_name'] ?? ''); ?>" autocomplete="family-name" required></div></div><input type="hidden" name="name" value="<?php echo esc_attr($submission['name'] ?? ''); ?>"><div class="grid"><div><label>Email *</label><input type="email" name="email" value="<?php echo esc_attr($submission['email'] ?? $request['recipient_email']); ?>" autocomplete="email" required></div></div>
@@ -13802,11 +13775,18 @@ public function handle_marketing_resubscribe() {
             <div class="mrm-check-section"><h3>Instruments</h3><p class="mrm-field-help">Select each instrument you are available to teach.</p><div class="mrm-check-grid"><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="trombone" <?php checked(in_array('trombone', (array)($submission['instruments'] ?? array()), true)); ?>><span>Trombone</span></label><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="euphonium" <?php checked(in_array('euphonium', (array)($submission['instruments'] ?? array()), true)); ?>><span>Euphonium</span></label><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="tuba" <?php checked(in_array('tuba', (array)($submission['instruments'] ?? array()), true)); ?>><span>Tuba</span></label></div></div>
             <div class="mrm-check-section"><h3>Google Calendar Availability</h3><?php if (!empty($admin_payload['instructor_calendar_url'])) : ?><p><a class="mrm-btn" href="<?php echo esc_url($admin_payload['instructor_calendar_url']); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open Your Instructor Calendar</a></p><?php endif; ?><p class="mrm-field-help">Before submitting this form, please open your instructor calendar and enter your recurring lesson availability.</p><ol><li>Create a new event during a time you are available to teach.</li><li>Title the event something clear, such as “Lesson Availability,” “Availability,” or a similar title that helps you recognize it.</li><li>Set the event status as free/available so it does not block unrelated personal events.</li><li>Repeat the availability event for any weekly recurring teaching windows.</li><li>When Low Brass Lessons schedules a lesson inside your availability window, lesson events will appear in yellow.</li></ol><?php foreach ($this->mrm_profile_card_availability_guide_image_urls() as $guide_image_url) : ?><p><img src="<?php echo esc_url($guide_image_url); ?>" alt="Google Calendar availability guide screenshot" style="max-width:100%;height:auto;border:1px solid #d9cfbe;border-radius:14px;"></p><?php endforeach; ?><label class="mrm-ack-row"><input type="checkbox" name="calendar_availability_completed" value="1" required <?php checked(!empty($submission['calendar_availability_completed'])); ?>><span>I confirm that I opened my instructor calendar and entered my available teaching times.</span></label></div>
           <?php endif; ?>
+          <?php if ($request_type === 'instructor_profile') : ?>
+            <label>Teaching Title *</label><p class="mrm-field-help">Example: Trombone Instructor, Low Brass Instructor, Euphonium Specialist, Tuba Instructor, or Brass Pedagogy Specialist.</p><input type="text" name="instructor_title" value="<?php echo esc_attr($submission['instructor_title'] ?? ''); ?>" required>
+          <?php endif; ?>
           <?php if ($request_type === 'presenter_profile') : ?><label>Presenter Title *</label><p class="mrm-field-help">Example: Professor of Trombone, Low Brass Specialist, Orchestral Tubist, Chamber Music Clinician, or Specialist in Brass Pedagogy.</p><input type="text" name="presenter_title" value="<?php echo esc_attr($submission['presenter_title'] ?? ''); ?>" required><?php endif; ?>
-          <label>Short Description *</label><p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'One sentence to describe your lessons.' : 'One sentence to describe your teaching style or professional focus.'; ?></p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
-          <label>Long Description *</label><p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'A longer description of your lesson approach, teaching background, and what students can expect.' : 'A longer professional description of your background, expertise, teaching style, and artistic work.'; ?></p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
+          <label><?php echo $request_type === 'instructor_profile' ? 'Instructor Short Bio *' : 'Presenter Short Bio *'; ?></label>
+          <p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'One sentence that summarizes your lesson style for families.' : 'One sentence that summarizes your presenting/teaching focus.'; ?></p>
+          <textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
+          <label><?php echo $request_type === 'instructor_profile' ? 'Instructor Full Bio *' : 'Presenter Full Bio *'; ?></label>
+          <p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'A polished biography describing your teaching background, lesson approach, and what students can expect.' : 'A polished biography describing your background, expertise, teaching style, and artistic work.'; ?></p>
+          <textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
           <div class="mrm-check-section"><h3>Optional Social / Professional Links</h3><p class="mrm-field-help">Add any public links you would like Low Brass Lessons to review for your profile. These are optional.</p><label>Website</label><input type="url" name="website_url" value="<?php echo esc_attr($submission['website_url'] ?? ''); ?>" placeholder="https://..."><label>Instagram</label><input type="url" name="instagram_url" value="<?php echo esc_attr($submission['instagram_url'] ?? ''); ?>" placeholder="https://..."><label>Facebook</label><input type="url" name="facebook_url" value="<?php echo esc_attr($submission['facebook_url'] ?? ''); ?>" placeholder="https://..."><label>YouTube</label><input type="url" name="youtube_url" value="<?php echo esc_attr($submission['youtube_url'] ?? ''); ?>" placeholder="https://..."><label>LinkedIn</label><input type="url" name="linkedin_url" value="<?php echo esc_attr($submission['linkedin_url'] ?? ''); ?>" placeholder="https://..."></div>
-          <label>Profile Image Upload</label><p class="mrm-field-help">Upload the photo you would like used on your public profile card. Low Brass Lessons will review and approve the image before publishing.</p><input type="file" name="profile_image_file" accept="image/*"><input type="hidden" name="existing_profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>">
+          <label>Profile Image Upload</label><p class="mrm-field-help">Upload the photo you would like used on your public profile card. Low Brass Lessons will review and approve the image before publishing.</p><input type="file" name="profile_image_file" accept="image/*" <?php echo empty($submission['profile_image_url']) ? 'required' : ''; ?>><input type="hidden" name="existing_profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>">
           <?php if (!empty($submission['profile_image_url'])) : ?><p class="mrm-field-help">A profile image has already been uploaded. Upload a new image only if you want to replace it.</p><?php endif; ?>
           <?php if ($request_type === 'instructor_profile') : ?>
             <?php
@@ -13881,11 +13861,23 @@ public function handle_marketing_resubscribe() {
         'masterclass_piece_url' => esc_url_raw(wp_unslash($_POST['masterclass_piece_url'] ?? '')),
         'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')),
         'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')),
+        'session_details' => wp_kses_post(wp_unslash($_POST['session_details'] ?? '')),
+        'preparation_notes' => wp_kses_post(wp_unslash($_POST['preparation_notes'] ?? '')),
         'start_time' => sanitize_text_field(wp_unslash($_POST['start_time'] ?? '')),
         'end_time' => sanitize_text_field(wp_unslash($_POST['end_time'] ?? '')),
         'timezone' => sanitize_text_field(wp_unslash($_POST['timezone'] ?? 'America/Phoenix')),
         'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0,
       );
+
+      if (
+        trim((string)$payload['event_title']) === '' ||
+        trim((string)$payload['short_description']) === '' ||
+        trim((string)$payload['long_description']) === '' ||
+        trim((string)$payload['session_details']) === '' ||
+        empty($payload['pay_ack'])
+      ) {
+        wp_die('Please complete all required masterclass event submission fields.');
+      }
     } else {
       $instruments = array();
 
@@ -13893,12 +13885,44 @@ public function handle_marketing_resubscribe() {
         $instruments = array_map('sanitize_key', wp_unslash($_POST['instruments']));
       }
 
-      $payload = array('first_name' => sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')), 'last_name' => sanitize_text_field(wp_unslash($_POST['last_name'] ?? '')), 'name' => trim(sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')) . ' ' . sanitize_text_field(wp_unslash($_POST['last_name'] ?? ''))), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'fingerprint_clearance_status' => sanitize_key(wp_unslash($_POST['fingerprint_clearance_status'] ?? '')), 'background_check_docusign_ack' => !empty($_POST['background_check_docusign_ack']) ? 1 : 0, 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'stripe_onboarding_completed' => !empty($_POST['stripe_onboarding_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0, 'calendar_availability_completed' => !empty($_POST['calendar_availability_completed']) ? 1 : 0, 'website_url' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram_url' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook_url' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube_url' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin_url' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')), 'profile_social_links_json' => wp_json_encode(array('website' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')))));
+      $payload = array('first_name' => sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')), 'last_name' => sanitize_text_field(wp_unslash($_POST['last_name'] ?? '')), 'name' => trim(sanitize_text_field(wp_unslash($_POST['first_name'] ?? '')) . ' ' . sanitize_text_field(wp_unslash($_POST['last_name'] ?? ''))), 'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')), 'city' => sanitize_text_field(wp_unslash($_POST['city'] ?? '')), 'state' => strtoupper(substr(sanitize_text_field(wp_unslash($_POST['state'] ?? '')), 0, 2)), 'address' => sanitize_text_field(wp_unslash($_POST['address'] ?? '')), 'zip_code' => sanitize_text_field(wp_unslash($_POST['zip_code'] ?? '')), 'offers_online' => !empty($_POST['offers_online']) ? 1 : 0, 'offers_in_person' => !empty($_POST['offers_in_person']) ? 1 : 0, 'instruments' => $instruments, 'instructor_title' => sanitize_text_field(wp_unslash($_POST['instructor_title'] ?? '')), 'presenter_title' => sanitize_text_field(wp_unslash($_POST['presenter_title'] ?? '')), 'short_description' => wp_kses_post(wp_unslash($_POST['short_description'] ?? '')), 'long_description' => wp_kses_post(wp_unslash($_POST['long_description'] ?? '')), 'profile_image_url' => esc_url_raw(wp_unslash($_POST['existing_profile_image_url'] ?? '')), 'fingerprint_clearance_status' => sanitize_key(wp_unslash($_POST['fingerprint_clearance_status'] ?? '')), 'background_check_docusign_ack' => !empty($_POST['background_check_docusign_ack']) ? 1 : 0, 'docusign_completed' => !empty($_POST['docusign_completed']) ? 1 : 0, 'stripe_onboarding_completed' => !empty($_POST['stripe_onboarding_completed']) ? 1 : 0, 'pay_ack' => !empty($_POST['pay_ack']) ? 1 : 0, 'calendar_availability_completed' => !empty($_POST['calendar_availability_completed']) ? 1 : 0, 'website_url' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram_url' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook_url' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube_url' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin_url' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')), 'profile_social_links_json' => wp_json_encode(array('website' => esc_url_raw(wp_unslash($_POST['website_url'] ?? '')), 'instagram' => esc_url_raw(wp_unslash($_POST['instagram_url'] ?? '')), 'facebook' => esc_url_raw(wp_unslash($_POST['facebook_url'] ?? '')), 'youtube' => esc_url_raw(wp_unslash($_POST['youtube_url'] ?? '')), 'linkedin' => esc_url_raw(wp_unslash($_POST['linkedin_url'] ?? '')))));
 
       $profile_image_url = $this->mrm_profile_card_handle_profile_image_upload('profile_image_file');
 
       if ($profile_image_url !== '') {
         $payload['profile_image_url'] = $profile_image_url;
+      }
+
+      if ($request_type === 'instructor_profile') {
+        if (
+          trim((string)$payload['first_name']) === '' ||
+          trim((string)$payload['last_name']) === '' ||
+          !is_email((string)$payload['email']) ||
+          trim((string)$payload['city']) === '' ||
+          trim((string)$payload['state']) === '' ||
+          trim((string)$payload['instructor_title']) === '' ||
+          trim((string)$payload['short_description']) === '' ||
+          trim((string)$payload['long_description']) === '' ||
+          empty($payload['profile_image_url'])
+        ) {
+          wp_die('Please complete all required instructor profile fields.');
+        }
+      }
+
+      if ($request_type === 'presenter_profile') {
+        if (
+          trim((string)$payload['first_name']) === '' ||
+          trim((string)$payload['last_name']) === '' ||
+          !is_email((string)$payload['email']) ||
+          trim((string)$payload['city']) === '' ||
+          trim((string)$payload['state']) === '' ||
+          trim((string)$payload['presenter_title']) === '' ||
+          trim((string)$payload['short_description']) === '' ||
+          trim((string)$payload['long_description']) === '' ||
+          empty($payload['profile_image_url'])
+        ) {
+          wp_die('Please complete all required presenter profile fields.');
+        }
       }
 
       if ($request_type === 'instructor_profile') {
@@ -13943,7 +13967,15 @@ public function handle_marketing_resubscribe() {
 
     $wpdb->update($table, $update_data, array('id' => absint($request['id'])));
 
-    wp_die('Thank you. Your request has been submitted to Low Brass Lessons for review.');
+    wp_die(
+      '<div style="font-family:Arial,sans-serif;max-width:720px;margin:40px auto;padding:28px;border:1px solid #d9cfbe;border-radius:18px;background:#fff;color:#171512;">
+        <h1 style="margin-top:0;">Submission Received</h1>
+        <p>Thank you. Your information has been submitted to Low Brass Lessons for review.</p>
+        <p>We will let you know if we need any revisions.</p>
+      </div>',
+      'Submission Received',
+      array('response' => 200)
+    );
   }
 
   public function handle_profile_card_admin_action() {
@@ -14270,7 +14302,11 @@ public function handle_marketing_resubscribe() {
       'piece_page_url' => esc_url_raw($payload['masterclass_piece_url'] ?? $admin_payload['masterclass_piece_url'] ?? ''),
       'description' => wp_kses_post($payload['short_description'] ?? ''),
       'short_description' => wp_kses_post($payload['short_description'] ?? ''),
-      'long_description' => wp_kses_post($payload['long_description'] ?? ''),
+      'long_description' => wp_kses_post(
+        trim((string)($payload['long_description'] ?? ''))
+        . (!empty($payload['session_details']) ? "\n\nSession Details:\n" . trim((string)$payload['session_details']) : '')
+        . (!empty($payload['preparation_notes']) ? "\n\nPreparation Notes:\n" . trim((string)$payload['preparation_notes']) : '')
+      ),
       'presenter_id' => absint($presenter['id']),
       'presenter_email' => sanitize_email($presenter['email']),
       'proctor_email' => '',
