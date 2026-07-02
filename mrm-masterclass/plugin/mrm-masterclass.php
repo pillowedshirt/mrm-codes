@@ -1294,6 +1294,7 @@ public function mrm_mc_render_critical_error_notice() {
 		'payout_batch_id'    => "ALTER TABLE {$ledger_table} ADD payout_batch_id VARCHAR(64) NULL",
 		'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
 		'stripe_payout_id'   => "ALTER TABLE {$ledger_table} ADD stripe_payout_id VARCHAR(191) NULL",
+		'stripe_refund_id'   => "ALTER TABLE {$ledger_table} ADD stripe_refund_id VARCHAR(191) NULL",
 	);
 
 	foreach ( $ledger_adds as $column => $sql ) {
@@ -2848,8 +2849,27 @@ private function mrm_mc_reverse_transfer( $transfer_id, $amount_cents = null, $m
 	);
 }
 
+private function mrm_mc_ensure_ledger_refund_columns() {
+	global $wpdb;
+
+	$ledger_table = $this->t( 'mrm_masterclass_payment_ledger' );
+
+	if ( ! $this->mrm_mc_table_exists( $ledger_table ) ) {
+		return;
+	}
+
+	$columns = $wpdb->get_col( "DESC {$ledger_table}", 0 );
+	$columns = is_array( $columns ) ? $columns : array();
+
+	if ( ! in_array( 'stripe_refund_id', $columns, true ) ) {
+		$wpdb->query( "ALTER TABLE {$ledger_table} ADD stripe_refund_id VARCHAR(191) NULL" );
+	}
+}
+
 private function mrm_mc_void_payout_ledger_for_refunded_registration( $registration_id, $refund_id = '', $reason = 'registration_refunded' ) {
 	global $wpdb;
+
+	$this->mrm_mc_ensure_ledger_refund_columns();
 
 	$registration_id = absint( $registration_id );
 	$refund_id       = sanitize_text_field( (string) $refund_id );
