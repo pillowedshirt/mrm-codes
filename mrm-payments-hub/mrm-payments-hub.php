@@ -420,6 +420,7 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->mrm_ensure_payout_ledger_status_column_width();
+    $this->mrm_ensure_subscription_portal_tokens();
   }
 
   private function install_or_upgrade_db() {
@@ -595,7 +596,7 @@ class MRM_Payments_Hub_Single {
       cancel_at_period_end TINYINT(1) NOT NULL DEFAULT 0,
       canceled_at DATETIME DEFAULT NULL,
       latest_invoice_id VARCHAR(255) DEFAULT NULL,
-      portal_token VARCHAR(64) NOT NULL,
+      portal_token VARCHAR(64) NULL,
       created_at DATETIME NOT NULL,
       updated_at DATETIME NOT NULL,
       PRIMARY KEY (id),
@@ -5372,6 +5373,105 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return wp_generate_password(48, false, false);
   }
 
+  private function mrm_sheet_music_subscription_is_manageable($row) {
+    $row = is_array($row) ? $row : array();
+
+    $status = sanitize_key((string)($row['stripe_status'] ?? $row['status'] ?? ''));
+    $cancel_at_period_end = !empty($row['cancel_at_period_end']);
+
+    $period_end_raw = (string)($row['current_period_end'] ?? '');
+    $period_end_ts = $period_end_raw !== '' ? strtotime($period_end_raw) : 0;
+    $now_ts = current_time('timestamp');
+
+    /*
+     * Active or trialing subscriptions are manageable unless they are already
+     * scheduled to cancel at period end.
+     */
+    if (in_array($status, array('active', 'trialing'), true) && !$cancel_at_period_end) {
+      return true;
+    }
+
+    /*
+     * If Stripe has already marked it cancel_at_period_end, the customer has
+     * already submitted cancellation. They should keep access through the paid
+     * period, but they do not need another cancel link.
+     */
+    if ($cancel_at_period_end) {
+      return false;
+    }
+
+    /*
+     * Some Stripe statuses can be temporarily unusual while still paid-through.
+     * Allow management only if the row is still inside the current paid period
+     * and not fully canceled.
+     */
+    if (
+      $period_end_ts > $now_ts
+      && !in_array($status, array('canceled', 'cancelled', 'unpaid', 'incomplete_expired'), true)
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private function mrm_ensure_subscription_portal_tokens() {
+    global $wpdb;
+
+    $table = $this->table_sheet_music_subscriptions();
+
+    $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+    if ($exists !== $table) {
+      return;
+    }
+
+    $columns = $wpdb->get_col("DESC {$table}", 0);
+    $columns = is_array($columns) ? $columns : array();
+
+    if (!in_array('portal_token', $columns, true)) {
+      $wpdb->query("ALTER TABLE {$table} ADD portal_token VARCHAR(64) NULL");
+    }
+
+    if (in_array('portal_token', $columns, true)) {
+      $wpdb->query("ALTER TABLE {$table} MODIFY portal_token VARCHAR(64) NULL");
+    }
+
+    /*
+     * Only backfill rows that could legitimately need a Cancel Subscription link.
+     * Do not backfill old expired/cancelled historical rows.
+     */
+    $rows = $wpdb->get_results(
+      "SELECT *
+       FROM {$table}
+       WHERE (portal_token IS NULL OR portal_token = '')
+         AND (
+           stripe_status IN ('active','trialing')
+           OR (
+             current_period_end IS NOT NULL
+             AND current_period_end <> ''
+             AND current_period_end > UTC_TIMESTAMP()
+             AND stripe_status NOT IN ('canceled','cancelled','unpaid','incomplete_expired')
+           )
+         )
+       LIMIT 500",
+      ARRAY_A
+    );
+
+    foreach ((array)$rows as $row) {
+      if (!$this->mrm_sheet_music_subscription_is_manageable($row)) {
+        continue;
+      }
+
+      $wpdb->update(
+        $table,
+        array('portal_token' => $this->mrm_generate_subscription_portal_token()),
+        array('id' => absint($row['id'] ?? 0)),
+        array('%s'),
+        array('%d')
+      );
+    }
+  }
+
   private function mrm_get_sheet_music_subscription_by_stripe_id($stripe_subscription_id) {
     global $wpdb;
     $table = $this->table_sheet_music_subscriptions();
@@ -6195,16 +6295,41 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     );
 
     if (!empty($existing['id'])) {
-      return false !== $wpdb->update(
+      $updated = false !== $wpdb->update(
         $table,
         $row,
         array('id' => (int)$existing['id']),
         array('%s','%s','%s','%s','%s','%s','%s','%s','%d','%s','%s','%s'),
         array('%d')
       );
+
+      /*
+       * Existing rows created before the portal-token feature may not have a token.
+       * Only generate one if the updated subscription is still manageable.
+       */
+      if ($updated) {
+        $merged_for_token_check = array_merge(is_array($existing) ? $existing : array(), $row);
+
+        if (
+          empty($existing['portal_token'])
+          && $this->mrm_sheet_music_subscription_is_manageable($merged_for_token_check)
+        ) {
+          $wpdb->update(
+            $table,
+            array('portal_token' => $this->mrm_generate_subscription_portal_token()),
+            array('id' => (int)$existing['id']),
+            array('%s'),
+            array('%d')
+          );
+        }
+      }
+
+      return $updated;
     }
 
-    $row['portal_token'] = $this->mrm_generate_subscription_portal_token();
+    $row['portal_token'] = $this->mrm_sheet_music_subscription_is_manageable($row)
+      ? $this->mrm_generate_subscription_portal_token()
+      : '';
     $row['created_at'] = $now;
 
     return false !== $wpdb->insert(
@@ -6215,7 +6340,13 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   private function mrm_subscription_manage_url($portal_token) {
-    return home_url('/wp-json/mrm-pay/v1/subscription-portal?token=' . rawurlencode((string)$portal_token));
+    $portal_token = trim((string)$portal_token);
+
+    if ($portal_token === '') {
+      return '';
+    }
+
+    return home_url('/wp-json/mrm-pay/v1/subscription-portal?token=' . rawurlencode($portal_token));
   }
 
   private function mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $fallback_email = '') {
@@ -9536,9 +9667,34 @@ private function charge_and_unlock_autopay($data) {
       wp_die('Invalid subscription token.', 'Subscription Portal', array('response' => 404));
     }
 
+    /*
+     * Refresh from Stripe before opening the portal, so an old email link cannot
+     * open management for a subscription that has already cancelled or expired.
+     */
+    if (!empty($sub['stripe_subscription_id'])) {
+      $stripe_sub = $this->stripe_retrieve_subscription((string)$sub['stripe_subscription_id']);
+
+      if (!is_wp_error($stripe_sub) && is_array($stripe_sub)) {
+        $this->mrm_sync_local_sheet_music_subscription_from_stripe(
+          $stripe_sub,
+          (string)($sub['email_plain'] ?? '')
+        );
+
+        $sub = $this->mrm_get_sheet_music_subscription_by_portal_token($token);
+      }
+    }
+
+    if (!$this->mrm_sheet_music_subscription_is_manageable($sub)) {
+      wp_die(
+        'This subscription is no longer active or has already been scheduled for cancellation. If you need help, please contact Low Brass Lessons.',
+        'Subscription Not Active',
+        array('response' => 403)
+      );
+    }
+
     $portal = $this->stripe_create_billing_portal_session(
       (string)$sub['stripe_customer_id'],
-      home_url('/')
+      home_url('/contact/')
     );
 
     if (is_wp_error($portal) || empty($portal['url'])) {
