@@ -245,6 +245,29 @@ class MRM_Payments_Hub_Single {
     return $wpdb->prefix . 'mrm_payout_ledger';
   }
 
+  private function mrm_ensure_payout_ledger_status_column_width() {
+    global $wpdb;
+
+    $table = $this->table_payout_ledger();
+
+    $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+    if ($exists !== $table) {
+      return;
+    }
+
+    $column = $wpdb->get_row("SHOW COLUMNS FROM {$table} LIKE 'status'", ARRAY_A);
+
+    if (!is_array($column) || empty($column['Type'])) {
+      return;
+    }
+
+    $type = strtolower((string)$column['Type']);
+
+    if (strpos($type, 'varchar(64)') === false) {
+      $wpdb->query("ALTER TABLE {$table} MODIFY status VARCHAR(64) NOT NULL DEFAULT 'pending'");
+    }
+  }
+
   private function table_lesson_credits() {
     global $wpdb;
     return $wpdb->prefix . 'mrm_lesson_credits';
@@ -395,6 +418,8 @@ class MRM_Payments_Hub_Single {
          WHERE sku = 'piece-all-sheet-music-access-complete-package'"
       );
     }
+
+    $this->mrm_ensure_payout_ledger_status_column_width();
   }
 
   private function install_or_upgrade_db() {
@@ -480,7 +505,7 @@ class MRM_Payments_Hub_Single {
       environment_mode VARCHAR(10) NOT NULL DEFAULT 'live',
       gross_cents INT NOT NULL DEFAULT 0,
       net_cents INT NOT NULL DEFAULT 0,
-      status VARCHAR(30) NOT NULL DEFAULT 'pending',
+      status VARCHAR(64) NOT NULL DEFAULT 'pending',
       transfer_id VARCHAR(255) DEFAULT NULL,
       payout_id VARCHAR(255) DEFAULT NULL,
       batch_key VARCHAR(80) DEFAULT NULL,
