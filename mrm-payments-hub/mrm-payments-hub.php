@@ -13442,7 +13442,7 @@ public function handle_marketing_resubscribe() {
       $title = 'Instructor Profile Card';
       $subject = 'Low Brass Lessons instructor profile card';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Instructor Profile Card</strong>.</p>';
-      $details = '<p>This form collects the information needed to build your instructor profile, including your public-facing name, teaching title, biography, and profile photo. Please fill it out in its entirety and we will let you know if we need any revisions.</p>';
+      $details = '<p>This form collects the information needed to build your instructor profile, including your public-facing name, teaching title, biography, profile photo, and recurring lesson availability. Please fill it out in its entirety and we will let you know if we need any revisions.</p>';
       $details .= '<div><strong>Request type:</strong> Instructor Profile Card</div>';
     }
 
@@ -13704,8 +13704,8 @@ public function handle_marketing_resubscribe() {
       ?>
         <div class="notice notice-warning" style="padding:12px 14px;">
           <p><strong>This email is already in use.</strong> A <?php echo esc_html($duplicate_label); ?> profile already exists for <code><?php echo esc_html($duplicate_email); ?></code>.</p>
-          <p>You can request an update to the existing profile card, or go back and choose a different email. Existing Stripe payout, hire date, calendar, and payout settings will be preserved during the update approval.</p>
-          <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;">
+          <p>You can request an update to the existing profile card, or go back and choose a different email. Existing Stripe payout, hire date, operational calendar ID, and payout settings will be preserved during the update approval. Instructor update requests still require a Google Calendar link so the instructor can review and update recurring lesson availability.</p>
+          <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;max-width:720px;">
             <?php wp_nonce_field('mrm_profile_card_create_invite', 'mrm_profile_card_nonce'); ?>
             <input type="hidden" name="action" value="mrm_profile_card_create_invite">
             <input type="hidden" name="request_type" value="<?php echo esc_attr($duplicate_type); ?>">
@@ -13714,6 +13714,27 @@ public function handle_marketing_resubscribe() {
             <input type="hidden" name="admin_note" value="<?php echo esc_attr($duplicate_note); ?>">
             <input type="hidden" name="force_profile_update" value="1">
             <input type="hidden" name="existing_target_id" value="<?php echo esc_attr($duplicate_id); ?>">
+
+            <?php if ($duplicate_type === 'instructor_profile') : ?>
+              <p style="margin:10px 0 6px 0;">
+                <label for="duplicate_instructor_calendar_url"><strong>Instructor Google Calendar Link</strong></label>
+              </p>
+              <p style="margin:0 0 10px 0;">
+                <input
+                  type="url"
+                  id="duplicate_instructor_calendar_url"
+                  name="instructor_calendar_url"
+                  class="regular-text"
+                  placeholder="https://calendar.google.com/..."
+                  required
+                  style="max-width:520px;width:100%;"
+                >
+              </p>
+              <p class="description" style="margin:0 0 12px 0;">
+                Required for instructor update requests so the instructor can review and update their recurring lesson availability before submitting the profile card.
+              </p>
+            <?php endif; ?>
+
             <button type="submit" class="button button-primary">Request Update to Existing Profile</button>
           </form>
           <a class="button" href="<?php echo esc_url(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation')); ?>">Go Back</a>
@@ -14032,7 +14053,7 @@ public function handle_marketing_resubscribe() {
 
     $instructor_calendar_url = esc_url_raw(wp_unslash($_POST['instructor_calendar_url'] ?? ''));
 
-    if ($request_type === 'instructor_profile' && !$force_profile_update && $instructor_calendar_url === '') {
+    if ($request_type === 'instructor_profile' && $instructor_calendar_url === '') {
       wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_instructor_calendar'));
       exit;
     }
@@ -14276,7 +14297,44 @@ public function handle_marketing_resubscribe() {
           <?php if ($request_type === 'instructor_profile') : ?>
             <div class="mrm-check-section"><h3>Teaching Formats</h3><p class="mrm-field-help">Select the lesson formats you are available to teach.</p><div class="mrm-check-grid"><label class="mrm-check-row"><input type="checkbox" name="offers_online" value="1" <?php checked(!empty($submission['offers_online'])); ?>><span>Online lessons</span></label><label class="mrm-check-row"><input type="checkbox" name="offers_in_person" value="1" <?php checked(!empty($submission['offers_in_person'])); ?>><span>In-person lessons</span></label></div></div>
             <div class="mrm-check-section"><h3>Instruments</h3><p class="mrm-field-help">Select each instrument you are available to teach.</p><div class="mrm-check-grid"><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="trombone" <?php checked(in_array('trombone', (array)($submission['instruments'] ?? array()), true)); ?>><span>Trombone</span></label><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="euphonium" <?php checked(in_array('euphonium', (array)($submission['instruments'] ?? array()), true)); ?>><span>Euphonium</span></label><label class="mrm-check-row"><input type="checkbox" name="instruments[]" value="tuba" <?php checked(in_array('tuba', (array)($submission['instruments'] ?? array()), true)); ?>><span>Tuba</span></label></div></div>
-            <div class="mrm-check-section"><h3>Google Calendar Availability</h3><?php if (!empty($admin_payload['instructor_calendar_url'])) : ?><p><a class="mrm-btn" href="<?php echo esc_url($admin_payload['instructor_calendar_url']); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open Your Instructor Calendar</a></p><?php endif; ?><p class="mrm-field-help">Before submitting this form, please open your instructor calendar and enter your recurring lesson availability.</p><ol><li>Create a new event during a time you are available to teach.</li><li>Title the event something clear, such as “Lesson Availability,” “Availability,” or a similar title that helps you recognize it.</li><li>Set the event status as free/available so it does not block unrelated personal events.</li><li>Repeat the availability event for any weekly recurring teaching windows.</li><li>When Low Brass Lessons schedules a lesson inside your availability window, lesson events will appear in yellow.</li></ol><?php foreach ($this->mrm_profile_card_availability_guide_image_urls() as $guide_image_url) : ?><p><img src="<?php echo esc_url($guide_image_url); ?>" alt="Google Calendar availability guide screenshot" style="max-width:100%;height:auto;border:1px solid #d9cfbe;border-radius:14px;"></p><?php endforeach; ?><label class="mrm-ack-row"><input type="checkbox" name="calendar_availability_completed" value="1" required <?php checked(!empty($submission['calendar_availability_completed'])); ?>><span>I confirm that I opened my instructor calendar and entered my available teaching times.</span></label></div>
+            <div class="mrm-check-section">
+              <h3>Google Calendar Availability</h3>
+
+              <?php if (!empty($admin_payload['instructor_calendar_url'])) : ?>
+                <p>
+                  <a class="mrm-btn" href="<?php echo esc_url($admin_payload['instructor_calendar_url']); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">
+                    Open Your Instructor Calendar
+                  </a>
+                </p>
+              <?php else : ?>
+                <p class="mrm-field-help" style="color:#b32d2e;">
+                  <strong>The instructor calendar link is missing from this request.</strong> Please contact Low Brass Lessons before submitting this form.
+                </p>
+              <?php endif; ?>
+
+              <p class="mrm-field-help">
+                Before submitting this form, please open your instructor calendar and enter your recurring lesson availability.
+              </p>
+
+              <ol>
+                <li>Create a new event during a time you are available to teach.</li>
+                <li>Title the event something clear, such as “Lesson Availability,” “Availability,” or a similar title that helps you recognize it.</li>
+                <li>Set the event status as free/available so it does not block unrelated personal events.</li>
+                <li>Repeat the availability event for any weekly recurring teaching windows.</li>
+                <li>When Low Brass Lessons schedules a lesson inside your availability window, lesson events will appear in yellow.</li>
+              </ol>
+
+              <?php foreach ($this->mrm_profile_card_availability_guide_image_urls() as $guide_image_url) : ?>
+                <p>
+                  <img src="<?php echo esc_url($guide_image_url); ?>" alt="Google Calendar availability guide screenshot" style="max-width:100%;height:auto;border:1px solid #d9cfbe;border-radius:14px;">
+                </p>
+              <?php endforeach; ?>
+
+              <label class="mrm-ack-row">
+                <input type="checkbox" name="calendar_availability_completed" value="1" required <?php checked(!empty($submission['calendar_availability_completed'])); ?>>
+                <span>I confirm that I opened my instructor calendar and entered my available teaching times.</span>
+              </label>
+            </div>
           <?php endif; ?>
           <?php if ($request_type === 'instructor_profile') : ?>
             <label>Teaching Title *</label><p class="mrm-field-help">Example: Trombone Instructor, Low Brass Instructor, Euphonium Specialist, Tuba Instructor, or Brass Pedagogy Specialist.</p><input type="text" name="instructor_title" value="<?php echo esc_attr($submission['instructor_title'] ?? ''); ?>" required>
@@ -14461,6 +14519,14 @@ public function handle_marketing_resubscribe() {
           empty($payload['profile_image_url'])
         ) {
           wp_die('Please complete all required instructor profile fields.');
+        }
+
+        if (empty($admin_payload['instructor_calendar_url'])) {
+          wp_die('This instructor profile request is missing the Google Calendar availability link. Please contact Low Brass Lessons for a corrected request link.');
+        }
+
+        if (empty($payload['calendar_availability_completed'])) {
+          wp_die('Please open your instructor calendar, enter your recurring lesson availability, and confirm that you completed the availability step.');
         }
       }
 
