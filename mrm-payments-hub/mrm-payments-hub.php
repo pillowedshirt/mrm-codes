@@ -4686,6 +4686,31 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     ), ARRAY_A);
   }
 
+  private function get_order_by_meta_value($meta_key, $meta_value) {
+    global $wpdb;
+
+    $meta_key = sanitize_key((string)$meta_key);
+    $meta_value = sanitize_text_field((string)$meta_value);
+
+    if ($meta_key === '' || $meta_value === '') {
+      return null;
+    }
+
+    $orders = $this->table_orders();
+
+    return $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT *
+         FROM {$orders}
+         WHERE metadata_json LIKE %s
+         ORDER BY id DESC
+         LIMIT 1",
+        '%' . $wpdb->esc_like('"' . $meta_key . '":"' . $meta_value . '"') . '%'
+      ),
+      ARRAY_A
+    );
+  }
+
   private function update_order_status_from_pi($payment_intent_id, $status, $stripe_status = null, $metadata = null) {
     global $wpdb;
     $data = array(
@@ -13646,7 +13671,7 @@ public function handle_marketing_resubscribe() {
       ?>
         <div class="notice notice-warning" style="padding:12px 14px;">
           <p><strong>This email is already in use.</strong> A <?php echo esc_html($duplicate_label); ?> profile already exists for <code><?php echo esc_html($duplicate_email); ?></code>.</p>
-          <p>You can request an update to the existing profile card, or go back and choose a different email.</p>
+          <p>You can request an update to the existing profile card, or go back and choose a different email. Existing Stripe payout, hire date, calendar, and payout settings will be preserved during the update approval.</p>
           <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;">
             <?php wp_nonce_field('mrm_profile_card_create_invite', 'mrm_profile_card_nonce'); ?>
             <input type="hidden" name="action" value="mrm_profile_card_create_invite">
@@ -13950,7 +13975,7 @@ public function handle_marketing_resubscribe() {
 
     $instructor_calendar_url = esc_url_raw(wp_unslash($_POST['instructor_calendar_url'] ?? ''));
 
-    if ($request_type === 'instructor_profile' && $instructor_calendar_url === '') {
+    if ($request_type === 'instructor_profile' && !$force_profile_update && $instructor_calendar_url === '') {
       wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_instructor_calendar'));
       exit;
     }
@@ -14000,7 +14025,33 @@ public function handle_marketing_resubscribe() {
 
     $now = current_time('mysql');
 
-    $wpdb->insert($table, array('request_type' => $request_type, 'status' => 'sent', 'recipient_name' => $recipient_name, 'recipient_email' => $recipient_email, 'token_hash' => $this->mrm_profile_card_hash_token($token), 'token_expires_at' => gmdate('Y-m-d H:i:s', time() + ($days * DAY_IN_SECONDS)), 'admin_payload' => $this->mrm_profile_card_encode_json($admin_payload), 'submission_payload' => $this->mrm_profile_card_encode_json(array()), 'review_notes' => $this->mrm_profile_card_encode_json(array()), 'uploaded_files' => $this->mrm_profile_card_encode_json(array()), 'sent_at' => $now, 'created_at' => $now, 'updated_at' => $now));
+    $inserted = $wpdb->insert(
+      $table,
+      array(
+        'request_type' => $request_type,
+        'status' => 'sent',
+        'recipient_name' => $recipient_name,
+        'recipient_email' => $recipient_email,
+        'token_hash' => $this->mrm_profile_card_hash_token($token),
+        'token_expires_at' => gmdate('Y-m-d H:i:s', time() + ($days * DAY_IN_SECONDS)),
+        'admin_payload' => $this->mrm_profile_card_encode_json($admin_payload),
+        'submission_payload' => $this->mrm_profile_card_encode_json(array()),
+        'review_notes' => $this->mrm_profile_card_encode_json(array()),
+        'uploaded_files' => $this->mrm_profile_card_encode_json(array()),
+        'sent_at' => $now,
+        'created_at' => $now,
+        'updated_at' => $now,
+      )
+    );
+
+    if (!$inserted) {
+      wp_safe_redirect(
+        admin_url(
+          'admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode('Request could not be saved before sending the email: ' . $wpdb->last_error)
+        )
+      );
+      exit;
+    }
 
     $url = add_query_arg(array('action' => 'mrm_profile_card_form', 'token' => $token), admin_url('admin-post.php'));
 
@@ -14025,7 +14076,7 @@ public function handle_marketing_resubscribe() {
     $subject = (string)$invite_parts['subject'];
 
     if ($force_profile_update) {
-      $subject .= ' update';
+      $subject .= ' Update';
     }
 
     $invite_buttons = is_array($invite_parts['buttons'] ?? null) ? $invite_parts['buttons'] : array();
@@ -14193,7 +14244,7 @@ public function handle_marketing_resubscribe() {
               <h3>Fingerprint Clearance / Background Check</h3>
               <p class="mrm-field-help">Do you have a valid fingerprint clearance for your state?</p>
               <div class="mrm-check-grid"><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="yes" required <?php checked($fingerprint_status, 'yes'); ?>><span>Yes — I have a valid fingerprint clearance for my state.</span></label><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="no" required <?php checked($fingerprint_status, 'no'); ?>><span>No — I need to complete the background-check documents.</span></label></div>
-              <div class="mrm-conditional-panel" data-fingerprint-panel="yes"><label>Fingerprint Clearance Proof *</label><p class="mrm-field-help">Upload a clear photo or PDF of your current fingerprint clearance card/document.</p><input type="file" name="fingerprint_card" accept="image/*,.pdf"><?php if (!empty($submission['fingerprint_card_name'])) : ?><p class="mrm-field-help">Current file on record: <?php echo esc_html($submission['fingerprint_card_name']); ?>. Upload a new file only if you want to replace it.</p><?php endif; ?></div>
+              <div class="mrm-conditional-panel" data-fingerprint-panel="yes"><label>Fingerprint Clearance Proof *</label><p class="mrm-field-help">Upload a clear photo or PDF of your current fingerprint clearance card/document.</p><input type="file" name="fingerprint_card" accept="image/*,.pdf" data-has-existing-file="<?php echo !empty($submission['fingerprint_card_file']) ? '1' : '0'; ?>"><?php if (!empty($submission['fingerprint_card_name'])) : ?><p class="mrm-field-help">Current file on record: <?php echo esc_html($submission['fingerprint_card_name']); ?>. Upload a new file only if you want to replace it.</p><?php endif; ?></div>
               <div class="mrm-conditional-panel" data-fingerprint-panel="no"><p class="mrm-field-help">Please complete the required background-check authorization documents before approval.</p><?php if ($background_check_docusign_url !== '') : ?><p><a href="<?php echo esc_url($background_check_docusign_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open Background Check Documents</a></p><?php else : ?><p class="mrm-field-help"><strong>Background-check document link has not been configured yet.</strong> Low Brass Lessons will send the document link separately.</p><?php endif; ?><label class="mrm-ack-row"><input type="checkbox" name="background_check_docusign_ack" value="1" <?php checked(!empty($submission['background_check_docusign_ack'])); ?>><span>I understand that Low Brass Lessons requires background-check documentation before my instructor profile can be approved.</span></label></div>
             </div>
           <?php endif; ?>
@@ -14218,7 +14269,7 @@ public function handle_marketing_resubscribe() {
       var fingerprintFile = form.querySelector('[name="fingerprint_card"]');
       var backgroundAck = form.querySelector('[name="background_check_docusign_ack"]');
       function selectedClearanceStatus(){ var selected = clearanceRadios.find(function(radio){ return radio.checked; }); return selected ? selected.value : ''; }
-      function syncFingerprintPanels(){ var status = selectedClearanceStatus(); panels.forEach(function(panel){ var shouldShow = panel.getAttribute('data-fingerprint-panel') === status; panel.style.display = shouldShow ? 'block' : 'none'; }); if (fingerprintFile) { if (status === 'yes') { fingerprintFile.setAttribute('required', 'required'); } else { fingerprintFile.removeAttribute('required'); } } if (backgroundAck) { if (status === 'no') { backgroundAck.setAttribute('required', 'required'); } else { backgroundAck.removeAttribute('required'); } } }
+      function syncFingerprintPanels(){ var status = selectedClearanceStatus(); panels.forEach(function(panel){ var shouldShow = panel.getAttribute('data-fingerprint-panel') === status; panel.style.display = shouldShow ? 'block' : 'none'; }); if (fingerprintFile) { var hasExistingFingerprint = fingerprintFile.getAttribute('data-has-existing-file') === '1'; if (status === 'yes' && !hasExistingFingerprint) { fingerprintFile.setAttribute('required', 'required'); } else { fingerprintFile.removeAttribute('required'); } } if (backgroundAck) { if (status === 'no') { backgroundAck.setAttribute('required', 'required'); } else { backgroundAck.removeAttribute('required'); } } }
       clearanceRadios.forEach(function(radio){ radio.addEventListener('change', syncFingerprintPanels); });
       form.addEventListener('submit', function(){ syncName(); syncFingerprintPanels(); });
       syncName();
@@ -14242,6 +14293,10 @@ public function handle_marketing_resubscribe() {
 
     if (!$request) {
       wp_die('Invalid request link.');
+    }
+
+    if (!empty($request['token_expires_at']) && strtotime((string)$request['token_expires_at']) < time()) {
+      wp_die('This profile card request link has expired. Please contact Low Brass Lessons for a new link.');
     }
 
     $request_type = sanitize_key($request['request_type']);
@@ -14322,10 +14377,22 @@ public function handle_marketing_resubscribe() {
 
       if ($request_type === 'instructor_profile') {
         $clearance_status = sanitize_key((string)($payload['fingerprint_clearance_status'] ?? ''));
-        if (!in_array($clearance_status, array('yes', 'no'), true)) { wp_die('Please answer whether you have a valid fingerprint clearance for your state.'); }
+
+        if (!in_array($clearance_status, array('yes', 'no'), true)) {
+          wp_die('Please answer whether you have a valid fingerprint clearance for your state.');
+        }
+
         $has_existing_fingerprint_file = !empty($existing_submission['fingerprint_card_file']);
-        if ($clearance_status === 'yes' && !$has_existing_fingerprint_file && empty($_FILES['fingerprint_card']['name'])) { wp_die('Please upload proof of your fingerprint clearance.'); }
-        if ($clearance_status === 'no' && empty($payload['background_check_docusign_ack'])) { wp_die('Please acknowledge the background-check document requirement.'); }
+        $has_new_fingerprint_file = !empty($_FILES['fingerprint_card']['name']);
+
+        if ($clearance_status === 'yes' && !$has_existing_fingerprint_file && !$has_new_fingerprint_file) {
+          wp_die('Please upload proof of your fingerprint clearance.');
+        }
+
+        if ($clearance_status === 'no' && empty($payload['background_check_docusign_ack'])) {
+          wp_die('Please acknowledge the background-check document requirement.');
+        }
+
         foreach (array('fingerprint_card_file', 'fingerprint_card_name', 'fingerprint_card_uploaded_at') as $existing_file_key) {
           if (!empty($existing_submission[$existing_file_key]) && empty($payload[$existing_file_key])) {
             $payload[$existing_file_key] = sanitize_text_field((string)$existing_submission[$existing_file_key]);
@@ -14348,6 +14415,10 @@ public function handle_marketing_resubscribe() {
       && !empty($_FILES['fingerprint_card']['name'])
     ) {
       $fingerprint_upload = $this->mrm_profile_card_handle_private_fingerprint_upload('fingerprint_card');
+
+      if (empty($fingerprint_upload['file'])) {
+        wp_die('The fingerprint clearance file could not be uploaded. Please upload a JPG, PNG, WEBP, or PDF file and try again.');
+      }
     }
 
     if (!empty($fingerprint_upload['file'])) {
@@ -14559,7 +14630,23 @@ public function handle_marketing_resubscribe() {
     $this->mrm_profile_card_add_profile_metadata_to_record($table, $data, $payload);
 
     if ($is_profile_update && $existing_target_id > 0) {
-      $updated = $wpdb->update($table, $data, array('id' => $existing_target_id));
+      $update_data = $data;
+
+      /*
+       * Preserve operational/payout fields that should not be reset by a profile-card update.
+       */
+      foreach (array(
+        'calendar_id',
+        'timezone',
+        'stripe_connected_account_id',
+        'hire_date',
+      ) as $preserve_key) {
+        if (array_key_exists($preserve_key, $update_data)) {
+          unset($update_data[$preserve_key]);
+        }
+      }
+
+      $updated = $wpdb->update($table, $update_data, array('id' => $existing_target_id));
 
       if ($updated === false) {
         return new WP_Error('instructor_update_failed', 'Instructor update failed: ' . $wpdb->last_error);
@@ -14630,7 +14717,25 @@ public function handle_marketing_resubscribe() {
     $this->mrm_profile_card_add_profile_metadata_to_record($table, $data, $payload);
 
     if ($is_profile_update && $existing_target_id > 0) {
-      $updated = $wpdb->update($table, $data, array('id' => $existing_target_id));
+      $update_data = $data;
+
+      /*
+       * Preserve payout/operational fields that should not be reset by a profile-card update.
+       */
+      foreach (array(
+        'timezone',
+        'stripe_connected_account_id',
+        'payout_percent',
+        'payout_per_student_cents',
+        'hire_date',
+        'created_at',
+      ) as $preserve_key) {
+        if (array_key_exists($preserve_key, $update_data)) {
+          unset($update_data[$preserve_key]);
+        }
+      }
+
+      $updated = $wpdb->update($table, $update_data, array('id' => $existing_target_id));
 
       if ($updated === false) {
         return new WP_Error('presenter_update_failed', 'Presenter update failed: ' . $wpdb->last_error);
