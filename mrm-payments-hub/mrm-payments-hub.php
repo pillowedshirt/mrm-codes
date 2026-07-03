@@ -12649,7 +12649,7 @@ public function handle_marketing_resubscribe() {
 
     $title = 'Set Up Your Payment Information';
 
-    $intro = '<p>Stripe is how Low Brass Lessons processes payments for instructors, presenters, composers, and other approved payees.</p>';
+    $intro = '<p>Stripe is the platform Low Brass Lessons uses to collect and issue payments.</p>';
 
     $details = ''
       . '<p>This request is for you to complete the additional information required for your connected Stripe account so that you can receive payments through Low Brass Lessons.</p>'
