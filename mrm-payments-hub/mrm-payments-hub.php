@@ -14464,6 +14464,7 @@ public function handle_marketing_resubscribe() {
 
     $request_type = sanitize_key($request['request_type']);
     $existing_submission = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+    $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
     $payload = array();
 
     if ($request_type === 'presenter_event') {
@@ -14677,16 +14678,26 @@ public function handle_marketing_resubscribe() {
       $note = sanitize_textarea_field(wp_unslash($_POST['change_request_note'] ?? ''));
       $new_token = $this->mrm_profile_card_new_token();
 
-      $wpdb->update(
+      $updated = $wpdb->update(
         $table,
         array(
           'status' => 'changes_requested',
           'token_hash' => $this->mrm_profile_card_hash_token($new_token),
+          'token_expires_at' => gmdate('Y-m-d H:i:s', time() + (14 * DAY_IN_SECONDS)),
           'review_notes' => $this->mrm_profile_card_encode_json(array('change_request_note' => $note)),
           'updated_at' => current_time('mysql'),
         ),
         array('id' => $request_id)
       );
+
+      if ($updated === false) {
+        wp_safe_redirect(
+          admin_url(
+            'admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode('Could not request changes: ' . $wpdb->last_error)
+          )
+        );
+        exit;
+      }
 
       $form_url = add_query_arg(
         array(
