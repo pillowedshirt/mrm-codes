@@ -13229,7 +13229,49 @@ public function handle_marketing_resubscribe() {
       return '$' . number_format(((int)($settings[$key] ?? $default)) / 100, 2);
     };
 
-    return '<div class="mrm-profile-public-pay-box">\n    <h3>Instructor Payout Acknowledgement</h3>\n    <p>Please review the current instructor payout chart before submitting your profile card.</p>\n    <table>\n      <thead><tr><th>Lesson Type</th><th>Year 1</th><th>Year 2</th><th>Year 3+</th></tr></thead>\n      <tbody>\n        <tr><td>30-minute online</td><td>' . esc_html($money('instructor_payout_30_online_year1_cents')) . '</td><td>' . esc_html($money('instructor_payout_30_online_year2_cents')) . '</td><td>' . esc_html($money('instructor_payout_30_online_year3_cents')) . '</td></tr>\n        <tr><td>30-minute in-person</td><td>' . esc_html($money('instructor_payout_30_inperson_year1_cents')) . '</td><td>' . esc_html($money('instructor_payout_30_inperson_year2_cents')) . '</td><td>' . esc_html($money('instructor_payout_30_inperson_year3_cents')) . '</td></tr>\n        <tr><td>60-minute online</td><td>' . esc_html($money('instructor_payout_60_online_year1_cents')) . '</td><td>' . esc_html($money('instructor_payout_60_online_year2_cents')) . '</td><td>' . esc_html($money('instructor_payout_60_online_year3_cents')) . '</td></tr>\n        <tr><td>60-minute in-person</td><td>' . esc_html($money('instructor_payout_60_inperson_year1_cents')) . '</td><td>' . esc_html($money('instructor_payout_60_inperson_year2_cents')) . '</td><td>' . esc_html($money('instructor_payout_60_inperson_year3_cents')) . '</td></tr>\n      </tbody>\n    </table>\n    <p class="mrm-field-help">In-person lesson travel amount is handled separately according to the site payout settings.</p>\n  </div>';
+    return implode('', array(
+      '<div class="mrm-profile-public-pay-box">',
+        '<h3>Instructor Payout Acknowledgement</h3>',
+        '<p>Please review the current instructor payout chart before submitting your profile card.</p>',
+        '<table>',
+          '<thead>',
+            '<tr>',
+              '<th>Lesson Type</th>',
+              '<th>Year 1</th>',
+              '<th>Year 2</th>',
+              '<th>Year 3+</th>',
+            '</tr>',
+          '</thead>',
+          '<tbody>',
+            '<tr>',
+              '<td>30-minute online</td>',
+              '<td>' . esc_html($money('instructor_payout_30_online_year1_cents')) . '</td>',
+              '<td>' . esc_html($money('instructor_payout_30_online_year2_cents')) . '</td>',
+              '<td>' . esc_html($money('instructor_payout_30_online_year3_cents')) . '</td>',
+            '</tr>',
+            '<tr>',
+              '<td>30-minute in-person</td>',
+              '<td>' . esc_html($money('instructor_payout_30_inperson_year1_cents')) . '</td>',
+              '<td>' . esc_html($money('instructor_payout_30_inperson_year2_cents')) . '</td>',
+              '<td>' . esc_html($money('instructor_payout_30_inperson_year3_cents')) . '</td>',
+            '</tr>',
+            '<tr>',
+              '<td>60-minute online</td>',
+              '<td>' . esc_html($money('instructor_payout_60_online_year1_cents')) . '</td>',
+              '<td>' . esc_html($money('instructor_payout_60_online_year2_cents')) . '</td>',
+              '<td>' . esc_html($money('instructor_payout_60_online_year3_cents')) . '</td>',
+            '</tr>',
+            '<tr>',
+              '<td>60-minute in-person</td>',
+              '<td>' . esc_html($money('instructor_payout_60_inperson_year1_cents')) . '</td>',
+              '<td>' . esc_html($money('instructor_payout_60_inperson_year2_cents')) . '</td>',
+              '<td>' . esc_html($money('instructor_payout_60_inperson_year3_cents')) . '</td>',
+            '</tr>',
+          '</tbody>',
+        '</table>',
+        '<p class="mrm-field-help">In-person lesson travel amount is handled separately according to the site payout settings.</p>',
+      '</div>',
+    ));
   }
 
   private function mrm_profile_card_presenter_approval_where_sql($table_alias = '') {
@@ -14520,17 +14562,70 @@ public function handle_marketing_resubscribe() {
         .mrm-field-help { margin: 4px 0 8px; color: #5f5851; font-size: 13px; line-height: 1.45; }
         input, select, textarea { width: 100%; box-sizing: border-box; border: 1px solid #d9cfbe; border-radius: 14px; padding: 12px 14px; font: inherit; }
         textarea { min-height: 120px; }
-        input[type="checkbox"] { appearance: none; -webkit-appearance: none; width: 18px; height: 18px; min-width: 18px; min-height: 18px; margin: 1px 10px 0 0; padding: 0; border: 2px solid #171512; border-radius: 5px; background: #ffffff; display: inline-grid; place-content: center; cursor: pointer; vertical-align: top; }
-        input[type="checkbox"]::after { content: ""; width: 9px; height: 5px; border-left: 2px solid #ffffff; border-bottom: 2px solid #ffffff; transform: rotate(-45deg); opacity: 0; margin-top: -1px; }
-        input[type="checkbox"]:checked { background: #171512; border-color: #171512; }
-        input[type="checkbox"]:checked::after { opacity: 1; }
+        input[type="checkbox"] {
+          appearance: none;
+          -webkit-appearance: none;
+          width: 18px;
+          height: 18px;
+          min-width: 18px;
+          min-height: 18px;
+          margin: 2px 0 0;
+          padding: 0;
+          border: 2px solid #171512;
+          border-radius: 5px;
+          background: #ffffff;
+          display: inline-grid;
+          place-content: center;
+          cursor: pointer;
+          vertical-align: top;
+          flex: 0 0 auto;
+        }
+
+        input[type="checkbox"]::after {
+          content: "";
+          width: 9px;
+          height: 5px;
+          border-left: 2px solid #ffffff;
+          border-bottom: 2px solid #ffffff;
+          transform: rotate(-45deg);
+          opacity: 0;
+          margin-top: -1px;
+        }
+
+        input[type="checkbox"]:checked {
+          background: #171512;
+          border-color: #171512;
+        }
+
+        input[type="checkbox"]:checked::after {
+          opacity: 1;
+        }
+
+        input[type="radio"] {
+          appearance: auto;
+          -webkit-appearance: auto;
+          width: 18px;
+          height: 18px;
+          min-width: 18px;
+          min-height: 18px;
+          margin: 2px 0 0;
+          padding: 0;
+          border: 0;
+          border-radius: 50%;
+          background: transparent;
+          cursor: pointer;
+          flex: 0 0 auto;
+        }
+
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
         .pay-box, .mrm-profile-public-pay-box, .mrm-check-section { background: #f6f1e7; border: 1px solid #d9cfbe; border-radius: 18px; padding: 16px; margin: 18px 0; }
         .mrm-check-section h3 { margin: 0 0 10px; }
         .mrm-check-grid { display: grid; gap: 8px; margin-top: 10px; }
         .mrm-check-row, .mrm-ack-row { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 10px 12px; border: 1px solid #d9cfbe; border-radius: 14px; background: #ffffff; color: #171512; font-weight: 700; line-height: 1.4; }
+        .mrm-check-row span, .mrm-ack-row span { display: block; flex: 1; }
         .mrm-ack-row { margin-top: 14px; }
         .mrm-check-row input, .mrm-ack-row input { flex: 0 0 auto; }
+        .mrm-conditional-panel { display: none; margin-top: 12px; padding: 12px 14px; border: 1px solid #d9cfbe; border-radius: 14px; background: #ffffff; }
         table { width: 100%; border-collapse: collapse; background: #fff; margin-top: 10px; }
         th, td { border: 1px solid #d9cfbe; padding: 8px; text-align: left; }
         button { border: 0; border-radius: 999px; background: #171512; color: #fff; padding: 14px 22px; font-weight: 900; cursor: pointer; }
@@ -14607,7 +14702,7 @@ public function handle_marketing_resubscribe() {
 
               <label class="mrm-ack-row">
                 <input type="checkbox" name="calendar_availability_completed" value="1" required <?php checked(!empty($submission['calendar_availability_completed'])); ?>>
-                <span>I confirm that I opened my instructor calendar and entered my available teaching times.</span>
+                <span>I confirm that I saved my instructor calendar and entered my available teaching times.</span>
               </label>
             </div>
           <?php endif; ?>
@@ -14621,7 +14716,6 @@ public function handle_marketing_resubscribe() {
           <label><?php echo $request_type === 'instructor_profile' ? 'Instructor Full Bio *' : 'Presenter Full Bio *'; ?></label>
           <p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'A polished biography describing your teaching background, lesson approach, and what students can expect.' : 'A polished biography describing your background, expertise, teaching style, and artistic work.'; ?></p>
           <textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
-          <div class="mrm-check-section"><h3>Optional Social / Professional Links</h3><p class="mrm-field-help">Add any public links you would like Low Brass Lessons to review for your profile. These are optional.</p><label>Website</label><input type="url" name="website_url" value="<?php echo esc_attr($submission['website_url'] ?? ''); ?>" placeholder="https://..."><label>Instagram</label><input type="url" name="instagram_url" value="<?php echo esc_attr($submission['instagram_url'] ?? ''); ?>" placeholder="https://..."><label>Facebook</label><input type="url" name="facebook_url" value="<?php echo esc_attr($submission['facebook_url'] ?? ''); ?>" placeholder="https://..."><label>YouTube</label><input type="url" name="youtube_url" value="<?php echo esc_attr($submission['youtube_url'] ?? ''); ?>" placeholder="https://..."><label>LinkedIn</label><input type="url" name="linkedin_url" value="<?php echo esc_attr($submission['linkedin_url'] ?? ''); ?>" placeholder="https://..."></div>
           <label>Profile Image Upload</label><p class="mrm-field-help">Upload the photo you would like used on your public profile card. Low Brass Lessons will review and approve the image before publishing.</p><input type="file" name="profile_image_file" accept="image/*" <?php echo empty($submission['profile_image_url']) ? 'required' : ''; ?>><input type="hidden" name="existing_profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>">
           <?php if (!empty($submission['profile_image_url'])) : ?><p class="mrm-field-help">A profile image has already been uploaded. Upload a new image only if you want to replace it.</p><?php endif; ?>
           <?php if ($request_type === 'instructor_profile') : ?>
@@ -14631,7 +14725,17 @@ public function handle_marketing_resubscribe() {
             <div class="mrm-check-section" id="mrm-fingerprint-clearance-section">
               <h3>Fingerprint Clearance / Background Check</h3>
               <p class="mrm-field-help">Do you have a valid fingerprint clearance for your state?</p>
-              <div class="mrm-check-grid"><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="yes" required <?php checked($fingerprint_status, 'yes'); ?>><span>Yes — I have a valid fingerprint clearance for my state.</span></label><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="no" required <?php checked($fingerprint_status, 'no'); ?>><span>No — I need to complete the background-check documents.</span></label></div>
+              <div class="mrm-check-grid mrm-fingerprint-options">
+                <label class="mrm-check-row">
+                  <input type="radio" name="fingerprint_clearance_status" value="yes" required <?php checked($fingerprint_status, 'yes'); ?>>
+                  <span>Yes — I have a valid fingerprint clearance for my state.</span>
+                </label>
+
+                <label class="mrm-check-row">
+                  <input type="radio" name="fingerprint_clearance_status" value="no" required <?php checked($fingerprint_status, 'no'); ?>>
+                  <span>No — I need to complete the background-check documents.</span>
+                </label>
+              </div>
               <div class="mrm-conditional-panel" data-fingerprint-panel="yes"><label>Fingerprint Clearance Proof *</label><p class="mrm-field-help">Upload a clear photo or PDF of your current fingerprint clearance card/document.</p><input type="file" name="fingerprint_card" accept="image/*,.pdf" data-has-existing-file="<?php echo !empty($submission['fingerprint_card_file']) ? '1' : '0'; ?>"><?php if (!empty($submission['fingerprint_card_name'])) : ?><p class="mrm-field-help">Current file on record: <?php echo esc_html($submission['fingerprint_card_name']); ?>. Upload a new file only if you want to replace it.</p><?php endif; ?></div>
               <div class="mrm-conditional-panel" data-fingerprint-panel="no">
                 <p class="mrm-field-help">
