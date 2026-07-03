@@ -13232,6 +13232,75 @@ public function handle_marketing_resubscribe() {
     return '<div class="mrm-profile-public-pay-box">\n    <h3>Instructor Payout Acknowledgement</h3>\n    <p>Please review the current instructor payout chart before submitting your profile card.</p>\n    <table>\n      <thead><tr><th>Lesson Type</th><th>Year 1</th><th>Year 2</th><th>Year 3+</th></tr></thead>\n      <tbody>\n        <tr><td>30-minute online</td><td>' . esc_html($money('instructor_payout_30_online_year1_cents')) . '</td><td>' . esc_html($money('instructor_payout_30_online_year2_cents')) . '</td><td>' . esc_html($money('instructor_payout_30_online_year3_cents')) . '</td></tr>\n        <tr><td>30-minute in-person</td><td>' . esc_html($money('instructor_payout_30_inperson_year1_cents')) . '</td><td>' . esc_html($money('instructor_payout_30_inperson_year2_cents')) . '</td><td>' . esc_html($money('instructor_payout_30_inperson_year3_cents')) . '</td></tr>\n        <tr><td>60-minute online</td><td>' . esc_html($money('instructor_payout_60_online_year1_cents')) . '</td><td>' . esc_html($money('instructor_payout_60_online_year2_cents')) . '</td><td>' . esc_html($money('instructor_payout_60_online_year3_cents')) . '</td></tr>\n        <tr><td>60-minute in-person</td><td>' . esc_html($money('instructor_payout_60_inperson_year1_cents')) . '</td><td>' . esc_html($money('instructor_payout_60_inperson_year2_cents')) . '</td><td>' . esc_html($money('instructor_payout_60_inperson_year3_cents')) . '</td></tr>\n      </tbody>\n    </table>\n    <p class="mrm-field-help">In-person lesson travel amount is handled separately according to the site payout settings.</p>\n  </div>';
   }
 
+  private function mrm_profile_card_presenter_approval_where_sql($table_alias = '') {
+    global $wpdb;
+
+    $presenters_table = $wpdb->prefix . 'mrm_masterclass_presenters';
+    $columns = $this->mrm_profile_card_table_columns($presenters_table);
+
+    $prefix = $table_alias !== '' ? sanitize_key($table_alias) . '.' : '';
+
+    $clauses = array();
+
+    if (in_array('status', $columns, true)) {
+      $clauses[] = $prefix . "status IN ('approved','active','published')";
+    }
+
+    if (in_array('profile_status', $columns, true)) {
+      $clauses[] = $prefix . "profile_status IN ('approved','active','published')";
+    }
+
+    if (in_array('is_approved', $columns, true)) {
+      $clauses[] = $prefix . "is_approved = 1";
+    }
+
+    if (in_array('approved', $columns, true)) {
+      $clauses[] = $prefix . "approved = 1";
+    }
+
+    /*
+     * If the presenter table has no approval/status column, do not block.
+     * Some builds only insert approved presenters into this table.
+     */
+    if (empty($clauses)) {
+      return '1=1';
+    }
+
+    return '(' . implode(' OR ', $clauses) . ')';
+  }
+
+  private function mrm_profile_card_presenter_is_approved($presenter_id) {
+    global $wpdb;
+
+    $presenter_id = absint($presenter_id);
+
+    if ($presenter_id <= 0) {
+      return false;
+    }
+
+    $table = $wpdb->prefix . 'mrm_masterclass_presenters';
+
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) !== $table) {
+      return false;
+    }
+
+    $where = $this->mrm_profile_card_presenter_approval_where_sql('');
+
+    $row = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT *
+         FROM {$table}
+         WHERE id = %d
+           AND {$where}
+         LIMIT 1",
+        $presenter_id
+      ),
+      ARRAY_A
+    );
+
+    return is_array($row) && !empty($row['id']);
+  }
+
   private function mrm_profile_card_table_columns($table) {
     global $wpdb;
 
@@ -13249,6 +13318,118 @@ public function handle_marketing_resubscribe() {
     }
 
     return array_intersect_key($data, array_flip($columns));
+  }
+
+  private function mrm_profile_card_decode_metadata_from_row($row) {
+    $row = is_array($row) ? $row : array();
+
+    foreach (array('profile_metadata_json', 'metadata_json') as $key) {
+      if (!empty($row[$key])) {
+        $decoded = json_decode((string)$row[$key], true);
+        if (is_array($decoded)) {
+          return $decoded;
+        }
+      }
+    }
+
+    return array();
+  }
+
+  private function mrm_profile_card_existing_profile_submission_payload($request_type, $existing_target_id) {
+    global $wpdb;
+
+    $request_type = sanitize_key((string)$request_type);
+    $existing_target_id = absint($existing_target_id);
+
+    if ($existing_target_id <= 0) {
+      return array();
+    }
+
+    if ($request_type === 'instructor_profile') {
+      $table = $wpdb->prefix . 'mrm_instructors';
+    } elseif ($request_type === 'presenter_profile') {
+      $table = $wpdb->prefix . 'mrm_masterclass_presenters';
+    } else {
+      return array();
+    }
+
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) !== $table) {
+      return array();
+    }
+
+    $row = $wpdb->get_row(
+      $wpdb->prepare("SELECT * FROM {$table} WHERE id = %d LIMIT 1", $existing_target_id),
+      ARRAY_A
+    );
+
+    if (!is_array($row) || empty($row['id'])) {
+      return array();
+    }
+
+    $metadata = $this->mrm_profile_card_decode_metadata_from_row($row);
+
+    $name = trim((string)($row['name'] ?? ''));
+    $first_name = '';
+    $last_name = '';
+
+    if ($name !== '') {
+      $parts = preg_split('/\s+/', $name);
+      $first_name = (string)array_shift($parts);
+      $last_name = trim(implode(' ', $parts));
+    }
+
+    $payload = array(
+      'first_name' => $first_name,
+      'last_name' => $last_name,
+      'name' => $name,
+      'email' => sanitize_email((string)($row['email'] ?? '')),
+      'city' => sanitize_text_field((string)($row['city'] ?? '')),
+      'state' => strtoupper(substr(sanitize_text_field((string)($row['state'] ?? '')), 0, 2)),
+      'address' => sanitize_text_field((string)($row['address'] ?? '')),
+      'zip_code' => sanitize_text_field((string)($row['zip_code'] ?? '')),
+      'profile_image_url' => esc_url_raw((string)($row['profile_image_url'] ?? '')),
+      'short_description' => wp_kses_post((string)($row['short_description'] ?? '')),
+      'long_description' => wp_kses_post((string)($row['long_description'] ?? $row['bio'] ?? '')),
+      'website_url' => esc_url_raw((string)($metadata['website_url'] ?? '')),
+      'instagram_url' => esc_url_raw((string)($metadata['instagram_url'] ?? '')),
+      'facebook_url' => esc_url_raw((string)($metadata['facebook_url'] ?? '')),
+      'youtube_url' => esc_url_raw((string)($metadata['youtube_url'] ?? '')),
+      'linkedin_url' => esc_url_raw((string)($metadata['linkedin_url'] ?? '')),
+    );
+
+    if ($request_type === 'instructor_profile') {
+      $payload['instructor_title'] = sanitize_text_field((string)(
+        $row['instructor_title']
+        ?? $metadata['instructor_title']
+        ?? ''
+      ));
+
+      $payload['offers_in_person'] = !empty($row['offers_in_person']) ? 1 : 0;
+      $payload['offers_online'] = !empty($row['offers_online']) ? 1 : 0;
+
+      $instruments = array();
+
+      if (!empty($row['instruments'])) {
+        $decoded_instruments = json_decode((string)$row['instruments'], true);
+        if (is_array($decoded_instruments)) {
+          $instruments = $decoded_instruments;
+        }
+      }
+
+      $payload['instruments'] = array_values(array_filter(array_map('sanitize_text_field', (array)$instruments)));
+    }
+
+    if ($request_type === 'presenter_profile') {
+      $payload['presenter_title'] = sanitize_text_field((string)(
+        $row['presenter_title']
+        ?? $metadata['presenter_title']
+        ?? ''
+      ));
+    }
+
+    return array_filter($payload, function($value) {
+      return $value !== '' && $value !== array() && $value !== null;
+    });
   }
 
   private function mrm_profile_card_add_profile_metadata_to_record($table, &$data, $payload) {
@@ -13660,8 +13841,13 @@ public function handle_marketing_resubscribe() {
     $presenters = array();
 
     if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $presenters_table)) === $presenters_table) {
+      $presenter_approval_where = $this->mrm_profile_card_presenter_approval_where_sql('');
+
       $presenters = $wpdb->get_results(
-        "SELECT id, name, email FROM {$presenters_table} ORDER BY name ASC, email ASC",
+        "SELECT id, name, email
+         FROM {$presenters_table}
+         WHERE {$presenter_approval_where}
+         ORDER BY name ASC, email ASC",
         ARRAY_A
       );
     }
@@ -13745,6 +13931,8 @@ public function handle_marketing_resubscribe() {
           $profile_card_error = sanitize_text_field(wp_unslash($_GET['error']));
           $profile_card_error_messages = array(
             'missing_presenter' => 'Please select an approved presenter profile before sending a Masterclass Event Submission request.',
+            'missing_admin_docusign_verification' => 'Please verify that the DocuSign agreement and W-9 have been completed before approving this profile card.',
+            'unapproved_presenter' => 'Please select an approved presenter profile before sending a Masterclass Event Submission request.',
             'invalid_presenter' => 'The selected presenter profile is missing a valid email address.',
             'invalid_recipient' => 'Please enter a valid recipient email address.',
             'missing_request' => 'The selected request could not be found.',
@@ -13935,7 +14123,43 @@ public function handle_marketing_resubscribe() {
       <table class="widefat striped"><thead><tr><th>ID</th><th>Type</th><th>Recipient</th><th>Status</th><th>Submitted</th><th>Created Target</th><th>Actions</th></tr></thead><tbody>
       <?php if (empty($requests)) : ?><tr><td colspan="7">No active profile card requests need review.</td></tr><?php else : foreach ($requests as $request) : $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? ''); $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? ''); $target = !empty($request['created_target_type']) && !empty($request['created_target_id']) ? $request['created_target_type'] . ' #' . $request['created_target_id'] : '—'; ?>
         <tr><td><?php echo esc_html($request['id']); ?></td><td><?php echo esc_html($this->mrm_profile_card_request_type_label($request['request_type'])); ?></td><td><strong><?php echo esc_html($request['recipient_name']); ?></strong><br><code><?php echo esc_html($request['recipient_email']); ?></code></td><td><?php echo esc_html($request['status']); ?></td><td><?php echo esc_html($request['submitted_at'] ?: '—'); ?></td><td><?php echo esc_html($target); ?></td><td><details><summary class="button">Preview / Review</summary><div style="margin-top:12px;padding:12px;border:1px solid #dcdcde;background:#fff;"><h3>Submitted Information</h3>
-        <?php if (empty($payload)) : ?><p>No submission data yet.</p><?php else : ?><table class="widefat striped"><tbody><?php foreach ($payload as $key => $value) : ?><tr><th style="width:220px;"><?php echo esc_html(ucwords(str_replace('_', ' ', $key))); ?></th><td><?php echo is_array($value) ? '<pre style="white-space:pre-wrap;">' . esc_html(wp_json_encode($value, JSON_PRETTY_PRINT)) . '</pre>' : wp_kses_post(nl2br(esc_html((string)$value))); ?></td></tr><?php endforeach; ?></tbody></table><?php endif; ?>
+        <?php if (empty($payload)) : ?>
+          <p>No submission data yet.</p>
+        <?php else : ?>
+          <table class="widefat striped">
+            <tbody>
+              <?php foreach ($payload as $key => $value) : ?>
+                <?php
+                  $hidden_payload_keys = array(
+                    'fingerprint_card_file',
+                  );
+
+                  if (in_array((string)$key, $hidden_payload_keys, true)) {
+                    continue;
+                  }
+
+                  if ((string)$key === 'fingerprint_card_name') {
+                    $display_value = (string)$value;
+                  } elseif ((string)$key === 'fingerprint_card_uploaded_at') {
+                    $display_value = (string)$value;
+                  } else {
+                    $display_value = $value;
+                  }
+                ?>
+                <tr>
+                  <th style="width:220px;"><?php echo esc_html(ucwords(str_replace('_', ' ', $key))); ?></th>
+                  <td>
+                    <?php
+                      echo is_array($display_value)
+                        ? '<pre style="white-space:pre-wrap;">' . esc_html(wp_json_encode($display_value, JSON_PRETTY_PRINT)) . '</pre>'
+                        : wp_kses_post(nl2br(esc_html((string)$display_value)));
+                    ?>
+                  </td>
+                </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        <?php endif; ?>
         <?php if (!empty($uploads)) : ?>
           <h3>Uploaded Files</h3>
           <ul>
@@ -13962,7 +14186,7 @@ public function handle_marketing_resubscribe() {
             <?php endforeach; ?>
           </ul>
         <?php endif; ?>
-        <h3>Admin Approval Fields</h3><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_profile_card_admin_action', 'mrm_profile_card_admin_nonce'); ?><input type="hidden" name="action" value="mrm_profile_card_admin_action"><input type="hidden" name="request_id" value="<?php echo esc_attr($request['id']); ?>"><p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified DocuSign contract and W-9 completion.</label></p><p><label>Approval note / internal note</label><br><textarea name="admin_review_note" rows="4" class="large-text"></textarea></p><p><label>Change request note to recipient</label><br><textarea name="change_request_note" rows="4" class="large-text" placeholder="Write what you want them to change. This will be emailed if you click Request Changes."></textarea></p><p><button type="submit" name="mrm_profile_card_do" value="approve" class="button button-primary">Approve and Create</button> <button type="submit" name="mrm_profile_card_do" value="changes" class="button">Request Changes</button> <button type="submit" name="mrm_profile_card_do" value="delete" class="button" onclick="return confirm('Delete this request? The private link will stop working and this request will be removed from the active review list.');">Delete This Request</button></p></form></div></details></td></tr>
+        <h3>Admin Approval Fields</h3><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_profile_card_admin_action', 'mrm_profile_card_admin_nonce'); ?><input type="hidden" name="action" value="mrm_profile_card_admin_action"><input type="hidden" name="request_id" value="<?php echo esc_attr($request['id']); ?>"><p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified the required DocuSign agreement and W-9 are complete. Required before approving Instructor and Presenter Profile Cards.</label></p><p><label>Approval note / internal note</label><br><textarea name="admin_review_note" rows="4" class="large-text"></textarea></p><p><label>Change request note to recipient</label><br><textarea name="change_request_note" rows="4" class="large-text" placeholder="Write what you want them to change. This will be emailed if you click Request Changes."></textarea></p><p><button type="submit" name="mrm_profile_card_do" value="approve" class="button button-primary">Approve and Create / Update</button> <button type="submit" name="mrm_profile_card_do" value="changes" class="button">Request Changes</button> <button type="submit" name="mrm_profile_card_do" value="delete" class="button" onclick="return confirm('Delete this request? The private link will stop working and this request will be removed from the active review list.');">Delete This Request</button></p></form></div></details></td></tr>
       <?php endforeach; endif; ?></tbody></table></div><?php
   }
 
@@ -14003,13 +14227,22 @@ public function handle_marketing_resubscribe() {
         exit;
       }
 
+      $presenter_approval_where = $this->mrm_profile_card_presenter_approval_where_sql('');
+
       $presenter = $wpdb->get_row(
-        $wpdb->prepare("SELECT id, name, email FROM {$presenters_table} WHERE id = %d LIMIT 1", $selected_presenter_id),
+        $wpdb->prepare(
+          "SELECT id, name, email
+           FROM {$presenters_table}
+           WHERE id = %d
+             AND {$presenter_approval_where}
+           LIMIT 1",
+          $selected_presenter_id
+        ),
         ARRAY_A
       );
 
       if (!$presenter || empty($presenter['email']) || !is_email($presenter['email'])) {
-        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=invalid_presenter'));
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=unapproved_presenter'));
         exit;
       }
 
@@ -14101,6 +14334,19 @@ public function handle_marketing_resubscribe() {
       }
     }
 
+    $initial_submission_payload = array();
+
+    if (
+      $force_profile_update
+      && $existing_target_id > 0
+      && in_array($request_type, array('instructor_profile', 'presenter_profile'), true)
+    ) {
+      $initial_submission_payload = $this->mrm_profile_card_existing_profile_submission_payload(
+        $request_type,
+        $existing_target_id
+      );
+    }
+
     $now = current_time('mysql');
 
     $inserted = $wpdb->insert(
@@ -14113,7 +14359,7 @@ public function handle_marketing_resubscribe() {
         'token_hash' => $this->mrm_profile_card_hash_token($token),
         'token_expires_at' => gmdate('Y-m-d H:i:s', time() + ($days * DAY_IN_SECONDS)),
         'admin_payload' => $this->mrm_profile_card_encode_json($admin_payload),
-        'submission_payload' => $this->mrm_profile_card_encode_json(array()),
+        'submission_payload' => $this->mrm_profile_card_encode_json($initial_submission_payload),
         'review_notes' => $this->mrm_profile_card_encode_json(array()),
         'uploaded_files' => $this->mrm_profile_card_encode_json(array()),
         'sent_at' => $now,
@@ -14734,6 +14980,18 @@ public function handle_marketing_resubscribe() {
     }
 
     if ($do === 'approve') {
+      $request_type_for_approval = sanitize_key((string)($request['request_type'] ?? ''));
+
+      if (
+        in_array($request_type_for_approval, array('instructor_profile', 'presenter_profile'), true)
+        && empty($_POST['docusign_verified'])
+      ) {
+        wp_safe_redirect(
+          admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_admin_docusign_verification')
+        );
+        exit;
+      }
+
       $result = $this->mrm_profile_card_approve_request($request);
 
       if (is_wp_error($result)) {
