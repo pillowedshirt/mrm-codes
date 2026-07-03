@@ -1374,7 +1374,7 @@ private function get_settings() {
     $opts = get_option(self::OPT_SETTINGS, array());
     $opts = is_array($opts) ? $opts : array();
 
-    return wp_parse_args($opts, array(
+    $settings = wp_parse_args($opts, array(
       'one_time_sheet_music_composer_pct' => 0,
       'in_person_travel_amount_cents' => 500,
 
@@ -1397,10 +1397,23 @@ private function get_settings() {
       'payout_anchor_date' => '',
       'composer_connected_account_id' => '',
       'test_composer_connected_account_id' => '',
-      'background_check_docusign_url' => '',
+      'background_check_docusign_url' => 'https://www.docusign.com/',
+      'background_check_standard_docusign_url' => 'https://www.docusign.com/',
+      'background_check_california_docusign_url' => 'https://www.docusign.com/',
+      'instructor_agreement_w9_docusign_url' => 'https://www.docusign.com/',
+      'presenter_agreement_w9_docusign_url' => 'https://www.docusign.com/',
       'owner_payout_summary_email' => get_option('admin_email', ''),
       'composer_payout_summary_email' => '',
     ));
+
+    if (
+      !array_key_exists('background_check_standard_docusign_url', $opts) &&
+      !empty($opts['background_check_docusign_url'])
+    ) {
+      $settings['background_check_standard_docusign_url'] = $opts['background_check_docusign_url'];
+    }
+
+    return $settings;
   }
 
   private function save_settings($opts) {
@@ -13654,7 +13667,27 @@ public function handle_marketing_resubscribe() {
     }
 
     $settings = $this->get_settings();
-    $background_check_docusign_url = esc_url((string)($settings['background_check_docusign_url'] ?? ''));
+
+    $background_check_standard_docusign_url = esc_url((string)(
+      $settings['background_check_standard_docusign_url']
+      ?? $settings['background_check_docusign_url']
+      ?? 'https://www.docusign.com/'
+    ));
+
+    $background_check_california_docusign_url = esc_url((string)(
+      $settings['background_check_california_docusign_url']
+      ?? 'https://www.docusign.com/'
+    ));
+
+    $instructor_agreement_w9_docusign_url = esc_url((string)(
+      $settings['instructor_agreement_w9_docusign_url']
+      ?? 'https://www.docusign.com/'
+    ));
+
+    $presenter_agreement_w9_docusign_url = esc_url((string)(
+      $settings['presenter_agreement_w9_docusign_url']
+      ?? 'https://www.docusign.com/'
+    ));
     ?>
     <div class="wrap"><h1>Profile Card Creation</h1>
       <p class="description">Send private onboarding links to instructors and presenters. Submitted requests appear below for review before anything is created in Scheduler or Masterclass settings.</p>
@@ -13736,10 +13769,34 @@ public function handle_marketing_resubscribe() {
 
         <table class="form-table">
           <tr>
-            <th scope="row"><label for="background_check_docusign_url">Background Check DocuSign Link</label></th>
+            <th scope="row"><label for="background_check_standard_docusign_url">Standard Background Check DocuSign Link</label></th>
             <td>
-              <input type="url" id="background_check_docusign_url" name="background_check_docusign_url" value="<?php echo $background_check_docusign_url; ?>" class="regular-text" placeholder="https://..." />
-              <p class="description">This link appears when an instructor says they do not already have a valid fingerprint clearance for their state.</p>
+              <input type="url" id="background_check_standard_docusign_url" name="background_check_standard_docusign_url" value="<?php echo $background_check_standard_docusign_url; ?>" class="regular-text" placeholder="https://www.docusign.com/" />
+              <p class="description">Shown to instructors outside California when they do not already have valid fingerprint clearance.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="background_check_california_docusign_url">California Background Check DocuSign Link</label></th>
+            <td>
+              <input type="url" id="background_check_california_docusign_url" name="background_check_california_docusign_url" value="<?php echo $background_check_california_docusign_url; ?>" class="regular-text" placeholder="https://www.docusign.com/" />
+              <p class="description">Shown to California instructors when they do not already have valid fingerprint clearance.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="instructor_agreement_w9_docusign_url">Instructor Agreement + W-9 DocuSign Link</label></th>
+            <td>
+              <input type="url" id="instructor_agreement_w9_docusign_url" name="instructor_agreement_w9_docusign_url" value="<?php echo $instructor_agreement_w9_docusign_url; ?>" class="regular-text" placeholder="https://www.docusign.com/" />
+              <p class="description">Shown on Instructor Profile Card requests before the instructor confirms they completed the agreement and W-9.</p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row"><label for="presenter_agreement_w9_docusign_url">Presenter Agreement + W-9 DocuSign Link</label></th>
+            <td>
+              <input type="url" id="presenter_agreement_w9_docusign_url" name="presenter_agreement_w9_docusign_url" value="<?php echo $presenter_agreement_w9_docusign_url; ?>" class="regular-text" placeholder="https://www.docusign.com/" />
+              <p class="description">Shown on Presenter Profile Card requests before the presenter confirms they completed the agreement and W-9.</p>
             </td>
           </tr>
         </table>
@@ -14237,7 +14294,18 @@ public function handle_marketing_resubscribe() {
           <?php if ($request_type === 'instructor_profile') : ?>
             <?php
               $settings = $this->get_settings();
-              $background_check_docusign_url = trim((string)($settings['background_check_docusign_url'] ?? ''));
+
+              $background_check_standard_docusign_url = trim((string)(
+                $settings['background_check_standard_docusign_url']
+                ?? $settings['background_check_docusign_url']
+                ?? 'https://www.docusign.com/'
+              ));
+
+              $background_check_california_docusign_url = trim((string)(
+                $settings['background_check_california_docusign_url']
+                ?? 'https://www.docusign.com/'
+              ));
+
               $fingerprint_status = sanitize_key((string)($submission['fingerprint_clearance_status'] ?? ''));
             ?>
             <div class="mrm-check-section" id="mrm-fingerprint-clearance-section">
@@ -14245,10 +14313,31 @@ public function handle_marketing_resubscribe() {
               <p class="mrm-field-help">Do you have a valid fingerprint clearance for your state?</p>
               <div class="mrm-check-grid"><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="yes" required <?php checked($fingerprint_status, 'yes'); ?>><span>Yes — I have a valid fingerprint clearance for my state.</span></label><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="no" required <?php checked($fingerprint_status, 'no'); ?>><span>No — I need to complete the background-check documents.</span></label></div>
               <div class="mrm-conditional-panel" data-fingerprint-panel="yes"><label>Fingerprint Clearance Proof *</label><p class="mrm-field-help">Upload a clear photo or PDF of your current fingerprint clearance card/document.</p><input type="file" name="fingerprint_card" accept="image/*,.pdf" data-has-existing-file="<?php echo !empty($submission['fingerprint_card_file']) ? '1' : '0'; ?>"><?php if (!empty($submission['fingerprint_card_name'])) : ?><p class="mrm-field-help">Current file on record: <?php echo esc_html($submission['fingerprint_card_name']); ?>. Upload a new file only if you want to replace it.</p><?php endif; ?></div>
-              <div class="mrm-conditional-panel" data-fingerprint-panel="no"><p class="mrm-field-help">Please complete the required background-check authorization documents before approval.</p><?php if ($background_check_docusign_url !== '') : ?><p><a href="<?php echo esc_url($background_check_docusign_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open Background Check Documents</a></p><?php else : ?><p class="mrm-field-help"><strong>Background-check document link has not been configured yet.</strong> Low Brass Lessons will send the document link separately.</p><?php endif; ?><label class="mrm-ack-row"><input type="checkbox" name="background_check_docusign_ack" value="1" <?php checked(!empty($submission['background_check_docusign_ack'])); ?>><span>I understand that Low Brass Lessons requires background-check documentation before my instructor profile can be approved.</span></label></div>
+              <div class="mrm-conditional-panel" data-fingerprint-panel="no">
+                <p class="mrm-field-help">Please complete the required background-check authorization documents before approval. The correct form will display based on the state selected above.</p>
+                <div class="mrm-background-check-link mrm-background-check-link-standard" data-background-check-link="standard"><p><a href="<?php echo esc_url($background_check_standard_docusign_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open Standard Background Check Documents</a></p></div>
+                <div class="mrm-background-check-link mrm-background-check-link-california" data-background-check-link="california"><p><a href="<?php echo esc_url($background_check_california_docusign_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open California Background Check Documents</a></p></div>
+                <p class="mrm-field-help" id="mrm-background-check-state-note"></p>
+                <label class="mrm-ack-row"><input type="checkbox" name="background_check_docusign_ack" value="1" <?php checked(!empty($submission['background_check_docusign_ack'])); ?>><span>I understand that Low Brass Lessons requires background-check documentation before my instructor profile can be approved.</span></label>
+              </div>
             </div>
           <?php endif; ?>
-          <label class="mrm-ack-row"><input type="checkbox" name="docusign_completed" value="1" required <?php checked(!empty($submission['docusign_completed'])); ?>><span>I confirm that I have completed the required DocuSign agreement and W-9 process.</span></label><label class="mrm-ack-row"><input type="checkbox" name="stripe_onboarding_completed" value="1" required <?php checked(!empty($submission['stripe_onboarding_completed'])); ?>><span>I confirm that I have completed the required Stripe account linking/onboarding step provided by Low Brass Lessons.</span></label>
+          <?php
+            $settings = $this->get_settings();
+
+            $agreement_w9_url = '';
+            $agreement_w9_label = 'Open Agreement and W-9 Documents';
+
+            if ($request_type === 'instructor_profile') {
+              $agreement_w9_url = trim((string)($settings['instructor_agreement_w9_docusign_url'] ?? 'https://www.docusign.com/'));
+              $agreement_w9_label = 'Open Instructor Agreement and W-9';
+            } elseif ($request_type === 'presenter_profile') {
+              $agreement_w9_url = trim((string)($settings['presenter_agreement_w9_docusign_url'] ?? 'https://www.docusign.com/'));
+              $agreement_w9_label = 'Open Presenter Agreement and W-9';
+            }
+          ?>
+          <div class="mrm-check-section"><h3>Agreement and W-9</h3><p class="mrm-field-help">Please complete the required DocuSign agreement and W-9 package before submitting this profile card.</p><?php if ($agreement_w9_url !== '') : ?><p><a href="<?php echo esc_url($agreement_w9_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;"><?php echo esc_html($agreement_w9_label); ?></a></p><?php else : ?><p class="mrm-field-help"><strong>Agreement/W-9 DocuSign link has not been configured yet.</strong> Low Brass Lessons will send the document link separately.</p><?php endif; ?><label class="mrm-ack-row"><input type="checkbox" name="docusign_completed" value="1" required <?php checked(!empty($submission['docusign_completed'])); ?>><span>I confirm that I have completed the required DocuSign agreement and W-9 process.</span></label></div>
+          <label class="mrm-ack-row"><input type="checkbox" name="stripe_onboarding_completed" value="1" required <?php checked(!empty($submission['stripe_onboarding_completed'])); ?>><span>I confirm that I have completed the required Stripe account linking/onboarding step provided by Low Brass Lessons.</span></label>
           <?php if ($request_type === 'instructor_profile') : ?><?php echo $this->mrm_profile_card_render_instructor_pay_chart_html(); ?><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the instructor payout chart shown above.</span></label><?php endif; ?>
         <?php endif; ?>
         <p style="margin-top:24px;"><button type="submit">Submit Your Request</button></p>
@@ -14268,9 +14357,25 @@ public function handle_marketing_resubscribe() {
       var panels = Array.prototype.slice.call(form.querySelectorAll('[data-fingerprint-panel]'));
       var fingerprintFile = form.querySelector('[name="fingerprint_card"]');
       var backgroundAck = form.querySelector('[name="background_check_docusign_ack"]');
+      var stateSelect = form.querySelector('[name="state"]');
+      var standardBgLink = form.querySelector('[data-background-check-link="standard"]');
+      var californiaBgLink = form.querySelector('[data-background-check-link="california"]');
+      var bgStateNote = form.querySelector('#mrm-background-check-state-note');
       function selectedClearanceStatus(){ var selected = clearanceRadios.find(function(radio){ return radio.checked; }); return selected ? selected.value : ''; }
-      function syncFingerprintPanels(){ var status = selectedClearanceStatus(); panels.forEach(function(panel){ var shouldShow = panel.getAttribute('data-fingerprint-panel') === status; panel.style.display = shouldShow ? 'block' : 'none'; }); if (fingerprintFile) { var hasExistingFingerprint = fingerprintFile.getAttribute('data-has-existing-file') === '1'; if (status === 'yes' && !hasExistingFingerprint) { fingerprintFile.setAttribute('required', 'required'); } else { fingerprintFile.removeAttribute('required'); } } if (backgroundAck) { if (status === 'no') { backgroundAck.setAttribute('required', 'required'); } else { backgroundAck.removeAttribute('required'); } } }
+      function syncFingerprintPanels(){
+        var status = selectedClearanceStatus();
+        var selectedState = stateSelect ? String(stateSelect.value || '').toUpperCase() : '';
+        var useCalifornia = selectedState === 'CA';
+        panels.forEach(function(panel){ var shouldShow = panel.getAttribute('data-fingerprint-panel') === status; panel.style.display = shouldShow ? 'block' : 'none'; });
+        if (fingerprintFile) { var hasExistingFingerprint = fingerprintFile.getAttribute('data-has-existing-file') === '1'; if (status === 'yes' && !hasExistingFingerprint) { fingerprintFile.setAttribute('required', 'required'); } else { fingerprintFile.removeAttribute('required'); } }
+        if (backgroundAck) { if (status === 'no') { backgroundAck.setAttribute('required', 'required'); } else { backgroundAck.removeAttribute('required'); } }
+        if (standardBgLink && californiaBgLink) { standardBgLink.style.display = (!useCalifornia && status === 'no') ? 'block' : 'none'; californiaBgLink.style.display = (useCalifornia && status === 'no') ? 'block' : 'none'; }
+        if (bgStateNote) { if (status !== 'no') { bgStateNote.textContent = ''; } else if (useCalifornia) { bgStateNote.textContent = 'Because California is selected, please use the California background-check document package.'; } else if (selectedState) { bgStateNote.textContent = 'Because your selected state is not California, please use the standard background-check document package.'; } else { bgStateNote.textContent = 'Please select your state above so the correct background-check document package can be shown.'; } }
+      }
       clearanceRadios.forEach(function(radio){ radio.addEventListener('change', syncFingerprintPanels); });
+      if (stateSelect) {
+        stateSelect.addEventListener('change', syncFingerprintPanels);
+      }
       form.addEventListener('submit', function(){ syncName(); syncFingerprintPanels(); });
       syncName();
       syncFingerprintPanels();
@@ -14372,6 +14477,16 @@ public function handle_marketing_resubscribe() {
           empty($payload['profile_image_url'])
         ) {
           wp_die('Please complete all required presenter profile fields.');
+        }
+      }
+
+      if (in_array($request_type, array('instructor_profile', 'presenter_profile'), true)) {
+        if (empty($payload['docusign_completed'])) {
+          wp_die('Please complete the required DocuSign agreement and W-9 process before submitting this profile card.');
+        }
+
+        if (empty($payload['stripe_onboarding_completed'])) {
+          wp_die('Please confirm that you completed the required Stripe account linking/onboarding step.');
         }
       }
 
@@ -16450,8 +16565,25 @@ public function handle_marketing_resubscribe() {
         $settings['composer_payout_summary_email'] = sanitize_email(wp_unslash($_POST['composer_payout_summary_email']));
       }
 
-      if (isset($_POST['background_check_docusign_url'])) {
-        $settings['background_check_docusign_url'] = esc_url_raw(wp_unslash($_POST['background_check_docusign_url']));
+      if (isset($_POST['background_check_standard_docusign_url'])) {
+        $settings['background_check_standard_docusign_url'] = esc_url_raw(wp_unslash($_POST['background_check_standard_docusign_url']));
+
+        /*
+         * Keep the old setting populated as a fallback for older code paths.
+         */
+        $settings['background_check_docusign_url'] = $settings['background_check_standard_docusign_url'];
+      }
+
+      if (isset($_POST['background_check_california_docusign_url'])) {
+        $settings['background_check_california_docusign_url'] = esc_url_raw(wp_unslash($_POST['background_check_california_docusign_url']));
+      }
+
+      if (isset($_POST['instructor_agreement_w9_docusign_url'])) {
+        $settings['instructor_agreement_w9_docusign_url'] = esc_url_raw(wp_unslash($_POST['instructor_agreement_w9_docusign_url']));
+      }
+
+      if (isset($_POST['presenter_agreement_w9_docusign_url'])) {
+        $settings['presenter_agreement_w9_docusign_url'] = esc_url_raw(wp_unslash($_POST['presenter_agreement_w9_docusign_url']));
       }
 
       if (isset($_POST['owner_payout_summary_email'])) {
