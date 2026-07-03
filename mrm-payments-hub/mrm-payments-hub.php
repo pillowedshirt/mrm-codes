@@ -55,6 +55,7 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_marketing_email_send', array($this, 'handle_marketing_email_send'));
     add_action('admin_post_mrm_pay_hub_send_email_tests', array($this, 'handle_email_testing_send'));
     add_action('admin_post_mrm_pay_hub_preview_email_tests', array($this, 'handle_email_testing_preview'));
+    add_action('admin_post_mrm_pay_hub_send_stripe_connect_email', array($this, 'handle_stripe_connect_email_send'));
     add_action('admin_post_mrm_marketing_resubscribe', array($this, 'handle_marketing_resubscribe'));
     add_action('admin_post_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
@@ -12528,6 +12529,165 @@ public function handle_marketing_resubscribe() {
 
 
 
+
+  public function render_stripe_connect_email_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die(esc_html('Not allowed.'));
+    }
+
+    $sent  = !empty($_GET['mrm_stripe_connect_email_sent']);
+    $error = isset($_GET['mrm_stripe_connect_email_error'])
+      ? sanitize_text_field(wp_unslash($_GET['mrm_stripe_connect_email_error']))
+      : '';
+
+    ?>
+    <div class="wrap">
+      <h1>Stripe Connect Email</h1>
+
+      <p>
+        Use this page to send a secure Stripe connected account setup link to an approved instructor, presenter, composer, or other payout recipient.
+      </p>
+
+      <?php if ($sent) : ?>
+        <div class="notice notice-success is-dismissible">
+          <p>Stripe Connect setup email sent successfully.</p>
+        </div>
+      <?php endif; ?>
+
+      <?php if ($error !== '') : ?>
+        <div class="notice notice-error is-dismissible">
+          <p><?php echo esc_html($error); ?></p>
+        </div>
+      <?php endif; ?>
+
+      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="max-width:900px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin-top:18px;">
+        <?php wp_nonce_field('mrm_pay_hub_stripe_connect_email', 'mrm_pay_hub_stripe_connect_email_nonce'); ?>
+        <input type="hidden" name="action" value="mrm_pay_hub_send_stripe_connect_email">
+
+        <h2>Send Stripe Connected Account Setup Link</h2>
+
+        <p class="description">
+          Paste the recipient email address and the Stripe connected account setup link generated for that recipient.
+          The email will use the same Low Brass Lessons branded email layout as the rest of the site.
+        </p>
+
+        <table class="form-table" role="presentation">
+          <tr>
+            <th scope="row">
+              <label for="mrm_stripe_connect_recipient_email">Recipient Email</label>
+            </th>
+            <td>
+              <input
+                type="email"
+                id="mrm_stripe_connect_recipient_email"
+                name="recipient_email"
+                class="regular-text"
+                required
+                placeholder="recipient@example.com"
+              >
+              <p class="description">
+                Enter the email address of the person who needs to complete their Stripe connected account setup.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <th scope="row">
+              <label for="mrm_stripe_connect_account_link">Stripe Connected Account Link</label>
+            </th>
+            <td>
+              <input
+                type="url"
+                id="mrm_stripe_connect_account_link"
+                name="stripe_connect_account_link"
+                class="large-text"
+                required
+                placeholder="https://connect.stripe.com/setup/..."
+              >
+              <p class="description">
+                Paste the secure Stripe account setup link for this specific recipient.
+              </p>
+            </td>
+          </tr>
+        </table>
+
+        <p class="submit">
+          <button type="submit" class="button button-primary">Send Stripe Connect Email</button>
+        </p>
+      </form>
+    </div>
+    <?php
+  }
+
+  public function handle_stripe_connect_email_send() {
+    if (!current_user_can('manage_options')) {
+      wp_die(esc_html('Not allowed.'));
+    }
+
+    check_admin_referer('mrm_pay_hub_stripe_connect_email', 'mrm_pay_hub_stripe_connect_email_nonce');
+
+    $recipient_email = sanitize_email(wp_unslash($_POST['recipient_email'] ?? ''));
+    $account_link    = esc_url_raw(wp_unslash($_POST['stripe_connect_account_link'] ?? ''));
+
+    if (!is_email($recipient_email)) {
+      wp_safe_redirect(add_query_arg(array(
+        'page' => 'mrm-pay-hub-stripe-connect-email',
+        'mrm_stripe_connect_email_error' => rawurlencode('Please enter a valid recipient email address.'),
+      ), admin_url('admin.php')));
+      exit;
+    }
+
+    if ($account_link === '' || !wp_http_validate_url($account_link)) {
+      wp_safe_redirect(add_query_arg(array(
+        'page' => 'mrm-pay-hub-stripe-connect-email',
+        'mrm_stripe_connect_email_error' => rawurlencode('Please enter a valid Stripe connected account setup link.'),
+      ), admin_url('admin.php')));
+      exit;
+    }
+
+    $subject = 'Request to Set Up Your Payment Information';
+
+    $title = 'Set Up Your Payment Information';
+
+    $intro = '<p>Stripe is how Low Brass Lessons processes payments for instructors, presenters, composers, and other approved payees.</p>';
+
+    $details = ''
+      . '<p>This request is for you to complete the additional information required for your connected Stripe account so that you can receive payments through Low Brass Lessons.</p>'
+      . '<p>Please use the secure button below to continue your Stripe account setup. Your payout setup will not be considered complete until Stripe has received and approved the required information.</p>';
+
+    $after_cta = '<p style="margin-top:18px;text-align:center;font-size:13px;color:#666;">If you were not expecting this request, please contact Low Brass Lessons before completing the setup.</p>';
+
+    $html = $this->mrm_email_wrap_html(
+      $title,
+      $intro,
+      $details,
+      $account_link,
+      'Set Up Your Account',
+      $after_cta
+    );
+
+    $headers = array(
+      'Content-Type: text/html; charset=UTF-8',
+      'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+    );
+
+    $sent = wp_mail($recipient_email, $subject, $html, $headers);
+
+    if (!$sent) {
+      wp_safe_redirect(add_query_arg(array(
+        'page' => 'mrm-pay-hub-stripe-connect-email',
+        'mrm_stripe_connect_email_error' => rawurlencode('The Stripe Connect setup email could not be sent. Please check your mail configuration and try again.'),
+      ), admin_url('admin.php')));
+      exit;
+    }
+
+    wp_safe_redirect(add_query_arg(array(
+      'page' => 'mrm-pay-hub-stripe-connect-email',
+      'mrm_stripe_connect_email_sent' => '1',
+    ), admin_url('admin.php')));
+    exit;
+  }
+
   private function mrm_email_testing_catalog() {
     return array(
       'payment_method_attention_student' => array('label' => 'Update payment information — student', 'description' => 'Sent when an AutoPay student needs to update payment information before a renewing lesson.', 'plugin' => 'payments'),
@@ -16519,6 +16679,15 @@ public function handle_marketing_resubscribe() {
       'manage_options',
       'mrm-pay-hub-email-testing',
       array($this, 'render_email_testing_page')
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Stripe Connect Email',
+      'Stripe Connect Email',
+      'manage_options',
+      'mrm-pay-hub-stripe-connect-email',
+      array($this, 'render_stripe_connect_email_page')
     );
 
     add_submenu_page(
