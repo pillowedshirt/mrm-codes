@@ -13603,7 +13603,7 @@ public function handle_marketing_resubscribe() {
       $title = 'Presenter Profile Card';
       $subject = 'Low Brass Lessons presenter profile card';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Presenter Profile Card</strong>.</p>';
-      $details = '<p>This form collects the information needed to build your presenter profile, including your public-facing name, presenter title, biography, and profile photo. Please fill it out in its entirety and we will let you know if we need any revisions.</p>';
+      $details = '<p>This form collects the information needed to build your presenter profile, including your public-facing name, presenter title, biography, and profile photo. After your profile information is submitted, please keep an eye on your email for the forms and agreements needed to complete onboarding.</p>';
       $details .= '<div><strong>Request type:</strong> Presenter Profile Card</div>';
     } elseif ($request_type === 'presenter_event') {
       $title = 'Masterclass Event Submission';
@@ -13623,7 +13623,7 @@ public function handle_marketing_resubscribe() {
       $title = 'Instructor Profile Card';
       $subject = 'Low Brass Lessons instructor profile card';
       $intro = '<p>Hello,</p><p>Low Brass Lessons has invited you to complete your <strong>Instructor Profile Card</strong>.</p>';
-      $details = '<p>This form collects the information needed to build your instructor profile, including your public-facing name, teaching title, biography, profile photo, and recurring lesson availability. Please fill it out in its entirety and we will let you know if we need any revisions.</p>';
+      $details = '<p>This form collects the information needed to build your instructor profile, including your public-facing name, teaching title, biography, profile photo, and recurring lesson availability. After your profile information is submitted, please keep an eye on your email for the forms and agreements needed to complete onboarding.</p>';
       $details .= '<div><strong>Request type:</strong> Instructor Profile Card</div>';
     }
 
@@ -13971,49 +13971,18 @@ public function handle_marketing_resubscribe() {
           <p>Profile Card Creation request deleted. The private link has been disabled.</p>
         </div>
       <?php endif; ?>
-      <form method="post" style="max-width:960px;background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:18px;margin:18px 0;">
-        <?php wp_nonce_field('mrm_pay_hub_save', 'mrm_pay_hub_nonce'); ?>
-
-        <h2>Onboarding / Background Check Settings</h2>
-
-        <table class="form-table">
-          <tr>
-            <th scope="row"><label for="background_check_standard_docusign_url">Standard Background Check DocuSign Link</label></th>
-            <td>
-              <input type="url" id="background_check_standard_docusign_url" name="background_check_standard_docusign_url" value="<?php echo $background_check_standard_docusign_url; ?>" class="regular-text" placeholder="https://www.docusign.com/" />
-              <p class="description">Shown to instructors outside California when they do not already have valid fingerprint clearance.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="background_check_california_docusign_url">California Background Check DocuSign Link</label></th>
-            <td>
-              <input type="url" id="background_check_california_docusign_url" name="background_check_california_docusign_url" value="<?php echo $background_check_california_docusign_url; ?>" class="regular-text" placeholder="https://www.docusign.com/" />
-              <p class="description">Shown to California instructors when they do not already have valid fingerprint clearance.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="instructor_agreement_w9_docusign_url">Instructor Agreement + W-9 DocuSign Link</label></th>
-            <td>
-              <input type="url" id="instructor_agreement_w9_docusign_url" name="instructor_agreement_w9_docusign_url" value="<?php echo $instructor_agreement_w9_docusign_url; ?>" class="regular-text" placeholder="https://www.docusign.com/" />
-              <p class="description">Shown on Instructor Profile Card requests before the instructor confirms they completed the agreement and W-9.</p>
-            </td>
-          </tr>
-
-          <tr>
-            <th scope="row"><label for="presenter_agreement_w9_docusign_url">Presenter Agreement + W-9 DocuSign Link</label></th>
-            <td>
-              <input type="url" id="presenter_agreement_w9_docusign_url" name="presenter_agreement_w9_docusign_url" value="<?php echo $presenter_agreement_w9_docusign_url; ?>" class="regular-text" placeholder="https://www.docusign.com/" />
-              <p class="description">Shown on Presenter Profile Card requests before the presenter confirms they completed the agreement and W-9.</p>
-            </td>
-          </tr>
-        </table>
-
-        <p class="submit">
-          <button type="submit" class="button button-primary">Save Background Check Settings</button>
+      <div style="max-width:960px;background:#fff;border:1px solid #dcdcde;border-radius:12px;padding:18px;margin:18px 0;">
+        <h2>Manual Agreement Workflow</h2>
+        <p>
+          Profile-card request forms now collect the approved instructor or presenter’s profile information first.
+          After the profile form is submitted, manually send the correct DocuSign agreement, W-9, Stripe payout setup,
+          and background-check documents if required.
         </p>
-      </form>
+        <p class="description">
+          The submitted request will remain in this review list until Low Brass Lessons verifies the required onboarding documents
+          and approves the profile.
+        </p>
+      </div>
 
       <hr>
       <h2>Create New Request</h2>
@@ -14037,12 +14006,12 @@ public function handle_marketing_resubscribe() {
 
           <tr class="mrm-profile-request-panel" data-show-for="instructor_profile">
             <th scope="row">Instructor Profile Request</th>
-            <td><div style="background:#f6f1e7;border:1px solid #d9cfbe;border-radius:12px;padding:14px;"><p style="margin-top:0;"><strong>Use this when:</strong> you need a new instructor to complete their public instructor profile, lesson availability, fingerprint clearance/background-check step, DocuSign/W-9 confirmation, Stripe onboarding confirmation, and instructor payout acknowledgement.</p></div></td>
+            <td><div style="background:#f6f1e7;border:1px solid #d9cfbe;border-radius:12px;padding:14px;"><p style="margin-top:0;"><strong>Use this when:</strong> you need an approved instructor to submit their public instructor profile information, recurring lesson availability, fingerprint-clearance status, profile photo, and instructor payout acknowledgement. After the profile form is submitted, Low Brass Lessons will manually send the required agreement, W-9, Stripe payout setup, and background-check documents if needed.</p></div></td>
           </tr>
 
           <tr class="mrm-profile-request-panel" data-show-for="presenter_profile">
             <th scope="row">Presenter Profile Request</th>
-            <td><div style="background:#f6f1e7;border:1px solid #d9cfbe;border-radius:12px;padding:14px;"><p style="margin-top:0;"><strong>Use this when:</strong> you need a presenter to complete their public presenter profile, biography, title, profile photo, DocuSign/W-9 confirmation, and Stripe onboarding confirmation.</p></div></td>
+            <td><div style="background:#f6f1e7;border:1px solid #d9cfbe;border-radius:12px;padding:14px;"><p style="margin-top:0;"><strong>Use this when:</strong> you need an approved presenter to submit their public presenter profile information, biography, title, and profile photo. After the profile form is submitted, Low Brass Lessons will manually send the required presenter agreement, W-9, and Stripe payout setup.</p></div></td>
           </tr>
 
           <tr class="mrm-profile-request-panel" data-show-for="presenter_event">
@@ -14051,8 +14020,29 @@ public function handle_marketing_resubscribe() {
           </tr>
 
           <tr class="mrm-profile-request-row" data-show-for="instructor_profile presenter_profile">
-            <th scope="row"><label for="recipient_email">Recipient Email</label></th>
-            <td><input type="email" id="recipient_email" name="recipient_email" class="regular-text"><p class="description">Used for Instructor Profile Card and Presenter Profile Card requests.</p></td>
+            <th scope="row">Recipient</th>
+            <td>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:720px;">
+                <div>
+                  <label for="recipient_first_name" style="font-weight:600;">First Name</label>
+                  <input type="text" id="recipient_first_name" name="recipient_first_name" class="regular-text">
+                </div>
+
+                <div>
+                  <label for="recipient_last_name" style="font-weight:600;">Last Name</label>
+                  <input type="text" id="recipient_last_name" name="recipient_last_name" class="regular-text">
+                </div>
+
+                <div style="grid-column:1 / -1;">
+                  <label for="recipient_email" style="font-weight:600;">Email</label>
+                  <input type="email" id="recipient_email" name="recipient_email" class="regular-text">
+                </div>
+              </div>
+
+              <p class="description">
+                Used for the private profile-card request and for manually sending the correct DocuSign agreement, W-9, Stripe onboarding, and background-check documents after the profile form is submitted.
+              </p>
+            </td>
           </tr>
 
           <tr class="mrm-profile-request-row" data-show-for="instructor_profile">
@@ -14101,8 +14091,23 @@ public function handle_marketing_resubscribe() {
               field.disabled = !shouldShow;
               var name = fieldName(field);
               if (!shouldShow) { field.removeAttribute('required'); return; }
-              if (selectedType === 'instructor_profile' && (name === 'recipient_email' || name === 'instructor_calendar_url')) { field.setAttribute('required', 'required'); }
-              if (selectedType === 'presenter_profile' && name === 'recipient_email') { field.setAttribute('required', 'required'); }
+              if (
+                selectedType === 'instructor_profile' &&
+                (
+                  name === 'recipient_first_name' ||
+                  name === 'recipient_last_name' ||
+                  name === 'recipient_email' ||
+                  name === 'instructor_calendar_url'
+                )
+              ) { field.setAttribute('required', 'required'); }
+              if (
+                selectedType === 'presenter_profile' &&
+                (
+                  name === 'recipient_first_name' ||
+                  name === 'recipient_last_name' ||
+                  name === 'recipient_email'
+                )
+              ) { field.setAttribute('required', 'required'); }
               if (selectedType === 'presenter_event' && (name === 'presenter_id' || name === 'masterclass_piece_sku' || name === 'event_start_time' || name === 'event_end_time' || name === 'event_price' || name === 'presenter_payout')) { field.setAttribute('required', 'required'); }
             });
           });
@@ -14186,7 +14191,7 @@ public function handle_marketing_resubscribe() {
             <?php endforeach; ?>
           </ul>
         <?php endif; ?>
-        <h3>Admin Approval Fields</h3><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_profile_card_admin_action', 'mrm_profile_card_admin_nonce'); ?><input type="hidden" name="action" value="mrm_profile_card_admin_action"><input type="hidden" name="request_id" value="<?php echo esc_attr($request['id']); ?>"><p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified the required DocuSign agreement and W-9 are complete. Required before approving Instructor and Presenter Profile Cards.</label></p><p><label>Approval note / internal note</label><br><textarea name="admin_review_note" rows="4" class="large-text"></textarea></p><p><label>Change request note to recipient</label><br><textarea name="change_request_note" rows="4" class="large-text" placeholder="Write what you want them to change. This will be emailed if you click Request Changes."></textarea></p><p><button type="submit" name="mrm_profile_card_do" value="approve" class="button button-primary">Approve and Create / Update</button> <button type="submit" name="mrm_profile_card_do" value="changes" class="button">Request Changes</button> <button type="submit" name="mrm_profile_card_do" value="delete" class="button" onclick="return confirm('Delete this request? The private link will stop working and this request will be removed from the active review list.');">Delete This Request</button></p></form></div></details></td></tr>
+        <h3>Admin Approval Fields</h3><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_profile_card_admin_action', 'mrm_profile_card_admin_nonce'); ?><input type="hidden" name="action" value="mrm_profile_card_admin_action"><input type="hidden" name="request_id" value="<?php echo esc_attr($request['id']); ?>"><p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified the required onboarding documents are complete, including the DocuSign agreement, W-9, Stripe payout setup, and background-check documents if required. Required before approving Instructor and Presenter Profile Cards.</label></p><p><label>Approval note / internal note</label><br><textarea name="admin_review_note" rows="4" class="large-text"></textarea></p><p><label>Change request note to recipient</label><br><textarea name="change_request_note" rows="4" class="large-text" placeholder="Write what you want them to change. This will be emailed if you click Request Changes."></textarea></p><p><button type="submit" name="mrm_profile_card_do" value="approve" class="button button-primary">Approve and Create / Update</button> <button type="submit" name="mrm_profile_card_do" value="changes" class="button">Request Changes</button> <button type="submit" name="mrm_profile_card_do" value="delete" class="button" onclick="return confirm('Delete this request? The private link will stop working and this request will be removed from the active review list.');">Delete This Request</button></p></form></div></details></td></tr>
       <?php endforeach; endif; ?></tbody></table></div><?php
   }
 
@@ -14210,7 +14215,12 @@ public function handle_marketing_resubscribe() {
 
     $recipient_email = '';
     $recipient_name = '';
+    $recipient_first_name = '';
+    $recipient_last_name = '';
     $selected_presenter_id = 0;
+
+    $force_profile_update = !empty($_POST['force_profile_update']);
+    $existing_target_id   = absint($_POST['existing_target_id'] ?? 0);
 
     if ($request_type === 'presenter_event') {
       $selected_presenter_id = absint($_POST['presenter_id'] ?? 0);
@@ -14249,22 +14259,34 @@ public function handle_marketing_resubscribe() {
       $recipient_email = sanitize_email($presenter['email']);
       $recipient_name = sanitize_text_field($presenter['name'] ?? '');
     } else {
-      $recipient_email = sanitize_email(wp_unslash($_POST['recipient_email'] ?? ''));
+      $recipient_first_name = sanitize_text_field(wp_unslash($_POST['recipient_first_name'] ?? ''));
+      $recipient_last_name  = sanitize_text_field(wp_unslash($_POST['recipient_last_name'] ?? ''));
+      $recipient_email      = sanitize_email(wp_unslash($_POST['recipient_email'] ?? ''));
 
-      if (!is_email($recipient_email)) {
+      if (
+        !is_email($recipient_email) ||
+        (
+          !$force_profile_update &&
+          (
+            trim($recipient_first_name) === '' ||
+            trim($recipient_last_name) === ''
+          )
+        )
+      ) {
         wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=invalid_recipient'));
         exit;
       }
 
-      $recipient_name = '';
+      $recipient_name = trim($recipient_first_name . ' ' . $recipient_last_name);
+
+      if ($recipient_name === '') {
+        $recipient_name = $recipient_email;
+      }
     }
 
     $token = $this->mrm_profile_card_new_token();
     $days = max(1, min(60, absint($_POST['token_days'] ?? 14)));
     $admin_note = sanitize_textarea_field(wp_unslash($_POST['admin_note'] ?? ''));
-
-    $force_profile_update = !empty($_POST['force_profile_update']);
-    $existing_target_id   = absint($_POST['existing_target_id'] ?? 0);
 
     if (!$force_profile_update && $request_type === 'instructor_profile') {
       $existing = $this->mrm_profile_card_existing_instructor_by_email($recipient_email);
@@ -14344,6 +14366,13 @@ public function handle_marketing_resubscribe() {
       $initial_submission_payload = $this->mrm_profile_card_existing_profile_submission_payload(
         $request_type,
         $existing_target_id
+      );
+    } elseif (in_array($request_type, array('instructor_profile', 'presenter_profile'), true)) {
+      $initial_submission_payload = array(
+        'first_name' => $recipient_first_name,
+        'last_name'  => $recipient_last_name,
+        'name'       => $recipient_name,
+        'email'      => $recipient_email,
       );
     }
 
@@ -14597,19 +14626,6 @@ public function handle_marketing_resubscribe() {
           <?php if (!empty($submission['profile_image_url'])) : ?><p class="mrm-field-help">A profile image has already been uploaded. Upload a new image only if you want to replace it.</p><?php endif; ?>
           <?php if ($request_type === 'instructor_profile') : ?>
             <?php
-              $settings = $this->get_settings();
-
-              $background_check_standard_docusign_url = trim((string)(
-                $settings['background_check_standard_docusign_url']
-                ?? $settings['background_check_docusign_url']
-                ?? 'https://www.docusign.com/'
-              ));
-
-              $background_check_california_docusign_url = trim((string)(
-                $settings['background_check_california_docusign_url']
-                ?? 'https://www.docusign.com/'
-              ));
-
               $fingerprint_status = sanitize_key((string)($submission['fingerprint_clearance_status'] ?? ''));
             ?>
             <div class="mrm-check-section" id="mrm-fingerprint-clearance-section">
@@ -14618,30 +14634,28 @@ public function handle_marketing_resubscribe() {
               <div class="mrm-check-grid"><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="yes" required <?php checked($fingerprint_status, 'yes'); ?>><span>Yes — I have a valid fingerprint clearance for my state.</span></label><label class="mrm-check-row"><input type="radio" name="fingerprint_clearance_status" value="no" required <?php checked($fingerprint_status, 'no'); ?>><span>No — I need to complete the background-check documents.</span></label></div>
               <div class="mrm-conditional-panel" data-fingerprint-panel="yes"><label>Fingerprint Clearance Proof *</label><p class="mrm-field-help">Upload a clear photo or PDF of your current fingerprint clearance card/document.</p><input type="file" name="fingerprint_card" accept="image/*,.pdf" data-has-existing-file="<?php echo !empty($submission['fingerprint_card_file']) ? '1' : '0'; ?>"><?php if (!empty($submission['fingerprint_card_name'])) : ?><p class="mrm-field-help">Current file on record: <?php echo esc_html($submission['fingerprint_card_name']); ?>. Upload a new file only if you want to replace it.</p><?php endif; ?></div>
               <div class="mrm-conditional-panel" data-fingerprint-panel="no">
-                <p class="mrm-field-help">Please complete the required background-check authorization documents before approval. The correct form will display based on the state selected above.</p>
-                <div class="mrm-background-check-link mrm-background-check-link-standard" data-background-check-link="standard"><p><a href="<?php echo esc_url($background_check_standard_docusign_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open Standard Background Check Documents</a></p></div>
-                <div class="mrm-background-check-link mrm-background-check-link-california" data-background-check-link="california"><p><a href="<?php echo esc_url($background_check_california_docusign_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;">Open California Background Check Documents</a></p></div>
+                <p class="mrm-field-help">
+                  Low Brass Lessons will email the required background-check authorization documents after this profile information is received.
+                  Please keep an eye on your email. Your instructor profile will not be approved until the required background-check documents
+                  have been completed and reviewed.
+                </p>
                 <p class="mrm-field-help" id="mrm-background-check-state-note"></p>
-                <label class="mrm-ack-row"><input type="checkbox" name="background_check_docusign_ack" value="1" <?php checked(!empty($submission['background_check_docusign_ack'])); ?>><span>I understand that Low Brass Lessons requires background-check documentation before my instructor profile can be approved.</span></label>
               </div>
             </div>
           <?php endif; ?>
-          <?php
-            $settings = $this->get_settings();
-
-            $agreement_w9_url = '';
-            $agreement_w9_label = 'Open Agreement and W-9 Documents';
-
-            if ($request_type === 'instructor_profile') {
-              $agreement_w9_url = trim((string)($settings['instructor_agreement_w9_docusign_url'] ?? 'https://www.docusign.com/'));
-              $agreement_w9_label = 'Open Instructor Agreement and W-9';
-            } elseif ($request_type === 'presenter_profile') {
-              $agreement_w9_url = trim((string)($settings['presenter_agreement_w9_docusign_url'] ?? 'https://www.docusign.com/'));
-              $agreement_w9_label = 'Open Presenter Agreement and W-9';
-            }
-          ?>
-          <div class="mrm-check-section"><h3>Agreement and W-9</h3><p class="mrm-field-help">Please complete the required DocuSign agreement and W-9 package before submitting this profile card.</p><?php if ($agreement_w9_url !== '') : ?><p><a href="<?php echo esc_url($agreement_w9_url); ?>" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#171512;color:#fff;text-decoration:none;padding:12px 18px;font-weight:900;"><?php echo esc_html($agreement_w9_label); ?></a></p><?php else : ?><p class="mrm-field-help"><strong>Agreement/W-9 DocuSign link has not been configured yet.</strong> Low Brass Lessons will send the document link separately.</p><?php endif; ?><label class="mrm-ack-row"><input type="checkbox" name="docusign_completed" value="1" required <?php checked(!empty($submission['docusign_completed'])); ?>><span>I confirm that I have completed the required DocuSign agreement and W-9 process.</span></label></div>
-          <label class="mrm-ack-row"><input type="checkbox" name="stripe_onboarding_completed" value="1" required <?php checked(!empty($submission['stripe_onboarding_completed'])); ?>><span>I confirm that I have completed the required Stripe account linking/onboarding step provided by Low Brass Lessons.</span></label>
+          <div class="mrm-check-section">
+            <h3>Forms and Agreements</h3>
+            <p class="mrm-field-help">
+              After your profile information is submitted, Low Brass Lessons will email the required onboarding documents to the email address listed on this form.
+            </p>
+            <p class="mrm-field-help">
+              Please keep an eye on your inbox for the forms and agreements needed to complete onboarding. This may include your services agreement,
+              W-9, Stripe payout setup, and background-check authorization documents if required.
+            </p>
+            <p class="mrm-field-help">
+              Your profile will not be activated until the required documents have been completed and verified by Low Brass Lessons.
+            </p>
+          </div>
           <?php if ($request_type === 'instructor_profile') : ?><?php echo $this->mrm_profile_card_render_instructor_pay_chart_html(); ?><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the instructor payout chart shown above.</span></label><?php endif; ?>
         <?php endif; ?>
         <p style="margin-top:24px;"><button type="submit">Submit Your Request</button></p>
@@ -14651,36 +14665,77 @@ public function handle_marketing_resubscribe() {
     (function(){
       var form = document.querySelector('form');
       if (!form) return;
+
       var first = form.querySelector('[name="first_name"]');
       var last = form.querySelector('[name="last_name"]');
       var full = form.querySelector('[name="name"]');
-      function syncName(){ if (!full) return; var f = first ? first.value.trim() : ''; var l = last ? last.value.trim() : ''; full.value = (f + ' ' + l).trim(); }
+
+      function syncName(){
+        if (!full) return;
+        var f = first ? first.value.trim() : '';
+        var l = last ? last.value.trim() : '';
+        full.value = (f + ' ' + l).trim();
+      }
+
       if (first) first.addEventListener('input', syncName);
       if (last) last.addEventListener('input', syncName);
+
       var clearanceRadios = Array.prototype.slice.call(form.querySelectorAll('[name="fingerprint_clearance_status"]'));
       var panels = Array.prototype.slice.call(form.querySelectorAll('[data-fingerprint-panel]'));
       var fingerprintFile = form.querySelector('[name="fingerprint_card"]');
-      var backgroundAck = form.querySelector('[name="background_check_docusign_ack"]');
       var stateSelect = form.querySelector('[name="state"]');
-      var standardBgLink = form.querySelector('[data-background-check-link="standard"]');
-      var californiaBgLink = form.querySelector('[data-background-check-link="california"]');
       var bgStateNote = form.querySelector('#mrm-background-check-state-note');
-      function selectedClearanceStatus(){ var selected = clearanceRadios.find(function(radio){ return radio.checked; }); return selected ? selected.value : ''; }
+
+      function selectedClearanceStatus(){
+        var selected = clearanceRadios.find(function(radio){ return radio.checked; });
+        return selected ? selected.value : '';
+      }
+
       function syncFingerprintPanels(){
         var status = selectedClearanceStatus();
         var selectedState = stateSelect ? String(stateSelect.value || '').toUpperCase() : '';
-        var useCalifornia = selectedState === 'CA';
-        panels.forEach(function(panel){ var shouldShow = panel.getAttribute('data-fingerprint-panel') === status; panel.style.display = shouldShow ? 'block' : 'none'; });
-        if (fingerprintFile) { var hasExistingFingerprint = fingerprintFile.getAttribute('data-has-existing-file') === '1'; if (status === 'yes' && !hasExistingFingerprint) { fingerprintFile.setAttribute('required', 'required'); } else { fingerprintFile.removeAttribute('required'); } }
-        if (backgroundAck) { if (status === 'no') { backgroundAck.setAttribute('required', 'required'); } else { backgroundAck.removeAttribute('required'); } }
-        if (standardBgLink && californiaBgLink) { standardBgLink.style.display = (!useCalifornia && status === 'no') ? 'block' : 'none'; californiaBgLink.style.display = (useCalifornia && status === 'no') ? 'block' : 'none'; }
-        if (bgStateNote) { if (status !== 'no') { bgStateNote.textContent = ''; } else if (useCalifornia) { bgStateNote.textContent = 'Because California is selected, please use the California background-check document package.'; } else if (selectedState) { bgStateNote.textContent = 'Because your selected state is not California, please use the standard background-check document package.'; } else { bgStateNote.textContent = 'Please select your state above so the correct background-check document package can be shown.'; } }
+
+        panels.forEach(function(panel){
+          var shouldShow = panel.getAttribute('data-fingerprint-panel') === status;
+          panel.style.display = shouldShow ? 'block' : 'none';
+        });
+
+        if (fingerprintFile) {
+          var hasExistingFingerprint = fingerprintFile.getAttribute('data-has-existing-file') === '1';
+
+          if (status === 'yes' && !hasExistingFingerprint) {
+            fingerprintFile.setAttribute('required', 'required');
+          } else {
+            fingerprintFile.removeAttribute('required');
+          }
+        }
+
+        if (bgStateNote) {
+          if (status !== 'no') {
+            bgStateNote.textContent = '';
+          } else if (selectedState === 'CA') {
+            bgStateNote.textContent = 'Because California is selected, Low Brass Lessons will send the California background-check document package if background-check documents are required.';
+          } else if (selectedState) {
+            bgStateNote.textContent = 'Low Brass Lessons will send the standard background-check document package if background-check documents are required.';
+          } else {
+            bgStateNote.textContent = 'Please select your state above so Low Brass Lessons can send the correct background-check document package if required.';
+          }
+        }
       }
-      clearanceRadios.forEach(function(radio){ radio.addEventListener('change', syncFingerprintPanels); });
+
+      clearanceRadios.forEach(function(radio){
+        radio.addEventListener('change', syncFingerprintPanels);
+      });
+
       if (stateSelect) {
         stateSelect.addEventListener('change', syncFingerprintPanels);
       }
-      form.addEventListener('submit', function(){ syncName(); syncFingerprintPanels(); });
+
+      form.addEventListener('submit', function(){
+        syncName();
+        syncFingerprintPanels();
+      });
+
       syncName();
       syncFingerprintPanels();
     })();
@@ -14793,16 +14848,6 @@ public function handle_marketing_resubscribe() {
         }
       }
 
-      if (in_array($request_type, array('instructor_profile', 'presenter_profile'), true)) {
-        if (empty($payload['docusign_completed'])) {
-          wp_die('Please complete the required DocuSign agreement and W-9 process before submitting this profile card.');
-        }
-
-        if (empty($payload['stripe_onboarding_completed'])) {
-          wp_die('Please confirm that you completed the required Stripe account linking/onboarding step.');
-        }
-      }
-
       if ($request_type === 'instructor_profile') {
         $clearance_status = sanitize_key((string)($payload['fingerprint_clearance_status'] ?? ''));
 
@@ -14815,10 +14860,6 @@ public function handle_marketing_resubscribe() {
 
         if ($clearance_status === 'yes' && !$has_existing_fingerprint_file && !$has_new_fingerprint_file) {
           wp_die('Please upload proof of your fingerprint clearance.');
-        }
-
-        if ($clearance_status === 'no' && empty($payload['background_check_docusign_ack'])) {
-          wp_die('Please acknowledge the background-check document requirement.');
         }
 
         foreach (array('fingerprint_card_file', 'fingerprint_card_name', 'fingerprint_card_uploaded_at') as $existing_file_key) {
@@ -14864,8 +14905,9 @@ public function handle_marketing_resubscribe() {
     wp_die(
       '<div style="font-family:Arial,sans-serif;max-width:720px;margin:40px auto;padding:28px;border:1px solid #d9cfbe;border-radius:18px;background:#fff;color:#171512;">
         <h1 style="margin-top:0;">Submission Received</h1>
-        <p>Thank you. Your information has been submitted to Low Brass Lessons for review.</p>
-        <p>We will let you know if we need any revisions.</p>
+        <p>Thank you. Your profile information has been submitted to Low Brass Lessons for review.</p>
+        <p>Please keep an eye on your email for the forms and agreements needed to complete onboarding.</p>
+        <p>Your profile will not be activated until the required documents have been completed and verified by Low Brass Lessons. We will contact you if any revisions are needed.</p>
       </div>',
       'Submission Received',
       array('response' => 200)
