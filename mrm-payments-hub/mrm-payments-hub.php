@@ -14742,6 +14742,12 @@ public function handle_marketing_resubscribe() {
         .mrm-field-help { margin: 4px 0 8px; color: #5f5851; font-size: 13px; line-height: 1.45; }
         input, select, textarea { width: 100%; box-sizing: border-box; border: 1px solid #d9cfbe; border-radius: 14px; padding: 12px 14px; font: inherit; }
         textarea { min-height: 120px; }
+        textarea.mrm-auto-grow-textarea {
+          min-height: 300px;
+          line-height: 1.55;
+          overflow: hidden;
+          resize: none;
+        }
         input[type="checkbox"] {
           appearance: none;
           -webkit-appearance: none;
@@ -14835,7 +14841,7 @@ public function handle_marketing_resubscribe() {
           <input type="hidden" name="timezone" value="<?php echo esc_attr($admin_payload['event_timezone'] ?? 'America/Phoenix'); ?>">
           <label>Masterclass Event Title *</label><p class="mrm-field-help">Enter the public title for the masterclass listing.</p><input type="text" name="event_title" value="<?php echo esc_attr($submission['event_title'] ?? ''); ?>" required>
           <label>Short Listing Description *</label><p class="mrm-field-help">Write one or two sentences that summarize the masterclass for the public listing card.</p><textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
-          <label>Full Masterclass Description *</label><p class="mrm-field-help">Describe what students will learn, who the class is for, and what makes this masterclass valuable.</p><textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
+          <label>Full Masterclass Description *</label><p class="mrm-field-help">Describe what students will learn, who the class is for, and what makes this masterclass valuable.</p><textarea name="long_description" rows="12" class="mrm-auto-grow-textarea mrm-long-description-textarea" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
           <label>Session Details *</label><p class="mrm-field-help">Include the format of the session, expected pacing, demonstration details, student participation expectations, guest players if applicable, and anything students should prepare in advance.</p><textarea name="session_details" required><?php echo esc_textarea($submission['session_details'] ?? ''); ?></textarea>
           <label>Materials / Preparation Notes</label><p class="mrm-field-help">Optional. Add any extra notes about the piece, handouts, equipment, camera/microphone setup, or preparation expectations.</p><textarea name="preparation_notes"><?php echo esc_textarea($submission['preparation_notes'] ?? ''); ?></textarea>
           <div class="pay-box"><p><strong>Student registration price:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['event_price_cents'] ?? 0)); ?></p><p><strong>Agreed presenter earnings:</strong> $<?php echo esc_html($this->mrm_profile_card_cents_to_money($admin_payload['presenter_payout_per_student_cents'] ?? 0)); ?> per student enrolled.</p><label class="mrm-ack-row"><input type="checkbox" name="pay_ack" value="1" required <?php checked(!empty($submission['pay_ack'])); ?>><span>I acknowledge the masterclass registration price and presenter earnings shown above.</span></label></div>
@@ -14895,7 +14901,7 @@ public function handle_marketing_resubscribe() {
           <textarea name="short_description" required><?php echo esc_textarea($submission['short_description'] ?? ''); ?></textarea>
           <label><?php echo $request_type === 'instructor_profile' ? 'Instructor Full Bio *' : 'Presenter Full Bio *'; ?></label>
           <p class="mrm-field-help"><?php echo $request_type === 'instructor_profile' ? 'A polished biography describing your teaching background, lesson approach, and what students can expect.' : 'A polished biography describing your background, expertise, teaching style, and artistic work.'; ?></p>
-          <textarea name="long_description" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
+          <textarea name="long_description" rows="12" class="mrm-auto-grow-textarea mrm-long-description-textarea" required><?php echo esc_textarea($submission['long_description'] ?? ''); ?></textarea>
           <label>Profile Image Upload</label><p class="mrm-field-help">Upload the photo you would like used on your public profile card. Low Brass Lessons will review and approve the image before publishing.</p><input type="file" name="profile_image_file" accept="image/*" <?php echo empty($submission['profile_image_url']) ? 'required' : ''; ?>><input type="hidden" name="existing_profile_image_url" value="<?php echo esc_attr($submission['profile_image_url'] ?? ''); ?>">
           <?php if (!empty($submission['profile_image_url'])) : ?><p class="mrm-field-help">A profile image has already been uploaded. Upload a new image only if you want to replace it.</p><?php endif; ?>
           <?php if ($request_type === 'instructor_profile') : ?>
@@ -14952,6 +14958,22 @@ public function handle_marketing_resubscribe() {
       var first = form.querySelector('[name="first_name"]');
       var last = form.querySelector('[name="last_name"]');
       var full = form.querySelector('[name="name"]');
+      var autoGrowTextareas = Array.prototype.slice.call(form.querySelectorAll('textarea.mrm-auto-grow-textarea'));
+
+      function autoGrowTextarea(textarea) {
+        if (!textarea) return;
+
+        textarea.style.height = 'auto';
+        textarea.style.height = Math.max(textarea.scrollHeight, 300) + 'px';
+      }
+
+      autoGrowTextareas.forEach(function(textarea) {
+        autoGrowTextarea(textarea);
+
+        textarea.addEventListener('input', function() {
+          autoGrowTextarea(textarea);
+        });
+      });
 
       function syncName(){
         if (!full) return;
@@ -15002,6 +15024,10 @@ public function handle_marketing_resubscribe() {
       form.addEventListener('submit', function(){
         syncName();
         syncFingerprintPanels();
+
+        autoGrowTextareas.forEach(function(textarea) {
+          autoGrowTextarea(textarea);
+        });
       });
 
       syncName();
