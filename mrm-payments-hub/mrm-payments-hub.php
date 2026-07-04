@@ -14923,7 +14923,6 @@ public function handle_marketing_resubscribe() {
                   Please keep an eye on your email. Your instructor profile will not be approved until the required background-check documents
                   have been completed and reviewed.
                 </p>
-                <p class="mrm-field-help" id="mrm-background-check-state-note"></p>
               </div>
             </div>
           <?php endif; ?>
@@ -14968,7 +14967,6 @@ public function handle_marketing_resubscribe() {
       var panels = Array.prototype.slice.call(form.querySelectorAll('[data-fingerprint-panel]'));
       var fingerprintFile = form.querySelector('[name="fingerprint_card"]');
       var stateSelect = form.querySelector('[name="state"]');
-      var bgStateNote = form.querySelector('#mrm-background-check-state-note');
 
       function selectedClearanceStatus(){
         var selected = clearanceRadios.find(function(radio){ return radio.checked; });
@@ -14977,8 +14975,6 @@ public function handle_marketing_resubscribe() {
 
       function syncFingerprintPanels(){
         var status = selectedClearanceStatus();
-        var selectedState = stateSelect ? String(stateSelect.value || '').toUpperCase() : '';
-
         panels.forEach(function(panel){
           var shouldShow = panel.getAttribute('data-fingerprint-panel') === status;
           panel.style.display = shouldShow ? 'block' : 'none';
@@ -14991,18 +14987,6 @@ public function handle_marketing_resubscribe() {
             fingerprintFile.setAttribute('required', 'required');
           } else {
             fingerprintFile.removeAttribute('required');
-          }
-        }
-
-        if (bgStateNote) {
-          if (status !== 'no') {
-            bgStateNote.textContent = '';
-          } else if (selectedState === 'CA') {
-            bgStateNote.textContent = 'Because California is selected, Low Brass Lessons will send the California background-check document package if background-check documents are required.';
-          } else if (selectedState) {
-            bgStateNote.textContent = 'Low Brass Lessons will send the standard background-check document package if background-check documents are required.';
-          } else {
-            bgStateNote.textContent = 'Please select your state above so Low Brass Lessons can send the correct background-check document package if required.';
           }
         }
       }
