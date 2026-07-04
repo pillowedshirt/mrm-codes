@@ -13385,9 +13385,29 @@ public function handle_marketing_resubscribe() {
   private function mrm_profile_card_render_instructor_pay_chart_html() {
     $settings = $this->get_settings();
 
-    $money = function($key, $default = 0) use ($settings) {
-      return '$' . number_format(((int)($settings[$key] ?? $default)) / 100, 2);
+    /*
+     * Public instructor profile-card acknowledgement chart.
+     *
+     * In-person lessons should visually show the online payout plus the
+     * $5 travel add-on, so instructors can clearly see the full amount.
+     */
+    $travel_cents = 500;
+
+    $amount_cents = function($key, $default = 0) use ($settings) {
+      return max(0, (int)($settings[$key] ?? $default));
     };
+
+    $money = function($cents) {
+      return '$' . number_format(max(0, (int)$cents) / 100, 2);
+    };
+
+    $p30_y1 = $amount_cents('instructor_payout_30_online_year1_cents');
+    $p30_y2 = $amount_cents('instructor_payout_30_online_year2_cents');
+    $p30_y3 = $amount_cents('instructor_payout_30_online_year3_cents');
+
+    $p60_y1 = $amount_cents('instructor_payout_60_online_year1_cents');
+    $p60_y2 = $amount_cents('instructor_payout_60_online_year2_cents');
+    $p60_y3 = $amount_cents('instructor_payout_60_online_year3_cents');
 
     return implode('', array(
       '<div class="mrm-profile-public-pay-box">',
@@ -13405,31 +13425,31 @@ public function handle_marketing_resubscribe() {
           '<tbody>',
             '<tr>',
               '<td>30-minute online</td>',
-              '<td>' . esc_html($money('instructor_payout_30_online_year1_cents')) . '</td>',
-              '<td>' . esc_html($money('instructor_payout_30_online_year2_cents')) . '</td>',
-              '<td>' . esc_html($money('instructor_payout_30_online_year3_cents')) . '</td>',
+              '<td>' . esc_html($money($p30_y1)) . '</td>',
+              '<td>' . esc_html($money($p30_y2)) . '</td>',
+              '<td>' . esc_html($money($p30_y3)) . '</td>',
             '</tr>',
             '<tr>',
               '<td>30-minute in-person</td>',
-              '<td>' . esc_html($money('instructor_payout_30_inperson_year1_cents')) . '</td>',
-              '<td>' . esc_html($money('instructor_payout_30_inperson_year2_cents')) . '</td>',
-              '<td>' . esc_html($money('instructor_payout_30_inperson_year3_cents')) . '</td>',
+              '<td>' . esc_html($money($p30_y1 + $travel_cents)) . '</td>',
+              '<td>' . esc_html($money($p30_y2 + $travel_cents)) . '</td>',
+              '<td>' . esc_html($money($p30_y3 + $travel_cents)) . '</td>',
             '</tr>',
             '<tr>',
               '<td>60-minute online</td>',
-              '<td>' . esc_html($money('instructor_payout_60_online_year1_cents')) . '</td>',
-              '<td>' . esc_html($money('instructor_payout_60_online_year2_cents')) . '</td>',
-              '<td>' . esc_html($money('instructor_payout_60_online_year3_cents')) . '</td>',
+              '<td>' . esc_html($money($p60_y1)) . '</td>',
+              '<td>' . esc_html($money($p60_y2)) . '</td>',
+              '<td>' . esc_html($money($p60_y3)) . '</td>',
             '</tr>',
             '<tr>',
               '<td>60-minute in-person</td>',
-              '<td>' . esc_html($money('instructor_payout_60_inperson_year1_cents')) . '</td>',
-              '<td>' . esc_html($money('instructor_payout_60_inperson_year2_cents')) . '</td>',
-              '<td>' . esc_html($money('instructor_payout_60_inperson_year3_cents')) . '</td>',
+              '<td>' . esc_html($money($p60_y1 + $travel_cents)) . '</td>',
+              '<td>' . esc_html($money($p60_y2 + $travel_cents)) . '</td>',
+              '<td>' . esc_html($money($p60_y3 + $travel_cents)) . '</td>',
             '</tr>',
           '</tbody>',
         '</table>',
-        '<p class="mrm-field-help">In-person lesson travel amount is handled separately according to the site payout settings.</p>',
+        '<p class="mrm-field-help">In-person lessons have an added $5.00 to account for travel costs.</p>',
       '</div>',
     ));
   }
