@@ -13744,24 +13744,112 @@ public function handle_marketing_resubscribe() {
   private function mrm_profile_card_review_field_label($key, $request_type = '') {
     $labels = $this->mrm_profile_card_review_field_labels($request_type);
     $key = (string)$key;
+    $request_type = sanitize_key((string)$request_type);
+
+    if ($request_type === 'presenter_event') {
+      $event_labels = array(
+        'event_title' => 'Masterclass Event Title',
+        'short_description' => 'Short Listing Description',
+        'long_description' => 'Full Masterclass Description',
+        'session_details' => 'Session Details',
+        'preparation_notes' => 'Preparation Notes',
+        'masterclass_piece_title' => 'Selected Piece',
+        'masterclass_piece_sku' => 'Selected Piece SKU',
+        'masterclass_piece_url' => 'Selected Piece URL',
+        'start_time' => 'Proposed Start Time',
+        'end_time' => 'Proposed End Time',
+        'timezone' => 'Timezone',
+        'pay_ack' => 'Payout Acknowledgement',
+      );
+
+      if (isset($event_labels[$key])) {
+        return $event_labels[$key];
+      }
+    }
+
     return isset($labels[$key]) ? $labels[$key] : ucwords(str_replace('_', ' ', $key));
   }
 
   private function mrm_profile_card_review_field_order($request_type, $payload) {
     $request_type = sanitize_key((string)$request_type);
     $payload = is_array($payload) ? $payload : array();
-    $preferred = $request_type === 'presenter_event'
-      ? array('event_title', 'masterclass_piece_title', 'masterclass_piece_sku', 'masterclass_piece_url', 'event_short_description', 'event_full_description', 'short_description', 'long_description', 'session_details', 'preparation_notes', 'pay_ack')
-      : array('first_name', 'last_name', 'name', 'email', 'city', 'state', 'address', 'zip_code', 'offers_online', 'offers_in_person', 'instruments', 'instructor_title', 'presenter_title', 'short_description', 'long_description', 'profile_image_url', 'fingerprint_clearance_status', 'background_check_docusign_ack', 'calendar_availability_completed', 'docusign_completed', 'stripe_onboarding_completed', 'pay_ack', 'website_url', 'instagram_url', 'facebook_url', 'youtube_url', 'linkedin_url', 'profile_social_links_json');
-    $hidden = array('fingerprint_card_file');
+
+    if ($request_type === 'presenter_event') {
+      $preferred = array(
+        'event_title',
+        'masterclass_piece_title',
+        'masterclass_piece_sku',
+        'masterclass_piece_url',
+        'short_description',
+        'long_description',
+        'session_details',
+        'preparation_notes',
+        'start_time',
+        'end_time',
+        'timezone',
+        'pay_ack',
+      );
+    } else {
+      $preferred = array(
+        'first_name',
+        'last_name',
+        'email',
+        'city',
+        'state',
+        'address',
+        'zip_code',
+        'offers_online',
+        'offers_in_person',
+        'instruments',
+        'instructor_title',
+        'presenter_title',
+        'short_description',
+        'long_description',
+        'profile_image_url',
+        'fingerprint_clearance_status',
+        'calendar_availability_completed',
+        'pay_ack',
+        'website_url',
+        'instagram_url',
+        'facebook_url',
+        'youtube_url',
+        'linkedin_url',
+      );
+    }
+
+    /*
+     * These are internal/generated/legacy values that should not appear as
+     * separate comment targets in the review table.
+     */
+    $hidden = array(
+      'name',
+      'profile_social_links_json',
+      'fingerprint_card_file',
+      'fingerprint_card_uploaded_at',
+      'docusign_completed',
+      'stripe_onboarding_completed',
+      'background_check_docusign_ack',
+      'event_short_description',
+      'event_full_description',
+      'selected_piece_title',
+      'selected_piece_sku',
+      'selected_piece_url',
+    );
+
     $ordered = array();
     $seen = array();
 
     foreach (array_merge($preferred, array_keys($payload)) as $key) {
       $key = (string)$key;
+
       if ($key === '' || isset($seen[$key]) || in_array($key, $hidden, true)) {
         continue;
       }
+
+      if (!array_key_exists($key, $payload)) {
+        continue;
+      }
+
       $seen[$key] = true;
       $ordered[] = $key;
     }
@@ -13843,16 +13931,47 @@ public function handle_marketing_resubscribe() {
       return;
     }
 
+    $display_only_keys = array(
+      'masterclass_piece_title',
+      'masterclass_piece_sku',
+      'masterclass_piece_url',
+      'start_time',
+      'end_time',
+      'timezone',
+    );
+
     echo '<table class="widefat striped mrm-profile-review-table" style="width:100%;table-layout:fixed;">';
-    echo '<thead><tr><th style="width:220px;">Field</th><th>Submitted Value</th><th style="width:360px;">Admin Comment for Request Changes</th></tr></thead><tbody>';
+    echo '<thead>';
+    echo '<tr>';
+    echo '<th style="width:220px;">Field</th>';
+    echo '<th>Submitted Value</th>';
+    echo '<th style="width:360px;">Admin Comment for Request Changes</th>';
+    echo '</tr>';
+    echo '</thead>';
+    echo '<tbody>';
+
     foreach ($this->mrm_profile_card_review_field_order($request_type, $payload) as $key) {
       $value = array_key_exists($key, $payload) ? $payload[$key] : '';
       $comment_value = (string)($field_comments[$key] ?? '');
-      echo '<tr><th style="vertical-align:top;">' . esc_html($this->mrm_profile_card_review_field_label($key, $request_type)) . '<br><code>' . esc_html($key) . '</code></th>';
+      $is_display_only = in_array((string)$key, $display_only_keys, true);
+
+      echo '<tr>';
+      echo '<th style="vertical-align:top;">' . esc_html($this->mrm_profile_card_review_field_label($key, $request_type)) . '<br><code>' . esc_html($key) . '</code></th>';
       echo '<td style="vertical-align:top;white-space:normal;word-break:break-word;">' . $this->mrm_profile_card_review_value_html($key, $value) . '</td>';
-      echo '<td style="vertical-align:top;"><textarea name="field_comments[' . esc_attr($key) . ']" rows="3" class="large-text" placeholder="Optional comment for this field.">' . esc_textarea($comment_value) . '</textarea></td></tr>';
+      echo '<td style="vertical-align:top;">';
+
+      if ($is_display_only) {
+        echo '<span class="description">Display-only request detail. To change this, create a new request with the corrected setup details.</span>';
+      } else {
+        echo '<textarea name="field_comments[' . esc_attr($key) . ']" rows="3" class="large-text" placeholder="Optional comment for this field.">' . esc_textarea($comment_value) . '</textarea>';
+      }
+
+      echo '</td>';
+      echo '</tr>';
     }
-    echo '</tbody></table>';
+
+    echo '</tbody>';
+    echo '</table>';
   }
 
   private function mrm_profile_card_piece_options() {
@@ -14219,6 +14338,20 @@ public function handle_marketing_resubscribe() {
     echo '<div class="wrap"><h1>Instructor Profiles</h1>';
     echo '<p class="description">Review existing instructor profile cards, leave field-specific comments, and request profile card updates from current instructors.</p>';
 
+    $instructor_search = sanitize_text_field(wp_unslash($_GET['s'] ?? ''));
+
+    echo '<form method="get" style="margin:16px 0;padding:14px;background:#fff;border:1px solid #dcdcde;border-radius:12px;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">';
+    echo '<input type="hidden" name="page" value="mrm-pay-hub-instructor-profiles">';
+    echo '<p style="margin:0;min-width:280px;flex:1;">';
+    echo '<label for="mrm_instructor_profile_search"><strong>Search instructors</strong></label><br>';
+    echo '<input type="search" id="mrm_instructor_profile_search" name="s" value="' . esc_attr($instructor_search) . '" class="regular-text" placeholder="Search by name, email, state, or title">';
+    echo '</p>';
+    echo '<p style="margin:0;">';
+    echo '<button type="submit" class="button button-primary">Search</button> ';
+    echo '<a class="button" href="' . esc_url(admin_url('admin.php?page=mrm-pay-hub-instructor-profiles')) . '">Clear</a>';
+    echo '</p>';
+    echo '</form>';
+
     if (isset($_GET['update_sent'])) {
       echo '<div class="notice notice-success"><p>Instructor profile update request sent.</p></div>';
     }
@@ -14230,9 +14363,40 @@ public function handle_marketing_resubscribe() {
       return;
     }
 
-    $instructors = $wpdb->get_results("SELECT * FROM {$instructors_table} ORDER BY name ASC, email ASC LIMIT 300", ARRAY_A);
+    if ($instructor_search !== '') {
+      $like = '%' . $wpdb->esc_like($instructor_search) . '%';
+
+      $instructors = $wpdb->get_results(
+        $wpdb->prepare(
+          "SELECT *
+           FROM {$instructors_table}
+           WHERE name LIKE %s
+              OR email LIKE %s
+              OR state LIKE %s
+           ORDER BY name ASC, email ASC
+           LIMIT 300",
+          $like,
+          $like,
+          $like
+        ),
+        ARRAY_A
+      );
+    } else {
+      $instructors = $wpdb->get_results(
+        "SELECT *
+         FROM {$instructors_table}
+         ORDER BY name ASC, email ASC
+         LIMIT 300",
+        ARRAY_A
+      );
+    }
+
     if (empty($instructors)) {
-      echo '<p>No instructors were found.</p></div>';
+      if ($instructor_search !== '') {
+        echo '<p>No instructors matched your search.</p></div>';
+      } else {
+        echo '<p>No instructors were found.</p></div>';
+      }
       return;
     }
 
@@ -14375,6 +14539,8 @@ public function handle_marketing_resubscribe() {
             'missing_event_details' => 'Please select the presenter, piece, proposed start time, proposed end time, student price, and presenter payout before sending a Masterclass Event Submission request.',
             'missing_instructor_calendar' => 'Please add the instructor Google Calendar link before sending an Instructor Profile Card request.',
             'missing_piece' => 'Please select the piece being discussed before sending a Masterclass Event Submission request.',
+            'changes_email_failed' => 'The request was updated, but the requested-changes email could not be sent. Please verify the email setup before relying on this request.',
+            'instructor_update_email_failed' => 'The instructor update request was created, but the requested-changes email could not be sent. Please verify the email setup before relying on this request.',
           );
           $profile_card_error_message = $profile_card_error_messages[$profile_card_error] ?? $profile_card_error;
         ?>
@@ -14669,7 +14835,21 @@ public function handle_marketing_resubscribe() {
     }
 
     $form_url = add_query_arg(array('action' => 'mrm_profile_card_form', 'token' => $token), admin_url('admin-post.php'));
-    $this->mrm_profile_card_send_changes_requested_email(array('request_type' => 'instructor_profile', 'recipient_email' => $recipient_email), $form_url, $note, $field_comments);
+    $email_sent = $this->mrm_profile_card_send_changes_requested_email(
+      array(
+        'request_type' => 'instructor_profile',
+        'recipient_email' => $recipient_email,
+      ),
+      $form_url,
+      $note,
+      $field_comments
+    );
+
+    if (!$email_sent) {
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-instructor-profiles&error=' . rawurlencode('The update request was created, but the email could not be sent. Please verify email delivery before relying on this request.')));
+      exit;
+    }
+
     wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-instructor-profiles&update_sent=1'));
     exit;
   }
@@ -14982,7 +15162,7 @@ public function handle_marketing_resubscribe() {
     $submission = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
     $review_notes = $this->mrm_profile_card_decode_json($request['review_notes'] ?? '');
     $field_comments = is_array($review_notes['field_comments'] ?? null) ? $review_notes['field_comments'] : array();
-    $show_field_comments = (!empty($admin_payload['is_profile_update']) && (string)($request['status'] ?? '') === 'changes_requested' && !empty($field_comments));
+    $show_field_comments = ((string)($request['status'] ?? '') === 'changes_requested' && !empty($field_comments));
 
     nocache_headers();
 
@@ -15218,7 +15398,40 @@ public function handle_marketing_resubscribe() {
       if (!form) return;
 
       var fieldComments = <?php echo wp_json_encode($show_field_comments ? $field_comments : array()); ?> || {};
-      var fieldCommentAliases = { profile_image_url: ['profile_image_file', 'existing_profile_image_url'], instruments: ['instruments[]'], offers_online: ['offers_online'], offers_in_person: ['offers_in_person'], fingerprint_clearance_status: ['fingerprint_clearance_status'], calendar_availability_completed: ['calendar_availability_completed'], background_check_docusign_ack: ['background_check_docusign_ack'], docusign_completed: ['docusign_completed'], stripe_onboarding_completed: ['stripe_onboarding_completed'], pay_ack: ['pay_ack'] };
+      var fieldCommentAliases = {
+        name: ['first_name', 'last_name'],
+        profile_image_url: ['profile_image_file', 'existing_profile_image_url'],
+        instruments: ['instruments[]'],
+        offers_online: ['offers_online'],
+        offers_in_person: ['offers_in_person'],
+
+        short_description: ['short_description'],
+        long_description: ['long_description'],
+
+        event_short_description: ['short_description'],
+        event_full_description: ['long_description'],
+
+        instructor_title: ['instructor_title'],
+        presenter_title: ['presenter_title'],
+        event_title: ['event_title'],
+        session_details: ['session_details'],
+        preparation_notes: ['preparation_notes'],
+
+        website_url: ['website_url'],
+        instagram_url: ['instagram_url'],
+        facebook_url: ['facebook_url'],
+        youtube_url: ['youtube_url'],
+        linkedin_url: ['linkedin_url'],
+        profile_social_links_json: ['website_url', 'instagram_url', 'facebook_url', 'youtube_url', 'linkedin_url'],
+
+        fingerprint_clearance_status: ['fingerprint_clearance_status'],
+        calendar_availability_completed: ['calendar_availability_completed'],
+        background_check_docusign_ack: ['fingerprint_clearance_status'],
+        docusign_completed: ['fingerprint_clearance_status'],
+        stripe_onboarding_completed: ['fingerprint_clearance_status'],
+
+        pay_ack: ['pay_ack']
+      };
       function mrmFieldSelector(name) { return '[name="' + String(name).replace(/"/g, '\\"') + '"]'; }
       function mrmFindFieldForComment(key) {
         var aliases = fieldCommentAliases[key] || [key];
@@ -15235,6 +15448,14 @@ public function handle_marketing_resubscribe() {
           var field = mrmFindFieldForComment(key);
           if (!field) return;
           var target = field.closest('.mrm-check-section') || field.closest('.grid > div') || field.parentElement;
+
+          if (field.type === 'hidden' && field.name === 'existing_profile_image_url') {
+            var imageUpload = form.querySelector('[name="profile_image_file"]');
+            if (imageUpload) {
+              target = imageUpload.parentElement;
+            }
+          }
+
           if (!target || target.querySelector('[data-field-comment-for="' + key + '"]')) return;
           var bubble = document.createElement('div');
           bubble.className = 'mrm-field-comment-bubble';
@@ -15594,7 +15815,12 @@ public function handle_marketing_resubscribe() {
         admin_url('admin-post.php')
       );
 
-      $this->mrm_profile_card_send_changes_requested_email($request, $form_url, $note, $field_comments);
+      $email_sent = $this->mrm_profile_card_send_changes_requested_email($request, $form_url, $note, $field_comments);
+
+      if (!$email_sent) {
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=changes_email_failed'));
+        exit;
+      }
 
       wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&changes=1'));
       exit;
