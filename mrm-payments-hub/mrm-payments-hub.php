@@ -13847,9 +13847,54 @@ public function handle_marketing_resubscribe() {
     return $this->mrm_profile_card_existing_profile_submission_payload('instructor_profile', $instructor_id);
   }
 
-  private function mrm_profile_card_add_profile_metadata_to_record($table, &$data, $payload, $request_type = '') {
+  private function mrm_profile_card_instructor_approved_archive_uploads($instructor_id, $instructor_row = array()) {
+    global $wpdb;
+
+    $instructor_id = absint($instructor_id);
+    $instructor_row = is_array($instructor_row) ? $instructor_row : array();
+
+    if ($instructor_id <= 0) {
+      return array();
+    }
+
+    $metadata = $this->mrm_profile_card_decode_metadata_from_row($instructor_row);
+
+    if (!empty($metadata['approved_profile_card_uploaded_files']) && is_array($metadata['approved_profile_card_uploaded_files'])) {
+      return $metadata['approved_profile_card_uploaded_files'];
+    }
+
+    $requests_table = $this->table_profile_card_requests();
+
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $requests_table)) !== $requests_table) {
+      return array();
+    }
+
+    $request = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT uploaded_files
+         FROM {$requests_table}
+         WHERE status = 'approved'
+           AND created_target_type = 'instructor'
+           AND created_target_id = %d
+         ORDER BY reviewed_at DESC, id DESC
+         LIMIT 1",
+        $instructor_id
+      ),
+      ARRAY_A
+    );
+
+    if (is_array($request) && !empty($request['uploaded_files'])) {
+      $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files']);
+      return is_array($uploads) ? $uploads : array();
+    }
+
+    return array();
+  }
+
+  private function mrm_profile_card_add_profile_metadata_to_record($table, &$data, $payload, $request_type = '', $uploaded_files = array()) {
     $data = is_array($data) ? $data : array();
     $payload = is_array($payload) ? $payload : array();
+    $uploaded_files = is_array($uploaded_files) ? $uploaded_files : array();
 
     $metadata = array(
       'instructor_title' => sanitize_text_field((string)($payload['instructor_title'] ?? '')),
@@ -13870,6 +13915,9 @@ public function handle_marketing_resubscribe() {
 
     if ($request_type !== '') {
       $metadata['approved_profile_card_payload'] = $this->mrm_profile_card_complete_submission_payload($request_type, $payload);
+      if (!empty($uploaded_files)) {
+        $metadata['approved_profile_card_uploaded_files'] = array_values($uploaded_files);
+      }
       $metadata['approved_profile_card_saved_at'] = current_time('mysql');
     }
 
@@ -14765,6 +14813,7 @@ public function handle_marketing_resubscribe() {
       $instructor_id = absint($instructor['id'] ?? 0);
       $payload = $this->mrm_profile_card_existing_profile_submission_payload('instructor_profile', $instructor_id);
       $archive_payload = $this->mrm_profile_card_instructor_approved_archive_payload($instructor_id, $instructor);
+      $archive_uploads = $this->mrm_profile_card_instructor_approved_archive_uploads($instructor_id, $instructor);
       echo '<div style="background:#fff;border:1px solid #dcdcde;border-radius:14px;padding:18px;">';
       echo '<div style="display:flex;justify-content:space-between;gap:18px;align-items:flex-start;flex-wrap:wrap;">';
       echo '<div><h2 style="margin:0 0 8px 0;">' . esc_html((string)($instructor['name'] ?? 'Instructor #' . $instructor_id)) . '</h2><p style="margin:0;"><code>' . esc_html((string)($instructor['email'] ?? '')) . '</code></p></div>';
@@ -14787,6 +14836,13 @@ public function handle_marketing_resubscribe() {
       echo '<h3>Saved Approved Profile Card Form</h3>';
       echo '<p class="description">This is the saved approved profile-card snapshot. It is preserved for future reference even after manual edits are made.</p>';
       $this->mrm_profile_card_render_review_payload_table(array('request_type' => 'instructor_profile'), $archive_payload, array(), false);
+      if (!empty($archive_uploads)) {
+        echo '<h3 style="margin-top:22px;">Uploaded Files</h3>';
+        echo '<p class="description">Fingerprint clearance files are stored privately and previewed here through an admin-only secure file route.</p>';
+        foreach ($archive_uploads as $file) {
+          echo $this->mrm_profile_card_private_file_preview_html($file);
+        }
+      }
       echo '</div>';
       echo '</details>';
 
@@ -15137,17 +15193,12 @@ public function handle_marketing_resubscribe() {
                     <p class="description">Use the comment box beside each field when you want the recipient to revise that specific item.</p>
                     <?php $this->mrm_profile_card_render_review_payload_table($request, $payload, $field_comments); ?>
                     <?php if (!empty($uploads)) : ?>
-                      <h3 style="margin-top:22px;">Uploaded Files</h3><ul>
+                      <h3 style="margin-top:22px;">Uploaded Files</h3>
+                      <p class="description">Fingerprint clearance files are stored privately and previewed here through an admin-only secure file route.</p>
+
                       <?php foreach ($uploads as $file) : ?>
-                        <?php
-                          $file_name = (string)($file['name'] ?? 'Uploaded file');
-                          $file_path = (string)($file['file'] ?? '');
-                          $file_url  = (string)($file['url'] ?? '');
-                          $download_url = $file_path !== '' ? wp_nonce_url(admin_url('admin-post.php?action=mrm_profile_card_download_private_file&file=' . rawurlencode($file_path)), 'mrm_profile_card_download_private_file') : $file_url;
-                        ?>
-                        <li><a href="<?php echo esc_url($download_url); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html($file_name); ?></a></li>
+                        <?php echo $this->mrm_profile_card_private_file_preview_html($file); ?>
                       <?php endforeach; ?>
-                      </ul>
                     <?php endif; ?>
                     <h3 style="margin-top:22px;">Admin Approval Fields</h3>
                     <p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified the required onboarding documents are complete, including the DocuSign agreement, W-9, Stripe payout setup, and background-check documents if required. Required before approving Instructor and Presenter Profile Cards.</label></p>
@@ -15255,6 +15306,9 @@ public function handle_marketing_resubscribe() {
     if (!empty($existing_metadata['approved_profile_card_payload']) && is_array($existing_metadata['approved_profile_card_payload'])) {
       $manual_metadata = $this->mrm_profile_card_decode_metadata_from_row($data);
       $manual_metadata['approved_profile_card_payload'] = $existing_metadata['approved_profile_card_payload'];
+      if (!empty($existing_metadata['approved_profile_card_uploaded_files']) && is_array($existing_metadata['approved_profile_card_uploaded_files'])) {
+        $manual_metadata['approved_profile_card_uploaded_files'] = $existing_metadata['approved_profile_card_uploaded_files'];
+      }
       $manual_metadata['approved_profile_card_saved_at'] = $existing_metadata['approved_profile_card_saved_at'] ?? ($manual_metadata['approved_profile_card_saved_at'] ?? '');
 
       if (array_key_exists('profile_metadata_json', $data)) {
@@ -15602,6 +15656,68 @@ public function handle_marketing_resubscribe() {
   }
 
 
+  private function mrm_profile_card_private_file_preview_html($file) {
+    $file = is_array($file) ? $file : array();
+
+    $file_name = sanitize_file_name((string)($file['name'] ?? 'Uploaded file'));
+    $file_path = (string)($file['file'] ?? '');
+    $file_url  = esc_url_raw((string)($file['url'] ?? ''));
+
+    if ($file_name === '') {
+      $file_name = 'Uploaded file';
+    }
+
+    $download_url = '';
+    $mime = '';
+
+    if ($file_path !== '') {
+      $download_url = wp_nonce_url(
+        admin_url(
+          'admin-post.php?action=mrm_profile_card_download_private_file'
+          . '&file=' . rawurlencode($file_path)
+          . '&name=' . rawurlencode($file_name)
+        ),
+        'mrm_profile_card_download_private_file'
+      );
+
+      $real_file = realpath($file_path);
+      $private_root = realpath($this->mrm_profile_card_private_upload_dir());
+
+      if ($real_file && $private_root && strpos($real_file, $private_root) === 0 && file_exists($real_file)) {
+        $mime = function_exists('mime_content_type') ? (string)mime_content_type($real_file) : '';
+      }
+    } elseif ($file_url !== '') {
+      $download_url = $file_url;
+    }
+
+    if ($download_url === '') {
+      return '<p class="description">Uploaded file reference is missing.</p>';
+    }
+
+    $html = '<div class="mrm-profile-card-upload-preview" style="margin:12px 0 18px;padding:14px;border:1px solid #dcdcde;background:#fff;border-radius:12px;">';
+
+    $html .= '<p style="margin:0 0 10px 0;">';
+    $html .= '<strong>' . esc_html($file_name) . '</strong><br>';
+    $html .= '<a class="button button-small" href="' . esc_url($download_url) . '" target="_blank" rel="noopener noreferrer">Open Full File</a>';
+    $html .= '</p>';
+
+    if (strpos($mime, 'image/') === 0) {
+      $html .= '<div style="margin-top:10px;">';
+      $html .= '<img src="' . esc_url($download_url) . '" alt="' . esc_attr($file_name) . '" style="display:block;max-width:100%;width:auto;max-height:720px;height:auto;border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;">';
+      $html .= '</div>';
+    } elseif ($mime === 'application/pdf') {
+      $html .= '<div style="margin-top:10px;">';
+      $html .= '<iframe src="' . esc_url($download_url) . '" title="' . esc_attr($file_name) . '" style="width:100%;height:720px;border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;"></iframe>';
+      $html .= '</div>';
+    } else {
+      $html .= '<p class="description" style="margin:10px 0 0 0;">Preview is not available for this file type. Use Open Full File to view or download it.</p>';
+    }
+
+    $html .= '</div>';
+
+    return $html;
+  }
+
   public function handle_profile_card_download_private_file() {
     if (!current_user_can('manage_options')) {
       wp_die('You do not have permission to access this file.');
@@ -15621,6 +15737,10 @@ public function handle_marketing_resubscribe() {
 
     if (!$real_file || !$private_root || strpos($real_file, $private_root) !== 0 || !file_exists($real_file)) {
       wp_die('File not found or not allowed.');
+    }
+
+    if ($name === '') {
+      $name = basename($real_file);
     }
 
     nocache_headers();
@@ -16385,6 +16505,8 @@ public function handle_marketing_resubscribe() {
 
     $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
     $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
+    $uploaded_files = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
+    $uploaded_files = is_array($uploaded_files) ? $uploaded_files : array();
     $is_profile_update = !empty($admin_payload['is_profile_update']);
     $existing_target_id = absint($admin_payload['existing_target_id'] ?? 0);
     $table = $wpdb->prefix . 'mrm_instructors';
@@ -16420,7 +16542,7 @@ public function handle_marketing_resubscribe() {
       'hire_date' => current_time('Y-m-d'),
     );
 
-    $this->mrm_profile_card_add_profile_metadata_to_record($table, $data, $payload, 'instructor_profile');
+    $this->mrm_profile_card_add_profile_metadata_to_record($table, $data, $payload, 'instructor_profile', $uploaded_files);
 
     if ($is_profile_update && $existing_target_id > 0) {
       $update_data = $data;
