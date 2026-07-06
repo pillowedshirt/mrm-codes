@@ -15807,7 +15807,7 @@ public function handle_marketing_resubscribe() {
         $download_url = wp_nonce_url(
           admin_url(
             'admin-post.php?action=mrm_profile_card_download_private_file'
-            . '&file=' . rawurlencode($real_file)
+            . '&stored_name=' . rawurlencode(basename($real_file))
             . '&name=' . rawurlencode($file_name)
           ),
           'mrm_profile_card_download_private_file'
@@ -15848,6 +15848,7 @@ public function handle_marketing_resubscribe() {
 
     if (!$file_exists && $file_path !== '') {
       $html .= '<br><span style="color:#b32d2e;font-weight:700;">The saved private file path could not be found on disk.</span>';
+      $html .= '<br><span class="description">Stored file expected: <code>' . esc_html($stored_name) . '</code></span>';
     }
 
     if ($download_url !== '') {
@@ -15898,7 +15899,12 @@ public function handle_marketing_resubscribe() {
     check_admin_referer('mrm_profile_card_download_private_file');
 
     $file = isset($_GET['file']) ? sanitize_text_field(wp_unslash($_GET['file'])) : '';
+    $stored_name = isset($_GET['stored_name']) ? sanitize_file_name(wp_unslash($_GET['stored_name'])) : '';
     $name = isset($_GET['name']) ? sanitize_file_name(wp_unslash($_GET['name'])) : 'fingerprint-proof';
+
+    if ($stored_name !== '') {
+      $file = trailingslashit($this->mrm_profile_card_private_upload_dir()) . $stored_name;
+    }
 
     if ($file === '') {
       wp_die('Missing file.');
@@ -15934,8 +15940,9 @@ public function handle_marketing_resubscribe() {
     }
 
     header('Content-Type: ' . $mime);
-    header('Content-Disposition: inline; filename="' . $name . '"');
+    header('Content-Disposition: inline; filename="' . rawurlencode($name) . '"');
     header('Content-Length: ' . filesize($real_file));
+    header('X-Content-Type-Options: nosniff');
 
     readfile($real_file);
     exit;
