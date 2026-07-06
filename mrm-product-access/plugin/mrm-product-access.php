@@ -2544,6 +2544,71 @@ function initRichTextToolbars(scope) {
         return ( $slug !== '' && preg_match( '/^[a-z0-9][a-z0-9\-_]{0,199}$/', $slug ) );
     }
 
+
+    private function mrm_pa_blocked_sheet_music_emails() {
+        $emails = get_option( 'mrm_pay_hub_sheet_music_blocked_emails', array() );
+
+        if ( ! is_array( $emails ) ) {
+            $emails = array();
+        }
+
+        $clean = array();
+
+        foreach ( $emails as $email ) {
+            $email = strtolower( trim( sanitize_email( (string) $email ) ) );
+
+            if ( $email && is_email( $email ) ) {
+                $clean[] = $email;
+            }
+        }
+
+        return array_values( array_unique( $clean ) );
+    }
+
+    private function mrm_pa_is_sheet_music_email_blocked( $email ) {
+        $email = strtolower( trim( sanitize_email( (string) $email ) ) );
+
+        if ( ! $email || ! is_email( $email ) ) {
+            return false;
+        }
+
+        return in_array( $email, $this->mrm_pa_blocked_sheet_music_emails(), true );
+    }
+
+    private function mrm_pa_is_sheet_music_email_hash_blocked( $email_hash ) {
+        $email_hash = trim( (string) $email_hash );
+
+        if ( $email_hash === '' ) {
+            return false;
+        }
+
+        foreach ( $this->mrm_pa_blocked_sheet_music_emails() as $blocked_email ) {
+            $salted_hash   = $this->hash_email( $blocked_email );
+            $unsalted_hash = hash( 'sha256', $blocked_email );
+
+            if (
+                hash_equals( $email_hash, $salted_hash )
+                || hash_equals( $email_hash, $unsalted_hash )
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function mrm_pa_blocked_sheet_music_response() {
+        return new WP_REST_Response(
+            array(
+                'ok'           => false,
+                'blocked'      => true,
+                'redirect_url' => home_url( '/contact/' ),
+                'message'      => __( 'This email is currently restricted from accessing sheet music. Please contact Low Brass Lessons support.', 'mrm-product-access' ),
+            ),
+            403
+        );
+    }
+
     private function payments_hub_has_access( $email_hash, $sku ) {
         global $wpdb;
         $table = $wpdb->prefix . 'mrm_sheet_music_access';
@@ -2551,6 +2616,10 @@ function initRichTextToolbars(scope) {
         $sku = strtolower( trim( (string) $sku ) );
         $sku = preg_replace( '/[^a-z0-9\-_]+/', '', $sku );
         if ( ! $sku ) return false;
+
+        if ( $this->mrm_pa_is_sheet_music_email_hash_blocked( $email_hash ) ) {
+            return false;
+        }
 
         // Pull lists from Payments Hub (legacy/option-based fallback)
         $lists = get_option( 'mrm_pay_hub_access_lists', array() );
@@ -2757,6 +2826,10 @@ function initRichTextToolbars(scope) {
         $email = sanitize_email( strtolower( trim( (string) $email ) ) );
 
         if ( empty( $email ) ) {
+            return false;
+        }
+
+        if ( $this->mrm_pa_is_sheet_music_email_blocked( $email ) ) {
             return false;
         }
 
@@ -4131,6 +4204,16 @@ function initRichTextToolbars(scope) {
         $email_hash       = $this->hash_email( $normalized_email );
         $ip               = $_SERVER['REMOTE_ADDR'] ?? '';
 
+        if ( $this->mrm_pa_is_sheet_music_email_blocked( $normalized_email ) ) {
+            $this->mrm_pa_log_access_event( 'otp_blocked_security_email', array(
+                'email'        => $normalized_email,
+                'product_slug' => $product_slug,
+                'ip'           => $ip,
+            ) );
+
+            return $this->mrm_pa_blocked_sheet_music_response();
+        }
+
         global $wpdb;
         $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
 
@@ -4294,6 +4377,15 @@ function initRichTextToolbars(scope) {
 
         $normalized_email = strtolower( trim( $email ) );
         $email_hash       = $this->hash_email( $normalized_email );
+
+        if ( $this->mrm_pa_is_sheet_music_email_blocked( $normalized_email ) ) {
+            $this->mrm_pa_log_access_event( 'otp_verify_blocked_security_email', array(
+                'email'        => $normalized_email,
+                'product_slug' => $product_slug,
+            ) );
+
+            return $this->mrm_pa_blocked_sheet_music_response();
+        }
 
         global $wpdb;
         $table_otps = $wpdb->prefix . 'mrm_otp_tokens';
