@@ -13508,6 +13508,8 @@ public function handle_marketing_resubscribe() {
 
     return array(
       'name' => $original_name,
+      'display_name' => $original_name,
+      'stored_name' => basename($destination),
       'file' => $destination,
       'uploaded_at' => current_time('mysql'),
     );
@@ -13872,6 +13874,11 @@ public function handle_marketing_resubscribe() {
       );
     }
 
+    $metadata_uploads = array_map(
+      array($this, 'mrm_profile_card_normalize_private_upload_file'),
+      $metadata_uploads
+    );
+
     if (!empty($metadata_uploads)) {
       return $metadata_uploads;
     }
@@ -13900,7 +13907,10 @@ public function handle_marketing_resubscribe() {
       $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
       $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
 
-      return $this->mrm_profile_card_merge_uploads_with_payload($uploads, $payload);
+      return array_map(
+        array($this, 'mrm_profile_card_normalize_private_upload_file'),
+        $this->mrm_profile_card_merge_uploads_with_payload($uploads, $payload)
+      );
     }
 
     return array();
@@ -14851,13 +14861,7 @@ public function handle_marketing_resubscribe() {
       echo '<h3>Saved Approved Profile Card Form</h3>';
       echo '<p class="description">This is the saved approved profile-card snapshot. It is preserved for future reference even after manual edits are made.</p>';
       $this->mrm_profile_card_render_review_payload_table(array('request_type' => 'instructor_profile'), $archive_payload, array(), false);
-      if (!empty($archive_uploads)) {
-        echo '<h3 style="margin-top:22px;">Uploaded Files</h3>';
-        echo '<p class="description">Fingerprint clearance files are stored privately and previewed here through an admin-only secure file route.</p>';
-        foreach ($archive_uploads as $file) {
-          echo $this->mrm_profile_card_private_file_preview_html($file);
-        }
-      }
+      $this->mrm_profile_card_render_uploaded_file_previews($archive_uploads, $archive_payload);
       echo '</div>';
       echo '</details>';
 
@@ -15208,14 +15212,7 @@ public function handle_marketing_resubscribe() {
                     <h3>Submitted Information</h3>
                     <p class="description">Use the comment box beside each field when you want the recipient to revise that specific item.</p>
                     <?php $this->mrm_profile_card_render_review_payload_table($request, $payload, $field_comments); ?>
-                    <?php if (!empty($uploads)) : ?>
-                      <h3 style="margin-top:22px;">Uploaded Files</h3>
-                      <p class="description">Fingerprint clearance files are stored privately and previewed here through an admin-only secure file route.</p>
-
-                      <?php foreach ($uploads as $file) : ?>
-                        <?php echo $this->mrm_profile_card_private_file_preview_html($file); ?>
-                      <?php endforeach; ?>
-                    <?php endif; ?>
+                    <?php $this->mrm_profile_card_render_uploaded_file_previews($uploads, $payload); ?>
                     <h3 style="margin-top:22px;">Admin Approval Fields</h3>
                     <p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified the required onboarding documents are complete, including the DocuSign agreement, W-9, Stripe payout setup, and background-check documents if required. Required before approving Instructor and Presenter Profile Cards.</label></p>
                     <p><label><strong>Approval note / internal note</strong></label><br><textarea name="admin_review_note" rows="4" class="large-text"></textarea></p>
@@ -15676,20 +15673,38 @@ public function handle_marketing_resubscribe() {
     $payload = is_array($payload) ? $payload : array();
 
     $file_path = (string)($payload['fingerprint_card_file'] ?? '');
-    $file_name = sanitize_file_name((string)($payload['fingerprint_card_name'] ?? 'fingerprint-clearance'));
+    $display_name = sanitize_file_name((string)(
+      $payload['fingerprint_card_display_name']
+      ?? $payload['fingerprint_card_name']
+      ?? 'fingerprint-clearance'
+    ));
+    $stored_name = sanitize_file_name((string)(
+      $payload['fingerprint_card_stored_name']
+      ?? ($file_path !== '' ? basename($file_path) : '')
+    ));
     $uploaded_at = sanitize_text_field((string)($payload['fingerprint_card_uploaded_at'] ?? ''));
+
+    if ($file_path === '' && $stored_name !== '') {
+      $candidate = trailingslashit($this->mrm_profile_card_private_upload_dir()) . $stored_name;
+
+      if (file_exists($candidate)) {
+        $file_path = $candidate;
+      }
+    }
 
     if ($file_path === '') {
       return array();
     }
 
-    if ($file_name === '') {
-      $file_name = basename($file_path);
+    if ($display_name === '') {
+      $display_name = $stored_name !== '' ? $stored_name : basename($file_path);
     }
 
     return array(
       array(
-        'name' => $file_name,
+        'name' => $display_name,
+        'display_name' => $display_name,
+        'stored_name' => $stored_name !== '' ? $stored_name : basename($file_path),
         'file' => $file_path,
         'uploaded_at' => $uploaded_at,
         'source' => 'submission_payload',
@@ -15726,10 +15741,51 @@ public function handle_marketing_resubscribe() {
     return $merged;
   }
 
-  private function mrm_profile_card_private_file_preview_html($file) {
+  private function mrm_profile_card_normalize_private_upload_file($file) {
     $file = is_array($file) ? $file : array();
 
+    $file_path = (string)($file['file'] ?? '');
+    $file_url = esc_url_raw((string)($file['url'] ?? ''));
+
+    $display_name = sanitize_file_name((string)(
+      $file['display_name']
+      ?? $file['name']
+      ?? 'Uploaded file'
+    ));
+
+    $stored_name = sanitize_file_name((string)(
+      $file['stored_name']
+      ?? ($file_path !== '' ? basename($file_path) : '')
+    ));
+
+    if ($file_path === '' && $stored_name !== '') {
+      $candidate = trailingslashit($this->mrm_profile_card_private_upload_dir()) . $stored_name;
+
+      if (file_exists($candidate)) {
+        $file_path = $candidate;
+      }
+    }
+
+    if ($display_name === '') {
+      $display_name = $stored_name !== '' ? $stored_name : 'Uploaded file';
+    }
+
+    return array(
+      'name' => $display_name,
+      'display_name' => $display_name,
+      'stored_name' => $stored_name,
+      'file' => $file_path,
+      'url' => $file_url,
+      'uploaded_at' => sanitize_text_field((string)($file['uploaded_at'] ?? '')),
+      'source' => sanitize_text_field((string)($file['source'] ?? '')),
+    );
+  }
+
+  private function mrm_profile_card_private_file_preview_html($file) {
+    $file = $this->mrm_profile_card_normalize_private_upload_file($file);
+
     $file_name = sanitize_file_name((string)($file['name'] ?? 'Uploaded file'));
+    $stored_name = sanitize_file_name((string)($file['stored_name'] ?? ''));
     $file_path = (string)($file['file'] ?? '');
     $file_url  = esc_url_raw((string)($file['url'] ?? ''));
 
@@ -15739,21 +15795,24 @@ public function handle_marketing_resubscribe() {
 
     $download_url = '';
     $mime = '';
+    $file_exists = false;
 
     if ($file_path !== '') {
-      $download_url = wp_nonce_url(
-        admin_url(
-          'admin-post.php?action=mrm_profile_card_download_private_file'
-          . '&file=' . rawurlencode($file_path)
-          . '&name=' . rawurlencode($file_name)
-        ),
-        'mrm_profile_card_download_private_file'
-      );
-
       $real_file = realpath($file_path);
       $private_root = realpath($this->mrm_profile_card_private_upload_dir());
 
       if ($real_file && $private_root && strpos($real_file, $private_root) === 0 && file_exists($real_file)) {
+        $file_exists = true;
+
+        $download_url = wp_nonce_url(
+          admin_url(
+            'admin-post.php?action=mrm_profile_card_download_private_file'
+            . '&file=' . rawurlencode($real_file)
+            . '&name=' . rawurlencode($file_name)
+          ),
+          'mrm_profile_card_download_private_file'
+        );
+
         $mime = function_exists('mime_content_type') ? (string)mime_content_type($real_file) : '';
 
         if ($mime === '' || $mime === 'application/octet-stream') {
@@ -15769,23 +15828,37 @@ public function handle_marketing_resubscribe() {
 
           $mime = $mime_by_ext[$ext] ?? $mime;
         }
+
+        if ($stored_name === '') {
+          $stored_name = basename($real_file);
+        }
       }
     } elseif ($file_url !== '') {
       $download_url = $file_url;
     }
 
-    if ($download_url === '') {
-      return '<p class="description">Uploaded file reference is missing.</p>';
-    }
-
     $html = '<div class="mrm-profile-card-upload-preview" style="margin:12px 0 18px;padding:14px;border:1px solid #dcdcde;background:#fff;border-radius:12px;">';
 
     $html .= '<p style="margin:0 0 10px 0;">';
-    $html .= '<strong>' . esc_html($file_name) . '</strong><br>';
-    $html .= '<a class="button button-small" href="' . esc_url($download_url) . '" target="_blank" rel="noopener noreferrer">Open Full File</a>';
+    $html .= '<strong>' . esc_html($file_name) . '</strong>';
+
+    if ($stored_name !== '' && $stored_name !== $file_name) {
+      $html .= '<br><span class="description">Stored private file: <code>' . esc_html($stored_name) . '</code></span>';
+    }
+
+    if (!$file_exists && $file_path !== '') {
+      $html .= '<br><span style="color:#b32d2e;font-weight:700;">The saved private file path could not be found on disk.</span>';
+    }
+
+    if ($download_url !== '') {
+      $html .= '<br><a class="button button-small" href="' . esc_url($download_url) . '" target="_blank" rel="noopener noreferrer">Open Full File</a>';
+    }
+
     $html .= '</p>';
 
-    if (strpos($mime, 'image/') === 0) {
+    if ($download_url === '') {
+      $html .= '<p class="description">Uploaded file reference is missing or incomplete.</p>';
+    } elseif (strpos($mime, 'image/') === 0) {
       $html .= '<div style="margin-top:10px;">';
       $html .= '<img src="' . esc_url($download_url) . '" alt="' . esc_attr($file_name) . '" style="display:block;max-width:100%;width:auto;max-height:720px;height:auto;border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;">';
       $html .= '</div>';
@@ -15800,6 +15873,21 @@ public function handle_marketing_resubscribe() {
     $html .= '</div>';
 
     return $html;
+  }
+
+  private function mrm_profile_card_render_uploaded_file_previews($uploads, $payload = array()) {
+    $uploads = $this->mrm_profile_card_merge_uploads_with_payload($uploads, $payload);
+
+    if (empty($uploads)) {
+      return;
+    }
+
+    echo '<h3 style="margin-top:22px;">Uploaded Files</h3>';
+    echo '<p class="description">Fingerprint clearance files are stored privately and previewed here through an admin-only secure file route.</p>';
+
+    foreach ($uploads as $file) {
+      echo $this->mrm_profile_card_private_file_preview_html($file);
+    }
   }
 
   public function handle_profile_card_download_private_file() {
@@ -15829,7 +15917,21 @@ public function handle_marketing_resubscribe() {
 
     nocache_headers();
 
-    $mime = function_exists('mime_content_type') ? mime_content_type($real_file) : 'application/octet-stream';
+    $mime = function_exists('mime_content_type') ? (string)mime_content_type($real_file) : '';
+
+    if ($mime === '' || $mime === 'application/octet-stream') {
+      $ext = strtolower(pathinfo($real_file, PATHINFO_EXTENSION));
+
+      $mime_by_ext = array(
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'webp' => 'image/webp',
+        'pdf' => 'application/pdf',
+      );
+
+      $mime = $mime_by_ext[$ext] ?? 'application/octet-stream';
+    }
 
     header('Content-Type: ' . $mime);
     header('Content-Disposition: inline; filename="' . $name . '"');
@@ -16366,7 +16468,7 @@ public function handle_marketing_resubscribe() {
           wp_die('Please upload proof of your fingerprint clearance.');
         }
 
-        foreach (array('fingerprint_card_file', 'fingerprint_card_name', 'fingerprint_card_uploaded_at') as $existing_file_key) {
+        foreach (array('fingerprint_card_file', 'fingerprint_card_name', 'fingerprint_card_display_name', 'fingerprint_card_stored_name', 'fingerprint_card_uploaded_at') as $existing_file_key) {
           if (!empty($existing_submission[$existing_file_key]) && empty($payload[$existing_file_key])) {
             $payload[$existing_file_key] = sanitize_text_field((string)$existing_submission[$existing_file_key]);
           }
@@ -16402,6 +16504,8 @@ public function handle_marketing_resubscribe() {
       $uploads[] = $fingerprint_upload;
       $payload['fingerprint_card_file'] = $fingerprint_upload['file'];
       $payload['fingerprint_card_name'] = $fingerprint_upload['name'];
+      $payload['fingerprint_card_display_name'] = $fingerprint_upload['display_name'] ?? $fingerprint_upload['name'];
+      $payload['fingerprint_card_stored_name'] = $fingerprint_upload['stored_name'] ?? basename((string)$fingerprint_upload['file']);
       $payload['fingerprint_card_uploaded_at'] = $fingerprint_upload['uploaded_at'];
     }
 
