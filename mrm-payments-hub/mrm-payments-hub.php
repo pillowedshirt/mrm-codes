@@ -17548,7 +17548,7 @@ public function handle_marketing_resubscribe() {
     echo '</tbody>';
     echo '</table>';
     echo '<h2 style="margin-top:28px;">Active Piece Access — Manual Grants and Purchases</h2>';
-    echo '<p class="description">This list includes active per-piece access rows from manual grants and completed purchases. Use Block Email to temporarily prevent an email from accessing any sheet music without deleting the access record.</p>';
+    echo '<p class="description">This list includes active per-piece access rows from manual grants and completed purchases. Manual grants can be edited or revoked here. Purchase-created rows are shown for review and security blocking only. Use Block Email to temporarily prevent an email from accessing any sheet music without deleting the original access record.</p>';
 
     if (empty($active_rows)) {
       echo '<p>No active manual piece access rows were found.</p>';
@@ -17561,6 +17561,8 @@ public function handle_marketing_resubscribe() {
         $row_id = absint($row['id'] ?? 0);
         $sku = (string)($row['sku'] ?? '');
         $label = $sheet_music_products[$sku] ?? $this->mrm_sheet_music_manual_access_label($sku, array());
+        $row_source = strtolower(trim((string)($row['source'] ?? '')));
+        $row_is_manual = in_array($row_source, array('manual_admin', 'manual'), true);
         $start_value = '';
         if (!empty($row['start_at'])) {
           $start_ts = strtotime((string)$row['start_at']);
@@ -17572,19 +17574,51 @@ public function handle_marketing_resubscribe() {
           if ($expires_ts) $expires_value = date('Y-m-d', $expires_ts);
         }
         echo '<tr>';
-        echo '<td><input type="hidden" name="mrm_access_row_id[]" value="' . esc_attr($row_id) . '"><label><input type="checkbox" name="mrm_access_row_delete[]" value="' . esc_attr($row_id) . '"> Revoke</label></td>';
+        echo '<td>';
+        echo '<input type="hidden" name="mrm_access_row_id[]" value="' . esc_attr($row_id) . '">';
+        if ($row_is_manual) {
+          echo '<label><input type="checkbox" name="mrm_access_row_delete[]" value="' . esc_attr($row_id) . '"> Revoke</label>';
+        } else {
+          echo '<span class="description">Purchase-managed</span>';
+        }
+        echo '</td>';
         $row_email = strtolower(trim(sanitize_email((string)($row['email_plain'] ?? ''))));
         $row_is_blocked = $row_email !== '' && in_array($row_email, $blocked_emails, true);
 
         echo '<td>';
-        echo '<input type="email" name="mrm_access_row_email[]" value="' . esc_attr($row_email) . '" class="regular-text">';
+
+        if ($row_is_manual) {
+          echo '<input type="email" name="mrm_access_row_email[]" value="' . esc_attr($row_email) . '" class="regular-text">';
+        } else {
+          echo '<code>' . esc_html($row_email) . '</code>';
+          echo '<input type="hidden" name="mrm_access_row_email[]" value="' . esc_attr($row_email) . '">';
+        }
+
         if ($row_is_blocked) {
           echo '<br><span style="display:inline-block;margin-top:6px;padding:3px 8px;border-radius:999px;background:#b32d2e;color:#fff;font-weight:700;">Blocked</span>';
         }
+
         echo '</td>';
+
         echo '<td><strong>' . esc_html($label) . '</strong><br><code>' . esc_html($sku) . '</code></td>';
-        echo '<td><input type="date" name="mrm_access_row_start[]" value="' . esc_attr($start_value) . '"></td>';
-        echo '<td><input type="date" name="mrm_access_row_expires[]" value="' . esc_attr($expires_value) . '"></td>';
+
+        echo '<td>';
+        if ($row_is_manual) {
+          echo '<input type="date" name="mrm_access_row_start[]" value="' . esc_attr($start_value) . '">';
+        } else {
+          echo esc_html($start_value ?: '—');
+          echo '<input type="hidden" name="mrm_access_row_start[]" value="' . esc_attr($start_value) . '">';
+        }
+        echo '</td>';
+
+        echo '<td>';
+        if ($row_is_manual) {
+          echo '<input type="date" name="mrm_access_row_expires[]" value="' . esc_attr($expires_value) . '">';
+        } else {
+          echo esc_html($expires_value ?: '—');
+          echo '<input type="hidden" name="mrm_access_row_expires[]" value="' . esc_attr($expires_value) . '">';
+        }
+        echo '</td>';
         echo '<td>' . esc_html((string)($row['granted_at'] ?? '')) . '</td>';
         echo '<td>' . esc_html($this->mrm_sheet_music_access_source_label((string)($row['source'] ?? ''), $sku)) . '</td>';
 
@@ -18184,11 +18218,27 @@ public function handle_marketing_resubscribe() {
           $row_id = (int)$id_raw;
           if ($row_id <= 0) continue;
 
-          $row_sku = (string)$wpdb->get_var($wpdb->prepare(
-            "SELECT sku FROM {$access_table} WHERE id = %d LIMIT 1",
-            $row_id
-          ));
+          $row_record = $wpdb->get_row(
+            $wpdb->prepare(
+              "SELECT sku, source FROM {$access_table} WHERE id = %d LIMIT 1",
+              $row_id
+            ),
+            ARRAY_A
+          );
+
+          $row_sku = (string)($row_record['sku'] ?? '');
+          $row_source = strtolower(trim((string)($row_record['source'] ?? '')));
+          $row_is_manual = in_array($row_source, array('manual_admin', 'manual'), true);
+
           if ($row_sku === 'all-sheet-music') {
+            continue;
+          }
+
+          /*
+           * Purchase/subscription-generated access rows are reviewable and blockable,
+           * but should not be edited or revoked from this manual access editor.
+           */
+          if (!$row_is_manual) {
             continue;
           }
 

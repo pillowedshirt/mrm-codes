@@ -3055,6 +3055,11 @@ function initRichTextToolbars(scope) {
         $sku = strtolower( trim( (string) $sku ) );
         if ( $sku === '' ) return $context;
 
+        if ( $this->mrm_pa_is_sheet_music_email_hash_blocked( $email_hash ) ) {
+            $context['source'] = 'blocked_email';
+            return $context;
+        }
+
         // Instructor-wide piece access
         $instructor_master_sku = 'all-piece-products-instructors';
         $rows = $wpdb->get_results( $wpdb->prepare(
@@ -3392,6 +3397,12 @@ function initRichTextToolbars(scope) {
 
         // Hub is the source of truth for access.
         $email_hash_from_payload = (string) ( $payload['email_hash'] ?? '' );
+
+        if ( $email_hash_from_payload !== '' && $this->mrm_pa_is_sheet_music_email_hash_blocked( $email_hash_from_payload ) ) {
+            wp_safe_redirect( home_url( '/contact/' ) );
+            exit;
+        }
+
         $access_still_valid = false;
 
         // The access page payload stores the hash, not the email.
@@ -4010,6 +4021,10 @@ function initRichTextToolbars(scope) {
 
         if ( ! $email || ! is_email( $email ) || $sku === '' ) {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Missing email or sku.' ), 400 );
+        }
+
+        if ( $this->mrm_pa_is_sheet_music_email_blocked( $email ) ) {
+            return $this->mrm_pa_blocked_sheet_music_response();
         }
 
         $email_hash = $this->hash_email( strtolower( trim( $email ) ) );
@@ -6947,6 +6962,10 @@ audio.mrm-audio {
         $email_hash = $payload['email'] ?? '';
         if ( ( $payload['product_slug'] ?? '' ) !== $product_slug ) {
             return new WP_REST_Response( array( 'error' => 'Unauthorized.' ), 403 );
+        }
+
+        if ( $this->mrm_pa_is_sheet_music_email_hash_blocked( (string) $email_hash ) ) {
+            return $this->mrm_pa_blocked_sheet_music_response();
         }
 
         // ✅ Hub is the ONLY source of truth for access (download time enforcement).
