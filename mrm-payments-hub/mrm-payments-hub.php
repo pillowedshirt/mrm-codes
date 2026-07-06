@@ -13859,8 +13859,21 @@ public function handle_marketing_resubscribe() {
 
     $metadata = $this->mrm_profile_card_decode_metadata_from_row($instructor_row);
 
+    $metadata_uploads = array();
+
     if (!empty($metadata['approved_profile_card_uploaded_files']) && is_array($metadata['approved_profile_card_uploaded_files'])) {
-      return $metadata['approved_profile_card_uploaded_files'];
+      $metadata_uploads = $metadata['approved_profile_card_uploaded_files'];
+    }
+
+    if (!empty($metadata['approved_profile_card_payload']) && is_array($metadata['approved_profile_card_payload'])) {
+      $metadata_uploads = $this->mrm_profile_card_merge_uploads_with_payload(
+        $metadata_uploads,
+        $metadata['approved_profile_card_payload']
+      );
+    }
+
+    if (!empty($metadata_uploads)) {
+      return $metadata_uploads;
     }
 
     $requests_table = $this->table_profile_card_requests();
@@ -13871,7 +13884,7 @@ public function handle_marketing_resubscribe() {
 
     $request = $wpdb->get_row(
       $wpdb->prepare(
-        "SELECT uploaded_files
+        "SELECT uploaded_files, submission_payload
          FROM {$requests_table}
          WHERE status = 'approved'
            AND created_target_type = 'instructor'
@@ -13883,9 +13896,11 @@ public function handle_marketing_resubscribe() {
       ARRAY_A
     );
 
-    if (is_array($request) && !empty($request['uploaded_files'])) {
-      $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files']);
-      return is_array($uploads) ? $uploads : array();
+    if (is_array($request)) {
+      $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
+      $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+
+      return $this->mrm_profile_card_merge_uploads_with_payload($uploads, $payload);
     }
 
     return array();
@@ -15172,6 +15187,7 @@ public function handle_marketing_resubscribe() {
               $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
               $admin_payload_for_review = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
               $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
+              $uploads = $this->mrm_profile_card_merge_uploads_with_payload($uploads, $payload);
               $review_notes = $this->mrm_profile_card_decode_json($request['review_notes'] ?? '');
               $request['admin_payload_decoded'] = $admin_payload_for_review;
               $field_comments = is_array($review_notes['field_comments'] ?? null) ? $review_notes['field_comments'] : array();
@@ -15656,6 +15672,60 @@ public function handle_marketing_resubscribe() {
   }
 
 
+  private function mrm_profile_card_uploads_from_payload($payload) {
+    $payload = is_array($payload) ? $payload : array();
+
+    $file_path = (string)($payload['fingerprint_card_file'] ?? '');
+    $file_name = sanitize_file_name((string)($payload['fingerprint_card_name'] ?? 'fingerprint-clearance'));
+    $uploaded_at = sanitize_text_field((string)($payload['fingerprint_card_uploaded_at'] ?? ''));
+
+    if ($file_path === '') {
+      return array();
+    }
+
+    if ($file_name === '') {
+      $file_name = basename($file_path);
+    }
+
+    return array(
+      array(
+        'name' => $file_name,
+        'file' => $file_path,
+        'uploaded_at' => $uploaded_at,
+        'source' => 'submission_payload',
+      ),
+    );
+  }
+
+  private function mrm_profile_card_merge_uploads_with_payload($uploads, $payload) {
+    $uploads = is_array($uploads) ? $uploads : array();
+    $payload_uploads = $this->mrm_profile_card_uploads_from_payload($payload);
+
+    $merged = array();
+    $seen = array();
+
+    foreach (array_merge($uploads, $payload_uploads) as $file) {
+      if (!is_array($file)) {
+        continue;
+      }
+
+      $file_path = (string)($file['file'] ?? '');
+      $file_url = (string)($file['url'] ?? '');
+      $file_name = (string)($file['name'] ?? '');
+
+      $key = $file_path !== '' ? $file_path : ($file_url !== '' ? $file_url : $file_name);
+
+      if ($key === '' || isset($seen[$key])) {
+        continue;
+      }
+
+      $seen[$key] = true;
+      $merged[] = $file;
+    }
+
+    return $merged;
+  }
+
   private function mrm_profile_card_private_file_preview_html($file) {
     $file = is_array($file) ? $file : array();
 
@@ -15685,6 +15755,20 @@ public function handle_marketing_resubscribe() {
 
       if ($real_file && $private_root && strpos($real_file, $private_root) === 0 && file_exists($real_file)) {
         $mime = function_exists('mime_content_type') ? (string)mime_content_type($real_file) : '';
+
+        if ($mime === '' || $mime === 'application/octet-stream') {
+          $ext = strtolower(pathinfo($real_file, PATHINFO_EXTENSION));
+
+          $mime_by_ext = array(
+            'jpg' => 'image/jpeg',
+            'jpeg' => 'image/jpeg',
+            'png' => 'image/png',
+            'webp' => 'image/webp',
+            'pdf' => 'application/pdf',
+          );
+
+          $mime = $mime_by_ext[$ext] ?? $mime;
+        }
       }
     } elseif ($file_url !== '') {
       $download_url = $file_url;
@@ -16298,6 +16382,7 @@ public function handle_marketing_resubscribe() {
     $update_data = array('status' => 'pending_review', 'submission_payload' => $this->mrm_profile_card_encode_json($payload), 'review_notes' => $this->mrm_profile_card_encode_json($existing_review_notes), 'submitted_at' => $now, 'updated_at' => $now);
 
     $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
+    $uploads = $this->mrm_profile_card_merge_uploads_with_payload($uploads, $existing_submission);
 
     $fingerprint_upload = array();
 
@@ -16318,9 +16403,15 @@ public function handle_marketing_resubscribe() {
       $payload['fingerprint_card_file'] = $fingerprint_upload['file'];
       $payload['fingerprint_card_name'] = $fingerprint_upload['name'];
       $payload['fingerprint_card_uploaded_at'] = $fingerprint_upload['uploaded_at'];
-      $update_data['submission_payload'] = $this->mrm_profile_card_encode_json($payload);
+    }
+
+    $uploads = $this->mrm_profile_card_merge_uploads_with_payload($uploads, $payload);
+
+    if (!empty($uploads)) {
       $update_data['uploaded_files'] = $this->mrm_profile_card_encode_json($uploads);
     }
+
+    $update_data['submission_payload'] = $this->mrm_profile_card_encode_json($payload);
 
 
     $wpdb->update($table, $update_data, array('id' => absint($request['id'])));
@@ -16506,7 +16597,7 @@ public function handle_marketing_resubscribe() {
     $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
     $admin_payload = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
     $uploaded_files = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
-    $uploaded_files = is_array($uploaded_files) ? $uploaded_files : array();
+    $uploaded_files = $this->mrm_profile_card_merge_uploads_with_payload($uploaded_files, $payload);
     $is_profile_update = !empty($admin_payload['is_profile_update']);
     $existing_target_id = absint($admin_payload['existing_target_id'] ?? 0);
     $table = $wpdb->prefix . 'mrm_instructors';
