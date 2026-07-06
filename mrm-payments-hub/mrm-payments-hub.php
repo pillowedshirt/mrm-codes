@@ -29,6 +29,7 @@ class MRM_Payments_Hub_Single {
   const OPT_PRODUCTS = 'mrm_pay_hub_products';
   const OPT_ACCESS_LISTS = 'mrm_pay_hub_access_lists';
   const OPT_EMAIL_LISTS = 'mrm_pay_hub_email_lists';
+  const OPT_SHEET_MUSIC_BLOCKED_EMAILS = 'mrm_pay_hub_sheet_music_blocked_emails';
 
   // Admin menu
   const MENU_SLUG = 'mrm-payments-hub';
@@ -2131,6 +2132,116 @@ private function all_products() {
     update_option(self::OPT_ACCESS_LISTS, $lists);
   }
 
+  private function mrm_sheet_music_blocked_emails() {
+    $emails = get_option(self::OPT_SHEET_MUSIC_BLOCKED_EMAILS, array());
+
+    if (!is_array($emails)) {
+      $emails = array();
+    }
+
+    $clean = array();
+
+    foreach ($emails as $email) {
+      $email = strtolower(trim(sanitize_email((string)$email)));
+
+      if ($email && is_email($email)) {
+        $clean[] = $email;
+      }
+    }
+
+    return array_values(array_unique($clean));
+  }
+
+  private function mrm_save_sheet_music_blocked_emails($emails) {
+    $emails = is_array($emails) ? $emails : array();
+    $clean = array();
+
+    foreach ($emails as $email) {
+      $email = strtolower(trim(sanitize_email((string)$email)));
+
+      if ($email && is_email($email)) {
+        $clean[] = $email;
+      }
+    }
+
+    update_option(self::OPT_SHEET_MUSIC_BLOCKED_EMAILS, array_values(array_unique($clean)));
+  }
+
+  private function mrm_sheet_music_email_is_blocked($email) {
+    $email = strtolower(trim(sanitize_email((string)$email)));
+
+    if (!$email || !is_email($email)) {
+      return false;
+    }
+
+    return in_array($email, $this->mrm_sheet_music_blocked_emails(), true);
+  }
+
+  private function mrm_block_sheet_music_email($email) {
+    $email = strtolower(trim(sanitize_email((string)$email)));
+
+    if (!$email || !is_email($email)) {
+      return false;
+    }
+
+    $blocked = $this->mrm_sheet_music_blocked_emails();
+    $blocked[] = $email;
+
+    $this->mrm_save_sheet_music_blocked_emails($blocked);
+
+    return true;
+  }
+
+  private function mrm_unblock_sheet_music_email($email) {
+    $email = strtolower(trim(sanitize_email((string)$email)));
+
+    if (!$email || !is_email($email)) {
+      return false;
+    }
+
+    $blocked = array_values(array_filter(
+      $this->mrm_sheet_music_blocked_emails(),
+      function($blocked_email) use ($email) {
+        return $blocked_email !== $email;
+      }
+    ));
+
+    $this->mrm_save_sheet_music_blocked_emails($blocked);
+
+    return true;
+  }
+
+  private function mrm_sheet_music_contact_url() {
+    return home_url('/contact/');
+  }
+
+  private function mrm_sheet_music_access_source_label($source, $sku = '') {
+    $source = strtolower(trim((string)$source));
+    $sku = strtolower(trim((string)$sku));
+
+    if ($sku === 'all-sheet-music') {
+      return 'Subscription / All Sheet Music';
+    }
+
+    if ($source === 'manual_admin' || $source === 'manual') {
+      return 'Manual Grant';
+    }
+
+    if ($source === 'stripe_pi') {
+      return 'Purchase';
+    }
+
+    if ($source === 'subscription' || strpos($source, 'subscription') !== false) {
+      return 'Subscription';
+    }
+
+    if ($source !== '') {
+      return ucwords(str_replace(array('_', '-'), ' ', $source));
+    }
+
+    return 'Access Row';
+  }
+
   private function normalize_email_list_textarea($raw) {
     $raw = (string)$raw;
     $parts = preg_split('/[\s,;]+/', $raw);
@@ -3357,6 +3468,15 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         'reason' => 'invalid_email',
       );
       return $result;
+    }
+
+    if ($this->mrm_sheet_music_email_is_blocked($email)) {
+      return array(
+        'has_access' => false,
+        'status' => '',
+        'subscription_id' => '',
+        'reason' => 'blocked_email',
+      );
     }
 
     $customer = $this->stripe_find_customer_by_email($email);
@@ -11635,6 +11755,15 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       ), 400);
     }
 
+    if ($this->mrm_sheet_music_email_is_blocked($email)) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'blocked' => true,
+        'redirect_url' => $this->mrm_sheet_music_contact_url(),
+        'message' => 'This email is currently restricted from accessing sheet music. Please contact Low Brass Lessons support.',
+      ), 403);
+    }
+
     $p = $this->get_product($sku);
     if (!$p || empty($p['active'])) {
       return new WP_REST_Response(array(
@@ -11701,6 +11830,17 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     }
     if (!$email || !is_email($email)) {
       return new WP_REST_Response(array('ok' => false, 'message' => 'Valid email required.'), 400);
+    }
+
+    if ($this->mrm_sheet_music_email_is_blocked($email)) {
+      return new WP_REST_Response(array(
+        'ok' => true,
+        'sku' => $sku,
+        'has_access' => false,
+        'blocked' => true,
+        'redirect_url' => $this->mrm_sheet_music_contact_url(),
+        'message' => 'This email is currently restricted from accessing sheet music. Please contact Low Brass Lessons support.',
+      ), 200);
     }
 
     $email_hash = $this->email_hash($email);
@@ -11803,6 +11943,10 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
 
     $product_slug = $this->sanitize_product_slug($product_slug);
     if (!$product_slug) return false;
+
+    if ($this->mrm_sheet_music_email_is_blocked($email)) {
+      return false;
+    }
 
     $lists = $this->all_access_lists();
 
@@ -17326,11 +17470,40 @@ public function handle_marketing_resubscribe() {
       );
     }
 
+    $blocked_emails = $this->mrm_sheet_music_blocked_emails();
+
+    $subscription_rows = array();
+    $subscriptions_table = $this->table_sheet_music_subscriptions();
+    $subscriptions_table_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $subscriptions_table));
+
+    if ($subscriptions_table_exists === $subscriptions_table) {
+      $subscription_rows = $wpdb->get_results(
+        "SELECT id, email_plain, stripe_status, current_period_start, current_period_end, cancel_at_period_end, canceled_at, stripe_subscription_id, updated_at
+         FROM {$subscriptions_table}
+         WHERE email_plain <> ''
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 500",
+        ARRAY_A
+      );
+    }
+
     echo '<div class="wrap">';
     echo '<h1>Sheet Music Access</h1>';
     settings_errors('mrm_pay_hub');
 
-    echo '<p>Use this page to manually grant, edit, or revoke access to individual sheet music products. Subscription-based all-access rows are Stripe-managed and intentionally excluded from manual editing here.</p>';
+    if (isset($_GET['sheet_music_blocked'])) {
+      echo '<div class="notice notice-success"><p>Email blocked from sheet music access.</p></div>';
+    }
+
+    if (isset($_GET['sheet_music_unblocked'])) {
+      echo '<div class="notice notice-success"><p>Email removed from the blocked sheet music access list. Existing valid access rows will work again.</p></div>';
+    }
+
+    if (isset($_GET['sheet_music_block_error'])) {
+      echo '<div class="notice notice-error"><p>Could not update the blocked email list. Please confirm the email address is valid.</p></div>';
+    }
+
+    echo '<p>Use this page to manually grant access, review purchase-based access, review subscription access, and temporarily block abusive emails from accessing sheet music. Blocking an email does not delete its original access row; it acts as a security override until the email is unblocked.</p>';
 
     if ($table_exists !== $access_table) {
       echo '<div class="notice notice-error"><p>The sheet music access table is missing. The plugin attempted to run the database installer, but the table was not found.</p></div>';
@@ -17374,14 +17547,15 @@ public function handle_marketing_resubscribe() {
 
     echo '</tbody>';
     echo '</table>';
-    echo '<h2 style="margin-top:28px;">Active Manual Piece Access</h2>';
+    echo '<h2 style="margin-top:28px;">Active Piece Access — Manual Grants and Purchases</h2>';
+    echo '<p class="description">This list includes active per-piece access rows from manual grants and completed purchases. Use Block Email to temporarily prevent an email from accessing any sheet music without deleting the access record.</p>';
 
     if (empty($active_rows)) {
       echo '<p>No active manual piece access rows were found.</p>';
     } else {
       echo '<table class="widefat striped" style="max-width:1200px;">';
       echo '<thead><tr>';
-      echo '<th>Delete</th><th>Email</th><th>Piece/Product</th><th>Start Date</th><th>Expires Date</th><th>Granted</th><th>Source</th>';
+      echo '<th>Revoke</th><th>Email</th><th>Piece/Product</th><th>Start Date</th><th>Expires Date</th><th>Granted</th><th>Source</th><th>Security</th>';
       echo '</tr></thead><tbody>';
       foreach ($active_rows as $row) {
         $row_id = absint($row['id'] ?? 0);
@@ -17399,16 +17573,100 @@ public function handle_marketing_resubscribe() {
         }
         echo '<tr>';
         echo '<td><input type="hidden" name="mrm_access_row_id[]" value="' . esc_attr($row_id) . '"><label><input type="checkbox" name="mrm_access_row_delete[]" value="' . esc_attr($row_id) . '"> Revoke</label></td>';
-        echo '<td><input type="email" name="mrm_access_row_email[]" value="' . esc_attr((string)($row['email_plain'] ?? '')) . '" class="regular-text"></td>';
+        $row_email = strtolower(trim(sanitize_email((string)($row['email_plain'] ?? ''))));
+        $row_is_blocked = $row_email !== '' && in_array($row_email, $blocked_emails, true);
+
+        echo '<td>';
+        echo '<input type="email" name="mrm_access_row_email[]" value="' . esc_attr($row_email) . '" class="regular-text">';
+        if ($row_is_blocked) {
+          echo '<br><span style="display:inline-block;margin-top:6px;padding:3px 8px;border-radius:999px;background:#b32d2e;color:#fff;font-weight:700;">Blocked</span>';
+        }
+        echo '</td>';
         echo '<td><strong>' . esc_html($label) . '</strong><br><code>' . esc_html($sku) . '</code></td>';
         echo '<td><input type="date" name="mrm_access_row_start[]" value="' . esc_attr($start_value) . '"></td>';
         echo '<td><input type="date" name="mrm_access_row_expires[]" value="' . esc_attr($expires_value) . '"></td>';
         echo '<td>' . esc_html((string)($row['granted_at'] ?? '')) . '</td>';
-        echo '<td>' . esc_html((string)($row['source'] ?? '')) . '</td>';
+        echo '<td>' . esc_html($this->mrm_sheet_music_access_source_label((string)($row['source'] ?? ''), $sku)) . '</td>';
+
+        echo '<td>';
+        if ($row_email && is_email($row_email)) {
+          if ($row_is_blocked) {
+            echo '<button type="submit" class="button button-small" name="mrm_sheet_music_unblock_email" value="' . esc_attr($row_email) . '">Unblock Email</button>';
+          } else {
+            echo '<button type="submit" class="button button-small button-link-delete" name="mrm_sheet_music_block_email" value="' . esc_attr($row_email) . '" onclick="return confirm(\'Block this email from accessing all sheet music?\');">Block Email</button>';
+          }
+        } else {
+          echo '<span class="description">No email stored.</span>';
+        }
+        echo '</td>';
         echo '</tr>';
       }
       echo '</tbody></table>';
     }
+
+    echo '<h2 style="margin-top:32px;">Subscription / All Sheet Music Access</h2>';
+    echo '<p class="description">These rows come from the sheet music subscription ledger. Blocking an email here restricts access without canceling the Stripe subscription.</p>';
+
+    if (empty($subscription_rows)) {
+      echo '<p>No subscription access rows were found.</p>';
+    } else {
+      echo '<table class="widefat striped" style="max-width:1200px;">';
+      echo '<thead><tr>';
+      echo '<th>Email</th><th>Status</th><th>Period Start</th><th>Period End</th><th>Cancel at Period End</th><th>Stripe Subscription</th><th>Security</th>';
+      echo '</tr></thead><tbody>';
+
+      foreach ($subscription_rows as $sub_row) {
+        $sub_email = strtolower(trim(sanitize_email((string)($sub_row['email_plain'] ?? ''))));
+        $sub_is_blocked = $sub_email !== '' && in_array($sub_email, $blocked_emails, true);
+
+        echo '<tr>';
+        echo '<td>';
+        echo esc_html($sub_email);
+        if ($sub_is_blocked) {
+          echo '<br><span style="display:inline-block;margin-top:6px;padding:3px 8px;border-radius:999px;background:#b32d2e;color:#fff;font-weight:700;">Blocked</span>';
+        }
+        echo '</td>';
+        echo '<td>' . esc_html((string)($sub_row['stripe_status'] ?? '')) . '</td>';
+        echo '<td>' . esc_html((string)($sub_row['current_period_start'] ?? '')) . '</td>';
+        echo '<td>' . esc_html((string)($sub_row['current_period_end'] ?? '')) . '</td>';
+        echo '<td>' . (!empty($sub_row['cancel_at_period_end']) ? 'Yes' : 'No') . '</td>';
+        echo '<td><code>' . esc_html((string)($sub_row['stripe_subscription_id'] ?? '')) . '</code></td>';
+        echo '<td>';
+        if ($sub_email && is_email($sub_email)) {
+          if ($sub_is_blocked) {
+            echo '<button type="submit" class="button button-small" name="mrm_sheet_music_unblock_email" value="' . esc_attr($sub_email) . '">Unblock Email</button>';
+          } else {
+            echo '<button type="submit" class="button button-small button-link-delete" name="mrm_sheet_music_block_email" value="' . esc_attr($sub_email) . '" onclick="return confirm(\'Block this email from accessing all sheet music?\');">Block Email</button>';
+          }
+        } else {
+          echo '<span class="description">No email stored.</span>';
+        }
+        echo '</td>';
+        echo '</tr>';
+      }
+
+      echo '</tbody></table>';
+    }
+
+    echo '<h2 style="margin-top:32px;">Blocked Sheet Music Access Emails</h2>';
+    echo '<p class="description">Emails on this list cannot access any sheet music, even if they have a valid manual grant, completed purchase, or subscription. Use Unblock Email to restore access if the underlying access row is still valid.</p>';
+
+    if (empty($blocked_emails)) {
+      echo '<p>No emails are currently blocked.</p>';
+    } else {
+      echo '<table class="widefat striped" style="max-width:900px;">';
+      echo '<thead><tr><th>Email</th><th>Action</th></tr></thead><tbody>';
+
+      foreach ($blocked_emails as $blocked_email) {
+        echo '<tr>';
+        echo '<td><code>' . esc_html($blocked_email) . '</code></td>';
+        echo '<td><button type="submit" class="button button-small" name="mrm_sheet_music_unblock_email" value="' . esc_attr($blocked_email) . '">Unblock Email</button></td>';
+        echo '</tr>';
+      }
+
+      echo '</tbody></table>';
+    }
+
     echo '<p class="submit"><button type="submit" class="button button-primary">Save Sheet Music Access</button></p>';
     echo '</form></div>';
   }
@@ -17751,6 +18009,30 @@ public function handle_marketing_resubscribe() {
 
     if (isset($_POST['mrm_pay_hub_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_nonce'], 'mrm_pay_hub_save')) {
       $settings = $this->get_settings();
+      if (isset($_POST['mrm_sheet_music_block_email'])) {
+        $email_to_block = sanitize_email(wp_unslash($_POST['mrm_sheet_music_block_email']));
+
+        if ($this->mrm_block_sheet_music_email($email_to_block)) {
+          wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-access&sheet_music_blocked=1'));
+          exit;
+        }
+
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-access&sheet_music_block_error=1'));
+        exit;
+      }
+
+      if (isset($_POST['mrm_sheet_music_unblock_email'])) {
+        $email_to_unblock = sanitize_email(wp_unslash($_POST['mrm_sheet_music_unblock_email']));
+
+        if ($this->mrm_unblock_sheet_music_email($email_to_unblock)) {
+          wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-access&sheet_music_unblocked=1'));
+          exit;
+        }
+
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-access&sheet_music_block_error=1'));
+        exit;
+      }
+
       // AWS / wp-config managed Stripe credentials are no longer stored in WordPress settings.
 
       if (isset($_POST['stripe_sheet_music_subscription_price_id'])) {
