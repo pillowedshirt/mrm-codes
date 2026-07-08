@@ -5190,26 +5190,34 @@ function initRichTextToolbars(scope) {
         }
 
         .pdf-preview {
-          width: 100%;
-          height: 460px;
-          border-radius: var(--radius-md);
+          width: min(860px, 100%);
+          height: clamp(420px, 56vh, 720px);
+          border-radius: var(--radius-lg);
           overflow: hidden;
-          border: none;
-          background: transparent;
+          border: 1px solid rgba(0,0,0,0.12);
+          background: linear-gradient(180deg, rgba(0,0,0,0.02), rgba(0,0,0,0.00));
           position: relative;
           cursor: zoom-in;
           user-select: none;
           -webkit-tap-highlight-color: transparent;
+          display: flex;
+          align-items: center;
+          justify-content: center;
         }
 
-        .pdf-preview canvas { width: 100%; height: 100%; display: block; }
+        .pdf-preview canvas {
+          display: block;
+          margin: 0 auto;
+        }
 
         .mrm-pdfOverlay {
           position: fixed;
           inset: 0;
           width: 100vw;
           height: 100vh;
-          background: rgba(0,0,0,0.001);
+          background: rgba(0,0,0,0.50);
+          backdrop-filter: blur(6px);
+          -webkit-backdrop-filter: blur(6px);
           display: none;
           align-items: center;
           justify-content: center;
@@ -5223,9 +5231,9 @@ function initRichTextToolbars(scope) {
         .mrm-pdfOverlay.is-open { display: flex; }
 
         .mrm-pdfModal {
-          width: min(980px, calc(100vw - 36px));
-          height: min(92vh, 1200px);
-          border-radius: var(--radius-md);
+          width: min(1100px, calc(100vw - 36px));
+          height: min(92vh, 1400px);
+          border-radius: var(--radius-lg);
           overflow: hidden;
           background: var(--color-surface);
           border: none;
@@ -5377,9 +5385,8 @@ function initRichTextToolbars(scope) {
 
           .pdf-col { align-items: center; }
           .pdf-preview {
-            width: min(720px, 100%);
-            height: 360px;
-            border-radius: 20px;
+            width: 100%;
+            height: clamp(360px, 62vh, 640px);
           }
           .pdf-preview canvas { margin: 0 auto; }
 
@@ -6099,6 +6106,22 @@ audio.mrm-audio {
     justify-content: flex-end !important;
   }
 }
+
+.mrm-sheet-music-catalog-section .pdf-preview {
+  width: min(860px, 100%) !important;
+  height: clamp(420px, 56vh, 720px) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+@media (max-width: 700px) {
+  .mrm-sheet-music-catalog-section .pdf-preview {
+    width: 100% !important;
+    height: clamp(360px, 62vh, 640px) !important;
+  }
+}
+
 
 @media (max-width: 420px) {
   .mrm-sheet-music-catalog-section .mrm-catalog.wrapper {

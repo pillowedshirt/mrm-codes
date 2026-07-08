@@ -795,14 +795,38 @@ audio.mrm-audio{
   -webkit-user-select:none;
   pointer-events:auto !important;
 }
-/* OTP modal Close button: guarantee visible label */
-.mrm-otpOverlay .mrm-closeBtn{
-  color:#000000 !important;
-  font-size:14px !important;
-  line-height:1.1 !important;
-  opacity:1 !important;
-  text-shadow:none !important;
-  -webkit-text-fill-color:#000000 !important; /* Safari/Chrome edge cases */
+/* Access modal uses the same top-right X close style as the payment modal. */
+.mrm-otpOverlay .mrm-access-modal {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 36px);
+  padding: 0 !important;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.mrm-otpOverlay .mrm-access-modal .modal-header {
+  flex: 0 0 auto;
+}
+
+.mrm-otpOverlay .mrm-access-modal .modal-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mrm-otpOverlay .mrm-closeBtn.mrm-xbtn {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 999px !important;
+  font-size: 22px !important;
+  font-weight: 800 !important;
+  line-height: 1 !important;
+  padding: 0 !important;
+  opacity: 1 !important;
+  text-shadow: none !important;
+  -webkit-text-fill-color: currentColor !important;
 }
 .mrm-otpOverlay.is-open{ display:flex; }
 .hidden{ display:none; }
@@ -1133,14 +1157,31 @@ audio.mrm-audio{
 .mrm-piece-product-page .mrm-payment-security-badge { background: var(--mrm-warm-popup-bg-light) !important; border: 1px solid var(--mrm-warm-popup-border) !important; color: var(--mrm-warm-popup-text) !important; }
 .mrm-piece-product-page .mrm-payment-security-copy strong { color: var(--mrm-warm-popup-text) !important; }
 .mrm-piece-product-page .mrm-payment-security-copy small { color: var(--mrm-warm-popup-muted) !important; }
-.mrm-piece-product-page .mrm-otpOverlay .modal > div:last-child { background: var(--mrm-warm-popup-bg-soft) !important; border-top: 1px solid rgba(124, 74, 45, 0.20) !important; }
+.mrm-piece-product-page .mrm-otpOverlay .modal-body {
+  background: var(--mrm-warm-popup-bg) !important;
+}
 .mrm-piece-product-page .mrm-otpOverlay button.primary,
 .mrm-piece-product-page .mrm-otpOverlay .mrm-otp-send-btn,
 .mrm-piece-product-page .mrm-otpOverlay .mrm-otp-verify-btn,
 .mrm-piece-product-page .mrm-otpOverlay .mrm-sendCodeBtn,
 .mrm-piece-product-page .mrm-otpOverlay .mrm-verifyBtn { background: var(--mrm-warm-popup-deep) !important; color: #ffffff !important; }
-.mrm-piece-product-page .mrm-otpOverlay button.secondary,
-.mrm-piece-product-page .mrm-otpOverlay .mrm-closeBtn { background: #ffffff !important; color: var(--mrm-warm-popup-text) !important; border: 1px solid var(--mrm-warm-popup-deep) !important; }
+.mrm-piece-product-page .mrm-otpOverlay button.secondary {
+  background: #ffffff !important;
+  color: var(--mrm-warm-popup-text) !important;
+  border: 1px solid var(--mrm-warm-popup-deep) !important;
+}
+
+.mrm-piece-product-page .mrm-otpOverlay .mrm-closeBtn.mrm-xbtn {
+  background: rgba(124, 74, 45, 0.10) !important;
+  color: #3b2618 !important;
+  border: 0 !important;
+}
+
+.mrm-piece-product-page .mrm-otpOverlay .mrm-closeBtn.mrm-xbtn:hover,
+.mrm-piece-product-page .mrm-otpOverlay .mrm-closeBtn.mrm-xbtn:focus {
+  background: rgba(124, 74, 45, 0.18) !important;
+  outline: none !important;
+}
 
 /* =========================================================
    MRM Warm Product Page Surface Patch
@@ -1599,12 +1640,20 @@ audio.mrm-audio{
           </div>
         </div>
 
-        <!-- OTP Modal (kept minimal for functionality) -->
+        <!-- OTP / Access Modal -->
         <div class="mrm-otpOverlay" aria-hidden="true">
-          <div class="modal" style="background:#fff;border-radius:22px;max-width:860px;width:94vw;padding:18px;border:1px solid rgba(0,0,0,0.10);box-shadow:0 26px 90px rgba(0,0,0,0.38);">
-            <h2 style="margin:0 0 14px 0;">Access Purchased Product</h2>
+          <div class="modal mrm-access-modal" role="dialog" aria-modal="true" aria-label="Access Purchased Product">
+            <div class="modal-header">
+              <h2>Access Purchased Product</h2>
+              <button
+                type="button"
+                class="mrm-xbtn mrm-closeBtn"
+                aria-label="Close"
+              >×</button>
+            </div>
 
-            <div class="mrm-stepEmail">
+            <div class="modal-body">
+              <div class="mrm-stepEmail">
               <label style="display:block;font-weight:800;margin-bottom:8px;">Email address</label>
               <input type="email" class="mrm-email" autocomplete="email" required style="width:100%;padding:14px;border-radius:14px;border:1px solid rgba(0,0,0,0.16);">
               <button
@@ -1630,15 +1679,6 @@ audio.mrm-audio{
 
             <div class="message mrm-message" style="margin-top:12px;min-height:24px;opacity:0.85;"></div>
 
-            <div style="margin-top:12px;display:flex;justify-content:flex-end;">
-              <button
-                type="button"
-                class="secondary mrm-closeBtn"
-                aria-label="Close"
-                style="padding:10px 14px;border-radius:14px;border:1px solid #2f2f2f;background:#ffffff;color:#000000;font-weight:900;font-size:14px;line-height:1.1;cursor:pointer;text-decoration:none;"
-              >
-                Close
-              </button>
             </div>
           </div>
         </div>
@@ -1756,9 +1796,9 @@ audio.mrm-audio{
               </div>
 
               <div id="mrm-piece-card-step" class="mrm-piece-step" hidden>
-                <h3 class="mrm-piece-payment-step-heading">Complete Payment</h3>
+                <h3 class="mrm-piece-payment-step-heading">Submit Payment</h3>
                 <p class="mrm-piece-payment-step-note">
-                  Review your total below, enter your card information, and complete secure checkout.
+                  Review your total below, enter your card information, and submit your secure payment.
                 </p>
 
               <div id="payment-instructions"></div>
@@ -3910,7 +3950,7 @@ async function getOfferSkuCandidates(offerEl) {
     if (sendBtn.dataset.mrmOtpBound === '1') return;
     sendBtn.dataset.mrmOtpBound = '1';
     verifyBtn.dataset.mrmOtpBound = '1';
-    closeBtn.textContent = 'Close';
+    closeBtn.textContent = '×';
     closeBtn.setAttribute('aria-label', 'Close');
 
     if (piece.dataset.mrmOtpDelegatedBound !== '1') {
@@ -4006,7 +4046,12 @@ async function getOfferSkuCandidates(offerEl) {
       window.scrollTo(0, top ? -parseInt(top,10) : 0);
     }
     closeBtn.addEventListener('click', closeOtpModal);
-    otpOverlay.addEventListener('click', e => { if (e.target === otpOverlay) closeOtpModal(); });
+    otpOverlay.addEventListener('click', e => {
+      if (e.target === otpOverlay) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
 
   }
 
