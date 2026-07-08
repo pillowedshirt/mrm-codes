@@ -5048,9 +5048,19 @@ function initRichTextToolbars(scope) {
             </div>
 
             <div class="mrm-otpOverlay" aria-hidden="true">
-              <div class="modal" role="dialog" aria-modal="true" aria-label="<?php echo esc_attr__( 'Access purchased product', 'mrm-product-access' ); ?>">
-                <h2><?php echo esc_html__( 'Access Purchased Product', 'mrm-product-access' ); ?></h2>
-                <div class="mrm-stepEmail">
+              <div class="modal mrm-otp-modal" role="dialog" aria-modal="true" aria-label="<?php echo esc_attr__( 'Access purchased product', 'mrm-product-access' ); ?>">
+                <div class="modal-header">
+                  <h2><?php echo esc_html__( 'Access Purchased Product', 'mrm-product-access' ); ?></h2>
+                  <button
+                    type="button"
+                    class="mrm-xbtn mrm-otp-close-btn mrm-closeBtn"
+                    data-mrm-otp-action="close"
+                    aria-label="<?php echo esc_attr__( 'Close access code modal', 'mrm-product-access' ); ?>"
+                  >×</button>
+                </div>
+
+                <div class="modal-body">
+                  <div class="mrm-stepEmail">
                   <label><?php echo esc_html__( 'Email address', 'mrm-product-access' ); ?></label>
                   <input type="email" class="mrm-email" autocomplete="email" required>
                   <button
@@ -5075,15 +5085,6 @@ function initRichTextToolbars(scope) {
                   </button>
                 </div>
                 <div class="message mrm-message" aria-live="polite"></div>
-                <div>
-                  <button
-                    type="button"
-                    class="secondary mrm-otp-close-btn mrm-closeBtn"
-                    data-mrm-otp-action="close"
-                    aria-label="<?php echo esc_attr__( 'Close access code modal', 'mrm-product-access' ); ?>"
-                  >
-                    <?php echo esc_html__( 'Close', 'mrm-product-access' ); ?>
-                  </button>
                 </div>
               </div>
             </div>
@@ -5209,11 +5210,13 @@ function initRichTextToolbars(scope) {
           inset: 0;
           width: 100vw;
           height: 100vh;
-          background: rgba(0,0,0,0.001);
+          background: rgba(0,0,0,0.68);
+          backdrop-filter: blur(6px);
+          -webkit-backdrop-filter: blur(6px);
           display: none;
           align-items: center;
           justify-content: center;
-          padding: 18px;
+          padding: 20px;
           box-sizing: border-box;
           z-index: 2147483600;
           cursor: zoom-out;
@@ -5223,13 +5226,14 @@ function initRichTextToolbars(scope) {
         .mrm-pdfOverlay.is-open { display: flex; }
 
         .mrm-pdfModal {
-          width: min(980px, calc(100vw - 36px));
-          height: min(92vh, 1200px);
-          border-radius: var(--radius-md);
+          width: min(1180px, calc(100vw - 40px));
+          height: calc(100vh - 40px);
+          max-height: calc(100vh - 40px);
+          border-radius: 18px;
           overflow: hidden;
-          background: var(--color-surface);
+          background: #111111;
           border: none;
-          box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+          box-shadow: 0 24px 90px rgba(0,0,0,0.42);
           display: flex;
           cursor: zoom-out;
         }
@@ -5240,17 +5244,47 @@ function initRichTextToolbars(scope) {
           overflow-y: auto;
           overflow-x: hidden;
           -webkit-overflow-scrolling: touch;
-          padding: 18px;
+          padding: 0;
           box-sizing: border-box;
+          cursor: zoom-out;
+          background: #111111;
+          position: relative;
+        }
+
+        .mrm-pdfScroll.is-loading::before {
+          content: "Loading preview…";
+          position: sticky;
+          top: 0;
+          z-index: 2;
+          display: block;
+          padding: 10px 14px;
+          background: rgba(17,17,17,0.92);
+          color: #ffffff;
+          font-weight: 800;
+          text-align: center;
         }
 
         .mrm-pdfPage {
           display: block;
-          margin: 0 auto 18px;
+          margin: 0 auto 14px;
           border: none;
-          background: transparent;
-          max-width: 100%;
-          height: auto;
+          background: #ffffff;
+          width: 100% !important;
+          max-width: 100% !important;
+          height: auto !important;
+        }
+
+        @media (max-width: 640px) {
+          .mrm-pdfOverlay {
+            padding: 10px;
+          }
+
+          .mrm-pdfModal {
+            width: calc(100vw - 20px);
+            height: calc(100vh - 20px);
+            max-height: calc(100vh - 20px);
+            border-radius: 14px;
+          }
         }
 
         .meta .description {
@@ -5714,8 +5748,7 @@ function initRichTextToolbars(scope) {
    Applies the Masterclass popup palette to shortcode-generated OTP/PDF popups.
    ========================================================= */
 
-.mrm-otpOverlay .modal,
-.mrm-pdfModal { background: #fffaf3 !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; box-shadow: 0 24px 70px rgba(27, 20, 15, 0.22) !important; }
+.mrm-otpOverlay .modal { background: #fffaf3 !important; color: #2f2118 !important; border: 1px solid rgba(124, 74, 45, 0.22) !important; box-shadow: 0 24px 70px rgba(27, 20, 15, 0.22) !important; }
 .mrm-otpOverlay .modal,
 .mrm-otpOverlay .modal * { color: #2f2118 !important; }
 .mrm-otpOverlay .modal h2 { background: linear-gradient(135deg, #fffaf3 0%, #f7efe3 100%) !important; color: #2f2118 !important; border-bottom: 1px solid rgba(124, 74, 45, 0.20) !important; }
@@ -5730,8 +5763,57 @@ function initRichTextToolbars(scope) {
 .mrm-otpOverlay .mrm-otp-verify-btn,
 .mrm-otpOverlay .mrm-sendCodeBtn,
 .mrm-otpOverlay .mrm-verifyBtn { background: #20170f !important; color: #ffffff !important; }
-.mrm-otpOverlay button.secondary,
-.mrm-otpOverlay .mrm-closeBtn { background: #ffffff !important; color: #2f2118 !important; border: 1px solid #20170f !important; }
+.mrm-otpOverlay button.secondary {
+  background: #ffffff !important;
+  color: #2f2118 !important;
+  border: 1px solid #20170f !important;
+}
+
+.mrm-otpOverlay .mrm-otp-modal .modal-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 14px !important;
+  padding: 14px 16px !important;
+  background: linear-gradient(135deg, #fffaf3 0%, #f7efe3 100%) !important;
+  border-bottom: 1px solid rgba(124, 74, 45, 0.20) !important;
+}
+
+.mrm-otpOverlay .mrm-otp-modal .modal-header h2 {
+  margin: 0 !important;
+  background: transparent !important;
+  border-bottom: 0 !important;
+}
+
+.mrm-otpOverlay .mrm-otp-modal .modal-body {
+  padding: 16px !important;
+  overflow: auto !important;
+  -webkit-overflow-scrolling: touch !important;
+}
+
+.mrm-otpOverlay .mrm-xbtn.mrm-closeBtn {
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 36px !important;
+  min-height: 36px !important;
+  border-radius: 10px !important;
+  border: 0 !important;
+  background: #000000 !important;
+  color: #ffffff !important;
+  font-size: 22px !important;
+  font-weight: 800 !important;
+  line-height: 1 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  cursor: pointer !important;
+  padding: 0 !important;
+  text-decoration: none !important;
+  opacity: 1 !important;
+  text-shadow: none !important;
+  -webkit-text-fill-color: #ffffff !important;
+  flex: 0 0 auto !important;
+}
 
 /* =========================================================
    MRM Warm Product Detail Surface Patch
@@ -6505,6 +6587,8 @@ audio.mrm-audio {
             let pdfDoc = null;
             let overlayOpen = false;
             let overlayRendered = false;
+            let overlayRenderToken = 0;
+            let overlayLastWidth = 0;
             let resizeTimer = null;
             let scrollY = 0;
 
@@ -6532,42 +6616,79 @@ audio.mrm-audio {
               await renderSinglePageToCanvas(previewCanvas, previewWrap, PREVIEW_PAGE);
             }
 
-            async function renderOverlayAllPages() {
-              if (!pdfDoc || overlayRendered) return;
-              pdfScroll.innerHTML = "";
+            async function renderOverlayAllPages(forceRender) {
+              if (!pdfDoc) return;
+
               await new Promise(r => requestAnimationFrame(r));
 
-              const containerWidth = pdfScroll.clientWidth;
-              const dpr = Math.max(1, window.devicePixelRatio || 1);
+              const containerWidth = Math.max(1, Math.floor(pdfScroll.clientWidth));
+              const shouldReuse =
+                overlayRendered &&
+                !forceRender &&
+                Math.abs(containerWidth - overlayLastWidth) < 8 &&
+                pdfScroll.children.length > 0;
+
+              if (shouldReuse) {
+                return;
+              }
+
+              const renderToken = ++overlayRenderToken;
+              const previousScrollTop = pdfScroll.scrollTop || 0;
+              const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+              const fragment = document.createDocumentFragment();
+
+              pdfScroll.classList.add('is-loading');
 
               for (let i = 1; i <= pdfDoc.numPages; i++) {
+                if (!overlayOpen || renderToken !== overlayRenderToken) {
+                  pdfScroll.classList.remove('is-loading');
+                  return;
+                }
+
                 const page = await pdfDoc.getPage(i);
                 const unscaled = page.getViewport({ scale: 1 });
-
                 const scale = containerWidth / unscaled.width;
                 const viewport = page.getViewport({ scale });
 
                 const canvas = document.createElement('canvas');
                 canvas.className = "mrm-pdfPage";
-                canvas.style.width = Math.floor(viewport.width) + "px";
+                canvas.style.width = "100%";
                 canvas.style.height = Math.floor(viewport.height) + "px";
-                canvas.width = Math.floor(viewport.width * dpr);
+                canvas.width = Math.floor(containerWidth * dpr);
                 canvas.height = Math.floor(viewport.height * dpr);
 
                 const ctx = canvas.getContext('2d', { alpha: false });
                 ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
                 ctx.imageSmoothingEnabled = true;
 
-                pdfScroll.appendChild(canvas);
                 await page.render({ canvasContext: ctx, viewport }).promise;
+
+                if (!overlayOpen || renderToken !== overlayRenderToken) {
+                  pdfScroll.classList.remove('is-loading');
+                  return;
+                }
+
+                fragment.appendChild(canvas);
               }
 
+              if (!overlayOpen || renderToken !== overlayRenderToken) {
+                pdfScroll.classList.remove('is-loading');
+                return;
+              }
+
+              pdfScroll.replaceChildren(fragment);
+              overlayLastWidth = containerWidth;
               overlayRendered = true;
+
+              if (previousScrollTop > 0) {
+                pdfScroll.scrollTop = Math.min(previousScrollTop, pdfScroll.scrollHeight);
+              }
+
+              pdfScroll.classList.remove('is-loading');
             }
 
             function openOverlay() {
               overlayOpen = true;
-              overlayRendered = false;
 
               scrollY = window.scrollY || window.pageYOffset || 0;
               document.body.style.top = `-${scrollY}px`;
@@ -6576,11 +6697,12 @@ audio.mrm-audio {
               overlay.classList.add('is-open');
               overlay.setAttribute('aria-hidden', 'false');
 
-              renderOverlayAllPages();
+              renderOverlayAllPages(false);
             }
 
             function closeOverlay() {
               overlayOpen = false;
+              overlayRenderToken++;
 
               overlay.classList.remove('is-open');
               overlay.setAttribute('aria-hidden', 'true');
@@ -6602,7 +6724,10 @@ audio.mrm-audio {
               clearTimeout(resizeTimer);
               resizeTimer = setTimeout(() => {
                 renderPreview();
-                if (overlayOpen) { overlayRendered = false; renderOverlayAllPages(); }
+                if (overlayOpen) {
+                  overlayRendered = false;
+                  renderOverlayAllPages(true);
+                }
               }, 150);
             }
 
@@ -6611,8 +6736,48 @@ audio.mrm-audio {
               if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleOverlay(); }
             });
 
-            // Close PDF overlay when clicking anywhere (including the PDF itself)
-            overlay.addEventListener('click', () => closeOverlay());
+            let pdfPointerStartX = 0;
+            let pdfPointerStartY = 0;
+            let pdfPointerMoved = false;
+
+            function rememberPdfPointerStart(e) {
+              const point = e.touches && e.touches.length ? e.touches[0] : e;
+              pdfPointerStartX = point.clientX || 0;
+              pdfPointerStartY = point.clientY || 0;
+              pdfPointerMoved = false;
+            }
+
+            function trackPdfPointerMove(e) {
+              const point = e.touches && e.touches.length ? e.touches[0] : e;
+              const dx = Math.abs((point.clientX || 0) - pdfPointerStartX);
+              const dy = Math.abs((point.clientY || 0) - pdfPointerStartY);
+
+              if (dx > 8 || dy > 8) {
+                pdfPointerMoved = true;
+              }
+            }
+
+            overlay.addEventListener('pointerdown', rememberPdfPointerStart);
+            overlay.addEventListener('pointermove', trackPdfPointerMove);
+
+            pdfScroll.addEventListener('pointerdown', rememberPdfPointerStart);
+            pdfScroll.addEventListener('pointermove', trackPdfPointerMove);
+
+            overlay.addEventListener('click', (e) => {
+              if (!overlayOpen) return;
+
+              if (pdfPointerMoved) {
+                return;
+              }
+
+              const clickedOverlayBackground = e.target === overlay;
+              const clickedScrollBackground = e.target === pdfScroll;
+              const clickedPdfCanvas = e.target && e.target.classList && e.target.classList.contains('mrm-pdfPage');
+
+              if (clickedOverlayBackground || clickedScrollBackground || clickedPdfCanvas) {
+                closeOverlay();
+              }
+            });
 
             document.addEventListener('keydown', (e) => {
               if (e.key === 'Escape' && overlayOpen) closeOverlay();
@@ -6688,7 +6853,7 @@ audio.mrm-audio {
 
             // Force a visible, consistent close label (base behavior)
             if (closeBtn) {
-              closeBtn.textContent = 'Close';
+              closeBtn.textContent = '×';
               closeBtn.setAttribute('type', 'button');
               closeBtn.setAttribute('aria-label', 'Close');
             }
@@ -6900,7 +7065,6 @@ audio.mrm-audio {
             }
 
             closeBtn.addEventListener('click', closeOtpModal);
-            otpOverlay.addEventListener('click', (e) => { if (e.target === otpOverlay) closeOtpModal(); });
 
           }
 

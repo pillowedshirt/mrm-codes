@@ -711,13 +711,13 @@ audio.mrm-audio{
   inset:0;
   width:100vw;
   height:100vh;
-  background: rgba(0,0,0,0.72);
+  background: rgba(0,0,0,0.68);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   display:none;
-  align-items:stretch;
-  justify-content:stretch;
-  padding:0;
+  align-items:center;
+  justify-content:center;
+  padding:20px;
   box-sizing:border-box;
   z-index:2147483600;
   cursor:zoom-out;
@@ -727,13 +727,14 @@ audio.mrm-audio{
 .mrm-pdfOverlay.is-open{ display:flex; }
 
 .mrm-pdfModal{
-  width:100vw;
-  height:100vh;
-  border-radius:0;
+  width:min(1180px, calc(100vw - 40px));
+  height:calc(100vh - 40px);
+  max-height:calc(100vh - 40px);
+  border-radius:18px;
   overflow:hidden;
   background:#111111;
   border:none;
-  box-shadow:none;
+  box-shadow:0 24px 90px rgba(0,0,0,0.42);
   display:flex;
   cursor:zoom-out;
 }
@@ -746,14 +747,41 @@ audio.mrm-audio{
   padding:0;
   box-sizing:border-box;
   cursor:zoom-out;
+  background:#111111;
+  position:relative;
+}
+.mrm-pdfScroll.is-loading::before{
+  content:"Loading preview…";
+  position:sticky;
+  top:0;
+  z-index:2;
+  display:block;
+  padding:10px 14px;
+  background:rgba(17,17,17,0.92);
+  color:#ffffff;
+  font-weight:800;
+  text-align:center;
 }
 .mrm-pdfPage{
   display:block;
-  margin:0 auto;
+  margin:0 auto 14px;
   width:100% !important;
   max-width:100% !important;
   height:auto !important;
   background:#ffffff;
+}
+
+@media (max-width: 640px){
+  .mrm-pdfOverlay{
+    padding:10px;
+  }
+
+  .mrm-pdfModal{
+    width:calc(100vw - 20px);
+    height:calc(100vh - 20px);
+    max-height:calc(100vh - 20px);
+    border-radius:14px;
+  }
 }
 
 /* OTP MODAL (unchanged) */
@@ -1113,7 +1141,6 @@ audio.mrm-audio{
 }
 .mrm-piece-product-page .modal,
 .mrm-piece-product-page .mrm-success-modal,
-.mrm-piece-product-page .mrm-pdfModal,
 .mrm-piece-product-page .mrm-otpOverlay .modal { background: var(--mrm-warm-popup-bg) !important; color: var(--mrm-warm-popup-text) !important; border: 1px solid var(--mrm-warm-popup-border) !important; box-shadow: var(--mrm-warm-popup-shadow) !important; }
 .mrm-piece-product-page .modal-header { background: linear-gradient(135deg, var(--mrm-warm-popup-bg) 0%, var(--mrm-warm-popup-bg-soft) 100%) !important; border-bottom: 1px solid rgba(124, 74, 45, 0.20) !important; }
 .mrm-piece-product-page .modal-header h2,
@@ -1142,11 +1169,43 @@ audio.mrm-audio{
 .mrm-piece-product-page .mrm-otpOverlay .mrm-otp-verify-btn,
 .mrm-piece-product-page .mrm-otpOverlay .mrm-sendCodeBtn,
 .mrm-piece-product-page .mrm-otpOverlay .mrm-verifyBtn { background: var(--mrm-warm-popup-deep) !important; color: #ffffff !important; }
-.mrm-piece-product-page .mrm-otpOverlay button.secondary,
-.mrm-piece-product-page .mrm-otpOverlay .mrm-closeBtn { background: #ffffff !important; color: var(--mrm-warm-popup-text) !important; border: 1px solid var(--mrm-warm-popup-deep) !important; }
+.mrm-piece-product-page .mrm-otpOverlay button.secondary {
+  background: #ffffff !important;
+  color: var(--mrm-warm-popup-text) !important;
+  border: 1px solid var(--mrm-warm-popup-deep) !important;
+}
+
+.mrm-piece-product-page .mrm-otpOverlay .mrm-otp-modal {
+  padding: 0 !important;
+  width: min(860px, 94vw) !important;
+  max-width: 860px !important;
+  border-radius: 22px !important;
+  overflow: hidden !important;
+}
+
+.mrm-piece-product-page .mrm-otpOverlay .mrm-otp-modal .modal-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 14px !important;
+  padding: 14px 16px !important;
+}
+
+.mrm-piece-product-page .mrm-otpOverlay .mrm-otp-modal .modal-header h2 {
+  margin: 0 !important;
+}
+
+.mrm-piece-product-page .mrm-otpOverlay .mrm-otp-modal .modal-body {
+  padding: 16px !important;
+  overflow: auto !important;
+  -webkit-overflow-scrolling: touch !important;
+}
+
 .mrm-piece-product-page .mrm-otpOverlay .mrm-xbtn.mrm-closeBtn {
   width: 36px !important;
   height: 36px !important;
+  min-width: 36px !important;
+  min-height: 36px !important;
   border-radius: 10px !important;
   border: 0 !important;
   background: #000000 !important;
@@ -1163,6 +1222,7 @@ audio.mrm-audio{
   opacity: 1 !important;
   text-shadow: none !important;
   -webkit-text-fill-color: #ffffff !important;
+  flex: 0 0 auto !important;
 }
 
 /* =========================================================
@@ -1271,8 +1331,7 @@ audio.mrm-audio{
 .mrm-piece-product-page .offer,
 .mrm-piece-product-page .meta-panel,
 .mrm-piece-product-page .modal,
-.mrm-piece-product-page .mrm-success-modal,
-.mrm-piece-product-page .mrm-pdfModal {
+.mrm-piece-product-page .mrm-success-modal {
   background: #ffffff !important;
   border-color: #d9cfbe !important;
   color: #171512 !important;
@@ -1624,10 +1683,14 @@ audio.mrm-audio{
 
         <!-- OTP Modal (kept minimal for functionality) -->
         <div class="mrm-otpOverlay" aria-hidden="true">
-          <div class="modal" style="background:#fff;border-radius:22px;max-width:860px;width:94vw;padding:18px;border:1px solid rgba(0,0,0,0.10);box-shadow:0 26px 90px rgba(0,0,0,0.38);">
-            <h2 style="margin:0 0 14px 0;">Access Purchased Product</h2>
+          <div class="modal mrm-otp-modal" role="dialog" aria-modal="true" aria-label="Access purchased product">
+            <div class="modal-header">
+              <h2>Access Purchased Product</h2>
+              <button type="button" class="mrm-xbtn mrm-closeBtn" aria-label="Close">×</button>
+            </div>
 
-            <div class="mrm-stepEmail">
+            <div class="modal-body">
+              <div class="mrm-stepEmail">
               <label style="display:block;font-weight:800;margin-bottom:8px;">Email address</label>
               <input type="email" class="mrm-email" autocomplete="email" required style="width:100%;padding:14px;border-radius:14px;border:1px solid rgba(0,0,0,0.16);">
               <button
@@ -1653,12 +1716,6 @@ audio.mrm-audio{
 
             <div class="message mrm-message" style="margin-top:12px;min-height:24px;opacity:0.85;"></div>
 
-            <div style="margin-top:12px;display:flex;justify-content:flex-end;">
-              <button
-                type="button"
-                class="mrm-xbtn mrm-closeBtn"
-                aria-label="Close"
-              >×</button>
             </div>
           </div>
         </div>
@@ -3464,6 +3521,8 @@ async function getOfferSkuCandidates(offerEl) {
     let pdfDoc = null;
     let overlayOpen = false;
     let overlayRendered = false;
+    let overlayRenderToken = 0;
+    let overlayLastWidth = 0;
     let resizeTimer = null;
     let scrollY = 0;
 
@@ -3494,27 +3553,44 @@ async function getOfferSkuCandidates(offerEl) {
       await renderSinglePageToCanvas(previewCanvas, previewWrap, PREVIEW_PAGE);
     }
 
-    async function renderOverlayAllPages(){
-      if (!pdfDoc || overlayRendered) return;
-      pdfScroll.innerHTML = "";
+    async function renderOverlayAllPages(forceRender){
+      if (!pdfDoc) return;
+
       await new Promise(r => requestAnimationFrame(r));
 
-      const containerWidth = Math.max(1, pdfScroll.clientWidth);
-      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const containerWidth = Math.max(1, Math.floor(pdfScroll.clientWidth));
+      const shouldReuse =
+        overlayRendered &&
+        !forceRender &&
+        Math.abs(containerWidth - overlayLastWidth) < 8 &&
+        pdfScroll.children.length > 0;
+
+      if (shouldReuse) {
+        return;
+      }
+
+      const renderToken = ++overlayRenderToken;
+      const previousScrollTop = pdfScroll.scrollTop || 0;
+      const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+      const fragment = document.createDocumentFragment();
+
+      pdfScroll.classList.add('is-loading');
 
       for (let i=1; i<=pdfDoc.numPages; i++){
+        if (!overlayOpen || renderToken !== overlayRenderToken) {
+          pdfScroll.classList.remove('is-loading');
+          return;
+        }
+
         const page = await pdfDoc.getPage(i);
         const unscaled = page.getViewport({ scale: 1 });
-
         const scale = containerWidth / unscaled.width;
         const viewport = page.getViewport({ scale });
 
         const canvas = document.createElement('canvas');
         canvas.className = "mrm-pdfPage";
-
         canvas.style.width = "100%";
         canvas.style.height = Math.floor(viewport.height) + "px";
-
         canvas.width = Math.floor(containerWidth * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
 
@@ -3522,16 +3598,34 @@ async function getOfferSkuCandidates(offerEl) {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.imageSmoothingEnabled = true;
 
-        pdfScroll.appendChild(canvas);
         await page.render({ canvasContext: ctx, viewport }).promise;
+
+        if (!overlayOpen || renderToken !== overlayRenderToken) {
+          pdfScroll.classList.remove('is-loading');
+          return;
+        }
+
+        fragment.appendChild(canvas);
       }
 
+      if (!overlayOpen || renderToken !== overlayRenderToken) {
+        pdfScroll.classList.remove('is-loading');
+        return;
+      }
+
+      pdfScroll.replaceChildren(fragment);
+      overlayLastWidth = containerWidth;
       overlayRendered = true;
+
+      if (previousScrollTop > 0) {
+        pdfScroll.scrollTop = Math.min(previousScrollTop, pdfScroll.scrollHeight);
+      }
+
+      pdfScroll.classList.remove('is-loading');
     }
 
     function openOverlay(){
       overlayOpen = true;
-      overlayRendered = false;
 
       scrollY = window.scrollY || window.pageYOffset || 0;
       document.body.style.top = `-${scrollY}px`;
@@ -3540,11 +3634,12 @@ async function getOfferSkuCandidates(offerEl) {
       overlay.classList.add('is-open');
       overlay.setAttribute('aria-hidden','false');
 
-      renderOverlayAllPages();
+      renderOverlayAllPages(false);
     }
 
     function closeOverlay(){
       overlayOpen = false;
+      overlayRenderToken++;
 
       overlay.classList.remove('is-open');
       overlay.setAttribute('aria-hidden','true');
@@ -3564,7 +3659,10 @@ async function getOfferSkuCandidates(offerEl) {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         renderPreview();
-        if (overlayOpen) { overlayRendered = false; renderOverlayAllPages(); }
+        if (overlayOpen) {
+          overlayRendered = false;
+          renderOverlayAllPages(true);
+        }
       }, 150);
     }
 
@@ -3608,21 +3706,10 @@ async function getOfferSkuCandidates(offerEl) {
       }
 
       const clickedOverlayBackground = e.target === overlay;
+      const clickedScrollBackground = e.target === pdfScroll;
       const clickedPdfCanvas = e.target && e.target.classList && e.target.classList.contains('mrm-pdfPage');
 
-      if (clickedOverlayBackground || clickedPdfCanvas) {
-        closeOverlay();
-      }
-    });
-
-    pdfScroll.addEventListener('click', (e) => {
-      if (!overlayOpen) return;
-
-      if (pdfPointerMoved) {
-        return;
-      }
-
-      if (e.target === pdfScroll) {
+      if (clickedOverlayBackground || clickedScrollBackground || clickedPdfCanvas) {
         closeOverlay();
       }
     });
