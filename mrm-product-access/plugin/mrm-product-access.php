@@ -4738,7 +4738,7 @@ function initRichTextToolbars(scope) {
             // Link behavior (match old HTML)
             $piece_url = $this->get_piece_url( $slug );
 
-            echo '<article class="product-card mrm-piece"'
+            echo '<article class="product-card mrm-piece mrm-catalog-piece-card"'
                 // IMPORTANT: match old HTML expectations
                 . ' data-product-slug="' . esc_attr( $slug ) . '"'
                 // Keep back-compat for your current JS too
@@ -5885,10 +5885,11 @@ audio.mrm-audio {
   background: #ffffff !important;
   border-color: #d9cfbe !important;
   box-sizing: border-box !important;
-  overflow: hidden !important;
+  overflow: visible !important;
   display: grid !important;
-  grid-template-columns: minmax(260px, 420px) minmax(0, 1fr) !important;
+  grid-template-columns: 1fr !important;
   align-items: start !important;
+  justify-items: center !important;
 }
 
 .mrm-sheet-music-catalog-section .product-card *,
@@ -5906,6 +5907,24 @@ audio.mrm-audio {
   min-width: 0 !important;
   max-width: 100% !important;
 }
+
+.mrm-sheet-music-catalog-section .mrm-catalog-piece-card .pdf-col {
+  width: 100% !important;
+  max-width: 100% !important;
+  grid-column: 1 / -1 !important;
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  overflow: visible !important;
+  background: transparent !important;
+}
+
+.mrm-sheet-music-catalog-section .mrm-catalog-piece-card .meta {
+  width: min(860px, 100%) !important;
+  max-width: 100% !important;
+  grid-column: 1 / -1 !important;
+}
+
 
 .mrm-sheet-music-catalog-section .pdf-preview {
   width: min(860px, 100%) !important;
@@ -6005,7 +6024,8 @@ audio.mrm-audio {
     grid-template-columns: 1fr !important;
     gap: 18px !important;
     padding: 16px !important;
-    overflow: hidden !important;
+    overflow: visible !important;
+    justify-items: center !important;
   }
 
   .mrm-sheet-music-catalog-section .pdf-preview {
@@ -6119,8 +6139,9 @@ audio.mrm-audio {
   }
 
   .mrm-sheet-music-catalog-section .product-card {
-    grid-template-columns: minmax(220px, 36vw) minmax(0, 1fr) !important;
+    grid-template-columns: 1fr !important;
     gap: 20px !important;
+    justify-items: center !important;
   }
 
   .mrm-sheet-music-catalog-section .pdf-preview {
@@ -6503,10 +6524,13 @@ audio.mrm-audio {
 }
 
 .mrm-sheet-music-catalog-section .product-card {
-  contain: layout paint;
+  contain: none !important;
 }
 
-.mrm-sheet-music-catalog-section .pdf-col,
+.mrm-sheet-music-catalog-section .pdf-col {
+  overflow: visible !important;
+}
+
 .mrm-sheet-music-catalog-section .meta {
   overflow: hidden !important;
 }
@@ -6527,7 +6551,15 @@ audio.mrm-audio {
   background: transparent !important;
 }
 
-.mrm-sheet-music-catalog-section .pdf-preview,
+.mrm-sheet-music-catalog-section .mrm-catalog-piece-card .title-block,
+.mrm-sheet-music-catalog-section .mrm-catalog-piece-card .description,
+.mrm-sheet-music-catalog-section .mrm-catalog-piece-card .audio-box,
+.mrm-sheet-music-catalog-section .mrm-catalog-piece-card .mrm-view-options-row {
+  width: 100% !important;
+  max-width: 860px !important;
+}
+
+.mrm-sheet-music-catalog-section .mrm-catalog-piece-card .pdf-preview,
 .mrm-piece-details-wrapper .pdf-preview {
   width: min(860px, 100%) !important;
   height: clamp(420px, 56vh, 720px) !important;
@@ -6539,9 +6571,10 @@ audio.mrm-audio {
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
+  overflow: hidden !important;
 }
 
-.mrm-sheet-music-catalog-section .pdf-preview canvas,
+.mrm-sheet-music-catalog-section .mrm-catalog-piece-card .pdf-preview canvas,
 .mrm-piece-details-wrapper .pdf-preview canvas {
   display: block !important;
   margin: 0 auto !important;
@@ -6549,6 +6582,19 @@ audio.mrm-audio {
   max-height: 100% !important;
   width: auto !important;
   height: auto !important;
+}
+
+.mrm-sheet-music-catalog-section .mrm-pdfOverlay,
+.mrm-piece-details-wrapper .mrm-pdfOverlay {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 18px !important;
+  box-sizing: border-box !important;
+  z-index: 2147483600 !important;
 }
 
 .mrm-sheet-music-catalog-section .mrm-pdfOverlay.is-open,
@@ -6566,20 +6612,31 @@ audio.mrm-audio {
   max-height: calc(100vh - 36px) !important;
   margin: auto !important;
   background: #fffaf3 !important;
+  border-radius: var(--radius-lg) !important;
+  display: flex !important;
+  overflow: hidden !important;
 }
 
 .mrm-sheet-music-catalog-section .mrm-pdfScroll,
 .mrm-piece-details-wrapper .mrm-pdfScroll {
+  width: 100% !important;
+  height: 100% !important;
   display: flex !important;
   flex-direction: column !important;
   align-items: center !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
 }
 
 @media (max-width: 700px) {
-  .mrm-sheet-music-catalog-section .pdf-preview,
+  .mrm-sheet-music-catalog-section .mrm-catalog-piece-card .pdf-preview,
   .mrm-piece-details-wrapper .pdf-preview {
     width: 100% !important;
     height: clamp(360px, 62vh, 640px) !important;
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-catalog-piece-card .meta {
+    width: 100% !important;
   }
 }
 </style>
