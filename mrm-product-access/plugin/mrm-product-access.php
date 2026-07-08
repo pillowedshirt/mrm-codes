@@ -6582,6 +6582,92 @@ audio.mrm-audio {
     height: clamp(360px, 62vh, 640px) !important;
   }
 }
+
+/* =========================================================
+   Catalog PDF popup-only fix
+   Keeps [mrm_sheet_music_catalog] cards untouched.
+   The popup is portaled to body when opened, so these styles
+   must work globally and not depend on the catalog wrapper.
+   ========================================================= */
+body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 18px !important;
+  box-sizing: border-box !important;
+  background: rgba(0, 0, 0, 0.50) !important;
+  backdrop-filter: blur(6px) !important;
+  -webkit-backdrop-filter: blur(6px) !important;
+  z-index: 2147483600 !important;
+  cursor: zoom-out !important;
+  overscroll-behavior: none !important;
+  overflow: hidden !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay.is-open {
+  display: flex !important;
+}
+
+body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfModal {
+  width: min(1100px, calc(100vw - 36px)) !important;
+  height: min(92vh, 1400px) !important;
+  max-width: calc(100vw - 36px) !important;
+  max-height: calc(100vh - 36px) !important;
+  margin: auto !important;
+  border-radius: var(--radius-lg, 22px) !important;
+  overflow: hidden !important;
+  background: #fffaf3 !important;
+  border: 1px solid rgba(124, 74, 45, 0.22) !important;
+  box-shadow: 0 24px 70px rgba(27, 20, 15, 0.22) !important;
+  display: flex !important;
+  cursor: zoom-out !important;
+}
+
+body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfScroll {
+  width: 100% !important;
+  height: 100% !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  -webkit-overflow-scrolling: touch !important;
+  padding: 18px !important;
+  box-sizing: border-box !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+}
+
+body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
+  display: block !important;
+  margin: 0 auto 18px !important;
+  background: #fff !important;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.18) !important;
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+@media (max-width: 700px) {
+  body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay {
+    padding: 12px !important;
+  }
+
+  body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfModal {
+    width: calc(100vw - 24px) !important;
+    height: calc(100vh - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(100vh - 24px) !important;
+  }
+
+  body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfScroll {
+    padding: 12px !important;
+  }
+}
+
 </style>
 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -6637,7 +6723,17 @@ audio.mrm-audio {
             const previewWrap = piece.querySelector('.mrm-pdfPreview');
             const previewCanvas = piece.querySelector('.mrm-pdfCanvas');
             const overlay = piece.querySelector('.mrm-pdfOverlay');
-            const pdfScroll = piece.querySelector('.mrm-pdfScroll');
+            const pdfScroll = overlay ? overlay.querySelector('.mrm-pdfScroll') : null;
+
+            /*
+             * The catalog card uses containment/overflow rules.
+             * Keep the inline preview inside the card, but portal the popup overlay
+             * to <body> so it centers against the viewport like piece-product.html.
+             */
+            if (overlay && overlay.parentElement !== document.body) {
+              overlay.classList.add('mrm-catalog-pdfOverlay');
+              document.body.appendChild(overlay);
+            }
 
             let pdfDoc = null;
             let overlayOpen = false;
@@ -6670,11 +6766,21 @@ audio.mrm-audio {
             }
 
             async function renderOverlayAllPages() {
-              if (!pdfDoc || overlayRendered) return;
+              if (!pdfDoc || overlayRendered || !pdfScroll) return;
               pdfScroll.innerHTML = "";
               await new Promise(r => requestAnimationFrame(r));
 
-              const containerWidth = pdfScroll.clientWidth;
+              /*
+               * Match the piece-product.html behavior more closely:
+               * use the popup scroll width, but cap the PDF page width so it
+               * feels like a full-sized centered preview rather than an oversized
+               * page stretched edge-to-edge.
+               */
+              const containerWidth = Math.min(
+                1040,
+                Math.max(320, pdfScroll.clientWidth - 4)
+              );
+
               const dpr = Math.max(1, window.devicePixelRatio || 1);
 
               for (let i = 1; i <= pdfDoc.numPages; i++) {
@@ -6703,6 +6809,8 @@ audio.mrm-audio {
             }
 
             function openOverlay() {
+              if (!overlay || !pdfScroll) return;
+
               overlayOpen = true;
               overlayRendered = false;
 
@@ -6710,17 +6818,28 @@ audio.mrm-audio {
               document.body.style.top = `-${scrollY}px`;
               document.body.classList.add('no-scroll');
 
+              overlay.classList.add('mrm-catalog-pdfOverlay');
               overlay.classList.add('is-open');
               overlay.setAttribute('aria-hidden', 'false');
+
+              /*
+               * Force viewport centering even if older stylesheet rules remain.
+               */
+              overlay.style.display = 'flex';
+              overlay.style.alignItems = 'center';
+              overlay.style.justifyContent = 'center';
 
               renderOverlayAllPages();
             }
 
             function closeOverlay() {
+              if (!overlay || !pdfScroll) return;
+
               overlayOpen = false;
 
               overlay.classList.remove('is-open');
               overlay.setAttribute('aria-hidden', 'true');
+              overlay.style.display = '';
 
               document.body.classList.remove('no-scroll');
               const top = document.body.style.top;
