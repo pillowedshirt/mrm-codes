@@ -711,13 +711,13 @@ audio.mrm-audio{
   inset:0;
   width:100vw;
   height:100vh;
-  background: rgba(0,0,0,0.50);
+  background: rgba(0,0,0,0.72);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   display:none;
-  align-items:center;
-  justify-content:center;
-  padding:18px;
+  align-items:stretch;
+  justify-content:stretch;
+  padding:0;
   box-sizing:border-box;
   z-index:2147483600;
   cursor:zoom-out;
@@ -727,13 +727,13 @@ audio.mrm-audio{
 .mrm-pdfOverlay.is-open{ display:flex; }
 
 .mrm-pdfModal{
-  width: min(1100px, calc(100vw - 36px));
-  height: min(92vh, 1400px);
-  border-radius: var(--radius-lg);
+  width:100vw;
+  height:100vh;
+  border-radius:0;
   overflow:hidden;
-  background: var(--color-surface);
+  background:#111111;
   border:none;
-  box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+  box-shadow:none;
   display:flex;
   cursor:zoom-out;
 }
@@ -743,14 +743,17 @@ audio.mrm-audio{
   overflow-y:auto;
   overflow-x:hidden;
   -webkit-overflow-scrolling:touch;
-  padding:18px;
+  padding:0;
   box-sizing:border-box;
+  cursor:zoom-out;
 }
 .mrm-pdfPage{
   display:block;
-  margin:0 auto 18px;
-  max-width:100%;
-  height:auto;
+  margin:0 auto;
+  width:100% !important;
+  max-width:100% !important;
+  height:auto !important;
+  background:#ffffff;
 }
 
 /* OTP MODAL (unchanged) */
@@ -1141,6 +1144,26 @@ audio.mrm-audio{
 .mrm-piece-product-page .mrm-otpOverlay .mrm-verifyBtn { background: var(--mrm-warm-popup-deep) !important; color: #ffffff !important; }
 .mrm-piece-product-page .mrm-otpOverlay button.secondary,
 .mrm-piece-product-page .mrm-otpOverlay .mrm-closeBtn { background: #ffffff !important; color: var(--mrm-warm-popup-text) !important; border: 1px solid var(--mrm-warm-popup-deep) !important; }
+.mrm-piece-product-page .mrm-otpOverlay .mrm-xbtn.mrm-closeBtn {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 10px !important;
+  border: 0 !important;
+  background: #000000 !important;
+  color: #ffffff !important;
+  font-size: 22px !important;
+  font-weight: 800 !important;
+  line-height: 1 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  cursor: pointer !important;
+  padding: 0 !important;
+  text-decoration: none !important;
+  opacity: 1 !important;
+  text-shadow: none !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
 
 /* =========================================================
    MRM Warm Product Page Surface Patch
@@ -1633,12 +1656,9 @@ audio.mrm-audio{
             <div style="margin-top:12px;display:flex;justify-content:flex-end;">
               <button
                 type="button"
-                class="secondary mrm-closeBtn"
+                class="mrm-xbtn mrm-closeBtn"
                 aria-label="Close"
-                style="padding:10px 14px;border-radius:14px;border:1px solid #2f2f2f;background:#ffffff;color:#000000;font-weight:900;font-size:14px;line-height:1.1;cursor:pointer;text-decoration:none;"
-              >
-                Close
-              </button>
+              >×</button>
             </div>
           </div>
         </div>
@@ -1756,7 +1776,7 @@ audio.mrm-audio{
               </div>
 
               <div id="mrm-piece-card-step" class="mrm-piece-step" hidden>
-                <h3 class="mrm-piece-payment-step-heading">Complete Payment</h3>
+                <h3 class="mrm-piece-payment-step-heading">Submit Payment</h3>
                 <p class="mrm-piece-payment-step-note">
                   Review your total below, enter your card information, and complete secure checkout.
                 </p>
@@ -1769,7 +1789,7 @@ audio.mrm-audio{
               </div>
               <div style="display:flex;gap:10px;margin-top:18px;">
                 <button id="mrm-payment-back" class="button-secondary" type="button" style="flex:1;">Go Back</button>
-                <button id="mrm-pay-btn" class="button-primary" style="flex:1;">Complete Purchase</button>
+                <button id="mrm-pay-btn" class="button-primary" style="flex:1;">Submit Payment</button>
               </div>
               <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
               </div>
@@ -2551,7 +2571,7 @@ async function getOfferSkuCandidates(offerEl) {
 
     errorEl.textContent = '';
     payBtn.disabled = true;
-    payBtn.textContent = 'Complete Purchase';
+    payBtn.textContent = 'Submit Payment';
 
     mrmPieceAppliedPromoCode = '';
     mrmPieceAppliedPromoDiscountCents = 0;
@@ -3479,7 +3499,7 @@ async function getOfferSkuCandidates(offerEl) {
       pdfScroll.innerHTML = "";
       await new Promise(r => requestAnimationFrame(r));
 
-      const containerWidth = pdfScroll.clientWidth;
+      const containerWidth = Math.max(1, pdfScroll.clientWidth);
       const dpr = Math.max(1, window.devicePixelRatio || 1);
 
       for (let i=1; i<=pdfDoc.numPages; i++){
@@ -3491,9 +3511,11 @@ async function getOfferSkuCandidates(offerEl) {
 
         const canvas = document.createElement('canvas');
         canvas.className = "mrm-pdfPage";
-        canvas.style.width = Math.floor(viewport.width) + "px";
+
+        canvas.style.width = "100%";
         canvas.style.height = Math.floor(viewport.height) + "px";
-        canvas.width = Math.floor(viewport.width * dpr);
+
+        canvas.width = Math.floor(containerWidth * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
 
         const ctx = canvas.getContext('2d', { alpha: false });
@@ -3551,7 +3573,59 @@ async function getOfferSkuCandidates(offerEl) {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleOverlay(); }
     });
 
-    overlay.addEventListener('click', () => { if (overlayOpen) closeOverlay(); });
+    let pdfPointerStartX = 0;
+    let pdfPointerStartY = 0;
+    let pdfPointerMoved = false;
+
+    function rememberPdfPointerStart(e) {
+      const point = e.touches && e.touches.length ? e.touches[0] : e;
+      pdfPointerStartX = point.clientX || 0;
+      pdfPointerStartY = point.clientY || 0;
+      pdfPointerMoved = false;
+    }
+
+    function trackPdfPointerMove(e) {
+      const point = e.touches && e.touches.length ? e.touches[0] : e;
+      const dx = Math.abs((point.clientX || 0) - pdfPointerStartX);
+      const dy = Math.abs((point.clientY || 0) - pdfPointerStartY);
+
+      if (dx > 8 || dy > 8) {
+        pdfPointerMoved = true;
+      }
+    }
+
+    overlay.addEventListener('pointerdown', rememberPdfPointerStart);
+    overlay.addEventListener('pointermove', trackPdfPointerMove);
+
+    pdfScroll.addEventListener('pointerdown', rememberPdfPointerStart);
+    pdfScroll.addEventListener('pointermove', trackPdfPointerMove);
+
+    overlay.addEventListener('click', (e) => {
+      if (!overlayOpen) return;
+
+      if (pdfPointerMoved) {
+        return;
+      }
+
+      const clickedOverlayBackground = e.target === overlay;
+      const clickedPdfCanvas = e.target && e.target.classList && e.target.classList.contains('mrm-pdfPage');
+
+      if (clickedOverlayBackground || clickedPdfCanvas) {
+        closeOverlay();
+      }
+    });
+
+    pdfScroll.addEventListener('click', (e) => {
+      if (!overlayOpen) return;
+
+      if (pdfPointerMoved) {
+        return;
+      }
+
+      if (e.target === pdfScroll) {
+        closeOverlay();
+      }
+    });
 
     window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlayOpen) closeOverlay(); });
     window.addEventListener('resize', debounceRerender);
@@ -3910,7 +3984,7 @@ async function getOfferSkuCandidates(offerEl) {
     if (sendBtn.dataset.mrmOtpBound === '1') return;
     sendBtn.dataset.mrmOtpBound = '1';
     verifyBtn.dataset.mrmOtpBound = '1';
-    closeBtn.textContent = 'Close';
+    closeBtn.textContent = '×';
     closeBtn.setAttribute('aria-label', 'Close');
 
     if (piece.dataset.mrmOtpDelegatedBound !== '1') {
@@ -4006,7 +4080,6 @@ async function getOfferSkuCandidates(offerEl) {
       window.scrollTo(0, top ? -parseInt(top,10) : 0);
     }
     closeBtn.addEventListener('click', closeOtpModal);
-    otpOverlay.addEventListener('click', e => { if (e.target === otpOverlay) closeOtpModal(); });
 
   }
 
