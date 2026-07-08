@@ -5210,30 +5210,31 @@ function initRichTextToolbars(scope) {
           inset: 0;
           width: 100vw;
           height: 100vh;
-          background: rgba(0,0,0,0.68);
+          background: rgba(0,0,0,0.58);
           backdrop-filter: blur(6px);
           -webkit-backdrop-filter: blur(6px);
           display: none;
           align-items: center;
           justify-content: center;
-          padding: 20px;
+          padding: 18px;
           box-sizing: border-box;
           z-index: 2147483600;
           cursor: zoom-out;
           overscroll-behavior: none;
           overflow: hidden;
         }
-        .mrm-pdfOverlay.is-open { display: flex; }
+        .mrm-pdfOverlay.is-open {
+          display: flex;
+        }
 
         .mrm-pdfModal {
-          width: min(1180px, calc(100vw - 40px));
-          height: calc(100vh - 40px);
-          max-height: calc(100vh - 40px);
+          width: min(1040px, calc(100vw - 36px));
+          height: min(92vh, 1200px);
           border-radius: 18px;
           overflow: hidden;
           background: #111111;
           border: none;
-          box-shadow: 0 24px 90px rgba(0,0,0,0.42);
+          box-shadow: 0 18px 60px rgba(0,0,0,0.35);
           display: flex;
           cursor: zoom-out;
         }
@@ -5244,7 +5245,7 @@ function initRichTextToolbars(scope) {
           overflow-y: auto;
           overflow-x: hidden;
           -webkit-overflow-scrolling: touch;
-          padding: 0;
+          padding: 18px;
           box-sizing: border-box;
           cursor: zoom-out;
           background: #111111;
@@ -5257,6 +5258,7 @@ function initRichTextToolbars(scope) {
           top: 0;
           z-index: 2;
           display: block;
+          margin: -18px -18px 14px;
           padding: 10px 14px;
           background: rgba(17,17,17,0.92);
           color: #ffffff;
@@ -5266,12 +5268,11 @@ function initRichTextToolbars(scope) {
 
         .mrm-pdfPage {
           display: block;
-          margin: 0 auto 14px;
+          margin: 0 auto 18px;
           border: none;
           background: #ffffff;
-          width: 100% !important;
-          max-width: 100% !important;
-          height: auto !important;
+          max-width: 100%;
+          height: auto;
         }
 
         @media (max-width: 640px) {
@@ -5284,6 +5285,14 @@ function initRichTextToolbars(scope) {
             height: calc(100vh - 20px);
             max-height: calc(100vh - 20px);
             border-radius: 14px;
+          }
+
+          .mrm-pdfScroll {
+            padding: 10px;
+          }
+
+          .mrm-pdfScroll.is-loading::before {
+            margin: -10px -10px 10px;
           }
         }
 
@@ -6617,16 +6626,16 @@ audio.mrm-audio {
             }
 
             async function renderOverlayAllPages(forceRender) {
-              if (!pdfDoc) return;
+              if (!pdfDoc || !pdfScroll) return;
 
               await new Promise(r => requestAnimationFrame(r));
 
-              const containerWidth = Math.max(1, Math.floor(pdfScroll.clientWidth));
+              const containerWidth = Math.max(1, Math.floor(pdfScroll.clientWidth - 36));
               const shouldReuse =
                 overlayRendered &&
                 !forceRender &&
                 Math.abs(containerWidth - overlayLastWidth) < 8 &&
-                pdfScroll.children.length > 0;
+                pdfScroll.querySelectorAll('.mrm-pdfPage').length > 0;
 
               if (shouldReuse) {
                 return;
@@ -6635,9 +6644,11 @@ audio.mrm-audio {
               const renderToken = ++overlayRenderToken;
               const previousScrollTop = pdfScroll.scrollTop || 0;
               const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
-              const fragment = document.createDocumentFragment();
 
+              overlayRendered = false;
+              overlayLastWidth = containerWidth;
               pdfScroll.classList.add('is-loading');
+              pdfScroll.innerHTML = '';
 
               for (let i = 1; i <= pdfDoc.numPages; i++) {
                 if (!overlayOpen || renderToken !== overlayRenderToken) {
@@ -6652,23 +6663,27 @@ audio.mrm-audio {
 
                 const canvas = document.createElement('canvas');
                 canvas.className = "mrm-pdfPage";
-                canvas.style.width = "100%";
+                canvas.style.width = Math.floor(viewport.width) + "px";
                 canvas.style.height = Math.floor(viewport.height) + "px";
-                canvas.width = Math.floor(containerWidth * dpr);
+                canvas.width = Math.floor(viewport.width * dpr);
                 canvas.height = Math.floor(viewport.height * dpr);
 
                 const ctx = canvas.getContext('2d', { alpha: false });
                 ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
                 ctx.imageSmoothingEnabled = true;
+                ctx.fillStyle = "#ffffff";
+                ctx.fillRect(0, 0, viewport.width, viewport.height);
 
-                await page.render({ canvasContext: ctx, viewport }).promise;
+                pdfScroll.appendChild(canvas);
 
-                if (!overlayOpen || renderToken !== overlayRenderToken) {
-                  pdfScroll.classList.remove('is-loading');
-                  return;
+                try {
+                  await page.render({ canvasContext: ctx, viewport }).promise;
+                } catch (err) {
+                  if (renderToken === overlayRenderToken) {
+                    canvas.remove();
+                  }
+                  continue;
                 }
-
-                fragment.appendChild(canvas);
               }
 
               if (!overlayOpen || renderToken !== overlayRenderToken) {
@@ -6676,44 +6691,57 @@ audio.mrm-audio {
                 return;
               }
 
-              pdfScroll.replaceChildren(fragment);
-              overlayLastWidth = containerWidth;
               overlayRendered = true;
+              pdfScroll.classList.remove('is-loading');
 
               if (previousScrollTop > 0) {
                 pdfScroll.scrollTop = Math.min(previousScrollTop, pdfScroll.scrollHeight);
               }
-
-              pdfScroll.classList.remove('is-loading');
             }
 
             function openOverlay() {
+              if (!overlay || !pdfScroll) return;
+
               overlayOpen = true;
+              overlayRendered = false;
+              overlayRenderToken++;
+              overlayLastWidth = 0;
+              pdfScroll.innerHTML = '';
+              pdfScroll.scrollTop = 0;
 
               scrollY = window.scrollY || window.pageYOffset || 0;
               document.body.style.top = `-${scrollY}px`;
-              document.body.classList.add('no-scroll');
+              document.body.classList.add('mrm-piece-no-scroll');
 
               overlay.classList.add('is-open');
               overlay.setAttribute('aria-hidden', 'false');
 
-              renderOverlayAllPages(false);
+              renderOverlayAllPages(true);
             }
 
             function closeOverlay() {
               overlayOpen = false;
               overlayRenderToken++;
 
-              overlay.classList.remove('is-open');
-              overlay.setAttribute('aria-hidden', 'true');
+              if (pdfScroll) {
+                pdfScroll.classList.remove('is-loading');
+                pdfScroll.scrollTop = 0;
+              }
 
-              document.body.classList.remove('no-scroll');
+              if (overlay) {
+                overlay.classList.remove('is-open');
+                overlay.setAttribute('aria-hidden', 'true');
+              }
+
               const top = document.body.style.top;
+              document.body.classList.remove('mrm-piece-no-scroll');
               document.body.style.top = "";
-              const restoreY = top ? -parseInt(top, 10) : scrollY;
-              window.scrollTo(0, restoreY);
 
-              pdfScroll.scrollTop = 0;
+              if (top) {
+                window.scrollTo(0, -parseInt(top, 10));
+              } else if (scrollY) {
+                window.scrollTo(0, scrollY);
+              }
             }
 
             function toggleOverlay() {
@@ -6764,11 +6792,7 @@ audio.mrm-audio {
             pdfScroll.addEventListener('pointermove', trackPdfPointerMove);
 
             overlay.addEventListener('click', (e) => {
-              if (!overlayOpen) return;
-
-              if (pdfPointerMoved) {
-                return;
-              }
+              if (!overlayOpen || pdfPointerMoved) return;
 
               const clickedOverlayBackground = e.target === overlay;
               const clickedScrollBackground = e.target === pdfScroll;
@@ -6951,14 +6975,21 @@ audio.mrm-audio {
             }
 
             function openOtpModal(){
-              const pdfOverlay = piece.querySelector('.mrm-pdfOverlay');
-              if (pdfOverlay) {
+              piece.querySelectorAll('.mrm-pdfOverlay.is-open').forEach((pdfOverlay) => {
                 pdfOverlay.classList.remove('is-open');
                 pdfOverlay.setAttribute('aria-hidden', 'true');
-              }
+              });
 
               if (typeof overlayOpen !== 'undefined') {
                 overlayOpen = false;
+              }
+
+              const lockedTop = document.body.style.top;
+              document.body.classList.remove('mrm-piece-no-scroll');
+              document.body.style.top = "";
+
+              if (lockedTop) {
+                window.scrollTo(0, -parseInt(lockedTop, 10));
               }
 
               if (sendBtn) {
