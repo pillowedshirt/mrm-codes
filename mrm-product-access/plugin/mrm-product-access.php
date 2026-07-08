@@ -5194,8 +5194,8 @@ function initRichTextToolbars(scope) {
           height: clamp(420px, 56vh, 720px);
           border-radius: var(--radius-lg);
           overflow: hidden;
-          border: 1px solid rgba(0,0,0,0.12);
-          background: linear-gradient(180deg, rgba(0,0,0,0.02), rgba(0,0,0,0.00));
+          border: none;
+          background: transparent;
           position: relative;
           cursor: zoom-in;
           user-select: none;
@@ -5208,6 +5208,10 @@ function initRichTextToolbars(scope) {
         .pdf-preview canvas {
           display: block;
           margin: 0 auto;
+          max-width: 100%;
+          max-height: 100%;
+          width: auto;
+          height: auto;
         }
 
         .mrm-pdfOverlay {
@@ -5228,16 +5232,24 @@ function initRichTextToolbars(scope) {
           overscroll-behavior: none;
           overflow: hidden;
         }
-        .mrm-pdfOverlay.is-open { display: flex; }
+
+        .mrm-pdfOverlay.is-open {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
 
         .mrm-pdfModal {
           width: min(1100px, calc(100vw - 36px));
           height: min(92vh, 1400px);
+          max-width: calc(100vw - 36px);
+          max-height: calc(100vh - 36px);
+          margin: auto;
           border-radius: var(--radius-lg);
           overflow: hidden;
-          background: var(--color-surface);
-          border: none;
-          box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+          background: #fffaf3;
+          border: 1px solid rgba(124, 74, 45, 0.22);
+          box-shadow: 0 24px 70px rgba(27, 20, 15, 0.22);
           display: flex;
           cursor: zoom-out;
         }
@@ -5250,13 +5262,16 @@ function initRichTextToolbars(scope) {
           -webkit-overflow-scrolling: touch;
           padding: 18px;
           box-sizing: border-box;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
         }
 
         .mrm-pdfPage {
           display: block;
           margin: 0 auto 18px;
-          border: none;
-          background: transparent;
+          background: #fff;
+          box-shadow: 0 10px 28px rgba(0,0,0,0.18);
           max-width: 100%;
           height: auto;
         }
@@ -5893,14 +5908,26 @@ audio.mrm-audio {
 }
 
 .mrm-sheet-music-catalog-section .pdf-preview {
-  width: 100% !important;
+  width: min(860px, 100%) !important;
+  height: clamp(420px, 56vh, 720px) !important;
   max-width: 100% !important;
   min-width: 0 !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
   overflow: hidden !important;
+  border: none !important;
+  background: transparent !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }
 
 .mrm-sheet-music-catalog-section .pdf-preview canvas {
+  display: block !important;
+  margin: 0 auto !important;
   max-width: 100% !important;
+  max-height: 100% !important;
+  width: auto !important;
   height: auto !important;
 }
 
@@ -5984,7 +6011,11 @@ audio.mrm-audio {
   .mrm-sheet-music-catalog-section .pdf-preview {
     width: 100% !important;
     max-width: 100% !important;
-    height: clamp(260px, 68vw, 380px) !important;
+    height: clamp(360px, 62vh, 640px) !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    background: transparent !important;
+    border: none !important;
   }
 
   .mrm-sheet-music-catalog-section .title-block,
@@ -6093,7 +6124,9 @@ audio.mrm-audio {
   }
 
   .mrm-sheet-music-catalog-section .pdf-preview {
-    height: clamp(320px, 44vw, 430px) !important;
+    height: clamp(420px, 56vh, 720px) !important;
+    background: transparent !important;
+    border: none !important;
   }
 
   .mrm-sheet-music-catalog-section .audio-controls {
@@ -6110,15 +6143,32 @@ audio.mrm-audio {
 .mrm-sheet-music-catalog-section .pdf-preview {
   width: min(860px, 100%) !important;
   height: clamp(420px, 56vh, 720px) !important;
+  max-width: 100% !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
+}
+
+.mrm-sheet-music-catalog-section .pdf-preview canvas {
+  display: block !important;
+  margin: 0 auto !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  width: auto !important;
+  height: auto !important;
 }
 
 @media (max-width: 700px) {
   .mrm-sheet-music-catalog-section .pdf-preview {
     width: 100% !important;
     height: clamp(360px, 62vh, 640px) !important;
+    background: transparent !important;
+    border: none !important;
   }
 }
 
@@ -6467,6 +6517,70 @@ audio.mrm-audio {
 
 .mrm-sheet-music-catalog-section .progress {
   min-width: 0 !important;
+}
+
+/* Final shortcode PDF preview override: keep catalog previews large, transparent, and centered. */
+.mrm-sheet-music-catalog-section .pdf-col {
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  background: transparent !important;
+}
+
+.mrm-sheet-music-catalog-section .pdf-preview,
+.mrm-piece-details-wrapper .pdf-preview {
+  width: min(860px, 100%) !important;
+  height: clamp(420px, 56vh, 720px) !important;
+  max-width: 100% !important;
+  margin: 0 auto !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.mrm-sheet-music-catalog-section .pdf-preview canvas,
+.mrm-piece-details-wrapper .pdf-preview canvas {
+  display: block !important;
+  margin: 0 auto !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  width: auto !important;
+  height: auto !important;
+}
+
+.mrm-sheet-music-catalog-section .mrm-pdfOverlay.is-open,
+.mrm-piece-details-wrapper .mrm-pdfOverlay.is-open {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.mrm-sheet-music-catalog-section .mrm-pdfModal,
+.mrm-piece-details-wrapper .mrm-pdfModal {
+  width: min(1100px, calc(100vw - 36px)) !important;
+  height: min(92vh, 1400px) !important;
+  max-width: calc(100vw - 36px) !important;
+  max-height: calc(100vh - 36px) !important;
+  margin: auto !important;
+  background: #fffaf3 !important;
+}
+
+.mrm-sheet-music-catalog-section .mrm-pdfScroll,
+.mrm-piece-details-wrapper .mrm-pdfScroll {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+}
+
+@media (max-width: 700px) {
+  .mrm-sheet-music-catalog-section .pdf-preview,
+  .mrm-piece-details-wrapper .pdf-preview {
+    width: 100% !important;
+    height: clamp(360px, 62vh, 640px) !important;
+  }
 }
 </style>
 
