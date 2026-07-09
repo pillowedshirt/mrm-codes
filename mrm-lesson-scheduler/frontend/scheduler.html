@@ -2770,16 +2770,6 @@ body {
   display: none !important;
 }
 
-/* Mobile keyboard pan only for scheduler popups with text/payment inputs. */
-@media (max-width: 700px) {
-  #booking-modal .modal,
-  #mrm-payment-overlay .modal {
-    transform: translateY(var(--mrm-keyboard-pan-y, 0px)) !important;
-    transition: transform 180ms ease !important;
-    will-change: transform;
-  }
-}
-
 </style>
 </head>
 
@@ -3187,14 +3177,18 @@ window.addEventListener('orientationchange', function() {
   }, 300);
 });
 
-function mrmSchedulerResetKeyboardPan() {
-  document.querySelectorAll('#booking-modal .modal, #mrm-payment-overlay .modal').forEach(function(panel) {
-    panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
-    panel.classList.remove('mrm-keyboard-pan-active');
-  });
+function mrmSchedulerPopupScrollBox(field) {
+  const overlay = field && field.closest ? field.closest('#booking-modal, #mrm-payment-overlay') : null;
+  if (!overlay) return null;
+
+  return (
+    field.closest('.modal-body') ||
+    overlay.querySelector('.modal-body') ||
+    field.closest('.modal')
+  );
 }
 
-function mrmSchedulerPanPopupField(target) {
+function mrmSchedulerScrollPopupFieldIntoView(target) {
   if (!window.matchMedia || !window.matchMedia('(max-width: 700px)').matches) return;
   if (!target || !target.closest) return;
 
@@ -3203,64 +3197,43 @@ function mrmSchedulerPanPopupField(target) {
   );
 
   if (!field) return;
+  if (!field.closest('#booking-modal, #mrm-payment-overlay')) return;
 
-  const overlay = field.closest('#booking-modal, #mrm-payment-overlay');
-  if (!overlay) return;
+  const scrollBox = mrmSchedulerPopupScrollBox(field);
+  if (!scrollBox) return;
 
-  const panel = field.closest('.modal');
-  if (!panel) return;
-
-  panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
-
-  try {
-    field.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
-  } catch (err) {}
-
-  setTimeout(function() {
+  function adjust() {
+    const fieldRect = field.getBoundingClientRect();
+    const boxRect = scrollBox.getBoundingClientRect();
     const vv = window.visualViewport;
-    if (!vv) return;
 
-    const rect = field.getBoundingClientRect();
-    const safeBottom = vv.offsetTop + vv.height - 24;
-    const targetCenter = vv.offsetTop + (vv.height * 0.45);
-    const fieldCenter = rect.top + (rect.height / 2);
+    const viewportTop = vv ? vv.offsetTop : 0;
+    const viewportBottom = vv ? (vv.offsetTop + vv.height) : window.innerHeight;
 
-    let panY = 0;
+    const visibleTop = Math.max(boxRect.top, viewportTop + 18);
+    const visibleBottom = Math.min(boxRect.bottom, viewportBottom - 24);
 
-    if (rect.bottom > safeBottom) {
-      panY = Math.round(targetCenter - fieldCenter);
+    if (visibleBottom <= visibleTop) return;
+
+    const fieldCenter = fieldRect.top + (fieldRect.height / 2);
+    const targetCenter = visibleTop + ((visibleBottom - visibleTop) * 0.44);
+
+    if (fieldRect.top < visibleTop || fieldRect.bottom > visibleBottom) {
+      scrollBox.scrollTop += Math.round(fieldCenter - targetCenter);
     }
+  }
 
-    if (panY > 0) panY = 0;
-
-    const maxPan = Math.round((window.innerHeight || vv.height) * 0.42);
-    if (panY < -maxPan) panY = -maxPan;
-
-    panel.classList.add('mrm-keyboard-pan-active');
-    panel.style.setProperty('--mrm-keyboard-pan-y', panY + 'px');
-  }, 360);
+  setTimeout(adjust, 90);
+  setTimeout(adjust, 360);
 }
 
 document.addEventListener('focusin', function(e) {
-  mrmSchedulerPanPopupField(e.target);
-}, true);
-
-document.addEventListener('focusout', function(e) {
-  setTimeout(function() {
-    const el = document.activeElement;
-    if (
-      !el ||
-      !el.closest ||
-      !el.closest('#booking-modal, #mrm-payment-overlay')
-    ) {
-      mrmSchedulerResetKeyboardPan();
-    }
-  }, 180);
+  mrmSchedulerScrollPopupFieldIntoView(e.target);
 }, true);
 
 document.addEventListener('touchstart', function(e) {
   if (e.target && e.target.closest && e.target.closest('#mrm-payment-element')) {
-    mrmSchedulerPanPopupField(e.target);
+    mrmSchedulerScrollPopupFieldIntoView(e.target);
   }
 }, { passive: true, capture: true });
 
@@ -3272,10 +3245,11 @@ if (window.visualViewport) {
       el.closest &&
       el.closest('#booking-modal, #mrm-payment-overlay')
     ) {
-      mrmSchedulerPanPopupField(el);
+      mrmSchedulerScrollPopupFieldIntoView(el);
     }
   });
 }
+
 
 const apiBase = '/wp-json/mrm-schedule/v1';
 const payApiBase = '/wp-json/mrm-pay/v1';
