@@ -1224,7 +1224,8 @@ input[type="checkbox"] {
 
 html.mrm-modal-open,
 body.mrm-modal-open {
-  overflow: hidden;
+  overflow: hidden !important;
+  touch-action: none;
 }
 
 .mrm-masterclass-event-card {
@@ -1758,6 +1759,77 @@ body,
   opacity: 1 !important;
 }
 
+/* =========================================================
+   Mobile popup hardening — masterclass registration flow
+   ========================================================= */
+
+@media (max-width: 700px) {
+  .mrm-modal {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: var(--mrm-mobile-vh, 100dvh) !important;
+    min-height: var(--mrm-mobile-vh, 100dvh) !important;
+    padding:
+      max(12px, env(safe-area-inset-top))
+      12px
+      max(12px, env(safe-area-inset-bottom))
+      12px !important;
+    box-sizing: border-box !important;
+    align-items: center !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+    overscroll-behavior: contain !important;
+  }
+
+  .mrm-modal:not([hidden]) {
+    display: flex !important;
+  }
+
+  .mrm-modal-panel {
+    width: min(100%, 680px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    margin: auto !important;
+    border-radius: 18px !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-sizing: border-box !important;
+  }
+
+  .mrm-modal-body {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+  }
+
+  .mrm-modal-header {
+    flex: 0 0 auto !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 5 !important;
+  }
+
+  .mrm-modal input,
+  .mrm-modal select,
+  .mrm-modal textarea,
+  .mrm-modal button {
+    font-size: 16px !important;
+  }
+
+  .mrm-modal input[type="checkbox"],
+  .mrm-modal input[type="radio"] {
+    font-size: initial !important;
+  }
+
+  .mrm-modal-x {
+    touch-action: manipulation !important;
+  }
+}
+
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
@@ -1919,6 +1991,23 @@ body,
 (function () {
   function mrmMasterclassController() {
     'use strict';
+
+    function mrmMasterclassSyncMobileViewport() {
+      const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+    }
+
+    mrmMasterclassSyncMobileViewport();
+
+    window.addEventListener('resize', mrmMasterclassSyncMobileViewport, { passive: true });
+    window.addEventListener('orientationchange', function() {
+      setTimeout(mrmMasterclassSyncMobileViewport, 250);
+    });
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', mrmMasterclassSyncMobileViewport);
+      window.visualViewport.addEventListener('scroll', mrmMasterclassSyncMobileViewport);
+    }
 
     const root = document.getElementById('mrm-masterclass-root');
     const calendar = document.getElementById('mrm-masterclass-calendar');

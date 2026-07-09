@@ -5136,7 +5136,8 @@ function initRichTextToolbars(scope) {
         }
 
         body.no-scroll {
-          overflow: hidden;
+          overflow: hidden !important;
+          touch-action: none;
           position: fixed;
           width: 100%;
           left: 0;
@@ -6668,6 +6669,77 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
   }
 }
 
+/* =========================================================
+   Mobile popup hardening — plugin-generated sheet music UI
+   Applies to shortcode and plugin-rendered access popups.
+   ========================================================= */
+
+@media (max-width: 700px) {
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay,
+  .mrm-piece-details-wrapper .mrm-otpOverlay {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: var(--mrm-mobile-vh, 100dvh) !important;
+    min-height: var(--mrm-mobile-vh, 100dvh) !important;
+    padding:
+      max(12px, env(safe-area-inset-top))
+      12px
+      max(12px, env(safe-area-inset-bottom))
+      12px !important;
+    box-sizing: border-box !important;
+    align-items: center !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+    overscroll-behavior: contain !important;
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay.is-open,
+  .mrm-piece-details-wrapper .mrm-otpOverlay.is-open {
+    display: flex !important;
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay .modal,
+  .mrm-piece-details-wrapper .mrm-otpOverlay .modal {
+    width: min(100%, 680px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    margin: auto !important;
+    border-radius: 18px !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-sizing: border-box !important;
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay .modal-body,
+  .mrm-piece-details-wrapper .mrm-otpOverlay .modal-body {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 96px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay input,
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay select,
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay textarea,
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay button,
+  .mrm-piece-details-wrapper .mrm-otpOverlay input,
+  .mrm-piece-details-wrapper .mrm-otpOverlay select,
+  .mrm-piece-details-wrapper .mrm-otpOverlay textarea,
+  .mrm-piece-details-wrapper .mrm-otpOverlay button {
+    font-size: 16px !important;
+  }
+
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay input[type="checkbox"],
+  .mrm-sheet-music-catalog-section .mrm-otpOverlay input[type="radio"],
+  .mrm-piece-details-wrapper .mrm-otpOverlay input[type="checkbox"],
+  .mrm-piece-details-wrapper .mrm-otpOverlay input[type="radio"] {
+    font-size: initial !important;
+  }
+}
+
 </style>
 
         <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -6675,6 +6747,23 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
         (function(){
           if (window.__MRM_CATALOG_INIT__) return;
           window.__MRM_CATALOG_INIT__ = true;
+
+          function mrmProductAccessSyncMobileViewport() {
+            var height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+            document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+          }
+
+          mrmProductAccessSyncMobileViewport();
+
+          window.addEventListener('resize', mrmProductAccessSyncMobileViewport, { passive: true });
+          window.addEventListener('orientationchange', function() {
+            setTimeout(mrmProductAccessSyncMobileViewport, 250);
+          });
+
+          if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', mrmProductAccessSyncMobileViewport);
+            window.visualViewport.addEventListener('scroll', mrmProductAccessSyncMobileViewport);
+          }
 
           if (window.pdfjsLib) {
             pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -7156,7 +7245,12 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
             }
 
             closeBtn.addEventListener('click', closeOtpModal);
-            otpOverlay.addEventListener('click', (e) => { if (e.target === otpOverlay) closeOtpModal(); });
+            otpOverlay.addEventListener('click', (e) => {
+              if (e.target === otpOverlay) {
+                e.preventDefault();
+                e.stopPropagation();
+              }
+            });
 
           }
 
