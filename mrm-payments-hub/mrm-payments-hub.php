@@ -58,6 +58,8 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_pay_hub_preview_email_tests', array($this, 'handle_email_testing_preview'));
     add_action('admin_post_mrm_pay_hub_send_stripe_connect_email', array($this, 'handle_stripe_connect_email_send'));
     add_action('admin_post_mrm_marketing_resubscribe', array($this, 'handle_marketing_resubscribe'));
+    add_action('admin_post_mrm_marketing_general_interest_signup', array($this, 'handle_marketing_general_interest_signup'));
+    add_action('admin_post_nopriv_mrm_marketing_general_interest_signup', array($this, 'handle_marketing_general_interest_signup'));
     add_action('admin_post_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
     add_action('admin_post_nopriv_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
     add_action('admin_post_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
@@ -12637,6 +12639,86 @@ cliniccontact@example.org",
     'mrm_marketing_failed' => (string)$failed,
   ), admin_url('admin.php')));
   exit;
+}
+
+private function mrm_marketing_signup_redirect_back($status) {
+  $status = sanitize_key((string)$status);
+
+  $fallback = home_url('/');
+  $referer = wp_get_referer();
+
+  $url = $referer ? $referer : $fallback;
+
+  $url = remove_query_arg(array('mrm_marketing_signup_status'), $url);
+  $url = add_query_arg('mrm_marketing_signup_status', $status, $url);
+
+  wp_safe_redirect($url . '#mrm-general-interest-form-section');
+  exit;
+}
+
+public function handle_marketing_general_interest_signup() {
+  $nonce = isset($_POST['mrm_marketing_signup_nonce'])
+    ? sanitize_text_field(wp_unslash($_POST['mrm_marketing_signup_nonce']))
+    : '';
+
+  if (!$nonce || !wp_verify_nonce($nonce, 'mrm_marketing_general_interest_signup')) {
+    $this->mrm_marketing_signup_redirect_back('error');
+  }
+
+  $honeypot = isset($_POST['mrm_marketing_website'])
+    ? trim(sanitize_text_field(wp_unslash($_POST['mrm_marketing_website'])))
+    : '';
+
+  if ($honeypot !== '') {
+    $this->mrm_marketing_signup_redirect_back('error');
+  }
+
+  $loaded_at_ms = isset($_POST['mrm_marketing_loaded_at'])
+    ? absint(wp_unslash($_POST['mrm_marketing_loaded_at']))
+    : 0;
+
+  $now_ms = (int) round(microtime(true) * 1000);
+  $elapsed_ms = $loaded_at_ms > 0 ? ($now_ms - $loaded_at_ms) : 0;
+
+  if ($loaded_at_ms <= 0 || $elapsed_ms < 2500 || $elapsed_ms > 7200000) {
+    $this->mrm_marketing_signup_redirect_back('error');
+  }
+
+  $email = isset($_POST['mrm_marketing_email'])
+    ? strtolower(sanitize_email(wp_unslash($_POST['mrm_marketing_email'])))
+    : '';
+
+  $consent = isset($_POST['mrm_marketing_consent'])
+    ? sanitize_text_field(wp_unslash($_POST['mrm_marketing_consent']))
+    : '';
+
+  if (!$email || !is_email($email) || $consent !== '1') {
+    $this->mrm_marketing_signup_redirect_back('error');
+  }
+
+  $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+
+  if (isset($unsubscribed[$email])) {
+    $this->mrm_marketing_signup_redirect_back('unsubscribed');
+  }
+
+  $lists = $this->mrm_marketing_manual_lists();
+
+  if (!isset($lists['general_interest']) || !is_array($lists['general_interest'])) {
+    $lists['general_interest'] = array();
+  }
+
+  $already_exists = in_array($email, $lists['general_interest'], true);
+
+  if (!$already_exists) {
+    $lists['general_interest'][] = $email;
+    $lists['general_interest'] = array_values(array_unique($lists['general_interest']));
+    sort($lists['general_interest']);
+    $this->save_email_lists($lists);
+    $this->mrm_marketing_signup_redirect_back('joined');
+  }
+
+  $this->mrm_marketing_signup_redirect_back('already');
 }
 
 public function handle_marketing_resubscribe() {

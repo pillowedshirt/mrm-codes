@@ -12404,6 +12404,69 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         </div>
       </form>
     </div>
+
+    <div class="mrm-email-list-card" id="mrm-general-interest-form-section">
+      <div class="mrm-email-list-accent"></div>
+
+      <div class="mrm-email-list-compact-layout">
+        <div class="mrm-email-list-heading">
+          <p class="mrm-email-list-eyebrow">General Interest List</p>
+          <h2>Stay connected with Low Brass Lessons.</h2>
+          <p class="mrm-email-list-subtitle">
+            Online and in-person low brass lessons, sheet music, and masterclass updates.
+          </p>
+        </div>
+
+        <div class="mrm-email-list-copy">
+          <p>
+            Low Brass Lessons provides online and in-person private lessons for trombone,
+            euphonium, and tuba students, along with original low brass sheet music,
+            student resources, and music masterclass opportunities.
+          </p>
+          <p>
+            Join the general interest list to receive occasional updates about promo codes,
+            new masterclasses, new sheet music releases, and studio announcements.
+          </p>
+        </div>
+      </div>
+
+      {{mrm_marketing_signup_notice}}
+
+      <form class="mrm-email-list-form" method="post" action="{{mrm_contact_action}}">
+        {{mrm_marketing_signup_nonce_field}}
+
+        <input type="hidden" name="action" value="mrm_marketing_general_interest_signup">
+        <input type="hidden" name="mrm_marketing_list" value="general_interest">
+        <input type="hidden" id="mrm_marketing_loaded_at" name="mrm_marketing_loaded_at" value="">
+
+        <div class="mrm-email-list-row">
+          <div class="mrm-email-list-field">
+            <label for="mrm_marketing_email">Email address <span>*</span></label>
+            <input type="email" id="mrm_marketing_email" name="mrm_marketing_email" autocomplete="email" placeholder="you@example.com" required>
+          </div>
+
+          <div class="mrm-email-list-actions">
+            <button type="submit">Join the Email List</button>
+          </div>
+        </div>
+
+        <div class="mrm-email-list-consent">
+          <input type="checkbox" id="mrm_marketing_consent" name="mrm_marketing_consent" value="1" required>
+          <label for="mrm_marketing_consent">
+            I agree to receive occasional marketing emails from Low Brass Lessons about lessons,
+            sheet music, masterclasses, promo codes, and studio updates. I understand I can
+            unsubscribe at any time.
+          </label>
+        </div>
+
+        <p class="mrm-email-list-note">No spam — just occasional updates from Low Brass Lessons.</p>
+
+        <div class="mrm-email-list-website-field" aria-hidden="true">
+          <label for="mrm_marketing_website">Website</label>
+          <input type="text" id="mrm_marketing_website" name="mrm_marketing_website" tabindex="-1" autocomplete="off">
+        </div>
+      </form>
+    </div>
   </div>
 </section>
 
@@ -12435,6 +12498,8 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
   .mrm-contact-shell {
     width: min(100%, 920px);
     margin: 0 auto;
+    display: grid;
+    gap: 24px;
   }
 
   .mrm-contact-card {
@@ -12522,6 +12587,8 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
   .mrm-contact-field select,
   .mrm-contact-field textarea {
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     min-height: 48px;
     border: 1px solid var(--mrm-contact-border);
     border-radius: 12px;
@@ -12529,7 +12596,78 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     color: var(--mrm-contact-text);
     padding: 12px 14px;
     font: inherit;
-    font-size: 15px;
+    font-size: 16px;
+    line-height: 1.35;
+    outline: none;
+    transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  }
+
+  .mrm-contact-field select,
+  .mrm-contact-select {
+    display: block;
+    height: auto;
+    min-height: 50px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: normal;
+    -webkit-appearance: menulist;
+    appearance: auto;
+  }
+
+  .mrm-contact-field select option {
+    color: #111111;
+    background: #ffffff;
+    font-size: 16px;
+    line-height: 1.4;
+    white-space: normal;
+  }
+
+  .mrm-email-list-card {
+    position: relative;
+    overflow: hidden;
+    border-radius: 22px;
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.10);
+    background: linear-gradient(rgba(255,255,255,.20), rgba(255,255,255,.08)), #f4ead7;
+    border: 1px solid #d8c49a;
+    padding: clamp(20px, 3vw, 28px);
+  }
+
+  .mrm-email-list-accent { position: absolute; inset: 0 0 auto 0; height: 6px; background: linear-gradient(90deg, #2f2f2f, #c9a227); }
+  .mrm-email-list-compact-layout { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 24px; align-items: start; margin-top: 4px; margin-bottom: 18px; }
+  .mrm-email-list-eyebrow { margin: 0 0 8px; color: #c9a227; font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+  .mrm-email-list-heading h2 { color: #171512; font-size: clamp(25px, 3vw, 34px); margin: 0 0 8px; line-height: 1.05; }
+  .mrm-email-list-subtitle { margin: 0; color: #171512; font-size: 15px; line-height: 1.45; font-weight: 800; }
+  .mrm-email-list-copy p { margin: 0; color: #5d5345; font-size: 14.5px; line-height: 1.55; }
+  .mrm-email-list-copy p + p { margin-top: 8px; }
+  .mrm-email-list-form { display: grid; gap: 10px; }
+  .mrm-email-list-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+  .mrm-email-list-field { display: grid; gap: 7px; min-width: 0; }
+  .mrm-email-list-field label { color: #111111; font-size: 14px; font-weight: 800; }
+  .mrm-email-list-field label span { color: #c9a227; }
+  .mrm-email-list-field input { width: 100%; max-width: 100%; min-width: 0; min-height: 48px; border: 1px solid #dddddd; border-radius: 14px; background: #ffffff; color: #111111; padding: 12px 14px; font: inherit; font-size: 16px; line-height: 1.35; outline: none; transition: border-color 0.18s ease, box-shadow 0.18s ease; }
+  .mrm-email-list-field input:focus { border-color: #c9a227; box-shadow: 0 0 0 4px rgba(201, 162, 39, 0.14); }
+  .mrm-email-list-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 0; align-self: end; }
+  .mrm-email-list-actions button { appearance: none; border: 0; border-radius: 999px; background: #2f2f2f; color: #ffffff; cursor: pointer; font-size: 15px; font-weight: 900; letter-spacing: 0.02em; padding: 14px 26px; min-height: 48px; white-space: nowrap; transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease; }
+  .mrm-email-list-actions button:hover, .mrm-email-list-actions button:focus { background: #111111; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18); transform: translateY(-1px); }
+  .mrm-email-list-consent { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start; color: #5d5345; font-size: 12.5px; line-height: 1.4; margin-top: 2px; }
+  .mrm-email-list-consent input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: #c9a227; }
+  .mrm-email-list-consent label { color: #5d5345; font-weight: 600; }
+  .mrm-email-list-note { margin: 0; color: #5d5345; font-size: 12.5px; line-height: 1.35; text-align: center; }
+  .mrm-email-list-website-field { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+
+  .mrm-contact-field textarea {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    min-height: 48px;
+    border: 1px solid var(--mrm-contact-border);
+    border-radius: 12px;
+    background: #ffffff;
+    color: var(--mrm-contact-text);
+    padding: 12px 14px;
+    font: inherit;
+    font-size: 16px;
+    line-height: 1.35;
     outline: none;
     transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
   }
@@ -12658,6 +12796,53 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
     .mrm-contact-actions p {
       text-align: center;
     }
+
+    .mrm-contact-field select,
+    .mrm-contact-select {
+      width: 100%;
+      max-width: 100%;
+      min-height: 52px;
+      font-size: 16px;
+      line-height: 1.4;
+    }
+
+    .mrm-contact-field select option {
+      font-size: 16px;
+      line-height: 1.45;
+      white-space: normal;
+    }
+
+    .mrm-email-list-row {
+      grid-template-columns: 1fr;
+    }
+
+    .mrm-email-list-actions,
+    .mrm-email-list-actions button {
+      width: 100%;
+    }
+  }
+
+  @media (max-width: 820px) {
+    .mrm-email-list-compact-layout {
+      grid-template-columns: 1fr;
+      gap: 12px;
+      text-align: center;
+    }
+
+    .mrm-email-list-copy p {
+      font-size: 14px;
+    }
+  }
+
+  @media (max-width: 420px) {
+    .mrm-email-list-card {
+      padding: 22px 16px 20px;
+      border-radius: 18px;
+    }
+
+    .mrm-email-list-heading h2 {
+      font-size: 26px;
+    }
   }
 </style>
 
@@ -12697,8 +12882,22 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
       syncOtherField();
     }
 
+    function setupMrmMarketingSignup(root) {
+      var loadedAt = root.querySelector('#mrm_marketing_loaded_at');
+
+      if (loadedAt) {
+        loadedAt.value = String(Date.now());
+      }
+    }
+
     function boot() {
       document.querySelectorAll('.mrm-contact-section').forEach(setupMrmContactForm);
+
+      var marketingRoot = document.getElementById('mrm-general-interest-form-section');
+
+      if (marketingRoot) {
+        setupMrmMarketingSignup(marketingRoot);
+      }
     }
 
     if (document.readyState === 'loading') {
@@ -12759,7 +12958,9 @@ public function render_admin_contact_form_page() {
                 <code>{{mrm_contact_action}}</code>,
                 <code>{{mrm_contact_nonce_field}}</code>,
                 <code>{{mrm_contact_notice}}</code>,
-                and <code>{{mrm_contact_recaptcha_site_key}}</code>.
+                <code>{{mrm_contact_recaptcha_site_key}}</code>,
+                <code>{{mrm_marketing_signup_notice}}</code>,
+                and <code>{{mrm_marketing_signup_nonce_field}}</code>.
             </p>
         </div>
 
@@ -12925,11 +13126,28 @@ public function render_contact_form_shortcode() {
         $notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Something went wrong. Please confirm all required fields, complete the reCAPTCHA verification, and try again.</div>';
     }
 
+    $marketing_notice = '';
+    $marketing_status = isset( $_GET['mrm_marketing_signup_status'] )
+        ? sanitize_key( wp_unslash( $_GET['mrm_marketing_signup_status'] ) )
+        : '';
+
+    if ( $marketing_status === 'joined' ) {
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Thanks for joining the Low Brass Lessons general interest list.</div>';
+    } elseif ( $marketing_status === 'already' ) {
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">This email is already on the Low Brass Lessons general interest list.</div>';
+    } elseif ( $marketing_status === 'unsubscribed' ) {
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">This email was previously unsubscribed from marketing emails. Please contact Low Brass Lessons if you would like to re-subscribe.</div>';
+    } elseif ( $marketing_status === 'error' ) {
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Please enter a valid email address, confirm consent, and try again.</div>';
+    }
+
     $replacements = array(
-        '{{mrm_contact_action}}'             => esc_url( admin_url( 'admin-post.php' ) ),
-        '{{mrm_contact_nonce_field}}'        => wp_nonce_field( 'mrm_scheduler_contact_submit', 'mrm_scheduler_contact_nonce', true, false ),
-        '{{mrm_contact_notice}}'             => $notice,
-        '{{mrm_contact_recaptcha_site_key}}' => esc_attr( $recaptcha_site_key ),
+        '{{mrm_contact_action}}'               => esc_url( admin_url( 'admin-post.php' ) ),
+        '{{mrm_contact_nonce_field}}'          => wp_nonce_field( 'mrm_scheduler_contact_submit', 'mrm_scheduler_contact_nonce', true, false ),
+        '{{mrm_contact_notice}}'               => $notice,
+        '{{mrm_contact_recaptcha_site_key}}'   => esc_attr( $recaptcha_site_key ),
+        '{{mrm_marketing_signup_notice}}'      => $marketing_notice,
+        '{{mrm_marketing_signup_nonce_field}}' => wp_nonce_field( 'mrm_marketing_general_interest_signup', 'mrm_marketing_signup_nonce', true, false ),
     );
 
     return strtr( $html, $replacements );
