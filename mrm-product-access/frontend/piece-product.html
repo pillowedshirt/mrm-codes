@@ -1609,17 +1609,6 @@ audio.mrm-audio{
   }
 }
 
-/* Mobile keyboard pan only for sheet music popups with text/payment inputs. */
-@media (max-width: 700px) {
-  .mrm-piece-product-page #mrm-payment-overlay .modal,
-  .mrm-piece-product-page .mrm-otpOverlay .modal,
-  .mrm-piece-product-page .mrm-otpOverlay .mrm-access-modal {
-    transform: translateY(var(--mrm-keyboard-pan-y, 0px)) !important;
-    transition: transform 180ms ease !important;
-    will-change: transform;
-  }
-}
-
 </style>
 
 <main class="mrm-piece-product-page page">
@@ -2021,16 +2010,18 @@ audio.mrm-audio{
     }, 300);
   });
 
-  function mrmPieceProductResetKeyboardPan() {
-    document.querySelectorAll(
-      '#mrm-payment-overlay .modal, .mrm-otpOverlay .modal, .mrm-otpOverlay .mrm-access-modal'
-    ).forEach(function(panel) {
-      panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
-      panel.classList.remove('mrm-keyboard-pan-active');
-    });
+  function mrmPieceProductPopupScrollBox(field) {
+    const overlay = field && field.closest ? field.closest('#mrm-payment-overlay, .mrm-otpOverlay') : null;
+    if (!overlay) return null;
+
+    return (
+      field.closest('.modal-body') ||
+      overlay.querySelector('.modal-body') ||
+      field.closest('.modal, .mrm-access-modal')
+    );
   }
 
-  function mrmPieceProductPanPopupField(target) {
+  function mrmPieceProductScrollPopupFieldIntoView(target) {
     if (!window.matchMedia || !window.matchMedia('(max-width: 700px)').matches) return;
     if (!target || !target.closest) return;
 
@@ -2039,64 +2030,43 @@ audio.mrm-audio{
     );
 
     if (!field) return;
+    if (!field.closest('#mrm-payment-overlay, .mrm-otpOverlay')) return;
 
-    const overlay = field.closest('#mrm-payment-overlay, .mrm-otpOverlay');
-    if (!overlay) return;
+    const scrollBox = mrmPieceProductPopupScrollBox(field);
+    if (!scrollBox) return;
 
-    const panel = field.closest('.modal, .mrm-access-modal');
-    if (!panel) return;
-
-    panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
-
-    try {
-      field.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
-    } catch (err) {}
-
-    setTimeout(function() {
+    function adjust() {
+      const fieldRect = field.getBoundingClientRect();
+      const boxRect = scrollBox.getBoundingClientRect();
       const vv = window.visualViewport;
-      if (!vv) return;
 
-      const rect = field.getBoundingClientRect();
-      const safeBottom = vv.offsetTop + vv.height - 24;
-      const targetCenter = vv.offsetTop + (vv.height * 0.45);
-      const fieldCenter = rect.top + (rect.height / 2);
+      const viewportTop = vv ? vv.offsetTop : 0;
+      const viewportBottom = vv ? (vv.offsetTop + vv.height) : window.innerHeight;
 
-      let panY = 0;
+      const visibleTop = Math.max(boxRect.top, viewportTop + 18);
+      const visibleBottom = Math.min(boxRect.bottom, viewportBottom - 24);
 
-      if (rect.bottom > safeBottom) {
-        panY = Math.round(targetCenter - fieldCenter);
+      if (visibleBottom <= visibleTop) return;
+
+      const fieldCenter = fieldRect.top + (fieldRect.height / 2);
+      const targetCenter = visibleTop + ((visibleBottom - visibleTop) * 0.44);
+
+      if (fieldRect.top < visibleTop || fieldRect.bottom > visibleBottom) {
+        scrollBox.scrollTop += Math.round(fieldCenter - targetCenter);
       }
+    }
 
-      if (panY > 0) panY = 0;
-
-      const maxPan = Math.round((window.innerHeight || vv.height) * 0.42);
-      if (panY < -maxPan) panY = -maxPan;
-
-      panel.classList.add('mrm-keyboard-pan-active');
-      panel.style.setProperty('--mrm-keyboard-pan-y', panY + 'px');
-    }, 360);
+    setTimeout(adjust, 90);
+    setTimeout(adjust, 360);
   }
 
   document.addEventListener('focusin', function(e) {
-    mrmPieceProductPanPopupField(e.target);
-  }, true);
-
-  document.addEventListener('focusout', function(e) {
-    setTimeout(function() {
-      const el = document.activeElement;
-      if (
-        !el ||
-        !el.closest ||
-        !el.closest('#mrm-payment-overlay, .mrm-otpOverlay')
-      ) {
-        mrmPieceProductResetKeyboardPan();
-      }
-    }, 180);
+    mrmPieceProductScrollPopupFieldIntoView(e.target);
   }, true);
 
   document.addEventListener('touchstart', function(e) {
     if (e.target && e.target.closest && e.target.closest('#mrm-payment-element')) {
-      mrmPieceProductPanPopupField(e.target);
+      mrmPieceProductScrollPopupFieldIntoView(e.target);
     }
   }, { passive: true, capture: true });
 
@@ -2108,7 +2078,7 @@ audio.mrm-audio{
         el.closest &&
         el.closest('#mrm-payment-overlay, .mrm-otpOverlay')
       ) {
-        mrmPieceProductPanPopupField(el);
+        mrmPieceProductScrollPopupFieldIntoView(el);
       }
     });
   }

@@ -6741,13 +6741,15 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
 }
 
 
-/* Mobile keyboard pan only for plugin-generated sheet music access popups. */
+/* Plugin-generated sheet music access modals need the modal itself
+   to be scrollable because this markup does not always include .modal-body. */
 @media (max-width: 700px) {
   .mrm-sheet-music-catalog-section .mrm-otpOverlay .modal,
   .mrm-piece-details-wrapper .mrm-otpOverlay .modal {
-    transform: translateY(var(--mrm-keyboard-pan-y, 0px)) !important;
-    transition: transform 180ms ease !important;
-    will-change: transform;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
   }
 }
 </style>
@@ -6793,16 +6795,21 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
             }, 300);
           });
 
-          function mrmProductAccessResetKeyboardPan() {
-            document.querySelectorAll(
-              '.mrm-sheet-music-catalog-section .mrm-otpOverlay .modal, .mrm-piece-details-wrapper .mrm-otpOverlay .modal'
-            ).forEach(function(panel) {
-              panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
-              panel.classList.remove('mrm-keyboard-pan-active');
-            });
+          function mrmProductAccessPopupScrollBox(field) {
+            var overlay = field && field.closest
+              ? field.closest('.mrm-sheet-music-catalog-section .mrm-otpOverlay, .mrm-piece-details-wrapper .mrm-otpOverlay')
+              : null;
+
+            if (!overlay) return null;
+
+            return (
+              field.closest('.modal-body') ||
+              overlay.querySelector('.modal-body') ||
+              field.closest('.modal')
+            );
           }
 
-          function mrmProductAccessPanPopupField(target) {
+          function mrmProductAccessScrollPopupFieldIntoView(target) {
             if (!window.matchMedia || !window.matchMedia('(max-width: 700px)').matches) return;
             if (!target || !target.closest) return;
 
@@ -6812,61 +6819,40 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
 
             if (!field) return;
 
-            var overlay = field.closest(
-              '.mrm-sheet-music-catalog-section .mrm-otpOverlay, .mrm-piece-details-wrapper .mrm-otpOverlay'
-            );
+            if (!field.closest('.mrm-sheet-music-catalog-section .mrm-otpOverlay, .mrm-piece-details-wrapper .mrm-otpOverlay')) {
+              return;
+            }
 
-            if (!overlay) return;
+            var scrollBox = mrmProductAccessPopupScrollBox(field);
+            if (!scrollBox) return;
 
-            var panel = field.closest('.modal');
-            if (!panel) return;
-
-            panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
-
-            try {
-              field.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
-            } catch (err) {}
-
-            setTimeout(function() {
+            function adjust() {
+              var fieldRect = field.getBoundingClientRect();
+              var boxRect = scrollBox.getBoundingClientRect();
               var vv = window.visualViewport;
-              if (!vv) return;
 
-              var rect = field.getBoundingClientRect();
-              var safeBottom = vv.offsetTop + vv.height - 24;
-              var targetCenter = vv.offsetTop + (vv.height * 0.45);
-              var fieldCenter = rect.top + (rect.height / 2);
+              var viewportTop = vv ? vv.offsetTop : 0;
+              var viewportBottom = vv ? (vv.offsetTop + vv.height) : window.innerHeight;
 
-              var panY = 0;
+              var visibleTop = Math.max(boxRect.top, viewportTop + 18);
+              var visibleBottom = Math.min(boxRect.bottom, viewportBottom - 24);
 
-              if (rect.bottom > safeBottom) {
-                panY = Math.round(targetCenter - fieldCenter);
+              if (visibleBottom <= visibleTop) return;
+
+              var fieldCenter = fieldRect.top + (fieldRect.height / 2);
+              var targetCenter = visibleTop + ((visibleBottom - visibleTop) * 0.44);
+
+              if (fieldRect.top < visibleTop || fieldRect.bottom > visibleBottom) {
+                scrollBox.scrollTop += Math.round(fieldCenter - targetCenter);
               }
+            }
 
-              if (panY > 0) panY = 0;
-
-              var maxPan = Math.round((window.innerHeight || vv.height) * 0.42);
-              if (panY < -maxPan) panY = -maxPan;
-
-              panel.classList.add('mrm-keyboard-pan-active');
-              panel.style.setProperty('--mrm-keyboard-pan-y', panY + 'px');
-            }, 360);
+            setTimeout(adjust, 90);
+            setTimeout(adjust, 360);
           }
 
           document.addEventListener('focusin', function(e) {
-            mrmProductAccessPanPopupField(e.target);
-          }, true);
-
-          document.addEventListener('focusout', function(e) {
-            setTimeout(function() {
-              var el = document.activeElement;
-              if (
-                !el ||
-                !el.closest ||
-                !el.closest('.mrm-sheet-music-catalog-section .mrm-otpOverlay, .mrm-piece-details-wrapper .mrm-otpOverlay')
-              ) {
-                mrmProductAccessResetKeyboardPan();
-              }
-            }, 180);
+            mrmProductAccessScrollPopupFieldIntoView(e.target);
           }, true);
 
           if (window.visualViewport) {
@@ -6877,10 +6863,11 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
                 el.closest &&
                 el.closest('.mrm-sheet-music-catalog-section .mrm-otpOverlay, .mrm-piece-details-wrapper .mrm-otpOverlay')
               ) {
-                mrmProductAccessPanPopupField(el);
+                mrmProductAccessScrollPopupFieldIntoView(el);
               }
             });
           }
+
 
           if (window.pdfjsLib) {
             pdfjsLib.GlobalWorkerOptions.workerSrc =
