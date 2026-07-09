@@ -1768,8 +1768,8 @@ body,
     position: fixed !important;
     inset: 0 !important;
     width: 100vw !important;
-    height: var(--mrm-mobile-vh, 100dvh) !important;
-    min-height: var(--mrm-mobile-vh, 100dvh) !important;
+    height: var(--mrm-mobile-vh, 100vh) !important;
+    min-height: var(--mrm-mobile-vh, 100vh) !important;
     padding:
       max(12px, env(safe-area-inset-top))
       12px
@@ -1789,7 +1789,7 @@ body,
   .mrm-modal-panel {
     width: min(100%, 680px) !important;
     max-width: calc(100vw - 24px) !important;
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100vh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
     margin: auto !important;
     border-radius: 18px !important;
     overflow: hidden !important;
@@ -1803,7 +1803,7 @@ body,
     overflow-x: hidden !important;
     -webkit-overflow-scrolling: touch !important;
     overscroll-behavior: contain !important;
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100vh) - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
   }
 
   .mrm-modal-header {
@@ -1992,21 +1992,95 @@ body,
   function mrmMasterclassController() {
     'use strict';
 
-    function mrmMasterclassSyncMobileViewport() {
-      const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+    let mrmMasterclassPopupViewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+
+    function mrmMasterclassSyncMobileViewport(force = false) {
+      const width = window.innerWidth || document.documentElement.clientWidth || 0;
+      const height = window.innerHeight || document.documentElement.clientHeight || 0;
+      const existing = parseFloat(
+        document.documentElement.style.getPropertyValue('--mrm-mobile-vh')
+      ) || 0;
+
+      const widthChanged = Math.abs(width - mrmMasterclassPopupViewportWidth) > 40;
+
+      if (force || !existing || widthChanged) {
+        mrmMasterclassPopupViewportWidth = width;
+        document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+      }
     }
 
-    mrmMasterclassSyncMobileViewport();
+    mrmMasterclassSyncMobileViewport(true);
 
-    window.addEventListener('resize', mrmMasterclassSyncMobileViewport, { passive: true });
+    window.addEventListener('resize', function() {
+      mrmMasterclassSyncMobileViewport(false);
+    }, { passive: true });
+
     window.addEventListener('orientationchange', function() {
-      setTimeout(mrmMasterclassSyncMobileViewport, 250);
+      setTimeout(function() {
+        mrmMasterclassSyncMobileViewport(true);
+      }, 300);
     });
 
+    function mrmMasterclassFindPopupScrollParent(el) {
+      if (!el) return null;
+
+      return (
+        el.closest('.mrm-modal-body') ||
+        el.closest('.mrm-modal-panel') ||
+        el.closest('.mrm-modal')
+      );
+    }
+
+    function mrmMasterclassPanFocusedPopupField(el) {
+      if (!el || window.innerWidth > 700) return;
+
+      const popup = el.closest(
+        '.mrm-modal'
+      );
+
+      if (!popup) return;
+
+      const pan = function() {
+        const vv = window.visualViewport;
+        const visibleTop = vv ? vv.offsetTop : 0;
+        const visibleHeight = vv ? vv.height : window.innerHeight;
+        const desiredCenter = visibleTop + visibleHeight * 0.42;
+
+        const rect = el.getBoundingClientRect();
+        const fieldCenter = rect.top + rect.height / 2;
+        const delta = fieldCenter - desiredCenter;
+
+        if (Math.abs(delta) < 24) return;
+
+        const scroller = mrmMasterclassFindPopupScrollParent(el);
+
+        if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+          scroller.scrollBy({ top: delta, behavior: 'smooth' });
+        } else {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        }
+      };
+
+      setTimeout(pan, 80);
+      setTimeout(pan, 350);
+    }
+
+    document.addEventListener('focusin', function(e) {
+      const el = e.target;
+
+      if (!el || !el.matches('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select')) return;
+
+      mrmMasterclassPanFocusedPopupField(el);
+    }, true);
+
     if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', mrmMasterclassSyncMobileViewport);
-      window.visualViewport.addEventListener('scroll', mrmMasterclassSyncMobileViewport);
+      window.visualViewport.addEventListener('resize', function() {
+        const el = document.activeElement;
+
+        if (el && el.matches('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select')) {
+          mrmMasterclassPanFocusedPopupField(el);
+        }
+      });
     }
 
     const root = document.getElementById('mrm-masterclass-root');

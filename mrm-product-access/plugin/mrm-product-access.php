@@ -6680,8 +6680,8 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
     position: fixed !important;
     inset: 0 !important;
     width: 100vw !important;
-    height: var(--mrm-mobile-vh, 100dvh) !important;
-    min-height: var(--mrm-mobile-vh, 100dvh) !important;
+    height: var(--mrm-mobile-vh, 100vh) !important;
+    min-height: var(--mrm-mobile-vh, 100vh) !important;
     padding:
       max(12px, env(safe-area-inset-top))
       12px
@@ -6703,7 +6703,7 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
   .mrm-piece-details-wrapper .mrm-otpOverlay .modal {
     width: min(100%, 680px) !important;
     max-width: calc(100vw - 24px) !important;
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100vh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
     margin: auto !important;
     border-radius: 18px !important;
     overflow: hidden !important;
@@ -6718,7 +6718,7 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
     overflow-x: hidden !important;
     -webkit-overflow-scrolling: touch !important;
     overscroll-behavior: contain !important;
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 96px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100vh) - 96px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
   }
 
   .mrm-sheet-music-catalog-section .mrm-otpOverlay input,
@@ -6748,21 +6748,95 @@ body > .mrm-pdfOverlay.mrm-catalog-pdfOverlay .mrm-pdfPage {
           if (window.__MRM_CATALOG_INIT__) return;
           window.__MRM_CATALOG_INIT__ = true;
 
-          function mrmProductAccessSyncMobileViewport() {
-            var height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-            document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+          var mrmProductAccessPopupViewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+
+          function mrmProductAccessSyncMobileViewport(force) {
+            var width = window.innerWidth || document.documentElement.clientWidth || 0;
+            var height = window.innerHeight || document.documentElement.clientHeight || 0;
+            var existing = parseFloat(
+              document.documentElement.style.getPropertyValue('--mrm-mobile-vh')
+            ) || 0;
+
+            var widthChanged = Math.abs(width - mrmProductAccessPopupViewportWidth) > 40;
+
+            if (force || !existing || widthChanged) {
+              mrmProductAccessPopupViewportWidth = width;
+              document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+            }
           }
 
-          mrmProductAccessSyncMobileViewport();
+          mrmProductAccessSyncMobileViewport(true);
 
-          window.addEventListener('resize', mrmProductAccessSyncMobileViewport, { passive: true });
+          window.addEventListener('resize', function() {
+            mrmProductAccessSyncMobileViewport(false);
+          }, { passive: true });
+
           window.addEventListener('orientationchange', function() {
-            setTimeout(mrmProductAccessSyncMobileViewport, 250);
+            setTimeout(function() {
+              mrmProductAccessSyncMobileViewport(true);
+            }, 300);
           });
 
+          function mrmProductAccessFindPopupScrollParent(el) {
+            if (!el) return null;
+
+            return (
+              el.closest('.modal-body') ||
+              el.closest('.mrm-otpOverlay .modal') ||
+              el.closest('.modal')
+            );
+          }
+
+          function mrmProductAccessPanFocusedPopupField(el) {
+            if (!el || window.innerWidth > 700) return;
+
+            var popup = el.closest(
+              '.mrm-sheet-music-catalog-section .mrm-otpOverlay, .mrm-piece-details-wrapper .mrm-otpOverlay'
+            );
+
+            if (!popup) return;
+
+            var pan = function() {
+              var vv = window.visualViewport;
+              var visibleTop = vv ? vv.offsetTop : 0;
+              var visibleHeight = vv ? vv.height : window.innerHeight;
+              var desiredCenter = visibleTop + visibleHeight * 0.42;
+
+              var rect = el.getBoundingClientRect();
+              var fieldCenter = rect.top + rect.height / 2;
+              var delta = fieldCenter - desiredCenter;
+
+              if (Math.abs(delta) < 24) return;
+
+              var scroller = mrmProductAccessFindPopupScrollParent(el);
+
+              if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+                scroller.scrollBy({ top: delta, behavior: 'smooth' });
+              } else {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+              }
+            };
+
+            setTimeout(pan, 80);
+            setTimeout(pan, 350);
+          }
+
+          document.addEventListener('focusin', function(e) {
+            var el = e.target;
+
+            if (!el || !el.matches('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select')) return;
+
+            mrmProductAccessPanFocusedPopupField(el);
+          }, true);
+
           if (window.visualViewport) {
-            window.visualViewport.addEventListener('resize', mrmProductAccessSyncMobileViewport);
-            window.visualViewport.addEventListener('scroll', mrmProductAccessSyncMobileViewport);
+            window.visualViewport.addEventListener('resize', function() {
+              var el = document.activeElement;
+
+              if (el && el.matches('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select')) {
+                mrmProductAccessPanFocusedPopupField(el);
+              }
+            });
           }
 
           if (window.pdfjsLib) {

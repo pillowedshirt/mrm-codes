@@ -2653,7 +2653,6 @@ body {
    ========================================================= */
 
 @media (max-width: 700px) {
-  .mrm-pref-overlay,
   #booking-modal.modal-overlay,
   #mrm-payment-overlay.modal-overlay,
   #mrm-confirm-total-overlay.modal-overlay,
@@ -2662,8 +2661,8 @@ body {
     position: fixed !important;
     inset: 0 !important;
     width: 100vw !important;
-    height: var(--mrm-mobile-vh, 100dvh) !important;
-    min-height: var(--mrm-mobile-vh, 100dvh) !important;
+    height: var(--mrm-mobile-vh, 100vh) !important;
+    min-height: var(--mrm-mobile-vh, 100vh) !important;
     padding:
       max(12px, env(safe-area-inset-top))
       12px
@@ -2676,7 +2675,6 @@ body {
     overscroll-behavior: contain !important;
   }
 
-  .mrm-pref-overlay[aria-hidden="false"],
   #booking-modal[aria-hidden="false"],
   #mrm-payment-overlay[aria-hidden="false"],
   #mrm-confirm-total-overlay[aria-hidden="false"],
@@ -2685,7 +2683,6 @@ body {
     display: flex !important;
   }
 
-  .mrm-pref-modal,
   #booking-modal .modal,
   #mrm-payment-overlay .modal,
   #mrm-confirm-total-overlay .modal,
@@ -2693,7 +2690,7 @@ body {
   #mrm-sheet-music-resume-overlay .modal {
     width: min(100%, 680px) !important;
     max-width: calc(100vw - 24px) !important;
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100vh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
     margin: auto !important;
     border-radius: 18px !important;
     overflow: hidden !important;
@@ -2702,7 +2699,6 @@ body {
     box-sizing: border-box !important;
   }
 
-  .mrm-pref-modal,
   #booking-modal .modal-body,
   #mrm-payment-overlay .modal-body,
   #mrm-confirm-total-overlay .modal-body,
@@ -2718,10 +2714,9 @@ body {
   #mrm-payment-overlay .modal-body,
   #mrm-confirm-total-overlay .modal-body,
   #mrm-sheet-music-resume-overlay .modal-body {
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100vh) - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
   }
 
-  .mrm-pref-overlay input, .mrm-pref-overlay select, .mrm-pref-overlay textarea, .mrm-pref-overlay button,
   #booking-modal input, #booking-modal select, #booking-modal textarea, #booking-modal button,
   #mrm-payment-overlay input, #mrm-payment-overlay select, #mrm-payment-overlay textarea, #mrm-payment-overlay button,
   #mrm-confirm-total-overlay input, #mrm-confirm-total-overlay select, #mrm-confirm-total-overlay textarea, #mrm-confirm-total-overlay button,
@@ -2729,7 +2724,6 @@ body {
     font-size: 16px !important;
   }
 
-  .mrm-pref-overlay input[type="checkbox"], .mrm-pref-overlay input[type="radio"],
   #booking-modal input[type="checkbox"], #booking-modal input[type="radio"],
   #mrm-payment-overlay input[type="checkbox"], #mrm-payment-overlay input[type="radio"],
   #mrm-confirm-total-overlay input[type="checkbox"], #mrm-confirm-total-overlay input[type="radio"] {
@@ -2747,7 +2741,7 @@ body {
   .day-slots.is-mobile-modal {
     position: fixed !important;
     inset: 0 !important;
-    height: var(--mrm-mobile-vh, 100dvh) !important;
+    height: var(--mrm-mobile-vh, 100vh) !important;
     padding:
       max(12px, env(safe-area-inset-top))
       12px
@@ -2758,7 +2752,7 @@ body {
   }
 
   .day-slots.is-mobile-modal .day-slots-sheet {
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100vh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
     overflow-y: auto !important;
     -webkit-overflow-scrolling: touch !important;
   }
@@ -2777,48 +2771,6 @@ body {
     <strong>How enrollment works:</strong> choose your instrument and lesson format, select your state and instructor, pick an available time, and complete the secure booking flow.
   </section>
 
-
-  <!-- Initial preferences popup -->
-  <div id="mrm-pref-overlay" class="mrm-pref-overlay" aria-hidden="false" style="display:none;">
-    <div class="mrm-pref-modal" role="dialog" aria-modal="true" aria-label="Choose lesson preferences">
-      <div class="mrm-pref-head">
-        <div class="mrm-pref-title">Choose your lesson details</div>
-        <button type="button" id="mrm-pref-close" class="mrm-pref-close" aria-label="Close">×</button>
-      </div>
-
-      <div class="mrm-pref-grid">
-        <div>
-          <label>Instrument</label>
-          <select id="mrm-pref-instrument"></select>
-        </div>
-        <div>
-          <label>Lesson type</label>
-          <select id="mrm-pref-lesson-option"></select>
-        </div>
-        <div id="mrm-pref-length-wrap" class="mrm-pref-field">
-          <label>Lesson length</label>
-          <select id="mrm-pref-length"></select>
-        </div>
-        <div id="mrm-pref-frequency-wrap" class="mrm-pref-field">
-          <label>Frequency</label>
-          <select id="mrm-pref-frequency"></select>
-        </div>
-        <div id="mrm-pref-duration-wrap" class="mrm-pref-field">
-          <label>Reserve time for</label>
-          <select id="mrm-pref-duration"></select>
-        </div>
-      </div>
-
-      <div id="mrm-pref-pricing-summary" class="mrm-pricing-summary mrm-pref-pricing-summary is-hidden" aria-live="polite">
-        <div class="mrm-pricing-summary-title">Lesson Pricing</div>
-        <div id="mrm-pref-pricing-summary-main" class="mrm-pricing-summary-main"></div>
-        <div id="mrm-pref-pricing-summary-sub" class="mrm-pricing-summary-sub"></div>
-      </div>
-
-      <button type="button" id="mrm-pref-see" class="mrm-pref-see">See availability</button>
-      <div class="mrm-pref-note">You can still adjust these options after availability loads.</div>
-    </div>
-  </div>
 
   <div class="filters">
     <div>
@@ -3136,21 +3088,105 @@ body {
 
 <script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1" src="https://js.stripe.com/v3/"></script>
 <script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1">
-function mrmSchedulerSyncMobileViewport() {
-  const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-  document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+let mrmSchedulerViewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+
+function mrmSchedulerSyncMobileViewport(force = false) {
+  const width = window.innerWidth || document.documentElement.clientWidth || 0;
+  const height = window.innerHeight || document.documentElement.clientHeight || 0;
+  const existing = parseFloat(
+    document.documentElement.style.getPropertyValue('--mrm-mobile-vh')
+  ) || 0;
+
+  const widthChanged = Math.abs(width - mrmSchedulerViewportWidth) > 40;
+
+  if (force || !existing || widthChanged) {
+    mrmSchedulerViewportWidth = width;
+    document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+  }
 }
 
-mrmSchedulerSyncMobileViewport();
+mrmSchedulerSyncMobileViewport(true);
 
-window.addEventListener('resize', mrmSchedulerSyncMobileViewport, { passive: true });
+window.addEventListener('resize', function() {
+  mrmSchedulerSyncMobileViewport(false);
+}, { passive: true });
+
 window.addEventListener('orientationchange', function() {
-  setTimeout(mrmSchedulerSyncMobileViewport, 250);
+  setTimeout(function() {
+    mrmSchedulerSyncMobileViewport(true);
+  }, 300);
 });
 
+function mrmSchedulerFindPopupScrollParent(el) {
+  if (!el) return null;
+
+  return (
+    el.closest('.modal-body') ||
+    el.closest('.day-slots-sheet') ||
+    el.closest('.modal') ||
+    el.closest('.day-slots.is-mobile-modal')
+  );
+}
+
+function mrmSchedulerPanFocusedPopupField(el) {
+  if (!el || window.innerWidth > 700) return;
+
+  const popup = el.closest(
+    '#booking-modal, #mrm-payment-overlay, #mrm-confirm-total-overlay, #mrm-success-overlay, #mrm-sheet-music-resume-overlay, .day-slots.is-mobile-modal'
+  );
+
+  if (!popup) return;
+
+  const pan = function() {
+    const vv = window.visualViewport;
+    const visibleTop = vv ? vv.offsetTop : 0;
+    const visibleHeight = vv ? vv.height : window.innerHeight;
+    const desiredCenter = visibleTop + visibleHeight * 0.42;
+
+    const rect = el.getBoundingClientRect();
+    const fieldCenter = rect.top + rect.height / 2;
+    const delta = fieldCenter - desiredCenter;
+
+    if (Math.abs(delta) < 24) return;
+
+    const scroller = mrmSchedulerFindPopupScrollParent(el);
+
+    if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+      scroller.scrollBy({
+        top: delta,
+        behavior: 'smooth'
+      });
+    } else {
+      el.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+        inline: 'nearest'
+      });
+    }
+  };
+
+  setTimeout(pan, 80);
+  setTimeout(pan, 350);
+}
+
+document.addEventListener('focusin', function(e) {
+  const el = e.target;
+
+  if (!el || !el.matches('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select')) {
+    return;
+  }
+
+  mrmSchedulerPanFocusedPopupField(el);
+}, true);
+
 if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', mrmSchedulerSyncMobileViewport);
-  window.visualViewport.addEventListener('scroll', mrmSchedulerSyncMobileViewport);
+  window.visualViewport.addEventListener('resize', function() {
+    const el = document.activeElement;
+
+    if (el && el.matches('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select')) {
+      mrmSchedulerPanFocusedPopupField(el);
+    }
+  });
 }
 
 const apiBase = '/wp-json/mrm-schedule/v1';
@@ -7796,8 +7832,7 @@ document.addEventListener('keydown', (e)=>{
     'mrm-confirm-total-overlay',
     'mrm-sheet-music-resume-overlay',
     'mrm-payment-overlay',
-    'booking-modal',
-    'mrm-pref-overlay'
+    'booking-modal'
   ];
 
   for (const id of visibleOverlays) {
@@ -7832,8 +7867,6 @@ document.getElementById('online-select')?.addEventListener('change', ()=>{
 });
 document.getElementById('repeat-frequency').addEventListener('change', updatePaymentCheckboxVisibility);
 
-document.getElementById('mrm-pref-see')?.addEventListener('click', mrmApplyPrefAndLoad);
-document.getElementById('mrm-pref-close')?.addEventListener('click', mrmApplyPrefAndLoad);
 
 const autopayEl = document.getElementById('mrm-autopay-opt');
 const prepayEl  = document.getElementById('mrm-prepay-opt');
@@ -7864,55 +7897,7 @@ updateAutopayVisualNote();
 // Initial preferences popup flow
 // ------------------------------
 function mrmOpenPrefPopup(){
-  const overlay = document.getElementById('mrm-pref-overlay');
-  if(!overlay) return;
-
-  // Copy options from main selects so there is only one “source of truth”
-  const mainInstrument = document.getElementById('instrument-input');
-  const mainOpt        = document.getElementById('lesson-option');
-  const mainLen        = document.getElementById('length-select');
-  const mainFreq       = document.getElementById('repeat-frequency');
-  const mainDur        = document.getElementById('repeat-duration');
-
-  const pInstrument = document.getElementById('mrm-pref-instrument');
-  const pOpt        = document.getElementById('mrm-pref-lesson-option');
-  const pLen        = document.getElementById('mrm-pref-length');
-  const pFreq       = document.getElementById('mrm-pref-frequency');
-  const pDur        = document.getElementById('mrm-pref-duration');
-
-  if(mainInstrument && pInstrument) pInstrument.innerHTML = mainInstrument.innerHTML;
-  if(mainOpt && pOpt)              pOpt.innerHTML        = mainOpt.innerHTML;
-  if(mainLen && pLen)              pLen.innerHTML        = mainLen.innerHTML;
-  if(mainFreq && pFreq)            pFreq.innerHTML       = mainFreq.innerHTML;
-  if(mainDur && pDur)              pDur.innerHTML        = mainDur.innerHTML;
-
-  // Default values from the current page state
-  if(mainInstrument && pInstrument) pInstrument.value = mainInstrument.value || '';
-  if(mainOpt && pOpt)              pOpt.value        = mainOpt.value || 'consultation';
-  if(mainLen && pLen)              pLen.value        = mainLen.value || '60';
-  if(mainFreq && pFreq)            pFreq.value       = mainFreq.value || 'weekly';
-  if(mainDur && pDur)              pDur.value        = mainDur.value || '1_month';
-
-  // Keep popup fields consistent with consultation + repeat rules
-  if (pOpt && !pOpt.dataset.mrmBound) {
-    pOpt.dataset.mrmBound = '1';
-    pOpt.addEventListener('change', mrmPrefApplyDefaults);
-  }
-  if (pFreq && !pFreq.dataset.mrmBound) {
-    pFreq.dataset.mrmBound = '1';
-    pFreq.addEventListener('change', mrmPrefApplyRepeatRules);
-  }
-  if (pLen && !pLen.dataset.mrmBound) {
-    pLen.dataset.mrmBound = '1';
-    pLen.addEventListener('change', mrmRefreshAllPricingUI);
-  }
-
-  mrmPrefApplyDefaults();
-  mrmRefreshAllPricingUI();
-
-  overlay.style.display = 'flex';
-  overlay.setAttribute('aria-hidden','false');
-  document.body.classList.add('mrm-booking-modal-open');
+  return;
 }
 
 function mrmClosePrefPopup(){
