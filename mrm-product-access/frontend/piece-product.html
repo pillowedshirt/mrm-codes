@@ -1609,6 +1609,17 @@ audio.mrm-audio{
   }
 }
 
+/* Mobile keyboard pan only for sheet music popups with text/payment inputs. */
+@media (max-width: 700px) {
+  .mrm-piece-product-page #mrm-payment-overlay .modal,
+  .mrm-piece-product-page .mrm-otpOverlay .modal,
+  .mrm-piece-product-page .mrm-otpOverlay .mrm-access-modal {
+    transform: translateY(var(--mrm-keyboard-pan-y, 0px)) !important;
+    transition: transform 180ms ease !important;
+    will-change: transform;
+  }
+}
+
 </style>
 
 <main class="mrm-piece-product-page page">
@@ -1975,21 +1986,131 @@ audio.mrm-audio{
   if (window.__MRM_PIECE_PAGE_INIT__) return;
   window.__MRM_PIECE_PAGE_INIT__ = true;
 
-  function mrmSyncMobilePopupViewport() {
-    const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-    document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+  function mrmPieceProductPopupTextFieldFocused() {
+    const el = document.activeElement;
+    return !!(
+      el &&
+      el.matches &&
+      el.matches('input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), textarea') &&
+      el.closest('#mrm-payment-overlay, .mrm-otpOverlay')
+    );
   }
 
-  mrmSyncMobilePopupViewport();
+  function mrmSyncMobilePopupViewport(force) {
+    if (!force && mrmPieceProductPopupTextFieldFocused()) return;
 
-  window.addEventListener('resize', mrmSyncMobilePopupViewport, { passive: true });
+    const height = Math.max(
+      window.innerHeight || 0,
+      document.documentElement.clientHeight || 0
+    );
+
+    if (height > 0) {
+      document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+    }
+  }
+
+  mrmSyncMobilePopupViewport(true);
+
+  window.addEventListener('resize', function() {
+    mrmSyncMobilePopupViewport(false);
+  }, { passive: true });
+
   window.addEventListener('orientationchange', function() {
-    setTimeout(mrmSyncMobilePopupViewport, 250);
+    setTimeout(function() {
+      mrmSyncMobilePopupViewport(true);
+    }, 300);
   });
 
+  function mrmPieceProductResetKeyboardPan() {
+    document.querySelectorAll(
+      '#mrm-payment-overlay .modal, .mrm-otpOverlay .modal, .mrm-otpOverlay .mrm-access-modal'
+    ).forEach(function(panel) {
+      panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
+      panel.classList.remove('mrm-keyboard-pan-active');
+    });
+  }
+
+  function mrmPieceProductPanPopupField(target) {
+    if (!window.matchMedia || !window.matchMedia('(max-width: 700px)').matches) return;
+    if (!target || !target.closest) return;
+
+    const field = target.closest(
+      'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), textarea, #mrm-payment-element'
+    );
+
+    if (!field) return;
+
+    const overlay = field.closest('#mrm-payment-overlay, .mrm-otpOverlay');
+    if (!overlay) return;
+
+    const panel = field.closest('.modal, .mrm-access-modal');
+    if (!panel) return;
+
+    panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
+
+    try {
+      field.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+    } catch (err) {}
+
+    setTimeout(function() {
+      const vv = window.visualViewport;
+      if (!vv) return;
+
+      const rect = field.getBoundingClientRect();
+      const safeBottom = vv.offsetTop + vv.height - 24;
+      const targetCenter = vv.offsetTop + (vv.height * 0.45);
+      const fieldCenter = rect.top + (rect.height / 2);
+
+      let panY = 0;
+
+      if (rect.bottom > safeBottom) {
+        panY = Math.round(targetCenter - fieldCenter);
+      }
+
+      if (panY > 0) panY = 0;
+
+      const maxPan = Math.round((window.innerHeight || vv.height) * 0.42);
+      if (panY < -maxPan) panY = -maxPan;
+
+      panel.classList.add('mrm-keyboard-pan-active');
+      panel.style.setProperty('--mrm-keyboard-pan-y', panY + 'px');
+    }, 360);
+  }
+
+  document.addEventListener('focusin', function(e) {
+    mrmPieceProductPanPopupField(e.target);
+  }, true);
+
+  document.addEventListener('focusout', function(e) {
+    setTimeout(function() {
+      const el = document.activeElement;
+      if (
+        !el ||
+        !el.closest ||
+        !el.closest('#mrm-payment-overlay, .mrm-otpOverlay')
+      ) {
+        mrmPieceProductResetKeyboardPan();
+      }
+    }, 180);
+  }, true);
+
+  document.addEventListener('touchstart', function(e) {
+    if (e.target && e.target.closest && e.target.closest('#mrm-payment-element')) {
+      mrmPieceProductPanPopupField(e.target);
+    }
+  }, { passive: true, capture: true });
+
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', mrmSyncMobilePopupViewport);
-    window.visualViewport.addEventListener('scroll', mrmSyncMobilePopupViewport);
+    window.visualViewport.addEventListener('resize', function() {
+      const el = document.activeElement;
+      if (
+        el &&
+        el.closest &&
+        el.closest('#mrm-payment-overlay, .mrm-otpOverlay')
+      ) {
+        mrmPieceProductPanPopupField(el);
+      }
+    });
   }
 
   let stripe = null;
