@@ -2649,22 +2649,31 @@ function initRichTextToolbars(scope) {
 
         $now = current_time( 'mysql' );
 
-        // Helper: match a DB row against Product Access hash (salted) OR exact db hash (legacy/current)
         $row_matches_email_hash = function( $row ) use ( $email_hash ) {
-            $db_hash = isset( $row->email_hash ) ? (string) $row->email_hash : '';
-            if ( $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) {
+            $email_hash = (string) $email_hash;
+            $db_hash    = isset( $row->email_hash ) ? (string) $row->email_hash : '';
+
+            /*
+             * Strict rule:
+             * The submitted email hash must match the row.
+             * Do not treat a row as matching just because the row's own email_hash
+             * matches the row's own email_plain. That was the unsafe self-match path.
+             */
+            if ( $email_hash !== '' && $db_hash !== '' && hash_equals( $email_hash, $db_hash ) ) {
                 return true;
             }
 
             $email_plain = isset( $row->email_plain ) ? sanitize_email( (string) $row->email_plain ) : '';
-            if ( $email_plain !== '' ) {
-                $salted = $this->hash_email( strtolower( trim( $email_plain ) ) );
-                if ( hash_equals( $email_hash, $salted ) ) {
-                    return true;
-                }
 
-                $unsalted = hash( 'sha256', strtolower( trim( $email_plain ) ) );
-                if ( hash_equals( $email_hash, $unsalted ) || ( $db_hash !== '' && hash_equals( $db_hash, $unsalted ) ) ) {
+            if ( $email_plain !== '' && $email_hash !== '' ) {
+                $normalized_plain = strtolower( trim( $email_plain ) );
+                $salted_plain     = $this->hash_email( $normalized_plain );
+                $unsalted_plain   = hash( 'sha256', $normalized_plain );
+
+                if (
+                    hash_equals( $email_hash, $salted_plain )
+                    || hash_equals( $email_hash, $unsalted_plain )
+                ) {
                     return true;
                 }
             }

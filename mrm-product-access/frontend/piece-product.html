@@ -1574,9 +1574,7 @@ audio.mrm-audio{
   }
 
   .mrm-piece-product-page .modal-body,
-  .mrm-piece-product-page .mrm-access-modal .modal-body,
-  .mrm-piece-product-page #mrm-piece-details-step,
-  .mrm-piece-product-page #mrm-piece-card-step {
+  .mrm-piece-product-page .mrm-access-modal .modal-body {
     overflow-y: auto !important;
     overflow-x: hidden !important;
     -webkit-overflow-scrolling: touch !important;
@@ -1606,6 +1604,74 @@ audio.mrm-audio{
   .mrm-piece-product-page .mrm-xbtn,
   .mrm-piece-product-page .mrm-closeBtn {
     touch-action: manipulation !important;
+  }
+}
+
+/* Sheet music card/payment step: scheduler-style mobile flow. */
+.mrm-piece-product-page #mrm-piece-card-step.mrm-piece-card-payment-step {
+  min-height: 0;
+}
+
+.mrm-piece-product-page #mrm-piece-card-step.mrm-piece-card-payment-step[hidden] {
+  display: none !important;
+}
+
+.mrm-piece-product-page .mrm-piece-card-scroll {
+  min-height: 0;
+}
+
+.mrm-piece-product-page .mrm-piece-card-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.mrm-piece-product-page .mrm-piece-card-actions button {
+  flex: 1;
+}
+
+@media (max-width: 700px) {
+  .mrm-piece-product-page #mrm-payment-overlay .modal-body {
+    display: block !important;
+    padding-bottom: 0 !important;
+  }
+
+  .mrm-piece-product-page #mrm-piece-card-step.mrm-piece-card-payment-step {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .mrm-piece-product-page #mrm-piece-card-step.mrm-piece-card-payment-step[hidden] {
+    display: none !important;
+  }
+
+  .mrm-piece-product-page .mrm-piece-card-scroll {
+    min-height: 0;
+    padding-bottom: 12px;
+  }
+
+  .mrm-piece-product-page .mrm-piece-card-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 8;
+    margin: 14px -1px 0;
+    padding: 12px 0 max(12px, env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, rgba(255,250,243,0.88), #fffaf3 42%, #fffaf3 100%);
+    border-top: 1px solid rgba(124, 74, 45, 0.18);
+  }
+
+  .mrm-piece-product-page .mrm-piece-card-actions button {
+    min-height: 48px;
+    font-size: 16px !important;
+  }
+
+  .mrm-piece-product-page #mrm-payment-element:not(:empty) {
+    min-height: 250px;
+  }
+
+  .mrm-piece-product-page .mrm-piece-card-promo-box input {
+    max-width: 100% !important;
   }
 }
 
@@ -1831,39 +1897,6 @@ audio.mrm-audio{
                 <option value="US" selected>United States</option>
               </select>
 
-              <div
-                class="mrm-promo-box"
-                style="margin:14px 0;padding:14px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;background:rgba(255,255,255,0.72);"
-              >
-                <label
-                  for="mrm-piece-promo-code-input"
-                  style="display:block;font-weight:700;margin-bottom:6px;"
-                >
-                  Promotional code
-                </label>
-
-                <input
-                  id="mrm-piece-promo-code-input"
-                  type="text"
-                  autocomplete="off"
-                  placeholder="Enter code"
-                  style="width:100%;max-width:320px;padding:10px 12px;border-radius:10px;border:1px solid rgba(0,0,0,0.18);"
-                />
-
-                <button
-                  id="mrm-piece-promo-code-apply"
-                  type="button"
-                  style="display:none;margin-top:8px;padding:9px 14px;border:0;border-radius:999px;background:#7c4a2d;color:#fff;font-weight:700;cursor:pointer;"
-                >
-                  Apply Code
-                </button>
-
-                <div
-                  id="mrm-piece-promo-code-message"
-                  style="margin-top:8px;font-size:0.92rem;"
-                ></div>
-              </div>
-
               <div class="mrm-piece-terms-row mrm-piece-terms-modal-row">
                 <input type="checkbox" class="mrm-piece-terms-check" id="mrm-piece-payment-terms">
                 <label for="mrm-piece-payment-terms">
@@ -1881,23 +1914,62 @@ audio.mrm-audio{
               </div>
               </div>
 
-              <div id="mrm-piece-card-step" class="mrm-piece-step" hidden>
-                <h3 class="mrm-piece-payment-step-heading">Submit Payment</h3>
-                <p class="mrm-piece-payment-step-note">
-                  Review your total below, enter your card information, and submit your secure payment.
-                </p>
+              <div id="mrm-piece-card-step" class="mrm-piece-step mrm-piece-card-payment-step" hidden>
+                <div class="mrm-piece-card-scroll">
+                  <h3 class="mrm-piece-payment-step-heading">Submit Payment</h3>
+                  <p class="mrm-piece-payment-step-note">
+                    Review your total below, enter any promotional code, enter your card information, and submit your secure payment.
+                  </p>
 
-              <div id="payment-instructions"></div>
-              <div id="mrm-payment-element"></div>
-              <div class="mrm-payment-security-badge" aria-label="Secure payment information">
-                <span class="mrm-payment-security-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" focusable="false"><path fill="currentColor" d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 0 1 4 0v2h-4V7Zm7 12H7v-8h10v8Z"></path></svg></span>
-                <span class="mrm-payment-security-copy"><strong>Secure checkout</strong><small>Payment details are securely processed by Stripe. Low Brass Lessons does not store your full card number.</small></span>
-              </div>
-              <div style="display:flex;gap:10px;margin-top:18px;">
-                <button id="mrm-payment-back" class="button-secondary" type="button" style="flex:1;">Go Back</button>
-                <button id="mrm-pay-btn" class="button-primary" style="flex:1;">Complete Purchase</button>
-              </div>
-              <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
+                  <div id="payment-instructions"></div>
+
+                  <div
+                    class="mrm-promo-box mrm-piece-card-promo-box"
+                    style="margin:14px 0;padding:14px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;background:rgba(255,255,255,0.72);"
+                  >
+                    <label
+                      for="mrm-piece-promo-code-input"
+                      style="display:block;font-weight:700;margin-bottom:6px;"
+                    >
+                      Promotional code
+                    </label>
+
+                    <input
+                      id="mrm-piece-promo-code-input"
+                      type="text"
+                      autocomplete="off"
+                      placeholder="Enter code"
+                      style="width:100%;max-width:320px;padding:10px 12px;border-radius:10px;border:1px solid rgba(0,0,0,0.18);"
+                    />
+
+                    <button
+                      id="mrm-piece-promo-code-apply"
+                      type="button"
+                      style="display:none;margin-top:8px;padding:9px 14px;border:0;border-radius:999px;background:#7c4a2d;color:#fff;font-weight:700;cursor:pointer;"
+                    >
+                      Apply Code
+                    </button>
+
+                    <div
+                      id="mrm-piece-promo-code-message"
+                      style="margin-top:8px;font-size:0.92rem;"
+                    ></div>
+                  </div>
+
+                  <div id="mrm-payment-element"></div>
+
+                  <div class="mrm-payment-security-badge" aria-label="Secure payment information">
+                    <span class="mrm-payment-security-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" focusable="false"><path fill="currentColor" d="M17 9h-1V7a4 4 0 0 0-8 0v2H7a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2Zm-7-2a2 2 0 0 1 4 0v2h-4V7Zm7 12H7v-8h10v8Z"></path></svg></span>
+                    <span class="mrm-payment-security-copy"><strong>Secure checkout</strong><small>Payment details are securely processed by Stripe. Low Brass Lessons does not store your full card number.</small></span>
+                  </div>
+
+                  <div id="mrm-payment-error" style="color:red;margin-top:10px;"></div>
+                </div>
+
+                <div class="modal-actions mrm-piece-card-actions">
+                  <button id="mrm-payment-back" class="button-secondary" type="button">Go Back</button>
+                  <button id="mrm-pay-btn" class="button-primary" type="button">Submit Payment</button>
+                </div>
               </div>
             </div>
           </div>
@@ -2785,7 +2857,7 @@ async function getOfferSkuCandidates(offerEl) {
 
     errorEl.textContent = '';
     payBtn.disabled = true;
-    payBtn.textContent = 'Complete Purchase';
+    payBtn.textContent = 'Submit Payment';
 
     mrmPieceAppliedPromoCode = '';
     mrmPieceAppliedPromoDiscountCents = 0;
@@ -3152,6 +3224,10 @@ async function getOfferSkuCandidates(offerEl) {
 
         if (detailsStep) detailsStep.hidden = true;
         if (cardStep) cardStep.hidden = false;
+
+        const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
+        if (modalBody) modalBody.scrollTop = 0;
+        if (cardStep) cardStep.scrollTop = 0;
 
         continueToPaymentBtn.disabled = true;
         continueToPaymentBtn.textContent = 'Loading payment...';
@@ -4184,11 +4260,14 @@ async function getOfferSkuCandidates(offerEl) {
               return;
             }
 
-            if (!response.ok) {
-              messageDiv.textContent = data.message || 'We could not send an access code right now. Please try again or contact Low Brass Lessons.';
+            if (!response.ok || !data.ok || data.code_sent !== true) {
+              messageDiv.textContent = data.message || 'We could not verify a completed purchase for that email and piece.';
+              stepEmail.classList.remove('hidden');
+              stepOtp.classList.add('hidden');
               return;
             }
-            messageDiv.textContent = data.message || 'If this purchase exists, a code will be sent shortly.';
+
+            messageDiv.textContent = data.message || 'A one-time access code has been sent to the verified purchase email.';
             stepEmail.classList.add('hidden');
             stepOtp.classList.remove('hidden');
             window.setTimeout(function () { otpInput.focus(); }, 50);
