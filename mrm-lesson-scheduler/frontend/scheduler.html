@@ -32,11 +32,12 @@ body {
   color: var(--color-text-main);
 }
 
-body.mrm-day-modal-open { overflow: hidden; }
+body.mrm-day-modal-open { overflow: hidden !important; }
 
 /* prevent background scrolling when the booking modal is open */
 body.mrm-booking-modal-open {
-  overflow: hidden;
+  overflow: hidden !important;
+  touch-action: none;
 }
 
 .wrapper {
@@ -2647,6 +2648,122 @@ body {
   display: none !important;
 }
 
+/* =========================================================
+   Mobile popup hardening — private lesson scheduler
+   ========================================================= */
+
+@media (max-width: 700px) {
+  .mrm-pref-overlay,
+  #booking-modal.modal-overlay,
+  #mrm-payment-overlay.modal-overlay,
+  #mrm-confirm-total-overlay.modal-overlay,
+  #mrm-success-overlay.modal-overlay,
+  #mrm-sheet-music-resume-overlay.modal-overlay {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: var(--mrm-mobile-vh, 100dvh) !important;
+    min-height: var(--mrm-mobile-vh, 100dvh) !important;
+    padding:
+      max(12px, env(safe-area-inset-top))
+      12px
+      max(12px, env(safe-area-inset-bottom))
+      12px !important;
+    box-sizing: border-box !important;
+    align-items: center !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+    overscroll-behavior: contain !important;
+  }
+
+  .mrm-pref-overlay[aria-hidden="false"],
+  #booking-modal[aria-hidden="false"],
+  #mrm-payment-overlay[aria-hidden="false"],
+  #mrm-confirm-total-overlay[aria-hidden="false"],
+  #mrm-success-overlay[aria-hidden="false"],
+  #mrm-sheet-music-resume-overlay[aria-hidden="false"] {
+    display: flex !important;
+  }
+
+  .mrm-pref-modal,
+  #booking-modal .modal,
+  #mrm-payment-overlay .modal,
+  #mrm-confirm-total-overlay .modal,
+  #mrm-success-overlay .mrm-success-modal,
+  #mrm-sheet-music-resume-overlay .modal {
+    width: min(100%, 680px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    margin: auto !important;
+    border-radius: 18px !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-sizing: border-box !important;
+  }
+
+  .mrm-pref-modal,
+  #booking-modal .modal-body,
+  #mrm-payment-overlay .modal-body,
+  #mrm-confirm-total-overlay .modal-body,
+  #mrm-success-overlay .mrm-success-modal,
+  #mrm-sheet-music-resume-overlay .modal-body {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
+  }
+
+  #booking-modal .modal-body,
+  #mrm-payment-overlay .modal-body,
+  #mrm-confirm-total-overlay .modal-body,
+  #mrm-sheet-music-resume-overlay .modal-body {
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+  }
+
+  .mrm-pref-overlay input, .mrm-pref-overlay select, .mrm-pref-overlay textarea, .mrm-pref-overlay button,
+  #booking-modal input, #booking-modal select, #booking-modal textarea, #booking-modal button,
+  #mrm-payment-overlay input, #mrm-payment-overlay select, #mrm-payment-overlay textarea, #mrm-payment-overlay button,
+  #mrm-confirm-total-overlay input, #mrm-confirm-total-overlay select, #mrm-confirm-total-overlay textarea, #mrm-confirm-total-overlay button,
+  #mrm-sheet-music-resume-overlay input, #mrm-sheet-music-resume-overlay select, #mrm-sheet-music-resume-overlay textarea, #mrm-sheet-music-resume-overlay button {
+    font-size: 16px !important;
+  }
+
+  .mrm-pref-overlay input[type="checkbox"], .mrm-pref-overlay input[type="radio"],
+  #booking-modal input[type="checkbox"], #booking-modal input[type="radio"],
+  #mrm-payment-overlay input[type="checkbox"], #mrm-payment-overlay input[type="radio"],
+  #mrm-confirm-total-overlay input[type="checkbox"], #mrm-confirm-total-overlay input[type="radio"] {
+    font-size: initial !important;
+  }
+
+  #booking-modal .modal-header,
+  #mrm-payment-overlay .modal-header {
+    flex: 0 0 auto !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 5 !important;
+  }
+
+  .day-slots.is-mobile-modal {
+    position: fixed !important;
+    inset: 0 !important;
+    height: var(--mrm-mobile-vh, 100dvh) !important;
+    padding:
+      max(12px, env(safe-area-inset-top))
+      12px
+      max(12px, env(safe-area-inset-bottom))
+      12px !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+  }
+
+  .day-slots.is-mobile-modal .day-slots-sheet {
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+  }
+}
+
 </style>
 </head>
 
@@ -3019,6 +3136,23 @@ body {
 
 <script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1" src="https://js.stripe.com/v3/"></script>
 <script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1">
+function mrmSchedulerSyncMobileViewport() {
+  const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+}
+
+mrmSchedulerSyncMobileViewport();
+
+window.addEventListener('resize', mrmSchedulerSyncMobileViewport, { passive: true });
+window.addEventListener('orientationchange', function() {
+  setTimeout(mrmSchedulerSyncMobileViewport, 250);
+});
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', mrmSchedulerSyncMobileViewport);
+  window.visualViewport.addEventListener('scroll', mrmSchedulerSyncMobileViewport);
+}
+
 const apiBase = '/wp-json/mrm-schedule/v1';
 const payApiBase = '/wp-json/mrm-pay/v1';
 const mrmLessonPricingCache = {

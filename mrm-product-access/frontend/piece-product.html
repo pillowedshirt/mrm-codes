@@ -26,7 +26,8 @@
 
 /* Lock body scroll only when a piece-product modal is open. */
 body.mrm-piece-no-scroll{
-  overflow:hidden;
+  overflow:hidden !important;
+  touch-action:none;
   position:fixed;
   width:100%;
   left:0;
@@ -1523,6 +1524,91 @@ audio.mrm-audio{
     height:14px !important;
   }
 }
+/* =========================================================
+   Mobile popup hardening — sheet music piece product page
+   Prevents iOS input zoom and keeps modals centered/reliable.
+   ========================================================= */
+
+@media (max-width: 700px) {
+  .mrm-piece-product-page .modal-overlay,
+  .mrm-piece-product-page .mrm-otpOverlay,
+  .mrm-piece-product-page #mrm-confirm-total-overlay,
+  .mrm-piece-product-page #mrm-success-overlay {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: var(--mrm-mobile-vh, 100dvh) !important;
+    min-height: var(--mrm-mobile-vh, 100dvh) !important;
+    padding:
+      max(12px, env(safe-area-inset-top))
+      12px
+      max(12px, env(safe-area-inset-bottom))
+      12px !important;
+    box-sizing: border-box !important;
+    align-items: center !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+    overscroll-behavior: contain !important;
+  }
+
+  .mrm-piece-product-page .modal-overlay.is-open,
+  .mrm-piece-product-page .mrm-otpOverlay.is-open,
+  .mrm-piece-product-page #mrm-confirm-total-overlay[aria-hidden="false"],
+  .mrm-piece-product-page #mrm-success-overlay[aria-hidden="false"] {
+    display: flex !important;
+  }
+
+  .mrm-piece-product-page .modal,
+  .mrm-piece-product-page .mrm-access-modal,
+  .mrm-piece-product-page .mrm-success-modal,
+  .mrm-piece-product-page #mrm-confirm-total-overlay .modal {
+    width: min(100%, 680px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    margin: auto !important;
+    border-radius: 18px !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    box-sizing: border-box !important;
+  }
+
+  .mrm-piece-product-page .modal-body,
+  .mrm-piece-product-page .mrm-access-modal .modal-body,
+  .mrm-piece-product-page #mrm-piece-details-step,
+  .mrm-piece-product-page #mrm-piece-card-step {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
+    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+  }
+
+  .mrm-piece-product-page input,
+  .mrm-piece-product-page select,
+  .mrm-piece-product-page textarea,
+  .mrm-piece-product-page button {
+    font-size: 16px !important;
+  }
+
+  .mrm-piece-product-page input[type="checkbox"],
+  .mrm-piece-product-page input[type="radio"] {
+    font-size: initial !important;
+  }
+
+  .mrm-piece-product-page .modal-header {
+    flex: 0 0 auto !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 5 !important;
+  }
+
+  .mrm-piece-product-page .mrm-xbtn,
+  .mrm-piece-product-page .mrm-closeBtn {
+    touch-action: manipulation !important;
+  }
+}
+
 </style>
 
 <main class="mrm-piece-product-page page">
@@ -1888,6 +1974,23 @@ audio.mrm-audio{
 (function(){
   if (window.__MRM_PIECE_PAGE_INIT__) return;
   window.__MRM_PIECE_PAGE_INIT__ = true;
+
+  function mrmSyncMobilePopupViewport() {
+    const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+  }
+
+  mrmSyncMobilePopupViewport();
+
+  window.addEventListener('resize', mrmSyncMobilePopupViewport, { passive: true });
+  window.addEventListener('orientationchange', function() {
+    setTimeout(mrmSyncMobilePopupViewport, 250);
+  });
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', mrmSyncMobilePopupViewport);
+    window.visualViewport.addEventListener('scroll', mrmSyncMobilePopupViewport);
+  }
 
   let stripe = null;
   let activePaymentElement = null;
