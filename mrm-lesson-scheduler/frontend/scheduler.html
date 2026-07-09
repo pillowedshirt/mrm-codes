@@ -2764,6 +2764,22 @@ body {
   }
 }
 
+/* Retired scheduler preference popup.
+   This old startup popup should never display. */
+#mrm-pref-overlay[data-mrm-retired="true"] {
+  display: none !important;
+}
+
+/* Mobile keyboard pan only for scheduler popups with text/payment inputs. */
+@media (max-width: 700px) {
+  #booking-modal .modal,
+  #mrm-payment-overlay .modal {
+    transform: translateY(var(--mrm-keyboard-pan-y, 0px)) !important;
+    transition: transform 180ms ease !important;
+    will-change: transform;
+  }
+}
+
 </style>
 </head>
 
@@ -2779,7 +2795,7 @@ body {
 
 
   <!-- Initial preferences popup -->
-  <div id="mrm-pref-overlay" class="mrm-pref-overlay" aria-hidden="false" style="display:none;">
+  <div id="mrm-pref-overlay" class="mrm-pref-overlay" aria-hidden="true" data-mrm-retired="true" style="display:none;">
     <div class="mrm-pref-modal" role="dialog" aria-modal="true" aria-label="Choose lesson preferences">
       <div class="mrm-pref-head">
         <div class="mrm-pref-title">Choose your lesson details</div>
@@ -3136,21 +3152,129 @@ body {
 
 <script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1" src="https://js.stripe.com/v3/"></script>
 <script data-cfasync="false" data-no-optimize="1" data-no-defer="1" data-no-minify="1">
-function mrmSchedulerSyncMobileViewport() {
-  const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-  document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+function mrmSchedulerPopupTextFieldFocused() {
+  const el = document.activeElement;
+  return !!(
+    el &&
+    el.matches &&
+    el.matches('input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), textarea') &&
+    el.closest('#booking-modal, #mrm-payment-overlay')
+  );
 }
 
-mrmSchedulerSyncMobileViewport();
+function mrmSchedulerSyncMobileViewport(force) {
+  if (!force && mrmSchedulerPopupTextFieldFocused()) return;
 
-window.addEventListener('resize', mrmSchedulerSyncMobileViewport, { passive: true });
+  const height = Math.max(
+    window.innerHeight || 0,
+    document.documentElement.clientHeight || 0
+  );
+
+  if (height > 0) {
+    document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+  }
+}
+
+mrmSchedulerSyncMobileViewport(true);
+
+window.addEventListener('resize', function() {
+  mrmSchedulerSyncMobileViewport(false);
+}, { passive: true });
+
 window.addEventListener('orientationchange', function() {
-  setTimeout(mrmSchedulerSyncMobileViewport, 250);
+  setTimeout(function() {
+    mrmSchedulerSyncMobileViewport(true);
+  }, 300);
 });
 
+function mrmSchedulerResetKeyboardPan() {
+  document.querySelectorAll('#booking-modal .modal, #mrm-payment-overlay .modal').forEach(function(panel) {
+    panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
+    panel.classList.remove('mrm-keyboard-pan-active');
+  });
+}
+
+function mrmSchedulerPanPopupField(target) {
+  if (!window.matchMedia || !window.matchMedia('(max-width: 700px)').matches) return;
+  if (!target || !target.closest) return;
+
+  const field = target.closest(
+    'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), textarea, #mrm-payment-element'
+  );
+
+  if (!field) return;
+
+  const overlay = field.closest('#booking-modal, #mrm-payment-overlay');
+  if (!overlay) return;
+
+  const panel = field.closest('.modal');
+  if (!panel) return;
+
+  panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
+
+  try {
+    field.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+  } catch (err) {}
+
+  setTimeout(function() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+
+    const rect = field.getBoundingClientRect();
+    const safeBottom = vv.offsetTop + vv.height - 24;
+    const targetCenter = vv.offsetTop + (vv.height * 0.45);
+    const fieldCenter = rect.top + (rect.height / 2);
+
+    let panY = 0;
+
+    if (rect.bottom > safeBottom) {
+      panY = Math.round(targetCenter - fieldCenter);
+    }
+
+    if (panY > 0) panY = 0;
+
+    const maxPan = Math.round((window.innerHeight || vv.height) * 0.42);
+    if (panY < -maxPan) panY = -maxPan;
+
+    panel.classList.add('mrm-keyboard-pan-active');
+    panel.style.setProperty('--mrm-keyboard-pan-y', panY + 'px');
+  }, 360);
+}
+
+document.addEventListener('focusin', function(e) {
+  mrmSchedulerPanPopupField(e.target);
+}, true);
+
+document.addEventListener('focusout', function(e) {
+  setTimeout(function() {
+    const el = document.activeElement;
+    if (
+      !el ||
+      !el.closest ||
+      !el.closest('#booking-modal, #mrm-payment-overlay')
+    ) {
+      mrmSchedulerResetKeyboardPan();
+    }
+  }, 180);
+}, true);
+
+document.addEventListener('touchstart', function(e) {
+  if (e.target && e.target.closest && e.target.closest('#mrm-payment-element')) {
+    mrmSchedulerPanPopupField(e.target);
+  }
+}, { passive: true, capture: true });
+
 if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', mrmSchedulerSyncMobileViewport);
-  window.visualViewport.addEventListener('scroll', mrmSchedulerSyncMobileViewport);
+  window.visualViewport.addEventListener('resize', function() {
+    const el = document.activeElement;
+    if (
+      el &&
+      el.closest &&
+      el.closest('#booking-modal, #mrm-payment-overlay')
+    ) {
+      mrmSchedulerPanPopupField(el);
+    }
+  });
 }
 
 const apiBase = '/wp-json/mrm-schedule/v1';
@@ -7796,8 +7920,7 @@ document.addEventListener('keydown', (e)=>{
     'mrm-confirm-total-overlay',
     'mrm-sheet-music-resume-overlay',
     'mrm-payment-overlay',
-    'booking-modal',
-    'mrm-pref-overlay'
+    'booking-modal'
   ];
 
   for (const id of visibleOverlays) {
@@ -7864,55 +7987,7 @@ updateAutopayVisualNote();
 // Initial preferences popup flow
 // ------------------------------
 function mrmOpenPrefPopup(){
-  const overlay = document.getElementById('mrm-pref-overlay');
-  if(!overlay) return;
-
-  // Copy options from main selects so there is only one “source of truth”
-  const mainInstrument = document.getElementById('instrument-input');
-  const mainOpt        = document.getElementById('lesson-option');
-  const mainLen        = document.getElementById('length-select');
-  const mainFreq       = document.getElementById('repeat-frequency');
-  const mainDur        = document.getElementById('repeat-duration');
-
-  const pInstrument = document.getElementById('mrm-pref-instrument');
-  const pOpt        = document.getElementById('mrm-pref-lesson-option');
-  const pLen        = document.getElementById('mrm-pref-length');
-  const pFreq       = document.getElementById('mrm-pref-frequency');
-  const pDur        = document.getElementById('mrm-pref-duration');
-
-  if(mainInstrument && pInstrument) pInstrument.innerHTML = mainInstrument.innerHTML;
-  if(mainOpt && pOpt)              pOpt.innerHTML        = mainOpt.innerHTML;
-  if(mainLen && pLen)              pLen.innerHTML        = mainLen.innerHTML;
-  if(mainFreq && pFreq)            pFreq.innerHTML       = mainFreq.innerHTML;
-  if(mainDur && pDur)              pDur.innerHTML        = mainDur.innerHTML;
-
-  // Default values from the current page state
-  if(mainInstrument && pInstrument) pInstrument.value = mainInstrument.value || '';
-  if(mainOpt && pOpt)              pOpt.value        = mainOpt.value || 'consultation';
-  if(mainLen && pLen)              pLen.value        = mainLen.value || '60';
-  if(mainFreq && pFreq)            pFreq.value       = mainFreq.value || 'weekly';
-  if(mainDur && pDur)              pDur.value        = mainDur.value || '1_month';
-
-  // Keep popup fields consistent with consultation + repeat rules
-  if (pOpt && !pOpt.dataset.mrmBound) {
-    pOpt.dataset.mrmBound = '1';
-    pOpt.addEventListener('change', mrmPrefApplyDefaults);
-  }
-  if (pFreq && !pFreq.dataset.mrmBound) {
-    pFreq.dataset.mrmBound = '1';
-    pFreq.addEventListener('change', mrmPrefApplyRepeatRules);
-  }
-  if (pLen && !pLen.dataset.mrmBound) {
-    pLen.dataset.mrmBound = '1';
-    pLen.addEventListener('change', mrmRefreshAllPricingUI);
-  }
-
-  mrmPrefApplyDefaults();
-  mrmRefreshAllPricingUI();
-
-  overlay.style.display = 'flex';
-  overlay.setAttribute('aria-hidden','false');
-  document.body.classList.add('mrm-booking-modal-open');
+  return;
 }
 
 function mrmClosePrefPopup(){

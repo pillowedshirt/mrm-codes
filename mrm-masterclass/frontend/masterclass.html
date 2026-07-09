@@ -1830,6 +1830,16 @@ body,
   }
 }
 
+/* Mobile keyboard pan only for masterclass popups with text/payment inputs. */
+@media (max-width: 700px) {
+  #registrationModal .mrm-modal-panel,
+  #masterclassPaymentModal .mrm-modal-panel {
+    transform: translateY(var(--mrm-keyboard-pan-y, 0px)) !important;
+    transition: transform 180ms ease !important;
+    will-change: transform;
+  }
+}
+
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
@@ -1992,21 +2002,131 @@ body,
   function mrmMasterclassController() {
     'use strict';
 
-    function mrmMasterclassSyncMobileViewport() {
-      const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+    function mrmMasterclassPopupTextFieldFocused() {
+      const el = document.activeElement;
+      return !!(
+        el &&
+        el.matches &&
+        el.matches('input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), textarea') &&
+        el.closest('#registrationModal, #masterclassPaymentModal')
+      );
     }
 
-    mrmMasterclassSyncMobileViewport();
+    function mrmMasterclassSyncMobileViewport(force) {
+      if (!force && mrmMasterclassPopupTextFieldFocused()) return;
 
-    window.addEventListener('resize', mrmMasterclassSyncMobileViewport, { passive: true });
+      const height = Math.max(
+        window.innerHeight || 0,
+        document.documentElement.clientHeight || 0
+      );
+
+      if (height > 0) {
+        document.documentElement.style.setProperty('--mrm-mobile-vh', height + 'px');
+      }
+    }
+
+    mrmMasterclassSyncMobileViewport(true);
+
+    window.addEventListener('resize', function() {
+      mrmMasterclassSyncMobileViewport(false);
+    }, { passive: true });
+
     window.addEventListener('orientationchange', function() {
-      setTimeout(mrmMasterclassSyncMobileViewport, 250);
+      setTimeout(function() {
+        mrmMasterclassSyncMobileViewport(true);
+      }, 300);
     });
 
+    function mrmMasterclassResetKeyboardPan() {
+      document.querySelectorAll(
+        '#registrationModal .mrm-modal-panel, #masterclassPaymentModal .mrm-modal-panel'
+      ).forEach(function(panel) {
+        panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
+        panel.classList.remove('mrm-keyboard-pan-active');
+      });
+    }
+
+    function mrmMasterclassPanPopupField(target) {
+      if (!window.matchMedia || !window.matchMedia('(max-width: 700px)').matches) return;
+      if (!target || !target.closest) return;
+
+      const field = target.closest(
+        'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), textarea, #paymentElement'
+      );
+
+      if (!field) return;
+
+      const overlay = field.closest('#registrationModal, #masterclassPaymentModal');
+      if (!overlay) return;
+
+      const panel = field.closest('.mrm-modal-panel');
+      if (!panel) return;
+
+      panel.style.setProperty('--mrm-keyboard-pan-y', '0px');
+
+      try {
+        field.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+      } catch (err) {}
+
+      setTimeout(function() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+
+        const rect = field.getBoundingClientRect();
+        const safeBottom = vv.offsetTop + vv.height - 24;
+        const targetCenter = vv.offsetTop + (vv.height * 0.45);
+        const fieldCenter = rect.top + (rect.height / 2);
+
+        let panY = 0;
+
+        if (rect.bottom > safeBottom) {
+          panY = Math.round(targetCenter - fieldCenter);
+        }
+
+        if (panY > 0) panY = 0;
+
+        const maxPan = Math.round((window.innerHeight || vv.height) * 0.42);
+        if (panY < -maxPan) panY = -maxPan;
+
+        panel.classList.add('mrm-keyboard-pan-active');
+        panel.style.setProperty('--mrm-keyboard-pan-y', panY + 'px');
+      }, 360);
+    }
+
+    document.addEventListener('focusin', function(e) {
+      mrmMasterclassPanPopupField(e.target);
+    }, true);
+
+    document.addEventListener('focusout', function(e) {
+      setTimeout(function() {
+        const el = document.activeElement;
+        if (
+          !el ||
+          !el.closest ||
+          !el.closest('#registrationModal, #masterclassPaymentModal')
+        ) {
+          mrmMasterclassResetKeyboardPan();
+        }
+      }, 180);
+    }, true);
+
+    document.addEventListener('touchstart', function(e) {
+      if (e.target && e.target.closest && e.target.closest('#paymentElement')) {
+        mrmMasterclassPanPopupField(e.target);
+      }
+    }, { passive: true, capture: true });
+
     if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', mrmMasterclassSyncMobileViewport);
-      window.visualViewport.addEventListener('scroll', mrmMasterclassSyncMobileViewport);
+      window.visualViewport.addEventListener('resize', function() {
+        const el = document.activeElement;
+        if (
+          el &&
+          el.closest &&
+          el.closest('#registrationModal, #masterclassPaymentModal')
+        ) {
+          mrmMasterclassPanPopupField(el);
+        }
+      });
     }
 
     const root = document.getElementById('mrm-masterclass-root');
