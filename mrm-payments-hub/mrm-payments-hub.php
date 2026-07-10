@@ -12119,6 +12119,40 @@ artsadmin@example.edu",
     return 'school_outreach_' . $state . '_' . $type;
   }
 
+  private function mrm_marketing_state_instructor_key($state) {
+    $states = $this->mrm_marketing_state_options();
+    $state = sanitize_key((string)$state);
+
+    if (!isset($states[$state])) {
+      return '';
+    }
+
+    return 'state_instructors_' . $state;
+  }
+
+  private function mrm_marketing_parse_state_instructor_key($list_key) {
+    $list_key = sanitize_key((string)$list_key);
+    $prefix = 'state_instructors_';
+
+    if (strpos($list_key, $prefix) !== 0) {
+      return array();
+    }
+
+    $state = substr($list_key, strlen($prefix));
+    $states = $this->mrm_marketing_state_options();
+
+    if (!isset($states[$state])) {
+      return array();
+    }
+
+    return array(
+      'state' => $state,
+      'state_code' => strtoupper($state),
+      'state_label' => (string)$states[$state],
+      'label' => 'Instructors in ' . (string)$states[$state],
+    );
+  }
+
   private function mrm_marketing_parse_school_outreach_key($list_key) {
     $list_key = sanitize_key((string)$list_key);
 
@@ -12177,6 +12211,12 @@ artsadmin@example.edu",
       'label' => 'Past Lesson Students With No Upcoming Lessons',
       'type' => 'dynamic',
       'desc' => 'Students whose last lesson was at least one full month ago and who have no upcoming lesson.',
+      'example' => '',
+    ),
+    'all_current_instructors' => array(
+      'label' => 'All Current Instructors',
+      'type' => 'dynamic',
+      'desc' => 'All fully onboarded instructors currently represented in the instructor profile table.',
       'example' => '',
     ),
     'general_interest' => array(
@@ -12412,12 +12452,82 @@ community@example.org",
     return array();
   }
 
+  private function mrm_marketing_instructor_emails($state = '') {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'mrm_instructors';
+
+    $table_exists = $wpdb->get_var(
+      $wpdb->prepare(
+        'SHOW TABLES LIKE %s',
+        $table
+      )
+    );
+
+    if ($table_exists !== $table) {
+      return array();
+    }
+
+    $state = strtoupper(
+      substr(
+        sanitize_text_field((string)$state),
+        0,
+        2
+      )
+    );
+
+    if ($state !== '') {
+      $rows = $wpdb->get_col(
+        $wpdb->prepare(
+          "SELECT DISTINCT email
+           FROM {$table}
+           WHERE email IS NOT NULL
+             AND email <> ''
+             AND UPPER(state) = %s
+           ORDER BY email ASC",
+          $state
+        )
+      );
+    } else {
+      $rows = $wpdb->get_col(
+        "SELECT DISTINCT email
+         FROM {$table}
+         WHERE email IS NOT NULL
+           AND email <> ''
+         ORDER BY email ASC"
+      );
+    }
+
+    $emails = array();
+
+    foreach ((array)$rows as $email) {
+      $email = strtolower(
+        sanitize_email((string)$email)
+      );
+
+      if ($email !== '' && is_email($email)) {
+        $emails[$email] = true;
+      }
+    }
+
+    $emails = array_keys($emails);
+    sort($emails);
+
+    return $emails;
+  }
+
   private function mrm_marketing_get_list_recipients($list_key, $apply_suppression = true) {
     $defs = $this->mrm_marketing_default_lists();
     $list_key = sanitize_key((string)$list_key);
-    $school_list = $this->mrm_marketing_parse_school_outreach_key($list_key);
 
-    if (!isset($defs[$list_key]) && empty($school_list)) {
+    $school_list = $this->mrm_marketing_parse_school_outreach_key($list_key);
+    $state_instructor_list = $this->mrm_marketing_parse_state_instructor_key($list_key);
+
+    if (
+      !isset($defs[$list_key]) &&
+      empty($school_list) &&
+      empty($state_instructor_list)
+    ) {
       return array();
     }
 
@@ -12434,9 +12544,20 @@ community@example.org",
       case 'past_lesson_students':
         $emails = $this->mrm_marketing_lesson_student_emails('past');
         break;
+      case 'all_current_instructors':
+        $emails = $this->mrm_marketing_instructor_emails();
+        break;
       default:
-        $manual = $this->mrm_marketing_manual_lists();
-        $emails = isset($manual[$list_key]) ? (array)$manual[$list_key] : array();
+        if (!empty($state_instructor_list)) {
+          $emails = $this->mrm_marketing_instructor_emails(
+            $state_instructor_list['state_code']
+          );
+        } else {
+          $manual = $this->mrm_marketing_manual_lists();
+          $emails = isset($manual[$list_key])
+            ? (array)$manual[$list_key]
+            : array();
+        }
         break;
     }
 
@@ -12836,6 +12957,15 @@ community@example.org",
           . ' — '
           . (string)$school_list['type_label'];
       }
+
+      $state_instructor_list = $this->mrm_marketing_parse_state_instructor_key(
+        $key
+      );
+
+      if (!empty($state_instructor_list)) {
+        $labels[] = 'Instructors — '
+          . (string)$state_instructor_list['state_label'];
+      }
     }
 
     $log = $this->mrm_marketing_sent_log();
@@ -13108,9 +13238,19 @@ community@example.org",
   $allowed_lists = array();
 
   foreach ($selected_lists as $list_key) {
-    $school_list = $this->mrm_marketing_parse_school_outreach_key($list_key);
+    $school_list = $this->mrm_marketing_parse_school_outreach_key(
+      $list_key
+    );
 
-    if (!isset($defs[$list_key]) && empty($school_list)) {
+    $state_instructor_list = $this->mrm_marketing_parse_state_instructor_key(
+      $list_key
+    );
+
+    if (
+      !isset($defs[$list_key]) &&
+      empty($school_list) &&
+      empty($state_instructor_list)
+    ) {
       continue;
     }
 
@@ -19045,6 +19185,14 @@ public function handle_marketing_resubscribe() {
       $selected_send_state = $selected_outreach_state;
     }
 
+    $selected_instructor_state = isset($_GET['mrm_instructor_state'])
+      ? sanitize_key(wp_unslash($_GET['mrm_instructor_state']))
+      : $selected_send_state;
+
+    if (!isset($state_options[$selected_instructor_state])) {
+      $selected_instructor_state = $selected_send_state;
+    }
+
     echo '<div class="wrap">';
     echo '<h1>Marketing Email Lists</h1>';
     $log_deleted_status = isset($_GET['mrm_marketing_log_deleted'])
@@ -19106,6 +19254,64 @@ public function handle_marketing_resubscribe() {
       }
       echo '</div>';
     }
+    echo '<div style="border-top:2px solid #ccd0d4;padding-top:18px;margin-top:22px;">';
+
+    echo '<h2 style="margin-bottom:4px;">Instructor Lists by State</h2>';
+
+    echo '<p class="description">These dynamic lists are generated from fully onboarded instructor profile records. They cannot be edited manually.</p>';
+
+    echo '<form method="get" action="' . esc_url(admin_url('admin.php')) . '" style="margin:14px 0;">';
+
+    echo '<input type="hidden" name="page" value="mrm-pay-hub-marketing-email-lists">';
+
+    echo '<input type="hidden" name="mrm_outreach_state" value="'
+      . esc_attr($selected_outreach_state)
+      . '">';
+
+    echo '<label for="mrm-instructor-state-selector"><strong>Instructor state</strong></label><br>';
+
+    echo '<select id="mrm-instructor-state-selector" name="mrm_instructor_state" onchange="this.form.submit();" style="min-width:260px;margin-top:6px;">';
+
+    foreach ($state_options as $state_key => $state_label) {
+      echo '<option value="' . esc_attr($state_key) . '" '
+        . selected($selected_instructor_state, $state_key, false)
+        . '>'
+        . esc_html($state_label)
+        . '</option>';
+    }
+
+    echo '</select>';
+
+    echo '<noscript><button type="submit" class="button" style="margin-left:8px;">View State</button></noscript>';
+
+    echo '</form>';
+
+    $selected_instructor_list_key = $this->mrm_marketing_state_instructor_key(
+      $selected_instructor_state
+    );
+
+    $selected_instructor_recipients = $this->mrm_marketing_get_list_recipients(
+      $selected_instructor_list_key,
+      true
+    );
+
+    echo '<div style="border-top:1px solid #e5e5e5;padding-top:14px;margin-top:14px;">';
+
+    echo '<h3 style="margin-bottom:4px;">Instructors in '
+      . esc_html($state_options[$selected_instructor_state])
+      . '</h3>';
+
+    echo '<p class="description">Fully onboarded instructor profiles whose saved state is '
+      . esc_html($state_options[$selected_instructor_state])
+      . '.</p>';
+
+    echo '<p><strong>Dynamic list:</strong> '
+      . esc_html((string)count($selected_instructor_recipients))
+      . ' active recipient(s) after unsubscribe suppression.</p>';
+
+    echo '</div>';
+    echo '</div>';
+
     echo '<div style="border-top:2px solid #ccd0d4;padding-top:18px;margin-top:22px;">';
     echo '<h2 style="margin-bottom:4px;">'
       . esc_html($state_options[$selected_outreach_state])
@@ -19193,6 +19399,24 @@ public function handle_marketing_resubscribe() {
     echo '</td>';
     echo '</tr>';
 
+    echo '<tr>';
+    echo '<th scope="row"><label for="mrm-marketing-instructor-send-state">Instructor State</label></th>';
+    echo '<td>';
+    echo '<select id="mrm-marketing-instructor-send-state" style="min-width:260px;">';
+
+    foreach ($state_options as $state_key => $state_label) {
+      echo '<option value="' . esc_attr($state_key) . '" '
+        . selected($selected_instructor_state, $state_key, false)
+        . '>'
+        . esc_html($state_label)
+        . '</option>';
+    }
+
+    echo '</select>';
+    echo '<p class="description">This dropdown controls which state-specific instructor list is shown below. All Current Instructors remains available as a standard list.</p>';
+    echo '</td>';
+    echo '</tr>';
+
     echo '<tr><th scope="row">Send To Lists</th><td>';
 
     echo '<div style="margin-bottom:16px;">';
@@ -19207,6 +19431,43 @@ public function handle_marketing_resubscribe() {
       echo esc_html($label);
       echo ' <span class="description">(' . esc_html((string)$count) . ' recipient(s))</span>';
       echo '</label>';
+    }
+
+    echo '</div>';
+
+    echo '<div style="border-top:1px solid #dcdcde;padding-top:14px;margin-bottom:16px;">';
+    echo '<strong>Instructor Lists by State</strong>';
+
+    foreach ($state_options as $state_key => $state_label) {
+      $display = $state_key === $selected_instructor_state
+        ? 'block'
+        : 'none';
+
+      $list_key = $this->mrm_marketing_state_instructor_key($state_key);
+
+      $count = count(
+        $this->mrm_marketing_get_list_recipients(
+          $list_key,
+          true
+        )
+      );
+
+      echo '<div class="mrm-marketing-instructor-state-group" data-state="'
+        . esc_attr($state_key)
+        . '" style="display:'
+        . esc_attr($display)
+        . ';margin-top:8px;">';
+
+      echo '<label style="display:block;margin:6px 0;">';
+      echo '<input type="checkbox" name="mrm_marketing_lists[]" value="'
+        . esc_attr($list_key)
+        . '"> ';
+      echo 'Instructors in ' . esc_html($state_label);
+      echo ' <span class="description">('
+        . esc_html((string)$count)
+        . ' recipient(s))</span>';
+      echo '</label>';
+      echo '</div>';
     }
 
     echo '</div>';
@@ -19318,6 +19579,12 @@ public function handle_marketing_resubscribe() {
       var frame = document.getElementById('mrm-marketing-preview-frame');
       var sendStateSelector = document.getElementById('mrm-marketing-send-state');
       var sendStateGroups = document.querySelectorAll('.mrm-marketing-send-state-group');
+      var instructorStateSelector = document.getElementById(
+        'mrm-marketing-instructor-send-state'
+      );
+      var instructorStateGroups = document.querySelectorAll(
+        '.mrm-marketing-instructor-state-group'
+      );
 
       function updateSendStateGroups() {
         var selectedState = sendStateSelector
@@ -19340,9 +19607,52 @@ public function handle_marketing_resubscribe() {
         });
       }
 
+      function updateInstructorStateGroups() {
+        var selectedState = instructorStateSelector
+          ? String(instructorStateSelector.value || '')
+          : '';
+
+        Array.prototype.forEach.call(
+          instructorStateGroups,
+          function(group) {
+            var groupState = String(
+              group.getAttribute('data-state') || ''
+            );
+
+            var isVisible = groupState === selectedState;
+
+            group.style.display = isVisible
+              ? 'block'
+              : 'none';
+
+            if (!isVisible) {
+              var checkboxes = group.querySelectorAll(
+                'input[type="checkbox"]'
+              );
+
+              Array.prototype.forEach.call(
+                checkboxes,
+                function(checkbox) {
+                  checkbox.checked = false;
+                }
+              );
+            }
+          }
+        );
+      }
+
       if (sendStateSelector) {
         sendStateSelector.addEventListener('change', updateSendStateGroups);
         updateSendStateGroups();
+      }
+
+      if (instructorStateSelector) {
+        instructorStateSelector.addEventListener(
+          'change',
+          updateInstructorStateGroups
+        );
+
+        updateInstructorStateGroups();
       }
 
       function escapeHtml(value) { return String(value || '').replace(/[&<>"']/g, function(ch){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]); }); }
