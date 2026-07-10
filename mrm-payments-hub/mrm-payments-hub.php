@@ -54,15 +54,20 @@ class MRM_Payments_Hub_Single {
      */
     add_action('admin_post_mrm_marketing_email_save_lists', array($this, 'handle_marketing_email_save_lists'));
     add_action('admin_post_mrm_marketing_email_send', array($this, 'handle_marketing_email_send'));
+    add_action(
+      'admin_post_mrm_marketing_delete_sent_log_item',
+      array($this, 'handle_marketing_delete_sent_log_item')
+    );
     add_action('admin_post_mrm_pay_hub_send_email_tests', array($this, 'handle_email_testing_send'));
     add_action('admin_post_mrm_pay_hub_preview_email_tests', array($this, 'handle_email_testing_preview'));
     add_action('admin_post_mrm_pay_hub_send_stripe_connect_email', array($this, 'handle_stripe_connect_email_send'));
     add_action('admin_post_mrm_marketing_resubscribe', array($this, 'handle_marketing_resubscribe'));
     add_action('admin_post_mrm_marketing_general_interest_signup', array($this, 'handle_marketing_general_interest_signup'));
     add_action('admin_post_nopriv_mrm_marketing_general_interest_signup', array($this, 'handle_marketing_general_interest_signup'));
-    add_action('init', array($this, 'register_marketing_unsubscribe_endpoint'));
+    add_action('init', array($this, 'register_marketing_unsubscribe_endpoint'), 1);
     add_filter('query_vars', array($this, 'register_marketing_unsubscribe_query_vars'));
-    add_action('template_redirect', array($this, 'handle_public_marketing_unsubscribe'));
+    add_action('parse_request', array($this, 'intercept_public_marketing_unsubscribe'), 1);
+    add_action('template_redirect', array($this, 'handle_public_marketing_unsubscribe'), 1);
     add_action('admin_post_mrm_profile_card_create_invite', array($this, 'handle_profile_card_create_invite'));
     add_action('admin_post_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
     add_action('admin_post_nopriv_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
@@ -147,6 +152,9 @@ class MRM_Payments_Hub_Single {
     if (!wp_next_scheduled('mrm_sheet_music_subscription_renewal_reminder_cron')) {
       wp_schedule_event(time() + 360, 'hourly', 'mrm_sheet_music_subscription_renewal_reminder_cron');
     }
+
+    $this->register_marketing_unsubscribe_endpoint();
+    flush_rewrite_rules(false);
   }
 
   public function mrm_run_instructor_piece_access_sync() {
@@ -426,6 +434,23 @@ class MRM_Payments_Hub_Single {
 
     $this->mrm_ensure_payout_ledger_status_column_width();
     $this->mrm_ensure_subscription_portal_tokens();
+
+    $unsubscribe_route_version = '1.1';
+    $saved_unsubscribe_route_version = get_option(
+      'mrm_pay_hub_unsubscribe_route_version',
+      ''
+    );
+
+    if ($saved_unsubscribe_route_version !== $unsubscribe_route_version) {
+      $this->register_marketing_unsubscribe_endpoint();
+      flush_rewrite_rules(false);
+
+      update_option(
+        'mrm_pay_hub_unsubscribe_route_version',
+        $unsubscribe_route_version,
+        false
+      );
+    }
   }
 
   private function install_or_upgrade_db() {
@@ -12345,10 +12370,64 @@ districtcontact@example.org",
     return $vars;
   }
 
-  public function handle_public_marketing_unsubscribe() {
-    if ((string)get_query_var('mrm_marketing_unsubscribe') !== '1') {
+  public function intercept_public_marketing_unsubscribe($wp) {
+    $request_path = isset($wp->request)
+      ? trim((string)$wp->request, '/')
+      : '';
+
+    if ($request_path !== 'marketing-unsubscribe') {
       return;
     }
+
+    $wp->query_vars['mrm_marketing_unsubscribe'] = '1';
+
+    if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'POST') {
+      $this->handle_marketing_unsubscribe_do();
+      exit;
+    }
+
+    $this->handle_marketing_unsubscribe_confirm();
+    exit;
+  }
+
+  public function handle_public_marketing_unsubscribe() {
+    $is_endpoint = (string)get_query_var('mrm_marketing_unsubscribe') === '1';
+
+    if (!$is_endpoint) {
+      $request_uri = isset($_SERVER['REQUEST_URI'])
+        ? wp_unslash($_SERVER['REQUEST_URI'])
+        : '';
+
+      $request_path = trim(
+        (string)wp_parse_url($request_uri, PHP_URL_PATH),
+        '/'
+      );
+
+      $home_path = trim(
+        (string)wp_parse_url(home_url('/'), PHP_URL_PATH),
+        '/'
+      );
+
+      if ($home_path !== '' && strpos($request_path, $home_path . '/') === 0) {
+        $request_path = substr($request_path, strlen($home_path) + 1);
+      }
+
+      $is_endpoint = $request_path === 'marketing-unsubscribe';
+    }
+
+    if (!$is_endpoint) {
+      return;
+    }
+
+    global $wp_query;
+
+    if ($wp_query) {
+      $wp_query->is_404 = false;
+      $wp_query->is_page = true;
+    }
+
+    status_header(200);
+    nocache_headers();
 
     if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'POST') {
       $this->handle_marketing_unsubscribe_do();
@@ -12367,7 +12446,7 @@ districtcontact@example.org",
     }
 
     return add_query_arg(
-      array('token' => rawurlencode($token)),
+      array('token' => $token),
       home_url('/marketing-unsubscribe/')
     );
   }
@@ -12386,7 +12465,9 @@ districtcontact@example.org",
       exit;
     }
 
-    $form = '<form method="post" action="' . esc_url(home_url('/marketing-unsubscribe/')) . '" style="margin-top:20px;">'
+    $unsubscribe_action_url = home_url('/marketing-unsubscribe/');
+
+    $form = '<form method="post" action="' . esc_url($unsubscribe_action_url) . '" style="margin-top:20px;">'
       . '<input type="hidden" name="token" value="' . esc_attr($token) . '">'
       . wp_nonce_field(
           'mrm_marketing_unsubscribe_do_' . $email,
@@ -12563,7 +12644,29 @@ districtcontact@example.org",
 
     foreach ((array)$log as $item) {
       if (!is_array($item)) continue;
+
+      $item_id = sanitize_key((string)($item['id'] ?? ''));
+
+      if ($item_id === '') {
+        $item_id = 'legacy_' . substr(
+          hash(
+            'sha256',
+            wp_json_encode(array(
+              $item['sent_at'] ?? '',
+              $item['subject'] ?? '',
+              $item['list_keys'] ?? array(),
+              $item['recipient_count'] ?? 0,
+              $item['sent_count'] ?? 0,
+              $item['failed_count'] ?? 0,
+            ))
+          ),
+          0,
+          20
+        );
+      }
+
       $clean[] = array(
+        'id' => $item_id,
         'sent_at' => sanitize_text_field((string)($item['sent_at'] ?? '')),
         'subject' => sanitize_text_field((string)($item['subject'] ?? '')),
         'list_keys' => array_values(array_map('sanitize_key', (array)($item['list_keys'] ?? array()))),
@@ -12590,8 +12693,10 @@ districtcontact@example.org",
     }
 
     $log = $this->mrm_marketing_sent_log();
+    $log_id = 'send_' . wp_generate_uuid4();
 
     array_unshift($log, array(
+      'id' => sanitize_key($log_id),
       'sent_at' => current_time('mysql'),
       'subject' => sanitize_text_field((string)$subject),
       'list_keys' => array_values(array_map('sanitize_key', (array)$list_keys)),
@@ -12707,6 +12812,65 @@ districtcontact@example.org",
     $this->save_email_lists($lists);
 
     wp_safe_redirect(add_query_arg(array('page'=>'mrm-pay-hub-marketing-email-lists','mrm_marketing_saved'=>'1'), admin_url('admin.php')));
+    exit;
+  }
+
+
+  public function handle_marketing_delete_sent_log_item() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to remove marketing email history.');
+    }
+
+    check_admin_referer(
+      'mrm_marketing_delete_sent_log_item',
+      'mrm_marketing_delete_sent_log_nonce'
+    );
+
+    $item_id = isset($_POST['mrm_marketing_sent_log_id'])
+      ? sanitize_key(wp_unslash($_POST['mrm_marketing_sent_log_id']))
+      : '';
+
+    if ($item_id === '') {
+      wp_safe_redirect(
+        add_query_arg(
+          array(
+            'page' => 'mrm-pay-hub-marketing-email-lists',
+            'mrm_marketing_log_deleted' => '0',
+          ),
+          admin_url('admin.php')
+        )
+      );
+      exit;
+    }
+
+    $log = $this->mrm_marketing_sent_log();
+    $new_log = array();
+    $deleted = false;
+
+    foreach ((array)$log as $item) {
+      $current_id = sanitize_key((string)($item['id'] ?? ''));
+
+      if (!$deleted && $current_id === $item_id) {
+        $deleted = true;
+        continue;
+      }
+
+      $new_log[] = $item;
+    }
+
+    if ($deleted) {
+      $this->mrm_marketing_save_sent_log($new_log);
+    }
+
+    wp_safe_redirect(
+      add_query_arg(
+        array(
+          'page' => 'mrm-pay-hub-marketing-email-lists',
+          'mrm_marketing_log_deleted' => $deleted ? '1' : '0',
+        ),
+        admin_url('admin.php')
+      )
+    );
     exit;
   }
 
@@ -18623,9 +18787,20 @@ public function handle_marketing_resubscribe() {
     $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
     $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
     $sent_log = $this->mrm_marketing_sent_log();
+    $this->mrm_marketing_save_sent_log($sent_log);
+    $sent_log = $this->mrm_marketing_sent_log();
 
     echo '<div class="wrap">';
     echo '<h1>Marketing Email Lists</h1>';
+    $log_deleted_status = isset($_GET['mrm_marketing_log_deleted'])
+      ? sanitize_key(wp_unslash($_GET['mrm_marketing_log_deleted']))
+      : '';
+
+    if ($log_deleted_status === '1') {
+      echo '<div class="notice notice-success is-dismissible"><p>The selected marketing email history entry was removed.</p></div>';
+    } elseif ($log_deleted_status === '0') {
+      echo '<div class="notice notice-error is-dismissible"><p>The selected marketing email history entry could not be found or removed.</p></div>';
+    }
     if (!empty($_GET['mrm_marketing_saved'])) echo '<div class="notice notice-success"><p>Marketing email lists saved.</p></div>';
     if (!empty($_GET['mrm_marketing_sent']) || isset($_GET['mrm_marketing_failed'])) echo '<div class="notice notice-success"><p>Marketing email send complete. Sent: ' . esc_html((string)($_GET['mrm_marketing_sent'] ?? '0')) . '. Failed: ' . esc_html((string)($_GET['mrm_marketing_failed'] ?? '0')) . '.</p></div>';
     if (!empty($_GET['mrm_marketing_resubscribed'])) echo '<div class="notice notice-success"><p>Re-subscribed ' . esc_html((string)$_GET['mrm_marketing_resubscribed']) . ' email(s).</p></div>';
@@ -18678,13 +18853,13 @@ public function handle_marketing_resubscribe() {
     echo '<p><strong>Currently unsubscribed:</strong> ' . esc_html((string)count($unsubscribed)) . '</p>';
 
     echo '<hr><h2>Previously Sent Marketing Emails</h2>';
-    echo '<p class="description">Most recent marketing sends, organized by recipient list and timestamp.</p>';
+    echo '<p class="description">Most recent marketing sends, organized by recipient list and timestamp. Removing an entry deletes only this local history record; it cannot recall an email that was already delivered.</p>';
 
     if (empty($sent_log)) {
       echo '<p>No marketing emails have been sent yet.</p>';
     } else {
       echo '<table class="widefat striped"><thead><tr>';
-      echo '<th>Date / Time</th><th>Subject</th><th>Recipient List(s)</th><th>Recipients</th><th>Sent</th><th>Failed</th>';
+      echo '<th>Date / Time</th><th>Subject</th><th>Recipient List(s)</th><th>Recipients</th><th>Sent</th><th>Failed</th><th>Action</th>';
       echo '</tr></thead><tbody>';
 
       foreach ((array)$sent_log as $item) {
@@ -18696,6 +18871,28 @@ public function handle_marketing_resubscribe() {
         echo '<td>' . esc_html((string)absint($item['recipient_count'] ?? 0)) . '</td>';
         echo '<td>' . esc_html((string)absint($item['sent_count'] ?? 0)) . '</td>';
         echo '<td>' . esc_html((string)absint($item['failed_count'] ?? 0)) . '</td>';
+
+        $item_id = sanitize_key((string)($item['id'] ?? ''));
+
+        echo '<td>';
+
+        if ($item_id !== '') {
+          echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
+          echo '<input type="hidden" name="action" value="mrm_marketing_delete_sent_log_item">';
+          echo '<input type="hidden" name="mrm_marketing_sent_log_id" value="' . esc_attr($item_id) . '">';
+
+          wp_nonce_field(
+            'mrm_marketing_delete_sent_log_item',
+            'mrm_marketing_delete_sent_log_nonce'
+          );
+
+          echo '<button type="submit" class="button button-small" onclick="return confirm(\'Remove this sent-email history entry? This does not recall or delete emails that were already delivered.\');">Remove</button>';
+          echo '</form>';
+        } else {
+          echo '&mdash;';
+        }
+
+        echo '</td>';
         echo '</tr>';
       }
 
