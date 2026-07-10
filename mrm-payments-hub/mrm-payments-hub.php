@@ -12153,6 +12153,41 @@ artsadmin@example.edu",
     );
   }
 
+  private function mrm_marketing_is_instructor_list($list_key) {
+    $list_key = sanitize_key((string)$list_key);
+
+    if ($list_key === 'all_current_instructors') {
+      return true;
+    }
+
+    return !empty(
+      $this->mrm_marketing_parse_state_instructor_key($list_key)
+    );
+  }
+
+  private function mrm_marketing_selected_list_mode($list_keys) {
+    $has_instructor = false;
+    $has_marketing = false;
+
+    foreach ((array)$list_keys as $list_key) {
+      if ($this->mrm_marketing_is_instructor_list($list_key)) {
+        $has_instructor = true;
+      } else {
+        $has_marketing = true;
+      }
+    }
+
+    if ($has_instructor && $has_marketing) {
+      return 'mixed';
+    }
+
+    if ($has_instructor) {
+      return 'instructor';
+    }
+
+    return 'marketing';
+  }
+
   private function mrm_marketing_parse_school_outreach_key($list_key) {
     $list_key = sanitize_key((string)$list_key);
 
@@ -12577,15 +12612,26 @@ community@example.org",
     return $final;
   }
 
-  private function mrm_marketing_get_combined_recipients($list_keys) {
+  private function mrm_marketing_get_combined_recipients(
+    $list_keys,
+    $apply_suppression = true
+  ) {
     $out = array();
+
     foreach ((array)$list_keys as $list_key) {
-      foreach ($this->mrm_marketing_get_list_recipients($list_key, true) as $email) {
+      foreach (
+        $this->mrm_marketing_get_list_recipients(
+          $list_key,
+          $apply_suppression
+        ) as $email
+      ) {
         $out[$email] = true;
       }
     }
+
     $final = array_keys($out);
     sort($final);
+
     return $final;
   }
 
@@ -12891,6 +12937,32 @@ community@example.org",
       . '</body></html>';
   }
 
+  private function mrm_instructor_correspondence_build_email_html($body_html) {
+    $body_html = (string)$body_html;
+
+    /*
+     * A complete HTML document is sent exactly as entered.
+     */
+    if (stripos($body_html, '<html') !== false) {
+      return $body_html;
+    }
+
+    /*
+     * An HTML fragment receives only the minimum document wrapper.
+     * No marketing footer or additional visible content is inserted.
+     */
+    return '<!doctype html>'
+      . '<html>'
+      . '<head>'
+      . '<meta charset="utf-8">'
+      . '<meta name="viewport" content="width=device-width,initial-scale=1">'
+      . '</head>'
+      . '<body style="margin:0;padding:0;">'
+      . $body_html
+      . '</body>'
+      . '</html>';
+  }
+
   private function mrm_marketing_sent_log() {
     $log = get_option('mrm_pay_hub_marketing_sent_log', array());
     return is_array($log) ? $log : array();
@@ -12931,6 +13003,13 @@ community@example.org",
         'recipient_count' => absint($item['recipient_count'] ?? 0),
         'sent_count' => absint($item['sent_count'] ?? 0),
         'failed_count' => absint($item['failed_count'] ?? 0),
+        'send_mode' => in_array(
+          (string)($item['send_mode'] ?? 'marketing'),
+          array('marketing', 'instructor'),
+          true
+        )
+          ? (string)($item['send_mode'] ?? 'marketing')
+          : 'marketing',
       );
     }
 
@@ -12938,7 +13017,14 @@ community@example.org",
     update_option('mrm_pay_hub_marketing_sent_log', $clean, false);
   }
 
-  private function mrm_marketing_add_sent_log_item($subject, $list_keys, $recipient_count, $sent_count, $failed_count) {
+  private function mrm_marketing_add_sent_log_item(
+    $subject,
+    $list_keys,
+    $recipient_count,
+    $sent_count,
+    $failed_count,
+    $send_mode = 'marketing'
+  ) {
     $defs = $this->mrm_marketing_default_lists();
     $labels = array();
 
@@ -12971,15 +13057,22 @@ community@example.org",
     $log = $this->mrm_marketing_sent_log();
     $log_id = 'send_' . wp_generate_uuid4();
 
+    $send_mode = $send_mode === 'instructor'
+      ? 'instructor'
+      : 'marketing';
+
     array_unshift($log, array(
       'id' => sanitize_key($log_id),
       'sent_at' => current_time('mysql'),
       'subject' => sanitize_text_field((string)$subject),
-      'list_keys' => array_values(array_map('sanitize_key', (array)$list_keys)),
+      'list_keys' => array_values(
+        array_map('sanitize_key', (array)$list_keys)
+      ),
       'list_labels' => $labels,
       'recipient_count' => absint($recipient_count),
       'sent_count' => absint($sent_count),
       'failed_count' => absint($failed_count),
+      'send_mode' => $send_mode,
     ));
 
     $this->mrm_marketing_save_sent_log($log);
@@ -13259,6 +13352,25 @@ community@example.org",
 
   $selected_lists = array_keys($allowed_lists);
 
+  $send_mode = $this->mrm_marketing_selected_list_mode(
+    $selected_lists
+  );
+
+  if ($send_mode === 'mixed') {
+    wp_safe_redirect(
+      add_query_arg(
+        array(
+          'page' => 'mrm-pay-hub-marketing-email-lists',
+          'mrm_marketing_error' => rawurlencode(
+            'Instructor correspondence lists cannot be combined with marketing or school outreach lists. Send instructor correspondence separately.'
+          ),
+        ),
+        admin_url('admin.php')
+      )
+    );
+    exit;
+  }
+
   if ($subject === '' || trim(wp_strip_all_tags($body_html)) === '' || empty($selected_lists)) {
     wp_safe_redirect(add_query_arg(array(
       'page' => 'mrm-pay-hub-marketing-email-lists',
@@ -13267,11 +13379,20 @@ community@example.org",
     exit;
   }
 
-  $recipients = $this->mrm_marketing_get_combined_recipients($selected_lists);
+  $apply_unsubscribe_suppression = $send_mode !== 'instructor';
+
+  $recipients = $this->mrm_marketing_get_combined_recipients(
+    $selected_lists,
+    $apply_unsubscribe_suppression
+  );
   if (empty($recipients)) {
+    $no_recipients_message = $send_mode === 'instructor'
+      ? 'No recipients found after deduplication.'
+      : 'No recipients found after deduplication and unsubscribe suppression.';
+
     wp_safe_redirect(add_query_arg(array(
       'page' => 'mrm-pay-hub-marketing-email-lists',
-      'mrm_marketing_error' => rawurlencode('No recipients found after deduplication and unsubscribe suppression.'),
+      'mrm_marketing_error' => rawurlencode($no_recipients_message),
     ), admin_url('admin.php')));
     exit;
   }
@@ -13303,9 +13424,35 @@ community@example.org",
   $failed = 0;
 
   foreach ($recipients as $email) {
-    $unsubscribe_url = $this->mrm_marketing_unsubscribe_url($email);
-    $final_html = $this->mrm_marketing_build_email_html($body_html, $unsubscribe_url, $mailing_address);
-    $ok = wp_mail($email, $subject, $final_html, $headers, $attachments);
+    if ($send_mode === 'instructor') {
+      /*
+       * Instructor correspondence:
+       * no marketing sentence, address, or unsubscribe link.
+       */
+      $final_html = $this->mrm_instructor_correspondence_build_email_html(
+        $body_html
+      );
+    } else {
+      /*
+       * All customer, student, general-interest, purchaser,
+       * subscriber, and school-outreach sends remain marketing sends.
+       */
+      $unsubscribe_url = $this->mrm_marketing_unsubscribe_url($email);
+
+      $final_html = $this->mrm_marketing_build_email_html(
+        $body_html,
+        $unsubscribe_url,
+        $mailing_address
+      );
+    }
+
+    $ok = wp_mail(
+      $email,
+      $subject,
+      $final_html,
+      $headers,
+      $attachments
+    );
 
     if ($ok) {
       $sent++;
@@ -13321,7 +13468,8 @@ community@example.org",
     $selected_lists,
     count($recipients),
     $sent,
-    $failed
+    $failed,
+    $send_mode
   );
 
   wp_safe_redirect(add_query_arg(array(
@@ -19373,12 +19521,17 @@ public function handle_marketing_resubscribe() {
       . esc_html($state_options[$selected_outreach_state])
       . '</button></p></form></div>';
 
-    echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;"><h2>Preview and Send Marketing Email</h2>';
+    echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;"><h2>Preview and Send Email</h2>';
+    echo '<p class="description">'
+      . '<strong>Instructor correspondence:</strong> Emails sent exclusively to All Current Instructors or a state-specific instructor list are sent without the marketing footer or unsubscribe link. '
+      . '<strong>All other recipient lists:</strong> The normal marketing footer, mailing address, unsubscribe link, and suppression rules remain active. '
+      . 'Instructor lists cannot be combined with marketing or school outreach lists in one send.'
+      . '</p>';
     echo '<div style="border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;padding:14px;margin-bottom:18px;"><h3 style="margin-top:0;">Live Preview</h3><div><strong id="mrm-marketing-preview-subject">Subject preview will appear here.</strong></div><iframe id="mrm-marketing-preview-frame" title="Marketing email preview" style="display:block;width:100%;height:520px;border:1px solid #dcdcde;border-radius:8px;background:#fff;margin-top:10px;"></iframe></div>';
-    echo '<form method="post" enctype="multipart/form-data" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_email_send">';
+    echo '<form id="mrm-marketing-email-send-form" method="post" enctype="multipart/form-data" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_email_send">';
     wp_nonce_field('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
     echo '<table class="form-table"><tr><th scope="row"><label for="mrm_marketing_subject">Subject</label></th><td><input type="text" id="mrm_marketing_subject" name="mrm_marketing_subject" class="large-text" required></td></tr>';
-    echo '<tr><th scope="row"><label for="mrm_marketing_html">Email Body</label></th><td><textarea id="mrm_marketing_html" name="mrm_marketing_html" rows="12" class="large-text code" required></textarea><p class="description">Enter the complete custom HTML for this marketing email. The subject line is used only as the email subject and is not inserted into the body. The preview matches the sent email body with the required unsubscribe footer appended.</p></td></tr>';
+    echo '<tr><th scope="row"><label for="mrm_marketing_html">Email Body</label></th><td><textarea id="mrm_marketing_html" name="mrm_marketing_html" rows="12" class="large-text code" required></textarea><p class="description">Enter the complete custom HTML for this email. The subject line is used only as the email subject and is not inserted into the body. Instructor-only correspondence is sent without an automatic footer. All other recipient lists receive the configured marketing mailing address and unsubscribe footer.</p></td></tr>';
     echo '<tr>';
     echo '<th scope="row"><label for="mrm-marketing-send-state">School Outreach State</label></th>';
     echo '<td>';
@@ -19427,9 +19580,26 @@ public function handle_marketing_resubscribe() {
       $count = count($this->mrm_marketing_get_list_recipients($key, true));
 
       echo '<label style="display:block;margin:6px 0;">';
-      echo '<input type="checkbox" name="mrm_marketing_lists[]" value="' . esc_attr($key) . '"> ';
+      $list_mode = $this->mrm_marketing_is_instructor_list($key)
+        ? 'instructor'
+        : 'marketing';
+
+      echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="'
+        . esc_attr($list_mode)
+        . '" name="mrm_marketing_lists[]" value="'
+        . esc_attr($key)
+        . '"> ';
       echo esc_html($label);
-      echo ' <span class="description">(' . esc_html((string)$count) . ' recipient(s))</span>';
+
+      if ($this->mrm_marketing_is_instructor_list($key)) {
+        echo ' <span class="description">(Instructor correspondence — no marketing footer; '
+          . esc_html((string)$count)
+          . ' recipient(s))</span>';
+      } else {
+        echo ' <span class="description">('
+          . esc_html((string)$count)
+          . ' recipient(s))</span>';
+      }
       echo '</label>';
     }
 
@@ -19459,11 +19629,11 @@ public function handle_marketing_resubscribe() {
         . ';margin-top:8px;">';
 
       echo '<label style="display:block;margin:6px 0;">';
-      echo '<input type="checkbox" name="mrm_marketing_lists[]" value="'
+      echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="instructor" name="mrm_marketing_lists[]" value="'
         . esc_attr($list_key)
         . '"> ';
       echo 'Instructors in ' . esc_html($state_label);
-      echo ' <span class="description">('
+      echo ' <span class="description">(Instructor correspondence — no marketing footer; '
         . esc_html((string)$count)
         . ' recipient(s))</span>';
       echo '</label>';
@@ -19500,7 +19670,7 @@ public function handle_marketing_resubscribe() {
         );
 
         echo '<label style="display:block;margin:6px 0;">';
-        echo '<input type="checkbox" name="mrm_marketing_lists[]" value="'
+        echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" name="mrm_marketing_lists[]" value="'
           . esc_attr($list_key)
           . '"> ';
         echo esc_html($label);
@@ -19513,6 +19683,9 @@ public function handle_marketing_resubscribe() {
       echo '</div>';
     }
 
+    echo '</div>';
+    echo '<div id="mrm-marketing-selection-warning" class="notice notice-warning inline" style="display:none;margin:12px 0 0;">';
+    echo '<p>Instructor correspondence lists cannot be combined with marketing or school outreach lists. Clear one group before sending.</p>';
     echo '</div>';
     echo '</td></tr><tr><th scope="row"><label for="mrm_marketing_attachments">Attachments</label></th><td><input type="file" id="mrm_marketing_attachments" name="mrm_marketing_attachments[]" multiple><p class="description">Optional attachments.</p></td></tr></table>';
     echo '<p class="submit"><button type="submit" class="button button-primary">Send Marketing Email</button></p></form><hr>';
@@ -19529,14 +19702,34 @@ public function handle_marketing_resubscribe() {
       echo '<p>No marketing emails have been sent yet.</p>';
     } else {
       echo '<table class="widefat striped"><thead><tr>';
-      echo '<th>Date / Time</th><th>Subject</th><th>Recipient List(s)</th><th>Recipients</th><th>Sent</th><th>Failed</th><th>Action</th>';
+      echo '<th>Date / Time</th>';
+      echo '<th>Type</th>';
+      echo '<th>Subject</th>';
+      echo '<th>Recipient List(s)</th>';
+      echo '<th>Recipients</th>';
+      echo '<th>Sent</th>';
+      echo '<th>Failed</th>';
+      echo '<th>Action</th>';
       echo '</tr></thead><tbody>';
 
       foreach ((array)$sent_log as $item) {
         $labels = isset($item['list_labels']) && is_array($item['list_labels']) ? $item['list_labels'] : array();
+        $history_send_mode = (string)($item['send_mode'] ?? 'marketing');
+
+        $history_type_label = $history_send_mode === 'instructor'
+          ? 'Instructor Correspondence'
+          : 'Marketing Email';
+
         echo '<tr>';
-        echo '<td>' . esc_html((string)($item['sent_at'] ?? '')) . '</td>';
-        echo '<td>' . esc_html((string)($item['subject'] ?? '')) . '</td>';
+        echo '<td>'
+          . esc_html((string)($item['sent_at'] ?? ''))
+          . '</td>';
+        echo '<td>'
+          . esc_html($history_type_label)
+          . '</td>';
+        echo '<td>'
+          . esc_html((string)($item['subject'] ?? ''))
+          . '</td>';
         echo '<td>' . esc_html(implode(', ', array_map('sanitize_text_field', $labels))) . '</td>';
         echo '<td>' . esc_html((string)absint($item['recipient_count'] ?? 0)) . '</td>';
         echo '<td>' . esc_html((string)absint($item['sent_count'] ?? 0)) . '</td>';
@@ -19584,6 +19777,15 @@ public function handle_marketing_resubscribe() {
       );
       var instructorStateGroups = document.querySelectorAll(
         '.mrm-marketing-instructor-state-group'
+      );
+      var recipientListCheckboxes = document.querySelectorAll(
+        '.mrm-marketing-recipient-list'
+      );
+      var selectionWarning = document.getElementById(
+        'mrm-marketing-selection-warning'
+      );
+      var marketingSendForm = document.getElementById(
+        'mrm-marketing-email-send-form'
       );
 
       function updateSendStateGroups() {
@@ -19642,17 +19844,69 @@ public function handle_marketing_resubscribe() {
       }
 
       if (sendStateSelector) {
-        sendStateSelector.addEventListener('change', updateSendStateGroups);
+        sendStateSelector.addEventListener('change', function() {
+          updateSendStateGroups();
+          updateSelectionWarning();
+          updatePreview();
+        });
         updateSendStateGroups();
       }
 
       if (instructorStateSelector) {
         instructorStateSelector.addEventListener(
           'change',
-          updateInstructorStateGroups
+          function() {
+            updateInstructorStateGroups();
+            updateSelectionWarning();
+            updatePreview();
+          }
         );
 
         updateInstructorStateGroups();
+      }
+
+      function getSelectedEmailMode() {
+        var hasInstructor = false;
+        var hasMarketing = false;
+
+        Array.prototype.forEach.call(
+          recipientListCheckboxes,
+          function(checkbox) {
+            if (!checkbox.checked) {
+              return;
+            }
+
+            if (
+              String(checkbox.getAttribute('data-list-mode')) ===
+              'instructor'
+            ) {
+              hasInstructor = true;
+            } else {
+              hasMarketing = true;
+            }
+          }
+        );
+
+        if (hasInstructor && hasMarketing) {
+          return 'mixed';
+        }
+
+        if (hasInstructor) {
+          return 'instructor';
+        }
+
+        return 'marketing';
+      }
+
+      function updateSelectionWarning() {
+        var emailMode = getSelectedEmailMode();
+
+        if (selectionWarning) {
+          selectionWarning.style.display =
+            emailMode === 'mixed'
+              ? 'block'
+              : 'none';
+        }
       }
 
       function escapeHtml(value) { return String(value || '').replace(/[&<>"']/g, function(ch){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]); }); }
@@ -19661,10 +19915,18 @@ public function handle_marketing_resubscribe() {
         var b = body ? body.value : '';
         if (subjectPreview) subjectPreview.textContent = s || 'Subject preview will appear here.';
         if (frame) {
-          var footer = '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
-            + '<div>You are receiving this marketing email from Low Brass Lessons.</div>'
-            + '<div style="margin-top:10px;"><a href="#" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div>'
-            + '</div>';
+          var emailMode = getSelectedEmailMode();
+
+          var footer = '';
+
+          if (emailMode !== 'instructor') {
+            footer =
+              '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
+              + '<div>You are receiving this marketing email from Low Brass Lessons.</div>'
+              + '<div style="margin-top:8px;">The configured marketing mailing address will appear here.</div>'
+              + '<div style="margin-top:10px;"><a href="#" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div>'
+              + '</div>';
+          }
 
           var html = b || '<p>Email body preview will appear here.</p>';
 
@@ -19679,8 +19941,34 @@ public function handle_marketing_resubscribe() {
           frame.srcdoc = html;
         }
       }
+      Array.prototype.forEach.call(
+        recipientListCheckboxes,
+        function(checkbox) {
+          checkbox.addEventListener('change', function() {
+            updateSelectionWarning();
+            updatePreview();
+          });
+        }
+      );
+
+      if (marketingSendForm) {
+        marketingSendForm.addEventListener(
+          'submit',
+          function(event) {
+            if (getSelectedEmailMode() === 'mixed') {
+              event.preventDefault();
+
+              window.alert(
+                'Instructor correspondence lists cannot be combined with marketing or school outreach lists. Send them separately.'
+              );
+            }
+          }
+        );
+      }
+
       if (subject) subject.addEventListener('input', updatePreview);
       if (body) body.addEventListener('input', updatePreview);
+      updateSelectionWarning();
       updatePreview();
     })();
     </script>
