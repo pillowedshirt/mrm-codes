@@ -12459,6 +12459,13 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
           </label>
         </div>
 
+        <div class="mrm-email-list-recaptcha-wrap">
+          <div
+            class="g-recaptcha mrm-email-list-recaptcha"
+            data-sitekey="{{mrm_contact_recaptcha_site_key}}"
+          ></div>
+        </div>
+
         <p class="mrm-email-list-note">No spam — just occasional updates from Low Brass Lessons.</p>
 
         <div class="mrm-email-list-website-field" aria-hidden="true">
@@ -12652,6 +12659,9 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
   .mrm-email-list-consent { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start; color: #5d5345; font-size: 12.5px; line-height: 1.4; margin-top: 2px; }
   .mrm-email-list-consent input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: #c9a227; }
   .mrm-email-list-consent label { color: #5d5345; font-weight: 600; }
+  .mrm-email-list-recaptcha-wrap { width: 100%; max-width: 100%; min-height: 78px; display: flex; justify-content: flex-start; align-items: center; overflow: visible; margin-top: 2px; }
+  .mrm-email-list-recaptcha { width: 304px; max-width: 304px; min-height: 78px; overflow: visible !important; transform-origin: left center; }
+  .mrm-email-list-recaptcha iframe { display: block; max-width: none !important; overflow: hidden !important; }
   .mrm-email-list-note { margin: 0; color: #5d5345; font-size: 12.5px; line-height: 1.35; text-align: center; }
   .mrm-email-list-website-field { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
 
@@ -12831,6 +12841,26 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
 
     .mrm-email-list-copy p {
       font-size: 14px;
+    }
+  }
+
+  @media (max-width: 380px) {
+    .mrm-email-list-recaptcha-wrap {
+      min-height: 68px;
+    }
+
+    .mrm-email-list-recaptcha {
+      transform: scale(0.88);
+    }
+  }
+
+  @media (max-width: 340px) {
+    .mrm-email-list-recaptcha-wrap {
+      min-height: 62px;
+    }
+
+    .mrm-email-list-recaptcha {
+      transform: scale(0.80);
     }
   }
 
@@ -13137,6 +13167,8 @@ public function render_contact_form_shortcode() {
         $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">This email is already on the Low Brass Lessons general interest list.</div>';
     } elseif ( $marketing_status === 'unsubscribed' ) {
         $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">This email was previously unsubscribed from marketing emails. Please contact Low Brass Lessons if you would like to re-subscribe.</div>';
+    } elseif ( $marketing_status === 'recaptcha' ) {
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Please complete the reCAPTCHA verification and try again.</div>';
     } elseif ( $marketing_status === 'error' ) {
         $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Please enter a valid email address, confirm consent, and try again.</div>';
     }

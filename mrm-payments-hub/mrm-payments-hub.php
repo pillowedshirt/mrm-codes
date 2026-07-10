@@ -13651,6 +13651,59 @@ community@example.org",
   exit;
 }
 
+private function mrm_marketing_verify_recaptcha($response_token) {
+  $response_token = trim(sanitize_text_field((string)$response_token));
+
+  if ($response_token === '') {
+    return false;
+  }
+
+  $scheduler_settings = get_option('mrm_scheduler_settings', array());
+  $secret_key = is_array($scheduler_settings) && isset($scheduler_settings['contact_form_recaptcha_secret_key'])
+    ? trim((string)$scheduler_settings['contact_form_recaptcha_secret_key'])
+    : '';
+
+  if ($secret_key === '') {
+    return false;
+  }
+
+  $remote_ip = '';
+
+  if (!empty($_SERVER['REMOTE_ADDR'])) {
+    $remote_ip = sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR']));
+  }
+
+  $verification = wp_remote_post(
+    'https://www.google.com/recaptcha/api/siteverify',
+    array(
+      'timeout' => 15,
+      'body' => array(
+        'secret' => $secret_key,
+        'response' => $response_token,
+        'remoteip' => $remote_ip,
+      ),
+    )
+  );
+
+  if (is_wp_error($verification)) {
+    return false;
+  }
+
+  $status_code = wp_remote_retrieve_response_code($verification);
+
+  if ($status_code !== 200) {
+    return false;
+  }
+
+  $result = json_decode(wp_remote_retrieve_body($verification), true);
+
+  if (!is_array($result)) {
+    return false;
+  }
+
+  return !empty($result['success']);
+}
+
 private function mrm_marketing_signup_redirect_back($status) {
   $status = sanitize_key((string)$status);
 
@@ -13704,6 +13757,14 @@ public function handle_marketing_general_interest_signup() {
 
   if (!$email || !is_email($email) || $consent !== '1') {
     $this->mrm_marketing_signup_redirect_back('error');
+  }
+
+  $recaptcha_response = isset($_POST['g-recaptcha-response'])
+    ? sanitize_text_field(wp_unslash($_POST['g-recaptcha-response']))
+    : '';
+
+  if (!$this->mrm_marketing_verify_recaptcha($recaptcha_response)) {
+    $this->mrm_marketing_signup_redirect_back('recaptcha');
   }
 
   $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
