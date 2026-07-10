@@ -12020,6 +12020,139 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
    * Marketing Email Lists
    * ======================================================= */
 
+  private function mrm_marketing_state_options() {
+    return array(
+      'al' => 'Alabama',
+      'ak' => 'Alaska',
+      'az' => 'Arizona',
+      'ar' => 'Arkansas',
+      'ca' => 'California',
+      'co' => 'Colorado',
+      'ct' => 'Connecticut',
+      'de' => 'Delaware',
+      'dc' => 'District of Columbia',
+      'fl' => 'Florida',
+      'ga' => 'Georgia',
+      'hi' => 'Hawaii',
+      'id' => 'Idaho',
+      'il' => 'Illinois',
+      'in' => 'Indiana',
+      'ia' => 'Iowa',
+      'ks' => 'Kansas',
+      'ky' => 'Kentucky',
+      'la' => 'Louisiana',
+      'me' => 'Maine',
+      'md' => 'Maryland',
+      'ma' => 'Massachusetts',
+      'mi' => 'Michigan',
+      'mn' => 'Minnesota',
+      'ms' => 'Mississippi',
+      'mo' => 'Missouri',
+      'mt' => 'Montana',
+      'ne' => 'Nebraska',
+      'nv' => 'Nevada',
+      'nh' => 'New Hampshire',
+      'nj' => 'New Jersey',
+      'nm' => 'New Mexico',
+      'ny' => 'New York',
+      'nc' => 'North Carolina',
+      'nd' => 'North Dakota',
+      'oh' => 'Ohio',
+      'ok' => 'Oklahoma',
+      'or' => 'Oregon',
+      'pa' => 'Pennsylvania',
+      'ri' => 'Rhode Island',
+      'sc' => 'South Carolina',
+      'sd' => 'South Dakota',
+      'tn' => 'Tennessee',
+      'tx' => 'Texas',
+      'ut' => 'Utah',
+      'vt' => 'Vermont',
+      'va' => 'Virginia',
+      'wa' => 'Washington',
+      'wv' => 'West Virginia',
+      'wi' => 'Wisconsin',
+      'wy' => 'Wyoming',
+    );
+  }
+
+  private function mrm_marketing_school_outreach_types() {
+    return array(
+      'middle_school_band_directors' => array(
+        'label' => 'Middle School Band Directors',
+        'desc' => 'Professional outreach emails for middle school band directors and music educators.',
+        'example' => "director@example.edu
+bandteacher@example.edu",
+      ),
+      'middle_school_administrators' => array(
+        'label' => 'Middle School Administrators',
+        'desc' => 'Professional outreach emails for middle school principals, arts administrators, and school leadership.',
+        'example' => "principal@example.edu
+artsadmin@example.edu",
+      ),
+      'high_school_band_directors' => array(
+        'label' => 'High School Band Directors',
+        'desc' => 'Professional outreach emails for high school band directors and music educators.',
+        'example' => "director@example.edu
+bandteacher@example.edu",
+      ),
+      'high_school_administrators' => array(
+        'label' => 'High School Administrators',
+        'desc' => 'Professional outreach emails for high school principals, arts administrators, and school leadership.',
+        'example' => "principal@example.edu
+artsadmin@example.edu",
+      ),
+    );
+  }
+
+  private function mrm_marketing_school_outreach_key($state, $type) {
+    $states = $this->mrm_marketing_state_options();
+    $types = $this->mrm_marketing_school_outreach_types();
+
+    $state = sanitize_key((string)$state);
+    $type = sanitize_key((string)$type);
+
+    if (!isset($states[$state]) || !isset($types[$type])) {
+      return '';
+    }
+
+    return 'school_outreach_' . $state . '_' . $type;
+  }
+
+  private function mrm_marketing_parse_school_outreach_key($list_key) {
+    $list_key = sanitize_key((string)$list_key);
+
+    if (strpos($list_key, 'school_outreach_') !== 0) {
+      return array();
+    }
+
+    $states = $this->mrm_marketing_state_options();
+    $types = $this->mrm_marketing_school_outreach_types();
+
+    foreach ($states as $state_key => $state_label) {
+      $prefix = 'school_outreach_' . $state_key . '_';
+
+      if (strpos($list_key, $prefix) !== 0) {
+        continue;
+      }
+
+      $type = substr($list_key, strlen($prefix));
+
+      if (!isset($types[$type])) {
+        return array();
+      }
+
+      return array(
+        'state' => $state_key,
+        'state_label' => $state_label,
+        'type' => $type,
+        'type_label' => (string)$types[$type]['label'],
+      );
+    }
+
+    return array();
+  }
+
   private function mrm_marketing_default_lists() {
   return array(
     'all_sheet_music_purchasers' => array(
@@ -12054,22 +12187,6 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
 studentfamily@example.com
 community@example.org",
     ),
-    'band_directors' => array(
-      'label' => 'Band Directors',
-      'type' => 'manual',
-      'desc' => 'Manual outreach list for band directors and music educators.',
-      'example' => "director@example.edu
-assistant.director@example.edu
-programlead@example.org",
-    ),
-    'school_administrators' => array(
-      'label' => 'School Administrators',
-      'type' => 'manual',
-      'desc' => 'Manual outreach list for school administrators, district contacts, and school leadership contacts.',
-      'example' => "principal@example.edu
-artsadmin@example.edu
-districtcontact@example.org",
-    ),
   );
 }
 
@@ -12083,12 +12200,27 @@ districtcontact@example.org",
       }
     }
 
+    foreach ($this->mrm_marketing_state_options() as $state_key => $state_label) {
+      foreach ($this->mrm_marketing_school_outreach_types() as $type_key => $type_def) {
+        $list_key = $this->mrm_marketing_school_outreach_key($state_key, $type_key);
+
+        if ($list_key !== '' && !isset($lists[$list_key])) {
+          $lists[$list_key] = array();
+        }
+      }
+    }
+
     foreach ($lists as $key => $emails) {
       $normalized = array();
+
       foreach ((array)$emails as $email) {
         $email = strtolower(sanitize_email((string)$email));
-        if ($email && is_email($email)) $normalized[$email] = true;
+
+        if ($email && is_email($email)) {
+          $normalized[$email] = true;
+        }
       }
+
       $lists[$key] = array_keys($normalized);
       sort($lists[$key]);
     }
@@ -12283,7 +12415,11 @@ districtcontact@example.org",
   private function mrm_marketing_get_list_recipients($list_key, $apply_suppression = true) {
     $defs = $this->mrm_marketing_default_lists();
     $list_key = sanitize_key((string)$list_key);
-    if (!isset($defs[$list_key])) return array();
+    $school_list = $this->mrm_marketing_parse_school_outreach_key($list_key);
+
+    if (!isset($defs[$list_key]) && empty($school_list)) {
+      return array();
+    }
 
     switch ($list_key) {
       case 'all_sheet_music_purchasers':
@@ -12687,8 +12823,18 @@ districtcontact@example.org",
 
     foreach ((array)$list_keys as $key) {
       $key = sanitize_key((string)$key);
+
       if (isset($defs[$key])) {
         $labels[] = (string)($defs[$key]['label'] ?? $key);
+        continue;
+      }
+
+      $school_list = $this->mrm_marketing_parse_school_outreach_key($key);
+
+      if (!empty($school_list)) {
+        $labels[] = (string)$school_list['state_label']
+          . ' — '
+          . (string)$school_list['type_label'];
       }
     }
 
@@ -12785,33 +12931,109 @@ districtcontact@example.org",
   }
 
   public function handle_marketing_email_save_lists() {
-    if (!current_user_can('manage_options')) wp_die('You do not have permission to save marketing email lists.');
-    check_admin_referer('mrm_marketing_email_save_lists', 'mrm_marketing_email_lists_nonce');
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to save marketing email lists.');
+    }
+
+    check_admin_referer(
+      'mrm_marketing_email_save_lists',
+      'mrm_marketing_email_lists_nonce'
+    );
 
     $defs = $this->mrm_marketing_default_lists();
     $lists = $this->mrm_marketing_manual_lists();
 
+    /*
+     * Save normal manual lists, currently General Interest.
+     */
     foreach ($defs as $key => $def) {
-      if (($def['type'] ?? '') !== 'manual') continue;
-      $raw = isset($_POST['mrm_marketing_list_' . $key])
-        ? wp_unslash($_POST['mrm_marketing_list_' . $key])
+      if (($def['type'] ?? '') !== 'manual') {
+        continue;
+      }
+
+      $field_name = 'mrm_marketing_list_' . $key;
+
+      $raw = isset($_POST[$field_name])
+        ? wp_unslash($_POST[$field_name])
         : '';
+
       $lists[$key] = $this->mrm_marketing_normalize_emails_from_text($raw);
     }
 
-    foreach (array_keys($lists) as $key) {
-      if (!isset($defs[$key]) || (($defs[$key]['type'] ?? '') !== 'manual')) {
-        unset($lists[$key]);
+    /*
+     * Save the four lists for the state currently shown in the admin page.
+     */
+    $states = $this->mrm_marketing_state_options();
+    $types = $this->mrm_marketing_school_outreach_types();
+
+    $selected_state = isset($_POST['mrm_marketing_outreach_state'])
+      ? sanitize_key(wp_unslash($_POST['mrm_marketing_outreach_state']))
+      : '';
+
+    if (isset($states[$selected_state])) {
+      foreach ($types as $type_key => $type_def) {
+        $list_key = $this->mrm_marketing_school_outreach_key(
+          $selected_state,
+          $type_key
+        );
+
+        if ($list_key === '') {
+          continue;
+        }
+
+        $field_name = 'mrm_marketing_school_list_' . $type_key;
+
+        $raw = isset($_POST[$field_name])
+          ? wp_unslash($_POST[$field_name])
+          : '';
+
+        $lists[$list_key] = $this->mrm_marketing_normalize_emails_from_text($raw);
       }
+    }
+
+    /*
+     * Remove only obsolete non-school manual keys.
+     * Preserve all valid generated school outreach keys.
+     */
+    foreach (array_keys($lists) as $key) {
+      if (isset($defs[$key]) && (($defs[$key]['type'] ?? '') === 'manual')) {
+        continue;
+      }
+
+      if (!empty($this->mrm_marketing_parse_school_outreach_key($key))) {
+        continue;
+      }
+
+      unset($lists[$key]);
     }
 
     $mailing_address = isset($_POST['mrm_marketing_mailing_address'])
       ? wp_kses_post(wp_unslash($_POST['mrm_marketing_mailing_address']))
       : '';
-    update_option('mrm_pay_hub_marketing_mailing_address', $mailing_address, false);
+
+    update_option(
+      'mrm_pay_hub_marketing_mailing_address',
+      $mailing_address,
+      false
+    );
+
     $this->save_email_lists($lists);
 
-    wp_safe_redirect(add_query_arg(array('page'=>'mrm-pay-hub-marketing-email-lists','mrm_marketing_saved'=>'1'), admin_url('admin.php')));
+    $redirect_args = array(
+      'page' => 'mrm-pay-hub-marketing-email-lists',
+      'mrm_marketing_saved' => '1',
+    );
+
+    if (isset($states[$selected_state])) {
+      $redirect_args['mrm_outreach_state'] = $selected_state;
+    }
+
+    wp_safe_redirect(
+      add_query_arg(
+        $redirect_args,
+        admin_url('admin.php')
+      )
+    );
     exit;
   }
 
@@ -12882,6 +13104,20 @@ districtcontact@example.org",
   $raw_body = isset($_POST['mrm_marketing_html']) ? wp_unslash($_POST['mrm_marketing_html']) : '';
   $body_html = $this->mrm_marketing_allowed_html($raw_body);
   $selected_lists = isset($_POST['mrm_marketing_lists']) && is_array($_POST['mrm_marketing_lists']) ? array_map('sanitize_key', (array)$_POST['mrm_marketing_lists']) : array();
+  $defs = $this->mrm_marketing_default_lists();
+  $allowed_lists = array();
+
+  foreach ($selected_lists as $list_key) {
+    $school_list = $this->mrm_marketing_parse_school_outreach_key($list_key);
+
+    if (!isset($defs[$list_key]) && empty($school_list)) {
+      continue;
+    }
+
+    $allowed_lists[$list_key] = true;
+  }
+
+  $selected_lists = array_keys($allowed_lists);
 
   if ($subject === '' || trim(wp_strip_all_tags($body_html)) === '' || empty($selected_lists)) {
     wp_safe_redirect(add_query_arg(array(
@@ -18790,6 +19026,25 @@ public function handle_marketing_resubscribe() {
     $this->mrm_marketing_save_sent_log($sent_log);
     $sent_log = $this->mrm_marketing_sent_log();
 
+    $state_options = $this->mrm_marketing_state_options();
+    $school_outreach_types = $this->mrm_marketing_school_outreach_types();
+
+    $selected_outreach_state = isset($_GET['mrm_outreach_state'])
+      ? sanitize_key(wp_unslash($_GET['mrm_outreach_state']))
+      : 'az';
+
+    if (!isset($state_options[$selected_outreach_state])) {
+      $selected_outreach_state = 'az';
+    }
+
+    $selected_send_state = isset($_GET['mrm_send_outreach_state'])
+      ? sanitize_key(wp_unslash($_GET['mrm_send_outreach_state']))
+      : $selected_outreach_state;
+
+    if (!isset($state_options[$selected_send_state])) {
+      $selected_send_state = $selected_outreach_state;
+    }
+
     echo '<div class="wrap">';
     echo '<h1>Marketing Email Lists</h1>';
     $log_deleted_status = isset($_GET['mrm_marketing_log_deleted'])
@@ -18810,8 +19065,30 @@ public function handle_marketing_resubscribe() {
     echo '<div style="display:grid;grid-template-columns:minmax(320px, 1fr) minmax(360px, 1fr);gap:20px;align-items:start;">';
     echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;">';
     echo '<h2>Save Manual Lists</h2>';
-    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_email_save_lists">';
-    wp_nonce_field('mrm_marketing_email_save_lists', 'mrm_marketing_email_lists_nonce');
+
+    echo '<form method="get" action="' . esc_url(admin_url('admin.php')) . '" style="margin:0 0 18px;">';
+    echo '<input type="hidden" name="page" value="mrm-pay-hub-marketing-email-lists">';
+    echo '<label for="mrm-outreach-state-selector"><strong>School outreach state</strong></label><br>';
+    echo '<select id="mrm-outreach-state-selector" name="mrm_outreach_state" onchange="this.form.submit();" style="min-width:260px;margin-top:6px;">';
+
+    foreach ($state_options as $state_key => $state_label) {
+      echo '<option value="' . esc_attr($state_key) . '" ' . selected($selected_outreach_state, $state_key, false) . '>'
+        . esc_html($state_label)
+        . '</option>';
+    }
+
+    echo '</select>';
+    echo '<noscript><button type="submit" class="button" style="margin-left:8px;">View State</button></noscript>';
+    echo '</form>';
+
+    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+    echo '<input type="hidden" name="action" value="mrm_marketing_email_save_lists">';
+    echo '<input type="hidden" name="mrm_marketing_outreach_state" value="' . esc_attr($selected_outreach_state) . '">';
+
+    wp_nonce_field(
+      'mrm_marketing_email_save_lists',
+      'mrm_marketing_email_lists_nonce'
+    );
     foreach ($defs as $key => $def) {
       $type = (string)($def['type'] ?? '');
       $label = (string)($def['label'] ?? $key);
@@ -18829,21 +19106,153 @@ public function handle_marketing_resubscribe() {
       }
       echo '</div>';
     }
+    echo '<div style="border-top:2px solid #ccd0d4;padding-top:18px;margin-top:22px;">';
+    echo '<h2 style="margin-bottom:4px;">'
+      . esc_html($state_options[$selected_outreach_state])
+      . ' School Outreach Lists'
+      . '</h2>';
+
+    echo '<p class="description">The four lists below belong only to '
+      . esc_html($state_options[$selected_outreach_state])
+      . '. Use the state dropdown above to view and edit another state.</p>';
+
+    foreach ($school_outreach_types as $type_key => $type_def) {
+      $list_key = $this->mrm_marketing_school_outreach_key(
+        $selected_outreach_state,
+        $type_key
+      );
+
+      $emails = isset($manual_lists[$list_key])
+        ? (array)$manual_lists[$list_key]
+        : array();
+
+      $label = (string)($type_def['label'] ?? $type_key);
+      $desc = (string)($type_def['desc'] ?? '');
+      $example = (string)($type_def['example'] ?? '');
+
+      echo '<div style="border-top:1px solid #e5e5e5;padding-top:14px;margin-top:14px;">';
+      echo '<h3 style="margin-bottom:4px;">' . esc_html($label) . '</h3>';
+
+      if ($desc !== '') {
+        echo '<p class="description">' . esc_html($desc) . '</p>';
+      }
+
+      if ($example !== '') {
+        echo '<details style="margin:8px 0 10px;">';
+        echo '<summary style="cursor:pointer;">Show formatting example</summary>';
+        echo '<pre style="white-space:pre-wrap;background:#f6f7f7;padding:10px;border:1px solid #dcdcde;">'
+          . esc_html($example)
+          . '</pre>';
+        echo '</details>';
+      }
+
+      echo '<textarea name="mrm_marketing_school_list_'
+        . esc_attr($type_key)
+        . '" rows="7" class="large-text code" placeholder="one@example.edu&#10;two@example.edu">'
+        . esc_textarea(implode("\n", $emails))
+        . '</textarea>';
+
+      echo '<p class="description">Current saved emails: '
+        . esc_html((string)count($emails))
+        . '</p>';
+
+      echo '</div>';
+    }
+
+    echo '</div>';
+
     echo '<h3 style="margin-top:20px;">Mailing Address / Footer Text</h3><p class="description">Shown in the footer of marketing emails.</p>';
     echo '<textarea name="mrm_marketing_mailing_address" rows="4" class="large-text">' . esc_textarea($mailing_address) . '</textarea>';
-    echo '<p class="submit"><button type="submit" class="button button-primary">Save Marketing Lists</button></p></form></div>';
+    echo '<p class="submit"><button type="submit" class="button button-primary">Save Marketing Lists for '
+      . esc_html($state_options[$selected_outreach_state])
+      . '</button></p></form></div>';
 
     echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;"><h2>Preview and Send Marketing Email</h2>';
     echo '<div style="border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;padding:14px;margin-bottom:18px;"><h3 style="margin-top:0;">Live Preview</h3><div><strong id="mrm-marketing-preview-subject">Subject preview will appear here.</strong></div><iframe id="mrm-marketing-preview-frame" title="Marketing email preview" style="display:block;width:100%;height:520px;border:1px solid #dcdcde;border-radius:8px;background:#fff;margin-top:10px;"></iframe></div>';
     echo '<form method="post" enctype="multipart/form-data" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_email_send">';
     wp_nonce_field('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
     echo '<table class="form-table"><tr><th scope="row"><label for="mrm_marketing_subject">Subject</label></th><td><input type="text" id="mrm_marketing_subject" name="mrm_marketing_subject" class="large-text" required></td></tr>';
-    echo '<tr><th scope="row"><label for="mrm_marketing_html">Email Body</label></th><td><textarea id="mrm_marketing_html" name="mrm_marketing_html" rows="12" class="large-text code" required></textarea><p class="description">Enter the complete custom HTML for this marketing email. The subject line is used only as the email subject and is not inserted into the body. The preview matches the sent email body with the required unsubscribe footer appended.</p></td></tr><tr><th scope="row">Send To Lists</th><td>';
+    echo '<tr><th scope="row"><label for="mrm_marketing_html">Email Body</label></th><td><textarea id="mrm_marketing_html" name="mrm_marketing_html" rows="12" class="large-text code" required></textarea><p class="description">Enter the complete custom HTML for this marketing email. The subject line is used only as the email subject and is not inserted into the body. The preview matches the sent email body with the required unsubscribe footer appended.</p></td></tr>';
+    echo '<tr>';
+    echo '<th scope="row"><label for="mrm-marketing-send-state">School Outreach State</label></th>';
+    echo '<td>';
+
+    echo '<select id="mrm-marketing-send-state" style="min-width:260px;">';
+
+    foreach ($state_options as $state_key => $state_label) {
+      echo '<option value="' . esc_attr($state_key) . '" '
+        . selected($selected_send_state, $state_key, false)
+        . '>'
+        . esc_html($state_label)
+        . '</option>';
+    }
+
+    echo '</select>';
+
+    echo '<p class="description">This dropdown controls which state’s four school outreach lists are shown below. It does not affect the dynamic or General Interest lists.</p>';
+    echo '</td>';
+    echo '</tr>';
+
+    echo '<tr><th scope="row">Send To Lists</th><td>';
+
+    echo '<div style="margin-bottom:16px;">';
+    echo '<strong>Standard Lists</strong>';
+
     foreach ($defs as $key => $def) {
       $label = (string)($def['label'] ?? $key);
       $count = count($this->mrm_marketing_get_list_recipients($key, true));
-      echo '<label style="display:block;margin:6px 0;"><input type="checkbox" name="mrm_marketing_lists[]" value="' . esc_attr($key) . '"> ' . esc_html($label) . ' <span class="description">(' . esc_html((string)$count) . ' recipient(s))</span></label>';
+
+      echo '<label style="display:block;margin:6px 0;">';
+      echo '<input type="checkbox" name="mrm_marketing_lists[]" value="' . esc_attr($key) . '"> ';
+      echo esc_html($label);
+      echo ' <span class="description">(' . esc_html((string)$count) . ' recipient(s))</span>';
+      echo '</label>';
     }
+
+    echo '</div>';
+
+    echo '<div style="border-top:1px solid #dcdcde;padding-top:14px;">';
+    echo '<strong>School Outreach Lists</strong>';
+
+    foreach ($state_options as $state_key => $state_label) {
+      $display = $state_key === $selected_send_state ? 'block' : 'none';
+
+      echo '<div class="mrm-marketing-send-state-group" data-state="'
+        . esc_attr($state_key)
+        . '" style="display:'
+        . esc_attr($display)
+        . ';margin-top:8px;">';
+
+      echo '<p style="margin:0 0 8px;"><strong>'
+        . esc_html($state_label)
+        . '</strong></p>';
+
+      foreach ($school_outreach_types as $type_key => $type_def) {
+        $list_key = $this->mrm_marketing_school_outreach_key(
+          $state_key,
+          $type_key
+        );
+
+        $label = (string)($type_def['label'] ?? $type_key);
+        $count = count(
+          $this->mrm_marketing_get_list_recipients($list_key, true)
+        );
+
+        echo '<label style="display:block;margin:6px 0;">';
+        echo '<input type="checkbox" name="mrm_marketing_lists[]" value="'
+          . esc_attr($list_key)
+          . '"> ';
+        echo esc_html($label);
+        echo ' <span class="description">('
+          . esc_html((string)$count)
+          . ' recipient(s))</span>';
+        echo '</label>';
+      }
+
+      echo '</div>';
+    }
+
+    echo '</div>';
     echo '</td></tr><tr><th scope="row"><label for="mrm_marketing_attachments">Attachments</label></th><td><input type="file" id="mrm_marketing_attachments" name="mrm_marketing_attachments[]" multiple><p class="description">Optional attachments.</p></td></tr></table>';
     echo '<p class="submit"><button type="submit" class="button button-primary">Send Marketing Email</button></p></form><hr>';
     echo '<h2>Re-subscribe Emails</h2><p class="description">Use this only when someone asks to be added back after unsubscribing.</p>';
@@ -18907,6 +19316,35 @@ public function handle_marketing_resubscribe() {
       var body = document.getElementById('mrm_marketing_html');
       var subjectPreview = document.getElementById('mrm-marketing-preview-subject');
       var frame = document.getElementById('mrm-marketing-preview-frame');
+      var sendStateSelector = document.getElementById('mrm-marketing-send-state');
+      var sendStateGroups = document.querySelectorAll('.mrm-marketing-send-state-group');
+
+      function updateSendStateGroups() {
+        var selectedState = sendStateSelector
+          ? String(sendStateSelector.value || '')
+          : '';
+
+        Array.prototype.forEach.call(sendStateGroups, function(group) {
+          var groupState = String(group.getAttribute('data-state') || '');
+          var isVisible = groupState === selectedState;
+
+          group.style.display = isVisible ? 'block' : 'none';
+
+          if (!isVisible) {
+            var checkboxes = group.querySelectorAll('input[type="checkbox"]');
+
+            Array.prototype.forEach.call(checkboxes, function(checkbox) {
+              checkbox.checked = false;
+            });
+          }
+        });
+      }
+
+      if (sendStateSelector) {
+        sendStateSelector.addEventListener('change', updateSendStateGroups);
+        updateSendStateGroups();
+      }
+
       function escapeHtml(value) { return String(value || '').replace(/[&<>"']/g, function(ch){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]); }); }
       function updatePreview(){
         var s = subject ? subject.value : '';
