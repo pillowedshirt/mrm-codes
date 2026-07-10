@@ -12153,6 +12153,40 @@ artsadmin@example.edu",
     );
   }
 
+  private function mrm_marketing_state_college_professor_key($state) {
+    $states = $this->mrm_marketing_state_options();
+    $state = sanitize_key((string)$state);
+
+    if (!isset($states[$state])) {
+      return '';
+    }
+
+    return 'college_professors_' . $state;
+  }
+
+  private function mrm_marketing_parse_state_college_professor_key($list_key) {
+    $list_key = sanitize_key((string)$list_key);
+    $prefix = 'college_professors_';
+
+    if (strpos($list_key, $prefix) !== 0) {
+      return array();
+    }
+
+    $state = substr($list_key, strlen($prefix));
+    $states = $this->mrm_marketing_state_options();
+
+    if (!isset($states[$state])) {
+      return array();
+    }
+
+    return array(
+      'state' => $state,
+      'state_code' => strtoupper($state),
+      'state_label' => (string)$states[$state],
+      'label' => 'College Professors in ' . (string)$states[$state],
+    );
+  }
+
   private function mrm_marketing_is_instructor_list($list_key) {
     $list_key = sanitize_key((string)$list_key);
 
@@ -12254,6 +12288,12 @@ artsadmin@example.edu",
       'desc' => 'All fully onboarded instructors currently represented in the instructor profile table.',
       'example' => '',
     ),
+    'all_college_professors' => array(
+      'label' => 'All College Professors',
+      'type' => 'dynamic',
+      'desc' => 'Combined college professor outreach emails from every state, after duplicate removal and unsubscribe suppression.',
+      'example' => '',
+    ),
     'general_interest' => array(
       'label' => 'General Interest',
       'type' => 'manual',
@@ -12282,6 +12322,16 @@ community@example.org",
         if ($list_key !== '' && !isset($lists[$list_key])) {
           $lists[$list_key] = array();
         }
+      }
+    }
+
+    foreach ($this->mrm_marketing_state_options() as $state_key => $state_label) {
+      $list_key = $this->mrm_marketing_state_college_professor_key(
+        $state_key
+      );
+
+      if ($list_key !== '' && !isset($lists[$list_key])) {
+        $lists[$list_key] = array();
       }
     }
 
@@ -12551,17 +12601,58 @@ community@example.org",
     return $emails;
   }
 
+  private function mrm_marketing_all_college_professor_emails() {
+    $lists = $this->mrm_marketing_manual_lists();
+    $emails = array();
+
+    foreach ($this->mrm_marketing_state_options() as $state_key => $state_label) {
+      $list_key = $this->mrm_marketing_state_college_professor_key(
+        $state_key
+      );
+
+      if ($list_key === '' || empty($lists[$list_key])) {
+        continue;
+      }
+
+      foreach ((array)$lists[$list_key] as $email) {
+        $email = strtolower(
+          sanitize_email((string)$email)
+        );
+
+        if ($email !== '' && is_email($email)) {
+          $emails[$email] = true;
+        }
+      }
+    }
+
+    $emails = array_keys($emails);
+    sort($emails);
+
+    return $emails;
+  }
+
   private function mrm_marketing_get_list_recipients($list_key, $apply_suppression = true) {
     $defs = $this->mrm_marketing_default_lists();
     $list_key = sanitize_key((string)$list_key);
 
-    $school_list = $this->mrm_marketing_parse_school_outreach_key($list_key);
-    $state_instructor_list = $this->mrm_marketing_parse_state_instructor_key($list_key);
+    $school_list = $this->mrm_marketing_parse_school_outreach_key(
+      $list_key
+    );
+
+    $state_instructor_list = $this->mrm_marketing_parse_state_instructor_key(
+      $list_key
+    );
+
+    $state_college_professor_list =
+      $this->mrm_marketing_parse_state_college_professor_key(
+        $list_key
+      );
 
     if (
       !isset($defs[$list_key]) &&
       empty($school_list) &&
-      empty($state_instructor_list)
+      empty($state_instructor_list) &&
+      empty($state_college_professor_list)
     ) {
       return array();
     }
@@ -12582,12 +12673,19 @@ community@example.org",
       case 'all_current_instructors':
         $emails = $this->mrm_marketing_instructor_emails();
         break;
+      case 'all_college_professors':
+        $emails = $this->mrm_marketing_all_college_professor_emails();
+        break;
       default:
         if (!empty($state_instructor_list)) {
           $emails = $this->mrm_marketing_instructor_emails(
             $state_instructor_list['state_code']
           );
         } else {
+          /*
+           * State college-professor lists and school outreach lists
+           * are both manually stored.
+           */
           $manual = $this->mrm_marketing_manual_lists();
           $emails = isset($manual[$list_key])
             ? (array)$manual[$list_key]
@@ -13052,6 +13150,18 @@ community@example.org",
         $labels[] = 'Instructors — '
           . (string)$state_instructor_list['state_label'];
       }
+
+      $state_college_professor_list =
+        $this->mrm_marketing_parse_state_college_professor_key(
+          $key
+        );
+
+      if (!empty($state_college_professor_list)) {
+        $labels[] = 'College Professors — '
+          . (string)$state_college_professor_list[
+            'state_label'
+          ];
+      }
     }
 
     $log = $this->mrm_marketing_sent_log();
@@ -13193,6 +13303,12 @@ community@example.org",
       ? sanitize_key(wp_unslash($_POST['mrm_marketing_outreach_state']))
       : '';
 
+    $selected_professor_state = isset($_POST['mrm_marketing_professor_state'])
+      ? sanitize_key(
+          wp_unslash($_POST['mrm_marketing_professor_state'])
+        )
+      : '';
+
     if (isset($states[$selected_state])) {
       foreach ($types as $type_key => $type_def) {
         $list_key = $this->mrm_marketing_school_outreach_key(
@@ -13215,15 +13331,57 @@ community@example.org",
     }
 
     /*
+     * Save the college-professor list for the selected state.
+     */
+    if (isset($states[$selected_professor_state])) {
+      $professor_list_key =
+        $this->mrm_marketing_state_college_professor_key(
+          $selected_professor_state
+        );
+
+      if ($professor_list_key !== '') {
+        $raw_professor_emails = isset(
+          $_POST['mrm_marketing_college_professor_emails']
+        )
+          ? wp_unslash(
+              $_POST['mrm_marketing_college_professor_emails']
+            )
+          : '';
+
+        $lists[$professor_list_key] =
+          $this->mrm_marketing_normalize_emails_from_text(
+            $raw_professor_emails
+          );
+      }
+    }
+
+    /*
      * Remove only obsolete non-school manual keys.
      * Preserve all valid generated school outreach keys.
      */
     foreach (array_keys($lists) as $key) {
-      if (isset($defs[$key]) && (($defs[$key]['type'] ?? '') === 'manual')) {
+      if (
+        isset($defs[$key]) &&
+        (($defs[$key]['type'] ?? '') === 'manual')
+      ) {
         continue;
       }
 
-      if (!empty($this->mrm_marketing_parse_school_outreach_key($key))) {
+      if (
+        !empty(
+          $this->mrm_marketing_parse_school_outreach_key($key)
+        )
+      ) {
+        continue;
+      }
+
+      if (
+        !empty(
+          $this->mrm_marketing_parse_state_college_professor_key(
+            $key
+          )
+        )
+      ) {
         continue;
       }
 
@@ -13249,6 +13407,11 @@ community@example.org",
 
     if (isset($states[$selected_state])) {
       $redirect_args['mrm_outreach_state'] = $selected_state;
+    }
+
+    if (isset($states[$selected_professor_state])) {
+      $redirect_args['mrm_professor_state'] =
+        $selected_professor_state;
     }
 
     wp_safe_redirect(
@@ -13331,18 +13494,26 @@ community@example.org",
   $allowed_lists = array();
 
   foreach ($selected_lists as $list_key) {
-    $school_list = $this->mrm_marketing_parse_school_outreach_key(
-      $list_key
-    );
+    $school_list =
+      $this->mrm_marketing_parse_school_outreach_key(
+        $list_key
+      );
 
-    $state_instructor_list = $this->mrm_marketing_parse_state_instructor_key(
-      $list_key
-    );
+    $state_instructor_list =
+      $this->mrm_marketing_parse_state_instructor_key(
+        $list_key
+      );
+
+    $state_college_professor_list =
+      $this->mrm_marketing_parse_state_college_professor_key(
+        $list_key
+      );
 
     if (
       !isset($defs[$list_key]) &&
       empty($school_list) &&
-      empty($state_instructor_list)
+      empty($state_instructor_list) &&
+      empty($state_college_professor_list)
     ) {
       continue;
     }
@@ -19341,6 +19512,31 @@ public function handle_marketing_resubscribe() {
       $selected_instructor_state = $selected_send_state;
     }
 
+    $selected_professor_state = isset($_GET['mrm_professor_state'])
+      ? sanitize_key(wp_unslash($_GET['mrm_professor_state']))
+      : $selected_outreach_state;
+
+    if (!isset($state_options[$selected_professor_state])) {
+      $selected_professor_state = $selected_outreach_state;
+    }
+
+    $selected_professor_send_state = isset(
+      $_GET['mrm_professor_send_state']
+    )
+      ? sanitize_key(
+          wp_unslash($_GET['mrm_professor_send_state'])
+        )
+      : $selected_professor_state;
+
+    if (
+      !isset(
+        $state_options[$selected_professor_send_state]
+      )
+    ) {
+      $selected_professor_send_state =
+        $selected_professor_state;
+    }
+
     echo '<div class="wrap">';
     echo '<h1>Marketing Email Lists</h1>';
     $log_deleted_status = isset($_GET['mrm_marketing_log_deleted'])
@@ -19377,9 +19573,12 @@ public function handle_marketing_resubscribe() {
     echo '<noscript><button type="submit" class="button" style="margin-left:8px;">View State</button></noscript>';
     echo '</form>';
 
-    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+    echo '<form id="mrm-marketing-list-save-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
     echo '<input type="hidden" name="action" value="mrm_marketing_email_save_lists">';
     echo '<input type="hidden" name="mrm_marketing_outreach_state" value="' . esc_attr($selected_outreach_state) . '">';
+    echo '<input type="hidden" name="mrm_marketing_professor_state" value="'
+      . esc_attr($selected_professor_state)
+      . '">';
 
     wp_nonce_field(
       'mrm_marketing_email_save_lists',
@@ -19414,6 +19613,10 @@ public function handle_marketing_resubscribe() {
 
     echo '<input type="hidden" name="mrm_outreach_state" value="'
       . esc_attr($selected_outreach_state)
+      . '">';
+
+    echo '<input type="hidden" name="mrm_professor_state" value="'
+      . esc_attr($selected_professor_state)
       . '">';
 
     echo '<label for="mrm-instructor-state-selector"><strong>Instructor state</strong></label><br>';
@@ -19456,6 +19659,84 @@ public function handle_marketing_resubscribe() {
     echo '<p><strong>Dynamic list:</strong> '
       . esc_html((string)count($selected_instructor_recipients))
       . ' active recipient(s) after unsubscribe suppression.</p>';
+
+    echo '</div>';
+    echo '</div>';
+
+    echo '<div style="border-top:2px solid #ccd0d4;padding-top:18px;margin-top:22px;">';
+
+    echo '<h2 style="margin-bottom:4px;">College Professor Lists by State</h2>';
+
+    echo '<p class="description">These are manually populated marketing outreach lists. All College Professors automatically combines every state list and removes duplicate emails.</p>';
+
+    echo '<form method="get" action="'
+      . esc_url(admin_url('admin.php'))
+      . '" style="margin:14px 0;">';
+
+    echo '<input type="hidden" name="page" value="mrm-pay-hub-marketing-email-lists">';
+
+    echo '<input type="hidden" name="mrm_outreach_state" value="'
+      . esc_attr($selected_outreach_state)
+      . '">';
+
+    echo '<input type="hidden" name="mrm_instructor_state" value="'
+      . esc_attr($selected_instructor_state)
+      . '">';
+
+    echo '<label for="mrm-professor-state-selector"><strong>College professor state</strong></label><br>';
+
+    echo '<select id="mrm-professor-state-selector" name="mrm_professor_state" onchange="this.form.submit();" style="min-width:260px;margin-top:6px;">';
+
+    foreach ($state_options as $state_key => $state_label) {
+      echo '<option value="' . esc_attr($state_key) . '" '
+        . selected(
+            $selected_professor_state,
+            $state_key,
+            false
+          )
+        . '>'
+        . esc_html($state_label)
+        . '</option>';
+    }
+
+    echo '</select>';
+
+    echo '<noscript><button type="submit" class="button" style="margin-left:8px;">View State</button></noscript>';
+
+    echo '</form>';
+
+    $selected_professor_list_key =
+      $this->mrm_marketing_state_college_professor_key(
+        $selected_professor_state
+      );
+
+    $selected_professor_emails = isset(
+      $manual_lists[$selected_professor_list_key]
+    )
+      ? (array)$manual_lists[$selected_professor_list_key]
+      : array();
+
+    echo '<div style="border-top:1px solid #e5e5e5;padding-top:14px;margin-top:14px;">';
+
+    echo '<h3 style="margin-bottom:4px;">College Professors in '
+      . esc_html(
+          $state_options[$selected_professor_state]
+        )
+      . '</h3>';
+
+    echo '<p class="description">Add one professional college or university professor email per line. This list receives the normal marketing footer and unsubscribe option.</p>';
+
+    echo '<textarea name="mrm_marketing_college_professor_emails" rows="8" class="large-text code" form="mrm-marketing-list-save-form" placeholder="professor@example.edu&#10;faculty@example.edu">'
+      . esc_textarea(
+          implode("\n", $selected_professor_emails)
+        )
+      . '</textarea>';
+
+    echo '<p class="description">Current saved emails: '
+      . esc_html(
+          (string)count($selected_professor_emails)
+        )
+      . '</p>';
 
     echo '</div>';
     echo '</div>';
@@ -19570,6 +19851,28 @@ public function handle_marketing_resubscribe() {
     echo '</td>';
     echo '</tr>';
 
+    echo '<tr>';
+    echo '<th scope="row"><label for="mrm-marketing-professor-send-state">College Professor State</label></th>';
+    echo '<td>';
+    echo '<select id="mrm-marketing-professor-send-state" style="min-width:260px;">';
+
+    foreach ($state_options as $state_key => $state_label) {
+      echo '<option value="' . esc_attr($state_key) . '" '
+        . selected(
+            $selected_professor_send_state,
+            $state_key,
+            false
+          )
+        . '>'
+        . esc_html($state_label)
+        . '</option>';
+    }
+
+    echo '</select>';
+    echo '<p class="description">This dropdown controls which state-specific college-professor marketing list is shown below. All College Professors remains available under Standard Lists.</p>';
+    echo '</td>';
+    echo '</tr>';
+
     echo '<tr><th scope="row">Send To Lists</th><td>';
 
     echo '<div style="margin-bottom:16px;">';
@@ -19636,6 +19939,53 @@ public function handle_marketing_resubscribe() {
       echo ' <span class="description">(Instructor correspondence — no marketing footer; '
         . esc_html((string)$count)
         . ' recipient(s))</span>';
+      echo '</label>';
+      echo '</div>';
+    }
+
+    echo '</div>';
+
+    echo '<div style="border-top:1px solid #dcdcde;padding-top:14px;margin-bottom:16px;">';
+
+    echo '<strong>College Professor Lists by State</strong>';
+
+    foreach ($state_options as $state_key => $state_label) {
+      $display =
+        $state_key === $selected_professor_send_state
+          ? 'block'
+          : 'none';
+
+      $list_key =
+        $this->mrm_marketing_state_college_professor_key(
+          $state_key
+        );
+
+      $count = count(
+        $this->mrm_marketing_get_list_recipients(
+          $list_key,
+          true
+        )
+      );
+
+      echo '<div class="mrm-marketing-professor-state-group" data-state="'
+        . esc_attr($state_key)
+        . '" style="display:'
+        . esc_attr($display)
+        . ';margin-top:8px;">';
+
+      echo '<label style="display:block;margin:6px 0;">';
+
+      echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" name="mrm_marketing_lists[]" value="'
+        . esc_attr($list_key)
+        . '"> ';
+
+      echo 'College Professors in '
+        . esc_html($state_label);
+
+      echo ' <span class="description">('
+        . esc_html((string)$count)
+        . ' recipient(s); marketing footer and unsubscribe enabled)</span>';
+
       echo '</label>';
       echo '</div>';
     }
@@ -19778,6 +20128,12 @@ public function handle_marketing_resubscribe() {
       var instructorStateGroups = document.querySelectorAll(
         '.mrm-marketing-instructor-state-group'
       );
+      var professorStateSelector = document.getElementById(
+        'mrm-marketing-professor-send-state'
+      );
+      var professorStateGroups = document.querySelectorAll(
+        '.mrm-marketing-professor-state-group'
+      );
       var recipientListCheckboxes = document.querySelectorAll(
         '.mrm-marketing-recipient-list'
       );
@@ -19843,6 +20199,40 @@ public function handle_marketing_resubscribe() {
         );
       }
 
+      function updateProfessorStateGroups() {
+        var selectedState = professorStateSelector
+          ? String(professorStateSelector.value || '')
+          : '';
+
+        Array.prototype.forEach.call(
+          professorStateGroups,
+          function(group) {
+            var groupState = String(
+              group.getAttribute('data-state') || ''
+            );
+
+            var isVisible = groupState === selectedState;
+
+            group.style.display = isVisible
+              ? 'block'
+              : 'none';
+
+            if (!isVisible) {
+              var checkboxes = group.querySelectorAll(
+                'input[type="checkbox"]'
+              );
+
+              Array.prototype.forEach.call(
+                checkboxes,
+                function(checkbox) {
+                  checkbox.checked = false;
+                }
+              );
+            }
+          }
+        );
+      }
+
       if (sendStateSelector) {
         sendStateSelector.addEventListener('change', function() {
           updateSendStateGroups();
@@ -19863,6 +20253,19 @@ public function handle_marketing_resubscribe() {
         );
 
         updateInstructorStateGroups();
+      }
+
+      if (professorStateSelector) {
+        professorStateSelector.addEventListener(
+          'change',
+          function() {
+            updateProfessorStateGroups();
+            updateSelectionWarning();
+            updatePreview();
+          }
+        );
+
+        updateProfessorStateGroups();
       }
 
       function getSelectedEmailMode() {
