@@ -12294,6 +12294,30 @@ artsadmin@example.edu",
       'desc' => 'Combined college professor outreach emails from every state, after duplicate removal and unsubscribe suppression.',
       'example' => '',
     ),
+    'all_middle_school_band_directors' => array(
+      'label' => 'All Middle School Band Directors',
+      'type' => 'dynamic',
+      'desc' => 'Combined middle school band director outreach emails from every state, after duplicate removal and unsubscribe suppression.',
+      'example' => '',
+    ),
+    'all_middle_school_administrators' => array(
+      'label' => 'All Middle School Administrators',
+      'type' => 'dynamic',
+      'desc' => 'Combined middle school administrator outreach emails from every state, after duplicate removal and unsubscribe suppression.',
+      'example' => '',
+    ),
+    'all_high_school_band_directors' => array(
+      'label' => 'All High School Band Directors',
+      'type' => 'dynamic',
+      'desc' => 'Combined high school band director outreach emails from every state, after duplicate removal and unsubscribe suppression.',
+      'example' => '',
+    ),
+    'all_high_school_administrators' => array(
+      'label' => 'All High School Administrators',
+      'type' => 'dynamic',
+      'desc' => 'Combined high school administrator outreach emails from every state, after duplicate removal and unsubscribe suppression.',
+      'example' => '',
+    ),
     'general_interest' => array(
       'label' => 'General Interest',
       'type' => 'manual',
@@ -12631,6 +12655,42 @@ community@example.org",
     return $emails;
   }
 
+
+  private function mrm_marketing_all_school_outreach_emails($type) {
+    $types = $this->mrm_marketing_school_outreach_types();
+    $states = $this->mrm_marketing_state_options();
+    $lists = $this->mrm_marketing_manual_lists();
+
+    $type = sanitize_key((string)$type);
+
+    if (!isset($types[$type])) {
+      return array();
+    }
+
+    $emails = array();
+
+    foreach ($states as $state_key => $state_label) {
+      $list_key = $this->mrm_marketing_school_outreach_key($state_key, $type);
+
+      if ($list_key === '' || empty($lists[$list_key])) {
+        continue;
+      }
+
+      foreach ((array)$lists[$list_key] as $email) {
+        $email = strtolower(sanitize_email((string)$email));
+
+        if ($email !== '' && is_email($email)) {
+          $emails[$email] = true;
+        }
+      }
+    }
+
+    $emails = array_keys($emails);
+    sort($emails);
+
+    return $emails;
+  }
+
   private function mrm_marketing_get_list_recipients($list_key, $apply_suppression = true) {
     $defs = $this->mrm_marketing_default_lists();
     $list_key = sanitize_key((string)$list_key);
@@ -12675,6 +12735,18 @@ community@example.org",
         break;
       case 'all_college_professors':
         $emails = $this->mrm_marketing_all_college_professor_emails();
+        break;
+      case 'all_middle_school_band_directors':
+        $emails = $this->mrm_marketing_all_school_outreach_emails('middle_school_band_directors');
+        break;
+      case 'all_middle_school_administrators':
+        $emails = $this->mrm_marketing_all_school_outreach_emails('middle_school_administrators');
+        break;
+      case 'all_high_school_band_directors':
+        $emails = $this->mrm_marketing_all_school_outreach_emails('high_school_band_directors');
+        break;
+      case 'all_high_school_administrators':
+        $emails = $this->mrm_marketing_all_school_outreach_emails('high_school_administrators');
         break;
       default:
         if (!empty($state_instructor_list)) {
@@ -13299,13 +13371,9 @@ community@example.org",
     $states = $this->mrm_marketing_state_options();
     $types = $this->mrm_marketing_school_outreach_types();
 
-    $selected_state = isset($_POST['mrm_marketing_outreach_state'])
-      ? sanitize_key(wp_unslash($_POST['mrm_marketing_outreach_state']))
-      : '';
-
-    $selected_professor_state = isset($_POST['mrm_marketing_professor_state'])
+    $selected_state = isset($_POST['mrm_marketing_state'])
       ? sanitize_key(
-          wp_unslash($_POST['mrm_marketing_professor_state'])
+          wp_unslash($_POST['mrm_marketing_state'])
         )
       : '';
 
@@ -13333,10 +13401,10 @@ community@example.org",
     /*
      * Save the college-professor list for the selected state.
      */
-    if (isset($states[$selected_professor_state])) {
+    if (isset($states[$selected_state])) {
       $professor_list_key =
         $this->mrm_marketing_state_college_professor_key(
-          $selected_professor_state
+          $selected_state
         );
 
       if ($professor_list_key !== '') {
@@ -13406,12 +13474,7 @@ community@example.org",
     );
 
     if (isset($states[$selected_state])) {
-      $redirect_args['mrm_outreach_state'] = $selected_state;
-    }
-
-    if (isset($states[$selected_professor_state])) {
-      $redirect_args['mrm_professor_state'] =
-        $selected_professor_state;
+      $redirect_args['mrm_state'] = $selected_state;
     }
 
     wp_safe_redirect(
@@ -13591,9 +13654,28 @@ community@example.org",
     'Reply-To: ' . $from_name . ' <' . $from_email . '>',
   );
 
+  $headers = array_values(
+    array_filter(
+      $headers,
+      static function($header) {
+        $header = strtolower(trim((string)$header));
+
+        return strpos($header, 'cc:') !== 0
+          && strpos($header, 'bcc:') !== 0
+          && strpos($header, 'to:') !== 0;
+      }
+    )
+  );
+
   $sent = 0;
   $failed = 0;
 
+  /*
+   * Privacy requirement:
+   * Send one separate wp_mail() call per recipient.
+   * Never pass the full recipient array to wp_mail() and never place
+   * recipient lists in To, Cc, or Bcc headers.
+   */
   foreach ($recipients as $email) {
     if ($send_mode === 'instructor') {
       /*
@@ -19549,53 +19631,12 @@ public function handle_marketing_resubscribe() {
     $state_options = $this->mrm_marketing_state_options();
     $school_outreach_types = $this->mrm_marketing_school_outreach_types();
 
-    $selected_outreach_state = isset($_GET['mrm_outreach_state'])
-      ? sanitize_key(wp_unslash($_GET['mrm_outreach_state']))
+    $selected_state = isset($_GET['mrm_state'])
+      ? sanitize_key(wp_unslash($_GET['mrm_state']))
       : 'az';
 
-    if (!isset($state_options[$selected_outreach_state])) {
-      $selected_outreach_state = 'az';
-    }
-
-    $selected_send_state = isset($_GET['mrm_send_outreach_state'])
-      ? sanitize_key(wp_unslash($_GET['mrm_send_outreach_state']))
-      : $selected_outreach_state;
-
-    if (!isset($state_options[$selected_send_state])) {
-      $selected_send_state = $selected_outreach_state;
-    }
-
-    $selected_instructor_state = isset($_GET['mrm_instructor_state'])
-      ? sanitize_key(wp_unslash($_GET['mrm_instructor_state']))
-      : $selected_send_state;
-
-    if (!isset($state_options[$selected_instructor_state])) {
-      $selected_instructor_state = $selected_send_state;
-    }
-
-    $selected_professor_state = isset($_GET['mrm_professor_state'])
-      ? sanitize_key(wp_unslash($_GET['mrm_professor_state']))
-      : $selected_outreach_state;
-
-    if (!isset($state_options[$selected_professor_state])) {
-      $selected_professor_state = $selected_outreach_state;
-    }
-
-    $selected_professor_send_state = isset(
-      $_GET['mrm_professor_send_state']
-    )
-      ? sanitize_key(
-          wp_unslash($_GET['mrm_professor_send_state'])
-        )
-      : $selected_professor_state;
-
-    if (
-      !isset(
-        $state_options[$selected_professor_send_state]
-      )
-    ) {
-      $selected_professor_send_state =
-        $selected_professor_state;
+    if (!isset($state_options[$selected_state])) {
+      $selected_state = 'az';
     }
 
     echo '<div class="wrap">';
@@ -19619,26 +19660,26 @@ public function handle_marketing_resubscribe() {
     echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;">';
     echo '<h2>Save Manual Lists</h2>';
 
-    echo '<form method="get" action="' . esc_url(admin_url('admin.php')) . '" style="margin:0 0 18px;">';
+    echo '<form method="get" action="' . esc_url(admin_url('admin.php')) . '" style="margin:0 0 20px;">';
     echo '<input type="hidden" name="page" value="mrm-pay-hub-marketing-email-lists">';
-    echo '<label for="mrm-outreach-state-selector"><strong>School outreach state</strong></label><br>';
-    echo '<select id="mrm-outreach-state-selector" name="mrm_outreach_state" onchange="this.form.submit();" style="min-width:260px;margin-top:6px;">';
+    echo '<label for="mrm-marketing-state-selector"><strong>State-specific lists</strong></label><br>';
+    echo '<select id="mrm-marketing-state-selector" name="mrm_state" onchange="this.form.submit();" style="min-width:280px;margin-top:6px;">';
 
     foreach ($state_options as $state_key => $state_label) {
-      echo '<option value="' . esc_attr($state_key) . '" ' . selected($selected_outreach_state, $state_key, false) . '>'
+      echo '<option value="' . esc_attr($state_key) . '" ' . selected($selected_state, $state_key, false) . '>'
         . esc_html($state_label)
         . '</option>';
     }
 
     echo '</select>';
-    echo '<noscript><button type="submit" class="button" style="margin-left:8px;">View State</button></noscript>';
+    echo '<p class="description">This selection controls every state-specific instructor, professor, director, and administrator list on this page.</p>';
+    echo '<noscript><button type="submit" class="button">View State</button></noscript>';
     echo '</form>';
 
     echo '<form id="mrm-marketing-list-save-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
     echo '<input type="hidden" name="action" value="mrm_marketing_email_save_lists">';
-    echo '<input type="hidden" name="mrm_marketing_outreach_state" value="' . esc_attr($selected_outreach_state) . '">';
-    echo '<input type="hidden" name="mrm_marketing_professor_state" value="'
-      . esc_attr($selected_professor_state)
+    echo '<input type="hidden" name="mrm_marketing_state" value="'
+      . esc_attr($selected_state)
       . '">';
 
     wp_nonce_field(
@@ -19668,38 +19709,8 @@ public function handle_marketing_resubscribe() {
 
     echo '<p class="description">These dynamic lists are generated from fully onboarded instructor profile records. They cannot be edited manually.</p>';
 
-    echo '<form method="get" action="' . esc_url(admin_url('admin.php')) . '" style="margin:14px 0;">';
-
-    echo '<input type="hidden" name="page" value="mrm-pay-hub-marketing-email-lists">';
-
-    echo '<input type="hidden" name="mrm_outreach_state" value="'
-      . esc_attr($selected_outreach_state)
-      . '">';
-
-    echo '<input type="hidden" name="mrm_professor_state" value="'
-      . esc_attr($selected_professor_state)
-      . '">';
-
-    echo '<label for="mrm-instructor-state-selector"><strong>Instructor state</strong></label><br>';
-
-    echo '<select id="mrm-instructor-state-selector" name="mrm_instructor_state" onchange="this.form.submit();" style="min-width:260px;margin-top:6px;">';
-
-    foreach ($state_options as $state_key => $state_label) {
-      echo '<option value="' . esc_attr($state_key) . '" '
-        . selected($selected_instructor_state, $state_key, false)
-        . '>'
-        . esc_html($state_label)
-        . '</option>';
-    }
-
-    echo '</select>';
-
-    echo '<noscript><button type="submit" class="button" style="margin-left:8px;">View State</button></noscript>';
-
-    echo '</form>';
-
     $selected_instructor_list_key = $this->mrm_marketing_state_instructor_key(
-      $selected_instructor_state
+      $selected_state
     );
 
     $selected_instructor_recipients = $this->mrm_marketing_get_list_recipients(
@@ -19710,11 +19721,11 @@ public function handle_marketing_resubscribe() {
     echo '<div style="border-top:1px solid #e5e5e5;padding-top:14px;margin-top:14px;">';
 
     echo '<h3 style="margin-bottom:4px;">Instructors in '
-      . esc_html($state_options[$selected_instructor_state])
+      . esc_html($state_options[$selected_state])
       . '</h3>';
 
     echo '<p class="description">Fully onboarded instructor profiles whose saved state is '
-      . esc_html($state_options[$selected_instructor_state])
+      . esc_html($state_options[$selected_state])
       . '.</p>';
 
     echo '<p><strong>Dynamic list:</strong> '
@@ -19730,45 +19741,9 @@ public function handle_marketing_resubscribe() {
 
     echo '<p class="description">These are manually populated marketing outreach lists. All College Professors automatically combines every state list and removes duplicate emails.</p>';
 
-    echo '<form method="get" action="'
-      . esc_url(admin_url('admin.php'))
-      . '" style="margin:14px 0;">';
-
-    echo '<input type="hidden" name="page" value="mrm-pay-hub-marketing-email-lists">';
-
-    echo '<input type="hidden" name="mrm_outreach_state" value="'
-      . esc_attr($selected_outreach_state)
-      . '">';
-
-    echo '<input type="hidden" name="mrm_instructor_state" value="'
-      . esc_attr($selected_instructor_state)
-      . '">';
-
-    echo '<label for="mrm-professor-state-selector"><strong>College professor state</strong></label><br>';
-
-    echo '<select id="mrm-professor-state-selector" name="mrm_professor_state" onchange="this.form.submit();" style="min-width:260px;margin-top:6px;">';
-
-    foreach ($state_options as $state_key => $state_label) {
-      echo '<option value="' . esc_attr($state_key) . '" '
-        . selected(
-            $selected_professor_state,
-            $state_key,
-            false
-          )
-        . '>'
-        . esc_html($state_label)
-        . '</option>';
-    }
-
-    echo '</select>';
-
-    echo '<noscript><button type="submit" class="button" style="margin-left:8px;">View State</button></noscript>';
-
-    echo '</form>';
-
     $selected_professor_list_key =
       $this->mrm_marketing_state_college_professor_key(
-        $selected_professor_state
+        $selected_state
       );
 
     $selected_professor_emails = isset(
@@ -19781,7 +19756,7 @@ public function handle_marketing_resubscribe() {
 
     echo '<h3 style="margin-bottom:4px;">College Professors in '
       . esc_html(
-          $state_options[$selected_professor_state]
+          $state_options[$selected_state]
         )
       . '</h3>';
 
@@ -19804,17 +19779,17 @@ public function handle_marketing_resubscribe() {
 
     echo '<div style="border-top:2px solid #ccd0d4;padding-top:18px;margin-top:22px;">';
     echo '<h2 style="margin-bottom:4px;">'
-      . esc_html($state_options[$selected_outreach_state])
+      . esc_html($state_options[$selected_state])
       . ' School Outreach Lists'
       . '</h2>';
 
     echo '<p class="description">The four lists below belong only to '
-      . esc_html($state_options[$selected_outreach_state])
+      . esc_html($state_options[$selected_state])
       . '. Use the state dropdown above to view and edit another state.</p>';
 
     foreach ($school_outreach_types as $type_key => $type_def) {
       $list_key = $this->mrm_marketing_school_outreach_key(
-        $selected_outreach_state,
+        $selected_state,
         $type_key
       );
 
@@ -19859,9 +19834,13 @@ public function handle_marketing_resubscribe() {
 
     echo '<h3 style="margin-top:20px;">Mailing Address / Footer Text</h3><p class="description">Shown in the footer of marketing emails.</p>';
     echo '<textarea name="mrm_marketing_mailing_address" rows="4" class="large-text">' . esc_textarea($mailing_address) . '</textarea>';
-    echo '<p class="submit"><button type="submit" class="button button-primary">Save Marketing Lists for '
-      . esc_html($state_options[$selected_outreach_state])
-      . '</button></p></form></div>';
+    echo '<p class="submit">';
+    echo '<button type="submit" class="button button-primary">';
+    echo 'Save All Marketing Lists';
+    echo '</button>';
+    echo '</p>';
+    echo '</form>';
+    echo '</div>';
 
     echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;"><h2>Preview and Send Email</h2>';
     echo '<p class="description">'
@@ -19874,66 +19853,6 @@ public function handle_marketing_resubscribe() {
     wp_nonce_field('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
     echo '<table class="form-table"><tr><th scope="row"><label for="mrm_marketing_subject">Subject</label></th><td><input type="text" id="mrm_marketing_subject" name="mrm_marketing_subject" class="large-text" required></td></tr>';
     echo '<tr><th scope="row"><label for="mrm_marketing_html">Email Body</label></th><td><textarea id="mrm_marketing_html" name="mrm_marketing_html" rows="12" class="large-text code" required></textarea><p class="description">Enter the complete custom HTML for this email. The subject line is used only as the email subject and is not inserted into the body. Instructor-only correspondence is sent without an automatic footer. All other recipient lists receive the configured marketing mailing address and unsubscribe footer.</p></td></tr>';
-    echo '<tr>';
-    echo '<th scope="row"><label for="mrm-marketing-send-state">School Outreach State</label></th>';
-    echo '<td>';
-
-    echo '<select id="mrm-marketing-send-state" style="min-width:260px;">';
-
-    foreach ($state_options as $state_key => $state_label) {
-      echo '<option value="' . esc_attr($state_key) . '" '
-        . selected($selected_send_state, $state_key, false)
-        . '>'
-        . esc_html($state_label)
-        . '</option>';
-    }
-
-    echo '</select>';
-
-    echo '<p class="description">This dropdown controls which state’s four school outreach lists are shown below. It does not affect the dynamic or General Interest lists.</p>';
-    echo '</td>';
-    echo '</tr>';
-
-    echo '<tr>';
-    echo '<th scope="row"><label for="mrm-marketing-instructor-send-state">Instructor State</label></th>';
-    echo '<td>';
-    echo '<select id="mrm-marketing-instructor-send-state" style="min-width:260px;">';
-
-    foreach ($state_options as $state_key => $state_label) {
-      echo '<option value="' . esc_attr($state_key) . '" '
-        . selected($selected_instructor_state, $state_key, false)
-        . '>'
-        . esc_html($state_label)
-        . '</option>';
-    }
-
-    echo '</select>';
-    echo '<p class="description">This dropdown controls which state-specific instructor list is shown below. All Current Instructors remains available as a standard list.</p>';
-    echo '</td>';
-    echo '</tr>';
-
-    echo '<tr>';
-    echo '<th scope="row"><label for="mrm-marketing-professor-send-state">College Professor State</label></th>';
-    echo '<td>';
-    echo '<select id="mrm-marketing-professor-send-state" style="min-width:260px;">';
-
-    foreach ($state_options as $state_key => $state_label) {
-      echo '<option value="' . esc_attr($state_key) . '" '
-        . selected(
-            $selected_professor_send_state,
-            $state_key,
-            false
-          )
-        . '>'
-        . esc_html($state_label)
-        . '</option>';
-    }
-
-    echo '</select>';
-    echo '<p class="description">This dropdown controls which state-specific college-professor marketing list is shown below. All College Professors remains available under Standard Lists.</p>';
-    echo '</td>';
-    echo '</tr>';
-
     echo '<tr><th scope="row">Send To Lists</th><td>';
 
     echo '<div style="margin-bottom:16px;">';
@@ -19969,129 +19888,95 @@ public function handle_marketing_resubscribe() {
 
     echo '</div>';
 
-    echo '<div style="border-top:1px solid #dcdcde;padding-top:14px;margin-bottom:16px;">';
-    echo '<strong>Instructor Lists by State</strong>';
-
-    foreach ($state_options as $state_key => $state_label) {
-      $display = $state_key === $selected_instructor_state
-        ? 'block'
-        : 'none';
-
-      $list_key = $this->mrm_marketing_state_instructor_key($state_key);
-
-      $count = count(
-        $this->mrm_marketing_get_list_recipients(
-          $list_key,
-          true
-        )
+    $state_instructor_list_key =
+      $this->mrm_marketing_state_instructor_key(
+        $selected_state
       );
 
-      echo '<div class="mrm-marketing-instructor-state-group" data-state="'
-        . esc_attr($state_key)
-        . '" style="display:'
-        . esc_attr($display)
-        . ';margin-top:8px;">';
+    $state_instructor_count = count(
+      $this->mrm_marketing_get_list_recipients(
+        $state_instructor_list_key,
+        false
+      )
+    );
 
-      echo '<label style="display:block;margin:6px 0;">';
-      echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="instructor" name="mrm_marketing_lists[]" value="'
-        . esc_attr($list_key)
-        . '"> ';
-      echo 'Instructors in ' . esc_html($state_label);
-      echo ' <span class="description">(Instructor correspondence — no marketing footer; '
-        . esc_html((string)$count)
-        . ' recipient(s))</span>';
-      echo '</label>';
-      echo '</div>';
-    }
-
+    echo '<div style="border-top:1px solid #dcdcde;padding-top:14px;margin-bottom:16px;">';
+    echo '<strong>Instructor List for '
+      . esc_html($state_options[$selected_state])
+      . '</strong>';
+    echo '<label style="display:block;margin:8px 0;">';
+    echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="instructor" name="mrm_marketing_lists[]" value="'
+      . esc_attr($state_instructor_list_key)
+      . '"> ';
+    echo 'Instructors in ' . esc_html($state_options[$selected_state]);
+    echo ' <span class="description">(Instructor correspondence — no marketing footer; '
+      . esc_html((string)$state_instructor_count)
+      . ' recipient(s))</span>';
+    echo '</label>';
     echo '</div>';
 
-    echo '<div style="border-top:1px solid #dcdcde;padding-top:14px;margin-bottom:16px;">';
-
-    echo '<strong>College Professor Lists by State</strong>';
-
-    foreach ($state_options as $state_key => $state_label) {
-      $display =
-        $state_key === $selected_professor_send_state
-          ? 'block'
-          : 'none';
-
-      $list_key =
-        $this->mrm_marketing_state_college_professor_key(
-          $state_key
-        );
-
-      $count = count(
-        $this->mrm_marketing_get_list_recipients(
-          $list_key,
-          true
-        )
+    $state_professor_list_key =
+      $this->mrm_marketing_state_college_professor_key(
+        $selected_state
       );
 
-      echo '<div class="mrm-marketing-professor-state-group" data-state="'
-        . esc_attr($state_key)
-        . '" style="display:'
-        . esc_attr($display)
-        . ';margin-top:8px;">';
+    $state_professor_count = count(
+      $this->mrm_marketing_get_list_recipients(
+        $state_professor_list_key,
+        true
+      )
+    );
 
-      echo '<label style="display:block;margin:6px 0;">';
-
-      echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" name="mrm_marketing_lists[]" value="'
-        . esc_attr($list_key)
-        . '"> ';
-
-      echo 'College Professors in '
-        . esc_html($state_label);
-
-      echo ' <span class="description">('
-        . esc_html((string)$count)
-        . ' recipient(s); marketing footer and unsubscribe enabled)</span>';
-
-      echo '</label>';
-      echo '</div>';
-    }
-
+    echo '<div style="border-top:1px solid #dcdcde;padding-top:14px;margin-bottom:16px;">';
+    echo '<strong>College Professor List for '
+      . esc_html($state_options[$selected_state])
+      . '</strong>';
+    echo '<label style="display:block;margin:8px 0;">';
+    echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" name="mrm_marketing_lists[]" value="'
+      . esc_attr($state_professor_list_key)
+      . '"> ';
+    echo 'College Professors in ' . esc_html($state_options[$selected_state]);
+    echo ' <span class="description">('
+      . esc_html((string)$state_professor_count)
+      . ' recipient(s); marketing footer and unsubscribe enabled)</span>';
+    echo '</label>';
     echo '</div>';
 
     echo '<div style="border-top:1px solid #dcdcde;padding-top:14px;">';
-    echo '<strong>School Outreach Lists</strong>';
+    echo '<strong>School Outreach Lists for '
+      . esc_html($state_options[$selected_state])
+      . '</strong>';
 
-    foreach ($state_options as $state_key => $state_label) {
-      $display = $state_key === $selected_send_state ? 'block' : 'none';
+    foreach ($school_outreach_types as $type_key => $type_def) {
+      $list_key = $this->mrm_marketing_school_outreach_key(
+        $selected_state,
+        $type_key
+      );
 
-      echo '<div class="mrm-marketing-send-state-group" data-state="'
-        . esc_attr($state_key)
-        . '" style="display:'
-        . esc_attr($display)
-        . ';margin-top:8px;">';
+      $label = (string)(
+        $type_def['label'] ?? $type_key
+      );
 
-      echo '<p style="margin:0 0 8px;"><strong>'
-        . esc_html($state_label)
-        . '</strong></p>';
+      $count = count(
+        $this->mrm_marketing_get_list_recipients(
+          $list_key,
+          true
+        )
+      );
 
-      foreach ($school_outreach_types as $type_key => $type_def) {
-        $list_key = $this->mrm_marketing_school_outreach_key(
-          $state_key,
-          $type_key
-        );
-
-        $label = (string)($type_def['label'] ?? $type_key);
-        $count = count(
-          $this->mrm_marketing_get_list_recipients($list_key, true)
-        );
-
-        echo '<label style="display:block;margin:6px 0;">';
-        echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" name="mrm_marketing_lists[]" value="'
-          . esc_attr($list_key)
-          . '"> ';
-        echo esc_html($label);
-        echo ' <span class="description">('
-          . esc_html((string)$count)
-          . ' recipient(s))</span>';
-        echo '</label>';
-      }
-
-      echo '</div>';
+      echo '<label style="display:block;margin:8px 0;">';
+      echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" name="mrm_marketing_lists[]" value="'
+        . esc_attr($list_key)
+        . '"> ';
+      echo esc_html(
+        $state_options[$selected_state]
+        . ' — '
+        . $label
+      );
+      echo ' <span class="description">('
+        . esc_html((string)$count)
+        . ' recipient(s))</span>';
+      echo '</label>';
     }
 
     echo '</div>';
@@ -20181,20 +20066,6 @@ public function handle_marketing_resubscribe() {
       var body = document.getElementById('mrm_marketing_html');
       var subjectPreview = document.getElementById('mrm-marketing-preview-subject');
       var frame = document.getElementById('mrm-marketing-preview-frame');
-      var sendStateSelector = document.getElementById('mrm-marketing-send-state');
-      var sendStateGroups = document.querySelectorAll('.mrm-marketing-send-state-group');
-      var instructorStateSelector = document.getElementById(
-        'mrm-marketing-instructor-send-state'
-      );
-      var instructorStateGroups = document.querySelectorAll(
-        '.mrm-marketing-instructor-state-group'
-      );
-      var professorStateSelector = document.getElementById(
-        'mrm-marketing-professor-send-state'
-      );
-      var professorStateGroups = document.querySelectorAll(
-        '.mrm-marketing-professor-state-group'
-      );
       var recipientListCheckboxes = document.querySelectorAll(
         '.mrm-marketing-recipient-list'
       );
@@ -20204,130 +20075,6 @@ public function handle_marketing_resubscribe() {
       var marketingSendForm = document.getElementById(
         'mrm-marketing-email-send-form'
       );
-
-      function updateSendStateGroups() {
-        var selectedState = sendStateSelector
-          ? String(sendStateSelector.value || '')
-          : '';
-
-        Array.prototype.forEach.call(sendStateGroups, function(group) {
-          var groupState = String(group.getAttribute('data-state') || '');
-          var isVisible = groupState === selectedState;
-
-          group.style.display = isVisible ? 'block' : 'none';
-
-          if (!isVisible) {
-            var checkboxes = group.querySelectorAll('input[type="checkbox"]');
-
-            Array.prototype.forEach.call(checkboxes, function(checkbox) {
-              checkbox.checked = false;
-            });
-          }
-        });
-      }
-
-      function updateInstructorStateGroups() {
-        var selectedState = instructorStateSelector
-          ? String(instructorStateSelector.value || '')
-          : '';
-
-        Array.prototype.forEach.call(
-          instructorStateGroups,
-          function(group) {
-            var groupState = String(
-              group.getAttribute('data-state') || ''
-            );
-
-            var isVisible = groupState === selectedState;
-
-            group.style.display = isVisible
-              ? 'block'
-              : 'none';
-
-            if (!isVisible) {
-              var checkboxes = group.querySelectorAll(
-                'input[type="checkbox"]'
-              );
-
-              Array.prototype.forEach.call(
-                checkboxes,
-                function(checkbox) {
-                  checkbox.checked = false;
-                }
-              );
-            }
-          }
-        );
-      }
-
-      function updateProfessorStateGroups() {
-        var selectedState = professorStateSelector
-          ? String(professorStateSelector.value || '')
-          : '';
-
-        Array.prototype.forEach.call(
-          professorStateGroups,
-          function(group) {
-            var groupState = String(
-              group.getAttribute('data-state') || ''
-            );
-
-            var isVisible = groupState === selectedState;
-
-            group.style.display = isVisible
-              ? 'block'
-              : 'none';
-
-            if (!isVisible) {
-              var checkboxes = group.querySelectorAll(
-                'input[type="checkbox"]'
-              );
-
-              Array.prototype.forEach.call(
-                checkboxes,
-                function(checkbox) {
-                  checkbox.checked = false;
-                }
-              );
-            }
-          }
-        );
-      }
-
-      if (sendStateSelector) {
-        sendStateSelector.addEventListener('change', function() {
-          updateSendStateGroups();
-          updateSelectionWarning();
-          updatePreview();
-        });
-        updateSendStateGroups();
-      }
-
-      if (instructorStateSelector) {
-        instructorStateSelector.addEventListener(
-          'change',
-          function() {
-            updateInstructorStateGroups();
-            updateSelectionWarning();
-            updatePreview();
-          }
-        );
-
-        updateInstructorStateGroups();
-      }
-
-      if (professorStateSelector) {
-        professorStateSelector.addEventListener(
-          'change',
-          function() {
-            updateProfessorStateGroups();
-            updateSelectionWarning();
-            updatePreview();
-          }
-        );
-
-        updateProfessorStateGroups();
-      }
 
       function getSelectedEmailMode() {
         var hasInstructor = false;
