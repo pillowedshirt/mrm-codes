@@ -12010,12 +12010,6 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       'desc' => 'Emails from the sheet music subscription table.',
       'example' => '',
     ),
-    'all_lesson_students' => array(
-      'label' => 'All Lesson Purchasers / Students',
-      'type' => 'dynamic',
-      'desc' => 'Anyone with a lesson record in the scheduler table.',
-      'example' => '',
-    ),
     'active_lesson_students' => array(
       'label' => 'Active Lesson Students',
       'type' => 'dynamic',
@@ -12025,56 +12019,32 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     'past_lesson_students' => array(
       'label' => 'Past Lesson Students With No Upcoming Lessons',
       'type' => 'dynamic',
-      'desc' => 'Students who have booked before but have no upcoming lesson.',
+      'desc' => 'Students whose last lesson was at least one full month ago and who have no upcoming lesson.',
       'example' => '',
-    ),
-    'band_directors' => array(
-      'label' => 'Band Directors',
-      'type' => 'manual',
-      'desc' => 'Manual list for band directors, school contacts, and program leads.',
-      'example' => "director@example.edu
-assistant.director@example.edu
-programlead@example.org",
     ),
     'general_interest' => array(
       'label' => 'General Interest',
       'type' => 'manual',
-      'desc' => 'Manual list for general updates.',
+      'desc' => 'Manual list for general Low Brass Lessons updates, promo codes, masterclasses, sheet music releases, and studio announcements.',
       'example' => "parent@example.com
 studentfamily@example.com
 community@example.org",
     ),
-    'low_brass_plus_interest' => array(
-      'label' => 'Low Brass Plus Interest',
+    'band_directors' => array(
+      'label' => 'Band Directors',
       'type' => 'manual',
-      'desc' => 'Manual list for Low Brass Plus offers and subscription updates.',
-      'example' => "plus.interest@example.com
-sheetmusicfan@example.com
-subscriberlead@example.org",
+      'desc' => 'Manual outreach list for band directors and music educators.',
+      'example' => "director@example.edu
+assistant.director@example.edu
+programlead@example.org",
     ),
-    'prospective_instructors' => array(
-      'label' => 'Prospective Instructors',
+    'school_administrators' => array(
+      'label' => 'School Administrators',
       'type' => 'manual',
-      'desc' => 'Manual list for potential future instructor recruiting.',
-      'example' => "teacher@example.com
-tubainstructor@example.com
-trombonist@example.org",
-    ),
-    'concert_event_interest' => array(
-      'label' => 'Concert / Event Interest',
-      'type' => 'manual',
-      'desc' => 'Manual list for events, clinics, concerts, and announcements.',
-      'example' => "concertgoer@example.com
-clinicfamily@example.com
-events@example.org",
-    ),
-    'school_programs_clinics' => array(
-      'label' => 'School Programs / Clinics',
-      'type' => 'manual',
-      'desc' => 'Manual list for clinics, masterclasses, and school-program outreach.',
-      'example' => "schoolprogram@example.edu
-musicdepartment@example.edu
-cliniccontact@example.org",
+      'desc' => 'Manual outreach list for school administrators, district contacts, and school leadership contacts.',
+      'example' => "principal@example.edu
+artsadmin@example.edu
+districtcontact@example.org",
     ),
   );
 }
@@ -12218,12 +12188,14 @@ cliniccontact@example.org",
     return $emails;
   }
 
-  private function mrm_marketing_lesson_student_emails($mode = 'all') {
+  private function mrm_marketing_lesson_student_emails($mode = 'active') {
     global $wpdb;
     $lessons = $this->table_lessons();
     if (!$this->mrm_marketing_table_exists($lessons)) return array();
 
     $now = current_time('mysql');
+    $one_month_ago = date('Y-m-d H:i:s', strtotime('-1 month', current_time('timestamp')));
+
     $active_rows = $wpdb->get_col(
       $wpdb->prepare(
         "SELECT DISTINCT student_email FROM {$lessons}
@@ -12249,28 +12221,39 @@ cliniccontact@example.org",
       return $emails;
     }
 
-    $all_rows = $wpdb->get_col(
-      "SELECT DISTINCT student_email FROM {$lessons}
-       WHERE student_email IS NOT NULL
-         AND student_email <> ''
-         AND status NOT IN ('cancelled','refunded','failed')
-       ORDER BY student_email ASC
-       LIMIT 5000"
-    );
-
-    $all = array();
-    foreach ((array)$all_rows as $email) {
-      $email = strtolower(sanitize_email((string)$email));
-      if ($email && is_email($email)) $all[$email] = true;
-    }
-
     if ($mode === 'past') {
-      foreach (array_keys($active) as $email) unset($all[$email]);
+      $past_rows = $wpdb->get_results(
+        $wpdb->prepare(
+          "SELECT student_email, MAX(start_time) AS last_lesson_at
+           FROM {$lessons}
+           WHERE student_email IS NOT NULL
+             AND student_email <> ''
+             AND start_time < %s
+             AND status NOT IN ('cancelled','refunded','failed')
+           GROUP BY student_email
+           HAVING last_lesson_at <= %s
+           ORDER BY student_email ASC
+           LIMIT 5000",
+          $now,
+          $one_month_ago
+        ),
+        ARRAY_A
+      );
+
+      $past = array();
+      foreach ((array)$past_rows as $row) {
+        $email = strtolower(sanitize_email((string)($row['student_email'] ?? '')));
+        if ($email && is_email($email) && !isset($active[$email])) {
+          $past[$email] = true;
+        }
+      }
+
+      $emails = array_keys($past);
+      sort($emails);
+      return $emails;
     }
 
-    $emails = array_keys($all);
-    sort($emails);
-    return $emails;
+    return array();
   }
 
   private function mrm_marketing_get_list_recipients($list_key, $apply_suppression = true) {
@@ -12284,9 +12267,6 @@ cliniccontact@example.org",
         break;
       case 'sheet_music_subscribers':
         $emails = $this->mrm_marketing_sheet_music_subscriber_emails();
-        break;
-      case 'all_lesson_students':
-        $emails = $this->mrm_marketing_lesson_student_emails('all');
         break;
       case 'active_lesson_students':
         $emails = $this->mrm_marketing_lesson_student_emails('active');
@@ -12377,7 +12357,7 @@ cliniccontact@example.org",
       . '<input type="hidden" name="action" value="mrm_marketing_unsubscribe_do">'
       . '<input type="hidden" name="token" value="' . esc_attr($token) . '">'
       . wp_nonce_field('mrm_marketing_unsubscribe_do_' . $email, 'mrm_marketing_unsubscribe_nonce', true, false)
-      . '<button type="submit" style="background:#111;color:#fff;border:0;border-radius:6px;padding:12px 18px;cursor:pointer;">Unsubscribe</button>'
+      . '<button type="submit" style="appearance:none;background:#111;color:#fff;border:0;border-radius:999px;padding:13px 22px;cursor:pointer;font-weight:800;">Remove me from marketing emails</button>'
       . '</form>';
 
     $this->mrm_marketing_render_unsubscribe_page(
@@ -12405,7 +12385,7 @@ cliniccontact@example.org",
       ? sanitize_text_field(wp_unslash($_POST['mrm_marketing_unsubscribe_nonce']))
       : '';
 
-    if ($nonce && !wp_verify_nonce($nonce, 'mrm_marketing_unsubscribe_do_' . $email)) {
+    if (!$nonce || !wp_verify_nonce($nonce, 'mrm_marketing_unsubscribe_do_' . $email)) {
       $this->mrm_marketing_render_unsubscribe_page(
         'Unsubscribe request expired',
         'Please reopen the unsubscribe link from your email and try again.',
@@ -12443,7 +12423,7 @@ cliniccontact@example.org",
 
   private function mrm_marketing_allowed_html($html) {
     $html = (string)$html;
-    if (current_user_can('unfiltered_html')) return $html;
+    if (current_user_can('manage_options')) return $html;
     $allowed = wp_kses_allowed_html('post');
     foreach ($allowed as $tag => $attrs) {
       $allowed[$tag]['style'] = true;
@@ -12460,14 +12440,88 @@ cliniccontact@example.org",
     return wp_kses($html, $allowed);
   }
 
-  private function mrm_marketing_wrap_email_html($subject, $body_html, $unsubscribe_url, $mailing_address = '') {
-    $site = esc_html(get_bloginfo('name'));
-    $logo_url = $this->mrm_get_site_logo_url();
-    $logo_html = $logo_url ? '<div style="text-align:center;margin:0 0 22px 0;"><img src="' . esc_url($logo_url) . '" alt="' . $site . '" style="max-width:220px;height:auto;border:0;display:inline-block;"></div>' : '';
-    $address_html = trim((string)$mailing_address) !== '' ? '<div style="margin-top:10px;">' . nl2br(esc_html((string)$mailing_address)) . '</div>' : '';
-    $unsubscribe_html = $unsubscribe_url ? '<div style="margin-top:22px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;"><div>You are receiving this marketing email from ' . $site . '.</div>' . $address_html . '<div style="margin-top:10px;"><a href="' . esc_url($unsubscribe_url) . '" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div></div>' : '';
+  private function mrm_marketing_email_footer_html($unsubscribe_url, $mailing_address = '') {
+    $site = esc_html(get_bloginfo('name') ? get_bloginfo('name') : 'Low Brass Lessons');
+    $address_html = trim((string)$mailing_address) !== ''
+      ? '<div style="margin-top:8px;">' . nl2br(esc_html((string)$mailing_address)) . '</div>'
+      : '';
 
-    return '<!doctype html><html><body style="margin:0;padding:0;background:#f6f6f6;"><div style="max-width:680px;margin:0 auto;padding:24px;"><div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.05);font-family:&quot;Source Sans 3&quot;,Arial,Helvetica,sans-serif;color:#111;">' . $logo_html . '<div style="font-size:15px;line-height:1.7;color:#222;text-align:left;">' . $body_html . '</div>' . $unsubscribe_html . '</div></div></body></html>';
+    if (!$unsubscribe_url) return '';
+
+    return '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
+      . '<div>You are receiving this marketing email from ' . $site . '.</div>'
+      . $address_html
+      . '<div style="margin-top:10px;"><a href="' . esc_url($unsubscribe_url) . '" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div>'
+      . '</div>';
+  }
+
+  private function mrm_marketing_build_email_html($body_html, $unsubscribe_url, $mailing_address = '') {
+    $body_html = (string)$body_html;
+    $footer_html = $this->mrm_marketing_email_footer_html($unsubscribe_url, $mailing_address);
+
+    if (stripos($body_html, '</body>') !== false) {
+      return preg_replace('/<\/body>/i', $footer_html . '</body>', $body_html, 1);
+    }
+
+    if (stripos($body_html, '<html') !== false) {
+      return $body_html . $footer_html;
+    }
+
+    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;">'
+      . $body_html
+      . $footer_html
+      . '</body></html>';
+  }
+
+  private function mrm_marketing_sent_log() {
+    $log = get_option('mrm_pay_hub_marketing_sent_log', array());
+    return is_array($log) ? $log : array();
+  }
+
+  private function mrm_marketing_save_sent_log($log) {
+    $clean = array();
+
+    foreach ((array)$log as $item) {
+      if (!is_array($item)) continue;
+      $clean[] = array(
+        'sent_at' => sanitize_text_field((string)($item['sent_at'] ?? '')),
+        'subject' => sanitize_text_field((string)($item['subject'] ?? '')),
+        'list_keys' => array_values(array_map('sanitize_key', (array)($item['list_keys'] ?? array()))),
+        'list_labels' => array_values(array_map('sanitize_text_field', (array)($item['list_labels'] ?? array()))),
+        'recipient_count' => absint($item['recipient_count'] ?? 0),
+        'sent_count' => absint($item['sent_count'] ?? 0),
+        'failed_count' => absint($item['failed_count'] ?? 0),
+      );
+    }
+
+    $clean = array_slice($clean, 0, 250);
+    update_option('mrm_pay_hub_marketing_sent_log', $clean, false);
+  }
+
+  private function mrm_marketing_add_sent_log_item($subject, $list_keys, $recipient_count, $sent_count, $failed_count) {
+    $defs = $this->mrm_marketing_default_lists();
+    $labels = array();
+
+    foreach ((array)$list_keys as $key) {
+      $key = sanitize_key((string)$key);
+      if (isset($defs[$key])) {
+        $labels[] = (string)($defs[$key]['label'] ?? $key);
+      }
+    }
+
+    $log = $this->mrm_marketing_sent_log();
+
+    array_unshift($log, array(
+      'sent_at' => current_time('mysql'),
+      'subject' => sanitize_text_field((string)$subject),
+      'list_keys' => array_values(array_map('sanitize_key', (array)$list_keys)),
+      'list_labels' => $labels,
+      'recipient_count' => absint($recipient_count),
+      'sent_count' => absint($sent_count),
+      'failed_count' => absint($failed_count),
+    ));
+
+    $this->mrm_marketing_save_sent_log($log);
   }
 
   private function mrm_marketing_upload_attachments_from_request() {
@@ -12554,13 +12608,22 @@ cliniccontact@example.org",
 
     foreach ($defs as $key => $def) {
       if (($def['type'] ?? '') !== 'manual') continue;
-      $field = 'mrm_marketing_list_' . $key;
-      $raw = isset($_POST[$field]) ? wp_unslash($_POST[$field]) : '';
+      $raw = isset($_POST['mrm_marketing_list_' . $key])
+        ? wp_unslash($_POST['mrm_marketing_list_' . $key])
+        : '';
       $lists[$key] = $this->mrm_marketing_normalize_emails_from_text($raw);
     }
 
-    $mailing_address = isset($_POST['mrm_marketing_mailing_address']) ? wp_kses_post(wp_unslash($_POST['mrm_marketing_mailing_address'])) : '';
-    update_option('mrm_pay_hub_marketing_mailing_address', trim((string)$mailing_address), false);
+    foreach (array_keys($lists) as $key) {
+      if (!isset($defs[$key]) || (($defs[$key]['type'] ?? '') !== 'manual')) {
+        unset($lists[$key]);
+      }
+    }
+
+    $mailing_address = isset($_POST['mrm_marketing_mailing_address'])
+      ? wp_kses_post(wp_unslash($_POST['mrm_marketing_mailing_address']))
+      : '';
+    update_option('mrm_pay_hub_marketing_mailing_address', $mailing_address, false);
     $this->save_email_lists($lists);
 
     wp_safe_redirect(add_query_arg(array('page'=>'mrm-pay-hub-marketing-email-lists','mrm_marketing_saved'=>'1'), admin_url('admin.php')));
@@ -12621,7 +12684,7 @@ cliniccontact@example.org",
 
   foreach ($recipients as $email) {
     $unsubscribe_url = $this->mrm_marketing_unsubscribe_url($email);
-    $final_html = $this->mrm_marketing_wrap_email_html($subject, $body_html, $unsubscribe_url, $mailing_address);
+    $final_html = $this->mrm_marketing_build_email_html($body_html, $unsubscribe_url, $mailing_address);
     $ok = wp_mail($email, $subject, $final_html, $headers, $attachments);
 
     if ($ok) {
@@ -12632,6 +12695,14 @@ cliniccontact@example.org",
   }
 
   $this->mrm_marketing_delete_temp_attachments($attachments);
+
+  $this->mrm_marketing_add_sent_log_item(
+    $subject,
+    $selected_lists,
+    count($recipients),
+    $sent,
+    $failed
+  );
 
   wp_safe_redirect(add_query_arg(array(
     'page' => 'mrm-pay-hub-marketing-email-lists',
@@ -18471,6 +18542,7 @@ public function handle_marketing_resubscribe() {
     $manual_lists = $this->mrm_marketing_manual_lists();
     $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
     $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+    $sent_log = $this->mrm_marketing_sent_log();
 
     echo '<div class="wrap">';
     echo '<h1>Marketing Email Lists</h1>';
@@ -18511,7 +18583,7 @@ public function handle_marketing_resubscribe() {
     echo '<form method="post" enctype="multipart/form-data" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_email_send">';
     wp_nonce_field('mrm_marketing_email_send', 'mrm_marketing_email_send_nonce');
     echo '<table class="form-table"><tr><th scope="row"><label for="mrm_marketing_subject">Subject</label></th><td><input type="text" id="mrm_marketing_subject" name="mrm_marketing_subject" class="large-text" required></td></tr>';
-    echo '<tr><th scope="row"><label for="mrm_marketing_html">Email Body</label></th><td><textarea id="mrm_marketing_html" name="mrm_marketing_html" rows="12" class="large-text code" required></textarea><p class="description">Basic HTML is allowed. This preview shows the wrapped email layout before sending.</p></td></tr><tr><th scope="row">Send To Lists</th><td>';
+    echo '<tr><th scope="row"><label for="mrm_marketing_html">Email Body</label></th><td><textarea id="mrm_marketing_html" name="mrm_marketing_html" rows="12" class="large-text code" required></textarea><p class="description">Enter the complete custom HTML for this marketing email. The subject line is used only as the email subject and is not inserted into the body. The preview matches the sent email body with the required unsubscribe footer appended.</p></td></tr><tr><th scope="row">Send To Lists</th><td>';
     foreach ($defs as $key => $def) {
       $label = (string)($def['label'] ?? $key);
       $count = count($this->mrm_marketing_get_list_recipients($key, true));
@@ -18523,7 +18595,34 @@ public function handle_marketing_resubscribe() {
     echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_resubscribe">';
     wp_nonce_field('mrm_marketing_resubscribe', 'mrm_marketing_resubscribe_nonce');
     echo '<textarea name="mrm_marketing_resubscribe_emails" rows="4" class="large-text" placeholder="person@example.com"></textarea><p class="submit"><button type="submit" class="button">Re-subscribe</button></p></form>';
-    echo '<p><strong>Currently unsubscribed:</strong> ' . esc_html((string)count($unsubscribed)) . '</p></div></div>';
+    echo '<p><strong>Currently unsubscribed:</strong> ' . esc_html((string)count($unsubscribed)) . '</p>';
+
+    echo '<hr><h2>Previously Sent Marketing Emails</h2>';
+    echo '<p class="description">Most recent marketing sends, organized by recipient list and timestamp.</p>';
+
+    if (empty($sent_log)) {
+      echo '<p>No marketing emails have been sent yet.</p>';
+    } else {
+      echo '<table class="widefat striped"><thead><tr>';
+      echo '<th>Date / Time</th><th>Subject</th><th>Recipient List(s)</th><th>Recipients</th><th>Sent</th><th>Failed</th>';
+      echo '</tr></thead><tbody>';
+
+      foreach ((array)$sent_log as $item) {
+        $labels = isset($item['list_labels']) && is_array($item['list_labels']) ? $item['list_labels'] : array();
+        echo '<tr>';
+        echo '<td>' . esc_html((string)($item['sent_at'] ?? '')) . '</td>';
+        echo '<td>' . esc_html((string)($item['subject'] ?? '')) . '</td>';
+        echo '<td>' . esc_html(implode(', ', array_map('sanitize_text_field', $labels))) . '</td>';
+        echo '<td>' . esc_html((string)absint($item['recipient_count'] ?? 0)) . '</td>';
+        echo '<td>' . esc_html((string)absint($item['sent_count'] ?? 0)) . '</td>';
+        echo '<td>' . esc_html((string)absint($item['failed_count'] ?? 0)) . '</td>';
+        echo '</tr>';
+      }
+
+      echo '</tbody></table>';
+    }
+
+    echo '</div></div>';
     ?>
     <script>
     (function(){
@@ -18536,7 +18635,24 @@ public function handle_marketing_resubscribe() {
         var s = subject ? subject.value : '';
         var b = body ? body.value : '';
         if (subjectPreview) subjectPreview.textContent = s || 'Subject preview will appear here.';
-        if (frame) frame.srcdoc = '<!doctype html><html><body style="margin:0;background:#f7f3eb;font-family:Arial,sans-serif;color:#171512;"><div style="max-width:680px;margin:0 auto;padding:24px;"><div style="background:#fff;border:1px solid #d9cfbe;border-radius:16px;padding:24px;"><h1 style="margin-top:0;">' + escapeHtml(s) + '</h1><div>' + (b || '<p>Email body preview will appear here.</p>') + '</div><hr><p style="font-size:12px;color:#666;">Unsubscribe link and mailing address appear in the sent email footer.</p></div></div></body></html>';
+        if (frame) {
+          var footer = '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
+            + '<div>You are receiving this marketing email from Low Brass Lessons.</div>'
+            + '<div style="margin-top:10px;"><a href="#" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div>'
+            + '</div>';
+
+          var html = b || '<p>Email body preview will appear here.</p>';
+
+          if (html.toLowerCase().indexOf('</body>') !== -1) {
+            html = html.replace(/<\/body>/i, footer + '</body>');
+          } else if (html.toLowerCase().indexOf('<html') !== -1) {
+            html = html + footer;
+          } else {
+            html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;">' + html + footer + '</body></html>';
+          }
+
+          frame.srcdoc = html;
+        }
       }
       if (subject) subject.addEventListener('input', updatePreview);
       if (body) body.addEventListener('input', updatePreview);
