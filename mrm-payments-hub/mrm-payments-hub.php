@@ -60,10 +60,9 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_marketing_resubscribe', array($this, 'handle_marketing_resubscribe'));
     add_action('admin_post_mrm_marketing_general_interest_signup', array($this, 'handle_marketing_general_interest_signup'));
     add_action('admin_post_nopriv_mrm_marketing_general_interest_signup', array($this, 'handle_marketing_general_interest_signup'));
-    add_action('admin_post_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
-    add_action('admin_post_nopriv_mrm_marketing_unsubscribe_confirm', array($this, 'handle_marketing_unsubscribe_confirm'));
-    add_action('admin_post_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
-    add_action('admin_post_nopriv_mrm_marketing_unsubscribe_do', array($this, 'handle_marketing_unsubscribe_do'));
+    add_action('init', array($this, 'register_marketing_unsubscribe_endpoint'));
+    add_filter('query_vars', array($this, 'register_marketing_unsubscribe_query_vars'));
+    add_action('template_redirect', array($this, 'handle_public_marketing_unsubscribe'));
     add_action('admin_post_mrm_profile_card_create_invite', array($this, 'handle_profile_card_create_invite'));
     add_action('admin_post_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
     add_action('admin_post_nopriv_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
@@ -12333,10 +12332,44 @@ districtcontact@example.org",
     return hash_equals($expected, (string)$sig) ? $email : '';
   }
 
+  public function register_marketing_unsubscribe_endpoint() {
+    add_rewrite_rule(
+      '^marketing-unsubscribe/?$',
+      'index.php?mrm_marketing_unsubscribe=1',
+      'top'
+    );
+  }
+
+  public function register_marketing_unsubscribe_query_vars($vars) {
+    $vars[] = 'mrm_marketing_unsubscribe';
+    return $vars;
+  }
+
+  public function handle_public_marketing_unsubscribe() {
+    if ((string)get_query_var('mrm_marketing_unsubscribe') !== '1') {
+      return;
+    }
+
+    if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'POST') {
+      $this->handle_marketing_unsubscribe_do();
+      exit;
+    }
+
+    $this->handle_marketing_unsubscribe_confirm();
+    exit;
+  }
+
   private function mrm_marketing_unsubscribe_url($email) {
     $token = $this->mrm_marketing_token_for_email($email);
-    if ($token === '') return '';
-    return add_query_arg(array('action' => 'mrm_marketing_unsubscribe_confirm', 'token' => $token), admin_url('admin-post.php'));
+
+    if ($token === '') {
+      return '';
+    }
+
+    return add_query_arg(
+      array('token' => rawurlencode($token)),
+      home_url('/marketing-unsubscribe/')
+    );
   }
 
   // BEGIN PAYMENT HUB MARKETING UNSUBSCRIBE FIX
@@ -12353,10 +12386,14 @@ districtcontact@example.org",
       exit;
     }
 
-    $form = '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:20px;">'
-      . '<input type="hidden" name="action" value="mrm_marketing_unsubscribe_do">'
+    $form = '<form method="post" action="' . esc_url(home_url('/marketing-unsubscribe/')) . '" style="margin-top:20px;">'
       . '<input type="hidden" name="token" value="' . esc_attr($token) . '">'
-      . wp_nonce_field('mrm_marketing_unsubscribe_do_' . $email, 'mrm_marketing_unsubscribe_nonce', true, false)
+      . wp_nonce_field(
+          'mrm_marketing_unsubscribe_do_' . $email,
+          'mrm_marketing_unsubscribe_nonce',
+          true,
+          false
+        )
       . '<button type="submit" style="appearance:none;background:#111;color:#fff;border:0;border-radius:999px;padding:13px 22px;cursor:pointer;font-weight:800;">Remove me from marketing emails</button>'
       . '</form>';
 
@@ -12369,7 +12406,10 @@ districtcontact@example.org",
   }
 
   public function handle_marketing_unsubscribe_do() {
-    $token = isset($_POST['token']) ? sanitize_text_field(wp_unslash($_POST['token'])) : '';
+    $token = isset($_POST['token'])
+      ? sanitize_text_field(wp_unslash($_POST['token']))
+      : '';
+
     $email = $this->mrm_marketing_email_from_token($token);
 
     if (!$email) {
@@ -12385,7 +12425,13 @@ districtcontact@example.org",
       ? sanitize_text_field(wp_unslash($_POST['mrm_marketing_unsubscribe_nonce']))
       : '';
 
-    if (!$nonce || !wp_verify_nonce($nonce, 'mrm_marketing_unsubscribe_do_' . $email)) {
+    if (
+      !$nonce ||
+      !wp_verify_nonce(
+        $nonce,
+        'mrm_marketing_unsubscribe_do_' . $email
+      )
+    ) {
       $this->mrm_marketing_render_unsubscribe_page(
         'Unsubscribe request expired',
         'Please reopen the unsubscribe link from your email and try again.',
@@ -12416,7 +12462,41 @@ districtcontact@example.org",
     echo '<main style="max-width:640px;margin:60px auto;padding:28px;background:#fff;border:1px solid #e5e5e5;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.06);">';
     echo '<h1 style="margin:0 0 14px;font-size:28px;line-height:1.2;font-family:&quot;Academico&quot;,Georgia,&quot;Times New Roman&quot;,serif;">' . esc_html($title) . '</h1>';
     echo '<p style="font-size:16px;line-height:1.6;margin:0;">' . wp_kses_post($message) . '</p>';
-    echo wp_kses_post($extra_html);
+
+    $allowed_unsubscribe_html = array(
+      'form' => array(
+        'method' => true,
+        'action' => true,
+        'style' => true,
+      ),
+      'input' => array(
+        'type' => true,
+        'name' => true,
+        'id' => true,
+        'value' => true,
+      ),
+      'button' => array(
+        'type' => true,
+        'style' => true,
+      ),
+      'p' => array(
+        'style' => true,
+        'class' => true,
+      ),
+      'a' => array(
+        'href' => true,
+        'style' => true,
+        'class' => true,
+      ),
+      'div' => array(
+        'style' => true,
+        'class' => true,
+      ),
+      'strong' => array(),
+      'br' => array(),
+    );
+
+    echo wp_kses($extra_html, $allowed_unsubscribe_html);
     echo '</main></body></html>';
   }
   // END PAYMENT HUB MARKETING UNSUBSCRIBE FIX
