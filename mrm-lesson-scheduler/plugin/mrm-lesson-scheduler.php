@@ -13236,6 +13236,7 @@ protected function mrm_get_contact_represents_label( $value ) {
         'incoming_student'                    => 'Incoming student',
         'currently_enrolled_student'          => 'Currently enrolled student',
         'interested_instructor'               => 'Interested instructor',
+        'current_instructor'                  => 'Current instructor',
         'composer_arranger'                   => 'Composer/arranger',
         'school_band_director_music_educator' => 'School band director/music educator',
         'film_media_creative_collaborator'    => 'Film, media, or creative collaborator',
