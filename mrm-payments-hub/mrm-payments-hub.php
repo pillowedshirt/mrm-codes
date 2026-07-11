@@ -19698,8 +19698,29 @@ public function handle_marketing_resubscribe() {
         echo '<textarea name="mrm_marketing_list_' . esc_attr($key) . '" rows="7" class="large-text code" placeholder="one@example.com&#10;two@example.com">' . esc_textarea(implode("\n", $emails)) . '</textarea>';
         echo '<p class="description">Current saved emails: ' . esc_html((string)count($emails)) . '</p>';
       } else {
-        $recipients = $this->mrm_marketing_get_list_recipients($key, true);
-        echo '<p><strong>Dynamic list:</strong> ' . esc_html((string)count($recipients)) . ' active recipient(s) after unsubscribe suppression.</p>';
+        /*
+         * Instructor correspondence does not use the marketing
+         * unsubscribe suppression list. Its displayed count should
+         * therefore match the recipients that will actually be sent
+         * correspondence.
+         */
+        $apply_suppression =
+          !$this->mrm_marketing_is_instructor_list($key);
+
+        $recipients = $this->mrm_marketing_get_list_recipients(
+          $key,
+          $apply_suppression
+        );
+
+        if ($this->mrm_marketing_is_instructor_list($key)) {
+          echo '<p><strong>Dynamic list:</strong> '
+            . esc_html((string)count($recipients))
+            . ' current instructor recipient(s).</p>';
+        } else {
+          echo '<p><strong>Dynamic list:</strong> '
+            . esc_html((string)count($recipients))
+            . ' active recipient(s) after unsubscribe suppression.</p>';
+        }
       }
       echo '</div>';
     }
@@ -19715,7 +19736,7 @@ public function handle_marketing_resubscribe() {
 
     $selected_instructor_recipients = $this->mrm_marketing_get_list_recipients(
       $selected_instructor_list_key,
-      true
+      false
     );
 
     echo '<div style="border-top:1px solid #e5e5e5;padding-top:14px;margin-top:14px;">';
@@ -19730,7 +19751,7 @@ public function handle_marketing_resubscribe() {
 
     echo '<p><strong>Dynamic list:</strong> '
       . esc_html((string)count($selected_instructor_recipients))
-      . ' active recipient(s) after unsubscribe suppression.</p>';
+      . ' current instructor recipient(s).</p>';
 
     echo '</div>';
     echo '</div>';
@@ -19860,7 +19881,20 @@ public function handle_marketing_resubscribe() {
 
     foreach ($defs as $key => $def) {
       $label = (string)($def['label'] ?? $key);
-      $count = count($this->mrm_marketing_get_list_recipients($key, true));
+
+      /*
+       * Instructor correspondence ignores marketing unsubscribe
+       * suppression, so instructor list counts must do the same.
+       */
+      $apply_count_suppression =
+        !$this->mrm_marketing_is_instructor_list($key);
+
+      $count = count(
+        $this->mrm_marketing_get_list_recipients(
+          $key,
+          $apply_count_suppression
+        )
+      );
 
       echo '<label style="display:block;margin:6px 0;">';
       $list_mode = $this->mrm_marketing_is_instructor_list($key)
