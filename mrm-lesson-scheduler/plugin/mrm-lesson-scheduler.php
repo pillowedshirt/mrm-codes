@@ -2352,6 +2352,7 @@ protected function mrm_get_google_service_account_json() {
     docusign_completed TINYINT(1) NOT NULL DEFAULT 0,
     stripe_onboarding_completed TINYINT(1) NOT NULL DEFAULT 0,
     stripe_connected_account_id VARCHAR(255) DEFAULT NULL,
+    stripe_tax_location_id VARCHAR(191) NULL,
     hire_date DATE DEFAULT NULL,
     PRIMARY KEY (id),
     KEY city_idx (city),
@@ -2539,6 +2540,17 @@ protected function mrm_get_google_service_account_json() {
             }
         }
 
+        $instructor_required_columns = array(
+            'stripe_tax_location_id' => "ALTER TABLE {$table_instructors} ADD COLUMN stripe_tax_location_id VARCHAR(191) NULL",
+        );
+
+        foreach ( $instructor_required_columns as $col_name => $alter_sql ) {
+            $column_exists = $wpdb->get_var( $wpdb->prepare( "SHOW COLUMNS FROM {$table_instructors} LIKE %s", $col_name ) );
+            if ( empty( $column_exists ) ) {
+                $wpdb->query( $alter_sql );
+            }
+        }
+
         // Ensure mileage cache has error-message support for Google Distance Matrix diagnostics.
         $mileage_table = $wpdb->prefix . 'mrm_tax_mileage_cache';
         $found_mileage_table = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $mileage_table ) );
@@ -2703,7 +2715,7 @@ protected function mrm_get_google_service_account_json() {
 
         $instructor_cols = $wpdb->get_col( "DESC {$instructors}", 0 );
         $need_instructors = array(
-            'timezone', 'first_name', 'last_name', 'fingerprint_card_file', 'fingerprint_card_name', 'fingerprint_card_uploaded_at', 'docusign_completed', 'stripe_onboarding_completed', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state', 'address', 'zip_code', 'offers_in_person', 'offers_online',
+            'timezone', 'first_name', 'last_name', 'fingerprint_card_file', 'fingerprint_card_name', 'fingerprint_card_uploaded_at', 'docusign_completed', 'stripe_onboarding_completed', 'stripe_connected_account_id', 'hire_date', 'calendar_id', 'profile_image_url', 'short_description', 'long_description', 'instruments', 'state', 'address', 'zip_code', 'offers_in_person', 'offers_online', 'stripe_tax_location_id',
         );
 
         foreach ( $need_instructors as $col ) {
