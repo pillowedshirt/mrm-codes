@@ -2037,6 +2037,14 @@ protected function mrm_get_google_service_account_json() {
         return array( $start_ts, $end_ts );
     }
 
+    protected function google_event_start_utc( $event ) {
+        list( $start_ts, $end_ts ) = $this->google_event_to_utc_ts( $event );
+
+        if ( ! $start_ts ) return '';
+
+        return gmdate( 'Y-m-d H:i:s', $start_ts );
+    }
+
     protected function google_event_end_utc( $event ) {
         list( , $end_ts ) = $this->google_event_to_utc_ts( $event );
         if ( ! $end_ts ) return '';

@@ -2085,6 +2085,50 @@ private function mrm_mc_email_details_box_html( $details_html ) {
 	</div>';
 }
 
+private function mrm_mc_send_email_recorded( $email_type, $recipient_email, $subject, $html_body, $event_id = null, $registration_id = null ) {
+	global $wpdb;
+
+	$email_type      = sanitize_key( $email_type );
+	$recipient_email = sanitize_email( $recipient_email );
+	$subject         = sanitize_text_field( $subject );
+	$event_id        = null === $event_id ? null : absint( $event_id );
+	$registration_id = null === $registration_id ? null : absint( $registration_id );
+	$sent            = false;
+	$error_message   = '';
+
+	if ( '' === $recipient_email || ! is_email( $recipient_email ) ) {
+		$error_message = 'The recipient email address was invalid.';
+	} elseif ( '' === $subject ) {
+		$error_message = 'The email subject was empty.';
+	} elseif ( '' === trim( (string) $html_body ) ) {
+		$error_message = 'The email body was empty.';
+	} else {
+		try {
+			$sent = wp_mail( $recipient_email, $subject, $html_body, array( 'Content-Type: text/html; charset=UTF-8' ) );
+			if ( ! $sent ) {
+				$error_message = 'wp_mail returned false.';
+			}
+		} catch ( Throwable $error ) {
+			$sent          = false;
+			$error_message = $error->getMessage();
+		}
+	}
+
+	$table = $this->t( 'mrm_masterclass_email_log' );
+	if ( $this->mrm_mc_table_exists( $table ) ) {
+		$inserted = $wpdb->insert( $table, array( 'event_id' => $event_id, 'registration_id' => $registration_id, 'recipient_email' => $recipient_email, 'email_type' => $email_type, 'subject' => $subject, 'status' => $sent ? 'sent' : 'failed', 'error_message' => $sent ? null : $error_message, 'sent_at' => $this->now() ) );
+		if ( false === $inserted ) {
+			$this->mrm_mc_debug_log( 'Masterclass email log insert failed.', array( 'email_type' => $email_type, 'recipient' => $recipient_email, 'database_error' => $wpdb->last_error ) );
+		}
+	}
+
+	if ( ! $sent ) {
+		$this->mrm_mc_debug_log( 'Masterclass email delivery failed.', array( 'email_type' => $email_type, 'recipient' => $recipient_email, 'error' => $error_message ) );
+	}
+
+	return $sent;
+}
+
 private function mrm_mc_sheet_music_piece_options() {
     $products = get_option( 'mrm_pay_hub_products', array() );
     $products = is_array( $products ) ? $products : array();
@@ -4294,6 +4338,21 @@ private function mrm_mc_create_payment_intent( $event, $email, $terms ) {
 			'GET',
 			'payment_intents/' . rawurlencode( $payment_intent_id )
 		);
+	}
+	private function mrm_mc_actual_stripe_fee_cents( $payment_intent_id ) {
+		$payment_intent_id = sanitize_text_field( $payment_intent_id );
+		if ( '' === $payment_intent_id ) return new WP_Error( 'missing_masterclass_payment_intent', 'Missing Masterclass PaymentIntent ID.' );
+		$payment_intent = $this->mrm_mc_stripe_request( 'GET', 'payment_intents/' . rawurlencode( $payment_intent_id ) . '?expand%5B%5D=' . rawurlencode( 'latest_charge.balance_transaction' ) );
+		if ( is_wp_error( $payment_intent ) ) return $payment_intent;
+		$charge = $payment_intent['latest_charge'] ?? null;
+		if ( ! is_array( $charge ) ) return new WP_Error( 'masterclass_charge_not_expanded', 'The Stripe Charge could not be retrieved.' );
+		$balance_transaction = $charge['balance_transaction'] ?? null;
+		if ( is_string( $balance_transaction ) ) {
+			$balance_transaction = $this->mrm_mc_stripe_request( 'GET', 'balance_transactions/' . rawurlencode( $balance_transaction ) );
+			if ( is_wp_error( $balance_transaction ) ) return $balance_transaction;
+		}
+		if ( ! is_array( $balance_transaction ) ) return new WP_Error( 'masterclass_balance_transaction_missing', 'The Stripe Balance Transaction was unavailable.' );
+		return absint( $balance_transaction['fee'] ?? 0 );
 	}
 	private function mrm_mc_refund_payment_intent( $payment_intent_id, $amount_cents ) {
 		$payment_intent_id = sanitize_text_field( $payment_intent_id );
@@ -9298,18 +9357,26 @@ public function rest_finalize_registration( $request ) {
 
 	$discount_cents = max( 0, $base_amount_cents - $subtotal_cents );
 	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair(); $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
-	$share_calc = $this->mrm_mc_calculate_registration_shares( $subtotal_cents, absint( $event->presenter_id ), absint( $event->id ) );
-	$stripe_fee = absint( $share_calc['stripe_fee_cents'] );
-	$net_cents = absint( $share_calc['net_cents'] );
-	$presenter_cut = absint( $share_calc['presenter_share_cents'] );
-	$platform_cut  = absint( $share_calc['platform_share_cents'] );
+	$actual_fee_result = $this->mrm_mc_actual_stripe_fee_cents( $payment_intent_id );
+	$ledger_status = 'payable';
+	$fee_note = 'Actual Stripe processing fee retrieved from the Balance Transaction.';
+	if ( is_wp_error( $actual_fee_result ) ) {
+		$stripe_fee = $this->mrm_mc_estimated_stripe_fee_cents( $amount_received );
+		$ledger_status = 'payout_review_required';
+		$fee_note = 'Actual Stripe fee retrieval failed. The payout is held for review. ' . $actual_fee_result->get_error_message();
+	} else {
+		$stripe_fee = absint( $actual_fee_result );
+	}
+	$net_cents = max( 0, $subtotal_cents - $stripe_fee );
+	$presenter_cut = min( $this->mrm_mc_event_payout_per_student_cents( absint( $event->id ), absint( $event->presenter_id ) ), $net_cents );
+	$platform_cut = max( 0, $net_cents - $presenter_cut );
 	$terms_snapshot = wp_json_encode( $terms );
 	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','billing_line1'=>sanitize_text_field($metadata['billing_line1'] ?? ''),'billing_line2'=>sanitize_text_field($metadata['billing_line2'] ?? ''),'billing_city'=>sanitize_text_field($metadata['billing_city'] ?? ''),'billing_state'=>sanitize_text_field($metadata['billing_state'] ?? ''),'billing_postal_code'=>sanitize_text_field($metadata['billing_postal_code'] ?? ''),'billing_country'=>sanitize_text_field($metadata['billing_country'] ?? 'US'),'subtotal_cents'=>$subtotal_cents,'tax_cents'=>$tax_cents,'tax_code'=>sanitize_text_field($metadata['mrm_tax_code'] ?? 'txcd_20060045'),'tax_calculation_id'=>sanitize_text_field($metadata['mrm_tax_calculation_id'] ?? ''),'taxability_reason'=>sanitize_key($metadata['mrm_taxability_reason'] ?? ''),'terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'promo_discount_cents'=>$discount_cents,'original_amount_cents'=>$base_amount_cents,'final_amount_cents'=>$amount_received,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'cancel_url'=>esc_url_raw( $this->mrm_mc_cancel_url_for_token( $gate['token'] ) ),'feedback_url'=>esc_url_raw( $this->mrm_mc_feedback_url_for_token( $gate['token'] ) ),'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
 	$registration_data = $this->mrm_mc_filter_data_for_table( $regs_table, $registration_data );
 	$inserted = $wpdb->insert( $regs_table, $registration_data );
 	if ( false === $inserted ) { return new WP_Error('mrm_masterclass_registration_insert_failed','Payment succeeded, but registration could not be saved. Please contact support.',array('status'=>500)); }
 	$registration_id = absint( $wpdb->insert_id );
-	$ledger_data = array('event_id'=>$event_id,'registration_id'=>$registration_id,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'gross_cents'=>$amount_received,'discount_cents'=>$discount_cents,'stripe_fee_cents'=>$stripe_fee,'estimated_stripe_fee_cents'=>$stripe_fee,'net_cents'=>$net_cents,'presenter_share_cents'=>$presenter_cut,'platform_share_cents'=>$platform_cut,'status'=>'payable','notes'=>'Masterclass registration payment finalized. Presenter payout was calculated from the per-student payout amount assigned to this Masterclass.','payout_eligible_at'=>gmdate( 'Y-m-d H:i:s', strtotime( $event->end_time . ' UTC' ) + WEEK_IN_SECONDS ),'created_at'=>$this->now(),'updated_at'=>$this->now());
+	$ledger_data = array('event_id'=>$event_id,'registration_id'=>$registration_id,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'gross_cents'=>$amount_received,'discount_cents'=>$discount_cents,'stripe_fee_cents'=>$stripe_fee,'estimated_stripe_fee_cents'=>$stripe_fee,'net_cents'=>$net_cents,'presenter_share_cents'=>$presenter_cut,'platform_share_cents'=>$platform_cut,'status'=>$ledger_status,'notes'=>'Masterclass registration payment finalized. Collected tax was excluded from revenue. ' . $fee_note,'payout_eligible_at'=>gmdate( 'Y-m-d H:i:s', strtotime( $event->end_time . ' UTC' ) + WEEK_IN_SECONDS ),'created_at'=>$this->now(),'updated_at'=>$this->now());
 	$ledger_data = $this->mrm_mc_filter_data_for_table( $ledger_table, $ledger_data );
 	$wpdb->insert( $ledger_table, $ledger_data );
 
