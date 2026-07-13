@@ -33,6 +33,9 @@ class MRM_Payments_Hub_Single {
 
   // Admin menu
   const MENU_SLUG = 'mrm-payments-hub';
+  const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
+  const TAX_RULES_VERSION = '2026-07-12';
+  const TAX_MONITOR_MENU_SLUG = 'mrm-pay-hub-sales-tax-nexus';
   private const MRM_AUTO_REFUND_MAX_AGE_DAYS = 7;
   private const MRM_PM_LOOKAHEAD_HOURS = 72;
   private const MRM_PM_SAME_MONTH_REQUIRES_UPDATE = true;
@@ -69,6 +72,9 @@ class MRM_Payments_Hub_Single {
     add_action('parse_request', array($this, 'intercept_public_marketing_unsubscribe'), 1);
     add_action('template_redirect', array($this, 'handle_public_marketing_unsubscribe'), 1);
     add_action('admin_post_mrm_profile_card_create_invite', array($this, 'handle_profile_card_create_invite'));
+    add_action('admin_post_mrm_tax_state_save', array($this, 'handle_tax_state_save'));
+    add_action('admin_post_mrm_tax_sync_stripe_registrations', array($this, 'handle_tax_sync_stripe_registrations'));
+    add_action('admin_post_mrm_tax_recompute_thresholds', array($this, 'handle_tax_recompute_thresholds'));
     add_action('admin_post_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
     add_action('admin_post_nopriv_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
     add_action('admin_post_mrm_lesson_cancel_request', array($this, 'render_lesson_cancel_request'));
@@ -99,6 +105,8 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_check_upcoming_payment_methods', array($this, 'cron_check_upcoming_payment_methods'));
     add_action('mrm_pay_hub_retry_sheet_music_subscriptions', array($this, 'cron_retry_sheet_music_subscriptions'));
     add_action('mrm_sheet_music_subscription_renewal_reminder_cron', array($this, 'cron_send_sheet_music_subscription_renewal_reminders'));
+    add_action('mrm_pay_hub_tax_sync_registrations', array($this, 'cron_tax_sync_registrations'));
+    add_action('mrm_pay_hub_tax_recompute_thresholds', array($this, 'cron_tax_recompute_thresholds'));
 
     add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
@@ -151,6 +159,14 @@ class MRM_Payments_Hub_Single {
 
     if (!wp_next_scheduled('mrm_sheet_music_subscription_renewal_reminder_cron')) {
       wp_schedule_event(time() + 360, 'hourly', 'mrm_sheet_music_subscription_renewal_reminder_cron');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_tax_sync_registrations')) {
+      wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', 'mrm_pay_hub_tax_sync_registrations');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_tax_recompute_thresholds')) {
+      wp_schedule_event(time() + DAY_IN_SECONDS, 'daily', 'mrm_pay_hub_tax_recompute_thresholds');
     }
 
     $this->register_marketing_unsubscribe_endpoint();
@@ -311,6 +327,21 @@ class MRM_Payments_Hub_Single {
     return $wpdb->prefix . 'mrm_profile_card_requests';
   }
 
+  private function table_tax_state_status() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_tax_state_status';
+  }
+
+  private function table_tax_sales_ledger() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_tax_sales_ledger';
+  }
+
+  private function table_tax_alerts() {
+    global $wpdb;
+    return $wpdb->prefix . 'mrm_tax_alerts';
+  }
+
   public function maybe_install_or_upgrade_db() {
     // Run a lightweight existence + schema check; only dbDelta if needed.
     global $wpdb;
@@ -325,11 +356,14 @@ class MRM_Payments_Hub_Single {
     $subs = $this->table_sheet_music_subscriptions();
     $promo_redemptions = $this->table_promo_redemptions();
     $profile_requests = $this->table_profile_card_requests();
+    $tax_states = $this->table_tax_state_status();
+    $tax_sales  = $this->table_tax_sales_ledger();
+    $tax_alerts = $this->table_tax_alerts();
 
     $needs_upgrade = false;
 
     // 1) Table existence check
-    foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks, $subs, $promo_redemptions, $profile_requests) as $t) {
+    foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks, $subs, $promo_redemptions, $profile_requests, $tax_states, $tax_sales, $tax_alerts) as $t) {
       $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
       if ($found !== $t) {
         $needs_upgrade = true;
@@ -421,6 +455,8 @@ class MRM_Payments_Hub_Single {
       $this->install_or_upgrade_db();
     }
 
+    $this->mrm_tax_seed_state_rows();
+
     // ✅ One-time migration: move old master SKU rows to all-sheet-music
     $table = $this->table_sheet_music_access();
     $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
@@ -468,6 +504,9 @@ class MRM_Payments_Hub_Single {
     $subs = $this->table_sheet_music_subscriptions();
     $promo_redemptions = $this->table_promo_redemptions();
     $profile_requests = $this->table_profile_card_requests();
+    $tax_states = $this->table_tax_state_status();
+    $tax_sales  = $this->table_tax_sales_ledger();
+    $tax_alerts = $this->table_tax_alerts();
 
     $sql_orders = "CREATE TABLE {$orders} (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -698,6 +737,108 @@ class MRM_Payments_Hub_Single {
     dbDelta($sql_promo_redemptions);
     dbDelta($sql_profile_requests);
 
+    $sql_tax_states = "CREATE TABLE {$tax_states} (
+      state_code CHAR(2) NOT NULL,
+      state_name VARCHAR(100) NOT NULL,
+      jurisdiction_type VARCHAR(32) NOT NULL DEFAULT 'state',
+      general_sales_tax_status VARCHAR(32) NOT NULL DEFAULT 'statewide',
+      threshold_rule_verified TINYINT(1) NOT NULL DEFAULT 0,
+      threshold_amount_cents BIGINT UNSIGNED NULL,
+      threshold_transaction_count INT UNSIGNED NULL,
+      threshold_operator VARCHAR(8) NOT NULL DEFAULT 'amount',
+      measurement_window VARCHAR(64) NOT NULL DEFAULT '',
+      included_sales_basis VARCHAR(191) NOT NULL DEFAULT '',
+      rules_json LONGTEXT NULL,
+      rule_source_url TEXT NULL,
+      rule_effective_date DATE NULL,
+      rules_version VARCHAR(32) NOT NULL DEFAULT '',
+      physical_nexus_flag TINYINT(1) NOT NULL DEFAULT 0,
+      physical_nexus_reason TEXT NULL,
+      first_flagged_at DATETIME NULL,
+      authority_registration_status VARCHAR(32) NOT NULL DEFAULT 'not_started',
+      authority_registration_number VARCHAR(191) NULL,
+      authority_registration_effective_date DATE NULL,
+      stripe_registration_id VARCHAR(191) NULL,
+      stripe_registration_status VARCHAR(32) NOT NULL DEFAULT 'none',
+      stripe_livemode TINYINT(1) NOT NULL DEFAULT 0,
+      collection_active TINYINT(1) NOT NULL DEFAULT 0,
+      estimated_sales_cents BIGINT NOT NULL DEFAULT 0,
+      estimated_transaction_count INT NOT NULL DEFAULT 0,
+      estimated_threshold_percent DECIMAL(10,2) NOT NULL DEFAULT 0,
+      estimated_threshold_status VARCHAR(32) NOT NULL DEFAULT 'not_evaluated',
+      stripe_threshold_status VARCHAR(32) NOT NULL DEFAULT 'not_confirmed',
+      threshold_hit_at DATETIME NULL,
+      last_stripe_sync_at DATETIME NULL,
+      last_recomputed_at DATETIME NULL,
+      admin_notes LONGTEXT NULL,
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (state_code),
+      KEY collection_active (collection_active),
+      KEY estimated_threshold_status (estimated_threshold_status),
+      KEY physical_nexus_flag (physical_nexus_flag)
+    ) {$charset};";
+
+    $sql_tax_sales = "CREATE TABLE {$tax_sales} (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      external_id VARCHAR(191) NOT NULL,
+      source_type VARCHAR(64) NOT NULL,
+      source_id BIGINT UNSIGNED NULL,
+      payment_intent_id VARCHAR(191) NULL,
+      invoice_id VARCHAR(191) NULL,
+      customer_state CHAR(2) NOT NULL,
+      customer_country CHAR(2) NOT NULL DEFAULT 'US',
+      product_type VARCHAR(64) NOT NULL,
+      threshold_category VARCHAR(64) NOT NULL,
+      sales_channel VARCHAR(32) NOT NULL DEFAULT 'direct',
+      gross_sales_cents BIGINT NOT NULL DEFAULT 0,
+      taxable_sales_cents BIGINT NOT NULL DEFAULT 0,
+      tax_cents BIGINT NOT NULL DEFAULT 0,
+      refunded_sales_cents BIGINT NOT NULL DEFAULT 0,
+      refunded_tax_cents BIGINT NOT NULL DEFAULT 0,
+      transaction_count INT NOT NULL DEFAULT 1,
+      currency VARCHAR(10) NOT NULL DEFAULT 'usd',
+      tax_code VARCHAR(64) NULL,
+      taxability_reason VARCHAR(64) NULL,
+      tax_calculation_id VARCHAR(191) NULL,
+      tax_association_id VARCHAR(191) NULL,
+      tax_transaction_id VARCHAR(191) NULL,
+      tax_transaction_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+      occurred_at DATETIME NOT NULL,
+      metadata_json LONGTEXT NULL,
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY external_id (external_id),
+      KEY customer_state (customer_state),
+      KEY occurred_at (occurred_at),
+      KEY product_type (product_type),
+      KEY payment_intent_id (payment_intent_id)
+    ) {$charset};";
+
+    $sql_tax_alerts = "CREATE TABLE {$tax_alerts} (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      alert_key VARCHAR(191) NOT NULL,
+      state_code CHAR(2) NOT NULL,
+      alert_type VARCHAR(64) NOT NULL,
+      alert_status VARCHAR(32) NOT NULL DEFAULT 'open',
+      source_type VARCHAR(64) NULL,
+      source_id BIGINT UNSIGNED NULL,
+      details_json LONGTEXT NULL,
+      emailed_at DATETIME NULL,
+      resolved_at DATETIME NULL,
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY alert_key (alert_key),
+      KEY state_code (state_code),
+      KEY alert_status (alert_status)
+    ) {$charset};";
+
+    dbDelta($sql_tax_states);
+    dbDelta($sql_tax_sales);
+    dbDelta($sql_tax_alerts);
+
     // Promo codes may be reusable per email, so the old unique index must be removed.
     // dbDelta() does not reliably remove old indexes, so do it explicitly.
     $promo_unique_exists = $wpdb->get_var($wpdb->prepare(
@@ -744,6 +885,7 @@ class MRM_Payments_Hub_Single {
     if (!in_array('promo_started_at', $autopay_column_names, true)) {
       $wpdb->query("ALTER TABLE {$autopay} ADD promo_started_at DATETIME DEFAULT NULL AFTER promo_code");
     }
+    $this->mrm_tax_seed_state_rows();
   }
 
 
@@ -3022,6 +3164,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   /* =========================================================
    * Stripe HTTP (no composer dependency)
    * ======================================================= */
+
+  private function mrm_stripe_tax_headers() {
+    return array('Stripe-Version' => self::STRIPE_TAX_API_VERSION);
+  }
 
   private function stripe_api_request($method, $path, $params = array(), $extra_headers = array()) {
     $key = $this->secret_key();
@@ -16110,6 +16256,111 @@ public function handle_marketing_resubscribe() {
     echo '</div></div>';
   }
 
+
+
+  private function mrm_tax_seed_state_rows() {
+    global $wpdb;
+    $table = $this->table_tax_state_status();
+    $now = current_time('mysql');
+    $states = array('AL'=>'Alabama','AK'=>'Alaska','AZ'=>'Arizona','AR'=>'Arkansas','CA'=>'California','CO'=>'Colorado','CT'=>'Connecticut','DE'=>'Delaware','FL'=>'Florida','GA'=>'Georgia','HI'=>'Hawaii','ID'=>'Idaho','IL'=>'Illinois','IN'=>'Indiana','IA'=>'Iowa','KS'=>'Kansas','KY'=>'Kentucky','LA'=>'Louisiana','ME'=>'Maine','MD'=>'Maryland','MA'=>'Massachusetts','MI'=>'Michigan','MN'=>'Minnesota','MS'=>'Mississippi','MO'=>'Missouri','MT'=>'Montana','NE'=>'Nebraska','NV'=>'Nevada','NH'=>'New Hampshire','NJ'=>'New Jersey','NM'=>'New Mexico','NY'=>'New York','NC'=>'North Carolina','ND'=>'North Dakota','OH'=>'Ohio','OK'=>'Oklahoma','OR'=>'Oregon','PA'=>'Pennsylvania','RI'=>'Rhode Island','SC'=>'South Carolina','SD'=>'South Dakota','TN'=>'Tennessee','TX'=>'Texas','UT'=>'Utah','VT'=>'Vermont','VA'=>'Virginia','WA'=>'Washington','WV'=>'West Virginia','WI'=>'Wisconsin','WY'=>'Wyoming','DC'=>'District of Columbia');
+    foreach ($states as $code => $name) {
+      $existing = $wpdb->get_var($wpdb->prepare("SELECT state_code FROM {$table} WHERE state_code = %s", $code));
+      if ($existing) continue;
+      $general_status = 'statewide';
+      if (in_array($code, array('DE','MT','NH','OR'), true)) $general_status = 'no_general_state_sales_tax';
+      if ($code === 'AK') $general_status = 'local_sales_tax_only';
+      $wpdb->insert($table, array('state_code'=>$code,'state_name'=>$name,'general_sales_tax_status'=>$general_status,'threshold_rule_verified'=>0,'rules_version'=>self::TAX_RULES_VERSION,'authority_registration_status'=>'not_started','stripe_registration_status'=>'none','collection_active'=>0,'created_at'=>$now,'updated_at'=>$now));
+    }
+    $wpdb->update($table, array('physical_nexus_flag'=>1,'physical_nexus_reason'=>'Low Brass Lessons home-state business presence.','first_flagged_at'=>$now,'updated_at'=>$now), array('state_code'=>'AZ'));
+    $this->mrm_tax_seed_initial_verified_rules();
+  }
+
+  private function mrm_tax_seed_initial_verified_rules() {
+    global $wpdb;
+    $table = $this->table_tax_state_status();
+    $now = current_time('mysql');
+    $rules = array(
+      'AZ'=>array('threshold_amount_cents'=>10000000,'threshold_transaction_count'=>null,'threshold_operator'=>'amount','measurement_window'=>'current_or_previous_calendar_year','included_sales_basis'=>'gross sales excluding marketplace sales','rules_json'=>array('included_channels'=>array('direct'),'included_categories'=>array('all'),'subtract_refunds'=>false),'rule_source_url'=>'https://docs.stripe.com/tax/supported-countries/united-states/collect-tax?tax-jurisdiction-united-states=arizona'),
+      'TX'=>array('threshold_amount_cents'=>50000000,'threshold_transaction_count'=>null,'threshold_operator'=>'amount','measurement_window'=>'rolling_12_months','included_sales_basis'=>'gross sales including marketplace sales','rules_json'=>array('included_channels'=>array('direct','marketplace'),'included_categories'=>array('all'),'subtract_refunds'=>false),'rule_source_url'=>'https://docs.stripe.com/tax/supported-countries/united-states/collect-tax?tax-jurisdiction-united-states=texas'),
+      'IN'=>array('threshold_amount_cents'=>10000000,'threshold_transaction_count'=>null,'threshold_operator'=>'amount','measurement_window'=>'previous_calendar_year','included_sales_basis'=>'gross sales excluding marketplace sales','rules_json'=>array('included_channels'=>array('direct'),'included_categories'=>array('all'),'subtract_refunds'=>false),'rule_source_url'=>'https://docs.stripe.com/tax/supported-countries/united-states/collect-tax?tax-jurisdiction-united-states=indiana'),
+    );
+    foreach ($rules as $state=>$rule) {
+      $wpdb->update($table, array('threshold_rule_verified'=>1,'threshold_amount_cents'=>$rule['threshold_amount_cents'],'threshold_transaction_count'=>$rule['threshold_transaction_count'],'threshold_operator'=>$rule['threshold_operator'],'measurement_window'=>$rule['measurement_window'],'included_sales_basis'=>$rule['included_sales_basis'],'rules_json'=>wp_json_encode($rule['rules_json']),'rule_source_url'=>$rule['rule_source_url'],'rule_effective_date'=>'2026-07-12','rules_version'=>self::TAX_RULES_VERSION,'updated_at'=>$now), array('state_code'=>$state));
+    }
+  }
+
+  private function mrm_tax_is_live_stripe_key() { return strpos((string)$this->secret_key(), 'sk_live_') === 0; }
+
+  private function mrm_tax_sync_stripe_registrations() {
+    global $wpdb; $table=$this->table_tax_state_status(); $now=current_time('mysql'); $active=array(); $starting_after='';
+    do { $params=array('status'=>'active','limit'=>100); if($starting_after!=='') $params['starting_after']=$starting_after; $response=$this->stripe_api_request('GET','/v1/tax/registrations',$params,$this->mrm_stripe_tax_headers()); if(is_wp_error($response)) return $response; $data=(isset($response['data'])&&is_array($response['data']))?$response['data']:array(); foreach($data as $registration){ if(($registration['country']??'')!=='US') continue; $us=$registration['country_options']['us']??array(); if(($us['type']??'')!=='state_sales_tax') continue; $state=$this->mrm_normalize_state_code($us['state']??''); if($state==='') continue; $active[$state]=array('id'=>sanitize_text_field($registration['id']??''),'status'=>sanitize_key($registration['status']??''),'livemode'=>!empty($registration['livemode'])?1:0); } $has_more=!empty($response['has_more']); if($has_more && !empty($data)){ $last=end($data); $starting_after=sanitize_text_field($last['id']??''); } else { $starting_after=''; } } while($starting_after!=='');
+    $wpdb->query("UPDATE {$table} SET stripe_registration_id = NULL, stripe_registration_status = 'none', stripe_livemode = 0, collection_active = 0, last_stripe_sync_at = '" . esc_sql($now) . "', updated_at = '" . esc_sql($now) . "'");
+    foreach($active as $state=>$registration){ $row=$wpdb->get_row($wpdb->prepare("SELECT authority_registration_status FROM {$table} WHERE state_code = %s",$state),ARRAY_A); $authority_active=(($row['authority_registration_status']??'')==='active'); $stripe_mode_valid=$this->mrm_tax_is_live_stripe_key()?!empty($registration['livemode']):true; $collection_active=$authority_active && $registration['status']==='active' && $stripe_mode_valid; $wpdb->update($table,array('stripe_registration_id'=>$registration['id'],'stripe_registration_status'=>$registration['status'],'stripe_livemode'=>$registration['livemode'],'collection_active'=>$collection_active?1:0,'last_stripe_sync_at'=>$now,'updated_at'=>$now),array('state_code'=>$state)); if($collection_active) $this->mrm_tax_release_blocked_profile_requests_for_state($state); }
+    return true;
+  }
+
+  public function handle_tax_sync_stripe_registrations() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_sync_stripe_registrations','mrm_tax_sync_nonce'); $result=$this->mrm_tax_sync_stripe_registrations(); $url=admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG); $url=is_wp_error($result)?add_query_arg('tax_error',rawurlencode($result->get_error_message()),$url):add_query_arg('stripe_sync','1',$url); wp_safe_redirect($url); exit; }
+  public function cron_tax_sync_registrations() { $this->mrm_tax_sync_stripe_registrations(); }
+  public function cron_tax_recompute_thresholds() { $this->mrm_tax_recompute_all_thresholds(); }
+
+  private function mrm_tax_get_state_gate($state) {
+    global $wpdb; $state=$this->mrm_normalize_state_code($state); if($state==='') return array('allowed'=>false,'message'=>'The instructor state is missing or invalid.'); $row=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_state_status()} WHERE state_code = %s",$state),ARRAY_A); if(!$row) return array('allowed'=>false,'message'=>'The instructor state is not present in the tax registry.');
+    if(($row['authority_registration_status']??'')!=='active') return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because the {$state} state tax registration has not been marked active.");
+    if(($row['stripe_registration_status']??'')!=='active') return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because Stripe does not report an active sales-tax registration for {$state}.");
+    if($this->mrm_tax_is_live_stripe_key() && empty($row['stripe_livemode'])) return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because the {$state} Stripe registration is not active in live mode.");
+    if(empty($row['collection_active'])) return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because sales-tax collection for {$state} is not fully active.");
+    return array('allowed'=>true,'state'=>$state,'row'=>$row);
+  }
+
+  private function mrm_tax_flag_instructor_state($profile_request_id, $payload) {
+    global $wpdb; $state=$this->mrm_normalize_state_code($payload['state']??''); if($state==='') return array('allowed'=>false,'state'=>'','message'=>'The submitted instructor state is invalid.'); $table=$this->table_tax_state_status(); $now=current_time('mysql'); $existing=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE state_code = %s",$state),ARRAY_A); if(!$existing) return array('allowed'=>false,'state'=>$state,'message'=>'The submitted state is missing from the tax registry.'); $reasons=array(); if(!empty($existing['physical_nexus_reason'])) $reasons[]=$existing['physical_nexus_reason']; $reason='Instructor profile request #'.absint($profile_request_id).' submitted for '.$state.'.'; if(!in_array($reason,$reasons,true)) $reasons[]=$reason; $wpdb->update($table,array('physical_nexus_flag'=>1,'physical_nexus_reason'=>implode("\n",$reasons),'first_flagged_at'=>!empty($existing['first_flagged_at'])?$existing['first_flagged_at']:$now,'updated_at'=>$now),array('state_code'=>$state)); $this->mrm_tax_create_alert($state,'new_instructor_state','profile_request',absint($profile_request_id),array('message'=>"An instructor submitted a profile in {$state}. State tax-registration review is required before approval.")); return $this->mrm_tax_get_state_gate($state);
+  }
+
+  private function mrm_tax_release_blocked_profile_requests_for_state($state) { global $wpdb; $state=$this->mrm_normalize_state_code($state); if($state==='') return; $table=$this->table_profile_card_requests(); $requests=$wpdb->get_results("SELECT id, submission_payload FROM {$table} WHERE request_type = 'instructor_profile' AND status = 'tax_registration_required'",ARRAY_A); foreach($requests as $request){ $payload=$this->mrm_profile_card_decode_json($request['submission_payload']??''); if($this->mrm_normalize_state_code($payload['state']??'')!==$state) continue; $wpdb->update($table,array('status'=>'pending_review','updated_at'=>current_time('mysql')),array('id'=>absint($request['id']))); } }
+
+  private function mrm_tax_create_alert($state,$alert_type,$source_type='',$source_id=0,$details=array()) { global $wpdb; $state=$this->mrm_normalize_state_code($state); $alert_type=sanitize_key($alert_type); $source_type=sanitize_key($source_type); $source_id=absint($source_id); $alert_key=implode(':',array($state,$alert_type,$source_type,$source_id)); $table=$this->table_tax_alerts(); $now=current_time('mysql'); $existing=$wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE alert_key = %s",$alert_key)); if($existing) return absint($existing); $wpdb->insert($table,array('alert_key'=>$alert_key,'state_code'=>$state,'alert_type'=>$alert_type,'alert_status'=>'open','source_type'=>$source_type,'source_id'=>$source_id,'details_json'=>wp_json_encode($details),'created_at'=>$now,'updated_at'=>$now)); $alert_id=absint($wpdb->insert_id); $to=sanitize_email(get_option('admin_email')); if($to && is_email($to)){ $subject='Low Brass Lessons sales-tax action required: '.$state; $body="A sales-tax compliance action has been created.\n\nState: {$state}\nAlert: {$alert_type}\nDetails: ".sanitize_text_field($details['message']??'')."\n\nOpen Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$subject,$body)) $wpdb->update($table,array('emailed_at'=>$now,'updated_at'=>$now),array('id'=>$alert_id)); } return $alert_id; }
+
+  private function mrm_tax_window_start($measurement_window) { $timezone=wp_timezone(); $now=new DateTimeImmutable('now',$timezone); switch($measurement_window){ case 'rolling_12_months': return $now->modify('-12 months')->format('Y-m-d H:i:s'); case 'previous_calendar_year': return $now->modify('first day of January last year')->setTime(0,0,0)->format('Y-m-d H:i:s'); case 'previous_four_quarters': return $now->modify('first day of this quarter')->modify('-12 months')->setTime(0,0,0)->format('Y-m-d H:i:s'); case 'current_or_previous_calendar_year': default: return $now->modify('first day of January last year')->setTime(0,0,0)->format('Y-m-d H:i:s'); } }
+
+  private function mrm_tax_window_bounds($measurement_window) { $tz=wp_timezone(); $now=new DateTimeImmutable('now',$tz); if($measurement_window==='previous_calendar_year'){ $start=$now->modify('first day of January last year')->setTime(0,0,0); $end=$now->modify('last day of December last year')->setTime(23,59,59); return array(array($start->format('Y-m-d H:i:s'),$end->format('Y-m-d H:i:s'))); } if($measurement_window==='current_or_previous_calendar_year'){ return array(array($now->modify('first day of January this year')->setTime(0,0,0)->format('Y-m-d H:i:s'),$now->format('Y-m-d H:i:s')),array($now->modify('first day of January last year')->setTime(0,0,0)->format('Y-m-d H:i:s'),$now->modify('last day of December last year')->setTime(23,59,59)->format('Y-m-d H:i:s'))); } return array(array($this->mrm_tax_window_start($measurement_window),$now->format('Y-m-d H:i:s'))); }
+
+  private function mrm_tax_recompute_all_thresholds() {
+    global $wpdb; $states=$wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()}",ARRAY_A); $now=current_time('mysql');
+    foreach((array)$states as $row){ $state=$row['state_code']; if(!empty($row['collection_active'])){ $status='registered'; } elseif(!empty($row['physical_nexus_flag'])){ $status='physical_nexus_review'; $this->mrm_tax_create_alert($state,'physical_nexus_collection_inactive','tax_state',0,array('message'=>"{$state} has physical nexus flagged but collection is not active.")); } elseif(empty($row['threshold_rule_verified'])){ $wpdb->update($this->table_tax_state_status(),array('estimated_threshold_status'=>'not_evaluated','last_recomputed_at'=>$now,'updated_at'=>$now),array('state_code'=>$state)); continue; } else { $status='below_75'; }
+      $sales=0; $tx=0; $pct=0.0;
+      if(!empty($row['threshold_rule_verified'])){ $rules=json_decode((string)($row['rules_json']??''),true); if(!is_array($rules)) $rules=array(); $channels=(array)($rules['included_channels']??array('direct')); $cats=(array)($rules['included_categories']??array('all')); $subtract=!empty($rules['subtract_refunds']); $best=array('sales'=>0,'tx'=>0,'pct'=>0); foreach($this->mrm_tax_window_bounds($row['measurement_window']) as $bounds){ list($start,$end)=$bounds; $where=$wpdb->prepare("customer_state = %s AND occurred_at >= %s AND occurred_at <= %s",$state,$start,$end); if(!in_array('all',$channels,true)){ $in=implode(',',array_fill(0,count($channels),'%s')); $where.=$wpdb->prepare(" AND sales_channel IN ($in)",...$channels); } if(!in_array('all',$cats,true)){ $in=implode(',',array_fill(0,count($cats),'%s')); $where.=$wpdb->prepare(" AND threshold_category IN ($in)",...$cats); } $agg=$wpdb->get_row("SELECT COALESCE(SUM(gross_sales_cents".($subtract?' - refunded_sales_cents':'')."),0) sales, COALESCE(SUM(transaction_count),0) tx FROM {$this->table_tax_sales_ledger()} WHERE {$where}",ARRAY_A); $a_sales=(int)($agg['sales']??0); $a_tx=(int)($agg['tx']??0); $amount_threshold=(int)($row['threshold_amount_cents']??0); $count_threshold=(int)($row['threshold_transaction_count']??0); $amount_pct=$amount_threshold>0?($a_sales/$amount_threshold*100):0; $count_pct=$count_threshold>0?($a_tx/$count_threshold*100):0; $op=$row['threshold_operator']?:'amount'; $a_pct=in_array($op,array('count'),true)?$count_pct:($op==='amount_and_count'?min($amount_pct,$count_pct):max($amount_pct,$count_pct)); if($a_pct>$best['pct']) $best=array('sales'=>$a_sales,'tx'=>$a_tx,'pct'=>$a_pct); } $sales=$best['sales']; $tx=$best['tx']; $pct=round($best['pct'],2); if($status==='below_75'){ if($pct>=100) $status='threshold_reached'; elseif($pct>=90) $status='approaching_90'; elseif($pct>=75) $status='approaching_75'; } if($pct>=75) $this->mrm_tax_create_alert($state,'threshold_'.($pct>=100?'100':($pct>=90?'90':'75')),'tax_state',0,array('message'=>"{$state} threshold progress is {$pct}%.")); }
+      $wpdb->update($this->table_tax_state_status(),array('estimated_sales_cents'=>$sales,'estimated_transaction_count'=>$tx,'estimated_threshold_percent'=>$pct,'estimated_threshold_status'=>$status,'threshold_hit_at'=>$status==='threshold_reached' && empty($row['threshold_hit_at'])?$now:$row['threshold_hit_at'],'last_recomputed_at'=>$now,'updated_at'=>$now),array('state_code'=>$state));
+    }
+  }
+
+  public function handle_tax_recompute_thresholds() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_recompute_thresholds','mrm_tax_recompute_nonce'); $this->mrm_tax_recompute_all_thresholds(); wp_safe_redirect(admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG.'&thresholds_recomputed=1')); exit; }
+
+  public function handle_tax_state_save() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); $state=$this->mrm_normalize_state_code(wp_unslash($_POST['state_code']??'')); check_admin_referer('mrm_tax_state_save_'.$state,'mrm_tax_state_nonce'); if($state==='') wp_die('Invalid state.'); global $wpdb; $amount_dollars=(float)wp_unslash($_POST['threshold_amount_dollars']??0); $wpdb->update($this->table_tax_state_status(),array('authority_registration_status'=>sanitize_key(wp_unslash($_POST['authority_registration_status']??'not_started')),'authority_registration_number'=>sanitize_text_field(wp_unslash($_POST['authority_registration_number']??'')),'authority_registration_effective_date'=>sanitize_text_field(wp_unslash($_POST['authority_registration_effective_date']??'')),'threshold_rule_verified'=>!empty($_POST['threshold_rule_verified'])?1:0,'threshold_amount_cents'=>$amount_dollars>0?(int)round($amount_dollars*100):null,'threshold_transaction_count'=>absint($_POST['threshold_transaction_count']??0)?:null,'threshold_operator'=>sanitize_key(wp_unslash($_POST['threshold_operator']??'amount')),'measurement_window'=>sanitize_key(wp_unslash($_POST['measurement_window']??'')),'included_sales_basis'=>sanitize_text_field(wp_unslash($_POST['included_sales_basis']??'')),'rule_source_url'=>esc_url_raw(wp_unslash($_POST['rule_source_url']??'')),'rule_effective_date'=>sanitize_text_field(wp_unslash($_POST['rule_effective_date']??'')),'stripe_threshold_status'=>sanitize_key(wp_unslash($_POST['stripe_threshold_status']??'not_confirmed')),'admin_notes'=>sanitize_textarea_field(wp_unslash($_POST['admin_notes']??'')),'updated_at'=>current_time('mysql')),array('state_code'=>$state)); $this->mrm_tax_sync_stripe_registrations(); wp_safe_redirect(admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG.'&state_saved='.rawurlencode($state))); exit; }
+
+  public function render_sales_tax_nexus_page() {
+    if(!current_user_can('manage_options')) wp_die('You do not have permission to access this page.'); global $wpdb; $this->maybe_install_or_upgrade_db(); $rows=$wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} ORDER BY state_name ASC",ARRAY_A); $live=$this->mrm_tax_is_live_stripe_key(); ?>
+    <div class="wrap"><h1>Sales Tax &amp; Nexus</h1>
+      <?php if(isset($_GET['tax_error'])):?><div class="notice notice-error"><p><?php echo esc_html(wp_unslash($_GET['tax_error'])); ?></p></div><?php endif; ?>
+      <?php if(isset($_GET['stripe_sync'])):?><div class="notice notice-success"><p>Stripe registrations synced.</p></div><?php endif; ?>
+      <?php if(isset($_GET['thresholds_recomputed'])):?><div class="notice notice-success"><p>State thresholds recomputed.</p></div><?php endif; ?>
+      <?php if(isset($_GET['state_saved'])):?><div class="notice notice-success"><p>Saved <?php echo esc_html(wp_unslash($_GET['state_saved'])); ?>.</p></div><?php endif; ?>
+      <p><strong>Stripe mode:</strong> <?php echo $live ? '<span style="color:#008a20;font-weight:700;">LIVE</span>' : '<span style="color:#b32d2e;font-weight:700;">TEST</span>'; ?></p>
+      <?php if(!$live): ?><div class="notice notice-warning"><p>The site is using a Stripe test key. Test-mode registrations do not satisfy the production approval gate.</p></div><?php endif; ?>
+      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_sync_stripe_registrations','mrm_tax_sync_nonce'); ?><input type="hidden" name="action" value="mrm_tax_sync_stripe_registrations"><button class="button button-primary">Sync Stripe Registrations Now</button></form>
+      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_recompute_thresholds','mrm_tax_recompute_nonce'); ?><input type="hidden" name="action" value="mrm_tax_recompute_thresholds"><button class="button">Recompute State Thresholds</button></form>
+      <a class="button" href="https://dashboard.stripe.com/tax/locations" target="_blank" rel="noopener">Stripe Tax &gt; Locations</a> <a class="button" href="https://dashboard.stripe.com/tax/registrations" target="_blank" rel="noopener">Stripe Tax &gt; Registrations</a>
+      <table class="widefat striped" style="margin-top:18px;font-size:12px;"><thead><tr><th>State</th><th>Nexus</th><th>Reason</th><th>Authority</th><th>Stripe</th><th>Active</th><th>Rule</th><th>Period</th><th>Basis</th><th>Sales</th><th>Tx</th><th>Threshold</th><th>Progress</th><th>Estimate</th><th>Stripe Threshold</th><th>Actions</th></tr></thead><tbody>
+      <?php foreach($rows as $r): $color='#646970'; if($r['general_sales_tax_status']==='no_general_state_sales_tax') $color='#2271b1'; if($r['general_sales_tax_status']==='local_sales_tax_only') $color='#8c54a1'; if(empty($r['threshold_rule_verified'])) $color='#646970'; if(!empty($r['collection_active'])) $color='#008a20'; if(!empty($r['physical_nexus_flag']) && empty($r['collection_active'])) $color='#b32d2e'; if(($r['estimated_threshold_status']??'')==='threshold_reached' && empty($r['collection_active'])) $color='#b32d2e'; if((float)$r['estimated_threshold_percent']>=90 && (float)$r['estimated_threshold_percent']<100) $color='#d63638'; if((float)$r['estimated_threshold_percent']>=75 && (float)$r['estimated_threshold_percent']<90) $color='#996800'; ?>
+        <tr style="border-left:5px solid <?php echo esc_attr($color); ?>"><td><strong><?php echo esc_html($r['state_code']); ?></strong><br><?php echo esc_html($r['state_name']); ?></td><td><?php echo !empty($r['physical_nexus_flag'])?'Yes':'No'; ?></td><td><?php echo nl2br(esc_html($r['physical_nexus_reason'])); ?></td><td><?php echo esc_html($r['authority_registration_status']); ?><br><?php echo esc_html($r['authority_registration_number']); ?></td><td><?php echo esc_html($r['stripe_registration_status']); ?><br><code><?php echo esc_html($r['stripe_registration_id']); ?></code><br><?php echo !empty($r['stripe_livemode'])?'live':'test/none'; ?></td><td><?php echo !empty($r['collection_active'])?'Yes':'No'; ?></td><td><?php echo !empty($r['threshold_rule_verified'])?'Verified':'Rule verification required'; ?></td><td><?php echo esc_html($r['measurement_window']); ?></td><td><?php echo esc_html($r['included_sales_basis']); ?></td><td>$<?php echo esc_html(number_format(((int)$r['estimated_sales_cents'])/100,2)); ?></td><td><?php echo esc_html($r['estimated_transaction_count']); ?></td><td><?php echo !empty($r['threshold_amount_cents'])?'$'.esc_html(number_format(((int)$r['threshold_amount_cents'])/100,2)):'—'; ?><br><?php echo !empty($r['threshold_transaction_count'])?esc_html($r['threshold_transaction_count']).' tx':''; ?></td><td><?php echo esc_html($r['estimated_threshold_percent']); ?>%</td><td><?php echo esc_html(empty($r['threshold_rule_verified'])?'Rule verification required':$r['estimated_threshold_status']); ?></td><td><?php echo esc_html($r['stripe_threshold_status']); ?></td><td>
+          <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:260px;"><?php wp_nonce_field('mrm_tax_state_save_'.$r['state_code'],'mrm_tax_state_nonce'); ?><input type="hidden" name="action" value="mrm_tax_state_save"><input type="hidden" name="state_code" value="<?php echo esc_attr($r['state_code']); ?>">
+            <select name="authority_registration_status"><?php foreach(array('not_started','reviewing','application_pending','active','not_required_written_determination','closed') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['authority_registration_status'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br>
+            <input name="authority_registration_number" value="<?php echo esc_attr($r['authority_registration_number']); ?>" placeholder="Authority #"><input type="date" name="authority_registration_effective_date" value="<?php echo esc_attr($r['authority_registration_effective_date']); ?>"><br>
+            <label><input type="checkbox" name="threshold_rule_verified" value="1" <?php checked(!empty($r['threshold_rule_verified'])); ?>> Rule verified</label><br><input type="number" step="0.01" name="threshold_amount_dollars" value="<?php echo esc_attr(!empty($r['threshold_amount_cents'])?((int)$r['threshold_amount_cents']/100):''); ?>" placeholder="Threshold $"><input type="number" name="threshold_transaction_count" value="<?php echo esc_attr($r['threshold_transaction_count']); ?>" placeholder="Tx count"><br>
+            <select name="threshold_operator"><?php foreach(array('amount','count','amount_or_count','amount_and_count') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['threshold_operator'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><input name="measurement_window" value="<?php echo esc_attr($r['measurement_window']); ?>" placeholder="measurement_window"><br><input name="included_sales_basis" value="<?php echo esc_attr($r['included_sales_basis']); ?>" placeholder="Included basis"><br><input type="url" name="rule_source_url" value="<?php echo esc_attr($r['rule_source_url']); ?>" placeholder="Source URL"><input type="date" name="rule_effective_date" value="<?php echo esc_attr($r['rule_effective_date']); ?>"><br>
+            <select name="stripe_threshold_status"><?php foreach(array('not_confirmed','below_threshold_confirmed','threshold_reached_confirmed','registration_required_confirmed') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['stripe_threshold_status'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br><textarea name="admin_notes" placeholder="Admin notes"><?php echo esc_textarea($r['admin_notes']); ?></textarea><br><button class="button button-small">Save</button></form>
+        </td></tr><?php endforeach; ?></tbody></table></div><?php
+  }
+
   public function render_profile_card_creation_page() {
     if (!current_user_can('manage_options')) wp_die('You do not have permission to access this page.');
     global $wpdb;
@@ -16117,7 +16368,7 @@ public function handle_marketing_resubscribe() {
     $this->maybe_install_or_upgrade_db();
     $requests = $wpdb->get_results(
       "SELECT * FROM {$table}
-       WHERE status IN ('sent', 'pending_review', 'changes_requested')
+       WHERE status IN ('sent', 'pending_review', 'changes_requested', 'tax_registration_required')
        ORDER BY updated_at DESC, id DESC
        LIMIT 100",
       ARRAY_A
@@ -16437,6 +16688,11 @@ public function handle_marketing_resubscribe() {
                 <div><h3 style="margin:0 0 8px 0;">Request #<?php echo esc_html($request['id']); ?> — <?php echo esc_html($this->mrm_profile_card_request_type_label($request['request_type'])); ?></h3><p style="margin:0;"><strong>Recipient:</strong> <?php echo esc_html($request['recipient_name']); ?><br><code><?php echo esc_html($request['recipient_email']); ?></code></p></div>
                 <div style="min-width:260px;"><p style="margin:0;"><strong>Status:</strong> <?php echo esc_html($request['status']); ?></p><p style="margin:4px 0 0 0;"><strong>Submitted:</strong> <?php echo esc_html($request['submitted_at'] ?: '—'); ?></p><p style="margin:4px 0 0 0;"><strong>Created Target:</strong> <?php echo esc_html($target); ?></p></div>
               </div>
+              <?php if ($request['status'] === 'tax_registration_required') : ?>
+                <div class="notice notice-error inline">
+                  <p><strong>Sales-tax registration required.</strong> This instructor cannot be approved until their state registration is active with the state and confirmed active in Stripe Tax.</p>
+                </div>
+              <?php endif; ?>
               <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:16px;">
                 <?php wp_nonce_field('mrm_profile_card_admin_action', 'mrm_profile_card_admin_nonce'); ?>
                 <input type="hidden" name="action" value="mrm_profile_card_admin_action">
@@ -17725,6 +17981,20 @@ public function handle_marketing_resubscribe() {
 
     $update_data = array('status' => 'pending_review', 'submission_payload' => $this->mrm_profile_card_encode_json($payload), 'review_notes' => $this->mrm_profile_card_encode_json($existing_review_notes), 'submitted_at' => $now, 'updated_at' => $now);
 
+    if ($request_type === 'instructor_profile') {
+      $tax_gate = $this->mrm_tax_flag_instructor_state(absint($request['id']), $payload);
+
+      if (empty($tax_gate['allowed'])) {
+        $update_data['status'] = 'tax_registration_required';
+        $existing_review_notes['tax_registration_gate'] = array(
+          'state' => sanitize_text_field($tax_gate['state'] ?? ''),
+          'message' => sanitize_text_field($tax_gate['message'] ?? ''),
+          'flagged_at' => $now,
+        );
+        $update_data['review_notes'] = $this->mrm_profile_card_encode_json($existing_review_notes);
+      }
+    }
+
     $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
     $uploads = $this->mrm_profile_card_merge_uploads_with_payload($uploads, $existing_submission);
 
@@ -17875,6 +18145,24 @@ public function handle_marketing_resubscribe() {
 
     if ($do === 'approve') {
       $request_type_for_approval = sanitize_key((string)($request['request_type'] ?? ''));
+
+      if ($request_type_for_approval === 'instructor_profile') {
+        $sync_result = $this->mrm_tax_sync_stripe_registrations();
+
+        if (is_wp_error($sync_result)) {
+          wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode('Unable to verify the active Stripe tax registration. Instructor approval remains blocked.')));
+          exit;
+        }
+
+        $submission = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+        $gate = $this->mrm_tax_get_state_gate($submission['state'] ?? '');
+
+        if (empty($gate['allowed'])) {
+          $wpdb->update($table, array('status' => 'tax_registration_required', 'updated_at' => current_time('mysql')), array('id' => $request_id));
+          wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode($gate['message'])));
+          exit;
+        }
+      }
 
       if (
         in_array($request_type_for_approval, array('instructor_profile', 'presenter_profile'), true)
@@ -19293,6 +19581,15 @@ public function handle_marketing_resubscribe() {
       'manage_options',
       'mrm-pay-hub-promo-codes',
       array($this, 'render_promo_codes_page')
+    );
+
+    add_submenu_page(
+      self::MENU_SLUG,
+      'Sales Tax & Nexus',
+      'Sales Tax & Nexus',
+      'manage_options',
+      self::TAX_MONITOR_MENU_SLUG,
+      array($this, 'render_sales_tax_nexus_page')
     );
 
     add_submenu_page(
