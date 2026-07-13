@@ -1789,7 +1789,14 @@ body,
   .mrm-modal-panel {
     width: min(100%, 680px) !important;
     max-width: calc(100vw - 24px) !important;
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+
+    max-height: calc(
+      var(--mrm-mobile-vh, 100dvh)
+      - 24px
+      - env(safe-area-inset-top)
+      - env(safe-area-inset-bottom)
+    ) !important;
+
     margin: auto !important;
     border-radius: 18px !important;
     overflow: hidden !important;
@@ -1798,19 +1805,16 @@ body,
     box-sizing: border-box !important;
   }
 
-  .mrm-modal-body {
+  .mrm-modal-content {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    width: 100% !important;
     overflow-y: auto !important;
     overflow-x: hidden !important;
     -webkit-overflow-scrolling: touch !important;
     overscroll-behavior: contain !important;
-    max-height: calc(var(--mrm-mobile-vh, 100dvh) - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
-  }
-
-  .mrm-modal-header {
-    flex: 0 0 auto !important;
-    position: sticky !important;
-    top: 0 !important;
-    z-index: 5 !important;
+    box-sizing: border-box !important;
+    padding-bottom: max(24px, env(safe-area-inset-bottom)) !important;
   }
 
   .mrm-modal input,
@@ -1987,7 +1991,7 @@ body,
       <div class="mrm-masterclass-success-icon" aria-hidden="true">✓</div>
       <h2 id="masterclassSuccessTitle">Your Masterclass registration is confirmed.</h2>
       <p id="masterclassSuccessMessage" class="modal-meta">
-        Your Masterclass registration is confirmed. A confirmation email with your protected access link has been sent to the email address you provided.
+        Your Masterclass registration is confirmed. Your protected access link is available below.
       </p>
       <a id="masterclassSuccessAccessLink" class="mrm-primary-btn mrm-masterclass-success-access" href="#" style="display:none;">Open Your Access Page</a>
       </div>
@@ -3224,11 +3228,14 @@ body,
       .replace(/'/g, '&#039;');
   }
 
-  async function fetchJson(url, options) {
+  async function fetchJson(url, options, timeoutMs) {
     const controller = new AbortController();
+
+    const resolvedTimeout = Number(timeoutMs || 8000);
+
     const timeoutId = window.setTimeout(function () {
       controller.abort();
-    }, 8000);
+    }, resolvedTimeout);
 
     const mergedOptions = Object.assign({}, options || {}, {
       signal: controller.signal
@@ -3710,7 +3717,7 @@ body,
           terms_accepted: data.termsAccepted,
           billing_address: data.billingAddress
         })
-      });
+      }, 30000);
 
       const payload = result.data;
 
@@ -3809,32 +3816,69 @@ body,
     }
   }
 
-  function openSuccessPopup(finalData, state) {
-    const successModal = byId('masterclassSuccessModal');
-    const successMessage = byId('masterclassSuccessMessage');
-    const accessLink = byId('masterclassSuccessAccessLink');
+  function openSuccessPopup(
+    finalData,
+    state
+  ) {
+    const successModal =
+      byId('masterclassSuccessModal');
 
-    const eventTitle = state && state.event && state.event.title ? state.event.title : 'your Masterclass';
-    const gateUrl = finalData && finalData.gate_url ? finalData.gate_url : '';
+    const successMessage =
+      byId('masterclassSuccessMessage');
+
+    const accessLink =
+      byId('masterclassSuccessAccessLink');
+
+    const eventTitle =
+      state &&
+      state.event &&
+      state.event.title
+        ? state.event.title
+        : 'your Masterclass';
+
+    const gateUrl =
+      finalData &&
+      finalData.gate_url
+        ? finalData.gate_url
+        : '';
+
+    const emailSent =
+      !finalData ||
+      finalData.confirmation_email_sent
+        !== false;
 
     if (successMessage) {
-      successMessage.textContent = 'Your Masterclass registration for ' + eventTitle + ' is confirmed. A confirmation email with your protected access link has been sent to the email address you provided.';
+      if (emailSent) {
+        successMessage.textContent =
+          'Your Masterclass registration for ' +
+          eventTitle +
+          ' is confirmed. A confirmation email with your protected access link has been sent to the email address you provided.';
+      } else {
+        successMessage.textContent =
+          'Your Masterclass registration for ' +
+          eventTitle +
+          ' is confirmed, but the confirmation email could not be sent automatically. Please save the protected access link shown below and contact Low Brass Lessons if assistance is needed.';
+      }
     }
 
     if (accessLink) {
       if (gateUrl) {
         accessLink.href = gateUrl;
-        accessLink.style.display = 'inline-flex';
+        accessLink.style.display =
+          'inline-flex';
       } else {
         accessLink.href = '#';
-        accessLink.style.display = 'none';
+        accessLink.style.display =
+          'none';
       }
     }
 
     closeAllModals();
 
     if (successModal) {
-      openModal('masterclassSuccessModal');
+      openModal(
+        'masterclassSuccessModal'
+      );
     }
   }
 
@@ -3868,6 +3912,8 @@ body,
     const state = window.MRM_MASTERCLASS_PAYMENT_STATE;
     const message = byId('modalMessage');
     const confirmButton = byId('confirmFinalPayment');
+
+    let paymentWasConfirmed = false;
 
     if (!state || !state.stripe || !state.elements || !state.event || !state.checkout) {
       if (message) {
@@ -3907,6 +3953,8 @@ body,
         throw new Error(confirmResult.error && confirmResult.error.type === 'card_error' ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.');
       }
 
+      paymentWasConfirmed = true;
+
       const paymentIntentId = confirmResult.paymentIntent && confirmResult.paymentIntent.id
         ? confirmResult.paymentIntent.id
         : state.paymentIntentId;
@@ -3928,7 +3976,7 @@ body,
           terms_accepted: state.checkout.termsAccepted,
           promo_code: state.checkout.promoCode
         })
-      });
+      }, 30000);
 
       openSuccessPopup(finalResult.data, state);
 
@@ -3947,6 +3995,30 @@ body,
         }
       }, 1000);
     } catch (error) {
+
+      if (paymentWasConfirmed) {
+        if (message) {
+          message.textContent =
+            'Your payment was received, but the registration confirmation response took longer than expected. Do not submit another payment. Please refresh this page and check your email. Contact Low Brass Lessons if your confirmation does not appear.';
+        }
+
+        if (confirmButton) {
+          confirmButton.disabled = true;
+          confirmButton.textContent =
+            'Payment Received';
+        }
+
+        const submitPayment =
+          byId('submitPayment');
+
+        if (submitPayment) {
+          submitPayment.disabled = true;
+          submitPayment.textContent =
+            'Payment Received';
+        }
+
+        return;
+      }
 
       if (message) {
         message.textContent = error && error.message ? error.message : 'We could not complete this payment. Please review your details and try again.';

@@ -35,7 +35,7 @@ class MRM_Payments_Hub_Single {
   const MENU_SLUG = 'mrm-payments-hub';
   const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
   const STRIPE_TAX_PAYMENT_INTENT_BETA = 'payment_intent_with_tax_api_beta=v1';
-  const STRIPE_TAX_LOCATION_API_VERSION = '2026-02-25.preview';
+  const STRIPE_TAX_LOCATION_API_VERSION = '2026-06-24.preview';
   const TAX_RULES_VERSION = '2026-07-13';
   const TAX_SCHEMA_VERSION = '2026-07-13-2';
   const TAX_MONITOR_MENU_SLUG = 'mrm-pay-hub-sales-tax-nexus';
@@ -3139,6 +3139,19 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     );
   }
 
+  private function mrm_stripe_tax_calculation_headers(
+    $has_performance_location = false
+  ) {
+    if ($has_performance_location) {
+      return array(
+        'Stripe-Version' =>
+          self::STRIPE_TAX_LOCATION_API_VERSION,
+      );
+    }
+
+    return $this->mrm_stripe_tax_headers();
+  }
+
   private function stripe_api_request($method, $path, $params = array(), $extra_headers = array()) {
     $key = $this->secret_key();
     if (!$key) return new WP_Error('stripe_not_configured', 'Stripe secret key is not configured.');
@@ -3221,7 +3234,9 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       }
     }
     if (empty($line_items) || !is_array($line_items)) return new WP_Error('tax_line_items_missing','Sales tax could not be calculated because no line items were provided.');
-    $items = array(); $subtotal = 0;
+    $items = array();
+    $subtotal = 0;
+    $has_performance_location = false;
     foreach ($line_items as $line_item) {
       $amount = absint($line_item['amount_cents'] ?? 0);
       $tax_code = sanitize_text_field($line_item['tax_code'] ?? '');
@@ -3230,8 +3245,27 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       $reference = sanitize_key($line_item['reference'] ?? '');
       if ($reference === '') $reference = 'item_' . count($items);
       $stripe_item = array('amount'=>$amount,'reference'=>$reference,'tax_code'=>$tax_code,'tax_behavior'=>'exclusive');
-      if (!empty($line_item['performance_location'])) $stripe_item['performance_location'] = sanitize_text_field($line_item['performance_location']);
-      $subtotal += $amount; $items[] = $stripe_item;
+      if (
+        !empty(
+          $line_item[
+            'performance_location'
+          ]
+        )
+      ) {
+        $stripe_item[
+          'performance_location'
+        ] = sanitize_text_field(
+          $line_item[
+            'performance_location'
+          ]
+        );
+
+        $has_performance_location =
+          true;
+      }
+
+      $subtotal += $amount;
+      $items[] = $stripe_item;
     }
     if (empty($items)) return new WP_Error('tax_items_empty','Sales tax could not be calculated for this checkout.');
     $payload = array('currency'=>strtolower($currency),'line_items'=>$items,'expand[]'=>'line_items');
@@ -3242,7 +3276,16 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       if ($address['line2'] !== '') $stripe_address['line2'] = $address['line2'];
       $payload['customer_details'] = array('address_source'=>'billing','address'=>$stripe_address);
     }
-    $calculation = $this->stripe_api_request('POST','/v1/tax/calculations',$payload,$this->mrm_stripe_tax_headers());
+    $calculation =
+      $this->stripe_api_request(
+        'POST',
+        '/v1/tax/calculations',
+        $payload,
+        $this
+          ->mrm_stripe_tax_calculation_headers(
+            $has_performance_location
+          )
+      );
     if (is_wp_error($calculation)) { $this->stripe_debug_log('stripe tax calculation failed', array('message'=>$calculation->get_error_message())); return new WP_Error('stripe_tax_calculation_failed','Sales tax could not be calculated. Please verify your billing address and try again.'); }
     $calculation_id = sanitize_text_field($calculation['id'] ?? '');
     if ($calculation_id === '') return new WP_Error('stripe_tax_calculation_missing','Stripe did not return a valid tax calculation.');
@@ -4929,10 +4972,66 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if (!is_wp_error($row_id)) $this->mrm_tax_recompute_all_thresholds(); return $row_id;
   }
 
-  private function mrm_create_subscription_invoice_refund($invoice_id, $amount_cents) {
-    $invoice_id = sanitize_text_field($invoice_id); $amount_cents = absint($amount_cents);
-    if ($invoice_id === '' || $amount_cents <= 0) return new WP_Error('invalid_invoice_refund', 'Missing invoice or refund amount.');
-    return $this->stripe_api_request('POST', '/v1/credit_notes', array('invoice'=>$invoice_id,'refund_amount'=>$amount_cents,'reason'=>'order_change','memo'=>'Low Brass Lessons subscription refund'));
+  private function mrm_create_subscription_invoice_refund(
+    $invoice_id,
+    $amount_cents
+  ) {
+    $invoice_id =
+      sanitize_text_field(
+        $invoice_id
+      );
+
+    $amount_cents =
+      absint(
+        $amount_cents
+      );
+
+    if (
+      $invoice_id === ''
+      || $amount_cents <= 0
+    ) {
+      return new WP_Error(
+        'invalid_invoice_refund',
+        'Missing invoice or refund amount.'
+      );
+    }
+
+    return $this->stripe_api_request(
+      'POST',
+      '/v1/credit_notes',
+      array(
+        /*
+         * Total value credited by the
+         * Credit Note.
+         */
+        'amount' =>
+          $amount_cents,
+
+        /*
+         * Portion returned to the original
+         * payment method.
+         */
+        'refund_amount' =>
+          $amount_cents,
+
+        'invoice' =>
+          $invoice_id,
+
+        'reason' =>
+          'order_change',
+
+        'memo' =>
+          'Low Brass Lessons subscription refund',
+
+        'metadata' => array(
+          'source' =>
+            'low_brass_lessons',
+
+          'refund_type' =>
+            'sheet_music_subscription',
+        ),
+      )
+    );
   }
 
   private function mrm_tax_sync_subscription_invoice_refunds($invoice_id) {
