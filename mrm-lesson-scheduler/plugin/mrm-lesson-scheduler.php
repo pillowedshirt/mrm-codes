@@ -13989,6 +13989,7 @@ public function render_contractor_tax_profiles_page() {
             $zip_code = isset( $_POST['zip_code'] ) ? sanitize_text_field( wp_unslash( $_POST['zip_code'] ) ) : '';
             $offers_in_person = ! empty( $_POST['offers_in_person'] ) ? 1 : 0;
             $offers_online = ! empty( $_POST['offers_online'] ) ? 1 : 0;
+            $stripe_tax_location_id = isset( $_POST['stripe_tax_location_id'] ) ? sanitize_text_field( wp_unslash( $_POST['stripe_tax_location_id'] ) ) : '';
             $calendar_id = isset( $_POST['calendar_id'] ) ? sanitize_text_field( wp_unslash( $_POST['calendar_id'] ) ) : '';
             $timezone    = isset( $_POST['timezone'] ) ? sanitize_text_field( wp_unslash( $_POST['timezone'] ) ) : 'America/Phoenix';
             $stripe_connected_account_id = isset( $_POST['stripe_connected_account_id'] ) ? sanitize_text_field( wp_unslash( $_POST['stripe_connected_account_id'] ) ) : '';
@@ -14018,6 +14019,9 @@ public function render_contractor_tax_profiles_page() {
                 if ( ! $offers_in_person && ! $offers_online ) {
                     $errors[] = 'At least one teaching format must be selected.';
                 }
+                if ( $stripe_tax_location_id !== '' && ! preg_match( '/^taxloc_[A-Za-z0-9]+$/', $stripe_tax_location_id ) ) {
+                    $errors[] = 'Stripe Tax Location ID must start with taxloc_.';
+                }
             }
             $schema = $this->schema_status();
             if ( ! $schema['ok'] ) $errors[] = 'Database schema is not ready. Click “Run Installer/Upgrade” first.';
@@ -14031,6 +14035,7 @@ public function render_contractor_tax_profiles_page() {
                     'zip_code' => $zip_code,
                     'offers_in_person' => $offers_in_person,
                     'offers_online' => $offers_online,
+                    'stripe_tax_location_id' => ( $stripe_tax_location_id === '' ? null : $stripe_tax_location_id ),
                     'calendar_id' => $calendar_id,
                     'timezone' => $timezone,
                     'stripe_connected_account_id' => ( $stripe_connected_account_id === '' ? null : $stripe_connected_account_id ),
@@ -14040,7 +14045,7 @@ public function render_contractor_tax_profiles_page() {
                     'long_description' => ( $long_description === '' ? null : $long_description ),
                     'instruments' => ( $instruments_json === '' ? null : $instruments_json ),
                 );
-                $formats = array( '%s','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s' );
+                $formats = array( '%s','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s','%s','%s' );
                 if ( $action === 'add' ) {
                     $result = $wpdb->insert( $table, $data, $formats );
                     if ( $result === false ) {
@@ -14087,6 +14092,15 @@ public function render_contractor_tax_profiles_page() {
                 } elseif ( $action === 'update' && $id ) {
                     $result = $wpdb->update( $table, $data, array( 'id' => $id ), $formats, array( '%d' ) );
                     echo $result === false ? '<div class="notice notice-error"><p><strong>Database error:</strong> ' . esc_html( $wpdb->last_error ) . '</p></div>' : '<div class="notice notice-success"><p>Instructor updated (ID ' . esc_html( $id ) . ').</p></div>';
+                    if ( $result !== false && ! empty( $_POST['mrm_create_stripe_tax_location'] ) && function_exists( 'mrm_payments_hub_create_instructor_tax_location' ) ) {
+                        $location_result = mrm_payments_hub_create_instructor_tax_location( $id );
+                        if ( is_wp_error( $location_result ) ) {
+                            echo '<div class="notice notice-error"><p>' . esc_html( $location_result->get_error_message() ) . '</p></div>';
+                        } else {
+                            echo '<div class="notice notice-success"><p>Stripe Tax Location created: <code>' . esc_html( $location_result['id'] ?? '' ) . '</code></p></div>';
+                            $editing = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ), ARRAY_A );
+                        }
+                    }
                 } elseif ( $action === 'delete' && $id ) {
                     $lessons_table = $wpdb->prefix . 'mrm_lessons';
                     $count = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$lessons_table} WHERE instructor_id = %d", $id ) );
@@ -14226,6 +14240,16 @@ public function render_contractor_tax_profiles_page() {
                         <td>
                             <input name="zip_code" id="zip_code" type="text" class="regular-text" placeholder="85001" value="<?php echo esc_attr( $editing['zip_code'] ?? '' ); ?>">
                             <p class="description">Instructor ZIP code for backend reference and location-based admin use.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="stripe_tax_location_id">Stripe Tax Location ID</label></th>
+                        <td>
+                            <input name="stripe_tax_location_id" id="stripe_tax_location_id" type="text" class="regular-text" placeholder="taxloc_..." value="<?php echo esc_attr( $editing['stripe_tax_location_id'] ?? '' ); ?>">
+                            <p class="description">Required for instructors who offer in-person lessons. The location must represent the actual place where lessons are performed.</p>
+                            <?php if ( $editing ) : ?>
+                                <button type="submit" class="button" name="mrm_create_stripe_tax_location" value="1">Create From Instructor Address</button>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <tr>
