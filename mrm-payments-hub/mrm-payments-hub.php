@@ -34,7 +34,9 @@ class MRM_Payments_Hub_Single {
   // Admin menu
   const MENU_SLUG = 'mrm-payments-hub';
   const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
-  const TAX_RULES_VERSION = '2026-07-12';
+  const STRIPE_TAX_PAYMENT_INTENT_BETA = 'payment_intent_with_tax_api_beta=v1';
+  const TAX_RULES_VERSION = '2026-07-13';
+  const TAX_SCHEMA_VERSION = '2026-07-13-2';
   const TAX_MONITOR_MENU_SLUG = 'mrm-pay-hub-sales-tax-nexus';
   private const MRM_AUTO_REFUND_MAX_AGE_DAYS = 7;
   private const MRM_PM_LOOKAHEAD_HOURS = 72;
@@ -745,7 +747,7 @@ class MRM_Payments_Hub_Single {
       threshold_rule_verified TINYINT(1) NOT NULL DEFAULT 0,
       threshold_amount_cents BIGINT UNSIGNED NULL,
       threshold_transaction_count INT UNSIGNED NULL,
-      threshold_operator VARCHAR(8) NOT NULL DEFAULT 'amount',
+      threshold_operator VARCHAR(32) NOT NULL DEFAULT 'amount',
       measurement_window VARCHAR(64) NOT NULL DEFAULT '',
       included_sales_basis VARCHAR(191) NOT NULL DEFAULT '',
       rules_json LONGTEXT NULL,
@@ -758,6 +760,8 @@ class MRM_Payments_Hub_Single {
       authority_registration_status VARCHAR(32) NOT NULL DEFAULT 'not_started',
       authority_registration_number VARCHAR(191) NULL,
       authority_registration_effective_date DATE NULL,
+      written_determination_reviewed_at DATE NULL,
+      written_determination_reference TEXT NULL,
       stripe_registration_id VARCHAR(191) NULL,
       stripe_registration_status VARCHAR(32) NOT NULL DEFAULT 'none',
       stripe_livemode TINYINT(1) NOT NULL DEFAULT 0,
@@ -803,6 +807,11 @@ class MRM_Payments_Hub_Single {
       tax_calculation_id VARCHAR(191) NULL,
       tax_association_id VARCHAR(191) NULL,
       tax_transaction_id VARCHAR(191) NULL,
+      stripe_tax_line_item_id VARCHAR(191) NULL,
+      tax_reversals_json LONGTEXT NULL,
+      calculation_line_items_json LONGTEXT NULL,
+      last_association_sync_at DATETIME NULL,
+      association_error TEXT NULL,
       tax_transaction_status VARCHAR(32) NOT NULL DEFAULT 'pending',
       occurred_at DATETIME NOT NULL,
       metadata_json LONGTEXT NULL,
@@ -813,6 +822,7 @@ class MRM_Payments_Hub_Single {
       KEY customer_state (customer_state),
       KEY occurred_at (occurred_at),
       KEY product_type (product_type),
+      KEY stripe_tax_line_item_id (stripe_tax_line_item_id),
       KEY payment_intent_id (payment_intent_id)
     ) {$charset};";
 
@@ -885,7 +895,32 @@ class MRM_Payments_Hub_Single {
     if (!in_array('promo_started_at', $autopay_column_names, true)) {
       $wpdb->query("ALTER TABLE {$autopay} ADD promo_started_at DATETIME DEFAULT NULL AFTER promo_code");
     }
+    $this->mrm_tax_run_schema_migrations();
     $this->mrm_tax_seed_state_rows();
+  }
+
+  private function mrm_tax_add_column_if_missing($table, $column, $definition) {
+    global $wpdb;
+    $exists = $wpdb->get_var($wpdb->prepare("SHOW COLUMNS FROM {$table} LIKE %s", $column));
+    if (!$exists) {
+      $wpdb->query("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+    }
+  }
+
+  private function mrm_tax_run_schema_migrations() {
+    global $wpdb;
+    if (get_option('mrm_tax_schema_version') === self::TAX_SCHEMA_VERSION) return;
+    $state_table = $this->table_tax_state_status();
+    $sales_table = $this->table_tax_sales_ledger();
+    $wpdb->query("ALTER TABLE {$state_table} MODIFY threshold_operator VARCHAR(32) NOT NULL DEFAULT 'amount'");
+    $this->mrm_tax_add_column_if_missing($state_table, 'written_determination_reviewed_at', 'DATE NULL');
+    $this->mrm_tax_add_column_if_missing($state_table, 'written_determination_reference', 'TEXT NULL');
+    $this->mrm_tax_add_column_if_missing($sales_table, 'stripe_tax_line_item_id', 'VARCHAR(191) NULL');
+    $this->mrm_tax_add_column_if_missing($sales_table, 'tax_reversals_json', 'LONGTEXT NULL');
+    $this->mrm_tax_add_column_if_missing($sales_table, 'calculation_line_items_json', 'LONGTEXT NULL');
+    $this->mrm_tax_add_column_if_missing($sales_table, 'last_association_sync_at', 'DATETIME NULL');
+    $this->mrm_tax_add_column_if_missing($sales_table, 'association_error', 'TEXT NULL');
+    update_option('mrm_tax_schema_version', self::TAX_SCHEMA_VERSION, false);
   }
 
 
@@ -2665,180 +2700,82 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return substr($state, 0, 2);
   }
 
+
+  private function mrm_get_instructor_performance_location_id($instructor_id) {
+    global $wpdb;
+    $instructor_id = absint($instructor_id);
+    if ($instructor_id <= 0) return '';
+    $table = $wpdb->prefix . 'mrm_instructors';
+    return sanitize_text_field($wpdb->get_var($wpdb->prepare("SELECT stripe_tax_location_id FROM {$table} WHERE id = %d", $instructor_id)));
+  }
+
   private function mrm_normalize_tax_address($address = array()) {
     return array(
       'country' => strtoupper(trim((string)($address['country'] ?? 'US'))),
       'state' => $this->mrm_normalize_state_code($address['state'] ?? ''),
       'postal_code' => trim((string)($address['postal_code'] ?? '')),
       'line1' => trim((string)($address['line1'] ?? '')),
+      'line2' => trim((string)($address['line2'] ?? '')),
       'city' => sanitize_text_field((string)($address['city'] ?? '')),
     );
   }
 
   private function mrm_get_tax_product_profiles($product_type, $addon_selected = false, $product_cfg = array(), $context = array()) {
+    $product_type = sanitize_key($product_type);
+    $context = is_array($context) ? $context : array();
+    $sku = sanitize_key($context['sku'] ?? $product_cfg['sku'] ?? '');
     $profiles = array();
-
     if ($product_type === 'sheet_music') {
-      $profiles[] = array(
-        'key' => 'sheet_music_base',
-        'label' => 'Sheet music',
-        'taxable' => true,
-        'tax_code' => 'txcd_10302000',
-        'amount_source' => 'base',
-      );
+      $profiles[] = array('key'=>'sheet_music_base','label'=>'Sheet music download','taxable'=>true,'tax_code'=>'txcd_10503000','amount_source'=>'base','threshold_category'=>'digital_document_download');
+      if ($addon_selected) {
+        $access_model = sanitize_key(get_option('mrm_sheet_music_subscription_tax_model','downloadable_conditional'));
+        if ($access_model === 'view_only_conditional') $subscription_code = 'txcd_10503005';
+        elseif ($access_model === 'downloadable_conditional') $subscription_code = 'txcd_10503002';
+        else return new WP_Error('invalid_subscription_tax_model','The sheet-music subscription rights model has not been approved for tax purposes.');
+        $profiles[] = array('key'=>'sheet_music_access','label'=>'Sheet music access subscription','taxable'=>true,'tax_code'=>$subscription_code,'amount_source'=>'addon','threshold_category'=>'digital_document_subscription');
+      }
+      return $profiles;
     }
-
-    if ($addon_selected) {
-      $profiles[] = array(
-        'key' => 'sheet_music_access',
-        'label' => 'Sheet music access subscription',
-        'taxable' => true,
-        'tax_code' => 'txcd_10302002',
-        'amount_source' => 'addon',
-      );
+    if ($product_type === 'lesson') {
+      $lesson_mode = sanitize_key($context['lesson_mode'] ?? $context['lesson_type'] ?? '');
+      $online = !empty($context['online']) || $lesson_mode === 'online' || strpos($sku, '_online') !== false;
+      $profile = array('key'=>$online?'private_lesson_online':'private_lesson_in_person','label'=>$online?'Live online private lesson':'In-person private lesson','taxable'=>true,'tax_code'=>$online?'txcd_20060045':'txcd_20060044','amount_source'=>'base','threshold_category'=>$online?'service_live_virtual':'service_in_person');
+      if (!$online && !empty($context['stripe_tax_performance_location_id'])) $profile['performance_location'] = sanitize_text_field($context['stripe_tax_performance_location_id']);
+      return array($profile);
     }
-
-    if ($product_type === 'lesson' && empty($profiles)) {
-      $profiles[] = array(
-        'key' => 'lesson_service',
-        'label' => 'Lesson service',
-        'taxable' => false,
-        'tax_code' => '',
-        'amount_source' => 'base',
-      );
-    }
-
-    return $profiles;
+    if ($product_type === 'masterclass') return array(array('key'=>'masterclass_live_virtual','label'=>'Live online masterclass','taxable'=>true,'tax_code'=>'txcd_20060045','amount_source'=>'base','threshold_category'=>'service_live_virtual'));
+    return new WP_Error('unclassified_tax_product','This checkout has no approved Stripe Tax product classification.');
   }
 
   private function mrm_build_tax_policy($address, $product_type, $addon_selected = false, $product_cfg = array(), $context = array()) {
     $address = $this->mrm_normalize_tax_address($address);
     $context = is_array($context) ? $context : array();
-
     $allow_incomplete_address = !empty($context['allow_incomplete_address']);
-
     $missing_address_fields = array();
-
-    if ($product_type === 'sheet_music') {
-
-      if (trim((string)($address['line1'] ?? '')) === '') {
-        $missing_address_fields[] = 'street address';
-      }
-
-      if (trim((string)($address['city'] ?? '')) === '') {
-        $missing_address_fields[] = 'city';
-      }
-
-      if (trim((string)($address['state'] ?? '')) === '') {
-        $missing_address_fields[] = 'state';
-      }
-
-      if (trim((string)($address['postal_code'] ?? '')) === '') {
-        $missing_address_fields[] = 'ZIP code';
-      }
-
-      if (trim((string)($address['country'] ?? '')) === '') {
-        $missing_address_fields[] = 'country';
-      }
-
-      if (!empty($missing_address_fields) && !$allow_incomplete_address) {
-        return array(
-          'ok' => false,
-          'code' => 'billing_address_required',
-          'message' => 'Please enter your full billing address before purchasing sheet music: ' . implode(', ', $missing_address_fields) . '.',
-          'address' => $address,
-          'missing_address_fields' => $missing_address_fields,
-          'jurisdiction' => array(
-            'country' => (string)($address['country'] ?? 'US'),
-            'state' => (string)($address['state'] ?? ''),
-            'exists' => false,
-            'registered' => null,
-            'collect_enabled' => null,
-            'stripe_controls_rollout' => true,
-          ),
-          'profiles' => array(),
-          'policy_reason' => 'billing_address_required',
-          'policy_message' => 'Please enter your full billing address before purchasing sheet music: ' . implode(', ', $missing_address_fields) . '.',
-          'should_collect_tax' => false,
-          'allow_subscription_automatic_tax' => false,
-        );
-      }
-    }
-    $country = (string)($address['country'] ?? 'US');
-    $state = (string)($address['state'] ?? '');
-
-    $profiles = $this->mrm_get_tax_product_profiles($product_type, $addon_selected, $product_cfg, $context);
-
-    $has_taxable_profile = false;
-    foreach ((array)$profiles as $profile) {
-      if (!empty($profile['taxable'])) {
-        $has_taxable_profile = true;
-        break;
-      }
-    }
-
-    $policy_reason = 'stripe_tax_calculation_ready';
-    $policy_message = 'Sales tax is calculated after billing state and ZIP are entered.';
-    $should_collect_tax = true;
-
-    if (!$has_taxable_profile) {
-      $policy_reason = 'non_taxable_product_profile';
-      $policy_message = 'This checkout currently has no taxable product profile.';
-      $should_collect_tax = false;
-    } elseif ($country !== 'US') {
-      $policy_reason = 'unsupported_country';
-      $policy_message = 'Tax calculation is currently configured only for U.S. billing addresses.';
-      $should_collect_tax = false;
-    } elseif ($state === '') {
-      $policy_reason = 'missing_state';
-      $policy_message = 'Sales tax is calculated after billing state and ZIP are entered.';
-      $should_collect_tax = false;
-    }
-
-    if ($allow_incomplete_address && $product_type === 'sheet_music' && !empty($missing_address_fields)) {
-      $policy_reason = 'billing_address_preview_incomplete';
-      $policy_message = 'Sales tax is calculated after billing state and ZIP are entered.';
-      $should_collect_tax = false;
-    }
-
-    return array(
-      'ok' => true,
-      'address' => $address,
-      'missing_address_fields' => $missing_address_fields,
-      'jurisdiction' => array(
-        'country' => $country,
-        'state' => $state,
-        'exists' => ($country === 'US' && $state !== ''),
-        'registered' => null,
-        'collect_enabled' => null,
-        'stripe_controls_rollout' => true,
-      ),
-      'profiles' => $profiles,
-      'policy_reason' => $policy_reason,
-      'policy_message' => $policy_message,
-      'should_collect_tax' => $should_collect_tax,
-      'allow_subscription_automatic_tax' => ($country === 'US' && $state !== ''),
-    );
+    $required_fields = array('line1'=>'street address','city'=>'city','state'=>'state','postal_code'=>'ZIP code','country'=>'country');
+    foreach ($required_fields as $field=>$label) if (trim((string)($address[$field] ?? '')) === '') $missing_address_fields[] = $label;
+    if (!empty($missing_address_fields) && !$allow_incomplete_address) return array('ok'=>false,'code'=>'billing_address_required','message'=>'Please enter your complete billing address before checkout: '.implode(', ',$missing_address_fields).'.','address'=>$address,'missing_address_fields'=>$missing_address_fields,'profiles'=>array(),'should_collect_tax'=>false,'allow_subscription_automatic_tax'=>false);
+    if (($address['country'] ?? 'US') !== 'US') return array('ok'=>false,'code'=>'unsupported_tax_country','message'=>'This checkout currently supports United States billing addresses only.','address'=>$address,'profiles'=>array(),'should_collect_tax'=>false,'allow_subscription_automatic_tax'=>false);
+    $profiles = $this->mrm_get_tax_product_profiles($product_type,$addon_selected,$product_cfg,$context);
+    if (is_wp_error($profiles)) return array('ok'=>false,'code'=>$profiles->get_error_code(),'message'=>$profiles->get_error_message(),'address'=>$address,'profiles'=>array(),'should_collect_tax'=>false,'allow_subscription_automatic_tax'=>false);
+    $preview_incomplete = $allow_incomplete_address && !empty($missing_address_fields);
+    return array('ok'=>true,'address'=>$address,'missing_address_fields'=>$missing_address_fields,'jurisdiction'=>array('country'=>(string)$address['country'],'state'=>(string)$address['state'],'exists'=>!$preview_incomplete,'stripe_controls_rollout'=>true),'profiles'=>$profiles,'policy_reason'=>$preview_incomplete?'billing_address_preview_incomplete':'stripe_tax_calculation_ready','policy_message'=>$preview_incomplete?'Sales tax is calculated after the complete billing address is entered.':'Sales tax is calculated from the billing address provided.','should_collect_tax'=>!$preview_incomplete,'allow_subscription_automatic_tax'=>!$preview_incomplete);
   }
 
   private function mrm_build_taxable_items_from_policy($policy, $base_amount_cents, $addon_amount_cents) {
     $items = array();
-
     foreach ((array)($policy['profiles'] ?? array()) as $profile) {
       if (empty($profile['taxable'])) continue;
-
       $amount_source = (string)($profile['amount_source'] ?? 'base');
-      $amount_cents = ($amount_source === 'addon') ? (int)$addon_amount_cents : (int)$base_amount_cents;
-
+      $amount_cents = $amount_source === 'addon' ? (int)$addon_amount_cents : (int)$base_amount_cents;
       if ($amount_cents <= 0) continue;
-
-      $items[] = array(
-        'amount_cents' => $amount_cents,
-        'reference' => (string)($profile['key'] ?? 'item'),
-        'tax_code' => (string)($profile['tax_code'] ?? 'txcd_10000000'),
-      );
+      $tax_code = sanitize_text_field($profile['tax_code'] ?? '');
+      if ($tax_code === '') return new WP_Error('missing_tax_code','A taxable checkout item is missing its Stripe tax code.');
+      $item = array('amount_cents'=>$amount_cents,'reference'=>sanitize_key($profile['key'] ?? 'item'),'tax_code'=>$tax_code,'threshold_category'=>sanitize_key($profile['threshold_category'] ?? 'other'));
+      if (!empty($profile['performance_location'])) $item['performance_location'] = sanitize_text_field($profile['performance_location']);
+      $items[] = $item;
     }
-
+    if (empty($items)) return new WP_Error('missing_taxable_items','The checkout did not produce a valid taxable line item.');
     return $items;
   }
 
@@ -3166,7 +3103,9 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
    * ======================================================= */
 
   private function mrm_stripe_tax_headers() {
-    return array('Stripe-Version' => self::STRIPE_TAX_API_VERSION);
+    return array(
+      'Stripe-Version' => self::STRIPE_TAX_API_VERSION . '; ' . self::STRIPE_TAX_PAYMENT_INTENT_BETA,
+    );
   }
 
   private function stripe_api_request($method, $path, $params = array(), $extra_headers = array()) {
@@ -3243,162 +3182,42 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
    * Returns array: ['ok'=>bool,'tax_cents'=>int,'amount_total_cents'=>int,'calculation_id'=>string,'line_items'=>array]
    */
   private function mrm_tax_calculate_for_items($address, $line_items, $currency = 'usd') {
-    $country = strtoupper((string)($address['country'] ?? ''));
-    $postal  = trim((string)($address['postal_code'] ?? ''));
-    $state   = trim((string)($address['state'] ?? ''));
-    $line1   = trim((string)($address['line1'] ?? ''));
-    $city    = trim((string)($address['city'] ?? ''));
-
-    if (!$country || !$postal) {
-      $this->stripe_debug_log('tax calculation skipped: missing minimum address fields', array(
-        'country' => $country,
-        'postal_code' => $postal,
-        'state' => $state,
-        'line1_present' => $line1 ? 'yes' : 'no',
-      ));
-
-      return array(
-        'ok'=>false,
-        'tax_cents'=>0,
-        'amount_total_cents'=>0,
-        'calculation_id'=>'',
-        'line_items'=>array(),
-        'taxability_reason'=>'missing_location_inputs',
-      );
+    $address = $this->mrm_normalize_tax_address($address);
+    foreach (array('country','line1','city','state','postal_code') as $required) {
+      if (trim((string)($address[$required] ?? '')) === '') return new WP_Error('tax_address_incomplete','Please enter your complete billing address.');
     }
-
-    $items = array();
-    $subtotal = 0;
-
-    foreach ((array)$line_items as $li) {
-      $amt = isset($li['amount_cents']) ? (int)$li['amount_cents'] : 0;
-      if ($amt <= 0) continue;
-      $subtotal += $amt;
-
-      $ref = isset($li['reference']) ? (string)$li['reference'] : '';
-      if (!$ref) $ref = 'item_' . count($items) . '_' . $amt;
-
-      $tax_code = isset($li['tax_code']) ? (string)$li['tax_code'] : '';
-      if (!$tax_code) {
-        $tax_code = 'txcd_10000000';
-      }
-
-      $items[] = array(
-        'amount' => $amt,
-        'reference' => $ref,
-        'tax_code' => $tax_code,
-      );
+    if (empty($line_items) || !is_array($line_items)) return new WP_Error('tax_line_items_missing','Sales tax could not be calculated because no line items were provided.');
+    $items = array(); $subtotal = 0;
+    foreach ($line_items as $line_item) {
+      $amount = absint($line_item['amount_cents'] ?? 0);
+      $tax_code = sanitize_text_field($line_item['tax_code'] ?? '');
+      if ($amount <= 0) continue;
+      if ($tax_code === '') return new WP_Error('tax_code_missing','A checkout item is missing its Stripe tax code.');
+      $reference = sanitize_key($line_item['reference'] ?? '');
+      if ($reference === '') $reference = 'item_' . count($items);
+      $stripe_item = array('amount'=>$amount,'reference'=>$reference,'tax_code'=>$tax_code,'tax_behavior'=>'exclusive');
+      if (!empty($line_item['performance_location'])) $stripe_item['performance_location'] = sanitize_text_field($line_item['performance_location']);
+      $subtotal += $amount; $items[] = $stripe_item;
     }
-
-    if (empty($items)) {
-      $this->stripe_debug_log('tax calculation skipped: no taxable items', array(
-        'subtotal' => $subtotal,
-      ));
-
-      return array(
-        'ok'=>true,
-        'tax_cents'=>0,
-        'amount_total_cents'=>$subtotal,
-        'calculation_id'=>'',
-        'line_items'=>array(),
-        'taxability_reason'=>'no_taxable_items',
-      );
-    }
-
-    $payload = array(
-      'currency' => strtolower((string)$currency),
-      'customer_details' => array(
-        'address_source' => 'shipping',
-        'address' => array(
-          'country' => (string)($address['country'] ?? 'US'),
-          'postal_code' => (string)($address['postal_code'] ?? ''),
-          'state' => (string)($address['state'] ?? ''),
-          'line1' => (string)($address['line1'] ?? ''),
-        ),
-      ),
-      'line_items' => $items,
-      'expand[]' => 'line_items',
-    );
-
-    if ($state) {
-      $payload['customer_details']['address']['state'] = $state;
-    }
-    if ($line1) {
-      $payload['customer_details']['address']['line1'] = $line1;
-    }
-
-    $this->stripe_debug_log('tax calculation request', array(
-      'currency' => strtolower((string)$currency),
-      'address_source' => 'shipping',
-      'address' => array(
-        'country' => (string)($address['country'] ?? 'US'),
-        'postal_code' => (string)($address['postal_code'] ?? ''),
-        'state' => (string)($address['state'] ?? ''),
-        'line1_present' => (!empty($address['line1']) ? 'yes' : 'no'),
-      ),
-      'line_items' => $items,
-    ));
-
-    $calc = $this->stripe_api_request('POST', '/v1/tax/calculations', $payload);
-
-    if (is_wp_error($calc)) {
-      $this->stripe_debug_log('tax calculation error', array(
-        'message' => $calc->get_error_message(),
-      ));
-
-      return array(
-        'ok'=>false,
-        'tax_cents'=>0,
-        'amount_total_cents'=>$subtotal,
-        'calculation_id'=>'',
-        'line_items'=>array(),
-        'taxability_reason'=>'stripe_error',
-      );
-    }
-
-    $tax_cents = isset($calc['tax_amount_exclusive']) ? (int)$calc['tax_amount_exclusive'] : 0;
-    $amount_total = isset($calc['amount_total']) ? (int)$calc['amount_total'] : ($subtotal + $tax_cents);
-    $calc_id = isset($calc['id']) ? (string)$calc['id'] : '';
-
+    if (empty($items)) return new WP_Error('tax_items_empty','Sales tax could not be calculated for this checkout.');
+    $stripe_address = array('country'=>$address['country'],'line1'=>$address['line1'],'city'=>$address['city'],'state'=>$address['state'],'postal_code'=>$address['postal_code']);
+    if ($address['line2'] !== '') $stripe_address['line2'] = $address['line2'];
+    $payload = array('currency'=>strtolower($currency),'customer_details'=>array('address_source'=>'billing','address'=>$stripe_address),'line_items'=>$items,'expand[]'=>'line_items');
+    $calculation = $this->stripe_api_request('POST','/v1/tax/calculations',$payload,$this->mrm_stripe_tax_headers());
+    if (is_wp_error($calculation)) { $this->stripe_debug_log('stripe tax calculation failed', array('message'=>$calculation->get_error_message())); return new WP_Error('stripe_tax_calculation_failed','Sales tax could not be calculated. Please verify your billing address and try again.'); }
+    $calculation_id = sanitize_text_field($calculation['id'] ?? '');
+    if ($calculation_id === '') return new WP_Error('stripe_tax_calculation_missing','Stripe did not return a valid tax calculation.');
+    $amount_total_cents = (int)($calculation['amount_total'] ?? 0);
+    if ($amount_total_cents <= 0) return new WP_Error('stripe_tax_total_invalid','Stripe returned an invalid payment total.');
+    $tax_cents = max(0,(int)($calculation['tax_amount_exclusive'] ?? 0));
+    $overall_reason = '';
+    foreach ((array)($calculation['tax_breakdown'] ?? array()) as $breakdown) { $reason = sanitize_key($breakdown['taxability_reason'] ?? ''); if ($reason !== '') { $overall_reason = $reason; break; } }
     $out_items = array();
-    $taxability_reason = '';
-
-    if (!empty($calc['line_items']['data']) && is_array($calc['line_items']['data'])) {
-      foreach ($calc['line_items']['data'] as $x) {
-        $reason = (string)($x['taxability_reason'] ?? '');
-        if ($reason && $taxability_reason === '') {
-          $taxability_reason = $reason;
-        }
-
-        $out_items[] = array(
-          'reference' => (string)($x['reference'] ?? ''),
-          'amount_cents' => (int)($x['amount'] ?? 0),
-          'tax_cents' => (int)($x['amount_tax'] ?? 0),
-          'taxability_reason' => $reason,
-          'tax_code' => (string)($x['tax_code'] ?? ''),
-        );
-      }
-    }
-
-    $this->stripe_debug_log('tax calculation response', array(
-      'calculation_id' => $calc_id,
-      'tax_cents' => $tax_cents,
-      'amount_total_cents' => $amount_total,
-      'taxability_reason' => $taxability_reason,
-      'line_items' => $out_items,
-    ));
-
-    return array(
-      'ok' => true,
-      'tax_cents' => $tax_cents,
-      'amount_total_cents' => $amount_total,
-      'calculation_id' => $calc_id,
-      'line_items' => $out_items,
-      'taxability_reason' => $taxability_reason,
-    );
+    foreach ((array)($calculation['line_items']['data'] ?? array()) as $line) $out_items[] = array('id'=>sanitize_text_field($line['id'] ?? ''),'reference'=>sanitize_key($line['reference'] ?? ''),'amount_cents'=>(int)($line['amount'] ?? 0),'tax_cents'=>(int)($line['amount_tax'] ?? 0),'taxability_reason'=>sanitize_key($line['taxability_reason'] ?? $overall_reason),'tax_code'=>sanitize_text_field($line['tax_code'] ?? ''));
+    return array('ok'=>true,'subtotal_cents'=>$subtotal,'tax_cents'=>$tax_cents,'amount_total_cents'=>$amount_total_cents,'calculation_id'=>$calculation_id,'line_items'=>$out_items,'taxability_reason'=>$overall_reason);
   }
 
-  private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array(), $payment_method_types = array('card')) {
+  private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array(), $payment_method_types = array('card'), $tax_calculation_id = '') {
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => $currency ?: 'usd',
@@ -3406,6 +3225,11 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     if ($description) {
       $params['description'] = $description;
+    }
+
+    $tax_calculation_id = sanitize_text_field($tax_calculation_id);
+    if ($tax_calculation_id !== '') {
+      $params['hooks[inputs][tax][calculation]'] = $tax_calculation_id;
     }
 
     $idx = 0;
@@ -3433,7 +3257,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       $params["metadata[{$k}]"] = (string)$v;
     }
 
-    return $this->stripe_api_request('POST', '/v1/payment_intents', $params);
+    return $this->stripe_api_request('POST', '/v1/payment_intents', $params, $this->mrm_stripe_tax_headers());
   }
 
   private function stripe_retrieve_payment_intent($pi_id) {
@@ -3483,7 +3307,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       if ($k === '' || $v === null) continue;
       $params["metadata[{$k}]"] = (string)$v;
     }
-    return $this->stripe_api_request('POST', '/v1/payment_intents', $params);
+    return $this->stripe_api_request('POST', '/v1/payment_intents', $params, $this->mrm_stripe_tax_headers());
   }
 
   private function stripe_attach_payment_method_to_customer($payment_method_id, $customer_id) {
@@ -4038,6 +3862,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
 
     $line1 = trim((string)($address['line1'] ?? ''));
+    $line2 = trim((string)($address['line2'] ?? ''));
     $city = trim((string)($address['city'] ?? ''));
     $state = trim((string)($address['state'] ?? ''));
     $postal = trim((string)($address['postal_code'] ?? ''));
@@ -4054,6 +3879,9 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if ($line1 !== '') {
       $params['address[line1]'] = $line1;
     }
+    if ($line2 !== '') {
+      $params['address[line2]'] = $line2;
+    }
     if ($city !== '') {
       $params['address[city]'] = $city;
     }
@@ -4067,22 +3895,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       $params['address[country]'] = $country;
     }
 
-    $params['shipping[name]'] = $name !== '' ? (string)$name : $email;
-    if ($line1 !== '') {
-      $params['shipping[address][line1]'] = $line1;
-    }
-    if ($city !== '') {
-      $params['shipping[address][city]'] = $city;
-    }
-    if ($state !== '') {
-      $params['shipping[address][state]'] = $state;
-    }
-    if ($postal !== '') {
-      $params['shipping[address][postal_code]'] = $postal;
-    }
-    if ($country !== '') {
-      $params['shipping[address][country]'] = $country;
-    }
+    $params['tax[validate_location]'] = 'immediately';
 
     $this->stripe_debug_log('updating stripe customer tax location', array(
       'customer_id' => $customer_id,
@@ -10537,6 +10350,14 @@ private function charge_and_unlock_autopay($data) {
       $base_amount_cents = max(50, $base_amount_cents - $promo_discount_cents);
     }
 
+    $context['sku'] = $sku;
+    $lesson_mode = sanitize_key($context['lesson_mode'] ?? '');
+    if ($product_type === 'lesson' && $lesson_mode !== 'online') {
+      $performance_location_id = $this->mrm_get_instructor_performance_location_id(absint($context['instructor_id'] ?? 0));
+      if ($performance_location_id === '') return new WP_REST_Response(array('ok'=>false,'code'=>'performance_location_required','message'=>'This in-person lesson location is not yet configured for tax calculation.'), 409);
+      $context['stripe_tax_performance_location_id'] = $performance_location_id;
+    }
+
     $tax_policy = $this->mrm_build_tax_policy($address, $product_type, $addon_selected, $p, $context);
 
     if ($tax_policy instanceof WP_REST_Response) {
@@ -10561,24 +10382,13 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
-
-    $tax_result = array(
-      'ok' => true,
-      'tax_cents' => 0,
-      'amount_total_cents' => ($base_amount_cents + $addon_amount_cents),
-      'calculation_id' => '',
-      'line_items' => array(),
-      'taxability_reason' => (string)($tax_policy['policy_reason'] ?? ''),
-    );
-
-    if (!empty($tax_policy['should_collect_tax']) && !empty($taxable_items)) {
-      $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
-    }
-
-    $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
-    $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
+    if (is_wp_error($taxable_items)) return new WP_REST_Response(array('ok'=>false,'code'=>$taxable_items->get_error_code(),'message'=>$taxable_items->get_error_message()), 500);
+    $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    if (is_wp_error($tax_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$tax_result->get_error_code(),'message'=>$tax_result->get_error_message()), 503);
+    $tax_cents = (int)$tax_result['tax_cents'];
+    $tax_calc_id = sanitize_text_field($tax_result['calculation_id']);
     $tax_message = $this->mrm_build_tax_display_message($tax_policy, $tax_result, $tax_cents);
-    $final_amount_cents = $base_amount_cents + $addon_amount_cents + $tax_cents;
+    $final_amount_cents = (int)$tax_result['amount_total_cents'];
 
     return new WP_REST_Response(array(
       'ok' => true,
@@ -10769,6 +10579,14 @@ private function charge_and_unlock_autopay($data) {
       $base_amount_cents = max(50, $base_amount_cents - $promo_discount_cents);
     }
 
+    $context['sku'] = $sku;
+    $lesson_mode = sanitize_key($context['lesson_mode'] ?? '');
+    if ($product_type === 'lesson' && $lesson_mode !== 'online') {
+      $performance_location_id = $this->mrm_get_instructor_performance_location_id(absint($context['instructor_id'] ?? 0));
+      if ($performance_location_id === '') return new WP_REST_Response(array('ok'=>false,'code'=>'performance_location_required','message'=>'This in-person lesson location is not yet configured for tax calculation.'), 409);
+      $context['stripe_tax_performance_location_id'] = $performance_location_id;
+    }
+
     $tax_policy = $this->mrm_build_tax_policy($address, $product_type, $addon_selected, $p, $context);
 
     if (is_array($tax_policy) && empty($tax_policy['ok']) && !empty($tax_policy['code'])) {
@@ -10793,30 +10611,11 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
-
-    $tax_result = array(
-      'ok' => true,
-      'tax_cents' => 0,
-      'amount_total_cents' => ($base_amount_cents + $addon_amount_cents),
-      'calculation_id' => '',
-      'line_items' => array(),
-      'taxability_reason' => (string)($tax_policy['policy_reason'] ?? ''),
-    );
-
-    if (!empty($tax_policy['should_collect_tax']) && !empty($taxable_items)) {
-      $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
-    } else {
-      $this->stripe_debug_log('create_payment_intent tax skipped before stripe tax request', array(
-        'sku' => $sku,
-        'product_type' => $product_type,
-        'policy_reason' => (string)($tax_policy['policy_reason'] ?? ''),
-        'policy_message' => (string)($tax_policy['policy_message'] ?? ''),
-        'address' => $address,
-      ));
-    }
-
-    $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
-    $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
+    if (is_wp_error($taxable_items)) return new WP_REST_Response(array('ok'=>false,'code'=>$taxable_items->get_error_code(),'message'=>$taxable_items->get_error_message()), 500);
+    $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    if (is_wp_error($tax_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$tax_result->get_error_code(),'message'=>$tax_result->get_error_message()), 503);
+    $tax_cents = (int)$tax_result['tax_cents'];
+    $tax_calc_id = sanitize_text_field($tax_result['calculation_id']);
     $tax_message = $this->mrm_build_tax_display_message($tax_policy, $tax_result, $tax_cents);
 
     if ($tax_cents <= 0 && !empty($taxable_items)) {
@@ -10832,7 +10631,7 @@ private function charge_and_unlock_autopay($data) {
       ));
     }
 
-    $final_amount_cents = $base_amount_cents + $addon_amount_cents + $tax_cents;
+    $final_amount_cents = (int)$tax_result['amount_total_cents'];
 
     // Final safety: NEVER create PI with amount=0
     if ($final_amount_cents <= 0) {
@@ -10862,8 +10661,10 @@ private function charge_and_unlock_autopay($data) {
       $metadata['mrm_promo_discount_cents'] = (string)$promo_discount_cents;
     }
     // Total tax for this order (covers sheet music base + subscription add-on, depending on product).
+    $metadata['mrm_subtotal_cents'] = (string)$tax_result['subtotal_cents'];
     $metadata['mrm_tax_cents'] = (string)$tax_cents;
-    $metadata['mrm_tax_calculation_id'] = (string)$tax_calc_id;
+    $metadata['mrm_total_cents'] = (string)$final_amount_cents;
+    $metadata['mrm_tax_calculation_id'] = $tax_calc_id;
     // Back-compat key (historically used for the $5 add-on tax only).
     $metadata['mrm_addon_tax_cents'] = (string)$tax_cents;
 
@@ -10876,7 +10677,10 @@ private function charge_and_unlock_autopay($data) {
     $metadata['mrm_tax_calculation_requested'] = !empty($tax_policy['should_collect_tax']) ? 'yes' : 'no';
     $metadata['mrm_tax_policy_reason'] = (string)($tax_policy['policy_reason'] ?? '');
     $metadata['mrm_tax_policy_message'] = (string)$tax_message;
-    $metadata['mrm_taxability_reason'] = (string)($tax_result['taxability_reason'] ?? '');
+    $metadata['mrm_taxability_reason'] = sanitize_key($tax_result['taxability_reason'] ?? '');
+    $metadata['mrm_customer_state'] = (string)$address['state'];
+    $metadata['mrm_customer_country'] = (string)$address['country'];
+    $metadata['mrm_tax_lines_json'] = wp_json_encode($tax_result['line_items']);
 
     // Early duplicate guard:
     // If this is a lesson checkout with the $5 sheet music add-on selected,
@@ -11016,7 +10820,7 @@ private function charge_and_unlock_autopay($data) {
       ), 500);
     }
 
-    $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra, $payment_method_types);
+    $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra, $payment_method_types, $tax_calc_id);
     if (is_wp_error($pi)) {
       $data = $pi->get_error_data();
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
@@ -11529,44 +11333,35 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     }
 
     $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
-
-    $tax_result = array(
-      'ok' => true,
-      'tax_cents' => 0,
-      'amount_total_cents' => ($base_amount_cents + $addon_amount_cents),
-      'calculation_id' => '',
-      'line_items' => array(),
-      'taxability_reason' => (string)($tax_policy['policy_reason'] ?? ''),
-    );
-
-    if (!empty($tax_policy['should_collect_tax']) && !empty($taxable_items)) {
-      $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
-    } else {
-      $this->stripe_debug_log('update_tax skipped before stripe tax request', array(
-        'order_id' => $order_id,
-        'product_type' => $product_type,
-        'policy_reason' => (string)($tax_policy['policy_reason'] ?? ''),
-        'policy_message' => (string)($tax_policy['policy_message'] ?? ''),
-        'address' => $address,
-      ));
-    }
-
-    $tax_cents = (!empty($tax_result['ok'])) ? (int)($tax_result['tax_cents'] ?? 0) : 0;
-    $tax_calc_id = (!empty($tax_result['ok'])) ? (string)($tax_result['calculation_id'] ?? '') : '';
+    if (is_wp_error($taxable_items)) return new WP_REST_Response(array('ok'=>false,'code'=>$taxable_items->get_error_code(),'message'=>$taxable_items->get_error_message()), 500);
+    $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
+    if (is_wp_error($tax_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$tax_result->get_error_code(),'message'=>$tax_result->get_error_message()), 503);
+    $tax_cents = (int)$tax_result['tax_cents'];
+    $tax_calc_id = sanitize_text_field($tax_result['calculation_id']);
     $tax_message = $this->mrm_build_tax_display_message($tax_policy, $tax_result, $tax_cents);
 
-    $new_total_cents = $base_amount_cents + $addon_amount_cents + $tax_cents;
+    $new_total_cents = (int)$tax_result['amount_total_cents'];
 
     // Update Stripe PaymentIntent amount (before confirmation)
-    $pi = $this->stripe_api_request('POST', '/v1/payment_intents/' . $pi_id, array(
-      'amount' => $new_total_cents,
-    ));
+    $update_params = array(
+      'amount' => (int)$tax_result['amount_total_cents'],
+      'hooks[inputs][tax][calculation]' => sanitize_text_field($tax_result['calculation_id']),
+      'metadata[mrm_subtotal_cents]' => (string)$tax_result['subtotal_cents'],
+      'metadata[mrm_tax_cents]' => (string)$tax_result['tax_cents'],
+      'metadata[mrm_total_cents]' => (string)$tax_result['amount_total_cents'],
+      'metadata[mrm_tax_calculation_id]' => sanitize_text_field($tax_result['calculation_id']),
+      'metadata[mrm_taxability_reason]' => sanitize_key($tax_result['taxability_reason'] ?? ''),
+      'metadata[mrm_tax_lines_json]' => wp_json_encode($tax_result['line_items']),
+    );
+    $pi = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($pi_id), $update_params, $this->mrm_stripe_tax_headers());
     if (is_wp_error($pi)) {
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
     }
 
     // Persist into order metadata so receipts and ledger remain consistent
+    $meta['mrm_subtotal_cents'] = (string)$tax_result['subtotal_cents'];
     $meta['mrm_tax_cents'] = (string)$tax_cents;
+    $meta['mrm_total_cents'] = (string)$new_total_cents;
     $meta['mrm_tax_calculation_id'] = (string)$tax_calc_id;
     $meta['mrm_addon_tax_cents'] = (string)$tax_cents; // back-compat
     $meta['mrm_tax_country'] = (string)($address['country'] ?? 'US');
@@ -16271,7 +16066,10 @@ public function handle_marketing_resubscribe() {
       if ($code === 'AK') $general_status = 'local_sales_tax_only';
       $wpdb->insert($table, array('state_code'=>$code,'state_name'=>$name,'general_sales_tax_status'=>$general_status,'threshold_rule_verified'=>0,'rules_version'=>self::TAX_RULES_VERSION,'authority_registration_status'=>'not_started','stripe_registration_status'=>'none','collection_active'=>0,'created_at'=>$now,'updated_at'=>$now));
     }
-    $wpdb->update($table, array('physical_nexus_flag'=>1,'physical_nexus_reason'=>'Low Brass Lessons home-state business presence.','first_flagged_at'=>$now,'updated_at'=>$now), array('state_code'=>'AZ'));
+    $az = $wpdb->get_row("SELECT physical_nexus_flag, first_flagged_at FROM {$table} WHERE state_code = 'AZ'", ARRAY_A);
+    if ($az && empty($az['physical_nexus_flag'])) {
+      $wpdb->update($table, array('physical_nexus_flag'=>1,'physical_nexus_reason'=>'Low Brass Lessons home-state business presence.','first_flagged_at'=>$now,'updated_at'=>$now), array('state_code'=>'AZ'));
+    }
     $this->mrm_tax_seed_initial_verified_rules();
   }
 
@@ -16285,7 +16083,7 @@ public function handle_marketing_resubscribe() {
       'IN'=>array('threshold_amount_cents'=>10000000,'threshold_transaction_count'=>null,'threshold_operator'=>'amount','measurement_window'=>'previous_calendar_year','included_sales_basis'=>'gross sales excluding marketplace sales','rules_json'=>array('included_channels'=>array('direct'),'included_categories'=>array('all'),'subtract_refunds'=>false),'rule_source_url'=>'https://docs.stripe.com/tax/supported-countries/united-states/collect-tax?tax-jurisdiction-united-states=indiana'),
     );
     foreach ($rules as $state=>$rule) {
-      $wpdb->update($table, array('threshold_rule_verified'=>1,'threshold_amount_cents'=>$rule['threshold_amount_cents'],'threshold_transaction_count'=>$rule['threshold_transaction_count'],'threshold_operator'=>$rule['threshold_operator'],'measurement_window'=>$rule['measurement_window'],'included_sales_basis'=>$rule['included_sales_basis'],'rules_json'=>wp_json_encode($rule['rules_json']),'rule_source_url'=>$rule['rule_source_url'],'rule_effective_date'=>'2026-07-12','rules_version'=>self::TAX_RULES_VERSION,'updated_at'=>$now), array('state_code'=>$state));
+      if ((int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(1) FROM {$table} WHERE state_code = %s AND threshold_rule_verified = 0 AND rule_effective_date IS NULL", $state)) > 0) $wpdb->update($table, array('threshold_rule_verified'=>1,'threshold_amount_cents'=>$rule['threshold_amount_cents'],'threshold_transaction_count'=>$rule['threshold_transaction_count'],'threshold_operator'=>$rule['threshold_operator'],'measurement_window'=>$rule['measurement_window'],'included_sales_basis'=>$rule['included_sales_basis'],'rules_json'=>wp_json_encode($rule['rules_json']),'rule_source_url'=>$rule['rule_source_url'],'rule_effective_date'=>'2026-07-12','rules_version'=>self::TAX_RULES_VERSION,'updated_at'=>$now), array('state_code'=>$state));
     }
   }
 
@@ -16305,7 +16103,14 @@ public function handle_marketing_resubscribe() {
 
   private function mrm_tax_get_state_gate($state) {
     global $wpdb; $state=$this->mrm_normalize_state_code($state); if($state==='') return array('allowed'=>false,'message'=>'The instructor state is missing or invalid.'); $row=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_state_status()} WHERE state_code = %s",$state),ARRAY_A); if(!$row) return array('allowed'=>false,'message'=>'The instructor state is not present in the tax registry.');
-    if(($row['authority_registration_status']??'')!=='active') return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because the {$state} state tax registration has not been marked active.");
+    $authority_status = sanitize_key($row['authority_registration_status'] ?? '');
+    if ($authority_status === 'not_required_written_determination') {
+      $reviewed_at = sanitize_text_field($row['written_determination_reviewed_at'] ?? '');
+      $reference = trim((string)($row['written_determination_reference'] ?? ''));
+      if ($reviewed_at !== '' && $reference !== '') return array('allowed'=>true,'state'=>$state,'row'=>$row,'reason'=>'written_determination');
+      return array('allowed'=>false,'state'=>$state,'message'=>'The written no-registration determination is incomplete.');
+    }
+    if($authority_status!=='active') return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because the {$state} state tax registration has not been marked active.");
     if(($row['stripe_registration_status']??'')!=='active') return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because Stripe does not report an active sales-tax registration for {$state}.");
     if($this->mrm_tax_is_live_stripe_key() && empty($row['stripe_livemode'])) return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because the {$state} Stripe registration is not active in live mode.");
     if(empty($row['collection_active'])) return array('allowed'=>false,'state'=>$state,'message'=>"Instructor approval is blocked because sales-tax collection for {$state} is not fully active.");
@@ -16320,7 +16125,7 @@ public function handle_marketing_resubscribe() {
 
   private function mrm_tax_create_alert($state,$alert_type,$source_type='',$source_id=0,$details=array()) { global $wpdb; $state=$this->mrm_normalize_state_code($state); $alert_type=sanitize_key($alert_type); $source_type=sanitize_key($source_type); $source_id=absint($source_id); $alert_key=implode(':',array($state,$alert_type,$source_type,$source_id)); $table=$this->table_tax_alerts(); $now=current_time('mysql'); $existing=$wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE alert_key = %s",$alert_key)); if($existing) return absint($existing); $wpdb->insert($table,array('alert_key'=>$alert_key,'state_code'=>$state,'alert_type'=>$alert_type,'alert_status'=>'open','source_type'=>$source_type,'source_id'=>$source_id,'details_json'=>wp_json_encode($details),'created_at'=>$now,'updated_at'=>$now)); $alert_id=absint($wpdb->insert_id); $to=sanitize_email(get_option('admin_email')); if($to && is_email($to)){ $subject='Low Brass Lessons sales-tax action required: '.$state; $body="A sales-tax compliance action has been created.\n\nState: {$state}\nAlert: {$alert_type}\nDetails: ".sanitize_text_field($details['message']??'')."\n\nOpen Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$subject,$body)) $wpdb->update($table,array('emailed_at'=>$now,'updated_at'=>$now),array('id'=>$alert_id)); } return $alert_id; }
 
-  private function mrm_tax_window_start($measurement_window) { $timezone=wp_timezone(); $now=new DateTimeImmutable('now',$timezone); switch($measurement_window){ case 'rolling_12_months': return $now->modify('-12 months')->format('Y-m-d H:i:s'); case 'previous_calendar_year': return $now->modify('first day of January last year')->setTime(0,0,0)->format('Y-m-d H:i:s'); case 'previous_four_quarters': return $now->modify('first day of this quarter')->modify('-12 months')->setTime(0,0,0)->format('Y-m-d H:i:s'); case 'current_or_previous_calendar_year': default: return $now->modify('first day of January last year')->setTime(0,0,0)->format('Y-m-d H:i:s'); } }
+  private function mrm_tax_window_start($measurement_window) { $timezone=wp_timezone(); $now=new DateTimeImmutable('now',$timezone); switch($measurement_window){ case 'rolling_12_months': return $now->modify('-12 months')->format('Y-m-d H:i:s'); case 'previous_calendar_year': return new DateTimeImmutable(($now->format('Y')-1).'-01-01 00:00:00',$timezone); case 'previous_four_quarters': $month=(int)$now->format('n'); $quarter_start_month=((int)floor(($month-1)/3)*3)+1; $current_quarter_start=$now->setDate((int)$now->format('Y'),$quarter_start_month,1)->setTime(0,0,0); return $current_quarter_start->modify('-12 months')->format('Y-m-d H:i:s'); case 'current_or_previous_calendar_year': default: return new DateTimeImmutable(($now->format('Y')-1).'-01-01 00:00:00',$timezone); } }
 
   private function mrm_tax_window_bounds($measurement_window) { $tz=wp_timezone(); $now=new DateTimeImmutable('now',$tz); if($measurement_window==='previous_calendar_year'){ $start=$now->modify('first day of January last year')->setTime(0,0,0); $end=$now->modify('last day of December last year')->setTime(23,59,59); return array(array($start->format('Y-m-d H:i:s'),$end->format('Y-m-d H:i:s'))); } if($measurement_window==='current_or_previous_calendar_year'){ return array(array($now->modify('first day of January this year')->setTime(0,0,0)->format('Y-m-d H:i:s'),$now->format('Y-m-d H:i:s')),array($now->modify('first day of January last year')->setTime(0,0,0)->format('Y-m-d H:i:s'),$now->modify('last day of December last year')->setTime(23,59,59)->format('Y-m-d H:i:s'))); } return array(array($this->mrm_tax_window_start($measurement_window),$now->format('Y-m-d H:i:s'))); }
 
@@ -16335,7 +16140,7 @@ public function handle_marketing_resubscribe() {
 
   public function handle_tax_recompute_thresholds() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_recompute_thresholds','mrm_tax_recompute_nonce'); $this->mrm_tax_recompute_all_thresholds(); wp_safe_redirect(admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG.'&thresholds_recomputed=1')); exit; }
 
-  public function handle_tax_state_save() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); $state=$this->mrm_normalize_state_code(wp_unslash($_POST['state_code']??'')); check_admin_referer('mrm_tax_state_save_'.$state,'mrm_tax_state_nonce'); if($state==='') wp_die('Invalid state.'); global $wpdb; $amount_dollars=(float)wp_unslash($_POST['threshold_amount_dollars']??0); $wpdb->update($this->table_tax_state_status(),array('authority_registration_status'=>sanitize_key(wp_unslash($_POST['authority_registration_status']??'not_started')),'authority_registration_number'=>sanitize_text_field(wp_unslash($_POST['authority_registration_number']??'')),'authority_registration_effective_date'=>sanitize_text_field(wp_unslash($_POST['authority_registration_effective_date']??'')),'threshold_rule_verified'=>!empty($_POST['threshold_rule_verified'])?1:0,'threshold_amount_cents'=>$amount_dollars>0?(int)round($amount_dollars*100):null,'threshold_transaction_count'=>absint($_POST['threshold_transaction_count']??0)?:null,'threshold_operator'=>sanitize_key(wp_unslash($_POST['threshold_operator']??'amount')),'measurement_window'=>sanitize_key(wp_unslash($_POST['measurement_window']??'')),'included_sales_basis'=>sanitize_text_field(wp_unslash($_POST['included_sales_basis']??'')),'rule_source_url'=>esc_url_raw(wp_unslash($_POST['rule_source_url']??'')),'rule_effective_date'=>sanitize_text_field(wp_unslash($_POST['rule_effective_date']??'')),'stripe_threshold_status'=>sanitize_key(wp_unslash($_POST['stripe_threshold_status']??'not_confirmed')),'admin_notes'=>sanitize_textarea_field(wp_unslash($_POST['admin_notes']??'')),'updated_at'=>current_time('mysql')),array('state_code'=>$state)); $this->mrm_tax_sync_stripe_registrations(); wp_safe_redirect(admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG.'&state_saved='.rawurlencode($state))); exit; }
+  public function handle_tax_state_save() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); $state=$this->mrm_normalize_state_code(wp_unslash($_POST['state_code']??'')); check_admin_referer('mrm_tax_state_save_'.$state,'mrm_tax_state_nonce'); if($state==='') wp_die('Invalid state.'); global $wpdb; $amount_dollars=(float)wp_unslash($_POST['threshold_amount_dollars']??0); $wpdb->update($this->table_tax_state_status(),array('authority_registration_status'=>sanitize_key(wp_unslash($_POST['authority_registration_status']??'not_started')),'authority_registration_number'=>sanitize_text_field(wp_unslash($_POST['authority_registration_number']??'')),'authority_registration_effective_date'=>sanitize_text_field(wp_unslash($_POST['authority_registration_effective_date']??'')),'written_determination_reviewed_at'=>sanitize_text_field(wp_unslash($_POST['written_determination_reviewed_at']??'')),'written_determination_reference'=>sanitize_textarea_field(wp_unslash($_POST['written_determination_reference']??'')),'threshold_rule_verified'=>!empty($_POST['threshold_rule_verified'])?1:0,'threshold_amount_cents'=>$amount_dollars>0?(int)round($amount_dollars*100):null,'threshold_transaction_count'=>absint($_POST['threshold_transaction_count']??0)?:null,'threshold_operator'=>sanitize_key(wp_unslash($_POST['threshold_operator']??'amount')),'measurement_window'=>sanitize_key(wp_unslash($_POST['measurement_window']??'')),'included_sales_basis'=>sanitize_text_field(wp_unslash($_POST['included_sales_basis']??'')),'rule_source_url'=>esc_url_raw(wp_unslash($_POST['rule_source_url']??'')),'rule_effective_date'=>sanitize_text_field(wp_unslash($_POST['rule_effective_date']??'')),'stripe_threshold_status'=>sanitize_key(wp_unslash($_POST['stripe_threshold_status']??'not_confirmed')),'admin_notes'=>sanitize_textarea_field(wp_unslash($_POST['admin_notes']??'')),'updated_at'=>current_time('mysql')),array('state_code'=>$state)); $this->mrm_tax_sync_stripe_registrations(); wp_safe_redirect(admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG.'&state_saved='.rawurlencode($state))); exit; }
 
   public function render_sales_tax_nexus_page() {
     if(!current_user_can('manage_options')) wp_die('You do not have permission to access this page.'); global $wpdb; $this->maybe_install_or_upgrade_db(); $rows=$wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} ORDER BY state_name ASC",ARRAY_A); $live=$this->mrm_tax_is_live_stripe_key(); ?>
@@ -16354,7 +16159,7 @@ public function handle_marketing_resubscribe() {
         <tr style="border-left:5px solid <?php echo esc_attr($color); ?>"><td><strong><?php echo esc_html($r['state_code']); ?></strong><br><?php echo esc_html($r['state_name']); ?></td><td><?php echo !empty($r['physical_nexus_flag'])?'Yes':'No'; ?></td><td><?php echo nl2br(esc_html($r['physical_nexus_reason'])); ?></td><td><?php echo esc_html($r['authority_registration_status']); ?><br><?php echo esc_html($r['authority_registration_number']); ?></td><td><?php echo esc_html($r['stripe_registration_status']); ?><br><code><?php echo esc_html($r['stripe_registration_id']); ?></code><br><?php echo !empty($r['stripe_livemode'])?'live':'test/none'; ?></td><td><?php echo !empty($r['collection_active'])?'Yes':'No'; ?></td><td><?php echo !empty($r['threshold_rule_verified'])?'Verified':'Rule verification required'; ?></td><td><?php echo esc_html($r['measurement_window']); ?></td><td><?php echo esc_html($r['included_sales_basis']); ?></td><td>$<?php echo esc_html(number_format(((int)$r['estimated_sales_cents'])/100,2)); ?></td><td><?php echo esc_html($r['estimated_transaction_count']); ?></td><td><?php echo !empty($r['threshold_amount_cents'])?'$'.esc_html(number_format(((int)$r['threshold_amount_cents'])/100,2)):'—'; ?><br><?php echo !empty($r['threshold_transaction_count'])?esc_html($r['threshold_transaction_count']).' tx':''; ?></td><td><?php echo esc_html($r['estimated_threshold_percent']); ?>%</td><td><?php echo esc_html(empty($r['threshold_rule_verified'])?'Rule verification required':$r['estimated_threshold_status']); ?></td><td><?php echo esc_html($r['stripe_threshold_status']); ?></td><td>
           <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:260px;"><?php wp_nonce_field('mrm_tax_state_save_'.$r['state_code'],'mrm_tax_state_nonce'); ?><input type="hidden" name="action" value="mrm_tax_state_save"><input type="hidden" name="state_code" value="<?php echo esc_attr($r['state_code']); ?>">
             <select name="authority_registration_status"><?php foreach(array('not_started','reviewing','application_pending','active','not_required_written_determination','closed') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['authority_registration_status'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br>
-            <input name="authority_registration_number" value="<?php echo esc_attr($r['authority_registration_number']); ?>" placeholder="Authority #"><input type="date" name="authority_registration_effective_date" value="<?php echo esc_attr($r['authority_registration_effective_date']); ?>"><br>
+            <input name="authority_registration_number" value="<?php echo esc_attr($r['authority_registration_number']); ?>" placeholder="Authority #"><input type="date" name="authority_registration_effective_date" value="<?php echo esc_attr($r['authority_registration_effective_date']); ?>"><br><input type="date" name="written_determination_reviewed_at" value="<?php echo esc_attr($r['written_determination_reviewed_at'] ?? ''); ?>" title="Written determination reviewed date"><textarea name="written_determination_reference" placeholder="Written no-registration determination reference"><?php echo esc_textarea($r['written_determination_reference'] ?? ''); ?></textarea><br>
             <label><input type="checkbox" name="threshold_rule_verified" value="1" <?php checked(!empty($r['threshold_rule_verified'])); ?>> Rule verified</label><br><input type="number" step="0.01" name="threshold_amount_dollars" value="<?php echo esc_attr(!empty($r['threshold_amount_cents'])?((int)$r['threshold_amount_cents']/100):''); ?>" placeholder="Threshold $"><input type="number" name="threshold_transaction_count" value="<?php echo esc_attr($r['threshold_transaction_count']); ?>" placeholder="Tx count"><br>
             <select name="threshold_operator"><?php foreach(array('amount','count','amount_or_count','amount_and_count') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['threshold_operator'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><input name="measurement_window" value="<?php echo esc_attr($r['measurement_window']); ?>" placeholder="measurement_window"><br><input name="included_sales_basis" value="<?php echo esc_attr($r['included_sales_basis']); ?>" placeholder="Included basis"><br><input type="url" name="rule_source_url" value="<?php echo esc_attr($r['rule_source_url']); ?>" placeholder="Source URL"><input type="date" name="rule_effective_date" value="<?php echo esc_attr($r['rule_effective_date']); ?>"><br>
             <select name="stripe_threshold_status"><?php foreach(array('not_confirmed','below_threshold_confirmed','threshold_reached_confirmed','registration_required_confirmed') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['stripe_threshold_status'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br><textarea name="admin_notes" placeholder="Admin notes"><?php echo esc_textarea($r['admin_notes']); ?></textarea><br><button class="button button-small">Save</button></form>
@@ -22456,6 +22261,32 @@ public function handle_marketing_resubscribe() {
   private function mrm_pay_hub_temp_audit_redact($value) { $value = (string)$value; $patterns = array('/sk_(?:live|test)_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_SECRET_KEY]', '/rk_(?:live|test)_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_RESTRICTED_KEY]', '/whsec_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_WEBHOOK_SECRET]', '/Bearer\s+[A-Za-z0-9_\.\-]+/i' => 'Bearer [REDACTED_TOKEN]', '/password\s*[=:]\s*[^\s,;]+/i' => 'password=[REDACTED]', '/passwd\s*[=:]\s*[^\s,;]+/i' => 'passwd=[REDACTED]', '/private_key\s*[=:]\s*[^\s,;]+/i' => 'private_key=[REDACTED]', '/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----/s' => '[REDACTED_PRIVATE_KEY]', '/\b\d{3}-\d{2}-\d{4}\b/' => '[REDACTED_SSN]', '/\b\d{2}-\d{7}\b/' => '[REDACTED_TAX_ID]', '/wordpress_logged_in_[^=\s]+=[^\s;]+/i' => 'wordpress_logged_in_[REDACTED_COOKIE]'); foreach ($patterns as $regex => $replacement) $value = preg_replace($regex, $replacement, $value); return $value; }
   // END TEMP PAYMENT HUB AUDIT
 
+
+  public function create_external_taxed_payment_intent($args) {
+    $args = wp_parse_args($args, array('amount_cents'=>0,'currency'=>'usd','tax_code'=>'','reference'=>'','threshold_category'=>'other','address'=>array(),'metadata'=>array(),'description'=>'','receipt_email'=>''));
+    $amount = absint($args['amount_cents']);
+    $tax_code = sanitize_text_field($args['tax_code']);
+    if ($amount <= 0 || $tax_code === '') return new WP_Error('external_tax_item_invalid','The checkout amount or tax code is invalid.');
+    $tax = $this->mrm_tax_calculate_for_items($args['address'], array(array('amount_cents'=>$amount,'reference'=>sanitize_key($args['reference'] ?: 'external_item'),'tax_code'=>$tax_code,'threshold_category'=>sanitize_key($args['threshold_category']))), $args['currency']);
+    if (is_wp_error($tax)) return $tax;
+    $metadata = is_array($args['metadata']) ? $args['metadata'] : array();
+    $metadata['mrm_subtotal_cents'] = (string)$tax['subtotal_cents'];
+    $metadata['mrm_tax_cents'] = (string)$tax['tax_cents'];
+    $metadata['mrm_total_cents'] = (string)$tax['amount_total_cents'];
+    $metadata['mrm_tax_calculation_id'] = $tax['calculation_id'];
+    $metadata['mrm_taxability_reason'] = $tax['taxability_reason'];
+    $metadata['mrm_tax_code'] = $tax_code;
+    $metadata['mrm_threshold_category'] = sanitize_key($args['threshold_category']);
+    $metadata['mrm_customer_state'] = $this->mrm_normalize_state_code($args['address']['state'] ?? '');
+    $metadata['mrm_customer_country'] = strtoupper(sanitize_text_field($args['address']['country'] ?? 'US'));
+    $metadata['mrm_tax_lines_json'] = wp_json_encode($tax['line_items']);
+    $extra = array();
+    if (is_email($args['receipt_email'])) $extra['receipt_email'] = sanitize_email($args['receipt_email']);
+    $intent = $this->stripe_create_payment_intent($tax['amount_total_cents'], $args['currency'], $metadata, $args['description'], $extra, array('card'), $tax['calculation_id']);
+    if (is_wp_error($intent)) return $intent;
+    return array('payment_intent'=>$intent,'subtotal_cents'=>$tax['subtotal_cents'],'tax_cents'=>$tax['tax_cents'],'amount_total_cents'=>$tax['amount_total_cents'],'calculation_id'=>$tax['calculation_id'],'taxability_reason'=>$tax['taxability_reason']);
+  }
+
 }
 
 global $mrm_pay_hub_singleton;
@@ -22464,6 +22295,15 @@ $mrm_pay_hub_singleton = new MRM_Payments_Hub_Single();
 function mrm_pay_hub_singleton() {
   global $mrm_pay_hub_singleton;
   return $mrm_pay_hub_singleton instanceof MRM_Payments_Hub_Single ? $mrm_pay_hub_singleton : null;
+}
+
+
+function mrm_payments_hub_create_taxed_payment_intent($args) {
+  $hub = mrm_pay_hub_singleton();
+  if (!$hub || !method_exists($hub, 'create_external_taxed_payment_intent')) {
+    return new WP_Error('payments_hub_tax_unavailable','The shared tax service is unavailable.');
+  }
+  return $hub->create_external_taxed_payment_intent($args);
 }
 
 if (!function_exists('mrm_payments_hub_resolve_promo_discount')) {

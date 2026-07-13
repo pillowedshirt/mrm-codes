@@ -993,6 +993,19 @@ public function mrm_mc_render_critical_error_notice() {
 			amount_cents INT NOT NULL,
 			currency VARCHAR(10) NOT NULL DEFAULT 'usd',
 			payment_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+			billing_line1 VARCHAR(255) NULL,
+			billing_line2 VARCHAR(255) NULL,
+			billing_city VARCHAR(191) NULL,
+			billing_state VARCHAR(32) NULL,
+			billing_postal_code VARCHAR(32) NULL,
+			billing_country VARCHAR(8) NULL,
+			subtotal_cents INT NOT NULL DEFAULT 0,
+			tax_cents INT NOT NULL DEFAULT 0,
+			tax_code VARCHAR(64) NULL,
+			tax_calculation_id VARCHAR(191) NULL,
+			tax_association_id VARCHAR(191) NULL,
+			tax_transaction_id VARCHAR(191) NULL,
+			taxability_reason VARCHAR(64) NULL,
 			google_attendee_added TINYINT(1) NOT NULL DEFAULT 0,
 			terms_version VARCHAR(32) NOT NULL DEFAULT 'v1',
 			terms_accepted TINYINT(1) NOT NULL DEFAULT 0,
@@ -1334,6 +1347,19 @@ public function mrm_mc_render_critical_error_notice() {
 		'promo_status'         => "ALTER TABLE {$registrations_table} ADD promo_status VARCHAR(64) NULL",
 		'reminder_24h_sent_at' => "ALTER TABLE {$registrations_table} ADD reminder_24h_sent_at DATETIME NULL",
 		'reminder_1h_sent_at'  => "ALTER TABLE {$registrations_table} ADD reminder_1h_sent_at DATETIME NULL",
+		'billing_line1'       => "ALTER TABLE {$registrations_table} ADD billing_line1 VARCHAR(255) NULL",
+		'billing_line2'       => "ALTER TABLE {$registrations_table} ADD billing_line2 VARCHAR(255) NULL",
+		'billing_city'        => "ALTER TABLE {$registrations_table} ADD billing_city VARCHAR(191) NULL",
+		'billing_state'       => "ALTER TABLE {$registrations_table} ADD billing_state VARCHAR(32) NULL",
+		'billing_postal_code' => "ALTER TABLE {$registrations_table} ADD billing_postal_code VARCHAR(32) NULL",
+		'billing_country'     => "ALTER TABLE {$registrations_table} ADD billing_country VARCHAR(8) NULL",
+		'subtotal_cents'      => "ALTER TABLE {$registrations_table} ADD subtotal_cents INT NOT NULL DEFAULT 0",
+		'tax_cents'           => "ALTER TABLE {$registrations_table} ADD tax_cents INT NOT NULL DEFAULT 0",
+		'tax_code'            => "ALTER TABLE {$registrations_table} ADD tax_code VARCHAR(64) NULL",
+		'tax_calculation_id'  => "ALTER TABLE {$registrations_table} ADD tax_calculation_id VARCHAR(191) NULL",
+		'tax_association_id'  => "ALTER TABLE {$registrations_table} ADD tax_association_id VARCHAR(191) NULL",
+		'tax_transaction_id'  => "ALTER TABLE {$registrations_table} ADD tax_transaction_id VARCHAR(191) NULL",
+		'taxability_reason'   => "ALTER TABLE {$registrations_table} ADD taxability_reason VARCHAR(64) NULL",
 	);
 
 	foreach ( $registration_compat_adds as $column => $sql ) {
@@ -9021,54 +9047,71 @@ public function rest_create_payment_intent( $request ) {
 
 	$discount_cents = absint( $promo['discount_cents'] ?? 0 );
 	$amount_cents   = max( 50, absint( $promo['final_amount_cents'] ?? $base_amount_cents ) );
+	$address_raw = $this->mrm_mc_get_rest_param_value( $request, 'billing_address', array() );
+	$address = array(
+		'line1' => sanitize_text_field( $address_raw['line1'] ?? '' ),
+		'line2' => sanitize_text_field( $address_raw['line2'] ?? '' ),
+		'city' => sanitize_text_field( $address_raw['city'] ?? '' ),
+		'state' => strtoupper( substr( sanitize_text_field( $address_raw['state'] ?? '' ), 0, 2 ) ),
+		'postal_code' => sanitize_text_field( $address_raw['postal_code'] ?? '' ),
+		'country' => 'US',
+	);
+	if ( '' === $address['line1'] || '' === $address['city'] || '' === $address['state'] || '' === $address['postal_code'] ) {
+		return new WP_Error( 'masterclass_billing_address_required', 'Please enter your complete billing address.', array( 'status' => 400 ) );
+	}
+	$subtotal_cents = $amount_cents;
 	$keys           = $this->mrm_mc_get_stripe_keys();
 
 	if ( is_wp_error( $keys ) ) {
 		return new WP_Error( 'mrm_masterclass_stripe_unavailable', 'Payments are temporarily unavailable. Please try again later.', array( 'status' => 503 ) );
 	}
 
-	$intent = $this->mrm_mc_stripe_request(
-		'POST',
-		'payment_intents',
+	if ( ! function_exists( 'mrm_payments_hub_create_taxed_payment_intent' ) ) {
+		return new WP_Error( 'masterclass_tax_service_missing', 'Payments are temporarily unavailable.', array( 'status' => 503 ) );
+	}
+
+	$result = mrm_payments_hub_create_taxed_payment_intent(
 		array(
-			'amount'                              => $amount_cents,
-			'currency'                            => 'usd',
-
-			/*
-			 * Card-only checkout.
-			 * This prevents Klarna, bank redirect, ACH, Afterpay/Clearpay, Cash App,
-			 * and other automatic Stripe payment methods from appearing.
-			 */
-			'payment_method_types[]'               => 'card',
-
-			'description'                         => 'Masterclass registration: ' . sanitize_text_field( $event->title ),
-			'receipt_email'                       => $email,
-
-			'metadata[event_id]'                  => (string) $event_id,
-			'metadata[mrm_type]'                  => 'masterclass',
-			'metadata[masterclass_event_id]'      => (string) $event_id,
-			'metadata[mrm_masterclass_event_id]'  => (string) $event_id,
-			'metadata[event_title]'               => sanitize_text_field( $event->title ),
-			'metadata[first_name]'                => $first_name,
-			'metadata[last_name]'                 => $last_name,
-			'metadata[name]'                      => $name,
-			'metadata[email]'                     => $email,
-			'metadata[promo_code]'                => $promo_code,
-			'metadata[promo_status]'              => sanitize_key( $promo['promo_status'] ?? 'none' ),
-			'metadata[promo_discount_cents]'      => (string) $discount_cents,
-			'metadata[original_amount_cents]'     => (string) $base_amount_cents,
-			'metadata[final_amount_cents]'        => (string) $amount_cents,
-			'metadata[base_amount]'               => (string) $base_amount_cents,
-			'metadata[discount_amount]'           => (string) $discount_cents,
-			'metadata[source]'                    => 'mrm_masterclass',
-			'metadata[source_flow]'               => 'masterclass_registration',
-			'metadata[terms_accepted]'            => $terms_accepted ? '1' : '0',
+			'amount_cents' => $subtotal_cents,
+			'currency' => 'usd',
+			'tax_code' => 'txcd_20060045',
+			'reference' => 'masterclass_' . $event_id,
+			'threshold_category' => 'service_live_virtual',
+			'address' => $address,
+			'receipt_email' => $email,
+			'description' => 'Masterclass registration: ' . sanitize_text_field( $event->title ),
+			'metadata' => array(
+				'event_id' => (string) $event_id,
+				'mrm_type' => 'masterclass',
+				'mrm_product_type' => 'masterclass',
+				'masterclass_event_id' => (string) $event_id,
+				'mrm_masterclass_event_id' => (string) $event_id,
+				'event_title' => sanitize_text_field( $event->title ),
+				'first_name' => $first_name,
+				'last_name' => $last_name,
+				'name' => $name,
+				'email' => $email,
+				'promo_code' => $promo_code,
+				'promo_status' => sanitize_key( $promo['promo_status'] ?? 'none' ),
+				'promo_discount_cents' => (string) $discount_cents,
+				'original_amount_cents' => (string) $base_amount_cents,
+				'billing_line1' => $address['line1'],
+				'billing_line2' => $address['line2'],
+				'billing_city' => $address['city'],
+				'billing_state' => $address['state'],
+				'billing_postal_code' => $address['postal_code'],
+				'billing_country' => 'US',
+				'source_flow' => 'masterclass_registration',
+				'terms_accepted' => $terms_accepted ? '1' : '0',
+			),
 		)
 	);
 
-	if ( is_wp_error( $intent ) ) {
-		return new WP_Error( $intent->get_error_code(), $intent->get_error_message(), array( 'status' => 500 ) );
+	if ( is_wp_error( $result ) ) {
+		return new WP_Error( $result->get_error_code(), $result->get_error_message(), array( 'status' => 503 ) );
 	}
+
+	$intent = $result['payment_intent'];
 
 	if ( empty( $intent['client_secret'] ) || empty( $intent['id'] ) ) {
 		$this->mrm_mc_debug_log(
@@ -9098,7 +9141,10 @@ public function rest_create_payment_intent( $request ) {
 			'client_secret'           => sanitize_text_field( $intent['client_secret'] ),
 			'payment_intent_id'       => sanitize_text_field( $intent['id'] ),
 			'publishable_key'         => sanitize_text_field( $keys['publishable_key'] ),
-			'amount_cents'            => $amount_cents,
+			'subtotal_cents'          => $result['subtotal_cents'],
+			'tax_cents'               => $result['tax_cents'],
+			'amount_total_cents'      => $result['amount_total_cents'],
+			'amount_cents'            => $result['amount_total_cents'],
 			'base_amount_cents'       => $base_amount_cents,
 			'discount_cents'          => $discount_cents,
 			'promo_status'            => sanitize_key( $promo['promo_status'] ?? 'none' ),
@@ -9107,6 +9153,8 @@ public function rest_create_payment_intent( $request ) {
 			/*
 			 * Frontend should render the same controlled method list every time.
 			 */
+			'tax_calculation_id'      => $result['calculation_id'],
+			'taxability_reason'       => $result['taxability_reason'],
 			'allowed_payment_methods' => array( 'card' ),
 		)
 	);
@@ -9233,35 +9281,24 @@ public function rest_finalize_registration( $request ) {
 	$promo_code        = strtoupper( sanitize_text_field( $metadata['promo_code'] ?? $promo_code ) );
 	$promo_status      = sanitize_key( $metadata['promo_status'] ?? ( '' === $promo_code ? 'none' : 'invalid' ) );
 	$expected_discount = absint( $metadata['promo_discount_cents'] ?? 0 );
-	$expected_amount   = max( 50, absint( $metadata['final_amount_cents'] ?? ( $base_amount_cents - $expected_discount ) ) );
+	$subtotal_cents = absint( $metadata['mrm_subtotal_cents'] ?? max( 50, $base_amount_cents - $expected_discount ) );
+	$tax_cents = absint( $metadata['mrm_tax_cents'] ?? 0 );
+	$expected_amount = absint( $metadata['mrm_total_cents'] ?? ( $subtotal_cents + $tax_cents ) );
 
 	if ( $amount_received !== $expected_amount ) {
-		$this->mrm_mc_debug_log(
-			'Masterclass finalize blocked because Stripe amount did not match expected event amount.',
-			array(
-				'event_id'          => $event_id,
-				'payment_intent_id' => $payment_intent_id,
-				'amount_received'   => $amount_received,
-				'expected_amount'   => $expected_amount,
-			)
-		);
-
-		return new WP_Error(
-			'mrm_masterclass_payment_amount_mismatch',
-			'Payment verification failed because the paid amount did not match this Masterclass event. Please contact support.',
-			array( 'status' => 409 )
-		);
+		$this->mrm_mc_debug_log('Masterclass finalize blocked because Stripe amount did not match expected tax-inclusive amount.', array('event_id'=>$event_id,'payment_intent_id'=>$payment_intent_id,'amount_received'=>$amount_received,'expected_amount'=>$expected_amount));
+		return new WP_Error('mrm_masterclass_payment_amount_mismatch','Payment verification failed because the paid amount did not match this Masterclass event. Please contact support.',array( 'status' => 409 ));
 	}
 
-	$discount_cents = max( 0, $base_amount_cents - $amount_received );
+	$discount_cents = max( 0, $base_amount_cents - $subtotal_cents );
 	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair(); $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
-	$share_calc = $this->mrm_mc_calculate_registration_shares( $amount_received, absint( $event->presenter_id ), absint( $event->id ) );
+	$share_calc = $this->mrm_mc_calculate_registration_shares( $subtotal_cents, absint( $event->presenter_id ), absint( $event->id ) );
 	$stripe_fee = absint( $share_calc['stripe_fee_cents'] );
 	$net_cents = absint( $share_calc['net_cents'] );
 	$presenter_cut = absint( $share_calc['presenter_share_cents'] );
 	$platform_cut  = absint( $share_calc['platform_share_cents'] );
 	$terms_snapshot = wp_json_encode( $terms );
-	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'promo_discount_cents'=>$discount_cents,'original_amount_cents'=>$base_amount_cents,'final_amount_cents'=>$amount_received,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'cancel_url'=>esc_url_raw( $this->mrm_mc_cancel_url_for_token( $gate['token'] ) ),'feedback_url'=>esc_url_raw( $this->mrm_mc_feedback_url_for_token( $gate['token'] ) ),'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
+	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','billing_line1'=>sanitize_text_field($metadata['billing_line1'] ?? ''),'billing_line2'=>sanitize_text_field($metadata['billing_line2'] ?? ''),'billing_city'=>sanitize_text_field($metadata['billing_city'] ?? ''),'billing_state'=>sanitize_text_field($metadata['billing_state'] ?? ''),'billing_postal_code'=>sanitize_text_field($metadata['billing_postal_code'] ?? ''),'billing_country'=>sanitize_text_field($metadata['billing_country'] ?? 'US'),'subtotal_cents'=>$subtotal_cents,'tax_cents'=>$tax_cents,'tax_code'=>sanitize_text_field($metadata['mrm_tax_code'] ?? 'txcd_20060045'),'tax_calculation_id'=>sanitize_text_field($metadata['mrm_tax_calculation_id'] ?? ''),'taxability_reason'=>sanitize_key($metadata['mrm_taxability_reason'] ?? ''),'terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'promo_discount_cents'=>$discount_cents,'original_amount_cents'=>$base_amount_cents,'final_amount_cents'=>$amount_received,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'cancel_url'=>esc_url_raw( $this->mrm_mc_cancel_url_for_token( $gate['token'] ) ),'feedback_url'=>esc_url_raw( $this->mrm_mc_feedback_url_for_token( $gate['token'] ) ),'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
 	$registration_data = $this->mrm_mc_filter_data_for_table( $regs_table, $registration_data );
 	$inserted = $wpdb->insert( $regs_table, $registration_data );
 	if ( false === $inserted ) { return new WP_Error('mrm_masterclass_registration_insert_failed','Payment succeeded, but registration could not be saved. Please contact support.',array('status'=>500)); }
