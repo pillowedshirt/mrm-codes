@@ -113,6 +113,15 @@ class LowBrass_MRM_Masterclass_Plugin {
 	$this->mrm_mc_add_action_if_method_exists( 'wp_head', 'mrm_mc_print_session_page_title_css', 21, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'register_admin_menu' );
 	add_action( 'mrm_send_cross_plugin_email_test', array( $this, 'handle_cross_plugin_email_test' ), 10, 3 );
+	add_action(
+		'mrm_masterclass_deferred_tax_sync',
+		array(
+			$this,
+			'mrm_mc_run_deferred_tax_sync',
+		),
+		10,
+		1
+	);
 	add_filter( 'mrm_cross_plugin_email_preview', array( $this, 'handle_cross_plugin_email_preview' ), 10, 2 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
@@ -3073,6 +3082,44 @@ private function mrm_mc_void_payout_ledger_for_refunded_registration( $registrat
 	);
 
 	return $summary;
+}
+
+public function mrm_mc_run_deferred_tax_sync(
+	$payment_intent_id
+) {
+	$payment_intent_id =
+		sanitize_text_field(
+			$payment_intent_id
+		);
+
+	if ($payment_intent_id === '') {
+		return;
+	}
+
+	if (
+		function_exists(
+			'mrm_payments_hub_sync_tax_ledger_for_payment_intent'
+		)
+	) {
+		$result =
+			mrm_payments_hub_sync_tax_ledger_for_payment_intent(
+				$payment_intent_id
+			);
+
+		if (is_wp_error($result)) {
+			$this->mrm_mc_debug_log(
+				'Deferred Masterclass tax-ledger synchronization failed.',
+				array(
+					'payment_intent_id' =>
+						$payment_intent_id,
+
+					'message' =>
+						$result
+							->get_error_message(),
+				)
+			);
+		}
+	}
 }
 
 private function mrm_mc_refund_registration( $registration, $event, $reason = 'event_cancelled' ) {
@@ -9380,8 +9427,21 @@ public function rest_finalize_registration( $request ) {
 	$ledger_data = $this->mrm_mc_filter_data_for_table( $ledger_table, $ledger_data );
 	$wpdb->insert( $ledger_table, $ledger_data );
 
-	if ( function_exists( 'mrm_payments_hub_sync_tax_ledger_for_payment_intent' ) ) {
-		mrm_payments_hub_sync_tax_ledger_for_payment_intent( $payment_intent_id );
+	$deferred_tax_args = array(
+		$payment_intent_id,
+	);
+
+	if (
+		!wp_next_scheduled(
+			'mrm_masterclass_deferred_tax_sync',
+			$deferred_tax_args
+		)
+	) {
+		wp_schedule_single_event(
+			time() + 60,
+			'mrm_masterclass_deferred_tax_sync',
+			$deferred_tax_args
+		);
 	}
 
 	$confirmation_sent = $this->mrm_mc_send_confirmation_for_registration( $registration_id );
