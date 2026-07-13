@@ -3040,6 +3040,9 @@ private function mrm_mc_refund_registration( $registration, $event, $reason = 'e
 	if ( '' === $payment_intent_id || $amount_cents <= 0 ) { return new WP_Error( 'mrm_masterclass_refund_missing_data', 'Refund data was incomplete.' ); }
 	$refund_result = $this->mrm_mc_refund_payment_intent( $payment_intent_id, $amount_cents );
 	if ( is_wp_error( $refund_result ) ) { return $refund_result; }
+	if ( function_exists( 'mrm_payments_hub_sync_tax_ledger_for_payment_intent' ) ) {
+		mrm_payments_hub_sync_tax_ledger_for_payment_intent( $payment_intent_id );
+	}
 	$refund_id = sanitize_text_field( $refund_result['id'] ?? '' );
 	$refund_status = sanitize_key( $refund_result['status'] ?? 'succeeded' );
 	$wpdb->insert( $refunds_table, $this->mrm_mc_filter_data_for_table( $refunds_table, array( 'event_id' => absint( $event->id ), 'registration_id' => absint( $registration->id ), 'payment_intent_id' => $payment_intent_id, 'refund_id' => $refund_id, 'amount_cents' => $amount_cents, 'status' => $refund_status, 'reason' => sanitize_key( $reason ), 'error_message' => '', 'created_at' => $this->now(), 'updated_at' => $this->now() ) ) );
@@ -9084,6 +9087,9 @@ public function rest_create_payment_intent( $request ) {
 				'event_id' => (string) $event_id,
 				'mrm_type' => 'masterclass',
 				'mrm_product_type' => 'masterclass',
+				'mrm_threshold_category' => 'service_live_virtual',
+				'mrm_customer_state' => $address['state'],
+				'mrm_customer_country' => $address['country'],
 				'masterclass_event_id' => (string) $event_id,
 				'mrm_masterclass_event_id' => (string) $event_id,
 				'event_title' => sanitize_text_field( $event->title ),
@@ -9306,6 +9312,10 @@ public function rest_finalize_registration( $request ) {
 	$ledger_data = array('event_id'=>$event_id,'registration_id'=>$registration_id,'presenter_id'=>absint( $event->presenter_id ),'ledger_type'=>'registration_payment','stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'gross_cents'=>$amount_received,'discount_cents'=>$discount_cents,'stripe_fee_cents'=>$stripe_fee,'estimated_stripe_fee_cents'=>$stripe_fee,'net_cents'=>$net_cents,'presenter_share_cents'=>$presenter_cut,'platform_share_cents'=>$platform_cut,'status'=>'payable','notes'=>'Masterclass registration payment finalized. Presenter payout was calculated from the per-student payout amount assigned to this Masterclass.','payout_eligible_at'=>gmdate( 'Y-m-d H:i:s', strtotime( $event->end_time . ' UTC' ) + WEEK_IN_SECONDS ),'created_at'=>$this->now(),'updated_at'=>$this->now());
 	$ledger_data = $this->mrm_mc_filter_data_for_table( $ledger_table, $ledger_data );
 	$wpdb->insert( $ledger_table, $ledger_data );
+
+	if ( function_exists( 'mrm_payments_hub_sync_tax_ledger_for_payment_intent' ) ) {
+		mrm_payments_hub_sync_tax_ledger_for_payment_intent( $payment_intent_id );
+	}
 
 	$confirmation_sent = $this->mrm_mc_send_confirmation_for_registration( $registration_id );
 

@@ -3587,24 +3587,73 @@ body,
     return '';
   }
 
-  function renderMasterclassCheckoutSummary(event, payload, checkout) {
-    const summary = byId('mrm-masterclass-checkout-summary');
+  function renderMasterclassCheckoutSummary(
+    event,
+    payload,
+    checkout
+  ) {
+    const summary = byId(
+      'mrm-masterclass-checkout-summary'
+    );
+
     if (!summary) return;
-    const presenter = event.presenter_name || event.presenter || 'Low Brass Lessons';
-    const promoCode = (checkout && checkout.promoCode) || '';
-    const original = Number(payload.original_amount_cents || event.price_cents || payload.amount_cents || 0);
-    const discount = Math.max(0, original - Number(payload.amount_cents || 0));
+
+    const presenter =
+      event.presenter_name ||
+      event.presenter ||
+      'Low Brass Lessons';
+
+    const promoCode =
+      (checkout && checkout.promoCode) ||
+      '';
+
+    const original = Number(
+      payload.original_amount_cents ||
+      event.price_cents ||
+      0
+    );
+
+    const discount = Number(
+      payload.discount_cents ||
+      payload.promo_discount_cents ||
+      0
+    );
+
+    const subtotal = Number(
+      payload.subtotal_cents ||
+      Math.max(
+        0,
+        original - discount
+      )
+    );
+
+    const tax = Number(
+      payload.tax_cents ||
+      0
+    );
+
+    const total = Number(
+      payload.amount_total_cents ||
+      payload.amount_cents ||
+      subtotal + tax
+    );
+
     const rows = [
       ['Masterclass', event.title || 'Masterclass'],
       ['Presenter', presenter],
       ['Date / Time', formatDateTime(eventStart(event))],
       ['Registration Price', money(original)]
     ];
+
     if (promoCode) rows.push(['Promotional Code', promoCode]);
     if (discount > 0) rows.push(['Discount', '-' + money(discount)]);
+    rows.push(['Subtotal', money(subtotal)]);
+    rows.push(['Sales Tax', money(tax)]);
+
     summary.innerHTML = rows.map(function (row) {
       return '<div class="mrm-checkout-summary-row"><span>' + escapeHtml(row[0]) + '</span><strong>' + escapeHtml(row[1]) + '</strong></div>';
-    }).join('') + '<div class="mrm-checkout-summary-row mrm-checkout-summary-total"><span>Total Due Today</span><strong>' + money(payload.amount_cents || 0) + '</strong></div>';
+    }).join('') + '<div class="mrm-checkout-summary-row mrm-checkout-summary-total"><span>Total Due Today</span><strong>' + money(total) + '</strong></div>';
+
     summary.hidden = false;
   }
 
@@ -3728,7 +3777,9 @@ body,
         stripe: stripe,
         elements: elements,
         paymentIntentId: payload.payment_intent_id,
-        amountCents: payload.amount_cents,
+        amountCents:
+          payload.amount_total_cents ||
+          payload.amount_cents,
         checkout: data,
         event: event
       };
