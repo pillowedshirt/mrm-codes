@@ -1975,6 +1975,7 @@ body,
       <h2 id="finalConfirmationTitle">Confirm Registration</h2>
       <p id="finalConfirmationDetails" class="modal-meta"></p>
       <p>Please confirm that you want to complete this Masterclass registration and submit your card payment.</p>
+      <p id="finalConfirmationMessage" class="message" role="status" aria-live="polite"></p>
       <div class="mrm-confirmation-actions">
         <button id="confirmFinalPayment" class="mrm-primary-btn" type="button">Complete Registration</button>
         <button id="cancelFinalPayment" class="mrm-secondary-btn" type="button">Go Back</button>
@@ -2158,6 +2159,36 @@ body,
 
   function byId(id) {
     return document.getElementById(id);
+  }
+
+  const MASTERCLASS_PENDING_FINALIZATION_KEY = 'mrmMasterclassPendingFinalization';
+
+  let masterclassFinalizationRecoveryRunning = false;
+
+  function savePendingMasterclassFinalization(data) {
+    try {
+      sessionStorage.setItem(MASTERCLASS_PENDING_FINALIZATION_KEY, JSON.stringify(data));
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function readPendingMasterclassFinalization() {
+    try {
+      const stored = sessionStorage.getItem(MASTERCLASS_PENDING_FINALIZATION_KEY);
+      if (!stored) return null;
+      const parsed = JSON.parse(stored);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function clearPendingMasterclassFinalization() {
+    try {
+      sessionStorage.removeItem(MASTERCLASS_PENDING_FINALIZATION_KEY);
+    } catch (error) {}
   }
 
   function showError(message) {
@@ -3253,7 +3284,10 @@ body,
       }
 
       if (!response.ok) {
-        throw new Error((data && data.message) || ('Request failed with HTTP ' + response.status + '.'));
+        const requestError = new Error((data && data.message) || ('Request failed with HTTP ' + response.status + '.'));
+        requestError.status = response.status;
+        requestError.data = data;
+        throw requestError;
       }
 
       return {
@@ -3895,6 +3929,11 @@ body,
 
     const finalModal = byId('finalConfirmationModal');
     const details = byId('finalConfirmationDetails');
+    const finalMessage = byId('finalConfirmationMessage');
+    const cancelButton = byId('cancelFinalPayment');
+
+    if (finalMessage) finalMessage.textContent = '';
+    if (cancelButton) cancelButton.hidden = false;
 
     if (details && state.event) {
       details.textContent = (state.event.title || 'Masterclass') + ' • ' + formatDateTime(eventStart(state.event)) + ' • ' + money(state.amountCents || state.event.price_cents || 0);
@@ -3908,9 +3947,82 @@ body,
     }
   }
 
+  async function submitMasterclassFinalization(pendingFinalization) {
+    const result = await fetchJson(restUrl('finalize-registration'), {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        event_id: pendingFinalization.event_id,
+        payment_intent_id: pendingFinalization.payment_intent_id,
+        first_name: pendingFinalization.first_name,
+        last_name: pendingFinalization.last_name,
+        name: pendingFinalization.name,
+        email: pendingFinalization.email,
+        terms_accepted: pendingFinalization.terms_accepted,
+        promo_code: pendingFinalization.promo_code
+      })
+    }, 30000);
+
+    return result.data;
+  }
+
+  async function retryPendingMasterclassFinalization(openRecoveryModal) {
+    if (masterclassFinalizationRecoveryRunning) return;
+    const pending = readPendingMasterclassFinalization();
+    if (!pending || !pending.payment_intent_id || !pending.event_id) return;
+
+    masterclassFinalizationRecoveryRunning = true;
+    const finalMessage = byId('finalConfirmationMessage');
+    const confirmButton = byId('confirmFinalPayment');
+    const cancelButton = byId('cancelFinalPayment');
+
+    if (openRecoveryModal) {
+      closeOtherMasterclassModals('finalConfirmationModal');
+      openModal('finalConfirmationModal');
+    }
+
+    if (finalMessage) finalMessage.textContent = 'Your payment has already been received. We are confirming your registration now. Do not submit another payment.';
+    if (confirmButton) {
+      confirmButton.disabled = true;
+      confirmButton.textContent = 'Confirming Registration...';
+    }
+    if (cancelButton) cancelButton.hidden = true;
+
+    try {
+      const finalData = await submitMasterclassFinalization(pending);
+      clearPendingMasterclassFinalization();
+      openSuccessPopup(finalData, { event: { title: pending.event_title || 'Masterclass' } });
+      window.setTimeout(function () { loadEvents(); }, 1000);
+    } catch (error) {
+      const responseData = error && error.data && error.data.data ? error.data.data : {};
+      if (responseData.payment_refunded) {
+        clearPendingMasterclassFinalization();
+        if (finalMessage) finalMessage.textContent = 'The final available seat was claimed before your registration completed. Your payment was automatically refunded. No additional action is required.';
+        if (confirmButton) {
+          confirmButton.disabled = true;
+          confirmButton.textContent = 'Refund Issued';
+        }
+        return;
+      }
+      if (finalMessage) finalMessage.textContent = 'Your payment was received, but registration confirmation is still pending. Do not submit another payment. Select Retry Confirmation below or contact Low Brass Lessons.';
+      if (confirmButton) {
+        confirmButton.disabled = false;
+        confirmButton.textContent = 'Retry Confirmation';
+      }
+    } finally {
+      masterclassFinalizationRecoveryRunning = false;
+    }
+  }
+
   async function confirmFinalPayment() {
     const state = window.MRM_MASTERCLASS_PAYMENT_STATE;
-    const message = byId('modalMessage');
+    const registrationMessage = byId('modalMessage');
+    const finalMessage = byId('finalConfirmationMessage');
+    const message = finalMessage || registrationMessage;
     const confirmButton = byId('confirmFinalPayment');
 
     let paymentWasConfirmed = false;
@@ -3959,26 +4071,25 @@ body,
         ? confirmResult.paymentIntent.id
         : state.paymentIntentId;
 
-      const finalResult = await fetchJson(restUrl('finalize-registration'), {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify({
-          event_id: state.event.id,
-          payment_intent_id: paymentIntentId,
-          first_name: state.checkout.firstName,
-          last_name: state.checkout.lastName,
-          name: state.checkout.name,
-          email: state.checkout.email,
-          terms_accepted: state.checkout.termsAccepted,
-          promo_code: state.checkout.promoCode
-        })
-      }, 30000);
+      const pendingFinalization = {
+        event_id: state.event.id,
+        event_title: state.event.title || 'Masterclass',
+        payment_intent_id: paymentIntentId,
+        first_name: state.checkout.firstName,
+        last_name: state.checkout.lastName,
+        name: state.checkout.name,
+        email: state.checkout.email,
+        terms_accepted: state.checkout.termsAccepted,
+        promo_code: state.checkout.promoCode
+      };
 
-      openSuccessPopup(finalResult.data, state);
+      savePendingMasterclassFinalization(pendingFinalization);
+
+      const finalData = await submitMasterclassFinalization(pendingFinalization);
+
+      clearPendingMasterclassFinalization();
+
+      openSuccessPopup(finalData, state);
 
       const submitPayment = byId('submitPayment');
       if (submitPayment) {
@@ -3997,38 +4108,32 @@ body,
     } catch (error) {
 
       if (paymentWasConfirmed) {
-        if (message) {
-          message.textContent =
-            'Your payment was received, but the registration confirmation response took longer than expected. Do not submit another payment. Please refresh this page and check your email. Contact Low Brass Lessons if your confirmation does not appear.';
+        const responseData = error && error.data && error.data.data ? error.data.data : {};
+
+        if (responseData.payment_refunded) {
+          clearPendingMasterclassFinalization();
+          if (message) message.textContent = 'The final available seat was claimed before your registration completed. Your payment was automatically refunded. No additional action is required.';
+          if (confirmButton) {
+            confirmButton.disabled = true;
+            confirmButton.textContent = 'Refund Issued';
+          }
+          return;
         }
 
+        if (message) message.textContent = 'Your payment was received, but registration confirmation did not finish. Do not submit another payment. Select Retry Confirmation below.';
         if (confirmButton) {
-          confirmButton.disabled = true;
-          confirmButton.textContent =
-            'Payment Received';
+          confirmButton.disabled = false;
+          confirmButton.textContent = 'Retry Confirmation';
         }
 
-        const submitPayment =
-          byId('submitPayment');
-
+        const submitPayment = byId('submitPayment');
         if (submitPayment) {
           submitPayment.disabled = true;
-          submitPayment.textContent =
-            'Payment Received';
+          submitPayment.textContent = 'Payment Received';
         }
 
         return;
-      }
-
-      if (message) {
-        message.textContent = error && error.message ? error.message : 'We could not complete this payment. Please review your details and try again.';
-      }
-
-      if (confirmButton) {
-        confirmButton.disabled = false;
-        confirmButton.textContent = 'Confirm and Pay';
-      }
-    }
+      }    }
   }
 
   function bindModalControls() {
@@ -4085,6 +4190,11 @@ body,
       confirmFinal.dataset.mrmBound = '1';
       confirmFinal.addEventListener('click', function (event) {
         event.preventDefault();
+        const pending = readPendingMasterclassFinalization();
+        if (pending && pending.payment_intent_id) {
+          retryPendingMasterclassFinalization(true);
+          return;
+        }
         confirmFinalPayment();
       });
     }
@@ -4153,6 +4263,10 @@ body,
     Promise.resolve(bootPromise)
       .finally(function () {
         window.__mrmMasterclassBootRunning = false;
+        const pending = readPendingMasterclassFinalization();
+        if (pending && pending.payment_intent_id) {
+          retryPendingMasterclassFinalization(true);
+        }
       });
   }
 

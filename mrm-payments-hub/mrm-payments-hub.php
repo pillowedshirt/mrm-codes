@@ -4084,6 +4084,17 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       $this->stripe_debug_log('Payment succeeded but local tax-ledger synchronization is pending.', array('payment_intent_id'=>$pi_id,'message'=>$tax_sync_result->get_error_message()));
     }
 
+    /*
+     * Masterclass payments do not necessarily have
+     * a Payments Hub order. Give the Masterclass
+     * plugin an opportunity to finalize the paid
+     * registration before this handler exits.
+     */
+    do_action(
+      'mrm_masterclass_payment_intent_succeeded',
+      $pi
+    );
+
     $order = $this->get_order_by_pi($pi_id);
     if (!$order) return;
 
