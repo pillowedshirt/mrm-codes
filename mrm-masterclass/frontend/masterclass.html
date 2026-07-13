@@ -3822,7 +3822,12 @@ body,
           payload.amount_total_cents ||
           payload.amount_cents,
         checkout: data,
-        event: event
+        event: event,
+        seatHoldToken:
+          payload.seat_hold_token || '',
+        seatHoldExpiresAt:
+          payload.seat_hold_expires_at || '',
+        paymentConfirmed: false
       };
 
       if (message) {
@@ -3847,6 +3852,72 @@ body,
         payButton.disabled = false;
         payButton.textContent = 'Continue to Payment';
       }
+    }
+  }
+
+  async function releaseCurrentMasterclassSeatHold() {
+    const state =
+      window.MRM_MASTERCLASS_PAYMENT_STATE;
+
+    if (
+      !state ||
+      !state.seatHoldToken ||
+      state.paymentConfirmed
+    ) {
+      return true;
+    }
+
+    const holdToken =
+      state.seatHoldToken;
+
+    const eventId =
+      state.event &&
+      state.event.id
+        ? state.event.id
+        : 0;
+
+    if (!eventId) {
+      return false;
+    }
+
+    try {
+      await fetchJson(
+        restUrl('release-seat-hold'),
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          keepalive: true,
+          headers: {
+            'Content-Type':
+              'application/json',
+            'Accept':
+              'application/json'
+          },
+          body: JSON.stringify({
+            event_id: eventId,
+            hold_token: holdToken
+          })
+        },
+        15000
+      );
+
+      state.seatHoldToken = '';
+      state.seatHoldExpiresAt = '';
+
+      return true;
+    } catch (error) {
+      const responseData =
+        error &&
+        error.data &&
+        error.data.data
+          ? error.data.data
+          : {};
+
+      if (responseData.payment_received) {
+        state.paymentConfirmed = true;
+      }
+
+      return false;
     }
   }
 
@@ -4067,6 +4138,13 @@ body,
 
       paymentWasConfirmed = true;
 
+      if (
+        window.MRM_MASTERCLASS_PAYMENT_STATE
+      ) {
+        window.MRM_MASTERCLASS_PAYMENT_STATE
+          .paymentConfirmed = true;
+      }
+
       const paymentIntentId = confirmResult.paymentIntent && confirmResult.paymentIntent.id
         ? confirmResult.paymentIntent.id
         : state.paymentIntentId;
@@ -4133,7 +4211,30 @@ body,
         }
 
         return;
-      }    }
+      }
+
+      if (message) {
+        message.textContent =
+          error && error.message
+            ? error.message
+            : 'We could not complete this payment. Please review your card details and try again.';
+      }
+
+      if (confirmButton) {
+        confirmButton.disabled = false;
+        confirmButton.textContent =
+          'Confirm and Pay';
+      }
+
+      const submitPayment =
+        byId('submitPayment');
+
+      if (submitPayment) {
+        submitPayment.disabled = false;
+        submitPayment.textContent =
+          'Complete Registration';
+      }
+    }
   }
 
   function bindModalControls() {
@@ -4146,7 +4247,9 @@ body,
 
     if (paymentBack && !paymentBack.dataset.mrmBound) {
       paymentBack.dataset.mrmBound = '1';
-      paymentBack.addEventListener('click', function () {
+      paymentBack.addEventListener('click', async function (event) {
+        event.preventDefault();
+        await releaseCurrentMasterclassSeatHold();
         closeModal('masterclassPaymentModal');
         openModal('registrationModal');
         window.__mrmMasterclassCheckoutInProgress = true;
@@ -4201,12 +4304,27 @@ body,
 
   }
 
-  document.addEventListener('click', function (event) {
+  document.addEventListener('click', async function (event) {
     const closeButton = event.target.closest('[data-mrm-modal-close]');
     if (!closeButton) return;
 
     const modal = closeButton.closest('.mrm-modal');
     if (modal && modal.id) {
+      const state =
+        window.MRM_MASTERCLASS_PAYMENT_STATE;
+
+      if (
+        state &&
+        state.seatHoldToken &&
+        !state.paymentConfirmed &&
+        (
+          modal.id === 'masterclassPaymentModal' ||
+          modal.id === 'registrationModal'
+        )
+      ) {
+        await releaseCurrentMasterclassSeatHold();
+      }
+
       closeModal(modal.id);
     }
   });
