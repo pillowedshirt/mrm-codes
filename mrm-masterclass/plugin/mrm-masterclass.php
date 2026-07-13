@@ -4482,6 +4482,75 @@ private function mrm_mc_stripe_request( $method, $path, $body = array() ) {
 
 	return $json;
 }
+
+private function mrm_mc_cancel_unconfirmed_payment_intent( $payment_intent_id ) {
+	$payment_intent_id = sanitize_text_field( $payment_intent_id );
+
+	if ( '' === $payment_intent_id ) {
+		return true;
+	}
+
+	$intent = $this->mrm_mc_stripe_request( 'GET', 'payment_intents/' . rawurlencode( $payment_intent_id ) );
+
+	if ( is_wp_error( $intent ) ) {
+		return $intent;
+	}
+
+	$status = sanitize_key( $intent['status'] ?? '' );
+
+	if ( 'succeeded' === $status ) {
+		return new WP_Error( 'mrm_masterclass_payment_already_received', 'This payment has already succeeded.', array( 'payment_received' => true ) );
+	}
+
+	if ( in_array( $status, array( 'canceled', 'requires_payment_method', 'requires_confirmation', 'requires_action', 'requires_capture' ), true ) ) {
+		if ( 'canceled' === $status ) {
+			return true;
+		}
+
+		return $this->mrm_mc_stripe_request( 'POST', 'payment_intents/' . rawurlencode( $payment_intent_id ) . '/cancel' );
+	}
+
+	return new WP_Error( 'mrm_masterclass_payment_not_releasable', 'The payment is currently being processed and the seat hold cannot be released yet.', array( 'payment_status' => $status ) );
+}
+
+private function mrm_mc_release_existing_customer_holds( $event_id, $email ) {
+	global $wpdb;
+
+	$event_id = absint( $event_id );
+	$email    = sanitize_email( $email );
+
+	if ( $event_id <= 0 || ! is_email( $email ) ) {
+		return true;
+	}
+
+	$table      = $this->t( 'mrm_masterclass_seat_holds' );
+	$email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
+
+	return $this->mrm_mc_with_event_seat_lock( $event_id, function () use ( $wpdb, $table, $event_id, $email_hash ) {
+		$holds = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE event_id = %d AND email_hash = %s AND status = 'reserved' AND expires_at > UTC_TIMESTAMP() ORDER BY id DESC", $event_id, $email_hash ), ARRAY_A );
+
+		foreach ( (array) $holds as $hold ) {
+			$payment_intent_id = sanitize_text_field( $hold['payment_intent_id'] ?? '' );
+
+			if ( '' !== $payment_intent_id ) {
+				$cancel_result = $this->mrm_mc_cancel_unconfirmed_payment_intent( $payment_intent_id );
+
+				if ( is_wp_error( $cancel_result ) ) {
+					return $cancel_result;
+				}
+			}
+
+			$updated = $wpdb->update( $table, array( 'status' => 'released', 'updated_at' => $this->now() ), array( 'id' => absint( $hold['id'] ) ) );
+
+			if ( false === $updated ) {
+				return new WP_Error( 'mrm_masterclass_hold_release_failed', 'The previous seat hold could not be released.' );
+			}
+		}
+
+		return true;
+	} );
+}
+
 private function mrm_mc_create_payment_intent( $event, $email, $terms ) {
 		return $this->mrm_mc_stripe_request(
 			'POST',
@@ -8803,6 +8872,16 @@ public function render_email_log_page() {
 
 		register_rest_route(
 			self::REST_NAMESPACE,
+			'/release-seat-hold',
+			array(
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( $this, 'rest_release_seat_hold' ),
+				'permission_callback' => '__return_true',
+			)
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
 			'/verify-payment-intent',
 			array(
 				'methods'             => 'POST',
@@ -9307,6 +9386,18 @@ public function rest_create_payment_intent( $request ) {
 		return new WP_Error( 'masterclass_tax_service_missing', 'Payments are temporarily unavailable.', array( 'status' => 503 ) );
 	}
 
+	$old_hold_release = $this->mrm_mc_release_existing_customer_holds( absint( $event->id ), $email );
+
+	if ( is_wp_error( $old_hold_release ) ) {
+		$error_data = $old_hold_release->get_error_data();
+
+		if ( is_array( $error_data ) && ! empty( $error_data['payment_received'] ) ) {
+			return new WP_Error( 'mrm_masterclass_existing_payment_pending', 'A payment for this Masterclass has already been received and is being finalized. Do not submit another payment.', array( 'status' => 409, 'payment_received' => true ) );
+		}
+
+		return new WP_Error( 'mrm_masterclass_previous_hold_release_failed', 'Your earlier checkout session could not be closed. Please wait a moment and try again.', array( 'status' => 409 ) );
+	}
+
 	$seat_hold = $this->mrm_mc_create_seat_hold( $event, $email );
 	if ( is_wp_error( $seat_hold ) ) {
 		return $seat_hold;
@@ -9404,6 +9495,8 @@ public function rest_create_payment_intent( $request ) {
 			'discount_cents'          => $discount_cents,
 			'promo_status'            => sanitize_key( $promo['promo_status'] ?? 'none' ),
 			'promo_message'           => sanitize_text_field( $promo['message'] ?? '' ),
+			'seat_hold_token'         => $seat_hold_token,
+			'seat_hold_expires_at'    => sanitize_text_field( $seat_hold['expires_at'] ?? '' ),
 
 			/*
 			 * Frontend should render the same controlled method list every time.
@@ -9413,6 +9506,54 @@ public function rest_create_payment_intent( $request ) {
 			'allowed_payment_methods' => array( 'card' ),
 		)
 	);
+}
+
+
+public function rest_release_seat_hold( WP_REST_Request $request ) {
+	global $wpdb;
+
+	$data       = (array) $request->get_json_params();
+	$hold_token = sanitize_text_field( $data['hold_token'] ?? '' );
+	$event_id   = absint( $data['event_id'] ?? 0 );
+
+	if ( '' === $hold_token || $event_id <= 0 ) {
+		return new WP_Error( 'mrm_masterclass_hold_reference_missing', 'The seat-hold reference is incomplete.', array( 'status' => 400 ) );
+	}
+
+	$table = $this->t( 'mrm_masterclass_seat_holds' );
+	$hold  = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE hold_token = %s AND event_id = %d LIMIT 1", $hold_token, $event_id ), ARRAY_A );
+
+	if ( ! $hold ) {
+		return rest_ensure_response( array( 'success' => true, 'already_released' => true ) );
+	}
+
+	if ( 'reserved' !== sanitize_key( $hold['status'] ?? '' ) ) {
+		return rest_ensure_response( array( 'success' => true, 'status' => sanitize_key( $hold['status'] ?? '' ) ) );
+	}
+
+	$payment_intent_id = sanitize_text_field( $hold['payment_intent_id'] ?? '' );
+
+	if ( '' !== $payment_intent_id ) {
+		$cancel_result = $this->mrm_mc_cancel_unconfirmed_payment_intent( $payment_intent_id );
+
+		if ( is_wp_error( $cancel_result ) ) {
+			$error_data = $cancel_result->get_error_data();
+
+			if ( is_array( $error_data ) && ! empty( $error_data['payment_received'] ) ) {
+				return new WP_Error( 'mrm_masterclass_payment_already_received', 'The payment has already been received and the seat cannot be released.', array( 'status' => 409, 'payment_received' => true ) );
+			}
+
+			return new WP_Error( 'mrm_masterclass_hold_not_releasable', $cancel_result->get_error_message(), array( 'status' => 409 ) );
+		}
+	}
+
+	$updated = $wpdb->update( $table, array( 'status' => 'released', 'updated_at' => $this->now() ), array( 'id' => absint( $hold['id'] ) ) );
+
+	if ( false === $updated ) {
+		return new WP_Error( 'mrm_masterclass_hold_release_failed', 'The seat hold could not be released.', array( 'status' => 500 ) );
+	}
+
+	return rest_ensure_response( array( 'success' => true, 'released' => true ) );
 }
 
 public function rest_verify_pi( WP_REST_Request $request ) {
