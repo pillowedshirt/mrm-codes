@@ -186,6 +186,31 @@
   text-decoration:none;
 }
 
+.mrm-masterclass-recaptcha {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  min-height: 78px;
+  margin: 16px 0;
+  overflow: visible;
+}
+
+.mrm-masterclass-recaptcha > div {
+  max-width: 100%;
+}
+
+@media (max-width: 380px) {
+  .mrm-masterclass-recaptcha {
+    min-height: 70px;
+  }
+
+  .mrm-masterclass-recaptcha > div {
+    transform: scale(0.88);
+    transform-origin: center center;
+  }
+}
+
 .mrm-modal[hidden] {
   display:none !important;
 }
@@ -4306,6 +4331,7 @@ body,
       paymentBack.addEventListener('click', async function (event) {
         event.preventDefault();
         await releaseCurrentMasterclassSeatHold();
+        resetMasterclassRecaptcha();
         closeModal('masterclassPaymentModal');
         openModal('registrationModal');
         window.__mrmMasterclassCheckoutInProgress = true;
@@ -4379,6 +4405,7 @@ body,
         )
       ) {
         await releaseCurrentMasterclassSeatHold();
+        resetMasterclassRecaptcha();
       }
 
       closeModal(modal.id);
