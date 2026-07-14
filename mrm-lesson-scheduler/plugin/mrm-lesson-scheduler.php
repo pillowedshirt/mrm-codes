@@ -11060,6 +11060,7 @@ public function handle_mrm_clear_all_mileage_cache() {
         global $wpdb;
 
         $this->mrm_ensure_contractor_tax_profile_schema();
+    $tax_nexus_warnings = array();
 
         list( $start, $end ) = $this->mrm_get_tax_period_dates( $tax_year, $tax_quarter );
 
@@ -13697,6 +13698,28 @@ protected function mrm_sanitize_tax_profile_row( $raw, $payee_type, $related_ins
     );
 }
 
+
+protected function mrm_flag_tax_payee_physical_nexus( $data ) {
+    $data = is_array( $data ) ? $data : array();
+    $country = strtoupper( sanitize_text_field( $data['mailing_country'] ?? 'US' ) );
+    $state = strtoupper( substr( sanitize_text_field( $data['mailing_state'] ?? '' ), 0, 2 ) );
+    if ( $country !== 'US' || $state === '' ) return array( 'allowed' => true, 'reason' => 'not_applicable' );
+    if ( ! function_exists( 'mrm_payments_hub_flag_physical_nexus' ) ) return new WP_Error( 'physical_nexus_service_unavailable', 'The Payments Hub physical-nexus service is unavailable.' );
+    $payee_type = sanitize_key( $data['payee_type'] ?? 'contractor' );
+    if ( $payee_type === 'instructor' ) $source_id = absint( $data['related_instructor_id'] ?? 0 );
+    elseif ( $payee_type === 'presenter' ) $source_id = absint( $data['related_presenter_id'] ?? 0 );
+    else $source_id = sanitize_text_field( $data['composer_key'] ?? 'composer:default' );
+    $worker_type = ! empty( $data['is_employee'] ) ? 'Employee' : ucfirst( $payee_type );
+    return mrm_payments_hub_flag_physical_nexus( array(
+        'state' => $state,
+        'country' => $country,
+        'source_type' => 'tax_payee_' . $payee_type,
+        'source_id' => $source_id,
+        'source_label' => $worker_type . ' tax profile',
+        'details' => sanitize_text_field( $data['display_name'] ?? $data['legal_name'] ?? '' ),
+    ) );
+}
+
 protected function mrm_upsert_tax_payee_profile( $data ) {
     global $wpdb;
     $table = $wpdb->prefix . 'mrm_tax_payee_profiles';
@@ -13810,6 +13833,7 @@ protected function mrm_handle_contractor_tax_profiles_save() {
     }
     check_admin_referer( 'mrm_save_contractor_tax_profiles', 'mrm_contractor_tax_profiles_nonce' );
     $this->mrm_ensure_contractor_tax_profile_schema();
+    $tax_nexus_warnings = array();
     if ( isset( $_POST['mrm_1099_payer_profile'] ) && is_array( $_POST['mrm_1099_payer_profile'] ) ) {
         update_option( 'mrm_1099_payer_profile', $this->mrm_sanitize_1099_payer_profile( $_POST['mrm_1099_payer_profile'] ), false );
     }
@@ -13822,6 +13846,9 @@ protected function mrm_handle_contractor_tax_profiles_save() {
                     $existing = $this->mrm_get_tax_profile_for_instructor( $instructor_id );
                     $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'instructor', $instructor_id, $existing );
                     $data['composer_key'] = '';
+                    $nexus_result = $this->mrm_flag_tax_payee_physical_nexus( $data );
+                    if ( is_wp_error( $nexus_result ) ) $tax_nexus_warnings[] = $nexus_result->get_error_message();
+                    elseif ( empty( $nexus_result['allowed'] ) ) $tax_nexus_warnings[] = sanitize_text_field( $nexus_result['message'] ?? 'The payee state requires tax-registration review.' );
                     $this->mrm_upsert_tax_payee_profile( $data );
                 }
             }
@@ -13832,6 +13859,9 @@ protected function mrm_handle_contractor_tax_profiles_save() {
                     $data = $this->mrm_sanitize_tax_profile_row( $raw_profile, 'presenter', 0, $existing );
                     $data['related_presenter_id'] = $presenter_id;
                     $data['composer_key'] = '';
+                    $nexus_result = $this->mrm_flag_tax_payee_physical_nexus( $data );
+                    if ( is_wp_error( $nexus_result ) ) $tax_nexus_warnings[] = $nexus_result->get_error_message();
+                    elseif ( empty( $nexus_result['allowed'] ) ) $tax_nexus_warnings[] = sanitize_text_field( $nexus_result['message'] ?? 'The payee state requires tax-registration review.' );
                     $this->mrm_upsert_tax_payee_profile( $data );
                 }
             }
@@ -13841,11 +13871,19 @@ protected function mrm_handle_contractor_tax_profiles_save() {
                 if ( empty( $data['composer_key'] ) ) {
                     $data['composer_key'] = 'composer:default';
                 }
+                $nexus_result = $this->mrm_flag_tax_payee_physical_nexus( $data );
+                if ( is_wp_error( $nexus_result ) ) $tax_nexus_warnings[] = $nexus_result->get_error_message();
+                elseif ( empty( $nexus_result['allowed'] ) ) $tax_nexus_warnings[] = sanitize_text_field( $nexus_result['message'] ?? 'The payee state requires tax-registration review.' );
                 $this->mrm_upsert_tax_payee_profile( $data );
             }
         }
     }
     echo '<div class="notice notice-success"><p>Contractor tax profiles saved.</p></div>';
+    if ( ! empty( $tax_nexus_warnings ) ) {
+        echo '<div class="notice notice-warning"><p><strong>Tax registration review required:</strong></p><ul style="list-style:disc;padding-left:22px;">';
+        foreach ( array_unique( $tax_nexus_warnings ) as $warning ) echo '<li>' . esc_html( $warning ) . '</li>';
+        echo '</ul></div>';
+    }
 }
 
 protected function mrm_render_tax_profile_card( $field_key, $profile, $context ) {
