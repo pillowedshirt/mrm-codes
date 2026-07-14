@@ -1931,6 +1931,12 @@ body,
         </span>
       </label>
 
+      <div
+        id="mrm-masterclass-recaptcha"
+        class="mrm-masterclass-recaptcha"
+        aria-label="Security verification"
+      ></div>
+
       <button id="payButton" class="mrm-primary-btn" type="button">Continue</button>
 
 
@@ -2138,6 +2144,49 @@ body,
     promo: null,
     calendarDate: new Date()
   };
+
+
+  let masterclassRecaptchaWidgetId = null;
+  let masterclassRecaptchaRequired = true;
+  let masterclassRecaptchaReady = false;
+
+  function loadMasterclassExternalScript(src) {
+    return new Promise(function (resolve, reject) {
+      const existing = document.querySelector('script[src="' + src + '"]');
+      if (existing) {
+        if (window.grecaptcha && typeof window.grecaptcha.render === 'function') { resolve(); return; }
+        existing.addEventListener('load', resolve, {once: true});
+        existing.addEventListener('error', reject, {once: true});
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src; script.async = true; script.defer = true; script.onload = resolve; script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  }
+
+  async function initializeMasterclassRecaptcha() {
+    const result = await fetchJson(restUrl('public-config'), {method: 'GET', credentials: 'same-origin', headers: {'Accept': 'application/json'}}, 10000);
+    const config = result.data || {};
+    const siteKey = config.recaptcha_site_key || '';
+    masterclassRecaptchaRequired = true;
+    if (!config.recaptcha_enabled || !siteKey) throw new Error('The checkout security verification is not configured.');
+    await loadMasterclassExternalScript('https://www.google.com/recaptcha/api.js?render=explicit');
+    if (!window.grecaptcha || typeof window.grecaptcha.render !== 'function') throw new Error('The checkout security verification could not load.');
+    const container = byId('mrm-masterclass-recaptcha');
+    if (!container) throw new Error('The checkout security verification container is missing.');
+    if (masterclassRecaptchaWidgetId === null) masterclassRecaptchaWidgetId = window.grecaptcha.render(container, {sitekey: siteKey});
+    masterclassRecaptchaReady = true;
+  }
+
+  function masterclassRecaptchaToken() {
+    if (!masterclassRecaptchaReady || masterclassRecaptchaWidgetId === null || !window.grecaptcha) return '';
+    return window.grecaptcha.getResponse(masterclassRecaptchaWidgetId) || '';
+  }
+
+  function resetMasterclassRecaptcha() {
+    if (masterclassRecaptchaWidgetId !== null && window.grecaptcha && typeof window.grecaptcha.reset === 'function') window.grecaptcha.reset(masterclassRecaptchaWidgetId);
+  }
 
   function getConfig() {
     const globalConfig = window.MRM_MASTERCLASS || {};
@@ -3524,6 +3573,7 @@ body,
       promoCode: promoCode,
       promo: state.promo,
       termsAccepted: termsAccepted,
+      recaptchaToken: masterclassRecaptchaToken(),
       billingAddress: {
         line1: byId('masterclassBillingLine1')?.value.trim() || '',
         line2: byId('masterclassBillingLine2')?.value.trim() || '',
@@ -3623,6 +3673,10 @@ body,
 
     if (!data.termsAccepted) {
       return 'Please accept the Terms of Service before continuing.';
+    }
+
+    if (masterclassRecaptchaRequired && !data.recaptchaToken) {
+      return 'Please complete the security verification before continuing.';
     }
 
     return '';
@@ -3749,6 +3803,7 @@ body,
           name: data.name,
           email: data.email,
           terms_accepted: data.termsAccepted,
+          recaptcha_token: data.recaptchaToken,
           billing_address: data.billingAddress
         })
       }, 30000);
@@ -3843,6 +3898,7 @@ body,
         submitPayment.disabled = false;
       }
     } catch (error) {
+      resetMasterclassRecaptcha();
 
       if (message) {
         message.textContent = 'We could not complete this payment. Please review your details and try again.';
@@ -4329,15 +4385,22 @@ body,
     }
   });
 
-  document.addEventListener('keydown', function (event) {
+  document.addEventListener('keydown', async function (event) {
     if (event.key !== 'Escape') return;
 
     const modals = Array.from(document.querySelectorAll('.mrm-modal:not([hidden])'));
     const topModal = modals.pop();
 
-    if (topModal && topModal.id) {
-      closeModal(topModal.id);
+    if (!topModal || !topModal.id) return;
+
+    const state = window.MRM_MASTERCLASS_PAYMENT_STATE;
+
+    if (state && state.seatHoldToken && !state.paymentConfirmed && (topModal.id === 'masterclassPaymentModal' || topModal.id === 'registrationModal')) {
+      await releaseCurrentMasterclassSeatHold();
+      resetMasterclassRecaptcha();
     }
+
+    closeModal(topModal.id);
   });
 
   window.addEventListener('error', function () {
@@ -4363,6 +4426,19 @@ body,
 
     bindModalControls();
     applyMasterclassPageMode();
+
+    initializeMasterclassRecaptcha()
+      .catch(function (error) {
+        masterclassRecaptchaReady = false;
+        const message = byId('modalMessage');
+        const payButton = byId('payButton');
+        if (message) {
+          message.textContent = error && error.message ? error.message : 'The checkout security verification could not load.';
+        }
+        if (payButton) {
+          payButton.disabled = true;
+        }
+      });
 
     const params = currentMasterclassParams();
     const presenterId = Number(params.get('presenter') || 0);
