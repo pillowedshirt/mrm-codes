@@ -4790,13 +4790,18 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if ($subscription_id === '') return new WP_Error('missing_subscription_id', 'Missing Stripe subscription ID.');
     $reason = $this->mrm_subscription_tax_location_problem($subscription, $invoice);
     if ($reason === '') return true;
-    $updated_subscription = $subscription;
-    if (sanitize_key($subscription['pause_collection']['behavior'] ?? '') !== 'keep_as_draft') {
-      $updated_subscription = $this->stripe_update_subscription($subscription_id, array('pause_collection[behavior]' => 'keep_as_draft', 'automatic_tax[enabled]' => 'true', 'metadata[mrm_tax_attention_status]' => 'requires_location_inputs', 'metadata[mrm_tax_attention_reason]' => $reason));
-      if (is_wp_error($updated_subscription)) {
-        $this->mrm_tax_create_alert('', 'subscription_tax_pause_failed', 'subscription', 0, array('message' => 'Subscription ' . $subscription_id . ' could not be paused after a tax-location failure: ' . $updated_subscription->get_error_message(), 'subscription_id' => $subscription_id), sanitize_key($subscription_id));
-        return $updated_subscription;
-      }
+    $pause_params = array(
+      'metadata[mrm_tax_attention_status]' => 'requires_location_inputs',
+      'metadata[mrm_tax_attention_reason]' => $reason,
+    );
+    $current_pause_behavior = sanitize_key($subscription['pause_collection']['behavior'] ?? '');
+    if ($current_pause_behavior !== 'keep_as_draft') {
+      $pause_params['pause_collection[behavior]'] = 'keep_as_draft';
+    }
+    $updated_subscription = $this->stripe_update_subscription($subscription_id, $pause_params);
+    if (is_wp_error($updated_subscription)) {
+      $this->mrm_tax_create_alert('', 'subscription_tax_pause_failed', 'subscription', 0, array('message' => 'Subscription ' . $subscription_id . ' could not be paused after a tax-location failure: ' . $updated_subscription->get_error_message(), 'subscription_id' => $subscription_id, 'tax_attention_reason' => $reason), sanitize_key($subscription_id));
+      return $updated_subscription;
     }
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($updated_subscription, sanitize_email($updated_subscription['metadata']['mrm_customer_email'] ?? ''));
     $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
@@ -4806,6 +4811,37 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $this->mrm_send_subscription_tax_attention_emails($local, $reason);
     $this->mrm_tax_create_alert('', 'subscription_tax_location_attention', 'subscription', 0, array('message' => 'Subscription ' . $subscription_id . ' was paused because Stripe could not confirm the customer tax location.', 'subscription_id' => $subscription_id, 'invoice_id' => sanitize_text_field($invoice['id'] ?? ''), 'reason' => $reason), sanitize_key($subscription_id));
     return $updated_subscription;
+  }
+
+  private function mrm_tax_customer_state_from_stripe_customer($customer) {
+    if (!is_array($customer)) return '';
+    $address = is_array($customer['address'] ?? null) ? $customer['address'] : array();
+    if (empty($address['state']) && is_array($customer['shipping'] ?? null) && is_array($customer['shipping']['address'] ?? null)) {
+      $address = $customer['shipping']['address'];
+    }
+    if (empty($address['state']) && is_array($customer['tax'] ?? null) && is_array($customer['tax']['location'] ?? null)) {
+      $address = $customer['tax']['location'];
+    }
+    return $this->mrm_normalize_state_code($address['state'] ?? '');
+  }
+
+  private function mrm_tax_state_allows_not_collecting($state) {
+    global $wpdb;
+    $state = $this->mrm_normalize_state_code($state);
+    if ($state === '') return false;
+    $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_state_status()} WHERE state_code = %s LIMIT 1", $state), ARRAY_A);
+    if (!is_array($row)) return false;
+    if ($this->mrm_tax_row_has_written_clearance($row)) return true;
+    if (!empty($row['collection_active']) || sanitize_key($row['stripe_registration_status'] ?? '') === 'active' || !empty($row['stripe_livemode'])) return false;
+    $authority_status = sanitize_key($row['authority_registration_status'] ?? '');
+    if (in_array($authority_status, array('reviewing', 'application_pending', 'active'), true)) return false;
+    if (!empty($row['physical_nexus_flag'])) return false;
+    $estimated_status = sanitize_key($row['estimated_threshold_status'] ?? '');
+    if (in_array($estimated_status, array('threshold_reached', 'physical_nexus_review', 'registered'), true)) return false;
+    $stripe_threshold_status = sanitize_key($row['stripe_threshold_status'] ?? '');
+    if (in_array($stripe_threshold_status, array('threshold_reached_confirmed', 'registration_required_confirmed'), true)) return false;
+    if (empty($row['threshold_rule_verified'])) return false;
+    return in_array($estimated_status, array('below_75', 'approaching_75', 'approaching_90'), true);
   }
 
   private function mrm_resume_subscription_after_tax_location_fix($subscription) {
@@ -4821,8 +4857,18 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if (is_wp_error($customer)) return false;
     $automatic_tax_status = sanitize_key($customer['tax']['automatic_tax'] ?? '');
     if (!in_array($automatic_tax_status, array('supported', 'not_collecting'), true)) return false;
+    $customer_state = $this->mrm_tax_customer_state_from_stripe_customer($customer);
+    if ($automatic_tax_status === 'not_collecting' && !$this->mrm_tax_state_allows_not_collecting($customer_state)) {
+      $reason = $customer_state !== '' ? ('Stripe recognizes the customer location in ' . $customer_state . ', but is not collecting tax. The state obligation registry does not authorize automatic untaxed billing.') : ('Stripe recognizes the customer location but is not collecting tax, and the customer state could not be confirmed.');
+      $wpdb->update($this->table_sheet_music_subscriptions(), array('tax_attention_status' => 'not_collecting_review_required', 'tax_attention_reason' => $reason, 'collection_paused_for_tax' => 1, 'updated_at' => current_time('mysql')), array('stripe_subscription_id' => $subscription_id));
+      $this->mrm_tax_create_alert($customer_state, 'subscription_not_collecting_review_required', 'subscription', 0, array('message' => $reason, 'subscription_id' => $subscription_id, 'customer_id' => $customer_id, 'customer_state' => $customer_state), sanitize_key($subscription_id . '_' . ($customer_state ?: 'unknown')));
+      return false;
+    }
     $updated_subscription = $this->stripe_update_subscription($subscription_id, array('pause_collection' => '', 'automatic_tax[enabled]' => 'true', 'metadata[mrm_tax_attention_status]' => '', 'metadata[mrm_tax_attention_reason]' => ''));
-    if (is_wp_error($updated_subscription)) return false;
+    if (is_wp_error($updated_subscription)) {
+      $this->mrm_tax_create_alert($customer_state, 'subscription_tax_resume_failed', 'subscription', 0, array('message' => 'Subscription ' . $subscription_id . ' could not resume after the customer tax location was reviewed: ' . $updated_subscription->get_error_message(), 'subscription_id' => $subscription_id), sanitize_key($subscription_id));
+      return false;
+    }
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($updated_subscription, sanitize_email($local['email_plain'] ?? ''));
     $wpdb->update($this->table_sheet_music_subscriptions(), array('tax_attention_status' => 'clear', 'tax_attention_reason' => null, 'tax_attention_since' => null, 'tax_attention_notified_at' => null, 'collection_paused_for_tax' => 0, 'updated_at' => current_time('mysql')), array('stripe_subscription_id' => $subscription_id));
     return true;
@@ -5122,7 +5168,20 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $transaction = $this->mrm_tax_retrieve_transaction($parsed['original_transaction_id']); $original_lines = $this->mrm_tax_get_transaction_line_items($parsed['original_transaction_id']);
     if (is_wp_error($transaction)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The Stripe Tax Transaction could not be retrieved: ' . $transaction->get_error_message());
     if (is_wp_error($original_lines)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The Stripe Tax Transaction line items could not be retrieved: ' . $original_lines->get_error_message());
-    $refunds_by_original_line = array(); foreach ($parsed['reversal_transaction_ids'] as $reversal_id) { $reversal_lines = $this->mrm_tax_get_transaction_line_items($reversal_id); if (is_wp_error($reversal_lines)) continue; foreach ((array)($reversal_lines['data'] ?? array()) as $line) { $original_line_id = sanitize_text_field($line['reversal']['original_line_item'] ?? ''); if ($original_line_id === '') continue; if (!isset($refunds_by_original_line[$original_line_id])) $refunds_by_original_line[$original_line_id] = array('sales'=>0,'tax'=>0,'transactions'=>array()); $refunds_by_original_line[$original_line_id]['sales'] += abs((int)($line['amount'] ?? 0)); $refunds_by_original_line[$original_line_id]['tax'] += abs((int)($line['amount_tax'] ?? 0)); $refunds_by_original_line[$original_line_id]['transactions'][] = $reversal_id; } }
+    $refunds_by_original_line = array();
+    $reversal_transaction_ids = array_values(array_unique(array_filter(array_map('sanitize_text_field', (array)($parsed['reversal_transaction_ids'] ?? array())))));
+    foreach ($reversal_transaction_ids as $reversal_id) {
+      $reversal_lines = $this->mrm_tax_get_transaction_line_items($reversal_id);
+      if (is_wp_error($reversal_lines)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The Stripe Tax reversal ' . $reversal_id . ' line items could not be retrieved: ' . $reversal_lines->get_error_message());
+      foreach ((array)($reversal_lines['data'] ?? array()) as $line) {
+        $original_line_id = sanitize_text_field($line['reversal']['original_line_item'] ?? '');
+        if ($original_line_id === '') continue;
+        if (!isset($refunds_by_original_line[$original_line_id])) $refunds_by_original_line[$original_line_id] = array('sales'=>0,'tax'=>0,'transactions'=>array());
+        $refunds_by_original_line[$original_line_id]['sales'] += abs((int)($line['amount'] ?? 0));
+        $refunds_by_original_line[$original_line_id]['tax'] += abs((int)($line['amount_tax'] ?? 0));
+        $refunds_by_original_line[$original_line_id]['transactions'][] = $reversal_id;
+      }
+    }
     $transaction_address = is_array($transaction['customer_details']['address'] ?? null) ? $transaction['customer_details']['address'] : array(); $customer_state = $this->mrm_normalize_state_code($transaction_address['state'] ?? $metadata['mrm_customer_state'] ?? ''); $customer_country = strtoupper(sanitize_text_field($transaction_address['country'] ?? $metadata['mrm_customer_country'] ?? 'US'));
     $calculation_lines = json_decode((string)($metadata['mrm_tax_lines_json'] ?? '[]'), true); if (!is_array($calculation_lines)) $calculation_lines = array(); $index = 0; $ledger_write_errors = array();
     foreach ((array)($original_lines['data'] ?? array()) as $line) { $line_id = sanitize_text_field($line['id'] ?? ''); $reference = sanitize_key($line['reference'] ?? 'item_' . $index); $refund = $refunds_by_original_line[$line_id] ?? array('sales'=>0,'tax'=>0,'transactions'=>array()); $taxability_reason = sanitize_key($line['taxability_reason'] ?? $metadata['mrm_taxability_reason'] ?? ''); $line_amount = (int)($line['amount'] ?? 0); $taxable_sales = in_array($taxability_reason, array('not_subject_to_tax','product_exempt','customer_exempt'), true) ? 0 : $line_amount; $ledger_write_result = $this->mrm_tax_upsert_ledger_row(array('external_id'=>'payment_intent:' . $pi_id . ':' . ($line_id !== '' ? $line_id : $reference),'source_type'=>'payment_intent','payment_intent_id'=>$pi_id,'customer_state'=>$customer_state,'customer_country'=>$customer_country,'product_type'=>$this->mrm_tax_product_from_reference($reference, $metadata),'threshold_category'=>$this->mrm_tax_category_from_reference($reference, $metadata),'gross_sales_cents'=>$line_amount,'taxable_sales_cents'=>$taxable_sales,'tax_cents'=>(int)($line['amount_tax'] ?? 0),'refunded_sales_cents'=>$refund['sales'],'refunded_tax_cents'=>$refund['tax'],'transaction_count'=>$index === 0 ? 1 : 0,'currency'=>$payment_intent['currency'] ?? 'usd','tax_code'=>sanitize_text_field($line['tax_code'] ?? ''),'taxability_reason'=>$taxability_reason,'tax_calculation_id'=>$parsed['calculation_id'],'tax_association_id'=>$parsed['association_id'],'tax_transaction_id'=>$parsed['original_transaction_id'],'stripe_tax_line_item_id'=>$line_id,'tax_reversals'=>array_values(array_unique($refund['transactions'])),'calculation_line_items'=>$calculation_lines,'tax_transaction_status'=>'committed','occurred_at'=>!empty($payment_intent['created']) ? gmdate('Y-m-d H:i:s', (int)$payment_intent['created']) : current_time('mysql'),'metadata'=>$metadata)); if (is_wp_error($ledger_write_result)) $ledger_write_errors[] = $ledger_write_result->get_error_message(); $index++; }

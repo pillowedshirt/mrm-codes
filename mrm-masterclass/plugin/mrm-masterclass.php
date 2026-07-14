@@ -9614,8 +9614,9 @@ public function rest_create_payment_intent( $request ) {
 			if ( is_wp_error( $cancel_result ) ) {
 				$error_data = $cancel_result->get_error_data();
 				$payment_received = is_array( $error_data ) && ! empty( $error_data['payment_received'] );
-				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, $payment_received ? 'payment_received' : 'released', '', $cancel_result->get_error_message() );
-				$cleanup_message .= ' ' . $cancel_result->get_error_message();
+				$hold_status = $payment_received ? 'payment_received' : 'reserved';
+				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, $hold_status, '', $cancel_result->get_error_message() );
+				$cleanup_message .= ' The PaymentIntent cancellation could not be confirmed, so the seat hold was preserved. ' . $cancel_result->get_error_message();
 			} else {
 				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', $cleanup_message );
 			}
@@ -9630,8 +9631,14 @@ public function rest_create_payment_intent( $request ) {
 
 	$hold_attached = $this->mrm_mc_attach_payment_intent_to_seat_hold( $seat_hold_token, $intent['id'] );
 	if ( ! $hold_attached ) {
-		$this->mrm_mc_stripe_request( 'POST', 'payment_intents/' . rawurlencode( $intent['id'] ) . '/cancel' );
-		$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', 'The PaymentIntent could not be attached to the seat hold.' );
+		$cancel_result = $this->mrm_mc_cancel_unconfirmed_payment_intent( $intent['id'] );
+		if ( is_wp_error( $cancel_result ) ) {
+			$error_data = $cancel_result->get_error_data();
+			$payment_received = is_array( $error_data ) && ! empty( $error_data['payment_received'] );
+			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, $payment_received ? 'payment_received' : 'reserved', '', 'The PaymentIntent could not be attached to the seat hold, and its cancellation could not be confirmed: ' . $cancel_result->get_error_message() );
+			return new WP_Error( $payment_received ? 'mrm_masterclass_payment_received_hold_attach_failed' : 'mrm_masterclass_seat_hold_attach_cancel_uncertain', $payment_received ? 'Your payment was received, but registration finalization requires administrative recovery. Do not submit another payment.' : 'Payment setup could not be completed safely. The seat remains reserved while the payment status is confirmed.', array( 'status' => $payment_received ? 409 : 503, 'payment_received' => $payment_received ) );
+		}
+		$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', 'The PaymentIntent could not be attached to the seat hold and was canceled.' );
 		return new WP_Error( 'mrm_masterclass_seat_hold_attach_failed', 'Payment setup could not be completed. Please try again.', array( 'status' => 503 ) );
 	}
 
