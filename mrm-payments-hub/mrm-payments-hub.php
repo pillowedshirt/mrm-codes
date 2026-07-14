@@ -182,7 +182,6 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->register_marketing_unsubscribe_endpoint();
-    flush_rewrite_rules(false);
   }
 
   public function mrm_run_instructor_piece_access_sync() {
@@ -10696,6 +10695,9 @@ private function charge_and_unlock_autopay($data) {
 
   public function rest_tax_preview(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
+    $exemption_check = $this->mrm_tax_reject_unsupported_exemption_claim($data);
+    if (is_wp_error($exemption_check)) return new WP_REST_Response(array('ok'=>false,'code'=>$exemption_check->get_error_code(),'message'=>$exemption_check->get_error_message()), 400);
+
     $readiness = $this->mrm_tax_live_checkout_readiness();
     $readiness_response = $this->mrm_tax_customer_readiness_response($readiness);
     if ($readiness_response) return $readiness_response;
@@ -10875,6 +10877,9 @@ private function charge_and_unlock_autopay($data) {
 
   public function rest_create_payment_intent(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
+    $exemption_check = $this->mrm_tax_reject_unsupported_exemption_claim($data);
+    if (is_wp_error($exemption_check)) return new WP_REST_Response(array('ok'=>false,'code'=>$exemption_check->get_error_code(),'message'=>$exemption_check->get_error_message()), 400);
+
     $readiness = $this->mrm_tax_live_checkout_readiness();
     $readiness_response = $this->mrm_tax_customer_readiness_response($readiness);
     if ($readiness_response) return $readiness_response;
@@ -11736,6 +11741,9 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
 
   public function rest_update_tax(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
+    $exemption_check = $this->mrm_tax_reject_unsupported_exemption_claim($data);
+    if (is_wp_error($exemption_check)) return new WP_REST_Response(array('ok'=>false,'code'=>$exemption_check->get_error_code(),'message'=>$exemption_check->get_error_message()), 400);
+
     $order_id = isset($data['order_id']) ? absint($data['order_id']) : 0;
     $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
 
@@ -16579,23 +16587,72 @@ public function handle_marketing_resubscribe() {
     return sanitize_key($row['authority_registration_status'] ?? '') === 'not_required_written_determination' && trim((string)($row['written_determination_reviewed_at'] ?? '')) !== '' && trim((string)($row['written_determination_reference'] ?? '')) !== '';
   }
 
+
+  private function mrm_tax_reject_unsupported_exemption_claim($payload) {
+    $payload = is_array($payload) ? $payload : array();
+    $claim_keys = array('tax_exempt','tax_exemption','exemption_certificate','exemption_certificate_id','tax_exempt_customer');
+    foreach ($claim_keys as $key) {
+      if (!array_key_exists($key, $payload)) continue;
+      $value = $payload[$key];
+      if (is_array($value) ? !empty($value) : trim((string)$value) !== '') return new WP_Error('online_tax_exemption_not_supported', 'Tax-exempt purchasing is not available through the public checkout. Please contact Low Brass Lessons before purchasing.', array('status'=>400));
+    }
+    return true;
+  }
+
   private function mrm_tax_live_checkout_readiness() {
     global $wpdb;
+
     if (!$this->mrm_tax_is_live_stripe_key()) return true;
+
     $state_table = $this->table_tax_state_status();
     $arizona = $wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A);
+
     if (!$arizona) return new WP_Error('arizona_tax_registry_missing', 'Arizona is missing from the tax registry.');
     if (sanitize_key($arizona['authority_registration_status'] ?? '') !== 'active') return new WP_Error('arizona_authority_registration_inactive', 'The Arizona TPT registration has not been marked active.');
     if (sanitize_key($arizona['stripe_registration_status'] ?? '') !== 'active' || empty($arizona['stripe_livemode']) || empty($arizona['collection_active'])) return new WP_Error('arizona_stripe_registration_inactive', 'The Arizona live Stripe Tax registration is not fully active.');
-    $unresolved_states = $wpdb->get_results("SELECT * FROM {$state_table} WHERE state_code <> 'AZ' AND (physical_nexus_flag = 1 OR estimated_threshold_status = 'threshold_reached' OR stripe_threshold_status IN ('threshold_reached_confirmed','registration_required_confirmed'))", ARRAY_A);
-    foreach ((array)$unresolved_states as $row) { if (!empty($row['collection_active'])) continue; if ($this->mrm_tax_row_has_written_clearance($row)) continue; return new WP_Error('unresolved_state_tax_obligation', sprintf('%s has an unresolved tax-registration obligation.', sanitize_text_field($row['state_code'] ?? ''))); }
-    $settings = $this->mrm_tax_get_compliance_settings();
-    if (sanitize_key($settings['national_monitoring_mode']) !== 'stripe_professional_review') return new WP_Error('national_monitoring_not_configured', 'National threshold monitoring has not been configured.');
-    if (!$this->mrm_tax_review_is_current($settings['professional_reviewed_at'], 90) || trim((string)$settings['professional_reference']) === '') return new WP_Error('national_review_expired', 'The national tax-obligation review is missing or older than 90 days.');
-    if (sanitize_key($settings['filing_provider_status']) !== 'active' || sanitize_key($settings['filing_provider']) === '' || trim((string)$settings['filing_provider_effective_date']) === '' || trim((string)$settings['filing_provider_reference']) === '') return new WP_Error('filing_provider_not_configured', 'The filing and remittance provider has not been fully configured.');
-    $active_states = $wpdb->get_results("SELECT * FROM {$state_table} WHERE collection_active = 1", ARRAY_A);
-    foreach ((array)$active_states as $row) { $filing_status = sanitize_key($row['filing_status'] ?? ''); if (!in_array($filing_status, array('provider_managed','manual_managed'), true)) return new WP_Error('state_filing_not_configured', sprintf('%s filing responsibility has not been configured.', sanitize_text_field($row['state_code'] ?? ''))); if (trim((string)($row['next_return_due_date'] ?? '')) === '') return new WP_Error('state_filing_due_date_missing', sprintf('%s has no next return due date.', sanitize_text_field($row['state_code'] ?? ''))); }
+
+    $potential_obligations = $wpdb->get_results("SELECT * FROM {$state_table} WHERE state_code <> 'AZ' AND (physical_nexus_flag = 1 OR estimated_threshold_status = 'threshold_reached' OR stripe_threshold_status IN ('threshold_reached_confirmed','registration_required_confirmed') OR authority_registration_status IN ('reviewing','application_pending','active'))", ARRAY_A);
+
+    foreach ((array)$potential_obligations as $row) {
+      $state = $this->mrm_normalize_state_code($row['state_code'] ?? '');
+      if ($state === '' || $this->mrm_tax_row_has_written_clearance($row)) continue;
+
+      $authority_status = sanitize_key($row['authority_registration_status'] ?? '');
+      $stripe_status = sanitize_key($row['stripe_registration_status'] ?? '');
+      $collection_active = !empty($row['collection_active']);
+      $live_registration = !empty($row['stripe_livemode']);
+
+      if ($authority_status === 'active') {
+        if ($stripe_status !== 'active' || !$live_registration || !$collection_active) return new WP_Error('registered_state_not_collecting', sprintf('%s is registered with the authority, but its live Stripe Tax collection is not active.', $state));
+        continue;
+      }
+
+      if (in_array($authority_status, array('reviewing','application_pending'), true)) return new WP_Error('state_registration_pending', sprintf('%s has a tax-registration review or application that has not been completed.', $state));
+
+      if (!empty($row['physical_nexus_flag']) || sanitize_key($row['estimated_threshold_status'] ?? '') === 'threshold_reached' || in_array(sanitize_key($row['stripe_threshold_status'] ?? ''), array('threshold_reached_confirmed','registration_required_confirmed'), true)) return new WP_Error('unresolved_state_tax_obligation', sprintf('%s has an unresolved tax-registration obligation.', $state));
+    }
+
     return true;
+  }
+
+  private function mrm_tax_administrative_compliance_issues() {
+    global $wpdb;
+    $issues = array();
+    $settings = $this->mrm_tax_get_compliance_settings();
+
+    if (sanitize_key($settings['national_monitoring_mode'] ?? '') !== 'stripe_professional_review') $issues[] = array('code'=>'national_monitoring_not_configured','state'=>'AZ','message'=>'National threshold monitoring has not been configured.');
+    if (!$this->mrm_tax_review_is_current($settings['professional_reviewed_at'] ?? '', 90) || trim((string)($settings['professional_reference'] ?? '')) === '') $issues[] = array('code'=>'national_review_expired','state'=>'AZ','message'=>'The documented national tax-obligation review is missing or older than 90 days.');
+    if (sanitize_key($settings['filing_provider_status'] ?? '') !== 'active' || sanitize_key($settings['filing_provider'] ?? '') === '' || trim((string)($settings['filing_provider_effective_date'] ?? '')) === '' || trim((string)($settings['filing_provider_reference'] ?? '')) === '') $issues[] = array('code'=>'filing_provider_not_configured','state'=>'AZ','message'=>'The filing and remittance provider record is incomplete.');
+
+    $active_states = $wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} WHERE collection_active = 1", ARRAY_A);
+    foreach ((array)$active_states as $row) {
+      $state = $this->mrm_normalize_state_code($row['state_code'] ?? '');
+      $filing_status = sanitize_key($row['filing_status'] ?? '');
+      if (!in_array($filing_status, array('provider_managed','manual_managed'), true)) $issues[] = array('code'=>'state_filing_not_configured','state'=>$state,'message'=>$state . ' filing responsibility has not been configured.');
+      if (trim((string)($row['next_return_due_date'] ?? '')) === '') $issues[] = array('code'=>'state_filing_due_date_missing','state'=>$state,'message'=>$state . ' has no next return due date.');
+    }
+
+    return $issues;
   }
 
   private function mrm_tax_customer_readiness_response($readiness) {
@@ -16618,7 +16675,10 @@ public function handle_marketing_resubscribe() {
     }
   }
 
-  private function mrm_tax_is_live_stripe_key() { return strpos((string)$this->secret_key(), 'sk_live_') === 0; }
+  private function mrm_tax_is_live_stripe_key() {
+    $key = trim((string)$this->secret_key());
+    return strpos($key, 'sk_live_') === 0 || strpos($key, 'rk_live_') === 0;
+  }
 
   private function mrm_tax_sync_stripe_registrations() {
     global $wpdb; $table=$this->table_tax_state_status(); $now=current_time('mysql'); $active=array(); $starting_after='';
@@ -16717,6 +16777,13 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
       if ($days < 0) { $this->mrm_tax_create_alert($state, 'tax_return_overdue', 'tax_state', 0, array('message'=>$state . ' return was due on ' . $due_date . '.'), sanitize_key($due_date)); continue; }
       if ($days <= 10) $this->mrm_tax_create_alert($state, 'tax_return_due_soon', 'tax_state', 0, array('message'=>$state . ' return is due on ' . $due_date . '.'), sanitize_key($due_date));
     }
+    $administrative_issues = $this->mrm_tax_administrative_compliance_issues();
+    foreach ($administrative_issues as $issue) {
+      $state = $this->mrm_normalize_state_code($issue['state'] ?? 'AZ');
+      if ($state === '') $state = 'AZ';
+      $code = sanitize_key($issue['code'] ?? 'administrative_compliance');
+      $this->mrm_tax_create_alert($state, $code, 'tax_administration', 0, array('message'=>sanitize_text_field($issue['message'] ?? '')), sanitize_key(gmdate('Y-m')));
+    }
   }
 
   public function handle_tax_compliance_settings_save() {
@@ -16781,14 +16848,14 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
   }
 
   public function render_sales_tax_nexus_page() {
-    if(!current_user_can('manage_options')) wp_die('You do not have permission to access this page.'); global $wpdb; $this->maybe_install_or_upgrade_db(); $rows=$wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} ORDER BY state_name ASC",ARRAY_A); $live=$this->mrm_tax_is_live_stripe_key(); $compliance=$this->mrm_tax_get_compliance_settings(); $readiness=$this->mrm_tax_live_checkout_readiness(); ?>
+    if(!current_user_can('manage_options')) wp_die('You do not have permission to access this page.'); global $wpdb; $this->maybe_install_or_upgrade_db(); $rows=$wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} ORDER BY state_name ASC",ARRAY_A); $live=$this->mrm_tax_is_live_stripe_key(); $compliance=$this->mrm_tax_get_compliance_settings(); $readiness=$this->mrm_tax_live_checkout_readiness(); $administrative_issues=$this->mrm_tax_administrative_compliance_issues(); ?>
     <div class="wrap"><h1>Sales Tax &amp; Nexus</h1>
       <?php if(isset($_GET['tax_error'])):?><div class="notice notice-error"><p><?php echo esc_html(wp_unslash($_GET['tax_error'])); ?></p></div><?php endif; ?>
       <?php if(isset($_GET['stripe_sync'])):?><div class="notice notice-success"><p>Stripe registrations synced.</p></div><?php endif; ?>
       <?php if(isset($_GET['thresholds_recomputed'])):?><div class="notice notice-success"><p>State thresholds recomputed.</p></div><?php endif; ?>
       <?php if(isset($_GET['state_saved'])):?><div class="notice notice-success"><p>Saved <?php echo esc_html(wp_unslash($_GET['state_saved'])); ?>.</p></div><?php endif; ?>
       <p><strong>Stripe mode:</strong> <?php echo $live ? '<span style="color:#008a20;font-weight:700;">LIVE</span>' : '<span style="color:#b32d2e;font-weight:700;">TEST</span>'; ?></p>
-      <?php if(!$live): ?><div class="notice notice-warning"><p>The site is using a Stripe test key. Test-mode registrations do not satisfy the production approval gate.</p></div><?php endif; ?><?php if($live): ?><?php if(is_wp_error($readiness)): ?><div class="notice notice-error"><p><strong>Live checkout readiness: BLOCKED</strong></p><p><?php echo esc_html($readiness->get_error_message()); ?></p></div><?php else: ?><div class="notice notice-success"><p><strong>Live checkout readiness: READY</strong></p></div><?php endif; ?><?php endif; ?><?php if(isset($_GET['compliance_settings_saved'])): ?><div class="notice notice-success"><p>National monitoring and filing settings saved.</p></div><?php endif; ?><div style="background:#fff;border:1px solid #dcdcde;padding:18px;margin:18px 0;max-width:900px;"><h2>National Monitoring, Filing, and Remittance</h2><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_compliance_settings_save','mrm_tax_compliance_nonce'); ?><input type="hidden" name="action" value="mrm_tax_compliance_settings_save"><p><label><strong>National monitoring method</strong></label><br><select name="national_monitoring_mode" required><option value="">Select</option><option value="stripe_professional_review" <?php selected($compliance['national_monitoring_mode'],'stripe_professional_review'); ?>>Stripe thresholds plus documented professional review</option></select></p><p><label><strong>Professional review date</strong></label><br><input type="date" name="professional_reviewed_at" value="<?php echo esc_attr($compliance['professional_reviewed_at']); ?>" required></p><p><label><strong>Professional review reference</strong></label><br><textarea name="professional_reference" rows="3" class="large-text" required><?php echo esc_textarea($compliance['professional_reference']); ?></textarea></p><p><label><strong>Filing provider</strong></label><br><select name="filing_provider" required><?php foreach(array(''=>'Select','stripe_automated_filing'=>'Stripe automated filing','taxjar'=>'TaxJar','taxually'=>'Taxually','host'=>'Hands-off Sales Tax (HOST)','cpa_or_tax_firm'=>'CPA or sales-tax firm','manual_internal'=>'Internally managed filing') as $value=>$label): ?><option value="<?php echo esc_attr($value); ?>" <?php selected($compliance['filing_provider'],$value); ?>><?php echo esc_html($label); ?></option><?php endforeach; ?></select></p><p><label><input type="checkbox" name="filing_provider_active" value="1" <?php checked($compliance['filing_provider_status'],'active'); ?>> Filing and remittance workflow is active</label></p><p><label><strong>Effective date</strong></label><br><input type="date" name="filing_provider_effective_date" value="<?php echo esc_attr($compliance['filing_provider_effective_date']); ?>" required></p><p><label><strong>Provider account or engagement reference</strong></label><br><textarea name="filing_provider_reference" rows="3" class="large-text" required><?php echo esc_textarea($compliance['filing_provider_reference']); ?></textarea></p><?php submit_button('Save National Compliance Settings'); ?></form></div>
+      <?php if(!$live): ?><div class="notice notice-warning"><p>The site is using a Stripe test key. Test-mode registrations do not satisfy the production approval gate.</p></div><?php endif; ?><?php if($live): ?><?php if(is_wp_error($readiness)): ?><div class="notice notice-error"><p><strong>Live checkout readiness: BLOCKED</strong></p><p><?php echo esc_html($readiness->get_error_message()); ?></p></div><?php else: ?><div class="notice notice-success"><p><strong>Live checkout readiness: READY</strong></p></div><?php endif; ?><?php endif; ?><?php if(!empty($administrative_issues)): ?><div class="notice notice-warning"><p><strong>Tax administration requires attention</strong></p><ul style="list-style:disc;padding-left:22px;"><?php foreach($administrative_issues as $issue): ?><li><?php echo esc_html($issue['message'] ?? ''); ?></li><?php endforeach; ?></ul></div><?php endif; ?><?php if(isset($_GET['compliance_settings_saved'])): ?><div class="notice notice-success"><p>National monitoring and filing settings saved.</p></div><?php endif; ?><div style="background:#fff;border:1px solid #dcdcde;padding:18px;margin:18px 0;max-width:900px;"><h2>National Monitoring, Filing, and Remittance</h2><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_compliance_settings_save','mrm_tax_compliance_nonce'); ?><input type="hidden" name="action" value="mrm_tax_compliance_settings_save"><p><label><strong>National monitoring method</strong></label><br><select name="national_monitoring_mode" required><option value="">Select</option><option value="stripe_professional_review" <?php selected($compliance['national_monitoring_mode'],'stripe_professional_review'); ?>>Stripe thresholds plus documented professional review</option></select></p><p><label><strong>Professional review date</strong></label><br><input type="date" name="professional_reviewed_at" value="<?php echo esc_attr($compliance['professional_reviewed_at']); ?>" required></p><p><label><strong>Professional review reference</strong></label><br><textarea name="professional_reference" rows="3" class="large-text" required><?php echo esc_textarea($compliance['professional_reference']); ?></textarea></p><p><label><strong>Filing provider</strong></label><br><select name="filing_provider" required><?php foreach(array(''=>'Select','stripe_automated_filing'=>'Stripe automated filing','taxjar'=>'TaxJar','taxually'=>'Taxually','host'=>'Hands-off Sales Tax (HOST)','cpa_or_tax_firm'=>'CPA or sales-tax firm','manual_internal'=>'Internally managed filing') as $value=>$label): ?><option value="<?php echo esc_attr($value); ?>" <?php selected($compliance['filing_provider'],$value); ?>><?php echo esc_html($label); ?></option><?php endforeach; ?></select></p><p><label><input type="checkbox" name="filing_provider_active" value="1" <?php checked($compliance['filing_provider_status'],'active'); ?>> Filing and remittance workflow is active</label></p><p><label><strong>Effective date</strong></label><br><input type="date" name="filing_provider_effective_date" value="<?php echo esc_attr($compliance['filing_provider_effective_date']); ?>" required></p><p><label><strong>Provider account or engagement reference</strong></label><br><textarea name="filing_provider_reference" rows="3" class="large-text" required><?php echo esc_textarea($compliance['filing_provider_reference']); ?></textarea></p><?php submit_button('Save National Compliance Settings'); ?></form></div>
       <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_sync_stripe_registrations','mrm_tax_sync_nonce'); ?><input type="hidden" name="action" value="mrm_tax_sync_stripe_registrations"><button class="button button-primary">Sync Stripe Registrations Now</button></form>
       <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_recompute_thresholds','mrm_tax_recompute_nonce'); ?><input type="hidden" name="action" value="mrm_tax_recompute_thresholds"><button class="button">Recompute State Thresholds</button></form>
       <a class="button" href="https://dashboard.stripe.com/tax/locations" target="_blank" rel="noopener">Stripe Tax &gt; Locations</a> <a class="button" href="https://dashboard.stripe.com/tax/registrations" target="_blank" rel="noopener">Stripe Tax &gt; Registrations</a>
@@ -22919,6 +22986,8 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
 
 
   public function create_external_taxed_payment_intent($args) {
+    $exemption_check = $this->mrm_tax_reject_unsupported_exemption_claim($args);
+    if (is_wp_error($exemption_check)) return $exemption_check;
     $readiness = $this->mrm_tax_live_checkout_readiness();
     if (is_wp_error($readiness)) { $this->stripe_debug_log('External taxed checkout blocked.', array('code'=>$readiness->get_error_code(),'message'=>$readiness->get_error_message())); return new WP_Error('tax_configuration_not_ready', 'Payments are temporarily unavailable while our tax configuration is being updated.'); }
     $args = wp_parse_args($args, array('amount_cents'=>0,'currency'=>'usd','tax_code'=>'','reference'=>'','threshold_category'=>'other','address'=>array(),'metadata'=>array(),'description'=>'','receipt_email'=>''));
