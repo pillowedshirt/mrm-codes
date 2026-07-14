@@ -34,11 +34,12 @@ class MRM_Payments_Hub_Single {
 
   // Admin menu
   const MENU_SLUG = 'mrm-payments-hub';
+  const STRIPE_CORE_API_VERSION = '2026-06-24.dahlia';
   const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
   const STRIPE_TAX_PAYMENT_INTENT_BETA = 'payment_intent_with_tax_api_beta=v1';
   const STRIPE_TAX_LOCATION_API_VERSION = '2026-06-24.preview';
-  const TAX_RULES_VERSION = '2026-07-13';
-  const TAX_SCHEMA_VERSION = '2026-07-13-3';
+  const TAX_RULES_VERSION = '2026-07-14-national-v1';
+  const TAX_SCHEMA_VERSION = '2026-07-14-4';
   const TAX_MONITOR_MENU_SLUG = 'mrm-pay-hub-sales-tax-nexus';
   private const MRM_AUTO_REFUND_MAX_AGE_DAYS = 7;
   private const MRM_PM_LOOKAHEAD_HOURS = 72;
@@ -114,6 +115,7 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_tax_recompute_thresholds', array($this, 'cron_tax_recompute_thresholds'));
     add_action('mrm_pay_hub_tax_retry_association', array($this, 'mrm_tax_retry_association'), 10, 2);
     add_action('mrm_pay_hub_tax_retry_refund_association', array($this, 'mrm_tax_retry_refund_association'), 10, 3);
+    add_action('mrm_pay_hub_retry_subscription_invoice_refunds', array($this, 'mrm_tax_retry_subscription_invoice_refunds'), 10, 2);
     add_action('mrm_pay_hub_tax_filing_deadline_check', array($this, 'cron_tax_filing_deadline_check'));
 
     add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
@@ -792,6 +794,7 @@ class MRM_Payments_Hub_Single {
       jurisdiction_type VARCHAR(32) NOT NULL DEFAULT 'state',
       general_sales_tax_status VARCHAR(32) NOT NULL DEFAULT 'statewide',
       threshold_rule_verified TINYINT(1) NOT NULL DEFAULT 0,
+      rule_management_mode VARCHAR(20) NOT NULL DEFAULT 'catalog',
       threshold_amount_cents BIGINT UNSIGNED NULL,
       threshold_transaction_count INT UNSIGNED NULL,
       threshold_operator VARCHAR(32) NOT NULL DEFAULT 'amount',
@@ -848,6 +851,7 @@ class MRM_Payments_Hub_Single {
       threshold_category VARCHAR(64) NOT NULL,
       sales_channel VARCHAR(32) NOT NULL DEFAULT 'direct',
       gross_sales_cents BIGINT NOT NULL DEFAULT 0,
+      retail_sales_cents BIGINT NOT NULL DEFAULT 0,
       taxable_sales_cents BIGINT NOT NULL DEFAULT 0,
       tax_cents BIGINT NOT NULL DEFAULT 0,
       refunded_sales_cents BIGINT NOT NULL DEFAULT 0,
@@ -990,6 +994,11 @@ class MRM_Payments_Hub_Single {
     $this->mrm_tax_add_column_if_missing($state_table, 'next_return_due_date', 'DATE NULL', $errors);
     $this->mrm_tax_add_column_if_missing($state_table, 'last_return_filed_at', 'DATE NULL', $errors);
     $this->mrm_tax_add_column_if_missing($state_table, 'last_return_confirmation', 'TEXT NULL', $errors);
+    $this->mrm_tax_add_column_if_missing($state_table, 'rule_management_mode', "VARCHAR(20) NOT NULL DEFAULT 'catalog'", $errors);
+    $this->mrm_tax_add_column_if_missing($sales_table, 'retail_sales_cents', 'BIGINT NOT NULL DEFAULT 0', $errors);
+    $wpdb->last_error = '';
+    $backfilled = $wpdb->query("UPDATE {$sales_table} SET retail_sales_cents = gross_sales_cents WHERE retail_sales_cents = 0 AND gross_sales_cents > 0");
+    if ($backfilled === false || $wpdb->last_error !== '') $errors[] = 'Unable to backfill retail sales: ' . $wpdb->last_error;
     $operator_column = $wpdb->get_row($wpdb->prepare("SHOW COLUMNS FROM {$state_table} LIKE %s", 'threshold_operator'), ARRAY_A);
     if (!is_array($operator_column) || strtolower((string)($operator_column['Type'] ?? '')) !== 'varchar(32)') $errors[] = 'threshold_operator was not verified as VARCHAR(32).';
     if (!empty($errors)) {
@@ -3215,6 +3224,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $headers = array(
       'Authorization' => 'Bearer ' . $key,
       'Content-Type'  => 'application/x-www-form-urlencoded',
+      'Stripe-Version' => self::STRIPE_CORE_API_VERSION,
     );
 
     if (!empty($extra_headers) && is_array($extra_headers)) {
@@ -3654,7 +3664,8 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       $status = strtolower((string)($subscription['status'] ?? ''));
       $subscription_id = (string)($subscription['id'] ?? '');
       $cancel_at_period_end = !empty($subscription['cancel_at_period_end']);
-      $current_period_end = !empty($subscription['current_period_end']) ? (int)$subscription['current_period_end'] : 0;
+      $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
+      $current_period_end = (int)$period_bounds['end'];
 
       // Still renewing
       if (in_array($status, array('active', 'trialing'), true) && !$cancel_at_period_end) {
@@ -4560,11 +4571,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
      * If Stripe provided an expanded invoice object, try to read the subscription.
      */
     if ($subscription_id === '' && isset($charge['invoice']) && is_array($charge['invoice'])) {
-      if (isset($charge['invoice']['subscription'])) {
-        $subscription_id = is_array($charge['invoice']['subscription'])
-          ? sanitize_text_field((string)($charge['invoice']['subscription']['id'] ?? ''))
-          : sanitize_text_field((string)$charge['invoice']['subscription']);
-      }
+      $subscription_id = $this->mrm_stripe_invoice_subscription_id($charge['invoice']);
     }
 
     /*
@@ -4574,11 +4581,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       $invoice = $this->stripe_api_request('GET', '/v1/invoices/' . rawurlencode($invoice_id));
 
       if (!is_wp_error($invoice) && is_array($invoice)) {
-        $subscription_id = isset($invoice['subscription'])
-          ? (is_array($invoice['subscription'])
-            ? sanitize_text_field((string)($invoice['subscription']['id'] ?? ''))
-            : sanitize_text_field((string)$invoice['subscription']))
-          : '';
+        $subscription_id = $this->mrm_stripe_invoice_subscription_id($invoice);
       }
     }
 
@@ -4874,8 +4877,56 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return true;
   }
 
+  private function mrm_stripe_expandable_id($value) {
+    if (is_array($value)) return sanitize_text_field($value['id'] ?? '');
+    return sanitize_text_field((string)$value);
+  }
+
+  private function mrm_stripe_invoice_subscription_id($invoice) {
+    if (!is_array($invoice)) return '';
+    $legacy_id = $this->mrm_stripe_expandable_id($invoice['subscription'] ?? '');
+    if ($legacy_id !== '') return $legacy_id;
+    $parent = is_array($invoice['parent'] ?? null) ? $invoice['parent'] : array();
+    if (sanitize_key($parent['type'] ?? '') !== 'subscription_details') return '';
+    $details = is_array($parent['subscription_details'] ?? null) ? $parent['subscription_details'] : array();
+    return $this->mrm_stripe_expandable_id($details['subscription'] ?? '');
+  }
+
+  private function mrm_stripe_invoice_line_price_id($line) {
+    if (!is_array($line)) return '';
+    $legacy_price = $this->mrm_stripe_expandable_id($line['price'] ?? '');
+    if ($legacy_price !== '') return $legacy_price;
+    $pricing = is_array($line['pricing'] ?? null) ? $line['pricing'] : array();
+    if (sanitize_key($pricing['type'] ?? '') !== 'price_details') return '';
+    $price_details = is_array($pricing['price_details'] ?? null) ? $pricing['price_details'] : array();
+    return $this->mrm_stripe_expandable_id($price_details['price'] ?? '');
+  }
+
+  private function mrm_stripe_invoice_primary_price_id($invoice) {
+    if (!is_array($invoice)) return '';
+    foreach ((array)($invoice['lines']['data'] ?? array()) as $line) {
+      $price_id = $this->mrm_stripe_invoice_line_price_id($line);
+      if ($price_id !== '') return $price_id;
+    }
+    return '';
+  }
+
+  private function mrm_stripe_subscription_period_bounds($subscription) {
+    if (!is_array($subscription)) return array('start'=>0,'end'=>0);
+    $starts = array(); $ends = array();
+    if (!empty($subscription['current_period_start'])) $starts[] = (int)$subscription['current_period_start'];
+    if (!empty($subscription['current_period_end'])) $ends[] = (int)$subscription['current_period_end'];
+    foreach ((array)($subscription['items']['data'] ?? array()) as $item) {
+      if (!empty($item['current_period_start'])) $starts[] = (int)$item['current_period_start'];
+      if (!empty($item['current_period_end'])) $ends[] = (int)$item['current_period_end'];
+    }
+    $starts = array_values(array_filter($starts, static function($value){ return $value > 0; }));
+    $ends = array_values(array_filter($ends, static function($value){ return $value > 0; }));
+    return array('start'=>!empty($starts)?min($starts):0,'end'=>!empty($ends)?max($ends):0);
+  }
+
   private function mrm_handle_invoice_finalization_failed_webhook($invoice) {
-    $subscription_id = is_array($invoice['subscription'] ?? null) ? sanitize_text_field($invoice['subscription']['id'] ?? '') : sanitize_text_field($invoice['subscription'] ?? '');
+    $subscription_id = $this->mrm_stripe_invoice_subscription_id($invoice);
     if ($subscription_id === '') return;
     $subscription = $this->stripe_retrieve_subscription($subscription_id);
     if (is_wp_error($subscription)) return;
@@ -5003,11 +5054,11 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   private function mrm_handle_invoice_paid_webhook($invoice) {
     $this->stripe_debug_log('invoice.paid handler entered', array(
       'invoice_id' => (string)($invoice['id'] ?? ''),
-      'subscription_id' => (string)($invoice['subscription'] ?? ''),
+      'subscription_id' => $this->mrm_stripe_invoice_subscription_id($invoice),
       'amount_paid' => (int)($invoice['amount_paid'] ?? 0),
     ));
 
-    $subscription_id = (string)($invoice['subscription'] ?? '');
+    $subscription_id = $this->mrm_stripe_invoice_subscription_id($invoice);
     $amount_paid = (int)($invoice['amount_paid'] ?? 0);
 
     // Ignore non-subscription or zero-dollar invoice events.
@@ -5032,7 +5083,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
 
     $configured_price_id = $this->subscription_price_id();
-    $invoice_price_id = (string)($invoice['lines']['data'][0]['price']['id'] ?? '');
+    $invoice_price_id = $this->mrm_stripe_invoice_primary_price_id($invoice);
 
     if ($configured_price_id !== '' && $invoice_price_id !== '' && $invoice_price_id !== $configured_price_id) {
       $this->stripe_debug_log('invoice.paid ignored due to price mismatch', array(
@@ -5077,7 +5128,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   private function mrm_handle_invoice_payment_failed_webhook($invoice) {
-    $subscription_id = (string)($invoice['subscription'] ?? '');
+    $subscription_id = $this->mrm_stripe_invoice_subscription_id($invoice);
     if ($subscription_id === '') return;
 
     $sub = $this->stripe_retrieve_subscription($subscription_id);
@@ -5141,7 +5192,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     global $wpdb; $table = $this->table_tax_sales_ledger(); $external_id = sanitize_text_field($data['external_id'] ?? '');
     if ($external_id === '') return new WP_Error('tax_ledger_id_missing', 'Missing tax-ledger external ID.');
     $now = current_time('mysql');
-    $row = array('source_type'=>sanitize_key($data['source_type'] ?? 'payment_intent'),'source_id'=>absint($data['source_id'] ?? 0),'payment_intent_id'=>sanitize_text_field($data['payment_intent_id'] ?? ''),'invoice_id'=>sanitize_text_field($data['invoice_id'] ?? ''),'customer_state'=>$this->mrm_normalize_state_code($data['customer_state'] ?? ''),'customer_country'=>strtoupper(sanitize_text_field($data['customer_country'] ?? 'US')),'product_type'=>sanitize_key($data['product_type'] ?? 'unknown'),'threshold_category'=>sanitize_key($data['threshold_category'] ?? 'other'),'sales_channel'=>sanitize_key($data['sales_channel'] ?? 'direct'),'gross_sales_cents'=>(int)($data['gross_sales_cents'] ?? 0),'taxable_sales_cents'=>(int)($data['taxable_sales_cents'] ?? 0),'tax_cents'=>(int)($data['tax_cents'] ?? 0),'refunded_sales_cents'=>(int)($data['refunded_sales_cents'] ?? 0),'refunded_tax_cents'=>(int)($data['refunded_tax_cents'] ?? 0),'transaction_count'=>(int)($data['transaction_count'] ?? 1),'currency'=>sanitize_key($data['currency'] ?? 'usd'),'tax_code'=>sanitize_text_field($data['tax_code'] ?? ''),'taxability_reason'=>sanitize_key($data['taxability_reason'] ?? ''),'tax_calculation_id'=>sanitize_text_field($data['tax_calculation_id'] ?? ''),'tax_association_id'=>sanitize_text_field($data['tax_association_id'] ?? ''),'tax_transaction_id'=>sanitize_text_field($data['tax_transaction_id'] ?? ''),'stripe_tax_line_item_id'=>sanitize_text_field($data['stripe_tax_line_item_id'] ?? ''),'tax_reversals_json'=>wp_json_encode($data['tax_reversals'] ?? array()),'calculation_line_items_json'=>wp_json_encode($data['calculation_line_items'] ?? array()),'last_association_sync_at'=>$now,'association_error'=>sanitize_textarea_field($data['association_error'] ?? ''),'tax_transaction_status'=>sanitize_key($data['tax_transaction_status'] ?? 'pending'),'occurred_at'=>sanitize_text_field($data['occurred_at'] ?? $now),'metadata_json'=>wp_json_encode($data['metadata'] ?? array()),'updated_at'=>$now);
+    $row = array('source_type'=>sanitize_key($data['source_type'] ?? 'payment_intent'),'source_id'=>absint($data['source_id'] ?? 0),'payment_intent_id'=>sanitize_text_field($data['payment_intent_id'] ?? ''),'invoice_id'=>sanitize_text_field($data['invoice_id'] ?? ''),'customer_state'=>$this->mrm_normalize_state_code($data['customer_state'] ?? ''),'customer_country'=>strtoupper(sanitize_text_field($data['customer_country'] ?? 'US')),'product_type'=>sanitize_key($data['product_type'] ?? 'unknown'),'threshold_category'=>sanitize_key($data['threshold_category'] ?? 'other'),'sales_channel'=>sanitize_key($data['sales_channel'] ?? 'direct'),'gross_sales_cents'=>(int)($data['gross_sales_cents'] ?? 0),'retail_sales_cents'=>(int)($data['retail_sales_cents'] ?? $data['gross_sales_cents'] ?? 0),'taxable_sales_cents'=>(int)($data['taxable_sales_cents'] ?? 0),'tax_cents'=>(int)($data['tax_cents'] ?? 0),'refunded_sales_cents'=>(int)($data['refunded_sales_cents'] ?? 0),'refunded_tax_cents'=>(int)($data['refunded_tax_cents'] ?? 0),'transaction_count'=>(int)($data['transaction_count'] ?? 1),'currency'=>sanitize_key($data['currency'] ?? 'usd'),'tax_code'=>sanitize_text_field($data['tax_code'] ?? ''),'taxability_reason'=>sanitize_key($data['taxability_reason'] ?? ''),'tax_calculation_id'=>sanitize_text_field($data['tax_calculation_id'] ?? ''),'tax_association_id'=>sanitize_text_field($data['tax_association_id'] ?? ''),'tax_transaction_id'=>sanitize_text_field($data['tax_transaction_id'] ?? ''),'stripe_tax_line_item_id'=>sanitize_text_field($data['stripe_tax_line_item_id'] ?? ''),'tax_reversals_json'=>wp_json_encode($data['tax_reversals'] ?? array()),'calculation_line_items_json'=>wp_json_encode($data['calculation_line_items'] ?? array()),'last_association_sync_at'=>$now,'association_error'=>sanitize_textarea_field($data['association_error'] ?? ''),'tax_transaction_status'=>sanitize_key($data['tax_transaction_status'] ?? 'pending'),'occurred_at'=>sanitize_text_field($data['occurred_at'] ?? $now),'metadata_json'=>wp_json_encode($data['metadata'] ?? array()),'updated_at'=>$now);
     $existing_id = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE external_id = %s", $external_id));
     if ($existing_id) { $updated = $wpdb->update($table, $row, array('id'=>absint($existing_id))); if ($updated === false) return new WP_Error('tax_ledger_update_failed', $wpdb->last_error); return absint($existing_id); }
     $row['external_id'] = $external_id; $row['created_at'] = $now; $inserted = $wpdb->insert($table, $row); if ($inserted === false) return new WP_Error('tax_ledger_insert_failed', $wpdb->last_error); return absint($wpdb->insert_id);
@@ -5184,7 +5235,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
     $transaction_address = is_array($transaction['customer_details']['address'] ?? null) ? $transaction['customer_details']['address'] : array(); $customer_state = $this->mrm_normalize_state_code($transaction_address['state'] ?? $metadata['mrm_customer_state'] ?? ''); $customer_country = strtoupper(sanitize_text_field($transaction_address['country'] ?? $metadata['mrm_customer_country'] ?? 'US'));
     $calculation_lines = json_decode((string)($metadata['mrm_tax_lines_json'] ?? '[]'), true); if (!is_array($calculation_lines)) $calculation_lines = array(); $index = 0; $ledger_write_errors = array();
-    foreach ((array)($original_lines['data'] ?? array()) as $line) { $line_id = sanitize_text_field($line['id'] ?? ''); $reference = sanitize_key($line['reference'] ?? 'item_' . $index); $refund = $refunds_by_original_line[$line_id] ?? array('sales'=>0,'tax'=>0,'transactions'=>array()); $taxability_reason = sanitize_key($line['taxability_reason'] ?? $metadata['mrm_taxability_reason'] ?? ''); $line_amount = (int)($line['amount'] ?? 0); $taxable_sales = in_array($taxability_reason, array('not_subject_to_tax','product_exempt','customer_exempt'), true) ? 0 : $line_amount; $ledger_write_result = $this->mrm_tax_upsert_ledger_row(array('external_id'=>'payment_intent:' . $pi_id . ':' . ($line_id !== '' ? $line_id : $reference),'source_type'=>'payment_intent','payment_intent_id'=>$pi_id,'customer_state'=>$customer_state,'customer_country'=>$customer_country,'product_type'=>$this->mrm_tax_product_from_reference($reference, $metadata),'threshold_category'=>$this->mrm_tax_category_from_reference($reference, $metadata),'gross_sales_cents'=>$line_amount,'taxable_sales_cents'=>$taxable_sales,'tax_cents'=>(int)($line['amount_tax'] ?? 0),'refunded_sales_cents'=>$refund['sales'],'refunded_tax_cents'=>$refund['tax'],'transaction_count'=>$index === 0 ? 1 : 0,'currency'=>$payment_intent['currency'] ?? 'usd','tax_code'=>sanitize_text_field($line['tax_code'] ?? ''),'taxability_reason'=>$taxability_reason,'tax_calculation_id'=>$parsed['calculation_id'],'tax_association_id'=>$parsed['association_id'],'tax_transaction_id'=>$parsed['original_transaction_id'],'stripe_tax_line_item_id'=>$line_id,'tax_reversals'=>array_values(array_unique($refund['transactions'])),'calculation_line_items'=>$calculation_lines,'tax_transaction_status'=>'committed','occurred_at'=>!empty($payment_intent['created']) ? gmdate('Y-m-d H:i:s', (int)$payment_intent['created']) : current_time('mysql'),'metadata'=>$metadata)); if (is_wp_error($ledger_write_result)) $ledger_write_errors[] = $ledger_write_result->get_error_message(); $index++; }
+    foreach ((array)($original_lines['data'] ?? array()) as $line) { $line_id = sanitize_text_field($line['id'] ?? ''); $reference = sanitize_key($line['reference'] ?? 'item_' . $index); $refund = $refunds_by_original_line[$line_id] ?? array('sales'=>0,'tax'=>0,'transactions'=>array()); $taxability_reason = sanitize_key($line['taxability_reason'] ?? $metadata['mrm_taxability_reason'] ?? ''); $line_amount = (int)($line['amount'] ?? 0); $taxable_sales = in_array($taxability_reason, array('not_subject_to_tax','product_exempt','customer_exempt'), true) ? 0 : $line_amount; $ledger_write_result = $this->mrm_tax_upsert_ledger_row(array('external_id'=>'payment_intent:' . $pi_id . ':' . ($line_id !== '' ? $line_id : $reference),'source_type'=>'payment_intent','payment_intent_id'=>$pi_id,'customer_state'=>$customer_state,'customer_country'=>$customer_country,'product_type'=>$this->mrm_tax_product_from_reference($reference, $metadata),'threshold_category'=>$this->mrm_tax_category_from_reference($reference, $metadata),'gross_sales_cents'=>$line_amount,'retail_sales_cents'=>$line_amount,'taxable_sales_cents'=>$taxable_sales,'tax_cents'=>(int)($line['amount_tax'] ?? 0),'refunded_sales_cents'=>$refund['sales'],'refunded_tax_cents'=>$refund['tax'],'transaction_count'=>$index === 0 ? 1 : 0,'currency'=>$payment_intent['currency'] ?? 'usd','tax_code'=>sanitize_text_field($line['tax_code'] ?? ''),'taxability_reason'=>$taxability_reason,'tax_calculation_id'=>$parsed['calculation_id'],'tax_association_id'=>$parsed['association_id'],'tax_transaction_id'=>$parsed['original_transaction_id'],'stripe_tax_line_item_id'=>$line_id,'tax_reversals'=>array_values(array_unique($refund['transactions'])),'calculation_line_items'=>$calculation_lines,'tax_transaction_status'=>'committed','occurred_at'=>!empty($payment_intent['created']) ? gmdate('Y-m-d H:i:s', (int)$payment_intent['created']) : current_time('mysql'),'metadata'=>$metadata)); if (is_wp_error($ledger_write_result)) $ledger_write_errors[] = $ledger_write_result->get_error_message(); $index++; }
     if (!empty($ledger_write_errors)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state, 'One or more tax-ledger rows failed: ' . implode(' | ', $ledger_write_errors));
     if ($customer_state !== '') { $threshold_result = $this->mrm_tax_recompute_all_thresholds(); if (is_wp_error($threshold_result)) $this->mrm_tax_create_alert($customer_state, 'threshold_recompute_failed', 'payment_intent', 0, array('message'=>$threshold_result->get_error_message(),'payment_intent_id'=>$pi_id), sanitize_key($pi_id)); }
     return true;
@@ -5228,7 +5279,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $taxable_sales_cents = $this->mrm_tax_invoice_taxable_sales_cents($invoice);
     $address = is_array($invoice['customer_address'] ?? null) ? $invoice['customer_address'] : array(); $state = $this->mrm_normalize_state_code($address['state'] ?? '');
     if ($state === '') return new WP_Error('subscription_invoice_state_missing', 'The paid subscription invoice has no customer state.');
-    $row_id = $this->mrm_tax_upsert_ledger_row(array('external_id'=>'invoice:' . $invoice_id . ':sheet_music_subscription','source_type'=>'subscription_invoice','invoice_id'=>$invoice_id,'customer_state'=>$state,'customer_country'=>strtoupper(sanitize_text_field($address['country'] ?? 'US')),'product_type'=>'sheet_music','threshold_category'=>'digital_document_subscription','gross_sales_cents'=>$pretax_cents,'taxable_sales_cents'=>$taxable_sales_cents,'tax_cents'=>$tax_cents,'transaction_count'=>1,'currency'=>sanitize_key($invoice['currency'] ?? 'usd'),'tax_code'=>$this->mrm_expected_subscription_tax_code(),'taxability_reason'=>$taxability_reason !== '' ? $taxability_reason : 'not_available','tax_transaction_status'=>$automatic_tax_status !== '' ? $automatic_tax_status : 'unknown','occurred_at'=>!empty($invoice['status_transitions']['paid_at']) ? gmdate('Y-m-d H:i:s', (int)$invoice['status_transitions']['paid_at']) : current_time('mysql'),'metadata'=>is_array($invoice['metadata'] ?? null) ? $invoice['metadata'] : array()));
+    $row_id = $this->mrm_tax_upsert_ledger_row(array('external_id'=>'invoice:' . $invoice_id . ':sheet_music_subscription','source_type'=>'subscription_invoice','invoice_id'=>$invoice_id,'customer_state'=>$state,'customer_country'=>strtoupper(sanitize_text_field($address['country'] ?? 'US')),'product_type'=>'sheet_music','threshold_category'=>'digital_document_subscription','gross_sales_cents'=>$pretax_cents,'retail_sales_cents'=>$pretax_cents,'taxable_sales_cents'=>$taxable_sales_cents,'tax_cents'=>$tax_cents,'transaction_count'=>1,'currency'=>sanitize_key($invoice['currency'] ?? 'usd'),'tax_code'=>$this->mrm_expected_subscription_tax_code(),'taxability_reason'=>$taxability_reason !== '' ? $taxability_reason : 'not_available','tax_transaction_status'=>$automatic_tax_status !== '' ? $automatic_tax_status : 'unknown','occurred_at'=>!empty($invoice['status_transitions']['paid_at']) ? gmdate('Y-m-d H:i:s', (int)$invoice['status_transitions']['paid_at']) : current_time('mysql'),'metadata'=>is_array($invoice['metadata'] ?? null) ? $invoice['metadata'] : array()));
     if (!is_wp_error($row_id)) $this->mrm_tax_recompute_all_thresholds(); return $row_id;
   }
 
@@ -5294,15 +5345,53 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     );
   }
 
-  private function mrm_tax_sync_subscription_invoice_refunds($invoice_id) {
-    global $wpdb; $invoice_id = sanitize_text_field($invoice_id); if ($invoice_id === '') return;
-    $credit_notes = $this->stripe_api_request('GET', '/v1/credit_notes', array('invoice'=>$invoice_id,'limit'=>100)); if (is_wp_error($credit_notes)) return;
-    $refunded_sales_cents = 0; $refunded_tax_cents = 0; $credit_note_ids = array();
-    foreach ((array)($credit_notes['data'] ?? array()) as $credit_note) { if (sanitize_key($credit_note['status'] ?? '') !== 'issued') continue; $credit_note_ids[] = sanitize_text_field($credit_note['id'] ?? ''); $refunded_sales_cents += (int)($credit_note['total_excluding_tax'] ?? 0); foreach ((array)($credit_note['total_taxes'] ?? array()) as $tax) $refunded_tax_cents += (int)($tax['amount'] ?? 0); }
-    $updated = $wpdb->update($this->table_tax_sales_ledger(), array('refunded_sales_cents'=>$refunded_sales_cents,'refunded_tax_cents'=>$refunded_tax_cents,'tax_reversals_json'=>wp_json_encode(array_values(array_filter(array_unique($credit_note_ids)))),'updated_at'=>current_time('mysql')), array('external_id'=>'invoice:' . $invoice_id . ':sheet_music_subscription'));
-    if ($updated !== false) $this->mrm_tax_recompute_all_thresholds();
+  private function mrm_tax_schedule_subscription_invoice_refund_retry($invoice_id, $attempt) {
+    $invoice_id = sanitize_text_field($invoice_id); $attempt = absint($attempt);
+    if ($invoice_id === '' || $attempt > 6) return;
+    $args = array($invoice_id, $attempt);
+    if (!wp_next_scheduled('mrm_pay_hub_retry_subscription_invoice_refunds', $args)) wp_schedule_single_event(time() + 300, 'mrm_pay_hub_retry_subscription_invoice_refunds', $args);
   }
 
+  private function mrm_tax_subscription_invoice_refund_failure($invoice_id, $attempt, $message) {
+    global $wpdb;
+    $invoice_id = sanitize_text_field($invoice_id); $attempt = absint($attempt); $message = sanitize_textarea_field($message);
+    if ($attempt < 6) {
+      $this->mrm_tax_schedule_subscription_invoice_refund_retry($invoice_id, $attempt + 1);
+    } else {
+      $state = $this->mrm_normalize_state_code($wpdb->get_var($wpdb->prepare("SELECT customer_state FROM {$this->table_tax_sales_ledger()} WHERE external_id = %s LIMIT 1", 'invoice:' . $invoice_id . ':sheet_music_subscription')));
+      $this->mrm_tax_create_alert($state, 'subscription_credit_note_sync_failed', 'invoice', 0, array('message'=>$message,'invoice_id'=>$invoice_id,'attempts'=>$attempt), sanitize_key($invoice_id));
+    }
+    return new WP_Error('subscription_credit_note_sync_failed', $message);
+  }
+
+  public function mrm_tax_retry_subscription_invoice_refunds($invoice_id, $attempt) {
+    $result = $this->mrm_tax_sync_subscription_invoice_refunds($invoice_id, $attempt);
+    if (is_wp_error($result)) $this->stripe_debug_log('Subscription Credit Note reconciliation retry failed.', array('invoice_id'=>sanitize_text_field($invoice_id),'attempt'=>absint($attempt),'message'=>$result->get_error_message()));
+  }
+
+  private function mrm_tax_sync_subscription_invoice_refunds($invoice_id, $attempt = 0) {
+    global $wpdb;
+    $invoice_id = sanitize_text_field($invoice_id); $attempt = absint($attempt);
+    if ($invoice_id === '') return new WP_Error('missing_subscription_invoice', 'The subscription Invoice ID is missing.');
+    $external_id = 'invoice:' . $invoice_id . ':sheet_music_subscription';
+    $ledger_row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_sales_ledger()} WHERE external_id = %s LIMIT 1", $external_id), ARRAY_A);
+    if (!is_array($ledger_row)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id, $attempt, 'The local subscription Invoice tax-ledger row does not exist yet.');
+    $credit_notes = $this->stripe_api_request('GET', '/v1/credit_notes', array('invoice'=>$invoice_id,'limit'=>100));
+    if (is_wp_error($credit_notes)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id, $attempt, 'Stripe Credit Notes could not be retrieved: ' . $credit_notes->get_error_message());
+    $refunded_sales_cents = 0; $refunded_tax_cents = 0; $credit_note_ids = array();
+    foreach ((array)($credit_notes['data'] ?? array()) as $credit_note) {
+      if (sanitize_key($credit_note['status'] ?? '') !== 'issued') continue;
+      $credit_note_id = sanitize_text_field($credit_note['id'] ?? ''); if ($credit_note_id !== '') $credit_note_ids[] = $credit_note_id;
+      $refunded_sales_cents += absint($credit_note['total_excluding_tax'] ?? 0);
+      foreach ((array)($credit_note['total_taxes'] ?? array()) as $tax) $refunded_tax_cents += absint($tax['amount'] ?? 0);
+    }
+    $wpdb->last_error = '';
+    $updated = $wpdb->update($this->table_tax_sales_ledger(), array('refunded_sales_cents'=>$refunded_sales_cents,'refunded_tax_cents'=>$refunded_tax_cents,'tax_reversals_json'=>wp_json_encode(array_values(array_filter(array_unique($credit_note_ids)))),'updated_at'=>current_time('mysql')), array('external_id'=>$external_id));
+    if ($updated === false || $wpdb->last_error !== '') return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id, $attempt, 'The local subscription refund ledger could not be updated: ' . ($wpdb->last_error ?: 'Unknown database error.'));
+    $threshold_result = $this->mrm_tax_recompute_all_thresholds();
+    if (is_wp_error($threshold_result)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id, $attempt, 'The refund ledger was updated, but state threshold recomputation failed: ' . $threshold_result->get_error_message());
+    return true;
+  }
 
   private function stripe_retrieve_price($price_id) { $price_id = sanitize_text_field($price_id); if ($price_id === '') return new WP_Error('missing_price_id', 'Missing Stripe Price ID.'); return $this->stripe_api_request('GET', '/v1/prices/' . rawurlencode($price_id)); }
   private function stripe_retrieve_product($product_id) { $product_id = sanitize_text_field($product_id); if ($product_id === '') return new WP_Error('missing_product_id', 'Missing Stripe Product ID.'); return $this->stripe_api_request('GET', '/v1/products/' . rawurlencode($product_id)); }
@@ -6277,7 +6366,8 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
     $live_status = strtolower((string)($subscription['status'] ?? ''));
     $cancel_at_period_end = !empty($subscription['cancel_at_period_end']);
-    $current_period_end = !empty($subscription['current_period_end']) ? (int)$subscription['current_period_end'] : 0;
+    $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
+    $current_period_end = (int)$period_bounds['end'];
 
     if (
       in_array($live_status, array('active', 'trialing'), true) &&
@@ -6764,9 +6854,8 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         $this->mrm_claim_subscription_enrollment_send((int)$order_id)
       ) {
         $billing_anchor_ts = 0;
-        if (!empty($subscription['current_period_end'])) {
-          $billing_anchor_ts = (int)$subscription['current_period_end'];
-        }
+        $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
+        $billing_anchor_ts = (int)$period_bounds['end'];
 
         $sent = $this->mrm_send_sheet_music_subscription_enrollment_email($local, $billing_anchor_ts);
 
@@ -7116,8 +7205,9 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       ? (string)(($subscription['latest_invoice']['id'] ?? ''))
       : (string)($subscription['latest_invoice'] ?? '');
     $price_id = (string)($subscription['items']['data'][0]['price']['id'] ?? '');
-    $period_start = !empty($subscription['current_period_start']) ? $this->mrm_mysql_from_ts((int)$subscription['current_period_start']) : null;
-    $period_end = !empty($subscription['current_period_end']) ? $this->mrm_mysql_from_ts((int)$subscription['current_period_end']) : null;
+    $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
+    $period_start = $period_bounds['start'] > 0 ? $this->mrm_mysql_from_ts($period_bounds['start']) : null;
+    $period_end = $period_bounds['end'] > 0 ? $this->mrm_mysql_from_ts($period_bounds['end']) : null;
     $canceled_at = !empty($subscription['canceled_at']) ? $this->mrm_mysql_from_ts((int)$subscription['canceled_at']) : null;
 
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? $fallback_email));
@@ -8304,7 +8394,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if (!is_array($invoice)) return false;
 
     $invoice_id = trim((string)($invoice['id'] ?? ''));
-    $subscription_id = trim((string)($invoice['subscription'] ?? ''));
+    $subscription_id = $this->mrm_stripe_invoice_subscription_id($invoice);
     $amount_paid = (int)($invoice['amount_paid'] ?? 0);
     $currency = strtolower(trim((string)($invoice['currency'] ?? 'usd')));
 
@@ -10423,6 +10513,8 @@ private function charge_and_unlock_autopay($data) {
       return new WP_REST_Response(array('ok' => true, 'duplicate' => true), 200);
     }
 
+    $required_processing_result = true;
+
     switch ($event_type) {
       case 'payment_intent.succeeded':
         $this->mrm_handle_payment_intent_succeeded_webhook($object);
@@ -10447,8 +10539,12 @@ private function charge_and_unlock_autopay($data) {
       case 'credit_note.created':
       case 'credit_note.updated':
       case 'credit_note.voided':
-        $invoice_id = is_array($object['invoice'] ?? null) ? sanitize_text_field($object['invoice']['id'] ?? '') : sanitize_text_field($object['invoice'] ?? '');
-        if ($invoice_id !== '') $this->mrm_tax_sync_subscription_invoice_refunds($invoice_id);
+        $invoice_id = $this->mrm_stripe_expandable_id($object['invoice'] ?? '');
+        if ($invoice_id === '') {
+          $required_processing_result = new WP_Error('credit_note_invoice_missing', 'The Credit Note webhook does not contain an Invoice ID.');
+        } else {
+          $required_processing_result = $this->mrm_tax_sync_subscription_invoice_refunds($invoice_id, 0);
+        }
         break;
 
       case 'customer.subscription.created':
@@ -10482,6 +10578,11 @@ private function charge_and_unlock_autopay($data) {
       default:
         // Acknowledge unhandled events so Stripe does not keep retrying forever.
         break;
+    }
+
+    if (is_wp_error($required_processing_result)) {
+      $this->stripe_debug_log('Required Stripe webhook processing failed.', array('event_id'=>$event_id,'event_type'=>$event_type,'object_id'=>$object_id,'message'=>$required_processing_result->get_error_message()));
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Required local reconciliation failed.'), 500);
     }
 
     $this->mrm_mark_webhook_event_processed($event_id, $event_type, $object_id);
@@ -16902,18 +17003,100 @@ public function handle_marketing_resubscribe() {
     return new WP_REST_Response(array('ok'=>false,'code'=>'tax_configuration_not_ready','message'=>'Payments are temporarily unavailable while our tax configuration is being updated. Please try again later or contact Low Brass Lessons.'), 503);
   }
 
-  private function mrm_tax_seed_initial_verified_rules() {
-    global $wpdb;
-    $table = $this->table_tax_state_status();
-    $now = current_time('mysql');
-    $rules = array(
-      'AZ'=>array('threshold_amount_cents'=>10000000,'threshold_transaction_count'=>null,'threshold_operator'=>'amount','measurement_window'=>'current_or_previous_calendar_year','included_sales_basis'=>'gross sales excluding marketplace sales','rules_json'=>array('included_channels'=>array('direct'),'included_categories'=>array('all'),'subtract_refunds'=>false),'rule_source_url'=>'https://docs.stripe.com/tax/supported-countries/united-states/collect-tax?tax-jurisdiction-united-states=arizona'),
-      'TX'=>array('threshold_amount_cents'=>50000000,'threshold_transaction_count'=>null,'threshold_operator'=>'amount','measurement_window'=>'rolling_12_months','included_sales_basis'=>'gross sales including marketplace sales','rules_json'=>array('included_channels'=>array('direct','marketplace'),'included_categories'=>array('all'),'subtract_refunds'=>false),'rule_source_url'=>'https://docs.stripe.com/tax/supported-countries/united-states/collect-tax?tax-jurisdiction-united-states=texas'),
-      'IN'=>array('threshold_amount_cents'=>10000000,'threshold_transaction_count'=>null,'threshold_operator'=>'amount','measurement_window'=>'current_or_previous_calendar_year','included_sales_basis'=>'gross sales excluding marketplace sales','rules_json'=>array('included_channels'=>array('direct'),'included_categories'=>array('all'),'subtract_refunds'=>false),'rule_source_url'=>'https://docs.stripe.com/tax/supported-countries/united-states/collect-tax?tax-jurisdiction-united-states=indiana'),
-    );
-    foreach ($rules as $state=>$rule) {
-      if ((int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(1) FROM {$table} WHERE state_code = %s AND threshold_rule_verified = 0 AND rule_effective_date IS NULL", $state)) > 0) $wpdb->update($table, array('threshold_rule_verified'=>1,'threshold_amount_cents'=>$rule['threshold_amount_cents'],'threshold_transaction_count'=>$rule['threshold_transaction_count'],'threshold_operator'=>$rule['threshold_operator'],'measurement_window'=>$rule['measurement_window'],'included_sales_basis'=>$rule['included_sales_basis'],'rules_json'=>wp_json_encode($rule['rules_json']),'rule_source_url'=>$rule['rule_source_url'],'rule_effective_date'=>'2026-07-12','rules_version'=>self::TAX_RULES_VERSION,'updated_at'=>$now), array('state_code'=>$state));
+  private function mrm_tax_national_rule_catalog() {
+    $raw = <<<'MRM_TAX_RULES'
+AL|2018-10-01|25000000||amount|previous_calendar_year|retail|direct|greater_than|at_least|standard|1|$250,000 plus specified activities; amount is monitored conservatively.
+AK|2025-01-01|10000000||amount|current_or_previous_calendar_year|gross|all|at_least|at_least|local_only|1|Alaska local-jurisdiction remote seller system; statewide aggregate is a conservative monitor.
+AZ|2021-01-01|10000000||amount|current_or_previous_calendar_year|gross|direct|greater_than|at_least|standard|1|Arizona physical nexus applies independently of this remote-seller threshold.
+AR|2019-07-01|10000000|200|amount_or_count|current_or_previous_calendar_year|taxable|direct|greater_than|at_least|standard|1|Taxable sales; marketplace sales excluded for individual sellers.
+CA|2019-04-25|50000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales of tangible personal property; all cataloged receipts are monitored conservatively.
+CO|2019-04-14|10000000||amount|current_or_previous_calendar_year|retail|direct|greater_than|at_least|standard|1|Retail sales; marketplace sales excluded for individual sellers.
+CT|2019-07-01|10000000|200|amount_and_count|connecticut_september_30_lookback|retail|all|at_least|at_least|standard|1|Retail sales during the 12-month period ending September 30.
+DE|1900-01-01|||not_applicable|not_applicable|none|none|at_least|at_least|no_general_sales_tax|0|No general state sales tax.
+FL|2021-07-01|10000000||amount|previous_calendar_year|taxable|direct|greater_than|at_least|standard|1|Taxable sales; marketplace sales excluded for individual sellers.
+GA|2020-01-01|10000000|200|amount_or_count|current_or_previous_calendar_year|retail|direct|greater_than|at_least|standard|1|Retail sales of tangible personal property delivered physically or electronically.
+HI|2018-07-01|10000000|200|amount_or_count|current_or_previous_calendar_year|gross|all|at_least|at_least|standard|1|Gross sales; marketplace sales included.
+ID|2019-06-01|10000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales; marketplace sales included.
+IL|2026-01-01|10000000||amount|previous_four_completed_calendar_quarters|retail|direct|at_least|at_least|standard|1|Retail sales; evaluated quarterly using the preceding 12-month period.
+IN|2024-01-01|10000000||amount|current_or_previous_calendar_year|gross|direct|greater_than|at_least|standard|1|Gross sales; marketplace sales excluded for individual sellers.
+IA|2019-05-03|10000000||amount|current_or_previous_calendar_year|gross|all|at_least|at_least|standard|1|Gross sales; marketplace sales included.
+KS|2021-07-01|10000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales for remote sellers.
+KY|2018-10-01|10000000|200|amount_or_count|current_or_previous_calendar_year|gross|all|at_least|at_least|standard|1|Current rule through July 31, 2026.
+KY|2026-08-01|10000000||amount|current_or_previous_calendar_year|gross|all|at_least|at_least|standard|1|Transaction threshold removed effective August 1, 2026.
+LA|2023-08-01|10000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales for remote sellers; marketplace sales included.
+ME|2022-01-01|10000000||amount|current_or_previous_calendar_year|gross|direct|greater_than|at_least|standard|1|Gross sales; marketplace sales excluded for individual sellers.
+MD|2018-10-01|10000000|200|amount_or_count|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales; marketplace sales included.
+MA|2019-10-01|10000000||amount|current_or_previous_calendar_year|gross|direct|greater_than|at_least|standard|1|Gross sales; marketplace sales excluded when the facilitator collects.
+MI|2018-10-01|10000000|200|amount_or_count|previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales in the previous calendar year.
+MN|2019-10-01|10000000|200|amount_or_count|previous_four_completed_calendar_quarters|retail|all|greater_than|at_least|standard|1|Retail sales in the 12 months ending with the most recently completed quarter.
+MS|2018-09-01|25000000||amount|rolling_12_months|gross|direct|greater_than|at_least|standard|1|More than $250,000 in gross sales during the prior 12 months.
+MO|2023-01-01|10000000||amount|previous_four_completed_calendar_quarters|taxable|all|greater_than|at_least|standard|1|Taxable tangible personal property sales; reviewed quarterly.
+MT|1900-01-01|||not_applicable|not_applicable|none|none|at_least|at_least|no_general_sales_tax|0|No general state sales tax.
+NE|2019-04-01|10000000|200|amount_or_count|current_or_previous_calendar_year|retail|all|greater_than|at_least|standard|1|Retail sales; marketplace sales included.
+NV|2018-11-01|10000000|200|amount_or_count|current_or_previous_calendar_year|retail|all|greater_than|at_least|standard|1|Retail sales; marketplace sales included.
+NH|1900-01-01|||not_applicable|not_applicable|none|none|at_least|at_least|no_general_sales_tax|0|No general state sales tax.
+NJ|2018-11-01|10000000|200|amount_or_count|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales; marketplace sales included.
+NM|2019-07-01|10000000||amount|previous_calendar_year|taxable|direct|at_least|at_least|standard|1|Taxable sales; marketplace sales excluded for individual sellers.
+NY|2019-06-24|50000000|100|amount_and_count|new_york_previous_four_sales_tax_quarters|gross|all|greater_than|greater_than|standard|1|Gross receipts from tangible personal property and more than 100 sales.
+NC|2024-07-01|10000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales; marketplace sales included.
+ND|2019-07-01|10000000||amount|current_or_previous_calendar_year|taxable|direct|at_least|at_least|standard|1|Taxable sales; marketplace sales excluded for individual sellers.
+OH|2019-08-01|10000000|200|amount_or_count|current_or_previous_calendar_year|retail|all|greater_than|at_least|standard|1|Retail sales; marketplace sales included.
+OK|2019-11-01|10000000||amount|current_or_previous_calendar_year|taxable|direct|at_least|at_least|standard|1|Taxable sales of tangible personal property.
+OR|1900-01-01|||not_applicable|not_applicable|none|none|at_least|at_least|no_general_sales_tax|0|No general state sales tax.
+PA|2019-07-01|10000000||amount|rolling_12_months|gross|all|greater_than|at_least|standard|1|Gross sales on all channels during the previous 12 months.
+RI|2019-07-01|10000000|200|amount_or_count|previous_calendar_year|gross|all|at_least|at_least|standard|1|Gross sales during the immediately preceding calendar year.
+SC|2018-11-01|10000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales; marketplace sales included.
+SD|2023-07-01|10000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross revenue; marketplace sales included.
+TN|2020-10-01|10000000||amount|rolling_12_months|retail|direct|greater_than|at_least|standard|1|Retail sales; marketplace sales excluded for individual sellers.
+TX|2019-10-01|50000000||amount|rolling_12_months|gross|all|at_least|at_least|standard|1|Total Texas revenue including taxable, nontaxable, and exempt sales.
+UT|2025-07-01|10000000||amount|current_or_previous_calendar_year|gross|direct|greater_than|at_least|standard|1|Gross sales; marketplace sales excluded for individual sellers.
+VT|2018-07-01|10000000|200|amount_or_count|previous_four_completed_calendar_quarters|gross|all|at_least|at_least|standard|1|Gross sales during the prior four completed calendar quarters.
+VA|2019-07-01|10000000|200|amount_or_count|current_or_previous_calendar_year|retail|direct|greater_than|at_least|standard|1|Retail sales; marketplace sales excluded for individual sellers.
+WA|2020-01-01|10000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross income; marketplace sales included.
+WV|2019-01-01|10000000|200|amount_or_count|current_or_previous_calendar_year|gross|all|at_least|at_least|standard|1|Gross sales; marketplace sales included.
+WI|2021-02-20|10000000||amount|current_or_previous_calendar_year|gross|all|greater_than|at_least|standard|1|Gross sales; marketplace sales included.
+WY|2024-07-01|10000000||amount|current_or_previous_calendar_year|gross|direct|greater_than|at_least|standard|1|Gross sales; marketplace sales excluded for individual sellers.
+DC|2019-01-01|10000000|200|amount_or_count|current_or_previous_calendar_year|retail|all|greater_than|at_least|standard|1|District of Columbia retail-sales threshold.
+MRM_TAX_RULES;
+    $catalog = array();
+    foreach (preg_split('/\R/', trim($raw)) as $line) {
+      $parts = array_pad(explode('|', trim($line), 13), 13, '');
+      $state = $this->mrm_normalize_state_code($parts[0]);
+      if ($state === '') continue;
+      $catalog[$state][] = array('state'=>$state,'effective_date'=>sanitize_text_field($parts[1]),'threshold_amount_cents'=>$parts[2]!==''?(int)$parts[2]:null,'threshold_transaction_count'=>$parts[3]!==''?(int)$parts[3]:null,'threshold_operator'=>sanitize_key($parts[4]),'measurement_window'=>sanitize_key($parts[5]),'sales_basis'=>sanitize_key($parts[6]),'channels'=>sanitize_key($parts[7]),'amount_comparison'=>sanitize_key($parts[8]),'count_comparison'=>sanitize_key($parts[9]),'tax_system'=>sanitize_key($parts[10]),'economic_nexus_applicable'=>(int)$parts[11]===1,'note'=>sanitize_text_field($parts[12]));
     }
+    return $catalog;
+  }
+
+  private function mrm_tax_catalog_rule_for_state($state, $as_of_date = '') {
+    $state = $this->mrm_normalize_state_code($state); if ($state === '') return null;
+    $versions = $this->mrm_tax_national_rule_catalog()[$state] ?? array(); if (empty($versions)) return null;
+    $as_of_date = sanitize_text_field($as_of_date); if ($as_of_date === '') $as_of_date = wp_date('Y-m-d');
+    usort($versions, static function($left,$right){ return strcmp((string)($left['effective_date'] ?? ''),(string)($right['effective_date'] ?? '')); });
+    $selected = null; foreach ($versions as $version) { $effective = (string)($version['effective_date'] ?? ''); if ($effective !== '' && $effective <= $as_of_date) $selected = $version; }
+    return $selected;
+  }
+
+  private function mrm_tax_sync_rule_catalog($state_filter = '') {
+    global $wpdb; $table = $this->table_tax_state_status(); $state_filter = $this->mrm_normalize_state_code($state_filter); $catalog = $this->mrm_tax_national_rule_catalog(); $states = $state_filter !== '' ? array($state_filter) : array_keys($catalog); $now = current_time('mysql');
+    foreach ($states as $state) {
+      $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE state_code = %s LIMIT 1", $state), ARRAY_A); if (!is_array($row)) continue;
+      if (sanitize_key($row['rule_management_mode'] ?? 'catalog') === 'manual') continue;
+      $rule = $this->mrm_tax_catalog_rule_for_state($state); if (!is_array($rule)) continue;
+      $channels = $rule['channels'] === 'all' ? array('direct','marketplace') : array('direct');
+      $applicable = !empty($rule['economic_nexus_applicable']);
+      $general_status = $rule['tax_system'] === 'no_general_sales_tax' ? 'no_general_state_sales_tax' : ($rule['tax_system'] === 'local_only' ? 'local_sales_tax_only' : 'statewide');
+      $source_url = $state === 'IL' ? 'https://tax.illinois.gov/research/publications/bulletins/fy-2026-12.html' : 'https://www.salestaxinstitute.com/resources/economic-nexus-state-guide';
+      $basis_description = !$applicable ? 'Not applicable' : ucfirst($rule['sales_basis']) . ' sales; ' . ($rule['channels'] === 'all' ? 'marketplace included' : 'marketplace excluded for individual sellers');
+      $rules_json = array('catalog_managed'=>true,'catalog_as_of'=>'2026-07-14','source_chart_as_of'=>'2026-05-04','economic_nexus_applicable'=>$applicable,'tax_system'=>$rule['tax_system'],'sales_basis'=>$rule['sales_basis'],'included_channels'=>$channels,'included_categories'=>array('all'),'subtract_refunds'=>false,'amount_comparison'=>$rule['amount_comparison'],'count_comparison'=>$rule['count_comparison'],'conservative_scope'=>'The engine may overcount product or service categories when a state threshold is limited to particular sale types. It must not be used to override physical nexus or a documented registration obligation.','source_note'=>$rule['note'],'secondary_source_url'=>'https://www.streamlinedsalestax.org/state-tables');
+      $updated = $wpdb->update($table, array('general_sales_tax_status'=>$general_status,'rule_management_mode'=>'catalog','threshold_rule_verified'=>1,'threshold_amount_cents'=>$rule['threshold_amount_cents'],'threshold_transaction_count'=>$rule['threshold_transaction_count'],'threshold_operator'=>$rule['threshold_operator'],'measurement_window'=>$rule['measurement_window'],'included_sales_basis'=>$basis_description,'rules_json'=>wp_json_encode($rules_json),'rule_source_url'=>$source_url,'rule_effective_date'=>$rule['effective_date'],'rules_version'=>self::TAX_RULES_VERSION,'updated_at'=>$now), array('state_code'=>$state));
+      if ($updated === false) return new WP_Error('tax_rule_catalog_sync_failed', $state . ': ' . ($wpdb->last_error ?: 'The catalog rule could not be saved.'));
+    }
+    return true;
+  }
+
+  private function mrm_tax_seed_initial_verified_rules() {
+    return $this->mrm_tax_sync_rule_catalog();
   }
 
   private function mrm_tax_is_live_stripe_key() {
@@ -16966,36 +17149,107 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
   private function mrm_tax_window_start($measurement_window) { $timezone=wp_timezone(); $now=new DateTimeImmutable('now',$timezone); switch($measurement_window){ case 'rolling_12_months': return $now->modify('-12 months')->format('Y-m-d H:i:s'); case 'previous_calendar_year': return new DateTimeImmutable(($now->format('Y')-1).'-01-01 00:00:00',$timezone); case 'previous_four_quarters': $month=(int)$now->format('n'); $quarter_start_month=((int)floor(($month-1)/3)*3)+1; $current_quarter_start=$now->setDate((int)$now->format('Y'),$quarter_start_month,1)->setTime(0,0,0); return $current_quarter_start->modify('-12 months')->format('Y-m-d H:i:s'); case 'current_or_previous_calendar_year': default: return new DateTimeImmutable(($now->format('Y')-1).'-01-01 00:00:00',$timezone); } }
 
   private function mrm_tax_window_bounds($measurement_window) {
-    $timezone = wp_timezone(); $now = new DateTimeImmutable('now', $timezone);
-    if ($measurement_window === 'previous_calendar_year') { $year = (int)$now->format('Y') - 1; return array(array(sprintf('%04d-01-01 00:00:00', $year), sprintf('%04d-12-31 23:59:59', $year))); }
-    if ($measurement_window === 'current_or_previous_calendar_year') { $current_year = (int)$now->format('Y'); $previous_year = $current_year - 1; return array(array(sprintf('%04d-01-01 00:00:00', $current_year), $now->format('Y-m-d H:i:s')), array(sprintf('%04d-01-01 00:00:00', $previous_year), sprintf('%04d-12-31 23:59:59', $previous_year))); }
-    if ($measurement_window === 'previous_four_quarters') { $month = (int)$now->format('n'); $quarter_start_month = ((int)floor(($month - 1) / 3) * 3) + 1; $current_quarter_start = $now->setDate((int)$now->format('Y'), $quarter_start_month, 1)->setTime(0,0,0); $start = $current_quarter_start->modify('-12 months'); $end = $current_quarter_start->modify('-1 second'); return array(array($start->format('Y-m-d H:i:s'), $end->format('Y-m-d H:i:s'))); }
-    return array(array($now->modify('-12 months')->format('Y-m-d H:i:s'), $now->format('Y-m-d H:i:s')));
+    $timezone = wp_timezone();
+    $now = new DateTimeImmutable('now', $timezone);
+    $measurement_window = sanitize_key($measurement_window);
+    switch ($measurement_window) {
+      case 'not_applicable': return array();
+      case 'previous_calendar_year':
+        $year = (int)$now->format('Y') - 1;
+        return array(array(sprintf('%04d-01-01 00:00:00', $year), sprintf('%04d-12-31 23:59:59', $year)));
+      case 'current_or_previous_calendar_year':
+        $current_year = (int)$now->format('Y'); $previous_year = $current_year - 1;
+        return array(array(sprintf('%04d-01-01 00:00:00', $current_year), $now->format('Y-m-d H:i:s')), array(sprintf('%04d-01-01 00:00:00', $previous_year), sprintf('%04d-12-31 23:59:59', $previous_year)));
+      case 'previous_four_quarters':
+      case 'previous_four_completed_calendar_quarters':
+        $month = (int)$now->format('n'); $quarter_start_month = ((int)floor(($month - 1) / 3) * 3) + 1;
+        $current_quarter_start = $now->setDate((int)$now->format('Y'), $quarter_start_month, 1)->setTime(0,0,0);
+        return array(array($current_quarter_start->modify('-12 months')->format('Y-m-d H:i:s'), $current_quarter_start->modify('-1 second')->format('Y-m-d H:i:s')));
+      case 'connecticut_september_30_lookback':
+        $year = (int)$now->format('Y'); $current_september_end = new DateTimeImmutable($year . '-09-30 23:59:59', $timezone); if ($now < $current_september_end) $year--;
+        return array(array(($year - 1) . '-10-01 00:00:00', $year . '-09-30 23:59:59'));
+      case 'new_york_previous_four_sales_tax_quarters':
+        $year = (int)$now->format('Y'); $month = (int)$now->format('n');
+        if ($month >= 3 && $month <= 5) $quarter_start = new DateTimeImmutable($year . '-03-01 00:00:00', $timezone);
+        elseif ($month >= 6 && $month <= 8) $quarter_start = new DateTimeImmutable($year . '-06-01 00:00:00', $timezone);
+        elseif ($month >= 9 && $month <= 11) $quarter_start = new DateTimeImmutable($year . '-09-01 00:00:00', $timezone);
+        elseif ($month === 12) $quarter_start = new DateTimeImmutable($year . '-12-01 00:00:00', $timezone);
+        else $quarter_start = new DateTimeImmutable(($year - 1) . '-12-01 00:00:00', $timezone);
+        return array(array($quarter_start->modify('-12 months')->format('Y-m-d H:i:s'), $quarter_start->modify('-1 second')->format('Y-m-d H:i:s')));
+      case 'rolling_12_months':
+      default:
+        return array(array($now->modify('-12 months')->format('Y-m-d H:i:s'), $now->format('Y-m-d H:i:s')));
+    }
   }
 
   private function mrm_tax_measure_state_window($state, $start, $end, $rules) {
-    global $wpdb; $state = $this->mrm_normalize_state_code($state); if ($state === '') return new WP_Error('invalid_tax_state', 'The state threshold calculation received an invalid state.'); $rules = is_array($rules) ? $rules : array();
+    global $wpdb;
+    $state = $this->mrm_normalize_state_code($state); if ($state === '') return new WP_Error('invalid_tax_state', 'The state threshold calculation received an invalid state.');
+    $rules = is_array($rules) ? $rules : array(); $sales_basis = sanitize_key($rules['sales_basis'] ?? 'gross');
+    $basis_columns = array('gross'=>'gross_sales_cents','retail'=>'retail_sales_cents','taxable'=>'taxable_sales_cents');
+    if ($sales_basis === 'none' || !isset($basis_columns[$sales_basis])) return array('sales_cents'=>0,'transaction_count'=>0);
+    $basis_column = $basis_columns[$sales_basis];
     $included_channels = isset($rules['included_channels']) && is_array($rules['included_channels']) ? array_values(array_filter(array_map('sanitize_key', $rules['included_channels']))) : array('direct');
-    $included_categories = isset($rules['included_categories']) && is_array($rules['included_categories']) ? array_values(array_filter(array_map('sanitize_key', $rules['included_categories']))) : array('all'); $subtract_refunds = !empty($rules['subtract_refunds']);
+    $included_categories = isset($rules['included_categories']) && is_array($rules['included_categories']) ? array_values(array_filter(array_map('sanitize_key', $rules['included_categories']))) : array('all');
+    $subtract_refunds = !empty($rules['subtract_refunds']);
     $where = array('customer_state = %s','occurred_at >= %s','occurred_at <= %s'); $args = array($state,$start,$end);
-    if (!empty($included_channels) && !in_array('all',$included_channels,true)) { $placeholders = implode(',', array_fill(0,count($included_channels),'%s')); $where[] = "sales_channel IN ({$placeholders})"; foreach ($included_channels as $channel) $args[] = $channel; }
-    if (!empty($included_categories) && !in_array('all',$included_categories,true)) { $placeholders = implode(',', array_fill(0,count($included_categories),'%s')); $where[] = "threshold_category IN ({$placeholders})"; foreach ($included_categories as $category) $args[] = $category; }
-    $sales_expression = $subtract_refunds ? 'COALESCE(SUM(GREATEST(0, gross_sales_cents - refunded_sales_cents)), 0)' : 'COALESCE(SUM(gross_sales_cents), 0)';
-    $sql = "SELECT {$sales_expression} AS sales_cents, COALESCE(SUM(transaction_count), 0) AS transaction_count FROM {$this->table_tax_sales_ledger()} WHERE " . implode(' AND ', $where); $prepared = $wpdb->prepare($sql, $args); $wpdb->last_error = ''; $row = $wpdb->get_row($prepared, ARRAY_A); if ($wpdb->last_error !== '') return new WP_Error('tax_threshold_query_failed', $wpdb->last_error); return array('sales_cents'=>(int)($row['sales_cents'] ?? 0),'transaction_count'=>(int)($row['transaction_count'] ?? 0));
+    if (!empty($included_channels) && !in_array('all', $included_channels, true)) { $where[] = 'sales_channel IN (' . implode(',', array_fill(0, count($included_channels), '%s')) . ')'; foreach ($included_channels as $channel) $args[] = $channel; }
+    if (!empty($included_categories) && !in_array('all', $included_categories, true)) { $where[] = 'threshold_category IN (' . implode(',', array_fill(0, count($included_categories), '%s')) . ')'; foreach ($included_categories as $category) $args[] = $category; }
+    $sales_expression = $subtract_refunds ? "COALESCE(SUM(GREATEST(0, {$basis_column} - refunded_sales_cents)), 0)" : "COALESCE(SUM({$basis_column}), 0)";
+    $sql = "SELECT {$sales_expression} AS sales_cents, COALESCE(SUM(transaction_count), 0) AS transaction_count FROM {$this->table_tax_sales_ledger()} WHERE " . implode(' AND ', $where);
+    $wpdb->last_error = ''; $row = $wpdb->get_row($wpdb->prepare($sql, $args), ARRAY_A);
+    if ($wpdb->last_error !== '') return new WP_Error('tax_threshold_query_failed', $wpdb->last_error);
+    return array('sales_cents'=>(int)($row['sales_cents'] ?? 0),'transaction_count'=>(int)($row['transaction_count'] ?? 0));
+  }
+
+  private function mrm_tax_threshold_value_reached($actual, $threshold, $comparison) {
+    $actual = (float)$actual; $threshold = (float)$threshold; if ($threshold <= 0) return false;
+    return sanitize_key($comparison) === 'greater_than' ? $actual > $threshold : $actual >= $threshold;
   }
 
   private function mrm_tax_recompute_all_thresholds() {
-    global $wpdb; $state_table = $this->table_tax_state_status(); $sales_table = $this->table_tax_sales_ledger(); $states = $wpdb->get_results("SELECT * FROM {$state_table} ORDER BY state_code ASC", ARRAY_A); if (!is_array($states)) return new WP_Error('tax_states_unavailable', 'The state tax registry could not be loaded.'); $now = current_time('mysql'); $errors = array();
-    foreach ($states as $row) { $state = $this->mrm_normalize_state_code($row['state_code'] ?? ''); if ($state === '') continue; $wpdb->last_error = ''; $unverified_summary = $wpdb->get_row($wpdb->prepare("SELECT COALESCE(SUM(gross_sales_cents), 0) AS sales_cents, COALESCE(SUM(transaction_count), 0) AS transaction_count FROM {$sales_table} WHERE customer_state = %s", $state), ARRAY_A); if ($wpdb->last_error !== '') { $errors[] = $state . ': ' . $wpdb->last_error; continue; }
-      if (empty($row['threshold_rule_verified'])) { $updated = $wpdb->update($state_table, array('estimated_sales_cents'=>(int)($unverified_summary['sales_cents'] ?? 0),'estimated_transaction_count'=>(int)($unverified_summary['transaction_count'] ?? 0),'estimated_threshold_percent'=>0,'estimated_threshold_status'=>'not_evaluated','last_recomputed_at'=>$now,'updated_at'=>$now), array('state_code'=>$state)); if ($updated === false) $errors[] = $state . ': ' . $wpdb->last_error; $unverified_sales = (int)($unverified_summary['sales_cents'] ?? 0); if ($unverified_sales > 0) $this->mrm_tax_create_alert($state, 'rule_verification_required', 'tax_state', 0, array('message'=>$state . ' has recorded sales, but its local threshold rule has not been verified.','sales_cents'=>$unverified_sales), sanitize_key(self::TAX_RULES_VERSION . '_' . gmdate('Y'))); continue; }
-      $rules = json_decode((string)($row['rules_json'] ?? ''), true); if (!is_array($rules)) $rules = array(); $windows = $this->mrm_tax_window_bounds(sanitize_key($row['measurement_window'] ?? 'rolling_12_months')); if (empty($windows)) { $errors[] = $state . ': no measurement window was produced.'; continue; }
-      $amount_threshold = (int)($row['threshold_amount_cents'] ?? 0); $count_threshold = (int)($row['threshold_transaction_count'] ?? 0); $operator = sanitize_key($row['threshold_operator'] ?? 'amount'); $best = array('sales'=>0,'transactions'=>0,'percent'=>0,'start'=>'','end'=>'');
-      foreach ($windows as $window) { $start = sanitize_text_field($window[0] ?? ''); $end = sanitize_text_field($window[1] ?? ''); if ($start === '' || $end === '') continue; $measurement = $this->mrm_tax_measure_state_window($state,$start,$end,$rules); if (is_wp_error($measurement)) { $errors[] = $state . ': ' . $measurement->get_error_message(); continue; } $sales = (int)$measurement['sales_cents']; $transactions = (int)$measurement['transaction_count']; $amount_percent = $amount_threshold > 0 ? ($sales / $amount_threshold) * 100 : 0; $count_percent = $count_threshold > 0 ? ($transactions / $count_threshold) * 100 : 0; switch ($operator) { case 'count': $percent = $count_threshold > 0 ? $count_percent : 0; break; case 'amount_or_count': $available = array(); if ($amount_threshold > 0) $available[] = $amount_percent; if ($count_threshold > 0) $available[] = $count_percent; $percent = !empty($available) ? max($available) : 0; break; case 'amount_and_count': $percent = ($amount_threshold <= 0 || $count_threshold <= 0) ? 0 : min($amount_percent, $count_percent); break; case 'amount': default: $percent = $amount_threshold > 0 ? $amount_percent : 0; break; } if ($percent > $best['percent']) $best = array('sales'=>$sales,'transactions'=>$transactions,'percent'=>$percent,'start'=>$start,'end'=>$end); }
-      $percent = round(max(0, $best['percent']), 2); if (!empty($row['collection_active'])) $status='registered'; elseif (!empty($row['physical_nexus_flag'])) $status='physical_nexus_review'; elseif ($percent >= 100) $status='threshold_reached'; elseif ($percent >= 90) $status='approaching_90'; elseif ($percent >= 75) $status='approaching_75'; else $status='below_75'; $update = array('estimated_sales_cents'=>(int)$best['sales'],'estimated_transaction_count'=>(int)$best['transactions'],'estimated_threshold_percent'=>$percent,'estimated_threshold_status'=>$status,'last_recomputed_at'=>$now,'updated_at'=>$now); if ($status === 'threshold_reached' && empty($row['threshold_hit_at'])) $update['threshold_hit_at'] = $now; $updated = $wpdb->update($state_table, $update, array('state_code'=>$state)); if ($updated === false) { $errors[] = $state . ': ' . $wpdb->last_error; continue; }
-      if (!empty($row['physical_nexus_flag']) && empty($row['collection_active'])) $this->mrm_tax_create_alert($state,'physical_nexus_registration_required','tax_state',0,array('message'=>$state . ' has a physical-nexus indicator but collection is not active.'),sanitize_key('physical_nexus_' . ($row['rules_version'] ?? self::TAX_RULES_VERSION)));
-      if ($percent >= 75 && empty($row['collection_active'])) { $level = $percent >= 100 ? '100' : ($percent >= 90 ? '90' : '75'); $period_key = $this->mrm_tax_threshold_period_key($row, $best['start'], $best['end']); $this->mrm_tax_create_alert($state,'threshold_' . $level,'tax_state',0,array('message'=>$state . ' threshold progress is ' . $percent . '%.','window_start'=>$best['start'],'window_end'=>$best['end']),$period_key); }
+    global $wpdb;
+    $catalog_result = $this->mrm_tax_sync_rule_catalog(); if (is_wp_error($catalog_result)) return $catalog_result;
+    $state_table = $this->table_tax_state_status(); $sales_table = $this->table_tax_sales_ledger();
+    $states = $wpdb->get_results("SELECT * FROM {$state_table} ORDER BY state_code ASC", ARRAY_A); if (!is_array($states)) return new WP_Error('tax_states_unavailable', 'The state tax registry could not be loaded.');
+    $now = current_time('mysql'); $errors = array();
+    foreach ($states as $row) {
+      $state = $this->mrm_normalize_state_code($row['state_code'] ?? ''); if ($state === '') continue;
+      $rules = json_decode((string)($row['rules_json'] ?? ''), true); if (!is_array($rules)) $rules = array();
+      if (array_key_exists('economic_nexus_applicable', $rules) && empty($rules['economic_nexus_applicable'])) {
+        $updated = $wpdb->update($state_table, array('estimated_sales_cents'=>0,'estimated_transaction_count'=>0,'estimated_threshold_percent'=>0,'estimated_threshold_status'=>'not_applicable','last_recomputed_at'=>$now,'updated_at'=>$now), array('state_code'=>$state));
+        if ($updated === false) $errors[] = $state . ': ' . $wpdb->last_error; continue;
+      }
+      if (empty($row['threshold_rule_verified'])) {
+        $unverified = $wpdb->get_row($wpdb->prepare("SELECT COALESCE(SUM(gross_sales_cents), 0) AS sales_cents, COALESCE(SUM(transaction_count), 0) AS transaction_count FROM {$sales_table} WHERE customer_state = %s", $state), ARRAY_A);
+        $updated = $wpdb->update($state_table, array('estimated_sales_cents'=>(int)($unverified['sales_cents'] ?? 0),'estimated_transaction_count'=>(int)($unverified['transaction_count'] ?? 0),'estimated_threshold_percent'=>0,'estimated_threshold_status'=>'not_evaluated','last_recomputed_at'=>$now,'updated_at'=>$now), array('state_code'=>$state));
+        if ($updated === false) $errors[] = $state . ': ' . $wpdb->last_error; continue;
+      }
+      $windows = $this->mrm_tax_window_bounds(sanitize_key($row['measurement_window'] ?? 'rolling_12_months')); if (empty($windows)) { $errors[] = $state . ': no measurement window was produced.'; continue; }
+      $amount_threshold = (int)($row['threshold_amount_cents'] ?? 0); $count_threshold = (int)($row['threshold_transaction_count'] ?? 0); $operator = sanitize_key($row['threshold_operator'] ?? 'amount');
+      $amount_comparison = sanitize_key($rules['amount_comparison'] ?? 'at_least'); $count_comparison = sanitize_key($rules['count_comparison'] ?? 'at_least');
+      $best = array('sales'=>0,'transactions'=>0,'percent'=>0,'reached'=>false,'at_exact_unreached'=>false,'start'=>'','end'=>'');
+      foreach ($windows as $window) {
+        $start = sanitize_text_field($window[0] ?? ''); $end = sanitize_text_field($window[1] ?? ''); if ($start === '' || $end === '') continue;
+        $measurement = $this->mrm_tax_measure_state_window($state, $start, $end, $rules); if (is_wp_error($measurement)) { $errors[] = $state . ': ' . $measurement->get_error_message(); continue; }
+        $sales = (int)$measurement['sales_cents']; $transactions = (int)$measurement['transaction_count'];
+        $amount_percent = $amount_threshold > 0 ? ($sales / $amount_threshold) * 100 : 0; $count_percent = $count_threshold > 0 ? ($transactions / $count_threshold) * 100 : 0;
+        $amount_reached = $this->mrm_tax_threshold_value_reached($sales, $amount_threshold, $amount_comparison); $count_reached = $this->mrm_tax_threshold_value_reached($transactions, $count_threshold, $count_comparison);
+        switch ($operator) { case 'count': $reached=$count_reached; $percent=$count_threshold>0?$count_percent:0; break; case 'amount_or_count': $reached=$amount_reached||$count_reached; $available=array(); if($amount_threshold>0)$available[]=$amount_percent; if($count_threshold>0)$available[]=$count_percent; $percent=!empty($available)?max($available):0; break; case 'amount_and_count': $reached=$amount_reached&&$count_reached; $percent=($amount_threshold>0&&$count_threshold>0)?min($amount_percent,$count_percent):0; break; case 'not_applicable': $reached=false; $percent=0; break; case 'amount': default: $reached=$amount_reached; $percent=$amount_threshold>0?$amount_percent:0; break; }
+        $at_exact_unreached = !$reached && (($amount_comparison === 'greater_than' && $amount_threshold > 0 && $sales === $amount_threshold) || ($count_comparison === 'greater_than' && $count_threshold > 0 && $transactions === $count_threshold));
+        if ($reached || $percent > $best['percent']) $best = array('sales'=>$sales,'transactions'=>$transactions,'percent'=>$percent,'reached'=>$reached,'at_exact_unreached'=>$at_exact_unreached,'start'=>$start,'end'=>$end);
+        if ($reached) break;
+      }
+      $percent = round(max(0, $best['percent']), 2);
+      if (!empty($row['collection_active'])) $status='registered'; elseif (!empty($row['physical_nexus_flag'])) $status='physical_nexus_review'; elseif (!empty($best['reached'])) $status='threshold_reached'; elseif (!empty($best['at_exact_unreached'])) $status='at_threshold_not_exceeded'; elseif ($percent >= 90) $status='approaching_90'; elseif ($percent >= 75) $status='approaching_75'; else $status='below_75';
+      $update = array('estimated_sales_cents'=>(int)$best['sales'],'estimated_transaction_count'=>(int)$best['transactions'],'estimated_threshold_percent'=>$percent,'estimated_threshold_status'=>$status,'last_recomputed_at'=>$now,'updated_at'=>$now); if ($status === 'threshold_reached' && empty($row['threshold_hit_at'])) $update['threshold_hit_at']=$now;
+      $updated = $wpdb->update($state_table, $update, array('state_code'=>$state)); if ($updated === false) { $errors[] = $state . ': ' . $wpdb->last_error; continue; }
+      if (!empty($row['physical_nexus_flag']) && empty($row['collection_active'])) $this->mrm_tax_create_alert($state, 'physical_nexus_registration_required', 'tax_state', 0, array('message'=>$state . ' has a physical-nexus indicator but collection is not active.'), sanitize_key('physical_nexus_' . ($row['rules_version'] ?? self::TAX_RULES_VERSION)));
+      if ($status === 'threshold_reached' && empty($row['collection_active'])) $this->mrm_tax_create_alert($state, 'threshold_100', 'tax_state', 0, array('message'=>$state . ' economic-nexus threshold has been reached.','window_start'=>$best['start'],'window_end'=>$best['end']), $this->mrm_tax_threshold_period_key($row, $best['start'], $best['end']));
+      elseif ($percent >= 75 && empty($row['collection_active'])) { $level = $percent >= 90 ? '90' : '75'; $this->mrm_tax_create_alert($state, 'threshold_' . $level, 'tax_state', 0, array('message'=>$state . ' threshold progress is ' . $percent . '%.','window_start'=>$best['start'],'window_end'=>$best['end']), $this->mrm_tax_threshold_period_key($row, $best['start'], $best['end'])); }
     }
-    if (!empty($errors)) return new WP_Error('tax_threshold_recompute_failed', implode(' | ', $errors)); return true;
+    if (!empty($errors)) return new WP_Error('tax_threshold_recompute_failed', implode(' | ', $errors));
+    return true;
   }
 
   private function mrm_tax_threshold_period_key($state_row, $start, $end) { return sanitize_key(implode('_', array($state_row['rules_version'] ?? self::TAX_RULES_VERSION, $state_row['measurement_window'] ?? 'unknown', substr((string)$start, 0, 10), substr((string)$end, 0, 10))));
@@ -17059,12 +17313,15 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
     $allowed_filing_statuses = array('not_configured','provider_managed','manual_managed','filing_attention_required');
     $filing_status = sanitize_key(wp_unslash($_POST['filing_status'] ?? 'not_configured'));
     if (!in_array($filing_status, $allowed_filing_statuses, true)) $filing_status = 'not_configured';
+    $rule_management_mode = sanitize_key(wp_unslash($_POST['rule_management_mode'] ?? 'catalog'));
+    if (!in_array($rule_management_mode, array('catalog','manual'), true)) $rule_management_mode = 'catalog';
     $updated = $wpdb->update($this->table_tax_state_status(), array(
       'authority_registration_status'=>sanitize_key(wp_unslash($_POST['authority_registration_status'] ?? 'not_started')),
       'authority_registration_number'=>sanitize_text_field(wp_unslash($_POST['authority_registration_number'] ?? '')),
       'authority_registration_effective_date'=>sanitize_text_field(wp_unslash($_POST['authority_registration_effective_date'] ?? '')),
       'written_determination_reviewed_at'=>sanitize_text_field(wp_unslash($_POST['written_determination_reviewed_at'] ?? '')),
       'written_determination_reference'=>sanitize_textarea_field(wp_unslash($_POST['written_determination_reference'] ?? '')),
+      'rule_management_mode'=>$rule_management_mode,
       'threshold_rule_verified'=>!empty($_POST['threshold_rule_verified']) ? 1 : 0,
       'threshold_amount_cents'=>$amount_dollars > 0 ? (int)round($amount_dollars * 100) : null,
       'threshold_transaction_count'=>absint($_POST['threshold_transaction_count'] ?? 0) ?: null,
@@ -17083,6 +17340,15 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
       'updated_at'=>current_time('mysql'),
     ), array('state_code'=>$state));
     if ($updated === false) { wp_safe_redirect(add_query_arg('tax_error', rawurlencode($wpdb->last_error), admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG))); exit; }
+    if ($rule_management_mode === 'catalog') {
+      $catalog_result = $this->mrm_tax_sync_rule_catalog($state);
+      if (is_wp_error($catalog_result)) { wp_safe_redirect(add_query_arg('tax_error', rawurlencode($catalog_result->get_error_message()), admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG))); exit; }
+    } else {
+      $existing_rules = $wpdb->get_var($wpdb->prepare("SELECT rules_json FROM {$this->table_tax_state_status()} WHERE state_code = %s", $state));
+      $manual_rules = json_decode((string)$existing_rules, true); if (!is_array($manual_rules)) $manual_rules = array();
+      $manual_rules['catalog_managed'] = false; $manual_rules['manual_updated_at'] = current_time('mysql');
+      $wpdb->update($this->table_tax_state_status(), array('rules_json'=>wp_json_encode($manual_rules),'rules_version'=>'manual-' . gmdate('Ymd'),'updated_at'=>current_time('mysql')), array('state_code'=>$state));
+    }
     $this->mrm_tax_sync_stripe_registrations();
     wp_safe_redirect(admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG . '&state_saved=' . rawurlencode($state)));
     exit;
@@ -17106,8 +17372,9 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
           <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:260px;"><?php wp_nonce_field('mrm_tax_state_save_'.$r['state_code'],'mrm_tax_state_nonce'); ?><input type="hidden" name="action" value="mrm_tax_state_save"><input type="hidden" name="state_code" value="<?php echo esc_attr($r['state_code']); ?>">
             <select name="authority_registration_status"><?php foreach(array('not_started','reviewing','application_pending','active','not_required_written_determination','closed') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['authority_registration_status'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br>
             <input name="authority_registration_number" value="<?php echo esc_attr($r['authority_registration_number']); ?>" placeholder="Authority #"><input type="date" name="authority_registration_effective_date" value="<?php echo esc_attr($r['authority_registration_effective_date']); ?>"><br><input type="date" name="written_determination_reviewed_at" value="<?php echo esc_attr($r['written_determination_reviewed_at'] ?? ''); ?>" title="Written determination reviewed date"><textarea name="written_determination_reference" placeholder="Written no-registration determination reference"><?php echo esc_textarea($r['written_determination_reference'] ?? ''); ?></textarea><br>
+            <label><strong>Threshold rule source</strong></label><br><select name="rule_management_mode"><option value="catalog" <?php selected($r['rule_management_mode'] ?? 'catalog','catalog'); ?>>National catalog</option><option value="manual" <?php selected($r['rule_management_mode'] ?? 'catalog','manual'); ?>>Manual reviewed override</option></select><br>
             <label><input type="checkbox" name="threshold_rule_verified" value="1" <?php checked(!empty($r['threshold_rule_verified'])); ?>> Rule verified</label><br><input type="number" step="0.01" name="threshold_amount_dollars" value="<?php echo esc_attr(!empty($r['threshold_amount_cents'])?((int)$r['threshold_amount_cents']/100):''); ?>" placeholder="Threshold $"><input type="number" name="threshold_transaction_count" value="<?php echo esc_attr($r['threshold_transaction_count']); ?>" placeholder="Tx count"><br>
-            <select name="threshold_operator"><?php foreach(array('amount','count','amount_or_count','amount_and_count') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['threshold_operator'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><input name="measurement_window" value="<?php echo esc_attr($r['measurement_window']); ?>" placeholder="measurement_window"><br><input name="included_sales_basis" value="<?php echo esc_attr($r['included_sales_basis']); ?>" placeholder="Included basis"><br><input type="url" name="rule_source_url" value="<?php echo esc_attr($r['rule_source_url']); ?>" placeholder="Source URL"><input type="date" name="rule_effective_date" value="<?php echo esc_attr($r['rule_effective_date']); ?>"><br>
+            <select name="threshold_operator"><?php foreach(array('amount','count','amount_or_count','amount_and_count','not_applicable') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['threshold_operator'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><input name="measurement_window" value="<?php echo esc_attr($r['measurement_window']); ?>" placeholder="measurement_window"><br><input name="included_sales_basis" value="<?php echo esc_attr($r['included_sales_basis']); ?>" placeholder="Included basis"><br><input type="url" name="rule_source_url" value="<?php echo esc_attr($r['rule_source_url']); ?>" placeholder="Source URL"><input type="date" name="rule_effective_date" value="<?php echo esc_attr($r['rule_effective_date']); ?>"><br>
             <select name="stripe_threshold_status"><?php foreach(array('not_confirmed','below_threshold_confirmed','threshold_reached_confirmed','registration_required_confirmed') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['stripe_threshold_status'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br><hr><strong>Filing and Remittance</strong><br><select name="filing_status"><?php foreach(array('not_configured','provider_managed','manual_managed','filing_attention_required') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['filing_status'] ?? 'not_configured',$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br><select name="filing_frequency"><?php foreach(array(''=>'Frequency','monthly'=>'Monthly','quarterly'=>'Quarterly','annual'=>'Annual','other'=>'Other') as $v=>$label): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['filing_frequency'] ?? '',$v); ?>><?php echo esc_html($label); ?></option><?php endforeach; ?></select><br><label>Next return due</label><br><input type="date" name="next_return_due_date" value="<?php echo esc_attr($r['next_return_due_date'] ?? ''); ?>"><br><label>Last return filed</label><br><input type="date" name="last_return_filed_at" value="<?php echo esc_attr($r['last_return_filed_at'] ?? ''); ?>"><br><textarea name="last_return_confirmation" placeholder="Return confirmation, payment confirmation, provider filing ID, or authority receipt"><?php echo esc_textarea($r['last_return_confirmation'] ?? ''); ?></textarea><br><textarea name="admin_notes" placeholder="Admin notes"><?php echo esc_textarea($r['admin_notes']); ?></textarea><br><button class="button button-small">Save</button></form>
         </td></tr><?php endforeach; ?></tbody></table></div><?php
   }
