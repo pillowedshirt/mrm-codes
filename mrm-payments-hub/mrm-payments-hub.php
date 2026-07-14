@@ -445,6 +445,34 @@ class MRM_Payments_Hub_Single {
       }
     }
 
+    if (!$needs_upgrade) {
+      $required_subscription_columns = array(
+        'tax_attention_status',
+        'tax_attention_reason',
+        'tax_attention_since',
+        'tax_attention_notified_at',
+        'collection_paused_for_tax',
+      );
+
+      $existing_subscription_columns = array();
+      $subscription_columns = $wpdb->get_results("SHOW COLUMNS FROM {$subs}");
+
+      if (is_array($subscription_columns)) {
+        foreach ($subscription_columns as $column) {
+          if (!empty($column->Field)) {
+            $existing_subscription_columns[] = (string)$column->Field;
+          }
+        }
+      }
+
+      foreach ($required_subscription_columns as $required_column) {
+        if (!in_array($required_column, $existing_subscription_columns, true)) {
+          $needs_upgrade = true;
+          break;
+        }
+      }
+    }
+
     // 4) Promo redemption schema check
     if (!$needs_upgrade) {
       $promo_cols = $wpdb->get_results("SHOW COLUMNS FROM {$promo_redemptions}");
@@ -674,6 +702,11 @@ class MRM_Payments_Hub_Single {
       stripe_subscription_id VARCHAR(255) NOT NULL,
       stripe_price_id VARCHAR(255) NOT NULL,
       stripe_status VARCHAR(60) NOT NULL DEFAULT 'pending',
+      tax_attention_status VARCHAR(60) NOT NULL DEFAULT 'clear',
+      tax_attention_reason VARCHAR(255) NULL,
+      tax_attention_since DATETIME NULL,
+      tax_attention_notified_at DATETIME NULL,
+      collection_paused_for_tax TINYINT(1) NOT NULL DEFAULT 0,
       current_period_start DATETIME DEFAULT NULL,
       current_period_end DATETIME DEFAULT NULL,
       renewal_reminder_24h_sent_at DATETIME NULL,
@@ -688,7 +721,8 @@ class MRM_Payments_Hub_Single {
       UNIQUE KEY portal_token_uniq (portal_token),
       KEY email_hash_idx (email_hash),
       KEY stripe_customer_idx (stripe_customer_id),
-      KEY stripe_status_idx (stripe_status)
+      KEY stripe_status_idx (stripe_status),
+      KEY tax_attention_idx (tax_attention_status, collection_paused_for_tax)
     ) {$charset};";
 
     $sql_promo_redemptions = "CREATE TABLE {$promo_redemptions} (
@@ -3488,6 +3522,17 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     );
   }
 
+
+  private function stripe_retrieve_customer_with_tax($customer_id) {
+    $customer_id = sanitize_text_field($customer_id);
+
+    if ($customer_id === '') {
+      return new WP_Error('missing_stripe_customer', 'Missing Stripe Customer ID.');
+    }
+
+    return $this->stripe_api_request('GET', '/v1/customers/' . rawurlencode($customer_id), array('expand[]' => 'tax'));
+  }
+
   private function mrm_resume_sheet_music_subscription($email, $payment_method_id = '', $order_id = 0) {
     $email = sanitize_email((string)$email);
     if (!$email || !is_email($email)) {
@@ -4701,6 +4746,114 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
   }
 
+  private function mrm_subscription_tax_location_problem($subscription = array(), $invoice = array()) {
+    $subscription = is_array($subscription) ? $subscription : array();
+    $invoice = is_array($invoice) ? $invoice : array();
+    $subscription_reason = sanitize_key($subscription['automatic_tax']['disabled_reason'] ?? '');
+    $invoice_status = sanitize_key($invoice['automatic_tax']['status'] ?? '');
+    $invoice_reason = sanitize_key($invoice['automatic_tax']['disabled_reason'] ?? '');
+    $finalization_error_code = sanitize_key($invoice['last_finalization_error']['code'] ?? '');
+    if ($subscription_reason === 'requires_location_inputs') return 'requires_location_inputs';
+    if ($invoice_status === 'requires_location_inputs') return 'requires_location_inputs';
+    if ($invoice_reason === 'finalization_requires_location_inputs') return 'requires_location_inputs';
+    if ($finalization_error_code === 'customer_tax_location_invalid') return 'customer_tax_location_invalid';
+    return '';
+  }
+
+  private function mrm_send_subscription_tax_attention_emails($local_subscription, $reason) {
+    global $wpdb;
+    $local_subscription = is_array($local_subscription) ? $local_subscription : array();
+    $subscription_id = sanitize_text_field($local_subscription['stripe_subscription_id'] ?? '');
+    $email = sanitize_email($local_subscription['email_plain'] ?? '');
+    if ($subscription_id === '') return false;
+    if (!empty($local_subscription['tax_attention_notified_at'])) return true;
+    $manage_url = $this->mrm_subscription_manage_url($local_subscription['portal_token'] ?? '');
+    $details = '<div><strong>Subscription:</strong> ' . esc_html($subscription_id) . '</div>' . '<div><strong>Issue:</strong> ' . esc_html($reason) . '</div>';
+    $customer_sent = false;
+    if ($email && is_email($email)) {
+      $customer_body = $this->mrm_email_wrap_html('Billing address update required', '<p>Stripe could not confirm a valid tax location for your sheet-music subscription. Future automatic billing has been paused until your billing address is corrected.</p>', $details, $manage_url, 'Update Billing Information', '<p style="margin-top:16px;">Your current paid access remains available according to your existing subscription period.</p>');
+      $customer_sent = wp_mail($email, 'Billing address update required for your sheet music subscription', $customer_body, array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>'));
+    }
+    $admin_email = sanitize_email(get_option('admin_email'));
+    if ($admin_email && is_email($admin_email)) {
+      $admin_body = $this->mrm_email_wrap_html('Subscription tax location requires attention', '<p>A sheet-music subscription has been paused because Stripe could not confirm the customer’s tax location.</p>', $details);
+      wp_mail($admin_email, 'Subscription tax location requires attention', $admin_body, array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>'));
+    }
+    $wpdb->update($this->table_sheet_music_subscriptions(), array('tax_attention_notified_at' => current_time('mysql'), 'updated_at' => current_time('mysql')), array('stripe_subscription_id' => $subscription_id));
+    return $customer_sent;
+  }
+
+  private function mrm_pause_subscription_for_tax_location($subscription, $invoice = array()) {
+    global $wpdb;
+    if (!is_array($subscription)) return new WP_Error('invalid_subscription', 'Invalid Stripe subscription.');
+    $subscription_id = sanitize_text_field($subscription['id'] ?? '');
+    if ($subscription_id === '') return new WP_Error('missing_subscription_id', 'Missing Stripe subscription ID.');
+    $reason = $this->mrm_subscription_tax_location_problem($subscription, $invoice);
+    if ($reason === '') return true;
+    $updated_subscription = $subscription;
+    if (sanitize_key($subscription['pause_collection']['behavior'] ?? '') !== 'keep_as_draft') {
+      $updated_subscription = $this->stripe_update_subscription($subscription_id, array('pause_collection[behavior]' => 'keep_as_draft', 'automatic_tax[enabled]' => 'true', 'metadata[mrm_tax_attention_status]' => 'requires_location_inputs', 'metadata[mrm_tax_attention_reason]' => $reason));
+      if (is_wp_error($updated_subscription)) {
+        $this->mrm_tax_create_alert('', 'subscription_tax_pause_failed', 'subscription', 0, array('message' => 'Subscription ' . $subscription_id . ' could not be paused after a tax-location failure: ' . $updated_subscription->get_error_message(), 'subscription_id' => $subscription_id), sanitize_key($subscription_id));
+        return $updated_subscription;
+      }
+    }
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($updated_subscription, sanitize_email($updated_subscription['metadata']['mrm_customer_email'] ?? ''));
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+    $attention_since = !empty($local['tax_attention_since']) ? $local['tax_attention_since'] : current_time('mysql');
+    $wpdb->update($this->table_sheet_music_subscriptions(), array('tax_attention_status' => 'requires_location_inputs', 'tax_attention_reason' => $reason, 'tax_attention_since' => $attention_since, 'collection_paused_for_tax' => 1, 'updated_at' => current_time('mysql')), array('stripe_subscription_id' => $subscription_id));
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+    $this->mrm_send_subscription_tax_attention_emails($local, $reason);
+    $this->mrm_tax_create_alert('', 'subscription_tax_location_attention', 'subscription', 0, array('message' => 'Subscription ' . $subscription_id . ' was paused because Stripe could not confirm the customer tax location.', 'subscription_id' => $subscription_id, 'invoice_id' => sanitize_text_field($invoice['id'] ?? ''), 'reason' => $reason), sanitize_key($subscription_id));
+    return $updated_subscription;
+  }
+
+  private function mrm_resume_subscription_after_tax_location_fix($subscription) {
+    global $wpdb;
+    if (!is_array($subscription)) return false;
+    $subscription_id = sanitize_text_field($subscription['id'] ?? '');
+    if ($subscription_id === '') return false;
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+    if (empty($local['collection_paused_for_tax'])) return true;
+    $customer_id = is_array($subscription['customer'] ?? null) ? sanitize_text_field($subscription['customer']['id'] ?? '') : sanitize_text_field($subscription['customer'] ?? '');
+    if ($customer_id === '') return false;
+    $customer = $this->stripe_retrieve_customer_with_tax($customer_id);
+    if (is_wp_error($customer)) return false;
+    $automatic_tax_status = sanitize_key($customer['tax']['automatic_tax'] ?? '');
+    if (!in_array($automatic_tax_status, array('supported', 'not_collecting'), true)) return false;
+    $updated_subscription = $this->stripe_update_subscription($subscription_id, array('pause_collection' => '', 'automatic_tax[enabled]' => 'true', 'metadata[mrm_tax_attention_status]' => '', 'metadata[mrm_tax_attention_reason]' => ''));
+    if (is_wp_error($updated_subscription)) return false;
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($updated_subscription, sanitize_email($local['email_plain'] ?? ''));
+    $wpdb->update($this->table_sheet_music_subscriptions(), array('tax_attention_status' => 'clear', 'tax_attention_reason' => null, 'tax_attention_since' => null, 'tax_attention_notified_at' => null, 'collection_paused_for_tax' => 0, 'updated_at' => current_time('mysql')), array('stripe_subscription_id' => $subscription_id));
+    return true;
+  }
+
+  private function mrm_handle_invoice_finalization_failed_webhook($invoice) {
+    $subscription_id = is_array($invoice['subscription'] ?? null) ? sanitize_text_field($invoice['subscription']['id'] ?? '') : sanitize_text_field($invoice['subscription'] ?? '');
+    if ($subscription_id === '') return;
+    $subscription = $this->stripe_retrieve_subscription($subscription_id);
+    if (is_wp_error($subscription)) return;
+    if ($this->mrm_subscription_tax_location_problem($subscription, $invoice) !== '') $this->mrm_pause_subscription_for_tax_location($subscription, $invoice);
+  }
+
+  private function mrm_handle_customer_updated_webhook($customer) {
+    $customer_id = sanitize_text_field($customer['id'] ?? '');
+    if ($customer_id === '') return;
+    $expanded_customer = $this->stripe_retrieve_customer_with_tax($customer_id);
+    if (is_wp_error($expanded_customer)) return;
+    $automatic_tax_status = sanitize_key($expanded_customer['tax']['automatic_tax'] ?? '');
+    if (!in_array($automatic_tax_status, array('supported', 'not_collecting'), true)) return;
+    $subscriptions = $this->stripe_api_request('GET', '/v1/subscriptions', array('customer' => $customer_id, 'status' => 'all', 'limit' => 100));
+    if (is_wp_error($subscriptions)) return;
+    foreach ((array)($subscriptions['data'] ?? array()) as $subscription) {
+      $subscription_id = sanitize_text_field($subscription['id'] ?? '');
+      if ($subscription_id === '') continue;
+      $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+      if (empty($local) || empty($local['collection_paused_for_tax'])) continue;
+      $this->mrm_resume_subscription_after_tax_location_fix($subscription);
+    }
+  }
+
   private function mrm_handle_customer_subscription_created_webhook($subscription) {
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
     $this->stripe_debug_log('customer.subscription.created handler entered', array(
@@ -4736,13 +4889,25 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
   private function mrm_handle_customer_subscription_updated_webhook($subscription) {
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    $subscription_id = sanitize_text_field($subscription['id'] ?? '');
+
     $this->stripe_debug_log('customer.subscription.updated handler entered', array(
-      'subscription_id' => (string)($subscription['id'] ?? ''),
+      'subscription_id' => $subscription_id,
       'status' => (string)($subscription['status'] ?? ''),
       'cancel_at_period_end' => !empty($subscription['cancel_at_period_end']) ? 'yes' : 'no',
+      'automatic_tax_disabled_reason' => sanitize_key($subscription['automatic_tax']['disabled_reason'] ?? ''),
       'email' => $email,
     ));
+
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
+
+    $tax_problem = $this->mrm_subscription_tax_location_problem($subscription);
+    if ($tax_problem !== '') {
+      $this->mrm_pause_subscription_for_tax_location($subscription);
+      return;
+    }
+
+    $this->mrm_resume_subscription_after_tax_location_fix($subscription);
   }
 
   private function mrm_handle_customer_subscription_deleted_webhook($subscription) {
@@ -4831,6 +4996,11 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         'configured_price_id' => $configured_price_id,
       ));
       return;
+    }
+
+    $tax_problem = $this->mrm_subscription_tax_location_problem($sub, $invoice);
+    if ($tax_problem !== '') {
+      $this->mrm_pause_subscription_for_tax_location($sub, $invoice);
     }
 
     $tax_ledger_result = $this->mrm_tax_record_subscription_invoice($invoice);
@@ -6681,6 +6851,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
             email_plain,
             stripe_subscription_id,
             stripe_status,
+            tax_attention_status,
+            tax_attention_reason,
+            tax_attention_since,
+            collection_paused_for_tax,
             cancel_at_period_end,
             current_period_start,
             current_period_end,
@@ -10226,8 +10400,16 @@ private function charge_and_unlock_autopay($data) {
         $this->mrm_handle_customer_subscription_updated_webhook($object);
         break;
 
+      case 'customer.updated':
+        $this->mrm_handle_customer_updated_webhook($object);
+        break;
+
       case 'customer.subscription.deleted':
         $this->mrm_handle_customer_subscription_deleted_webhook($object);
+        break;
+
+      case 'invoice.finalization_failed':
+        $this->mrm_handle_invoice_finalization_failed_webhook($object);
         break;
 
       case 'invoice.paid':
@@ -21887,6 +22069,7 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
                       <th>Subscription Active</th>
                       <th>End Date</th>
                       <th>Stripe Status</th>
+                      <th>Tax Status</th>
                       <th>Order ID</th>
                       <th>Payment Intent ID</th>
                       <th>Activation Status</th>
@@ -21896,7 +22079,7 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
                   </thead>
                   <tbody>
                   <?php if (empty($rows)) : ?>
-                    <tr><td colspan="10">No sheet music subscriptions found.</td></tr>
+                    <tr><td colspan="11">No sheet music subscriptions found.</td></tr>
                   <?php else : ?>
                     <?php foreach ($rows as $row) :
                       $is_active = $this->mrm_is_sheet_music_subscription_active_for_admin($row);
@@ -21907,6 +22090,19 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
                         <td style="text-align:center;"><?php echo $is_active ? '✔' : ''; ?></td>
                         <td><?php echo esc_html($end_date); ?></td>
                         <td><?php echo esc_html((string)$row['stripe_status']); ?></td>
+                        <td>
+                          <?php
+                          $tax_attention_status = sanitize_key($row['tax_attention_status'] ?? 'clear');
+                          if (!empty($row['collection_paused_for_tax'])) {
+                            echo '<strong style="color:#b32d2e;">Billing paused</strong>';
+                            if (!empty($row['tax_attention_reason'])) {
+                              echo '<br><small>' . esc_html($row['tax_attention_reason']) . '</small>';
+                            }
+                          } else {
+                            echo esc_html($tax_attention_status ?: 'clear');
+                          }
+                          ?>
+                        </td>
                         <td><?php echo esc_html((string)($row['order_id'] ?? '')); ?></td>
                         <td><?php echo esc_html((string)($row['payment_intent_id'] ?? '')); ?></td>
                         <td><?php echo esc_html((string)($row['activation_status'] ?? '')); ?></td>
