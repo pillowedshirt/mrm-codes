@@ -4688,24 +4688,7 @@ private function mrm_mc_release_existing_customer_holds(
 	return true;
 }
 
-private function mrm_mc_create_payment_intent( $event, $email, $terms ) {
-		return $this->mrm_mc_stripe_request(
-			'POST',
-			'payment_intents',
-			array(
-				'amount'                                  => absint( $event->price_cents ),
-				'currency'                                => 'usd',
-				'payment_method_types[]'                  => 'card',
-				'metadata[mrm_masterclass_event_id]'      => absint( $event->id ),
-				'metadata[mrm_masterclass_customer_email]'=> sanitize_email( $email ),
-				'metadata[mrm_product_type]'              => 'masterclass',
-				'metadata[source_flow]'                   => 'masterclass_registration',
-				'metadata[terms_version]'                 => sanitize_text_field( $terms['version'] ?? 'v1' ),
-				'metadata[terms_accepted]'                => ! empty( $terms['accepted'] ) ? '1' : '0',
-			)
-		);
-	}
-	private function mrm_mc_retrieve_payment_intent( $payment_intent_id ) {
+private function mrm_mc_retrieve_payment_intent( $payment_intent_id ) {
 		$payment_intent_id = sanitize_text_field( $payment_intent_id );
 
 		if ( '' === $payment_intent_id || ! preg_match( '/^pi_/', $payment_intent_id ) ) {
@@ -5260,6 +5243,23 @@ public function handle_save_presenter() {
 		'instruments'                 => wp_json_encode( array() ),
 		'updated_at'                  => $this->now(),
 	);
+
+	if ( function_exists( 'mrm_payments_hub_flag_physical_nexus' ) ) {
+		$tax_gate = mrm_payments_hub_flag_physical_nexus( array(
+			'state' => $data['state'] ?? '',
+			'country' => 'US',
+			'source_type' => 'masterclass_presenter',
+			'source_id' => $id > 0 ? $id : sanitize_email( $email ),
+			'source_label' => 'Masterclass presenter',
+			'details' => $name,
+		) );
+		if ( is_wp_error( $tax_gate ) || empty( $tax_gate['allowed'] ) ) {
+			$message = is_wp_error( $tax_gate ) ? $tax_gate->get_error_message() : sanitize_text_field( $tax_gate['message'] ?? 'The presenter state requires tax-registration review.' );
+			wp_die( esc_html( $message ), esc_html__( 'Presenter Tax Registration Required', 'mrm-masterclass' ), array( 'response' => 409 ) );
+		}
+	} else {
+		wp_die( esc_html__( 'The Payments Hub physical-nexus service is unavailable.', 'mrm-masterclass' ), esc_html__( 'Presenter Tax Verification Failed', 'mrm-masterclass' ), array( 'response' => 503 ) );
+	}
 
 	if ( $id > 0 ) {
 		$result = $wpdb->update(

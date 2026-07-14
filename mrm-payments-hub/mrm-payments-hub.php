@@ -38,8 +38,11 @@ class MRM_Payments_Hub_Single {
   const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
   const STRIPE_TAX_PAYMENT_INTENT_BETA = 'payment_intent_with_tax_api_beta=v1';
   const STRIPE_TAX_LOCATION_API_VERSION = '2026-06-24.preview';
-  const TAX_RULES_VERSION = '2026-07-14-national-v1';
-  const TAX_SCHEMA_VERSION = '2026-07-14-4';
+  const TAX_RULES_VERSION = '2026-07-14-national-v2';
+  const TAX_SCHEMA_VERSION = '2026-07-14-5';
+  const TAX_STRIPE_SYNC_MAX_AGE_MINUTES = 120;
+  const TAX_RULE_REVIEW_MAX_AGE_DAYS = 365;
+  const TAX_LEDGER_RECONCILIATION_GRACE_MINUTES = 30;
   const TAX_MONITOR_MENU_SLUG = 'mrm-pay-hub-sales-tax-nexus';
   private const MRM_AUTO_REFUND_MAX_AGE_DAYS = 7;
   private const MRM_PM_LOOKAHEAD_HOURS = 72;
@@ -53,10 +56,6 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_pay_hub_run_all_payee_payouts', array($this, 'handle_run_all_payee_payouts'));
     add_action('admin_post_mrm_pay_hub_run_presenter_payout', array($this, 'handle_run_presenter_payout'));
     add_action('admin_post_mrm_pay_hub_run_all_due_presenter_payouts', array($this, 'handle_run_all_due_presenter_payouts'));
-    // BEGIN TEMP PAYMENT HUB AUDIT
-    add_action('admin_post_mrm_pay_hub_run_temp_audit', array($this, 'handle_temp_payment_hub_audit_run'));
-    // END TEMP PAYMENT HUB AUDIT
-
     /**
      * Marketing Email Lists admin + unsubscribe actions.
      */
@@ -81,6 +80,7 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_tax_compliance_settings_save', array($this, 'handle_tax_compliance_settings_save'));
     add_action('admin_post_mrm_tax_sync_stripe_registrations', array($this, 'handle_tax_sync_stripe_registrations'));
     add_action('admin_post_mrm_tax_recompute_thresholds', array($this, 'handle_tax_recompute_thresholds'));
+    add_action('admin_post_mrm_tax_reconcile_payment_intent', array($this, 'handle_tax_reconcile_payment_intent'));
     add_action('admin_post_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
     add_action('admin_post_nopriv_mrm_autopay_update_payment', array($this, 'handle_autopay_update_payment'));
     add_action('admin_post_mrm_lesson_cancel_request', array($this, 'render_lesson_cancel_request'));
@@ -794,6 +794,8 @@ class MRM_Payments_Hub_Single {
       jurisdiction_type VARCHAR(32) NOT NULL DEFAULT 'state',
       general_sales_tax_status VARCHAR(32) NOT NULL DEFAULT 'statewide',
       threshold_rule_verified TINYINT(1) NOT NULL DEFAULT 0,
+      rule_professionally_reviewed_at DATE NULL,
+      rule_professional_reference TEXT NULL,
       rule_management_mode VARCHAR(20) NOT NULL DEFAULT 'catalog',
       threshold_amount_cents BIGINT UNSIGNED NULL,
       threshold_transaction_count INT UNSIGNED NULL,
@@ -984,6 +986,8 @@ class MRM_Payments_Hub_Single {
     if ($modified === false || $wpdb->last_error !== '') $errors[] = 'Unable to update threshold_operator: ' . $wpdb->last_error;
     $this->mrm_tax_add_column_if_missing($state_table, 'written_determination_reviewed_at', 'DATE NULL', $errors);
     $this->mrm_tax_add_column_if_missing($state_table, 'written_determination_reference', 'TEXT NULL', $errors);
+    $this->mrm_tax_add_column_if_missing($state_table, 'rule_professionally_reviewed_at', 'DATE NULL', $errors);
+    $this->mrm_tax_add_column_if_missing($state_table, 'rule_professional_reference', 'TEXT NULL', $errors);
     $this->mrm_tax_add_column_if_missing($sales_table, 'stripe_tax_line_item_id', 'VARCHAR(191) NULL', $errors);
     $this->mrm_tax_add_column_if_missing($sales_table, 'tax_reversals_json', 'LONGTEXT NULL', $errors);
     $this->mrm_tax_add_column_if_missing($sales_table, 'calculation_line_items_json', 'LONGTEXT NULL', $errors);
@@ -1001,6 +1005,9 @@ class MRM_Payments_Hub_Single {
     if ($backfilled === false || $wpdb->last_error !== '') $errors[] = 'Unable to backfill retail sales: ' . $wpdb->last_error;
     $operator_column = $wpdb->get_row($wpdb->prepare("SHOW COLUMNS FROM {$state_table} LIKE %s", 'threshold_operator'), ARRAY_A);
     if (!is_array($operator_column) || strtolower((string)($operator_column['Type'] ?? '')) !== 'varchar(32)') $errors[] = 'threshold_operator was not verified as VARCHAR(32).';
+    $wpdb->last_error = '';
+    $catalog_verification_reset = $wpdb->query("UPDATE {$state_table} SET threshold_rule_verified = 0, rule_professionally_reviewed_at = NULL, rule_professional_reference = NULL WHERE rule_management_mode = 'catalog'");
+    if ($catalog_verification_reset === false || $wpdb->last_error !== '') $errors[] = 'Unable to reset automatically verified catalog rules: ' . $wpdb->last_error;
     if (!empty($errors)) {
       update_option('mrm_tax_schema_migration_error', implode("\n", $errors), false);
       error_log('MRM tax schema migration failed: ' . implode(' | ', $errors));
@@ -14956,7 +14963,8 @@ public function handle_marketing_resubscribe() {
       <div style="max-width:1100px;background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin-top:18px;">
         <h2>Select the email you want to preview</h2>
         <p>Checking a box updates the preview window immediately. No emails are sent from this screen.</p>
-        <table class="widefat striped">
+        <?php if(!empty($reconciliation_rows)): ?><div style="background:#fff;border:1px solid #d63638;padding:18px;margin:18px 0;"><h2>Tax Transactions Requiring Reconciliation</h2><p>Live checkout remains blocked until these committed transactions or refund reversals are confirmed.</p><table class="widefat striped"><thead><tr><th>Ledger ID</th><th>PaymentIntent</th><th>State</th><th>Status</th><th>Error</th><th>Occurred</th><th>Action</th></tr></thead><tbody><?php foreach($reconciliation_rows as $tax_row): ?><tr><td><?php echo esc_html($tax_row['id']); ?></td><td><code><?php echo esc_html($tax_row['payment_intent_id'] ?: 'Unavailable'); ?></code></td><td><?php echo esc_html($tax_row['customer_state']); ?></td><td><?php echo esc_html($tax_row['tax_transaction_status']); ?></td><td><?php echo esc_html($tax_row['association_error'] ?: 'Missing transaction or reversal record'); ?></td><td><?php echo esc_html($tax_row['occurred_at']); ?></td><td><?php if(!empty($tax_row['payment_intent_id'])): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_payment_intent','mrm_tax_reconcile_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_payment_intent"><input type="hidden" name="payment_intent_id" value="<?php echo esc_attr($tax_row['payment_intent_id']); ?>"><button type="submit" class="button button-small">Reconcile</button></form><?php else: ?>Manual Stripe review required<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
+      <table class="widefat striped">
           <thead>
             <tr>
               <th style="width:60px;">Preview</th>
@@ -16911,7 +16919,7 @@ public function handle_marketing_resubscribe() {
     if ($az && empty($az['physical_nexus_flag'])) {
       $wpdb->update($table, array('physical_nexus_flag'=>1,'physical_nexus_reason'=>'Low Brass Lessons home-state business presence.','first_flagged_at'=>$now,'updated_at'=>$now), array('state_code'=>'AZ'));
     }
-    $this->mrm_tax_seed_initial_verified_rules();
+    $this->mrm_tax_seed_initial_rules();
   }
 
 
@@ -16924,6 +16932,11 @@ public function handle_marketing_resubscribe() {
     if ($date === '') return false;
     try { $reviewed = new DateTimeImmutable($date . ' 23:59:59', wp_timezone()); $cutoff = new DateTimeImmutable('-' . absint($maximum_age_days) . ' days', wp_timezone()); return $reviewed >= $cutoff; } catch (Throwable $error) { return false; }
   }
+
+  private function mrm_tax_stripe_sync_is_fresh($row, $maximum_age_minutes = self::TAX_STRIPE_SYNC_MAX_AGE_MINUTES) { $row = is_array($row) ? $row : array(); $last_sync = sanitize_text_field($row['last_stripe_sync_at'] ?? ''); if ($last_sync === '') return false; try { $synced = new DateTimeImmutable($last_sync, wp_timezone()); $cutoff = new DateTimeImmutable('-' . absint($maximum_age_minutes) . ' minutes', wp_timezone()); return $synced >= $cutoff; } catch (Throwable $error) { return false; } }
+  private function mrm_tax_row_rule_review_is_current($row) { $row = is_array($row) ? $row : array(); return (!empty($row['threshold_rule_verified']) && $this->mrm_tax_review_is_current($row['rule_professionally_reviewed_at'] ?? '', self::TAX_RULE_REVIEW_MAX_AGE_DAYS) && trim((string)($row['rule_professional_reference'] ?? '')) !== ''); }
+  private function mrm_tax_rule_status_label($row) { $row = is_array($row) ? $row : array(); if ($this->mrm_tax_row_rule_review_is_current($row)) return 'Professionally verified'; if (sanitize_key($row['rule_management_mode'] ?? 'catalog') === 'catalog') return 'Catalog monitoring rule'; return 'Professional verification required'; }
+  private function mrm_tax_ledger_reconciliation_rows($limit = 50) { global $wpdb; $limit = max(1, min(200, absint($limit))); $cutoff = wp_date('Y-m-d H:i:s', current_time('timestamp') - (self::TAX_LEDGER_RECONCILIATION_GRACE_MINUTES * MINUTE_IN_SECONDS), wp_timezone()); $sql = $wpdb->prepare("SELECT id, external_id, source_type, payment_intent_id, invoice_id, customer_state, tax_transaction_status, tax_transaction_id, refunded_tax_cents, tax_reversals_json, association_error, occurred_at, updated_at FROM {$this->table_tax_sales_ledger()} WHERE occurred_at <= %s AND (((source_type = 'payment_intent') AND (COALESCE(tax_transaction_status, '') <> 'committed' OR COALESCE(tax_transaction_id, '') = '' OR COALESCE(association_error, '') <> '')) OR (refunded_tax_cents > 0 AND TRIM(COALESCE(tax_reversals_json, '')) IN ('', '[]'))) ORDER BY occurred_at ASC, id ASC LIMIT %d", $cutoff, $limit); $rows = $wpdb->get_results($sql, ARRAY_A); return is_array($rows) ? $rows : array(); }
 
   private function mrm_tax_row_has_written_clearance($row) {
     return sanitize_key($row['authority_registration_status'] ?? '') === 'not_required_written_determination' && trim((string)($row['written_determination_reviewed_at'] ?? '')) !== '' && trim((string)($row['written_determination_reference'] ?? '')) !== '';
@@ -16942,59 +16955,22 @@ public function handle_marketing_resubscribe() {
   }
 
   private function mrm_tax_live_checkout_readiness() {
-    global $wpdb;
-
-    if (!$this->mrm_tax_is_live_stripe_key()) return true;
-
-    $state_table = $this->table_tax_state_status();
-    $arizona = $wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A);
-
-    if (!$arizona) return new WP_Error('arizona_tax_registry_missing', 'Arizona is missing from the tax registry.');
-    if (sanitize_key($arizona['authority_registration_status'] ?? '') !== 'active') return new WP_Error('arizona_authority_registration_inactive', 'The Arizona TPT registration has not been marked active.');
-    if (sanitize_key($arizona['stripe_registration_status'] ?? '') !== 'active' || empty($arizona['stripe_livemode']) || empty($arizona['collection_active'])) return new WP_Error('arizona_stripe_registration_inactive', 'The Arizona live Stripe Tax registration is not fully active.');
-
+    global $wpdb; if (!$this->mrm_tax_is_live_stripe_key()) return true; $state_table = $this->table_tax_state_status(); $arizona = $wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A);
+    if (!$arizona || !$this->mrm_tax_stripe_sync_is_fresh($arizona)) { $sync_result = $this->mrm_tax_sync_stripe_registrations(); if (is_wp_error($sync_result)) return new WP_Error('stripe_registration_sync_failed', 'The live Stripe Tax registration status could not be refreshed: ' . $sync_result->get_error_message()); $arizona = $wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A); }
+    if (!$arizona) return new WP_Error('arizona_tax_registry_missing', 'Arizona is missing from the tax registry.'); if (sanitize_key($arizona['authority_registration_status'] ?? '') !== 'active') return new WP_Error('arizona_authority_registration_inactive', 'The Arizona TPT registration has not been marked active.'); if (sanitize_key($arizona['stripe_registration_status'] ?? '') !== 'active' || empty($arizona['stripe_livemode']) || empty($arizona['collection_active'])) return new WP_Error('arizona_stripe_registration_inactive', 'The Arizona live Stripe Tax registration is not fully active.');
     $potential_obligations = $wpdb->get_results("SELECT * FROM {$state_table} WHERE state_code <> 'AZ' AND (physical_nexus_flag = 1 OR estimated_threshold_status = 'threshold_reached' OR stripe_threshold_status IN ('threshold_reached_confirmed','registration_required_confirmed') OR authority_registration_status IN ('reviewing','application_pending','active'))", ARRAY_A);
-
-    foreach ((array)$potential_obligations as $row) {
-      $state = $this->mrm_normalize_state_code($row['state_code'] ?? '');
-      if ($state === '' || $this->mrm_tax_row_has_written_clearance($row)) continue;
-
-      $authority_status = sanitize_key($row['authority_registration_status'] ?? '');
-      $stripe_status = sanitize_key($row['stripe_registration_status'] ?? '');
-      $collection_active = !empty($row['collection_active']);
-      $live_registration = !empty($row['stripe_livemode']);
-
-      if ($authority_status === 'active') {
-        if ($stripe_status !== 'active' || !$live_registration || !$collection_active) return new WP_Error('registered_state_not_collecting', sprintf('%s is registered with the authority, but its live Stripe Tax collection is not active.', $state));
-        continue;
-      }
-
-      if (in_array($authority_status, array('reviewing','application_pending'), true)) return new WP_Error('state_registration_pending', sprintf('%s has a tax-registration review or application that has not been completed.', $state));
-
-      if (!empty($row['physical_nexus_flag']) || sanitize_key($row['estimated_threshold_status'] ?? '') === 'threshold_reached' || in_array(sanitize_key($row['stripe_threshold_status'] ?? ''), array('threshold_reached_confirmed','registration_required_confirmed'), true)) return new WP_Error('unresolved_state_tax_obligation', sprintf('%s has an unresolved tax-registration obligation.', $state));
-    }
-
+    foreach ((array)$potential_obligations as $row) { $state = $this->mrm_normalize_state_code($row['state_code'] ?? ''); if ($state === '' || $this->mrm_tax_row_has_written_clearance($row)) continue; $authority_status = sanitize_key($row['authority_registration_status'] ?? ''); $stripe_status = sanitize_key($row['stripe_registration_status'] ?? ''); $collection_active = !empty($row['collection_active']); $live_registration = !empty($row['stripe_livemode']); if ($authority_status === 'active') { if ($stripe_status !== 'active' || !$live_registration || !$collection_active) return new WP_Error('registered_state_not_collecting', sprintf('%s is registered with the authority, but its live Stripe Tax collection is not active.', $state)); continue; } if (in_array($authority_status, array('reviewing','application_pending'), true)) return new WP_Error('state_registration_pending', sprintf('%s has a tax-registration review or application that has not been completed.', $state)); if (!empty($row['physical_nexus_flag']) || sanitize_key($row['estimated_threshold_status'] ?? '') === 'threshold_reached' || in_array(sanitize_key($row['stripe_threshold_status'] ?? ''), array('threshold_reached_confirmed','registration_required_confirmed'), true)) return new WP_Error('unresolved_state_tax_obligation', sprintf('%s has an unresolved tax-registration obligation.', $state)); }
+    $administrative_issues = $this->mrm_tax_administrative_compliance_issues(); if (!empty($administrative_issues)) { $messages = array(); foreach ($administrative_issues as $issue) { $message = sanitize_text_field($issue['message'] ?? ''); if ($message !== '') $messages[] = $message; } $messages = array_values(array_unique($messages)); return new WP_Error('tax_administration_not_ready', !empty($messages) ? implode(' ', array_slice($messages, 0, 6)) : 'The tax administration configuration is incomplete.', array('issues'=>$administrative_issues)); }
     return true;
   }
 
   private function mrm_tax_administrative_compliance_issues() {
-    global $wpdb;
-    $issues = array();
-    $settings = $this->mrm_tax_get_compliance_settings();
-
-    if (sanitize_key($settings['national_monitoring_mode'] ?? '') !== 'stripe_professional_review') $issues[] = array('code'=>'national_monitoring_not_configured','state'=>'AZ','message'=>'National threshold monitoring has not been configured.');
-    if (!$this->mrm_tax_review_is_current($settings['professional_reviewed_at'] ?? '', 90) || trim((string)($settings['professional_reference'] ?? '')) === '') $issues[] = array('code'=>'national_review_expired','state'=>'AZ','message'=>'The documented national tax-obligation review is missing or older than 90 days.');
-    if (sanitize_key($settings['filing_provider_status'] ?? '') !== 'active' || sanitize_key($settings['filing_provider'] ?? '') === '' || trim((string)($settings['filing_provider_effective_date'] ?? '')) === '' || trim((string)($settings['filing_provider_reference'] ?? '')) === '') $issues[] = array('code'=>'filing_provider_not_configured','state'=>'AZ','message'=>'The filing and remittance provider record is incomplete.');
-
-    $active_states = $wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} WHERE collection_active = 1", ARRAY_A);
-    foreach ((array)$active_states as $row) {
-      $state = $this->mrm_normalize_state_code($row['state_code'] ?? '');
-      $filing_status = sanitize_key($row['filing_status'] ?? '');
-      if (!in_array($filing_status, array('provider_managed','manual_managed'), true)) $issues[] = array('code'=>'state_filing_not_configured','state'=>$state,'message'=>$state . ' filing responsibility has not been configured.');
-      if (trim((string)($row['next_return_due_date'] ?? '')) === '') $issues[] = array('code'=>'state_filing_due_date_missing','state'=>$state,'message'=>$state . ' has no next return due date.');
-    }
-
-    return $issues;
+    global $wpdb; $issues = array(); $settings = $this->mrm_tax_get_compliance_settings(); $state_table = $this->table_tax_state_status();
+    if (sanitize_key($settings['national_monitoring_mode'] ?? '') !== 'stripe_professional_review') $issues[] = array('code'=>'national_monitoring_not_configured','state'=>'AZ','message'=>'National threshold monitoring has not been configured.'); if (!$this->mrm_tax_review_is_current($settings['professional_reviewed_at'] ?? '', 90) || trim((string)($settings['professional_reference'] ?? '')) === '') $issues[] = array('code'=>'national_review_expired','state'=>'AZ','message'=>'The documented national tax-obligation review is missing or older than 90 days.'); if (sanitize_key($settings['filing_provider_status'] ?? '') !== 'active' || sanitize_key($settings['filing_provider'] ?? '') === '' || trim((string)($settings['filing_provider_effective_date'] ?? '')) === '' || trim((string)($settings['filing_provider_reference'] ?? '')) === '') $issues[] = array('code'=>'filing_provider_not_configured','state'=>'AZ','message'=>'The filing and remittance provider record is incomplete.');
+    if ($this->mrm_tax_is_live_stripe_key()) { $arizona = $wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A); if (!is_array($arizona) || !$this->mrm_tax_stripe_sync_is_fresh($arizona)) $issues[] = array('code'=>'stripe_registration_sync_stale','state'=>'AZ','message'=>'The live Stripe Tax registration sync is missing or older than two hours.'); }
+    $active_states = $wpdb->get_results("SELECT * FROM {$state_table} WHERE collection_active = 1", ARRAY_A); $today = new DateTimeImmutable('today', wp_timezone()); foreach ((array)$active_states as $row) { $state = $this->mrm_normalize_state_code($row['state_code'] ?? ''); $filing_status = sanitize_key($row['filing_status'] ?? ''); if (!in_array($filing_status, array('provider_managed','manual_managed'), true)) $issues[] = array('code'=>'state_filing_not_configured','state'=>$state,'message'=>$state . ' filing responsibility has not been configured.'); $due_date = sanitize_text_field($row['next_return_due_date'] ?? ''); if ($due_date === '') { $issues[] = array('code'=>'state_filing_due_date_missing','state'=>$state,'message'=>$state . ' has no next return due date.'); continue; } try { $due = new DateTimeImmutable($due_date . ' 00:00:00', wp_timezone()); if ($due < $today) $issues[] = array('code'=>'state_filing_due_date_overdue','state'=>$state,'message'=>$state . ' has an overdue return date of ' . $due_date . '.'); } catch (Throwable $error) { $issues[] = array('code'=>'state_filing_due_date_invalid','state'=>$state,'message'=>$state . ' has an invalid next return due date.'); } }
+    $review_states = $wpdb->get_results("SELECT * FROM {$state_table} WHERE estimated_threshold_percent >= 75 OR stripe_threshold_status IN ('threshold_reached_confirmed','registration_required_confirmed')", ARRAY_A); foreach ((array)$review_states as $row) { $state = $this->mrm_normalize_state_code($row['state_code'] ?? ''); if ($state === '' || !empty($row['collection_active']) || $this->mrm_tax_row_has_written_clearance($row)) continue; if (!$this->mrm_tax_row_rule_review_is_current($row)) $issues[] = array('code'=>'state_rule_review_required','state'=>$state,'message'=>$state . ' is approaching or has reached a monitored threshold, but its state rule does not have a current documented professional review.'); }
+    $reconciliation_rows = $this->mrm_tax_ledger_reconciliation_rows(50); if (!empty($reconciliation_rows)) $issues[] = array('code'=>'tax_ledger_reconciliation_required','state'=>'AZ','message'=>count($reconciliation_rows) . ' tax-ledger transaction(s) require reconciliation.'); return $issues;
   }
 
   private function mrm_tax_customer_readiness_response($readiness) {
@@ -17088,14 +17064,14 @@ MRM_TAX_RULES;
       $general_status = $rule['tax_system'] === 'no_general_sales_tax' ? 'no_general_state_sales_tax' : ($rule['tax_system'] === 'local_only' ? 'local_sales_tax_only' : 'statewide');
       $source_url = $state === 'IL' ? 'https://tax.illinois.gov/research/publications/bulletins/fy-2026-12.html' : 'https://www.salestaxinstitute.com/resources/economic-nexus-state-guide';
       $basis_description = !$applicable ? 'Not applicable' : ucfirst($rule['sales_basis']) . ' sales; ' . ($rule['channels'] === 'all' ? 'marketplace included' : 'marketplace excluded for individual sellers');
-      $rules_json = array('catalog_managed'=>true,'catalog_as_of'=>'2026-07-14','source_chart_as_of'=>'2026-05-04','economic_nexus_applicable'=>$applicable,'tax_system'=>$rule['tax_system'],'sales_basis'=>$rule['sales_basis'],'included_channels'=>$channels,'included_categories'=>array('all'),'subtract_refunds'=>false,'amount_comparison'=>$rule['amount_comparison'],'count_comparison'=>$rule['count_comparison'],'conservative_scope'=>'The engine may overcount product or service categories when a state threshold is limited to particular sale types. It must not be used to override physical nexus or a documented registration obligation.','source_note'=>$rule['note'],'secondary_source_url'=>'https://www.streamlinedsalestax.org/state-tables');
-      $updated = $wpdb->update($table, array('general_sales_tax_status'=>$general_status,'rule_management_mode'=>'catalog','threshold_rule_verified'=>1,'threshold_amount_cents'=>$rule['threshold_amount_cents'],'threshold_transaction_count'=>$rule['threshold_transaction_count'],'threshold_operator'=>$rule['threshold_operator'],'measurement_window'=>$rule['measurement_window'],'included_sales_basis'=>$basis_description,'rules_json'=>wp_json_encode($rules_json),'rule_source_url'=>$source_url,'rule_effective_date'=>$rule['effective_date'],'rules_version'=>self::TAX_RULES_VERSION,'updated_at'=>$now), array('state_code'=>$state));
+      $rules_json = array('catalog_managed'=>true,'catalog_as_of'=>'2026-07-14','verification_status'=>'catalog_monitoring_only','source_chart_as_of'=>'2026-05-04','economic_nexus_applicable'=>$applicable,'tax_system'=>$rule['tax_system'],'sales_basis'=>$rule['sales_basis'],'included_channels'=>$channels,'included_categories'=>array('all'),'subtract_refunds'=>false,'amount_comparison'=>$rule['amount_comparison'],'count_comparison'=>$rule['count_comparison'],'conservative_scope'=>'The engine may overcount product or service categories when a state threshold is limited to particular sale types. It must not be used to override physical nexus or a documented registration obligation.','source_note'=>$rule['note'],'secondary_source_url'=>'https://www.streamlinedsalestax.org/state-tables');
+      $updated = $wpdb->update($table, array('general_sales_tax_status'=>$general_status,'rule_management_mode'=>'catalog','threshold_amount_cents'=>$rule['threshold_amount_cents'],'threshold_transaction_count'=>$rule['threshold_transaction_count'],'threshold_operator'=>$rule['threshold_operator'],'measurement_window'=>$rule['measurement_window'],'included_sales_basis'=>$basis_description,'rules_json'=>wp_json_encode($rules_json),'rule_source_url'=>$source_url,'rule_effective_date'=>$rule['effective_date'],'rules_version'=>self::TAX_RULES_VERSION,'updated_at'=>$now), array('state_code'=>$state));
       if ($updated === false) return new WP_Error('tax_rule_catalog_sync_failed', $state . ': ' . ($wpdb->last_error ?: 'The catalog rule could not be saved.'));
     }
     return true;
   }
 
-  private function mrm_tax_seed_initial_verified_rules() {
+  private function mrm_tax_seed_initial_rules() {
     return $this->mrm_tax_sync_rule_catalog();
   }
 
@@ -17116,6 +17092,31 @@ MRM_TAX_RULES;
   public function cron_tax_sync_registrations() { $this->mrm_tax_sync_stripe_registrations(); }
   public function cron_tax_recompute_thresholds() { $result = $this->mrm_tax_recompute_all_thresholds(); if (is_wp_error($result)) error_log('MRM tax threshold recomputation failed: ' . $result->get_error_message()); }
 
+  public function register_external_physical_nexus_source($args) {
+    global $wpdb;
+    $args = wp_parse_args($args, array('state'=>'','country'=>'US','source_type'=>'manual_activity','source_id'=>'','source_label'=>'Business activity','details'=>''));
+    $country = strtoupper(sanitize_text_field($args['country']));
+    if ($country !== 'US') return array('allowed'=>true,'reason'=>'non_us');
+    $state = $this->mrm_normalize_state_code($args['state']);
+    if ($state === '') return new WP_Error('invalid_physical_nexus_state','The physical-nexus state is missing or invalid.');
+    $table = $this->table_tax_state_status();
+    $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE state_code = %s LIMIT 1", $state), ARRAY_A);
+    if (!is_array($row)) return new WP_Error('physical_nexus_state_missing','The state is missing from the tax registry.');
+    $source_type = sanitize_key($args['source_type']);
+    $source_id = sanitize_text_field((string)$args['source_id']);
+    $source_label = sanitize_text_field($args['source_label']);
+    $details = sanitize_text_field($args['details']);
+    $reason = trim($source_label . ($source_id !== '' ? ' #' . $source_id : '') . ' reported activity or presence in ' . $state . ($details !== '' ? ': ' . $details : '') . '.');
+    $reasons = preg_split('/\r\n|\r|\n/', (string)($row['physical_nexus_reason'] ?? ''));
+    $reasons = array_values(array_filter(array_map('trim', (array)$reasons)));
+    if (!in_array($reason, $reasons, true)) $reasons[] = $reason;
+    $now = current_time('mysql');
+    $updated = $wpdb->update($table, array('physical_nexus_flag'=>1,'physical_nexus_reason'=>implode("\n", $reasons),'first_flagged_at'=>!empty($row['first_flagged_at']) ? $row['first_flagged_at'] : $now,'updated_at'=>$now), array('state_code'=>$state));
+    if ($updated === false) return new WP_Error('physical_nexus_save_failed', $wpdb->last_error ?: 'The physical-nexus record could not be saved.');
+    $this->mrm_tax_create_alert($state, 'physical_nexus_source_added', $source_type, absint($source_id), array('message'=>$reason), sanitize_key(substr(md5($source_type . '|' . $source_id . '|' . $state), 0, 24)));
+    return $this->mrm_tax_get_state_gate($state);
+  }
+
   private function mrm_tax_get_state_gate($state) {
     global $wpdb; $state=$this->mrm_normalize_state_code($state); if($state==='') return array('allowed'=>false,'message'=>'The instructor state is missing or invalid.'); $row=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_state_status()} WHERE state_code = %s",$state),ARRAY_A); if(!$row) return array('allowed'=>false,'message'=>'The instructor state is not present in the tax registry.');
     $authority_status = sanitize_key($row['authority_registration_status'] ?? '');
@@ -17132,55 +17133,9 @@ MRM_TAX_RULES;
     return array('allowed'=>true,'state'=>$state,'row'=>$row);
   }
 
-  private function mrm_tax_flag_instructor_state($profile_request_id, $payload) {
-    global $wpdb; $state=$this->mrm_normalize_state_code($payload['state']??''); if($state==='') return array('allowed'=>false,'state'=>'','message'=>'The submitted instructor state is invalid.'); $table=$this->table_tax_state_status(); $now=current_time('mysql'); $existing=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE state_code = %s",$state),ARRAY_A); if(!$existing) return array('allowed'=>false,'state'=>$state,'message'=>'The submitted state is missing from the tax registry.'); $reasons=array(); if(!empty($existing['physical_nexus_reason'])) $reasons[]=$existing['physical_nexus_reason']; $reason='Instructor profile request #'.absint($profile_request_id).' submitted for '.$state.'.'; if(!in_array($reason,$reasons,true)) $reasons[]=$reason; $wpdb->update($table,array('physical_nexus_flag'=>1,'physical_nexus_reason'=>implode("\n",$reasons),'first_flagged_at'=>!empty($existing['first_flagged_at'])?$existing['first_flagged_at']:$now,'updated_at'=>$now),array('state_code'=>$state)); $this->mrm_tax_create_alert($state,'new_instructor_state','profile_request',absint($profile_request_id),array('message'=>"An instructor submitted a profile in {$state}. State tax-registration review is required before approval.")); return $this->mrm_tax_get_state_gate($state);
-  }
+  private function mrm_tax_flag_instructor_state($profile_request_id, $payload) { return $this->register_external_physical_nexus_source(array('state'=>$payload['state'] ?? '', 'country'=>'US', 'source_type'=>'instructor_profile', 'source_id'=>absint($profile_request_id), 'source_label'=>'Instructor profile request', 'details'=>sanitize_text_field($payload['name'] ?? ''))); }
 
-  private function mrm_tax_release_blocked_profile_requests_for_state($state) { global $wpdb; $state=$this->mrm_normalize_state_code($state); if($state==='') return; $table=$this->table_profile_card_requests(); $requests=$wpdb->get_results("SELECT id, submission_payload FROM {$table} WHERE request_type = 'instructor_profile' AND status = 'tax_registration_required'",ARRAY_A); foreach($requests as $request){ $payload=$this->mrm_profile_card_decode_json($request['submission_payload']??''); if($this->mrm_normalize_state_code($payload['state']??'')!==$state) continue; $wpdb->update($table,array('status'=>'pending_review','updated_at'=>current_time('mysql')),array('id'=>absint($request['id']))); } }
-
-  private function mrm_tax_create_alert($state,$alert_type,$source_type='',$source_id=0,$details=array(),$period_key='') { global $wpdb; $state=$this->mrm_normalize_state_code($state); $alert_type=sanitize_key($alert_type); $source_type=sanitize_key($source_type); $source_id=absint($source_id); $period_key=sanitize_key($period_key); $alert_key=implode(':',array_filter(array($state,$alert_type,$source_type,$source_id,$period_key), static function($value){ return $value !== ''; })); $table=$this->table_tax_alerts(); $now=current_time('mysql'); $existing=$wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE alert_key = %s",$alert_key)); if($existing) return absint($existing); $wpdb->insert($table,array('alert_key'=>$alert_key,'state_code'=>$state,'alert_type'=>$alert_type,'alert_status'=>'open','source_type'=>$source_type,'source_id'=>$source_id,'details_json'=>wp_json_encode($details),'created_at'=>$now,'updated_at'=>$now)); $alert_id=absint($wpdb->insert_id); $to=sanitize_email(get_option('admin_email')); if($to && is_email($to)){ $subject='Low Brass Lessons sales-tax action required: '.$state; $body="A sales-tax compliance action has been created.
-
-State: {$state}
-Alert: {$alert_type}
-Details: ".sanitize_text_field($details['message']??'')."
-
-Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$subject,$body)) $wpdb->update($table,array('emailed_at'=>$now,'updated_at'=>$now),array('id'=>$alert_id)); } return $alert_id; }
-
-  private function mrm_tax_window_start($measurement_window) { $timezone=wp_timezone(); $now=new DateTimeImmutable('now',$timezone); switch($measurement_window){ case 'rolling_12_months': return $now->modify('-12 months')->format('Y-m-d H:i:s'); case 'previous_calendar_year': return new DateTimeImmutable(($now->format('Y')-1).'-01-01 00:00:00',$timezone); case 'previous_four_quarters': $month=(int)$now->format('n'); $quarter_start_month=((int)floor(($month-1)/3)*3)+1; $current_quarter_start=$now->setDate((int)$now->format('Y'),$quarter_start_month,1)->setTime(0,0,0); return $current_quarter_start->modify('-12 months')->format('Y-m-d H:i:s'); case 'current_or_previous_calendar_year': default: return new DateTimeImmutable(($now->format('Y')-1).'-01-01 00:00:00',$timezone); } }
-
-  private function mrm_tax_window_bounds($measurement_window) {
-    $timezone = wp_timezone();
-    $now = new DateTimeImmutable('now', $timezone);
-    $measurement_window = sanitize_key($measurement_window);
-    switch ($measurement_window) {
-      case 'not_applicable': return array();
-      case 'previous_calendar_year':
-        $year = (int)$now->format('Y') - 1;
-        return array(array(sprintf('%04d-01-01 00:00:00', $year), sprintf('%04d-12-31 23:59:59', $year)));
-      case 'current_or_previous_calendar_year':
-        $current_year = (int)$now->format('Y'); $previous_year = $current_year - 1;
-        return array(array(sprintf('%04d-01-01 00:00:00', $current_year), $now->format('Y-m-d H:i:s')), array(sprintf('%04d-01-01 00:00:00', $previous_year), sprintf('%04d-12-31 23:59:59', $previous_year)));
-      case 'previous_four_quarters':
-      case 'previous_four_completed_calendar_quarters':
-        $month = (int)$now->format('n'); $quarter_start_month = ((int)floor(($month - 1) / 3) * 3) + 1;
-        $current_quarter_start = $now->setDate((int)$now->format('Y'), $quarter_start_month, 1)->setTime(0,0,0);
-        return array(array($current_quarter_start->modify('-12 months')->format('Y-m-d H:i:s'), $current_quarter_start->modify('-1 second')->format('Y-m-d H:i:s')));
-      case 'connecticut_september_30_lookback':
-        $year = (int)$now->format('Y'); $current_september_end = new DateTimeImmutable($year . '-09-30 23:59:59', $timezone); if ($now < $current_september_end) $year--;
-        return array(array(($year - 1) . '-10-01 00:00:00', $year . '-09-30 23:59:59'));
-      case 'new_york_previous_four_sales_tax_quarters':
-        $year = (int)$now->format('Y'); $month = (int)$now->format('n');
-        if ($month >= 3 && $month <= 5) $quarter_start = new DateTimeImmutable($year . '-03-01 00:00:00', $timezone);
-        elseif ($month >= 6 && $month <= 8) $quarter_start = new DateTimeImmutable($year . '-06-01 00:00:00', $timezone);
-        elseif ($month >= 9 && $month <= 11) $quarter_start = new DateTimeImmutable($year . '-09-01 00:00:00', $timezone);
-        elseif ($month === 12) $quarter_start = new DateTimeImmutable($year . '-12-01 00:00:00', $timezone);
-        else $quarter_start = new DateTimeImmutable(($year - 1) . '-12-01 00:00:00', $timezone);
-        return array(array($quarter_start->modify('-12 months')->format('Y-m-d H:i:s'), $quarter_start->modify('-1 second')->format('Y-m-d H:i:s')));
-      case 'rolling_12_months':
-      default:
-        return array(array($now->modify('-12 months')->format('Y-m-d H:i:s'), $now->format('Y-m-d H:i:s')));
-    }
-  }
+  private function mrm_tax_release_blocked_profile_requests_for_state($state) { global $wpdb; $state=$this->mrm_normalize_state_code($state); if($state==='') return; $table=$this->table_profile_card_requests(); $requests=$wpdb->get_results("SELECT id, request_type, submission_payload FROM {$table} WHERE request_type IN ('instructor_profile','presenter_profile') AND status = 'tax_registration_required'",ARRAY_A); foreach((array)$requests as $request){ $payload=$this->mrm_profile_card_decode_json($request['submission_payload']??''); if($this->mrm_normalize_state_code($payload['state']??'')!==$state) continue; $wpdb->update($table,array('status'=>'pending_review','updated_at'=>current_time('mysql')),array('id'=>absint($request['id']))); } }
 
   private function mrm_tax_measure_state_window($state, $start, $end, $rules) {
     global $wpdb;
@@ -17220,11 +17175,8 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
         $updated = $wpdb->update($state_table, array('estimated_sales_cents'=>0,'estimated_transaction_count'=>0,'estimated_threshold_percent'=>0,'estimated_threshold_status'=>'not_applicable','last_recomputed_at'=>$now,'updated_at'=>$now), array('state_code'=>$state));
         if ($updated === false) $errors[] = $state . ': ' . $wpdb->last_error; continue;
       }
-      if (empty($row['threshold_rule_verified'])) {
-        $unverified = $wpdb->get_row($wpdb->prepare("SELECT COALESCE(SUM(gross_sales_cents), 0) AS sales_cents, COALESCE(SUM(transaction_count), 0) AS transaction_count FROM {$sales_table} WHERE customer_state = %s", $state), ARRAY_A);
-        $updated = $wpdb->update($state_table, array('estimated_sales_cents'=>(int)($unverified['sales_cents'] ?? 0),'estimated_transaction_count'=>(int)($unverified['transaction_count'] ?? 0),'estimated_threshold_percent'=>0,'estimated_threshold_status'=>'not_evaluated','last_recomputed_at'=>$now,'updated_at'=>$now), array('state_code'=>$state));
-        if ($updated === false) $errors[] = $state . ': ' . $wpdb->last_error; continue;
-      }
+      $threshold_operator = sanitize_key($row['threshold_operator'] ?? ''); $has_monitoring_rule = (array_key_exists('economic_nexus_applicable', $rules) || !empty($row['threshold_amount_cents']) || !empty($row['threshold_transaction_count']) || $threshold_operator === 'not_applicable');
+      if (!$has_monitoring_rule) { $unconfigured = $wpdb->get_row($wpdb->prepare("SELECT COALESCE(SUM(gross_sales_cents), 0) AS sales_cents, COALESCE(SUM(transaction_count), 0) AS transaction_count FROM {$sales_table} WHERE customer_state = %s", $state), ARRAY_A); $updated = $wpdb->update($state_table, array('estimated_sales_cents'=>(int)($unconfigured['sales_cents'] ?? 0),'estimated_transaction_count'=>(int)($unconfigured['transaction_count'] ?? 0),'estimated_threshold_percent'=>0,'estimated_threshold_status'=>'not_evaluated','last_recomputed_at'=>$now,'updated_at'=>$now), array('state_code'=>$state)); if ($updated === false) $errors[] = $state . ': ' . $wpdb->last_error; continue; }
       $windows = $this->mrm_tax_window_bounds(sanitize_key($row['measurement_window'] ?? 'rolling_12_months')); if (empty($windows)) { $errors[] = $state . ': no measurement window was produced.'; continue; }
       $amount_threshold = (int)($row['threshold_amount_cents'] ?? 0); $count_threshold = (int)($row['threshold_transaction_count'] ?? 0); $operator = sanitize_key($row['threshold_operator'] ?? 'amount');
       $amount_comparison = sanitize_key($rules['amount_comparison'] ?? 'at_least'); $count_comparison = sanitize_key($rules['count_comparison'] ?? 'at_least');
@@ -17256,6 +17208,8 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
   }
 
   public function handle_tax_recompute_thresholds() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_recompute_thresholds','mrm_tax_recompute_nonce'); $result = $this->mrm_tax_recompute_all_thresholds(); $url = admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG); $url = is_wp_error($result) ? add_query_arg('tax_error', rawurlencode($result->get_error_message()), $url) : add_query_arg('thresholds_recomputed', '1', $url); wp_safe_redirect($url); exit; }
+
+  public function handle_tax_reconcile_payment_intent() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_reconcile_payment_intent','mrm_tax_reconcile_nonce'); $payment_intent_id=sanitize_text_field(wp_unslash($_POST['payment_intent_id'] ?? '')); if(!preg_match('/^pi_[A-Za-z0-9_]+$/',$payment_intent_id)){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode('The PaymentIntent ID was invalid.'),admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG))); exit; } $result=$this->mrm_tax_resync_payment_intent_id($payment_intent_id); $url=admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG); $url=is_wp_error($result)?add_query_arg('tax_error',rawurlencode($result->get_error_message()),$url):add_query_arg('tax_reconciled',rawurlencode($payment_intent_id),$url); wp_safe_redirect($url); exit; }
 
 
 
@@ -17315,6 +17269,7 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
     if (!in_array($filing_status, $allowed_filing_statuses, true)) $filing_status = 'not_configured';
     $rule_management_mode = sanitize_key(wp_unslash($_POST['rule_management_mode'] ?? 'catalog'));
     if (!in_array($rule_management_mode, array('catalog','manual'), true)) $rule_management_mode = 'catalog';
+    $physical_nexus_flag = !empty($_POST['physical_nexus_flag']) ? 1 : 0; $physical_nexus_reason = sanitize_textarea_field(wp_unslash($_POST['physical_nexus_reason'] ?? '')); if ($state === 'AZ') { $physical_nexus_flag = 1; if ($physical_nexus_reason === '') $physical_nexus_reason = 'Low Brass Lessons home-state business presence.'; } $rule_verified = !empty($_POST['threshold_rule_verified']) ? 1 : 0; $rule_professionally_reviewed_at = sanitize_text_field(wp_unslash($_POST['rule_professionally_reviewed_at'] ?? '')); $rule_professional_reference = sanitize_textarea_field(wp_unslash($_POST['rule_professional_reference'] ?? '')); if ($rule_verified && ($rule_professionally_reviewed_at === '' || $rule_professional_reference === '')) { wp_safe_redirect(add_query_arg('tax_error', rawurlencode('A professionally verified rule requires both a professional review date and a review reference.'), admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG))); exit; }
     $updated = $wpdb->update($this->table_tax_state_status(), array(
       'authority_registration_status'=>sanitize_key(wp_unslash($_POST['authority_registration_status'] ?? 'not_started')),
       'authority_registration_number'=>sanitize_text_field(wp_unslash($_POST['authority_registration_number'] ?? '')),
@@ -17322,7 +17277,7 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
       'written_determination_reviewed_at'=>sanitize_text_field(wp_unslash($_POST['written_determination_reviewed_at'] ?? '')),
       'written_determination_reference'=>sanitize_textarea_field(wp_unslash($_POST['written_determination_reference'] ?? '')),
       'rule_management_mode'=>$rule_management_mode,
-      'threshold_rule_verified'=>!empty($_POST['threshold_rule_verified']) ? 1 : 0,
+      'threshold_rule_verified'=>$rule_verified,'rule_professionally_reviewed_at'=>$rule_professionally_reviewed_at ?: null,'rule_professional_reference'=>$rule_professional_reference,
       'threshold_amount_cents'=>$amount_dollars > 0 ? (int)round($amount_dollars * 100) : null,
       'threshold_transaction_count'=>absint($_POST['threshold_transaction_count'] ?? 0) ?: null,
       'threshold_operator'=>sanitize_key(wp_unslash($_POST['threshold_operator'] ?? 'amount')),
@@ -17336,7 +17291,7 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
       'next_return_due_date'=>sanitize_text_field(wp_unslash($_POST['next_return_due_date'] ?? '')) ?: null,
       'last_return_filed_at'=>sanitize_text_field(wp_unslash($_POST['last_return_filed_at'] ?? '')) ?: null,
       'last_return_confirmation'=>sanitize_textarea_field(wp_unslash($_POST['last_return_confirmation'] ?? '')),
-      'admin_notes'=>sanitize_textarea_field(wp_unslash($_POST['admin_notes'] ?? '')),
+      'admin_notes'=>sanitize_textarea_field(wp_unslash($_POST['admin_notes'] ?? '')),'physical_nexus_flag'=>$physical_nexus_flag,'physical_nexus_reason'=>$physical_nexus_reason,'first_flagged_at'=>$physical_nexus_flag ? ($wpdb->get_var($wpdb->prepare("SELECT first_flagged_at FROM {$this->table_tax_state_status()} WHERE state_code = %s", $state)) ?: current_time('mysql')) : null,
       'updated_at'=>current_time('mysql'),
     ), array('state_code'=>$state));
     if ($updated === false) { wp_safe_redirect(add_query_arg('tax_error', rawurlencode($wpdb->last_error), admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG))); exit; }
@@ -17355,12 +17310,12 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
   }
 
   public function render_sales_tax_nexus_page() {
-    if(!current_user_can('manage_options')) wp_die('You do not have permission to access this page.'); global $wpdb; $this->maybe_install_or_upgrade_db(); $rows=$wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} ORDER BY state_name ASC",ARRAY_A); $live=$this->mrm_tax_is_live_stripe_key(); $compliance=$this->mrm_tax_get_compliance_settings(); $readiness=$this->mrm_tax_live_checkout_readiness(); $administrative_issues=$this->mrm_tax_administrative_compliance_issues(); ?>
+    if(!current_user_can('manage_options')) wp_die('You do not have permission to access this page.'); global $wpdb; $this->maybe_install_or_upgrade_db(); $rows=$wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} ORDER BY state_name ASC",ARRAY_A); $live=$this->mrm_tax_is_live_stripe_key(); $compliance=$this->mrm_tax_get_compliance_settings(); $readiness=$this->mrm_tax_live_checkout_readiness(); $administrative_issues=$this->mrm_tax_administrative_compliance_issues(); $reconciliation_rows=$this->mrm_tax_ledger_reconciliation_rows(50); ?>
     <div class="wrap"><h1>Sales Tax &amp; Nexus</h1>
       <?php if(isset($_GET['tax_error'])):?><div class="notice notice-error"><p><?php echo esc_html(wp_unslash($_GET['tax_error'])); ?></p></div><?php endif; ?>
       <?php if(isset($_GET['stripe_sync'])):?><div class="notice notice-success"><p>Stripe registrations synced.</p></div><?php endif; ?>
       <?php if(isset($_GET['thresholds_recomputed'])):?><div class="notice notice-success"><p>State thresholds recomputed.</p></div><?php endif; ?>
-      <?php if(isset($_GET['state_saved'])):?><div class="notice notice-success"><p>Saved <?php echo esc_html(wp_unslash($_GET['state_saved'])); ?>.</p></div><?php endif; ?>
+      <?php if(isset($_GET['state_saved'])):?><div class="notice notice-success"><p>Saved <?php echo esc_html(wp_unslash($_GET['state_saved'])); ?>.</p></div><?php endif; ?><?php if(isset($_GET['tax_reconciled'])):?><div class="notice notice-success"><p>Tax reconciliation completed for <code><?php echo esc_html(wp_unslash($_GET['tax_reconciled'])); ?></code>.</p></div><?php endif; ?>
       <p><strong>Stripe mode:</strong> <?php echo $live ? '<span style="color:#008a20;font-weight:700;">LIVE</span>' : '<span style="color:#b32d2e;font-weight:700;">TEST</span>'; ?></p>
       <?php if(!$live): ?><div class="notice notice-warning"><p>The site is using a Stripe test key. Test-mode registrations do not satisfy the production approval gate.</p></div><?php endif; ?><?php if($live): ?><?php if(is_wp_error($readiness)): ?><div class="notice notice-error"><p><strong>Live checkout readiness: BLOCKED</strong></p><p><?php echo esc_html($readiness->get_error_message()); ?></p></div><?php else: ?><div class="notice notice-success"><p><strong>Live checkout readiness: READY</strong></p></div><?php endif; ?><?php endif; ?><?php if(!empty($administrative_issues)): ?><div class="notice notice-warning"><p><strong>Tax administration requires attention</strong></p><ul style="list-style:disc;padding-left:22px;"><?php foreach($administrative_issues as $issue): ?><li><?php echo esc_html($issue['message'] ?? ''); ?></li><?php endforeach; ?></ul></div><?php endif; ?><?php if(isset($_GET['compliance_settings_saved'])): ?><div class="notice notice-success"><p>National monitoring and filing settings saved.</p></div><?php endif; ?><div style="background:#fff;border:1px solid #dcdcde;padding:18px;margin:18px 0;max-width:900px;"><h2>National Monitoring, Filing, and Remittance</h2><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_compliance_settings_save','mrm_tax_compliance_nonce'); ?><input type="hidden" name="action" value="mrm_tax_compliance_settings_save"><p><label><strong>National monitoring method</strong></label><br><select name="national_monitoring_mode" required><option value="">Select</option><option value="stripe_professional_review" <?php selected($compliance['national_monitoring_mode'],'stripe_professional_review'); ?>>Stripe thresholds plus documented professional review</option></select></p><p><label><strong>Professional review date</strong></label><br><input type="date" name="professional_reviewed_at" value="<?php echo esc_attr($compliance['professional_reviewed_at']); ?>" required></p><p><label><strong>Professional review reference</strong></label><br><textarea name="professional_reference" rows="3" class="large-text" required><?php echo esc_textarea($compliance['professional_reference']); ?></textarea></p><p><label><strong>Filing provider</strong></label><br><select name="filing_provider" required><?php foreach(array(''=>'Select','stripe_automated_filing'=>'Stripe automated filing','taxjar'=>'TaxJar','taxually'=>'Taxually','host'=>'Hands-off Sales Tax (HOST)','cpa_or_tax_firm'=>'CPA or sales-tax firm','manual_internal'=>'Internally managed filing') as $value=>$label): ?><option value="<?php echo esc_attr($value); ?>" <?php selected($compliance['filing_provider'],$value); ?>><?php echo esc_html($label); ?></option><?php endforeach; ?></select></p><p><label><input type="checkbox" name="filing_provider_active" value="1" <?php checked($compliance['filing_provider_status'],'active'); ?>> Filing and remittance workflow is active</label></p><p><label><strong>Effective date</strong></label><br><input type="date" name="filing_provider_effective_date" value="<?php echo esc_attr($compliance['filing_provider_effective_date']); ?>" required></p><p><label><strong>Provider account or engagement reference</strong></label><br><textarea name="filing_provider_reference" rows="3" class="large-text" required><?php echo esc_textarea($compliance['filing_provider_reference']); ?></textarea></p><?php submit_button('Save National Compliance Settings'); ?></form></div>
       <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_sync_stripe_registrations','mrm_tax_sync_nonce'); ?><input type="hidden" name="action" value="mrm_tax_sync_stripe_registrations"><button class="button button-primary">Sync Stripe Registrations Now</button></form>
@@ -17368,12 +17323,12 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
       <a class="button" href="https://dashboard.stripe.com/tax/locations" target="_blank" rel="noopener">Stripe Tax &gt; Locations</a> <a class="button" href="https://dashboard.stripe.com/tax/registrations" target="_blank" rel="noopener">Stripe Tax &gt; Registrations</a>
       <table class="widefat striped" style="margin-top:18px;font-size:12px;"><thead><tr><th>State</th><th>Nexus</th><th>Reason</th><th>Authority</th><th>Stripe</th><th>Active</th><th>Rule</th><th>Period</th><th>Basis</th><th>Sales</th><th>Tx</th><th>Threshold</th><th>Progress</th><th>Estimate</th><th>Stripe Threshold</th><th>Actions</th></tr></thead><tbody>
       <?php foreach($rows as $r): $color='#646970'; if($r['general_sales_tax_status']==='no_general_state_sales_tax') $color='#2271b1'; if($r['general_sales_tax_status']==='local_sales_tax_only') $color='#8c54a1'; if(empty($r['threshold_rule_verified'])) $color='#646970'; if(!empty($r['collection_active'])) $color='#008a20'; if(!empty($r['physical_nexus_flag']) && empty($r['collection_active'])) $color='#b32d2e'; if(($r['estimated_threshold_status']??'')==='threshold_reached' && empty($r['collection_active'])) $color='#b32d2e'; if((float)$r['estimated_threshold_percent']>=90 && (float)$r['estimated_threshold_percent']<100) $color='#d63638'; if((float)$r['estimated_threshold_percent']>=75 && (float)$r['estimated_threshold_percent']<90) $color='#996800'; ?>
-        <tr style="border-left:5px solid <?php echo esc_attr($color); ?>"><td><strong><?php echo esc_html($r['state_code']); ?></strong><br><?php echo esc_html($r['state_name']); ?></td><td><?php echo !empty($r['physical_nexus_flag'])?'Yes':'No'; ?></td><td><?php echo nl2br(esc_html($r['physical_nexus_reason'])); ?></td><td><?php echo esc_html($r['authority_registration_status']); ?><br><?php echo esc_html($r['authority_registration_number']); ?></td><td><?php echo esc_html($r['stripe_registration_status']); ?><br><code><?php echo esc_html($r['stripe_registration_id']); ?></code><br><?php echo !empty($r['stripe_livemode'])?'live':'test/none'; ?></td><td><?php echo !empty($r['collection_active'])?'Yes':'No'; ?></td><td><?php echo !empty($r['threshold_rule_verified'])?'Verified':'Rule verification required'; ?></td><td><?php echo esc_html($r['measurement_window']); ?></td><td><?php echo esc_html($r['included_sales_basis']); ?></td><td>$<?php echo esc_html(number_format(((int)$r['estimated_sales_cents'])/100,2)); ?></td><td><?php echo esc_html($r['estimated_transaction_count']); ?></td><td><?php echo !empty($r['threshold_amount_cents'])?'$'.esc_html(number_format(((int)$r['threshold_amount_cents'])/100,2)):'—'; ?><br><?php echo !empty($r['threshold_transaction_count'])?esc_html($r['threshold_transaction_count']).' tx':''; ?></td><td><?php echo esc_html($r['estimated_threshold_percent']); ?>%</td><td><?php echo esc_html(empty($r['threshold_rule_verified'])?'Rule verification required':$r['estimated_threshold_status']); ?></td><td><?php echo esc_html($r['stripe_threshold_status']); ?></td><td>
+        <tr style="border-left:5px solid <?php echo esc_attr($color); ?>"><td><strong><?php echo esc_html($r['state_code']); ?></strong><br><?php echo esc_html($r['state_name']); ?></td><td><?php echo !empty($r['physical_nexus_flag'])?'Yes':'No'; ?></td><td><?php echo nl2br(esc_html($r['physical_nexus_reason'])); ?></td><td><?php echo esc_html($r['authority_registration_status']); ?><br><?php echo esc_html($r['authority_registration_number']); ?></td><td><?php echo esc_html($r['stripe_registration_status']); ?><br><code><?php echo esc_html($r['stripe_registration_id']); ?></code><br><?php echo !empty($r['stripe_livemode'])?'live':'test/none'; ?><br><small>Last successful sync: <?php echo esc_html($r['last_stripe_sync_at'] ?: 'Never'); ?></small></td><td><?php echo !empty($r['collection_active'])?'Yes':'No'; ?></td><td><?php echo esc_html($this->mrm_tax_rule_status_label($r)); ?></td><td><?php echo esc_html($r['measurement_window']); ?></td><td><?php echo esc_html($r['included_sales_basis']); ?></td><td>$<?php echo esc_html(number_format(((int)$r['estimated_sales_cents'])/100,2)); ?></td><td><?php echo esc_html($r['estimated_transaction_count']); ?></td><td><?php echo !empty($r['threshold_amount_cents'])?'$'.esc_html(number_format(((int)$r['threshold_amount_cents'])/100,2)):'—'; ?><br><?php echo !empty($r['threshold_transaction_count'])?esc_html($r['threshold_transaction_count']).' tx':''; ?></td><td><?php echo esc_html($r['estimated_threshold_percent']); ?>%</td><td><?php echo esc_html($r['estimated_threshold_status']); ?></td><td><?php echo esc_html($r['stripe_threshold_status']); ?></td><td>
           <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:260px;"><?php wp_nonce_field('mrm_tax_state_save_'.$r['state_code'],'mrm_tax_state_nonce'); ?><input type="hidden" name="action" value="mrm_tax_state_save"><input type="hidden" name="state_code" value="<?php echo esc_attr($r['state_code']); ?>">
             <select name="authority_registration_status"><?php foreach(array('not_started','reviewing','application_pending','active','not_required_written_determination','closed') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['authority_registration_status'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br>
-            <input name="authority_registration_number" value="<?php echo esc_attr($r['authority_registration_number']); ?>" placeholder="Authority #"><input type="date" name="authority_registration_effective_date" value="<?php echo esc_attr($r['authority_registration_effective_date']); ?>"><br><input type="date" name="written_determination_reviewed_at" value="<?php echo esc_attr($r['written_determination_reviewed_at'] ?? ''); ?>" title="Written determination reviewed date"><textarea name="written_determination_reference" placeholder="Written no-registration determination reference"><?php echo esc_textarea($r['written_determination_reference'] ?? ''); ?></textarea><br>
+            <input name="authority_registration_number" value="<?php echo esc_attr($r['authority_registration_number']); ?>" placeholder="Authority #"><input type="date" name="authority_registration_effective_date" value="<?php echo esc_attr($r['authority_registration_effective_date']); ?>"><br><input type="date" name="written_determination_reviewed_at" value="<?php echo esc_attr($r['written_determination_reviewed_at'] ?? ''); ?>" title="Written determination reviewed date"><textarea name="written_determination_reference" placeholder="Written no-registration determination reference"><?php echo esc_textarea($r['written_determination_reference'] ?? ''); ?></textarea><br><hr><strong>Physical Nexus Review</strong><br><label><input type="checkbox" name="physical_nexus_flag" value="1" <?php checked(!empty($r['physical_nexus_flag'])); ?>> Physical presence or business activity has been identified</label><br><textarea name="physical_nexus_reason" rows="4" placeholder="List employees, contractors, presenters, offices, equipment, inventory, temporary events, travel, or other state activity."><?php echo esc_textarea($r['physical_nexus_reason'] ?? ''); ?></textarea><br>
             <label><strong>Threshold rule source</strong></label><br><select name="rule_management_mode"><option value="catalog" <?php selected($r['rule_management_mode'] ?? 'catalog','catalog'); ?>>National catalog</option><option value="manual" <?php selected($r['rule_management_mode'] ?? 'catalog','manual'); ?>>Manual reviewed override</option></select><br>
-            <label><input type="checkbox" name="threshold_rule_verified" value="1" <?php checked(!empty($r['threshold_rule_verified'])); ?>> Rule verified</label><br><input type="number" step="0.01" name="threshold_amount_dollars" value="<?php echo esc_attr(!empty($r['threshold_amount_cents'])?((int)$r['threshold_amount_cents']/100):''); ?>" placeholder="Threshold $"><input type="number" name="threshold_transaction_count" value="<?php echo esc_attr($r['threshold_transaction_count']); ?>" placeholder="Tx count"><br>
+            <label><input type="checkbox" name="threshold_rule_verified" value="1" <?php checked(!empty($r['threshold_rule_verified'])); ?>> Professionally verified</label><br><label><strong>Professional rule review date</strong></label><br><input type="date" name="rule_professionally_reviewed_at" value="<?php echo esc_attr($r['rule_professionally_reviewed_at'] ?? ''); ?>"><br><textarea name="rule_professional_reference" rows="3" placeholder="CPA, attorney, tax-firm memo, engagement reference, authority guidance, or documented determination."><?php echo esc_textarea($r['rule_professional_reference'] ?? ''); ?></textarea><br><input type="number" step="0.01" name="threshold_amount_dollars" value="<?php echo esc_attr(!empty($r['threshold_amount_cents'])?((int)$r['threshold_amount_cents']/100):''); ?>" placeholder="Threshold $"><input type="number" name="threshold_transaction_count" value="<?php echo esc_attr($r['threshold_transaction_count']); ?>" placeholder="Tx count"><br>
             <select name="threshold_operator"><?php foreach(array('amount','count','amount_or_count','amount_and_count','not_applicable') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['threshold_operator'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><input name="measurement_window" value="<?php echo esc_attr($r['measurement_window']); ?>" placeholder="measurement_window"><br><input name="included_sales_basis" value="<?php echo esc_attr($r['included_sales_basis']); ?>" placeholder="Included basis"><br><input type="url" name="rule_source_url" value="<?php echo esc_attr($r['rule_source_url']); ?>" placeholder="Source URL"><input type="date" name="rule_effective_date" value="<?php echo esc_attr($r['rule_effective_date']); ?>"><br>
             <select name="stripe_threshold_status"><?php foreach(array('not_confirmed','below_threshold_confirmed','threshold_reached_confirmed','registration_required_confirmed') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['stripe_threshold_status'],$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br><hr><strong>Filing and Remittance</strong><br><select name="filing_status"><?php foreach(array('not_configured','provider_managed','manual_managed','filing_attention_required') as $v): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['filing_status'] ?? 'not_configured',$v); ?>><?php echo esc_html($v); ?></option><?php endforeach; ?></select><br><select name="filing_frequency"><?php foreach(array(''=>'Frequency','monthly'=>'Monthly','quarterly'=>'Quarterly','annual'=>'Annual','other'=>'Other') as $v=>$label): ?><option value="<?php echo esc_attr($v); ?>" <?php selected($r['filing_frequency'] ?? '',$v); ?>><?php echo esc_html($label); ?></option><?php endforeach; ?></select><br><label>Next return due</label><br><input type="date" name="next_return_due_date" value="<?php echo esc_attr($r['next_return_due_date'] ?? ''); ?>"><br><label>Last return filed</label><br><input type="date" name="last_return_filed_at" value="<?php echo esc_attr($r['last_return_filed_at'] ?? ''); ?>"><br><textarea name="last_return_confirmation" placeholder="Return confirmation, payment confirmation, provider filing ID, or authority receipt"><?php echo esc_textarea($r['last_return_confirmation'] ?? ''); ?></textarea><br><textarea name="admin_notes" placeholder="Admin notes"><?php echo esc_textarea($r['admin_notes']); ?></textarea><br><button class="button button-small">Save</button></form>
         </td></tr><?php endforeach; ?></tbody></table></div><?php
@@ -17708,7 +17663,7 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
               </div>
               <?php if ($request['status'] === 'tax_registration_required') : ?>
                 <div class="notice notice-error inline">
-                  <p><strong>Sales-tax registration required.</strong> This instructor cannot be approved until their state registration is active with the state and confirmed active in Stripe Tax.</p>
+                  <p><strong>Sales-tax registration required.</strong> This instructor or presenter profile cannot be approved until the applicable state registration is active or a documented written determination has been entered.</p>
                 </div>
               <?php endif; ?>
               <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:16px;">
@@ -18999,18 +18954,10 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
 
     $update_data = array('status' => 'pending_review', 'submission_payload' => $this->mrm_profile_card_encode_json($payload), 'review_notes' => $this->mrm_profile_card_encode_json($existing_review_notes), 'submitted_at' => $now, 'updated_at' => $now);
 
-    if ($request_type === 'instructor_profile') {
-      $tax_gate = $this->mrm_tax_flag_instructor_state(absint($request['id']), $payload);
-
-      if (empty($tax_gate['allowed'])) {
-        $update_data['status'] = 'tax_registration_required';
-        $existing_review_notes['tax_registration_gate'] = array(
-          'state' => sanitize_text_field($tax_gate['state'] ?? ''),
-          'message' => sanitize_text_field($tax_gate['message'] ?? ''),
-          'flagged_at' => $now,
-        );
-        $update_data['review_notes'] = $this->mrm_profile_card_encode_json($existing_review_notes);
-      }
+    if (in_array($request_type, array('instructor_profile','presenter_profile'), true)) {
+      if ($request_type === 'instructor_profile') $tax_gate = $this->mrm_tax_flag_instructor_state(absint($request['id']), $payload);
+      else $tax_gate = $this->register_external_physical_nexus_source(array('state'=>$payload['state'] ?? '', 'country'=>'US', 'source_type'=>'presenter_profile', 'source_id'=>absint($request['id']), 'source_label'=>'Presenter profile request', 'details'=>sanitize_text_field($payload['name'] ?? '')));
+      if (is_wp_error($tax_gate) || empty($tax_gate['allowed'])) { $update_data['status'] = 'tax_registration_required'; $existing_review_notes['tax_registration_gate'] = array('state'=>sanitize_text_field(is_wp_error($tax_gate) ? ($payload['state'] ?? '') : ($tax_gate['state'] ?? '')), 'message'=>sanitize_text_field(is_wp_error($tax_gate) ? $tax_gate->get_error_message() : ($tax_gate['message'] ?? '')), 'flagged_at'=>$now); $update_data['review_notes'] = $this->mrm_profile_card_encode_json($existing_review_notes); }
     }
 
     $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
@@ -19164,7 +19111,7 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
     if ($do === 'approve') {
       $request_type_for_approval = sanitize_key((string)($request['request_type'] ?? ''));
 
-      if ($request_type_for_approval === 'instructor_profile') {
+      if (in_array($request_type_for_approval, array('instructor_profile','presenter_profile'), true)) {
         $sync_result = $this->mrm_tax_sync_stripe_registrations();
 
         if (is_wp_error($sync_result)) {
@@ -20627,17 +20574,6 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
       'mrm-pay-hub-instructor-profiles',
       array($this, 'render_instructor_profiles_page')
     );
-
-    // BEGIN TEMP PAYMENT HUB AUDIT
-    add_submenu_page(
-      self::MENU_SLUG,
-      'Payment Hub Audit',
-      'Audit',
-      'manage_options',
-      'mrm-pay-hub-audit',
-      array($this, 'render_temp_payment_hub_audit_page')
-    );
-    // END TEMP PAYMENT HUB AUDIT
 
   }
 
@@ -22579,916 +22515,6 @@ Open Payment Hub > Sales Tax & Nexus to review this state."; if(wp_mail($to,$sub
   }
 
 
-  // BEGIN TEMP PAYMENT HUB AUDIT
-  public function render_temp_payment_hub_audit_page() {
-    if (!current_user_can('manage_options')) {
-      wp_die(esc_html__('You do not have permission to access this page.', 'mrm-payments-hub'));
-    }
-
-    $summary_key = 'mrm_pay_hub_temp_audit_summary_' . get_current_user_id();
-    $summary = get_transient($summary_key);
-    if (isset($_GET['mrm_audit_run'])) {
-      delete_transient($summary_key);
-    }
-
-    $log_file = 'wp-content/mrm-payment-hub-audit.log';
-    ?>
-    <div class="wrap">
-      <h1>Payment Hub Audit</h1>
-      <p>This is a temporary, admin-only pre-launch audit tool. It performs read-only checks across the Low Brass Lessons plugin/frontend files and writes one audit log file.</p>
-      <p><strong>Safety:</strong> this tool does not trigger real payments, refunds, payouts, emails, registrations, cancellations, Google Calendar writes, or other live external side effects.</p>
-
-      <?php if (is_array($summary)) : ?>
-        <div class="notice notice-<?php echo !empty($summary['notice_class']) ? esc_attr($summary['notice_class']) : 'success'; ?> is-dismissible">
-          <p><strong>Audit completed.</strong></p>
-          <p>
-            Overall status: <strong><?php echo esc_html((string)($summary['status'] ?? 'UNKNOWN')); ?></strong><br>
-            Good findings: <?php echo esc_html((string)($summary['good'] ?? 0)); ?> |
-            Warnings: <?php echo esc_html((string)($summary['warning'] ?? 0)); ?> |
-            Errors: <?php echo esc_html((string)($summary['error'] ?? 0)); ?> |
-            Skipped: <?php echo esc_html((string)($summary['skipped'] ?? 0)); ?><br>
-            Log written to <code><?php echo esc_html($log_file); ?></code>
-          </p>
-          <?php if (!empty($summary['message'])) : ?>
-            <p><?php echo esc_html((string)$summary['message']); ?></p>
-          <?php endif; ?>
-        </div>
-      <?php elseif (isset($_GET['mrm_audit_run'])) : ?>
-        <div class="notice notice-error is-dismissible"><p><strong>Audit failed.</strong> No audit summary was available. Check file permissions for <code><?php echo esc_html($log_file); ?></code>.</p></div>
-      <?php endif; ?>
-
-      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-        <input type="hidden" name="action" value="mrm_pay_hub_run_temp_audit" />
-        <?php wp_nonce_field('mrm_pay_hub_run_temp_audit', 'mrm_pay_hub_temp_audit_nonce'); ?>
-        <p><button type="submit" class="button button-primary">Run Audit Now</button></p>
-      </form>
-    </div>
-    <?php
-  }
-
-  public function handle_temp_payment_hub_audit_run() {
-    if (!current_user_can('manage_options')) {
-      wp_die(esc_html__('You do not have permission to run this audit.', 'mrm-payments-hub'));
-    }
-    check_admin_referer('mrm_pay_hub_run_temp_audit', 'mrm_pay_hub_temp_audit_nonce');
-    $summary = array('status' => 'FAIL', 'good' => 0, 'warning' => 0, 'error' => 1, 'skipped' => 0, 'notice_class' => 'error', 'message' => 'The audit did not complete.');
-    try {
-      $result = $this->mrm_pay_hub_temp_audit_run_all_checks();
-      if (is_array($result)) $summary = $result;
-    } catch (Throwable $e) {
-      $summary['message'] = 'Audit stopped because PHP reported: ' . $this->mrm_pay_hub_temp_audit_redact($e->getMessage());
-      $this->mrm_pay_hub_temp_audit_write_emergency_log($summary['message']);
-    }
-    set_transient('mrm_pay_hub_temp_audit_summary_' . get_current_user_id(), $summary, 5 * MINUTE_IN_SECONDS);
-    wp_safe_redirect(add_query_arg(array('page' => 'mrm-pay-hub-audit', 'mrm_audit_run' => '1'), admin_url('admin.php')));
-    exit;
-  }
-
-  private function mrm_pay_hub_temp_audit_run_all_checks() {
-    $state = array(
-      'started_at' => current_time('mysql'), 'site_url' => site_url(), 'active_theme' => $this->mrm_pay_hub_temp_audit_active_theme_name(),
-      'roots' => array(), 'files' => array(), 'file_contents' => array(), 'functions' => array(), 'methods' => array(), 'hooks' => array(),
-      'rest_routes' => array(), 'scheduled_hooks' => array(), 'table_names' => array(), 'html' => array(),
-      'counts' => array('GOOD' => 0, 'WARNING' => 0, 'ERROR' => 0, 'SKIPPED' => 0),
-      'findings' => array('Backend/plugin health' => array(), 'Admin UI workflows' => array(), 'REST endpoints' => array(), 'Admin-post/admin-ajax hooks' => array(), 'Cron/timing' => array(), 'Database tables' => array(), 'Frontend HTML/JS' => array(), 'Design/layout consistency' => array(), 'Payment/customer flows' => array(), 'Email/calendar/access gates' => array(), 'Public debug/diagnostic cleanup' => array()),
-    );
-    $state['roots'] = $this->mrm_pay_hub_temp_audit_find_scan_roots();
-    $this->mrm_pay_hub_temp_audit_collect_files($state);
-    $this->mrm_pay_hub_temp_audit_build_index($state);
-    $this->mrm_pay_hub_temp_audit_collect_wp_page_html($state);
-    $this->mrm_pay_hub_temp_audit_check_plugin_health($state);
-    $this->mrm_pay_hub_temp_audit_check_admin_ui_workflows($state);
-    $this->mrm_pay_hub_temp_audit_check_rest_routes($state);
-    $this->mrm_pay_hub_temp_audit_check_admin_ajax_post($state);
-    $this->mrm_pay_hub_temp_audit_check_cron($state);
-    $this->mrm_pay_hub_temp_audit_check_database($state);
-    $this->mrm_pay_hub_temp_audit_check_frontend_html_js($state);
-    $this->mrm_pay_hub_temp_audit_check_design_consistency($state);
-    $this->mrm_pay_hub_temp_audit_check_payment_flows($state);
-    $this->mrm_pay_hub_temp_audit_check_email_calendar_access($state);
-    $this->mrm_pay_hub_temp_audit_check_public_debug($state);
-    $status = $this->mrm_pay_hub_temp_audit_launch_status($state['counts']);
-    $written = $this->mrm_pay_hub_temp_audit_write_log($this->mrm_pay_hub_temp_audit_format_log($state, $status));
-    return array('status' => $status, 'good' => (int)$state['counts']['GOOD'], 'warning' => (int)$state['counts']['WARNING'], 'error' => (int)$state['counts']['ERROR'], 'skipped' => (int)$state['counts']['SKIPPED'], 'notice_class' => $state['counts']['ERROR'] > 0 ? 'error' : ($state['counts']['WARNING'] > 0 ? 'warning' : 'success'), 'message' => $written ? 'Review the structured log before launch.' : 'Audit ran, but the log could not be written.');
-  }
-
-  private function mrm_pay_hub_temp_audit_active_theme_name() {
-    if (function_exists('wp_get_theme')) {
-      $theme = wp_get_theme();
-      if ($theme && is_object($theme)) {
-        $name = trim((string)$theme->get('Name'));
-        if ($name !== '') return $name;
-      }
-    }
-    return 'Unknown';
-  }
-
-  private function mrm_pay_hub_temp_audit_find_scan_roots() {
-    $roots = array();
-    $candidates = array(dirname(__FILE__));
-    if (defined('WP_PLUGIN_DIR') && is_dir(WP_PLUGIN_DIR)) {
-      $known = array('mrm-payments-hub', 'mrm-lesson-scheduler', 'mrm-masterclass', 'mrm-product-access', 'mrm-sheet-music', 'mrm-onboarding', 'mrm-meeting-scheduler', 'mrm-contact-form');
-      foreach ($known as $dir_name) $candidates[] = trailingslashit(WP_PLUGIN_DIR) . $dir_name;
-      $children = @scandir(WP_PLUGIN_DIR);
-      if (is_array($children)) foreach ($children as $child) {
-        if ($child === '.' || $child === '..') continue;
-        $path = trailingslashit(WP_PLUGIN_DIR) . $child;
-        if (!is_dir($path)) continue;
-        $lower = strtolower($child);
-        if (strpos($lower, 'mrm-') === 0 || strpos($lower, 'low-brass') !== false || strpos($lower, 'lowbrass') !== false) $candidates[] = $path;
-      }
-    }
-    foreach ($candidates as $candidate) {
-      $real = realpath($candidate);
-      if (!$real || !is_dir($real) || !is_readable($real) || $this->mrm_pay_hub_temp_audit_path_is_forbidden($real)) continue;
-      $roots[$real] = $real;
-    }
-    return array_values($roots);
-  }
-
-  private function mrm_pay_hub_temp_audit_path_is_forbidden($path) {
-    $path = str_replace('\\', '/', (string)$path);
-    $lower = strtolower($path);
-    $forbidden = array('/wp-admin/', '/wp-includes/', '/uploads/', '/cache/', '/node_modules/', '/vendor/', '/.git/', '/logs/', '/tmp/', '/backup', '/backups/');
-    foreach ($forbidden as $segment) if (strpos($lower, $segment) !== false) return true;
-    return in_array(strtolower(basename($path)), array('wp-config.php', '.env', 'debug.log'), true);
-  }
-
-  private function mrm_pay_hub_temp_audit_collect_files(&$state) {
-    foreach ($state['roots'] as $root) $this->mrm_pay_hub_temp_audit_walk_dir($root, $state, 0);
-    if (empty($state['files'])) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'ERROR', 'File scan', 'Collect PHP, HTML, JS, CSS, and JSON files.', 'No readable code/frontend files were collected.', 'No launch checks can be completed without code files.', 'Confirm the plugin folders are readable by WordPress.');
-    } else {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', 'File scan', 'Collect PHP, HTML, JS, CSS, and JSON files.', 'Collected ' . count($state['files']) . ' readable file(s).', 'The scanner has enough local source files to evaluate wiring and frontend consistency.', 'No fix needed.');
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_walk_dir($dir, &$state, $depth) {
-    if ($depth > 8) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($dir), 'Recursive scan depth limit.', 'Skipped a deeply nested directory.', 'Depth limits prevent shared hosting timeouts.', 'Move relevant frontend/plugin files closer to the plugin root if they must be audited.');
-      return;
-    }
-    if (count($state['files']) >= 750) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', 'File scan', 'File count safety limit.', 'Stopped after collecting 750 files.', 'Large scans can time out on shared hosting.', 'Temporarily narrow the plugin folders or increase the safety limit only if needed.');
-      return;
-    }
-    $items = @scandir($dir);
-    if (!is_array($items)) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($dir), 'Read directory.', 'Directory could not be read.', 'Unreadable folders may hide launch issues.', 'Check permissions or ignore if the folder is unrelated.');
-      return;
-    }
-    foreach ($items as $item) {
-      if ($item === '.' || $item === '..') continue;
-      $path = $dir . DIRECTORY_SEPARATOR . $item;
-      if ($this->mrm_pay_hub_temp_audit_path_is_forbidden($path)) continue;
-      if (is_dir($path)) { $this->mrm_pay_hub_temp_audit_walk_dir($path, $state, $depth + 1); continue; }
-      if (!is_file($path) || !is_readable($path)) continue;
-      $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-      if (!in_array($ext, array('php', 'html', 'htm', 'js', 'css', 'json'), true)) continue;
-      $size = @filesize($path);
-      if ($size !== false && $size > 2500000) {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($path), 'Read file size.', 'Skipped because the file is larger than 2.5 MB.', 'Large files can cause audit timeouts on shared hosting.', 'Split very large frontend files or inspect them manually.');
-        continue;
-      }
-      $state['files'][] = $path;
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_build_index(&$state) {
-    foreach ($state['files'] as $file) {
-      $content = @file_get_contents($file, false, null, 0, 1600000);
-      if (!is_string($content)) {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'SKIPPED', $this->mrm_pay_hub_temp_audit_rel($file), 'Read source file.', 'File could not be read.', 'Unreadable files can hide missing callbacks or frontend issues.', 'Check file permissions.');
-        continue;
-      }
-      $content = $this->mrm_pay_hub_temp_audit_strip_temp_audit_block($content);
-      $rel = $this->mrm_pay_hub_temp_audit_rel($file);
-      $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
-      $state['file_contents'][$file] = $content;
-      if (preg_match_all('/function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/', $content, $matches)) foreach ($matches[1] as $name) { $state['functions'][$name] = $rel; $state['methods'][$name] = $rel; }
-      if (preg_match_all('/add_(action|filter)\s*\((.*?)\);/s', $content, $matches, PREG_SET_ORDER)) foreach ($matches as $m) {
-        $stmt = 'add_' . $m[1] . '(' . $m[2] . ');';
-        $hook = $this->mrm_pay_hub_temp_audit_first_string_arg($m[2]);
-        if ($hook !== '') $state['hooks'][] = array('type' => $m[1], 'hook' => $hook, 'callback' => $this->mrm_pay_hub_temp_audit_extract_callback($stmt), 'file' => $rel, 'statement' => $stmt);
-      }
-      if (preg_match_all('/(?:\$this->)?[A-Za-z0-9_]*add_action_if_method_exists\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]\s*(?:,\s*-?\d+)?\s*(?:,\s*\d+)?\s*\)/', $content, $matches, PREG_SET_ORDER)) {
-        foreach ($matches as $m) {
-          $hook = (string) $m[1];
-          $method = (string) $m[2];
-
-          if ($hook !== '' && $method !== '') {
-            $state['hooks'][] = array(
-              'type' => 'action',
-              'hook' => $hook,
-              'callback' => array('type' => 'method', 'name' => $method),
-              'file' => $rel,
-              'statement' => $m[0],
-            );
-          }
-        }
-      }
-      if (preg_match_all('/register_rest_route\s*\(\s*([\'"])(.*?)\1\s*,\s*([\'"])(.*?)\3\s*,(.*?)\);/s', $content, $matches, PREG_SET_ORDER)) foreach ($matches as $m) {
-        $block = $m[5];
-        $state['rest_routes'][] = array('namespace' => $m[2], 'route' => $m[4], 'callback' => $this->mrm_pay_hub_temp_audit_extract_callback($block), 'permission' => $this->mrm_pay_hub_temp_audit_extract_permission_callback($block), 'methods' => $this->mrm_pay_hub_temp_audit_extract_rest_methods($block), 'file' => $rel, 'block' => $block);
-      }
-      if (preg_match_all('/wp_(?:schedule_event|schedule_single_event)\s*\((.*?)\);/s', $content, $matches, PREG_SET_ORDER)) {
-        foreach ($matches as $m) {
-          $args = trim((string) $m[1]);
-          $hook = '';
-
-          /*
-           * Preferred case:
-           * wp_schedule_event($timestamp, 'daily', 'real_hook_name');
-           * The hook is the third argument, not the recurrence.
-           */
-          if (preg_match('/^[^,]+,\s*[^,]+,\s*[\'"]([^\'"]+)[\'"]/', $args, $hook_match)) {
-            $hook = (string) $hook_match[1];
-          }
-
-          /*
-           * If the third argument is a variable, do not guess from the recurrence.
-           * Example:
-           * wp_schedule_event($timestamp, 'daily', $hook);
-           * In that case, `daily` is not a hook and should not be reported as missing.
-           */
-          if ($hook === '') {
-            if (preg_match('/^[^,]+,\s*[\'"](hourly|twicedaily|daily|weekly|mrm_10min)[\'"]\s*,\s*\$/i', $args)) {
-              $this->mrm_pay_hub_temp_audit_add_finding(
-                $state,
-                'Cron/timing',
-                'SKIPPED',
-                $rel,
-                'Parse scheduled hook with variable hook name.',
-                'Skipped a wp_schedule_event() call that uses a variable hook name.',
-                'This avoids incorrectly treating the recurrence string, such as daily, as the hook name.',
-                'No code change needed if the variable hook is registered elsewhere.'
-              );
-              continue;
-            }
-
-            if (preg_match_all('/[\'"]([^\'"]+)[\'"]/', $args, $strings) && !empty($strings[1])) {
-              $candidate = end($strings[1]);
-              if (!in_array($candidate, array('hourly', 'twicedaily', 'daily', 'weekly', 'mrm_10min'), true)) {
-                $hook = (string) $candidate;
-              }
-            }
-          }
-
-          if ($hook !== '') {
-            /*
-             * Ignore parser/example artifacts from the temporary audit code itself.
-             * These are not real production cron hooks.
-             */
-            $hook_clean = trim((string) $hook);
-
-            if (
-              $hook_clean === '' ||
-              $hook_clean === 'real_hook_name' ||
-              $hook_clean === ',' ||
-              strpos($hook_clean, '$args') !== false ||
-              strpos($hook_clean, ' . ') !== false ||
-              !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $hook_clean)
-            ) {
-              $this->mrm_pay_hub_temp_audit_add_finding(
-                $state,
-                'Cron/timing',
-                'SKIPPED',
-                $rel,
-                'Skip malformed scheduled hook parser artifact.',
-                'Skipped malformed scheduled hook candidate: ' . $hook_clean,
-                'This prevents audit example/parser text from being counted as a real missing cron hook.',
-                'No production code change needed.'
-              );
-              continue;
-            }
-
-            $state['scheduled_hooks'][] = array(
-              'hook' => $hook_clean,
-              'file' => $rel,
-              'statement' => 'wp_schedule_event(' . $args . ');',
-            );
-          }
-        }
-      }
-      if (preg_match_all('/\$wpdb->prefix\s*\.\s*[\'"]([^\'"]+)[\'"]/', $content, $matches)) foreach ($matches[1] as $table_tail) $state['table_names'][$table_tail] = $rel;
-      if (in_array($ext, array('html', 'htm'), true)) {
-        $ids = array();
-        if (preg_match_all('/\bid\s*=\s*[\'"]([^\'"]+)[\'"]/i', $content, $id_matches)) foreach ($id_matches[1] as $id) $ids[$id] = true;
-        $state['html'][$file] = array('rel' => $rel, 'ids' => $ids, 'content' => $content);
-      }
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_check_plugin_health(&$state) {
-    $php_files = 0; $plugin_headers = 0;
-    foreach ($state['file_contents'] as $file => $content) {
-      if (strtolower(pathinfo($file, PATHINFO_EXTENSION)) !== 'php') continue;
-      $php_files++; $rel = $this->mrm_pay_hub_temp_audit_rel($file);
-      if (strpos($content, 'Plugin Name:') !== false) { $plugin_headers++; $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', $rel, 'Check WordPress plugin header.', 'Plugin header found.', 'WordPress can identify the plugin bootstrap file.', 'No fix needed.'); }
-      if (!preg_match('/defined\s*\(\s*[\'"]ABSPATH[\'"]\s*\)/', $content)) {
-        $this->mrm_pay_hub_temp_audit_add_finding(
-          $state,
-          'Backend/plugin health',
-          'WARNING',
-          $rel,
-          'Check direct-access guard.',
-          'No obvious ABSPATH guard was found.',
-          'Publicly loading PHP plugin files directly can expose unsafe behavior.',
-          'Add `if (!defined(\'ABSPATH\')) exit;` near the top if this file is directly web-accessible.'
-        );
-      }
-      if (abs(substr_count($content, '{') - substr_count($content, '}')) > 2) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'WARNING', $rel, 'Check rough brace balance.', 'The file has a suspicious brace count difference.', 'Large brace mismatches can indicate syntax or copy/paste risks.', 'Open the file in an editor with PHP linting and inspect unmatched blocks.');
-      else $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', $rel, 'Check rough brace balance.', 'Brace count does not look suspicious.', 'This reduces obvious fatal syntax-risk signals without using shell commands.', 'No fix needed.');
-    }
-    if ($php_files > 0) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Backend/plugin health', 'GOOD', 'PHP scan', 'Confirm PHP files exist.', 'Found ' . $php_files . ' PHP file(s), including ' . $plugin_headers . ' plugin header file(s).', 'The audit can evaluate plugin registrations and callbacks.', 'No fix needed.');
-    foreach ($state['hooks'] as $hook) {
-      $cb = $hook['callback'];
-
-      if (empty($cb['type']) || $cb['type'] === 'closure') {
-        continue;
-      }
-
-      $callback_name = isset($cb['name']) ? (string) $cb['name'] : '';
-
-      if ($callback_name !== '' && !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $callback_name)) {
-        $this->mrm_pay_hub_temp_audit_add_finding(
-          $state,
-          'Backend/plugin health',
-          'WARNING',
-          $hook['file'] . ' / ' . $hook['hook'],
-          'Validate parsed callback name.',
-          'The audit parser produced a malformed callback name: ' . $callback_name,
-          'Malformed callback names usually indicate an audit parser limitation, not necessarily a real WordPress callback.',
-          'Review the nearby hook registration manually. If the real callback exists, no production code change is needed.'
-        );
-        continue;
-      }
-
-      if ($cb['type'] === 'method' && empty($state['methods'][$callback_name])) {
-        $this->mrm_pay_hub_temp_audit_add_finding(
-          $state,
-          'Backend/plugin health',
-          'ERROR',
-          $hook['file'] . ' / ' . $hook['hook'],
-          'Confirm registered callback method exists.',
-          'Missing method callback: ' . $callback_name,
-          'A missing callback can cause fatal errors or dead admin/customer flows.',
-          'Create the method or remove/fix the hook registration.'
-        );
-      } elseif ($cb['type'] === 'function' && empty($state['functions'][$callback_name]) && !function_exists($callback_name)) {
-        $this->mrm_pay_hub_temp_audit_add_finding(
-          $state,
-          'Backend/plugin health',
-          'WARNING',
-          $hook['file'] . ' / ' . $hook['hook'],
-          'Confirm registered callback function exists.',
-          'Function callback was not found in scanned files: ' . $callback_name,
-          'If this function is not loaded by WordPress, the hook will fail.',
-          'Confirm the function is loaded, or change the hook to an existing callback.'
-        );
-      }
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_check_admin_ui_workflows(&$state) {
-    $payment_hub = '';
-    $scheduler = '';
-
-    foreach ($state['file_contents'] as $file => $content) {
-      $rel = $this->mrm_pay_hub_temp_audit_rel($file);
-
-      if (strpos($rel, 'mrm-payments-hub.php') !== false) {
-        $payment_hub = $content;
-      }
-
-      if (strpos($rel, 'mrm-lesson-scheduler.php') !== false) {
-        $scheduler = $content;
-      }
-    }
-
-    $email_testing_source = $this->mrm_pay_hub_temp_audit_source_for_callable($state, 'render_email_testing_page');
-
-    if ($email_testing_source === '') {
-      $email_testing_source = $payment_hub;
-    }
-
-    $email_testing_ok = (
-      strpos($email_testing_source, 'mrm-email-testing-preview-frame') !== false &&
-      strpos($email_testing_source, 'Select the email you want to preview') !== false &&
-      strpos($email_testing_source, 'mrm-email-test-checkbox') !== false &&
-      strpos($email_testing_source, 'addEventListener') !== false &&
-      strpos($email_testing_source, 'clearPreview') !== false &&
-      strpos($email_testing_source, 'showPreview') !== false
-    );
-
-    $old_email_testing_submit_ui_present = (
-      strpos($email_testing_source, 'Preview Selected Emails') !== false ||
-      strpos($email_testing_source, 'mrm_pay_hub_preview_email_tests') !== false ||
-      strpos($email_testing_source, 'mrm_email_tests[]') !== false
-    );
-
-    $this->mrm_pay_hub_temp_audit_add_finding(
-      $state,
-      'Admin UI workflows',
-      ($email_testing_ok && !$old_email_testing_submit_ui_present) ? 'GOOD' : 'WARNING',
-      'Payment Hub / Email Testing',
-      'Check live single-email preview workflow.',
-      ($email_testing_ok && !$old_email_testing_submit_ui_present)
-        ? 'Email Testing uses the live single-checkbox preview workflow and no old submit-to-preview UI was detected inside render_email_testing_page().'
-        : 'Email Testing does not appear to fully match the requested live single-checkbox preview workflow inside render_email_testing_page().',
-      'The preview workflow should update immediately without requiring a Preview Selected Emails submit button.',
-      ($email_testing_ok && !$old_email_testing_submit_ui_present)
-        ? 'No fix needed.'
-        : 'Update render_email_testing_page() so the preview iframe, single-checkbox behavior, and immediate JavaScript preview are all inside that method.'
-    );
-
-    $marketing_preview_ok = (
-      strpos($payment_hub, 'mrm-marketing-live-preview') !== false &&
-      strpos($payment_hub, 'mrm-marketing-preview-frame') !== false &&
-      strpos($payment_hub, 'mrm-marketing-subject-input') !== false &&
-      strpos($payment_hub, 'mrm-marketing-html-input') !== false
-    );
-
-    $this->mrm_pay_hub_temp_audit_add_finding(
-      $state,
-      'Admin UI workflows',
-      $marketing_preview_ok ? 'GOOD' : 'WARNING',
-      'Payment Hub / Marketing Email Lists',
-      'Check live marketing email preview workflow.',
-      $marketing_preview_ok ? 'Marketing Email Lists appears to include a live subject/body preview window.' : 'Marketing Email Lists does not appear to include the requested live preview window.',
-      'Marketing sends should be visually reviewed before sending to a list.',
-      $marketing_preview_ok ? 'No fix needed.' : 'Add the live preview window and script to render_marketing_email_lists_page().'
-    );
-
-    $unified_1099_ok = (
-      strpos($scheduler, 'mrm_get_calculations_presenter_summary') !== false &&
-      strpos($scheduler, 'mrm_get_paid_out_masterclass_1099_payees') !== false &&
-      strpos($scheduler, 'mrm_tax_payroll_imports') !== false &&
-      strpos($scheduler, 'presenters.') !== false
-    );
-
-    $this->mrm_pay_hub_temp_audit_add_finding(
-      $state,
-      'Admin UI workflows',
-      $unified_1099_ok ? 'GOOD' : 'WARNING',
-      'Scheduler / Calculations',
-      'Check unified calculations and 1099 export support.',
-      $unified_1099_ok ? 'Calculations appears to include Masterclass presenter payout summaries and unified 1099 export support.' : 'Calculations does not appear to include all requested presenter/payroll/1099 support.',
-      'The goal is to run Calculations once and export 1099 documents for instructors, composer, and presenters.',
-      $unified_1099_ok ? 'No fix needed.' : 'Add presenter summary and presenter 1099 merge support to Scheduler Calculations.'
-    );
-  }
-
-  private function mrm_pay_hub_temp_audit_check_rest_routes(&$state) {
-    if (empty($state['rest_routes'])) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'SKIPPED', 'REST scan', 'Identify registered REST routes.', 'No register_rest_route calls were found in scanned files.', 'This is fine only if no frontend depends on WordPress REST endpoints.', 'Confirm whether REST endpoints are expected for this install.');
-      return;
-    }
-
-    foreach ($state['rest_routes'] as $route) {
-      $full = '/' . trim($route['namespace'], '/') . '/' . trim($route['route'], '/');
-      $cb = $route['callback'];
-      $methods = strtoupper((string)$route['methods']);
-      $perm = (string)$route['permission'];
-      $callback_name = isset($cb['name']) ? (string)$cb['name'] : '';
-      $callback_source = $callback_name !== '' ? $this->mrm_pay_hub_temp_audit_source_for_callable($state, $callback_name) : '';
-
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Identify REST route.', 'Route registered with methods: ' . ($methods !== '' ? $methods : 'not detected'), 'Mapped routes help compare backend endpoints against frontend fetch calls.', 'No fix needed.');
-
-      if (empty($cb['type'])) {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'WARNING', $route['file'] . ' ' . $full, 'Check REST callback.', 'No obvious callback was detected in the route registration.', 'Routes without callbacks cannot respond correctly.', 'Confirm the route array includes a callback.');
-      } elseif ($cb['type'] === 'method' && empty($state['methods'][$callback_name])) {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'ERROR', $route['file'] . ' ' . $full, 'Check REST callback method.', 'Missing REST callback method: ' . $callback_name, 'Frontend API requests may fail with server errors.', 'Create the callback method or update the route registration.');
-      } else {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check REST callback.', 'Callback appears to be present.', 'Endpoint wiring appears structurally complete.', 'No fix needed.');
-      }
-
-      if ($perm === '') {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'WARNING', $route['file'] . ' ' . $full, 'Check permission_callback.', 'No obvious permission_callback was detected.', 'Modern WordPress REST routes should explicitly declare public/protected access.', 'Add a permission_callback that returns true only for safe public reads or validates permissions/tokens/nonces for sensitive routes.');
-        continue;
-      }
-
-      if (strpos($perm, '__return_true') === false) {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check REST permissions.', 'permission_callback is present and not simply __return_true.', 'Protected route wiring is less likely to be accidentally public.', 'No fix needed.');
-        continue;
-      }
-
-      $sensitive = preg_match('/payment|intent|verify|refund|cancel|register|payout|admin|stripe|calendar|email|token|access|grant|otp/i', $full . ' ' . $methods);
-
-      if (!$sensitive) {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'REST endpoints', 'GOOD', $route['file'] . ' ' . $full, 'Check public REST permissions.', 'permission_callback appears public: __return_true.', 'Public read endpoints are acceptable when they do not mutate data or expose secrets.', 'No fix needed if this is intentionally public read-only.');
-        continue;
-      }
-
-      $has_validation = $this->mrm_pay_hub_temp_audit_rest_callback_has_validation($full, $callback_source);
-
-      $this->mrm_pay_hub_temp_audit_add_finding(
-        $state,
-        'REST endpoints',
-        $has_validation ? 'GOOD' : 'WARNING',
-        $route['file'] . ' ' . $full,
-        'Check public sensitive REST callback validation.',
-        $has_validation ? 'Route is public, but the callback contains validation/security indicators.' : 'Route is public and the audit did not find enough callback-level validation indicators.',
-        $has_validation ? 'Customer-facing checkout/access routes often must be public, but the callback must validate payment status, tokens, emails, Stripe signatures, or required fields internally.' : 'Sensitive public routes need internal validation because permission_callback allows unauthenticated requests.',
-        $has_validation ? 'No fix needed. Keep this endpoint public only if the callback validation remains in place.' : 'Review the callback and add strict validation before performing any write, grant, or payment-related action.'
-      );
-    }
-  }
-
-
-  private function mrm_pay_hub_temp_audit_check_admin_ajax_post(&$state) {
-    $found = 0;
-    foreach ($state['hooks'] as $hook) {
-      $name = (string)$hook['hook'];
-      if (strpos($name, 'admin_post_') !== 0 && strpos($name, 'wp_ajax_') !== 0 && strpos($name, 'wp_ajax_nopriv_') !== 0) continue;
-      $found++; $cb = $hook['callback'];
-      $sensitive = preg_match('/refund|payout|payment|stripe|cancel|delete|save|send|email|calendar|register|access|grant|export/i', $name);
-      $content = $this->mrm_pay_hub_temp_audit_file_content_by_rel($state, $hook['file']);
-      $callback_name = isset($cb['name']) ? (string) $cb['name'] : '';
-
-      if ($callback_name !== '' && !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $callback_name)) {
-        $this->mrm_pay_hub_temp_audit_add_finding(
-          $state,
-          'Admin-post/admin-ajax hooks',
-          'WARNING',
-          $hook['file'] . ' / ' . $name,
-          'Validate parsed admin-post/admin-ajax callback name.',
-          'The audit parser produced a malformed callback name: ' . $callback_name,
-          'Malformed callback names usually indicate an audit parser limitation, not necessarily a real endpoint failure.',
-          'Review the nearby hook registration manually. If the real callback exists, no production code change is needed.'
-        );
-        continue;
-      }
-
-      if (!empty($cb['type']) && $cb['type'] === 'method' && empty($state['methods'][$callback_name])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Admin-post/admin-ajax hooks', 'ERROR', $hook['file'] . ' / ' . $name, 'Check callback method exists.', 'Missing callback method: ' . $callback_name, 'The endpoint can fail when submitted.', 'Create the method or correct the hook registration.');
-      else $this->mrm_pay_hub_temp_audit_add_finding($state, 'Admin-post/admin-ajax hooks', 'GOOD', $hook['file'] . ' / ' . $name, 'Check callback exists.', 'Callback appears present or uses a closure/function.', 'Endpoint wiring is structurally complete.', 'No fix needed.');
-      $has_security = preg_match('/check_admin_referer|wp_verify_nonce|current_user_can|sanitize_|absint|token|hash_equals|permission|capability/i', $content . ' ' . $hook['statement']);
-      if ($sensitive && !$has_security) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Admin-post/admin-ajax hooks', 'WARNING', $hook['file'] . ' / ' . $name, 'Check sensitive endpoint validation hints.', 'No obvious nonce/capability/token/sanitization indicators were found near this hook file.', 'Sensitive post/ajax actions must not be callable without validation.', 'Review the callback body and confirm nonce, capability, token, and sanitized field checks exist.');
-    }
-    if ($found === 0) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Admin-post/admin-ajax hooks', 'SKIPPED', 'Hook scan', 'Identify admin_post/admin_ajax hooks.', 'No admin_post/admin_ajax hooks were found.', 'This is fine only if the system does not use these endpoint types.', 'Confirm expected forms use REST or normal admin settings instead.');
-  }
-
-  private function mrm_pay_hub_temp_audit_check_cron(&$state) {
-    $cron_hooks = array();
-    foreach ($state['hooks'] as $hook) if (preg_match('/^mrm_.*(cron|cleanup|retry|daily|reminder|feedback|payout|reconcile|charge|subscription|payment|access|sync|check|discover|reset|due|delivered|cancelled)/i', $hook['hook'])) $cron_hooks[$hook['hook']] = $hook;
-    foreach ($state['scheduled_hooks'] as $scheduled) {
-      $name = $scheduled['hook'];
-      if (isset($cron_hooks[$name])) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Cron/timing', 'GOOD', $scheduled['file'] . ' / ' . $name, 'Match scheduled event to callback hook.', 'Scheduled hook has a registered callback.', 'Cron jobs need callbacks or reminders/retries/payouts never run.', 'No fix needed.');
-      else $this->mrm_pay_hub_temp_audit_add_finding($state, 'Cron/timing', 'ERROR', $scheduled['file'] . ' / ' . $name, 'Match scheduled event to callback hook.', 'Scheduled hook has no matching add_action callback in scanned files.', 'The event may fire but do nothing.', 'Add an add_action callback for this scheduled hook or remove the schedule.');
-    }
-    if (empty($state['scheduled_hooks']) && empty($cron_hooks)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Cron/timing', 'SKIPPED', 'Cron scan', 'Identify scheduled hooks and callbacks.', 'No obvious cron hooks or schedule calls were found.', 'This is fine only if reminders, feedback, payouts, and syncs are not cron-driven.', 'Confirm timing features are handled elsewhere.');
-  }
-
-  private function mrm_pay_hub_temp_audit_check_database(&$state) {
-    global $wpdb;
-
-    if (empty($state['table_names'])) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', 'Database scan', 'Identify custom table names.', 'No $wpdb->prefix table references were found.', 'This is fine only if the plugins do not use custom tables.', 'Confirm expected data is stored in options or external systems.');
-      return;
-    }
-
-    foreach ($state['table_names'] as $tail => $rel) {
-      $tail = (string)$tail;
-
-      if ($tail === 'mrm_masterclass_invalid_table') {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', $rel . ' / ' . $tail, 'Classify table reference.', 'This is a defensive sentinel table name returned only when the Masterclass table helper receives an empty table name.', 'This is not a real required database table and should not be created.', 'No database change needed. Investigate only if another audit finding shows a blank table helper call.');
-        continue;
-      }
-
-      if (!is_object($wpdb) || empty($wpdb->prefix)) {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', $rel . ' / ' . $tail, 'Runtime table existence check.', '$wpdb was unavailable.', 'The audit cannot confirm table existence without a database connection.', 'Rerun inside normal WordPress admin.');
-        continue;
-      }
-
-      if ($tail === 'mrm_pay_orders') {
-        $current_orders_table = $wpdb->prefix . 'mrm_orders';
-        $legacy_orders_table = $wpdb->prefix . 'mrm_pay_orders';
-
-        $current_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $current_orders_table));
-        $legacy_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $legacy_orders_table));
-
-        if ($current_exists === $current_orders_table) {
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'SKIPPED', $rel . ' / ' . $legacy_orders_table, 'Classify legacy order table fallback.', 'Legacy table wp_mrm_pay_orders is missing, but current table wp_mrm_orders exists.', 'The current legal/payment order record table is wp_mrm_orders. Creating the old fallback table is unnecessary and could create duplicate recordkeeping confusion.', 'No database change needed.');
-        } elseif ($legacy_exists === $legacy_orders_table) {
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'GOOD', $rel . ' / ' . $legacy_orders_table, 'Check legacy order table fallback.', 'Legacy fallback table exists.', 'Older installs may still depend on this fallback.', 'No fix needed.');
-        } else {
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'ERROR', $rel . ' / ' . $current_orders_table, 'Check current or legacy order table.', 'Neither wp_mrm_orders nor wp_mrm_pay_orders exists.', 'Payment confirmation and legal order records may fail if no order table exists.', 'Run the Payments Hub installer/upgrade routine after backing up the database.');
-        }
-
-        continue;
-      }
-
-      $table = $wpdb->prefix . $tail;
-      $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
-
-      if ($found === $table) {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'GOOD', $rel . ' / ' . $table, 'Check required table exists.', 'Table exists.', 'Existing tables reduce launch risk for orders, access, ledgers, reminders, and registrations.', 'No fix needed.');
-        continue;
-      }
-
-      if ($tail === 'mrm_tax_payroll_imports') {
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'WARNING', $rel . ' / ' . $table, 'Check optional payroll import table.', 'The payroll import table does not exist.', 'This does not appear to block customer payments, bookings, registrations, or access. From a legal/tax perspective, it matters only if you rely on the Calculations page for imported payroll/W-2 officer compensation support.', 'Do not create this table just to satisfy the audit. Create it later only if you intentionally add payroll import functionality.');
-        continue;
-      }
-
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Database tables', 'ERROR', $rel . ' / ' . $table, 'Check required table exists.', 'Table was not found.', 'Missing tables can break payments, registrations, access gates, payouts, or logs.', 'Run the relevant plugin install/upgrade routine after backing up the database.');
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_check_frontend_html_js(&$state) {
-    if (empty($state['html'])) { $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', 'HTML scan', 'Find pasted frontend HTML files.', 'No frontend HTML files were found.', 'The audit cannot verify customer-facing DOM/script consistency.', 'Confirm frontend HTML files are installed near the plugin folders.'); return; }
-    foreach ($state['html'] as $file => $info) {
-      $rel = $info['rel']; $content = $info['content']; $ids = $info['ids']; $refs = array();
-      if (preg_match_all('/getElementById\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)/', $content, $m)) foreach ($m[1] as $id) $refs[$id] = 'getElementById';
-      if (preg_match_all('/querySelector(?:All)?\s*\(\s*[\'"]#([A-Za-z0-9_\-:]+)[\'"]\s*\)/', $content, $m)) foreach ($m[1] as $id) $refs[$id] = 'querySelector';
-      $missing = array(); foreach ($refs as $id => $source) if (!isset($ids[$id])) $missing[] = $id;
-      if (empty($missing)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'GOOD', $rel, 'Compare JavaScript ID selectors to DOM IDs.', 'No missing ID selectors were detected among ' . count($refs) . ' referenced ID(s).', 'Missing DOM IDs can stop page boot, payment setup, forms, or loading state resolution.', 'No fix needed.');
-      else $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', $rel, 'Compare JavaScript ID selectors to DOM IDs.', 'Missing DOM IDs referenced by JavaScript: ' . implode(', ', array_slice($missing, 0, 20)), 'Missing DOM IDs can leave frontend pages stuck or non-clickable.', 'Add the missing elements or update the script selectors.');
-      $has_boot = preg_match('/DOMContentLoaded|addEventListener\s*\(\s*[\'"]load|\binit[A-Za-z0-9_]*\s*\(|\bboot[A-Za-z0-9_]*\s*\(|\bmount[A-Za-z0-9_]*\s*\(/i', $content); $has_fetch = preg_match('/\bfetch\s*\(/i', $content); $has_catch = preg_match('/\.catch\s*\(|try\s*\{|catch\s*\(/i', $content);
-      if ($has_fetch && !$has_catch) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', $rel, 'Check fetch error handling.', 'Fetch calls were found without an obvious catch/try error path.', 'Missing failure paths can leave customers stuck on loading screens.', 'Add catch/error UI handling for REST failures.');
-      elseif ($has_fetch) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'GOOD', $rel, 'Check fetch error handling.', 'Fetch calls appear to have an error-handling path.', 'Customers should see clean failures instead of infinite loading.', 'No fix needed.');
-      if (!$has_boot && strpos($content, '<script') !== false) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', $rel, 'Check frontend boot signal.', 'Script tags exist but no obvious DOMContentLoaded/load/init/boot/mount signal was found.', 'Without a reliable boot path, frontend code may not initialize after paste/optimization.', 'Confirm the controller runs after the DOM exists.');
-      if (strpos($content, '<script') !== false) {
-        $looks_like_custom_controller = preg_match('/fetch\s*\(|addEventListener|getElementById|querySelector|Stripe\s*\(|wp-json|rest_route|mrm-|payment|checkout|otp|access|download|calendar|scheduler|masterclass|sheet/i', $content);
-        $has_attrs = preg_match('/data-cfasync\s*=|data-no-optimize\s*=|data-no-defer\s*=|data-no-minify\s*=/i', $content);
-
-        if (!$looks_like_custom_controller) {
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', $rel, 'Check optimizer-resistant script attributes.', 'Script tags exist, but no custom controller indicators were detected.', 'Theme, builder, analytics, or embed scripts may not need custom optimizer-resistant attributes.', 'No fix needed unless this page contains a custom checkout, access, scheduler, masterclass, or product controller.');
-        } elseif ($has_attrs) {
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'GOOD', $rel, 'Check optimizer-resistant script attributes.', 'At least one optimizer-resistant script attribute was found.', 'These attributes help prevent caching/minification/defer tools from breaking pasted page controllers.', 'No fix needed.');
-        } else {
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', $rel, 'Check optimizer-resistant script attributes.', 'Custom controller indicators were found, but no data-cfasync/data-no-optimize/data-no-defer/data-no-minify attributes were detected.', 'Optimizers can defer or rewrite inline controllers and break boot timing.', 'Add these attributes to critical frontend controller script tags where needed.');
-        }
-      }
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_check_design_consistency(&$state) {
-    $button_classes = array();
-    $modal_classes = array();
-    $colors = array();
-
-    foreach ($state['html'] as $info) {
-      $rel = $info['rel'];
-      $content = $info['content'];
-
-      if (preg_match_all('/class\s*=\s*[\'"]([^\'"]*(?:button|btn|mrm-btn)[^\'"]*)[\'"]/i', $content, $m)) {
-        foreach ($m[1] as $class) {
-          $button_classes[$class][$rel] = true;
-        }
-      }
-
-      if (preg_match_all('/class\s*=\s*[\'"]([^\'"]*modal[^\'"]*)[\'"]/i', $content, $m)) {
-        foreach ($m[1] as $class) {
-          $modal_classes[$class][$rel] = true;
-        }
-      }
-
-      if (preg_match_all('/#[0-9A-Fa-f]{6}\b/', $content, $m)) {
-        foreach ($m[0] as $color) {
-          $colors[strtolower($color)] = true;
-        }
-      }
-    }
-
-    $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', 'GOOD', 'Frontend HTML', 'Compare button class naming across customer-facing HTML.', 'Detected ' . count($button_classes) . ' button-related class strings. This is now treated as an advisory count rather than a launch warning.', 'Different page builders and product templates can create multiple class strings without breaking launch readiness.', 'No immediate fix needed unless a specific page looks visually inconsistent.');
-
-    $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', 'GOOD', 'Frontend HTML', 'Compare modal class naming.', 'Detected ' . count($modal_classes) . ' modal-related class strings. This is now treated as an advisory count rather than a launch warning.', 'The audit should not fail launch readiness only because class names vary across different page templates.', 'No immediate fix needed unless a specific modal looks inconsistent.');
-
-    if (isset($colors['#95c2d8'])) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Design/layout consistency', 'GOOD', 'Frontend HTML', 'Check recurring brand accent color.', 'Detected #95c2d8 in frontend styling.', 'Shared brand color usage helps page consistency.', 'No fix needed.');
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_check_payment_flows(&$state) {
-    $found_payment_code = false;
-    foreach ($state['file_contents'] as $file => $content) { $rel = $this->mrm_pay_hub_temp_audit_rel($file); if (!preg_match('/stripe|payment_intent|PaymentIntent|card|promo|discount|tax|total/i', $content)) continue; $found_payment_code = true;
-      if (preg_match('/sk_(?:test|live)_[A-Za-z0-9_\-]+/', $content)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Payment/customer flows', 'ERROR', $rel, 'Check for exposed Stripe secret keys.', 'A Stripe secret-key-looking value was found in source.', 'Secret keys must never be exposed in plugin files or frontend HTML.', 'Move secrets to AWS Secrets Manager, wp-config, or server environment and rotate the key.');
-      if (preg_match('/pk_(?:test|live)_[A-Za-z0-9_\-]+/', $content)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Payment/customer flows', 'GOOD', $rel, 'Check Stripe publishable-key usage.', 'A publishable-key-looking value/reference was found.', 'Frontend Stripe.js should use publishable keys only.', 'No fix needed if no secret keys are exposed.');
-      if (preg_match('/create-payment-intent|PaymentIntent::create|payment_intents/i', $content)) { $valid = preg_match('/sanitize_|absint|floatval|intval|email|sku|amount|currency|metadata|promo|tax/i', $content); $this->mrm_pay_hub_temp_audit_add_finding($state, 'Payment/customer flows', $valid ? 'GOOD' : 'WARNING', $rel, 'Check payment-intent validation hints.', $valid ? 'Payment code contains field validation/calculation indicators.' : 'No obvious validation/calculation indicators were detected in payment code.', 'Payment endpoints must validate amount/product/customer fields server-side.', $valid ? 'No fix needed, but manually review final amount/tax/promo calculations.' : 'Review the callback and validate product, total, tax, discount, and customer fields server-side.'); }
-    }
-    if (!$found_payment_code) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Payment/customer flows', 'SKIPPED', 'Payment scan', 'Identify payment/customer flow code.', 'No obvious payment-related code was found.', 'This is unexpected for Payment Hub unless payment code is outside the scan roots.', 'Confirm Payment Hub was included in scan roots.');
-  }
-
-  private function mrm_pay_hub_temp_audit_check_email_calendar_access(&$state) {
-    $found = false;
-    foreach ($state['file_contents'] as $file => $content) { if (!preg_match('/wp_mail|send_mail|email|Google|Calendar|meet\.google|zoom\.us|access gate|token|reminder|feedback|confirmation/i', $content)) continue; $found = true; $rel = $this->mrm_pay_hub_temp_audit_rel($file);
-      if (preg_match('/wp_mail|send_mail|email/i', $content)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'GOOD', $rel, 'Identify email flow code.', 'Email-related code was found.', 'Confirmation, reminder, feedback, and test email flows can be manually reviewed from this location.', 'No fix needed.');
-      if (preg_match('/Calendar|googleapis|meet\.google/i', $content)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'GOOD', $rel, 'Identify calendar/meeting code.', 'Calendar or meeting-link code was found.', 'Calendar writes and protected meeting gates should be manually verified without triggering live writes.', 'No fix needed.');
-      if (preg_match('/meet\.google\.com|zoom\.us/i', $content) && preg_match('/frontend|\.html/i', $rel)) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'WARNING', $rel, 'Check raw meeting links in public frontend files.', 'A raw meeting URL pattern was found in a public-facing frontend file.', 'Raw meeting links can bypass protected access gates.', 'Replace public raw meeting links with protected gate links unless this is only placeholder text.');
-      if (preg_match('/token/i', $content)) {
-        $valid = preg_match('/hash_equals|expires|current_time|sanitize|wp_verify_nonce|nonce|email_hash|otp|payment_intent|stripe/i', $content);
-        $looks_like_protected_gate = preg_match('/gate|access|download|meet|zoom|protected|verify|otp/i', $content);
-
-        if ($valid || !$looks_like_protected_gate) {
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'GOOD', $rel, 'Check access-token validation hints.', $valid ? 'Token-related code includes validation/expiration indicators.' : 'Token wording was detected, but this file does not appear to be a protected access gate.', 'Protected gates need token checks, expiration, and safe comparisons.', 'No fix needed, but manually verify access windows on protected pages.');
-        } else {
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'WARNING', $rel, 'Check access-token validation hints.', 'Token-related code was found without obvious validation/expiration indicators.', 'Weak token checks can allow link sharing or blocked legitimate access.', 'Review token validation, expiration, device lock, and reconnect behavior.');
-        }
-      }
-    }
-    if (!$found) $this->mrm_pay_hub_temp_audit_add_finding($state, 'Email/calendar/access gates', 'SKIPPED', 'Email/calendar/access scan', 'Identify email, calendar, and access-gate code.', 'No related code was detected.', 'This is unexpected if lessons/masterclasses/meetings are in scope.', 'Confirm those plugins are installed in scan roots.');
-  }
-
-  private function mrm_pay_hub_temp_audit_check_public_debug(&$state) {
-    $patterns = array(
-      '/\bvar_dump\s*\(/i' => 'var_dump call',
-      '/\bprint_r\s*\(/i' => 'print_r call',
-      '/console\.log\s*\(/i' => 'console.log call',
-      '/debug panel|debug route|debug output|health check|launch debug|raw json|paste this into console|diagnostic panel|diagnostic route|diagnostic output|diagnostic log/i' => 'public debug/diagnostic tooling wording',
-      '/MRM_LAUNCH_DEBUG\s*,\s*true/i' => 'MRM_LAUNCH_DEBUG enabled'
-    );
-
-    $hits = 0;
-
-    foreach ($state['file_contents'] as $file => $content) {
-      $rel = $this->mrm_pay_hub_temp_audit_rel($file);
-      $is_public_page = strpos($rel, 'WP Page') === 0 || strpos($rel, 'frontend/') !== false || preg_match('/\.html?$/i', $rel);
-
-      if (!$is_public_page) {
-        continue;
-      }
-
-      foreach ($patterns as $regex => $label) {
-        if (preg_match($regex, $content)) {
-          $hits++;
-          $this->mrm_pay_hub_temp_audit_add_finding($state, 'Public debug/diagnostic cleanup', 'WARNING', $rel, 'Scan public-facing page content for debug/diagnostic leftovers.', 'Found indicator: ' . $label, 'Debug leftovers can expose internals or make launch pages look unfinished.', 'Remove customer-facing debug output or wrap it behind admin-only checks and disabled constants.');
-        }
-      }
-    }
-
-    if ($hits === 0) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Public debug/diagnostic cleanup', 'GOOD', 'Public pages and frontend HTML', 'Scan public-facing page content for debug/diagnostic leftovers.', 'No obvious public-facing debug/diagnostic output indicators were found.', 'Customer-facing pages are less likely to expose internal testing labels.', 'No fix needed.');
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_strip_temp_audit_block($content) {
-    /*
-     * Only strip blocks whose marker is exactly:
-     * // BEGIN TEMP PAYMENT HUB AUDIT
-     * ...
-     * // END TEMP PAYMENT HUB AUDIT
-     *
-     * Do not strip repair blocks such as:
-     * // BEGIN TEMP PAYMENT HUB AUDIT FIX - ...
-     *
-     * This prevents the audit from hiding real repair methods such as
-     * handle_marketing_unsubscribe_confirm() and handle_marketing_unsubscribe_do().
-     */
-    return preg_replace(
-      '/^[ \t]*\/\/ BEGIN TEMP PAYMENT HUB AUDIT[ \t]*\R.*?^[ \t]*\/\/ END TEMP PAYMENT HUB AUDIT[ \t]*$/ms',
-      '/* temporary audit block omitted from self-scan */',
-      (string) $content
-    );
-  }
-
-  private function mrm_pay_hub_temp_audit_collect_wp_page_html(&$state) {
-    if (!function_exists('get_posts')) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', 'WordPress Pages', 'Load WordPress Pages for frontend HTML scanning.', 'get_posts() was unavailable.', 'The audit cannot inspect pasted frontend HTML stored in Pages.', 'Run this audit from normal WordPress admin.');
-      return;
-    }
-
-    $pages = get_posts(array(
-      'post_type' => 'page',
-      'post_status' => array('publish', 'draft', 'private'),
-      'numberposts' => 150,
-      'orderby' => 'modified',
-      'order' => 'DESC',
-      'suppress_filters' => true,
-    ));
-
-    if (empty($pages)) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', 'WordPress Pages', 'Load WordPress Pages for frontend HTML scanning.', 'No WordPress Pages were found.', 'The audit cannot inspect pasted frontend HTML if no pages are returned.', 'Confirm the customer-facing pages are stored as WordPress Pages.');
-      return;
-    }
-
-    $added = 0;
-
-    foreach ($pages as $page) {
-      if (!is_object($page) || empty($page->ID)) {
-        continue;
-      }
-
-      $chunks = array((string)$page->post_content);
-
-      $elementor_data = get_post_meta($page->ID, '_elementor_data', true);
-      if (!empty($elementor_data)) {
-        $chunks[] = is_string($elementor_data) ? $elementor_data : wp_json_encode($elementor_data);
-      }
-
-      $content = implode("\n\n", array_filter($chunks));
-      $content = $this->mrm_pay_hub_temp_audit_redact($content);
-
-      if (trim($content) === '') {
-        continue;
-      }
-
-      if (!preg_match('/<script|<style|<form|<button|<div|mrm-|stripe|masterclass|scheduler|lesson|sheet|otp|payment|access|modal|data-no-|wp-json|rest_route/i', $content)) {
-        continue;
-      }
-
-      if (strlen($content) > 1600000) {
-        $content = substr($content, 0, 1600000);
-        $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'SKIPPED', 'WP Page #' . absint($page->ID), 'Read WordPress Page HTML size.', 'Page content was truncated for audit safety.', 'Very large builder pages can time out shared hosting scans.', 'Manually inspect the full page if this page contains critical checkout, scheduler, masterclass, or access code.');
-      }
-
-      $ids = array();
-      if (preg_match_all('/\bid\s*=\s*[\'"]([^\'"]+)[\'"]/i', $content, $id_matches)) {
-        foreach ($id_matches[1] as $id) {
-          $ids[$id] = true;
-        }
-      }
-
-      $title = get_the_title($page);
-      $permalink = get_permalink($page);
-      $rel = 'WP Page: ' . ($title ? $title : 'Untitled') . ' (#' . absint($page->ID) . ')';
-      if ($permalink) {
-        $rel .= ' / ' . $permalink;
-      }
-
-      $key = 'wp-page://' . absint($page->ID);
-      $state['file_contents'][$key] = $content;
-      $state['html'][$key] = array(
-        'rel' => $rel,
-        'ids' => $ids,
-        'content' => $content,
-      );
-
-      $added++;
-    }
-
-    if ($added > 0) {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'GOOD', 'WordPress Pages', 'Load WordPress Pages for frontend HTML scanning.', 'Added ' . $added . ' WordPress Page(s) to the frontend HTML audit.', 'This lets the audit inspect pasted customer-facing HTML that lives in the Pages section instead of plugin files.', 'No fix needed.');
-    } else {
-      $this->mrm_pay_hub_temp_audit_add_finding($state, 'Frontend HTML/JS', 'WARNING', 'WordPress Pages', 'Load WordPress Pages for frontend HTML scanning.', 'Pages were found, but none matched frontend HTML/script markers.', 'The audit may still miss builder-rendered HTML if it is stored in custom builder metadata.', 'Confirm the key customer-facing pages contain pasted HTML or add their builder meta keys to the audit.');
-    }
-  }
-
-  private function mrm_pay_hub_temp_audit_first_string_arg($args) { if (preg_match('/^[\s\(]*[\'"]([^\'"]+)[\'"]/', (string)$args, $m)) return $m[1]; return ''; }
-  private function mrm_pay_hub_temp_audit_extract_callback($text) { $text = (string)$text; if (preg_match('/function\s*\(/', $text)) return array('type' => 'closure', 'name' => 'closure'); if (preg_match('/(?:array\s*\(\s*\$this\s*,\s*|\[\s*\$this\s*,\s*)[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]/s', $text, $m)) return array('type' => 'method', 'name' => $m[1]); if (preg_match('/callback[\'"]?\s*=>\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]/s', $text, $m)) return array('type' => 'function', 'name' => $m[1]); if (preg_match('/,\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]\s*(?:,|\))/s', $text, $m)) return array('type' => 'function', 'name' => $m[1]); return array('type' => '', 'name' => ''); }
-  private function mrm_pay_hub_temp_audit_extract_permission_callback($block) { if (preg_match('/permission_callback[\'"]?\s*=>\s*(.*?)(?:,\s*[\'"][A-Za-z_]|\n\s*\)|\n\s*array|\n\s*\])/s', (string)$block, $m)) return trim(preg_replace('/\s+/', ' ', $m[1])); return ''; }
-  private function mrm_pay_hub_temp_audit_extract_rest_methods($block) { if (preg_match('/methods[\'"]?\s*=>\s*(.*?)(?:,\s*[\'"][A-Za-z_]|\n\s*\)|\n\s*array|\n\s*\])/s', (string)$block, $m)) return trim(preg_replace('/\s+/', ' ', $m[1])); return ''; }
-  private function mrm_pay_hub_temp_audit_source_for_callable($state, $callable_name) {
-    $callable_name = preg_quote((string)$callable_name, '/');
-
-    foreach ($state['file_contents'] as $content) {
-      if (preg_match('/function\s+' . $callable_name . '\s*\([^)]*\)\s*\{/s', $content, $m, PREG_OFFSET_CAPTURE)) {
-        $start = (int)$m[0][1];
-        return substr($content, $start, 9000);
-      }
-    }
-
-    return '';
-  }
-
-  private function mrm_pay_hub_temp_audit_rest_callback_has_validation($route, $source) {
-    $route = strtolower((string)$route);
-    $source = (string)$source;
-
-    $checks = array(
-      'sanitize' => preg_match('/sanitize_|absint|intval|floatval|is_email|sanitize_email|sanitize_text_field|sanitize_key/i', $source),
-      'required_fields' => preg_match('/return\s+new\s+WP_REST_Response|WP_Error|missing|required|valid|required/i', $source),
-      'stripe_payment' => preg_match('/stripe_retrieve_payment_intent|payment_intent|PaymentIntent|status.+succeeded|requires_capture|amount|currency|metadata/i', $source),
-      'stripe_webhook' => preg_match('/stripe_construct_webhook_event|HTTP_STRIPE_SIGNATURE|webhook_secret|signature|event_id|event_type/i', $source),
-      'access_token' => preg_match('/token|email_hash|hash_equals|expires|revoked_at|otp|one.?time|verify/i', $source),
-      'admin_gate' => preg_match('/current_user_can|manage_options|permission|nonce|wp_verify_nonce/i', $source),
-    );
-
-    if (strpos($route, 'stripe-webhook') !== false) {
-      return !empty($checks['stripe_webhook']);
-    }
-
-    if (strpos($route, 'payment-intent') !== false || strpos($route, 'setup-intent') !== false) {
-      return !empty($checks['sanitize']) && !empty($checks['required_fields']) && !empty($checks['stripe_payment']);
-    }
-
-    if (strpos($route, 'grant-sheet-music-access') !== false) {
-      return !empty($checks['sanitize']) && !empty($checks['stripe_payment']);
-    }
-
-    if (strpos($route, 'has-access') !== false || strpos($route, 'access-context') !== false || strpos($route, 'verify-otp') !== false) {
-      return !empty($checks['sanitize']) && !empty($checks['access_token']);
-    }
-
-    return !empty($checks['sanitize']) && (!empty($checks['required_fields']) || !empty($checks['access_token']) || !empty($checks['admin_gate']));
-  }
-
-  private function mrm_pay_hub_temp_audit_file_content_by_rel($state, $rel) { foreach ($state['file_contents'] as $file => $content) if ($this->mrm_pay_hub_temp_audit_rel($file) === $rel) return $content; return ''; }
-  private function mrm_pay_hub_temp_audit_launch_status($counts) { $errors = isset($counts['ERROR']) ? (int)$counts['ERROR'] : 0; $warnings = isset($counts['WARNING']) ? (int)$counts['WARNING'] : 0; if ($errors >= 5) return 'FAIL'; if ($errors > 0) return 'NEEDS ATTENTION'; if ($warnings > 0) return 'PASS WITH WARNINGS'; return 'PASS'; }
-  private function mrm_pay_hub_temp_audit_add_finding(&$state, $section, $severity, $location, $checked, $found, $matters, $fix) { $severity = strtoupper((string)$severity); if (!isset($state['counts'][$severity])) $severity = 'WARNING'; if (!isset($state['findings'][$section])) $state['findings'][$section] = array(); $state['counts'][$severity]++; $state['findings'][$section][] = array('severity' => $severity, 'location' => $this->mrm_pay_hub_temp_audit_redact($location), 'checked' => $this->mrm_pay_hub_temp_audit_redact($checked), 'found' => $this->mrm_pay_hub_temp_audit_redact($found), 'matters' => $this->mrm_pay_hub_temp_audit_redact($matters), 'fix' => $this->mrm_pay_hub_temp_audit_redact($fix)); }
-
-  private function mrm_pay_hub_temp_audit_format_log($state, $status) {
-    $lines = array('LOW BRASS LESSONS / PAYMENT HUB TEMP AUDIT LOG', '=================================================', 'Timestamp: ' . $this->mrm_pay_hub_temp_audit_redact($state['started_at']), 'Site URL: ' . $this->mrm_pay_hub_temp_audit_redact($state['site_url']), 'Active Theme: ' . $this->mrm_pay_hub_temp_audit_redact($state['active_theme']), 'Overall launch readiness: ' . $status, '', 'Audit summary:', '- Good findings: ' . (int)$state['counts']['GOOD'], '- Warnings: ' . (int)$state['counts']['WARNING'], '- Errors: ' . (int)$state['counts']['ERROR'], '- Skipped checks: ' . (int)$state['counts']['SKIPPED'], '- Files scanned: ' . count($state['file_contents']), '');
-    foreach ($state['findings'] as $section => $findings) { $lines[] = ''; $lines[] = $section; $lines[] = str_repeat('-', strlen($section)); if (empty($findings)) { $lines[] = 'No findings recorded.'; continue; } $i = 1; foreach ($findings as $finding) { $lines[] = $i . '. Severity: ' . $finding['severity']; $lines[] = '   File/function/route/hook: ' . $finding['location']; $lines[] = '   What was checked: ' . $finding['checked']; $lines[] = '   What was found: ' . $finding['found']; $lines[] = '   Why it matters: ' . $finding['matters']; $lines[] = '   Suggested fix: ' . $finding['fix']; $i++; } }
-    $lines[] = ''; $lines[] = 'Temporary audit notes:'; $lines[] = '- This audit is heuristic and read-only except for writing this log file.'; $lines[] = '- It does not trigger payments, refunds, payouts, emails, registrations, cancellations, Stripe writes, or Google Calendar writes.'; $lines[] = '- Manually verify any WARNING/ERROR before launch.'; return implode("\n", array_map(array($this, 'mrm_pay_hub_temp_audit_redact'), $lines)) . "\n";
-  }
-  private function mrm_pay_hub_temp_audit_write_log($log) { $path = trailingslashit(WP_CONTENT_DIR) . 'mrm-payment-hub-audit.log'; $bytes = @file_put_contents($path, $log, LOCK_EX); return ($bytes !== false); }
-  private function mrm_pay_hub_temp_audit_write_emergency_log($message) { $path = trailingslashit(WP_CONTENT_DIR) . 'mrm-payment-hub-audit.log'; $log = 'LOW BRASS LESSONS / PAYMENT HUB TEMP AUDIT LOG' . "\n"; $log .= 'Timestamp: ' . current_time('mysql') . "\n"; $log .= 'Overall launch readiness: FAIL' . "\n"; $log .= 'Audit failed before completion: ' . $this->mrm_pay_hub_temp_audit_redact($message) . "\n"; @file_put_contents($path, $log, LOCK_EX); }
-  private function mrm_pay_hub_temp_audit_rel($path) { $path = str_replace('\\', '/', (string)$path); if (strpos($path, 'wp-page://') === 0) return 'WP Page #' . absint(substr($path, strlen('wp-page://'))); $bases = array(); if (defined('WP_CONTENT_DIR')) $bases[] = str_replace('\\', '/', WP_CONTENT_DIR); if (defined('ABSPATH')) $bases[] = str_replace('\\', '/', ABSPATH); foreach ($bases as $base) { $base = rtrim($base, '/'); if ($base !== '' && strpos($path, $base) === 0) return ltrim(substr($path, strlen($base)), '/'); } return basename($path); }
-  private function mrm_pay_hub_temp_audit_redact($value) { $value = (string)$value; $patterns = array('/sk_(?:live|test)_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_SECRET_KEY]', '/rk_(?:live|test)_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_RESTRICTED_KEY]', '/whsec_[A-Za-z0-9_\-]+/' => '[REDACTED_STRIPE_WEBHOOK_SECRET]', '/Bearer\s+[A-Za-z0-9_\.\-]+/i' => 'Bearer [REDACTED_TOKEN]', '/password\s*[=:]\s*[^\s,;]+/i' => 'password=[REDACTED]', '/passwd\s*[=:]\s*[^\s,;]+/i' => 'passwd=[REDACTED]', '/private_key\s*[=:]\s*[^\s,;]+/i' => 'private_key=[REDACTED]', '/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----/s' => '[REDACTED_PRIVATE_KEY]', '/\b\d{3}-\d{2}-\d{4}\b/' => '[REDACTED_SSN]', '/\b\d{2}-\d{7}\b/' => '[REDACTED_TAX_ID]', '/wordpress_logged_in_[^=\s]+=[^\s;]+/i' => 'wordpress_logged_in_[REDACTED_COOKIE]'); foreach ($patterns as $regex => $replacement) $value = preg_replace($regex, $replacement, $value); return $value; }
-  // END TEMP PAYMENT HUB AUDIT
-
-
   public function create_instructor_performance_tax_location($instructor_id) {
     global $wpdb; $instructor_id = absint($instructor_id);
     if ($instructor_id <= 0) return new WP_Error('invalid_instructor', 'Invalid instructor ID.');
@@ -23554,6 +22580,8 @@ function mrm_payments_hub_sync_tax_ledger_for_payment_intent($payment_intent_id)
   return $hub->sync_external_payment_intent_tax_ledger($payment_intent_id);
 }
 
+function mrm_payments_hub_flag_physical_nexus($args) { $hub = mrm_pay_hub_singleton(); if (!$hub || !method_exists($hub, 'register_external_physical_nexus_source')) return new WP_Error('physical_nexus_service_unavailable', 'The shared physical-nexus service is unavailable.'); return $hub->register_external_physical_nexus_source($args); }
+
 function mrm_payments_hub_create_instructor_tax_location($instructor_id) {
   $hub = mrm_pay_hub_singleton();
   if (!$hub || !method_exists($hub, 'create_instructor_performance_tax_location')) return new WP_Error('tax_location_service_unavailable', 'The Stripe Tax Location service is unavailable.');
@@ -23608,11 +22636,8 @@ register_activation_hook(__FILE__, function() {
 });
 
 register_deactivation_hook(__FILE__, function() {
-  wp_clear_scheduled_hook('mrm_pay_hub_cleanup_access');
-  wp_clear_scheduled_hook('mrm_pay_hub_daily_payout_check');
-  wp_clear_scheduled_hook('mrm_pay_hub_daily_presenter_payout_check');
-  wp_clear_scheduled_hook('mrm_pay_hub_retry_autopay_charges');
-  wp_clear_scheduled_hook('mrm_pay_hub_retry_sheet_music_subscriptions');
+  $hooks = array('mrm_pay_hub_cleanup_access','mrm_pay_hub_daily_payout_check','mrm_pay_hub_daily_presenter_payout_check','mrm_pay_hub_retry_autopay_charges','mrm_pay_hub_discover_missed_autopay_lessons','mrm_pay_hub_reset_stuck_autopay_lessons','mrm_pay_hub_check_upcoming_payment_methods','mrm_pay_hub_retry_sheet_music_subscriptions','mrm_sheet_music_subscription_renewal_reminder_cron','mrm_pay_hub_tax_sync_registrations','mrm_pay_hub_tax_recompute_thresholds','mrm_pay_hub_tax_filing_deadline_check','mrm_pay_hub_tax_retry_association','mrm_pay_hub_tax_retry_refund_association','mrm_pay_hub_retry_subscription_invoice_refunds');
+  foreach ($hooks as $hook) wp_clear_scheduled_hook($hook);
 });
 
 /**
