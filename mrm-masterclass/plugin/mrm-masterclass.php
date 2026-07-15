@@ -141,6 +141,15 @@ class LowBrass_MRM_Masterclass_Plugin {
 		1
 	);
 add_action(
+		'mrm_payments_hub_refund_succeeded',
+		array(
+			$this,
+			'mrm_mc_handle_successful_refund'
+		),
+		10,
+		2
+	);
+add_action(
 		'mrm_payments_hub_refund_failed',
 		array(
 			$this,
@@ -3077,7 +3086,13 @@ private function mrm_mc_refund_completed_email_body( $event, $registration, $amo
 }
 
 private function mrm_mc_event_cancelled_email_body( $event, $registration, $amount_cents, $refund_status ) {
-	$intro = '<p>This Masterclass has been cancelled. A refund has been issued for your registration. It may take 3 to 5 business days for the funds to return to your account.</p>';
+	$refund_status = sanitize_key( $refund_status );
+
+	if ( $refund_status === 'succeeded' ) {
+		$intro = '<p>This Masterclass has been cancelled. Your refund has been confirmed by Stripe. It may take several business days for the funds to appear in your account.</p>';
+	} else {
+		$intro = '<p>This Masterclass has been cancelled. Your refund request has been submitted to Stripe and is still processing. Low Brass Lessons will send a separate confirmation after Stripe confirms that the refund succeeded.</p>';
+	}
 
 	$details = '<div><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '</div>'
 		. '<div><strong>Date/time:</strong> ' . esc_html( ( $event->start_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ) . '</div>'
@@ -3334,45 +3349,44 @@ public function mrm_mc_run_deferred_tax_sync(
 	}
 }
 
+public function mrm_mc_handle_successful_refund($refund, $charge) {
+	global $wpdb; if (!is_array($refund) || sanitize_key($refund['status'] ?? '') !== 'succeeded') return;
+	$refund_id=sanitize_text_field($refund['id'] ?? ''); $payment_intent_id=is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? ''); if ($payment_intent_id === '') return;
+	$registrations=$this->t('mrm_masterclass_registrations'); $refunds=$this->t('mrm_masterclass_refunds'); $seat_holds=$this->t('mrm_masterclass_seat_holds'); $events=$this->t('mrm_masterclass_events'); $pi_column=$this->mrm_mc_payment_intent_column_for_registrations();
+	if ($this->mrm_mc_table_exists($seat_holds)) $wpdb->update($seat_holds,array('status'=>'refunded','refund_id'=>$refund_id,'error_message'=>'','updated_at'=>$this->now()),array('payment_intent_id'=>$payment_intent_id));
+	$registration=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$registrations} WHERE {$pi_column} = %s LIMIT 1",$payment_intent_id)); if (!$registration) return;
+	$wpdb->update($registrations,array('payment_status'=>'refunded','updated_at'=>$this->now()),array('id'=>absint($registration->id)));
+	if ($refund_id !== '' && $this->mrm_mc_table_exists($refunds)) $wpdb->update($refunds,array('status'=>'succeeded','error_message'=>'','updated_at'=>$this->now()),array('refund_id'=>$refund_id));
+	$this->mrm_mc_void_payout_ledger_for_refunded_registration(absint($registration->id),$refund_id,'stripe_refund_succeeded');
+	$event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$events} WHERE id = %d LIMIT 1",absint($registration->event_id)));
+	if ($event) $this->mrm_mc_send_email_recorded('refund_completed',$registration->email,'Masterclass Refund Successful',$this->mrm_mc_refund_completed_email_body($event,$registration,absint($refund['amount'] ?? $registration->amount_cents ?? 0)),$event->id,$registration->id);
+}
+
 public function mrm_mc_handle_failed_refund($refund, $charge) {
 	global $wpdb;
 	if (!is_array($refund)) return;
 	$refund_id = sanitize_text_field($refund['id'] ?? ''); $refund_status = sanitize_key($refund['status'] ?? '');
 	$payment_intent_id = is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? '');
 	if ($payment_intent_id === '') return;
+	$seat_holds = $this->t('mrm_masterclass_seat_holds');
+	if ($this->mrm_mc_table_exists($seat_holds)) $wpdb->update($seat_holds,array('status'=>'refund_failed','refund_id'=>$refund_id,'error_message'=>sanitize_text_field($refund['failure_reason'] ?? 'Stripe refund failed or was canceled.'),'updated_at'=>$this->now()),array('payment_intent_id'=>$payment_intent_id));
 	$registrations = $this->t('mrm_masterclass_registrations'); $refunds = $this->t('mrm_masterclass_refunds'); $ledger = $this->t('mrm_masterclass_payment_ledger'); $pi_column = $this->mrm_mc_payment_intent_column_for_registrations();
 	$registration = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$registrations} WHERE {$pi_column} = %s LIMIT 1", $payment_intent_id));
 	if (!$registration) return;
 	$wpdb->update($registrations, array('payment_status'=>'paid','updated_at'=>$this->now()), array('id'=>absint($registration->id)));
 	if ($refund_id !== '' && $this->mrm_mc_table_exists($refunds)) $wpdb->update($refunds, array('status'=>$refund_status,'error_message'=>sanitize_text_field($refund['failure_reason'] ?? 'Stripe refund failed or was canceled.'),'updated_at'=>$this->now()), array('refund_id'=>$refund_id));
-	if ($this->mrm_mc_table_exists($ledger)) {
-		$wpdb->query($wpdb->prepare("UPDATE {$ledger} SET status = CASE WHEN status = 'refunded_void' THEN 'payable' WHEN status IN ('refunded_reversed','refund_reversal_failed','refund_after_payout_needs_recovery') THEN 'refund_failure_needs_recovery' ELSE status END, notes = CONCAT(COALESCE(notes, ''), %s), updated_at = %s WHERE registration_id = %d AND ledger_type = 'registration_payment'", ' Refund '.$refund_id.' later entered status '.$refund_status.'; payout records were reopened or flagged for recovery.', $this->now(), absint($registration->id)));
-	}
+	if ($this->mrm_mc_table_exists($ledger)) $wpdb->query($wpdb->prepare("UPDATE {$ledger} SET status = CASE WHEN status = 'refunded_void' THEN 'payable' WHEN status IN ('refunded_reversed','refund_reversal_failed','refund_after_payout_needs_recovery') THEN 'refund_failure_needs_recovery' ELSE status END, notes = CONCAT(COALESCE(notes, ''), %s), updated_at = %s WHERE registration_id = %d AND ledger_type = 'registration_payment'", ' Refund '.$refund_id.' later entered status '.$refund_status.'; payout records were reopened or flagged for recovery.', $this->now(), absint($registration->id)));
 }
 
 private function mrm_mc_refund_registration( $registration, $event, $reason = 'event_cancelled' ) {
-	global $wpdb;
-	$regs_table    = $this->t( 'mrm_masterclass_registrations' );
-	$refunds_table = $this->t( 'mrm_masterclass_refunds' );
-	$amount_cents = absint( $registration->amount_cents ?? 0 );
-	$payment_intent_id = sanitize_text_field( $registration->payment_intent_id ?? ( $registration->stripe_payment_intent_id ?? '' ) );
-	if ( '' === $payment_intent_id || $amount_cents <= 0 ) { return new WP_Error( 'mrm_masterclass_refund_missing_data', 'Refund data was incomplete.' ); }
-	$refund_result = $this->mrm_mc_refund_payment_intent( $payment_intent_id, $amount_cents );
-	if ( is_wp_error( $refund_result ) ) { return $refund_result; }
-	if ( function_exists( 'mrm_payments_hub_sync_tax_ledger_for_payment_intent' ) ) {
-		mrm_payments_hub_sync_tax_ledger_for_payment_intent( $payment_intent_id );
-	}
-	$refund_id = sanitize_text_field( $refund_result['id'] ?? '' );
-	$refund_status = sanitize_key( $refund_result['status'] ?? 'succeeded' );
-	$wpdb->insert( $refunds_table, $this->mrm_mc_filter_data_for_table( $refunds_table, array( 'event_id' => absint( $event->id ), 'registration_id' => absint( $registration->id ), 'payment_intent_id' => $payment_intent_id, 'refund_id' => $refund_id, 'amount_cents' => $amount_cents, 'status' => $refund_status, 'reason' => sanitize_key( $reason ), 'error_message' => '', 'created_at' => $this->now(), 'updated_at' => $this->now() ) ) );
-	$wpdb->update( $regs_table, array( 'payment_status' => 'refunded', 'updated_at' => $this->now() ), array( 'id' => absint( $registration->id ) ) );
-	$this->mrm_mc_void_payout_ledger_for_refunded_registration(
-		absint( $registration->id ),
-		$refund_id,
-		sanitize_key( $reason )
-	);
-	$this->mrm_mc_send_email_recorded( 'refund_completed', $registration->email, 'Masterclass Refund Successful', $this->mrm_mc_refund_completed_email_body( $event, $registration, $amount_cents ), $event->id, $registration->id );
-	return array( 'refund_id' => $refund_id, 'status' => $refund_status, 'amount_cents' => $amount_cents );
+	global $wpdb; $regs_table=$this->t('mrm_masterclass_registrations'); $refunds_table=$this->t('mrm_masterclass_refunds'); $amount_cents=absint($registration->amount_cents ?? 0); $payment_intent_id=sanitize_text_field($registration->payment_intent_id ?? ($registration->stripe_payment_intent_id ?? ''));
+	if ($payment_intent_id === '' || $amount_cents <= 0) return new WP_Error('mrm_masterclass_refund_missing_data','Refund data was incomplete.');
+	$refund_result=$this->mrm_mc_refund_payment_intent($payment_intent_id,$amount_cents); if (is_wp_error($refund_result)) return $refund_result;
+	$refund_id=sanitize_text_field($refund_result['id'] ?? ''); $refund_status=sanitize_key($refund_result['status'] ?? 'pending'); if ($refund_id === '') return new WP_Error('mrm_masterclass_refund_id_missing','Stripe created no usable Refund ID.');
+	$wpdb->insert($refunds_table,$this->mrm_mc_filter_data_for_table($refunds_table,array('event_id'=>absint($event->id),'registration_id'=>absint($registration->id),'payment_intent_id'=>$payment_intent_id,'refund_id'=>$refund_id,'amount_cents'=>$amount_cents,'status'=>$refund_status,'reason'=>sanitize_key($reason),'error_message'=>'','created_at'=>$this->now(),'updated_at'=>$this->now())));
+	if (in_array($refund_status,array('failed','canceled'),true)) { $this->mrm_mc_handle_failed_refund($refund_result,array()); return new WP_Error('mrm_masterclass_refund_not_successful','Stripe created the Refund, but it entered status '.$refund_status.'.'); }
+	$wpdb->update($regs_table,array('payment_status'=>'refund_pending','updated_at'=>$this->now()),array('id'=>absint($registration->id)));
+	return array('refund_id'=>$refund_id,'status'=>$refund_status,'amount_cents'=>$amount_cents);
 }
 
 private function mrm_mc_send_confirmation_for_registration( $registration_id ) {
@@ -5541,7 +5555,7 @@ public function handle_cancel_event() {
 	if ( in_array( sanitize_key( $event->status ), array( 'deleted', 'cancelled' ), true ) ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_cancel_already_deleted' ); }
 	$paid_regs = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$regs_table} WHERE event_id = %d AND payment_status = 'paid'",$event_id));
 	$refund_success_count=0; $refund_failure_count=0;
-	foreach((array)$paid_regs as $registration){$refund_result=$this->mrm_mc_refund_registration($registration,$event,'event_cancelled'); if(is_wp_error($refund_result)){$refund_failure_count++;continue;} $refund_success_count++; $this->mrm_mc_send_email_recorded('event_cancelled',$registration->email,'Masterclass Cancelled',$this->mrm_mc_event_cancelled_email_body( $event, $registration, absint( $registration->amount_cents ), 'refunded' ),$event->id,$registration->id);}
+	foreach((array)$paid_regs as $registration){$refund_result=$this->mrm_mc_refund_registration($registration,$event,'event_cancelled'); if(is_wp_error($refund_result)){$refund_failure_count++;continue;} $refund_success_count++; $refund_status=sanitize_key($refund_result['status'] ?? 'pending'); $this->mrm_mc_send_email_recorded('event_cancelled',$registration->email,'Masterclass Cancelled',$this->mrm_mc_event_cancelled_email_body( $event, $registration, absint( $registration->amount_cents ?? 0 ), $refund_status ),$event->id,$registration->id);}
 	$google_cancel_error=''; if(!empty($event->google_event_id)){ $google_cancel=$this->mrm_mc_google_cancel_event( $event->google_event_id, $event->calendar_id ?? '' ); if(is_wp_error($google_cancel)){$google_cancel_error=$google_cancel->get_error_message();}}
 	$wpdb->update($events_table,array('status'=>'deleted','registration_open'=>0,'cancellation_reason'=>'Admin cancelled the Masterclass. If paid registrations were eligible for automatic refund under the event cancellation policy, refunds were attempted immediately through Stripe. If the event was outside the automatic refund window, it was removed from active listings for administrative follow-up.','google_last_error'=>$google_cancel_error,'updated_at'=>$this->now()),array('id'=>$event_id));
 	if($refund_failure_count>0){$this->mrm_mc_admin_notice_redirect(self::ADMIN_EVENTS_SLUG,'event_cancel_refund_failures',array('event_id'=>$event_id,'success'=>$refund_success_count,'failed'=>$refund_failure_count));}
@@ -8286,7 +8300,7 @@ public function render_events_page() {
 		'event_cancel_not_found'              => array( 'error', 'Event cancellation failed because the event could not be found.' ),
 		'event_cancel_already_deleted'        => array( 'warning', 'This Masterclass event has already been deleted from active lists.' ),
 		'event_cancel_refund_failures'        => array( 'error', 'The Masterclass was removed from active listings, but one or more eligible automatic refunds failed; review Stripe and the Masterclass log before contacting registrants.' ),
-		'event_cancel_refunds_success'        => array( 'success', 'The Masterclass was removed from active listings and eligible paid registrations were automatically refunded through Stripe.' ),
+		'event_cancel_refunds_success'        => array( 'success', 'The Masterclass was removed from active listings and eligible refund requests were submitted to Stripe. Final success is confirmed asynchronously by the refund webhook.' ),
 		'event_updated_google_success'        => array( 'success', 'Masterclass event updated, Google Calendar updated, and registered paid attendees were notified.' ),
 		'event_missing_id'                    => array( 'error', 'Session page generation failed because the event ID was missing.' ),
 		'session_page_saved'                => array( 'success', 'Masterclass session page generated or updated.' ),
@@ -10039,11 +10053,13 @@ public function rest_finalize_registration( $request ) {
 				return new WP_Error( 'mrm_masterclass_sold_out_refund_failed', 'The final seat was claimed before registration completed. Your payment was received, but the automatic refund could not be completed. Please contact Low Brass Lessons immediately.', array( 'status' => 500, 'payment_received' => true ) );
 			}
 			$refund_id = sanitize_text_field( $refund_result['id'] ?? '' );
-			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'refunded', $refund_id, '' );
-			if ( function_exists( 'mrm_payments_hub_sync_tax_ledger_for_payment_intent' ) ) {
-				mrm_payments_hub_sync_tax_ledger_for_payment_intent( $payment_intent_id );
+			$refund_status = sanitize_key( $refund_result['status'] ?? 'pending' );
+			if ( $refund_id === '' || in_array( $refund_status, array( 'failed', 'canceled' ), true ) ) {
+				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'refund_failed', $refund_id, 'Stripe refund status: ' . ( $refund_status !== '' ? $refund_status : 'unknown' ) );
+				return new WP_Error( 'mrm_masterclass_sold_out_refund_failed', 'The final seat was claimed before registration completed. Your payment was received, but Stripe did not confirm a valid refund request. Please contact Low Brass Lessons immediately.', array( 'status' => 500, 'payment_received' => true, 'refund_id' => $refund_id ) );
 			}
-			return new WP_Error( 'mrm_masterclass_sold_out_payment_refunded', 'The final available seat was claimed before registration completed. Your payment was automatically refunded.', array( 'status' => 409, 'payment_refunded' => true, 'refund_id' => $refund_id ) );
+			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'refund_pending', $refund_id, '' );
+			return new WP_Error( 'mrm_masterclass_sold_out_refund_pending', 'The final available seat was claimed before registration completed. Your refund request has been submitted to Stripe and is still processing. Low Brass Lessons will treat the payment as refunded only after Stripe confirms final success.', array( 'status' => 409, 'payment_received' => true, 'payment_refund_pending' => true, 'payment_refunded' => false, 'refund_id' => $refund_id, 'refund_status' => $refund_status ) );
 		}
 		return $registration_result;
 	}
