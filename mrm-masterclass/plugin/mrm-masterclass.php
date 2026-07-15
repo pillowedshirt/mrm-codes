@@ -147,7 +147,16 @@ add_action(
 			'mrm_mc_handle_successful_refund'
 		),
 		10,
-		2
+		3
+	);
+add_action(
+		'mrm_payments_hub_refund_partially_succeeded',
+		array(
+			$this,
+			'mrm_mc_handle_partial_refund'
+		),
+		10,
+		3
 	);
 add_action(
 		'mrm_payments_hub_refund_failed',
@@ -156,7 +165,7 @@ add_action(
 			'mrm_mc_handle_failed_refund'
 		),
 		10,
-		2
+		3
 	);
 	add_filter( 'mrm_cross_plugin_email_preview', array( $this, 'handle_cross_plugin_email_preview' ), 10, 2 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
@@ -3349,8 +3358,8 @@ public function mrm_mc_run_deferred_tax_sync(
 	}
 }
 
-public function mrm_mc_handle_successful_refund($refund, $charge) {
-	global $wpdb; if (!is_array($refund) || sanitize_key($refund['status'] ?? '') !== 'succeeded') return;
+public function mrm_mc_handle_successful_refund($refund, $charge, $summary = array()) {
+	global $wpdb; if (!is_array($refund) || sanitize_key($refund['status'] ?? '') !== 'succeeded') return; if (empty($summary['is_full_refund'])) return;
 	$refund_id=sanitize_text_field($refund['id'] ?? ''); $payment_intent_id=is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? ''); if ($payment_intent_id === '') return;
 	$registrations=$this->t('mrm_masterclass_registrations'); $refunds=$this->t('mrm_masterclass_refunds'); $seat_holds=$this->t('mrm_masterclass_seat_holds'); $events=$this->t('mrm_masterclass_events'); $pi_column=$this->mrm_mc_payment_intent_column_for_registrations();
 	if ($this->mrm_mc_table_exists($seat_holds)) $wpdb->update($seat_holds,array('status'=>'refunded','refund_id'=>$refund_id,'error_message'=>'','updated_at'=>$this->now()),array('payment_intent_id'=>$payment_intent_id));
@@ -3362,21 +3371,31 @@ public function mrm_mc_handle_successful_refund($refund, $charge) {
 	if ($event) $this->mrm_mc_send_email_recorded('refund_completed',$registration->email,'Masterclass Refund Successful',$this->mrm_mc_refund_completed_email_body($event,$registration,absint($refund['amount'] ?? $registration->amount_cents ?? 0)),$event->id,$registration->id);
 }
 
-public function mrm_mc_handle_failed_refund($refund, $charge) {
-	global $wpdb;
-	if (!is_array($refund)) return;
-	$refund_id = sanitize_text_field($refund['id'] ?? ''); $refund_status = sanitize_key($refund['status'] ?? '');
-	$payment_intent_id = is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? '');
-	if ($payment_intent_id === '') return;
-	$seat_holds = $this->t('mrm_masterclass_seat_holds');
-	if ($this->mrm_mc_table_exists($seat_holds)) $wpdb->update($seat_holds,array('status'=>'refund_failed','refund_id'=>$refund_id,'error_message'=>sanitize_text_field($refund['failure_reason'] ?? 'Stripe refund failed or was canceled.'),'updated_at'=>$this->now()),array('payment_intent_id'=>$payment_intent_id));
-	$registrations = $this->t('mrm_masterclass_registrations'); $refunds = $this->t('mrm_masterclass_refunds'); $ledger = $this->t('mrm_masterclass_payment_ledger'); $pi_column = $this->mrm_mc_payment_intent_column_for_registrations();
-	$registration = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$registrations} WHERE {$pi_column} = %s LIMIT 1", $payment_intent_id));
-	if (!$registration) return;
-	$wpdb->update($registrations, array('payment_status'=>'paid','updated_at'=>$this->now()), array('id'=>absint($registration->id)));
-	if ($refund_id !== '' && $this->mrm_mc_table_exists($refunds)) $wpdb->update($refunds, array('status'=>$refund_status,'error_message'=>sanitize_text_field($refund['failure_reason'] ?? 'Stripe refund failed or was canceled.'),'updated_at'=>$this->now()), array('refund_id'=>$refund_id));
-	if ($this->mrm_mc_table_exists($ledger)) $wpdb->query($wpdb->prepare("UPDATE {$ledger} SET status = CASE WHEN status = 'refunded_void' THEN 'payable' WHEN status IN ('refunded_reversed','refund_reversal_failed','refund_after_payout_needs_recovery') THEN 'refund_failure_needs_recovery' ELSE status END, notes = CONCAT(COALESCE(notes, ''), %s), updated_at = %s WHERE registration_id = %d AND ledger_type = 'registration_payment'", ' Refund '.$refund_id.' later entered status '.$refund_status.'; payout records were reopened or flagged for recovery.', $this->now(), absint($registration->id)));
+public function mrm_mc_handle_partial_refund($refund, $charge, $summary = array()) {
+  global $wpdb;
+  if(!is_array($refund) || sanitize_key($refund['status'] ?? '')!=='succeeded') return; if(empty($summary['is_partial_refund'])) return;
+  $refund_id=sanitize_text_field($refund['id'] ?? ''); $payment_intent_id=is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? ''); if($payment_intent_id==='') return;
+  $registrations=$this->t('mrm_masterclass_registrations'); $refunds=$this->t('mrm_masterclass_refunds'); $seat_holds=$this->t('mrm_masterclass_seat_holds'); $pi_column=$this->mrm_mc_payment_intent_column_for_registrations();
+  if($this->mrm_mc_table_exists($seat_holds)) $wpdb->update($seat_holds,array('status'=>'partially_refunded','refund_id'=>$refund_id,'updated_at'=>$this->now()),array('payment_intent_id'=>$payment_intent_id));
+  $registration=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$registrations} WHERE {$pi_column} = %s LIMIT 1",$payment_intent_id)); if(!$registration) return;
+  $wpdb->update($registrations,array('payment_status'=>'partially_refunded','updated_at'=>$this->now()),array('id'=>absint($registration->id)));
+  if($refund_id!=='' && $this->mrm_mc_table_exists($refunds)) $wpdb->update($refunds,array('status'=>'succeeded','error_message'=>'Partial refund succeeded; payout and accounting review is required.','updated_at'=>$this->now()),array('refund_id'=>$refund_id));
 }
+
+
+
+public function mrm_mc_handle_failed_refund($refund, $charge, $summary = array()) {
+  global $wpdb; if(!is_array($refund)) return;
+  $refund_id=sanitize_text_field($refund['id'] ?? ''); $refund_status=sanitize_key($refund['status'] ?? ''); $payment_intent_id=is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? ''); if($payment_intent_id==='') return;
+  $successful_refund_cents=absint($summary['succeeded_refund_cents'] ?? 0); $is_full=!empty($summary['is_full_refund']); $is_partial=!empty($summary['is_partial_refund']); $remaining_payment_status=$is_full?'refunded':($is_partial?'partially_refunded':'paid'); $seat_hold_status=$is_full?'refunded':($is_partial?'partially_refunded':'refund_failed');
+  $seat_holds=$this->t('mrm_masterclass_seat_holds'); if($this->mrm_mc_table_exists($seat_holds)) $wpdb->update($seat_holds,array('status'=>$seat_hold_status,'refund_id'=>$refund_id,'error_message'=>sanitize_text_field($refund['failure_reason'] ?? 'Stripe refund failed or was canceled.'),'updated_at'=>$this->now()),array('payment_intent_id'=>$payment_intent_id));
+  $registrations=$this->t('mrm_masterclass_registrations'); $refunds=$this->t('mrm_masterclass_refunds'); $ledger=$this->t('mrm_masterclass_payment_ledger'); $pi_column=$this->mrm_mc_payment_intent_column_for_registrations(); $registration=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$registrations} WHERE {$pi_column} = %s LIMIT 1",$payment_intent_id)); if(!$registration) return;
+  $wpdb->update($registrations,array('payment_status'=>$remaining_payment_status,'updated_at'=>$this->now()),array('id'=>absint($registration->id)));
+  if($refund_id!=='' && $this->mrm_mc_table_exists($refunds)) $wpdb->update($refunds,array('status'=>$refund_status,'error_message'=>sanitize_text_field($refund['failure_reason'] ?? 'Stripe refund failed or was canceled.'),'updated_at'=>$this->now()),array('refund_id'=>$refund_id));
+  if($this->mrm_mc_table_exists($ledger)) $wpdb->query($wpdb->prepare("UPDATE {$ledger} SET status = 'refund_failure_needs_recovery', notes = CONCAT(COALESCE(notes, ''), %s), updated_at = %s WHERE registration_id = %d AND ledger_type = 'registration_payment'", ' Refund '.$refund_id.' entered status '.$refund_status.'; cumulative successful refunds now total '.$successful_refund_cents.' cents.', $this->now(), absint($registration->id)));
+}
+
+
 
 private function mrm_mc_refund_registration( $registration, $event, $reason = 'event_cancelled' ) {
 	global $wpdb; $regs_table=$this->t('mrm_masterclass_registrations'); $refunds_table=$this->t('mrm_masterclass_refunds'); $amount_cents=absint($registration->amount_cents ?? 0); $payment_intent_id=sanitize_text_field($registration->payment_intent_id ?? ($registration->stripe_payment_intent_id ?? ''));

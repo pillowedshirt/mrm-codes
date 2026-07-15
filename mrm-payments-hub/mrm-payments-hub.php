@@ -47,7 +47,7 @@ class MRM_Payments_Hub_Single {
   const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
   const STRIPE_TAX_PAYMENT_INTENT_BETA = 'payment_intent_with_tax_api_beta=v1';
   const STRIPE_TAX_LOCATION_API_VERSION = '2026-06-24.preview';
-  const TAX_RULES_VERSION = '2026-07-15-national-v8';
+  const TAX_RULES_VERSION = '2026-07-15-national-v9';
   const TAX_SCHEMA_VERSION = '2026-07-14-7';
 
   const TAX_STRIPE_SYNC_MAX_AGE_MINUTES = 120;
@@ -4791,19 +4791,45 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   );
 }
 
+private function mrm_refund_effects_state_key($refund_id) { return 'mrm_refund_effects_'.substr(hash('sha256',sanitize_text_field($refund_id)),0,40); }
+private function mrm_refund_effects_lock_key($refund_id) { return 'mrm_refund_effects_lock_'.substr(hash('sha256',sanitize_text_field($refund_id)),0,40); }
+private function mrm_refund_effects_status_applied($refund_id, $status) { $state=get_option($this->mrm_refund_effects_state_key($refund_id),array()); return is_array($state) && sanitize_key($state['last_status'] ?? '')===sanitize_key($status); }
+private function mrm_claim_refund_effects_lock($refund_id) { $lock_key=$this->mrm_refund_effects_lock_key($refund_id); if(add_option($lock_key,time(),'',false)) return true; $locked_at=absint(get_option($lock_key,0)); if($locked_at>0 && $locked_at < time()-300){ delete_option($lock_key); if(add_option($lock_key,time(),'',false)) return true; } return new WP_Error('refund_effects_locked','Refund business effects are already being processed.'); }
+private function mrm_release_refund_effects_lock($refund_id) { delete_option($this->mrm_refund_effects_lock_key($refund_id)); }
+private function mrm_store_refund_effects_state($refund_id, $status, $summary) { $summary=is_array($summary)?$summary:array(); return update_option($this->mrm_refund_effects_state_key($refund_id),array('refund_id'=>sanitize_text_field($refund_id),'last_status'=>sanitize_key($status),'charge_id'=>sanitize_text_field($summary['charge_id'] ?? ''),'charge_amount_cents'=>absint($summary['charge_amount_cents'] ?? 0),'succeeded_refund_cents'=>absint($summary['succeeded_refund_cents'] ?? 0),'is_full_refund'=>!empty($summary['is_full_refund'])?1:0,'applied_at'=>current_time('mysql')),false); }
+private function mrm_refund_charge_summary($charge) { if(!is_array($charge)) return new WP_Error('refund_charge_invalid','The Stripe Charge object was invalid.'); $charge_id=sanitize_text_field($charge['id'] ?? ''); $charge_amount=absint($charge['amount'] ?? 0); if($charge_id==='' || $charge_amount<=0) return new WP_Error('refund_charge_reference_invalid','The Stripe Charge amount or ID was invalid.'); $refunds=$this->mrm_stripe_list_all_refunds_for_charge($charge_id); if(is_wp_error($refunds)) return $refunds; $succeeded_total=0; $succeeded_ids=array(); foreach((array)$refunds as $refund){ if(sanitize_key($refund['status'] ?? '')!=='succeeded') continue; $succeeded_total+=absint($refund['amount'] ?? 0); $refund_id=sanitize_text_field($refund['id'] ?? ''); if($refund_id!=='') $succeeded_ids[]=$refund_id; } $succeeded_total=min($charge_amount,max(0,$succeeded_total)); return array('charge_id'=>$charge_id,'charge_amount_cents'=>$charge_amount,'succeeded_refund_cents'=>$succeeded_total,'remaining_cents'=>max(0,$charge_amount-$succeeded_total),'is_full_refund'=>$succeeded_total>=$charge_amount,'is_partial_refund'=>($succeeded_total>0 && $succeeded_total<$charge_amount),'succeeded_refund_ids'=>array_values(array_unique($succeeded_ids))); }
+
 private function mrm_apply_successful_refund_business_effects($refund, $charge) {
-  global $wpdb; $refund_id = sanitize_text_field($refund['id'] ?? ''); $pi_id = is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? '');
-  if ($pi_id !== '') { $order = $this->get_order_by_pi($pi_id); if ($order && !empty($order['id'])) { $order_id=absint($order['id']); $this->update_order_status_from_pi($pi_id,'refunded','refunded',array('mrm_refunded_at'=>current_time('mysql'),'mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded')); $this->mrm_void_standard_payouts_for_refunded_order($order_id,$pi_id,'stripe_refund_succeeded'); $product_type=sanitize_key($order['product_type'] ?? ''); $sku=sanitize_text_field($order['sku'] ?? ''); if ($product_type === 'sheet_music' && $sku !== '' && $sku !== 'all-sheet-music') $wpdb->update($this->table_sheet_music_access(), array('revoked_at'=>current_time('mysql')), array('sku'=>$sku,'source_id'=>$pi_id,'revoked_at'=>null)); } }
-  if (is_array($charge)) $this->mrm_void_subscription_composer_payout_from_refunded_charge($charge, 'stripe_refund_succeeded');
-  return true;
+  global $wpdb;
+  if(!is_array($refund)) return new WP_Error('successful_refund_invalid','The successful Refund object was invalid.');
+  $refund_id=sanitize_text_field($refund['id'] ?? ''); if($refund_id==='') return new WP_Error('successful_refund_id_missing','The successful Refund ID is missing.');
+  if($this->mrm_refund_effects_status_applied($refund_id,'succeeded')) return true;
+  $lock=$this->mrm_claim_refund_effects_lock($refund_id); if(is_wp_error($lock)) return $lock;
+  try { if($this->mrm_refund_effects_status_applied($refund_id,'succeeded')) return true; $summary=$this->mrm_refund_charge_summary($charge); if(is_wp_error($summary)) return $summary; $pi_id=$this->mrm_stripe_expandable_id($refund['payment_intent'] ?? '');
+    if($pi_id!==''){ $order=$this->get_order_by_pi($pi_id); if(is_array($order) && !empty($order['id'])){ $order_id=absint($order['id']); if(!empty($summary['is_full_refund'])){ $this->update_order_status_from_pi($pi_id,'refunded','refunded',array('mrm_refunded_at'=>current_time('mysql'),'mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); $this->mrm_void_standard_payouts_for_refunded_order($order_id,$pi_id,'stripe_cumulative_full_refund'); $product_type=sanitize_key($order['product_type'] ?? ''); $sku=sanitize_text_field($order['sku'] ?? ''); if($product_type==='sheet_music' && $sku!=='' && $sku!=='all-sheet-music') $wpdb->update($this->table_sheet_music_access(),array('revoked_at'=>current_time('mysql')),array('sku'=>$sku,'source_id'=>$pi_id,'revoked_at'=>null)); $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('partial_refund_business_review_required')); if(is_wp_error($resolved)) return $resolved; } else { $this->update_order_status_from_pi($pi_id,'partially_refunded','partially_refunded',array('mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'],'mrm_charge_amount_cents'=>(string)$summary['charge_amount_cents'])); $alert_result=$this->mrm_tax_create_alert('', 'partial_refund_business_review_required','refund',0,array('message'=>'A partial refund succeeded. Access remains active and the full payout was not voided. Review the proportional payout, accounting, and customer records.','refund_id'=>$refund_id,'payment_intent_id'=>$pi_id,'charge_id'=>$summary['charge_id'],'succeeded_refund_cents'=>$summary['succeeded_refund_cents'],'charge_amount_cents'=>$summary['charge_amount_cents']),sanitize_key($refund_id)); if(is_wp_error($alert_result)) return $alert_result; } } }
+    if(!empty($summary['is_full_refund']) && is_array($charge)) $this->mrm_void_subscription_composer_payout_from_refunded_charge($charge,'stripe_cumulative_full_refund');
+    if(!empty($summary['is_full_refund'])) do_action('mrm_payments_hub_refund_succeeded',$refund,$charge,$summary); else do_action('mrm_payments_hub_refund_partially_succeeded',$refund,$charge,$summary);
+    $saved=$this->mrm_store_refund_effects_state($refund_id,'succeeded',$summary); if($saved===false) return new WP_Error('refund_effects_state_save_failed','The successful Refund effects state could not be saved.'); return true;
+  } finally { $this->mrm_release_refund_effects_lock($refund_id); }
 }
 
+
+
 private function mrm_apply_failed_refund_recovery($refund, $charge) {
-  global $wpdb; $refund_id=sanitize_text_field($refund['id'] ?? ''); $refund_status=sanitize_key($refund['status'] ?? ''); $pi_id=is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? '');
-  if ($pi_id !== '') { $order=$this->get_order_by_pi($pi_id); if ($order && !empty($order['id'])) { $this->update_order_status_from_pi($pi_id,'paid','succeeded',array('mrm_refund_id'=>$refund_id,'mrm_refund_status'=>$refund_status,'mrm_refund_failed_at'=>current_time('mysql'))); if (sanitize_key($order['product_type'] ?? '') === 'sheet_music') $wpdb->update($this->table_sheet_music_access(), array('revoked_at'=>null), array('source_id'=>$pi_id)); } }
-  do_action('mrm_payments_hub_refund_failed', $refund, $charge);
-  return $this->mrm_tax_create_alert('', 'refund_failure_recovery_required', 'refund', 0, array('message'=>'Refund '.$refund_id.' entered status '.$refund_status.'. The tax ledger was restored, but order, access, registration, payout, and accounting records require review.','refund_id'=>$refund_id,'payment_intent_id'=>$pi_id,'charge_id'=>sanitize_text_field($charge['id'] ?? ''),'refund_status'=>$refund_status,'failure_reason'=>sanitize_text_field($refund['failure_reason'] ?? '')), sanitize_key($refund_id));
+  global $wpdb;
+  if(!is_array($refund)) return new WP_Error('failed_refund_invalid','The failed Refund object was invalid.');
+  $refund_id=sanitize_text_field($refund['id'] ?? ''); $refund_status=sanitize_key($refund['status'] ?? ''); if($refund_id==='') return new WP_Error('failed_refund_id_missing','The failed Refund ID is missing.');
+  if($this->mrm_refund_effects_status_applied($refund_id,$refund_status)) return true;
+  $lock=$this->mrm_claim_refund_effects_lock($refund_id); if(is_wp_error($lock)) return $lock;
+  try { if($this->mrm_refund_effects_status_applied($refund_id,$refund_status)) return true; $summary=$this->mrm_refund_charge_summary($charge); if(is_wp_error($summary)) return $summary; $pi_id=$this->mrm_stripe_expandable_id($refund['payment_intent'] ?? '');
+    if($pi_id!==''){ $order=$this->get_order_by_pi($pi_id); if(is_array($order) && !empty($order['id'])){ if(!empty($summary['is_full_refund'])){ $new_order_status='refunded'; $new_stripe_status='refunded'; } elseif(!empty($summary['is_partial_refund'])){ $new_order_status='partially_refunded'; $new_stripe_status='partially_refunded'; } else { $new_order_status='paid'; $new_stripe_status='succeeded'; } $this->update_order_status_from_pi($pi_id,$new_order_status,$new_stripe_status,array('mrm_refund_id'=>$refund_id,'mrm_refund_status'=>$refund_status,'mrm_refund_failed_at'=>current_time('mysql'),'mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); $wpdb->update($this->table_sheet_music_access(),array('revoked_at'=>!empty($summary['is_full_refund']) ? current_time('mysql') : null),array('source_id'=>$pi_id)); } }
+    do_action('mrm_payments_hub_refund_failed',$refund,$charge,$summary);
+    $alert_result=$this->mrm_tax_create_alert('', 'refund_failure_recovery_required','refund',0,array('message'=>'Refund '.$refund_id.' entered status '.$refund_status.'. The tax ledger was restored, but order, access, payout, registration, and accounting records require review.','refund_id'=>$refund_id,'payment_intent_id'=>$pi_id,'charge_id'=>sanitize_text_field($charge['id'] ?? ''),'refund_status'=>$refund_status,'failure_reason'=>sanitize_text_field($refund['failure_reason'] ?? ''),'remaining_successful_refund_cents'=>$summary['succeeded_refund_cents'],'charge_amount_cents'=>$summary['charge_amount_cents']),sanitize_key($refund_id)); if(is_wp_error($alert_result)) return $alert_result;
+    $saved=$this->mrm_store_refund_effects_state($refund_id,$refund_status,$summary); if($saved===false) return new WP_Error('refund_effects_state_save_failed','The failed Refund effects state could not be saved.'); return true;
+  } finally { $this->mrm_release_refund_effects_lock($refund_id); }
 }
+
+
 
 private function mrm_tax_schedule_refund_lifecycle_retry($refund_id, $attempt, $message) {
   $refund_id = sanitize_text_field($refund_id); $attempt = absint($attempt);
@@ -4837,7 +4863,7 @@ private function mrm_handle_refund_lifecycle_webhook($refund, $attempt = 0) {
   if ($invoice_id !== '') $tax_result=$this->mrm_tax_sync_subscription_invoice_refunds($invoice_id,$attempt); else { if ($payment_intent_id === '') return $this->mrm_tax_refund_lifecycle_failure($refund_id,$attempt,'Refund '.$refund_id.' has no PaymentIntent or Invoice reference.',array('charge_id'=>$charge_id,'refund_status'=>$status)); $tax_result=$this->mrm_tax_sync_refund_reversal($payment_intent_id,$refund_id,$attempt); }
   if (is_wp_error($tax_result)) return $tax_result;
   $resolved=$this->mrm_tax_resolve_alerts_by_reference('refund_id',$refund_id,array('refund_lifecycle_reconciliation_failed')); if (is_wp_error($resolved)) return $resolved;
-  if ($status === 'succeeded') { $business_result=$this->mrm_apply_successful_refund_business_effects($current,$charge); if (is_wp_error($business_result)) return $business_result; do_action('mrm_payments_hub_refund_succeeded',$current,$charge); return true; }
+  if ($status === 'succeeded') return $this->mrm_apply_successful_refund_business_effects($current,$charge);
   $recovery_result=$this->mrm_apply_failed_refund_recovery($current,$charge); if (is_wp_error($recovery_result)) return $recovery_result; return true;
 }
 
@@ -5279,6 +5305,28 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     }
   }
 
+  private function mrm_tax_sync_managed_subscription_invoice_lifecycle($invoice, $attempt = 0, $subscription = null) {
+    if (!is_array($invoice)) return new WP_Error('subscription_invoice_object_invalid','The Stripe Invoice object was invalid.');
+    $invoice_id=sanitize_text_field($invoice['id'] ?? ''); $subscription_id=$this->mrm_stripe_invoice_subscription_id($invoice);
+    if ($invoice_id==='' || $subscription_id==='') return true;
+    if (!is_array($subscription)) { $subscription=$this->stripe_retrieve_subscription($subscription_id); if (is_wp_error($subscription)) return $subscription; }
+    if (!$this->mrm_is_managed_sheet_music_subscription($subscription)) return true;
+    $configured_price_id=sanitize_text_field($this->subscription_price_id()); $invoice_price_id=sanitize_text_field($this->mrm_stripe_invoice_primary_price_id($invoice));
+    if($configured_price_id==='' || $invoice_price_id==='' || $invoice_price_id!==$configured_price_id) return new WP_Error('subscription_invoice_price_mismatch','Subscription Invoice '.$invoice_id.' does not use the configured Stripe Price.');
+    $configuration=$this->mrm_verify_sheet_music_subscription_tax_configuration($configured_price_id); if(is_wp_error($configuration)) return $configuration;
+    if(empty($subscription['automatic_tax']['enabled'])) return new WP_Error('subscription_invoice_automatic_tax_disabled','Stripe automatic tax is disabled on subscription '.$subscription_id.'.');
+    $tax_problem=$this->mrm_subscription_tax_location_problem($subscription,$invoice); if($tax_problem!==''){ $pause_result=$this->mrm_pause_subscription_for_tax_location($subscription,$invoice); if(is_wp_error($pause_result)) return $pause_result; }
+    $ledger_result=$this->mrm_tax_record_subscription_invoice($invoice);
+    if(is_wp_error($ledger_result)){ if($ledger_result->get_error_code()!=='subscription_invoice_tax_incomplete'){ $alert_result=$this->mrm_tax_create_alert($this->mrm_normalize_state_code($invoice['customer_address']['state'] ?? ''),'subscription_invoice_ledger_failed','invoice',0,array('message'=>$ledger_result->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); if(is_wp_error($alert_result)) return $alert_result; } return $ledger_result; }
+    $adjustment_result=$this->mrm_tax_sync_subscription_invoice_refunds($invoice_id,$attempt); if(is_wp_error($adjustment_result)) return $adjustment_result;
+    $resolved=$this->mrm_tax_resolve_alerts_by_reference('invoice_id',$invoice_id,array('subscription_invoice_tax_failed','subscription_invoice_ledger_failed')); if(is_wp_error($resolved)) return $resolved;
+    return true;
+  }
+
+  private function mrm_handle_invoice_finalized_webhook($invoice) { return $this->mrm_tax_sync_managed_subscription_invoice_lifecycle($invoice,0); }
+  private function mrm_handle_invoice_voided_webhook($invoice) { return $this->mrm_tax_sync_managed_subscription_invoice_lifecycle($invoice,0); }
+  private function mrm_handle_invoice_marked_uncollectible_webhook($invoice) { return $this->mrm_tax_sync_managed_subscription_invoice_lifecycle($invoice,0); }
+
   private function mrm_handle_invoice_paid_webhook($invoice) {
     if(!is_array($invoice)) return new WP_Error('invoice_paid_object_invalid','The invoice.paid event did not contain a valid invoice.');
     $invoice_id=sanitize_text_field($invoice['id'] ?? ''); $subscription_id=$this->mrm_stripe_invoice_subscription_id($invoice); $amount_paid=(int)($invoice['amount_paid'] ?? 0);
@@ -5291,61 +5339,8 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     if($configured_price_id==='' || $invoice_price_id==='' || $invoice_price_id!==$configured_price_id){ $error=new WP_Error('invoice_paid_price_mismatch','Paid subscription invoice '.$invoice_id.' uses Price ID '.($invoice_price_id!==''?$invoice_price_id:'missing').', but the site requires '.($configured_price_id!==''?$configured_price_id:'a configured Price ID').'.'); $this->mrm_tax_create_alert('','subscription_invoice_processing_failed','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
     $configuration=$this->mrm_verify_sheet_music_subscription_tax_configuration($configured_price_id); if(is_wp_error($configuration)){ $error=new WP_Error('invoice_paid_tax_configuration_invalid',$configuration->get_error_message()); $this->mrm_tax_create_alert('','subscription_tax_configuration_invalid','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
     if(empty($subscription['automatic_tax']['enabled'])){ $error=new WP_Error('invoice_paid_automatic_tax_disabled','Stripe automatic tax is disabled on subscription '.$subscription_id.'.'); $this->mrm_tax_create_alert('','subscription_tax_configuration_invalid','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
-    $tax_problem=$this->mrm_subscription_tax_location_problem($subscription,$invoice); if($tax_problem!==''){ $pause_result=$this->mrm_pause_subscription_for_tax_location($subscription,$invoice); if(is_wp_error($pause_result)) return $pause_result; }
-    $tax_ledger_result =
-      $this
-        ->mrm_tax_record_subscription_invoice(
-          $invoice
-        );
-
-    if (is_wp_error($tax_ledger_result)) {
-      /*
-       * The tax-recording method already creates the correct
-       * subscription_invoice_tax_failed alert when Stripe Tax is
-       * incomplete. Do not mislabel that as a database-ledger
-       * failure.
-       */
-      if (
-        $tax_ledger_result->get_error_code()
-        !== 'subscription_invoice_tax_incomplete'
-      ) {
-        $state =
-          $this->mrm_normalize_state_code(
-            $invoice[
-              'customer_address'
-            ]['state'] ?? ''
-          );
-
-        $alert_result =
-          $this->mrm_tax_create_alert(
-            $state,
-            'subscription_invoice_ledger_failed',
-            'invoice',
-            0,
-            array(
-              'message' =>
-                'The paid subscription invoice '
-                . $invoice_id
-                . ' could not be written to the state sales ledger: '
-                . $tax_ledger_result
-                  ->get_error_message(),
-
-              'invoice_id' =>
-                $invoice_id,
-
-              'subscription_id' =>
-                $subscription_id,
-            ),
-            sanitize_key($invoice_id)
-          );
-
-        if (is_wp_error($alert_result)) {
-          return $alert_result;
-        }
-      }
-
-      return $tax_ledger_result;
-    }
+    $lifecycle_result=$this->mrm_tax_sync_managed_subscription_invoice_lifecycle($invoice,0,$subscription);
+    if (is_wp_error($lifecycle_result)) return $lifecycle_result;
     $local_sync=$this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription,sanitize_email($subscription['metadata']['mrm_customer_email'] ?? '')); if(is_wp_error($local_sync)) return $local_sync;
     $local=$this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id); if(!is_array($local)){ $error=new WP_Error('invoice_paid_local_subscription_missing','Paid subscription invoice '.$invoice_id.' was recorded, but subscription '.$subscription_id.' is missing from the local subscription registry.'); $this->mrm_tax_create_alert('','subscription_invoice_processing_failed','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
     if(!empty($local['email_plain'])){ $invoice_created_ts=!empty($invoice['created'])?(int)$invoice['created']:time(); $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'],$invoice_created_ts,'stripe_subscription_invoice',$invoice_id); $this->mrm_create_composer_payout_for_subscription_invoice($invoice,$local); $sent=$this->mrm_send_sheet_music_subscription_charge_email($local,$invoice); $this->stripe_debug_log('subscription recurring charge email result',array('invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id,'email'=>(string)($local['email_plain'] ?? ''),'sent'=>$sent?'yes':'no')); }
@@ -5414,85 +5409,31 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     return sanitize_key($metadata['mrm_product_type'] ?? 'unknown');
   }
 
-  private function mrm_tax_upsert_ledger_row(
-    $data
-  ) {
+  private function mrm_tax_upsert_ledger_row($data) {
     global $wpdb;
-
     $table = $this->table_tax_sales_ledger();
     $external_id = sanitize_text_field($data['external_id'] ?? '');
-
-    if ($external_id === '') {
-      return new WP_Error('tax_ledger_id_missing', 'Missing tax-ledger external ID.');
-    }
-
-    /*
-     * created_at and updated_at remain WordPress-local
-     * administrative timestamps. occurred_at is always UTC.
-     */
+    if ($external_id === '') return new WP_Error('tax_ledger_id_missing','Missing tax-ledger external ID.');
+    $wpdb->last_error = '';
+    $existing = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE external_id = %s LIMIT 1", $external_id), ARRAY_A);
+    if ($wpdb->last_error !== '') return new WP_Error('tax_ledger_lookup_failed', $wpdb->last_error);
     $now = current_time('mysql');
     $occurred_at = sanitize_text_field($data['occurred_at'] ?? '');
-
-    if ($occurred_at === '') {
-      $occurred_at = $this->mrm_tax_utc_mysql_from_timestamp();
-    }
-
-    $row = array(
-      'source_type' => sanitize_key($data['source_type'] ?? 'payment_intent'),
-      'source_id' => absint($data['source_id'] ?? 0),
-      'payment_intent_id' => sanitize_text_field($data['payment_intent_id'] ?? ''),
-      'invoice_id' => sanitize_text_field($data['invoice_id'] ?? ''),
-      'customer_state' => $this->mrm_normalize_state_code($data['customer_state'] ?? ''),
-      'customer_country' => strtoupper(sanitize_text_field($data['customer_country'] ?? 'US')),
-      'product_type' => sanitize_key($data['product_type'] ?? 'unknown'),
-      'threshold_category' => sanitize_key($data['threshold_category'] ?? 'other'),
-      'sales_channel' => sanitize_key($data['sales_channel'] ?? 'direct'),
-      'gross_sales_cents' => (int)($data['gross_sales_cents'] ?? 0),
-      'retail_sales_cents' => (int)($data['retail_sales_cents'] ?? $data['gross_sales_cents'] ?? 0),
-      'taxable_sales_cents' => (int)($data['taxable_sales_cents'] ?? 0),
-      'tax_cents' => (int)($data['tax_cents'] ?? 0),
-      'refunded_sales_cents' => (int)($data['refunded_sales_cents'] ?? 0),
-      'refunded_tax_cents' => (int)($data['refunded_tax_cents'] ?? 0),
-      'transaction_count' => (int)($data['transaction_count'] ?? 1),
-      'currency' => sanitize_key($data['currency'] ?? 'usd'),
-      'tax_code' => sanitize_text_field($data['tax_code'] ?? ''),
-      'taxability_reason' => sanitize_key($data['taxability_reason'] ?? ''),
-      'tax_calculation_id' => sanitize_text_field($data['tax_calculation_id'] ?? ''),
-      'tax_association_id' => sanitize_text_field($data['tax_association_id'] ?? ''),
-      'tax_transaction_id' => sanitize_text_field($data['tax_transaction_id'] ?? ''),
-      'stripe_tax_line_item_id' => sanitize_text_field($data['stripe_tax_line_item_id'] ?? ''),
-      'tax_reversals_json' => wp_json_encode($data['tax_reversals'] ?? array()),
-      'calculation_line_items_json' => wp_json_encode($data['calculation_line_items'] ?? array()),
-      'last_association_sync_at' => $now,
-      'association_error' => sanitize_textarea_field($data['association_error'] ?? ''),
-      'tax_transaction_status' => sanitize_key($data['tax_transaction_status'] ?? 'pending'),
-      'occurred_at' => $occurred_at,
-      'metadata_json' => wp_json_encode($data['metadata'] ?? array()),
-      'updated_at' => $now,
-    );
-
-    $wpdb->last_error = '';
-    $existing_id = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE external_id = %s LIMIT 1", $external_id));
-    if ($wpdb->last_error !== '') return new WP_Error('tax_ledger_lookup_failed', $wpdb->last_error);
-
-    if ($existing_id) {
-      $wpdb->last_error = '';
-      $updated = $wpdb->update($table, $row, array('id' => absint($existing_id)));
-      if ($updated === false || $wpdb->last_error !== '') {
-        return new WP_Error('tax_ledger_update_failed', $wpdb->last_error ?: 'The tax-ledger row could not be updated.');
-      }
-      return absint($existing_id);
-    }
-
-    $row['external_id'] = $external_id;
-    $row['created_at'] = $now;
-    $wpdb->last_error = '';
-    $inserted = $wpdb->insert($table, $row);
-    if ($inserted === false || $wpdb->last_error !== '') {
-      return new WP_Error('tax_ledger_insert_failed', $wpdb->last_error ?: 'The tax-ledger row could not be inserted.');
-    }
-    return absint($wpdb->insert_id);
+    if ($occurred_at === '') $occurred_at = $this->mrm_tax_utc_mysql_from_timestamp();
+    $incoming_metadata = is_array($data['metadata'] ?? null) ? $data['metadata'] : array();
+    $existing_metadata = array();
+    if (is_array($existing)) { $existing_metadata = json_decode((string)($existing['metadata_json'] ?? ''), true); if (!is_array($existing_metadata)) $existing_metadata = array(); }
+    $merged_metadata = array_replace_recursive($existing_metadata, $incoming_metadata);
+    $refunded_sales_cents = array_key_exists('refunded_sales_cents', $data) ? (int)$data['refunded_sales_cents'] : (is_array($existing) ? (int)($existing['refunded_sales_cents'] ?? 0) : 0);
+    $refunded_tax_cents = array_key_exists('refunded_tax_cents', $data) ? (int)$data['refunded_tax_cents'] : (is_array($existing) ? (int)($existing['refunded_tax_cents'] ?? 0) : 0);
+    if (array_key_exists('tax_reversals', $data)) $tax_reversals_json = wp_json_encode($data['tax_reversals']); elseif (is_array($existing)) $tax_reversals_json = (string)($existing['tax_reversals_json'] ?? '[]'); else $tax_reversals_json = '[]';
+    if (array_key_exists('calculation_line_items', $data)) $calculation_line_items_json = wp_json_encode($data['calculation_line_items']); elseif (is_array($existing)) $calculation_line_items_json = (string)($existing['calculation_line_items_json'] ?? '[]'); else $calculation_line_items_json = '[]';
+    $row = array('source_type'=>sanitize_key($data['source_type'] ?? 'payment_intent'),'source_id'=>absint($data['source_id'] ?? 0),'payment_intent_id'=>sanitize_text_field($data['payment_intent_id'] ?? ''),'invoice_id'=>sanitize_text_field($data['invoice_id'] ?? ''),'customer_state'=>$this->mrm_normalize_state_code($data['customer_state'] ?? ''),'customer_country'=>strtoupper(sanitize_text_field($data['customer_country'] ?? 'US')),'product_type'=>sanitize_key($data['product_type'] ?? 'unknown'),'threshold_category'=>sanitize_key($data['threshold_category'] ?? 'other'),'sales_channel'=>sanitize_key($data['sales_channel'] ?? 'direct'),'gross_sales_cents'=>(int)($data['gross_sales_cents'] ?? 0),'retail_sales_cents'=>(int)($data['retail_sales_cents'] ?? ($data['gross_sales_cents'] ?? 0)),'taxable_sales_cents'=>(int)($data['taxable_sales_cents'] ?? 0),'tax_cents'=>(int)($data['tax_cents'] ?? 0),'refunded_sales_cents'=>max(0,$refunded_sales_cents),'refunded_tax_cents'=>max(0,$refunded_tax_cents),'transaction_count'=>(int)($data['transaction_count'] ?? 1),'currency'=>sanitize_key($data['currency'] ?? 'usd'),'tax_code'=>sanitize_text_field($data['tax_code'] ?? ''),'taxability_reason'=>sanitize_key($data['taxability_reason'] ?? ''),'tax_calculation_id'=>sanitize_text_field($data['tax_calculation_id'] ?? ''),'tax_association_id'=>sanitize_text_field($data['tax_association_id'] ?? ''),'tax_transaction_id'=>sanitize_text_field($data['tax_transaction_id'] ?? ''),'stripe_tax_line_item_id'=>sanitize_text_field($data['stripe_tax_line_item_id'] ?? ''),'tax_reversals_json'=>$tax_reversals_json,'calculation_line_items_json'=>$calculation_line_items_json,'last_association_sync_at'=>$now,'association_error'=>sanitize_textarea_field($data['association_error'] ?? ''),'tax_transaction_status'=>sanitize_key($data['tax_transaction_status'] ?? 'pending'),'occurred_at'=>$occurred_at,'metadata_json'=>wp_json_encode($merged_metadata),'updated_at'=>$now);
+    if (is_array($existing)) { $wpdb->last_error=''; $updated=$wpdb->update($table,$row,array('id'=>absint($existing['id']))); if ($updated===false || $wpdb->last_error!=='') return new WP_Error('tax_ledger_update_failed',$wpdb->last_error ?: 'The tax-ledger row could not be updated.'); return absint($existing['id']); }
+    $row['external_id']=$external_id; $row['created_at']=$now; $wpdb->last_error=''; $inserted=$wpdb->insert($table,$row); if ($inserted===false || $wpdb->last_error!=='') return new WP_Error('tax_ledger_insert_failed',$wpdb->last_error ?: 'The tax-ledger row could not be inserted.'); return absint($wpdb->insert_id);
   }
+
+
 
   private function mrm_tax_schedule_checked_retry(
   $hook,
@@ -5725,6 +5666,11 @@ private function mrm_tax_retry_or_alert_payment_intent(
       );
     }
 
+    $finalized_at = absint($invoice['status_transitions']['finalized_at'] ?? 0);
+    if ($finalized_at <= 0) {
+      return new WP_Error('subscription_invoice_finalized_at_missing','The Stripe subscription Invoice has no finalization timestamp.');
+    }
+
     $subscription_id =
       $this->mrm_stripe_invoice_subscription_id(
         $invoice
@@ -5802,7 +5748,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
     if ($state === '') {
       return new WP_Error(
         'subscription_invoice_state_missing',
-        'The paid subscription invoice has no customer state.'
+        'The finalized subscription Invoice has no customer state.'
       );
     }
 
@@ -5847,6 +5793,11 @@ private function mrm_tax_retry_or_alert_payment_intent(
         ->mrm_tax_invoice_taxable_sales_cents(
           $invoice
         );
+
+    $invoice_metadata = is_array($invoice['metadata'] ?? null) ? $invoice['metadata'] : array();
+    $invoice_metadata['mrm_invoice_status'] = sanitize_key($invoice['status'] ?? '');
+    $invoice_metadata['mrm_invoice_finalized_at'] = $finalized_at;
+    $invoice_metadata['mrm_subscription_id'] = $subscription_id;
 
     $row_id =
       $this->mrm_tax_upsert_ledger_row(
@@ -5916,27 +5867,13 @@ private function mrm_tax_retry_or_alert_payment_intent(
             'complete',
 
           'occurred_at' =>
-            !empty(
-              $invoice[
-                'status_transitions'
-              ]['paid_at']
-            )
-              ? $this
-                ->mrm_tax_utc_mysql_from_timestamp(
-                  (int)$invoice[
-                    'status_transitions'
-                  ]['paid_at']
-                )
-              : $this
-                ->mrm_tax_utc_mysql_from_timestamp(),
+            $this
+              ->mrm_tax_utc_mysql_from_timestamp(
+                $finalized_at
+              ),
 
           'metadata' =>
-            is_array(
-              $invoice['metadata']
-                ?? null
-            )
-              ? $invoice['metadata']
-              : array(),
+            $invoice_metadata,
         )
       );
 
@@ -6110,34 +6047,45 @@ private function mrm_tax_retry_or_alert_payment_intent(
   }
 
   private function mrm_tax_sync_subscription_invoice_refunds($invoice_id, $attempt = 0) {
-    global $wpdb; $invoice_id=sanitize_text_field($invoice_id); $attempt=absint($attempt);
-    if ($invoice_id === '') return new WP_Error('missing_subscription_invoice','The subscription Invoice ID is missing.');
-    $invoice=$this->stripe_api_request('GET','/v1/invoices/'.rawurlencode($invoice_id)); if (is_wp_error($invoice)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The subscription Invoice could not be retrieved: '.$invoice->get_error_message());
-    $charge_id=$this->mrm_stripe_invoice_charge_id($invoice); if (is_wp_error($charge_id)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The subscription Invoice Charge could not be identified: '.$charge_id->get_error_message());
-    $external_id='invoice:'.$invoice_id.':sheet_music_subscription'; $wpdb->last_error=''; $ledger_row=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_sales_ledger()} WHERE external_id = %s LIMIT 1",$external_id),ARRAY_A);
-    if ($wpdb->last_error !== '' || !is_array($ledger_row)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,$wpdb->last_error !== '' ? 'The local subscription Invoice ledger could not be loaded: '.$wpdb->last_error : 'The local subscription Invoice tax-ledger row does not exist yet.');
-    $ledger_metadata=json_decode((string)($ledger_row['metadata_json'] ?? ''),true); if (!is_array($ledger_metadata)) $ledger_metadata=array(); $manual_direct_refunds=is_array($ledger_metadata['manual_direct_refunds'] ?? null) ? $ledger_metadata['manual_direct_refunds'] : array();
-    $credit_notes=$this->mrm_tax_list_all_credit_notes_for_invoice($invoice_id); if (is_wp_error($credit_notes)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'Stripe Credit Notes could not be retrieved: '.$credit_notes->get_error_message());
-    $refunds=$this->mrm_stripe_list_all_refunds_for_charge($charge_id); if (is_wp_error($refunds)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'Direct Stripe refunds could not be retrieved: '.$refunds->get_error_message());
+    global $wpdb;
+    $invoice_id=sanitize_text_field($invoice_id); $attempt=absint($attempt);
+    if ($invoice_id==='') return new WP_Error('missing_subscription_invoice','The subscription Invoice ID is missing.');
+    $invoice=$this->stripe_api_request('GET','/v1/invoices/'.rawurlencode($invoice_id));
+    if (is_wp_error($invoice)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The subscription Invoice could not be retrieved: '.$invoice->get_error_message());
+    $invoice_status=sanitize_key($invoice['status'] ?? ''); $external_id='invoice:'.$invoice_id.':sheet_music_subscription';
+    $wpdb->last_error=''; $ledger_row=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_sales_ledger()} WHERE external_id = %s LIMIT 1",$external_id),ARRAY_A);
+    if ($wpdb->last_error!=='' || !is_array($ledger_row)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,$wpdb->last_error!=='' ? 'The local subscription Invoice ledger could not be loaded: '.$wpdb->last_error : 'The local subscription Invoice tax-ledger row does not exist yet.');
+    $ledger_metadata=json_decode((string)($ledger_row['metadata_json'] ?? ''),true); if(!is_array($ledger_metadata)) $ledger_metadata=array();
+    $manual_direct_refunds=is_array($ledger_metadata['manual_direct_refunds'] ?? null) ? $ledger_metadata['manual_direct_refunds'] : array();
+    $original_sales=max(0,(int)($ledger_row['gross_sales_cents'] ?? 0)); $original_tax=max(0,(int)($ledger_row['tax_cents'] ?? 0));
+    $credit_notes=$this->mrm_tax_list_all_credit_notes_for_invoice($invoice_id); if(is_wp_error($credit_notes)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'Stripe Credit Notes could not be retrieved: '.$credit_notes->get_error_message());
     $refunded_sales_cents=0; $refunded_tax_cents=0; $reversal_ids=array(); $credit_note_refund_ids=array(); $resolved_manual_refund_ids=array();
-    foreach ($credit_notes as $credit_note) { if (sanitize_key($credit_note['status'] ?? '') !== 'issued') continue; $credit_note_id=sanitize_text_field($credit_note['id'] ?? ''); if ($credit_note_id !== '') $reversal_ids[]=$credit_note_id; $refunded_sales_cents += absint($credit_note['total_excluding_tax'] ?? 0); foreach ((array)($credit_note['total_taxes'] ?? array()) as $tax) $refunded_tax_cents += absint($tax['amount'] ?? 0); foreach ((array)($credit_note['refunds'] ?? array()) as $linked_refund) { $linked_refund_id=is_array($linked_refund['refund'] ?? null) ? sanitize_text_field($linked_refund['refund']['id'] ?? '') : sanitize_text_field($linked_refund['refund'] ?? ''); if ($linked_refund_id !== '') $credit_note_refund_ids[]=$linked_refund_id; } }
-    foreach ($refunds as $refund) { $refund_id=sanitize_text_field($refund['id'] ?? ''); if ($refund_id === '') continue; $refund_status=sanitize_key($refund['status'] ?? '');
-      if (in_array($refund_status,array('pending','requires_action'),true)) return $this->mrm_tax_refund_lifecycle_failure($refund_id,$attempt,'Subscription refund '.$refund_id.' has not reached a final status. Current status: '.$refund_status.'.',array('invoice_id'=>$invoice_id,'charge_id'=>$charge_id,'refund_status'=>$refund_status));
-      if (in_array($refund_status,array('failed','canceled'),true)) continue;
-      if ($refund_status !== 'succeeded') return $this->mrm_tax_refund_lifecycle_failure($refund_id,$attempt,'Subscription refund '.$refund_id.' has an unsupported status: '.($refund_status!==''?$refund_status:'unknown').'.',array('invoice_id'=>$invoice_id,'charge_id'=>$charge_id));
-      if (in_array($refund_id,$credit_note_refund_ids,true)) continue;
-      $manual=is_array($manual_direct_refunds[$refund_id] ?? null) ? $manual_direct_refunds[$refund_id] : array(); $manual_sales=isset($manual['sales_cents']) ? (int)$manual['sales_cents'] : -1; $manual_tax=isset($manual['tax_cents']) ? (int)$manual['tax_cents'] : -1; $refund_amount=absint($refund['amount'] ?? 0);
-      if ($manual_sales < 0 || $manual_tax < 0 || ($manual_sales + $manual_tax) !== $refund_amount) { $message='Subscription Invoice refund '.$refund_id.' was created directly without an exact issued Credit Note relationship. Enter the authoritative refunded pretax and tax amounts before the local ledger can be reconciled.'; $alert_result=$this->mrm_tax_create_alert('', 'subscription_direct_refund_review_required', 'refund', 0, array('message'=>$message,'refund_id'=>$refund_id,'invoice_id'=>$invoice_id,'charge_id'=>$charge_id,'refund_amount_cents'=>$refund_amount,'refund_status'=>$refund_status), sanitize_key($refund_id)); if (is_wp_error($alert_result)) return $alert_result; return new WP_Error('subscription_direct_refund_review_required',$message); }
-      $refunded_sales_cents += $manual_sales; $refunded_tax_cents += $manual_tax; $reversal_ids[]=$refund_id; $resolved_manual_refund_ids[]=$refund_id;
+    if (in_array($invoice_status,array('void','uncollectible'),true)) { $refunded_sales_cents=$original_sales; $refunded_tax_cents=$original_tax; $reversal_ids[]='invoice_status:'.$invoice_status; }
+    else {
+      foreach($credit_notes as $credit_note){ if(sanitize_key($credit_note['status'] ?? '')!=='issued') continue; $credit_note_id=sanitize_text_field($credit_note['id'] ?? ''); if($credit_note_id!=='') $reversal_ids[]=$credit_note_id; $refunded_sales_cents+=absint($credit_note['total_excluding_tax'] ?? 0); foreach((array)($credit_note['total_taxes'] ?? array()) as $tax) $refunded_tax_cents+=absint($tax['amount'] ?? 0); foreach((array)($credit_note['refunds'] ?? array()) as $linked_refund){ $linked_refund_id=is_array($linked_refund['refund'] ?? null) ? sanitize_text_field($linked_refund['refund']['id'] ?? '') : sanitize_text_field($linked_refund['refund'] ?? ''); if($linked_refund_id!=='') $credit_note_refund_ids[]=$linked_refund_id; } }
+      $charge_id=''; $charge_result=$this->mrm_stripe_invoice_charge_id($invoice); if(!is_wp_error($charge_result)) $charge_id=sanitize_text_field($charge_result); elseif($invoice_status==='paid' || absint($invoice['amount_paid'] ?? 0)>0) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'A paid subscription Invoice has no retrievable Charge: '.$charge_result->get_error_message());
+      $refunds=array(); if($charge_id!==''){ $refunds=$this->mrm_stripe_list_all_refunds_for_charge($charge_id); if(is_wp_error($refunds)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'Direct Stripe refunds could not be retrieved: '.$refunds->get_error_message()); }
+      foreach((array)$refunds as $refund){ $refund_id=sanitize_text_field($refund['id'] ?? ''); if($refund_id==='') continue; $refund_status=sanitize_key($refund['status'] ?? '');
+        if(in_array($refund_status,array('pending','requires_action'),true)) return $this->mrm_tax_refund_lifecycle_failure($refund_id,$attempt,'Subscription refund '.$refund_id.' has not reached a final status. Current status: '.$refund_status.'.',array('invoice_id'=>$invoice_id,'charge_id'=>$charge_id,'refund_status'=>$refund_status));
+        if(in_array($refund_status,array('failed','canceled'),true)) continue;
+        if($refund_status!=='succeeded') return $this->mrm_tax_refund_lifecycle_failure($refund_id,$attempt,'Subscription refund '.$refund_id.' has an unsupported status: '.($refund_status!==''?$refund_status:'unknown').'.',array('invoice_id'=>$invoice_id,'charge_id'=>$charge_id));
+        if(in_array($refund_id,$credit_note_refund_ids,true)) continue;
+        $manual=is_array($manual_direct_refunds[$refund_id] ?? null) ? $manual_direct_refunds[$refund_id] : array(); $manual_sales=isset($manual['sales_cents'])?(int)$manual['sales_cents']:-1; $manual_tax=isset($manual['tax_cents'])?(int)$manual['tax_cents']:-1; $refund_amount=absint($refund['amount'] ?? 0);
+        if($manual_sales<0 || $manual_tax<0 || ($manual_sales+$manual_tax)!==$refund_amount){ $message='Subscription Invoice refund '.$refund_id.' was created directly without an exact issued Credit Note relationship. Enter the authoritative refunded pretax and tax amounts before the local ledger can be reconciled.'; $alert_result=$this->mrm_tax_create_alert('', 'subscription_direct_refund_review_required','refund',0,array('message'=>$message,'refund_id'=>$refund_id,'invoice_id'=>$invoice_id,'charge_id'=>$charge_id,'refund_amount_cents'=>$refund_amount,'refund_status'=>$refund_status),sanitize_key($refund_id)); if(is_wp_error($alert_result)) return $alert_result; return new WP_Error('subscription_direct_refund_review_required',$message); }
+        $refunded_sales_cents+=$manual_sales; $refunded_tax_cents+=$manual_tax; $reversal_ids[]=$refund_id; $resolved_manual_refund_ids[]=$refund_id;
+      }
     }
-    $original_sales=max(0,(int)($ledger_row['gross_sales_cents'] ?? 0)); $original_tax=max(0,(int)($ledger_row['tax_cents'] ?? 0)); if ($refunded_sales_cents > $original_sales || $refunded_tax_cents > $original_tax) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The combined subscription refund sales or tax amounts exceed the original Invoice ledger amounts.');
-    $wpdb->last_error=''; $updated=$wpdb->update($this->table_tax_sales_ledger(), array('refunded_sales_cents'=>$refunded_sales_cents,'refunded_tax_cents'=>$refunded_tax_cents,'tax_reversals_json'=>wp_json_encode(array_values(array_unique(array_filter($reversal_ids)))),'updated_at'=>current_time('mysql')), array('external_id'=>$external_id));
-    if ($updated === false || $wpdb->last_error !== '') return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The local subscription refund ledger could not be updated: '.($wpdb->last_error ?: 'Unknown database error.'));
-    $threshold_result=$this->mrm_tax_recompute_all_thresholds(); if (is_wp_error($threshold_result)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The refund ledger was updated, but state threshold recomputation failed: '.$threshold_result->get_error_message());
-    $resolved=$this->mrm_tax_resolve_alerts_by_reference('invoice_id',$invoice_id,array('subscription_credit_note_sync_failed')); if (is_wp_error($resolved)) return $resolved;
-    foreach (array_values(array_unique($resolved_manual_refund_ids)) as $resolved_refund_id) { $resolved=$this->mrm_tax_resolve_alerts_by_reference('refund_id',$resolved_refund_id,array('subscription_direct_refund_review_required','refund_lifecycle_reconciliation_failed')); if (is_wp_error($resolved)) return $resolved; }
+    if($refunded_sales_cents>$original_sales || $refunded_tax_cents>$original_tax) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The combined subscription adjustments exceed the original Invoice ledger amounts.');
+    $ledger_metadata['mrm_invoice_status']=$invoice_status; $ledger_metadata['mrm_invoice_adjustments_synced_at']=current_time('mysql');
+    $wpdb->last_error=''; $updated=$wpdb->update($this->table_tax_sales_ledger(),array('refunded_sales_cents'=>max(0,$refunded_sales_cents),'refunded_tax_cents'=>max(0,$refunded_tax_cents),'tax_reversals_json'=>wp_json_encode(array_values(array_unique(array_filter($reversal_ids)))),'metadata_json'=>wp_json_encode($ledger_metadata),'updated_at'=>current_time('mysql')),array('external_id'=>$external_id));
+    if($updated===false || $wpdb->last_error!=='') return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The local subscription adjustment ledger could not be updated: '.($wpdb->last_error ?: 'Unknown database error.'));
+    $threshold_result=$this->mrm_tax_recompute_all_thresholds(); if(is_wp_error($threshold_result)) return $this->mrm_tax_subscription_invoice_refund_failure($invoice_id,$attempt,'The Invoice ledger was updated, but state threshold recomputation failed: '.$threshold_result->get_error_message());
+    $resolved=$this->mrm_tax_resolve_alerts_by_reference('invoice_id',$invoice_id,array('subscription_credit_note_sync_failed')); if(is_wp_error($resolved)) return $resolved;
+    foreach(array_values(array_unique($resolved_manual_refund_ids)) as $resolved_refund_id){ $resolved=$this->mrm_tax_resolve_alerts_by_reference('refund_id',$resolved_refund_id,array('subscription_direct_refund_review_required','refund_lifecycle_reconciliation_failed')); if(is_wp_error($resolved)) return $resolved; }
     return true;
   }
+
+
 
 
   private function stripe_retrieve_price($price_id) { $price_id = sanitize_text_field($price_id); if ($price_id === '') return new WP_Error('missing_price_id', 'Missing Stripe Price ID.'); return $this->stripe_api_request('GET', '/v1/prices/' . rawurlencode($price_id)); }
@@ -6648,11 +6596,6 @@ private function mrm_tax_retry_or_alert_payment_intent(
       return false;
     }
 
-    $this->mrm_void_standard_payouts_for_refunded_order(
-      $order_id,
-      $pi_id,
-      'refund_requested_by_site'
-    );
 
     $this->update_order_status_from_pi($pi_id, 'refund_pending', 'refund_pending', array(
       'mrm_refund_requested_at' => current_time('mysql'),
@@ -6689,11 +6632,6 @@ private function mrm_tax_retry_or_alert_payment_intent(
       return false;
     }
 
-    $this->mrm_void_standard_payouts_for_refunded_order(
-      $order_id,
-      $pi_id,
-      'partial_refund_requested_by_site'
-    );
 
     $this->update_order_status_from_pi($pi_id, $status, $status, array(
       'mrm_partial_refund_requested_at' => current_time('mysql'),
@@ -11307,6 +11245,18 @@ private function charge_and_unlock_autopay($data) {
 
       case 'invoice.finalization_failed':
         $required_processing_result = $this->mrm_handle_invoice_finalization_failed_webhook($object);
+        break;
+
+      case 'invoice.finalized':
+        $required_processing_result = $this->mrm_handle_invoice_finalized_webhook($object);
+        break;
+
+      case 'invoice.voided':
+        $required_processing_result = $this->mrm_handle_invoice_voided_webhook($object);
+        break;
+
+      case 'invoice.marked_uncollectible':
+        $required_processing_result = $this->mrm_handle_invoice_marked_uncollectible_webhook($object);
         break;
 
       case 'invoice.paid':
@@ -17718,6 +17668,7 @@ public function handle_marketing_resubscribe() {
       'refund_tax_reversal_unresolved',
       'refund_lifecycle_reconciliation_failed',
       'refund_failure_recovery_required',
+      'partial_refund_business_review_required',
       'subscription_direct_refund_review_required',
       'subscription_invoice_ledger_failed',
       'subscription_invoice_tax_failed',
@@ -18169,7 +18120,7 @@ MRM_TAX_RULES;
 
 
 
-  public function handle_tax_reconcile_invoice() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_reconcile_invoice','mrm_tax_reconcile_invoice_nonce'); $invoice_id=sanitize_text_field(wp_unslash($_POST['invoice_id'] ?? '')); $url=admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG); if(!preg_match('/^in_[A-Za-z0-9_]+$/',$invoice_id)){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode('The Stripe Invoice ID was invalid.'),$url)); exit; } $invoice=$this->stripe_api_request('GET','/v1/invoices/'.rawurlencode($invoice_id)); if(is_wp_error($invoice)){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode($invoice->get_error_message()),$url)); exit; } $status=sanitize_key($invoice['automatic_tax']['status'] ?? ''); if($status!=='complete'){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode('Invoice '.$invoice_id.' cannot be reconciled because Stripe automatic tax is '.($status!==''?$status:'unknown').'.'),$url)); exit; } $ledger=$this->mrm_tax_record_subscription_invoice($invoice); if(is_wp_error($ledger)){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode($ledger->get_error_message()),$url)); exit; } $refund=$this->mrm_tax_sync_subscription_invoice_refunds($invoice_id,0); if(is_wp_error($refund)){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode($refund->get_error_message()),$url)); exit; } $this->mrm_tax_resolve_alerts_by_reference('invoice_id',$invoice_id,array('subscription_invoice_tax_failed','subscription_invoice_ledger_failed','subscription_credit_note_sync_failed')); wp_safe_redirect(add_query_arg('tax_reconciled',rawurlencode($invoice_id),$url)); exit; }
+  public function handle_tax_reconcile_invoice() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_reconcile_invoice','mrm_tax_reconcile_invoice_nonce'); $invoice_id=sanitize_text_field(wp_unslash($_POST['invoice_id'] ?? '')); $url=admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG); if(!preg_match('/^in_[A-Za-z0-9_]+$/',$invoice_id)){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode('The Stripe Invoice ID was invalid.'),$url)); exit; } $invoice=$this->stripe_api_request('GET','/v1/invoices/'.rawurlencode($invoice_id)); if(is_wp_error($invoice)){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode($invoice->get_error_message()),$url)); exit; } $status=sanitize_key($invoice['automatic_tax']['status'] ?? ''); if($status!=='complete'){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode('Invoice '.$invoice_id.' cannot be reconciled because Stripe automatic tax is '.($status!==''?$status:'unknown').'.'),$url)); exit; } $result=$this->mrm_tax_sync_managed_subscription_invoice_lifecycle($invoice,0); if(is_wp_error($result)){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode($result->get_error_message()),$url)); exit; } $this->mrm_tax_resolve_alerts_by_reference('invoice_id',$invoice_id,array('subscription_invoice_tax_failed','subscription_invoice_ledger_failed','subscription_credit_note_sync_failed')); wp_safe_redirect(add_query_arg('tax_reconciled',rawurlencode($invoice_id),$url)); exit; }
   public function cron_tax_filing_deadline_check() {
     global $wpdb;
     $rows = $wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} WHERE collection_active = 1 OR (stripe_registration_status = 'active' AND stripe_livemode = 1)", ARRAY_A);
@@ -18280,13 +18231,24 @@ MRM_TAX_RULES;
   }
 
   public function handle_tax_resolve_refund_recovery() {
-    if (!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_resolve_refund_recovery','mrm_tax_refund_recovery_nonce'); $url=admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG); $refund_id=sanitize_text_field(wp_unslash($_POST['refund_id'] ?? '')); $notes=sanitize_textarea_field(wp_unslash($_POST['resolution_notes'] ?? '')); $fail=function($message) use ($url){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode($message),$url)); exit; };
-    foreach (array('order_access_reviewed','payout_reviewed','accounting_reviewed','customer_resolution_reviewed') as $confirmation) if (empty($_POST[$confirmation])) $fail('Every failed-refund recovery confirmation must be checked.'); if (!preg_match('/^re_[A-Za-z0-9_]+$/',$refund_id) || $notes === '') $fail('A valid Refund ID and resolution notes are required.');
-    $refund=$this->stripe_retrieve_refund($refund_id); if (is_wp_error($refund)) $fail($refund->get_error_message()); $refund_status=sanitize_key($refund['status'] ?? ''); if (!in_array($refund_status,array('failed','canceled'),true)) $fail('The Refund is not currently failed or canceled.');
-    $payment_intent_id=$this->mrm_stripe_expandable_id($refund['payment_intent'] ?? ''); $charge_id=$this->mrm_stripe_expandable_id($refund['charge'] ?? ''); $invoice_id=''; if ($charge_id !== '') { $charge=$this->stripe_retrieve_charge($charge_id); if (is_wp_error($charge)) $fail($charge->get_error_message()); $invoice_id=$this->mrm_stripe_expandable_id($charge['invoice'] ?? ''); }
-    $tax_result=$invoice_id !== '' ? $this->mrm_tax_sync_subscription_invoice_refunds($invoice_id,0) : $this->mrm_tax_sync_refund_reversal($payment_intent_id,$refund_id,0); if (is_wp_error($tax_result)) $fail('The tax ledger must be reconciled before the recovery alert can be resolved: '.$tax_result->get_error_message());
-    $resolution_result=$this->mrm_tax_resolve_review_alert('refund_failure_recovery_required',$refund_id,array('resolution_notes'=>$notes,'order_access_reviewed'=>true,'payout_reviewed'=>true,'accounting_reviewed'=>true,'customer_resolution_reviewed'=>true,'refund_status'=>$refund_status,'resolved_by_user_id'=>get_current_user_id(),'resolved_at'=>current_time('mysql'))); if (is_wp_error($resolution_result)) $fail($resolution_result->get_error_message()); wp_safe_redirect(add_query_arg('tax_reconciled',rawurlencode($refund_id),$url)); exit;
+    if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_resolve_refund_recovery','mrm_tax_refund_recovery_nonce');
+    $url=admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG); $refund_id=sanitize_text_field(wp_unslash($_POST['refund_id'] ?? '')); $alert_type=sanitize_key(wp_unslash($_POST['alert_type'] ?? 'refund_failure_recovery_required')); $notes=sanitize_textarea_field(wp_unslash($_POST['resolution_notes'] ?? ''));
+    $allowed_alert_types=array('refund_failure_recovery_required','partial_refund_business_review_required');
+    $fail=function($message) use ($url){ wp_safe_redirect(add_query_arg('tax_error',rawurlencode($message),$url)); exit; };
+    if(!in_array($alert_type,$allowed_alert_types,true)) $fail('The refund review type was invalid.');
+    foreach(array('order_access_reviewed','payout_reviewed','accounting_reviewed','customer_resolution_reviewed') as $confirmation) if(empty($_POST[$confirmation])) $fail('Every refund review confirmation must be checked.');
+    if(!preg_match('/^re_[A-Za-z0-9_]+$/',$refund_id) || $notes==='') $fail('A valid Refund ID and resolution notes are required.');
+    $refund=$this->stripe_retrieve_refund($refund_id); if(is_wp_error($refund)) $fail($refund->get_error_message()); $refund_status=sanitize_key($refund['status'] ?? '');
+    if($alert_type==='refund_failure_recovery_required' && !in_array($refund_status,array('failed','canceled'),true)) $fail('The Refund is not currently failed or canceled.');
+    if($alert_type==='partial_refund_business_review_required' && $refund_status!=='succeeded') $fail('The partial Refund is not currently succeeded.');
+    $payment_intent_id=$this->mrm_stripe_expandable_id($refund['payment_intent'] ?? ''); $charge_id=$this->mrm_stripe_expandable_id($refund['charge'] ?? ''); $invoice_id='';
+    if($charge_id!==''){ $charge=$this->stripe_retrieve_charge($charge_id); if(is_wp_error($charge)) $fail($charge->get_error_message()); $invoice_id=$this->mrm_stripe_expandable_id($charge['invoice'] ?? ''); }
+    $tax_result=$invoice_id!=='' ? $this->mrm_tax_sync_subscription_invoice_refunds($invoice_id,0) : $this->mrm_tax_sync_refund_reversal($payment_intent_id,$refund_id,0); if(is_wp_error($tax_result)) $fail('The tax ledger must be reconciled before the review can be resolved: '.$tax_result->get_error_message());
+    $resolution_result=$this->mrm_tax_resolve_review_alert($alert_type,$refund_id,array('resolution_notes'=>$notes,'order_access_reviewed'=>true,'payout_reviewed'=>true,'accounting_reviewed'=>true,'customer_resolution_reviewed'=>true,'refund_status'=>$refund_status,'resolved_by_user_id'=>get_current_user_id(),'resolved_at'=>current_time('mysql'))); if(is_wp_error($resolution_result)) $fail($resolution_result->get_error_message());
+    wp_safe_redirect(add_query_arg('tax_reconciled',rawurlencode($refund_id),$url)); exit;
   }
+
+
 
   public function render_sales_tax_nexus_page() {
     if(!current_user_can('manage_options')) wp_die('You do not have permission to access this page.'); global $wpdb; $this->maybe_install_or_upgrade_db(); $rows=$wpdb->get_results("SELECT * FROM {$this->table_tax_state_status()} ORDER BY state_name ASC",ARRAY_A); $live=$this->mrm_tax_is_live_stripe_key(); $compliance=$this->mrm_tax_get_compliance_settings(); $readiness=$this->mrm_tax_live_checkout_readiness(); $administrative_issues=$this->mrm_tax_administrative_compliance_issues(); $reconciliation_result=$this->mrm_tax_ledger_reconciliation_rows(50); $reconciliation_error=is_wp_error($reconciliation_result)?$reconciliation_result:null; $reconciliation_rows=is_wp_error($reconciliation_result)?array():$reconciliation_result; $critical_alert_result=$this->mrm_tax_critical_open_alerts(50); $critical_alert_error=is_wp_error($critical_alert_result)?$critical_alert_result:null; $critical_alerts=is_wp_error($critical_alert_result)?array():$critical_alert_result; ?>
@@ -18303,7 +18265,7 @@ MRM_TAX_RULES;
       <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_recompute_thresholds','mrm_tax_recompute_nonce'); ?><input type="hidden" name="action" value="mrm_tax_recompute_thresholds"><button class="button">Recompute State Thresholds</button></form>
       <a class="button" href="https://dashboard.stripe.com/tax/locations" target="_blank" rel="noopener">Stripe Tax &gt; Locations</a> <a class="button" href="https://dashboard.stripe.com/tax/registrations" target="_blank" rel="noopener">Stripe Tax &gt; Registrations</a>
       <?php if(!empty($reconciliation_rows)): ?><div style="background:#fff;border:1px solid #d63638;padding:18px;margin:18px 0;"><h2>Tax Transactions Requiring Reconciliation</h2><p>Live checkout remains blocked until these transactions or refund reversals are confirmed.</p><table class="widefat striped"><thead><tr><th>Ledger ID</th><th>Source</th><th>Stripe Reference</th><th>State</th><th>Status</th><th>Error</th><th>Occurred</th><th>Action</th></tr></thead><tbody><?php foreach($reconciliation_rows as $tax_row): ?><tr><td><?php echo esc_html($tax_row['id']); ?></td><td><?php echo esc_html($tax_row['source_type']); ?></td><td><code><?php echo esc_html($tax_row['payment_intent_id'] ?: ($tax_row['invoice_id'] ?: 'Unavailable')); ?></code></td><td><?php echo esc_html($tax_row['customer_state']); ?></td><td><?php echo esc_html($tax_row['tax_transaction_status']); ?></td><td><?php echo esc_html($tax_row['association_error'] ?: 'Missing or incomplete tax reconciliation record'); ?></td><td><?php echo esc_html($tax_row['occurred_at']); ?></td><td><?php if(!empty($tax_row['payment_intent_id'])): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_payment_intent','mrm_tax_reconcile_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_payment_intent"><input type="hidden" name="payment_intent_id" value="<?php echo esc_attr($tax_row['payment_intent_id']); ?>"><button type="submit" class="button button-small">Reconcile Payment</button></form><?php elseif(!empty($tax_row['invoice_id'])): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_invoice','mrm_tax_reconcile_invoice_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_invoice"><input type="hidden" name="invoice_id" value="<?php echo esc_attr($tax_row['invoice_id']); ?>"><button type="submit" class="button button-small">Reconcile Invoice</button></form><?php else: ?>Manual Stripe review required<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
-      <?php if(!empty($critical_alerts)): ?><div style="background:#fff;border:1px solid #d63638;padding:18px;margin:18px 0;"><h2>Critical Tax Alerts</h2><p>These alerts must be reconciled before live checkout can report READY.</p><table class="widefat striped"><thead><tr><th>Alert</th><th>State</th><th>Message</th><th>Created</th><th>Action</th></tr></thead><tbody><?php foreach($critical_alerts as $alert): $details=json_decode((string)($alert['details_json'] ?? ''),true); if(!is_array($details)) $details=array(); $payment_intent_id=sanitize_text_field($details['payment_intent_id'] ?? ''); $invoice_id=sanitize_text_field($details['invoice_id'] ?? ''); $refund_id=sanitize_text_field($details['refund_id'] ?? ''); ?><tr><td><?php echo esc_html($alert['alert_type']); ?></td><td><?php echo esc_html($alert['state_code'] ?: '—'); ?></td><td><?php echo esc_html($details['message'] ?? 'Tax review required.'); ?></td><td><?php echo esc_html($alert['created_at']); ?></td><td><?php if($alert['alert_type']==='refund_failure_recovery_required' && $refund_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:300px;"><?php wp_nonce_field('mrm_tax_resolve_refund_recovery','mrm_tax_refund_recovery_nonce'); ?><input type="hidden" name="action" value="mrm_tax_resolve_refund_recovery"><input type="hidden" name="refund_id" value="<?php echo esc_attr($refund_id); ?>"><label><input type="checkbox" name="order_access_reviewed" value="1"> Order and access reviewed</label><br><label><input type="checkbox" name="payout_reviewed" value="1"> Payout records reviewed</label><br><label><input type="checkbox" name="accounting_reviewed" value="1"> Accounting records reviewed</label><br><label><input type="checkbox" name="customer_resolution_reviewed" value="1"> Customer refund resolution reviewed</label><br><textarea name="resolution_notes" required rows="4" placeholder="Describe every correction and follow-up completed."></textarea><br><button class="button button-small" type="submit">Resolve Failed Refund</button></form><?php elseif($alert['alert_type']==='subscription_direct_refund_review_required' && $refund_id !== '' && $invoice_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:300px;"><?php wp_nonce_field('mrm_tax_resolve_direct_invoice_refund','mrm_tax_direct_refund_nonce'); ?><input type="hidden" name="action" value="mrm_tax_resolve_direct_invoice_refund"><input type="hidden" name="refund_id" value="<?php echo esc_attr($refund_id); ?>"><input type="hidden" name="invoice_id" value="<?php echo esc_attr($invoice_id); ?>"><label>Refunded pretax sales</label><br><input type="number" name="refunded_sales" min="0" step="0.01" required placeholder="0.00"><br><label>Refunded tax</label><br><input type="number" name="refunded_tax" min="0" step="0.01" required placeholder="0.00"><br><textarea name="resolution_notes" required rows="4" placeholder="Record the authoritative source used for the pretax and tax split."></textarea><br><button class="button button-small" type="submit">Apply Exact Refund Split</button></form><?php elseif($payment_intent_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_payment_intent','mrm_tax_reconcile_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_payment_intent"><input type="hidden" name="payment_intent_id" value="<?php echo esc_attr($payment_intent_id); ?>"><button class="button button-small" type="submit">Reconcile Payment</button></form><?php elseif($invoice_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_invoice','mrm_tax_reconcile_invoice_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_invoice"><input type="hidden" name="invoice_id" value="<?php echo esc_attr($invoice_id); ?>"><button class="button button-small" type="submit">Reconcile Invoice</button></form><?php else: ?>Manual review required<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
+      <?php if(!empty($critical_alerts)): ?><div style="background:#fff;border:1px solid #d63638;padding:18px;margin:18px 0;"><h2>Critical Tax Alerts</h2><p>These alerts must be reconciled before live checkout can report READY.</p><table class="widefat striped"><thead><tr><th>Alert</th><th>State</th><th>Message</th><th>Created</th><th>Action</th></tr></thead><tbody><?php foreach($critical_alerts as $alert): $details=json_decode((string)($alert['details_json'] ?? ''),true); if(!is_array($details)) $details=array(); $payment_intent_id=sanitize_text_field($details['payment_intent_id'] ?? ''); $invoice_id=sanitize_text_field($details['invoice_id'] ?? ''); $refund_id=sanitize_text_field($details['refund_id'] ?? ''); ?><tr><td><?php echo esc_html($alert['alert_type']); ?></td><td><?php echo esc_html($alert['state_code'] ?: '—'); ?></td><td><?php echo esc_html($details['message'] ?? 'Tax review required.'); ?></td><td><?php echo esc_html($alert['created_at']); ?></td><td><?php if(in_array($alert['alert_type'],array('refund_failure_recovery_required','partial_refund_business_review_required'),true) && $refund_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:300px;"><?php wp_nonce_field('mrm_tax_resolve_refund_recovery','mrm_tax_refund_recovery_nonce'); ?><input type="hidden" name="action" value="mrm_tax_resolve_refund_recovery"><input type="hidden" name="refund_id" value="<?php echo esc_attr($refund_id); ?>"><input type="hidden" name="alert_type" value="<?php echo esc_attr($alert['alert_type']); ?>"><label><input type="checkbox" name="order_access_reviewed" value="1"> Order and access reviewed</label><br><label><input type="checkbox" name="payout_reviewed" value="1"> Payout records reviewed</label><br><label><input type="checkbox" name="accounting_reviewed" value="1"> Accounting records reviewed</label><br><label><input type="checkbox" name="customer_resolution_reviewed" value="1"> Customer refund resolution reviewed</label><br><textarea name="resolution_notes" required rows="4" placeholder="Describe every correction and follow-up completed."></textarea><br><button class="button button-small" type="submit"><?php echo esc_html($alert['alert_type']==='partial_refund_business_review_required' ? 'Resolve Partial Refund Review' : 'Resolve Failed Refund'); ?></button></form><?php elseif($alert['alert_type']==='subscription_direct_refund_review_required' && $refund_id !== '' && $invoice_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:300px;"><?php wp_nonce_field('mrm_tax_resolve_direct_invoice_refund','mrm_tax_direct_refund_nonce'); ?><input type="hidden" name="action" value="mrm_tax_resolve_direct_invoice_refund"><input type="hidden" name="refund_id" value="<?php echo esc_attr($refund_id); ?>"><input type="hidden" name="invoice_id" value="<?php echo esc_attr($invoice_id); ?>"><label>Refunded pretax sales</label><br><input type="number" name="refunded_sales" min="0" step="0.01" required placeholder="0.00"><br><label>Refunded tax</label><br><input type="number" name="refunded_tax" min="0" step="0.01" required placeholder="0.00"><br><textarea name="resolution_notes" required rows="4" placeholder="Record the authoritative source used for the pretax and tax split."></textarea><br><button class="button button-small" type="submit">Apply Exact Refund Split</button></form><?php elseif($payment_intent_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_payment_intent','mrm_tax_reconcile_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_payment_intent"><input type="hidden" name="payment_intent_id" value="<?php echo esc_attr($payment_intent_id); ?>"><button class="button button-small" type="submit">Reconcile Payment</button></form><?php elseif($invoice_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_invoice','mrm_tax_reconcile_invoice_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_invoice"><input type="hidden" name="invoice_id" value="<?php echo esc_attr($invoice_id); ?>"><button class="button button-small" type="submit">Reconcile Invoice</button></form><?php else: ?>Manual review required<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
       <table class="widefat striped" style="margin-top:18px;font-size:12px;"><thead><tr><th>State</th><th>Nexus</th><th>Reason</th><th>Authority</th><th>Stripe</th><th>Active</th><th>Rule</th><th>Period</th><th>Basis</th><th>Sales</th><th>Tx</th><th>Threshold</th><th>Progress</th><th>Estimate</th><th>Stripe Threshold</th><th>Actions</th></tr></thead><tbody>
       <?php foreach($rows as $r): $color='#646970'; if($r['general_sales_tax_status']==='no_general_state_sales_tax') $color='#2271b1'; if($r['general_sales_tax_status']==='local_sales_tax_only') $color='#8c54a1'; if(empty($r['threshold_rule_verified'])) $color='#646970'; if(!empty($r['collection_active'])) $color='#008a20'; if(!empty($r['physical_nexus_flag']) && empty($r['collection_active'])) $color='#b32d2e'; if(($r['estimated_threshold_status']??'')==='threshold_reached' && empty($r['collection_active'])) $color='#b32d2e'; if((float)$r['estimated_threshold_percent']>=90 && (float)$r['estimated_threshold_percent']<100) $color='#d63638'; if((float)$r['estimated_threshold_percent']>=75 && (float)$r['estimated_threshold_percent']<90) $color='#996800'; ?>
         <tr style="border-left:5px solid <?php echo esc_attr($color); ?>"><td><strong><?php echo esc_html($r['state_code']); ?></strong><br><?php echo esc_html($r['state_name']); ?></td><td><?php echo !empty($r['physical_nexus_flag'])?'Yes':'No'; ?></td><td><?php echo nl2br(esc_html($r['physical_nexus_reason'])); ?></td><td><?php echo esc_html($r['authority_registration_status']); ?><br><?php echo esc_html($r['authority_registration_number']); ?></td><td><?php echo esc_html($r['stripe_registration_status']); ?><br><code><?php echo esc_html($r['stripe_registration_id']); ?></code><br><?php echo !empty($r['stripe_livemode'])?'live':'test/none'; ?><br><small>Last successful sync: <?php echo esc_html($r['last_stripe_sync_at'] ?: 'Never'); ?></small></td><td><?php echo !empty($r['collection_active'])?'Yes':'No'; ?></td><td><?php echo esc_html($this->mrm_tax_rule_status_label($r)); ?></td><td><?php echo esc_html($r['measurement_window']); ?></td><td><?php echo esc_html($r['included_sales_basis']); ?></td><td>$<?php echo esc_html(number_format(((int)$r['estimated_sales_cents'])/100,2)); ?></td><td><?php echo esc_html($r['estimated_transaction_count']); ?></td><td><?php echo !empty($r['threshold_amount_cents'])?'$'.esc_html(number_format(((int)$r['threshold_amount_cents'])/100,2)):'—'; ?><br><?php echo !empty($r['threshold_transaction_count'])?esc_html($r['threshold_transaction_count']).' tx':''; ?></td><td><?php echo esc_html($r['estimated_threshold_percent']); ?>%</td><td><?php echo esc_html($r['estimated_threshold_status']); ?></td><td><?php echo esc_html($r['stripe_threshold_status']); ?></td><td>
@@ -23079,7 +23041,7 @@ MRM_TAX_RULES;
     $amount_cents = $this->mrm_money_to_cents($amount_offs[$i] ?? '0.00', 0);
 
     $occurrence_count = max(0, absint($occurrence_counts[$i] ?? 0));
-    
+
     $starts_at = sanitize_text_field((string)($starts[$i] ?? ''));
     if ($starts_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $starts_at)) {
       $starts_at = '';
