@@ -56,6 +56,8 @@ class MRM_Payments_Hub_Single {
   const TAX_RULE_REVIEW_MAX_AGE_DAYS = 365;
   const TAX_LEDGER_RECONCILIATION_GRACE_MINUTES = 30;
   const TAX_SUBSCRIPTION_INVENTORY_MAX_AGE_MINUTES = 30;
+  const TAX_SUBSCRIPTION_CONFIG_PROFILE_VERSION =
+    '2026-07-15-v1';
   const TAX_MONITOR_MENU_SLUG = 'mrm-pay-hub-sales-tax-nexus';
   private const MRM_AUTO_REFUND_MAX_AGE_DAYS = 7;
   private const MRM_PM_LOOKAHEAD_HOURS = 72;
@@ -4943,17 +4945,29 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   private function mrm_tax_current_subscription_inventory_context($force_refresh = false) {
-    $key=trim((string)$this->secret_key()); if($key==='') return new WP_Error('stripe_inventory_key_missing','The Stripe API key is missing.'); $mode=$this->mrm_tax_is_live_stripe_key()?'live':'test'; $credential_fingerprint=hash_hmac('sha256',$key,wp_salt('auth')); $cache_key='mrm_stripe_inventory_context_'.substr($credential_fingerprint,0,20);
-    if(!$force_refresh){ $cached=get_transient($cache_key); if(is_array($cached)&&!empty($cached['account_id'])) return $cached; }
-    $account=$this->stripe_api_request('GET','/v1/account'); if(is_wp_error($account)) return new WP_Error('stripe_inventory_account_failed','The active Stripe account could not be identified: '.$account->get_error_message()); $account_id=sanitize_text_field($account['id'] ?? ''); if($account_id==='') return new WP_Error('stripe_inventory_account_id_missing','Stripe did not return an account ID.'); $price_id=sanitize_text_field($this->subscription_price_id()); if($price_id==='') return new WP_Error('stripe_inventory_price_missing','The configured sheet-music subscription price ID is missing.');
-    $context=array('account_id'=>$account_id,'mode'=>$mode,'credential_fingerprint'=>$credential_fingerprint,'price_id'=>$price_id,'api_version'=>self::STRIPE_CORE_API_VERSION); set_transient($cache_key,$context,10*MINUTE_IN_SECONDS); return $context;
+    $key=trim((string)$this->secret_key()); if($key==='') return new WP_Error('stripe_inventory_key_missing','The Stripe API key is missing.');
+    $mode=$this->mrm_tax_is_live_stripe_key()?'live':'test'; $credential_fingerprint=hash_hmac('sha256',$key,wp_salt('auth')); $price_id=sanitize_text_field($this->subscription_price_id());
+    if($price_id==='') return new WP_Error('stripe_inventory_price_missing','The configured sheet-music subscription Price ID is missing.');
+    $expected_tax_code=$this->mrm_expected_subscription_tax_code(); if($expected_tax_code==='') return new WP_Error('stripe_inventory_tax_model_missing','The sheet-music subscription tax model is invalid.');
+    $cache_material=implode('|',array($credential_fingerprint,$mode,$price_id,self::STRIPE_CORE_API_VERSION,self::TAX_SUBSCRIPTION_CONFIG_PROFILE_VERSION,$expected_tax_code)); $cache_key='mrm_stripe_inventory_context_'.substr(hash('sha256',$cache_material),0,32);
+    if(!$force_refresh){ $cached=get_transient($cache_key); if(is_array($cached) && !empty($cached['account_id']) && !empty($cached['configuration_fingerprint'])) return $cached; }
+    $account=$this->stripe_api_request('GET','/v1/account'); if(is_wp_error($account)) return new WP_Error('stripe_inventory_account_failed','The active Stripe account could not be identified: '.$account->get_error_message());
+    $account_id=sanitize_text_field($account['id'] ?? ''); if($account_id==='') return new WP_Error('stripe_inventory_account_id_missing','Stripe did not return an account ID.');
+    $configuration=$this->mrm_verify_sheet_music_subscription_tax_configuration($price_id); if(is_wp_error($configuration)) return new WP_Error('subscription_tax_configuration_invalid',$configuration->get_error_message());
+    $profile=is_array($configuration['profile'] ?? null)?$configuration['profile']:array(); $configuration_fingerprint=sanitize_text_field($configuration['configuration_fingerprint'] ?? '');
+    if(empty($profile) || $configuration_fingerprint==='') return new WP_Error('subscription_tax_configuration_profile_missing','The Stripe subscription tax-configuration profile could not be created.');
+    $context=array('account_id'=>$account_id,'mode'=>$mode,'credential_fingerprint'=>$credential_fingerprint,'price_id'=>$price_id,'product_id'=>sanitize_text_field($profile['product_id'] ?? ''),'expected_tax_code'=>sanitize_text_field($profile['expected_tax_code'] ?? ''),'actual_tax_code'=>sanitize_text_field($profile['actual_tax_code'] ?? ''),'configuration_fingerprint'=>$configuration_fingerprint,'subscription_configuration'=>$profile,'configuration_profile_version'=>self::TAX_SUBSCRIPTION_CONFIG_PROFILE_VERSION,'api_version'=>self::STRIPE_CORE_API_VERSION);
+    set_transient($cache_key,$context,2 * MINUTE_IN_SECONDS); return $context;
   }
 
   private function mrm_tax_subscription_inventory_snapshot_readiness($maximum_age_minutes = self::TAX_SUBSCRIPTION_INVENTORY_MAX_AGE_MINUTES) {
-    $current=$this->mrm_tax_current_subscription_inventory_context(); if(is_wp_error($current)) return $current; $snapshot=get_option(self::OPT_TAX_SUBSCRIPTION_INVENTORY_SNAPSHOT,array()); if(!is_array($snapshot)) return new WP_Error('subscription_inventory_snapshot_missing','The Stripe subscription inventory snapshot is missing.');
-    foreach(array('account_id','mode','credential_fingerprint','price_id','api_version') as $key){ if(!array_key_exists($key,$snapshot)||!array_key_exists($key,$current)||!hash_equals((string)$current[$key],(string)$snapshot[$key])) return new WP_Error('subscription_inventory_snapshot_mismatch','The Stripe subscription inventory snapshot does not match the currently configured account, mode, key, price, or API version.'); }
+    $current=$this->mrm_tax_current_subscription_inventory_context(true); if(is_wp_error($current)) return $current;
+    $snapshot=get_option(self::OPT_TAX_SUBSCRIPTION_INVENTORY_SNAPSHOT,array()); if(!is_array($snapshot)) return new WP_Error('subscription_inventory_snapshot_missing','The Stripe subscription inventory snapshot is missing.');
+    $required_matches=array('account_id','mode','credential_fingerprint','price_id','product_id','expected_tax_code','actual_tax_code','configuration_fingerprint','configuration_profile_version','api_version');
+    foreach($required_matches as $key){ if(!array_key_exists($key,$snapshot) || !array_key_exists($key,$current) || !hash_equals((string)$current[$key],(string)$snapshot[$key])) return new WP_Error('subscription_inventory_snapshot_mismatch','The Stripe subscription inventory snapshot does not match the active account, mode, key, Price, Product, tax code, recurring configuration, or API version.'); }
     $synced_at=sanitize_text_field($snapshot['synced_at'] ?? ''); if($synced_at==='') return new WP_Error('subscription_inventory_snapshot_time_missing','The Stripe subscription inventory snapshot has no synchronization time.');
-    try { $synced=new DateTimeImmutable($synced_at,wp_timezone()); $cutoff=new DateTimeImmutable('-'.absint($maximum_age_minutes).' minutes',wp_timezone()); if($synced<$cutoff) return new WP_Error('subscription_inventory_snapshot_stale','The Stripe subscription inventory snapshot is stale.'); } catch(Throwable $error){ return new WP_Error('subscription_inventory_snapshot_time_invalid','The Stripe subscription inventory synchronization time is invalid.'); }
+    try { $synced=new DateTimeImmutable($synced_at,wp_timezone()); $cutoff=new DateTimeImmutable('-'.absint($maximum_age_minutes).' minutes',wp_timezone()); if($synced<$cutoff) return new WP_Error('subscription_inventory_snapshot_stale','The Stripe subscription inventory snapshot is stale.'); }
+    catch(Throwable $error){ return new WP_Error('subscription_inventory_snapshot_time_invalid','The Stripe subscription inventory synchronization time is invalid.'); }
     return true;
   }
 
@@ -4979,10 +4993,23 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
   private function mrm_tax_contain_existing_subscription_invoices($subscription_id, $hold_status, $reason) {
     $subscription_id=sanitize_text_field($subscription_id); $hold_status=sanitize_key($hold_status); $reason=sanitize_text_field($reason); if($subscription_id==='') return new WP_Error('subscription_invoice_hold_id_missing','The Stripe subscription ID is missing.');
-    $actions=array(); $errors=array(); $draft_invoices=$this->mrm_stripe_list_subscription_invoices_by_status($subscription_id,'draft'); if(is_wp_error($draft_invoices)){ $errors[]=$draft_invoices->get_error_message(); $draft_invoices=array(); }
-    foreach((array)$draft_invoices as $invoice){ $invoice_id=sanitize_text_field($invoice['id'] ?? ''); $updated=$invoice; if(!array_key_exists('auto_advance',$invoice)||!empty($invoice['auto_advance'])) $updated=$this->stripe_api_request('POST','/v1/invoices/'.rawurlencode($invoice_id),array('auto_advance'=>'false')); if(is_wp_error($updated)){ $errors[]='Draft invoice '.$invoice_id.' could not be frozen: '.$updated->get_error_message(); continue; } if(sanitize_key($updated['status'] ?? '')!=='draft'||!array_key_exists('auto_advance',$updated)||!empty($updated['auto_advance'])){ $errors[]='Draft invoice '.$invoice_id.' was not verified with auto_advance disabled.'; continue; } $actions[]=array('invoice_id'=>$invoice_id,'original_status'=>'draft','action'=>'auto_advance_disabled','result_status'=>'draft','verified_at'=>current_time('mysql')); }
-    $open_invoices=$this->mrm_stripe_list_subscription_invoices_by_status($subscription_id,'open'); if(is_wp_error($open_invoices)){ $errors[]=$open_invoices->get_error_message(); $open_invoices=array(); }
-    foreach((array)$open_invoices as $invoice){ $invoice_id=sanitize_text_field($invoice['id'] ?? ''); $voided=$this->stripe_api_request('POST','/v1/invoices/'.rawurlencode($invoice_id).'/void'); if(is_wp_error($voided)){ $errors[]='Open invoice '.$invoice_id.' could not be voided: '.$voided->get_error_message(); continue; } if(sanitize_key($voided['status'] ?? '')!=='void'){ $errors[]='Open invoice '.$invoice_id.' was not verified as void.'; continue; } $actions[]=array('invoice_id'=>$invoice_id,'original_status'=>'open','action'=>'voided','result_status'=>'void','verified_at'=>current_time('mysql')); }
+    $actions=array(); $errors=array();
+    $draft_invoices=$this->mrm_stripe_list_subscription_invoices_by_status($subscription_id,'draft'); if(is_wp_error($draft_invoices)){ $errors[]=$draft_invoices->get_error_message(); $draft_invoices=array(); }
+    foreach((array)$draft_invoices as $invoice){ $invoice_id=sanitize_text_field($invoice['id'] ?? ''); if($invoice_id===''){ $errors[]='Stripe returned a draft invoice without an ID.'; continue; } $updated=$this->stripe_api_request('POST','/v1/invoices/'.rawurlencode($invoice_id),array('auto_advance'=>'false')); if(is_wp_error($updated)){ $errors[]='Draft invoice '.$invoice_id.' could not be frozen: '.$updated->get_error_message(); continue; } if(sanitize_key($updated['status'] ?? '')!=='draft' || !array_key_exists('auto_advance',$updated) || !empty($updated['auto_advance'])){ $errors[]='Draft invoice '.$invoice_id.' was not verified as draft with automatic advancement disabled.'; continue; } $actions[]=array('invoice_id'=>$invoice_id,'original_status'=>'draft','action'=>'auto_advance_disabled','result_status'=>'draft','verified_at'=>current_time('mysql')); }
+    $open_invoices=$this->mrm_stripe_list_subscription_invoices_by_status($subscription_id,'open');
+    if(is_wp_error($open_invoices)){ $errors[]=$open_invoices->get_error_message(); $open_invoices=array(); }
+    foreach((array)$open_invoices as $invoice){
+      $invoice_id=sanitize_text_field($invoice['id'] ?? '');
+      if($invoice_id===''){ $errors[]='Stripe returned an open invoice without an ID.'; continue; }
+      $updated=$invoice;
+      if(!array_key_exists('auto_advance',$invoice) || !empty($invoice['auto_advance'])){
+        $updated=$this->stripe_api_request('POST','/v1/invoices/'.rawurlencode($invoice_id),array('auto_advance'=>'false'));
+      }
+      if(is_wp_error($updated)){ $errors[]='Open invoice '.$invoice_id.' could not have automatic collection disabled: '.$updated->get_error_message(); continue; }
+      if(sanitize_key($updated['status'] ?? '')!=='open' || !array_key_exists('auto_advance',$updated) || !empty($updated['auto_advance'])){ $errors[]='Open invoice '.$invoice_id.' was not verified as open with automatic collection disabled.'; continue; }
+      $actions[]=array('invoice_id'=>$invoice_id,'original_status'=>'open','action'=>'auto_advance_disabled','result_status'=>'open','verified_at'=>current_time('mysql'));
+    }
+    $this->mrm_tax_store_subscription_invoice_hold_actions($subscription_id,$hold_status,$reason,$actions);
     if(!empty($errors)){ $message=implode(' | ',array_values(array_unique($errors))); $this->mrm_tax_create_alert('','subscription_invoice_hold_failed','subscription',0,array('message'=>$message,'subscription_id'=>$subscription_id,'hold_status'=>$hold_status,'hold_reason'=>$reason,'completed_actions'=>$actions),sanitize_key($subscription_id)); return new WP_Error('subscription_invoice_hold_failed',$message); }
     $this->mrm_tax_resolve_alerts_by_reference('subscription_id',$subscription_id,array('subscription_invoice_hold_failed')); return $actions;
   }
@@ -5082,11 +5109,18 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   private function mrm_tax_enforce_global_subscription_holds() {
-    $context=$this->mrm_tax_current_subscription_inventory_context(true); if(is_wp_error($context)){ $message=$context->get_error_message(); update_option(self::OPT_TAX_SUBSCRIPTION_HOLD_ERROR,$message,false); $this->mrm_tax_create_alert('','subscription_inventory_reconciliation_failed','stripe',0,array('message'=>$message),sanitize_key(gmdate('Y-m-d-H'))); return $context; }
-    $inventory=$this->mrm_stripe_list_all_managed_sheet_music_subscriptions(); if(is_wp_error($inventory)){ $message=$inventory->get_error_message(); update_option(self::OPT_TAX_SUBSCRIPTION_HOLD_ERROR,$message,false); $this->mrm_tax_create_alert('','subscription_inventory_reconciliation_failed','stripe',0,array('message'=>$message,'inventory_context'=>$context),sanitize_key(gmdate('Y-m-d-H'))); return $inventory; }
-    $blocking_failures=array(); $resume_failures=array(); foreach($inventory as $subscription){ $subscription_id=sanitize_text_field($subscription['id'] ?? ''); $result=$this->mrm_tax_enforce_single_subscription_hold($subscription); if(!is_wp_error($result)) continue; if($result->get_error_code()==='subscription_global_tax_resume_failed'){ $resume_failures[]=$subscription_id.': '.$result->get_error_message(); continue; } $blocking_failures[]=($subscription_id!==''?$subscription_id.': ':'').$result->get_error_message(); }
+    $context=$this->mrm_tax_current_subscription_inventory_context(true);
+    $inventory=$this->mrm_stripe_list_all_managed_sheet_music_subscriptions();
+    if(is_wp_error($inventory)){ $message=$inventory->get_error_message(); update_option(self::OPT_TAX_SUBSCRIPTION_HOLD_ERROR,$message,false); $this->mrm_tax_create_alert('','subscription_inventory_reconciliation_failed','stripe',0,array('message'=>$message),sanitize_key(gmdate('Y-m-d-H'))); return $inventory; }
+    if(is_wp_error($context)){ $configuration_message=$context->get_error_message(); $containment_failures=array(); foreach($inventory as $subscription){ $subscription_id=sanitize_text_field($subscription['id'] ?? ''); $this->mrm_tax_create_alert('','subscription_tax_configuration_invalid','subscription',0,array('message'=>$configuration_message,'subscription_id'=>$subscription_id),sanitize_key($subscription_id!==''?$subscription_id:gmdate('Y-m-d-H'))); $held=$this->mrm_pause_subscription_for_global_tax_hold($subscription,$context); if(is_wp_error($held)) $containment_failures[]=($subscription_id!==''?$subscription_id.': ':'').$held->get_error_message(); } $message=$configuration_message; if(!empty($containment_failures)) $message.=' | Hold failures: '.implode(' | ',array_values(array_unique($containment_failures))); update_option(self::OPT_TAX_SUBSCRIPTION_HOLD_ERROR,$message,false); return new WP_Error('subscription_tax_configuration_invalid',$message); }
+    $blocking_failures=array(); $resume_failures=array();
+    foreach($inventory as $subscription){ $subscription_id=sanitize_text_field($subscription['id'] ?? ''); $automatic_tax_enabled=!empty($subscription['automatic_tax']['enabled']); $uses_configured_price=false; foreach((array)($subscription['items']['data'] ?? array()) as $item){ $item_price_id=sanitize_text_field($item['price']['id'] ?? ''); if($item_price_id===$context['price_id']){ $uses_configured_price=true; break; } }
+      if(!$automatic_tax_enabled || !$uses_configured_price){ $reasons=array(); if(!$automatic_tax_enabled) $reasons[]='Stripe automatic tax is disabled on the subscription.'; if(!$uses_configured_price) $reasons[]='The subscription does not use the configured Price ID '.$context['price_id'].'.'; $configuration_error=new WP_Error('subscription_tax_configuration_invalid',implode(' ',$reasons)); $this->mrm_tax_create_alert('','subscription_tax_configuration_invalid','subscription',0,array('message'=>$configuration_error->get_error_message(),'subscription_id'=>$subscription_id),sanitize_key($subscription_id)); $held=$this->mrm_pause_subscription_for_global_tax_hold($subscription,$configuration_error); $blocking_failures[]=$subscription_id.': '.$configuration_error->get_error_message().(is_wp_error($held)?' Hold failure: '.$held->get_error_message():''); continue; }
+      $this->mrm_tax_resolve_alerts_by_reference('subscription_id',$subscription_id,array('subscription_tax_configuration_invalid'));
+      $result=$this->mrm_tax_enforce_single_subscription_hold($subscription); if(!is_wp_error($result)) continue; if($result->get_error_code()==='subscription_global_tax_resume_failed'){ $resume_failures[]=$subscription_id.': '.$result->get_error_message(); continue; } $blocking_failures[]=($subscription_id!==''?$subscription_id.': ':'').$result->get_error_message(); }
     if(!empty($blocking_failures)){ $message=implode(' | ',array_values(array_unique($blocking_failures))); update_option(self::OPT_TAX_SUBSCRIPTION_HOLD_ERROR,$message,false); return new WP_Error('subscription_tax_hold_enforcement_failed',$message); }
-    $snapshot=array_merge($context,array('synced_at'=>current_time('mysql'),'managed_subscription_count'=>count($inventory))); update_option(self::OPT_TAX_SUBSCRIPTION_INVENTORY_SNAPSHOT,$snapshot,false); $stored=get_option(self::OPT_TAX_SUBSCRIPTION_INVENTORY_SNAPSHOT,array()); if(!is_array($stored)) return new WP_Error('subscription_inventory_snapshot_save_failed','The Stripe subscription inventory snapshot could not be saved.'); foreach(array('account_id','mode','credential_fingerprint','price_id','api_version','synced_at') as $key){ if(!isset($stored[$key])||!isset($snapshot[$key])||!hash_equals((string)$snapshot[$key],(string)$stored[$key])) return new WP_Error('subscription_inventory_snapshot_verification_failed','The Stripe subscription inventory snapshot could not be verified after saving.'); }
+    $snapshot=array_merge($context,array('synced_at'=>current_time('mysql'),'managed_subscription_count'=>count($inventory))); update_option(self::OPT_TAX_SUBSCRIPTION_INVENTORY_SNAPSHOT,$snapshot,false); $stored=get_option(self::OPT_TAX_SUBSCRIPTION_INVENTORY_SNAPSHOT,array()); if(!is_array($stored)) return new WP_Error('subscription_inventory_snapshot_save_failed','The Stripe subscription inventory snapshot could not be saved.');
+    foreach(array('account_id','mode','credential_fingerprint','price_id','product_id','expected_tax_code','actual_tax_code','configuration_fingerprint','configuration_profile_version','api_version','synced_at') as $key){ if(!isset($stored[$key])||!isset($snapshot[$key])||!hash_equals((string)$snapshot[$key],(string)$stored[$key])) return new WP_Error('subscription_inventory_snapshot_verification_failed','The Stripe subscription inventory snapshot could not be verified after saving.'); }
     delete_option(self::OPT_TAX_LAST_SUCCESSFUL_SUBSCRIPTION_INVENTORY_SYNC); delete_option(self::OPT_TAX_SUBSCRIPTION_HOLD_ERROR); $this->mrm_tax_resolve_alert_type('subscription_inventory_reconciliation_failed'); if(!empty($resume_failures)) error_log('MRM subscription resume review required: '.implode(' | ',array_values(array_unique($resume_failures)))); return true;
   }
 
@@ -5242,79 +5276,24 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
   private function mrm_handle_invoice_paid_webhook($invoice) {
-    $this->stripe_debug_log('invoice.paid handler entered', array(
-      'invoice_id' => (string)($invoice['id'] ?? ''),
-      'subscription_id' => $this->mrm_stripe_invoice_subscription_id($invoice),
-      'amount_paid' => (int)($invoice['amount_paid'] ?? 0),
-    ));
-
-    $subscription_id = $this->mrm_stripe_invoice_subscription_id($invoice);
-    $amount_paid = (int)($invoice['amount_paid'] ?? 0);
-
-    // Ignore non-subscription or zero-dollar invoice events.
-    if ($subscription_id === '' || $amount_paid <= 0) {
-      $this->stripe_debug_log('invoice.paid ignored', array(
-        'invoice_id' => (string)($invoice['id'] ?? ''),
-        'subscription_id' => $subscription_id,
-        'amount_paid' => $amount_paid,
-        'reason' => ($subscription_id === '' ? 'missing_subscription_id' : 'zero_amount_paid'),
-      ));
-      return;
-    }
-
-    $sub = $this->stripe_retrieve_subscription($subscription_id);
-    if (is_wp_error($sub)) {
-      $this->stripe_debug_log('invoice.paid subscription retrieve failed', array(
-        'invoice_id' => (string)($invoice['id'] ?? ''),
-        'subscription_id' => $subscription_id,
-        'error' => $sub->get_error_message(),
-      ));
-      return;
-    }
-
-    $configured_price_id = $this->subscription_price_id();
-    $invoice_price_id = $this->mrm_stripe_invoice_primary_price_id($invoice);
-
-    if ($configured_price_id !== '' && $invoice_price_id !== '' && $invoice_price_id !== $configured_price_id) {
-      $this->stripe_debug_log('invoice.paid ignored due to price mismatch', array(
-        'invoice_id' => (string)($invoice['id'] ?? ''),
-        'subscription_id' => $subscription_id,
-        'invoice_price_id' => $invoice_price_id,
-        'configured_price_id' => $configured_price_id,
-      ));
-      return;
-    }
-
-    $tax_problem = $this->mrm_subscription_tax_location_problem($sub, $invoice);
-    if ($tax_problem !== '') {
-      $this->mrm_pause_subscription_for_tax_location($sub, $invoice);
-    }
-
-    $tax_ledger_result = $this->mrm_tax_record_subscription_invoice($invoice);
-    if (is_wp_error($tax_ledger_result)) {
-      $this->mrm_tax_create_alert($invoice['customer_address']['state'] ?? '', 'subscription_invoice_ledger_failed', 'invoice', 0, array('message'=>'The paid subscription invoice ' . sanitize_text_field($invoice['id'] ?? '') . ' could not be written to the state sales ledger: ' . $tax_ledger_result->get_error_message(), 'invoice_id'=>sanitize_text_field($invoice['id'] ?? '')), sanitize_key($invoice['id'] ?? ''));
-    }
-
-    $this->mrm_sync_local_sheet_music_subscription_from_stripe($sub, (string)($sub['metadata']['mrm_customer_email'] ?? ''));
-
-    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
-    if (!empty($local['email_plain'])) {
-      $invoice_created_ts = !empty($invoice['created']) ? (int)$invoice['created'] : time();
-      $invoice_id = (string)($invoice['id'] ?? '');
-
-      $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'], $invoice_created_ts, 'stripe_subscription_invoice', $invoice_id);
-
-      $this->mrm_create_composer_payout_for_subscription_invoice($invoice, $local);
-
-      $sent = $this->mrm_send_sheet_music_subscription_charge_email($local, $invoice);
-
-      $this->stripe_debug_log('subscription recurring charge email result', array(
-        'invoice_id' => $invoice_id,
-        'subscription_id' => $subscription_id,
-        'email' => (string)($local['email_plain'] ?? ''),
-        'sent' => ($sent ? 'yes' : 'no'),
-      ));
-    }
+    if(!is_array($invoice)) return new WP_Error('invoice_paid_object_invalid','The invoice.paid event did not contain a valid invoice.');
+    $invoice_id=sanitize_text_field($invoice['id'] ?? ''); $subscription_id=$this->mrm_stripe_invoice_subscription_id($invoice); $amount_paid=(int)($invoice['amount_paid'] ?? 0);
+    $this->stripe_debug_log('invoice.paid handler entered',array('invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id,'amount_paid'=>$amount_paid));
+    if($subscription_id==='' || $amount_paid<=0) return true;
+    $subscription=$this->stripe_retrieve_subscription($subscription_id);
+    if(is_wp_error($subscription)){ $error=new WP_Error('invoice_paid_subscription_retrieve_failed','Subscription '.$subscription_id.' could not be retrieved for paid invoice '.$invoice_id.': '.$subscription->get_error_message()); $this->mrm_tax_create_alert('','subscription_invoice_processing_failed','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
+    if(!$this->mrm_is_managed_sheet_music_subscription($subscription)) return true;
+    $configured_price_id=sanitize_text_field($this->subscription_price_id()); $invoice_price_id=sanitize_text_field($this->mrm_stripe_invoice_primary_price_id($invoice));
+    if($configured_price_id==='' || $invoice_price_id==='' || $invoice_price_id!==$configured_price_id){ $error=new WP_Error('invoice_paid_price_mismatch','Paid subscription invoice '.$invoice_id.' uses Price ID '.($invoice_price_id!==''?$invoice_price_id:'missing').', but the site requires '.($configured_price_id!==''?$configured_price_id:'a configured Price ID').'.'); $this->mrm_tax_create_alert('','subscription_invoice_processing_failed','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
+    $configuration=$this->mrm_verify_sheet_music_subscription_tax_configuration($configured_price_id); if(is_wp_error($configuration)){ $error=new WP_Error('invoice_paid_tax_configuration_invalid',$configuration->get_error_message()); $this->mrm_tax_create_alert('','subscription_tax_configuration_invalid','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
+    if(empty($subscription['automatic_tax']['enabled'])){ $error=new WP_Error('invoice_paid_automatic_tax_disabled','Stripe automatic tax is disabled on subscription '.$subscription_id.'.'); $this->mrm_tax_create_alert('','subscription_tax_configuration_invalid','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
+    $tax_problem=$this->mrm_subscription_tax_location_problem($subscription,$invoice); if($tax_problem!==''){ $pause_result=$this->mrm_pause_subscription_for_tax_location($subscription,$invoice); if(is_wp_error($pause_result)) return $pause_result; }
+    $tax_ledger_result=$this->mrm_tax_record_subscription_invoice($invoice); if(is_wp_error($tax_ledger_result)){ $state=$this->mrm_normalize_state_code($invoice['customer_address']['state'] ?? ''); $this->mrm_tax_create_alert($state,'subscription_invoice_ledger_failed','invoice',0,array('message'=>'The paid subscription invoice '.$invoice_id.' could not be written to the state sales ledger: '.$tax_ledger_result->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $tax_ledger_result; }
+    $local_sync=$this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription,sanitize_email($subscription['metadata']['mrm_customer_email'] ?? '')); if(is_wp_error($local_sync)) return $local_sync;
+    $local=$this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id); if(!is_array($local)){ $error=new WP_Error('invoice_paid_local_subscription_missing','Paid subscription invoice '.$invoice_id.' was recorded, but subscription '.$subscription_id.' is missing from the local subscription registry.'); $this->mrm_tax_create_alert('','subscription_invoice_processing_failed','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
+    if(!empty($local['email_plain'])){ $invoice_created_ts=!empty($invoice['created'])?(int)$invoice['created']:time(); $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'],$invoice_created_ts,'stripe_subscription_invoice',$invoice_id); $this->mrm_create_composer_payout_for_subscription_invoice($invoice,$local); $sent=$this->mrm_send_sheet_music_subscription_charge_email($local,$invoice); $this->stripe_debug_log('subscription recurring charge email result',array('invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id,'email'=>(string)($local['email_plain'] ?? ''),'sent'=>$sent?'yes':'no')); }
+    $this->mrm_tax_resolve_alerts_by_reference('invoice_id',$invoice_id,array('subscription_invoice_processing_failed','subscription_invoice_ledger_failed','subscription_tax_configuration_invalid'));
+    return true;
   }
 
   private function mrm_handle_invoice_payment_failed_webhook($invoice) {
@@ -5506,20 +5485,25 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   private function mrm_tax_resync_payment_intent_id($payment_intent_id) { $payment_intent_id = sanitize_text_field($payment_intent_id); if ($payment_intent_id === '') return; $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id); if (!is_wp_error($payment_intent)) return $this->mrm_tax_sync_payment_intent_ledger($payment_intent, 0); return $payment_intent; }
   public function sync_external_payment_intent_tax_ledger($payment_intent_id) { $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id); if (is_wp_error($payment_intent)) return $payment_intent; return $this->mrm_tax_sync_payment_intent_ledger($payment_intent, 0); }
   private function mrm_verify_sheet_music_subscription_tax_configuration($price_id) {
-    $expected_tax_code = $this->mrm_expected_subscription_tax_code();
-    if ($expected_tax_code === '') return new WP_Error('subscription_tax_model_invalid', 'The sheet-music subscription tax model is invalid.');
-    $price = $this->stripe_retrieve_price($price_id); if (is_wp_error($price)) return $price;
-    if (empty($price['active'])) return new WP_Error('subscription_price_inactive', 'The configured Stripe Price is inactive.');
-    if (sanitize_key($price['type'] ?? '') !== 'recurring') return new WP_Error('subscription_price_not_recurring', 'The configured Stripe Price is not recurring.');
-    if (sanitize_key($price['recurring']['interval'] ?? '') !== 'month') return new WP_Error('subscription_interval_invalid', 'The configured Stripe Price is not monthly.');
-    if (strtolower((string)($price['currency'] ?? '')) !== 'usd') return new WP_Error('subscription_currency_invalid', 'The configured Stripe Price is not USD.');
-    if (sanitize_key($price['tax_behavior'] ?? '') !== 'exclusive') return new WP_Error('subscription_tax_behavior_invalid', 'The Stripe Price tax behavior must be explicitly set to exclusive.');
-    $product_id = is_array($price['product'] ?? null) ? sanitize_text_field($price['product']['id'] ?? '') : sanitize_text_field($price['product'] ?? '');
-    $product = $this->stripe_retrieve_product($product_id); if (is_wp_error($product)) return $product;
-    if (empty($product['active'])) return new WP_Error('subscription_product_inactive', 'The configured Stripe Product is inactive.');
-    $actual_tax_code = is_array($product['tax_code'] ?? null) ? sanitize_text_field($product['tax_code']['id'] ?? '') : sanitize_text_field($product['tax_code'] ?? '');
-    if ($actual_tax_code !== $expected_tax_code) return new WP_Error('subscription_tax_code_mismatch', 'The Stripe Product tax code is ' . $actual_tax_code . ', but the site requires ' . $expected_tax_code . '.');
-    return array('price'=>$price,'product'=>$product,'tax_code'=>$expected_tax_code);
+    $price_id=sanitize_text_field($price_id); $expected_tax_code=$this->mrm_expected_subscription_tax_code();
+    if($expected_tax_code==='') return new WP_Error('subscription_tax_model_invalid','The sheet-music subscription tax model is invalid.');
+    if($price_id==='') return new WP_Error('subscription_price_id_missing','The configured Stripe subscription Price ID is missing.');
+    $price=$this->stripe_retrieve_price($price_id); if(is_wp_error($price)) return $price;
+    if(empty($price['active'])) return new WP_Error('subscription_price_inactive','The configured Stripe Price is inactive.');
+    if(sanitize_key($price['type'] ?? '')!=='recurring') return new WP_Error('subscription_price_not_recurring','The configured Stripe Price is not recurring.');
+    $interval=sanitize_key($price['recurring']['interval'] ?? ''); $interval_count=max(1,absint($price['recurring']['interval_count'] ?? 1));
+    if($interval!=='month' || $interval_count!==1) return new WP_Error('subscription_interval_invalid','The configured Stripe Price must recur once every month.');
+    $currency=strtolower(sanitize_text_field($price['currency'] ?? '')); if($currency!=='usd') return new WP_Error('subscription_currency_invalid','The configured Stripe Price is not USD.');
+    $tax_behavior=sanitize_key($price['tax_behavior'] ?? ''); if($tax_behavior!=='exclusive') return new WP_Error('subscription_tax_behavior_invalid','The Stripe Price tax behavior must be explicitly set to exclusive.');
+    $product_id=is_array($price['product'] ?? null)?sanitize_text_field($price['product']['id'] ?? ''):sanitize_text_field($price['product'] ?? '');
+    if($product_id==='') return new WP_Error('subscription_product_id_missing','The configured Stripe Price has no Product ID.');
+    $product=$this->stripe_retrieve_product($product_id); if(is_wp_error($product)) return $product;
+    if(empty($product['active'])) return new WP_Error('subscription_product_inactive','The configured Stripe Product is inactive.');
+    $actual_tax_code=is_array($product['tax_code'] ?? null)?sanitize_text_field($product['tax_code']['id'] ?? ''):sanitize_text_field($product['tax_code'] ?? '');
+    if($actual_tax_code!==$expected_tax_code) return new WP_Error('subscription_tax_code_mismatch','The Stripe Product tax code is '.($actual_tax_code!==''?$actual_tax_code:'missing').', but the site requires '.$expected_tax_code.'.');
+    $profile=array('profile_version'=>self::TAX_SUBSCRIPTION_CONFIG_PROFILE_VERSION,'price_id'=>$price_id,'product_id'=>$product_id,'price_active'=>!empty($price['active'])?1:0,'product_active'=>!empty($product['active'])?1:0,'price_type'=>sanitize_key($price['type'] ?? ''),'currency'=>$currency,'tax_behavior'=>$tax_behavior,'recurring_interval'=>$interval,'recurring_interval_count'=>$interval_count,'expected_tax_code'=>$expected_tax_code,'actual_tax_code'=>$actual_tax_code);
+    $configuration_fingerprint=hash('sha256',wp_json_encode($profile));
+    return array('price'=>$price,'product'=>$product,'tax_code'=>$expected_tax_code,'profile'=>$profile,'configuration_fingerprint'=>$configuration_fingerprint);
   }
 
   private function mrm_tax_invoice_taxable_sales_cents($invoice) {
@@ -10788,7 +10772,11 @@ private function charge_and_unlock_autopay($data) {
         break;
 
       case 'invoice.paid':
-        $this->mrm_handle_invoice_paid_webhook($object);
+        $required_processing_result =
+          $this
+            ->mrm_handle_invoice_paid_webhook(
+              $object
+            );
         break;
 
       case 'invoice.payment_failed':
@@ -17164,7 +17152,22 @@ public function handle_marketing_resubscribe() {
 
   private function mrm_tax_resolve_alert_type($alert_type) { global $wpdb; $alert_type=sanitize_key($alert_type); if($alert_type==='') return false; $now=current_time('mysql'); $wpdb->last_error=''; $result=$wpdb->query($wpdb->prepare("UPDATE {$this->table_tax_alerts()} SET alert_status = 'resolved', resolved_at = %s, updated_at = %s WHERE alert_status = 'open' AND alert_type = %s", $now, $now, $alert_type)); if($result===false || $wpdb->last_error!=='') return new WP_Error('tax_alert_type_resolution_failed', $wpdb->last_error ?: 'The tax alerts could not be resolved.'); return true; }
 
-  private function mrm_tax_critical_open_alerts($limit = 50) { global $wpdb; $limit=max(1,min(200,absint($limit))); $types=array('stripe_registration_sync_failed','tax_ledger_sync_failed','refund_tax_reversal_unresolved','subscription_invoice_ledger_failed','subscription_invoice_tax_failed','subscription_credit_note_sync_failed','subscription_global_tax_pause_failed','subscription_tax_pause_failed','subscription_local_sync_failed','subscription_inventory_reconciliation_failed','subscription_invoice_hold_failed','customer_subscription_reconciliation_failed'); $ph=implode(',',array_fill(0,count($types),'%s')); $sql="SELECT * FROM {$this->table_tax_alerts()} WHERE alert_status = 'open' AND alert_type IN ({$ph}) ORDER BY created_at ASC, id ASC LIMIT %d"; $wpdb->last_error=''; $rows=$wpdb->get_results($wpdb->prepare($sql,array_merge($types,array($limit))), ARRAY_A); if($wpdb->last_error!=='') return new WP_Error('tax_alert_query_failed',$wpdb->last_error); return is_array($rows)?$rows:array(); }
+  private function mrm_tax_critical_open_alerts($limit = 50) { global $wpdb; $limit=max(1,min(200,absint($limit))); $types = array(
+      'stripe_registration_sync_failed',
+      'tax_ledger_sync_failed',
+      'refund_tax_reversal_unresolved',
+      'subscription_invoice_ledger_failed',
+      'subscription_invoice_tax_failed',
+      'subscription_credit_note_sync_failed',
+      'subscription_global_tax_pause_failed',
+      'subscription_tax_pause_failed',
+      'subscription_local_sync_failed',
+      'subscription_inventory_reconciliation_failed',
+      'subscription_invoice_hold_failed',
+      'customer_subscription_reconciliation_failed',
+      'subscription_tax_configuration_invalid',
+      'subscription_invoice_processing_failed',
+    ); $ph=implode(',',array_fill(0,count($types),'%s')); $sql="SELECT * FROM {$this->table_tax_alerts()} WHERE alert_status = 'open' AND alert_type IN ({$ph}) ORDER BY created_at ASC, id ASC LIMIT %d"; $wpdb->last_error=''; $rows=$wpdb->get_results($wpdb->prepare($sql,array_merge($types,array($limit))), ARRAY_A); if($wpdb->last_error!=='') return new WP_Error('tax_alert_query_failed',$wpdb->last_error); return is_array($rows)?$rows:array(); }
 
   private function mrm_tax_utc_mysql_from_timestamp(
     $timestamp = 0
