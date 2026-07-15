@@ -140,6 +140,15 @@ class LowBrass_MRM_Masterclass_Plugin {
 		10,
 		1
 	);
+add_action(
+		'mrm_payments_hub_refund_failed',
+		array(
+			$this,
+			'mrm_mc_handle_failed_refund'
+		),
+		10,
+		2
+	);
 	add_filter( 'mrm_cross_plugin_email_preview', array( $this, 'handle_cross_plugin_email_preview' ), 10, 2 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_menu', 'mrm_mc_dedupe_admin_menu_after_registration', 999999, 0 );
 	$this->mrm_mc_add_action_if_method_exists( 'admin_init', 'mrm_mc_remove_stale_admin_visibility_css_hooks', -999999, 0 );
@@ -3322,6 +3331,22 @@ public function mrm_mc_run_deferred_tax_sync(
 				)
 			);
 		}
+	}
+}
+
+public function mrm_mc_handle_failed_refund($refund, $charge) {
+	global $wpdb;
+	if (!is_array($refund)) return;
+	$refund_id = sanitize_text_field($refund['id'] ?? ''); $refund_status = sanitize_key($refund['status'] ?? '');
+	$payment_intent_id = is_array($refund['payment_intent'] ?? null) ? sanitize_text_field($refund['payment_intent']['id'] ?? '') : sanitize_text_field($refund['payment_intent'] ?? '');
+	if ($payment_intent_id === '') return;
+	$registrations = $this->t('mrm_masterclass_registrations'); $refunds = $this->t('mrm_masterclass_refunds'); $ledger = $this->t('mrm_masterclass_payment_ledger'); $pi_column = $this->mrm_mc_payment_intent_column_for_registrations();
+	$registration = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$registrations} WHERE {$pi_column} = %s LIMIT 1", $payment_intent_id));
+	if (!$registration) return;
+	$wpdb->update($registrations, array('payment_status'=>'paid','updated_at'=>$this->now()), array('id'=>absint($registration->id)));
+	if ($refund_id !== '' && $this->mrm_mc_table_exists($refunds)) $wpdb->update($refunds, array('status'=>$refund_status,'error_message'=>sanitize_text_field($refund['failure_reason'] ?? 'Stripe refund failed or was canceled.'),'updated_at'=>$this->now()), array('refund_id'=>$refund_id));
+	if ($this->mrm_mc_table_exists($ledger)) {
+		$wpdb->query($wpdb->prepare("UPDATE {$ledger} SET status = CASE WHEN status = 'refunded_void' THEN 'payable' WHEN status IN ('refunded_reversed','refund_reversal_failed','refund_after_payout_needs_recovery') THEN 'refund_failure_needs_recovery' ELSE status END, notes = CONCAT(COALESCE(notes, ''), %s), updated_at = %s WHERE registration_id = %d AND ledger_type = 'registration_payment'", ' Refund '.$refund_id.' later entered status '.$refund_status.'; payout records were reopened or flagged for recovery.', $this->now(), absint($registration->id)));
 	}
 }
 
@@ -9856,8 +9881,8 @@ private function mrm_mc_repair_registration_side_effects( $registration, $event,
 		$ledger_data = $this->mrm_mc_filter_data_for_table( $ledger_table, $ledger_data );
 		if ( false === $wpdb->insert( $ledger_table, $ledger_data ) ) return new WP_Error( 'mrm_masterclass_ledger_repair_failed', $wpdb->last_error ?: 'The presenter payout ledger could not be repaired.' );
 	}
-	$tax_args = array( $payment_intent_id );
-	if ( ! wp_next_scheduled( 'mrm_masterclass_deferred_tax_sync', $tax_args ) ) wp_schedule_single_event( time() + 60, 'mrm_masterclass_deferred_tax_sync', $tax_args );
+	$tax_ready = $this->mrm_mc_require_shared_tax_ledger( $payment_intent_id );
+	if ( is_wp_error( $tax_ready ) ) return $tax_ready;
 	$confirmation_sent = ! empty( $registration->confirmation_sent );
 	if ( ! $confirmation_sent ) { $confirmation_sent = $this->mrm_mc_send_confirmation_for_registration( $registration_id ); if ( ! $confirmation_sent ) return new WP_Error( 'mrm_masterclass_confirmation_repair_failed', 'The registration exists, but its confirmation email could not be sent.' ); }
 	return array( 'registration_id' => $registration_id, 'confirmation_email_sent' => true );
@@ -9873,6 +9898,15 @@ public function mrm_mc_run_finalization_repair( $registration_id, $payment_inten
 	if ( ! $event || is_wp_error( $payment_intent ) ) { $this->mrm_mc_schedule_finalization_repair( $registration_id, $payment_intent_id, $attempt ); return; }
 	$repair = $this->mrm_mc_repair_registration_side_effects( $registration, $event, $payment_intent );
 	if ( is_wp_error( $repair ) ) { $this->mrm_mc_debug_log( 'Masterclass finalization repair failed.', array( 'registration_id'=>$registration_id, 'payment_intent_id'=>$payment_intent_id, 'attempt'=>$attempt, 'message'=>$repair->get_error_message() ) ); $this->mrm_mc_schedule_finalization_repair( $registration_id, $payment_intent_id, $attempt ); }
+}
+
+private function mrm_mc_require_shared_tax_ledger($payment_intent_id) {
+	$payment_intent_id = sanitize_text_field($payment_intent_id);
+	if ($payment_intent_id === '') return new WP_Error('mrm_masterclass_tax_payment_reference_missing', 'The payment reference required for sales-tax reconciliation is missing.', array('status'=>503));
+	if (!function_exists('mrm_payments_hub_sync_tax_ledger_for_payment_intent')) return new WP_Error('mrm_masterclass_tax_service_unavailable', 'The shared Payments Hub sales-tax service is unavailable.', array('status'=>503));
+	$result = mrm_payments_hub_sync_tax_ledger_for_payment_intent($payment_intent_id);
+	if (is_wp_error($result)) return new WP_Error('mrm_masterclass_tax_reconciliation_pending', 'Payment was received, but the required sales-tax transaction has not finished reconciling. Registration will finalize automatically after reconciliation succeeds.', array('status'=>503,'tax_error'=>$result->get_error_message()));
+	return true;
 }
 
 public function rest_finalize_registration( $request ) {
@@ -9914,6 +9948,8 @@ public function rest_finalize_registration( $request ) {
 	$existing = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$regs_table} WHERE {$pi_column} = %s LIMIT 1",$payment_intent_id));
 	if ( $existing ) {
 		if ( absint( $existing->event_id ) !== $event_id ) return new WP_Error( 'mrm_masterclass_existing_registration_event_mismatch', 'The existing paid registration does not match this Masterclass.', array( 'status' => 409 ) );
+		$tax_ready = $this->mrm_mc_require_shared_tax_ledger( $payment_intent_id );
+		if ( is_wp_error( $tax_ready ) ) return $tax_ready;
 		$existing_event = $this->mrm_mc_get_event( absint( $existing->event_id ) );
 		$existing_intent = $this->mrm_mc_retrieve_payment_intent( $payment_intent_id );
 		$repair_pending = false; $confirmation_sent = ! empty( $existing->confirmation_sent );
@@ -9985,6 +10021,9 @@ public function rest_finalize_registration( $request ) {
 		$this->mrm_mc_debug_log('Masterclass finalize blocked because Stripe amount did not match expected tax-inclusive amount.', array('event_id'=>$event_id,'payment_intent_id'=>$payment_intent_id,'amount_received'=>$amount_received,'expected_amount'=>$expected_amount));
 		return new WP_Error('mrm_masterclass_payment_amount_mismatch','Payment verification failed because the paid amount did not match this Masterclass event. Please contact support.',array( 'status' => 409 ));
 	}
+
+	$tax_ready = $this->mrm_mc_require_shared_tax_ledger( $payment_intent_id );
+	if ( is_wp_error( $tax_ready ) ) return $tax_ready;
 
 	$discount_cents = max( 0, $base_amount_cents - $subtotal_cents );
 	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair(); $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
