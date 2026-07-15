@@ -5009,7 +5009,6 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       if(sanitize_key($updated['status'] ?? '')!=='open' || !array_key_exists('auto_advance',$updated) || !empty($updated['auto_advance'])){ $errors[]='Open invoice '.$invoice_id.' was not verified as open with automatic collection disabled.'; continue; }
       $actions[]=array('invoice_id'=>$invoice_id,'original_status'=>'open','action'=>'auto_advance_disabled','result_status'=>'open','verified_at'=>current_time('mysql'));
     }
-    $this->mrm_tax_store_subscription_invoice_hold_actions($subscription_id,$hold_status,$reason,$actions);
     if(!empty($errors)){ $message=implode(' | ',array_values(array_unique($errors))); $this->mrm_tax_create_alert('','subscription_invoice_hold_failed','subscription',0,array('message'=>$message,'subscription_id'=>$subscription_id,'hold_status'=>$hold_status,'hold_reason'=>$reason,'completed_actions'=>$actions),sanitize_key($subscription_id)); return new WP_Error('subscription_invoice_hold_failed',$message); }
     $this->mrm_tax_resolve_alerts_by_reference('subscription_id',$subscription_id,array('subscription_invoice_hold_failed')); return $actions;
   }
@@ -5288,7 +5287,60 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $configuration=$this->mrm_verify_sheet_music_subscription_tax_configuration($configured_price_id); if(is_wp_error($configuration)){ $error=new WP_Error('invoice_paid_tax_configuration_invalid',$configuration->get_error_message()); $this->mrm_tax_create_alert('','subscription_tax_configuration_invalid','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
     if(empty($subscription['automatic_tax']['enabled'])){ $error=new WP_Error('invoice_paid_automatic_tax_disabled','Stripe automatic tax is disabled on subscription '.$subscription_id.'.'); $this->mrm_tax_create_alert('','subscription_tax_configuration_invalid','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
     $tax_problem=$this->mrm_subscription_tax_location_problem($subscription,$invoice); if($tax_problem!==''){ $pause_result=$this->mrm_pause_subscription_for_tax_location($subscription,$invoice); if(is_wp_error($pause_result)) return $pause_result; }
-    $tax_ledger_result=$this->mrm_tax_record_subscription_invoice($invoice); if(is_wp_error($tax_ledger_result)){ $state=$this->mrm_normalize_state_code($invoice['customer_address']['state'] ?? ''); $this->mrm_tax_create_alert($state,'subscription_invoice_ledger_failed','invoice',0,array('message'=>'The paid subscription invoice '.$invoice_id.' could not be written to the state sales ledger: '.$tax_ledger_result->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $tax_ledger_result; }
+    $tax_ledger_result =
+      $this
+        ->mrm_tax_record_subscription_invoice(
+          $invoice
+        );
+
+    if (is_wp_error($tax_ledger_result)) {
+      /*
+       * The tax-recording method already creates the correct
+       * subscription_invoice_tax_failed alert when Stripe Tax is
+       * incomplete. Do not mislabel that as a database-ledger
+       * failure.
+       */
+      if (
+        $tax_ledger_result->get_error_code()
+        !== 'subscription_invoice_tax_incomplete'
+      ) {
+        $state =
+          $this->mrm_normalize_state_code(
+            $invoice[
+              'customer_address'
+            ]['state'] ?? ''
+          );
+
+        $alert_result =
+          $this->mrm_tax_create_alert(
+            $state,
+            'subscription_invoice_ledger_failed',
+            'invoice',
+            0,
+            array(
+              'message' =>
+                'The paid subscription invoice '
+                . $invoice_id
+                . ' could not be written to the state sales ledger: '
+                . $tax_ledger_result
+                  ->get_error_message(),
+
+              'invoice_id' =>
+                $invoice_id,
+
+              'subscription_id' =>
+                $subscription_id,
+            ),
+            sanitize_key($invoice_id)
+          );
+
+        if (is_wp_error($alert_result)) {
+          return $alert_result;
+        }
+      }
+
+      return $tax_ledger_result;
+    }
     $local_sync=$this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription,sanitize_email($subscription['metadata']['mrm_customer_email'] ?? '')); if(is_wp_error($local_sync)) return $local_sync;
     $local=$this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id); if(!is_array($local)){ $error=new WP_Error('invoice_paid_local_subscription_missing','Paid subscription invoice '.$invoice_id.' was recorded, but subscription '.$subscription_id.' is missing from the local subscription registry.'); $this->mrm_tax_create_alert('','subscription_invoice_processing_failed','invoice',0,array('message'=>$error->get_error_message(),'invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id),sanitize_key($invoice_id)); return $error; }
     if(!empty($local['email_plain'])){ $invoice_created_ts=!empty($invoice['created'])?(int)$invoice['created']:time(); $this->mrm_grant_all_sheet_music_ledger((string)$local['email_plain'],$invoice_created_ts,'stripe_subscription_invoice',$invoice_id); $this->mrm_create_composer_payout_for_subscription_invoice($invoice,$local); $sent=$this->mrm_send_sheet_music_subscription_charge_email($local,$invoice); $this->stripe_debug_log('subscription recurring charge email result',array('invoice_id'=>$invoice_id,'subscription_id'=>$subscription_id,'email'=>(string)($local['email_plain'] ?? ''),'sent'=>$sent?'yes':'no')); }
@@ -5513,10 +5565,270 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return max(0, $taxable_sales_cents);
   }
 
-  private function mrm_tax_record_subscription_invoice($invoice) {
-    if(!is_array($invoice)) return new WP_Error('invalid_invoice','Invalid Stripe invoice.'); $invoice_id=sanitize_text_field($invoice['id'] ?? ''); if($invoice_id==='') return new WP_Error('missing_invoice_id','Missing Stripe invoice ID.'); $status=sanitize_key($invoice['automatic_tax']['status'] ?? ''); $address=is_array($invoice['customer_address'] ?? null)?$invoice['customer_address']:array(); $state=$this->mrm_normalize_state_code($address['state'] ?? ''); if($state==='') return new WP_Error('subscription_invoice_state_missing','The paid subscription invoice has no customer state.'); if($status!=='complete') $this->mrm_tax_create_alert($state,'subscription_invoice_tax_failed','invoice',0,array('message'=>'Automatic tax was not completed for invoice '.$invoice_id.'. Stripe status: '.($status!==''?$status:'unknown').'.','invoice_id'=>$invoice_id),sanitize_key($invoice_id));
-    $tax_cents=0; $reason=''; foreach((array)($invoice['total_taxes'] ?? array()) as $tax){ $tax_cents+=(int)($tax['amount'] ?? 0); if($reason===''&&!empty($tax['taxability_reason'])) $reason=sanitize_key($tax['taxability_reason']); } $pretax=isset($invoice['total_excluding_tax'])?(int)$invoice['total_excluding_tax']:max(0,(int)($invoice['total'] ?? 0)-$tax_cents); $taxable=$this->mrm_tax_invoice_taxable_sales_cents($invoice);
-    $row_id=$this->mrm_tax_upsert_ledger_row(array('external_id'=>'invoice:'.$invoice_id.':sheet_music_subscription','source_type'=>'subscription_invoice','invoice_id'=>$invoice_id,'customer_state'=>$state,'customer_country'=>strtoupper(sanitize_text_field($address['country'] ?? 'US')),'product_type'=>'sheet_music','threshold_category'=>'digital_document_subscription','gross_sales_cents'=>$pretax,'retail_sales_cents'=>$pretax,'taxable_sales_cents'=>$taxable,'tax_cents'=>$tax_cents,'transaction_count'=>1,'currency'=>sanitize_key($invoice['currency'] ?? 'usd'),'tax_code'=>$this->mrm_expected_subscription_tax_code(),'taxability_reason'=>$reason!==''?$reason:'not_available','tax_transaction_status'=>$status!==''?$status:'unknown','occurred_at'=>!empty($invoice['status_transitions']['paid_at'])?$this->mrm_tax_utc_mysql_from_timestamp((int)$invoice['status_transitions']['paid_at']):$this->mrm_tax_utc_mysql_from_timestamp(),'metadata'=>is_array($invoice['metadata'] ?? null)?$invoice['metadata']:array())); if(is_wp_error($row_id)) return $row_id; $threshold=$this->mrm_tax_recompute_all_thresholds(); if(is_wp_error($threshold)) return $threshold; if($status==='complete') $this->mrm_tax_resolve_alerts_by_reference('invoice_id',$invoice_id,array('subscription_invoice_tax_failed','subscription_invoice_ledger_failed')); return $row_id;
+  private function mrm_tax_record_subscription_invoice(
+    $invoice
+  ) {
+    if (!is_array($invoice)) {
+      return new WP_Error(
+        'invalid_invoice',
+        'Invalid Stripe invoice.'
+      );
+    }
+
+    $invoice_id = sanitize_text_field(
+      $invoice['id'] ?? ''
+    );
+
+    if ($invoice_id === '') {
+      return new WP_Error(
+        'missing_invoice_id',
+        'Missing Stripe invoice ID.'
+      );
+    }
+
+    $subscription_id =
+      $this->mrm_stripe_invoice_subscription_id(
+        $invoice
+      );
+
+    $status = sanitize_key(
+      $invoice['automatic_tax']['status']
+        ?? ''
+    );
+
+    $address = is_array(
+      $invoice['customer_address'] ?? null
+    )
+      ? $invoice['customer_address']
+      : array();
+
+    $state =
+      $this->mrm_normalize_state_code(
+        $address['state'] ?? ''
+      );
+
+    /*
+     * Never write an incomplete Stripe Tax result into the
+     * authoritative sales ledger.
+     */
+    if ($status !== 'complete') {
+      $status_label =
+        $status !== ''
+          ? $status
+          : 'unknown';
+
+      $message =
+        'Stripe automatic tax was not completed for invoice '
+        . $invoice_id
+        . '. Current status: '
+        . $status_label
+        . '.';
+
+      $alert_result =
+        $this->mrm_tax_create_alert(
+          $state,
+          'subscription_invoice_tax_failed',
+          'invoice',
+          0,
+          array(
+            'message' =>
+              $message,
+
+            'invoice_id' =>
+              $invoice_id,
+
+            'subscription_id' =>
+              $subscription_id,
+
+            'automatic_tax_status' =>
+              $status_label,
+          ),
+          sanitize_key($invoice_id)
+        );
+
+      if (is_wp_error($alert_result)) {
+        return $alert_result;
+      }
+
+      return new WP_Error(
+        'subscription_invoice_tax_incomplete',
+        $message
+      );
+    }
+
+    /*
+     * A complete tax result must also contain the state needed
+     * for the state-by-state sales ledger.
+     */
+    if ($state === '') {
+      return new WP_Error(
+        'subscription_invoice_state_missing',
+        'The paid subscription invoice has no customer state.'
+      );
+    }
+
+    $tax_cents = 0;
+    $reason = '';
+
+    foreach (
+      (array)(
+        $invoice['total_taxes'] ?? array()
+      )
+      as $tax
+    ) {
+      $tax_cents +=
+        (int)($tax['amount'] ?? 0);
+
+      if (
+        $reason === ''
+        && !empty(
+          $tax['taxability_reason']
+        )
+      ) {
+        $reason = sanitize_key(
+          $tax['taxability_reason']
+        );
+      }
+    }
+
+    $pretax = isset(
+      $invoice['total_excluding_tax']
+    )
+      ? (int)$invoice[
+          'total_excluding_tax'
+        ]
+      : max(
+          0,
+          (int)($invoice['total'] ?? 0)
+            - $tax_cents
+        );
+
+    $taxable =
+      $this
+        ->mrm_tax_invoice_taxable_sales_cents(
+          $invoice
+        );
+
+    $row_id =
+      $this->mrm_tax_upsert_ledger_row(
+        array(
+          'external_id' =>
+            'invoice:'
+            . $invoice_id
+            . ':sheet_music_subscription',
+
+          'source_type' =>
+            'subscription_invoice',
+
+          'invoice_id' =>
+            $invoice_id,
+
+          'customer_state' =>
+            $state,
+
+          'customer_country' =>
+            strtoupper(
+              sanitize_text_field(
+                $address['country']
+                  ?? 'US'
+              )
+            ),
+
+          'product_type' =>
+            'sheet_music',
+
+          'threshold_category' =>
+            'digital_document_subscription',
+
+          'gross_sales_cents' =>
+            $pretax,
+
+          'retail_sales_cents' =>
+            $pretax,
+
+          'taxable_sales_cents' =>
+            $taxable,
+
+          'tax_cents' =>
+            $tax_cents,
+
+          'transaction_count' =>
+            1,
+
+          'currency' =>
+            sanitize_key(
+              $invoice['currency']
+                ?? 'usd'
+            ),
+
+          'tax_code' =>
+            $this
+              ->mrm_expected_subscription_tax_code(),
+
+          'taxability_reason' =>
+            $reason !== ''
+              ? $reason
+              : 'not_available',
+
+          /*
+           * Only complete invoices reach this point.
+           */
+          'tax_transaction_status' =>
+            'complete',
+
+          'occurred_at' =>
+            !empty(
+              $invoice[
+                'status_transitions'
+              ]['paid_at']
+            )
+              ? $this
+                ->mrm_tax_utc_mysql_from_timestamp(
+                  (int)$invoice[
+                    'status_transitions'
+                  ]['paid_at']
+                )
+              : $this
+                ->mrm_tax_utc_mysql_from_timestamp(),
+
+          'metadata' =>
+            is_array(
+              $invoice['metadata']
+                ?? null
+            )
+              ? $invoice['metadata']
+              : array(),
+        )
+      );
+
+    if (is_wp_error($row_id)) {
+      return $row_id;
+    }
+
+    $threshold_result =
+      $this
+        ->mrm_tax_recompute_all_thresholds();
+
+    if (is_wp_error($threshold_result)) {
+      return $threshold_result;
+    }
+
+    $resolved =
+      $this
+        ->mrm_tax_resolve_alerts_by_reference(
+          'invoice_id',
+          $invoice_id,
+          array(
+            'subscription_invoice_tax_failed',
+            'subscription_invoice_ledger_failed',
+          )
+        );
+
+    if (is_wp_error($resolved)) {
+      return $resolved;
+    }
+
+    return $row_id;
   }
 
   private function mrm_create_subscription_invoice_refund(
