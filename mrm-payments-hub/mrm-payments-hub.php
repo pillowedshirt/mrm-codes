@@ -47,7 +47,7 @@ class MRM_Payments_Hub_Single {
   const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
   const STRIPE_TAX_PAYMENT_INTENT_BETA = 'payment_intent_with_tax_api_beta=v1';
   const STRIPE_TAX_LOCATION_API_VERSION = '2026-06-24.preview';
-  const TAX_RULES_VERSION = '2026-07-15-national-v11';
+  const TAX_RULES_VERSION = '2026-07-15-national-v12';
   const TAX_SCHEMA_VERSION = '2026-07-14-7';
 
   const TAX_STRIPE_SYNC_MAX_AGE_MINUTES = 120;
@@ -4402,7 +4402,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     }
 
     if ($lesson_id > 0 && (string)($order['sku'] ?? '') === 'autopay_lesson_charge') {
-      $this->mrm_finalize_autopay_lesson_success($lesson_id, $order, $pi_id);
+      $this->mrm_finalize_autopay_lesson_success($lesson_id, $order, $pi_id, true);
     }
   }
 
@@ -9330,11 +9330,160 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $this->charge_and_unlock_autopay($data);
   }
 
-  private function mrm_finalize_autopay_lesson_success($lesson_id, $order = array(), $pi_id = '') {
+
+  private function mrm_autopay_require_succeeded_tax_ledger($lesson_id, $order = array(), $pi_id = '', $payment_intent = null, $attempt = 0) {
+    global $wpdb;
+
+    $lesson_id = absint($lesson_id);
+    $attempt = absint($attempt);
+    $order = is_array($order) ? $order : array();
+    $pi_id = sanitize_text_field($pi_id !== '' ? $pi_id : ($order['stripe_payment_intent_id'] ?? ''));
+    $order_id = absint($order['id'] ?? 0);
+    $order_meta = array();
+
+    if (!empty($order['metadata_json'])) {
+      $decoded = json_decode((string)$order['metadata_json'], true);
+      if (is_array($decoded)) {
+        $order_meta = $decoded;
+      }
+    }
+
+    $customer_state = $this->mrm_normalize_state_code($order_meta['mrm_customer_state'] ?? '');
+
+    if ($pi_id === '') {
+      $message = 'The AutoPay lesson order has no Stripe PaymentIntent ID, so payment and tax reconciliation cannot be verified.';
+      $alert_result = $this->mrm_tax_create_alert(
+        $customer_state,
+        'tax_ledger_sync_failed',
+        'lesson',
+        $lesson_id,
+        array(
+          'message' => $message,
+          'lesson_id' => $lesson_id,
+          'order_id' => $order_id,
+        ),
+        sanitize_key('autopay_lesson_' . $lesson_id . '_missing_pi')
+      );
+
+      if (is_wp_error($alert_result)) {
+        return $alert_result;
+      }
+
+      return new WP_Error('autopay_payment_intent_missing', $message);
+    }
+
+    if (!is_array($payment_intent)) {
+      $payment_intent = $this->stripe_retrieve_payment_intent($pi_id);
+    }
+
+    if (is_wp_error($payment_intent)) {
+      return $this->mrm_tax_retry_or_alert_payment_intent(
+        $pi_id,
+        $attempt,
+        $customer_state,
+        'The AutoPay PaymentIntent could not be retrieved before lesson finalization: ' . $payment_intent->get_error_message()
+      );
+    }
+
+    $status = sanitize_key($payment_intent['status'] ?? '');
+    $metadata = is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : array();
+
+    if (!empty($payment_intent['latest_charge'])) {
+      $metadata['mrm_latest_charge_id'] = $this->mrm_stripe_expandable_id($payment_intent['latest_charge']);
+    }
+
+    /*
+     * succeeded is the only completed status accepted for
+     * lesson delivery, payout release, and tax finalization.
+     */
+    if ($status !== 'succeeded') {
+      $message = $status === 'requires_capture'
+        ? 'The AutoPay PaymentIntent is authorized but has not been captured. The lesson and payouts cannot be finalized.'
+        : ('The AutoPay PaymentIntent has not reached succeeded status. Current status: ' . ($status !== '' ? $status : 'unknown') . '.');
+
+      if ($order_id > 0) {
+        $this->update_order_status_from_pi($pi_id, 'processing', $status, array_merge($metadata, array(
+          'mrm_tax_reconciliation_status' => 'waiting_for_payment_success',
+          'mrm_tax_reconciliation_message' => $message,
+        )));
+      }
+
+      if ($lesson_id > 0) {
+        $wpdb->update($this->table_lessons(), array(
+          'status' => 'payment_due',
+          'charge_status' => 'processing',
+          'charge_last_error' => $message,
+          'updated_at' => current_time('mysql'),
+        ), array('id' => $lesson_id), array('%s','%s','%s','%s'), array('%d'));
+      }
+
+      return new WP_Error('autopay_payment_not_succeeded', $message);
+    }
+
+    $tax_result = $this->mrm_tax_sync_payment_intent_ledger($payment_intent, $attempt);
+
+    if (is_wp_error($tax_result)) {
+      $message = 'The AutoPay payment succeeded, but the required sales-tax ledger is still being reconciled: ' . $tax_result->get_error_message();
+
+      /*
+       * Stripe succeeded, but the local order remains processing
+       * until the authoritative tax ledger is complete.
+       */
+      if ($order_id > 0) {
+        $this->update_order_status_from_pi($pi_id, 'processing', 'succeeded', array_merge($metadata, array(
+          'mrm_tax_reconciliation_status' => 'pending',
+          'mrm_tax_reconciliation_message' => $message,
+        )));
+      }
+
+      if ($lesson_id > 0) {
+        $wpdb->update($this->table_lessons(), array(
+          'status' => 'payment_due',
+          'charge_status' => 'processing',
+          'charge_last_error' => $message,
+          'updated_at' => current_time('mysql'),
+        ), array('id' => $lesson_id), array('%s','%s','%s','%s'), array('%d'));
+      }
+
+      /*
+       * mrm_tax_sync_payment_intent_ledger() already creates
+       * tax_ledger_sync_failed and schedules its checked retry.
+       */
+      return $tax_result;
+    }
+
+    $metadata['mrm_tax_reconciliation_status'] = 'complete';
+    $metadata['mrm_tax_reconciled_at'] = current_time('mysql');
+    $metadata['mrm_tax_reconciliation_message'] = '';
+
+    $this->update_order_status_from_pi($pi_id, 'paid', 'succeeded', $metadata);
+    $fresh_order = $this->get_order_by_pi($pi_id);
+
+    return is_array($fresh_order) ? $fresh_order : $order;
+  }
+
+  private function mrm_finalize_autopay_lesson_success($lesson_id, $order = array(), $pi_id = '', $tax_already_reconciled = false) {
     global $wpdb;
 
     $lesson_id = (int)$lesson_id;
     if ($lesson_id <= 0) return;
+
+    if (!$tax_already_reconciled) {
+      $tax_ready_order = $this->mrm_autopay_require_succeeded_tax_ledger($lesson_id, $order, $pi_id, null, 0);
+
+      if (is_wp_error($tax_ready_order)) {
+        $this->stripe_debug_log('AutoPay lesson finalization blocked by payment or tax reconciliation.', array(
+          'lesson_id' => $lesson_id,
+          'payment_intent_id' => sanitize_text_field($pi_id),
+          'message' => $tax_ready_order->get_error_message(),
+        ));
+
+        return;
+      }
+
+      $order = $tax_ready_order;
+      $pi_id = sanitize_text_field($order['stripe_payment_intent_id'] ?? $pi_id);
+    }
 
     $lessons_table = $this->table_lessons();
     $lesson = $wpdb->get_row($wpdb->prepare(
@@ -9468,56 +9617,80 @@ private function mrm_tax_retry_or_alert_payment_intent(
   }
 
   private function mrm_reconcile_autopay_existing_order($lesson_id, $order) {
-    $lesson_id = (int)$lesson_id;
+    $lesson_id = absint($lesson_id);
+
     if ($lesson_id <= 0 || !is_array($order)) {
       return false;
     }
 
-    $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
+    $pi_id = sanitize_text_field($order['stripe_payment_intent_id'] ?? '');
     if ($pi_id === '') {
       return false;
     }
 
     $pi = $this->stripe_retrieve_payment_intent($pi_id);
     if (is_wp_error($pi)) {
-      return false;
-    }
-
-    $pi_status = (string)($pi['status'] ?? '');
-    $metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
-
-    if ($lesson_id > 0 && empty($metadata['mrm_lesson_id'])) {
-      $metadata['mrm_lesson_id'] = (string)$lesson_id;
-    }
-    if (!empty($pi['latest_charge'])) {
-      $metadata['mrm_latest_charge_id'] = (string)$pi['latest_charge'];
-    }
-
-    if (in_array($pi_status, array('succeeded', 'requires_capture'), true)) {
-      $this->update_order_status_from_pi($pi_id, 'paid', $pi_status, $metadata);
-      $fresh_order = $this->get_order_by_pi($pi_id);
-      $this->mrm_finalize_autopay_lesson_success(
-        $lesson_id,
-        (is_array($fresh_order) ? $fresh_order : $order),
-        $pi_id
+      $tax_error = $this->mrm_tax_retry_or_alert_payment_intent(
+        $pi_id,
+        0,
+        '',
+        'The AutoPay PaymentIntent could not be retrieved during order reconciliation: ' . $pi->get_error_message()
       );
+
+      $this->stripe_debug_log('AutoPay existing-order reconciliation could not retrieve the PaymentIntent.', array(
+        'lesson_id' => $lesson_id,
+        'payment_intent_id' => $pi_id,
+        'message' => is_wp_error($tax_error) ? $tax_error->get_error_message() : $pi->get_error_message(),
+      ));
+
       return true;
     }
 
-    if (in_array($pi_status, array('processing', 'requires_confirmation'), true)) {
-      $this->update_order_status_from_pi($pi_id, 'processing', $pi_status, $metadata);
+    $pi_status = sanitize_key($pi['status'] ?? '');
+    $metadata = is_array($pi['metadata'] ?? null) ? $pi['metadata'] : array();
+
+    if (empty($metadata['mrm_lesson_id'])) {
+      $metadata['mrm_lesson_id'] = (string)$lesson_id;
+    }
+
+    if (!empty($pi['latest_charge'])) {
+      $metadata['mrm_latest_charge_id'] = $this->mrm_stripe_expandable_id($pi['latest_charge']);
+    }
+
+    if ($pi_status === 'succeeded') {
+      $tax_ready_order = $this->mrm_autopay_require_succeeded_tax_ledger($lesson_id, $order, $pi_id, $pi, 0);
+
+      if (is_wp_error($tax_ready_order)) {
+        /*
+         * The order and lesson remain processing. The tax
+         * synchronizer has already opened its critical alert
+         * and scheduled the checked retry.
+         */
+        return true;
+      }
+
+      $this->mrm_finalize_autopay_lesson_success($lesson_id, $tax_ready_order, $pi_id, true);
+      return true;
+    }
+
+    if (in_array($pi_status, array('processing', 'requires_confirmation', 'requires_capture'), true)) {
+      $message = $pi_status === 'requires_capture'
+        ? 'The AutoPay charge is authorized but has not been captured.'
+        : 'The AutoPay charge is still processing.';
+
+      $this->update_order_status_from_pi($pi_id, 'processing', $pi_status, array_merge($metadata, array(
+        'mrm_tax_reconciliation_status' => 'waiting_for_payment_success',
+        'mrm_tax_reconciliation_message' => $message,
+      )));
+
       return true;
     }
 
     if (in_array($pi_status, array('requires_payment_method', 'requires_action', 'canceled'), true)) {
       $this->update_order_status_from_pi($pi_id, 'failed', $pi_status, $metadata);
-      $this->mrm_finalize_autopay_lesson_failure(
-        $lesson_id,
-        'Autopay reconcile status: ' . $pi_status
-      );
+      $this->mrm_finalize_autopay_lesson_failure($lesson_id, 'AutoPay reconcile status: ' . $pi_status);
       return true;
     }
-
 
     return false;
   }
@@ -9598,11 +9771,11 @@ private function mrm_tax_retry_or_alert_payment_intent(
       }
 
       if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
-        $this->mrm_finalize_autopay_lesson_success(
-          $lesson_id,
-          $existing_order,
-          (string)($existing_order['stripe_payment_intent_id'] ?? '')
-        );
+        /*
+         * mrm_reconcile_autopay_existing_order() already retrieved
+         * Stripe truth, synchronized the tax ledger, and finalized
+         * the lesson. Never finalize from local order status alone.
+         */
         continue;
       }
 
@@ -10204,11 +10377,11 @@ private function charge_and_unlock_autopay($data) {
       }
 
       if (in_array($existing_status, array('paid', 'completed', 'succeeded'), true)) {
-        $this->mrm_finalize_autopay_lesson_success(
-          $lesson_id,
-          $existing_order,
-          (string)($existing_order['stripe_payment_intent_id'] ?? '')
-        );
+        /*
+         * mrm_reconcile_autopay_existing_order() already performs
+         * the Stripe-status and tax-ledger checks before lesson
+         * finalization.
+         */
         return;
       }
 
@@ -10404,10 +10577,13 @@ private function charge_and_unlock_autopay($data) {
     $pi_id = (string)($pi['id'] ?? '');
     $status = (string)($pi['status'] ?? '');
 
+    /*
+     * A succeeded Stripe charge remains locally processing until
+     * the required Stripe Tax Transaction has been committed to
+     * the authoritative local ledger.
+     */
     $local_order_status = 'processing';
-    if (in_array($status, array('succeeded', 'requires_capture'), true)) {
-      $local_order_status = 'paid';
-    } elseif (in_array($status, array('requires_payment_method', 'requires_action', 'canceled'), true)) {
+    if (in_array($status, array('requires_payment_method', 'requires_action', 'canceled'), true)) {
       $local_order_status = 'failed';
     }
 
@@ -10418,16 +10594,29 @@ private function charge_and_unlock_autopay($data) {
       }
 
 
-    if (in_array($status, array('succeeded', 'requires_capture'), true)) {
-      // Fast-path finalize from direct Stripe truth.
-      // Webhook remains idempotent and will not hurt anything if it arrives later.
+    if ($status === 'succeeded') {
       $fresh_order = $this->get_order($order_id);
-      $this->mrm_finalize_autopay_lesson_success($lesson_id, $fresh_order, $pi_id);
+      $tax_ready_order = $this->mrm_autopay_require_succeeded_tax_ledger($lesson_id, $fresh_order, $pi_id, $pi, 0);
+
+      if (is_wp_error($tax_ready_order)) {
+        /*
+         * The helper leaves the lesson and order in a fail-closed
+         * processing state. The tax synchronizer also creates the
+         * critical alert and checked retry.
+         */
+        return;
+      }
+
+      $this->mrm_finalize_autopay_lesson_success($lesson_id, $tax_ready_order, $pi_id, true);
       return;
     }
 
-    if ($status === 'processing') {
-      // Leave lesson in payment_due / processing and let webhook or retry reconcile it.
+    if (in_array($status, array('processing', 'requires_capture'), true)) {
+      /*
+       * requires_capture is an uncaptured authorization, not a
+       * completed charge. Leave the lesson and payouts
+       * unfinalized.
+       */
       return;
     }
 
@@ -13015,6 +13204,7 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     $meta['mrm_tax_policy_reason'] = (string)($tax_policy['policy_reason'] ?? '');
     $meta['mrm_tax_policy_message'] = (string)$tax_message;
     $meta['mrm_taxability_reason'] = (string)($tax_result['taxability_reason'] ?? '');
+    $meta['mrm_tax_lines_json'] = wp_json_encode($tax_result['line_items']);
     $meta['mrm_lesson_mode'] = $is_online ? 'Online' : 'In Person';
     $meta['mrm_instructor_id'] = (string)$tax_context['instructor_id'];
     $meta['mrm_tax_code'] = sanitize_text_field($first_profile['tax_code'] ?? '');
