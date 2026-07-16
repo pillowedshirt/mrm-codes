@@ -3368,7 +3368,7 @@ public function mrm_mc_handle_successful_refund($refund, $charge, $summary = arr
 	if ($refund_id !== '' && $this->mrm_mc_table_exists($refunds)) $wpdb->update($refunds,array('status'=>'succeeded','error_message'=>'','updated_at'=>$this->now()),array('refund_id'=>$refund_id));
 	$this->mrm_mc_void_payout_ledger_for_refunded_registration(absint($registration->id),$refund_id,'stripe_refund_succeeded');
 	$event=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$events} WHERE id = %d LIMIT 1",absint($registration->event_id)));
-	if ($event) $this->mrm_mc_send_email_recorded('refund_completed',$registration->email,'Masterclass Refund Successful',$this->mrm_mc_refund_completed_email_body($event,$registration,absint($refund['amount'] ?? $registration->amount_cents ?? 0)),$event->id,$registration->id);
+	if ($event) $this->mrm_mc_send_email_recorded('refund_completed',$registration->email,'Masterclass Refund Successful',$this->mrm_mc_refund_completed_email_body($event,$registration,absint($summary['succeeded_refund_cents'] ?? $registration->amount_cents ?? 0)),$event->id,$registration->id);
 }
 
 public function mrm_mc_handle_partial_refund($refund, $charge, $summary = array()) {
