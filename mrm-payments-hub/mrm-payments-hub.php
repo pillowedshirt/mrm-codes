@@ -45,9 +45,8 @@ class MRM_Payments_Hub_Single {
   const MENU_SLUG = 'mrm-payments-hub';
   const STRIPE_CORE_API_VERSION = '2026-06-24.dahlia';
   const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
-  const STRIPE_TAX_PAYMENT_INTENT_BETA = 'payment_intent_with_tax_api_beta=v1';
-  const STRIPE_TAX_LOCATION_API_VERSION = '2026-06-24.dahlia';
-  const TAX_RULES_VERSION = '2026-07-16-stripe-first-v13';
+  const STRIPE_TAX_LOCATION_API_VERSION = '2026-06-24.preview';
+  const TAX_RULES_VERSION = '2026-07-16-national-v13';
   const TAX_SCHEMA_VERSION = '2026-07-14-7';
 
   const TAX_STRIPE_SYNC_MAX_AGE_MINUTES = 120;
@@ -3324,20 +3323,6 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   }
 
 
-  private function mrm_stripe_tax_association_headers() {
-    /*
-     * Stripe currently documents the feature token specifically
-     * for the Tax Association endpoint. Keep it isolated here.
-     */
-    return array(
-      'Stripe-Version' =>
-        self::STRIPE_TAX_API_VERSION
-        . '; '
-        . self::STRIPE_TAX_PAYMENT_INTENT_BETA,
-    );
-  }
-
-
   private function mrm_stripe_tax_location_headers() {
     return array(
       'Stripe-Version' =>
@@ -3524,7 +3509,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
 
     $tax_calculation_id = sanitize_text_field($tax_calculation_id);
     if ($tax_calculation_id !== '') {
-      $params['hooks[inputs][tax][calculation]'] = $tax_calculation_id;
+      $metadata['mrm_tax_calculation_id'] = $tax_calculation_id;
     }
 
     $idx = 0;
@@ -3552,7 +3537,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       $params["metadata[{$k}]"] = (string)$v;
     }
 
-    return $this->stripe_api_request('POST', '/v1/payment_intents', $params, $this->mrm_stripe_tax_headers());
+    return $this->stripe_api_request('POST', '/v1/payment_intents', $params);
   }
 
   private function stripe_retrieve_payment_intent($pi_id) {
@@ -3623,13 +3608,13 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       'payment_method_types[0]' => 'card',
     );
     $tax_calculation_id = sanitize_text_field($tax_calculation_id);
-    if ($tax_calculation_id !== '') $params['hooks[inputs][tax][calculation]'] = $tax_calculation_id;
+    if ($tax_calculation_id !== '') $metadata['mrm_tax_calculation_id'] = $tax_calculation_id;
     if ($description !== '') $params['description'] = (string)$description;
     foreach ((array)$metadata as $k => $v) {
       if ($k === '' || $v === null) continue;
       $params["metadata[{$k}]"] = (string)$v;
     }
-    return $this->stripe_api_request('POST', '/v1/payment_intents', $params, $this->mrm_stripe_tax_headers());
+    return $this->stripe_api_request('POST', '/v1/payment_intents', $params);
   }
 
   private function stripe_attach_payment_method_to_customer($payment_method_id, $customer_id) {
@@ -5460,9 +5445,7 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
   }
 
   private function mrm_tax_find_association($payment_intent_id) {
-    $payment_intent_id = sanitize_text_field($payment_intent_id);
-    if ($payment_intent_id === '') return new WP_Error('missing_payment_intent', 'Missing PaymentIntent ID.');
-    return $this->stripe_api_request('GET', '/v1/tax/associations/find', array('payment_intent'=>$payment_intent_id), $this->mrm_stripe_tax_association_headers());
+    return new WP_Error('tax_association_unsupported', 'Stripe Tax Associations are not used by the stable Tax Transaction flow.');
   }
 
   private function mrm_tax_retrieve_transaction($transaction_id) {
@@ -5475,6 +5458,66 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     $transaction_id = sanitize_text_field($transaction_id);
     if ($transaction_id === '') return new WP_Error('missing_tax_transaction', 'Missing Tax Transaction ID.');
     return $this->stripe_api_request('GET', '/v1/tax/transactions/' . rawurlencode($transaction_id) . '/line_items', array('limit'=>100), $this->mrm_stripe_tax_headers());
+  }
+
+
+  private function mrm_tax_existing_transaction_id_for_payment_intent($payment_intent_id, $metadata = array()) {
+    global $wpdb;
+    $payment_intent_id = sanitize_text_field($payment_intent_id);
+    $metadata = is_array($metadata) ? $metadata : array();
+    $metadata_transaction_id = sanitize_text_field($metadata['mrm_tax_transaction_id'] ?? '');
+    if ($metadata_transaction_id !== '') return $metadata_transaction_id;
+    if ($payment_intent_id === '') return '';
+    $wpdb->last_error = '';
+    $transaction_id = $wpdb->get_var($wpdb->prepare("SELECT tax_transaction_id FROM {$this->table_tax_sales_ledger()} WHERE payment_intent_id = %s AND COALESCE(tax_transaction_id, '') <> '' ORDER BY id ASC LIMIT 1", $payment_intent_id));
+    if ($wpdb->last_error !== '') return new WP_Error('tax_transaction_lookup_failed', $wpdb->last_error);
+    return sanitize_text_field($transaction_id);
+  }
+
+  private function mrm_tax_payment_intent_reversal_ids($payment_intent_id) {
+    global $wpdb;
+    $payment_intent_id = sanitize_text_field($payment_intent_id);
+    if ($payment_intent_id === '') return array();
+    $wpdb->last_error = '';
+    $values = $wpdb->get_col($wpdb->prepare("SELECT tax_reversals_json FROM {$this->table_tax_sales_ledger()} WHERE payment_intent_id = %s", $payment_intent_id));
+    if ($wpdb->last_error !== '') return new WP_Error('tax_reversal_lookup_failed', $wpdb->last_error);
+    $ids = array();
+    foreach ((array)$values as $value) { $decoded = json_decode((string)$value, true); if (!is_array($decoded)) continue; foreach ($decoded as $transaction_id) { $transaction_id = sanitize_text_field($transaction_id); if ($transaction_id !== '') $ids[$transaction_id] = true; } }
+    return array_keys($ids);
+  }
+
+  private function mrm_tax_add_reversal_to_payment_intent_ledger($payment_intent_id, $transaction_id) {
+    global $wpdb;
+    $payment_intent_id = sanitize_text_field($payment_intent_id); $transaction_id = sanitize_text_field($transaction_id);
+    if ($payment_intent_id === '' || $transaction_id === '') return new WP_Error('tax_reversal_reference_missing', 'The tax-reversal ledger references were incomplete.');
+    $wpdb->last_error = '';
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT id, tax_reversals_json FROM {$this->table_tax_sales_ledger()} WHERE payment_intent_id = %s", $payment_intent_id), ARRAY_A);
+    if ($wpdb->last_error !== '') return new WP_Error('tax_reversal_rows_lookup_failed', $wpdb->last_error);
+    if (empty($rows)) return new WP_Error('tax_reversal_sale_ledger_missing', 'The original payment tax ledger must exist before a reversal can be recorded.');
+    foreach ($rows as $row) { $ids = json_decode((string)($row['tax_reversals_json'] ?? '[]'), true); if (!is_array($ids)) $ids = array(); $ids[] = $transaction_id; $ids = array_values(array_unique(array_filter(array_map('sanitize_text_field', $ids)))); $wpdb->last_error = ''; $updated = $wpdb->update($this->table_tax_sales_ledger(), array('tax_reversals_json'=>wp_json_encode($ids),'updated_at'=>current_time('mysql')), array('id'=>absint($row['id']))); if ($updated === false || $wpdb->last_error !== '') return new WP_Error('tax_reversal_ledger_update_failed', $wpdb->last_error ?: 'The tax reversal could not be stored.'); }
+    return true;
+  }
+
+  private function mrm_tax_commit_payment_intent_transaction($payment_intent) {
+    if (!is_array($payment_intent)) return new WP_Error('tax_payment_intent_invalid', 'The PaymentIntent was invalid.');
+    $payment_intent_id = sanitize_text_field($payment_intent['id'] ?? '');
+    if ($payment_intent_id === '') return new WP_Error('tax_payment_intent_id_missing', 'The PaymentIntent ID is missing.');
+    if (sanitize_key($payment_intent['status'] ?? '') !== 'succeeded') return new WP_Error('tax_payment_not_succeeded', 'The tax transaction cannot be committed until the PaymentIntent succeeds.');
+    $metadata = is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : array();
+    $calculation_id = sanitize_text_field($metadata['mrm_tax_calculation_id'] ?? '');
+    if ($calculation_id === '') return new WP_Error('tax_calculation_id_missing', 'The succeeded PaymentIntent does not contain its Stripe Tax Calculation ID.');
+    $transaction_id = $this->mrm_tax_existing_transaction_id_for_payment_intent($payment_intent_id, $metadata); if (is_wp_error($transaction_id)) return $transaction_id;
+    if ($transaction_id === '') {
+      $posted_at = time(); $charge_id = $this->mrm_stripe_expandable_id($payment_intent['latest_charge'] ?? '');
+      if ($charge_id !== '') { $charge = $this->stripe_retrieve_charge($charge_id); if (!is_wp_error($charge) && !empty($charge['created'])) $posted_at = absint($charge['created']); }
+      $transaction = $this->stripe_api_request('POST', '/v1/tax/transactions/create_from_calculation', array('calculation'=>$calculation_id,'reference'=>'mrm-payment-intent-'.$payment_intent_id,'posted_at'=>$posted_at,'metadata[payment_intent_id]'=>$payment_intent_id,'expand[0]'=>'line_items'), array('Stripe-Version'=>self::STRIPE_TAX_API_VERSION,'Idempotency-Key'=>'mrm-tax-sale-'.hash('sha256',$payment_intent_id)));
+      if (is_wp_error($transaction)) return $transaction;
+      $transaction_id = sanitize_text_field($transaction['id'] ?? ''); if ($transaction_id === '') return new WP_Error('tax_transaction_id_missing', 'Stripe did not return a Tax Transaction ID.');
+      $updated_payment_intent = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($payment_intent_id), array('metadata[mrm_tax_transaction_id]'=>$transaction_id)); if (is_wp_error($updated_payment_intent)) return $updated_payment_intent; $payment_intent = $updated_payment_intent;
+    } else { $transaction = $this->mrm_tax_retrieve_transaction($transaction_id); if (is_wp_error($transaction)) return $transaction; }
+    $line_items = $this->mrm_tax_get_transaction_line_items($transaction_id); if (is_wp_error($line_items)) return $line_items;
+    $reversal_ids = $this->mrm_tax_payment_intent_reversal_ids($payment_intent_id); if (is_wp_error($reversal_ids)) return $reversal_ids;
+    return array('payment_intent'=>$payment_intent,'transaction'=>$transaction,'line_items'=>$line_items,'parsed'=>array('association_id'=>'','calculation_id'=>$calculation_id,'original_transaction_id'=>$transaction_id,'reversal_transaction_ids'=>$reversal_ids,'errors'=>array()));
   }
 
   private function mrm_tax_parse_association($association) {
@@ -5652,20 +5695,24 @@ private function mrm_tax_retry_or_alert_payment_intent(
   );
 }
   private function mrm_tax_sync_refund_reversal($payment_intent_id, $refund_id, $attempt = 0) {
-  $payment_intent_id = sanitize_text_field($payment_intent_id); $refund_id = sanitize_text_field($refund_id); $attempt = absint($attempt);
-  if ($payment_intent_id === '' || $refund_id === '') return new WP_Error('refund_tax_reference_missing', 'The refund tax references were incomplete.');
-  $refund = $this->stripe_retrieve_refund($refund_id); if (is_wp_error($refund)) return $refund;
-  $refund_status = sanitize_key($refund['status'] ?? '');
-  if (in_array($refund_status, array('pending','requires_action'), true)) { $message = 'Refund ' . $refund_id . ' has not reached a final status. Current status: ' . $refund_status . '.'; $alert_result = $this->mrm_tax_create_alert('', 'refund_tax_reversal_unresolved', 'refund', 0, array('message'=>$message,'payment_intent_id'=>$payment_intent_id,'refund_id'=>$refund_id,'refund_status'=>$refund_status,'attempt'=>$attempt), sanitize_key($refund_id)); if (is_wp_error($alert_result)) return $alert_result; if ($attempt < 6) { $schedule_result = $this->mrm_tax_schedule_refund_retry($payment_intent_id, $refund_id, $attempt + 1, '', $message); if (is_wp_error($schedule_result)) return $schedule_result; } return new WP_Error('refund_not_final', $message); }
-  if (!in_array($refund_status, array('succeeded','failed','canceled'), true)) return new WP_Error('refund_status_unknown', 'Refund ' . $refund_id . ' has an unsupported status: ' . ($refund_status !== '' ? $refund_status : 'unknown') . '.');
-  $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id); if (is_wp_error($payment_intent)) return $payment_intent;
-  $association = $this->mrm_tax_find_association($payment_intent_id); if (is_wp_error($association)) return $association;
-  $committed_count = $this->mrm_tax_association_committed_refund_count($association, $refund_id); $required_count = $refund_status === 'succeeded' ? 1 : 2;
-  if ($committed_count < $required_count) { $message = 'Stripe Tax has not yet committed every required reversal for refund ' . $refund_id . '. Refund status: ' . $refund_status . '. Required transactions: ' . $required_count . '. Current transactions: ' . $committed_count . '.'; $alert_result = $this->mrm_tax_create_alert('', 'refund_tax_reversal_unresolved', 'refund', 0, array('message'=>$message,'payment_intent_id'=>$payment_intent_id,'refund_id'=>$refund_id,'refund_status'=>$refund_status,'committed_count'=>$committed_count,'required_count'=>$required_count,'attempt'=>$attempt), sanitize_key($refund_id)); if (is_wp_error($alert_result)) return $alert_result; if ($attempt < 6) { $schedule_result = $this->mrm_tax_schedule_refund_retry($payment_intent_id, $refund_id, $attempt + 1, '', $message); if (is_wp_error($schedule_result)) return $schedule_result; } return new WP_Error('refund_tax_reversal_pending', $message); }
-  $sync_result = $this->mrm_tax_sync_payment_intent_ledger($payment_intent, $attempt); if (is_wp_error($sync_result)) return $sync_result;
-  $resolved = $this->mrm_tax_resolve_alerts_by_reference('refund_id', $refund_id, array('refund_tax_reversal_unresolved')); if (is_wp_error($resolved)) return $resolved;
-  return true;
-}
+    $payment_intent_id = sanitize_text_field($payment_intent_id); $refund_id = sanitize_text_field($refund_id); $attempt = absint($attempt);
+    if ($payment_intent_id === '' || $refund_id === '') return new WP_Error('refund_tax_reference_missing', 'The refund tax references were incomplete.');
+    $refund = $this->stripe_retrieve_refund($refund_id); if (is_wp_error($refund)) return $refund;
+    $refund_status = sanitize_key($refund['status'] ?? '');
+    if (in_array($refund_status, array('pending','requires_action'), true)) { $message = 'Refund ' . $refund_id . ' has not reached a final status. Current status: ' . $refund_status . '.'; $alert_result = $this->mrm_tax_create_alert('', 'refund_tax_reversal_unresolved', 'refund', 0, array('message'=>$message,'payment_intent_id'=>$payment_intent_id,'refund_id'=>$refund_id,'refund_status'=>$refund_status,'attempt'=>$attempt), sanitize_key($refund_id)); if (is_wp_error($alert_result)) return $alert_result; if ($attempt < 6) { $schedule_result = $this->mrm_tax_schedule_refund_retry($payment_intent_id, $refund_id, $attempt + 1, '', $message); if (is_wp_error($schedule_result)) return $schedule_result; } return new WP_Error('refund_not_final', $message); }
+    if (!in_array($refund_status, array('succeeded','failed','canceled'), true)) return new WP_Error('refund_status_unknown', 'Refund ' . $refund_id . ' has an unsupported status: ' . ($refund_status !== '' ? $refund_status : 'unknown') . '.');
+    $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id); if (is_wp_error($payment_intent)) return $payment_intent;
+    $original_sync = $this->mrm_tax_sync_payment_intent_ledger($payment_intent, $attempt); if (is_wp_error($original_sync)) return $original_sync;
+    $original_transaction_id = $this->mrm_tax_existing_transaction_id_for_payment_intent($payment_intent_id, is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : array()); if (is_wp_error($original_transaction_id)) return $original_transaction_id;
+    if ($original_transaction_id === '') return new WP_Error('refund_original_tax_transaction_missing', 'The original Tax Transaction is missing for this refund.');
+    $refund_metadata = is_array($refund['metadata'] ?? null) ? $refund['metadata'] : array(); $reversal_id = sanitize_text_field($refund_metadata['mrm_tax_reversal_id'] ?? '');
+    if ($refund_status === 'succeeded' && $reversal_id === '') { $refund_amount = absint($refund['amount'] ?? 0); if ($refund_amount <= 0) return new WP_Error('refund_tax_amount_invalid', 'The successful Refund has no usable amount.'); $reversal = $this->stripe_api_request('POST', '/v1/tax/transactions/create_reversal', array('mode'=>'partial','original_transaction'=>$original_transaction_id,'reference'=>'mrm-refund-'.$refund_id,'flat_amount'=>-1 * $refund_amount,'metadata[payment_intent_id]'=>$payment_intent_id,'metadata[refund_id]'=>$refund_id,'expand[0]'=>'line_items'), array('Stripe-Version'=>self::STRIPE_TAX_API_VERSION,'Idempotency-Key'=>'mrm-tax-refund-'.hash('sha256',$refund_id))); if (is_wp_error($reversal)) return $reversal; $reversal_id = sanitize_text_field($reversal['id'] ?? ''); if ($reversal_id === '') return new WP_Error('refund_tax_reversal_id_missing', 'Stripe did not return a reversal Tax Transaction ID.'); $refund_update = $this->stripe_api_request('POST', '/v1/refunds/' . rawurlencode($refund_id), array('metadata[mrm_tax_reversal_id]'=>$reversal_id)); if (is_wp_error($refund_update)) return $refund_update; $ledger_update = $this->mrm_tax_add_reversal_to_payment_intent_ledger($payment_intent_id, $reversal_id); if (is_wp_error($ledger_update)) return $ledger_update; }
+    if (in_array($refund_status, array('failed','canceled'), true) && $reversal_id !== '') { $restore_id = sanitize_text_field($refund_metadata['mrm_tax_reversal_restore_id'] ?? ''); if ($restore_id === '') { $restore = $this->stripe_api_request('POST', '/v1/tax/transactions/create_reversal', array('mode'=>'full','original_transaction'=>$reversal_id,'reference'=>'mrm-refund-restore-'.$refund_id,'metadata[payment_intent_id]'=>$payment_intent_id,'metadata[refund_id]'=>$refund_id), array('Stripe-Version'=>self::STRIPE_TAX_API_VERSION,'Idempotency-Key'=>'mrm-tax-refund-restore-'.hash('sha256',$refund_id))); if (is_wp_error($restore)) return $restore; $restore_id = sanitize_text_field($restore['id'] ?? ''); if ($restore_id === '') return new WP_Error('refund_tax_reversal_restore_id_missing', 'Stripe did not return a refund-restore Tax Transaction ID.'); $refund_update = $this->stripe_api_request('POST', '/v1/refunds/' . rawurlencode($refund_id), array('metadata[mrm_tax_reversal_restore_id]'=>$restore_id)); if (is_wp_error($refund_update)) return $refund_update; $ledger_update = $this->mrm_tax_add_reversal_to_payment_intent_ledger($payment_intent_id, $restore_id); if (is_wp_error($ledger_update)) return $ledger_update; } }
+    $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id); if (is_wp_error($payment_intent)) return $payment_intent;
+    $sync_result = $this->mrm_tax_sync_payment_intent_ledger($payment_intent, $attempt); if (is_wp_error($sync_result)) return $sync_result;
+    $resolved = $this->mrm_tax_resolve_alerts_by_reference('refund_id', $refund_id, array('refund_tax_reversal_unresolved')); if (is_wp_error($resolved)) return $resolved;
+    return true;
+  }
 
   public function mrm_tax_retry_refund_association($payment_intent_id, $refund_id, $attempt) { return $this->mrm_tax_sync_refund_reversal($payment_intent_id, $refund_id, $attempt); }
 
@@ -5696,11 +5743,14 @@ private function mrm_tax_retry_or_alert_payment_intent(
   private function mrm_tax_sync_payment_intent_ledger($payment_intent, $attempt = 0) {
     if (!is_array($payment_intent)) return new WP_Error('invalid_payment_intent', 'Invalid PaymentIntent.'); $pi_id = sanitize_text_field($payment_intent['id'] ?? ''); if ($pi_id === '') return new WP_Error('missing_payment_intent_id', 'Missing PaymentIntent ID.');
     $metadata = is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : array(); $customer_state_from_meta = $this->mrm_normalize_state_code($metadata['mrm_customer_state'] ?? '');
-    $association = $this->mrm_tax_find_association($pi_id); if (is_wp_error($association)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'Stripe Tax Association lookup failed: ' . $association->get_error_message());
-    $parsed = $this->mrm_tax_parse_association($association); if (empty($parsed['original_transaction_id'])) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'No committed original Stripe Tax Transaction was found.');
-    $transaction = $this->mrm_tax_retrieve_transaction($parsed['original_transaction_id']); $original_lines = $this->mrm_tax_get_transaction_line_items($parsed['original_transaction_id']);
-    if (is_wp_error($transaction)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The Stripe Tax Transaction could not be retrieved: ' . $transaction->get_error_message());
-    if (is_wp_error($original_lines)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The Stripe Tax Transaction line items could not be retrieved: ' . $original_lines->get_error_message());
+    $committed = $this->mrm_tax_commit_payment_intent_transaction($payment_intent);
+    if (is_wp_error($committed)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The stable Stripe Tax Transaction could not be committed: ' . $committed->get_error_message());
+    $payment_intent = is_array($committed['payment_intent'] ?? null) ? $committed['payment_intent'] : $payment_intent;
+    $metadata = is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : $metadata;
+    $parsed = is_array($committed['parsed'] ?? null) ? $committed['parsed'] : array();
+    $transaction = is_array($committed['transaction'] ?? null) ? $committed['transaction'] : array();
+    $original_lines = is_array($committed['line_items'] ?? null) ? $committed['line_items'] : array();
+    if (empty($parsed['original_transaction_id'])) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'No committed original Stripe Tax Transaction was found.');
     if (sanitize_key($transaction['type'] ?? '') !== 'transaction') return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The committed original Stripe Tax object is not a sale transaction.');
     $transaction_posted_at = absint($transaction['posted_at'] ?? 0); if ($transaction_posted_at <= 0) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The committed Stripe Tax Transaction has no valid posted_at timestamp.');
     $transaction_occurred_at = $this->mrm_tax_utc_mysql_from_timestamp($transaction_posted_at); $metadata['mrm_tax_transaction_posted_at']=$transaction_posted_at; $metadata['mrm_payment_intent_created_at']=absint($payment_intent['created'] ?? 0);
@@ -5745,14 +5795,16 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $interval=sanitize_key($price['recurring']['interval'] ?? ''); $interval_count=max(1,absint($price['recurring']['interval_count'] ?? 1));
     if($interval!=='month' || $interval_count!==1) return new WP_Error('subscription_interval_invalid','The configured Stripe Price must recur once every month.');
     $currency=strtolower(sanitize_text_field($price['currency'] ?? '')); if($currency!=='usd') return new WP_Error('subscription_currency_invalid','The configured Stripe Price is not USD.');
-    $tax_behavior=sanitize_key($price['tax_behavior'] ?? ''); if($tax_behavior!=='exclusive') return new WP_Error('subscription_tax_behavior_invalid','The Stripe Price tax behavior must be explicitly set to exclusive.');
+    $price_tax_behavior=sanitize_key($price['tax_behavior'] ?? ''); $effective_tax_behavior=$price_tax_behavior;
+    if($effective_tax_behavior==='' || $effective_tax_behavior==='unspecified') { $tax_settings=$this->stripe_api_request('GET','/v1/tax/settings',array(),$this->mrm_stripe_tax_headers()); if(is_wp_error($tax_settings)) return new WP_Error('subscription_tax_settings_unavailable','The Stripe Price does not specify tax behavior and the Stripe Tax default could not be retrieved: '.$tax_settings->get_error_message()); $default_tax_behavior=sanitize_key($tax_settings['defaults']['tax_behavior'] ?? ''); if($default_tax_behavior==='exclusive' || ($default_tax_behavior==='inferred_by_currency' && $currency==='usd')) $effective_tax_behavior='exclusive'; }
+    if($effective_tax_behavior!=='exclusive') return new WP_Error('subscription_tax_behavior_invalid','The subscription must use tax-exclusive pricing. Set the Price to exclusive or set the Stripe Tax default behavior to exclusive.');
     $product_id=is_array($price['product'] ?? null)?sanitize_text_field($price['product']['id'] ?? ''):sanitize_text_field($price['product'] ?? '');
     if($product_id==='') return new WP_Error('subscription_product_id_missing','The configured Stripe Price has no Product ID.');
     $product=$this->stripe_retrieve_product($product_id); if(is_wp_error($product)) return $product;
     if(empty($product['active'])) return new WP_Error('subscription_product_inactive','The configured Stripe Product is inactive.');
     $actual_tax_code=is_array($product['tax_code'] ?? null)?sanitize_text_field($product['tax_code']['id'] ?? ''):sanitize_text_field($product['tax_code'] ?? '');
     if($actual_tax_code!==$expected_tax_code) return new WP_Error('subscription_tax_code_mismatch','The Stripe Product tax code is '.($actual_tax_code!==''?$actual_tax_code:'missing').', but the site requires '.$expected_tax_code.'.');
-    $profile=array('profile_version'=>self::TAX_SUBSCRIPTION_CONFIG_PROFILE_VERSION,'price_id'=>$price_id,'product_id'=>$product_id,'price_active'=>!empty($price['active'])?1:0,'product_active'=>!empty($product['active'])?1:0,'price_type'=>sanitize_key($price['type'] ?? ''),'currency'=>$currency,'tax_behavior'=>$tax_behavior,'recurring_interval'=>$interval,'recurring_interval_count'=>$interval_count,'expected_tax_code'=>$expected_tax_code,'actual_tax_code'=>$actual_tax_code);
+    $profile=array('profile_version'=>self::TAX_SUBSCRIPTION_CONFIG_PROFILE_VERSION,'price_id'=>$price_id,'product_id'=>$product_id,'price_active'=>!empty($price['active'])?1:0,'product_active'=>!empty($product['active'])?1:0,'price_type'=>sanitize_key($price['type'] ?? ''),'currency'=>$currency,'price_tax_behavior'=>$price_tax_behavior,'effective_tax_behavior'=>$effective_tax_behavior,'recurring_interval'=>$interval,'recurring_interval_count'=>$interval_count,'expected_tax_code'=>$expected_tax_code,'actual_tax_code'=>$actual_tax_code);
     $configuration_fingerprint=hash('sha256',wp_json_encode($profile));
     return array('price'=>$price,'product'=>$product,'tax_code'=>$expected_tax_code,'profile'=>$profile,'configuration_fingerprint'=>$configuration_fingerprint);
   }
@@ -13190,7 +13242,6 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     // Update Stripe PaymentIntent amount (before confirmation)
     $update_params = array(
       'amount' => (int)$tax_result['amount_total_cents'],
-      'hooks[inputs][tax][calculation]' => sanitize_text_field($tax_result['calculation_id']),
       'metadata[mrm_subtotal_cents]' => (string)$tax_result['subtotal_cents'],
       'metadata[mrm_tax_cents]' => (string)$tax_result['tax_cents'],
       'metadata[mrm_total_cents]' => (string)$tax_result['amount_total_cents'],
@@ -13205,7 +13256,7 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       'metadata[mrm_customer_state]' => (string)($address['state'] ?? ''),
       'metadata[mrm_customer_country]' => (string)($address['country'] ?? 'US'),
     );
-    $pi = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($pi_id), $update_params, $this->mrm_stripe_tax_headers());
+    $pi = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($pi_id), $update_params);
     if (is_wp_error($pi)) {
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
     }
@@ -18181,29 +18232,17 @@ public function handle_marketing_resubscribe() {
   private function mrm_tax_core_live_checkout_readiness() {
     global $wpdb;
     if (!$this->mrm_tax_is_live_stripe_key()) return true;
-    $schema_error=trim((string)get_option('mrm_tax_schema_migration_error',''));
-    if ($schema_error !== '') return new WP_Error('tax_schema_migration_failed','The tax database schema migration has unresolved errors: '.$schema_error);
-    $engine_readiness=$this->mrm_tax_required_tables_innodb_readiness(); if (is_wp_error($engine_readiness)) return $engine_readiness;
-    $stripe_settings=$this->mrm_tax_stripe_settings_readiness(); if (is_wp_error($stripe_settings)) return $stripe_settings;
-    $threshold_error=trim((string)get_option('mrm_tax_threshold_recompute_error',''));
-    if ($threshold_error !== '') return new WP_Error('tax_threshold_recompute_failed','State payment monitoring has an unresolved error: '.$threshold_error);
-    if (!$this->mrm_tax_threshold_recompute_is_fresh()) return new WP_Error('tax_threshold_recompute_stale','State payment totals have not been recomputed successfully within the last '.self::TAX_THRESHOLD_RECOMPUTE_MAX_AGE_HOURS.' hours.');
-    $state_table=$this->table_tax_state_status(); $wpdb->last_error='';
-    $arizona=$wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A);
-    if ($wpdb->last_error !== '') return new WP_Error('arizona_tax_registry_query_failed',$wpdb->last_error);
-    if (!$this->mrm_tax_global_registration_sync_is_fresh() || !is_array($arizona) || !$this->mrm_tax_stripe_sync_is_fresh($arizona)) {
-      $sync=$this->mrm_tax_sync_stripe_registrations();
-      if (is_wp_error($sync)) return new WP_Error('stripe_registration_sync_failed','The live Stripe Tax registration status could not be refreshed: '.$sync->get_error_message());
-      $arizona=$wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A);
-    }
-    if (!is_array($arizona)) return new WP_Error('arizona_tax_registry_missing','Arizona is missing from the Stripe Tax monitor.');
-    if (sanitize_key($arizona['stripe_registration_status'] ?? '') !== 'active' || empty($arizona['stripe_livemode']) || empty($arizona['collection_active'])) return new WP_Error('arizona_stripe_registration_inactive','Stripe does not report an active live Arizona sales-tax registration.');
-    $wpdb->last_error='';
-    $action_states=$wpdb->get_results("SELECT state_code FROM {$state_table} WHERE state_code <> 'AZ' AND collection_active = 0 AND general_sales_tax_status <> 'no_general_state_sales_tax' AND (physical_nexus_flag = 1 OR estimated_threshold_status = 'threshold_reached') ORDER BY state_code ASC", ARRAY_A);
-    if ($wpdb->last_error !== '') return new WP_Error('state_tax_monitor_query_failed',$wpdb->last_error);
-    if (!empty($action_states)) { $codes=array(); foreach($action_states as $row){ $code=$this->mrm_normalize_state_code($row['state_code'] ?? ''); if($code!=='') $codes[]=$code; } $codes=array_values(array_unique($codes)); return new WP_Error('stripe_state_registration_action_required','Stripe Tax collection is not active for state(s) with a reached-threshold or physical-presence signal: '.implode(', ', $codes).'. Review these states in Stripe Tax → Needs attention or Registrations.'); }
-    $reconciliation=$this->mrm_tax_ledger_reconciliation_rows(50); if (is_wp_error($reconciliation)) return $reconciliation; if (!empty($reconciliation)) return new WP_Error('tax_ledger_reconciliation_required',count($reconciliation).' Stripe Tax transaction(s) require reconciliation.');
-    $critical_alerts=$this->mrm_tax_critical_open_alerts(50); if (is_wp_error($critical_alerts)) return $critical_alerts; if (!empty($critical_alerts)) return new WP_Error('critical_tax_alerts_open',count($critical_alerts).' critical Stripe Tax or refund alert(s) remain unresolved.');
+    $schema_error = trim((string)get_option('mrm_tax_schema_migration_error', ''));
+    if ($schema_error !== '') return new WP_Error('tax_schema_migration_failed', 'The tax database schema migration has unresolved errors: ' . $schema_error);
+    $engine_readiness = $this->mrm_tax_required_tables_innodb_readiness(); if (is_wp_error($engine_readiness)) return $engine_readiness;
+    $stripe_settings = $this->mrm_tax_stripe_settings_readiness(); if (is_wp_error($stripe_settings)) return $stripe_settings;
+    $state_table = $this->table_tax_state_status();
+    $arizona = $wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A);
+    if (!$this->mrm_tax_global_registration_sync_is_fresh() || !$arizona || !$this->mrm_tax_stripe_sync_is_fresh($arizona)) { $sync = $this->mrm_tax_sync_stripe_registrations(); if (is_wp_error($sync)) return new WP_Error('stripe_registration_sync_failed', 'The live Stripe Tax registration status could not be refreshed: ' . $sync->get_error_message()); $arizona = $wpdb->get_row("SELECT * FROM {$state_table} WHERE state_code = 'AZ' LIMIT 1", ARRAY_A); }
+    if (!$arizona) return new WP_Error('arizona_tax_registry_missing', 'Arizona is missing from the Stripe registration monitor.');
+    if (sanitize_key($arizona['stripe_registration_status'] ?? '') !== 'active' || empty($arizona['stripe_livemode']) || empty($arizona['collection_active'])) return new WP_Error('arizona_stripe_registration_inactive', 'The Arizona live Stripe Tax registration is not active.');
+    $reconciliation = $this->mrm_tax_ledger_reconciliation_rows(1); if (is_wp_error($reconciliation)) return $reconciliation; if (!empty($reconciliation)) return new WP_Error('tax_ledger_reconciliation_required', 'One or more completed payments or refunds still require tax-ledger reconciliation.');
+    $critical_alerts = $this->mrm_tax_critical_open_alerts(1); if (is_wp_error($critical_alerts)) return $critical_alerts; if (!empty($critical_alerts)) { $first = $critical_alerts[0]; return new WP_Error('tax_critical_alert_open', 'A critical tax alert is open: ' . sanitize_text_field($first['alert_type'] ?? 'unknown')); }
     return true;
   }
 
@@ -18609,12 +18648,12 @@ MRM_TAX_RULES;
       <?php if(isset($_GET['state_saved'])):?><div class="notice notice-success"><p>Saved <?php echo esc_html(wp_unslash($_GET['state_saved'])); ?>.</p></div><?php endif; ?><?php if(isset($_GET['tax_reconciled'])):?><div class="notice notice-success"><p>Tax reconciliation completed for <code><?php echo esc_html(wp_unslash($_GET['tax_reconciled'])); ?></code>.</p></div><?php endif; ?>
       <p><strong>Stripe mode:</strong> <?php echo $live ? '<span style="color:#008a20;font-weight:700;">LIVE</span>' : '<span style="color:#b32d2e;font-weight:700;">TEST</span>'; ?></p>
       <?php if(!$live): ?><div class="notice notice-warning"><p>The site is using a Stripe test key. Test-mode registrations do not satisfy the production approval gate.</p></div><?php endif; ?><?php if($live): ?><?php if(is_wp_error($readiness)): ?><div class="notice notice-error"><p><strong>Live checkout readiness: BLOCKED</strong></p><p><?php echo esc_html($readiness->get_error_message()); ?></p></div><?php else: ?><div class="notice notice-success"><p><strong>Live checkout readiness: READY</strong></p></div><?php endif; ?><?php endif; ?><?php if(!empty($administrative_issues)): ?><div class="notice notice-warning"><p><strong>Tax administration requires attention</strong></p><ul style="list-style:disc;padding-left:22px;"><?php foreach($administrative_issues as $issue): ?><li><?php echo esc_html($issue['message'] ?? ''); ?></li><?php endforeach; ?></ul></div><?php endif; ?>
-      <div style="background:#fff;border:1px solid #dcdcde;padding:18px;margin:18px 0;max-width:1000px;"><h2>How this monitor works</h2><p>This page reads Stripe Tax settings and active registrations, then combines them with the Stripe Tax transactions and payment totals recorded by this site.</p><p><strong>No per-state manual approval, filing, or professional-review fields are required by this page.</strong> Use Stripe Tax → Needs attention for economic-nexus monitoring and Stripe Tax → Registrations to activate collection after registration.</p><p>The site still flags instructor or presenter states as physical-presence signals because Stripe cannot infer every off-payment business activity.</p></div><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_sync_stripe_registrations','mrm_tax_sync_nonce'); ?><input type="hidden" name="action" value="mrm_tax_sync_stripe_registrations"><button class="button button-primary">Sync Stripe Registrations Now</button></form>
-      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_recompute_thresholds','mrm_tax_recompute_nonce'); ?><input type="hidden" name="action" value="mrm_tax_recompute_thresholds"><button class="button">Recompute State Thresholds</button></form>
+      <div style="background:#fff;border:1px solid #dcdcde;padding:18px;margin:18px 0;max-width:1000px;"><h2>How this monitor works</h2><p>This page reads Stripe Tax settings and active registrations, then combines them with the Stripe Tax transactions and payment totals recorded by this site.</p><p><strong>No per-state manual approval, filing, or professional-review fields are required by this page.</strong> Use Stripe Tax → Needs attention for economic-nexus monitoring and Stripe Tax → Registrations to activate collection after registration.</p><p>The site still flags instructor or presenter states as physical-presence signals because Stripe cannot infer every off-payment business activity.</p></div><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_sync_stripe_registrations','mrm_tax_sync_nonce'); ?><input type="hidden" name="action" value="mrm_tax_sync_stripe_registrations"><button class="button button-primary">Sync Stripe Registrations</button></form>
+      <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;margin-right:8px;"><?php wp_nonce_field('mrm_tax_recompute_thresholds','mrm_tax_recompute_nonce'); ?><input type="hidden" name="action" value="mrm_tax_recompute_thresholds"><button class="button">Recompute Tracked Sales</button></form>
       <a class="button" href="https://dashboard.stripe.com/tax/locations?primary_tab=needs_attention" target="_blank" rel="noopener">Stripe Tax &gt; Needs attention</a> <a class="button" href="https://dashboard.stripe.com/tax/registrations" target="_blank" rel="noopener">Stripe Tax &gt; Registrations</a> <a class="button" href="https://dashboard.stripe.com/tax/transactions" target="_blank" rel="noopener">Stripe Tax &gt; Transactions</a>
       <?php if(!empty($reconciliation_rows)): ?><div style="background:#fff;border:1px solid #d63638;padding:18px;margin:18px 0;"><h2>Tax Transactions Requiring Reconciliation</h2><p>Live checkout remains blocked until these transactions or refund reversals are confirmed.</p><table class="widefat striped"><thead><tr><th>Ledger ID</th><th>Source</th><th>Stripe Reference</th><th>State</th><th>Status</th><th>Error</th><th>Occurred</th><th>Action</th></tr></thead><tbody><?php foreach($reconciliation_rows as $tax_row): ?><tr><td><?php echo esc_html($tax_row['id']); ?></td><td><?php echo esc_html($tax_row['source_type']); ?></td><td><code><?php echo esc_html($tax_row['payment_intent_id'] ?: ($tax_row['invoice_id'] ?: 'Unavailable')); ?></code></td><td><?php echo esc_html($tax_row['customer_state']); ?></td><td><?php echo esc_html($tax_row['tax_transaction_status']); ?></td><td><?php echo esc_html($tax_row['association_error'] ?: 'Missing or incomplete tax reconciliation record'); ?></td><td><?php echo esc_html($tax_row['occurred_at']); ?></td><td><?php if(!empty($tax_row['payment_intent_id'])): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_payment_intent','mrm_tax_reconcile_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_payment_intent"><input type="hidden" name="payment_intent_id" value="<?php echo esc_attr($tax_row['payment_intent_id']); ?>"><button type="submit" class="button button-small">Reconcile Payment</button></form><?php elseif(!empty($tax_row['invoice_id'])): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_invoice','mrm_tax_reconcile_invoice_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_invoice"><input type="hidden" name="invoice_id" value="<?php echo esc_attr($tax_row['invoice_id']); ?>"><button type="submit" class="button button-small">Reconcile Invoice</button></form><?php else: ?>Manual Stripe review required<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
       <?php if(!empty($critical_alerts)): ?><div style="background:#fff;border:1px solid #d63638;padding:18px;margin:18px 0;"><h2>Critical Tax Alerts</h2><p>These alerts must be reconciled before live checkout can report READY.</p><table class="widefat striped"><thead><tr><th>Alert</th><th>State</th><th>Message</th><th>Created</th><th>Action</th></tr></thead><tbody><?php foreach($critical_alerts as $alert): $details=json_decode((string)($alert['details_json'] ?? ''),true); if(!is_array($details)) $details=array(); $payment_intent_id=sanitize_text_field($details['payment_intent_id'] ?? ''); $invoice_id=sanitize_text_field($details['invoice_id'] ?? ''); $refund_id=sanitize_text_field($details['refund_id'] ?? ''); ?><tr><td><?php echo esc_html($alert['alert_type']); ?></td><td><?php echo esc_html($alert['state_code'] ?: '—'); ?></td><td><?php echo esc_html($details['message'] ?? 'Tax review required.'); ?></td><td><?php echo esc_html($alert['created_at']); ?></td><td><?php if(in_array($alert['alert_type'],array('refund_failure_recovery_required','partial_refund_business_review_required'),true) && $refund_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:300px;"><?php wp_nonce_field('mrm_tax_resolve_refund_recovery','mrm_tax_refund_recovery_nonce'); ?><input type="hidden" name="action" value="mrm_tax_resolve_refund_recovery"><input type="hidden" name="refund_id" value="<?php echo esc_attr($refund_id); ?>"><input type="hidden" name="alert_type" value="<?php echo esc_attr($alert['alert_type']); ?>"><label><input type="checkbox" name="order_access_reviewed" value="1"> Order and access reviewed</label><br><label><input type="checkbox" name="payout_reviewed" value="1"> Payout records reviewed</label><br><label><input type="checkbox" name="accounting_reviewed" value="1"> Accounting records reviewed</label><br><label><input type="checkbox" name="customer_resolution_reviewed" value="1"> Customer refund resolution reviewed</label><br><textarea name="resolution_notes" required rows="4" placeholder="Describe every correction and follow-up completed."></textarea><br><button class="button button-small" type="submit"><?php echo esc_html($alert['alert_type']==='partial_refund_business_review_required' ? 'Resolve Partial Refund Review' : 'Resolve Failed Refund'); ?></button></form><?php elseif($alert['alert_type']==='subscription_direct_refund_review_required' && $refund_id !== '' && $invoice_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:300px;"><?php wp_nonce_field('mrm_tax_resolve_direct_invoice_refund','mrm_tax_direct_refund_nonce'); ?><input type="hidden" name="action" value="mrm_tax_resolve_direct_invoice_refund"><input type="hidden" name="refund_id" value="<?php echo esc_attr($refund_id); ?>"><input type="hidden" name="invoice_id" value="<?php echo esc_attr($invoice_id); ?>"><label>Refunded pretax sales</label><br><input type="number" name="refunded_sales" min="0" step="0.01" required placeholder="0.00"><br><label>Refunded tax</label><br><input type="number" name="refunded_tax" min="0" step="0.01" required placeholder="0.00"><br><textarea name="resolution_notes" required rows="4" placeholder="Record the authoritative source used for the pretax and tax split."></textarea><br><button class="button button-small" type="submit">Apply Exact Refund Split</button></form><?php elseif($payment_intent_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_payment_intent','mrm_tax_reconcile_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_payment_intent"><input type="hidden" name="payment_intent_id" value="<?php echo esc_attr($payment_intent_id); ?>"><button class="button button-small" type="submit">Reconcile Payment</button></form><?php elseif($invoice_id !== ''): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mrm_tax_reconcile_invoice','mrm_tax_reconcile_invoice_nonce'); ?><input type="hidden" name="action" value="mrm_tax_reconcile_invoice"><input type="hidden" name="invoice_id" value="<?php echo esc_attr($invoice_id); ?>"><button class="button button-small" type="submit">Reconcile Invoice</button></form><?php else: ?>Manual review required<?php endif; ?></td></tr><?php endforeach; ?></tbody></table></div><?php endif; ?>
-      <h2 style="margin-top:24px;">State Monitoring</h2><p>This table is read-only. Stripe is the collection source of truth; the local figures are monitoring estimates based on successfully reconciled site payments.</p><table class="widefat striped" style="margin-top:12px;"><thead><tr><th>State</th><th>Stripe collection</th><th>Tracked sales</th><th>Transactions</th><th>Catalog threshold</th><th>Progress</th><th>Local signal</th><th>Recommended action</th></tr></thead><tbody><?php foreach($rows as $r): $state=$this->mrm_normalize_state_code($r['state_code'] ?? ''); $collection_active=!empty($r['collection_active']); $no_general_tax=sanitize_key($r['general_sales_tax_status'] ?? '')==='no_general_state_sales_tax'; $physical_signal=!empty($r['physical_nexus_flag']); $threshold_reached=sanitize_key($r['estimated_threshold_status'] ?? '')==='threshold_reached'; $progress=max(0,(float)($r['estimated_threshold_percent'] ?? 0)); $color='#646970'; $signal='Monitoring'; $action='No action currently identified.'; if($collection_active){ $color='#008a20'; $signal='Collecting'; $action='Stripe Tax collection is active.'; } elseif($no_general_tax){ $color='#2271b1'; $signal='No general state sales tax'; $action='Monitor for product-specific or local obligations.'; } elseif($physical_signal || $threshold_reached){ $color='#b32d2e'; $signal=$physical_signal?'Physical-presence signal':'Threshold reached'; $action='Review this state in Stripe Tax and activate a registration when required.'; } elseif($progress >= 75){ $color=$progress >= 90 ? '#d63638' : '#996800'; $signal='Approaching threshold'; $action='Review Stripe Tax → Needs attention.'; } $threshold_parts=array(); if(!empty($r['threshold_amount_cents'])) $threshold_parts[]='$'.number_format(((int)$r['threshold_amount_cents'])/100,2); if(!empty($r['threshold_transaction_count'])) $threshold_parts[]=absint($r['threshold_transaction_count']).' transactions'; ?><tr style="border-left:5px solid <?php echo esc_attr($color); ?>"><td><strong><?php echo esc_html($state); ?></strong><br><?php echo esc_html($r['state_name'] ?? ''); ?></td><td><?php echo $collection_active ? 'Active' : 'Not active'; ?><br><?php if(!empty($r['stripe_registration_id'])): ?><code><?php echo esc_html($r['stripe_registration_id']); ?></code><br><?php endif; ?><small>Last sync: <?php echo esc_html($r['last_stripe_sync_at'] ?: 'Never'); ?></small></td><td>$<?php echo esc_html(number_format(((int)($r['estimated_sales_cents'] ?? 0))/100,2)); ?></td><td><?php echo esc_html(absint($r['estimated_transaction_count'] ?? 0)); ?></td><td><?php echo esc_html(!empty($threshold_parts) ? implode(' or ', $threshold_parts) : 'Not applicable'); ?></td><td><?php echo esc_html(number_format($progress,1)); ?>%</td><td><strong><?php echo esc_html($signal); ?></strong><?php if($physical_signal && !empty($r['physical_nexus_reason'])): ?><br><small><?php echo esc_html($r['physical_nexus_reason']); ?></small><?php endif; ?></td><td><?php echo esc_html($action); ?></td></tr><?php endforeach; ?></tbody></table></div><?php
+      <h2 style="margin-top:24px;">State Monitoring</h2><p>This table is read-only. Stripe is the collection source of truth; the local figures are monitoring estimates based on successfully reconciled site payments.</p><table class="widefat striped" style="margin-top:12px;"><thead><tr><th>State</th><th>Stripe Registration</th><th>Registration ID</th><th>Collection</th><th>Tracked sales</th><th>Tracked transactions</th><th>Monitored threshold</th><th>Threshold progress</th><th>Monitor status</th><th>Suggested action</th></tr></thead><tbody><?php foreach($rows as $r): $state=$this->mrm_normalize_state_code($r['state_code'] ?? ''); $collection_active=!empty($r['collection_active']); $no_general_tax=sanitize_key($r['general_sales_tax_status'] ?? '')==='no_general_state_sales_tax'; $physical_signal=!empty($r['physical_nexus_flag']); $threshold_reached=sanitize_key($r['estimated_threshold_status'] ?? '')==='threshold_reached'; $progress=max(0,(float)($r['estimated_threshold_percent'] ?? 0)); $color='#646970'; $signal='Monitoring'; $action='No action currently identified.'; if($collection_active){ $color='#008a20'; $signal='Collecting'; $action='Stripe Tax collection is active.'; } elseif($no_general_tax){ $color='#2271b1'; $signal='No general state sales tax'; $action='Monitor for product-specific or local obligations.'; } elseif($physical_signal || $threshold_reached){ $color='#b32d2e'; $signal=$physical_signal?'Physical-presence signal':'Threshold reached'; $action='Review this state in Stripe Tax and activate a registration when required.'; } elseif($progress >= 75){ $color=$progress >= 90 ? '#d63638' : '#996800'; $signal='Approaching threshold'; $action='Review Stripe Tax → Needs attention.'; } $threshold_parts=array(); if(!empty($r['threshold_amount_cents'])) $threshold_parts[]='$'.number_format(((int)$r['threshold_amount_cents'])/100,2); if(!empty($r['threshold_transaction_count'])) $threshold_parts[]=absint($r['threshold_transaction_count']).' transactions'; ?><tr style="border-left:5px solid <?php echo esc_attr($color); ?>"><td><strong><?php echo esc_html($state); ?></strong><br><?php echo esc_html($r['state_name'] ?? ''); ?></td><td><?php echo esc_html($r['stripe_registration_status'] ?: 'none'); ?><br><small>Last sync: <?php echo esc_html($r['last_stripe_sync_at'] ?: 'Never'); ?></small></td><td><?php if(!empty($r['stripe_registration_id'])): ?><code><?php echo esc_html($r['stripe_registration_id']); ?></code><?php else: ?>—<?php endif; ?></td><td><?php echo $collection_active ? 'Active' : 'Not active'; ?></td><td>$<?php echo esc_html(number_format(((int)($r['estimated_sales_cents'] ?? 0))/100,2)); ?></td><td><?php echo esc_html(absint($r['estimated_transaction_count'] ?? 0)); ?></td><td><?php echo esc_html(!empty($threshold_parts) ? implode(' or ', $threshold_parts) : 'Not applicable'); ?></td><td><?php echo esc_html(number_format($progress,1)); ?>%</td><td><strong><?php echo esc_html($signal); ?></strong><?php if($physical_signal && !empty($r['physical_nexus_reason'])): ?><br><small><?php echo esc_html($r['physical_nexus_reason']); ?></small><?php endif; ?></td><td><?php echo esc_html($action); ?></td></tr><?php endforeach; ?></tbody></table></div><?php
   }
 
   public function render_profile_card_creation_page() {
