@@ -603,6 +603,14 @@ h1 {
   border-top: 1px solid var(--color-border);
 }
 
+.day-slots-timezone {
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(0,0,0,0.74);
+  margin-bottom: 4px;
+  text-align: left;
+}
+
 .day-slots-summary {
   font-size: 13px;
   color: rgba(0,0,0,0.74);
@@ -3931,6 +3939,36 @@ function mrmGetBrowserTimezone() {
 
 const visitorTZ = mrmGetBrowserTimezone();
 
+function mrmGetBrowserTimezoneAbbreviation() {
+  const timezone = visitorTZ || undefined;
+
+  /*
+   * Prefer generic U.S. abbreviations such as ET, CT, MT, PT,
+   * MST, and HST. A generic abbreviation avoids showing EDT for
+   * an event that may occur later under EST.
+   */
+  const styles = ['shortGeneric', 'short'];
+
+  for (const timeZoneName of styles) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        timeZoneName
+      }).formatToParts(new Date());
+
+      const zonePart = parts.find(part => part.type === 'timeZoneName');
+
+      if (zonePart && zonePart.value) {
+        return zonePart.value;
+      }
+    } catch (error) {}
+  }
+
+  return visitorTZ || 'Local time';
+}
+
+const visitorTZAbbreviation = mrmGetBrowserTimezoneAbbreviation();
+
 let selectedSlots = [];
 let currentInstructor = null;
 
@@ -5947,6 +5985,11 @@ function renderCalendar(instr, state, container){
           return _mrmSameDay(dt, y, m, d);
         });
 
+        const timezoneNotice = document.createElement('div');
+        timezoneNotice.className = 'day-slots-timezone';
+        timezoneNotice.textContent = 'Detected timezone: ' + visitorTZAbbreviation;
+        modalContentHost.append(timezoneNotice);
+
         const summary = document.createElement('div');
         summary.className = 'day-slots-summary';
         if(selectedForDay.length){
@@ -7835,30 +7878,39 @@ function loadInstructors(){
             chev.textContent='▾';
             updateConfirmButton(instr.id);
 
+            const key = monthKey(state.year, state.month);
+            const cached = (state._monthCache && state._monthCache[key])
+              ? state._monthCache[key]
+              : null;
+
+            /* Reuse a recently loaded month without another request. */
+            if(cached && !shouldRefresh()){
+              state.slotsByDay = cached.slotsByDay || {};
+              state.busyByDay = cached.busyByDay || {};
+              renderCalendar(instr, state, calBody);
+              state._opened = true;
+              return;
+            }
+
             showLoader();
+            const token = ++state._preloadSeq;
 
-            const run = ()=>{
-              const sm = 15;
-              const token = ++state._preloadSeq;
-              startBackgroundPreload(sm);
-              const finishOpen = ()=>{
-                if(token !== state._preloadSeq) return;
-                if(cal.classList.contains('is-collapsed')) return;
-
-                state._opened = true;
-              };
-
-              refreshVisibleMonth({ force: true, renderIfVisible: true, year: state.year, month: state.month }).then(finishOpen);
-            };
-
-            run();
+            /* Load only the currently visible month. */
+            refreshVisibleMonth({
+              force: shouldRefresh(),
+              renderIfVisible: true,
+              year: state.year,
+              month: state.month
+            }).then(()=>{
+              if(token !== state._preloadSeq) return;
+              if(cal.classList.contains('is-collapsed')) return;
+              state._opened = true;
+            });
           }
 
           function closeCalendar(){
             cal.classList.add('is-collapsed');
             chev.textContent='▸';
-            state._isStale = true;
-            refreshMonthRange({ force: true, renderIfVisible: false });
           }
 
           function toggleOpen(){
