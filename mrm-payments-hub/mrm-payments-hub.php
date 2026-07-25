@@ -1134,6 +1134,45 @@ class MRM_Payments_Hub_Single {
     return new DateTimeZone(sprintf('%s%02d:%02d', $sign, abs($hours), $mins));
   }
 
+  private function mrm_lesson_normalize_timezone($timezone, $fallback = 'America/Phoenix') {
+    $candidates = array(trim((string)$timezone), trim((string)$fallback), 'UTC');
+    foreach ($candidates as $candidate) {
+      if ($candidate === '') continue;
+      try {
+        new DateTimeZone($candidate);
+        return $candidate;
+      } catch (Exception $e) {
+        continue;
+      }
+    }
+    return 'UTC';
+  }
+
+  private function mrm_lesson_utc_timestamp($value) {
+    $value = trim((string)$value);
+    if ($value === '') return 0;
+    try {
+      if (preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $value)) {
+        $datetime = DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', $value, new DateTimeZone('UTC'));
+        return $datetime instanceof DateTimeImmutable ? $datetime->getTimestamp() : 0;
+      }
+      return (new DateTimeImmutable($value, new DateTimeZone('UTC')))->getTimestamp();
+    } catch (Exception $e) {
+      return 0;
+    }
+  }
+
+  private function mrm_lesson_time_label($utc_value, $timezone, $fallback = 'America/Phoenix', $format = 'F j, Y \a\t g:i A T') {
+    $timestamp = $this->mrm_lesson_utc_timestamp($utc_value);
+    if ($timestamp <= 0) return '';
+    $timezone = $this->mrm_lesson_normalize_timezone($timezone, $fallback);
+    try {
+      return (new DateTimeImmutable('@' . $timestamp))->setTimezone(new DateTimeZone($timezone))->format($format);
+    } catch (Exception $e) {
+      return gmdate($format, $timestamp);
+    }
+  }
+
   private function mrm_month_key_from_ts($ts) {
     $ts = (int)$ts;
     if (function_exists('wp_date')) return wp_date('Y-m', $ts, $this->mrm_wp_tz());
@@ -3960,7 +3999,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       );
     }
 
-    $lesson_ts = strtotime($lesson_start_mysql);
+    $lesson_ts = $this->mrm_lesson_utc_timestamp($lesson_start_mysql);
     if (!$lesson_ts) {
       return array(
         'needs_attention' => true,
@@ -4027,7 +4066,6 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   private function mrm_send_upcoming_payment_method_attention_emails($lesson_row, $profile, $snapshot, $reason_text) {
     $lesson_id = (int)($lesson_row['id'] ?? 0);
     if ($lesson_id <= 0) return false;
-
     $student_email = sanitize_email((string)($lesson_row['student_email'] ?? ''));
     $student_name = trim((string)($lesson_row['student_name'] ?? $lesson_row['client_name'] ?? ''));
     $student_phone = trim((string)($lesson_row['student_phone'] ?? $lesson_row['client_phone'] ?? ''));
@@ -4036,42 +4074,36 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     $mode_label = $this->mrm_format_lesson_mode_label((int)($lesson_row['is_online'] ?? 0));
     $instructor = $this->mrm_get_instructor_contact_from_id((int)($lesson_row['instructor_id'] ?? 0));
     $instructor_name = (string)($instructor['name'] ?? '');
-    $instructor_email = (string)($instructor['email'] ?? '');
+    $instructor_email = sanitize_email((string)($instructor['email'] ?? ''));
     $instructor_phone = (string)($instructor['phone'] ?? '');
     $admin_email = $this->mrm_get_wp_admin_notification_email();
 
+    $student_timezone = $this->mrm_lesson_normalize_timezone($lesson_row['parent_timezone'] ?? '', 'America/Phoenix');
+    $instructor_timezone = $this->mrm_lesson_normalize_timezone($lesson_row['instructor_timezone'] ?? $instructor['timezone'] ?? '', 'America/Phoenix');
+    $admin_timezone = $this->mrm_wp_tz()->getName();
+    $student_when_line = $this->mrm_lesson_time_label($lesson_start, $student_timezone) ?: 'the scheduled lesson time';
+    $instructor_when_line = $this->mrm_lesson_time_label($lesson_start, $instructor_timezone) ?: 'the scheduled lesson time';
+    $admin_when_line = $this->mrm_lesson_time_label($lesson_start, $admin_timezone) ?: 'the scheduled lesson time';
+
     $brand = trim((string)($snapshot['brand'] ?? ''));
     $last4 = trim((string)($snapshot['last4'] ?? ''));
-    $exp_month = (int)($snapshot['exp_month'] ?? 0);
-    $exp_year = (int)($snapshot['exp_year'] ?? 0);
     $card_line = ($brand !== '' || $last4 !== '') ? trim($brand . ' ending in ' . $last4) : 'Saved payment method on file';
+    $exp_month = (int)($snapshot['exp_month'] ?? 0); $exp_year = (int)($snapshot['exp_year'] ?? 0);
     if ($exp_month > 0 && $exp_year > 0) $card_line .= sprintf(' (expires %02d/%04d)', $exp_month, $exp_year);
-
     $lesson_line = trim(($lesson_length > 0 ? $lesson_length . '-minute ' : '') . $mode_label . ' lesson');
-    $when_line = ($lesson_start !== '') ? $lesson_start : 'the scheduled lesson time';
-    $autopay_profile_id = (int)($lesson_row['autopay_profile_id'] ?? ($profile['id'] ?? 0));
-    $update_payment_url = $this->mrm_autopay_update_payment_url($lesson_id, $autopay_profile_id);
-
-    $student_subject = 'Your Payment Method Requires Attention';
-    $student_intro = '<p>Your payment information is in need of an update. Please use this link to update your payment information for the auto-pay lessons, renewing at <strong>' . esc_html($when_line) . '</strong>.</p>';
-    $student_details = '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' . '<div><strong>Renewing at:</strong> ' . esc_html($when_line) . '</div>' . '<div><strong>Saved payment method:</strong> ' . esc_html($card_line) . '</div>' . '<div><strong>Reason:</strong> ' . esc_html($reason_text) . '</div>';
-    $student_buttons = array(array('url' => $update_payment_url, 'label' => 'Update Payment Information', 'variant' => 'primary'));
-    $student_after = $this->mrm_email_contact_support_html('If you have any questions please fill out our contact form.');
-
-    $instructor_subject = 'Payment method needs attention for ' . $student_name;
-    $instructor_heading = 'Please withhold this lesson ' . $when_line . ' until payment method has been updated';
-    $instructor_intro = '<p>Your upcoming AutoPay lesson with <strong>' . esc_html($student_name) . '</strong> requires an updated payment method before the lesson can be processed. Please withhold lesson services until this has been confirmed.</p>';
-    $instructor_details = '<div><strong>Student:</strong> ' . esc_html($student_name) . '</div>' . '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' . '<div><strong>Scheduled time:</strong> ' . esc_html($when_line) . '</div>' . '<p style="margin-top:12px;">This client has also received a request to update their payment information. Feel free to connect and check in with them.</p>' . '<div><strong>Client email:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Client phone number:</strong> ' . esc_html($student_phone) . '</div>';
-
-    $admin_subject = 'Payment information update required for ' . $student_name;
-    $admin_intro = '<p>The system detected a need for payment information to be updated for <strong>' . esc_html($student_name) . '</strong> before their upcoming lesson time with <strong>' . esc_html($instructor_name) . '</strong> and <strong>' . esc_html($when_line) . '</strong>.</p>';
-    $admin_details = '<div><strong>Student:</strong> ' . esc_html($student_name) . '</div>' . '<div><strong>Student email:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Student phone:</strong> ' . esc_html($student_phone) . '</div>' . '<div><strong>Instructor:</strong> ' . esc_html($instructor_name) . '</div>' . '<div><strong>Instructor email:</strong> ' . esc_html($instructor_email) . '</div>' . '<div><strong>Instructor phone:</strong> ' . esc_html($instructor_phone) . '</div>' . '<div><strong>Lesson:</strong> ' . esc_html($lesson_line) . '</div>' . '<div><strong>Lesson day and time:</strong> ' . esc_html($when_line) . '</div>' . '<div><strong>Payment update portal:</strong> <a href="' . esc_url($update_payment_url) . '">' . esc_html($update_payment_url) . '</a></div>' . '<div><strong>Issue:</strong> ' . esc_html($reason_text) . '</div>';
-
+    $profile_id = (int)($lesson_row['autopay_profile_id'] ?? $profile['id'] ?? 0);
+    $update_url = $this->mrm_autopay_update_payment_url($lesson_id, $profile_id);
     $headers = array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>');
-    $student_sent = ($student_email && is_email($student_email)) ? wp_mail($student_email, $student_subject, $this->mrm_email_wrap_html('Update your payment information', $student_intro, $student_details, $student_buttons, '', $student_after), $headers) : false;
-    $instructor_sent = ($instructor_email && is_email($instructor_email)) ? wp_mail($instructor_email, $instructor_subject, $this->mrm_email_wrap_html($instructor_heading, $instructor_intro, $instructor_details, '', ''), $headers) : false;
-    $admin_sent = ($admin_email && is_email($admin_email)) ? wp_mail($admin_email, $admin_subject, $this->mrm_email_wrap_html('Payment method update needed', $admin_intro, $admin_details, '', ''), $headers) : false;
-    return ($student_sent || $instructor_sent || $admin_sent);
+
+    $student_details = '<div><strong>Lesson:</strong> '.esc_html($lesson_line).'</div><div><strong>Renewing at:</strong> '.esc_html($student_when_line).'</div><div><strong>Saved payment method:</strong> '.esc_html($card_line).'</div><div><strong>Reason:</strong> '.esc_html($reason_text).'</div>';
+    $student_sent = $student_email && is_email($student_email) ? wp_mail($student_email, 'Your Payment Method Requires Attention', $this->mrm_email_wrap_html('Update your payment information', '<p>Your payment information is in need of an update. Please update it for the auto-pay lesson renewing at <strong>'.esc_html($student_when_line).'</strong>.</p>', $student_details, array(array('url'=>$update_url,'label'=>'Update Payment Information','variant'=>'primary')), '', $this->mrm_email_contact_support_html('If you have any questions please fill out our contact form.')), $headers) : false;
+
+    $instructor_details = '<div><strong>Student:</strong> '.esc_html($student_name).'</div><div><strong>Lesson:</strong> '.esc_html($lesson_line).'</div><div><strong>Scheduled time:</strong> '.esc_html($instructor_when_line).'</div><div><strong>Client email:</strong> '.esc_html($student_email).'</div><div><strong>Client phone number:</strong> '.esc_html($student_phone).'</div>';
+    $instructor_sent = $instructor_email && is_email($instructor_email) ? wp_mail($instructor_email, 'Payment method needs attention for '.$student_name, $this->mrm_email_wrap_html('Please withhold this lesson '.$instructor_when_line.' until payment method has been updated', '<p>The upcoming AutoPay lesson requires an updated payment method before it can be processed.</p>', $instructor_details, '', ''), $headers) : false;
+
+    $admin_details = '<div><strong>Student:</strong> '.esc_html($student_name).'</div><div><strong>Student email:</strong> '.esc_html($student_email).'</div><div><strong>Student phone:</strong> '.esc_html($student_phone).'</div><div><strong>Instructor:</strong> '.esc_html($instructor_name).'</div><div><strong>Instructor email:</strong> '.esc_html($instructor_email).'</div><div><strong>Instructor phone:</strong> '.esc_html($instructor_phone).'</div><div><strong>Lesson:</strong> '.esc_html($lesson_line).'</div><div><strong>Lesson day and time:</strong> '.esc_html($admin_when_line).'</div><div><strong>Payment update portal:</strong> <a href="'.esc_url($update_url).'">'.esc_html($update_url).'</a></div><div><strong>Issue:</strong> '.esc_html($reason_text).'</div>';
+    $admin_sent = $admin_email && is_email($admin_email) ? wp_mail($admin_email, 'Payment information update required for '.$student_name, $this->mrm_email_wrap_html('Payment method update needed', '<p>Payment information must be updated before the upcoming lesson.</p>', $admin_details, '', ''), $headers) : false;
+    return $student_sent || $instructor_sent || $admin_sent;
   }
 
   private function mrm_signed_lesson_action_url($action, $lesson_id, $profile_id = 0) {
@@ -8154,19 +8186,20 @@ private function mrm_tax_retry_or_alert_payment_intent(
   private function mrm_get_instructor_contact_from_id($instructor_id) {
     global $wpdb;
     $iid = (int)$instructor_id;
-    if (!$iid) return array('name'=>'','email'=>'');
+    if (!$iid) return array('name'=>'','email'=>'','phone'=>'','timezone'=>'');
 
     $table = $wpdb->prefix . 'mrm_instructors';
     $row = $wpdb->get_row($wpdb->prepare(
-      "SELECT name,email,phone FROM {$table} WHERE id=%d LIMIT 1",
+      "SELECT name,email,phone,timezone FROM {$table} WHERE id=%d LIMIT 1",
       $iid
     ), ARRAY_A);
 
-    if (!is_array($row)) return array('name'=>'','email'=>'');
+    if (!is_array($row)) return array('name'=>'','email'=>'','phone'=>'','timezone'=>'');
     return array(
       'name'  => (string)($row['name'] ?? ''),
       'email' => (string)($row['email'] ?? ''),
       'phone' => (string)($row['phone'] ?? ''),
+      'timezone' => (string)($row['timezone'] ?? ''),
     );
   }
 
@@ -8669,7 +8702,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
     $lesson_start = (string)($lesson['start_time'] ?? '');
     $lesson_label = $lesson_start !== ''
-      ? wp_date('F j, Y \a\t g:i A', strtotime($lesson_start), wp_timezone())
+      ? $this->mrm_lesson_time_label($lesson_start, $lesson['parent_timezone'] ?? '', 'America/Phoenix', 'F j, Y \a\t g:i A T')
       : 'your scheduled lesson';
 
     $amount_label = $refund_amount_cents > 0
@@ -8707,7 +8740,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
     global $wpdb;
     $lessons = $this->table_lessons();
     $instructors = $wpdb->prefix . 'mrm_instructors';
-    $row = $wpdb->get_row($wpdb->prepare("SELECT l.*, i.name AS instructor_name, i.email AS instructor_email, i.phone AS instructor_phone FROM {$lessons} l LEFT JOIN {$instructors} i ON i.id = l.instructor_id WHERE l.id = %d LIMIT 1", absint($lesson_id)), ARRAY_A);
+    $row = $wpdb->get_row($wpdb->prepare("SELECT l.*, i.name AS instructor_name, i.email AS instructor_email, i.phone AS instructor_phone, i.timezone AS instructor_profile_timezone FROM {$lessons} l LEFT JOIN {$instructors} i ON i.id = l.instructor_id WHERE l.id = %d LIMIT 1", absint($lesson_id)), ARRAY_A);
     return is_array($row) ? $row : array();
   }
 
@@ -8715,7 +8748,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $lesson_id=absint($_GET['lesson_id'] ?? 0); $expires=absint($_GET['expires'] ?? 0); $sig=sanitize_text_field((string)($_GET['sig'] ?? ''));
     if (!$this->mrm_verify_signed_lesson_action('mrm_lesson_cancel_request',$lesson_id,0,$expires,$sig)) wp_die('This cancellation link is invalid or expired.', 'Cancel Lesson', array('response'=>403));
     $lesson=$this->mrm_get_lesson_for_cancellation($lesson_id); if (!$lesson) wp_die('Lesson not found.', 'Cancel Lesson', array('response'=>404));
-    $lesson_time=!empty($lesson['start_time']) ? wp_date('F j, Y \a\t g:i A', strtotime($lesson['start_time']), wp_timezone()) : '';
+    $lesson_time=!empty($lesson['start_time']) ? $this->mrm_lesson_time_label($lesson['start_time'], $lesson['parent_timezone'] ?? '', 'America/Phoenix', 'F j, Y \a\t g:i A') : '';
     echo '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cancel Lesson</title></head><body style="margin:0;background:#f6f6f6;font-family:Arial,sans-serif;color:#111;"><div style="max-width:720px;margin:0 auto;padding:28px;"><div style="background:#fff;border:1px solid #e8e8e8;border-radius:16px;padding:28px;"><h1>Cancel Lesson</h1><p>Please provide the reason for cancelling your lesson.</p><p><strong>Lesson:</strong> '.esc_html($lesson_time).'</p>';
     echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" id="mrm-lesson-cancel-form"><input type="hidden" name="action" value="mrm_lesson_cancel_submit"><input type="hidden" name="lesson_id" value="'.esc_attr($lesson_id).'"><input type="hidden" name="expires" value="'.esc_attr($expires).'"><input type="hidden" name="sig" value="'.esc_attr($sig).'">';
     foreach (array('Scheduling conflict','Illness or emergency','No longer available','Other') as $r) echo '<label><input type="radio" name="cancel_reason" value="'.esc_attr($r).'" required> '.esc_html($r).'</label><br>';
@@ -8728,7 +8761,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
     if (!$this->mrm_verify_signed_lesson_action('mrm_lesson_cancel_request',$lesson_id,0,$expires,$sig)) wp_die('This cancellation request is invalid or expired.', 'Cancel Lesson', array('response'=>403));
     $lesson=$this->mrm_get_lesson_for_cancellation($lesson_id); if (!$lesson) wp_die('Lesson not found.', 'Cancel Lesson', array('response'=>404));
     $reason=sanitize_text_field((string)($_POST['cancel_reason'] ?? '')); $other=sanitize_textarea_field((string)($_POST['cancel_reason_other'] ?? '')); if ($reason==='Other' && $other!=='') $reason .= ': '.$other;
-    $start_ts=!empty($lesson['start_time']) ? strtotime((string)$lesson['start_time']) : 0; $more_than_24h=($start_ts>0 && (time() <= ($start_ts - DAY_IN_SECONDS)));
+    $start_ts=!empty($lesson['start_time']) ? $this->mrm_lesson_utc_timestamp($lesson['start_time']) : 0; $more_than_24h=($start_ts>0 && (time() <= ($start_ts - DAY_IN_SECONDS)));
     $wpdb->update($this->table_lessons(), array('status'=>'cancelled','updated_at'=>current_time('mysql')), array('id'=>$lesson_id));
     $order_id=absint($lesson['order_id'] ?? 0); $order=$order_id>0 ? $this->mrm_get_order_by_id($order_id) : $this->mrm_find_lesson_charge_order($lesson_id);
     $refund_sent=false; $refund_amount_cents=0;
@@ -8777,18 +8810,25 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
   private function mrm_send_lesson_cancellation_no_refund_email($lesson, $amount_paid_cents = 0) {
     if (!is_array($lesson)) return false; $email=sanitize_email((string)($lesson['student_email'] ?? '')); if (!$email || !is_email($email)) return false;
-    $lesson_start=(string)($lesson['start_time'] ?? ''); $lesson_label=$lesson_start!=='' ? wp_date('F j, Y \a\t g:i A', strtotime($lesson_start), wp_timezone()) : 'your scheduled lesson';
+    $lesson_start=(string)($lesson['start_time'] ?? ''); $lesson_label=$lesson_start!=='' ? $this->mrm_lesson_time_label($lesson_start, $lesson['parent_timezone'] ?? '', 'America/Phoenix', 'F j, Y \a\t g:i A T') : 'your scheduled lesson';
     $amount_label=$amount_paid_cents > 0 ? '$'.number_format($amount_paid_cents/100,2) : 'your lesson payment';
     $details='<div><strong>Cancelled lesson:</strong> '.esc_html($lesson_label).'</div><div><strong>Amount paid:</strong> '.esc_html($amount_label).'</div><div style="margin-top:12px;">If you believe this to be a mistake please contact support.</div>';
     return wp_mail($email, 'Lesson update — Cancellation', $this->mrm_email_wrap_html('Lesson cancelled','<p>Your lesson has been cancelled and it does not qualify for a refund as the lesson was not cancelled the minimum 24 hours in advance.</p>',$details,$this->mrm_get_contact_url(),'Contact Support'), array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>'));
   }
 
   private function mrm_notify_lesson_cancelled_by_client($lesson, $reason, $refund_requested) {
-    $admin_email=sanitize_email((string)get_option('admin_email')); $instructor_email=sanitize_email((string)($lesson['instructor_email'] ?? ''));
-    $lesson_time=!empty($lesson['start_time']) ? wp_date('F j, Y \a\t g:i A', strtotime($lesson['start_time']), wp_timezone()) : '';
-    $details='<div><strong>Lesson:</strong> '.esc_html($lesson_time).'</div><div><strong>Instructor:</strong> '.esc_html((string)($lesson['instructor_name'] ?? '')).'</div><div><strong>Student email:</strong> '.esc_html((string)($lesson['student_email'] ?? '')).'</div><div><strong>Cancellation reason:</strong> '.esc_html($reason).'</div><div><strong>Refund requested:</strong> '.esc_html($refund_requested ? 'Yes' : 'No').'</div>';
-    $html=$this->mrm_email_wrap_html('Lesson Cancellation Notice','<p>A client has cancelled a lesson.</p>',$details,'',''); $headers=array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>');
-    if ($admin_email && is_email($admin_email)) wp_mail($admin_email,'Lesson cancellation notice',$html,$headers); if ($instructor_email && is_email($instructor_email)) wp_mail($instructor_email,'Lesson cancellation notice',$html,$headers);
+    if (!is_array($lesson)) return false;
+    $admin_email = sanitize_email((string)get_option('admin_email'));
+    $instructor_email = sanitize_email((string)($lesson['instructor_email'] ?? ''));
+    $admin_time = $this->mrm_lesson_time_label($lesson['start_time'] ?? '', $this->mrm_wp_tz()->getName());
+    $instructor_timezone = $this->mrm_lesson_normalize_timezone($lesson['instructor_timezone'] ?? $lesson['instructor_profile_timezone'] ?? '', 'America/Phoenix');
+    $instructor_time = $this->mrm_lesson_time_label($lesson['start_time'] ?? '', $instructor_timezone);
+    $common = '<div><strong>Instructor:</strong> '.esc_html((string)($lesson['instructor_name'] ?? '')).'</div><div><strong>Student email:</strong> '.esc_html((string)($lesson['student_email'] ?? '')).'</div><div><strong>Cancellation reason:</strong> '.esc_html($reason).'</div><div><strong>Refund requested:</strong> '.esc_html($refund_requested ? 'Yes' : 'No').'</div>';
+    $headers = array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>');
+    $sent = false;
+    if ($admin_email && is_email($admin_email)) $sent = wp_mail($admin_email, 'Lesson cancellation notice', $this->mrm_email_wrap_html('Lesson Cancellation Notice','<p>A client has cancelled a lesson.</p>','<div><strong>Lesson:</strong> '.esc_html($admin_time).'</div>'.$common,'',''),$headers) || $sent;
+    if ($instructor_email && is_email($instructor_email)) $sent = wp_mail($instructor_email, 'Lesson cancellation notice', $this->mrm_email_wrap_html('Lesson Cancellation Notice','<p>A client has cancelled a lesson.</p>','<div><strong>Lesson:</strong> '.esc_html($instructor_time).'</div>'.$common,'',''),$headers) || $sent;
+    return $sent;
   }
 
   private function build_metadata($sku, $product_type, $email_hash, $context, $product_cfg) {
@@ -10894,11 +10934,13 @@ private function charge_and_unlock_autopay($data) {
     $lessons_table = $this->table_lessons();
     $autopay_table = $this->table_autopay_profiles();
 
-    $window_start = current_time('mysql');
+    $window_start = gmdate('Y-m-d H:i:s', time());
     $window_end = gmdate('Y-m-d H:i:s', time() + (self::MRM_PM_LOOKAHEAD_HOURS * HOUR_IN_SECONDS));
 
     $rows = $wpdb->get_results($wpdb->prepare(
-      "SELECT l.id, l.instructor_id, l.student_email, l.lesson_length, l.is_online, l.start_time, l.end_time, l.autopay_profile_id,
+      "SELECT l.id, l.instructor_id, l.student_name, l.student_email, l.student_phone,
+              l.parent_timezone, l.instructor_timezone, l.lesson_length, l.is_online,
+              l.start_time, l.end_time, l.autopay_profile_id,
               l.status, l.charge_status, l.charge_last_error,
               ap.id AS profile_id, ap.payment_method_id, ap.pm_brand, ap.pm_last4, ap.pm_exp_month, ap.pm_exp_year,
               ap.pm_attention_status, ap.pm_attention_reason, ap.active

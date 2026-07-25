@@ -1595,7 +1595,7 @@ private function mrm_mc_event_rfc3339_utc( $datetime, $event_timezone ) {
 	return $timestamp > 0 ? gmdate( 'Y-m-d\TH:i:s\Z', $timestamp ) : '';
 }
 
-private function mrm_mc_format_event_datetime_for_timezone( $datetime, $event_timezone, $display_timezone, $format = 'F j, Y \\a\\t g:i A' ) {
+private function mrm_mc_format_event_datetime_for_timezone( $datetime, $event_timezone, $display_timezone, $format = 'F j, Y \\a\\t g:i A T' ) {
 	$timestamp = $this->mrm_mc_event_timestamp_from_local( $datetime, $event_timezone );
 	if ( $timestamp <= 0 ) return sanitize_text_field( (string) $datetime );
 	$display_timezone = $this->mrm_mc_normalize_timezone( $display_timezone, $event_timezone );
@@ -5500,7 +5500,17 @@ public function handle_save_event() {
 	$allowed_statuses = array( 'draft', 'scheduled', 'cancelled', 'completed', 'archived' );
 	if ( ! in_array( $status, $allowed_statuses, true ) ) { $status = 'scheduled'; }
 	if ( '' === $title || $presenter_id <= 0 || '' === $start_time || '' === $end_time || '' === $timezone ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_validation_failed' ); }
-	if ( strtotime( $end_time ) <= strtotime( $start_time ) ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_time_invalid' ); }
+	try {
+		$event_timezone_object = new DateTimeZone( $timezone );
+	} catch ( Exception $e ) {
+		$this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_validation_failed' );
+	}
+	$start_timestamp = $this->mrm_mc_event_timestamp_from_local( $start_time, $timezone );
+	$end_timestamp = $this->mrm_mc_event_timestamp_from_local( $end_time, $timezone );
+	if ( $start_timestamp <= 0 || $end_timestamp <= $start_timestamp ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_time_invalid' ); }
+	$start_roundtrip = ( new DateTimeImmutable( '@' . $start_timestamp ) )->setTimezone( $event_timezone_object )->format( 'Y-m-d H:i:s' );
+	$end_roundtrip = ( new DateTimeImmutable( '@' . $end_timestamp ) )->setTimezone( $event_timezone_object )->format( 'Y-m-d H:i:s' );
+	if ( $start_roundtrip !== $start_time || $end_roundtrip !== $end_time ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_time_invalid' ); }
 	if ( $price_cents <= 0 ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_price_invalid' ); }
 	$presenter = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$presenters_table} WHERE id = %d",$presenter_id));
 	if ( ! $presenter ) { $this->mrm_mc_admin_notice_redirect( self::ADMIN_EVENTS_SLUG, 'event_presenter_missing' ); }
@@ -6789,14 +6799,15 @@ private function mrm_mc_google_event_end_timestamp( $google_event, $fallback_tim
 }
 
 private function mrm_mc_resolve_gate_event_access_source( $event ) {
+	$event_timezone = $this->mrm_mc_normalize_timezone( $event->timezone ?? '', 'America/Phoenix' );
 	$source = array(
 		'source'       => 'local',
-		'start_ts'     => strtotime( $event->start_time . ' UTC' ),
-		'end_ts'       => strtotime( $event->end_time . ' UTC' ),
+		'start_ts'     => $this->mrm_mc_event_timestamp_from_local( $event->start_time ?? '', $event_timezone ),
+		'end_ts'       => $this->mrm_mc_event_timestamp_from_local( $event->end_time ?? '', $event_timezone ),
 		'meet_url'     => esc_url_raw( $event->google_meet_url ?? $event->online_link ?? '' ),
 		'title'        => sanitize_text_field( $event->title ?? 'Masterclass' ),
-		'timezone'     => sanitize_text_field( $event->timezone ?? 'America/Phoenix' ),
-		'start_label'  => sanitize_text_field( ( $event->start_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ),
+		'timezone'     => $event_timezone,
+		'start_label'  => sanitize_text_field( ( $event->start_time ?? '' ) . ' ' . $event_timezone ),
 		'google_error' => '',
 	);
 
@@ -9936,7 +9947,10 @@ private function mrm_mc_repair_registration_side_effects( $registration, $event,
 		$net_cents = max( 0, $subtotal_cents - $stripe_fee );
 		$presenter_cut = min( $this->mrm_mc_event_payout_per_student_cents( absint( $event->id ), absint( $event->presenter_id ) ), $net_cents );
 		$platform_cut = max( 0, $net_cents - $presenter_cut );
-		$ledger_data = array( 'event_id'=>absint($event->id), 'registration_id'=>$registration_id, 'presenter_id'=>absint($event->presenter_id), 'ledger_type'=>'registration_payment', 'stripe_payment_intent_id'=>$payment_intent_id, 'payment_intent_id'=>$payment_intent_id, 'gross_cents'=>$gross_cents, 'discount_cents'=>$discount_cents, 'stripe_fee_cents'=>$stripe_fee, 'estimated_stripe_fee_cents'=>$stripe_fee, 'net_cents'=>$net_cents, 'presenter_share_cents'=>$presenter_cut, 'platform_share_cents'=>$platform_cut, 'status'=>$ledger_status, 'notes'=>'Masterclass registration payment repaired. Collected tax was excluded from revenue. '.$fee_note, 'payout_eligible_at'=>gmdate( 'Y-m-d H:i:s', strtotime( $event->end_time . ' UTC' ) + WEEK_IN_SECONDS ), 'created_at'=>$this->now(), 'updated_at'=>$this->now() );
+		$event_end_timestamp = $this->mrm_mc_event_timestamp_from_local( $event->end_time ?? '', $event->timezone ?? 'America/Phoenix' );
+		if ( $event_end_timestamp <= 0 ) return new WP_Error( 'mrm_masterclass_repair_event_time_invalid', 'The Masterclass payout could not be repaired because the event end time is invalid.' );
+		$payout_eligible_at = gmdate( 'Y-m-d H:i:s', $event_end_timestamp + WEEK_IN_SECONDS );
+		$ledger_data = array( 'event_id'=>absint($event->id), 'registration_id'=>$registration_id, 'presenter_id'=>absint($event->presenter_id), 'ledger_type'=>'registration_payment', 'stripe_payment_intent_id'=>$payment_intent_id, 'payment_intent_id'=>$payment_intent_id, 'gross_cents'=>$gross_cents, 'discount_cents'=>$discount_cents, 'stripe_fee_cents'=>$stripe_fee, 'estimated_stripe_fee_cents'=>$stripe_fee, 'net_cents'=>$net_cents, 'presenter_share_cents'=>$presenter_cut, 'platform_share_cents'=>$platform_cut, 'status'=>$ledger_status, 'notes'=>'Masterclass registration payment repaired. Collected tax was excluded from revenue. '.$fee_note, 'payout_eligible_at'=>$payout_eligible_at, 'created_at'=>$this->now(), 'updated_at'=>$this->now() );
 		$ledger_data = $this->mrm_mc_filter_data_for_table( $ledger_table, $ledger_data );
 		if ( false === $wpdb->insert( $ledger_table, $ledger_data ) ) return new WP_Error( 'mrm_masterclass_ledger_repair_failed', $wpdb->last_error ?: 'The presenter payout ledger could not be repaired.' );
 	}
