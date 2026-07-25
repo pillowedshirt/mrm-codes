@@ -6807,7 +6807,12 @@ private function mrm_mc_resolve_gate_event_access_source( $event ) {
 		'meet_url'     => esc_url_raw( $event->google_meet_url ?? $event->online_link ?? '' ),
 		'title'        => sanitize_text_field( $event->title ?? 'Masterclass' ),
 		'timezone'     => $event_timezone,
-		'start_label'  => sanitize_text_field( ( $event->start_time ?? '' ) . ' ' . $event_timezone ),
+		'start_label' => $this->mrm_mc_format_event_datetime_for_timezone(
+			$event->start_time ?? '',
+			$event_timezone,
+			$event_timezone,
+			'F j, Y \a\t g:i A'
+		),
 		'google_error' => '',
 	);
 
@@ -6842,7 +6847,7 @@ private function mrm_mc_resolve_gate_event_access_source( $event ) {
 		$source['meet_url']    = $google_meet_url ?: $source['meet_url'];
 		$source['title']       = sanitize_text_field( $google_event['summary'] ?? $source['title'] );
 		$source['start_label'] = wp_date(
-			'F j, Y g:i A T',
+			'F j, Y \a\t g:i A',
 			$google_start_ts,
 			new DateTimeZone( $source['timezone'] ?: 'America/Phoenix' )
 		);

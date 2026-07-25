@@ -3315,8 +3315,37 @@ protected function mrm_get_google_service_account_json() {
                     'reminder_sent_at' => null,
                 ),
                 array(
-                    '%d','%d','%s','%s','%s','%s','%s','%s','%s','%d','%d','%s','%d','%s','%s','%s','%s','%s',
-                    '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'
+                    '%d', // instructor_id
+                    '%d', // series_id
+                    '%s', // student_name
+                    '%s', // student_email
+                    '%s', // parent_timezone
+                    '%s', // address
+                    '%s', // address_city
+                    '%s', // address_state
+                    '%s', // address_postal
+                    '%s', // instrument
+                    '%d', // is_online
+                    '%d', // is_consultation
+                    '%s', // instructor_timezone
+                    '%d', // lesson_length
+                    '%s', // start_time
+                    '%s', // end_time
+                    '%s', // google_original_start_time
+                    '%s', // status
+                    '%s', // google_event_id
+                    '%s', // google_meet_url
+                    '%d', // order_id
+                    '%s', // payment_mode
+                    '%s', // payout_unlocked_at
+                    '%d', // autopay_profile_id
+                    '%d', // agreement_id
+                    '%s', // created_at
+                    '%s', // updated_at
+                    '%s', // reminder_token
+                    '%s', // reminder_token_hash
+                    '%s', // reminder_scheduled_at
+                    '%s', // reminder_sent_at
                 )
             );
 
@@ -5601,8 +5630,34 @@ protected function mrm_get_google_service_account_json() {
                         'reminder_sent_at' => null,
                     ),
                     array(
-                        '%d','%d','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s',
-                        '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s'
+                        '%d', // instructor_id
+                        '%d', // series_id
+                        '%s', // student_name
+                        '%s', // student_email
+                        '%s', // parent_timezone
+                        '%s', // instructor_timezone
+                        '%s', // instrument
+                        '%d', // is_online
+                        '%d', // lesson_length
+                        '%s', // start_time
+                        '%s', // end_time
+                        '%s', // google_original_start_time
+                        '%s', // status
+                        '%s', // charge_status
+                        '%s', // google_event_id
+                        '%s', // google_instance_event_id
+                        '%s', // google_meet_url
+                        '%d', // order_id
+                        '%s', // payment_mode
+                        '%s', // payout_unlocked_at
+                        '%d', // autopay_profile_id
+                        '%d', // agreement_id
+                        '%s', // created_at
+                        '%s', // updated_at
+                        '%s', // reminder_token
+                        '%s', // reminder_token_hash
+                        '%s', // reminder_scheduled_at
+                        '%s', // reminder_sent_at
                     )
                 );
             }
