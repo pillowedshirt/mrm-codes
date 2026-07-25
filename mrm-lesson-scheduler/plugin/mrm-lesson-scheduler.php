@@ -2896,7 +2896,7 @@ protected function mrm_get_google_service_account_json() {
         } catch ( Exception $e ) { return 0; }
     }
 
-    protected function mrm_scheduler_format_utc_datetime( $utc_value, $timezone, $format = 'F j, Y \\a\\t g:i A' ) {
+    protected function mrm_scheduler_format_utc_datetime( $utc_value, $timezone, $format = 'F j, Y \\a\\t g:i A T' ) {
         $timestamp = $this->mrm_scheduler_parse_utc_timestamp( $utc_value );
         if ( $timestamp <= 0 ) return '';
         $timezone = $this->mrm_scheduler_normalize_timezone( $timezone, wp_timezone_string() );
@@ -3754,8 +3754,7 @@ protected function mrm_get_google_service_account_json() {
                         }
 
                     } else {
-                        $msg = is_wp_error( $start_rfc3339 ) ? $start_rfc3339->get_error_message() : $end_rfc3339->get_error_message();
-                        $google_messages[] = 'Calendar event was not created because time conversion failed: ' . $msg;
+                        $google_messages[] = 'Calendar event was not created because time conversion failed.';
                     }
                 }
             } else {
@@ -4189,7 +4188,7 @@ protected function mrm_get_google_service_account_json() {
         // Fetch instructor email + calendar id
         $instr = $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT name, email, calendar_id FROM {$table_instructors} WHERE id = %d LIMIT 1",
+                "SELECT name, email, calendar_id, timezone FROM {$table_instructors} WHERE id = %d LIMIT 1",
                 (int) $lesson['instructor_id']
             ),
             ARRAY_A
@@ -4209,35 +4208,40 @@ protected function mrm_get_google_service_account_json() {
 
         $subject = $join_name . ' has just joined ' . $student_name . ' ' . $minutes . ' Online ' . $thing_upper;
 
-        $start_str = gmdate( 'Y-m-d g:i A', $start_ts ) . ' - ' . gmdate( 'g:i A', $end_ts ) . ' UTC';
+        $start_utc_mysql = gmdate( 'Y-m-d H:i:s', $start_ts );
+        $end_utc_mysql = gmdate( 'Y-m-d H:i:s', $end_ts );
         $gate_url = add_query_arg( array( 'token' => $token ), home_url( '/join-online/' ) );
 
-        $to = array();
-        if ( is_email( $student_email ) ) $to[] = $student_email;
-        if ( is_email( $instructor_email ) ) $to[] = $instructor_email;
+        $recipient_notices = array();
+        if ( is_email( $student_email ) ) {
+            $recipient_notices[] = array(
+                'email' => $student_email,
+                'timezone' => $this->mrm_scheduler_normalize_timezone( $lesson['parent_timezone'] ?? '', wp_timezone_string() ),
+            );
+        }
+        if ( is_email( $instructor_email ) ) {
+            $recipient_notices[] = array(
+                'email' => $instructor_email,
+                'timezone' => $this->mrm_scheduler_normalize_timezone( $lesson['instructor_timezone'] ?? $instr['timezone'] ?? '', wp_timezone_string() ),
+            );
+        }
 
-        if ( ! empty( $to ) ) {
+        $headers = array(
+            'Content-Type: text/html; charset=UTF-8',
+            'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+        );
+
+        foreach ( $recipient_notices as $recipient_notice ) {
+            $recipient_start = $this->mrm_scheduler_format_utc_datetime( $start_utc_mysql, $recipient_notice['timezone'], 'F j, Y \a\t g:i A T' );
+            $recipient_end = $this->mrm_scheduler_format_utc_datetime( $end_utc_mysql, $recipient_notice['timezone'], 'g:i A T' );
+            $recipient_time_label = $recipient_start . ' – ' . $recipient_end;
             $title = 'Someone just joined your session';
             $intro_html = '<p>A participant has entered the online session.</p>';
-
-            $details_html = '';
-            $details_html .= '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>';
+            $details_html = '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>';
             $details_html .= '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>';
-            $details_html .= '<div><strong>Start time:</strong> ' . esc_html( $start_str ) . '</div>';
-
-            $email_html = $this->mrm_wrap_email_html(
-                $title,
-                $intro_html,
-                $details_html,
-                $gate_url,
-                'Open Join Page'
-            );
-
-            $headers = array(
-                'Content-Type: text/html; charset=UTF-8',
-                'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
-            );
-            wp_mail( $to, $subject, $email_html, $headers );
+            $details_html .= '<div><strong>Scheduled time:</strong> ' . esc_html( $recipient_time_label ) . '</div>';
+            $email_html = $this->mrm_wrap_email_html( $title, $intro_html, $details_html, $gate_url, 'Open Join Page' );
+            wp_mail( $recipient_notice['email'], $subject, $email_html, $headers );
         }
 
         // For recurring series, reuse one shared deferred room URL across the whole series.
@@ -5571,6 +5575,8 @@ protected function mrm_get_google_service_account_json() {
                         'series_id' => $series_id,
                         'student_name' => (string) ( $seed['student_name'] ?? '' ),
                         'student_email' => (string) ( $seed['student_email'] ?? '' ),
+                        'parent_timezone' => $this->mrm_scheduler_normalize_timezone( $seed['parent_timezone'] ?? '', $seed['timezone'] ?? 'America/Phoenix' ),
+                        'instructor_timezone' => $this->mrm_scheduler_normalize_timezone( $seed['instructor_timezone'] ?? $seed['timezone'] ?? '', 'America/Phoenix' ),
                         'instrument' => (string) ( $seed['instrument'] ?? 'unknown' ),
                         'is_online' => (int) ( $seed['is_online'] ?? 0 ),
                         'lesson_length' => (int) ( $seed['lesson_length'] ?? 60 ),
@@ -5595,7 +5601,7 @@ protected function mrm_get_google_service_account_json() {
                         'reminder_sent_at' => null,
                     ),
                     array(
-                        '%d','%d','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s',
+                        '%d','%d','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s','%s',
                         '%d','%s','%s','%d','%d','%s','%s','%s','%s','%s'
                     )
                 );
@@ -6592,7 +6598,7 @@ protected function mrm_get_google_service_account_json() {
         }
 
         $start_raw = (string) ( $lesson['start_time'] ?? '' );
-        $start_label = $this->mrm_scheduler_format_utc_datetime( $start_raw, $timezone_string, 'F j, Y \a\t g:i A' );
+        $start_label = $this->mrm_scheduler_format_utc_datetime( $start_raw, $timezone_string, 'F j, Y \a\t g:i A T' );
 
         $minutes = (int) ( $lesson['lesson_length'] ?? 0 );
 
@@ -8287,7 +8293,7 @@ protected function mrm_get_google_service_account_json() {
         $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
         $student_name     = (string) ( $lesson['student_name'] ?? '' );
         $instructor_name  = (string) ( $lesson['instructor_name'] ?? '' );
-        $start_label      = $this->mrm_scheduler_format_utc_datetime( $lesson['start_time'] ?? '', $lesson['instructor_timezone'] ?? wp_timezone_string(), 'F j, Y \a\t g:i A' );
+        $start_label      = $this->mrm_scheduler_format_utc_datetime( $lesson['start_time'] ?? '', $lesson['instructor_timezone'] ?? wp_timezone_string(), 'F j, Y \a\t g:i A T' );
 
         $intro = '<p>Parent feedback has been submitted for a lesson.</p>';
         $details = '<div><strong>Lesson ID:</strong> ' . (int) $lesson_id . '</div>' . '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>' . '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>' . '<div><strong>Lesson time:</strong> ' . esc_html( $start_label ) . '</div>' . '<div><strong>Rating:</strong> ' . esc_html( str_repeat( '★', (int) $rating ) ) . ' (' . (int) $rating . '/5)</div>' . '<div style="margin-top:12px;"><strong>Comment:</strong><br>' . nl2br( esc_html( (string) $comment ) ) . '</div>';
@@ -8391,8 +8397,8 @@ protected function mrm_get_google_service_account_json() {
         $lesson_id    = (int) ( $row['lesson_id'] ?? $row['id'] ?? 0 );
         $student_name = (string) ( $row['student_name'] ?? '' );
         $display_timezone = $row['instructor_timezone'] ?? wp_timezone_string();
-        $start_label = $this->mrm_scheduler_format_utc_datetime( $row['start_time'] ?? '', $display_timezone, 'F j, Y \a\t g:i A' );
-        $end_label = $this->mrm_scheduler_format_utc_datetime( $row['end_time'] ?? '', $display_timezone, 'F j, Y \a\t g:i A' );
+        $start_label = $this->mrm_scheduler_format_utc_datetime( $row['start_time'] ?? '', $display_timezone, 'F j, Y \a\t g:i A T' );
+        $end_label = $this->mrm_scheduler_format_utc_datetime( $row['end_time'] ?? '', $display_timezone, 'F j, Y \a\t g:i A T' );
 
         if ( $type === 'arrival_missing' ) {
             $title = 'Safety alert — instructor has not checked in';
