@@ -94,7 +94,7 @@ class LowBrass_MRM_Masterclass_Plugin {
 	 */
 	protected static $mrm_mc_admin_menu_registered = false;
 
-	const DB_VERSION = '1.4.2';
+	const DB_VERSION = '1.4.3';
 	const REST_NAMESPACE = 'mrm-masterclass/v1';
 	const DEFAULT_PRICE_CENTS = 2000;
 	const ADMIN_MENU_SLUG = 'mrm-masterclass';
@@ -1045,6 +1045,7 @@ public function mrm_mc_render_critical_error_notice() {
 			last_name VARCHAR(191) NOT NULL,
 			email VARCHAR(191) NOT NULL,
 			email_hash VARCHAR(64) NOT NULL,
+			visitor_timezone VARCHAR(64) NOT NULL DEFAULT '',
 			stripe_payment_intent_id VARCHAR(191) NULL,
 			amount_cents INT NOT NULL,
 			currency VARCHAR(10) NOT NULL DEFAULT 'usd',
@@ -1338,6 +1339,7 @@ public function mrm_mc_render_critical_error_notice() {
 	}
 
 	$registration_adds = array(
+		'visitor_timezone' => "ALTER TABLE {$registrations_table} ADD visitor_timezone VARCHAR(64) NOT NULL DEFAULT ''",
 		'promo_code'                => "ALTER TABLE {$registrations_table} ADD promo_code VARCHAR(100) NULL",
 		'discount_cents'            => "ALTER TABLE {$registrations_table} ADD discount_cents INT NOT NULL DEFAULT 0",
 		'promo_discount_cents'      => "ALTER TABLE {$registrations_table} ADD promo_discount_cents INT NOT NULL DEFAULT 0",
@@ -1434,6 +1436,7 @@ public function mrm_mc_render_critical_error_notice() {
 	}
 
 	$registration_compat_adds = array(
+		'visitor_timezone' => "ALTER TABLE {$registrations_table} ADD visitor_timezone VARCHAR(64) NOT NULL DEFAULT ''",
 		'name'                 => "ALTER TABLE {$registrations_table} ADD name VARCHAR(255) NULL",
 		'payment_intent_id'    => "ALTER TABLE {$registrations_table} ADD payment_intent_id VARCHAR(191) NULL",
 		'promo_status'         => "ALTER TABLE {$registrations_table} ADD promo_status VARCHAR(64) NULL",
@@ -1570,20 +1573,41 @@ public function mrm_mc_render_critical_error_notice() {
 	}
 	private function now(){return gmdate('Y-m-d H:i:s');}
 
+private function mrm_mc_normalize_timezone( $timezone, $fallback = 'America/Phoenix' ) {
+	$candidates = array( trim( (string) $timezone ), trim( (string) $fallback ), 'UTC' );
+	foreach ( $candidates as $candidate ) {
+		if ( $candidate === '' ) continue;
+		try { new DateTimeZone( $candidate ); return $candidate; } catch ( Exception $e ) { continue; }
+	}
+	return 'UTC';
+}
+
 private function mrm_mc_event_timestamp_from_local( $datetime, $timezone = 'America/Phoenix' ) {
 	$datetime = trim( (string) $datetime );
+	if ( $datetime === '' ) return 0;
+	$timezone = $this->mrm_mc_normalize_timezone( $timezone, 'America/Phoenix' );
+	try { return ( new DateTimeImmutable( $datetime, new DateTimeZone( $timezone ) ) )->getTimestamp(); }
+	catch ( Exception $e ) { return 0; }
+}
 
-	if ( '' === $datetime ) {
-		return 0;
-	}
+private function mrm_mc_event_rfc3339_utc( $datetime, $event_timezone ) {
+	$timestamp = $this->mrm_mc_event_timestamp_from_local( $datetime, $event_timezone );
+	return $timestamp > 0 ? gmdate( 'Y-m-d\TH:i:s\Z', $timestamp ) : '';
+}
 
-	try {
-		$tz = new DateTimeZone( $timezone ?: 'America/Phoenix' );
-		$dt = new DateTime( $datetime, $tz );
-		return $dt->getTimestamp();
-	} catch ( Exception $e ) {
-		return 0;
-	}
+private function mrm_mc_format_event_datetime_for_timezone( $datetime, $event_timezone, $display_timezone, $format = 'F j, Y \\a\\t g:i A' ) {
+	$timestamp = $this->mrm_mc_event_timestamp_from_local( $datetime, $event_timezone );
+	if ( $timestamp <= 0 ) return sanitize_text_field( (string) $datetime );
+	$display_timezone = $this->mrm_mc_normalize_timezone( $display_timezone, $event_timezone );
+	try { return ( new DateTimeImmutable( '@' . $timestamp ) )->setTimezone( new DateTimeZone( $display_timezone ) )->format( $format ); }
+	catch ( Exception $e ) { return sanitize_text_field( (string) $datetime ); }
+}
+
+private function mrm_mc_registration_display_timezone( $registration, $event_timezone ) {
+	$registration_timezone = '';
+	if ( is_object( $registration ) ) $registration_timezone = (string) ( $registration->visitor_timezone ?? '' );
+	elseif ( is_array( $registration ) ) $registration_timezone = (string) ( $registration['visitor_timezone'] ?? '' );
+	return $this->mrm_mc_normalize_timezone( $registration_timezone, $event_timezone );
 }
 
 private function mrm_mc_event_time_label( $datetime, $timezone = 'America/Phoenix' ) {
@@ -2614,25 +2638,19 @@ private function mrm_mc_registration_payment_breakdown_html( $registration, $eve
 
 private function mrm_mc_email_event_details_html( $event, $presenter = null, $registration = null ) {
 	$details = '';
-
+	$event_timezone = $this->mrm_mc_normalize_timezone( $event->timezone ?? '', 'America/Phoenix' );
+	$display_timezone = $this->mrm_mc_registration_display_timezone( $registration, $event_timezone );
 	$details .= '<div><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '</div>';
-
 	if ( ! empty( $event->start_time ) ) {
-		$details .= '<div><strong>Start time:</strong> ' . esc_html( ( $event->start_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ) . '</div>';
+		$start_label = $this->mrm_mc_format_event_datetime_for_timezone( $event->start_time, $event_timezone, $display_timezone );
+		$details .= '<div><strong>Start time:</strong> ' . esc_html( $start_label ) . '</div>';
 	}
-
 	if ( ! empty( $event->end_time ) ) {
-		$details .= '<div><strong>End time:</strong> ' . esc_html( ( $event->end_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ) . '</div>';
+		$end_label = $this->mrm_mc_format_event_datetime_for_timezone( $event->end_time, $event_timezone, $display_timezone );
+		$details .= '<div><strong>End time:</strong> ' . esc_html( $end_label ) . '</div>';
 	}
-
-	if ( $presenter && ! empty( $presenter->name ) ) {
-		$details .= '<div><strong>Presenter:</strong> ' . esc_html( $presenter->name ) . '</div>';
-	}
-
-	if ( $registration && ! empty( $registration->id ) ) {
-		$details .= '<div><strong>Registration ID:</strong> ' . esc_html( (string) absint( $registration->id ) ) . '</div>';
-	}
-
+	if ( $presenter && ! empty( $presenter->name ) ) $details .= '<div><strong>Presenter:</strong> ' . esc_html( $presenter->name ) . '</div>';
+	if ( $registration && ! empty( $registration->id ) ) $details .= '<div><strong>Registration ID:</strong> ' . esc_html( (string) absint( $registration->id ) ) . '</div>';
 	return $details;
 }
 
@@ -3103,8 +3121,12 @@ private function mrm_mc_event_cancelled_email_body( $event, $registration, $amou
 		$intro = '<p>This Masterclass has been cancelled. Your refund request has been submitted to Stripe and is still processing. Low Brass Lessons will send a separate confirmation after Stripe confirms that the refund succeeded.</p>';
 	}
 
+	$event_timezone = $this->mrm_mc_normalize_timezone( $event->timezone ?? '', 'America/Phoenix' );
+	$display_timezone = $this->mrm_mc_registration_display_timezone( $registration, $event_timezone );
+	$event_time_label = $this->mrm_mc_format_event_datetime_for_timezone( $event->start_time ?? '', $event_timezone, $display_timezone );
+
 	$details = '<div><strong>Masterclass:</strong> ' . esc_html( $event->title ?? 'Masterclass' ) . '</div>'
-		. '<div><strong>Date/time:</strong> ' . esc_html( ( $event->start_time ?? '' ) . ' ' . ( $event->timezone ?? '' ) ) . '</div>'
+		. '<div><strong>Date/time:</strong> ' . esc_html( $event_time_label ) . '</div>'
 		. '<div><strong>Refund amount:</strong> ' . esc_html( $this->cents_to_dollars( $amount_cents ) ) . '</div>';
 
 	$content = $intro
@@ -3491,8 +3513,8 @@ private function mrm_mc_public_event_payload( $row ) {
 		'session_page_url'            => ! empty( $row->id ) ? esc_url_raw( $this->mrm_mc_public_session_page_url( $row->id ) ) : '',
 		'start_time'         => sanitize_text_field( $row->start_time ),
 		'end_time'           => sanitize_text_field( $row->end_time ),
-		'start_time_rfc3339' => ! empty( $row->start_time ) ? mysql_to_rfc3339( $row->start_time ) : '',
-		'end_time_rfc3339'   => ! empty( $row->end_time ) ? mysql_to_rfc3339( $row->end_time ) : '',
+		'start_time_rfc3339' => ! empty( $row->start_time ) ? $this->mrm_mc_event_rfc3339_utc( $row->start_time, $row->timezone ?? 'America/Phoenix' ) : '',
+		'end_time_rfc3339' => ! empty( $row->end_time ) ? $this->mrm_mc_event_rfc3339_utc( $row->end_time, $row->timezone ?? 'America/Phoenix' ) : '',
 		'timezone'           => sanitize_text_field( $row->timezone ),
 		'price_cents'        => absint( $row->price_cents ),
 		'online_link'        => ! empty( $row->online_link ) ? esc_url_raw( $row->online_link ) : '',
@@ -9460,6 +9482,7 @@ public function rest_create_payment_intent( $request ) {
 	$terms_raw      = $this->mrm_mc_get_rest_param_value( $request, 'terms_accepted', false );
 	$terms_accepted = filter_var( $terms_raw, FILTER_VALIDATE_BOOLEAN );
 	$recaptcha_token = sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'recaptcha_token', '' ) );
+	$visitor_timezone_raw = sanitize_text_field( $this->mrm_mc_get_rest_param_value( $request, 'visitor_timezone', '' ) );
 
 	$this->mrm_mc_debug_log(
 		'Masterclass create-payment-intent request received.',
@@ -9511,6 +9534,8 @@ public function rest_create_payment_intent( $request ) {
 	if ( ! $event ) {
 		return new WP_Error( 'mrm_masterclass_event_missing', 'This Masterclass event could not be found.', array( 'status' => 404 ) );
 	}
+
+	$visitor_timezone = $this->mrm_mc_normalize_timezone( $visitor_timezone_raw, $event->timezone ?? 'America/Phoenix' );
 
 	if ( 'scheduled' !== sanitize_key( $event->status ) || empty( $event->registration_open ) ) {
 		return new WP_Error( 'mrm_masterclass_event_closed', 'Registration is not open for this Masterclass.', array( 'status' => 409 ) );
@@ -9639,6 +9664,7 @@ public function rest_create_payment_intent( $request ) {
 				'last_name' => $last_name,
 				'name' => $name,
 				'email' => $email,
+				'visitor_timezone' => $visitor_timezone,
 				'promo_code' => $promo_code,
 				'promo_status' => sanitize_key( $promo['promo_status'] ?? 'none' ),
 				'promo_discount_cents' => (string) $discount_cents,
@@ -9875,7 +9901,7 @@ public function mrm_mc_finalize_from_payment_intent_webhook( $payment_intent ) {
 	if ( '' === $payment_intent_id || $event_id <= 0 ) return;
 
 	$request = new WP_REST_Request( 'POST', '/mrm-masterclass/v1/finalize-registration' );
-	$request->set_body_params( array( 'event_id' => $event_id, 'payment_intent_id' => $payment_intent_id, 'first_name' => sanitize_text_field( $metadata['first_name'] ?? '' ), 'last_name' => sanitize_text_field( $metadata['last_name'] ?? '' ), 'name' => sanitize_text_field( $metadata['name'] ?? '' ), 'email' => sanitize_email( $metadata['email'] ?? '' ), 'terms_accepted' => ! empty( $metadata['terms_accepted'] ), 'promo_code' => sanitize_text_field( $metadata['promo_code'] ?? '' ) ) );
+	$request->set_body_params( array( 'event_id' => $event_id, 'payment_intent_id' => $payment_intent_id, 'first_name' => sanitize_text_field( $metadata['first_name'] ?? '' ), 'last_name' => sanitize_text_field( $metadata['last_name'] ?? '' ), 'name' => sanitize_text_field( $metadata['name'] ?? '' ), 'email' => sanitize_email( $metadata['email'] ?? '' ), 'terms_accepted' => ! empty( $metadata['terms_accepted'] ), 'promo_code' => sanitize_text_field( $metadata['promo_code'] ?? '' ), 'visitor_timezone' => sanitize_text_field( $metadata['visitor_timezone'] ?? '' ) ) );
 	$result = $this->rest_finalize_registration( $request );
 	if ( is_wp_error( $result ) ) {
 		$this->mrm_mc_debug_log( 'Webhook Masterclass finalization failed.', array( 'payment_intent_id' => $payment_intent_id, 'event_id' => $event_id, 'code' => $result->get_error_code(), 'message' => $result->get_error_message() ) );
@@ -9953,6 +9979,7 @@ public function rest_finalize_registration( $request ) {
 	$email             = sanitize_email( $request->get_param( 'email' ) ?? '' );
 	$terms_accepted    = filter_var( $request->get_param( 'terms_accepted' ), FILTER_VALIDATE_BOOLEAN );
 	$promo_code        = sanitize_text_field( $request->get_param( 'promo_code' ) ?? '' );
+	$visitor_timezone_raw = sanitize_text_field( $request->get_param( 'visitor_timezone' ) ?? '' );
 
 	if ( '' === $name && ( '' !== $first_name || '' !== $last_name ) ) {
 		$name = trim( $first_name . ' ' . $last_name );
@@ -10041,6 +10068,7 @@ public function rest_finalize_registration( $request ) {
 	}
 
 	$metadata          = is_array( $payment_intent['metadata'] ?? null ) ? $payment_intent['metadata'] : array();
+	$visitor_timezone = $this->mrm_mc_normalize_timezone( $metadata['visitor_timezone'] ?? $visitor_timezone_raw, $event->timezone ?? 'America/Phoenix' );
 	$seat_hold_token   = sanitize_text_field( $metadata['masterclass_seat_hold_token'] ?? '' );
 	$base_amount_cents = absint( $metadata['original_amount_cents'] ?? $event->price_cents );
 	$promo_code        = strtoupper( sanitize_text_field( $metadata['promo_code'] ?? $promo_code ) );
@@ -10061,7 +10089,7 @@ public function rest_finalize_registration( $request ) {
 	$discount_cents = max( 0, $base_amount_cents - $subtotal_cents );
 	$terms = $this->mrm_mc_terms_snapshot(); $gate = $this->mrm_mc_make_gate_token_pair(); $email_hash = hash( 'sha256', strtolower( trim( $email ) ) );
 	$terms_snapshot = wp_json_encode( $terms );
-	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','billing_line1'=>sanitize_text_field($metadata['billing_line1'] ?? ''),'billing_line2'=>sanitize_text_field($metadata['billing_line2'] ?? ''),'billing_city'=>sanitize_text_field($metadata['billing_city'] ?? ''),'billing_state'=>sanitize_text_field($metadata['billing_state'] ?? ''),'billing_postal_code'=>sanitize_text_field($metadata['billing_postal_code'] ?? ''),'billing_country'=>sanitize_text_field($metadata['billing_country'] ?? 'US'),'subtotal_cents'=>$subtotal_cents,'tax_cents'=>$tax_cents,'tax_code'=>sanitize_text_field($metadata['mrm_tax_code'] ?? 'txcd_20060045'),'tax_calculation_id'=>sanitize_text_field($metadata['mrm_tax_calculation_id'] ?? ''),'taxability_reason'=>sanitize_key($metadata['mrm_taxability_reason'] ?? ''),'terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'promo_discount_cents'=>$discount_cents,'original_amount_cents'=>$base_amount_cents,'final_amount_cents'=>$amount_received,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'cancel_url'=>esc_url_raw( $this->mrm_mc_cancel_url_for_token( $gate['token'] ) ),'feedback_url'=>esc_url_raw( $this->mrm_mc_feedback_url_for_token( $gate['token'] ) ),'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
+	$registration_data = array('event_id'=>$event_id,'first_name'=>$first_name,'last_name'=>$last_name,'name'=>$name,'email'=>$email,'email_hash'=>$email_hash,'visitor_timezone'=>$visitor_timezone,'stripe_payment_intent_id'=>$payment_intent_id,'payment_intent_id'=>$payment_intent_id,'amount_cents'=>$amount_received,'currency'=>$currency,'payment_status'=>'paid','billing_line1'=>sanitize_text_field($metadata['billing_line1'] ?? ''),'billing_line2'=>sanitize_text_field($metadata['billing_line2'] ?? ''),'billing_city'=>sanitize_text_field($metadata['billing_city'] ?? ''),'billing_state'=>sanitize_text_field($metadata['billing_state'] ?? ''),'billing_postal_code'=>sanitize_text_field($metadata['billing_postal_code'] ?? ''),'billing_country'=>sanitize_text_field($metadata['billing_country'] ?? 'US'),'subtotal_cents'=>$subtotal_cents,'tax_cents'=>$tax_cents,'tax_code'=>sanitize_text_field($metadata['mrm_tax_code'] ?? 'txcd_20060045'),'tax_calculation_id'=>sanitize_text_field($metadata['mrm_tax_calculation_id'] ?? ''),'taxability_reason'=>sanitize_key($metadata['mrm_taxability_reason'] ?? ''),'terms_version'=>sanitize_text_field( $terms['version'] ?? 'v1' ),'terms_accepted'=>1,'terms_snapshot'=>$terms_snapshot,'promo_code'=>$promo_code,'promo_status'=>$promo_status,'discount_cents'=>$discount_cents,'promo_discount_cents'=>$discount_cents,'original_amount_cents'=>$base_amount_cents,'final_amount_cents'=>$amount_received,'gate_token_hash'=>$gate['hash'],'gate_url'=>$gate['url'],'cancel_url'=>esc_url_raw( $this->mrm_mc_cancel_url_for_token( $gate['token'] ) ),'feedback_url'=>esc_url_raw( $this->mrm_mc_feedback_url_for_token( $gate['token'] ) ),'gate_token_revoked'=>0,'access_session_id_hash'=>null,'access_session_started_at'=>null,'access_session_last_seen'=>null,'access_last_status'=>'created','created_at'=>$this->now(),'updated_at'=>$this->now());
 	$registration_data = $this->mrm_mc_filter_data_for_table( $regs_table, $registration_data );
 	$registration_result = $this->mrm_mc_insert_registration_with_seat_lock( $event, $registration_data, $seat_hold_token, $payment_intent_id );
 	if ( is_wp_error( $registration_result ) ) {

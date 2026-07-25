@@ -3921,7 +3921,15 @@ async function verifyPaymentIntent(piId, email){
   }
   return vData;
 }
-const visitorTZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+function mrmGetBrowserTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch (error) {
+    return '';
+  }
+}
+
+const visitorTZ = mrmGetBrowserTimezone();
 
 let selectedSlots = [];
 let currentInstructor = null;
@@ -5066,13 +5074,14 @@ function ensureLegacyBookingHandler(){
       return;
     }
 
-    const expandedSelected = expandSelectedSlotsForRecurringBooking(
-      relevantSelected,
-      frequency,
-      reserveDuration
-    );
-
-    const slots = expandedSelected.map(s=>({
+    /*
+     * Send only the visitor-selected seed slots.
+     *
+     * PHP expands recurring lessons in the instructor's timezone so weekly and
+     * biweekly lessons retain the same instructor-local clock time across
+     * daylight-saving transitions.
+     */
+    const slots = relevantSelected.map(s => ({
       start: s.start,
       end: s.end,
       instructor_id: s.instructor_id
@@ -5093,7 +5102,7 @@ function ensureLegacyBookingHandler(){
       : getSlotMinutes();
 
 
-    const guessedParentTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Phoenix';
+    const guessedParentTimezone = mrmGetBrowserTimezone();
     const parentTimezoneEl = document.getElementById('parent-timezone');
     if (parentTimezoneEl) parentTimezoneEl.value = guessedParentTimezone;
 
@@ -5120,7 +5129,7 @@ function ensureLegacyBookingHandler(){
       // Recurrence controls
       repeat_frequency: frequency,          // weekly | biweekly | none
       repeat_duration: reserveDuration,     // 1_month | 3_months | indefinitely
-      slots_are_expanded: true,
+      slots_are_expanded: false,
 
       visitor_tz: visitorTZ,
       parent_timezone: guessedParentTimezone,
@@ -6469,7 +6478,7 @@ function loadMonth(instr,state,container){
   const reqId = ++state._reqSeq;
   state._monthReqId[key] = reqId;
 
-  fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&__ts=${Date.now()}`)
+  fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&visitor_timezone=${encodeURIComponent(visitorTZ)}&__ts=${Date.now()}`)
     .then(r=>r.json())
     .then(res=>{
       const grouped = groupSlotsByDay(res.slots||[]);
@@ -7550,7 +7559,7 @@ function loadInstructors(){
             const reqId = ++state._reqSeq;
             state._monthReqId[key] = reqId;
 
-            const p = fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&__ts=${Date.now()}`)
+            const p = fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&visitor_timezone=${encodeURIComponent(visitorTZ)}&__ts=${Date.now()}`)
               .then(r=>r.json())
               .then(res=>{
                 const grouped = groupSlotsByDay(res.slots||[]);
@@ -7665,7 +7674,7 @@ function loadInstructors(){
             const reqId = ++state._reqSeq;
             state._monthReqId[key] = reqId;
 
-            const p = fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&__ts=${Date.now()}`)
+            const p = fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${start}&end_date=${end}&visitor_timezone=${encodeURIComponent(visitorTZ)}&__ts=${Date.now()}`)
               .then(r=>r.json())
               .then(res=>{
                 const grouped = groupSlotsByDay(res.slots||[]);
@@ -7722,7 +7731,7 @@ function loadInstructors(){
               renderCalendar(instr,state,calBody);
             }
 
-            return fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${dayStr}&end_date=${dayStr}&__ts=${Date.now()}`)
+            return fetch(`${apiBase}/availability?instructor_id=${instr.id}&slot_minutes=15&start_date=${dayStr}&end_date=${dayStr}&visitor_timezone=${encodeURIComponent(visitorTZ)}&__ts=${Date.now()}`)
               .then(r=>r.json())
               .then(res=>{
                 if(reqId !== state._dayOpenSeq) return;

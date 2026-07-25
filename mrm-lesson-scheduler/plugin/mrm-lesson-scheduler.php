@@ -2847,6 +2847,10 @@ protected function mrm_get_google_service_account_json() {
 
                 // Optional slot size (scheduler.html sends slot_minutes=15)
                 'slot_minutes' => array( 'type' => 'integer', 'required' => false ),
+                'visitor_timezone' => array(
+                    'type'     => 'string',
+                    'required' => false,
+                ),
             ),
             'permission_callback' => '__return_true',
         ) );
@@ -2870,78 +2874,95 @@ protected function mrm_get_google_service_account_json() {
     }
 
 
-    protected function expand_booking_slots_from_repeat_rule( $slots, $repeat_frequency, $repeat_duration ) {
+    protected function mrm_scheduler_normalize_timezone( $timezone, $fallback = 'America/Phoenix' ) {
+        $candidates = array( trim( (string) $timezone ), trim( (string) $fallback ), 'UTC' );
+        foreach ( $candidates as $candidate ) {
+            if ( $candidate === '' ) continue;
+            try { new DateTimeZone( $candidate ); return $candidate; } catch ( Exception $e ) { continue; }
+        }
+        return 'UTC';
+    }
+
+    protected function mrm_scheduler_parse_utc_timestamp( $value ) {
+        $value = trim( (string) $value );
+        if ( $value === '' ) return 0;
+        try {
+            if ( preg_match( '/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $value ) ) {
+                $datetime = DateTimeImmutable::createFromFormat( '!Y-m-d H:i:s', $value, new DateTimeZone( 'UTC' ) );
+                return $datetime instanceof DateTimeImmutable ? $datetime->getTimestamp() : 0;
+            }
+            $datetime = new DateTimeImmutable( $value, new DateTimeZone( 'UTC' ) );
+            return $datetime->getTimestamp();
+        } catch ( Exception $e ) { return 0; }
+    }
+
+    protected function mrm_scheduler_format_utc_datetime( $utc_value, $timezone, $format = 'F j, Y \\a\\t g:i A' ) {
+        $timestamp = $this->mrm_scheduler_parse_utc_timestamp( $utc_value );
+        if ( $timestamp <= 0 ) return '';
+        $timezone = $this->mrm_scheduler_normalize_timezone( $timezone, wp_timezone_string() );
+        try { return wp_date( $format, $timestamp, new DateTimeZone( $timezone ) ); }
+        catch ( Exception $e ) { return gmdate( $format, $timestamp ); }
+    }
+
+    protected function mrm_scheduler_local_date_range_to_utc( $start_date, $end_date, $timezone ) {
+        $timezone = $this->mrm_scheduler_normalize_timezone( $timezone, wp_timezone_string() );
+        try {
+            $tz = new DateTimeZone( $timezone );
+            $start_local = DateTimeImmutable::createFromFormat( '!Y-m-d', (string) $start_date, $tz );
+            $end_local = DateTimeImmutable::createFromFormat( '!Y-m-d', (string) $end_date, $tz );
+            if ( ! $start_local instanceof DateTimeImmutable || ! $end_local instanceof DateTimeImmutable ) return array();
+            $end_exclusive = $end_local->modify( '+1 day' );
+            return array(
+                'time_min' => $start_local->setTimezone( new DateTimeZone( 'UTC' ) )->format( 'Y-m-d\TH:i:s\Z' ),
+                'time_max' => $end_exclusive->setTimezone( new DateTimeZone( 'UTC' ) )->format( 'Y-m-d\TH:i:s\Z' ),
+            );
+        } catch ( Exception $e ) { return array(); }
+    }
+
+    protected function mrm_scheduler_timestamp_to_rfc3339( $timestamp, $timezone ) {
+        $timestamp = (int) $timestamp;
+        if ( $timestamp <= 0 ) return '';
+        $timezone = $this->mrm_scheduler_normalize_timezone( $timezone, 'UTC' );
+        try { return ( new DateTimeImmutable( '@' . $timestamp ) )->setTimezone( new DateTimeZone( $timezone ) )->format( 'Y-m-d\TH:i:sP' ); }
+        catch ( Exception $e ) { return ''; }
+    }
+
+
+    protected function expand_booking_slots_from_repeat_rule( $slots, $repeat_frequency, $repeat_duration, $timezone = 'America/Phoenix' ) {
         $slots = is_array( $slots ) ? array_values( $slots ) : array();
         $repeat_frequency = strtolower( trim( (string) $repeat_frequency ) );
-        $repeat_duration  = strtolower( trim( (string) $repeat_duration ) );
-
+        $repeat_duration = strtolower( trim( (string) $repeat_duration ) );
         if ( empty( $slots ) ) return array();
         if ( $repeat_frequency !== 'weekly' && $repeat_frequency !== 'biweekly' ) return $slots;
-
-        $interval_days = ( $repeat_frequency === 'biweekly' ) ? 14 : 7;
-
-        $count_map = array(
-            '1_month'   => 4,
-            '2_months'  => 8,
-            '3_months'  => 12,
-            '6_months'  => 24,
-            '12_months' => 48,
-        );
-
-        if ( $repeat_frequency === 'biweekly' ) {
-            $count_map = array(
-                '1_month'   => 2,
-                '2_months'  => 4,
-                '3_months'  => 6,
-                '6_months'  => 12,
-                '12_months' => 24,
-            );
-        }
-
+        $timezone = $this->mrm_scheduler_normalize_timezone( $timezone, 'America/Phoenix' );
+        try { $local_timezone = new DateTimeZone( $timezone ); } catch ( Exception $e ) { return array(); }
+        $interval_days = $repeat_frequency === 'biweekly' ? 14 : 7;
+        $count_map = array( '1_month' => 4, '2_months' => 8, '3_months' => 12, '6_months' => 24, '12_months' => 48 );
+        if ( $repeat_frequency === 'biweekly' ) $count_map = array( '1_month' => 2, '2_months' => 4, '3_months' => 6, '6_months' => 12, '12_months' => 24 );
         $repeat_count = isset( $count_map[ $repeat_duration ] ) ? (int) $count_map[ $repeat_duration ] : 0;
-
-        // Indefinite recurring bookings should seed a rolling 90-day local horizon.
-        if ( $repeat_duration === 'indefinitely' ) {
-            $repeat_count = (int) floor( 90 / $interval_days ) + 1;
-        }
-
+        if ( $repeat_duration === 'indefinitely' ) $repeat_count = (int) floor( 90 / $interval_days ) + 1;
         if ( $repeat_count <= 1 ) return $slots;
-
         $expanded = array();
-
         foreach ( $slots as $slot ) {
-            $start_raw = (string) ( $slot['start'] ?? '' );
-            $end_raw   = (string) ( $slot['end'] ?? '' );
-
-            $start_ts = strtotime( $start_raw );
-            $end_ts   = strtotime( $end_raw );
-
-            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
-                continue;
-            }
-
-            for ( $i = 0; $i < $repeat_count; $i++ ) {
-                $expanded[] = array(
-                    'start' => gmdate( 'c', $start_ts + ( $i * $interval_days * DAY_IN_SECONDS ) ),
-                    'end'   => gmdate( 'c', $end_ts   + ( $i * $interval_days * DAY_IN_SECONDS ) ),
-                    'instructor_id' => (int) ( $slot['instructor_id'] ?? 0 ),
-                );
+            $start_timestamp = $this->mrm_scheduler_parse_utc_timestamp( $slot['start'] ?? '' );
+            $end_timestamp = $this->mrm_scheduler_parse_utc_timestamp( $slot['end'] ?? '' );
+            if ( $start_timestamp <= 0 || $end_timestamp <= $start_timestamp ) continue;
+            $local_start = ( new DateTimeImmutable( '@' . $start_timestamp ) )->setTimezone( $local_timezone );
+            $local_end = ( new DateTimeImmutable( '@' . $end_timestamp ) )->setTimezone( $local_timezone );
+            for ( $index = 0; $index < $repeat_count; $index++ ) {
+                $days_to_add = $index * $interval_days;
+                $occurrence_start = $days_to_add > 0 ? $local_start->modify( '+' . $days_to_add . ' days' ) : $local_start;
+                $occurrence_end = $days_to_add > 0 ? $local_end->modify( '+' . $days_to_add . ' days' ) : $local_end;
+                $expanded[] = array( 'start' => gmdate( 'c', $occurrence_start->getTimestamp() ), 'end' => gmdate( 'c', $occurrence_end->getTimestamp() ), 'instructor_id' => (int) ( $slot['instructor_id'] ?? 0 ) );
             }
         }
-
-        usort( $expanded, function( $a, $b ) {
-            return strcmp( (string) $a['start'], (string) $b['start'] );
-        } );
-
-        $deduped = array();
-        $seen = array();
+        usort( $expanded, function ( $left, $right ) { return strcmp( (string) $left['start'], (string) $right['start'] ); } );
+        $deduped = array(); $seen = array();
         foreach ( $expanded as $slot ) {
-            $k = (string) $slot['instructor_id'] . '|' . (string) $slot['start'] . '|' . (string) $slot['end'];
-            if ( isset( $seen[ $k ] ) ) continue;
-            $seen[ $k ] = true;
-            $deduped[] = $slot;
+            $key = (string) $slot['instructor_id'] . '|' . (string) $slot['start'] . '|' . (string) $slot['end'];
+            if ( isset( $seen[ $key ] ) ) continue;
+            $seen[ $key ] = true; $deduped[] = $slot;
         }
-
         return $deduped;
     }
 
@@ -2953,14 +2974,6 @@ protected function mrm_get_google_service_account_json() {
         $instructor_id = intval( $data['instructor_id'] ?? 0 );
         $slots         = isset( $data['slots'] ) && is_array( $data['slots'] ) ? $data['slots'] : array();
         $slots_are_expanded = ! empty( $data['slots_are_expanded'] );
-
-        if ( ! $slots_are_expanded ) {
-            $slots = $this->expand_booking_slots_from_repeat_rule(
-                $slots,
-                (string) ( $data['repeat_frequency'] ?? 'none' ),
-                (string) ( $data['repeat_duration'] ?? '' )
-            );
-        }
 
         $student_name  = sanitize_text_field( (string) ( $data['student_name'] ?? '' ) );
         $student_email = sanitize_email( (string) ( $data['student_email'] ?? '' ) );
@@ -2977,10 +2990,8 @@ protected function mrm_get_google_service_account_json() {
         $address_city  = sanitize_text_field( (string) ( $data['address_city'] ?? '' ) );
         $address_state = sanitize_text_field( (string) ( $data['address_state'] ?? '' ) );
         $address_postal= sanitize_text_field( (string) ( $data['address_postal'] ?? '' ) );
-        $parent_timezone = sanitize_text_field( (string) ( $data['parent_timezone'] ?? '' ) );
-        if ( $parent_timezone === '' ) {
-            $parent_timezone = 'America/Phoenix';
-        }
+        $parent_timezone_raw = sanitize_text_field( (string) ( $data['parent_timezone'] ?? '' ) );
+        $parent_timezone = '';
 
         $lesson_type       = sanitize_text_field( (string) ( $data['lesson_type'] ?? '' ) );          // online | inperson | consultation (per your UI)
         $repeat_frequency  = sanitize_text_field( (string) ( $data['repeat_frequency'] ?? 'none' ) ); // weekly | biweekly | none
@@ -3246,7 +3257,15 @@ protected function mrm_get_google_service_account_json() {
         );
 
         $calendar_id = ( is_array( $instr ) && ! empty( $instr['calendar_id'] ) ) ? (string) $instr['calendar_id'] : '';
-        $instr_tz    = ( is_array( $instr ) && ! empty( $instr['timezone'] ) ) ? (string) $instr['timezone'] : 'UTC';
+        $instr_tz = $this->mrm_scheduler_normalize_timezone( is_array( $instr ) ? (string) ( $instr['timezone'] ?? '' ) : '', 'America/Phoenix' );
+        $parent_timezone = $this->mrm_scheduler_normalize_timezone( $parent_timezone_raw, $instr_tz );
+
+        // Expand seed slots in the instructor's calendar timezone to preserve local time across DST.
+        if ( ! $slots_are_expanded ) {
+            $slots = $this->expand_booking_slots_from_repeat_rule( $slots, $repeat_frequency, $repeat_duration, $instr_tz );
+        }
+        $slots = is_array( $slots ) ? array_values( $slots ) : array();
+        if ( empty( $slots ) ) return new WP_REST_Response( array( 'ok' => false, 'message' => 'The selected lesson times could not be interpreted.' ), 400 );
 
         $is_recurring_booking = (
             in_array( strtolower( (string) $repeat_frequency ), array( 'weekly', 'biweekly' ), true ) &&
@@ -3255,6 +3274,11 @@ protected function mrm_get_google_service_account_json() {
 
         $series_id = null;
         if ( $is_recurring_booking ) {
+            $series_start_ts = $this->mrm_scheduler_parse_utc_timestamp( $slots[0]['start'] ?? '' );
+            $series_end_ts = $this->mrm_scheduler_parse_utc_timestamp( $slots[0]['end'] ?? '' );
+            if ( $series_start_ts <= 0 || $series_end_ts <= $series_start_ts ) {
+                return new WP_REST_Response( array( 'ok' => false, 'message' => 'The recurring lesson start time is invalid.' ), 400 );
+            }
             $wpdb->insert(
                 $lessons_table,
                 array(
@@ -3272,9 +3296,9 @@ protected function mrm_get_google_service_account_json() {
                     'is_consultation'  => $is_consultation,
                     'instructor_timezone' => $instr_tz,
                     'lesson_length'    => $lesson_length > 0 ? $lesson_length : 60,
-                    'start_time'    => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
-                    'end_time'      => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['end'] ?? '' ) ) ),
-                    'google_original_start_time' => gmdate( 'Y-m-d H:i:s', strtotime( (string) ( $slots[0]['start'] ?? '' ) ) ),
+                    'start_time'    => gmdate( 'Y-m-d H:i:s', $series_start_ts ),
+                    'end_time'      => gmdate( 'Y-m-d H:i:s', $series_end_ts ),
+                    'google_original_start_time' => gmdate( 'Y-m-d H:i:s', $series_start_ts ),
                     'status'        => 'series',
                     'google_event_id' => null,
                     'google_meet_url' => null,
@@ -3316,8 +3340,8 @@ protected function mrm_get_google_service_account_json() {
             $start_raw = (string) ( $slot['start'] ?? '' );
             $end_raw   = (string) ( $slot['end'] ?? '' );
 
-            $start_ts = strtotime( $start_raw );
-            $end_ts   = strtotime( $end_raw );
+            $start_ts = $this->mrm_scheduler_parse_utc_timestamp( $start_raw );
+            $end_ts = $this->mrm_scheduler_parse_utc_timestamp( $end_raw );
 
             if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
                 continue;
@@ -3646,11 +3670,11 @@ protected function mrm_get_google_service_account_json() {
                     }
 
                     // Use your existing RFC3339 UTC helper (already in this file)
-                    $start_rfc3339 = $this->to_rfc3339_utc( $start_raw );
-                    $end_rfc3339   = $this->to_rfc3339_utc( $end_raw );
+                    $start_rfc3339 = $this->mrm_scheduler_timestamp_to_rfc3339( $start_ts, $instr_tz );
+                    $end_rfc3339 = $this->mrm_scheduler_timestamp_to_rfc3339( $end_ts, $instr_tz );
 
                     // If conversion fails, do not break booking — just log
-                    if ( ! is_wp_error( $start_rfc3339 ) && ! is_wp_error( $end_rfc3339 ) ) {
+                    if ( $start_rfc3339 !== '' && $end_rfc3339 !== '' ) {
 
                         $recurrence_rules = array();
                         $create_meet = false;
@@ -3666,7 +3690,7 @@ protected function mrm_get_google_service_account_json() {
                             $location,
                             $start_rfc3339,
                             $end_rfc3339,
-                            'UTC',
+                            $instr_tz,
                             $extended_private,
                             $recurrence_rules,
                             $create_meet,
@@ -4906,9 +4930,6 @@ protected function mrm_get_google_service_account_json() {
             ), 400 );
         }
 
-        // 1) Availability windows from Google (your “free/transparent” availability blocks)
-        $availability = $this->get_calendar_availability_events( $instructor_id, $start, $end );
-
         // 2) Busy windows (ALWAYS compute: DB lessons + Google opaque events)
         // IMPORTANT: Keep DB busy separate from Google busy so we don't lose lesson_type metadata.
         $busy_db = array();
@@ -4924,9 +4945,23 @@ protected function mrm_get_google_service_account_json() {
             ARRAY_A
         );
 
-        $calendar_id = is_array( $row ) ? (string) ( $row['calendar_id'] ?? '' ) : '';
-        $tz          = is_array( $row ) ? (string) ( $row['timezone'] ?? '' ) : '';
-        if ( ! $tz ) $tz = 'America/Phoenix';
+        if ( ! is_array( $row ) ) {
+            return new WP_REST_Response( array( 'ok' => false, 'message' => 'Instructor not found.' ), 404 );
+        }
+        $calendar_id = (string) ( $row['calendar_id'] ?? '' );
+        $instructor_timezone = $this->mrm_scheduler_normalize_timezone( (string) ( $row['timezone'] ?? '' ), 'America/Phoenix' );
+        $tz = $this->mrm_scheduler_normalize_timezone(
+            sanitize_text_field( (string) $request->get_param( 'visitor_timezone' ) ),
+            $instructor_timezone
+        );
+
+        $utc_range = $this->mrm_scheduler_local_date_range_to_utc( $start, $end, $tz );
+        if ( empty( $utc_range['time_min'] ) || empty( $utc_range['time_max'] ) ) {
+            return new WP_REST_Response(
+                array( 'ok' => false, 'message' => 'The requested calendar range is invalid.' ),
+                400
+            );
+        }
 
         try {
             $start_local = DateTime::createFromFormat( 'Y-m-d', $start, new DateTimeZone( $tz ) );
@@ -4942,8 +4977,11 @@ protected function mrm_get_google_service_account_json() {
                 $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
                 $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
 
-                $time_min = $start_utc->format( 'Y-m-d\TH:i:s\Z' );
-                $time_max = $end_utc->format( 'Y-m-d\TH:i:s\Z' );
+                $time_min = $utc_range['time_min'];
+                $time_max = $utc_range['time_max'];
+
+                // Availability uses the same visitor-calendar UTC boundaries as busy queries.
+                $availability = $this->get_calendar_availability_events( $instructor_id, $time_min, $time_max );
 
                 // Map Google event IDs -> actual start/end timestamps for reconciliation (deletes/moves)
                 $google_event_map = array();
@@ -5044,9 +5082,11 @@ protected function mrm_get_google_service_account_json() {
                 $busy = array_merge( $busy_db, $busy_google );
             } else {
                 $busy = array();
+                $availability = array();
             }
         } catch ( Exception $e ) {
             $busy = array();
+            $availability = array();
         }
 
         // 3) Split availability into slots
@@ -5108,7 +5148,7 @@ protected function mrm_get_google_service_account_json() {
         return checkdate( $m, $d, $y );
     }
 
-    private function get_calendar_availability_events( $instructor_id, $start, $end ) {
+    private function get_calendar_availability_events( $instructor_id, $time_min, $time_max ) {
         global $wpdb;
         $table = $wpdb->prefix . 'mrm_instructors';
         $row = $wpdb->get_row( $wpdb->prepare( "SELECT calendar_id, timezone FROM {$table} WHERE id = %d", (int) $instructor_id ), ARRAY_A );
@@ -5122,36 +5162,6 @@ protected function mrm_get_google_service_account_json() {
         if ( ! $this->google_is_configured() ) {
             return array();
         }
-
-        $tz = (string) ( $row['timezone'] ?? '' );
-        if ( ! $tz ) {
-            $tz = 'America/Phoenix';
-        }
-
-        try {
-            // We require strict YYYY-MM-DD from the REST layer, so interpret as local-day boundaries:
-            // - start_date => inclusive at 00:00:00
-            // - end_date   => inclusive, implemented as EXCLUSIVE upper bound (end + 1 day at 00:00:00)
-            $start_local = DateTime::createFromFormat( 'Y-m-d', $start, new DateTimeZone( $tz ) );
-            $end_local   = DateTime::createFromFormat( 'Y-m-d', $end,   new DateTimeZone( $tz ) );
-
-            if ( ! $start_local || ! $end_local ) {
-                return array();
-            }
-
-            $start_local->setTime( 0, 0, 0 );
-            $end_local->setTime( 0, 0, 0 );
-            $end_local->modify( '+1 day' ); // makes end_date inclusive
-        } catch ( Exception $e ) {
-            return array();
-        }
-
-        $start_utc = clone $start_local;
-        $end_utc   = clone $end_local;
-        $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
-        $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
-        $time_min = $start_utc->format( 'Y-m-d\\TH:i:s\\Z' );
-        $time_max = $end_utc->format( 'Y-m-d\\TH:i:s\\Z' );
 
         $events_payload = $this->google_list_events( $calendar_id, $time_min, $time_max );
         if ( is_wp_error( $events_payload ) ) {
@@ -6582,10 +6592,7 @@ protected function mrm_get_google_service_account_json() {
         }
 
         $start_raw = (string) ( $lesson['start_time'] ?? '' );
-        $start_ts = strtotime( $start_raw );
-        $start_label = $start_raw !== '' && $start_ts
-            ? wp_date( 'F j, Y \a\t g:i A', $start_ts, $viewer_tz )
-            : '';
+        $start_label = $this->mrm_scheduler_format_utc_datetime( $start_raw, $timezone_string, 'F j, Y \a\t g:i A' );
 
         $minutes = (int) ( $lesson['lesson_length'] ?? 0 );
 
@@ -8280,7 +8287,7 @@ protected function mrm_get_google_service_account_json() {
         $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
         $student_name     = (string) ( $lesson['student_name'] ?? '' );
         $instructor_name  = (string) ( $lesson['instructor_name'] ?? '' );
-        $start_label      = wp_date( 'F j, Y \a\t g:i A', strtotime( (string) ( $lesson['start_time'] ?? '' ) ), wp_timezone() );
+        $start_label      = $this->mrm_scheduler_format_utc_datetime( $lesson['start_time'] ?? '', $lesson['instructor_timezone'] ?? wp_timezone_string(), 'F j, Y \a\t g:i A' );
 
         $intro = '<p>Parent feedback has been submitted for a lesson.</p>';
         $details = '<div><strong>Lesson ID:</strong> ' . (int) $lesson_id . '</div>' . '<div><strong>Student:</strong> ' . esc_html( $student_name ) . '</div>' . '<div><strong>Instructor:</strong> ' . esc_html( $instructor_name ) . '</div>' . '<div><strong>Lesson time:</strong> ' . esc_html( $start_label ) . '</div>' . '<div><strong>Rating:</strong> ' . esc_html( str_repeat( '★', (int) $rating ) ) . ' (' . (int) $rating . '/5)</div>' . '<div style="margin-top:12px;"><strong>Comment:</strong><br>' . nl2br( esc_html( (string) $comment ) ) . '</div>';
@@ -8383,8 +8390,9 @@ protected function mrm_get_google_service_account_json() {
     protected function send_safety_exception_email( $type, $row, $admin_email ) {
         $lesson_id    = (int) ( $row['lesson_id'] ?? $row['id'] ?? 0 );
         $student_name = (string) ( $row['student_name'] ?? '' );
-        $start_label  = wp_date( 'F j, Y \a\t g:i A', strtotime( (string) ( $row['start_time'] ?? '' ) ), wp_timezone() );
-        $end_label    = wp_date( 'F j, Y \a\t g:i A', strtotime( (string) ( $row['end_time'] ?? '' ) ), wp_timezone() );
+        $display_timezone = $row['instructor_timezone'] ?? wp_timezone_string();
+        $start_label = $this->mrm_scheduler_format_utc_datetime( $row['start_time'] ?? '', $display_timezone, 'F j, Y \a\t g:i A' );
+        $end_label = $this->mrm_scheduler_format_utc_datetime( $row['end_time'] ?? '', $display_timezone, 'F j, Y \a\t g:i A' );
 
         if ( $type === 'arrival_missing' ) {
             $title = 'Safety alert — instructor has not checked in';

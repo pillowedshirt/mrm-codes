@@ -2507,11 +2507,23 @@ body,
   }
 
   function eventStart(event) {
-    return event && (event.start_time_rfc3339 || event.start_time) ? (event.start_time_rfc3339 || event.start_time) : '';
+    return event && event.start_time_rfc3339
+      ? String(event.start_time_rfc3339)
+      : '';
   }
 
   function eventEnd(event) {
-    return event && (event.end_time_rfc3339 || event.end_time) ? (event.end_time_rfc3339 || event.end_time) : '';
+    return event && event.end_time_rfc3339
+      ? String(event.end_time_rfc3339)
+      : '';
+  }
+
+  function masterclassBrowserTimezone() {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    } catch (error) {
+      return '';
+    }
   }
 
   function isEnrollmentClosed(event) {
@@ -3599,6 +3611,7 @@ body,
       promo: state.promo,
       termsAccepted: termsAccepted,
       recaptchaToken: masterclassRecaptchaToken(),
+      visitorTimezone: masterclassBrowserTimezone(),
       billingAddress: {
         line1: byId('masterclassBillingLine1')?.value.trim() || '',
         line2: byId('masterclassBillingLine2')?.value.trim() || '',
@@ -3829,6 +3842,7 @@ body,
           email: data.email,
           terms_accepted: data.termsAccepted,
           recaptcha_token: data.recaptchaToken,
+          visitor_timezone: data.visitorTimezone,
           billing_address: data.billingAddress
         })
       }, 30000);
@@ -4115,7 +4129,8 @@ body,
         name: pendingFinalization.name,
         email: pendingFinalization.email,
         terms_accepted: pendingFinalization.terms_accepted,
-        promo_code: pendingFinalization.promo_code
+        promo_code: pendingFinalization.promo_code,
+        visitor_timezone: pendingFinalization.visitor_timezone || ''
       })
     }, 30000);
 
@@ -4239,7 +4254,8 @@ body,
         name: state.checkout.name,
         email: state.checkout.email,
         terms_accepted: state.checkout.termsAccepted,
-        promo_code: state.checkout.promoCode
+        promo_code: state.checkout.promoCode,
+        visitor_timezone: state.checkout.visitorTimezone
       };
 
       savePendingMasterclassFinalization(pendingFinalization);
