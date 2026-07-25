@@ -5840,22 +5840,59 @@ function renderCalendar(instr, state, container){
 
     cell.onclick=()=>{
       if(cell.classList.contains('past')) return;
-      if(state.expandedDay===day){
+
+      if(state.expandedDay === day){
         state.expandedDay = null;
         state._refreshingDay = null;
-        state._isStale = true;
+
+        /*
+         * Closing a day is a visual action only.
+         *
+         * Do not mark the month stale and do not start another
+         * availability request.
+         */
         _closeMobileDayModal();
-        renderCalendar(instr,state,container);
-        if(typeof state._refreshDayAvailability === 'function'){
-          state._refreshDayAvailability(day, { force: true, showLoading: false, renderOnComplete: false });
-        }
+        renderCalendar(
+          instr,
+          state,
+          container
+        );
+
         return;
       }
+
       state.expandedDay = day;
-      if(typeof state._refreshDayAvailability === 'function'){
-        state._refreshDayAvailability(day, { force: true });
-      } else {
-        renderCalendar(instr,state,container);
+
+      const monthNeedsRefresh =
+        state._isStale ||
+        (
+          Date.now() - state._lastRefreshMs >
+          state._refreshTtlMs
+        );
+
+      /*
+       * The monthly response already contains this day's availability.
+       *
+       * Display the existing data immediately while the month is fresh.
+       * Contact the availability endpoint only when the data has expired
+       * or another action has intentionally marked it stale.
+       */
+      if(
+        monthNeedsRefresh &&
+        typeof state._refreshDayAvailability === 'function'
+      ){
+        state._refreshDayAvailability(
+          day,
+          {
+            force: true
+          }
+        );
+      }else{
+        renderCalendar(
+          instr,
+          state,
+          container
+        );
       }
     };
 
@@ -5882,9 +5919,18 @@ function renderCalendar(instr, state, container){
         closeBtn.onclick = ()=>{
           state.expandedDay = null;
           state._refreshingDay = null;
-          state._isStale = true;
+
+          /*
+           * Closing the mobile day sheet does not change availability.
+           * Keep the loaded monthly data fresh.
+           */
           _closeMobileDayModal();
-          renderCalendar(instr,state,container);
+
+          renderCalendar(
+            instr,
+            state,
+            container
+          );
         };
         sheet.append(closeBtn);
 
@@ -5892,9 +5938,18 @@ function renderCalendar(instr, state, container){
           if(e.target === panel){
             state.expandedDay = null;
             state._refreshingDay = null;
-            state._isStale = true;
+
+            /*
+             * Clicking outside the mobile sheet only closes the interface.
+             * It must not invalidate the loaded availability.
+             */
             _closeMobileDayModal();
-            renderCalendar(instr,state,container);
+
+            renderCalendar(
+              instr,
+              state,
+              container
+            );
           }
         });
       }
