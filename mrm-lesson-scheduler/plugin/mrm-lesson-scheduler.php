@@ -4996,6 +4996,32 @@ protected function mrm_get_google_service_account_json() {
             );
         }
 
+        $time_min = (string) $utc_range['time_min'];
+        $time_max = (string) $utc_range['time_max'];
+
+        /*
+         * Cache one instructor/month response briefly. The key includes the
+         * booking cache-bust token, so successful bookings invalidate it.
+         */
+        $availability_cache_key = 'mrm_scheduler_availability_' . md5(
+            implode(
+                '|',
+                array(
+                    (string) $instructor_id,
+                    (string) $slot_minutes,
+                    $time_min,
+                    $time_max,
+                    (string) $this->get_cache_bust_token( $calendar_id ),
+                )
+            )
+        );
+
+        $cached_response = get_transient( $availability_cache_key );
+
+        if ( is_array( $cached_response ) ) {
+            return new WP_REST_Response( $cached_response, 200 );
+        }
+
         try {
             $start_local = DateTime::createFromFormat( 'Y-m-d', $start, new DateTimeZone( $tz ) );
             $end_local   = DateTime::createFromFormat( 'Y-m-d', $end,   new DateTimeZone( $tz ) );
@@ -5010,34 +5036,49 @@ protected function mrm_get_google_service_account_json() {
                 $start_utc->setTimezone( new DateTimeZone( 'UTC' ) );
                 $end_utc->setTimezone( new DateTimeZone( 'UTC' ) );
 
-                $time_min = $utc_range['time_min'];
-                $time_max = $utc_range['time_max'];
-
-                // Availability uses the same visitor-calendar UTC boundaries as busy queries.
-                $availability = $this->get_calendar_availability_events( $instructor_id, $time_min, $time_max );
-
-                // Map Google event IDs -> actual start/end timestamps for reconciliation (deletes/moves)
+                /*
+                 * Download this Google Calendar window once and reuse it for
+                 * Free availability and scheduled-lesson reconciliation.
+                 */
+                $availability     = array();
                 $google_event_map = array();
 
                 if ( $calendar_id !== '' && $this->google_is_configured() ) {
-                    $events = $this->google_list_events( $calendar_id, $time_min, $time_max );
-                    if ( ! is_wp_error( $events ) && is_array( $events ) ) {
-                        $items = isset( $events['items'] ) && is_array( $events['items'] ) ? $events['items'] : $events;
-                        foreach ( $items as $ev ) {
-                            $id = (string) ( $ev['id'] ?? '' );
-                            if ( $id === '' ) continue;
+                    $events_payload = $this->google_list_events( $calendar_id, $time_min, $time_max );
 
-                            $start_dt = $ev['start']['dateTime'] ?? '';
-                            $end_dt   = $ev['end']['dateTime'] ?? '';
+                    if ( ! is_wp_error( $events_payload ) && is_array( $events_payload ) ) {
+                        $google_items = isset( $events_payload['items'] ) && is_array( $events_payload['items'] )
+                            ? $events_payload['items']
+                            : $events_payload;
 
-                            // Skip all-day events
-                            if ( ! $start_dt || ! $end_dt ) continue;
+                        $windows = $this->events_to_availability_windows( $google_items, '' );
+                        foreach ( $windows as $window ) {
+                            $window_start = (int) ( $window['start_ts'] ?? 0 );
+                            $window_end   = (int) ( $window['end_ts'] ?? 0 );
+                            if ( $window_start <= 0 || $window_end <= $window_start ) continue;
 
-                            $s = strtotime( (string) $start_dt );
-                            $e = strtotime( (string) $end_dt );
-                            if ( ! $s || ! $e || $e <= $s ) continue;
+                            $availability[] = array(
+                                'start' => gmdate( 'c', $window_start ),
+                                'end'   => gmdate( 'c', $window_end ),
+                            );
+                        }
 
-                            $google_event_map[ $id ] = array( 'start_ts' => $s, 'end_ts' => $e );
+                        foreach ( $google_items as $event ) {
+                            $event_id = (string) ( $event['id'] ?? '' );
+                            if ( $event_id === '' ) continue;
+
+                            $event_start = (string) ( $event['start']['dateTime'] ?? '' );
+                            $event_end   = (string) ( $event['end']['dateTime'] ?? '' );
+                            if ( $event_start === '' || $event_end === '' ) continue;
+
+                            $event_start_timestamp = strtotime( $event_start );
+                            $event_end_timestamp   = strtotime( $event_end );
+                            if ( ! $event_start_timestamp || ! $event_end_timestamp || $event_end_timestamp <= $event_start_timestamp ) continue;
+
+                            $google_event_map[ $event_id ] = array(
+                                'start_ts' => $event_start_timestamp,
+                                'end_ts'   => $event_end_timestamp,
+                            );
                         }
                     }
                 }
@@ -5161,12 +5202,17 @@ protected function mrm_get_google_service_account_json() {
         // - slots: for booking
         // - busy: for calendar shading / busy markers
         // - availability: legacy alias used in older code paths
-        return new WP_REST_Response( array(
+        $response_data = array(
             'ok'           => true,
             'slots'        => array_values( $slots ),
             'busy'         => array_values( $busy ),
             'availability' => array_values( $slots ),
-        ), 200 );
+        );
+
+        /* Keep direct Google Calendar changes no more than 30 seconds stale. */
+        set_transient( $availability_cache_key, $response_data, 30 );
+
+        return new WP_REST_Response( $response_data, 200 );
     }
 
 

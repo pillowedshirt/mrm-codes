@@ -952,6 +952,22 @@ input[type="checkbox"] {
   display: none !important;
 }
 
+.mrm-masterclass-detected-timezone {
+  margin: 0;
+  padding: 10px 20px 0;
+  color: #5f5851;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.mrm-masterclass-time-box
+.mrm-masterclass-detected-timezone {
+  padding: 0 0 6px;
+  text-align: inherit;
+}
+
 .mrm-masterclass-calendar-nav {
   width: 46px;
   height: 46px;
@@ -1892,6 +1908,8 @@ body,
           </button>
         </div>
 
+        <p id="mrm-masterclass-calendar-timezone" class="mrm-masterclass-detected-timezone"></p>
+
         <div id="mrm-masterclass-calendar" class="mrm-masterclass-calendar"></div>
       </div>
     </section>
@@ -2407,9 +2425,40 @@ body,
     return formatMasterclassTimeOnly(start || end);
   }
 
+  function masterclassTimezoneAbbreviation() {
+    const timezone = masterclassBrowserTimezone() || undefined;
+    const styles = ['shortGeneric', 'short'];
+
+    for (const timeZoneName of styles) {
+      try {
+        const parts = new Intl.DateTimeFormat('en-US', {
+          timeZone: timezone,
+          timeZoneName: timeZoneName
+        }).formatToParts(new Date());
+        const zonePart = parts.find(function (part) {
+          return part.type === 'timeZoneName';
+        });
+
+        if (zonePart && zonePart.value) {
+          return zonePart.value;
+        }
+      } catch (error) {}
+    }
+
+    return masterclassBrowserTimezone() || 'Local time';
+  }
+
+  function masterclassTimezoneNoticeHtml() {
+    return '<div class="mrm-masterclass-detected-timezone">' +
+      'Detected timezone: ' +
+      escapeHtml(masterclassTimezoneAbbreviation()) +
+      '</div>';
+  }
+
   function renderMasterclassTimeBox(event) {
     return '' +
       '<div class="mrm-masterclass-time-box">' +
+        masterclassTimezoneNoticeHtml() +
         '<div class="mrm-masterclass-time-date">' + escapeHtml(formatMasterclassDateLine(eventStart(event))) + '</div>' +
         '<div class="mrm-masterclass-time-window">' + escapeHtml(formatMasterclassTimeWindow(event)) + '</div>' +
       '</div>';
@@ -2641,6 +2690,7 @@ body,
     const calendar = byId('mrm-masterclass-calendar');
     const monthTitle = byId('mrm-masterclass-calendar-current-month');
     const rangeNote = byId('mrm-masterclass-calendar-range-note');
+    const timezoneNotice = byId('mrm-masterclass-calendar-timezone');
 
     if (!calendar) {
       return;
@@ -2666,6 +2716,10 @@ body,
 
     if (monthTitle) {
       monthTitle.textContent = monthLabel;
+    }
+
+    if (timezoneNotice) {
+      timezoneNotice.textContent = 'Detected timezone: ' + masterclassTimezoneAbbreviation();
     }
 
     if (rangeNote) {
