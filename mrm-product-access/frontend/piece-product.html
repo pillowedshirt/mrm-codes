@@ -3116,12 +3116,7 @@ async function getOfferSkuCandidates(offerEl) {
         }
 
         if (!res.ok && data && data.code === 'fundamentals_addon_already_owned') {
-          mrmSetFundamentalsSelection(pendingSku, false);
-          lastTaxPreviewKey = '';
-          resetLoadedPaymentForBillingChange(data.message || 'This email already has access to the Fundamental Packet.');
-          errorEl.textContent = data.message || 'This email already has access to the Fundamental Packet.';
-          mrmUpdatePiecePromoTopBreakdown();
-          scheduleTaxPreview();
+          handleFundamentalsAlreadyOwned(data);
           return;
         }
         if (res.ok && data && data.ok) { applyServerBreakdown(data); }
@@ -3133,6 +3128,44 @@ async function getOfferSkuCandidates(offerEl) {
     const scheduleTaxPreview = () => {
       clearTimeout(taxPreviewTimer);
       taxPreviewTimer = setTimeout(requestTaxPreview, 350);
+    };
+
+    const handleFundamentalsAlreadyOwned = function(data) {
+      const message = data && data.message
+        ? String(data.message)
+        : 'This email already has access to the Fundamental Packet, so it has not been added to the order.';
+
+      /*
+       * This is intentionally cleared because charging the
+       * customer again would create a duplicate purchase.
+       */
+      mrmSetFundamentalsSelection(pendingSku, false);
+
+      lastTaxPreviewKey = '';
+
+      /*
+       * Remove any Stripe Payment Element or Payment Intent
+       * that may have been created with the add-on included.
+       */
+      resetLoadedPaymentForBillingChange(message);
+
+      /*
+       * Display the reason clearly instead of making the
+       * checkbox appear to clear without explanation.
+       */
+      errorEl.textContent = message;
+
+      /*
+       * Immediately remove the $5 row and recalculate the
+       * visible subtotal.
+       */
+      mrmUpdatePiecePromoTopBreakdown();
+
+      /*
+       * Request a corrected server breakdown without the
+       * duplicate add-on.
+       */
+      scheduleTaxPreview();
     };
 
     const scheduleLoad = () => {
@@ -3227,15 +3260,18 @@ async function getOfferSkuCandidates(offerEl) {
 
           if (!res.ok || !data.ok) {
             if (data && data.code === 'fundamentals_addon_already_owned') {
-              mrmSetFundamentalsSelection(pendingSku, false);
-              lastTaxPreviewKey = '';
-              resetLoadedPaymentForBillingChange(data.message || 'This email already has access to the Fundamental Packet.');
-              errorEl.textContent = data.message || 'This email already has access to the Fundamental Packet.';
-              mrmUpdatePiecePromoTopBreakdown();
-              scheduleTaxPreview();
+              handleFundamentalsAlreadyOwned(data);
               return;
             }
             errorEl.textContent = data.message || 'We could not complete this payment. Please review your details and try again.';
+            /*
+             * Keep the currently selected add-on visible in the price
+             * breakdown for errors unrelated to existing ownership.
+             *
+             * A Stripe configuration or API error should not silently
+             * change what the customer selected.
+             */
+            mrmUpdatePiecePromoTopBreakdown();
             payBtn.disabled = true;
             return;
           }
@@ -3266,6 +3302,11 @@ async function getOfferSkuCandidates(offerEl) {
           payBtn.disabled = false;
         } catch (err) {
           errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
+          /*
+           * Preserve the visible add-on selection and its $5 price
+           * when the request itself fails.
+           */
+          mrmUpdatePiecePromoTopBreakdown();
           payBtn.disabled = true;
         }
       }, 450);
@@ -3276,9 +3317,23 @@ async function getOfferSkuCandidates(offerEl) {
         const selected = fundamentalsAvailable && this.checked;
         mrmSetFundamentalsSelection(pendingSku, selected);
         lastTaxPreviewKey = '';
-        resetLoadedPaymentForBillingChange('Your add-on selection changed. Review the updated total, then continue to payment.');
+
+        /*
+         * Immediately update the visible order breakdown.
+         *
+         * The checkout does not need to wait for Stripe or
+         * the tax-preview request to show the additional $5.
+         */
         mrmUpdatePiecePromoTopBreakdown();
+
+        /*
+         * A previously created Payment Intent cannot be reused
+         * after changing the total.
+         */
+        resetLoadedPaymentForBillingChange('Your add-on selection changed. Review the updated total, then continue to payment.');
+
         scheduleTaxPreview();
+
         if (mrmPiecePaymentStepRequested) {
           scheduleLoad();
         }
