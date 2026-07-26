@@ -2967,6 +2967,7 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
 
   if ($product_type === 'sheet_music') {
     $profiles[] = array('key'=>'sheet_music_base','label'=>'Sheet music download','taxable'=>true,'tax_code'=>'txcd_10503000','amount_source'=>'base','threshold_category'=>'digital_document_download');
+    if (!empty($context['fundamentals_addon_selected'])) $profiles[] = array('key'=>'sheet_music_fundamentals_packet_addon','label'=>'Fundamental Packet download','taxable'=>true,'tax_code'=>'txcd_10503000','amount_source'=>'fundamentals_addon','threshold_category'=>'digital_document_download');
     if ($addon_selected) {
       $subscription_code = $this->mrm_expected_subscription_tax_code();
       if ($subscription_code === '') return new WP_Error('invalid_subscription_tax_model','The sheet-music subscription rights model has not been approved for tax purposes.');
@@ -3008,12 +3009,14 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return array('ok'=>true,'address'=>$address,'missing_address_fields'=>$missing_address_fields,'jurisdiction'=>array('country'=>(string)$address['country'],'state'=>(string)$address['state'],'exists'=>!$preview_incomplete,'stripe_controls_rollout'=>true),'profiles'=>$profiles,'policy_reason'=>$preview_incomplete?'billing_address_preview_incomplete':'stripe_tax_calculation_ready','policy_message'=>$preview_incomplete?'Sales tax is calculated after the complete billing address is entered.':'Sales tax is calculated from the billing address provided.','should_collect_tax'=>!$preview_incomplete,'allow_subscription_automatic_tax'=>!$preview_incomplete);
   }
 
-  private function mrm_build_taxable_items_from_policy($policy, $base_amount_cents, $addon_amount_cents) {
+  private function mrm_build_taxable_items_from_policy($policy, $base_amount_cents, $addon_amount_cents, $fundamentals_addon_amount_cents = 0) {
     $items = array();
     foreach ((array)($policy['profiles'] ?? array()) as $profile) {
       if (empty($profile['taxable'])) continue;
       $amount_source = (string)($profile['amount_source'] ?? 'base');
-      $amount_cents = $amount_source === 'addon' ? (int)$addon_amount_cents : (int)$base_amount_cents;
+      if ($amount_source === 'addon') $amount_cents = (int)$addon_amount_cents;
+      elseif ($amount_source === 'fundamentals_addon') $amount_cents = (int)$fundamentals_addon_amount_cents;
+      else $amount_cents = (int)$base_amount_cents;
       if ($amount_cents <= 0) continue;
       $tax_code = sanitize_text_field($profile['tax_code'] ?? '');
       if ($tax_code === '') return new WP_Error('missing_tax_code','A taxable checkout item is missing its Stripe tax code.');
@@ -3280,30 +3283,61 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return home_url('/' . $piece_slug . '/');
   }
 
+  private function mrm_email_has_direct_sheet_music_product_access($email, $sku) {
+    $email = sanitize_email((string)$email);
+    $sku = $this->sanitize_sku((string)$sku);
+    if (!$email || !is_email($email) || !$sku) return false;
+    if ($this->has_sheet_music_access($this->email_hash($email), $sku)) return true;
+    $lists = $this->all_access_lists();
+    foreach ((array)($lists[$sku] ?? array()) as $saved_email) {
+      if (strtolower(sanitize_email((string)$saved_email)) === strtolower($email)) return true;
+    }
+    return false;
+  }
+
   private function mrm_email_already_has_piece_or_package_access($email, $sku) {
     $email = sanitize_email((string)$email);
-    $sku   = $this->sanitize_sku((string)$sku);
-
-    if (!$email || !is_email($email) || !$sku) {
-      return false;
+    $sku = $this->sanitize_sku((string)$sku);
+    if (!$email || !is_email($email) || !$sku) return false;
+    if ($this->mrm_email_has_direct_sheet_music_product_access($email, $sku)) return true;
+    $target = $this->get_product($sku);
+    if (!is_array($target)) return false;
+    $category = sanitize_key((string)($target['category'] ?? ''));
+    if ($category === 'complete-package') return false;
+    $stem = $this->mrm_piece_stem_from_offer_slug($sku, $category);
+    if ($stem === '') return false;
+    foreach ($this->all_products() as $candidate_sku => $candidate) {
+      if (!is_array($candidate) || empty($candidate['active']) || sanitize_key((string)($candidate['product_type'] ?? '')) !== 'sheet_music' || sanitize_key((string)($candidate['category'] ?? '')) !== 'complete-package') continue;
+      $candidate_sku = $this->sanitize_sku($candidate_sku);
+      if ($candidate_sku && $this->mrm_piece_stem_from_offer_slug($candidate_sku, 'complete-package') === $stem && $this->mrm_email_has_direct_sheet_music_product_access($email, $candidate_sku)) return true;
     }
-
-    $email_hash = $this->email_hash($email);
-
-    if ($this->has_sheet_music_access($email_hash, $sku)) {
-      return true;
-    }
-
-    if (preg_match('/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m)) {
-      $piece_slug = (string)$m[1];
-      $package_sku = 'piece-' . $piece_slug . '-complete-package';
-
-      if ($package_sku !== $sku && $this->has_sheet_music_access($email_hash, $package_sku)) {
-        return true;
-      }
-    }
-
     return false;
+  }
+
+  private function mrm_get_fundamentals_addon_offer($base_sku) {
+    $empty = array('available'=>false,'selected'=>false,'sku'=>'','label'=>'','regular_amount_cents'=>0,'offer_amount_cents'=>0,'savings_cents'=>0);
+    $base_sku = $this->sanitize_sku($base_sku);
+    $base = $this->get_product($base_sku);
+    if (!$base_sku || !is_array($base) || empty($base['active']) || sanitize_key($base['product_type'] ?? '') !== 'sheet_music') return $empty;
+    $category = sanitize_key($base['category'] ?? '');
+    if (!in_array($category, array('tuba','trombone-euphonium'), true) || empty($base['fundamentals_addon_enabled'])) return $empty;
+    $addon_sku = $this->sanitize_sku($base['fundamentals_addon_sku'] ?? '');
+    $addon = $this->get_product($addon_sku);
+    if (!$addon_sku || $addon_sku === $base_sku || !is_array($addon) || empty($addon['active']) || sanitize_key($addon['product_type'] ?? '') !== 'sheet_music' || sanitize_key($addon['category'] ?? '') !== 'fundamentals') return $empty;
+    if (strtolower((string)($base['currency'] ?? 'usd')) !== strtolower((string)($addon['currency'] ?? 'usd'))) return $empty;
+    if ($this->mrm_piece_stem_from_offer_slug($base_sku,$category) === '' || $this->mrm_piece_stem_from_offer_slug($base_sku,$category) !== $this->mrm_piece_stem_from_offer_slug($addon_sku,'fundamentals')) return $empty;
+    $regular=max(0,(int)($addon['amount_cents']??0)); $offer=max(0,(int)($base['fundamentals_addon_amount_cents']??500));
+    if ($regular<=0 || $offer<=0 || $offer>$regular) return $empty;
+    return array('available'=>true,'selected'=>false,'sku'=>$addon_sku,'label'=>sanitize_text_field((string)($addon['label']??'Fundamental Packet')),'regular_amount_cents'=>$regular,'offer_amount_cents'=>$offer,'savings_cents'=>$regular-$offer);
+  }
+
+  private function mrm_resolve_fundamentals_addon_selection($base_sku, $requested, $email='') {
+    $offer=$this->mrm_get_fundamentals_addon_offer($base_sku);
+    if (!$requested) return $offer;
+    if (empty($offer['available'])) return new WP_Error('fundamentals_addon_not_available','The Fundamental Packet add-on is not available for this product.');
+    $email=sanitize_email($email);
+    if ($email && is_email($email) && $this->mrm_email_already_has_piece_or_package_access($email,$offer['sku'])) return new WP_Error('fundamentals_addon_already_owned','This email already has access to the Fundamental Packet, so it has not been added to the order.');
+    $offer['selected']=true; return $offer;
   }
 
   private function slugify($text) {
@@ -4405,6 +4439,10 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   $order = $this->get_order_by_pi($pi_id);
 
   if ($order) {
+    if (sanitize_key((string)($order['product_type'] ?? '')) === 'sheet_music') {
+      $grant_result = $this->mrm_grant_sheet_music_purchase_entitlements($pi, 'stripe_pi_webhook');
+      if (is_wp_error($grant_result)) return $grant_result;
+    }
     $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
     $this->mrm_maybe_create_payout_ledger_for_order($order);
 
@@ -4882,7 +4920,7 @@ private function mrm_apply_successful_refund_business_effects($refund, $charge) 
     $pi_id=$this->mrm_stripe_expandable_id($refund['payment_intent'] ?? ''); $order=array(); $order_id=0;
     if($pi_id!==''){ $order=$this->get_order_by_pi($pi_id); if(is_array($order) && !empty($order['id'])){ $order_id=absint($order['id']); $addon_refund_id=sanitize_text_field($this->mrm_get_order_meta_value($order,'mrm_subscription_addon_refund_id','')); if($addon_refund_id!=='' && hash_equals($addon_refund_id,$refund_id)){ $this->mrm_set_order_meta_flag($order_id,'mrm_subscription_addon_refund_status','succeeded'); $this->mrm_set_order_meta_flag($order_id,'mrm_sheet_music_subscription_status','activation_failed_addon_refund_succeeded'); } } }
     if($apply_full_transition){
-      if($order_id>0){ $this->update_order_status_from_pi($pi_id,'refunded','refunded',array('mrm_refunded_at'=>current_time('mysql'),'mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); $this->mrm_void_standard_payouts_for_refunded_order($order_id,$pi_id,'stripe_cumulative_full_refund'); $product_type=sanitize_key($order['product_type'] ?? ''); $sku=sanitize_text_field($order['sku'] ?? ''); if($product_type==='sheet_music' && $sku!=='' && $sku!=='all-sheet-music') $wpdb->update($this->table_sheet_music_access(),array('revoked_at'=>current_time('mysql')),array('sku'=>$sku,'source_id'=>$pi_id,'revoked_at'=>null)); $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('partial_refund_business_review_required')); if(is_wp_error($resolved)) return $resolved; }
+      if($order_id>0){ $this->update_order_status_from_pi($pi_id,'refunded','refunded',array('mrm_refunded_at'=>current_time('mysql'),'mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); $this->mrm_void_standard_payouts_for_refunded_order($order_id,$pi_id,'stripe_cumulative_full_refund'); $product_type=sanitize_key($order['product_type'] ?? ''); if($product_type==='sheet_music'){ $revoke_result=$this->mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id); if(is_wp_error($revoke_result)) return $revoke_result; } $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('partial_refund_business_review_required')); if(is_wp_error($resolved)) return $resolved; }
       $this->mrm_void_subscription_composer_payout_from_refunded_charge($charge,'stripe_cumulative_full_refund'); do_action('mrm_payments_hub_refund_succeeded',$refund,$charge,$summary);
     } elseif(empty($summary['is_full_refund']) && !$refund_already_applied) {
       if($order_id>0){ $this->update_order_status_from_pi($pi_id,'partially_refunded','partially_refunded',array('mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'],'mrm_charge_amount_cents'=>(string)$summary['charge_amount_cents'])); $alert_result=$this->mrm_tax_create_alert('', 'partial_refund_business_review_required','refund',0,array('message'=>'A partial refund succeeded. Access remains active and the full payout was not voided. Review the proportional payout, accounting, and customer records.','refund_id'=>$refund_id,'payment_intent_id'=>$pi_id,'charge_id'=>$summary['charge_id'],'succeeded_refund_cents'=>$summary['succeeded_refund_cents'],'charge_amount_cents'=>$summary['charge_amount_cents']),sanitize_key($refund_id)); if(is_wp_error($alert_result)) return $alert_result; }
@@ -7011,6 +7049,8 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
     $final_cents = max(0, (int)$amount_cents);
     $addon_cents = max(0, (int)($meta['mrm_addon_amount_cents'] ?? 0));
+    $fundamentals_addon_cents=max(0,(int)($meta['mrm_fundamentals_addon_amount_cents']??0));
+    $fundamentals_addon_label=sanitize_text_field((string)($meta['mrm_fundamentals_addon_label']??'Fundamental Packet'));
     $tax_cents = max(0, (int)($meta['mrm_tax_cents'] ?? ($meta['mrm_addon_tax_cents'] ?? 0)));
     $discounted_base_cents = max(0, (int)($meta['mrm_base_amount_cents'] ?? 0));
     $original_base_cents = max(0, (int)($meta['mrm_original_base_amount_cents'] ?? 0));
@@ -7021,7 +7061,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
       if ($discounted_base_cents > 0) {
         $original_base_cents = $discounted_base_cents + $promo_discount_cents;
       } else {
-        $paid_base_cents = max(0, $final_cents - $addon_cents - $tax_cents);
+        $paid_base_cents = max(0, $final_cents - $addon_cents - $fundamentals_addon_cents - $tax_cents);
         $original_base_cents = $paid_base_cents + $promo_discount_cents;
       }
     }
@@ -7042,6 +7082,8 @@ private function mrm_tax_retry_or_alert_payment_intent(
     if ($addon_cents > 0) {
       $html .= '<div><strong>Sheet music add-on:</strong> ' . esc_html($this->mrm_receipt_format_money($addon_cents)) . '</div>';
     }
+
+    if ($fundamentals_addon_cents>0) $html.='<div><strong>'.esc_html($fundamentals_addon_label.' add-on').':</strong> '.esc_html($this->mrm_receipt_format_money($fundamentals_addon_cents)).'</div>';
 
     $html .= '<div><strong>Tax:</strong> ' . esc_html($this->mrm_receipt_format_money($tax_cents)) . '</div>';
     $html .= '<div><strong>Total paid:</strong> ' . esc_html($this->mrm_receipt_format_money($final_cents)) . '</div>';
@@ -8453,14 +8495,17 @@ private function mrm_tax_retry_or_alert_payment_intent(
     }
     $cancel_url = $lesson_id > 0 ? $this->mrm_lesson_cancel_url($lesson_id) : '';
     $has_sheet_music_addon = ((int)($meta['mrm_addon_amount_cents'] ?? 0) > 0);
+    $has_fundamentals_addon=strtolower((string)($meta['mrm_fundamentals_addon']??'no'))==='yes' && (int)($meta['mrm_fundamentals_addon_amount_cents']??0)>0;
+    $fundamentals_addon_label=sanitize_text_field((string)($meta['mrm_fundamentals_addon_label']??'Fundamental Packet'));
 
     if ($product_type === 'sheet_music') {
       $title = 'Purchase Confirmation';
       $subject = 'Purchase Confirmation - ' . $label;
       $intro = '<p>We’ve received your payment successfully.</p>';
       $details = '<div><strong>Item:</strong> ' . esc_html($label) . '</div>';
+      if($has_fundamentals_addon) $details.='<div><strong>Included add-on:</strong> '.esc_html($fundamentals_addon_label).'</div>';
       $details .= $this->mrm_purchase_receipt_payment_breakdown_html($meta, $amount_cents, $product_type);
-      $details .= '<div style="margin-top:12px;"><strong>How to access your sheet music:</strong></div><ol style="margin:8px 0 0 18px;padding:0;"><li>Return to the piece page on the website.</li><li>Click the access button for your purchased category.</li><li>Enter your purchase email address.</li><li>Request your one-time access code and enter it to open the content.</li></ol>';
+      $details .= '<div style="margin-top:12px;"><strong>How to access your sheet music:</strong></div><ol style="margin:8px 0 0 18px;padding:0;"><li>Return to the piece page on the website.</li><li>Click the access button for your purchased category.</li>'.($has_fundamentals_addon?'<li>The purchase email has access to both the Full Piece and the Fundamental Packet.</li>':'').'<li>Enter your purchase email address.</li><li>Request your one-time access code and enter it to open the content.</li></ol>';
       $buttons = array();
       if ($piece_page_url !== '') $buttons[] = array('url' => $piece_page_url, 'label' => 'View Your Piece', 'variant' => 'primary');
       $buttons[] = array('url' => $contact_url, 'label' => 'Contact Support', 'variant' => 'primary');
@@ -9363,6 +9408,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $product_type = (string)($order['product_type'] ?? ($meta['mrm_product_type'] ?? ''));
     $base_cents = isset($meta['mrm_base_amount_cents']) ? (int)$meta['mrm_base_amount_cents'] : (int)($order['amount_cents'] ?? 0);
     $addon_cents = isset($meta['mrm_addon_amount_cents']) ? (int)$meta['mrm_addon_amount_cents'] : 0;
+    $fundamentals_addon_cents = max(0,(int)($meta['mrm_fundamentals_addon_amount_cents'] ?? 0));
 
     if ($product_type === 'sheet_music') {
       $composer_pct = $this->mrm_sanitize_percent_setting(
@@ -9370,8 +9416,11 @@ private function mrm_tax_retry_or_alert_payment_intent(
         $this->mrm_get_one_time_sheet_music_composer_pct()
       );
 
-      $composer_share = (int) round($base_cents * ($composer_pct / 100));
-      $platform_share = max(0, $base_cents - $composer_share) + max(0, $addon_cents);
+      $base_composer_share=(int)round(max(0,$base_cents)*($composer_pct/100));
+      $fundamentals_composer_share=(int)round($fundamentals_addon_cents*($composer_pct/100));
+      $composer_share=$base_composer_share+$fundamentals_composer_share;
+      $platform_share=max(0,$base_cents-$base_composer_share)+max(0,$fundamentals_addon_cents-$fundamentals_composer_share)+max(0,$addon_cents);
+      $composer_payout_note='Centralized one-time sheet music composer payout'.($fundamentals_addon_cents>0?' including the Fundamental Packet add-on':'');
       $composer_acct = $this->composer_connected_account_id();
 
       if ($composer_share > 0) {
@@ -9385,7 +9434,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
           $composer_share,
           $composer_share,
           $composer_acct ? 'pending' : 'blocked',
-          $composer_acct ? 'Centralized one-time sheet music composer payout' : 'Missing composer connected account ID'
+          $composer_acct ? $composer_payout_note : 'Missing composer connected account ID'
         );
       }
 
@@ -12139,6 +12188,7 @@ private function charge_and_unlock_autopay($data) {
       ), 404);
 
     $p = $this->get_product($sku);
+    $fundamentals_addon_offer = $this->mrm_get_fundamentals_addon_offer($sku);
     return new WP_REST_Response(array(
       'ok' => true,
       'sku' => $sku,
@@ -12146,6 +12196,7 @@ private function charge_and_unlock_autopay($data) {
       'amount_cents' => (int)($p['amount_cents'] ?? 0),
       'currency' => (string)($p['currency'] ?? 'usd'),
       'product_type' => (string)($p['product_type'] ?? 'unknown'),
+      'optional_addons' => array('fundamentals_packet'=>$fundamentals_addon_offer),
     ), 200);
   }
 
@@ -12223,6 +12274,12 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $addon_selected = (isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes');
+    $fundamentals_requested = isset($data['fundamentals_addon']) && strtolower((string)$data['fundamentals_addon']) === 'yes';
+    $fundamentals_addon = $this->mrm_resolve_fundamentals_addon_selection($sku, $fundamentals_requested, $email);
+    if (is_wp_error($fundamentals_addon)) return new WP_REST_Response(array('ok'=>false,'code'=>$fundamentals_addon->get_error_code(),'message'=>$fundamentals_addon->get_error_message()), $fundamentals_addon->get_error_code()==='fundamentals_addon_already_owned'?409:400);
+    $fundamentals_selected = !empty($fundamentals_addon['selected']);
+    $fundamentals_addon_amount_cents = $fundamentals_selected ? max(0,(int)($fundamentals_addon['offer_amount_cents']??0)) : 0;
+
     $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
     $address = $this->mrm_normalize_tax_address($address);
 
@@ -12264,6 +12321,7 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $context['sku'] = $sku;
+    $context['fundamentals_addon_selected'] = $fundamentals_selected;
     $lesson_mode = sanitize_key($context['lesson_mode'] ?? '');
     if ($product_type === 'lesson' && $lesson_mode !== 'online') {
       $performance_location_id = $this->mrm_get_instructor_performance_location_id(absint($context['instructor_id'] ?? 0));
@@ -12294,7 +12352,7 @@ private function charge_and_unlock_autopay($data) {
       ), 500);
     }
 
-    $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
+    $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents, $fundamentals_addon_amount_cents);
     if (is_wp_error($taxable_items)) return new WP_REST_Response(array('ok'=>false,'code'=>$taxable_items->get_error_code(),'message'=>$taxable_items->get_error_message()), 500);
     $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
     if (is_wp_error($tax_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$tax_result->get_error_code(),'message'=>$tax_result->get_error_message()), 503);
@@ -12312,6 +12370,12 @@ private function charge_and_unlock_autopay($data) {
       'original_base_amount_cents' => $original_base_amount_cents,
       'base_amount_cents' => $base_amount_cents,
       'addon_amount_cents' => $addon_amount_cents,
+      'fundamentals_addon_selected' => $fundamentals_selected,
+      'fundamentals_addon_sku' => $fundamentals_selected ? (string)$fundamentals_addon['sku'] : '',
+      'fundamentals_addon_label' => $fundamentals_selected ? (string)$fundamentals_addon['label'] : '',
+      'fundamentals_addon_amount_cents' => $fundamentals_addon_amount_cents,
+      'fundamentals_addon_regular_amount_cents' => (int)($fundamentals_addon['regular_amount_cents'] ?? 0),
+      'optional_addons' => array('fundamentals_packet'=>$fundamentals_addon),
       'promo_code' => $promo_code,
       'promo_discount_cents' => $promo_discount_cents,
       'tax_cents' => $tax_cents,
@@ -12462,6 +12526,12 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $addon_selected = (isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes');
+    $fundamentals_requested = isset($data['fundamentals_addon']) && strtolower((string)$data['fundamentals_addon']) === 'yes';
+    $fundamentals_addon = $this->mrm_resolve_fundamentals_addon_selection($sku, $fundamentals_requested, $email);
+    if (is_wp_error($fundamentals_addon)) return new WP_REST_Response(array('ok'=>false,'code'=>$fundamentals_addon->get_error_code(),'message'=>$fundamentals_addon->get_error_message()), $fundamentals_addon->get_error_code()==='fundamentals_addon_already_owned'?409:400);
+    $fundamentals_selected = !empty($fundamentals_addon['selected']);
+    $fundamentals_addon_amount_cents = $fundamentals_selected ? max(0,(int)($fundamentals_addon['offer_amount_cents']??0)) : 0;
+
     $address = (isset($data['address']) && is_array($data['address'])) ? $data['address'] : array();
     $address = $this->mrm_normalize_tax_address($address);
 
@@ -12499,6 +12569,7 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $context['sku'] = $sku;
+    $context['fundamentals_addon_selected'] = $fundamentals_selected;
     $lesson_mode = sanitize_key($context['lesson_mode'] ?? '');
     if ($product_type === 'lesson' && $lesson_mode !== 'online') {
       $performance_location_id = $this->mrm_get_instructor_performance_location_id(absint($context['instructor_id'] ?? 0));
@@ -12529,7 +12600,7 @@ private function charge_and_unlock_autopay($data) {
       ), 500);
     }
 
-    $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
+    $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents, $fundamentals_addon_amount_cents);
     if (is_wp_error($taxable_items)) return new WP_REST_Response(array('ok'=>false,'code'=>$taxable_items->get_error_code(),'message'=>$taxable_items->get_error_message()), 500);
     $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
     if (is_wp_error($tax_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$tax_result->get_error_code(),'message'=>$tax_result->get_error_message()), 503);
@@ -12575,6 +12646,11 @@ private function charge_and_unlock_autopay($data) {
     $metadata['mrm_original_base_amount_cents'] = (string)$original_base_amount_cents;
     $metadata['mrm_base_amount_cents'] = (string)$base_amount_cents;
     $metadata['mrm_addon_amount_cents'] = (string)$addon_amount_cents;
+    $metadata['mrm_fundamentals_addon'] = $fundamentals_selected ? 'yes' : 'no';
+    $metadata['mrm_fundamentals_addon_sku'] = $fundamentals_selected ? (string)$fundamentals_addon['sku'] : '';
+    $metadata['mrm_fundamentals_addon_label'] = $fundamentals_selected ? (string)$fundamentals_addon['label'] : '';
+    $metadata['mrm_fundamentals_addon_amount_cents'] = (string)$fundamentals_addon_amount_cents;
+    $metadata['mrm_fundamentals_addon_regular_amount_cents'] = (string)($fundamentals_addon['regular_amount_cents'] ?? 0);
     if ($promo_code !== '') {
       $metadata['mrm_promo_code'] = $promo_code;
       $metadata['mrm_promo_discount_cents'] = (string)$promo_discount_cents;
@@ -12767,6 +12843,11 @@ private function charge_and_unlock_autopay($data) {
       'original_base_amount_cents' => $original_base_amount_cents,
       'base_amount_cents' => $base_amount_cents,
       'addon_amount_cents' => $addon_amount_cents,
+      'fundamentals_addon_selected' => $fundamentals_selected,
+      'fundamentals_addon_sku' => $fundamentals_selected ? (string)$fundamentals_addon['sku'] : '',
+      'fundamentals_addon_label' => $fundamentals_selected ? (string)$fundamentals_addon['label'] : '',
+      'fundamentals_addon_amount_cents' => $fundamentals_addon_amount_cents,
+      'fundamentals_addon_regular_amount_cents' => (int)($fundamentals_addon['regular_amount_cents'] ?? 0),
       'promo_code' => $promo_code,
       'promo_discount_cents' => $promo_discount_cents,
       'promo_discount_type' => is_array($promo_validation) && !empty($promo_validation['promo']['discount_type'])
@@ -13444,6 +13525,7 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
 
     $piece_auto_grant_attempted = false;
     $piece_auto_grant_success = false;
+    $piece_auto_grant_skus = array();
 
     // If this PaymentIntent was created with a customer + setup_future_usage,
     // Stripe should attach the payment method to the customer.
@@ -13484,36 +13566,13 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       }
     }
 
-    // ✅ Piece-product path (new): auto-grant specific sheet-music SKU from PI metadata,
-    // same backend-driven pattern as scheduler verify flow.
-    if ($ok) {
-      $pi_product_type = sanitize_text_field((string)($meta['mrm_product_type'] ?? ''));
-      $pi_sku = $this->sanitize_sku((string)($meta['mrm_sku'] ?? ''));
-      $pi_email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
-
-      if ($pi_product_type === 'sheet_music' && $pi_sku && $pi_email && is_email($pi_email)) {
-        // Do not double-handle the scheduler addon master SKU here.
-        if ($pi_sku !== $this->master_sheet_music_sku()) {
-          $pi_product = $this->get_product($pi_sku);
-
-          if ($pi_product && !empty($pi_product['active']) && (string)($pi_product['product_type'] ?? '') === 'sheet_music') {
-            $email_hash = $this->email_hash($pi_email);
-            $piece_auto_grant_attempted = true;
-            $granted = $this->grant_sheet_music_access(
-              $email_hash,
-              $pi_email,
-              $pi_sku,
-              'stripe_pi_verify',
-              $pi_id,
-              $start_ts
-            );
-
-            $piece_auto_grant_success = (bool) $granted;
-
-            if (!$granted) {
-            }
-          }
-        }
+    // Piece-product path: trusted metadata grants all purchased products.
+    if ($ok && sanitize_key((string)($meta['mrm_product_type'] ?? '')) === 'sheet_music') {
+      $pi_sku=$this->sanitize_sku($meta['mrm_sku']??'');
+      if ($pi_sku && $pi_sku !== $this->master_sheet_music_sku()) {
+        $piece_auto_grant_attempted=true;
+        $grant_result=$this->mrm_grant_sheet_music_purchase_entitlements($pi,'stripe_pi_verify');
+        if (!is_wp_error($grant_result)) { $piece_auto_grant_success=true; $piece_auto_grant_skus=array_values((array)($grant_result['skus']??array())); }
       }
     }
 
@@ -13603,6 +13662,7 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       'metadata' => (array)($pi['metadata'] ?? array()),
       'piece_auto_grant_attempted' => (bool)$piece_auto_grant_attempted,
       'piece_auto_grant_success' => (bool)$piece_auto_grant_success,
+      'piece_auto_grant_skus' => $piece_auto_grant_skus,
     ), 200);
   }
 
@@ -13663,6 +13723,12 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       }
 
       $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+      if (sanitize_key((string)($meta['mrm_product_type'] ?? '')) === 'sheet_music') {
+        $grant_result=$this->mrm_grant_sheet_music_purchase_entitlements($pi,'stripe_pi_rest');
+        if (is_wp_error($grant_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$grant_result->get_error_code(),'message'=>$grant_result->get_error_message()),$grant_result->get_error_code()==='sheet_music_email_blocked'?403:500);
+        return new WP_REST_Response(array('ok'=>true,'granted'=>true,'email_hash'=>$grant_result['email_hash'],'sku'=>$grant_result['base_sku'],'skus'=>$grant_result['skus'],'payment_intent_id'=>$grant_result['payment_intent_id']),200);
+      }
+
 
       $pi_sku = $this->sanitize_sku((string)($meta['mrm_sku'] ?? ''));
       $pi_email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
@@ -13802,6 +13868,32 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     ), 200);
   }
 
+  private function mrm_grant_sheet_music_purchase_entitlements($pi, $source = 'stripe_pi') {
+    if (!is_array($pi) || strpos((string)($pi['id']??''),'pi_') !== 0) return new WP_Error('invalid_payment_intent','The Stripe Payment Intent could not be read.');
+    if (sanitize_key($pi['status']??'') !== 'succeeded') return new WP_Error('payment_not_succeeded','The payment has not completed successfully.');
+    $meta=is_array($pi['metadata']??null)?$pi['metadata']:array();
+    if (sanitize_key($meta['mrm_product_type']??'') !== 'sheet_music') return new WP_Error('not_sheet_music_purchase','This payment is not a sheet-music purchase.');
+    $email=sanitize_email($meta['mrm_customer_email']??'');
+    if (!$email || !is_email($email)) return new WP_Error('invalid_customer_email','The payment does not contain a valid customer email.');
+    if ($this->mrm_sheet_music_email_is_blocked($email)) return new WP_Error('sheet_music_email_blocked','This email is currently restricted from accessing sheet music.');
+    $base_sku=$this->sanitize_sku($meta['mrm_sku']??''); $base=$this->get_product($base_sku);
+    if (!$base_sku || !is_array($base) || sanitize_key($base['product_type']??'')!=='sheet_music' || $base_sku===$this->master_sheet_music_sku()) return new WP_Error('invalid_base_entitlement','The purchased sheet-music product could not be resolved.');
+    $skus=array($base_sku);
+    if (strtolower((string)($meta['mrm_fundamentals_addon']??'no'))==='yes') {
+      $addon_sku=$this->sanitize_sku($meta['mrm_fundamentals_addon_sku']??''); $addon=$this->get_product($addon_sku);
+      if (!$addon_sku || !is_array($addon) || sanitize_key($addon['product_type']??'')!=='sheet_music' || sanitize_key($addon['category']??'')!=='fundamentals') return new WP_Error('invalid_fundamentals_entitlement','The purchased Fundamental Packet could not be resolved.');
+      $category=sanitize_key($base['category']??'');
+      if ($this->mrm_piece_stem_from_offer_slug($base_sku,$category)==='' || $this->mrm_piece_stem_from_offer_slug($base_sku,$category)!==$this->mrm_piece_stem_from_offer_slug($addon_sku,'fundamentals')) return new WP_Error('fundamentals_entitlement_piece_mismatch','The purchased Fundamental Packet does not match the Full Piece.');
+      $skus[]=$addon_sku;
+    }
+    $created=(int)($pi['charges']['data'][0]['created']??($pi['created']??time())); $hash=$this->email_hash($email); $granted=array();
+    foreach(array_unique($skus) as $sku) {
+      if (!$this->grant_sheet_music_access($hash,$email,$sku,sanitize_text_field($source),(string)$pi['id'],$created)) return new WP_Error('sheet_music_entitlement_grant_failed','One or more purchased sheet-music entitlements could not be granted.');
+      $granted[]=$sku;
+    }
+    return array('ok'=>true,'email_hash'=>$hash,'email'=>$email,'base_sku'=>$base_sku,'skus'=>$granted,'payment_intent_id'=>(string)$pi['id']);
+  }
+
   private function grant_sheet_music_access($email_hash, $email_plain, $sku, $source = null, $source_id = null, $start_ts = null) {
     global $wpdb;
     $table = $this->table_sheet_music_access();
@@ -13917,6 +14009,26 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     $lists[$product_slug][] = strtolower($email);
     $lists[$product_slug] = array_values(array_unique($lists[$product_slug]));
     $this->save_access_lists($lists);
+    return true;
+  }
+
+  private function mrm_remove_email_from_access_list($product_slug,$email) {
+    $product_slug=$this->sanitize_product_slug($product_slug); $email=strtolower(sanitize_email($email));
+    if (!$product_slug || !$email || !is_email($email)) return false;
+    $lists=$this->all_access_lists();
+    if (!isset($lists[$product_slug]) || !is_array($lists[$product_slug])) return true;
+    $lists[$product_slug]=array_values(array_filter($lists[$product_slug],function($saved) use($email){ return strtolower(sanitize_email($saved))!==$email; }));
+    $this->save_access_lists($lists); return true;
+  }
+
+  private function mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id) {
+    global $wpdb; $pi_id=sanitize_text_field($pi_id);
+    if (!$pi_id || strpos($pi_id,'pi_')!==0) return new WP_Error('invalid_refund_payment_intent','The refunded Payment Intent ID is invalid.');
+    $table=$this->table_sheet_music_access(); $rows=$wpdb->get_results($wpdb->prepare("SELECT email_plain, sku FROM {$table} WHERE source_id=%s AND revoked_at IS NULL",$pi_id),ARRAY_A);
+    if ($wpdb->last_error!=='') return new WP_Error('refund_entitlement_lookup_failed',$wpdb->last_error);
+    $updated=$wpdb->query($wpdb->prepare("UPDATE {$table} SET revoked_at=%s WHERE source_id=%s AND revoked_at IS NULL",current_time('mysql'),$pi_id));
+    if ($updated===false) return new WP_Error('refund_entitlement_revoke_failed',$wpdb->last_error);
+    foreach((array)$rows as $row) $this->mrm_remove_email_from_access_list($row['sku']??'',$row['email_plain']??'');
     return true;
   }
 
@@ -23498,6 +23610,9 @@ MRM_TAX_RULES;
       $types = isset($_POST['product_type']) ? (array)$_POST['product_type'] : array();
       $categories = isset($_POST['category']) ? (array)$_POST['category'] : array();
       $deletes = isset($_POST['delete']) ? (array)$_POST['delete'] : array();
+      $fundamentals_addon_enabled=(array)($_POST['fundamentals_addon_enabled']??array());
+      $fundamentals_addon_skus=(array)($_POST['fundamentals_addon_sku']??array());
+      $fundamentals_addon_amounts=(array)($_POST['fundamentals_addon_amount_cents']??array());
 
       $allowed_currencies = array('usd', 'eur');
       $allowed_types = array('lesson', 'sheet_music');
@@ -23535,6 +23650,7 @@ MRM_TAX_RULES;
 
         $original_sku = $this->sanitize_sku((string)($original_skus[$index] ?? ''));
         $current_sku = $original_sku ? $original_sku : $this->sanitize_sku($sku_raw);
+        $existing_product=($current_sku && isset($products[$current_sku]) && is_array($products[$current_sku]))?$products[$current_sku]:array();
         if (!empty($deletes[$index])) {
           if ($current_sku) {
             unset($products[$current_sku]);
@@ -23558,9 +23674,9 @@ MRM_TAX_RULES;
         $label = $label_raw !== '' ? $label_raw : $sku;
 
         $amount_raw = trim((string)($amounts[$index] ?? ''));
-        if ($amount_raw === '' && $current_sku && isset($products[$current_sku]['amount_cents'])) {
+        if ($amount_raw === '' && isset($existing_product['amount_cents'])) {
           // Preserve the existing price if the field was left blank.
-          $final_amount_cents = max(0, (int)$products[$current_sku]['amount_cents']);
+          $final_amount_cents = max(0, (int)$existing_product['amount_cents']);
         } else {
           $final_amount_cents = max(0, (int)$amount_raw);
         }
@@ -23568,15 +23684,14 @@ MRM_TAX_RULES;
         $currency = sanitize_text_field((string)($currencies[$index] ?? 'usd'));
         if (!in_array($currency, $allowed_currencies, true)) $currency = 'usd';
 
-        $products[$sku] = array(
-          'sku' => $sku,
-          'label' => $label,
-          'amount_cents' => $final_amount_cents,
-          'currency' => $currency,
-          'product_type' => $type,
-          'category' => $category,
-          'active' => 1,
-        );
+        $is_full_piece=$type==='sheet_music' && in_array($category,array('tuba','trombone-euphonium'),true);
+        $products[$sku] = array_merge($existing_product,array(
+          'sku'=>$sku,'label'=>$label,'amount_cents'=>$final_amount_cents,'currency'=>$currency,
+          'product_type'=>$type,'category'=>$category,'active'=>1,
+          'fundamentals_addon_enabled'=>$is_full_piece && !empty($fundamentals_addon_enabled[$index])?1:0,
+          'fundamentals_addon_sku'=>$is_full_piece?$this->sanitize_sku($fundamentals_addon_skus[$index]??''):'',
+          'fundamentals_addon_amount_cents'=>$is_full_piece?max(1,(int)($fundamentals_addon_amounts[$index]??($existing_product['fundamentals_addon_amount_cents']??500))):500,
+        ));
       }
 
       $this->save_products($products);
@@ -23601,6 +23716,9 @@ MRM_TAX_RULES;
     );
     $currency_options = array('usd' => 'USD', 'eur' => 'EUR');
     $type_options = array('lesson' => 'Lesson', 'sheet_music' => 'Sheet Music');
+    $fundamentals_products=array();
+    foreach($products as $candidate_sku=>$candidate) if(is_array($candidate) && !empty($candidate['active']) && sanitize_key($candidate['product_type']??'')==='sheet_music' && sanitize_key($candidate['category']??'')==='fundamentals') $fundamentals_products[$this->sanitize_sku($candidate_sku)]=sanitize_text_field($candidate['label']??$candidate_sku);
+    asort($fundamentals_products);
 
     ob_start();
     ?>
@@ -23680,6 +23798,13 @@ MRM_TAX_RULES;
                 </select>
               </label>
             </p>
+            <?php $is_full_piece=$type==='sheet_music' && in_array($category,array('tuba','trombone-euphonium'),true); ?>
+            <div class="mrm-fundamentals-addon-settings" style="<?php echo $is_full_piece?'':'display:none;'; ?>padding:14px;margin:14px 0;border:1px solid #dcdcde;border-radius:8px;background:#f6f7f7;">
+              <p><strong>Fundamental Packet Add-On</strong></p>
+              <p><label><input type="checkbox" name="fundamentals_addon_enabled[<?php echo esc_attr($current_index); ?>]" value="1" <?php checked(!empty($product['fundamentals_addon_enabled'])); ?> /> Offer the matching Fundamental Packet with this Full Piece</label></p>
+              <p><label>Fundamental Packet<br/><select name="fundamentals_addon_sku[<?php echo esc_attr($current_index); ?>]"><option value="">Select a Fundamental Packet</option><?php foreach($fundamentals_products as $fs=>$fl): ?><option value="<?php echo esc_attr($fs); ?>" <?php selected($this->sanitize_sku($product['fundamentals_addon_sku']??''),$fs); ?>><?php echo esc_html($fl.' — '.$fs); ?></option><?php endforeach; ?></select></label></p>
+              <p><label>Special add-on price in cents<br/><input type="number" min="1" name="fundamentals_addon_amount_cents[<?php echo esc_attr($current_index); ?>]" value="<?php echo esc_attr((string)max(1,(int)($product['fundamentals_addon_amount_cents']??500))); ?>" class="small-text" /></label></p>
+            </div>
             <?php if ($type === 'sheet_music') : ?>
               <hr />
               <?php if ($sku === $all_sku) :
@@ -23800,6 +23925,11 @@ MRM_TAX_RULES;
               </select>
             </label>
           </p>
+          <div class="mrm-fundamentals-addon-settings" style="display:none;padding:14px;margin:14px 0;border:1px solid #dcdcde;border-radius:8px;background:#f6f7f7;">
+            <p><strong>Fundamental Packet Add-On</strong></p><p><label><input type="checkbox" name="fundamentals_addon_enabled[<?php echo esc_attr($new_index); ?>]" value="1" /> Offer the matching Fundamental Packet with this Full Piece</label></p>
+            <p><select name="fundamentals_addon_sku[<?php echo esc_attr($new_index); ?>]"><option value="">Select a Fundamental Packet</option><?php foreach($fundamentals_products as $fs=>$fl): ?><option value="<?php echo esc_attr($fs); ?>"><?php echo esc_html($fl.' — '.$fs); ?></option><?php endforeach; ?></select></p>
+            <p><input type="number" min="1" name="fundamentals_addon_amount_cents[<?php echo esc_attr($new_index); ?>]" value="500" /></p>
+          </div>
           <input type="hidden" name="delete[<?php echo esc_attr($new_index); ?>]" value="0" />
         </div>
       </div>
@@ -23811,6 +23941,10 @@ MRM_TAX_RULES;
       (function() {
         var lessonCategories = <?php echo wp_json_encode($lesson_categories); ?>;
         var sheetCategories = <?php echo wp_json_encode($sheet_categories); ?>;
+        function updateFundamentalsAddOnSettings(card) {
+          if(!card) return; var type=card.querySelector('.mrm-product-type'), category=card.querySelector('.mrm-product-category'), settings=card.querySelector('.mrm-fundamentals-addon-settings');
+          if(type&&category&&settings) settings.style.display=type.value==='sheet_music'&&(category.value==='tuba'||category.value==='trombone-euphonium')?'':'none';
+        }
         function updateCategory(select) {
           var card = select.closest('.card');
           if (!card) return;
@@ -23831,6 +23965,7 @@ MRM_TAX_RULES;
             var keys = Object.keys(options);
             if (keys.length) categorySelect.value = keys[0];
           }
+          updateFundamentalsAddOnSettings(card);
         }
         function slugify(s) {
           var text = String(s || '').trim().toLowerCase();
@@ -23856,6 +23991,7 @@ MRM_TAX_RULES;
           }
           skuInput.value = sku;
           if (skuDisplay) skuDisplay.value = sku;
+          updateFundamentalsAddOnSettings(card);
         }
         document.querySelectorAll('.mrm-product-type').forEach(function(select) {
           select.addEventListener('change', function() {

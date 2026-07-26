@@ -1675,6 +1675,8 @@ audio.mrm-audio{
   }
 }
 
+
+.mrm-fundamentals-addon-banner,.mrm-piece-checkout-addon-row{display:flex;align-items:center;gap:14px;width:100%;box-sizing:border-box;padding:16px 18px;border:1px solid rgba(110,100,63,.22);background:linear-gradient(135deg,#f8f1e5,#fffdf9);cursor:pointer}.mrm-fundamentals-addon-banner{margin:14px 0 0;border-width:1px 0 0}.mrm-fundamentals-addon-banner[hidden],.mrm-piece-checkout-addon-row[hidden]{display:none!important}.mrm-fundamentals-addon-copy,.mrm-piece-checkout-addon-copy{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}.mrm-fundamentals-addon-copy small,.mrm-piece-checkout-addon-copy small{color:#62483a;font-size:14px;line-height:1.4}.mrm-fundamentals-addon-price{padding:8px 12px;border:1px solid rgba(110,100,63,.25);border-radius:999px;background:#fff;font-weight:900;white-space:nowrap}.mrm-piece-checkout-addon-row{margin:0 0 14px;border-radius:14px}
 </style>
 
 <main class="mrm-piece-product-page page">
@@ -1897,6 +1899,7 @@ audio.mrm-audio{
                 <option value="US" selected>United States</option>
               </select>
 
+              <label id="mrm-piece-fundamentals-addon-checkout-row" class="mrm-piece-checkout-addon-row" hidden><input type="checkbox" id="mrm-piece-fundamentals-addon-checkout"/><span class="mrm-piece-checkout-addon-copy"><strong>Add the Fundamental Packet</strong><small id="mrm-piece-fundamentals-addon-checkout-description">Normally $10.00 — add it to this Full Piece for $5.00.</small></span></label>
               <div class="mrm-piece-terms-row mrm-piece-terms-modal-row">
                 <input type="checkbox" class="mrm-piece-terms-check" id="mrm-piece-payment-terms">
                 <label for="mrm-piece-payment-terms">
@@ -2166,6 +2169,10 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   let mrmPieceCurrentQuoteData = null;
   let mrmPieceCurrentPriceDisplay = '';
   let mrmPieceSchedulePaymentLoad = null;
+  const mrmPieceFundamentalsSelections=new Map();
+  let mrmPieceFundamentalsAddonOffer=null;
+  let mrmPieceFundamentalsAddonSelected=false;
+  let mrmPieceActiveOfferEl=null;
   let mrmPiecePaymentStepRequested = false;
 
 
@@ -2209,6 +2216,11 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   function mrmPieceMoney(cents) {
     return '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
   }
+  function mrmGetFundamentalsOfferFromQuote(data){ return data&&data.optional_addons&&data.optional_addons.fundamentals_packet||null; }
+  function mrmGetFundamentalsSelection(sku){ return mrmPieceFundamentalsSelections.get(String(sku||'').trim().toLowerCase())===true; }
+  function mrmSetFundamentalsSelection(sku,selected){ sku=String(sku||'').trim().toLowerCase(); if(!sku)return; mrmPieceFundamentalsSelections.set(sku,selected===true); mrmPieceFundamentalsAddonSelected=selected===true; document.querySelectorAll('.mrm-offer').forEach(el=>{if(String(el.dataset.resolvedSku||el.dataset.productSlug).toLowerCase()===sku){const c=el.querySelector('.mrm-fundamentals-addon-card-check');if(c)c.checked=selected;}});const c=document.getElementById('mrm-piece-fundamentals-addon-checkout');if(c)c.checked=selected; }
+  function mrmConfigureFundamentalsBanner(el,data){ if(!el)return; const banner=el.querySelector('.mrm-fundamentals-addon-banner'),check=el.querySelector('.mrm-fundamentals-addon-card-check'),offer=mrmGetFundamentalsOfferFromQuote(data); if(!banner||!check)return; if(!offer||!offer.available||!offer.sku){banner.hidden=true;check.disabled=true;return;} const sku=String(data.sku||el.dataset.resolvedSku).toLowerCase(); banner.hidden=false;check.disabled=false; const desc=el.querySelector('.mrm-fundamentals-addon-description'),price=el.querySelector('.mrm-fundamentals-addon-price');if(desc)desc.textContent='Normally '+mrmPieceMoney(offer.regular_amount_cents)+' — add it to this Full Piece for only '+mrmPieceMoney(offer.offer_amount_cents)+'.';if(price)price.textContent='+'+mrmPieceMoney(offer.offer_amount_cents);check.checked=mrmGetFundamentalsSelection(sku);check.onchange=()=>mrmSetFundamentalsSelection(sku,check.checked); }
+
 
   function mrmPieceNormalizeBreakdown(raw) {
     const data = raw || {};
@@ -2217,7 +2229,9 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
     const originalBase = Math.max(0, Number(data.original_base_amount_cents || data.original_amount_cents || data.subtotal_before_discount_cents || data.price_before_discount_cents || (serverBase + discount)));
     const discountedSubtotal = Math.max(0, Number(data.discounted_subtotal_cents || data.subtotal_after_discount_cents || data.final_base_amount_cents || serverBase));
     const tax = Math.max(0, Number(data.tax_cents || 0));
-    const total = Math.max(0, Number(data.amount_cents || data.total_cents || data.final_amount_cents || (discountedSubtotal + tax)));
+    const fundamentalsAddon=Math.max(0,Number(data.fundamentals_addon_amount_cents||0));
+    const fundamentalsAddonLabel=String(data.fundamentals_addon_label||'Fundamental Packet').trim();
+    const total = Math.max(0, Number(data.amount_cents || data.total_cents || data.final_amount_cents || (discountedSubtotal + fundamentalsAddon + tax)));
     return {
       sku: String(data.sku || pendingSku || '').trim(),
       label: String(data.label || data.product_label || 'Sheet music').trim(),
@@ -2225,6 +2239,9 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
       original_base_amount_cents: originalBase,
       promo_discount_cents: discount,
       discounted_subtotal_cents: discountedSubtotal,
+      fundamentals_addon_selected: fundamentalsAddon>0||data.fundamentals_addon_selected===true,
+      fundamentals_addon_label: fundamentalsAddonLabel,
+      fundamentals_addon_amount_cents: fundamentalsAddon,
       tax_cents: tax,
       amount_cents: total,
       tax_message: String(data.tax_message || (data.tax_policy && data.tax_policy.policy_message) || 'Sales tax will update after billing state and ZIP are entered.').trim(),
@@ -2248,6 +2265,7 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
       rows.push(`<div class="mrm-price-row mrm-price-row-discount"><span>Promotional Discount</span><strong>-${money(b.promo_discount_cents)}</strong></div>`);
       rows.push(`<div class="mrm-price-row"><span>Discounted Subtotal</span><strong>${money(b.discounted_subtotal_cents)}</strong></div>`);
     }
+    if(b.fundamentals_addon_amount_cents>0) rows.push(`<div class="mrm-price-row"><span>${esc(b.fundamentals_addon_label)}</span><strong>${money(b.fundamentals_addon_amount_cents)}</strong></div>`);
     rows.push(`<div class="mrm-price-row"><span>Sales Tax</span><strong>${b.tax_cents > 0 ? money(b.tax_cents) : esc(b.tax_message)}</strong></div>`);
     rows.push(`<div class="mrm-price-row mrm-price-row-total"><span>Total Due Today</span><strong>${money(b.amount_cents)}</strong></div>`);
     return `<div class="mrm-price-breakdown">${rows.join('')}</div>`;
@@ -2726,6 +2744,13 @@ async function getOfferSkuCandidates(offerEl) {
   setOfferButtonsEnabled(offerEl, true);
   setOfferStatus(offerEl, '');
 
+  try {
+    const validation=await validateResolvedOfferSku(offerEl.dataset.resolvedSku,offerEl);
+    if(validation&&validation.ok&&validation.data) mrmConfigureFundamentalsBanner(offerEl,validation.data);
+  } catch(error) {
+    const banner=offerEl.querySelector('.mrm-fundamentals-addon-banner'); if(banner)banner.hidden=true;
+  }
+
   // Offer initialized.
 
   return offerEl.dataset.resolvedSku;
@@ -2801,6 +2826,9 @@ async function getOfferSkuCandidates(offerEl) {
     const detailsStep = document.getElementById('mrm-piece-details-step');
     const cardStep = document.getElementById('mrm-piece-card-step');
     const continueToPaymentBtn = document.getElementById('mrm-piece-continue-to-payment');
+    const fundamentalsCheckoutRow=document.getElementById('mrm-piece-fundamentals-addon-checkout-row');
+    const fundamentalsCheckoutCheckbox=document.getElementById('mrm-piece-fundamentals-addon-checkout');
+    const fundamentalsCheckoutDescription=document.getElementById('mrm-piece-fundamentals-addon-checkout-description');
 
     const money = (cents) => '$' + ((Math.round(Number(cents || 0))) / 100).toFixed(2);
     const esc = (s) => String(s || '')
@@ -2812,6 +2840,14 @@ async function getOfferSkuCandidates(offerEl) {
 
     const baseFromQuote = Number(quoteData && quoteData.amount_cents ? quoteData.amount_cents : 0);
     const labelFromQuote = String((quoteData && quoteData.label) ? quoteData.label : '').trim();
+    mrmPieceFundamentalsAddonOffer=mrmGetFundamentalsOfferFromQuote(quoteData);
+    const fundamentalsAvailable=!!(mrmPieceFundamentalsAddonOffer&&mrmPieceFundamentalsAddonOffer.available&&mrmPieceFundamentalsAddonOffer.sku);
+    mrmPieceFundamentalsAddonSelected=fundamentalsAvailable&&mrmGetFundamentalsSelection(pendingSku);
+    const initialFundamentalsAmount=mrmPieceFundamentalsAddonSelected?Number(mrmPieceFundamentalsAddonOffer.offer_amount_cents||0):0;
+    if(fundamentalsCheckoutRow)fundamentalsCheckoutRow.hidden=!fundamentalsAvailable;
+    if(fundamentalsCheckoutCheckbox)fundamentalsCheckoutCheckbox.checked=mrmPieceFundamentalsAddonSelected;
+    if(fundamentalsAvailable&&fundamentalsCheckoutDescription)fundamentalsCheckoutDescription.textContent='Normally '+mrmPieceMoney(mrmPieceFundamentalsAddonOffer.regular_amount_cents)+' — add it to this Full Piece for '+mrmPieceMoney(mrmPieceFundamentalsAddonOffer.offer_amount_cents)+'.';
+
 
     const renderBreakdown = (opts = {}) => {
       const normalized = mrmPieceNormalizeBreakdown({
@@ -2825,6 +2861,9 @@ async function getOfferSkuCandidates(offerEl) {
         amount_cents: opts.amount_cents,
         tax_message: opts.tax_message,
         tax_policy: opts.tax_policy,
+        fundamentals_addon_selected: opts.fundamentals_addon_selected ?? mrmPieceFundamentalsAddonSelected,
+        fundamentals_addon_label: opts.fundamentals_addon_label || (mrmPieceFundamentalsAddonOffer?.label || 'Fundamental Packet'),
+        fundamentals_addon_amount_cents: opts.fundamentals_addon_amount_cents ?? (mrmPieceFundamentalsAddonSelected?Number(mrmPieceFundamentalsAddonOffer?.offer_amount_cents||0):0),
         promo_code: opts.promo_code || mrmPieceAppliedPromoCode
       });
       pendingBreakdown = normalized;
@@ -2838,7 +2877,9 @@ async function getOfferSkuCandidates(offerEl) {
       original_base_amount_cents: baseFromQuote,
       promo_discount_cents: 0,
       tax_cents: 0,
-      amount_cents: baseFromQuote,
+      fundamentals_addon_selected:mrmPieceFundamentalsAddonSelected,
+      fundamentals_addon_amount_cents:initialFundamentalsAmount,
+      amount_cents: baseFromQuote+initialFundamentalsAmount,
       tax_message: 'Sales tax will update after billing state and ZIP are entered.'
     });
 
@@ -2901,6 +2942,7 @@ async function getOfferSkuCandidates(offerEl) {
       pendingSku = '';
       pendingClientSecret = '';
       mrmPieceSchedulePaymentLoad = null;
+      mrmPieceFundamentalsAddonOffer=null; mrmPieceFundamentalsAddonSelected=false; mrmPieceActiveOfferEl=null;
       errorEl.textContent = '';
     };
 
@@ -3032,6 +3074,7 @@ async function getOfferSkuCandidates(offerEl) {
             sku: pendingSku,
             email: isEmailLike(email) ? email : '',
             promo_code: promoCode,
+            fundamentals_addon:mrmPieceFundamentalsAddonSelected?'yes':'no',
             context: {
               piece_slug: getPieceSlugFromUrl(),
               source_flow: 'piece_product_purchase'
@@ -3046,9 +3089,12 @@ async function getOfferSkuCandidates(offerEl) {
           return;
         }
 
-        if (res.ok && data && data.ok) {
-          applyServerBreakdown(data);
+        if(!res.ok&&data&&data.code==='fundamentals_addon_already_owned'){
+          mrmSetFundamentalsSelection(pendingSku,false); lastTaxPreviewKey='';
+          resetLoadedPaymentForBillingChange(data.message); errorEl.textContent=data.message;
+          scheduleTaxPreview(); return;
         }
+        if (res.ok && data && data.ok) { applyServerBreakdown(data); }
       } catch (err) {
         // Tax preview should not block normal checkout typing.
       }
@@ -3136,6 +3182,7 @@ async function getOfferSkuCandidates(offerEl) {
               sku: pendingSku,
               email: email,
               promo_code: mrmPieceAppliedPromoCode || mrmGetPiecePromoCodeInputValue() || '',
+              fundamentals_addon:mrmPieceFundamentalsAddonSelected?'yes':'no',
               context: {
                 piece_slug: getPieceSlugFromUrl(),
                 terms_version: '2026-04-25',
@@ -3149,6 +3196,10 @@ async function getOfferSkuCandidates(offerEl) {
           const data = await res.json();
 
           if (!res.ok || !data.ok) {
+            if(data&&data.code==='fundamentals_addon_already_owned'){
+              mrmSetFundamentalsSelection(pendingSku,false); lastTaxPreviewKey='';
+              resetLoadedPaymentForBillingChange(data.message); errorEl.textContent=data.message; scheduleTaxPreview(); return;
+            }
             errorEl.textContent = data.message || 'We could not complete this payment. Please review your details and try again.';
             payBtn.disabled = true;
             return;
@@ -3184,6 +3235,8 @@ async function getOfferSkuCandidates(offerEl) {
         }
       }, 450);
     };
+
+    if(fundamentalsCheckoutCheckbox) fundamentalsCheckoutCheckbox.onchange=function(){ const selected=fundamentalsAvailable&&this.checked; mrmSetFundamentalsSelection(pendingSku,selected); lastTaxPreviewKey=''; resetLoadedPaymentForBillingChange('Your add-on selection changed. Review the updated total, then continue to payment.'); scheduleTaxPreview(); if(mrmPiecePaymentStepRequested)scheduleLoad(); };
 
     mrmPieceSchedulePaymentLoad = scheduleLoad;
 
@@ -3552,7 +3605,8 @@ async function getOfferSkuCandidates(offerEl) {
             This option is temporarily unavailable. Please contact Low Brass Lessons.
           </div>
         </div>
-      `;
+
+    `;
       return card;
     }
 
@@ -3632,6 +3686,7 @@ async function getOfferSkuCandidates(offerEl) {
           <div class="mrm-offer-description-text">${descriptionHtml}</div>
         </details>
       ` : ''}
+      <label class="mrm-fundamentals-addon-banner" hidden><input type="checkbox" class="mrm-fundamentals-addon-card-check"/><span class="mrm-fundamentals-addon-copy"><strong>Add the Fundamental Packet for this piece</strong><small class="mrm-fundamentals-addon-description">Normally $10.00 — add it to this Full Piece for only $5.00.</small></span><span class="mrm-fundamentals-addon-price">+$5.00</span></label>
     `;
 
 
@@ -4025,6 +4080,7 @@ async function getOfferSkuCandidates(offerEl) {
         e.preventDefault();
 
         const offerEl = btn.closest('.mrm-offer');
+        mrmPieceActiveOfferEl = offerEl;
         let sku = '';
         try {
           sku = await getValidatedOfferSkuOrThrow(offerEl);
@@ -4079,6 +4135,10 @@ async function getOfferSkuCandidates(offerEl) {
           return;
         }
 
+        mrmPieceFundamentalsAddonOffer=mrmGetFundamentalsOfferFromQuote(quoteData);
+        mrmConfigureFundamentalsBanner(offerEl,quoteData);
+        mrmPieceFundamentalsAddonSelected=!!(mrmPieceFundamentalsAddonOffer&&mrmPieceFundamentalsAddonOffer.available&&mrmGetFundamentalsSelection(sku));
+        mrmSetFundamentalsSelection(sku,mrmPieceFundamentalsAddonSelected);
         pendingSku = sku;
 
         pendingClientSecret = '';
