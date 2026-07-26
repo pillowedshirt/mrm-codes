@@ -14024,8 +14024,19 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
   private function mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id) {
     global $wpdb; $pi_id=sanitize_text_field($pi_id);
     if (!$pi_id || strpos($pi_id,'pi_')!==0) return new WP_Error('invalid_refund_payment_intent','The refunded Payment Intent ID is invalid.');
-    $table=$this->table_sheet_music_access(); $rows=$wpdb->get_results($wpdb->prepare("SELECT email_plain, sku FROM {$table} WHERE source_id=%s AND revoked_at IS NULL",$pi_id),ARRAY_A);
-    if ($wpdb->last_error!=='') return new WP_Error('refund_entitlement_lookup_failed',$wpdb->last_error);
+    $table = $this->table_sheet_music_access();
+    $wpdb->last_error = '';
+    $rows = $wpdb->get_results(
+      $wpdb->prepare(
+        "SELECT email_plain, sku
+         FROM {$table}
+         WHERE source_id = %s
+           AND revoked_at IS NULL",
+        $pi_id
+      ),
+      ARRAY_A
+    );
+    if ($wpdb->last_error !== '') return new WP_Error('refund_entitlement_lookup_failed',$wpdb->last_error);
     $updated=$wpdb->query($wpdb->prepare("UPDATE {$table} SET revoked_at=%s WHERE source_id=%s AND revoked_at IS NULL",current_time('mysql'),$pi_id));
     if ($updated===false) return new WP_Error('refund_entitlement_revoke_failed',$wpdb->last_error);
     foreach((array)$rows as $row) $this->mrm_remove_email_from_access_list($row['sku']??'',$row['email_plain']??'');
@@ -23620,6 +23631,7 @@ MRM_TAX_RULES;
         'lesson' => array('60_online', '60_inperson', '30_online', '30_inperson'),
         'sheet_music' => array('fundamentals', 'trombone-euphonium', 'tuba', 'complete-package'),
       );
+      $sku_renames = array();
 
       foreach ($skus as $index => $sku_raw) {
         $raw_sku_value = trim((string)$sku_raw);
@@ -23660,11 +23672,13 @@ MRM_TAX_RULES;
         if ($type === 'sheet_music') {
           $sku = $this->generate_sheet_music_sku($label_raw, $category, $current_sku);
           if ($current_sku && $current_sku !== $sku) {
+            $sku_renames[$current_sku] = $sku;
             unset($products[$current_sku]);
           }
         } else {
           $sku = 'lesson_' . $category;
           if ($current_sku && $current_sku !== $sku) {
+            $sku_renames[$current_sku] = $sku;
             unset($products[$current_sku]);
           }
         }
@@ -23685,13 +23699,29 @@ MRM_TAX_RULES;
         if (!in_array($currency, $allowed_currencies, true)) $currency = 'usd';
 
         $is_full_piece=$type==='sheet_music' && in_array($category,array('tuba','trombone-euphonium'),true);
+        $posted_addon_amount = trim((string)($fundamentals_addon_amounts[$index] ?? ''));
+        $existing_addon_amount = max(1, (int)($existing_product['fundamentals_addon_amount_cents'] ?? 500));
+        if ($posted_addon_amount === '') {
+          $addon_amount_cents = $existing_addon_amount;
+        } else {
+          $addon_amount_cents = max(1, (int)$posted_addon_amount);
+        }
         $products[$sku] = array_merge($existing_product,array(
           'sku'=>$sku,'label'=>$label,'amount_cents'=>$final_amount_cents,'currency'=>$currency,
           'product_type'=>$type,'category'=>$category,'active'=>1,
           'fundamentals_addon_enabled'=>$is_full_piece && !empty($fundamentals_addon_enabled[$index])?1:0,
           'fundamentals_addon_sku'=>$is_full_piece?$this->sanitize_sku($fundamentals_addon_skus[$index]??''):'',
-          'fundamentals_addon_amount_cents'=>$is_full_piece?max(1,(int)($fundamentals_addon_amounts[$index]??($existing_product['fundamentals_addon_amount_cents']??500))):500,
+          'fundamentals_addon_amount_cents'=>$is_full_piece?$addon_amount_cents:500,
         ));
+      }
+
+      if (!empty($sku_renames)) {
+        foreach ($products as $saved_sku => $saved_product) {
+          if (!is_array($saved_product)) continue;
+          $linked_addon_sku = $this->sanitize_sku((string)($saved_product['fundamentals_addon_sku'] ?? ''));
+          if (!$linked_addon_sku || !isset($sku_renames[$linked_addon_sku])) continue;
+          $products[$saved_sku]['fundamentals_addon_sku'] = $this->sanitize_sku($sku_renames[$linked_addon_sku]);
+        }
       }
 
       $this->save_products($products);
