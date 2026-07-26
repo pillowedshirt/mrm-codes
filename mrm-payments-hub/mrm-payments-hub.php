@@ -12099,34 +12099,127 @@ private function charge_and_unlock_autopay($data) {
       );
     }
 
+    $fundamentals_addon_offer =
+      $this->mrm_get_fundamentals_addon_offer(
+        $sku
+      );
+
     $response = array(
       'ok' => true,
-      'sku' => $sku,
-      'label' => (string)($p['label'] ?? $sku),
-      'amount_cents' => $amount_cents,
-      'base_amount_cents' => $base_amount_cents,
-      'travel_amount_cents' => $travel_amount_cents,
-      'currency' => $currency,
-      'tax_pending' => true,
-      'tax_message' => (string)($preview_policy['policy_message'] ?? 'Sales tax is calculated after billing state and ZIP are entered.'),
-      'tax_policy_preview' => array(
-        'policy_reason' => (string)($preview_policy['policy_reason'] ?? ''),
-        'should_collect_tax' => !empty($preview_policy['should_collect_tax']),
-        'state' => (string)($preview_policy['jurisdiction']['state'] ?? ''),
-        'country' => (string)($preview_policy['jurisdiction']['country'] ?? 'US'),
+
+      'sku' =>
+        $sku,
+
+      'label' =>
+        (string)($p['label'] ?? $sku),
+
+      'amount_cents' =>
+        $amount_cents,
+
+      'base_amount_cents' =>
+        $base_amount_cents,
+
+      'travel_amount_cents' =>
+        $travel_amount_cents,
+
+      'currency' =>
+        $currency,
+
+      /*
+       * The frontend reads this information to decide whether the
+       * Full Piece banner and checkout checkbox should be shown.
+       */
+      'optional_addons' => array(
+        'fundamentals_packet' =>
+          $fundamentals_addon_offer,
       ),
-      'price_id' => $price_id ? $price_id : null,
+
+      'tax_pending' =>
+        true,
+
+      'tax_message' =>
+        (string)(
+          $preview_policy['policy_message'] ??
+          'Sales tax is calculated after billing state and ZIP are entered.'
+        ),
+
+      'tax_policy_preview' => array(
+        'policy_reason' =>
+          (string)(
+            $preview_policy['policy_reason'] ??
+            ''
+          ),
+
+        'should_collect_tax' =>
+          !empty(
+            $preview_policy[
+              'should_collect_tax'
+            ]
+          ),
+
+        'state' =>
+          (string)(
+            $preview_policy[
+              'jurisdiction'
+            ]['state'] ?? ''
+          ),
+
+        'country' =>
+          (string)(
+            $preview_policy[
+              'jurisdiction'
+            ]['country'] ?? 'US'
+          ),
+      ),
+
+      'price_id' =>
+        $price_id
+          ? $price_id
+          : null,
     );
 
-    $this->mrm_quote_debug_log('quote_success', array(
-      'request_id' => $request_id,
-      'response_summary' => array(
-        'sku' => $response['sku'],
-        'amount_cents' => $response['amount_cents'],
-        'currency' => $response['currency'],
-        'label' => $response['label'],
-      ),
-    ));
+    $this->mrm_quote_debug_log(
+      'quote_success',
+      array(
+        'request_id' =>
+          $request_id,
+
+        'response_summary' => array(
+          'sku' =>
+            $response['sku'],
+
+          'amount_cents' =>
+            $response['amount_cents'],
+
+          'currency' =>
+            $response['currency'],
+
+          'label' =>
+            $response['label'],
+
+          'fundamentals_addon_available' =>
+            !empty(
+              $fundamentals_addon_offer[
+                'available'
+              ]
+            ),
+
+          'fundamentals_addon_sku' =>
+            (string)(
+              $fundamentals_addon_offer[
+                'sku'
+              ] ?? ''
+            ),
+
+          'fundamentals_addon_amount_cents' =>
+            (int)(
+              $fundamentals_addon_offer[
+                'offer_amount_cents'
+              ] ?? 0
+            ),
+        ),
+      )
+    );
 
     return new WP_REST_Response($response, 200);
 
