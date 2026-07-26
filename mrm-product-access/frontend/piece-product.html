@@ -2272,12 +2272,31 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   }
 
   function mrmUpdatePiecePromoTopBreakdown() {
-    const instructions = document.getElementById('payment-instructions');
-    if (!instructions || !mrmPieceCurrentQuoteData) return;
+    const instructions =
+      document.getElementById(
+        'payment-instructions'
+      );
+
+    if (
+      !instructions ||
+      !mrmPieceCurrentQuoteData
+    ) {
+      return;
+    }
 
     const originalBase = Number(mrmPieceCurrentQuoteData.amount_cents || 0);
     const discount = Number(mrmPieceAppliedPromoDiscountCents || 0);
     const discountedSubtotal = Math.max(0, originalBase - discount);
+
+    const fundamentalsAddonAmount =
+      mrmPieceFundamentalsAddonSelected &&
+      mrmPieceFundamentalsAddonOffer
+        ? Number(mrmPieceFundamentalsAddonOffer.offer_amount_cents || 0)
+        : 0;
+
+    const fundamentalsAddonLabel = mrmPieceFundamentalsAddonOffer
+      ? String(mrmPieceFundamentalsAddonOffer.label || 'Fundamental Packet')
+      : 'Fundamental Packet';
 
     instructions.innerHTML = mrmPieceRenderPriceRows({
       sku: pendingSku,
@@ -2286,8 +2305,11 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
       original_base_amount_cents: originalBase,
       base_amount_cents: discountedSubtotal,
       promo_discount_cents: discount,
+      fundamentals_addon_selected: fundamentalsAddonAmount > 0,
+      fundamentals_addon_label: fundamentalsAddonLabel,
+      fundamentals_addon_amount_cents: fundamentalsAddonAmount,
       tax_cents: 0,
-      amount_cents: discountedSubtotal,
+      amount_cents: discountedSubtotal + fundamentalsAddonAmount,
       tax_message: 'Sales tax will update after billing state and ZIP are entered.'
     }, { includeProduct: true });
   }
@@ -3024,6 +3046,9 @@ async function getOfferSkuCandidates(offerEl) {
         base_amount_cents: Number(data.base_amount_cents || baseFromQuote || 0),
         original_base_amount_cents: Number(data.original_base_amount_cents || data.original_amount_cents || data.subtotal_before_discount_cents || 0),
         promo_discount_cents: Number(data.promo_discount_cents || data.discount_cents || 0),
+        fundamentals_addon_selected: !!data.fundamentals_addon_selected,
+        fundamentals_addon_label: data.fundamentals_addon_label || (mrmPieceFundamentalsAddonOffer ? mrmPieceFundamentalsAddonOffer.label : 'Fundamental Packet'),
+        fundamentals_addon_amount_cents: Number(data.fundamentals_addon_amount_cents || 0),
         tax_cents: Number(data.tax_cents || 0),
         amount_cents: Number(data.amount_cents || data.total_cents || 0),
         tax_message: data.tax_message || '',
@@ -3056,6 +3081,7 @@ async function getOfferSkuCandidates(offerEl) {
         sku: pendingSku,
         email: promoCode ? email : '',
         promo_code: promoCode,
+        fundamentals_addon: mrmPieceFundamentalsAddonSelected ? 'yes' : 'no',
         address: addressPayload
       });
 
@@ -3089,10 +3115,14 @@ async function getOfferSkuCandidates(offerEl) {
           return;
         }
 
-        if(!res.ok&&data&&data.code==='fundamentals_addon_already_owned'){
-          mrmSetFundamentalsSelection(pendingSku,false); lastTaxPreviewKey='';
-          resetLoadedPaymentForBillingChange(data.message); errorEl.textContent=data.message;
-          scheduleTaxPreview(); return;
+        if (!res.ok && data && data.code === 'fundamentals_addon_already_owned') {
+          mrmSetFundamentalsSelection(pendingSku, false);
+          lastTaxPreviewKey = '';
+          resetLoadedPaymentForBillingChange(data.message || 'This email already has access to the Fundamental Packet.');
+          errorEl.textContent = data.message || 'This email already has access to the Fundamental Packet.';
+          mrmUpdatePiecePromoTopBreakdown();
+          scheduleTaxPreview();
+          return;
         }
         if (res.ok && data && data.ok) { applyServerBreakdown(data); }
       } catch (err) {
@@ -3196,9 +3226,14 @@ async function getOfferSkuCandidates(offerEl) {
           const data = await res.json();
 
           if (!res.ok || !data.ok) {
-            if(data&&data.code==='fundamentals_addon_already_owned'){
-              mrmSetFundamentalsSelection(pendingSku,false); lastTaxPreviewKey='';
-              resetLoadedPaymentForBillingChange(data.message); errorEl.textContent=data.message; scheduleTaxPreview(); return;
+            if (data && data.code === 'fundamentals_addon_already_owned') {
+              mrmSetFundamentalsSelection(pendingSku, false);
+              lastTaxPreviewKey = '';
+              resetLoadedPaymentForBillingChange(data.message || 'This email already has access to the Fundamental Packet.');
+              errorEl.textContent = data.message || 'This email already has access to the Fundamental Packet.';
+              mrmUpdatePiecePromoTopBreakdown();
+              scheduleTaxPreview();
+              return;
             }
             errorEl.textContent = data.message || 'We could not complete this payment. Please review your details and try again.';
             payBtn.disabled = true;
@@ -3236,7 +3271,19 @@ async function getOfferSkuCandidates(offerEl) {
       }, 450);
     };
 
-    if(fundamentalsCheckoutCheckbox) fundamentalsCheckoutCheckbox.onchange=function(){ const selected=fundamentalsAvailable&&this.checked; mrmSetFundamentalsSelection(pendingSku,selected); lastTaxPreviewKey=''; resetLoadedPaymentForBillingChange('Your add-on selection changed. Review the updated total, then continue to payment.'); scheduleTaxPreview(); if(mrmPiecePaymentStepRequested)scheduleLoad(); };
+    if (fundamentalsCheckoutCheckbox) {
+      fundamentalsCheckoutCheckbox.onchange = function() {
+        const selected = fundamentalsAvailable && this.checked;
+        mrmSetFundamentalsSelection(pendingSku, selected);
+        lastTaxPreviewKey = '';
+        resetLoadedPaymentForBillingChange('Your add-on selection changed. Review the updated total, then continue to payment.');
+        mrmUpdatePiecePromoTopBreakdown();
+        scheduleTaxPreview();
+        if (mrmPiecePaymentStepRequested) {
+          scheduleLoad();
+        }
+      };
+    }
 
     mrmPieceSchedulePaymentLoad = scheduleLoad;
 
@@ -3402,9 +3449,13 @@ async function getOfferSkuCandidates(offerEl) {
       throw new Error(msg);
     }
 
+    const purchasedMultipleProducts = Array.isArray(gData.skus) && gData.skus.length > 1;
+
     mrmShowPieceSuccessPopup(
       'Your purchase is complete.',
-      'Your purchase is complete. Check your email for access instructions.'
+      purchasedMultipleProducts
+        ? 'Your Full Piece and Fundamental Packet are ready. Check your email for access instructions.'
+        : 'Your purchase is complete. Check your email for access instructions.'
     );
 
     return gData;
@@ -3434,9 +3485,13 @@ async function getOfferSkuCandidates(offerEl) {
       throw new Error(msg);
     }
 
+    const purchasedMultipleProducts = Array.isArray(gData.skus) && gData.skus.length > 1;
+
     mrmShowPieceSuccessPopup(
       'Your purchase is complete.',
-      'Your purchase is complete. Check your email for access instructions.'
+      purchasedMultipleProducts
+        ? 'Your Full Piece and Fundamental Packet are ready. Check your email for access instructions.'
+        : 'Your purchase is complete. Check your email for access instructions.'
     );
 
     return gData;
