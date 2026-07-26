@@ -12743,7 +12743,6 @@ private function charge_and_unlock_autopay($data) {
     $metadata['mrm_fundamentals_addon_sku'] = $fundamentals_selected ? (string)$fundamentals_addon['sku'] : '';
     $metadata['mrm_fundamentals_addon_label'] = $fundamentals_selected ? (string)$fundamentals_addon['label'] : '';
     $metadata['mrm_fundamentals_addon_amount_cents'] = (string)$fundamentals_addon_amount_cents;
-    $metadata['mrm_fundamentals_addon_regular_amount_cents'] = (string)($fundamentals_addon['regular_amount_cents'] ?? 0);
     if ($promo_code !== '') {
       $metadata['mrm_promo_code'] = $promo_code;
       $metadata['mrm_promo_discount_cents'] = (string)$promo_discount_cents;
