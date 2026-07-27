@@ -1978,6 +1978,23 @@ audio.mrm-audio{
           </div>
         </div>
 
+        <!-- Active Subscription Purchase Warning -->
+        <div id="mrm-subscription-purchase-warning-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
+          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mrm-subscription-purchase-warning-title" style="max-width:520px;">
+            <div class="modal-header">
+              <h2 id="mrm-subscription-purchase-warning-title" class="modal-title">Active Subscription</h2>
+              <button id="mrm-subscription-purchase-warning-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
+            </div>
+            <div class="modal-body">
+              <p id="mrm-subscription-purchase-warning-message" style="margin-top:0;">We notice you currently have an active subscription to access all the pieces in our catalog. Are you sure you want to make this purchase?</p>
+              <div style="display:flex;gap:10px;margin-top:18px;">
+                <button id="mrm-subscription-purchase-warning-no" type="button" class="button-secondary" style="flex:1;">No</button>
+                <button id="mrm-subscription-purchase-warning-yes" type="button" class="button-primary" style="flex:1;">Yes</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Confirm Total Overlay -->
         <div id="mrm-confirm-total-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
           <div class="modal" role="dialog" aria-modal="true" style="max-width:520px;">
@@ -2175,6 +2192,24 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   let mrmPieceActiveOfferEl=null;
   let mrmPiecePaymentStepRequested = false;
   let mrmPieceHandleFundamentalsAlreadyOwned = null;
+  let mrmPieceSubscriptionPurchaseAcknowledgementKey = '';
+
+  function mrmPieceSubscriptionPurchaseKey(email, sku) {
+    return String(email || '').trim().toLowerCase() + '|' + String(sku || '').trim().toLowerCase();
+  }
+
+  function mrmPieceHasSubscriptionPurchaseAcknowledgement(email, sku) {
+    const key = mrmPieceSubscriptionPurchaseKey(email, sku);
+    return key !== '|' && mrmPieceSubscriptionPurchaseAcknowledgementKey === key;
+  }
+
+  function mrmPieceRecordSubscriptionPurchaseAcknowledgement(email, sku) {
+    mrmPieceSubscriptionPurchaseAcknowledgementKey = mrmPieceSubscriptionPurchaseKey(email, sku);
+  }
+
+  function mrmPieceClearSubscriptionPurchaseAcknowledgement() {
+    mrmPieceSubscriptionPurchaseAcknowledgementKey = '';
+  }
   let mrmPieceModalEventsController = null;
   let mrmPieceModalRunId = 0;
 
@@ -2957,6 +2992,7 @@ async function getOfferSkuCandidates(offerEl) {
     });
 
     mrmPiecePaymentStepRequested = false;
+    mrmPieceClearSubscriptionPurchaseAcknowledgement();
 
     if (detailsStep) detailsStep.hidden = false;
     if (cardStep) cardStep.hidden = true;
@@ -3031,6 +3067,7 @@ async function getOfferSkuCandidates(offerEl) {
       mrmClearPendingPiecePaymentIdentity();
       mrmPieceSchedulePaymentLoad = null;
       mrmPieceHandleFundamentalsAlreadyOwned = null;
+      mrmPieceClearSubscriptionPurchaseAcknowledgement();
       mrmPieceFundamentalsAddonOffer=null; mrmPieceFundamentalsAddonSelected=false; mrmPieceActiveOfferEl=null;
       errorEl.textContent = '';
     };
@@ -3083,6 +3120,7 @@ async function getOfferSkuCandidates(offerEl) {
     let paymentIntentAbortController = null;
     let paymentIntentSeq = 0;
     let paymentIntentInFlight = false;
+    let subscriptionStatusLookupInFlight = false;
     let checkoutRequestStateKey = '';
     let checkoutRequestId = '';
 
@@ -3274,8 +3312,6 @@ async function getOfferSkuCandidates(offerEl) {
 
       if (source === 'complete_package_ledger' || source === 'complete_package_legacy') {
         message = 'This email already has access through the matching Complete Package, so the Fundamental Packet has not been added to the order.';
-      } else if (source === 'active_all_sheet_music_subscription') {
-        message = 'This email already has access through an active all-sheet-music subscription, so the Fundamental Packet has not been added to the order.';
       } else if (source === 'fundamental_packet_legacy') {
         message = 'This email already has Fundamental Packet access through an existing manual access record, so it has not been added to the order.';
       }
@@ -3420,6 +3456,7 @@ async function getOfferSkuCandidates(offerEl) {
                 piece_slug: getPieceSlugFromUrl(),
                 terms_version: '2026-04-25',
                 terms_accepted: !!document.getElementById('mrm-piece-payment-terms')?.checked,
+                subscription_purchase_acknowledged: mrmPieceHasSubscriptionPurchaseAcknowledgement(email, pendingSku),
                 source_flow: 'piece_product_purchase'
               },
               address: addressPayload
@@ -3440,6 +3477,21 @@ async function getOfferSkuCandidates(offerEl) {
           if (!res.ok || !data.ok) {
             if (data && data.code === 'fundamentals_addon_already_owned') {
               handleFundamentalsAlreadyOwned(data);
+              return;
+            }
+            if (data && data.code === 'sheet_music_subscription_purchase_ack_required') {
+              const confirmed = await mrmShowSubscriptionPurchaseWarning(data.message);
+              if (!confirmed) {
+                mrmPiecePaymentStepRequested = false;
+                if (cardStep) cardStep.hidden = true;
+                if (detailsStep) detailsStep.hidden = false;
+                errorEl.textContent = '';
+                setContinueButtonIdle();
+                return;
+              }
+              mrmPieceRecordSubscriptionPurchaseAcknowledgement(email, pendingSku);
+              errorEl.textContent = '';
+              window.setTimeout(function() { if (isCurrentPaymentModal()) scheduleLoad(); }, 0);
               return;
             }
             errorEl.textContent = data.message || 'We could not complete this payment. Please review your details and try again.';
@@ -3524,10 +3576,9 @@ async function getOfferSkuCandidates(offerEl) {
     mrmPieceSchedulePaymentLoad = scheduleLoad;
 
     if (continueToPaymentBtn) {
-      continueToPaymentBtn.onclick = function(event) {
+      continueToPaymentBtn.onclick = async function(event) {
         event.preventDefault();
-
-        if (paymentIntentInFlight || pendingClientSecret || activePaymentElement) return;
+        if (subscriptionStatusLookupInFlight || paymentIntentInFlight || pendingClientSecret || activePaymentElement) return;
 
         const email = (emailInput && emailInput.value ? emailInput.value : '').trim();
         const postal = (postalInput && postalInput.value ? postalInput.value : '').trim();
@@ -3538,36 +3589,59 @@ async function getOfferSkuCandidates(offerEl) {
           errorEl.textContent = 'Please enter a valid email address before continuing to payment.';
           return;
         }
-
         if (!addressPayload.line1) missingAddress.push('street address');
         if (!addressPayload.city) missingAddress.push('city');
         if (!addressPayload.state) missingAddress.push('state');
         if (!addressPayload.postal_code || !isPostalLike(postal)) missingAddress.push('ZIP code');
         if (!addressPayload.country) missingAddress.push('country');
-
         if (missingAddress.length) {
           errorEl.textContent = 'Please enter your full billing address: ' + missingAddress.join(', ') + '.';
           return;
         }
-
         if (!termsCheck || !termsCheck.checked) {
           errorEl.textContent = 'Please agree to the Terms of Service before continuing to payment.';
           return;
         }
 
+        subscriptionStatusLookupInFlight = true;
+        continueToPaymentBtn.disabled = true;
+        continueToPaymentBtn.textContent = 'Checking subscription...';
+        let subscriptionStatus = null;
+        try {
+          subscriptionStatus = await mrmGetSheetMusicPurchaseSubscriptionStatus(email, pendingSku);
+        } catch (error) {
+          subscriptionStatus = {ok:false, message:'We could not verify current sheet-music subscription access. No payment has been submitted. Please try again.'};
+        }
+        subscriptionStatusLookupInFlight = false;
+        if (!subscriptionStatus || !subscriptionStatus.ok) {
+          errorEl.textContent = subscriptionStatus && subscriptionStatus.message ? subscriptionStatus.message : 'We could not verify current sheet-music subscription access. No payment has been submitted. Please try again.';
+          setContinueButtonIdle();
+          return;
+        }
+
+        if (subscriptionStatus.notice_required) {
+          if (!mrmPieceHasSubscriptionPurchaseAcknowledgement(email, pendingSku)) {
+            const confirmed = await mrmShowSubscriptionPurchaseWarning(subscriptionStatus.message);
+            if (!confirmed) {
+              errorEl.textContent = '';
+              setContinueButtonIdle();
+              return;
+            }
+            mrmPieceRecordSubscriptionPurchaseAcknowledgement(email, pendingSku);
+          }
+        } else {
+          mrmPieceClearSubscriptionPurchaseAcknowledgement();
+        }
+
         errorEl.textContent = '';
         mrmPiecePaymentStepRequested = true;
-
         if (detailsStep) detailsStep.hidden = true;
         if (cardStep) cardStep.hidden = false;
-
         const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
         if (modalBody) modalBody.scrollTop = 0;
         if (cardStep) cardStep.scrollTop = 0;
-
         continueToPaymentBtn.disabled = true;
         continueToPaymentBtn.textContent = 'Loading payment...';
-
         scheduleLoad();
       };
     }
@@ -3605,6 +3679,51 @@ async function getOfferSkuCandidates(offerEl) {
     );
   }
 
+
+  async function mrmGetSheetMusicPurchaseSubscriptionStatus(email, sku) {
+    const response = await fetch('/wp-json/mrm-pay/v1/sheet-music-purchase-subscription-status', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: String(email || '').trim(), sku: String(sku || '').trim()}),
+    });
+    let data = {};
+    try { data = await response.json(); } catch (error) {}
+    if (!response.ok || !data || !data.ok) {
+      return Object.assign({
+        ok: false,
+        code: 'sheet_music_subscription_status_failed',
+        message: 'We could not verify current sheet-music subscription access. No payment has been submitted. Please try again.',
+      }, data || {});
+    }
+    return data;
+  }
+
+  function mrmShowSubscriptionPurchaseWarning(message) {
+    const overlay = document.getElementById('mrm-subscription-purchase-warning-overlay');
+    const messageEl = document.getElementById('mrm-subscription-purchase-warning-message');
+    const closeBtn = document.getElementById('mrm-subscription-purchase-warning-close');
+    const noBtn = document.getElementById('mrm-subscription-purchase-warning-no');
+    const yesBtn = document.getElementById('mrm-subscription-purchase-warning-yes');
+    if (!overlay || !messageEl || !closeBtn || !noBtn || !yesBtn) return Promise.resolve(false);
+
+    messageEl.textContent = String(message || 'We notice you currently have an active subscription to access all the pieces in our catalog. Are you sure you want to make this purchase?');
+    overlay.style.display = 'flex';
+    overlay.setAttribute('aria-hidden', 'false');
+
+    return new Promise(function(resolve) {
+      const cleanup = function(result) {
+        overlay.style.display = 'none';
+        overlay.setAttribute('aria-hidden', 'true');
+        closeBtn.onclick = null;
+        noBtn.onclick = null;
+        yesBtn.onclick = null;
+        resolve(result === true);
+      };
+      closeBtn.onclick = function() { cleanup(false); };
+      noBtn.onclick = function() { cleanup(false); };
+      yesBtn.onclick = function() { cleanup(true); };
+    });
+  }
 
   function showConfirmTotal(breakdown){
     const overlay = document.getElementById('mrm-confirm-total-overlay');
@@ -3705,6 +3824,7 @@ async function getOfferSkuCandidates(offerEl) {
           piece_slug: getPieceSlugFromUrl(),
           terms_version: '2026-04-25',
           terms_accepted: !!document.getElementById('mrm-piece-payment-terms')?.checked,
+          subscription_purchase_acknowledged: mrmPieceHasSubscriptionPurchaseAcknowledgement(email, pendingSku),
           source_flow: 'piece_product_purchase',
         },
         address: address,
@@ -4380,7 +4500,16 @@ async function getOfferSkuCandidates(offerEl) {
             return;
           }
 
-          const preconfirm = await mrmPreconfirmPiecePayment();
+          let preconfirm = await mrmPreconfirmPiecePayment();
+          if (preconfirm && preconfirm.code === 'sheet_music_subscription_purchase_ack_required') {
+            const confirmed = await mrmShowSubscriptionPurchaseWarning(preconfirm.message);
+            if (!confirmed) {
+              this.disabled = false;
+              return;
+            }
+            mrmPieceRecordSubscriptionPurchaseAcknowledgement(email, pendingSku);
+            preconfirm = await mrmPreconfirmPiecePayment();
+          }
           if (!preconfirm || !preconfirm.ok) {
             if (
               preconfirm &&
@@ -4399,6 +4528,20 @@ async function getOfferSkuCandidates(offerEl) {
               activePaymentElement = null;
               activeStripeElements = null;
               errorEl.textContent = preconfirm.message || 'This email already has access to this product. No payment has been submitted.';
+              this.disabled = true;
+              return;
+            }
+
+            if (preconfirm && preconfirm.code === 'sheet_music_email_blocked') {
+              mrmClearPendingPiecePaymentIdentity();
+              if (activePaymentElement) {
+                try { activePaymentElement.unmount(); } catch (error) {}
+              }
+              activePaymentElement = null;
+              activeStripeElements = null;
+              const paymentElementMount = document.getElementById('mrm-payment-element');
+              if (paymentElementMount) paymentElementMount.innerHTML = '';
+              errorEl.textContent = preconfirm.message || 'This email is currently restricted from purchasing or accessing sheet music. No payment has been submitted.';
               this.disabled = true;
               return;
             }
