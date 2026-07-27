@@ -12427,11 +12427,64 @@ private function charge_and_unlock_autopay($data) {
     return $token === '' ? '' : 'mrm_subtok_' . substr(hash('sha256', $token), 0, 40);
   }
 
+  private function mrm_piece_subscription_token_reuse_transient_key($sku, $browser_session_id) {
+    $sku = $this->sanitize_sku((string)$sku);
+    $browser_session_id = $this->mrm_sanitize_piece_browser_session_id($browser_session_id);
+    if ($sku === '' || $browser_session_id === '') {
+      return '';
+    }
+
+    $identity_hash = hash_hmac(
+      'sha256',
+      $sku . '|' . $browser_session_id,
+      wp_salt('auth')
+    );
+    return 'mrm_subtok_idx_' . substr($identity_hash, 0, 40);
+  }
+
   private function mrm_issue_piece_subscription_status_token($sku, $browser_session_id) {
     $sku = $this->sanitize_sku((string)$sku);
     $browser_session_id = $this->mrm_sanitize_piece_browser_session_id($browser_session_id);
     if ($sku === '' || $browser_session_id === '') {
       return new WP_Error('piece_subscription_token_request_invalid', 'The sheet-music checkout session could not be initialized.');
+    }
+
+    $session_hash = hash_hmac('sha256', $browser_session_id, wp_salt('auth'));
+    $reuse_transient_key = $this->mrm_piece_subscription_token_reuse_transient_key($sku, $browser_session_id);
+    if ($reuse_transient_key === '') {
+      return new WP_Error('piece_subscription_token_generation_failed', 'The sheet-music checkout session could not be initialized.');
+    }
+
+    /* Reuse the token while both its browser/SKU index and record are valid. */
+    $reuse_record = get_transient($reuse_transient_key);
+    if (is_array($reuse_record)) {
+      $existing_token = sanitize_text_field((string)($reuse_record['token'] ?? ''));
+      $existing_expires_at = max(0, (int)($reuse_record['expires_at'] ?? 0));
+      if (preg_match('/^[A-Za-z0-9]{48,96}$/', $existing_token) && $existing_expires_at > time()) {
+        $existing_token_key = $this->mrm_piece_subscription_token_transient_key($existing_token);
+        $existing_token_record = $existing_token_key !== '' ? get_transient($existing_token_key) : false;
+        if (is_array($existing_token_record)) {
+          $existing_sku = $this->sanitize_sku((string)($existing_token_record['sku'] ?? ''));
+          $existing_session_hash = sanitize_text_field((string)($existing_token_record['session_hash'] ?? ''));
+          $token_expires_at = max(0, (int)($existing_token_record['expires_at'] ?? 0));
+          if (
+            $existing_sku !== '' &&
+            hash_equals($sku, $existing_sku) &&
+            $existing_session_hash !== '' &&
+            hash_equals($session_hash, $existing_session_hash) &&
+            $token_expires_at > time()
+          ) {
+            return array(
+              'token' => $existing_token,
+              'expires_at' => $token_expires_at,
+              'reused' => true,
+            );
+          }
+        }
+      }
+
+      /* The index no longer points to a complete valid token. */
+      delete_transient($reuse_transient_key);
     }
 
     try {
@@ -12444,21 +12497,37 @@ private function charge_and_unlock_autopay($data) {
       return new WP_Error('piece_subscription_token_generation_failed', 'The sheet-music checkout session could not be initialized.');
     }
 
-    $transient_key = $this->mrm_piece_subscription_token_transient_key($token);
-    if ($transient_key === '') {
+    $token_transient_key = $this->mrm_piece_subscription_token_transient_key($token);
+    if ($token_transient_key === '') {
       return new WP_Error('piece_subscription_token_generation_failed', 'The sheet-music checkout session could not be initialized.');
     }
 
-    $expires_at = time() + (30 * MINUTE_IN_SECONDS);
-    $saved = set_transient($transient_key, array(
+    $lifetime = 30 * MINUTE_IN_SECONDS;
+    $expires_at = time() + $lifetime;
+    $token_saved = set_transient($token_transient_key, array(
       'sku' => $sku,
-      'session_hash' => hash_hmac('sha256', $browser_session_id, wp_salt('auth')),
+      'session_hash' => $session_hash,
       'expires_at' => $expires_at,
-    ), 30 * MINUTE_IN_SECONDS);
-    if (!$saved) {
+    ), $lifetime);
+    if (!$token_saved) {
       return new WP_Error('piece_subscription_token_storage_failed', 'The sheet-music checkout session could not be stored.');
     }
-    return array('token' => $token, 'expires_at' => $expires_at);
+
+    /* Index the active opaque token by browser session and resolved SKU. */
+    $reuse_saved = set_transient($reuse_transient_key, array(
+      'token' => $token,
+      'expires_at' => $expires_at,
+    ), $lifetime);
+    if (!$reuse_saved) {
+      delete_transient($token_transient_key);
+      return new WP_Error('piece_subscription_token_storage_failed', 'The sheet-music checkout session could not be stored.');
+    }
+
+    return array(
+      'token' => $token,
+      'expires_at' => $expires_at,
+      'reused' => false,
+    );
   }
 
   private function mrm_validate_piece_subscription_status_token($token, $sku, $browser_session_id) {
@@ -12472,11 +12541,19 @@ private function charge_and_unlock_autopay($data) {
     $transient_key = $this->mrm_piece_subscription_token_transient_key($token);
     $record = $transient_key !== '' ? get_transient($transient_key) : false;
     if (!is_array($record)) {
+      $reuse_transient_key = $this->mrm_piece_subscription_token_reuse_transient_key($sku, $browser_session_id);
+      if ($reuse_transient_key !== '') {
+        delete_transient($reuse_transient_key);
+      }
       return new WP_Error('piece_subscription_token_expired', 'The sheet-music checkout session expired. Please close checkout and open the purchase again.');
     }
     $expires_at = max(0, (int)($record['expires_at'] ?? 0));
     if ($expires_at <= 0 || $expires_at < time()) {
       delete_transient($transient_key);
+      $reuse_transient_key = $this->mrm_piece_subscription_token_reuse_transient_key($sku, $browser_session_id);
+      if ($reuse_transient_key !== '') {
+        delete_transient($reuse_transient_key);
+      }
       return new WP_Error('piece_subscription_token_expired', 'The sheet-music checkout session expired. Please close checkout and open the purchase again.');
     }
 
