@@ -1662,6 +1662,8 @@ private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $pa
   $promo = is_array($promo) ? $promo : array();
   if ($code === '' || $email_hash === '' || $order_id <= 0) return false;
   $table = $this->table_promo_redemptions();
+  $existing_order_redemption = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE order_id = %d AND promo_code = %s LIMIT 1", $order_id, $code));
+  if (!empty($existing_order_redemption)) return true;
   $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
   if ($found_table !== $table) $this->install_or_upgrade_db();
   $is_reusable = !empty($promo['reusable_per_email']);
@@ -3683,7 +3685,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   return array('ok'=>true,'subtotal_cents'=>$subtotal,'tax_cents'=>$tax_cents,'amount_total_cents'=>$amount_total_cents,'calculation_id'=>$calculation_id,'line_items'=>$out_items,'taxability_reason'=>$overall_reason,'customer_details'=>$customer_details);
 }
 
-  private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array(), $payment_method_types = array('card'), $tax_calculation_id = '') {
+  private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array(), $payment_method_types = array('card'), $tax_calculation_id = '', $idempotency_key = '') {
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => $currency ?: 'usd',
@@ -3723,7 +3725,10 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       $params["metadata[{$k}]"] = (string)$v;
     }
 
-    return $this->stripe_api_request('POST', '/v1/payment_intents', $params);
+    $extra_headers = array();
+    $idempotency_key = sanitize_text_field((string)$idempotency_key);
+    if ($idempotency_key !== '') $extra_headers['Idempotency-Key'] = $idempotency_key;
+    return $this->stripe_api_request('POST', '/v1/payment_intents', $params, $extra_headers);
   }
 
   private function stripe_retrieve_payment_intent($pi_id) {
@@ -4557,7 +4562,17 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       if (is_wp_error($grant_result)) return $grant_result;
     }
     $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
-    $this->mrm_maybe_create_payout_ledger_for_order($order);
+    $payout_result = $this->mrm_maybe_create_payout_ledger_for_order($order);
+    if (is_wp_error($payout_result)) {
+      $this->stripe_debug_log('Payment succeeded but payout-ledger persistence failed.', array(
+        'order_id'=>(int)($order['id'] ?? 0), 'payment_intent_id'=>$pi_id,
+        'message'=>$payout_result->get_error_message(), 'code'=>$payout_result->get_error_code(),
+      ));
+      return $payout_result;
+    }
+    if (in_array(sanitize_key((string)($order['product_type'] ?? '')), array('sheet_music', 'lesson'), true) && $payout_result !== true) {
+      return new WP_Error('payout_ledger_not_created', 'The required payout ledger was not created for the paid order.');
+    }
 
     $promo_code_from_meta = '';
 
@@ -6456,6 +6471,74 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $wpdb->update($this->table_orders(), array('status'=>'failed','stripe_status'=>'customer_tax_location_invalid','updated_at'=>current_time('mysql')), array('id'=>$order_id));
     $wpdb->delete($this->table_promo_redemptions(), array('order_id'=>$order_id,'status'=>'pending'));
     $this->stripe_debug_log('Order stopped before PaymentIntent creation.', array('order_id'=>$order_id,'message'=>sanitize_text_field($message)));
+  }
+
+  private function mrm_sanitize_checkout_request_id($request_id) {
+    $request_id = sanitize_text_field((string)$request_id);
+    if ($request_id === '' || strlen($request_id) < 16 || strlen($request_id) > 100 || !preg_match('/^[A-Za-z0-9_-]+$/', $request_id)) return '';
+    return $request_id;
+  }
+
+  private function mrm_checkout_lock_name($request_id) {
+    $request_id = $this->mrm_sanitize_checkout_request_id($request_id);
+    return $request_id === '' ? '' : 'mrm_checkout_' . substr(hash('sha256', $request_id), 0, 48);
+  }
+
+  private function mrm_acquire_checkout_lock($request_id) {
+    global $wpdb;
+    $lock_name = $this->mrm_checkout_lock_name($request_id);
+    if ($lock_name === '') return new WP_Error('checkout_request_id_invalid', 'The checkout request ID is invalid.');
+    $acquired = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, %d)', $lock_name, 30));
+    if ((int)$acquired !== 1) return new WP_Error('checkout_request_in_progress', 'This checkout request is already being processed. Please wait a moment and try again.');
+    return $lock_name;
+  }
+
+  private function mrm_release_checkout_lock($lock_name) {
+    global $wpdb;
+    $lock_name = sanitize_text_field((string)$lock_name);
+    if ($lock_name !== '') $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
+  }
+
+  private function mrm_checkout_order_matches_customer($order, $email_hash, $sku) {
+    return is_array($order) && hash_equals((string)($order['email_hash'] ?? ''), (string)$email_hash) && $this->sanitize_sku((string)($order['sku'] ?? '')) === $this->sanitize_sku((string)$sku);
+  }
+
+  private function mrm_build_reused_checkout_response($order) {
+    if (!is_array($order) || empty($order['id'])) return new WP_Error('checkout_order_invalid', 'The existing checkout order could not be read.');
+    $payment_intent_id = sanitize_text_field((string)($order['stripe_payment_intent_id'] ?? ''));
+    if ($payment_intent_id === '') return new WP_Error('checkout_payment_intent_missing', 'The existing checkout does not yet have a Payment Intent.');
+    $pi = $this->stripe_retrieve_payment_intent($payment_intent_id);
+    if (is_wp_error($pi)) return $pi;
+    $status = sanitize_key((string)($pi['status'] ?? ''));
+    if ($status === 'succeeded') return new WP_Error('checkout_request_already_completed', 'This checkout request has already been paid.');
+    if ($status === 'canceled') return new WP_Error('checkout_payment_intent_unusable', 'The previous checkout attempt can no longer be used. Please close checkout and begin again.');
+    $client_secret = sanitize_text_field((string)($pi['client_secret'] ?? ''));
+    if ($client_secret === '') return new WP_Error('checkout_client_secret_missing', 'Stripe did not return a usable client secret.');
+    $metadata = json_decode((string)($order['metadata_json'] ?? ''), true);
+    $metadata = is_array($metadata) ? $metadata : array();
+    if (is_array($pi['metadata'] ?? null)) $metadata = array_replace($metadata, $pi['metadata']);
+    $sku = $this->sanitize_sku((string)($order['sku'] ?? ($metadata['mrm_sku'] ?? '')));
+    $product = $this->get_product($sku);
+    $methods = array_values(array_filter(array_map('sanitize_key', (array)($pi['payment_method_types'] ?? array('card')))));
+    if (!$methods) $methods = array('card');
+    $key = $this->publishable_key();
+    if ($key === '') return new WP_Error('stripe_publishable_key_missing', 'Stripe publishable key is not configured.');
+    $amount = (int)($pi['amount'] ?? ($order['amount_cents'] ?? 0));
+    return new WP_REST_Response(array(
+      'ok'=>true, 'reused_checkout_request'=>true, 'publishableKey'=>$key, 'client_secret'=>$client_secret,
+      'payment_intent_id'=>$payment_intent_id, 'allowed_payment_methods'=>$methods, 'order_id'=>(int)$order['id'],
+      'customer_id'=>is_array($pi['customer'] ?? null) ? sanitize_text_field((string)($pi['customer']['id'] ?? '')) : sanitize_text_field((string)($pi['customer'] ?? '')),
+      'sku'=>$sku, 'label'=>sanitize_text_field((string)(is_array($product) ? ($product['label'] ?? $sku) : $sku)),
+      'amount_cents'=>$amount, 'total_cents'=>$amount,
+      'original_base_amount_cents'=>(int)($metadata['mrm_original_base_amount_cents'] ?? 0), 'base_amount_cents'=>(int)($metadata['mrm_base_amount_cents'] ?? 0),
+      'addon_amount_cents'=>(int)($metadata['mrm_addon_amount_cents'] ?? 0), 'fundamentals_addon_selected'=>strtolower((string)($metadata['mrm_fundamentals_addon'] ?? 'no')) === 'yes',
+      'fundamentals_addon_sku'=>$this->sanitize_sku((string)($metadata['mrm_fundamentals_addon_sku'] ?? '')), 'fundamentals_addon_label'=>sanitize_text_field((string)($metadata['mrm_fundamentals_addon_label'] ?? '')),
+      'fundamentals_addon_amount_cents'=>(int)($metadata['mrm_fundamentals_addon_amount_cents'] ?? 0), 'promo_code'=>sanitize_text_field((string)($metadata['mrm_promo_code'] ?? '')),
+      'promo_discount_cents'=>(int)($metadata['mrm_promo_discount_cents'] ?? 0), 'tax_cents'=>(int)($metadata['mrm_tax_cents'] ?? 0),
+      'tax_message'=>sanitize_text_field((string)($metadata['mrm_tax_policy_message'] ?? '')), 'tax_calculation_id'=>sanitize_text_field((string)($metadata['mrm_tax_calculation_id'] ?? '')),
+      'currency'=>strtolower(sanitize_text_field((string)($order['currency'] ?? ($pi['currency'] ?? 'usd')))),
+      'product_type'=>sanitize_key((string)($order['product_type'] ?? ($metadata['mrm_product_type'] ?? ''))), 'category'=>sanitize_key((string)(is_array($product) ? ($product['category'] ?? '') : '')),
+    ), 200);
   }
 
   private function create_order($email_hash, $sku, $product_type, $amount_cents, $currency, $metadata) {
@@ -9373,7 +9456,8 @@ private function mrm_tax_retry_or_alert_payment_intent(
     ));
     if ($existing) return (int)$existing;
 
-    $wpdb->insert($table, array(
+    $wpdb->last_error = '';
+    $inserted = $wpdb->insert($table, array(
       'order_id' => (int)$order_id,
       'stripe_payment_intent_id' => (string)$pi_id,
       'payee_type' => (string)$payee_type,
@@ -9392,7 +9476,16 @@ private function mrm_tax_retry_or_alert_payment_intent(
       'updated_at' => $now,
     ), array('%d','%s','%s','%s','%s','%s','%s','%d','%d','%s','%s','%s','%s','%s','%s'));
 
-    return (int)$wpdb->insert_id;
+    $row_id = (int)$wpdb->insert_id;
+    if ($inserted === false || $row_id <= 0) {
+      $this->stripe_debug_log('Payout ledger row insertion failed.', array(
+        'order_id'=>(int)$order_id, 'payment_intent_id'=>(string)$pi_id, 'payee_type'=>(string)$payee_type,
+        'payee_ref'=>(string)$payee_ref, 'gross_cents'=>(int)$gross_cents, 'net_cents'=>(int)$net_cents,
+        'database_error'=>(string)$wpdb->last_error,
+      ));
+      return 0;
+    }
+    return $row_id;
   }
 
 
@@ -9500,15 +9593,6 @@ private function mrm_tax_retry_or_alert_payment_intent(
     if (!$order || empty($order['id'])) return false;
     if ((string)($order['status'] ?? '') !== 'paid') return false;
 
-    global $wpdb;
-    $table = $this->table_payout_ledger();
-
-    $already = (int)$wpdb->get_var($wpdb->prepare(
-      "SELECT COUNT(*) FROM {$table} WHERE order_id=%d",
-      (int)$order['id']
-    ));
-    if ($already > 0) return true;
-
     $meta = array();
     if (!empty($order['metadata_json'])) {
       $decoded = json_decode((string)$order['metadata_json'], true);
@@ -9536,7 +9620,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $composer_acct = $this->composer_connected_account_id();
 
       if ($composer_share > 0) {
-        $this->mrm_insert_payout_ledger_row(
+        $composer_row_id = $this->mrm_insert_payout_ledger_row(
           $order_id,
           $pi_id,
           'composer',
@@ -9548,9 +9632,10 @@ private function mrm_tax_retry_or_alert_payment_intent(
           $composer_acct ? 'pending' : 'blocked',
           $composer_acct ? $composer_payout_note : 'Missing composer connected account ID'
         );
+        if ($composer_row_id <= 0) return new WP_Error('composer_payout_ledger_insert_failed', 'The composer payout record could not be saved.', array('order_id'=>$order_id, 'payment_intent_id'=>$pi_id, 'expected_cents'=>$composer_share));
       }
 
-      $this->mrm_insert_payout_ledger_row(
+      $platform_row_id = $this->mrm_insert_payout_ledger_row(
         $order_id,
         $pi_id,
         'platform',
@@ -9562,6 +9647,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
         'retained',
         'Retained by platform'
       );
+      if ($platform_row_id <= 0) return new WP_Error('platform_payout_ledger_insert_failed', 'The platform payout record could not be saved.', array('order_id'=>$order_id, 'payment_intent_id'=>$pi_id, 'expected_cents'=>$platform_share));
 
       return true;
     }
@@ -12666,6 +12752,11 @@ private function charge_and_unlock_autopay($data) {
       $source_flow = ($product_type === 'sheet_music') ? 'piece_product_purchase' : 'lesson_booking';
     }
 
+    $checkout_request_id = $this->mrm_sanitize_checkout_request_id($data['checkout_request_id'] ?? '');
+    if ($source_flow === 'piece_product_purchase' && $checkout_request_id === '') {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_request_id_required', 'message'=>'Checkout could not be initialized securely. Please close the payment window and try again.'), 400);
+    }
+
     if ($product_type === 'sheet_music') {
       if ($this->mrm_email_already_has_piece_or_package_access($email, $sku)) {
         return new WP_REST_Response(array(
@@ -12674,6 +12765,35 @@ private function charge_and_unlock_autopay($data) {
           'message' => 'This email already has access to this piece product. You do not need to purchase it again.',
           'already_owned' => true,
         ), 409);
+      }
+    }
+
+    $checkout_lock_name = '';
+    if ($checkout_request_id !== '') {
+      $request_email_hash = $this->email_hash($email);
+      $existing_checkout_order = $this->get_order_by_meta_value('mrm_checkout_request_id', $checkout_request_id);
+      if (is_array($existing_checkout_order) && !empty($existing_checkout_order['stripe_payment_intent_id'])) {
+        if (!$this->mrm_checkout_order_matches_customer($existing_checkout_order, $request_email_hash, $sku)) {
+          return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_request_mismatch', 'message'=>'This checkout request does not match the current customer or product.'), 409);
+        }
+        $reused_response = $this->mrm_build_reused_checkout_response($existing_checkout_order);
+        if (is_wp_error($reused_response)) return new WP_REST_Response(array('ok'=>false, 'code'=>$reused_response->get_error_code(), 'message'=>$reused_response->get_error_message()), 409);
+        return $reused_response;
+      }
+
+      $checkout_lock_result = $this->mrm_acquire_checkout_lock($checkout_request_id);
+      if (is_wp_error($checkout_lock_result)) return new WP_REST_Response(array('ok'=>false, 'code'=>$checkout_lock_result->get_error_code(), 'message'=>$checkout_lock_result->get_error_message()), 409);
+      $checkout_lock_name = $checkout_lock_result;
+      register_shutdown_function(function() use ($checkout_lock_name) { $this->mrm_release_checkout_lock($checkout_lock_name); });
+
+      $existing_checkout_order = $this->get_order_by_meta_value('mrm_checkout_request_id', $checkout_request_id);
+      if (is_array($existing_checkout_order) && !empty($existing_checkout_order['stripe_payment_intent_id'])) {
+        if (!$this->mrm_checkout_order_matches_customer($existing_checkout_order, $request_email_hash, $sku)) {
+          return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_request_mismatch', 'message'=>'This checkout request does not match the current customer or product.'), 409);
+        }
+        $reused_response = $this->mrm_build_reused_checkout_response($existing_checkout_order);
+        if (is_wp_error($reused_response)) return new WP_REST_Response(array('ok'=>false, 'code'=>$reused_response->get_error_code(), 'message'=>$reused_response->get_error_message()), 409);
+        return $reused_response;
       }
     }
 
@@ -12857,6 +12977,7 @@ private function charge_and_unlock_autopay($data) {
 
     // Build labels
     $metadata = $this->build_metadata($sku, $product_type, $email_hash, $context, $p);
+    if ($checkout_request_id !== '') $metadata['mrm_checkout_request_id'] = $checkout_request_id;
     $metadata['mrm_customer_email'] = $email;
     if ( $terms_version !== '' ) {
       $metadata['mrm_terms_version'] = $terms_version;
@@ -12902,6 +13023,15 @@ private function charge_and_unlock_autopay($data) {
     $metadata['mrm_customer_country'] = (string)$address['country'];
     $metadata['mrm_tax_lines_json'] = wp_json_encode($tax_result['line_items']);
 
+    $checkout_fingerprint = hash('sha256', wp_json_encode(array(
+      'checkout_request_id'=>$checkout_request_id, 'email_hash'=>$email_hash, 'sku'=>$sku, 'product_type'=>$product_type,
+      'currency'=>strtolower($currency), 'original_base_amount_cents'=>$original_base_amount_cents, 'base_amount_cents'=>$base_amount_cents,
+      'subscription_addon_cents'=>$addon_amount_cents, 'fundamentals_addon_sku'=>$fundamentals_selected ? (string)$fundamentals_addon['sku'] : '',
+      'fundamentals_addon_cents'=>$fundamentals_addon_amount_cents, 'promo_code'=>$promo_code, 'promo_discount_cents'=>$promo_discount_cents,
+      'tax_cents'=>$tax_cents, 'final_amount_cents'=>$final_amount_cents, 'terms_version'=>$terms_version, 'address'=>$address,
+    )));
+    $metadata['mrm_checkout_fingerprint'] = $checkout_fingerprint;
+
     // Early duplicate guard:
     // If this is a lesson checkout with the $5 sheet music add-on selected,
     // block checkout before creating the order / PaymentIntent when the email
@@ -12935,8 +13065,20 @@ private function charge_and_unlock_autopay($data) {
       }
     }
 
-    // Create internal order first so order_id can be labeled in Stripe metadata
-    $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
+    // Create or reuse one internal order for this checkout request.
+    $existing_checkout_order = $checkout_request_id !== '' ? $this->get_order_by_meta_value('mrm_checkout_request_id', $checkout_request_id) : null;
+    if (is_array($existing_checkout_order)) {
+      if (!$this->mrm_checkout_order_matches_customer($existing_checkout_order, $email_hash, $sku)) return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_request_mismatch', 'message'=>'This checkout request does not match the current customer or product.'), 409);
+      $existing_metadata = json_decode((string)($existing_checkout_order['metadata_json'] ?? ''), true);
+      $existing_metadata = is_array($existing_metadata) ? $existing_metadata : array();
+      $existing_fingerprint = sanitize_text_field((string)($existing_metadata['mrm_checkout_fingerprint'] ?? ''));
+      if ($existing_fingerprint !== '' && !hash_equals($existing_fingerprint, $checkout_fingerprint)) return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_request_parameters_changed', 'message'=>'The checkout details changed during payment creation. Please close checkout and begin again.'), 409);
+      $order_id = (int)$existing_checkout_order['id'];
+      $this->update_order_amount_and_metadata($order_id, $final_amount_cents, $metadata);
+    } else {
+      $order_id = $this->create_order($email_hash, $sku, $product_type, $final_amount_cents, $currency, $metadata);
+    }
+    if ($order_id <= 0) return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_order_creation_failed', 'message'=>'The local checkout order could not be created.'), 500);
     $metadata['mrm_order_id'] = (string)$order_id;
     if ($promo_code !== '' && $promo_discount_cents > 0) {
       $reserved = $this->mrm_reserve_promo_redemption(
@@ -13041,7 +13183,8 @@ private function charge_and_unlock_autopay($data) {
       ), 500);
     }
 
-    $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra, $payment_method_types, $tax_calc_id);
+    $stripe_idempotency_key = $checkout_request_id !== '' ? 'mrm-pi-' . hash('sha256', $checkout_request_id) : '';
+    $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra, $payment_method_types, $tax_calc_id, $stripe_idempotency_key);
     if (is_wp_error($pi)) {
       $data = $pi->get_error_data();
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
