@@ -3297,6 +3297,12 @@ async function getOfferSkuCandidates(offerEl) {
 
     const scheduleLoad = () => {
       clearTimeout(loadTimer);
+
+      /*
+       * Field changes should invalidate an active request.
+       * Passive startup callbacks must not reach this function
+       * after the card step has started.
+       */
       invalidatePaymentIntentRequest();
 
       taxPreviewSeq += 1;
@@ -3560,13 +3566,27 @@ async function getOfferSkuCandidates(offerEl) {
       });
     });
 
-    [250, 1000, 2000].forEach(function(delay) {
-      window.setTimeout(function() {
-        if (isCurrentPaymentModal()) {
+    window.setTimeout(
+      function() {
+        /*
+         * This one delayed pass supports browser autofill while
+         * the customer is still entering details.
+         *
+         * It must never abort or replace an active Payment Intent
+         * request.
+         */
+        if (
+          isCurrentPaymentModal() &&
+          !mrmPiecePaymentStepRequested &&
+          !paymentIntentInFlight &&
+          !pendingClientSecret &&
+          !activePaymentElement
+        ) {
           scheduleLoad();
         }
-      }, delay);
-    });
+      },
+      250
+    );
   }
 
 
