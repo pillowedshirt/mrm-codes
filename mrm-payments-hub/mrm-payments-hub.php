@@ -6659,6 +6659,230 @@ private function mrm_tax_retry_or_alert_payment_intent(
     return true;
   }
 
+  private function mrm_validate_reused_fundamentals_ownership(
+    $order
+  ) {
+    if (!is_array($order)) {
+      return new WP_Error(
+        'checkout_order_invalid',
+        'The existing checkout order could not be read.'
+      );
+    }
+
+    /*
+     * This validation applies only to sheet-music checkouts.
+     */
+    if (
+      sanitize_key(
+        (string)(
+          $order['product_type'] ?? ''
+        )
+      ) !== 'sheet_music'
+    ) {
+      return true;
+    }
+
+    $metadata =
+      $this->mrm_get_order_meta_array(
+        $order
+      );
+
+    $fundamentals_selected = (
+      strtolower(
+        (string)(
+          $metadata[
+            'mrm_fundamentals_addon'
+          ] ?? 'no'
+        )
+      ) === 'yes'
+    );
+
+    /*
+     * A Full Piece-only checkout has no packet ownership to
+     * recheck.
+     */
+    if (!$fundamentals_selected) {
+      return true;
+    }
+
+    $packet_sku =
+      $this->sanitize_sku(
+        (string)(
+          $metadata[
+            'mrm_fundamentals_addon_sku'
+          ] ?? ''
+        )
+      );
+
+    $packet_amount_cents =
+      max(
+        0,
+        (int)(
+          $metadata[
+            'mrm_fundamentals_addon_amount_cents'
+          ] ?? 0
+        )
+      );
+
+    $customer_email =
+      sanitize_email(
+        (string)(
+          $metadata[
+            'mrm_customer_email'
+          ] ??
+          $order[
+            'customer_email'
+          ] ??
+          ''
+        )
+      );
+
+    /*
+     * A stored combined checkout must contain a valid packet
+     * SKU, selling amount, and customer email before it can be
+     * safely reused.
+     */
+    if (
+      $packet_sku === '' ||
+      $packet_amount_cents <= 0 ||
+      $customer_email === '' ||
+      !is_email($customer_email)
+    ) {
+      return new WP_Error(
+        'checkout_snapshot_incomplete',
+        'The stored Fundamental Packet checkout information is incomplete. Please close checkout and begin again.'
+      );
+    }
+
+    $ownership =
+      $this
+        ->mrm_get_authoritative_fundamentals_ownership_match(
+          $customer_email,
+          $packet_sku
+        );
+
+    if (empty($ownership['owned'])) {
+      return true;
+    }
+
+    /*
+     * Return the same error code already handled by the
+     * product-page checkout frontend.
+     */
+    return new WP_Error(
+      'fundamentals_addon_already_owned',
+
+      'This email already has access to the Fundamental Packet, so it has not been added to the order.',
+
+      array(
+        'ownership_source' =>
+          sanitize_key(
+            (string)(
+              $ownership[
+                'ownership_source'
+              ] ?? ''
+            )
+          ),
+
+        'ownership_sku' =>
+          $this->sanitize_sku(
+            (string)(
+              $ownership[
+                'ownership_sku'
+              ] ?? ''
+            )
+          ),
+      )
+    );
+  }
+
+  private function mrm_checkout_wp_error_response(
+    $error,
+    $default_status = 409
+  ) {
+    if (!is_wp_error($error)) {
+      return new WP_REST_Response(
+        array(
+          'ok' =>
+            false,
+
+          'code' =>
+            'checkout_unknown_error',
+
+          'message' =>
+            'Checkout could not be completed.',
+        ),
+        500
+      );
+    }
+
+    $error_code =
+      sanitize_key(
+        (string)(
+          $error->get_error_code()
+        )
+      );
+
+    $error_data =
+      $error->get_error_data();
+
+    $error_data =
+      is_array($error_data)
+        ? $error_data
+        : array();
+
+    $status =
+      max(
+        400,
+        (int)$default_status
+      );
+
+    /*
+     * Existing ownership is a checkout-state conflict rather
+     * than a server failure.
+     */
+    if (
+      $error_code ===
+      'fundamentals_addon_already_owned'
+    ) {
+      $status = 409;
+    }
+
+    return new WP_REST_Response(
+      array(
+        'ok' =>
+          false,
+
+        'code' =>
+          $error_code !== ''
+            ? $error_code
+            : 'checkout_error',
+
+        'message' =>
+          $error->get_error_message(),
+
+        'ownership_source' =>
+          sanitize_key(
+            (string)(
+              $error_data[
+                'ownership_source'
+              ] ?? ''
+            )
+          ),
+
+        'ownership_sku' =>
+          $this->sanitize_sku(
+            (string)(
+              $error_data[
+                'ownership_sku'
+              ] ?? ''
+            )
+          ),
+      ),
+      $status
+    );
+  }
+
   private function mrm_resume_unattached_piece_checkout_order($order, $checkout_request_id) {
     if (!is_array($order) || empty($order['id'])) return new WP_Error('checkout_order_invalid', 'The existing checkout order could not be read.');
     $order_id = absint($order['id']);
@@ -6673,6 +6897,16 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $stored_request_id = $this->mrm_sanitize_checkout_request_id($metadata['mrm_checkout_request_id'] ?? '');
     if ($stored_request_id === '' || !hash_equals($stored_request_id, $checkout_request_id)) {
       return new WP_Error('checkout_resume_request_mismatch', 'The stored checkout request does not match the current request.');
+    }
+
+    $ownership_validation =
+      $this
+        ->mrm_validate_reused_fundamentals_ownership(
+          $order
+        );
+
+    if (is_wp_error($ownership_validation)) {
+      return $ownership_validation;
     }
 
     $amount_cents = max(0, (int)($order['amount_cents'] ?? 0));
@@ -6717,6 +6951,15 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $status = sanitize_key((string)($pi['status'] ?? ''));
     if ($status === 'succeeded') return new WP_Error('checkout_request_already_completed', 'This checkout request has already been paid.');
     if ($status === 'canceled') return new WP_Error('checkout_payment_intent_unusable', 'The previous checkout attempt can no longer be used. Please close checkout and begin again.');
+    $ownership_validation =
+      $this
+        ->mrm_validate_reused_fundamentals_ownership(
+          $order
+        );
+
+    if (is_wp_error($ownership_validation)) {
+      return $ownership_validation;
+    }
     $client_secret = sanitize_text_field((string)($pi['client_secret'] ?? ''));
     if ($client_secret === '') return new WP_Error('checkout_client_secret_missing', 'Stripe did not return a usable client secret.');
     $metadata = json_decode((string)($order['metadata_json'] ?? ''), true);
@@ -12996,7 +13239,13 @@ private function charge_and_unlock_autopay($data) {
         $state_validation = $this->mrm_validate_existing_piece_checkout_state($existing_checkout_order, $request_email_hash, $sku, $incoming_checkout_state_fingerprint);
         if (is_wp_error($state_validation)) return new WP_REST_Response(array('ok'=>false, 'code'=>$state_validation->get_error_code(), 'message'=>$state_validation->get_error_message()), 409);
         $reused_response = $this->mrm_build_reused_checkout_response($existing_checkout_order);
-        if (is_wp_error($reused_response)) return new WP_REST_Response(array('ok'=>false, 'code'=>$reused_response->get_error_code(), 'message'=>$reused_response->get_error_message()), 409);
+        if (is_wp_error($reused_response)) {
+          return $this
+            ->mrm_checkout_wp_error_response(
+              $reused_response,
+              409
+            );
+        }
         return $reused_response;
       }
 
@@ -13012,13 +13261,25 @@ private function charge_and_unlock_autopay($data) {
         if (is_wp_error($state_validation)) return new WP_REST_Response(array('ok'=>false, 'code'=>$state_validation->get_error_code(), 'message'=>$state_validation->get_error_message()), 409);
         if (!empty($existing_checkout_order['stripe_payment_intent_id'])) {
           $reused_response = $this->mrm_build_reused_checkout_response($existing_checkout_order);
-          if (is_wp_error($reused_response)) return new WP_REST_Response(array('ok'=>false, 'code'=>$reused_response->get_error_code(), 'message'=>$reused_response->get_error_message()), 409);
+          if (is_wp_error($reused_response)) {
+            return $this
+              ->mrm_checkout_wp_error_response(
+                $reused_response,
+                409
+              );
+          }
           return $reused_response;
         }
 
         /* Resume the stored calculation when the prior response ended before local PI attachment. */
         $resume_response = $this->mrm_resume_unattached_piece_checkout_order($existing_checkout_order, $checkout_request_id);
-        if (is_wp_error($resume_response)) return new WP_REST_Response(array('ok'=>false, 'code'=>$resume_response->get_error_code(), 'message'=>$resume_response->get_error_message()), 500);
+        if (is_wp_error($resume_response)) {
+          return $this
+            ->mrm_checkout_wp_error_response(
+              $resume_response,
+              500
+            );
+        }
         return $resume_response;
       }
     }
