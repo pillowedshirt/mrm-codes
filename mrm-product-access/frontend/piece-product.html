@@ -3633,6 +3633,27 @@ async function getOfferSkuCandidates(offerEl) {
               handleFundamentalsAlreadyOwned(data);
               return;
             }
+            /*
+             * The customer permanently owns the Full Piece, or the
+             * submitted email has become blocked.
+             *
+             * Use the shared modal recovery callback rather than
+             * leaving the customer on the payment-information step.
+             */
+            if (
+              data &&
+              (
+                data.code === 'already_purchased_piece_product' ||
+                data.code === 'sheet_music_email_blocked'
+              ) &&
+              typeof mrmPieceHandleCheckoutRecovery === 'function'
+            ) {
+              const recovered = mrmPieceHandleCheckoutRecovery(data);
+
+              if (recovered) {
+                return;
+              }
+            }
             if (data && data.code === 'sheet_music_subscription_purchase_ack_required') {
               const confirmed = await mrmShowSubscriptionPurchaseWarning(data.message);
               if (!confirmed) {
