@@ -4168,7 +4168,6 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     $fail_closed = false
   ) {
     $email = strtolower(sanitize_email((string)$email));
-
     $empty_result = array(
       'has_access' => false,
       'status' => '',
@@ -4182,37 +4181,33 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       $empty_result['reason'] = 'invalid_email';
       return $empty_result;
     }
-
     if ($this->mrm_sheet_music_email_is_blocked($email)) {
       $empty_result['reason'] = 'blocked_email';
       return $empty_result;
     }
 
-    /* Search every Stripe Customer matching the email. */
     $customers = $this->stripe_find_all_customers_by_email($email);
-
     if (is_wp_error($customers)) {
       if ($fail_closed) {
         return new WP_Error(
           'sheet_music_subscription_lookup_failed',
           'We could not verify existing sheet-music subscription access. No payment has been submitted. Please try again in a moment.',
-          array(
-            'lookup_stage' => 'customers',
-            'stripe_error_code' => sanitize_key((string)$customers->get_error_code()),
-          )
+          array('lookup_stage' => 'customers', 'stripe_error_code' => sanitize_key((string)$customers->get_error_code()))
         );
       }
-
       $empty_result['reason'] = 'customer_lookup_failed';
       return $empty_result;
     }
-
     if (empty($customers)) {
       $empty_result['reason'] = 'no_customer';
       return $empty_result;
     }
 
     $now_ts = time();
+    $best_access = null;
+    $best_priority = 0;
+    $best_period_end = 0;
+    $best_created = 0;
     $latest_managed_subscription = null;
     $latest_managed_created = 0;
     $lookup_failed = false;
@@ -4220,10 +4215,8 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     foreach ($customers as $customer) {
       $customer_id = sanitize_text_field((string)($customer['id'] ?? ''));
       if ($customer_id === '') continue;
-
       $subscription_rows = $this->mrm_stripe_list_managed_subscriptions_for_customer($customer_id);
       if (is_wp_error($subscription_rows)) {
-        /* Every matching Stripe Customer must be checked. */
         if ($fail_closed) {
           return new WP_Error(
             'sheet_music_subscription_lookup_failed',
@@ -4241,9 +4234,9 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
 
       foreach ($subscription_rows as $subscription) {
         if (!is_array($subscription)) continue;
-
         $status = sanitize_key((string)($subscription['status'] ?? ''));
         $subscription_id = sanitize_text_field((string)($subscription['id'] ?? ''));
+        if ($subscription_id === '') continue;
         $cancel_at_period_end = !empty($subscription['cancel_at_period_end']);
         $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
         $current_period_end = max(0, (int)($period_bounds['end'] ?? 0));
@@ -4254,35 +4247,45 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
           $latest_managed_created = $created;
         }
 
+        $priority = 0;
+        $reason = '';
         if (in_array($status, array('active', 'trialing'), true) && !$cancel_at_period_end) {
-          return array(
-            'has_access' => true,
-            'status' => $status,
-            'subscription_id' => $subscription_id,
-            'reason' => 'stripe_active',
-            'cancel_at_period_end' => false,
-            'current_period_end' => $current_period_end,
-          );
+          $priority = 4;
+          $reason = 'stripe_active';
+        } elseif (in_array($status, array('active', 'trialing'), true) && $cancel_at_period_end && $current_period_end > $now_ts) {
+          $priority = 3;
+          $reason = 'paid_through_canceled';
+        } elseif ($status === 'canceled' && $current_period_end > $now_ts) {
+          $priority = 2;
+          $reason = 'paid_through_canceled';
         }
+        if ($priority <= 0) continue;
 
-        if (in_array($status, array('active', 'trialing', 'canceled'), true) && $current_period_end > $now_ts) {
-          return array(
-            'has_access' => true,
-            'status' => $status,
-            'subscription_id' => $subscription_id,
-            'reason' => 'paid_through_canceled',
-            'cancel_at_period_end' => $cancel_at_period_end,
-            'current_period_end' => $current_period_end,
-          );
-        }
+        $is_better_candidate = $best_access === null || $priority > $best_priority
+          || ($priority === $best_priority && $current_period_end > $best_period_end)
+          || ($priority === $best_priority && $current_period_end === $best_period_end && $created > $best_created);
+        if (!$is_better_candidate) continue;
+
+        $best_priority = $priority;
+        $best_period_end = $current_period_end;
+        $best_created = $created;
+        $best_access = array(
+          'has_access' => true,
+          'status' => $status,
+          'subscription_id' => $subscription_id,
+          'reason' => $reason,
+          'cancel_at_period_end' => $cancel_at_period_end,
+          'current_period_end' => $current_period_end,
+        );
       }
     }
 
+    /* Select only after every customer and managed subscription is examined. */
+    if (is_array($best_access)) return $best_access;
     if ($lookup_failed) {
       $empty_result['reason'] = 'subscription_lookup_failed';
       return $empty_result;
     }
-
     if (is_array($latest_managed_subscription)) {
       $latest_period_bounds = $this->mrm_stripe_subscription_period_bounds($latest_managed_subscription);
       return array(
@@ -4294,7 +4297,6 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
         'current_period_end' => max(0, (int)($latest_period_bounds['end'] ?? 0)),
       );
     }
-
     $empty_result['reason'] = 'no_managed_subscriptions';
     return $empty_result;
   }
@@ -12415,6 +12417,119 @@ private function charge_and_unlock_autopay($data) {
    * REST API
    * ======================================================= */
 
+  private function mrm_sanitize_piece_browser_session_id($session_id) {
+    $session_id = sanitize_text_field((string)$session_id);
+    return preg_match('/^[A-Za-z0-9_-]{20,100}$/', $session_id) ? $session_id : '';
+  }
+
+  private function mrm_piece_subscription_token_transient_key($token) {
+    $token = sanitize_text_field((string)$token);
+    return $token === '' ? '' : 'mrm_subtok_' . substr(hash('sha256', $token), 0, 40);
+  }
+
+  private function mrm_issue_piece_subscription_status_token($sku, $browser_session_id) {
+    $sku = $this->sanitize_sku((string)$sku);
+    $browser_session_id = $this->mrm_sanitize_piece_browser_session_id($browser_session_id);
+    if ($sku === '' || $browser_session_id === '') {
+      return new WP_Error('piece_subscription_token_request_invalid', 'The sheet-music checkout session could not be initialized.');
+    }
+
+    try {
+      $token = bin2hex(random_bytes(32));
+    } catch (Throwable $error) {
+      $token = wp_generate_password(64, false, false);
+    }
+    $token = preg_replace('/[^A-Za-z0-9]/', '', (string)$token);
+    if (strlen($token) < 48 || strlen($token) > 96) {
+      return new WP_Error('piece_subscription_token_generation_failed', 'The sheet-music checkout session could not be initialized.');
+    }
+
+    $transient_key = $this->mrm_piece_subscription_token_transient_key($token);
+    if ($transient_key === '') {
+      return new WP_Error('piece_subscription_token_generation_failed', 'The sheet-music checkout session could not be initialized.');
+    }
+
+    $expires_at = time() + (30 * MINUTE_IN_SECONDS);
+    $saved = set_transient($transient_key, array(
+      'sku' => $sku,
+      'session_hash' => hash_hmac('sha256', $browser_session_id, wp_salt('auth')),
+      'expires_at' => $expires_at,
+    ), 30 * MINUTE_IN_SECONDS);
+    if (!$saved) {
+      return new WP_Error('piece_subscription_token_storage_failed', 'The sheet-music checkout session could not be stored.');
+    }
+    return array('token' => $token, 'expires_at' => $expires_at);
+  }
+
+  private function mrm_validate_piece_subscription_status_token($token, $sku, $browser_session_id) {
+    $token = sanitize_text_field((string)$token);
+    $sku = $this->sanitize_sku((string)$sku);
+    $browser_session_id = $this->mrm_sanitize_piece_browser_session_id($browser_session_id);
+    if (!preg_match('/^[A-Za-z0-9]{48,96}$/', $token) || $sku === '' || $browser_session_id === '') {
+      return new WP_Error('piece_subscription_token_invalid', 'The sheet-music checkout session is invalid. Please close checkout and open the purchase again.');
+    }
+
+    $transient_key = $this->mrm_piece_subscription_token_transient_key($token);
+    $record = $transient_key !== '' ? get_transient($transient_key) : false;
+    if (!is_array($record)) {
+      return new WP_Error('piece_subscription_token_expired', 'The sheet-music checkout session expired. Please close checkout and open the purchase again.');
+    }
+    $expires_at = max(0, (int)($record['expires_at'] ?? 0));
+    if ($expires_at <= 0 || $expires_at < time()) {
+      delete_transient($transient_key);
+      return new WP_Error('piece_subscription_token_expired', 'The sheet-music checkout session expired. Please close checkout and open the purchase again.');
+    }
+
+    $stored_sku = $this->sanitize_sku((string)($record['sku'] ?? ''));
+    if ($stored_sku === '' || !hash_equals($stored_sku, $sku)) {
+      return new WP_Error('piece_subscription_token_sku_mismatch', 'The sheet-music checkout session does not match the selected product.');
+    }
+    $incoming_session_hash = hash_hmac('sha256', $browser_session_id, wp_salt('auth'));
+    $stored_session_hash = sanitize_text_field((string)($record['session_hash'] ?? ''));
+    if ($stored_session_hash === '' || !hash_equals($stored_session_hash, $incoming_session_hash)) {
+      return new WP_Error('piece_subscription_token_session_mismatch', 'The sheet-music checkout session does not match this browser session.');
+    }
+    return true;
+  }
+
+  private function mrm_consume_piece_subscription_rate_bucket($bucket_key, $limit, $window_seconds) {
+    $bucket_key = sanitize_key((string)$bucket_key);
+    $limit = max(1, (int)$limit);
+    $window_seconds = max(60, (int)$window_seconds);
+    if ($bucket_key === '') {
+      return new WP_Error('piece_subscription_rate_limit_invalid', 'The subscription-status request could not be validated.');
+    }
+    $now = time();
+    $record = get_transient($bucket_key);
+    if (!is_array($record) || empty($record['expires_at']) || (int)$record['expires_at'] <= $now) {
+      $record = array('count' => 0, 'expires_at' => $now + $window_seconds);
+    }
+    $count = max(0, (int)($record['count'] ?? 0));
+    $expires_at = max($now + 1, (int)($record['expires_at'] ?? ($now + $window_seconds)));
+    if ($count >= $limit) {
+      return new WP_Error('piece_subscription_status_rate_limited', 'Too many subscription-status requests were received. Please wait before trying again.', array('retry_after' => max(1, $expires_at - $now)));
+    }
+    $record['count'] = $count + 1;
+    set_transient($bucket_key, $record, max(1, $expires_at - $now));
+    return true;
+  }
+
+  private function mrm_check_piece_subscription_status_rate_limit($email, $sku) {
+    $email = strtolower(sanitize_email((string)$email));
+    $sku = $this->sanitize_sku((string)$sku);
+    if (!$email || !is_email($email) || $sku === '') {
+      return new WP_Error('piece_subscription_rate_limit_request_invalid', 'The subscription-status request is invalid.');
+    }
+    $remote_address = sanitize_text_field((string)($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
+    if ($remote_address === '') $remote_address = 'unknown';
+    $ip_hash = hash_hmac('sha256', $remote_address, wp_salt('auth'));
+    $email_hash = $this->email_hash($email);
+    $combination_hash = hash_hmac('sha256', $ip_hash . '|' . $email_hash . '|' . $sku, wp_salt('auth'));
+    $combination_result = $this->mrm_consume_piece_subscription_rate_bucket('mrm_subrl_c_' . substr($combination_hash, 0, 32), 12, 10 * MINUTE_IN_SECONDS);
+    if (is_wp_error($combination_result)) return $combination_result;
+    return $this->mrm_consume_piece_subscription_rate_bucket('mrm_subrl_i_' . substr($ip_hash, 0, 32), 50, 10 * MINUTE_IN_SECONDS);
+  }
+
   public function register_routes() {
     register_rest_route('mrm-pay/v1', '/quote', array(
       'methods' => WP_REST_Server::READABLE,
@@ -12815,6 +12930,7 @@ private function charge_and_unlock_autopay($data) {
     $raw_params = $req->get_params();
 
     $sku = $this->sanitize_sku($req->get_param('sku'));
+    $browser_session_id = $this->mrm_sanitize_piece_browser_session_id($req->get_param('browser_session_id'));
 
     $context = array(
       'piece_slug' => sanitize_text_field((string)$req->get_param('piece_slug')),
@@ -12899,6 +13015,24 @@ private function charge_and_unlock_autopay($data) {
     $price_id = isset($p['stripe_price_id']) ? trim((string)$p['stripe_price_id']) : '';
     $product_type = (string)($p['product_type'] ?? '');
     $product_category = (string)($p['category'] ?? '');
+    $subscription_status_token_data = array('token' => '', 'expires_at' => 0);
+    if (sanitize_key($product_type) === 'sheet_music') {
+      if ($browser_session_id === '') {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => 'piece_browser_session_required',
+          'message' => 'The sheet-music checkout session could not be initialized. Please refresh the page and try again.',
+        ), 400);
+      }
+      $subscription_status_token_data = $this->mrm_issue_piece_subscription_status_token($sku, $browser_session_id);
+      if (is_wp_error($subscription_status_token_data)) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => $subscription_status_token_data->get_error_code(),
+          'message' => $subscription_status_token_data->get_error_message(),
+        ), 500);
+      }
+    }
 
     $this->mrm_quote_debug_log('quote_product_config', array(
       'request_id' => $request_id,
@@ -13045,6 +13179,12 @@ private function charge_and_unlock_autopay($data) {
 
       'currency' =>
         $currency,
+
+      'subscription_status_token' =>
+        sanitize_text_field((string)($subscription_status_token_data['token'] ?? '')),
+
+      'subscription_status_token_expires_at' =>
+        max(0, (int)($subscription_status_token_data['expires_at'] ?? 0)),
 
       /*
        * The frontend reads this information to decide whether the
@@ -13442,6 +13582,8 @@ private function charge_and_unlock_autopay($data) {
     $data = (array)$req->get_json_params();
     $email = strtolower(sanitize_email((string)($data['email'] ?? '')));
     $sku = $this->sanitize_sku((string)($data['sku'] ?? ''));
+    $checkout_status_token = sanitize_text_field((string)($data['checkout_status_token'] ?? ''));
+    $browser_session_id = $this->mrm_sanitize_piece_browser_session_id($data['browser_session_id'] ?? '');
 
     if (!$email || !is_email($email) || !$sku) {
       return new WP_REST_Response(array('ok'=>false, 'code'=>'sheet_music_subscription_status_request_invalid', 'message'=>'A valid sheet-music product and email are required.'), 400);
@@ -13450,6 +13592,30 @@ private function charge_and_unlock_autopay($data) {
     $product = $this->get_product($sku);
     if (!is_array($product) || empty($product['active']) || sanitize_key((string)($product['product_type'] ?? '')) !== 'sheet_music') {
       return new WP_REST_Response(array('ok'=>false, 'code'=>'sheet_music_subscription_status_product_invalid', 'message'=>'The selected sheet-music product is unavailable.'), 404);
+    }
+
+    $token_validation = $this->mrm_validate_piece_subscription_status_token($checkout_status_token, $sku, $browser_session_id);
+    if (is_wp_error($token_validation)) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'code' => $token_validation->get_error_code(),
+        'message' => $token_validation->get_error_message(),
+      ), 403);
+    }
+
+    $rate_limit_result = $this->mrm_check_piece_subscription_status_rate_limit($email, $sku);
+    if (is_wp_error($rate_limit_result)) {
+      $rate_data = $rate_limit_result->get_error_data();
+      $rate_data = is_array($rate_data) ? $rate_data : array();
+      $retry_after = max(1, (int)($rate_data['retry_after'] ?? 600));
+      $response = new WP_REST_Response(array(
+        'ok' => false,
+        'code' => $rate_limit_result->get_error_code(),
+        'message' => $rate_limit_result->get_error_message(),
+        'retry_after' => $retry_after,
+      ), 429);
+      $response->header('Retry-After', (string)$retry_after);
+      return $response;
     }
 
     if ($this->mrm_sheet_music_email_is_blocked($email)) {
@@ -13544,17 +13710,6 @@ private function charge_and_unlock_autopay($data) {
 
     $order_metadata = $this->mrm_get_order_meta_array($order);
     $payment_metadata = isset($payment_intent['metadata']) && is_array($payment_intent['metadata']) ? $payment_intent['metadata'] : array();
-    $acknowledgement_result = $this->mrm_persist_sheet_music_subscription_purchase_acknowledgement($order, $payment_intent, $subscription_purchase_check);
-    if (is_wp_error($acknowledgement_result)) return $this->mrm_checkout_wp_error_response($acknowledgement_result, 503);
-
-    /* Reload the local acknowledgement snapshot after persistence. */
-    if (!empty($subscription_purchase_check['active_subscription']) && !empty($subscription_purchase_check['acknowledged'])) {
-      $fresh_order = $this->get_order(absint($order['id']));
-      if (is_array($fresh_order)) {
-        $order = $fresh_order;
-        $order_metadata = $this->mrm_get_order_meta_array($order);
-      }
-    }
     $stored_request_id = $this->mrm_sanitize_checkout_request_id($order_metadata['mrm_checkout_request_id'] ?? '');
     $payment_request_id = $this->mrm_sanitize_checkout_request_id($payment_metadata['mrm_checkout_request_id'] ?? '');
     $payment_sku = $this->sanitize_sku((string)($payment_metadata['mrm_sku'] ?? ''));
@@ -13563,6 +13718,18 @@ private function charge_and_unlock_autopay($data) {
     $payment_total = max(0, (int)($payment_intent['amount'] ?? 0));
     if ($stored_request_id === '' || $payment_request_id === '' || !hash_equals($stored_request_id, $checkout_request_id) || !hash_equals($payment_request_id, $checkout_request_id) || $payment_sku !== $sku || $payment_order_id !== absint($order['id']) || $order_total <= 0 || $payment_total !== $order_total) {
       return new WP_REST_Response(array('ok'=>false, 'code'=>'piece_preconfirm_snapshot_mismatch', 'message'=>'The payment amount or product details changed. Please close checkout and begin again.'), 409);
+    }
+
+    $acknowledgement_result = $this->mrm_persist_sheet_music_subscription_purchase_acknowledgement($order, $payment_intent, $subscription_purchase_check);
+    if (is_wp_error($acknowledgement_result)) return $this->mrm_checkout_wp_error_response($acknowledgement_result, 503);
+
+    /* Reload only after the complete order/Payment Intent relationship is valid. */
+    if (!empty($subscription_purchase_check['active_subscription']) && !empty($subscription_purchase_check['acknowledged'])) {
+      $fresh_order = $this->get_order(absint($order['id']));
+      if (is_array($fresh_order)) {
+        $order = $fresh_order;
+        $order_metadata = $this->mrm_get_order_meta_array($order);
+      }
     }
 
     if ($this->mrm_email_already_has_piece_or_package_access($email, $sku)) {

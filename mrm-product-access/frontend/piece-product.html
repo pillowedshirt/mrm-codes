@@ -1915,6 +1915,12 @@ audio.mrm-audio{
                   Continue to Payment
                 </button>
               </div>
+              <div
+                id="mrm-piece-details-error"
+                style="color:red;margin-top:10px;"
+                role="alert"
+                aria-live="polite"
+              ></div>
               </div>
 
               <div id="mrm-piece-card-step" class="mrm-piece-step mrm-piece-card-payment-step" hidden>
@@ -2640,6 +2646,26 @@ function mrmGetPiecePromoCodeInputValue() {
     if (statusEl) statusEl.textContent = message || '';
   }
 
+  function mrmGetPieceBrowserSessionId() {
+    const storageKey = 'mrmPieceBrowserSessionId';
+    let value = '';
+
+    try { value = sessionStorage.getItem(storageKey) || ''; } catch (error) {}
+
+    if (!/^[A-Za-z0-9_-]{20,100}$/.test(value)) {
+      let uniquePart = '';
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        uniquePart = window.crypto.randomUUID();
+      } else {
+        uniquePart = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2) + '_' + Math.random().toString(36).slice(2);
+      }
+      value = ('mrm_' + uniquePart).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 100);
+      try { sessionStorage.setItem(storageKey, value); } catch (error) {}
+    }
+
+    return value;
+  }
+
   async function validateResolvedOfferSku(resolvedSku, offerEl) {
   if (!resolvedSku) {
     return {
@@ -2658,6 +2684,8 @@ function mrmGetPiecePromoCodeInputValue() {
       params.set('display_title', String((offerEl.querySelector('.offer-title') || {}).textContent || '').trim());
       params.set('subtitle', String((offerEl.querySelector('.offer-subtitle-panel, .offer-subtitle-row, .audio-subtitle') || {}).textContent || '').trim());
     }
+
+    params.set('browser_session_id', mrmGetPieceBrowserSessionId());
 
     const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
       method: 'GET'
@@ -2888,11 +2916,14 @@ async function getOfferSkuCandidates(offerEl) {
     };
 
     mrmPieceCurrentQuoteData = quoteData || null;
+    const subscriptionStatusToken = String(quoteData && quoteData.subscription_status_token ? quoteData.subscription_status_token : '');
+    const pieceBrowserSessionId = mrmGetPieceBrowserSessionId();
     mrmPieceCurrentPriceDisplay = priceDisplay || '';
 
     const overlay = document.getElementById('mrm-payment-overlay');
     const payBtn = document.getElementById('mrm-pay-btn');
     const errorEl = document.getElementById('mrm-payment-error');
+    const detailsErrorEl = document.getElementById('mrm-piece-details-error');
     const instructions = document.getElementById('payment-instructions');
     const emailInput = document.getElementById('mrm-payment-email');
 
@@ -3006,6 +3037,7 @@ async function getOfferSkuCandidates(offerEl) {
     overlay.setAttribute('aria-hidden', 'false');
 
     errorEl.textContent = '';
+    if (detailsErrorEl) detailsErrorEl.textContent = '';
     payBtn.disabled = true;
     payBtn.textContent = 'Submit Payment';
 
@@ -3586,6 +3618,7 @@ async function getOfferSkuCandidates(offerEl) {
     if (continueToPaymentBtn) {
       continueToPaymentBtn.onclick = async function(event) {
         event.preventDefault();
+        if (detailsErrorEl) detailsErrorEl.textContent = '';
         if (subscriptionStatusLookupInFlight || paymentIntentInFlight || pendingClientSecret || activePaymentElement) return;
 
         const email = (emailInput && emailInput.value ? emailInput.value : '').trim();
@@ -3624,7 +3657,13 @@ async function getOfferSkuCandidates(offerEl) {
         continueToPaymentBtn.textContent = 'Checking subscription...';
         let subscriptionStatus = null;
         try {
-          subscriptionStatus = await mrmGetSheetMusicPurchaseSubscriptionStatus(subscriptionLookupEmail, subscriptionLookupSku, subscriptionStatusSignal);
+          subscriptionStatus = await mrmGetSheetMusicPurchaseSubscriptionStatus(
+            subscriptionLookupEmail,
+            subscriptionLookupSku,
+            subscriptionStatusSignal,
+            subscriptionStatusToken,
+            pieceBrowserSessionId
+          );
         } catch (error) {
           if (error && error.name === 'AbortError') {
             if (subscriptionLookupSeq === subscriptionStatusLookupSeq) {
@@ -3730,12 +3769,17 @@ async function getOfferSkuCandidates(offerEl) {
   }
 
 
-  async function mrmGetSheetMusicPurchaseSubscriptionStatus(email, sku, signal = null) {
+  async function mrmGetSheetMusicPurchaseSubscriptionStatus(email, sku, signal = null, checkoutStatusToken = '', browserSessionId = '') {
     const response = await fetch('/wp-json/mrm-pay/v1/sheet-music-purchase-subscription-status', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       signal: signal || undefined,
-      body: JSON.stringify({email: String(email || '').trim(), sku: String(sku || '').trim()}),
+      body: JSON.stringify({
+        email: String(email || '').trim(),
+        sku: String(sku || '').trim(),
+        checkout_status_token: String(checkoutStatusToken || '').trim(),
+        browser_session_id: String(browserSessionId || '').trim(),
+      }),
     });
     let data = {};
     try { data = await response.json(); } catch (error) {}
@@ -4572,14 +4616,23 @@ async function getOfferSkuCandidates(offerEl) {
             }
 
             if (preconfirm && preconfirm.code === 'already_purchased_piece_product') {
+              const ownershipMessage = preconfirm.message || 'This email already has access to this product. No payment has been submitted.';
               mrmClearPendingPiecePaymentIdentity();
               if (activePaymentElement) {
                 try { activePaymentElement.unmount(); } catch (error) {}
               }
               activePaymentElement = null;
               activeStripeElements = null;
-              errorEl.textContent = preconfirm.message || 'This email already has access to this product. No payment has been submitted.';
-              this.disabled = true;
+              const paymentElementMount = document.getElementById('mrm-payment-element');
+              if (paymentElementMount) paymentElementMount.innerHTML = '';
+              mrmPiecePaymentStepRequested = false;
+              if (cardStep) cardStep.hidden = true;
+              if (detailsStep) detailsStep.hidden = false;
+              const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
+              if (modalBody) modalBody.scrollTop = 0;
+              errorEl.textContent = '';
+              if (detailsErrorEl) detailsErrorEl.textContent = ownershipMessage;
+              setContinueButtonIdle();
               return;
             }
 
@@ -4684,6 +4737,7 @@ async function getOfferSkuCandidates(offerEl) {
           params.set('type', typeof inferSheetMusicTypeFromOfferEl === 'function' ? inferSheetMusicTypeFromOfferEl(offerEl) : '');
             params.set('display_title', String((offerEl.querySelector('.offer-title') || {}).textContent || '').trim());
             params.set('subtitle', String((offerEl.querySelector('.offer-subtitle-panel, .offer-subtitle-row, .audio-subtitle') || {}).textContent || '').trim());
+            params.set('browser_session_id', mrmGetPieceBrowserSessionId());
 
             const qRes = await fetch(`/wp-json/mrm-pay/v1/quote?${params.toString()}`, {
               method: 'GET'
