@@ -3072,6 +3072,8 @@ async function getOfferSkuCandidates(offerEl) {
     let paymentIntentAbortController = null;
     let paymentIntentSeq = 0;
     let paymentIntentInFlight = false;
+    let checkoutRequestStateKey = '';
+    let checkoutRequestId = '';
 
     const hasFullBillingAddress = (addressPayload) => {
       return !!(
@@ -3121,6 +3123,25 @@ async function getOfferSkuCandidates(offerEl) {
         terms_accepted: !!(termsCheck && termsCheck.checked),
         address: getAddressPayload()
       });
+    };
+
+    const createCheckoutRequestId = function() {
+      let uniquePart = '';
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        uniquePart = window.crypto.randomUUID();
+      } else {
+        uniquePart = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2) + '_' + Math.random().toString(36).slice(2);
+      }
+      return 'mrm_' + String(uniquePart).replace(/[^A-Za-z0-9_-]/g, '_');
+    };
+
+    const getOrCreateCheckoutRequestId = function() {
+      const currentStateKey = getPaymentIntentRequestKey();
+      if (!checkoutRequestId || checkoutRequestStateKey !== currentStateKey) {
+        checkoutRequestStateKey = currentStateKey;
+        checkoutRequestId = createCheckoutRequestId();
+      }
+      return checkoutRequestId;
     };
 
     const invalidatePaymentIntentRequest = function() {
@@ -3357,6 +3378,7 @@ async function getOfferSkuCandidates(offerEl) {
 
         const paymentRequestSeq = ++paymentIntentSeq;
         const paymentRequestKey = getPaymentIntentRequestKey();
+        const currentCheckoutRequestId = getOrCreateCheckoutRequestId();
         if (paymentIntentAbortController) {
           try { paymentIntentAbortController.abort(); } catch (error) {}
         }
@@ -3372,6 +3394,7 @@ async function getOfferSkuCandidates(offerEl) {
             body: JSON.stringify({
               sku: pendingSku,
               email: email,
+              checkout_request_id: currentCheckoutRequestId,
               promo_code: mrmPieceAppliedPromoCode || mrmGetPiecePromoCodeInputValue() || '',
               fundamentals_addon:mrmPieceFundamentalsAddonSelected?'yes':'no',
               context: {
@@ -3389,7 +3412,8 @@ async function getOfferSkuCandidates(offerEl) {
           if (
             !isCurrentPaymentModal() || paymentIntentSignal.aborted ||
             paymentRequestSeq !== paymentIntentSeq ||
-            paymentRequestKey !== getPaymentIntentRequestKey()
+            paymentRequestKey !== getPaymentIntentRequestKey() ||
+            currentCheckoutRequestId !== getOrCreateCheckoutRequestId()
           ) {
             return;
           }
