@@ -3314,6 +3314,77 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     return false;
   }
 
+  private function mrm_get_authoritative_fundamentals_ownership_match($email, $packet_sku) {
+    $result = array(
+      'owned' => false,
+      'ownership_source' => '',
+      'ownership_sku' => '',
+    );
+
+    $email = sanitize_email((string)$email);
+    $packet_sku = $this->sanitize_sku((string)$packet_sku);
+
+    if (!$email || !is_email($email) || !$packet_sku) {
+      return $result;
+    }
+
+    $email_hash = $this->email_hash($email);
+
+    /*
+     * The database entitlement ledger is the authoritative source for
+     * deciding whether checkout should block a duplicate packet purchase.
+     * Legacy email lists remain available only for access compatibility.
+     */
+    if ($this->has_sheet_music_access($email_hash, $packet_sku)) {
+      return array(
+        'owned' => true,
+        'ownership_source' => 'fundamental_packet_ledger',
+        'ownership_sku' => $packet_sku,
+      );
+    }
+
+    $packet_product = $this->get_product($packet_sku);
+    if (!is_array($packet_product)) {
+      return $result;
+    }
+
+    $packet_stem = $this->mrm_piece_stem_from_offer_slug($packet_sku, 'fundamentals');
+    if ($packet_stem === '') {
+      return $result;
+    }
+
+    /* A matching Complete Package entitlement also proves packet ownership. */
+    foreach ($this->all_products() as $candidate_sku => $candidate_product) {
+      if (!is_array($candidate_product) || empty($candidate_product['active'])) {
+        continue;
+      }
+      if (sanitize_key((string)($candidate_product['product_type'] ?? '')) !== 'sheet_music') {
+        continue;
+      }
+      if (sanitize_key((string)($candidate_product['category'] ?? '')) !== 'complete-package') {
+        continue;
+      }
+
+      $candidate_sku = $this->sanitize_sku($candidate_sku);
+      if (!$candidate_sku) {
+        continue;
+      }
+      $candidate_stem = $this->mrm_piece_stem_from_offer_slug($candidate_sku, 'complete-package');
+      if ($candidate_stem !== $packet_stem) {
+        continue;
+      }
+      if ($this->has_sheet_music_access($email_hash, $candidate_sku)) {
+        return array(
+          'owned' => true,
+          'ownership_source' => 'complete_package_ledger',
+          'ownership_sku' => $candidate_sku,
+        );
+      }
+    }
+
+    return $result;
+  }
+
   private function mrm_get_fundamentals_addon_offer($base_sku) {
     $empty = array('available'=>false,'selected'=>false,'sku'=>'','label'=>'','regular_amount_cents'=>0,'offer_amount_cents'=>0,'savings_cents'=>0);
     $base_sku = $this->sanitize_sku($base_sku);
@@ -3336,7 +3407,19 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     if (!$requested) return $offer;
     if (empty($offer['available'])) return new WP_Error('fundamentals_addon_not_available','The Fundamental Packet add-on is not available for this product.');
     $email=sanitize_email($email);
-    if ($email && is_email($email) && $this->mrm_email_already_has_piece_or_package_access($email,$offer['sku'])) return new WP_Error('fundamentals_addon_already_owned','This email already has access to the Fundamental Packet, so it has not been added to the order.');
+    if ($email && is_email($email)) {
+      $ownership = $this->mrm_get_authoritative_fundamentals_ownership_match($email, (string)$offer['sku']);
+      if (!empty($ownership['owned'])) {
+        return new WP_Error(
+          'fundamentals_addon_already_owned',
+          'This email already has access to the Fundamental Packet, so it has not been added to the order.',
+          array(
+            'ownership_source' => sanitize_key((string)($ownership['ownership_source'] ?? '')),
+            'ownership_sku' => $this->sanitize_sku((string)($ownership['ownership_sku'] ?? '')),
+          )
+        );
+      }
+    }
     $offer['selected']=true; return $offer;
   }
 
@@ -12368,7 +12451,12 @@ private function charge_and_unlock_autopay($data) {
 
     $addon_selected = (isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes');
     $fundamentals_requested = isset($data['fundamentals_addon']) && strtolower((string)$data['fundamentals_addon']) === 'yes';
-    $fundamentals_addon = $this->mrm_resolve_fundamentals_addon_selection($sku, $fundamentals_requested, $email);
+    /*
+     * Tax preview calculates the selected order without mutating the
+     * customer's selection based on ownership. Ownership is enforced when
+     * the Payment Intent is created immediately before charging.
+     */
+    $fundamentals_addon = $this->mrm_resolve_fundamentals_addon_selection($sku, $fundamentals_requested, '');
     if (is_wp_error($fundamentals_addon)) return new WP_REST_Response(array('ok'=>false,'code'=>$fundamentals_addon->get_error_code(),'message'=>$fundamentals_addon->get_error_message()), $fundamentals_addon->get_error_code()==='fundamentals_addon_already_owned'?409:400);
     $fundamentals_selected = !empty($fundamentals_addon['selected']);
     $fundamentals_addon_amount_cents = $fundamentals_selected ? max(0,(int)($fundamentals_addon['offer_amount_cents']??0)) : 0;
@@ -12621,7 +12709,22 @@ private function charge_and_unlock_autopay($data) {
     $addon_selected = (isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes');
     $fundamentals_requested = isset($data['fundamentals_addon']) && strtolower((string)$data['fundamentals_addon']) === 'yes';
     $fundamentals_addon = $this->mrm_resolve_fundamentals_addon_selection($sku, $fundamentals_requested, $email);
-    if (is_wp_error($fundamentals_addon)) return new WP_REST_Response(array('ok'=>false,'code'=>$fundamentals_addon->get_error_code(),'message'=>$fundamentals_addon->get_error_message()), $fundamentals_addon->get_error_code()==='fundamentals_addon_already_owned'?409:400);
+    if (is_wp_error($fundamentals_addon)) {
+      $error_code = $fundamentals_addon->get_error_code();
+      $error_data = $fundamentals_addon->get_error_data();
+      $error_data = is_array($error_data) ? $error_data : array();
+
+      return new WP_REST_Response(
+        array(
+          'ok' => false,
+          'code' => $error_code,
+          'message' => $fundamentals_addon->get_error_message(),
+          'ownership_source' => sanitize_key((string)($error_data['ownership_source'] ?? '')),
+          'ownership_sku' => $this->sanitize_sku((string)($error_data['ownership_sku'] ?? '')),
+        ),
+        $error_code === 'fundamentals_addon_already_owned' ? 409 : 400
+      );
+    }
     $fundamentals_selected = !empty($fundamentals_addon['selected']);
     $fundamentals_addon_amount_cents = $fundamentals_selected ? max(0,(int)($fundamentals_addon['offer_amount_cents']??0)) : 0;
 

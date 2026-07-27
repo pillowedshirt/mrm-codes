@@ -2174,6 +2174,8 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   let mrmPieceFundamentalsAddonSelected=false;
   let mrmPieceActiveOfferEl=null;
   let mrmPiecePaymentStepRequested = false;
+  let mrmPieceModalEventsController = null;
+  let mrmPieceModalRunId = 0;
 
 
   function mrmHandleBlockedSheetMusicAccess(data, messageEl) {
@@ -2828,6 +2830,18 @@ async function getOfferSkuCandidates(offerEl) {
   }
 
   function openPaymentModal(quoteData, priceDisplay) {
+    const modalRunId = ++mrmPieceModalRunId;
+
+    if (mrmPieceModalEventsController) {
+      try { mrmPieceModalEventsController.abort(); } catch (error) {}
+    }
+
+    mrmPieceModalEventsController = new AbortController();
+    const modalEventSignal = mrmPieceModalEventsController.signal;
+    const isCurrentPaymentModal = function() {
+      return modalRunId === mrmPieceModalRunId && !modalEventSignal.aborted;
+    };
+
     mrmPieceCurrentQuoteData = quoteData || null;
     mrmPieceCurrentPriceDisplay = priceDisplay || '';
 
@@ -2890,6 +2904,33 @@ async function getOfferSkuCandidates(offerEl) {
       });
       pendingBreakdown = normalized;
       instructions.innerHTML = mrmPieceRenderPriceRows(normalized, { includeProduct: true });
+    };
+
+    const renderCurrentSelectionBreakdown = function(
+      taxMessage = 'Sales tax will update after billing state and ZIP are entered.'
+    ) {
+      const originalBase = Math.max(0, Number(baseFromQuote || 0));
+      const discount = Math.max(0, Number(mrmPieceAppliedPromoDiscountCents || 0));
+      const discountedBase = Math.max(0, originalBase - discount);
+      const addonAmount = mrmPieceFundamentalsAddonSelected && mrmPieceFundamentalsAddonOffer
+        ? Math.max(0, Number(mrmPieceFundamentalsAddonOffer.offer_amount_cents || 0))
+        : 0;
+      const addonLabel = mrmPieceFundamentalsAddonOffer && mrmPieceFundamentalsAddonOffer.label
+        ? String(mrmPieceFundamentalsAddonOffer.label)
+        : 'Fundamental Packet';
+
+      renderBreakdown({
+        label: labelFromQuote || 'Sheet music',
+        original_base_amount_cents: originalBase,
+        base_amount_cents: discountedBase,
+        promo_discount_cents: discount,
+        fundamentals_addon_selected: addonAmount > 0,
+        fundamentals_addon_label: addonLabel,
+        fundamentals_addon_amount_cents: addonAmount,
+        tax_cents: 0,
+        amount_cents: discountedBase + addonAmount,
+        tax_message: taxMessage,
+      });
     };
 
     // Initial breakdown (tax pending)
@@ -2955,6 +2996,12 @@ async function getOfferSkuCandidates(offerEl) {
       overlay.style.display = 'none';
       overlay.setAttribute('aria-hidden', 'true');
 
+      if (mrmPieceModalEventsController) {
+        try { mrmPieceModalEventsController.abort(); } catch (error) {}
+        mrmPieceModalEventsController = null;
+      }
+      mrmPieceModalRunId += 1;
+
       if (activePaymentElement) {
         try { activePaymentElement.unmount(); } catch (e) {}
       }
@@ -3009,6 +3056,7 @@ async function getOfferSkuCandidates(offerEl) {
     let taxPreviewTimer = null;
     let taxPreviewSeq = 0;
     let lastTaxPreviewKey = '';
+    let taxPreviewAbortController = null;
 
     const hasFullBillingAddress = (addressPayload) => {
       return !!(
@@ -3092,13 +3140,21 @@ async function getOfferSkuCandidates(offerEl) {
       lastTaxPreviewKey = previewKey;
       const seq = ++taxPreviewSeq;
 
+      if (taxPreviewAbortController) {
+        try { taxPreviewAbortController.abort(); } catch (error) {}
+      }
+      taxPreviewAbortController = new AbortController();
+      const previewSignal = taxPreviewAbortController.signal;
+      const selectedAtRequest = mrmPieceFundamentalsAddonSelected;
+
       try {
         const res = await fetch('/wp-json/mrm-pay/v1/tax-preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: previewSignal,
           body: JSON.stringify({
             sku: pendingSku,
-            email: isEmailLike(email) ? email : '',
+            email: promoCode && isEmailLike(email) ? email : '',
             promo_code: promoCode,
             fundamentals_addon:mrmPieceFundamentalsAddonSelected?'yes':'no',
             context: {
@@ -3111,17 +3167,21 @@ async function getOfferSkuCandidates(offerEl) {
 
         const data = await res.json();
 
-        if (seq !== taxPreviewSeq) {
+        if (
+          !isCurrentPaymentModal() ||
+          previewSignal.aborted ||
+          seq !== taxPreviewSeq ||
+          selectedAtRequest !== mrmPieceFundamentalsAddonSelected
+        ) {
           return;
         }
 
-        if (!res.ok && data && data.code === 'fundamentals_addon_already_owned') {
-          handleFundamentalsAlreadyOwned(data);
+        if (res.ok && data && data.ok) { applyServerBreakdown(data); }
+      } catch (error) {
+        if (error && error.name === 'AbortError') {
           return;
         }
-        if (res.ok && data && data.ok) { applyServerBreakdown(data); }
-      } catch (err) {
-        // Tax preview should not block normal checkout typing.
+        /* A preview failure must not clear the add-on or replace its price. */
       }
     };
 
@@ -3131,45 +3191,38 @@ async function getOfferSkuCandidates(offerEl) {
     };
 
     const handleFundamentalsAlreadyOwned = function(data) {
-      const message = data && data.message
+      const source = String(data && data.ownership_source ? data.ownership_source : '');
+      let message = data && data.message
         ? String(data.message)
         : 'This email already has access to the Fundamental Packet, so it has not been added to the order.';
 
-      /*
-       * This is intentionally cleared because charging the
-       * customer again would create a duplicate purchase.
-       */
+      if (source === 'complete_package_ledger') {
+        message = 'This email already has access through the matching Complete Package, so the Fundamental Packet has not been added to the order.';
+      }
+
+      taxPreviewSeq += 1;
+      if (taxPreviewAbortController) {
+        try { taxPreviewAbortController.abort(); } catch (error) {}
+        taxPreviewAbortController = null;
+      }
+
+      /* Only a final-payment database entitlement check clears this choice. */
       mrmSetFundamentalsSelection(pendingSku, false);
-
       lastTaxPreviewKey = '';
-
-      /*
-       * Remove any Stripe Payment Element or Payment Intent
-       * that may have been created with the add-on included.
-       */
       resetLoadedPaymentForBillingChange(message);
-
-      /*
-       * Display the reason clearly instead of making the
-       * checkbox appear to clear without explanation.
-       */
       errorEl.textContent = message;
-
-      /*
-       * Immediately remove the $5 row and recalculate the
-       * visible subtotal.
-       */
-      mrmUpdatePiecePromoTopBreakdown();
-
-      /*
-       * Request a corrected server breakdown without the
-       * duplicate add-on.
-       */
+      renderCurrentSelectionBreakdown('Sales tax will update for the revised order.');
       scheduleTaxPreview();
     };
 
     const scheduleLoad = () => {
       clearTimeout(loadTimer);
+
+      taxPreviewSeq += 1;
+      if (taxPreviewAbortController) {
+        try { taxPreviewAbortController.abort(); } catch (error) {}
+        taxPreviewAbortController = null;
+      }
 
       if (!mrmPiecePaymentStepRequested) {
         scheduleTaxPreview();
@@ -3258,6 +3311,10 @@ async function getOfferSkuCandidates(offerEl) {
 
           const data = await res.json();
 
+          if (!isCurrentPaymentModal()) {
+            return;
+          }
+
           if (!res.ok || !data.ok) {
             if (data && data.code === 'fundamentals_addon_already_owned') {
               handleFundamentalsAlreadyOwned(data);
@@ -3315,21 +3372,16 @@ async function getOfferSkuCandidates(offerEl) {
     if (fundamentalsCheckoutCheckbox) {
       fundamentalsCheckoutCheckbox.onchange = function() {
         const selected = fundamentalsAvailable && this.checked;
+
+        taxPreviewSeq += 1;
+        if (taxPreviewAbortController) {
+          try { taxPreviewAbortController.abort(); } catch (error) {}
+          taxPreviewAbortController = null;
+        }
+
         mrmSetFundamentalsSelection(pendingSku, selected);
         lastTaxPreviewKey = '';
-
-        /*
-         * Immediately update the visible order breakdown.
-         *
-         * The checkout does not need to wait for Stripe or
-         * the tax-preview request to show the additional $5.
-         */
-        mrmUpdatePiecePromoTopBreakdown();
-
-        /*
-         * A previously created Payment Intent cannot be reused
-         * after changing the total.
-         */
+        renderCurrentSelectionBreakdown();
         resetLoadedPaymentForBillingChange('Your add-on selection changed. Review the updated total, then continue to payment.');
 
         scheduleTaxPreview();
@@ -3342,10 +3394,8 @@ async function getOfferSkuCandidates(offerEl) {
 
     mrmPieceSchedulePaymentLoad = scheduleLoad;
 
-    if (continueToPaymentBtn && !continueToPaymentBtn.dataset.mrmBound) {
-      continueToPaymentBtn.dataset.mrmBound = '1';
-
-      continueToPaymentBtn.addEventListener('click', function(event) {
+    if (continueToPaymentBtn) {
+      continueToPaymentBtn.onclick = function(event) {
         event.preventDefault();
 
         const email = (emailInput && emailInput.value ? emailInput.value : '').trim();
@@ -3393,20 +3443,26 @@ async function getOfferSkuCandidates(offerEl) {
           continueToPaymentBtn.disabled = false;
           continueToPaymentBtn.textContent = 'Continue to Payment';
         }, 700);
-      });
+      };
     }
 
-    [emailInput, postalInput, stateInput, line1Input, cityInput, countrySelect, termsCheck].forEach((el) => {
-      if (!el) return;
+    [emailInput, postalInput, stateInput, line1Input, cityInput, countrySelect].forEach(function(element) {
+      if (!element) {
+        return;
+      }
 
-      ['input', 'change', 'blur', 'keyup', 'paste'].forEach((eventName) => {
-        el.addEventListener(eventName, scheduleLoad);
+      ['input', 'change', 'blur', 'keyup', 'paste'].forEach(function(eventName) {
+        element.addEventListener(eventName, scheduleLoad, { signal: modalEventSignal });
       });
     });
 
-    setTimeout(scheduleLoad, 250);
-    setTimeout(scheduleLoad, 1000);
-    setTimeout(scheduleLoad, 2000);
+    [250, 1000, 2000].forEach(function(delay) {
+      window.setTimeout(function() {
+        if (isCurrentPaymentModal()) {
+          scheduleLoad();
+        }
+      }, delay);
+    });
   }
 
 
