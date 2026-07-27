@@ -3767,7 +3767,126 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   return array('ok'=>true,'subtotal_cents'=>$subtotal,'tax_cents'=>$tax_cents,'amount_total_cents'=>$amount_total_cents,'calculation_id'=>$calculation_id,'line_items'=>$out_items,'metadata_line_items_json'=>$metadata_lines_json,'taxability_reason'=>$overall_reason,'customer_details'=>$customer_details);
 }
 
+  private function
+  mrm_prepare_payment_intent_metadata_for_stripe(
+    $metadata
+  ) {
+    $metadata = is_array($metadata) ? $metadata : array();
+
+    /*
+     * mrm_tax_cents is the authoritative current tax field.
+     *
+     * mrm_addon_tax_cents exists only for compatibility with
+     * older local order readers. Keep it in the WordPress
+     * order metadata, but do not spend a Stripe Payment Intent
+     * metadata position on the duplicate value.
+     */
+    unset($metadata['mrm_addon_tax_cents']);
+
+    /*
+     * These keys can be added after Payment Intent creation.
+     *
+     * mrm_tax_transaction_id:
+     * Added after payment succeeds and the stable Stripe Tax
+     * Transaction is committed.
+     *
+     * Subscriber acknowledgement keys:
+     * These can be added during final preconfirmation when a
+     * subscription becomes active after the Payment Intent was
+     * originally created.
+     */
+    $future_metadata_keys = array('mrm_tax_transaction_id');
+
+    $product_type = sanitize_key((string)($metadata['mrm_product_type'] ?? ''));
+    $source_flow = sanitize_key((string)($metadata['mrm_terms_source_flow'] ?? ''));
+
+    if ($product_type === 'sheet_music' && $source_flow === 'piece_product_purchase') {
+      $future_metadata_keys[] = 'mrm_sub_purchase_ack';
+      $future_metadata_keys[] = 'mrm_sub_purchase_id';
+      $future_metadata_keys[] = 'mrm_sub_purchase_ack_at';
+    }
+
+    /*
+     * Reserve only keys that are not already present.
+     *
+     * When the subscriber acknowledgement was recorded during
+     * initial Payment Intent creation, those three keys already
+     * count toward the current metadata total and do not need
+     * to be reserved again.
+     */
+    $reserved_key_count = 0;
+    foreach ($future_metadata_keys as $future_key) {
+      if (!array_key_exists($future_key, $metadata)) $reserved_key_count++;
+    }
+
+    $maximum_initial_key_count = 50 - $reserved_key_count;
+
+    /*
+     * Sanitize keys exactly once before sending them to Stripe.
+     * Also detect a collision where two original keys sanitize
+     * into the same final key.
+     */
+    $prepared_metadata = array();
+    foreach ($metadata as $key => $value) {
+      $prepared_key = preg_replace('/[^a-zA-Z0-9_\-]/', '_', (string)$key);
+      $prepared_key = (string)$prepared_key;
+
+      if ($prepared_key === '') {
+        return new WP_Error('payment_intent_metadata_key_invalid', 'The payment metadata contains an empty Stripe metadata key.');
+      }
+
+      if (strlen($prepared_key) > 40) {
+        return new WP_Error(
+          'payment_intent_metadata_key_too_long',
+          'The payment metadata key "' . sanitize_text_field($prepared_key) . '" exceeds the Stripe metadata key-length limit.'
+        );
+      }
+
+      if (array_key_exists($prepared_key, $prepared_metadata)) {
+        return new WP_Error(
+          'payment_intent_metadata_key_collision',
+          'Two payment metadata keys resolve to the same Stripe metadata key: "' . sanitize_text_field($prepared_key) . '".'
+        );
+      }
+
+      $prepared_metadata[$prepared_key] = (string)$value;
+    }
+
+    $current_key_count = count($prepared_metadata);
+    if ($current_key_count > $maximum_initial_key_count) {
+      return new WP_Error(
+        'payment_intent_metadata_capacity_exceeded',
+        sprintf(
+          'The payment metadata requires %1$d keys, but checkout must use no more than %2$d keys so later payment and tax metadata can be recorded.',
+          $current_key_count,
+          $maximum_initial_key_count
+        ),
+        array(
+          'current_key_count' => $current_key_count,
+          'maximum_initial_key_count' => $maximum_initial_key_count,
+          'reserved_key_count' => $reserved_key_count,
+          'reserved_keys' => array_values($future_metadata_keys),
+        )
+      );
+    }
+
+    return $prepared_metadata;
+  }
+
   private function stripe_create_payment_intent($amount_cents, $currency, $metadata, $description = '', $extra_params = array(), $payment_method_types = array('card'), $tax_calculation_id = '', $idempotency_key = '') {
+    /*
+     * Add the calculation ID before validating metadata
+     * capacity so the final key count includes it.
+     */
+    $tax_calculation_id = sanitize_text_field((string)$tax_calculation_id);
+    if ($tax_calculation_id !== '') {
+      $metadata = is_array($metadata) ? $metadata : array();
+      $metadata['mrm_tax_calculation_id'] = $tax_calculation_id;
+    }
+
+    $metadata = $this->mrm_prepare_payment_intent_metadata_for_stripe($metadata);
+    if (is_wp_error($metadata)) return $metadata;
+
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => $currency ?: 'usd',
@@ -3775,11 +3894,6 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
 
     if ($description) {
       $params['description'] = $description;
-    }
-
-    $tax_calculation_id = sanitize_text_field($tax_calculation_id);
-    if ($tax_calculation_id !== '') {
-      $metadata['mrm_tax_calculation_id'] = $tax_calculation_id;
     }
 
     $idx = 0;
@@ -3802,9 +3916,12 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       }
     }
 
-    foreach ((array)$metadata as $k => $v) {
-      $k = preg_replace('/[^a-zA-Z0-9_\-]/', '_', (string)$k);
-      $params["metadata[{$k}]"] = (string)$v;
+    foreach ($metadata as $key => $value) {
+      /*
+       * Keys were already sanitized and capacity-checked by
+       * mrm_prepare_payment_intent_metadata_for_stripe().
+       */
+      $params["metadata[{$key}]"] = (string)$value;
     }
 
     $extra_headers = array();
@@ -6046,7 +6163,25 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
       $transaction = $this->stripe_api_request('POST', '/v1/tax/transactions/create_from_calculation', array('calculation'=>$calculation_id,'reference'=>'mrm-payment-intent-'.$payment_intent_id,'posted_at'=>$posted_at,'metadata[payment_intent_id]'=>$payment_intent_id,'expand[0]'=>'line_items'), array('Stripe-Version'=>self::STRIPE_TAX_API_VERSION,'Idempotency-Key'=>'mrm-tax-sale-'.hash('sha256',$payment_intent_id)));
       if (is_wp_error($transaction)) return $transaction;
       $transaction_id = sanitize_text_field($transaction['id'] ?? ''); if ($transaction_id === '') return new WP_Error('tax_transaction_id_missing', 'Stripe did not return a Tax Transaction ID.');
-      $updated_payment_intent = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($payment_intent_id), array('metadata[mrm_tax_transaction_id]'=>$transaction_id)); if (is_wp_error($updated_payment_intent)) return $updated_payment_intent; $payment_intent = $updated_payment_intent;
+      /*
+       * Add the stable Stripe Tax Transaction reference.
+       *
+       * Also remove the obsolete mrm_addon_tax_cents key from any
+       * Payment Intent created before the metadata-capacity update.
+       *
+       * The authoritative mrm_tax_cents key remains on Stripe, and
+       * mrm_addon_tax_cents remains available in the local order.
+       */
+      $updated_payment_intent = $this->stripe_api_request(
+        'POST',
+        '/v1/payment_intents/' . rawurlencode($payment_intent_id),
+        array(
+          'metadata[mrm_addon_tax_cents]' => '',
+          'metadata[mrm_tax_transaction_id]' => $transaction_id,
+        )
+      );
+      if (is_wp_error($updated_payment_intent)) return $updated_payment_intent;
+      $payment_intent = $updated_payment_intent;
     } else { $transaction = $this->mrm_tax_retrieve_transaction($transaction_id); if (is_wp_error($transaction)) return $transaction; }
     $line_items = $this->mrm_tax_get_transaction_line_items($transaction_id); if (is_wp_error($line_items)) return $line_items;
     $reversal_ids = $this->mrm_tax_payment_intent_reversal_ids($payment_intent_id); if (is_wp_error($reversal_ids)) return $reversal_ids;
@@ -14216,7 +14351,13 @@ private function charge_and_unlock_autopay($data) {
     $metadata['mrm_tax_cents'] = (string)$tax_cents;
     $metadata['mrm_total_cents'] = (string)$final_amount_cents;
     $metadata['mrm_tax_calculation_id'] = $tax_calc_id;
-    // Back-compat key (historically used for the $5 add-on tax only).
+    /*
+     * Local WordPress order compatibility value.
+     *
+     * mrm_prepare_payment_intent_metadata_for_stripe() removes
+     * this duplicate key from the Stripe Payment Intent while
+     * preserving it in metadata_json for older local readers.
+     */
     $metadata['mrm_addon_tax_cents'] = (string)$tax_cents;
 
     $metadata['mrm_tax_country'] = (string)($address['country'] ?? 'US');
