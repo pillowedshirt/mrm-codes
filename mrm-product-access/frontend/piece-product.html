@@ -2944,6 +2944,25 @@ async function getOfferSkuCandidates(offerEl) {
     const payBtn = document.getElementById('mrm-pay-btn');
     const errorEl = document.getElementById('mrm-payment-error');
     const detailsErrorEl = document.getElementById('mrm-piece-details-error');
+    const setDetailsStepError = function(message) {
+      const normalizedMessage = String(message || '');
+
+      /*
+       * Clear the card-step error so an older payment message
+       * cannot appear when the customer later advances.
+       */
+      if (errorEl) {
+        errorEl.textContent = '';
+      }
+
+      /*
+       * Customer-details validation belongs in the visible
+       * first-step error element.
+       */
+      if (detailsErrorEl) {
+        detailsErrorEl.textContent = normalizedMessage;
+      }
+    };
     const instructions = document.getElementById('payment-instructions');
     const emailInput = document.getElementById('mrm-payment-email');
 
@@ -3640,7 +3659,7 @@ async function getOfferSkuCandidates(offerEl) {
     if (continueToPaymentBtn) {
       continueToPaymentBtn.onclick = async function(event) {
         event.preventDefault();
-        if (detailsErrorEl) detailsErrorEl.textContent = '';
+        setDetailsStepError('');
         if (subscriptionStatusLookupInFlight || paymentIntentInFlight || pendingClientSecret || activePaymentElement) return;
 
         const email = (emailInput && emailInput.value ? emailInput.value : '').trim();
@@ -3649,7 +3668,7 @@ async function getOfferSkuCandidates(offerEl) {
         const missingAddress = [];
 
         if (!isEmailLike(email)) {
-          errorEl.textContent = 'Please enter a valid email address before continuing to payment.';
+          setDetailsStepError('Please enter a valid email address before continuing to payment.');
           return;
         }
         if (!addressPayload.line1) missingAddress.push('street address');
@@ -3658,11 +3677,11 @@ async function getOfferSkuCandidates(offerEl) {
         if (!addressPayload.postal_code || !isPostalLike(postal)) missingAddress.push('ZIP code');
         if (!addressPayload.country) missingAddress.push('country');
         if (missingAddress.length) {
-          errorEl.textContent = 'Please enter your full billing address: ' + missingAddress.join(', ') + '.';
+          setDetailsStepError('Please enter your full billing address: ' + missingAddress.join(', ') + '.');
           return;
         }
         if (!termsCheck || !termsCheck.checked) {
-          errorEl.textContent = 'Please agree to the Terms of Service before continuing to payment.';
+          setDetailsStepError('Please agree to the Terms of Service before continuing to payment.');
           return;
         }
 
@@ -3710,7 +3729,7 @@ async function getOfferSkuCandidates(offerEl) {
         subscriptionStatusLookupInFlight = false;
         subscriptionStatusAbortController = null;
         if (!subscriptionStatus || !subscriptionStatus.ok) {
-          errorEl.textContent = subscriptionStatus && subscriptionStatus.message ? subscriptionStatus.message : 'We could not verify current sheet-music subscription access. No payment has been submitted. Please try again.';
+          setDetailsStepError(subscriptionStatus && subscriptionStatus.message ? subscriptionStatus.message : 'We could not verify current sheet-music subscription access. No payment has been submitted. Please try again.');
           setContinueButtonIdle();
           return;
         }
@@ -3719,7 +3738,7 @@ async function getOfferSkuCandidates(offerEl) {
           if (!mrmPieceHasSubscriptionPurchaseAcknowledgement(email, pendingSku)) {
             const confirmed = await mrmShowSubscriptionPurchaseWarning(subscriptionStatus.message);
             if (!confirmed) {
-              errorEl.textContent = '';
+              setDetailsStepError('');
               setContinueButtonIdle();
               return;
             }
@@ -3729,7 +3748,7 @@ async function getOfferSkuCandidates(offerEl) {
           mrmPieceClearSubscriptionPurchaseAcknowledgement();
         }
 
-        errorEl.textContent = '';
+        setDetailsStepError('');
         mrmPiecePaymentStepRequested = true;
         if (detailsStep) detailsStep.hidden = true;
         if (cardStep) cardStep.hidden = false;
