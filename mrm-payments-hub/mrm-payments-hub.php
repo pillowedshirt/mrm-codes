@@ -3771,17 +3771,89 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   mrm_prepare_payment_intent_metadata_for_stripe(
     $metadata
   ) {
-    $metadata = is_array($metadata) ? $metadata : array();
+    $metadata =
+      is_array($metadata)
+        ? $metadata
+        : array();
 
     /*
-     * mrm_tax_cents is the authoritative current tax field.
-     *
-     * mrm_addon_tax_cents exists only for compatibility with
-     * older local order readers. Keep it in the WordPress
-     * order metadata, but do not spend a Stripe Payment Intent
-     * metadata position on the duplicate value.
+     * These fields remain in the local WordPress order but do
+     * not need separate Stripe Payment Intent metadata slots.
      */
-    unset($metadata['mrm_addon_tax_cents']);
+
+    /*
+     * mrm_tax_cents is authoritative.
+     *
+     * mrm_addon_tax_cents remains only as a local compatibility
+     * value for older WordPress order readers.
+     */
+    unset(
+      $metadata[
+        'mrm_addon_tax_cents'
+      ]
+    );
+
+    $product_type =
+      sanitize_key(
+        (string)(
+          $metadata[
+            'mrm_product_type'
+          ] ?? ''
+        )
+      );
+
+    $order_id =
+      absint(
+        $metadata[
+          'mrm_order_id'
+        ] ?? 0
+      );
+
+    /*
+     * Local lesson and sheet-music checkouts have a complete
+     * metadata_json record stored in WordPress.
+     *
+     * Remove display-only, compatibility, and duplicated fields
+     * from the Stripe-specific copy. The local order retains
+     * every one of these values.
+     *
+     * External taxed Payment Intents without mrm_order_id are
+     * excluded from this reduction because they may rely on
+     * their Payment Intent metadata as the primary record.
+     */
+    $is_local_order_checkout = (
+      $order_id > 0 &&
+      in_array(
+        $product_type,
+        array(
+          'lesson',
+          'sheet_music',
+        ),
+        true
+      )
+    );
+
+    if ($is_local_order_checkout) {
+      $local_only_keys =
+        array(
+          'mrm_tax_policy_message',
+          'mrm_tax_rollout_mode',
+          'mrm_tax_calculation_requested',
+          'mrm_tax_policy_reason',
+        );
+
+      if (array_key_exists('mrm_tax_state', $metadata)) {
+        $local_only_keys[] = 'mrm_customer_state';
+      }
+
+      if (array_key_exists('mrm_tax_country', $metadata)) {
+        $local_only_keys[] = 'mrm_customer_country';
+      }
+
+      foreach ($local_only_keys as $local_only_key) {
+        unset($metadata[$local_only_key]);
+      }
+    }
 
     /*
      * These keys can be added after Payment Intent creation.
@@ -3797,7 +3869,6 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
      */
     $future_metadata_keys = array('mrm_tax_transaction_id');
 
-    $product_type = sanitize_key((string)($metadata['mrm_product_type'] ?? ''));
     $source_flow = sanitize_key((string)($metadata['mrm_terms_source_flow'] ?? ''));
 
     if ($product_type === 'sheet_music' && $source_flow === 'piece_product_purchase') {
@@ -6410,7 +6481,11 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
   private function mrm_tax_sync_payment_intent_ledger($payment_intent, $attempt = 0) {
     if (!is_array($payment_intent)) return new WP_Error('invalid_payment_intent', 'Invalid PaymentIntent.'); $pi_id = sanitize_text_field($payment_intent['id'] ?? ''); if ($pi_id === '') return new WP_Error('missing_payment_intent_id', 'Missing PaymentIntent ID.');
-    $metadata = is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : array(); $customer_state_from_meta = $this->mrm_normalize_state_code($metadata['mrm_customer_state'] ?? '');
+    $metadata = is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : array();
+    $metadata_state = $this->mrm_normalize_state_code($metadata['mrm_tax_state'] ?? ($metadata['mrm_customer_state'] ?? ''));
+    $metadata_country = strtoupper(sanitize_text_field((string)($metadata['mrm_tax_country'] ?? ($metadata['mrm_customer_country'] ?? 'US'))));
+    if ($metadata_country === '') $metadata_country = 'US';
+    $customer_state_from_meta = $metadata_state;
     $committed = $this->mrm_tax_commit_payment_intent_transaction($payment_intent);
     if (is_wp_error($committed)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The stable Stripe Tax Transaction could not be committed: ' . $committed->get_error_message());
     $payment_intent = is_array($committed['payment_intent'] ?? null) ? $committed['payment_intent'] : $payment_intent;
@@ -6425,8 +6500,10 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $reversal_transaction_ids = array_values(array_unique(array_filter(array_map('sanitize_text_field', (array)($parsed['reversal_transaction_ids'] ?? array())))));
     $refunds_by_original_line = $this->mrm_tax_net_reversals_by_original_line($parsed['original_transaction_id'], $original_lines, $reversal_transaction_ids); if (is_wp_error($refunds_by_original_line)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The Stripe Tax refund-reversal chain could not be reconciled: ' . $refunds_by_original_line->get_error_message());
     $transaction_address = is_array($transaction['customer_details']['address'] ?? null) ? $transaction['customer_details']['address'] : array();
-    $fallback_state = $this->mrm_normalize_state_code($transaction_address['state'] ?? $metadata['mrm_customer_state'] ?? '');
-    $fallback_country = strtoupper(sanitize_text_field($transaction_address['country'] ?? $metadata['mrm_customer_country'] ?? 'US'));
+    $transaction_state = $this->mrm_normalize_state_code($transaction_address['state'] ?? '');
+    $fallback_state = $transaction_state !== '' ? $transaction_state : $metadata_state;
+    $transaction_country = strtoupper(sanitize_text_field((string)($transaction_address['country'] ?? '')));
+    $fallback_country = $transaction_country !== '' ? $transaction_country : $metadata_country;
     $calculation_lines = $this->mrm_tax_decode_line_items_metadata($metadata['mrm_tax_lines_json'] ?? '');
     $calculation_by_reference=array(); foreach($calculation_lines as $calculation_line){ if(!is_array($calculation_line)) continue; $calculation_reference=sanitize_key($calculation_line['reference'] ?? ''); if($calculation_reference==='') continue; if(isset($calculation_by_reference[$calculation_reference])) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id,$attempt,$fallback_state,'The saved Stripe Tax calculation contains duplicate line references.'); $calculation_by_reference[$calculation_reference]=$calculation_line; }
     $ledger_write_errors=array(); $states_written=array(); $transaction_states_counted=array(); $index=0;
@@ -15108,10 +15185,14 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       'metadata[mrm_lesson_mode]' => $is_online ? 'Online' : 'In Person',
       'metadata[mrm_instructor_id]' => (string)$tax_context['instructor_id'],
       'metadata[mrm_product_type]' => sanitize_key($product_type),
-      'metadata[mrm_tax_code]' => sanitize_text_field($first_profile['tax_code'] ?? ''),
-      'metadata[mrm_threshold_category]' => sanitize_key($first_profile['threshold_category'] ?? 'other'),
-      'metadata[mrm_customer_state]' => (string)($address['state'] ?? ''),
-      'metadata[mrm_customer_country]' => (string)($address['country'] ?? 'US'),
+      'metadata[mrm_tax_state]' => (string)($address['state'] ?? ''),
+      'metadata[mrm_tax_country]' => (string)($address['country'] ?? 'US'),
+      'metadata[mrm_customer_state]' => '',
+      'metadata[mrm_customer_country]' => '',
+      'metadata[mrm_tax_policy_message]' => '',
+      'metadata[mrm_tax_rollout_mode]' => '',
+      'metadata[mrm_tax_calculation_requested]' => '',
+      'metadata[mrm_tax_policy_reason]' => '',
     );
     $pi = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($pi_id), $update_params);
     if (is_wp_error($pi)) {
