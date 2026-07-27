@@ -4169,22 +4169,23 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   ) {
     $email = strtolower(sanitize_email((string)$email));
 
+    $empty_result = array(
+      'has_access' => false,
+      'status' => '',
+      'subscription_id' => '',
+      'reason' => '',
+      'cancel_at_period_end' => false,
+      'current_period_end' => 0,
+    );
+
     if (!$email || !is_email($email)) {
-      return array(
-        'has_access' => false,
-        'status' => '',
-        'subscription_id' => '',
-        'reason' => 'invalid_email',
-      );
+      $empty_result['reason'] = 'invalid_email';
+      return $empty_result;
     }
 
     if ($this->mrm_sheet_music_email_is_blocked($email)) {
-      return array(
-        'has_access' => false,
-        'status' => '',
-        'subscription_id' => '',
-        'reason' => 'blocked_email',
-      );
+      $empty_result['reason'] = 'blocked_email';
+      return $empty_result;
     }
 
     /* Search every Stripe Customer matching the email. */
@@ -4202,21 +4203,13 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
         );
       }
 
-      return array(
-        'has_access' => false,
-        'status' => '',
-        'subscription_id' => '',
-        'reason' => 'customer_lookup_failed',
-      );
+      $empty_result['reason'] = 'customer_lookup_failed';
+      return $empty_result;
     }
 
     if (empty($customers)) {
-      return array(
-        'has_access' => false,
-        'status' => '',
-        'subscription_id' => '',
-        'reason' => 'no_customer',
-      );
+      $empty_result['reason'] = 'no_customer';
+      return $empty_result;
     }
 
     $now_ts = time();
@@ -4253,8 +4246,8 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
         $subscription_id = sanitize_text_field((string)($subscription['id'] ?? ''));
         $cancel_at_period_end = !empty($subscription['cancel_at_period_end']);
         $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
-        $current_period_end = (int)($period_bounds['end'] ?? 0);
-        $created = (int)($subscription['created'] ?? 0);
+        $current_period_end = max(0, (int)($period_bounds['end'] ?? 0));
+        $created = max(0, (int)($subscription['created'] ?? 0));
 
         if ($latest_managed_subscription === null || $created > $latest_managed_created) {
           $latest_managed_subscription = $subscription;
@@ -4267,6 +4260,8 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
             'status' => $status,
             'subscription_id' => $subscription_id,
             'reason' => 'stripe_active',
+            'cancel_at_period_end' => false,
+            'current_period_end' => $current_period_end,
           );
         }
 
@@ -4276,35 +4271,32 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
             'status' => $status,
             'subscription_id' => $subscription_id,
             'reason' => 'paid_through_canceled',
+            'cancel_at_period_end' => $cancel_at_period_end,
+            'current_period_end' => $current_period_end,
           );
         }
       }
     }
 
     if ($lookup_failed) {
-      return array(
-        'has_access' => false,
-        'status' => '',
-        'subscription_id' => '',
-        'reason' => 'subscription_lookup_failed',
-      );
+      $empty_result['reason'] = 'subscription_lookup_failed';
+      return $empty_result;
     }
 
     if (is_array($latest_managed_subscription)) {
+      $latest_period_bounds = $this->mrm_stripe_subscription_period_bounds($latest_managed_subscription);
       return array(
         'has_access' => false,
         'status' => sanitize_key((string)($latest_managed_subscription['status'] ?? '')),
         'subscription_id' => sanitize_text_field((string)($latest_managed_subscription['id'] ?? '')),
         'reason' => 'stripe_not_active',
+        'cancel_at_period_end' => !empty($latest_managed_subscription['cancel_at_period_end']),
+        'current_period_end' => max(0, (int)($latest_period_bounds['end'] ?? 0)),
       );
     }
 
-    return array(
-      'has_access' => false,
-      'status' => '',
-      'subscription_id' => '',
-      'reason' => 'no_managed_subscriptions',
-    );
+    $empty_result['reason'] = 'no_managed_subscriptions';
+    return $empty_result;
   }
 
   private function mrm_validate_sheet_music_subscription_purchase_acknowledgement($email, $context = array()) {
@@ -4341,6 +4333,64 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       'subscription_id' => sanitize_text_field((string)($subscription_status['subscription_id'] ?? '')),
       'subscription_reason' => sanitize_key((string)($subscription_status['reason'] ?? '')),
     );
+  }
+
+  private function mrm_persist_sheet_music_subscription_purchase_acknowledgement($order, $payment_intent, $subscription_purchase_check) {
+    global $wpdb;
+
+    $subscription_purchase_check = is_array($subscription_purchase_check) ? $subscription_purchase_check : array();
+    if (empty($subscription_purchase_check['active_subscription']) || empty($subscription_purchase_check['acknowledged'])) return true;
+
+    if (!is_array($order) || empty($order['id']) || !is_array($payment_intent)) {
+      return new WP_Error('sheet_music_subscription_ack_persist_failed', 'The subscription purchase acknowledgement could not be attached to the payment order.');
+    }
+
+    $order_id = absint($order['id']);
+    $payment_intent_id = sanitize_text_field((string)($payment_intent['id'] ?? ''));
+    $subscription_id = sanitize_text_field((string)($subscription_purchase_check['subscription_id'] ?? ''));
+    if ($order_id <= 0 || $payment_intent_id === '' || strpos($payment_intent_id, 'pi_') !== 0 || $subscription_id === '') {
+      return new WP_Error('sheet_music_subscription_ack_persist_failed', 'The subscription purchase acknowledgement is missing its order, payment, or subscription reference.');
+    }
+
+    $order_metadata = $this->mrm_get_order_meta_array($order);
+    $payment_metadata = isset($payment_intent['metadata']) && is_array($payment_intent['metadata']) ? $payment_intent['metadata'] : array();
+    $acknowledged_at = sanitize_text_field((string)($order_metadata['mrm_sub_purchase_ack_at'] ?? $payment_metadata['mrm_sub_purchase_ack_at'] ?? ''));
+    if ($acknowledged_at === '') $acknowledged_at = gmdate('Y-m-d\TH:i:s\Z');
+
+    $order_needs_update = strtolower((string)($order_metadata['mrm_sub_purchase_ack'] ?? 'no')) !== 'yes'
+      || !hash_equals(sanitize_text_field((string)($order_metadata['mrm_sub_purchase_id'] ?? '')), $subscription_id)
+      || sanitize_text_field((string)($order_metadata['mrm_sub_purchase_ack_at'] ?? '')) === '';
+    if ($order_needs_update) {
+      $order_metadata['mrm_sub_purchase_ack'] = 'yes';
+      $order_metadata['mrm_sub_purchase_id'] = $subscription_id;
+      $order_metadata['mrm_sub_purchase_ack_at'] = $acknowledged_at;
+      $encoded_metadata = wp_json_encode($order_metadata);
+      if (!is_string($encoded_metadata) || $encoded_metadata === '') {
+        return new WP_Error('sheet_music_subscription_ack_persist_failed', 'The subscription purchase acknowledgement could not be encoded for the order.');
+      }
+      $updated = $wpdb->update($this->table_orders(), array('metadata_json'=>$encoded_metadata, 'updated_at'=>current_time('mysql')), array('id'=>$order_id), array('%s','%s'), array('%d'));
+      if ($updated === false) {
+        return new WP_Error('sheet_music_subscription_ack_persist_failed', 'The subscription purchase acknowledgement could not be saved to the order.', array('order_id'=>$order_id, 'database_error'=>(string)$wpdb->last_error));
+      }
+    }
+
+    $payment_needs_update = strtolower((string)($payment_metadata['mrm_sub_purchase_ack'] ?? 'no')) !== 'yes'
+      || !hash_equals(sanitize_text_field((string)($payment_metadata['mrm_sub_purchase_id'] ?? '')), $subscription_id)
+      || sanitize_text_field((string)($payment_metadata['mrm_sub_purchase_ack_at'] ?? '')) === '';
+    if ($payment_needs_update) {
+      $updated_payment_intent = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($payment_intent_id), array(
+        'metadata[mrm_sub_purchase_ack]' => 'yes',
+        'metadata[mrm_sub_purchase_id]' => $subscription_id,
+        'metadata[mrm_sub_purchase_ack_at]' => $acknowledged_at,
+      ));
+      if (is_wp_error($updated_payment_intent)) {
+        return new WP_Error('sheet_music_subscription_ack_persist_failed', 'The subscription purchase acknowledgement could not be saved to the secure payment record. No payment has been submitted.', array(
+          'order_id'=>$order_id, 'payment_intent_id'=>$payment_intent_id,
+          'stripe_error_code'=>sanitize_key((string)$updated_payment_intent->get_error_code()),
+        ));
+      }
+    }
+    return true;
   }
 
   private function stripe_create_billing_portal_session($customer_id, $return_url) {
@@ -7086,7 +7136,6 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
         'active_subscription' => !empty($error_data['active_subscription']),
         'subscription_status' => sanitize_key((string)($error_data['subscription_status'] ?? '')),
-        'subscription_id' => sanitize_text_field((string)($error_data['subscription_id'] ?? '')),
       ),
       $status
     );
@@ -13416,7 +13465,6 @@ private function charge_and_unlock_autopay($data) {
       'notice_required' => $notice_required,
       'active_subscription' => $notice_required,
       'subscription_status' => sanitize_key((string)($subscription_status['status'] ?? '')),
-      'subscription_id' => sanitize_text_field((string)($subscription_status['subscription_id'] ?? '')),
       'message' => $notice_required ? 'We notice you currently have an active subscription to access all the pieces in our catalog. Are you sure you want to make this purchase?' : '',
     ), 200);
   }
@@ -13496,6 +13544,17 @@ private function charge_and_unlock_autopay($data) {
 
     $order_metadata = $this->mrm_get_order_meta_array($order);
     $payment_metadata = isset($payment_intent['metadata']) && is_array($payment_intent['metadata']) ? $payment_intent['metadata'] : array();
+    $acknowledgement_result = $this->mrm_persist_sheet_music_subscription_purchase_acknowledgement($order, $payment_intent, $subscription_purchase_check);
+    if (is_wp_error($acknowledgement_result)) return $this->mrm_checkout_wp_error_response($acknowledgement_result, 503);
+
+    /* Reload the local acknowledgement snapshot after persistence. */
+    if (!empty($subscription_purchase_check['active_subscription']) && !empty($subscription_purchase_check['acknowledged'])) {
+      $fresh_order = $this->get_order(absint($order['id']));
+      if (is_array($fresh_order)) {
+        $order = $fresh_order;
+        $order_metadata = $this->mrm_get_order_meta_array($order);
+      }
+    }
     $stored_request_id = $this->mrm_sanitize_checkout_request_id($order_metadata['mrm_checkout_request_id'] ?? '');
     $payment_request_id = $this->mrm_sanitize_checkout_request_id($payment_metadata['mrm_checkout_request_id'] ?? '');
     $payment_sku = $this->sanitize_sku((string)($payment_metadata['mrm_sku'] ?? ''));
@@ -13891,9 +13950,10 @@ private function charge_and_unlock_autopay($data) {
     if ( $source_flow !== '' ) {
       $metadata['mrm_terms_source_flow'] = $source_flow;
     }
-    if (!empty($subscription_purchase_check['active_subscription'])) {
+    if (!empty($subscription_purchase_check['active_subscription']) && !empty($subscription_purchase_check['acknowledged'])) {
       $metadata['mrm_sub_purchase_ack'] = 'yes';
       $metadata['mrm_sub_purchase_id'] = sanitize_text_field((string)($subscription_purchase_check['subscription_id'] ?? ''));
+      $metadata['mrm_sub_purchase_ack_at'] = gmdate('Y-m-d\TH:i:s\Z');
     }
     $metadata['mrm_sheet_music_addon'] = $addon_selected ? 'yes' : 'no';
     $metadata['mrm_original_base_amount_cents'] = (string)$original_base_amount_cents;
