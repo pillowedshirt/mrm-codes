@@ -3050,6 +3050,12 @@ async function getOfferSkuCandidates(offerEl) {
 
       clearTimeout(loadTimer);
       clearTimeout(taxPreviewTimer);
+      subscriptionStatusLookupSeq += 1;
+      if (subscriptionStatusAbortController) {
+        try { subscriptionStatusAbortController.abort(); } catch (error) {}
+        subscriptionStatusAbortController = null;
+      }
+      subscriptionStatusLookupInFlight = false;
       taxPreviewSeq += 1;
       if (taxPreviewAbortController) {
         try { taxPreviewAbortController.abort(); } catch (error) {}
@@ -3121,6 +3127,8 @@ async function getOfferSkuCandidates(offerEl) {
     let paymentIntentSeq = 0;
     let paymentIntentInFlight = false;
     let subscriptionStatusLookupInFlight = false;
+    let subscriptionStatusLookupSeq = 0;
+    let subscriptionStatusAbortController = null;
     let checkoutRequestStateKey = '';
     let checkoutRequestId = '';
 
@@ -3603,16 +3611,43 @@ async function getOfferSkuCandidates(offerEl) {
           return;
         }
 
+        const subscriptionLookupSeq = ++subscriptionStatusLookupSeq;
+        const subscriptionLookupEmail = String(email || '').trim().toLowerCase();
+        const subscriptionLookupSku = String(pendingSku || '').trim().toLowerCase();
+        if (subscriptionStatusAbortController) {
+          try { subscriptionStatusAbortController.abort(); } catch (error) {}
+        }
+        subscriptionStatusAbortController = new AbortController();
+        const subscriptionStatusSignal = subscriptionStatusAbortController.signal;
         subscriptionStatusLookupInFlight = true;
         continueToPaymentBtn.disabled = true;
         continueToPaymentBtn.textContent = 'Checking subscription...';
         let subscriptionStatus = null;
         try {
-          subscriptionStatus = await mrmGetSheetMusicPurchaseSubscriptionStatus(email, pendingSku);
+          subscriptionStatus = await mrmGetSheetMusicPurchaseSubscriptionStatus(subscriptionLookupEmail, subscriptionLookupSku, subscriptionStatusSignal);
         } catch (error) {
+          if (error && error.name === 'AbortError') {
+            if (subscriptionLookupSeq === subscriptionStatusLookupSeq) {
+              subscriptionStatusLookupInFlight = false;
+              subscriptionStatusAbortController = null;
+              setContinueButtonIdle();
+            }
+            return;
+          }
           subscriptionStatus = {ok:false, message:'We could not verify current sheet-music subscription access. No payment has been submitted. Please try again.'};
         }
+        const currentLookupEmail = String(emailInput && emailInput.value ? emailInput.value : '').trim().toLowerCase();
+        const currentLookupSku = String(pendingSku || '').trim().toLowerCase();
+        if (!isCurrentPaymentModal() || subscriptionStatusSignal.aborted || subscriptionLookupSeq !== subscriptionStatusLookupSeq || currentLookupEmail !== subscriptionLookupEmail || currentLookupSku !== subscriptionLookupSku) {
+          if (subscriptionLookupSeq === subscriptionStatusLookupSeq) {
+            subscriptionStatusLookupInFlight = false;
+            subscriptionStatusAbortController = null;
+            setContinueButtonIdle();
+          }
+          return;
+        }
         subscriptionStatusLookupInFlight = false;
+        subscriptionStatusAbortController = null;
         if (!subscriptionStatus || !subscriptionStatus.ok) {
           errorEl.textContent = subscriptionStatus && subscriptionStatus.message ? subscriptionStatus.message : 'We could not verify current sheet-music subscription access. No payment has been submitted. Please try again.';
           setContinueButtonIdle();
@@ -3644,6 +3679,21 @@ async function getOfferSkuCandidates(offerEl) {
         continueToPaymentBtn.textContent = 'Loading payment...';
         scheduleLoad();
       };
+    }
+
+    if (emailInput) {
+      const invalidateSubscriptionLookup = function() {
+        if (!subscriptionStatusLookupInFlight) return;
+        subscriptionStatusLookupSeq += 1;
+        if (subscriptionStatusAbortController) {
+          try { subscriptionStatusAbortController.abort(); } catch (error) {}
+          subscriptionStatusAbortController = null;
+        }
+        subscriptionStatusLookupInFlight = false;
+        if (isCurrentPaymentModal() && !mrmPiecePaymentStepRequested) setContinueButtonIdle();
+      };
+      emailInput.addEventListener('input', invalidateSubscriptionLookup, {signal: modalEventSignal});
+      emailInput.addEventListener('change', invalidateSubscriptionLookup, {signal: modalEventSignal});
     }
 
     [emailInput, postalInput, stateInput, line1Input, cityInput, countrySelect].forEach(function(element) {
@@ -3680,10 +3730,11 @@ async function getOfferSkuCandidates(offerEl) {
   }
 
 
-  async function mrmGetSheetMusicPurchaseSubscriptionStatus(email, sku) {
+  async function mrmGetSheetMusicPurchaseSubscriptionStatus(email, sku, signal = null) {
     const response = await fetch('/wp-json/mrm-pay/v1/sheet-music-purchase-subscription-status', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
+      signal: signal || undefined,
       body: JSON.stringify({email: String(email || '').trim(), sku: String(sku || '').trim()}),
     });
     let data = {};
