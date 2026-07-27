@@ -2198,6 +2198,7 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   let mrmPieceActiveOfferEl=null;
   let mrmPiecePaymentStepRequested = false;
   let mrmPieceHandleFundamentalsAlreadyOwned = null;
+  let mrmPieceHandleCheckoutRecovery = null;
   let mrmPieceSubscriptionPurchaseAcknowledgementKey = '';
 
   function mrmPieceSubscriptionPurchaseKey(email, sku) {
@@ -3157,6 +3158,7 @@ async function getOfferSkuCandidates(offerEl) {
       mrmClearPendingPiecePaymentIdentity();
       mrmPieceSchedulePaymentLoad = null;
       mrmPieceHandleFundamentalsAlreadyOwned = null;
+      mrmPieceHandleCheckoutRecovery = null;
       mrmPieceClearSubscriptionPurchaseAcknowledgement();
       mrmPieceFundamentalsAddonOffer=null; mrmPieceFundamentalsAddonSelected=false; mrmPieceActiveOfferEl=null;
       errorEl.textContent = '';
@@ -3251,6 +3253,64 @@ async function getOfferSkuCandidates(offerEl) {
       continueToPaymentBtn.disabled = false;
       continueToPaymentBtn.textContent = 'Continue to Payment';
     };
+
+    const handlePieceCheckoutRecovery = function(data) {
+      const code = String(data && data.code ? data.code : '');
+
+      if (
+        code !== 'already_purchased_piece_product' &&
+        code !== 'sheet_music_email_blocked'
+      ) {
+        return false;
+      }
+
+      const isBlockedEmail = code === 'sheet_music_email_blocked';
+      const message = data && data.message
+        ? String(data.message)
+        : (
+          isBlockedEmail
+            ? 'This email is currently restricted from purchasing or accessing sheet music. No payment has been submitted.'
+            : 'This email already has access to this product. No payment has been submitted.'
+        );
+
+      /* Invalidate outstanding payment or tax work for the obsolete session. */
+      clearTimeout(loadTimer);
+      taxPreviewSeq += 1;
+      if (taxPreviewAbortController) {
+        try { taxPreviewAbortController.abort(); } catch (error) {}
+        taxPreviewAbortController = null;
+      }
+      invalidatePaymentIntentRequest();
+
+      /* Remove every frontend reference to the obsolete Payment Intent. */
+      mrmClearPendingPiecePaymentIdentity();
+      if (activePaymentElement) {
+        try { activePaymentElement.unmount(); } catch (error) {}
+      }
+      activePaymentElement = null;
+      activeStripeElements = null;
+      if (paymentMount) paymentMount.innerHTML = '';
+
+      /* A new email address requires a new subscriber acknowledgement. */
+      mrmPieceClearSubscriptionPurchaseAcknowledgement();
+
+      mrmPiecePaymentStepRequested = false;
+      if (cardStep) cardStep.hidden = true;
+      if (detailsStep) detailsStep.hidden = false;
+      const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
+      if (modalBody) modalBody.scrollTop = 0;
+
+      /* Show the recovery message on the now-visible details step. */
+      if (errorEl) errorEl.textContent = '';
+      if (detailsErrorEl) detailsErrorEl.textContent = message;
+
+      /* Keep the obsolete submit button disabled while allowing a new attempt. */
+      if (payBtn) payBtn.disabled = true;
+      setContinueButtonIdle();
+      return true;
+    };
+
+    mrmPieceHandleCheckoutRecovery = handlePieceCheckoutRecovery;
 
     const getPaymentIntentRequestKey = function() {
       const currentEmail = String(emailInput && emailInput.value ? emailInput.value : '').trim().toLowerCase();
@@ -4672,54 +4732,16 @@ async function getOfferSkuCandidates(offerEl) {
               return;
             }
 
-            if (preconfirm && preconfirm.code === 'already_purchased_piece_product') {
-              const ownershipMessage = preconfirm.message || 'This email already has access to this product. No payment has been submitted.';
-              mrmClearPendingPiecePaymentIdentity();
-              if (activePaymentElement) {
-                try { activePaymentElement.unmount(); } catch (error) {}
-              }
-              activePaymentElement = null;
-              activeStripeElements = null;
-              const paymentElementMount = document.getElementById('mrm-payment-element');
-              if (paymentElementMount) paymentElementMount.innerHTML = '';
-              mrmPiecePaymentStepRequested = false;
-              if (cardStep) cardStep.hidden = true;
-              if (detailsStep) detailsStep.hidden = false;
-              const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
-              if (modalBody) modalBody.scrollTop = 0;
-              errorEl.textContent = '';
-              if (detailsErrorEl) detailsErrorEl.textContent = ownershipMessage;
-              setContinueButtonIdle();
-              return;
-            }
-
-            if (preconfirm && preconfirm.code === 'sheet_music_email_blocked') {
-              const blockedMessage = preconfirm.message || 'This email is currently restricted from purchasing or accessing sheet music. No payment has been submitted.';
-
-              /* The backend canceled the obsolete Payment Intent. */
-              mrmClearPendingPiecePaymentIdentity();
-              if (activePaymentElement) {
-                try { activePaymentElement.unmount(); } catch (error) {}
-              }
-              activePaymentElement = null;
-              activeStripeElements = null;
-              const paymentElementMount = document.getElementById('mrm-payment-element');
-              if (paymentElementMount) paymentElementMount.innerHTML = '';
-
-              mrmPieceClearSubscriptionPurchaseAcknowledgement();
-
-              /* Return to checkout details so the customer can change the email. */
-              mrmPiecePaymentStepRequested = false;
-              if (cardStep) cardStep.hidden = true;
-              if (detailsStep) detailsStep.hidden = false;
-              const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
-              if (modalBody) modalBody.scrollTop = 0;
-
-              errorEl.textContent = '';
-              if (detailsErrorEl) detailsErrorEl.textContent = blockedMessage;
-              setContinueButtonIdle();
-              this.disabled = true;
-              return;
+            if (
+              preconfirm &&
+              (
+                preconfirm.code === 'already_purchased_piece_product' ||
+                preconfirm.code === 'sheet_music_email_blocked'
+              ) &&
+              typeof mrmPieceHandleCheckoutRecovery === 'function'
+            ) {
+              const recovered = mrmPieceHandleCheckoutRecovery(preconfirm);
+              if (recovered) return;
             }
 
             errorEl.textContent = preconfirm && preconfirm.message
