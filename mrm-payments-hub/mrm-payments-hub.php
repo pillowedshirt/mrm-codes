@@ -3331,7 +3331,10 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     }
 
     /* An active all-sheet-music subscription includes this packet. */
-    $subscription_status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email);
+    $subscription_status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email, true);
+    if (is_wp_error($subscription_status)) {
+      return $subscription_status;
+    }
     if (is_array($subscription_status) && !empty($subscription_status['has_access'])) {
       return array(
         'owned' => true,
@@ -3441,6 +3444,9 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
     $email=sanitize_email($email);
     if ($email && is_email($email)) {
       $ownership = $this->mrm_get_authoritative_fundamentals_ownership_match($email, (string)$offer['sku']);
+      if (is_wp_error($ownership)) {
+        return $ownership;
+      }
       if (!empty($ownership['owned'])) {
         return new WP_Error(
           'fundamentals_addon_already_owned',
@@ -3824,6 +3830,53 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     return $this->stripe_api_request('GET', '/v1/payment_intents/' . rawurlencode((string)$pi_id));
   }
 
+  private function mrm_cancel_pending_piece_checkout($order, $payment_intent, $reason) {
+    if (!is_array($order) || empty($order['id']) || !is_array($payment_intent)) {
+      return new WP_Error('piece_checkout_cancel_failed', 'The obsolete payment session could not be invalidated safely.');
+    }
+    $payment_intent_id = sanitize_text_field((string)($payment_intent['id'] ?? ''));
+    $status = sanitize_key((string)($payment_intent['status'] ?? ''));
+    if ($payment_intent_id === '') {
+      return new WP_Error('piece_checkout_cancel_failed', 'The obsolete payment session does not contain a valid Payment Intent ID.');
+    }
+    if ($status === 'succeeded') {
+      return new WP_Error('checkout_request_already_completed', 'This checkout request has already been paid.');
+    }
+    $status_metadata = array(
+      'mrm_checkout_invalidated_reason' => sanitize_key((string)$reason),
+      'mrm_checkout_invalidated_at' => current_time('mysql'),
+    );
+    if ($status === 'canceled') {
+      $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', $status_metadata);
+      return true;
+    }
+    $canceled = $this->stripe_api_request(
+      'POST',
+      '/v1/payment_intents/' . rawurlencode($payment_intent_id) . '/cancel',
+      array('cancellation_reason' => 'abandoned')
+    );
+    if (is_wp_error($canceled)) {
+      $this->stripe_debug_log('Obsolete sheet-music Payment Intent cancellation failed.', array(
+        'order_id' => absint($order['id']),
+        'payment_intent_id' => $payment_intent_id,
+        'reason' => sanitize_key((string)$reason),
+        'message' => $canceled->get_error_message(),
+      ));
+      return new WP_Error(
+        'piece_checkout_cancel_failed',
+        'Existing access was detected, but the old payment session could not be invalidated safely. No payment has been submitted. Please close checkout and try again.',
+        array('payment_intent_id' => $payment_intent_id)
+      );
+    }
+    $this->update_order_status_from_pi(
+      $payment_intent_id,
+      'canceled',
+      sanitize_key((string)($canceled['status'] ?? 'canceled')),
+      $status_metadata
+    );
+    return true;
+  }
+
   private function stripe_retrieve_charge($charge_id) {
     $charge_id = sanitize_text_field((string)$charge_id);
 
@@ -4060,7 +4113,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     return $subscriptions;
   }
 
-  private function mrm_get_sheet_music_subscription_access_status_by_email($email) {
+  private function mrm_get_sheet_music_subscription_access_status_by_email($email, $fail_closed = false) {
     $email = sanitize_email((string)$email);
 
     if (!$email || !is_email($email)) {
@@ -4083,25 +4136,52 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     }
 
     $customer = $this->stripe_find_customer_by_email($email);
-    if (is_wp_error($customer) || empty($customer['id'])) {
-      $result = array(
+    if (is_wp_error($customer)) {
+      if ($customer->get_error_code() === 'customer_not_found') {
+        return array(
+          'has_access' => false, 'status' => '', 'subscription_id' => '', 'reason' => 'no_customer',
+        );
+      }
+      if ($fail_closed) {
+        return new WP_Error(
+          'sheet_music_subscription_lookup_failed',
+          'We could not verify existing sheet-music subscription access. No payment has been submitted. Please try again in a moment.',
+          array('lookup_stage' => 'customer', 'stripe_error_code' => sanitize_key((string)$customer->get_error_code()))
+        );
+      }
+      return array(
+        'has_access' => false, 'status' => '', 'subscription_id' => '', 'reason' => 'customer_lookup_failed',
+      );
+    }
+    if (empty($customer['id'])) {
+      return array(
         'has_access' => false,
         'status' => '',
         'subscription_id' => '',
         'reason' => 'no_customer',
       );
-      return $result;
     }
 
     $subscriptions = $this->stripe_list_customer_subscriptions($customer['id']);
-    if (is_wp_error($subscriptions) || empty($subscriptions['data']) || !is_array($subscriptions['data'])) {
-      $result = array(
+    if (is_wp_error($subscriptions)) {
+      if ($fail_closed) {
+        return new WP_Error(
+          'sheet_music_subscription_lookup_failed',
+          'We could not verify existing sheet-music subscription access. No payment has been submitted. Please try again in a moment.',
+          array('lookup_stage' => 'subscriptions', 'stripe_error_code' => sanitize_key((string)$subscriptions->get_error_code()))
+        );
+      }
+      return array(
+        'has_access' => false, 'status' => '', 'subscription_id' => '', 'reason' => 'subscription_lookup_failed',
+      );
+    }
+    if (empty($subscriptions['data']) || !is_array($subscriptions['data'])) {
+      return array(
         'has_access' => false,
         'status' => '',
         'subscription_id' => '',
         'reason' => 'no_subscriptions',
       );
-      return $result;
     }
 
     $now_ts = current_time('timestamp');
@@ -6761,6 +6841,10 @@ private function mrm_tax_retry_or_alert_payment_intent(
           $packet_sku
         );
 
+    if (is_wp_error($ownership)) {
+      return $ownership;
+    }
+
     if (empty($ownership['owned'])) {
       return true;
     }
@@ -6846,6 +6930,13 @@ private function mrm_tax_retry_or_alert_payment_intent(
       'fundamentals_addon_already_owned'
     ) {
       $status = 409;
+    }
+
+    if (in_array($error_code, array(
+      'sheet_music_subscription_lookup_failed',
+      'piece_checkout_cancel_failed',
+    ), true)) {
+      $status = 503;
     }
 
     return new WP_REST_Response(
@@ -9547,6 +9638,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
       $metadata['mrm_split_model'] = 'pct';
       $metadata['mrm_composer_pct'] = (string)$composer_pct;
+      $metadata['mrm_composer_account_id'] = sanitize_text_field((string)$this->composer_connected_account_id());
       $metadata['mrm_platform_pct'] = (string)(100 - $composer_pct);
     }
 
@@ -10065,7 +10157,11 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $composer_share = (int)round($composer_eligible_cents * ($composer_pct / 100));
       $platform_share = max(0, $composer_eligible_cents - $composer_share) + max(0, $addon_cents);
       $composer_payout_note='Centralized one-time sheet music composer payout'.($fundamentals_addon_cents>0?' including the Fundamental Packet add-on':'');
-      $composer_acct = $this->composer_connected_account_id();
+      $composer_acct = sanitize_text_field((string)($meta['mrm_composer_account_id'] ?? ''));
+      /* Backward compatibility for paid orders created before account capture. */
+      if ($composer_acct === '') {
+        $composer_acct = $this->composer_connected_account_id();
+      }
 
       if ($composer_share > 0) {
         $composer_row_id = $this->mrm_insert_payout_ledger_row(
@@ -12183,6 +12279,12 @@ private function charge_and_unlock_autopay($data) {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/preconfirm-piece-payment', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_preconfirm_piece_payment'),
+      'permission_callback' => '__return_true',
+    ));
+
     register_rest_route('mrm-pay/v1', '/update-tax', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_update_tax'),
@@ -13139,6 +13241,92 @@ private function charge_and_unlock_autopay($data) {
     ), 200);
   }
 
+  public function rest_preconfirm_piece_payment(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $payment_intent_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
+    $checkout_request_id = $this->mrm_sanitize_checkout_request_id($data['checkout_request_id'] ?? '');
+    $email = strtolower(sanitize_email((string)($data['email'] ?? '')));
+    $sku = $this->sanitize_sku((string)($data['sku'] ?? ''));
+    $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+    $terms_version = sanitize_text_field((string)($context['terms_version'] ?? ''));
+    $terms_accepted = !empty($context['terms_accepted']);
+    $source_flow = sanitize_key((string)($context['source_flow'] ?? 'piece_product_purchase'));
+
+    if ($payment_intent_id === '' || strpos($payment_intent_id, 'pi_') !== 0 || $checkout_request_id === '' || $email === '' || !is_email($email) || $sku === '') {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'piece_preconfirm_request_invalid', 'message'=>'The payment session is incomplete. Please close checkout and begin again.'), 400);
+    }
+    if (!$terms_accepted || $source_flow !== 'piece_product_purchase') {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'piece_preconfirm_terms_invalid', 'message'=>'Please review and accept the Terms of Service before payment.'), 409);
+    }
+
+    $order = $this->get_order_by_pi($payment_intent_id);
+    if (!is_array($order) || empty($order['id'])) {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'piece_preconfirm_order_missing', 'message'=>'The payment order could not be found. Please close checkout and begin again.'), 404);
+    }
+    if (sanitize_key((string)($order['product_type'] ?? '')) !== 'sheet_music') {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'piece_preconfirm_product_invalid', 'message'=>'This payment session is not a sheet-music purchase.'), 409);
+    }
+
+    $email_hash = $this->email_hash($email);
+    $incoming_state_fingerprint = $this->mrm_build_piece_checkout_state_fingerprint(
+      $checkout_request_id, $email_hash, $sku, $data, $context, $terms_version, $source_flow
+    );
+    $state_validation = $this->mrm_validate_existing_piece_checkout_state($order, $email_hash, $sku, $incoming_state_fingerprint);
+    if (is_wp_error($state_validation)) {
+      return $this->mrm_checkout_wp_error_response($state_validation, 409);
+    }
+
+    $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id);
+    if (is_wp_error($payment_intent)) {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'piece_preconfirm_stripe_failed', 'message'=>'We could not revalidate the secure payment session. No payment has been submitted. Please try again.'), 503);
+    }
+    $payment_status = sanitize_key((string)($payment_intent['status'] ?? ''));
+    if ($payment_status === 'succeeded') {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_request_already_completed', 'message'=>'This checkout request has already been paid.'), 409);
+    }
+    if ($payment_status === 'canceled') {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_payment_intent_unusable', 'message'=>'This payment session is no longer usable. Please close checkout and begin again.'), 409);
+    }
+    if (!in_array($payment_status, array('requires_payment_method', 'requires_confirmation', 'requires_action'), true)) {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'piece_preconfirm_status_invalid', 'message'=>'The payment session is not currently ready for confirmation.'), 409);
+    }
+
+    $order_metadata = $this->mrm_get_order_meta_array($order);
+    $payment_metadata = isset($payment_intent['metadata']) && is_array($payment_intent['metadata']) ? $payment_intent['metadata'] : array();
+    $stored_request_id = $this->mrm_sanitize_checkout_request_id($order_metadata['mrm_checkout_request_id'] ?? '');
+    $payment_request_id = $this->mrm_sanitize_checkout_request_id($payment_metadata['mrm_checkout_request_id'] ?? '');
+    $payment_sku = $this->sanitize_sku((string)($payment_metadata['mrm_sku'] ?? ''));
+    $payment_order_id = absint($payment_metadata['mrm_order_id'] ?? 0);
+    $order_total = max(0, (int)($order_metadata['mrm_total_cents'] ?? $order['amount_cents'] ?? 0));
+    $payment_total = max(0, (int)($payment_intent['amount'] ?? 0));
+    if ($stored_request_id === '' || $payment_request_id === '' || !hash_equals($stored_request_id, $checkout_request_id) || !hash_equals($payment_request_id, $checkout_request_id) || $payment_sku !== $sku || $payment_order_id !== absint($order['id']) || $order_total <= 0 || $payment_total !== $order_total) {
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'piece_preconfirm_snapshot_mismatch', 'message'=>'The payment amount or product details changed. Please close checkout and begin again.'), 409);
+    }
+
+    if ($this->mrm_email_already_has_piece_or_package_access($email, $sku)) {
+      $cancel_result = $this->mrm_cancel_pending_piece_checkout($order, $payment_intent, 'base_piece_already_owned');
+      if (is_wp_error($cancel_result)) return $this->mrm_checkout_wp_error_response($cancel_result, 503);
+      return new WP_REST_Response(array('ok'=>false, 'code'=>'already_purchased_piece_product', 'message'=>'This email already has access to this piece product. The obsolete payment session has been canceled.'), 409);
+    }
+
+    $ownership_validation = $this->mrm_validate_reused_fundamentals_ownership($order);
+    if (is_wp_error($ownership_validation)) {
+      if ($ownership_validation->get_error_code() === 'fundamentals_addon_already_owned') {
+        $cancel_result = $this->mrm_cancel_pending_piece_checkout($order, $payment_intent, 'fundamentals_addon_already_owned');
+        if (is_wp_error($cancel_result)) return $this->mrm_checkout_wp_error_response($cancel_result, 503);
+      }
+      return $this->mrm_checkout_wp_error_response($ownership_validation, 409);
+    }
+
+    return new WP_REST_Response(array(
+      'ok'=>true,
+      'payment_intent_id'=>$payment_intent_id,
+      'order_id'=>absint($order['id']),
+      'amount_cents'=>$payment_total,
+      'fundamentals_addon_selected'=>strtolower((string)($order_metadata['mrm_fundamentals_addon'] ?? 'no')) === 'yes',
+    ), 200);
+  }
+
   public function rest_create_payment_intent(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
     $exemption_check = $this->mrm_tax_reject_unsupported_exemption_claim($data);
@@ -13346,20 +13534,7 @@ private function charge_and_unlock_autopay($data) {
     $fundamentals_requested = isset($data['fundamentals_addon']) && strtolower((string)$data['fundamentals_addon']) === 'yes';
     $fundamentals_addon = $this->mrm_resolve_fundamentals_addon_selection($sku, $fundamentals_requested, $email);
     if (is_wp_error($fundamentals_addon)) {
-      $error_code = $fundamentals_addon->get_error_code();
-      $error_data = $fundamentals_addon->get_error_data();
-      $error_data = is_array($error_data) ? $error_data : array();
-
-      return new WP_REST_Response(
-        array(
-          'ok' => false,
-          'code' => $error_code,
-          'message' => $fundamentals_addon->get_error_message(),
-          'ownership_source' => sanitize_key((string)($error_data['ownership_source'] ?? '')),
-          'ownership_sku' => $this->sanitize_sku((string)($error_data['ownership_sku'] ?? '')),
-        ),
-        $error_code === 'fundamentals_addon_already_owned' ? 409 : 400
-      );
+      return $this->mrm_checkout_wp_error_response($fundamentals_addon, 400);
     }
     $fundamentals_selected = !empty($fundamentals_addon['selected']);
     $fundamentals_addon_amount_cents = $fundamentals_selected ? max(0,(int)($fundamentals_addon['offer_amount_cents']??0)) : 0;

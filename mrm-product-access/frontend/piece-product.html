@@ -2174,6 +2174,7 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   let mrmPieceFundamentalsAddonSelected=false;
   let mrmPieceActiveOfferEl=null;
   let mrmPiecePaymentStepRequested = false;
+  let mrmPieceHandleFundamentalsAlreadyOwned = null;
   let mrmPieceModalEventsController = null;
   let mrmPieceModalRunId = 0;
 
@@ -2196,7 +2197,7 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
   }
 
   function mrmResetPiecePaymentElement(message) {
-    pendingClientSecret = '';
+    mrmClearPendingPiecePaymentIdentity();
 
   if (activePaymentElement) {
     try { activePaymentElement.unmount(); } catch (e) {}
@@ -2454,7 +2455,16 @@ function mrmGetPiecePromoCodeInputValue() {
 
   let pendingClientSecret = '';
   let pendingOrderId = 0;
+  let pendingPaymentIntentId = '';
+  let pendingCheckoutRequestId = '';
   let pendingBreakdown = null;
+
+  function mrmClearPendingPiecePaymentIdentity() {
+    pendingClientSecret = '';
+    pendingOrderId = 0;
+    pendingPaymentIntentId = '';
+    pendingCheckoutRequestId = '';
+  }
 
   document.addEventListener('DOMContentLoaded', () => {
     const pk = (window.__mrmStripePk || '').trim();
@@ -2979,7 +2989,7 @@ async function getOfferSkuCandidates(offerEl) {
     if (countrySelect) countrySelect.value = 'US';
     if (termsCheck) termsCheck.checked = false;
 
-    pendingClientSecret = '';
+    mrmClearPendingPiecePaymentIdentity();
     if (activePaymentElement) {
       try { activePaymentElement.unmount(); } catch (e) {}
     }
@@ -3018,8 +3028,9 @@ async function getOfferSkuCandidates(offerEl) {
       activeStripeElements = null;
 
       pendingSku = '';
-      pendingClientSecret = '';
+      mrmClearPendingPiecePaymentIdentity();
       mrmPieceSchedulePaymentLoad = null;
+      mrmPieceHandleFundamentalsAlreadyOwned = null;
       mrmPieceFundamentalsAddonOffer=null; mrmPieceFundamentalsAddonSelected=false; mrmPieceActiveOfferEl=null;
       errorEl.textContent = '';
     };
@@ -3037,7 +3048,7 @@ async function getOfferSkuCandidates(offerEl) {
 
       activePaymentElement = null;
       activeStripeElements = null;
-      pendingClientSecret = '';
+      mrmClearPendingPiecePaymentIdentity();
 
       if (paymentMount) {
         paymentMount.innerHTML = '';
@@ -3093,7 +3104,7 @@ async function getOfferSkuCandidates(offerEl) {
 
       activePaymentElement = null;
       activeStripeElements = null;
-      pendingClientSecret = '';
+      mrmClearPendingPiecePaymentIdentity();
       payBtn.disabled = true;
 
       if (paymentMount) {
@@ -3295,6 +3306,8 @@ async function getOfferSkuCandidates(offerEl) {
       scheduleTaxPreview();
     };
 
+    mrmPieceHandleFundamentalsAlreadyOwned = handleFundamentalsAlreadyOwned;
+
     const scheduleLoad = () => {
       clearTimeout(loadTimer);
 
@@ -3453,6 +3466,9 @@ async function getOfferSkuCandidates(offerEl) {
           window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
 
           pendingClientSecret = data.client_secret || '';
+          pendingOrderId = Number(data.order_id || 0);
+          pendingPaymentIntentId = String(data.payment_intent_id || '');
+          pendingCheckoutRequestId = String(currentCheckoutRequestId || '');
 
           applyServerBreakdown(data);
 
@@ -3655,6 +3671,56 @@ async function getOfferSkuCandidates(offerEl) {
       // Reload only after Close is pressed (and after DOM updates apply)
       setTimeout(() => window.location.reload(), 0);
     };
+  }
+
+  async function mrmPreconfirmPiecePayment() {
+    const email = String(document.getElementById('mrm-payment-email')?.value || '').trim();
+    const address = {
+      line1: String(document.getElementById('mrm-billing-line1')?.value || '').trim(),
+      city: String(document.getElementById('mrm-billing-city')?.value || '').trim(),
+      state: String(document.getElementById('mrm-billing-state')?.value || '').trim(),
+      postal_code: String(document.getElementById('mrm-billing-postal')?.value || '').trim(),
+      country: String(document.getElementById('mrm-billing-country')?.value || 'US').trim(),
+    };
+
+    if (!pendingPaymentIntentId || !pendingCheckoutRequestId || !pendingSku) {
+      return {
+        ok: false,
+        code: 'piece_preconfirm_identity_missing',
+        message: 'The secure payment session is incomplete. Please close checkout and begin again.',
+      };
+    }
+
+    const response = await fetch('/wp-json/mrm-pay/v1/preconfirm-piece-payment', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        payment_intent_id: pendingPaymentIntentId,
+        checkout_request_id: pendingCheckoutRequestId,
+        sku: pendingSku,
+        email: email,
+        promo_code: mrmPieceAppliedPromoCode || mrmGetPiecePromoCodeInputValue() || '',
+        fundamentals_addon: mrmPieceFundamentalsAddonSelected ? 'yes' : 'no',
+        context: {
+          piece_slug: getPieceSlugFromUrl(),
+          terms_version: '2026-04-25',
+          terms_accepted: !!document.getElementById('mrm-piece-payment-terms')?.checked,
+          source_flow: 'piece_product_purchase',
+        },
+        address: address,
+      }),
+    });
+
+    let data = {};
+    try { data = await response.json(); } catch (error) {}
+    if (!response.ok || !data.ok) {
+      return Object.assign({
+        ok: false,
+        code: 'piece_preconfirm_failed',
+        message: 'The payment session could not be revalidated. No payment has been submitted.',
+      }, data || {});
+    }
+    return data;
   }
 
   async function verifyAndGrant(piId, email, sku){
@@ -4314,6 +4380,37 @@ async function getOfferSkuCandidates(offerEl) {
             return;
           }
 
+          const preconfirm = await mrmPreconfirmPiecePayment();
+          if (!preconfirm || !preconfirm.ok) {
+            if (
+              preconfirm &&
+              preconfirm.code === 'fundamentals_addon_already_owned' &&
+              typeof mrmPieceHandleFundamentalsAlreadyOwned === 'function'
+            ) {
+              mrmPieceHandleFundamentalsAlreadyOwned(preconfirm);
+              return;
+            }
+
+            if (preconfirm && preconfirm.code === 'already_purchased_piece_product') {
+              mrmClearPendingPiecePaymentIdentity();
+              if (activePaymentElement) {
+                try { activePaymentElement.unmount(); } catch (error) {}
+              }
+              activePaymentElement = null;
+              activeStripeElements = null;
+              errorEl.textContent = preconfirm.message || 'This email already has access to this product. No payment has been submitted.';
+              this.disabled = true;
+              return;
+            }
+
+            errorEl.textContent = preconfirm && preconfirm.message
+              ? preconfirm.message
+              : 'The payment session could not be revalidated. No payment has been submitted. Please try again.';
+            /* Temporary lookup failures leave the Payment Element retryable. */
+            this.disabled = false;
+            return;
+          }
+
           // Save context so redirect-return handler can finalize access + popup
           try {
             sessionStorage.setItem('mrmPiecePayment', JSON.stringify({
@@ -4431,7 +4528,7 @@ async function getOfferSkuCandidates(offerEl) {
         mrmSetFundamentalsSelection(sku,mrmPieceFundamentalsAddonSelected);
         pendingSku = sku;
 
-        pendingClientSecret = '';
+        mrmClearPendingPiecePaymentIdentity();
         if (activePaymentElement) {
           try { activePaymentElement.unmount(); } catch (e) {}
           activePaymentElement = null;
