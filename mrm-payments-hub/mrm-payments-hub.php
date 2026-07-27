@@ -3321,19 +3321,27 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       'ownership_sku' => '',
     );
 
-    $email = sanitize_email((string)$email);
+    $email = strtolower(sanitize_email((string)$email));
     $packet_sku = $this->sanitize_sku((string)$packet_sku);
 
     if (!$email || !is_email($email) || !$packet_sku) {
       return $result;
     }
 
+    /* An active all-sheet-music subscription includes this packet. */
+    $subscription_status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email);
+    if (is_array($subscription_status) && !empty($subscription_status['has_access'])) {
+      return array(
+        'owned' => true,
+        'ownership_source' => 'active_all_sheet_music_subscription',
+        'ownership_sku' => $this->mrm_master_all_sheet_music_sku(),
+      );
+    }
+
     $email_hash = $this->email_hash($email);
 
     /*
-     * The database entitlement ledger is the authoritative source for
-     * deciding whether checkout should block a duplicate packet purchase.
-     * Legacy email lists remain available only for access compatibility.
+     * Direct database entitlement for the exact packet.
      */
     if ($this->has_sheet_music_access($email_hash, $packet_sku)) {
       return array(
@@ -3341,6 +3349,18 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         'ownership_source' => 'fundamental_packet_ledger',
         'ownership_sku' => $packet_sku,
       );
+    }
+
+    /* Legacy/manual packet access is also valid current access. */
+    $lists = $this->all_access_lists();
+    foreach ((array)($lists[$packet_sku] ?? array()) as $saved_email) {
+      if (strtolower(sanitize_email((string)$saved_email)) === $email) {
+        return array(
+          'owned' => true,
+          'ownership_source' => 'fundamental_packet_legacy',
+          'ownership_sku' => $packet_sku,
+        );
+      }
     }
 
     $packet_product = $this->get_product($packet_sku);
@@ -3379,6 +3399,16 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
           'ownership_source' => 'complete_package_ledger',
           'ownership_sku' => $candidate_sku,
         );
+      }
+
+      foreach ((array)($lists[$candidate_sku] ?? array()) as $saved_email) {
+        if (strtolower(sanitize_email((string)$saved_email)) === $email) {
+          return array(
+            'owned' => true,
+            'ownership_source' => 'complete_package_legacy',
+            'ownership_sku' => $candidate_sku,
+          );
+        }
       }
     }
 
@@ -9499,10 +9529,9 @@ private function mrm_tax_retry_or_alert_payment_intent(
         $this->mrm_get_one_time_sheet_music_composer_pct()
       );
 
-      $base_composer_share=(int)round(max(0,$base_cents)*($composer_pct/100));
-      $fundamentals_composer_share=(int)round($fundamentals_addon_cents*($composer_pct/100));
-      $composer_share=$base_composer_share+$fundamentals_composer_share;
-      $platform_share=max(0,$base_cents-$base_composer_share)+max(0,$fundamentals_addon_cents-$fundamentals_composer_share)+max(0,$addon_cents);
+      $composer_eligible_cents = max(0, $base_cents) + max(0, $fundamentals_addon_cents);
+      $composer_share = (int)round($composer_eligible_cents * ($composer_pct / 100));
+      $platform_share = max(0, $composer_eligible_cents - $composer_share) + max(0, $addon_cents);
       $composer_payout_note='Centralized one-time sheet music composer payout'.($fundamentals_addon_cents>0?' including the Fundamental Packet add-on':'');
       $composer_acct = $this->composer_connected_account_id();
 
@@ -13505,6 +13534,11 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     $product_type = (string)($order['product_type'] ?? ($meta['mrm_product_type'] ?? ''));
     $base_amount_cents = isset($meta['mrm_base_amount_cents']) ? (int)$meta['mrm_base_amount_cents'] : (int)($order['amount_cents'] ?? 0);
     $addon_amount_cents = isset($meta['mrm_addon_amount_cents']) ? (int)$meta['mrm_addon_amount_cents'] : 0;
+    $fundamentals_addon_amount_cents = max(0, (int)($meta['mrm_fundamentals_addon_amount_cents'] ?? 0));
+    $fundamentals_selected = (
+      strtolower((string)($meta['mrm_fundamentals_addon'] ?? 'no')) === 'yes' &&
+      $fundamentals_addon_amount_cents > 0
+    );
 
     $currency = strtolower((string)($order['currency'] ?? 'usd'));
 
@@ -13516,6 +13550,7 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     $tax_context['online'] = $is_online;
     $tax_context['instructor_id'] = absint($meta['instructor_id'] ?? $meta['mrm_instructor_id'] ?? 0);
     $tax_context['sku'] = sanitize_key($order['sku'] ?? $meta['mrm_sku'] ?? '');
+    $tax_context['fundamentals_addon_selected'] = $fundamentals_selected;
     if ($product_type === 'lesson' && !$is_online) {
       $performance_location_id = $this->mrm_get_instructor_performance_location_id($tax_context['instructor_id']);
       if ($performance_location_id === '') {
@@ -13546,7 +13581,12 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       ), 500);
     }
 
-    $taxable_items = $this->mrm_build_taxable_items_from_policy($tax_policy, $base_amount_cents, $addon_amount_cents);
+    $taxable_items = $this->mrm_build_taxable_items_from_policy(
+      $tax_policy,
+      $base_amount_cents,
+      $addon_amount_cents,
+      $fundamentals_addon_amount_cents
+    );
     if (is_wp_error($taxable_items)) return new WP_REST_Response(array('ok'=>false,'code'=>$taxable_items->get_error_code(),'message'=>$taxable_items->get_error_message()), 500);
     $tax_result = $this->mrm_tax_calculate_for_items($address, $taxable_items, $currency);
     if (is_wp_error($tax_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$tax_result->get_error_code(),'message'=>$tax_result->get_error_message()), 503);

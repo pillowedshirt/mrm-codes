@@ -3002,6 +3002,15 @@ async function getOfferSkuCandidates(offerEl) {
       }
       mrmPieceModalRunId += 1;
 
+      clearTimeout(loadTimer);
+      clearTimeout(taxPreviewTimer);
+      taxPreviewSeq += 1;
+      if (taxPreviewAbortController) {
+        try { taxPreviewAbortController.abort(); } catch (error) {}
+        taxPreviewAbortController = null;
+      }
+      invalidatePaymentIntentRequest();
+
       if (activePaymentElement) {
         try { activePaymentElement.unmount(); } catch (e) {}
       }
@@ -3018,6 +3027,9 @@ async function getOfferSkuCandidates(offerEl) {
     const paymentBack = document.getElementById('mrm-payment-back');
     if (paymentBack) paymentBack.onclick = () => {
       mrmPiecePaymentStepRequested = false;
+      clearTimeout(loadTimer);
+      invalidatePaymentIntentRequest();
+      setContinueButtonIdle();
 
       if (activePaymentElement) {
         try { activePaymentElement.unmount(); } catch (e) {}
@@ -3057,6 +3069,9 @@ async function getOfferSkuCandidates(offerEl) {
     let taxPreviewSeq = 0;
     let lastTaxPreviewKey = '';
     let taxPreviewAbortController = null;
+    let paymentIntentAbortController = null;
+    let paymentIntentSeq = 0;
+    let paymentIntentInFlight = false;
 
     const hasFullBillingAddress = (addressPayload) => {
       return !!(
@@ -3086,6 +3101,35 @@ async function getOfferSkuCandidates(offerEl) {
           </div>
         `;
       }
+    };
+
+    const setContinueButtonIdle = function() {
+      if (!continueToPaymentBtn) return;
+      continueToPaymentBtn.disabled = false;
+      continueToPaymentBtn.textContent = 'Continue to Payment';
+    };
+
+    const getPaymentIntentRequestKey = function() {
+      const currentEmail = String(emailInput && emailInput.value ? emailInput.value : '').trim().toLowerCase();
+      const currentPromoCode = String(mrmPieceAppliedPromoCode || mrmGetPiecePromoCodeInputValue() || '').trim();
+      return JSON.stringify({
+        modal_run_id: modalRunId,
+        sku: String(pendingSku || ''),
+        email: currentEmail,
+        promo_code: currentPromoCode,
+        fundamentals_addon: mrmPieceFundamentalsAddonSelected ? 'yes' : 'no',
+        terms_accepted: !!(termsCheck && termsCheck.checked),
+        address: getAddressPayload()
+      });
+    };
+
+    const invalidatePaymentIntentRequest = function() {
+      paymentIntentSeq += 1;
+      if (paymentIntentAbortController) {
+        try { paymentIntentAbortController.abort(); } catch (error) {}
+        paymentIntentAbortController = null;
+      }
+      paymentIntentInFlight = false;
     };
 
     const applyServerBreakdown = (data) => {
@@ -3196,8 +3240,12 @@ async function getOfferSkuCandidates(offerEl) {
         ? String(data.message)
         : 'This email already has access to the Fundamental Packet, so it has not been added to the order.';
 
-      if (source === 'complete_package_ledger') {
+      if (source === 'complete_package_ledger' || source === 'complete_package_legacy') {
         message = 'This email already has access through the matching Complete Package, so the Fundamental Packet has not been added to the order.';
+      } else if (source === 'active_all_sheet_music_subscription') {
+        message = 'This email already has access through an active all-sheet-music subscription, so the Fundamental Packet has not been added to the order.';
+      } else if (source === 'fundamental_packet_legacy') {
+        message = 'This email already has Fundamental Packet access through an existing manual access record, so it has not been added to the order.';
       }
 
       taxPreviewSeq += 1;
@@ -3206,17 +3254,29 @@ async function getOfferSkuCandidates(offerEl) {
         taxPreviewAbortController = null;
       }
 
-      /* Only a final-payment database entitlement check clears this choice. */
+      invalidatePaymentIntentRequest();
+
+      /* Remove only the duplicate packet; keep the Full Piece selected. */
       mrmSetFundamentalsSelection(pendingSku, false);
       lastTaxPreviewKey = '';
       resetLoadedPaymentForBillingChange(message);
-      errorEl.textContent = message;
       renderCurrentSelectionBreakdown('Sales tax will update for the revised order.');
+
+      mrmPiecePaymentStepRequested = false;
+      if (cardStep) cardStep.hidden = true;
+      if (detailsStep) detailsStep.hidden = false;
+      const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
+      if (modalBody) modalBody.scrollTop = 0;
+
+      errorEl.textContent = message;
+      payBtn.disabled = true;
+      setContinueButtonIdle();
       scheduleTaxPreview();
     };
 
     const scheduleLoad = () => {
       clearTimeout(loadTimer);
+      invalidatePaymentIntentRequest();
 
       taxPreviewSeq += 1;
       if (taxPreviewAbortController) {
@@ -3236,6 +3296,7 @@ async function getOfferSkuCandidates(offerEl) {
       scheduleTaxPreview();
 
       loadTimer = setTimeout(async () => {
+        if (!isCurrentPaymentModal()) return;
         const email = (emailInput.value || '').trim();
 
         if (isEmailLike(email)) {
@@ -3247,6 +3308,7 @@ async function getOfferSkuCandidates(offerEl) {
 
         if (!isEmailLike(email) || !isPostalLike(postal)) {
           payBtn.disabled = true;
+          if (mrmPiecePaymentStepRequested) setContinueButtonIdle();
           return;
         }
 
@@ -3262,6 +3324,7 @@ async function getOfferSkuCandidates(offerEl) {
           if (termsCheck && termsCheck.checked) {
             errorEl.textContent = 'Please enter your full billing address: ' + missingAddress.join(', ') + '.';
           }
+          if (mrmPiecePaymentStepRequested) setContinueButtonIdle();
           return;
         }
 
@@ -3277,6 +3340,7 @@ async function getOfferSkuCandidates(offerEl) {
             `;
           }
 
+          if (mrmPiecePaymentStepRequested) setContinueButtonIdle();
           return;
         }
 
@@ -3287,13 +3351,24 @@ async function getOfferSkuCandidates(offerEl) {
         if (!pendingSku) {
           errorEl.textContent = 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
           payBtn.disabled = true;
+          setContinueButtonIdle();
           return;
         }
+
+        const paymentRequestSeq = ++paymentIntentSeq;
+        const paymentRequestKey = getPaymentIntentRequestKey();
+        if (paymentIntentAbortController) {
+          try { paymentIntentAbortController.abort(); } catch (error) {}
+        }
+        paymentIntentAbortController = new AbortController();
+        const paymentIntentSignal = paymentIntentAbortController.signal;
+        paymentIntentInFlight = true;
 
         try {
           const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: paymentIntentSignal,
             body: JSON.stringify({
               sku: pendingSku,
               email: email,
@@ -3311,7 +3386,11 @@ async function getOfferSkuCandidates(offerEl) {
 
           const data = await res.json();
 
-          if (!isCurrentPaymentModal()) {
+          if (
+            !isCurrentPaymentModal() || paymentIntentSignal.aborted ||
+            paymentRequestSeq !== paymentIntentSeq ||
+            paymentRequestKey !== getPaymentIntentRequestKey()
+          ) {
             return;
           }
 
@@ -3328,7 +3407,7 @@ async function getOfferSkuCandidates(offerEl) {
              * A Stripe configuration or API error should not silently
              * change what the customer selected.
              */
-            mrmUpdatePiecePromoTopBreakdown();
+            renderCurrentSelectionBreakdown();
             payBtn.disabled = true;
             return;
           }
@@ -3357,14 +3436,18 @@ async function getOfferSkuCandidates(offerEl) {
           activePaymentElement.mount('#mrm-payment-element');
 
           payBtn.disabled = false;
-        } catch (err) {
+        } catch (error) {
+          if (error && error.name === 'AbortError') return;
+          if (!isCurrentPaymentModal() || paymentRequestSeq !== paymentIntentSeq) return;
           errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
-          /*
-           * Preserve the visible add-on selection and its $5 price
-           * when the request itself fails.
-           */
-          mrmUpdatePiecePromoTopBreakdown();
+          renderCurrentSelectionBreakdown();
           payBtn.disabled = true;
+        } finally {
+          if (paymentRequestSeq === paymentIntentSeq) {
+            paymentIntentInFlight = false;
+            paymentIntentAbortController = null;
+            if (!pendingClientSecret && !activePaymentElement) setContinueButtonIdle();
+          }
         }
       }, 450);
     };
@@ -3397,6 +3480,8 @@ async function getOfferSkuCandidates(offerEl) {
     if (continueToPaymentBtn) {
       continueToPaymentBtn.onclick = function(event) {
         event.preventDefault();
+
+        if (paymentIntentInFlight || pendingClientSecret || activePaymentElement) return;
 
         const email = (emailInput && emailInput.value ? emailInput.value : '').trim();
         const postal = (postalInput && postalInput.value ? postalInput.value : '').trim();
@@ -3438,11 +3523,6 @@ async function getOfferSkuCandidates(offerEl) {
         continueToPaymentBtn.textContent = 'Loading payment...';
 
         scheduleLoad();
-
-        window.setTimeout(function() {
-          continueToPaymentBtn.disabled = false;
-          continueToPaymentBtn.textContent = 'Continue to Payment';
-        }, 700);
       };
     }
 
