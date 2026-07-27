@@ -2942,27 +2942,40 @@ async function getOfferSkuCandidates(offerEl) {
 
     const overlay = document.getElementById('mrm-payment-overlay');
     const payBtn = document.getElementById('mrm-pay-btn');
-    const errorEl = document.getElementById('mrm-payment-error');
-    const detailsErrorEl = document.getElementById('mrm-piece-details-error');
-    const setDetailsStepError = function(message) {
-      const normalizedMessage = String(message || '');
+    const errorEl =
+      document.getElementById(
+        'mrm-payment-error'
+      );
+    const detailsErrorEl =
+      document.getElementById(
+        'mrm-piece-details-error'
+      );
+    const setDetailsStepError =
+      function(message) {
+        const normalizedMessage =
+          String(
+            message || ''
+          );
 
-      /*
-       * Clear the card-step error so an older payment message
-       * cannot appear when the customer later advances.
-       */
-      if (errorEl) {
-        errorEl.textContent = '';
-      }
+        /*
+         * Clear the card-step error so an older payment message
+         * cannot appear when the customer later advances.
+         */
+        if (errorEl) {
+          errorEl.textContent =
+            '';
+        }
 
-      /*
-       * Customer-details validation belongs in the visible
-       * first-step error element.
-       */
-      if (detailsErrorEl) {
-        detailsErrorEl.textContent = normalizedMessage;
-      }
-    };
+        /*
+         * Customer-details validation belongs in the visible
+         * first-step error element.
+         */
+        if (detailsErrorEl) {
+          detailsErrorEl.textContent =
+            normalizedMessage;
+        }
+      };
+
     const instructions = document.getElementById('payment-instructions');
     const emailInput = document.getElementById('mrm-payment-email');
 
