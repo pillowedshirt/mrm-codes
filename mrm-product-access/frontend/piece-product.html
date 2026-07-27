@@ -2646,11 +2646,22 @@ function mrmGetPiecePromoCodeInputValue() {
     if (statusEl) statusEl.textContent = message || '';
   }
 
+  let mrmPieceBrowserSessionMemoryId = '';
+
   function mrmGetPieceBrowserSessionId() {
     const storageKey = 'mrmPieceBrowserSessionId';
-    let value = '';
 
-    try { value = sessionStorage.getItem(storageKey) || ''; } catch (error) {}
+    /*
+     * Begin with the in-memory value.
+     *
+     * This remains stable for the current page even when
+     * sessionStorage is disabled, denied, or unavailable.
+     */
+    let value = mrmPieceBrowserSessionMemoryId;
+
+    if (!/^[A-Za-z0-9_-]{20,100}$/.test(value)) {
+      try { value = sessionStorage.getItem(storageKey) || ''; } catch (error) {}
+    }
 
     if (!/^[A-Za-z0-9_-]{20,100}$/.test(value)) {
       let uniquePart = '';
@@ -2662,6 +2673,15 @@ function mrmGetPiecePromoCodeInputValue() {
       value = ('mrm_' + uniquePart).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 100);
       try { sessionStorage.setItem(storageKey, value); } catch (error) {}
     }
+
+    /*
+     * Always preserve the value in memory.
+     *
+     * The quote request and subscription-status request will
+     * now use the same browser-session ID even when storage
+     * writes fail.
+     */
+    mrmPieceBrowserSessionMemoryId = value;
 
     return value;
   }
@@ -3376,7 +3396,9 @@ async function getOfferSkuCandidates(offerEl) {
       const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
       if (modalBody) modalBody.scrollTop = 0;
 
-      errorEl.textContent = message;
+      /* The card-step error is hidden after returning to checkout details. */
+      errorEl.textContent = '';
+      if (detailsErrorEl) detailsErrorEl.textContent = message;
       payBtn.disabled = true;
       setContinueButtonIdle();
       scheduleTaxPreview();
@@ -3722,6 +3744,9 @@ async function getOfferSkuCandidates(offerEl) {
 
     if (emailInput) {
       const invalidateSubscriptionLookup = function() {
+        /* Ownership and blocked-email messages apply to the previous email. */
+        if (detailsErrorEl) detailsErrorEl.textContent = '';
+
         if (!subscriptionStatusLookupInFlight) return;
         subscriptionStatusLookupSeq += 1;
         if (subscriptionStatusAbortController) {
@@ -4637,6 +4662,9 @@ async function getOfferSkuCandidates(offerEl) {
             }
 
             if (preconfirm && preconfirm.code === 'sheet_music_email_blocked') {
+              const blockedMessage = preconfirm.message || 'This email is currently restricted from purchasing or accessing sheet music. No payment has been submitted.';
+
+              /* The backend canceled the obsolete Payment Intent. */
               mrmClearPendingPiecePaymentIdentity();
               if (activePaymentElement) {
                 try { activePaymentElement.unmount(); } catch (error) {}
@@ -4645,7 +4673,19 @@ async function getOfferSkuCandidates(offerEl) {
               activeStripeElements = null;
               const paymentElementMount = document.getElementById('mrm-payment-element');
               if (paymentElementMount) paymentElementMount.innerHTML = '';
-              errorEl.textContent = preconfirm.message || 'This email is currently restricted from purchasing or accessing sheet music. No payment has been submitted.';
+
+              mrmPieceClearSubscriptionPurchaseAcknowledgement();
+
+              /* Return to checkout details so the customer can change the email. */
+              mrmPiecePaymentStepRequested = false;
+              if (cardStep) cardStep.hidden = true;
+              if (detailsStep) detailsStep.hidden = false;
+              const modalBody = overlay ? overlay.querySelector('.modal-body') : null;
+              if (modalBody) modalBody.scrollTop = 0;
+
+              errorEl.textContent = '';
+              if (detailsErrorEl) detailsErrorEl.textContent = blockedMessage;
+              setContinueButtonIdle();
               this.disabled = true;
               return;
             }
