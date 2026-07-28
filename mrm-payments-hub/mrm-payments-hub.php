@@ -33,6 +33,8 @@ class MRM_Payments_Hub_Single {
   const OPT_TAX_COMPLIANCE_SETTINGS = 'mrm_pay_hub_tax_compliance_settings';
   const OPT_TAX_LAST_SUCCESSFUL_REGISTRATION_SYNC =
     'mrm_tax_last_successful_registration_sync_at';
+  const OPT_TAX_REGISTRATION_SYNC_LOCK =
+    'mrm_tax_registration_sync_lock';
 
   const OPT_TAX_SUBSCRIPTION_HOLD_ERROR =
     'mrm_tax_subscription_hold_enforcement_error';
@@ -47,7 +49,7 @@ class MRM_Payments_Hub_Single {
   const STRIPE_TAX_API_VERSION = '2026-06-24.dahlia';
   const STRIPE_TAX_LOCATION_API_VERSION = '2026-06-24.preview';
   const TAX_RULES_VERSION = '2026-07-16-national-v13';
-  const TAX_SCHEMA_VERSION = '2026-07-14-7';
+  const TAX_SCHEMA_VERSION = '2026-07-27-8';
 
   const TAX_STRIPE_SYNC_MAX_AGE_MINUTES = 120;
   const TAX_STRIPE_SETTINGS_CACHE_MINUTES = 15;
@@ -93,6 +95,10 @@ class MRM_Payments_Hub_Single {
 
 
     add_action('admin_post_mrm_tax_sync_stripe_registrations', array($this, 'handle_tax_sync_stripe_registrations'));
+    add_action(
+      'admin_post_mrm_tax_state_save',
+      array($this, 'handle_tax_state_save')
+    );
     add_action('admin_post_mrm_tax_recompute_thresholds', array($this, 'handle_tax_recompute_thresholds'));
     add_action('admin_post_mrm_tax_reconcile_payment_intent', array($this, 'handle_tax_reconcile_payment_intent'));
     add_action('admin_post_mrm_tax_reconcile_invoice', array($this, 'handle_tax_reconcile_invoice'));
@@ -407,6 +413,13 @@ class MRM_Payments_Hub_Single {
 
     $needs_upgrade = false;
 
+    if (
+      (string) get_option('mrm_tax_schema_version', '') !==
+      (string) self::TAX_SCHEMA_VERSION
+    ) {
+      $needs_upgrade = true;
+    }
+
     // 1) Table existence check
     foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks, $subs, $promo_redemptions, $profile_requests, $tax_states, $tax_sales, $tax_alerts) as $t) {
       $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
@@ -527,6 +540,8 @@ class MRM_Payments_Hub_Single {
     if ($needs_upgrade) {
       $this->install_or_upgrade_db();
     }
+
+    $this->mrm_tax_normalize_legacy_profile_requests();
 
     $this->mrm_tax_seed_state_rows();
 
@@ -839,7 +854,10 @@ class MRM_Payments_Hub_Single {
       physical_nexus_flag TINYINT(1) NOT NULL DEFAULT 0,
       physical_nexus_reason TEXT NULL,
       first_flagged_at DATETIME NULL,
+      physical_activity_started_at DATETIME NULL,
       authority_registration_status VARCHAR(32) NOT NULL DEFAULT 'not_started',
+      authority_registration_submitted_at DATETIME NULL,
+      authority_registration_application_reference VARCHAR(191) NULL,
       authority_registration_number VARCHAR(191) NULL,
       authority_registration_effective_date DATE NULL,
       written_determination_reviewed_at DATE NULL,
@@ -848,11 +866,26 @@ class MRM_Payments_Hub_Single {
       stripe_registration_status VARCHAR(32) NOT NULL DEFAULT 'none',
       stripe_livemode TINYINT(1) NOT NULL DEFAULT 0,
       collection_active TINYINT(1) NOT NULL DEFAULT 0,
+      stripe_collection_started_at DATETIME NULL,
+      pending_tax_tracking_started_at DATETIME NULL,
+      pending_tax_tracking_ended_at DATETIME NULL,
       filing_status VARCHAR(32) NOT NULL DEFAULT 'not_configured',
       filing_frequency VARCHAR(32) NULL,
       next_return_due_date DATE NULL,
       last_return_filed_at DATE NULL,
       last_return_confirmation TEXT NULL,
+      foreign_registration_status VARCHAR(32) NOT NULL DEFAULT 'not_started',
+      foreign_registration_grace_days SMALLINT UNSIGNED NULL,
+      foreign_registration_internal_due_date DATE NULL,
+      foreign_registration_outside_due_date DATE NULL,
+      registered_agent_status VARCHAR(32) NOT NULL DEFAULT 'not_started',
+      registered_agent_reference TEXT NULL,
+      foreign_registration_submitted_at DATETIME NULL,
+      foreign_registration_accepted_at DATETIME NULL,
+      foreign_registration_reference TEXT NULL,
+      pending_tax_reserve_rate_bps SMALLINT UNSIGNED NULL,
+      pending_tax_reconciled_at DATETIME NULL,
+      workflow_audit_json LONGTEXT NULL,
       estimated_sales_cents BIGINT NOT NULL DEFAULT 0,
       estimated_transaction_count INT NOT NULL DEFAULT 0,
       estimated_threshold_percent DECIMAL(10,2) NOT NULL DEFAULT 0,
@@ -867,7 +900,12 @@ class MRM_Payments_Hub_Single {
       PRIMARY KEY (state_code),
       KEY collection_active (collection_active),
       KEY estimated_threshold_status (estimated_threshold_status),
-      KEY physical_nexus_flag (physical_nexus_flag)
+      KEY physical_nexus_flag (physical_nexus_flag),
+      KEY authority_registration_status (authority_registration_status),
+      KEY foreign_registration_status (foreign_registration_status),
+      KEY foreign_registration_outside_due_date (
+        foreign_registration_outside_due_date
+      )
     ) ENGINE=InnoDB {$charset};";
 
     $sql_tax_sales = "CREATE TABLE {$tax_sales} (
@@ -911,7 +949,12 @@ class MRM_Payments_Hub_Single {
       KEY occurred_at (occurred_at),
       KEY product_type (product_type),
       KEY stripe_tax_line_item_id (stripe_tax_line_item_id),
-      KEY payment_intent_id (payment_intent_id)
+      KEY payment_intent_id (payment_intent_id),
+      KEY pending_state_period_category (
+        customer_state,
+        occurred_at,
+        threshold_category
+      )
     ) ENGINE=InnoDB {$charset};";
 
     $sql_tax_alerts = "CREATE TABLE {$tax_alerts} (
@@ -1067,6 +1110,44 @@ class MRM_Payments_Hub_Single {
     return true;
   }
 
+  private function mrm_tax_add_index_if_missing($table, $index_name, $definition, &$errors) {
+    global $wpdb;
+    $table = str_replace('`', '', (string) $table);
+    $index_name = sanitize_key($index_name);
+    $definition = trim((string) $definition);
+    if ($table === '' || $index_name === '' || $definition === '') {
+      $errors[] = 'An invalid tax index migration was supplied.';
+      return false;
+    }
+    $wpdb->last_error = '';
+    $existing = $wpdb->get_var($wpdb->prepare(
+      "SELECT INDEX_NAME FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = %s AND index_name = %s LIMIT 1",
+      $table,
+      $index_name
+    ));
+    if ($wpdb->last_error !== '') {
+      $errors[] = 'Unable to inspect index ' . $index_name . ' on ' . $table . ': ' . $wpdb->last_error;
+      return false;
+    }
+    if ((string) $existing === $index_name) return true;
+    $wpdb->last_error = '';
+    $result = $wpdb->query("ALTER TABLE `{$table}` ADD KEY `{$index_name}` {$definition}");
+    if ($result === false || $wpdb->last_error !== '') {
+      $errors[] = 'Unable to add index ' . $index_name . ' to ' . $table . ': ' . ($wpdb->last_error ?: 'Unknown database error.');
+      return false;
+    }
+    $verified = $wpdb->get_var($wpdb->prepare(
+      "SELECT INDEX_NAME FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = %s AND index_name = %s LIMIT 1",
+      $table,
+      $index_name
+    ));
+    if ((string) $verified !== $index_name) {
+      $errors[] = 'Index verification failed for ' . $table . '.' . $index_name . '.';
+      return false;
+    }
+    return true;
+  }
+
   private function mrm_tax_run_schema_migrations() {
     global $wpdb;
     if (get_option('mrm_tax_schema_version') === self::TAX_SCHEMA_VERSION) return true;
@@ -1089,6 +1170,29 @@ class MRM_Payments_Hub_Single {
     $this->mrm_tax_add_column_if_missing($sales_table, 'association_error', 'TEXT NULL', $errors);
     $this->mrm_tax_add_column_if_missing($subscriptions_table, 'tax_held_invoices_json', 'LONGTEXT NULL', $errors);
     $this->mrm_tax_add_column_if_missing($subscriptions_table, 'tax_held_invoices_verified_at', 'DATETIME NULL', $errors);
+    $workflow_columns = array(
+      'authority_registration_submitted_at' => 'DATETIME NULL',
+      'authority_registration_application_reference' => 'VARCHAR(191) NULL',
+      'physical_activity_started_at' => 'DATETIME NULL',
+      'stripe_collection_started_at' => 'DATETIME NULL',
+      'pending_tax_tracking_started_at' => 'DATETIME NULL',
+      'pending_tax_tracking_ended_at' => 'DATETIME NULL',
+      'foreign_registration_status' => "VARCHAR(32) NOT NULL DEFAULT 'not_started'",
+      'foreign_registration_grace_days' => 'SMALLINT UNSIGNED NULL',
+      'foreign_registration_internal_due_date' => 'DATE NULL',
+      'foreign_registration_outside_due_date' => 'DATE NULL',
+      'registered_agent_status' => "VARCHAR(32) NOT NULL DEFAULT 'not_started'",
+      'registered_agent_reference' => 'TEXT NULL',
+      'foreign_registration_submitted_at' => 'DATETIME NULL',
+      'foreign_registration_accepted_at' => 'DATETIME NULL',
+      'foreign_registration_reference' => 'TEXT NULL',
+      'pending_tax_reserve_rate_bps' => 'SMALLINT UNSIGNED NULL',
+      'pending_tax_reconciled_at' => 'DATETIME NULL',
+      'workflow_audit_json' => 'LONGTEXT NULL',
+    );
+    foreach ($workflow_columns as $column => $definition) {
+      $this->mrm_tax_add_column_if_missing($state_table, $column, $definition, $errors);
+    }
     $this->mrm_tax_add_column_if_missing($state_table, 'filing_status', "VARCHAR(32) NOT NULL DEFAULT 'not_configured'", $errors);
     $this->mrm_tax_add_column_if_missing($state_table, 'filing_frequency', 'VARCHAR(32) NULL', $errors);
     $this->mrm_tax_add_column_if_missing($state_table, 'next_return_due_date', 'DATE NULL', $errors);
@@ -1104,6 +1208,10 @@ class MRM_Payments_Hub_Single {
     $wpdb->last_error = '';
     $catalog_verification_reset = $wpdb->query("UPDATE {$state_table} SET threshold_rule_verified = 0, rule_professionally_reviewed_at = NULL, rule_professional_reference = NULL WHERE rule_management_mode = 'catalog'");
     if ($catalog_verification_reset === false || $wpdb->last_error !== '') $errors[] = 'Unable to reset automatically verified catalog rules: ' . $wpdb->last_error;
+    $this->mrm_tax_add_index_if_missing($state_table, 'authority_registration_status', '(authority_registration_status)', $errors);
+    $this->mrm_tax_add_index_if_missing($state_table, 'foreign_registration_status', '(foreign_registration_status)', $errors);
+    $this->mrm_tax_add_index_if_missing($state_table, 'foreign_registration_outside_due_date', '(foreign_registration_outside_due_date)', $errors);
+    $this->mrm_tax_add_index_if_missing($sales_table, 'pending_state_period_category', '(customer_state, occurred_at, threshold_category)', $errors);
     $this->mrm_tax_require_innodb_table($state_table, $errors);
     $this->mrm_tax_require_innodb_table($sales_table, $errors);
     $this->mrm_tax_require_innodb_table($alerts_table, $errors);
@@ -1115,6 +1223,108 @@ class MRM_Payments_Hub_Single {
     }
     delete_option('mrm_tax_schema_migration_error');
     update_option('mrm_tax_schema_version', self::TAX_SCHEMA_VERSION, false);
+    return true;
+  }
+
+  private function mrm_tax_get_state_row($state) {
+    global $wpdb;
+    $state = $this->mrm_normalize_state_code($state);
+    if ($state === '') return new WP_Error('invalid_tax_state', 'The state code is missing or invalid.');
+    $wpdb->last_error = '';
+    $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_state_status()} WHERE state_code = %s LIMIT 1", $state), ARRAY_A);
+    if ($wpdb->last_error !== '') return new WP_Error('tax_state_lookup_failed', $wpdb->last_error);
+    if (!is_array($row)) return new WP_Error('tax_state_missing', $state . ' is missing from the state tax registry.');
+    return $row;
+  }
+
+  private function mrm_tax_authority_registration_statuses() { return array('not_started','application_submitted','additional_information_requested','approved','active','denied','not_required_written_determination'); }
+  private function mrm_tax_foreign_registration_statuses() { return array('not_started','registered_agent_pending','preparing','submitted','correction_required','active','not_required_written_determination','overdue'); }
+  private function mrm_tax_registered_agent_statuses() { return array('not_started','researching','engagement_pending','engaged','active','not_required'); }
+  private function mrm_tax_filing_statuses() { return array('not_configured','provider_managed','manual_managed','filing_attention_required'); }
+
+  private function mrm_tax_parse_admin_date($value, $label) {
+    $value = trim(sanitize_text_field((string) $value));
+    if ($value === '') return '';
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value, wp_timezone());
+    $errors = DateTimeImmutable::getLastErrors();
+    if (!$date || (is_array($errors) && (!empty($errors['warning_count']) || !empty($errors['error_count']))) || $date->format('Y-m-d') !== $value) return new WP_Error('invalid_tax_date', $label . ' must use YYYY-MM-DD.');
+    return $date->format('Y-m-d');
+  }
+
+  private function mrm_tax_parse_admin_datetime($value, $label) {
+    $value = trim(sanitize_text_field((string) $value));
+    if ($value === '') return '';
+    foreach (array('Y-m-d\TH:i','Y-m-d H:i:s') as $format) {
+      $date = DateTimeImmutable::createFromFormat('!' . $format, $value, wp_timezone());
+      $errors = DateTimeImmutable::getLastErrors();
+      if ($date && (!is_array($errors) || (empty($errors['warning_count']) && empty($errors['error_count'])))) return $date->format('Y-m-d H:i:s');
+    }
+    return new WP_Error('invalid_tax_datetime', $label . ' contains an invalid date or time.');
+  }
+
+  private function mrm_tax_wp_local_mysql_to_utc_mysql($value) {
+    $value = trim((string) $value); if ($value === '') return '';
+    try { return (new DateTimeImmutable($value, wp_timezone()))->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s'); } catch (Throwable $error) { return ''; }
+  }
+
+  private function mrm_tax_append_workflow_audit($existing_json, $event) {
+    $audit = json_decode((string) $existing_json, true); if (!is_array($audit)) $audit = array();
+    $event = is_array($event) ? $event : array();
+    if (empty($event['recorded_at'])) $event['recorded_at'] = current_time('mysql');
+    if (!array_key_exists('administrator_id', $event)) $event['administrator_id'] = get_current_user_id();
+    $audit[] = $event; return wp_json_encode($audit);
+  }
+
+  private function mrm_tax_profile_approval_eligibility($state) {
+    $row = $this->mrm_tax_get_state_row($state);
+    if (is_wp_error($row)) return array('allowed'=>false,'state'=>$this->mrm_normalize_state_code($state),'approval_basis'=>'none','message'=>$row->get_error_message());
+    $state = $this->mrm_normalize_state_code($row['state_code'] ?? '');
+    if (sanitize_key($row['general_sales_tax_status'] ?? '') === 'no_general_state_sales_tax') return array('allowed'=>true,'state'=>$state,'row'=>$row,'approval_basis'=>'no_general_state_sales_tax','message'=>$state . ' does not impose a general state sales tax.');
+    if ($this->mrm_tax_row_has_written_clearance($row)) return array('allowed'=>true,'state'=>$state,'row'=>$row,'approval_basis'=>'written_determination','message'=>'A valid written determination is recorded.');
+    $stripe_active = sanitize_key($row['stripe_registration_status'] ?? '') === 'active' && !empty($row['collection_active']);
+    if ($this->mrm_tax_is_live_stripe_key() && empty($row['stripe_livemode'])) $stripe_active = false;
+    if ($stripe_active) return array('allowed'=>true,'state'=>$state,'row'=>$row,'approval_basis'=>'stripe_collection_active','message'=>'Stripe Tax collection is active.');
+    $status = sanitize_key($row['authority_registration_status'] ?? '');
+    $submitted = sanitize_text_field($row['authority_registration_submitted_at'] ?? '');
+    $reference = sanitize_text_field($row['authority_registration_application_reference'] ?? '');
+    $valid_date = false;
+    if ($submitted !== '') try { $valid_date = new DateTimeImmutable($submitted, wp_timezone()) <= new DateTimeImmutable('now', wp_timezone()); } catch (Throwable $error) { $valid_date = false; }
+    if (in_array($status,array('application_submitted','approved','active'),true) && $valid_date && $reference !== '') return array('allowed'=>true,'state'=>$state,'row'=>$row,'approval_basis'=>'permit_application_submitted','authority_registration_submitted_at'=>$submitted,'authority_registration_application_reference'=>$reference,'message'=>'The state permit application has been documented.');
+    return array('allowed'=>false,'state'=>$state,'row'=>$row,'approval_basis'=>'none','message'=>'Approval requires active Stripe collection, a no-general-sales-tax state, a valid written determination, or a documented permit application submission date and reference.');
+  }
+
+  private function mrm_tax_state_pending_registration_window_is_valid($row) {
+    if (!is_array($row)) return false;
+    if (sanitize_key($row['general_sales_tax_status'] ?? '') === 'no_general_state_sales_tax' || $this->mrm_tax_row_has_written_clearance($row)) return true;
+    if (!in_array(sanitize_key($row['authority_registration_status'] ?? ''),array('application_submitted','approved','active'),true)) return false;
+    if (empty($row['authority_registration_submitted_at']) || empty($row['authority_registration_application_reference']) || empty($row['physical_activity_started_at'])) return false;
+    try { if (new DateTimeImmutable($row['authority_registration_submitted_at'], wp_timezone()) > new DateTimeImmutable('now', wp_timezone())) return false; } catch (Throwable $error) { return false; }
+    if (in_array(sanitize_key($row['foreign_registration_status'] ?? ''),array('overdue','correction_required'),true)) return false;
+    $outside_due = sanitize_text_field($row['foreign_registration_outside_due_date'] ?? '');
+    if ($outside_due !== '') try { if (new DateTimeImmutable('now', wp_timezone()) > new DateTimeImmutable($outside_due . ' 23:59:59', wp_timezone())) return false; } catch (Throwable $error) { return false; }
+    return true;
+  }
+
+  private function mrm_tax_normalize_legacy_profile_requests() {
+    global $wpdb;
+    $migration_option = 'mrm_tax_profile_request_status_migration_v1';
+    if (get_option($migration_option) === 'complete') return true;
+    $table = $this->table_profile_card_requests();
+    $wpdb->last_error = '';
+    $requests = $wpdb->get_results("SELECT id, request_type, status, submission_payload, review_notes FROM {$table} WHERE status = 'tax_registration_required' AND request_type IN ('instructor_profile','presenter_profile') ORDER BY id ASC", ARRAY_A);
+    if ($wpdb->last_error !== '') return new WP_Error('legacy_profile_request_lookup_failed', $wpdb->last_error);
+    foreach ((array) $requests as $request) {
+      $request_id = absint($request['id'] ?? 0); if ($request_id <= 0) continue;
+      $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+      $notes = $this->mrm_profile_card_decode_json($request['review_notes'] ?? '');
+      $notes['legacy_tax_registration_status'] = array('original_status'=>'tax_registration_required','normalized_status'=>'pending_review','normalized_at'=>current_time('mysql'),'normalized_by_user_id'=>0,'state'=>$this->mrm_normalize_state_code($payload['state'] ?? ''),'original_tax_gate'=>$notes['tax_registration_gate'] ?? null);
+      $wpdb->last_error = '';
+      $updated = $wpdb->update($table,array('status'=>'pending_review','review_notes'=>$this->mrm_profile_card_encode_json($notes),'updated_at'=>current_time('mysql')),array('id'=>$request_id));
+      if ($updated === false || $wpdb->last_error !== '') return new WP_Error('legacy_profile_request_update_failed',$wpdb->last_error ?: 'A legacy profile request could not be normalized.');
+      $verified = $wpdb->get_row($wpdb->prepare("SELECT status, review_notes FROM {$table} WHERE id = %d LIMIT 1",$request_id),ARRAY_A);
+      if (!is_array($verified) || sanitize_key($verified['status'] ?? '') !== 'pending_review') return new WP_Error('legacy_profile_request_verification_failed','Legacy request #' . $request_id . ' could not be verified.');
+    }
+    update_option($migration_option, 'complete', false);
     return true;
   }
 
@@ -20374,7 +20584,7 @@ MRM_TAX_RULES;
     global $wpdb;
     $args = wp_parse_args($args, array('state'=>'','country'=>'US','source_type'=>'manual_activity','source_id'=>'','source_label'=>'Business activity','details'=>''));
     $country = strtoupper(sanitize_text_field($args['country']));
-    if ($country !== 'US') return array('allowed'=>true,'reason'=>'non_us');
+    if ($country !== 'US') { return array('recorded'=>false,'reason'=>'non_us'); }
     $state = $this->mrm_normalize_state_code($args['state']);
     if ($state === '') return new WP_Error('invalid_physical_nexus_state','The physical-nexus state is missing or invalid.');
     $table = $this->table_tax_state_status();
@@ -20392,22 +20602,7 @@ MRM_TAX_RULES;
     $updated = $wpdb->update($table, array('physical_nexus_flag'=>1,'physical_nexus_reason'=>implode("\n", $reasons),'first_flagged_at'=>!empty($row['first_flagged_at']) ? $row['first_flagged_at'] : $now,'updated_at'=>$now), array('state_code'=>$state));
     if ($updated === false) return new WP_Error('physical_nexus_save_failed', $wpdb->last_error ?: 'The physical-nexus record could not be saved.');
     $this->mrm_tax_create_alert($state, 'physical_nexus_source_added', $source_type, absint($source_id), array('message'=>$reason), sanitize_key(substr(md5($source_type . '|' . $source_id . '|' . $state), 0, 24)));
-    return $this->mrm_tax_get_state_gate($state);
-  }
-
-  private function mrm_tax_get_state_gate(
-    $state
-  ) {
-    global $wpdb;
-    $state = $this->mrm_normalize_state_code($state);
-    if ($state === '') { return array('allowed'=>false,'message'=>'The instructor state is missing or invalid.'); }
-    $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->table_tax_state_status()} WHERE state_code = %s LIMIT 1", $state), ARRAY_A);
-    if (!is_array($row)) { return array('allowed'=>false,'state'=>$state,'message'=>'The instructor state is not present in the Stripe Tax monitor.'); }
-    if (sanitize_key($row['general_sales_tax_status'] ?? '') === 'no_general_state_sales_tax') { return array('allowed'=>true,'state'=>$state,'row'=>$row,'reason'=>'no_general_state_sales_tax'); }
-    $stripe_active = sanitize_key($row['stripe_registration_status'] ?? '') === 'active' && !empty($row['collection_active']);
-    if ($this->mrm_tax_is_live_stripe_key() && empty($row['stripe_livemode'])) { $stripe_active = false; }
-    if (!$stripe_active) { return array('allowed'=>false,'state'=>$state,'message'=>'Instructor approval is blocked because this profile creates a physical-presence signal in '.$state.', but Stripe Tax collection is not active there. Review the state in Stripe Tax before approval.'); }
-    return array('allowed'=>true,'state'=>$state,'row'=>$row);
+    return array('recorded'=>true,'state'=>$state,'first_flagged_at'=>!empty($row['first_flagged_at']) ? $row['first_flagged_at'] : $now,'physical_nexus_reason'=>implode("\n", $reasons),'source_type'=>$source_type,'source_id'=>$source_id);
   }
 
 
@@ -20955,6 +21150,9 @@ MRM_TAX_RULES;
           <?php foreach ($requests as $request) : ?>
             <?php
               $payload = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
+              $profile_state = $this->mrm_normalize_state_code($payload['state'] ?? '');
+              $profile_state_row = $profile_state !== '' ? $this->mrm_tax_get_state_row($profile_state) : null;
+              $profile_state_eligibility = in_array(sanitize_key($request['request_type'] ?? ''), array('instructor_profile','presenter_profile'), true) ? $this->mrm_tax_profile_approval_eligibility($profile_state) : null;
               $admin_payload_for_review = $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '');
               $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
               $uploads = $this->mrm_profile_card_merge_uploads_with_payload($uploads, $payload);
@@ -20970,7 +21168,7 @@ MRM_TAX_RULES;
               </div>
               <?php if ($request['status'] === 'tax_registration_required') : ?>
                 <div class="notice notice-error inline">
-                  <p><strong>Sales-tax registration required.</strong> This instructor or presenter profile cannot be approved until the applicable state registration is active or a documented written determination has been entered.</p>
+                  <p><strong>Sales-tax registration required.</strong> This request entered the legacy tax-registration review status. It can be approved after documenting a valid state permit application, confirming active Stripe collection, confirming a no-general-sales-tax state, or recording a valid written determination.</p>
                 </div>
               <?php endif; ?>
               <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:16px;">
@@ -20986,6 +21184,25 @@ MRM_TAX_RULES;
                     <?php $this->mrm_profile_card_render_uploaded_file_previews($uploads, $payload); ?>
                     <h3 style="margin-top:22px;">Admin Approval Fields</h3>
                     <p><label><input type="checkbox" name="docusign_verified" value="1"> Admin verified the required onboarding documents are complete, including the DocuSign agreement, W-9, Stripe payout setup, and background-check documents if required. Required before approving Instructor and Presenter Profile Cards.</label></p>
+                    <?php if (in_array(sanitize_key($request['request_type'] ?? ''), array('instructor_profile','presenter_profile'), true)) : $workflow_row = is_array($profile_state_row) ? $profile_state_row : array(); ?>
+                      <div style="margin:16px 0;padding:14px;border:1px solid #dcdcde;background:#fff;">
+                        <h4 style="margin-top:0;">State Registration Workflow</h4>
+                        <p><strong>State:</strong> <?php echo esc_html($profile_state ?: 'Invalid'); ?><br>
+                        <strong>Physical-presence signal:</strong> <?php echo !empty($workflow_row['physical_nexus_flag']) ? 'Recorded' : 'Not recorded'; ?><br>
+                        <strong>First signal:</strong> <?php echo esc_html($workflow_row['first_flagged_at'] ?? '—'); ?><br>
+                        <strong>Business activity start:</strong> <?php echo esc_html($workflow_row['physical_activity_started_at'] ?? '—'); ?><br>
+                        <strong>Permit status:</strong> <?php echo esc_html($workflow_row['authority_registration_status'] ?? 'not_started'); ?><br>
+                        <strong>Stripe collection:</strong> <?php echo !empty($workflow_row['collection_active']) ? 'Active' : 'Not active'; ?><br>
+                        <strong>Foreign registration:</strong> <?php echo esc_html($workflow_row['foreign_registration_status'] ?? 'not_started'); ?><br>
+                        <strong>Internal target:</strong> <?php echo esc_html($workflow_row['foreign_registration_internal_due_date'] ?? '—'); ?><br>
+                        <strong>Outside tracked date:</strong> <?php echo esc_html($workflow_row['foreign_registration_outside_due_date'] ?? '—'); ?></p>
+                        <p><strong>Current approval basis:</strong> <?php echo esc_html(is_array($profile_state_eligibility) ? ($profile_state_eligibility['message'] ?? 'Not available.') : 'Not applicable.'); ?></p>
+                        <p><label><input type="checkbox" name="permit_application_submitted" value="1" <?php checked(in_array(sanitize_key($workflow_row['authority_registration_status'] ?? ''),array('application_submitted','approved','active'),true) && !empty($workflow_row['authority_registration_submitted_at']) && !empty($workflow_row['authority_registration_application_reference'])); ?>> Permit application submitted</label></p>
+                        <p><label><strong>Permit application submission date</strong></label><br><input type="datetime-local" name="authority_registration_submitted_at" value="<?php echo esc_attr(!empty($workflow_row['authority_registration_submitted_at']) ? str_replace(' ','T',substr($workflow_row['authority_registration_submitted_at'],0,16)) : ''); ?>"></p>
+                        <p><label><strong>Permit application confirmation or reference</strong></label><br><input type="text" class="regular-text" maxlength="191" name="authority_registration_application_reference" value="<?php echo esc_attr($workflow_row['authority_registration_application_reference'] ?? ''); ?>"></p>
+                        <p><label><strong>Permit application internal note</strong></label><br><textarea name="permit_application_internal_note" rows="3" class="large-text"></textarea></p>
+                      </div>
+                    <?php endif; ?>
                     <p><label><strong>Approval note / internal note</strong></label><br><textarea name="admin_review_note" rows="4" class="large-text"></textarea></p>
                     <p><label><strong>Overall change request note to recipient</strong></label><br><textarea name="change_request_note" rows="4" class="large-text" placeholder="Write the overall changes you want them to make. Field-specific comments above will also be included if you click Request Changes."></textarea></p>
                     <p><button type="submit" name="mrm_profile_card_do" value="approve" class="button button-primary">Approve and Create / Update</button> <button type="submit" name="mrm_profile_card_do" value="changes" class="button">Request Changes</button> <button type="submit" name="mrm_profile_card_do" value="delete" class="button" onclick="return confirm('Delete this request? The private link will stop working and this request will be removed from the active review list.');">Delete This Request</button></p>
@@ -22262,9 +22479,16 @@ MRM_TAX_RULES;
     $update_data = array('status' => 'pending_review', 'submission_payload' => $this->mrm_profile_card_encode_json($payload), 'review_notes' => $this->mrm_profile_card_encode_json($existing_review_notes), 'submitted_at' => $now, 'updated_at' => $now);
 
     if (in_array($request_type, array('instructor_profile','presenter_profile'), true)) {
-      if ($request_type === 'instructor_profile') $tax_gate = $this->mrm_tax_flag_instructor_state(absint($request['id']), $payload);
-      else $tax_gate = $this->register_external_physical_nexus_source(array('state'=>$payload['state'] ?? '', 'country'=>'US', 'source_type'=>'presenter_profile', 'source_id'=>absint($request['id']), 'source_label'=>'Presenter profile request', 'details'=>sanitize_text_field($payload['name'] ?? '')));
-      if (is_wp_error($tax_gate) || empty($tax_gate['allowed'])) { $update_data['status'] = 'tax_registration_required'; $existing_review_notes['tax_registration_gate'] = array('state'=>sanitize_text_field(is_wp_error($tax_gate) ? ($payload['state'] ?? '') : ($tax_gate['state'] ?? '')), 'message'=>sanitize_text_field(is_wp_error($tax_gate) ? $tax_gate->get_error_message() : ($tax_gate['message'] ?? '')), 'flagged_at'=>$now); $update_data['review_notes'] = $this->mrm_profile_card_encode_json($existing_review_notes); }
+      $signal_result = $request_type === 'instructor_profile'
+        ? $this->mrm_tax_flag_instructor_state(absint($request['id']), $payload)
+        : $this->register_external_physical_nexus_source(array('state'=>$payload['state'] ?? '', 'country'=>'US', 'source_type'=>'presenter_profile', 'source_id'=>absint($request['id']), 'source_label'=>'Presenter profile request', 'details'=>sanitize_text_field($payload['name'] ?? '')));
+      if (is_wp_error($signal_result)) {
+        $existing_review_notes['physical_nexus_recording_error'] = array('state'=>$this->mrm_normalize_state_code($payload['state'] ?? ''),'message'=>sanitize_text_field($signal_result->get_error_message()),'recorded_at'=>$now);
+      } else {
+        $existing_review_notes['physical_nexus_signal'] = array('state'=>sanitize_text_field($signal_result['state'] ?? ''),'first_flagged_at'=>sanitize_text_field($signal_result['first_flagged_at'] ?? ''),'source_type'=>$request_type,'source_id'=>absint($request['id']),'recorded_at'=>$now);
+      }
+      $update_data['status'] = 'pending_review';
+      $update_data['review_notes'] = $this->mrm_profile_card_encode_json($existing_review_notes);
     }
 
     $uploads = $this->mrm_profile_card_decode_json($request['uploaded_files'] ?? '');
@@ -22417,73 +22641,102 @@ MRM_TAX_RULES;
 
     if ($do === 'approve') {
       $request_type_for_approval = sanitize_key((string)($request['request_type'] ?? ''));
-
-      if (in_array($request_type_for_approval, array('instructor_profile','presenter_profile'), true)) {
-        $sync_result = $this->mrm_tax_sync_stripe_registrations();
-
-        if (is_wp_error($sync_result)) {
-          wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode('Unable to verify the active Stripe tax registration. Instructor approval remains blocked.')));
-          exit;
+      $is_state_profile = in_array($request_type_for_approval, array('instructor_profile','presenter_profile'), true);
+      if ($is_state_profile && empty($_POST['docusign_verified'])) {
+        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_admin_docusign_verification')); exit;
+      }
+      $submission = $this->mrm_profile_card_complete_submission_payload($request_type_for_approval,$this->mrm_profile_card_decode_json($request['submission_payload'] ?? ''),$this->mrm_profile_card_decode_json($request['admin_payload'] ?? ''));
+      $state = '';
+      if ($is_state_profile) {
+        $state = $this->mrm_normalize_state_code($submission['state'] ?? '');
+        if (!preg_match('/^[A-Z]{2}$/',$state)) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode('The profile state is missing or invalid.'))); exit; }
+        $state_row = $this->mrm_tax_get_state_row($state);
+        if (is_wp_error($state_row)) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($state_row->get_error_message()))); exit; }
+        if (!$this->mrm_tax_global_registration_sync_is_fresh()) $sync_result = $this->mrm_tax_sync_stripe_registrations();
+        if (!empty($_POST['permit_application_submitted'])) {
+          $permit_submitted_at = $this->mrm_tax_parse_admin_datetime(wp_unslash($_POST['authority_registration_submitted_at'] ?? ''),'Permit application submission date');
+          if (is_wp_error($permit_submitted_at)) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($permit_submitted_at->get_error_message()))); exit; }
+          $permit_reference = sanitize_text_field(wp_unslash($_POST['authority_registration_application_reference'] ?? ''));
+          $permit_note = sanitize_textarea_field(wp_unslash($_POST['permit_application_internal_note'] ?? ''));
+          if ($permit_submitted_at === '' || $permit_reference === '') { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode('Permit submission requires both a submission date and confirmation or reference.'))); exit; }
+          try { if (new DateTimeImmutable($permit_submitted_at,wp_timezone()) > new DateTimeImmutable('now',wp_timezone())) throw new RuntimeException('The permit submission date cannot be in the future.'); } catch (Throwable $error) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($error->getMessage()))); exit; }
+          $current = sanitize_key($state_row['authority_registration_status'] ?? 'not_started');
+          $next = in_array($current,array('approved','active','not_required_written_determination'),true) ? $current : 'application_submitted';
+          $audit = $state_row['workflow_audit_json'] ?? '';
+          if ($permit_note !== '') $audit = $this->mrm_tax_append_workflow_audit($audit,array('event'=>'permit_application_note_added','state'=>$state,'note'=>$permit_note,'request_id'=>$request_id));
+          $wpdb->last_error=''; $saved=$wpdb->update($this->table_tax_state_status(),array('authority_registration_status'=>$next,'authority_registration_submitted_at'=>$permit_submitted_at,'authority_registration_application_reference'=>$permit_reference,'workflow_audit_json'=>$audit,'updated_at'=>current_time('mysql')),array('state_code'=>$state));
+          if ($saved === false || $wpdb->last_error !== '') { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($wpdb->last_error ?: 'The permit application evidence could not be saved.'))); exit; }
         }
-
-        $submission = $this->mrm_profile_card_decode_json($request['submission_payload'] ?? '');
-        $gate = $this->mrm_tax_get_state_gate($submission['state'] ?? '');
-
-        if (empty($gate['allowed'])) {
-          $wpdb->update($table, array('status' => 'tax_registration_required', 'updated_at' => current_time('mysql')), array('id' => $request_id));
-          wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode($gate['message'])));
-          exit;
-        }
+        $eligibility = $this->mrm_tax_profile_approval_eligibility($state);
+        if (empty($eligibility['allowed'])) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($eligibility['message'] ?? 'The state approval requirements are incomplete.'))); exit; }
+      } else $eligibility=array('allowed'=>true,'approval_basis'=>'not_applicable');
+      $result=$this->mrm_profile_card_approve_request($request);
+      if (is_wp_error($result)) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($result->get_error_message()))); exit; }
+      $wpdb->last_error=''; $target_saved=$wpdb->update($table,array('created_target_type'=>$result['target_type'],'created_target_id'=>$result['target_id'],'updated_at'=>current_time('mysql')),array('id'=>$request_id));
+      if ($target_saved === false || $wpdb->last_error !== '') { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($wpdb->last_error ?: 'The created profile reference could not be saved.'))); exit; }
+      if ($is_state_profile) {
+        $activity=$this->mrm_tax_start_business_activity_after_profile_approval($state,array('request_id'=>$request_id,'request_type'=>$request_type_for_approval,'target_type'=>$result['target_type'],'target_id'=>$result['target_id'],'administrator_id'=>get_current_user_id()));
+        if (is_wp_error($activity)) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($activity->get_error_message()))); exit; }
       }
-
-      if (
-        in_array($request_type_for_approval, array('instructor_profile', 'presenter_profile'), true)
-        && empty($_POST['docusign_verified'])
-      ) {
-        wp_safe_redirect(
-          admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=missing_admin_docusign_verification')
-        );
-        exit;
-      }
-
-      $result = $this->mrm_profile_card_approve_request($request);
-
-      if (is_wp_error($result)) {
-        wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode($result->get_error_message())));
-        exit;
-      }
-
-      $wpdb->update(
-        $table,
-        array(
-          'status' => 'approved',
-          'created_target_type' => $result['target_type'],
-          'created_target_id' => $result['target_id'],
-          'review_notes' => $this->mrm_profile_card_encode_json(array(
-            'admin_review_note' => sanitize_textarea_field(wp_unslash($_POST['admin_review_note'] ?? '')),
-            'field_comments' => $this->mrm_profile_card_sanitize_field_comments_from_post($_POST['field_comments'] ?? array()),
-            'docusign_verified' => !empty($_POST['docusign_verified']) ? 1 : 0,
-            'approved_profile_card_payload' => $this->mrm_profile_card_complete_submission_payload(
-              sanitize_key((string)($request['request_type'] ?? '')),
-              $this->mrm_profile_card_decode_json($request['submission_payload'] ?? ''),
-              $this->mrm_profile_card_decode_json($request['admin_payload'] ?? '')
-            ),
-          )),
-          'reviewed_at' => current_time('mysql'),
-          'updated_at' => current_time('mysql'),
-        ),
-        array('id' => $request_id)
-      );
-
-      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&approved=1'));
-      exit;
+      $review_notes=$this->mrm_profile_card_decode_json($request['review_notes'] ?? '');
+      $review_notes['admin_review_note']=sanitize_textarea_field(wp_unslash($_POST['admin_review_note'] ?? ''));
+      $review_notes['field_comments']=$this->mrm_profile_card_sanitize_field_comments_from_post($_POST['field_comments'] ?? array());
+      $review_notes['docusign_verified']=!empty($_POST['docusign_verified']) ? 1 : 0;
+      $review_notes['approved_profile_card_payload']=$submission;
+      if ($is_state_profile) $review_notes['state_workflow_approval']=array('state'=>$state,'approval_basis'=>$eligibility['approval_basis'] ?? 'none','permit_application_submitted_at'=>$eligibility['authority_registration_submitted_at'] ?? null,'permit_application_reference'=>$eligibility['authority_registration_application_reference'] ?? null,'administrator_id'=>get_current_user_id(),'approved_at'=>current_time('mysql'));
+      $wpdb->last_error=''; $approved=$wpdb->update($table,array('status'=>'approved','created_target_type'=>$result['target_type'],'created_target_id'=>$result['target_id'],'review_notes'=>$this->mrm_profile_card_encode_json($review_notes),'reviewed_at'=>current_time('mysql'),'updated_at'=>current_time('mysql')),array('id'=>$request_id));
+      if ($approved === false || $wpdb->last_error !== '') { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($wpdb->last_error ?: 'The request could not be marked approved.'))); exit; }
+      $verified=$wpdb->get_row($wpdb->prepare("SELECT status, created_target_type, created_target_id FROM {$table} WHERE id = %d LIMIT 1",$request_id),ARRAY_A);
+      if (!is_array($verified) || sanitize_key($verified['status'] ?? '') !== 'approved' || absint($verified['created_target_id'] ?? 0) !== absint($result['target_id'])) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode('The approved request could not be verified.'))); exit; }
+      wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&approved=1')); exit;
     }
-
     wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=unknown_action'));
     exit;
   }
 
+  private function mrm_profile_card_target_exists($target_type, $target_id) {
+    global $wpdb;
+    $target_type = sanitize_key($target_type); $target_id = absint($target_id);
+    if ($target_id <= 0) return false;
+    if ($target_type === 'instructor') $table = $wpdb->prefix . 'mrm_instructors';
+    elseif ($target_type === 'presenter') $table = $wpdb->prefix . 'mrm_masterclass_presenters';
+    elseif ($target_type === 'masterclass_event') $table = $wpdb->prefix . 'mrm_masterclass_events';
+    else return false;
+    if ($wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table)) !== $table) return false;
+    return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(1) FROM {$table} WHERE id = %d", $target_id)) > 0;
+  }
+
+  private function mrm_tax_start_business_activity_after_profile_approval($state, $context = array()) {
+    global $wpdb;
+    $state = $this->mrm_normalize_state_code($state);
+    if ($state === '') return new WP_Error('invalid_activity_state','The business-activity state is invalid.');
+    $table = $this->table_tax_state_status(); $now = current_time('mysql'); $wpdb->last_error = '';
+    $started = $wpdb->query($wpdb->prepare("UPDATE {$table} SET physical_activity_started_at = %s, pending_tax_tracking_started_at = COALESCE(pending_tax_tracking_started_at, %s), updated_at = %s WHERE state_code = %s AND physical_activity_started_at IS NULL",$now,$now,$now,$state));
+    if ($started === false || $wpdb->last_error !== '') return new WP_Error('activity_start_save_failed',$wpdb->last_error ?: 'The state business-activity date could not be saved.');
+    $row = $this->mrm_tax_get_state_row($state); if (is_wp_error($row)) return $row;
+    $updates = array(
+      'workflow_audit_json'=>$this->mrm_tax_append_workflow_audit($row['workflow_audit_json'] ?? '',array('event'=>$started > 0 ? 'physical_activity_started' : 'additional_profile_approved','state'=>$state,'request_id'=>absint($context['request_id'] ?? 0),'request_type'=>sanitize_key($context['request_type'] ?? ''),'target_type'=>sanitize_key($context['target_type'] ?? ''),'target_id'=>absint($context['target_id'] ?? 0),'administrator_id'=>absint($context['administrator_id'] ?? get_current_user_id()),'recorded_at'=>$now)),
+      'updated_at'=>$now,
+    );
+    if ($state === 'TX' && $started > 0) {
+      try { $activity = new DateTimeImmutable($row['physical_activity_started_at'], wp_timezone()); } catch (Throwable $error) { return new WP_Error('activity_date_invalid','The Texas business-activity date is invalid.'); }
+      if (empty($row['foreign_registration_grace_days'])) $updates['foreign_registration_grace_days'] = 90;
+      if (empty($row['foreign_registration_internal_due_date'])) $updates['foreign_registration_internal_due_date'] = $activity->modify('+60 days')->format('Y-m-d');
+      if (empty($row['foreign_registration_outside_due_date'])) $updates['foreign_registration_outside_due_date'] = $activity->modify('+90 days')->format('Y-m-d');
+      if (empty($row['pending_tax_reserve_rate_bps'])) $updates['pending_tax_reserve_rate_bps'] = 825;
+    }
+    if (!empty($row['collection_active']) && empty($row['pending_tax_tracking_ended_at'])) $updates['pending_tax_tracking_ended_at'] = $row['physical_activity_started_at'];
+    $wpdb->last_error = ''; $saved = $wpdb->update($table,$updates,array('state_code'=>$state));
+    if ($saved === false || $wpdb->last_error !== '') return new WP_Error('activity_workflow_save_failed',$wpdb->last_error ?: 'The state workflow could not be saved.');
+    $verified = $this->mrm_tax_get_state_row($state);
+    if (is_wp_error($verified) || empty($verified['physical_activity_started_at'])) return new WP_Error('activity_start_verification_failed','The state business-activity date could not be verified.');
+    return $verified;
+  }
+
   private function mrm_profile_card_approve_request($request) {
+    $existing_target_type = sanitize_key($request['created_target_type'] ?? '');
+    $existing_target_id = absint($request['created_target_id'] ?? 0);
+    if ($existing_target_id > 0 && $this->mrm_profile_card_target_exists($existing_target_type, $existing_target_id)) return array('target_type'=>$existing_target_type,'target_id'=>$existing_target_id);
     $type = sanitize_key($request['request_type'] ?? '');
 
     if ($type === 'presenter_profile') {
