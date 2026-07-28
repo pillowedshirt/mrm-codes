@@ -20231,12 +20231,97 @@ public function handle_marketing_resubscribe() {
 
 
 
-  private function mrm_tax_append_alert_email_recovery_history($details_json, $event) {
-    $details=json_decode((string)$details_json,true); if(!is_array($details))$details=array();
-    $history=isset($details['email_recovery_history'])&&is_array($details['email_recovery_history'])?$details['email_recovery_history']:array();
-    $event=is_array($event)?$event:array(); if(empty($event['recorded_at']))$event['recorded_at']=current_time('mysql');
-    if(!array_key_exists('administrator_id',$event))$event['administrator_id']=get_current_user_id();
-    $history[]=$event; $details['email_recovery_history']=$history; return wp_json_encode($details);
+  private function
+  mrm_tax_alert_email_claim_is_expired(
+    $claimed_at,
+    $minutes = 15
+  ) {
+    $minutes = max(1, min(1440, absint($minutes)));
+    $claimed_at = sanitize_text_field((string) $claimed_at);
+    if ($claimed_at === '') return true;
+    try {
+      $claim_time = new DateTimeImmutable($claimed_at, wp_timezone());
+      $expires_at = $claim_time->modify('+' . $minutes . ' minutes');
+      $now = new DateTimeImmutable('now', wp_timezone());
+      return $expires_at <= $now;
+    } catch (Throwable $error) {
+      /* A malformed timestamp cannot be trusted as an active claim. */
+      return true;
+    }
+  }
+
+  private function
+  mrm_tax_transition_stale_alert_email_claim_to_uncertain($alert) {
+    global $wpdb;
+    if (!is_array($alert)) return new WP_Error('tax_alert_email_claim_row_invalid', 'The email claim record is invalid.');
+    $alert_id = absint($alert['id'] ?? 0);
+    $email_status = sanitize_key($alert['email_status'] ?? '');
+    $claim_token = sanitize_text_field($alert['email_claim_token'] ?? '');
+    $claimed_at = sanitize_text_field($alert['email_claimed_at'] ?? '');
+    if ($alert_id <= 0) return new WP_Error('tax_alert_email_claim_id_invalid', 'The email claim alert ID is invalid.');
+    if ($email_status !== 'sending') return false;
+    if (!$this->mrm_tax_alert_email_claim_is_expired($claimed_at, 15)) return false;
+    $table = $this->table_tax_alerts();
+    $now = current_time('mysql');
+    $message = 'A previous sending claim expired before its final state was confirmed. Automatic resend was suppressed to prevent a duplicate.';
+    $wpdb->last_error = '';
+    if ($claim_token !== '') {
+      $changed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status = 'uncertain', email_claim_token = NULL, email_last_error = %s, updated_at = %s WHERE id = %d AND email_status = 'sending' AND email_claim_token = %s", $message, $now, $alert_id, $claim_token));
+    } else {
+      $changed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status = 'uncertain', email_claim_token = NULL, email_last_error = %s, updated_at = %s WHERE id = %d AND email_status = 'sending' AND (email_claim_token IS NULL OR email_claim_token = '')", $message, $now, $alert_id));
+    }
+    if ($changed === false || $wpdb->last_error !== '') return new WP_Error('tax_alert_email_stale_claim_update_failed', $wpdb->last_error ?: 'The expired email claim could not be marked uncertain.');
+    if ((int) $changed === 0) return false;
+    $wpdb->last_error = '';
+    $verified = $wpdb->get_var($wpdb->prepare("SELECT email_status FROM {$table} WHERE id = %d LIMIT 1", $alert_id));
+    if ($wpdb->last_error !== '' || sanitize_key($verified) !== 'uncertain') return new WP_Error('tax_alert_email_stale_claim_unverified', $wpdb->last_error ?: 'The expired email claim transition could not be verified.');
+    return true;
+  }
+
+  private function
+  mrm_tax_cleanup_stale_alert_email_claims($limit = 100) {
+    global $wpdb;
+    $limit = max(1, min(500, absint($limit)));
+    $cutoff = (new DateTimeImmutable('now', wp_timezone()))->modify('-15 minutes')->format('Y-m-d H:i:s');
+    $table = $this->table_tax_alerts();
+    $wpdb->last_error = '';
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT id, email_status, email_claim_token, email_claimed_at FROM {$table} WHERE alert_status = 'open' AND email_status = 'sending' AND (email_claimed_at IS NULL OR email_claimed_at <= %s) ORDER BY email_claimed_at ASC, id ASC LIMIT %d", $cutoff, $limit), ARRAY_A);
+    if ($wpdb->last_error !== '') return new WP_Error('tax_alert_stale_claim_query_failed', $wpdb->last_error);
+    $transitioned = 0; $errors = array();
+    foreach ((array) $rows as $row) {
+      $result = $this->mrm_tax_transition_stale_alert_email_claim_to_uncertain($row);
+      if (is_wp_error($result)) {
+        $errors[] = array('alert_id'=>absint($row['id'] ?? 0), 'code'=>$result->get_error_code(), 'message'=>$result->get_error_message());
+        continue;
+      }
+      if ($result === true) $transitioned++;
+    }
+    return array('transitioned'=>$transitioned, 'errors'=>$errors);
+  }
+
+  private function
+  mrm_tax_append_alert_email_recovery_history($details_json, $event) {
+    $details = json_decode((string) $details_json, true);
+    if (!is_array($details)) $details = array();
+    $history = isset($details['email_recovery_history']) && is_array($details['email_recovery_history']) ? $details['email_recovery_history'] : array();
+    $event = is_array($event) ? $event : array();
+    if (empty($event['recorded_at'])) $event['recorded_at'] = current_time('mysql');
+    if (!array_key_exists('administrator_id', $event)) $event['administrator_id'] = get_current_user_id();
+    $history[] = $event;
+    $details['email_recovery_history'] = $history;
+    $details['email_recovery_last_resolution'] = $event;
+    return wp_json_encode($details);
+  }
+
+  private function
+  mrm_tax_merge_alert_details_preserving_recovery($new_details, $existing_details_json) {
+    $new_details = is_array($new_details) ? $new_details : array();
+    $existing_details = json_decode((string) $existing_details_json, true);
+    if (!is_array($existing_details)) return $new_details;
+    foreach (array('email_recovery_history', 'email_recovery_last_resolution') as $key) {
+      if (array_key_exists($key, $existing_details)) $new_details[$key] = $existing_details[$key];
+    }
+    return $new_details;
   }
 
   private function mrm_tax_attempt_alert_email($alert_id) {
@@ -20249,17 +20334,26 @@ public function handle_marketing_resubscribe() {
     $status=sanitize_key($alert['email_status']??''); if($status==='')$status=!empty($alert['emailed_at'])?'sent':'not_sent';
     if(in_array($status,array('sent','waived'),true))return $alert_id;
     if($status==='uncertain')return new WP_Error('tax_alert_email_uncertain','The email delivery state is uncertain and requires administrator review.');
-    if($status==='sending') {
-      $expired=false;
-      if(!empty($alert['email_claimed_at'])) { try{$claimed_at=new DateTimeImmutable($alert['email_claimed_at'],wp_timezone());$expired=$claimed_at->modify('+15 minutes')<new DateTimeImmutable('now',wp_timezone());}catch(Throwable $error){$expired=true;} } else $expired=true;
-      if(!$expired)return new WP_Error('tax_alert_email_in_progress','Another process is currently sending this alert email.');
-      $now=current_time('mysql');$wpdb->last_error='';$saved=$wpdb->update($table,array('email_status'=>'uncertain','email_last_error'=>'A previous sending claim expired before its final state was confirmed. Automatic resend was suppressed to prevent a duplicate.','updated_at'=>$now),array('id'=>$alert_id));
-      if($saved===false||$wpdb->last_error!=='')return new WP_Error('tax_alert_email_uncertain_save_failed',$wpdb->last_error?:'The expired email claim could not be marked uncertain.');
-      return new WP_Error('tax_alert_email_uncertain','The previous email attempt has an uncertain delivery state and requires administrator review.');
+    if ($status === 'sending') {
+      $transition = $this->mrm_tax_transition_stale_alert_email_claim_to_uncertain($alert);
+      if (is_wp_error($transition)) return $transition;
+      if ($transition === true) return new WP_Error('tax_alert_email_uncertain', 'The previous email attempt expired with an uncertain delivery state and requires administrator review.');
+      return new WP_Error('tax_alert_email_in_progress', 'Another process is currently sending this alert email.');
     }
     if(!in_array($status,array('not_sent','failed'),true))return new WP_Error('tax_alert_email_status_invalid','The tax alert has an unsupported email status.');
     $recipient=sanitize_email(get_option('admin_email'));
-    if($recipient===''||!is_email($recipient)){$now=current_time('mysql');$wpdb->update($table,array('email_status'=>'failed','email_last_attempt_at'=>$now,'email_last_error'=>'The WordPress administrator email address is missing or invalid.','updated_at'=>$now),array('id'=>$alert_id));return new WP_Error('tax_alert_email_recipient_invalid','The WordPress administrator email address is missing or invalid.');}
+    if ($recipient === '' || !is_email($recipient)) {
+      $now = current_time('mysql');
+      $error_message = 'The WordPress administrator email address is missing or invalid.';
+      $wpdb->last_error = '';
+      $failed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status = 'failed', email_claim_token = NULL, email_claimed_at = NULL, email_last_attempt_at = %s, email_last_error = %s, updated_at = %s WHERE id = %d AND email_status IN ('not_sent', 'failed')", $now, $error_message, $now, $alert_id));
+      if ($failed === false || $wpdb->last_error !== '') return new WP_Error('tax_alert_email_recipient_failure_save_failed', $wpdb->last_error ?: 'The invalid-recipient email state could not be saved.');
+      if ((int) $failed !== 1) return new WP_Error('tax_alert_email_recipient_state_changed', 'The alert email state changed before the invalid recipient could be recorded.');
+      $wpdb->last_error = '';
+      $verified = $wpdb->get_row($wpdb->prepare("SELECT email_status, email_last_error FROM {$table} WHERE id = %d LIMIT 1", $alert_id), ARRAY_A);
+      if ($wpdb->last_error !== '' || !is_array($verified) || sanitize_key($verified['email_status'] ?? '') !== 'failed' || sanitize_text_field($verified['email_last_error'] ?? '') !== $error_message) return new WP_Error('tax_alert_email_recipient_failure_unverified', $wpdb->last_error ?: 'The invalid-recipient email state could not be verified.');
+      return new WP_Error('tax_alert_email_recipient_invalid', $error_message);
+    }
     $token=wp_generate_uuid4();$now=current_time('mysql');$wpdb->last_error='';
     $claimed=$wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status='sending',email_claim_token=%s,email_claimed_at=%s,email_last_attempt_at=%s,email_last_error=NULL,updated_at=%s WHERE id=%d AND email_status IN ('not_sent','failed')",$token,$now,$now,$now,$alert_id));
     if($claimed===false||$wpdb->last_error!=='')return new WP_Error('tax_alert_email_claim_failed',$wpdb->last_error?:'The tax-alert email could not be claimed.');
@@ -20269,11 +20363,27 @@ public function handle_marketing_resubscribe() {
     $details=json_decode((string)($alert['details_json']??''),true);if(!is_array($details))$details=array();$type=sanitize_key($alert['alert_type']??'');$state=$this->mrm_normalize_state_code($alert['state_code']??'');$message=sanitize_textarea_field($details['message']??'A sales-tax issue requires attention.');
     $subject=sprintf('Sales Tax Alert: %s%s',str_replace('_',' ',ucwords($type,'_')),$state!==''?' — '.$state:'');
     $sent=wp_mail($recipient,$subject,$message."\n\nAlert type: ".$type."\nState: ".($state!==''?$state:'Not specified'));
-    if(!$sent){$wpdb->last_error='';$failed=$wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status='failed',email_claim_token=NULL,email_last_error=%s,updated_at=%s WHERE id=%d AND email_status='sending' AND email_claim_token=%s",'wp_mail() returned false.',$now,$alert_id,$token));if($failed===false||$wpdb->last_error!==''||(int)$failed!==1){$wpdb->update($table,array('email_status'=>'uncertain','email_last_error'=>'wp_mail() returned false, but the failed state could not be verified.','updated_at'=>$now),array('id'=>$alert_id));return new WP_Error('tax_alert_email_failure_state_unverified',$wpdb->last_error?:'The failed email state could not be verified.');}return new WP_Error('tax_alert_email_send_failed','WordPress mail did not accept the tax-alert email.');}
-    $wpdb->last_error='';$saved=$wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status='sent',email_claim_token=NULL,emailed_at=%s,email_last_error=NULL,updated_at=%s WHERE id=%d AND email_status='sending' AND email_claim_token=%s",$now,$now,$alert_id,$token));
-    if($saved===false||$wpdb->last_error!==''||(int)$saved!==1){$wpdb->update($table,array('email_status'=>'uncertain','email_last_error'=>'WordPress mail accepted the message, but the sent state could not be persisted. Automatic resend was suppressed.','updated_at'=>$now),array('id'=>$alert_id));return new WP_Error('tax_alert_email_sent_state_unverified','WordPress mail accepted the email, but its sent state could not be verified.');}
+    if (!$sent) {
+      $wpdb->last_error='';
+      $failed=$wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status='failed',email_claim_token=NULL,email_last_error=%s,updated_at=%s WHERE id=%d AND email_status='sending' AND email_claim_token=%s",'wp_mail() returned false.',$now,$alert_id,$token));
+      if($failed===false||$wpdb->last_error!==''||(int)$failed!==1){
+        $wpdb->last_error = '';
+        $uncertain = $wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status = 'uncertain', email_claim_token = NULL, email_last_error = %s, updated_at = %s WHERE id = %d AND email_status = 'sending' AND email_claim_token = %s", 'wp_mail() returned false, but the failed state could not be verified. Automatic resend was suppressed.', $now, $alert_id, $token));
+        if ($uncertain === false || $wpdb->last_error !== '') error_log('MRM could not preserve the uncertain email state for alert #' . $alert_id . ': ' . ($wpdb->last_error ?: 'The claim state changed before the fallback update.'));
+        return new WP_Error('tax_alert_email_failure_state_unverified',$wpdb->last_error?:'The failed email state could not be verified.');
+      }
+      return new WP_Error('tax_alert_email_send_failed','WordPress mail did not accept the tax-alert email.');
+    }
+    $wpdb->last_error='';$sent_saved=$wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status='sent',email_claim_token=NULL,emailed_at=%s,email_last_error=NULL,updated_at=%s WHERE id=%d AND email_status='sending' AND email_claim_token=%s",$now,$now,$alert_id,$token));
+    if($sent_saved===false||$wpdb->last_error!==''||(int)$sent_saved!==1){
+      $wpdb->last_error = '';
+      $uncertain = $wpdb->query($wpdb->prepare("UPDATE {$table} SET email_status = 'uncertain', email_claim_token = NULL, email_last_error = %s, updated_at = %s WHERE id = %d AND email_status = 'sending' AND email_claim_token = %s", 'WordPress mail accepted the message, but the sent state could not be persisted. Automatic resend was suppressed.', $now, $alert_id, $token));
+      if ($uncertain === false || $wpdb->last_error !== '') error_log('MRM could not preserve the post-send uncertain state for alert #' . $alert_id . ': ' . ($wpdb->last_error ?: 'The claim state changed before the fallback update.'));
+      return new WP_Error('tax_alert_email_sent_state_unverified', 'WordPress mail accepted the email, but its sent state could not be verified. Automatic resend was suppressed.');
+    }
     $wpdb->last_error='';$verified=$wpdb->get_row($wpdb->prepare("SELECT email_status,emailed_at FROM {$table} WHERE id=%d LIMIT 1",$alert_id),ARRAY_A);
-    if($wpdb->last_error!==''||!is_array($verified)||sanitize_key($verified['email_status']??'')!=='sent'||empty($verified['emailed_at'])){$wpdb->update($table,array('email_status'=>'uncertain','email_last_error'=>'The persisted sent state could not be reloaded and verified. Automatic resend was suppressed.','updated_at'=>$now),array('id'=>$alert_id));return new WP_Error('tax_alert_email_sent_state_unverified','The tax-alert email sent state could not be verified.');}
+    if ($wpdb->last_error !== '') return new WP_Error('tax_alert_email_sent_state_read_failed', $wpdb->last_error);
+    if (!is_array($verified) || sanitize_key($verified['email_status'] ?? '') !== 'sent' || empty($verified['emailed_at'])) return new WP_Error('tax_alert_email_sent_state_unverified', 'The tax-alert email sent state could not be verified without risking an overwrite of a newer state.');
     return $alert_id;
   }
 
@@ -20283,6 +20393,7 @@ public function handle_marketing_resubscribe() {
     if($deduplication_key==='')$deduplication_key=substr(sha1(wp_json_encode(array('state'=>$state,'alert_type'=>$alert_type,'source_type'=>$source_type,'source_id'=>$source_id,'details'=>$details))),0,40);
     $key=substr('mrm_tax_'.$alert_type.'_'.$deduplication_key,0,191);$table=$this->table_tax_alerts();$now=current_time('mysql');$wpdb->last_error='';$existing=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE alert_key=%s LIMIT 1",$key),ARRAY_A);
     if($wpdb->last_error!=='')return new WP_Error('tax_alert_lookup_failed',$wpdb->last_error);$exists=is_array($existing);$reopening=$exists&&sanitize_key($existing['alert_status']??'')!=='open';
+    if ($exists) $details = $this->mrm_tax_merge_alert_details_preserving_recovery($details, $existing['details_json'] ?? '');
     $data=array('state_code'=>$state,'alert_type'=>$alert_type,'alert_status'=>'open','source_type'=>$source_type,'source_id'=>$source_id,'details_json'=>wp_json_encode($details),'resolved_at'=>null,'updated_at'=>$now);
     if($reopening)$data+=array('email_status'=>'not_sent','email_claim_token'=>null,'email_claimed_at'=>null,'email_last_attempt_at'=>null,'email_last_error'=>null,'emailed_at'=>null);$wpdb->last_error='';
     if($exists){$saved=$wpdb->update($table,$data,array('id'=>absint($existing['id'])));$id=absint($existing['id']);}else{$data+=array('alert_key'=>$key,'email_status'=>'not_sent','created_at'=>$now);$saved=$wpdb->insert($table,$data);$id=absint($wpdb->insert_id);}
@@ -20291,8 +20402,14 @@ public function handle_marketing_resubscribe() {
   }
 
   private function mrm_tax_retry_failed_alert_emails($limit=25) {
-    global $wpdb;$limit=max(1,min(100,absint($limit)));$wpdb->last_error='';$rows=$wpdb->get_results($wpdb->prepare("SELECT id FROM {$this->table_tax_alerts()} WHERE alert_status='open' AND email_status IN ('not_sent','failed') ORDER BY COALESCE(email_last_attempt_at,created_at) ASC,id ASC LIMIT %d",$limit),ARRAY_A);
-    if($wpdb->last_error!=='')return new WP_Error('tax_alert_email_retry_query_failed',$wpdb->last_error);$errors=array();$attempted=0;foreach((array)$rows as $row){$id=absint($row['id']??0);if($id<=0)continue;$attempted++;$result=$this->mrm_tax_attempt_alert_email($id);if(is_wp_error($result))$errors[]=array('alert_id'=>$id,'code'=>$result->get_error_code(),'message'=>$result->get_error_message());}return array('attempted'=>$attempted,'errors'=>$errors);
+    global $wpdb;$limit=max(1,min(100,absint($limit)));
+    $cleanup_result=$this->mrm_tax_cleanup_stale_alert_email_claims($limit);
+    if(is_wp_error($cleanup_result))return $cleanup_result;
+    $errors=!empty($cleanup_result['errors'])&&is_array($cleanup_result['errors'])?$cleanup_result['errors']:array();
+    $stale_claims_transitioned=absint($cleanup_result['transitioned']??0);
+    $wpdb->last_error='';$rows=$wpdb->get_results($wpdb->prepare("SELECT id FROM {$this->table_tax_alerts()} WHERE alert_status='open' AND email_status IN ('not_sent','failed') ORDER BY COALESCE(email_last_attempt_at,created_at) ASC,id ASC LIMIT %d",$limit),ARRAY_A);
+    if($wpdb->last_error!=='')return new WP_Error('tax_alert_email_retry_query_failed',$wpdb->last_error);$attempted=0;foreach((array)$rows as $row){$id=absint($row['id']??0);if($id<=0)continue;$attempted++;$result=$this->mrm_tax_attempt_alert_email($id);if(is_wp_error($result))$errors[]=array('alert_id'=>$id,'code'=>$result->get_error_code(),'message'=>$result->get_error_message());}
+    return array('attempted'=>$attempted,'stale_claims_transitioned'=>$stale_claims_transitioned,'errors'=>$errors);
   }
 
   private function mrm_tax_resolve_review_alert($alert_type, $refund_id, $resolution) {
@@ -20316,7 +20433,11 @@ public function handle_marketing_resubscribe() {
   private function mrm_tax_resolve_alert_type($alert_type) { global $wpdb; $alert_type=sanitize_key($alert_type); if($alert_type==='') return false; $now=current_time('mysql'); $wpdb->last_error=''; $result=$wpdb->query($wpdb->prepare("UPDATE {$this->table_tax_alerts()} SET alert_status = 'resolved', resolved_at = %s, updated_at = %s WHERE alert_status = 'open' AND alert_type = %s", $now, $now, $alert_type)); if($result===false || $wpdb->last_error!=='') return new WP_Error('tax_alert_type_resolution_failed', $wpdb->last_error ?: 'The tax alerts could not be resolved.'); return true; }
 
   private function mrm_tax_email_attention_alerts($limit=100) {
-    global $wpdb;$limit=max(1,min(200,absint($limit)));$types=array('stripe_activation_notification_pending','stripe_activation_postprocessing_failed');$ph=implode(',',array_fill(0,count($types),'%s'));
+    global $wpdb;$limit=max(1,min(200,absint($limit)));
+    $cleanup_result=$this->mrm_tax_cleanup_stale_alert_email_claims($limit);
+    if(is_wp_error($cleanup_result))return $cleanup_result;
+    if(!empty($cleanup_result['errors']))foreach($cleanup_result['errors'] as $cleanup_error)error_log('MRM stale tax-alert email claim cleanup failed for alert #'.absint($cleanup_error['alert_id']??0).': '.sanitize_textarea_field($cleanup_error['message']??'Unknown stale-claim cleanup error.'));
+    $types=array('stripe_activation_notification_pending','stripe_activation_postprocessing_failed');$ph=implode(',',array_fill(0,count($types),'%s'));
     $sql="SELECT * FROM {$this->table_tax_alerts()} WHERE alert_status='open' AND (email_status IN ('not_sent','failed','sending','uncertain') OR alert_type IN ({$ph})) ORDER BY updated_at DESC,id DESC LIMIT %d";$wpdb->last_error='';$rows=$wpdb->get_results($wpdb->prepare($sql,array_merge($types,array($limit))),ARRAY_A);
     if($wpdb->last_error!=='')return new WP_Error('tax_alert_email_attention_query_failed',$wpdb->last_error);return is_array($rows)?$rows:array();
   }
@@ -21314,11 +21435,22 @@ MRM_TAX_RULES;
     if($note===''){wp_safe_redirect(add_query_arg('tax_error',rawurlencode('An administrator note is required for every email-recovery action.'),$url));exit;}
     if(!in_array($action,array('retry','mark_sent','waive'),true))wp_die('Invalid email-recovery action.');$table=$this->table_tax_alerts();$wpdb->last_error='';$alert=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id=%d LIMIT 1",$id),ARRAY_A);
     if($wpdb->last_error!==''||!is_array($alert)){wp_safe_redirect(add_query_arg('tax_error',rawurlencode($wpdb->last_error?:'The tax alert could not be loaded.'),$url));exit;}
-    $old=sanitize_key($alert['email_status']??'');$now=current_time('mysql');$details=$this->mrm_tax_append_alert_email_recovery_history($alert['details_json']??'',array('action'=>$action,'old_email_status'=>$old,'note'=>$note,'administrator_id'=>get_current_user_id(),'recorded_at'=>$now));$update=array('details_json'=>$details,'updated_at'=>$now);
+    $old=sanitize_key($alert['email_status']??'');
+    if($old==='sending'){
+      $transition=$this->mrm_tax_transition_stale_alert_email_claim_to_uncertain($alert);
+      if(is_wp_error($transition)){wp_safe_redirect(add_query_arg('tax_error',rawurlencode($transition->get_error_message()),$url));exit;}
+      if($transition!==true){wp_safe_redirect(add_query_arg('tax_error',rawurlencode('This alert email is currently being sent. Recovery actions are unavailable until the sending claim expires or completes.'),$url));exit;}
+      $wpdb->last_error='';$alert=$wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id = %d LIMIT 1",$id),ARRAY_A);
+      if($wpdb->last_error!==''||!is_array($alert)){wp_safe_redirect(add_query_arg('tax_error',rawurlencode($wpdb->last_error?:'The expired email claim could not be reloaded.'),$url));exit;}
+      $old=sanitize_key($alert['email_status']??'');
+    }
+    $recoverable_statuses=array('not_sent','failed','uncertain');
+    if(!in_array($old,$recoverable_statuses,true)){wp_safe_redirect(add_query_arg('tax_error',rawurlencode('This email state no longer permits an administrator recovery action.'),$url));exit;}
+    $now=current_time('mysql');$details=$this->mrm_tax_append_alert_email_recovery_history($alert['details_json']??'',array('action'=>$action,'old_email_status'=>$old,'note'=>$note,'administrator_id'=>get_current_user_id(),'recorded_at'=>$now));$update=array('details_json'=>$details,'updated_at'=>$now);
     if($action==='retry')$update+=array('email_status'=>'failed','email_claim_token'=>null,'email_claimed_at'=>null,'email_last_error'=>'Administrator authorized a deliberate retry: '.$note);
     elseif($action==='mark_sent')$update+=array('email_status'=>'sent','email_claim_token'=>null,'email_claimed_at'=>null,'email_last_error'=>null,'emailed_at'=>!empty($alert['emailed_at'])?$alert['emailed_at']:$now);
     else $update+=array('email_status'=>'waived','email_claim_token'=>null,'email_claimed_at'=>null,'email_last_error'=>'Administrator waived further automatic delivery: '.$note);
-    $wpdb->last_error='';$saved=$wpdb->update($table,$update,array('id'=>$id));if($saved===false||$wpdb->last_error!==''){wp_safe_redirect(add_query_arg('tax_error',rawurlencode($wpdb->last_error?:'The email-recovery action could not be saved.'),$url));exit;}
+    $wpdb->last_error='';$saved=$wpdb->update($table,$update,array('id'=>$id,'email_status'=>$old));if($saved===false||$wpdb->last_error!==''){wp_safe_redirect(add_query_arg('tax_error',rawurlencode($wpdb->last_error?:'The email-recovery action could not be saved.'),$url));exit;}if((int)$saved!==1){wp_safe_redirect(add_query_arg('tax_error',rawurlencode('The email state changed before the recovery action could be applied. Reload the page and review the current status.'),$url));exit;}
     if($action==='retry'){$result=$this->mrm_tax_attempt_alert_email($id);if(is_wp_error($result)){wp_safe_redirect(add_query_arg(array('tax_email_action'=>'retry_pending','tax_email_alert_id'=>$id),$url));exit;}}
     $verified=$wpdb->get_var($wpdb->prepare("SELECT email_status FROM {$table} WHERE id=%d LIMIT 1",$id));$expected=$action==='waive'?'waived':'sent';if(sanitize_key($verified)!==$expected){wp_safe_redirect(add_query_arg('tax_error',rawurlencode('The email-recovery action could not be verified.'),$url));exit;}
     wp_safe_redirect(add_query_arg(array('tax_email_action'=>$action,'tax_email_alert_id'=>$id),$url));exit;
@@ -21419,10 +21551,10 @@ MRM_TAX_RULES;
       <div style="background:#fff;border:1px solid #dba617;padding:18px;margin:18px 0;">
         <h2>Tax Alert Email Attention</h2><p>These records do not block checkout. They identify administrative notifications that failed, remain uncertain, are still being processed, or accompany pending Stripe activation reporting.</p>
         <table class="widefat striped"><thead><tr><th>Alert</th><th>State</th><th>Message</th><th>Email status</th><th>Last attempt</th><th>Email error</th><th>Recovery action</th></tr></thead><tbody>
-        <?php foreach($email_attention_alerts as $alert): $details=json_decode((string)($alert['details_json']??''),true);if(!is_array($details))$details=array();$alert_id=absint($alert['id']??0);$email_status=sanitize_key($alert['email_status']??'');$can_recover=in_array($email_status,array('not_sent','failed','sending','uncertain'),true); ?>
+        <?php foreach($email_attention_alerts as $alert): $details=json_decode((string)($alert['details_json']??''),true);if(!is_array($details))$details=array();$alert_id=absint($alert['id']??0);$email_status=sanitize_key($alert['email_status']??'');$can_recover=in_array($email_status,array('not_sent','failed','uncertain'),true); ?>
           <tr><td><strong><?php echo esc_html($alert['alert_type']??'unknown'); ?></strong><br>#<?php echo esc_html($alert_id); ?></td><td><?php echo esc_html($alert['state_code']?:'—'); ?></td><td><?php echo esc_html($details['message']??'Administrative review required.'); ?></td><td><?php echo esc_html($email_status?:'not_sent'); ?></td><td><?php echo esc_html($alert['email_last_attempt_at']??'—'); ?></td><td><?php echo esc_html($alert['email_last_error']??'—'); ?></td><td>
           <?php if($can_recover): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="min-width:280px;"><?php wp_nonce_field('mrm_tax_alert_email_action_'.$alert_id,'mrm_tax_alert_email_nonce'); ?><input type="hidden" name="action" value="mrm_tax_alert_email_action"><input type="hidden" name="alert_id" value="<?php echo esc_attr($alert_id); ?>"><select name="email_resolution_action" required><option value="">Select action</option><option value="retry">Retry email intentionally</option><option value="mark_sent">Mark sent after verification</option><option value="waive">Waive further delivery</option></select><br><textarea name="email_resolution_note" rows="3" required placeholder="Record what you verified and why this action is appropriate." style="width:100%;margin-top:6px;"></textarea><br><button class="button button-small" type="submit" style="margin-top:6px;">Apply email action</button></form>
-          <?php elseif(in_array(sanitize_key($alert['alert_type']??''),array('stripe_activation_notification_pending','stripe_activation_postprocessing_failed'),true)): ?>The underlying Stripe activation task will resolve this warning after its associated activation alert is recovered.<?php else: ?>No email recovery action is required.<?php endif; ?></td></tr>
+          <?php elseif($email_status==='sending'): ?>An email process currently holds this alert. Recovery controls will become available only after the send completes or the 15-minute claim expires.<?php elseif(in_array(sanitize_key($alert['alert_type']??''),array('stripe_activation_notification_pending','stripe_activation_postprocessing_failed'),true)): ?>The underlying Stripe activation task will resolve this warning after its associated activation alert is recovered.<?php else: ?>No email recovery action is required.<?php endif; ?></td></tr>
         <?php endforeach; ?></tbody></table>
       </div><?php endif; ?>
       <h2 style="margin-top:24px;">State Monitoring</h2><p>Stripe remains the source of truth for collection status. The monitoring table is read-only, and the focused workflow panels below allow administrator-only permit, filing, pending-period, and foreign-registration tracking.</p><table class="widefat striped" style="margin-top:12px;"><thead><tr><th>State</th><th>Stripe Registration</th><th>Registration ID</th><th>Collection</th><th>Tracked sales</th><th>Tracked transactions</th><th>Monitored threshold</th><th>Threshold progress</th><th>Monitor status</th><th>Suggested action</th></tr></thead><tbody><?php foreach($rows as $r): $state=$this->mrm_normalize_state_code($r['state_code'] ?? ''); $collection_active=!empty($r['collection_active']); $no_general_tax=sanitize_key($r['general_sales_tax_status'] ?? '')==='no_general_state_sales_tax'; $physical_signal=!empty($r['physical_nexus_flag']); $threshold_reached=sanitize_key($r['estimated_threshold_status'] ?? '')==='threshold_reached'; $progress=max(0,(float)($r['estimated_threshold_percent'] ?? 0)); $color='#646970'; $signal='Monitoring'; $action='No action currently identified.'; if($collection_active){ $color='#008a20'; $signal='Collecting'; $action='Stripe Tax collection is active.'; } elseif($no_general_tax){ $color='#2271b1'; $signal='No general state sales tax'; $action='Monitor for product-specific or local obligations.'; } elseif($physical_signal || $threshold_reached){ $color='#b32d2e'; $signal=$physical_signal?'Physical-presence signal':'Threshold reached'; $action='Review this state in Stripe Tax and activate a registration when required.'; } elseif($progress >= 75){ $color=$progress >= 90 ? '#d63638' : '#996800'; $signal='Approaching threshold'; $action='Review Stripe Tax → Needs attention.'; } $threshold_parts=array(); if(!empty($r['threshold_amount_cents'])) $threshold_parts[]='$'.number_format(((int)$r['threshold_amount_cents'])/100,2); if(!empty($r['threshold_transaction_count'])) $threshold_parts[]=absint($r['threshold_transaction_count']).' transactions'; ?><tr style="border-left:5px solid <?php echo esc_attr($color); ?>"><td><strong><?php echo esc_html($state); ?></strong><br><?php echo esc_html($r['state_name'] ?? ''); ?></td><td><?php echo esc_html($r['stripe_registration_status'] ?: 'none'); ?><br><small>Last sync: <?php echo esc_html($r['last_stripe_sync_at'] ?: 'Never'); ?></small></td><td><?php if(!empty($r['stripe_registration_id'])): ?><code><?php echo esc_html($r['stripe_registration_id']); ?></code><?php else: ?>—<?php endif; ?></td><td><?php echo $collection_active ? 'Active' : 'Not active'; ?></td><td>$<?php echo esc_html(number_format(((int)($r['estimated_sales_cents'] ?? 0))/100,2)); ?></td><td><?php echo esc_html(absint($r['estimated_transaction_count'] ?? 0)); ?></td><td><?php echo esc_html(!empty($threshold_parts) ? implode(' or ', $threshold_parts) : 'Not applicable'); ?></td><td><?php echo esc_html(number_format($progress,1)); ?>%</td><td><strong><?php echo esc_html($signal); ?></strong><?php if($physical_signal && !empty($r['physical_nexus_reason'])): ?><br><small><?php echo esc_html($r['physical_nexus_reason']); ?></small><?php endif; ?></td><td><?php echo esc_html($action); ?></td></tr><?php endforeach; ?></tbody></table>
