@@ -20581,6 +20581,117 @@ MRM_TAX_RULES;
   }
 
   private function
+  mrm_tax_collection_activation_source_context(
+    $row,
+    $collection_started_at
+  ) {
+    global $wpdb;
+
+    $result = array(
+      'source' => '',
+      'recorded' => false,
+    );
+
+    if (!is_array($row)) {
+      return $result;
+    }
+
+    $state = $this->mrm_normalize_state_code(
+      $row['state_code'] ?? ''
+    );
+
+    $collection_started_at = sanitize_text_field(
+      (string) $collection_started_at
+    );
+
+    if ($state === '' || $collection_started_at === '') {
+      return $result;
+    }
+
+    $allowed_sources = array(
+      'first_post_patch_verified_sync',
+      'inactive_to_active_transition',
+    );
+
+    /* First look for the canonical source event. */
+    $audit = json_decode(
+      (string) ($row['workflow_audit_json'] ?? ''),
+      true
+    );
+
+    if (is_array($audit)) {
+      foreach ($audit as $event) {
+        if (!is_array($event)) {
+          continue;
+        }
+
+        $event_name = sanitize_key($event['event'] ?? '');
+        $event_started_at = sanitize_text_field(
+          $event['collection_started_at'] ?? ''
+        );
+
+        if ($event_started_at !== $collection_started_at) {
+          continue;
+        }
+
+        if ($event_name === 'stripe_collection_start_source_recorded') {
+          $source = sanitize_key($event['source'] ?? '');
+          if (in_array($source, $allowed_sources, true)) {
+            return array('source' => $source, 'recorded' => true);
+          }
+        }
+
+        /* Preserve compatibility with an earlier successful implementation. */
+        if ($event_name === 'first_post_patch_verified_sync') {
+          return array(
+            'source' => 'first_post_patch_verified_sync',
+            'recorded' => true,
+          );
+        }
+      }
+    }
+
+    /* Recover the source from an activation alert created before this repair. */
+    $deduplication_key =
+      $this->mrm_tax_collection_activation_deduplication_key(
+        $state,
+        $collection_started_at
+      );
+    $alert_key = substr(
+      'mrm_tax_stripe_collection_activated_' . $deduplication_key,
+      0,
+      191
+    );
+    $wpdb->last_error = '';
+    $details_json = $wpdb->get_var(
+      $wpdb->prepare(
+        "SELECT details_json FROM {$this->table_tax_alerts()} WHERE alert_key = %s LIMIT 1",
+        $alert_key
+      )
+    );
+
+    if ($wpdb->last_error === '' && is_string($details_json) && $details_json !== '') {
+      $details = json_decode($details_json, true);
+      if (is_array($details)) {
+        $source = sanitize_key($details['activation_detection_source'] ?? '');
+        if (in_array($source, $allowed_sources, true)) {
+          return array('source' => $source, 'recorded' => false);
+        }
+
+        $message = sanitize_textarea_field($details['message'] ?? '');
+        if (strpos($message, 'first verified locally after the state-workflow update') !== false) {
+          return array(
+            'source' => 'first_post_patch_verified_sync',
+            'recorded' => false,
+          );
+        }
+      }
+    }
+
+    return $result;
+  }
+
+  private function
   mrm_tax_collection_activation_postprocessing_complete(
     $row
   ) {
@@ -20723,8 +20834,91 @@ MRM_TAX_RULES;
       if ($wpdb->query('COMMIT') === false || $wpdb->last_error !== '') return $failure('stripe_registration_commit_failed', $wpdb->last_error ?: 'The verified Stripe registration snapshot could not be committed.');
       $transaction_open = false;
       update_option(self::OPT_TAX_LAST_SUCCESSFUL_REGISTRATION_SYNC,$now,false);if(sanitize_text_field(get_option(self::OPT_TAX_LAST_SUCCESSFUL_REGISTRATION_SYNC,''))!==$now)return $failure('stripe_registration_global_timestamp_failed','The successful-sync timestamp could not be recorded.');
-      $current_rows=$wpdb->get_results("SELECT * FROM {$table}",ARRAY_A);if($wpdb->last_error!=='')return $failure('stripe_registration_committed_snapshot_failed',$wpdb->last_error);foreach ((array) $current_rows as $current) { $state=$this->mrm_normalize_state_code($current['state_code']??''); if($state==='') continue; $previous=$previous_by_state[$state]??array(); $was_active=!empty($previous['collection_active']); $is_active=!empty($current['collection_active']); $missing_collection_start=$is_active&&empty($current['stripe_collection_started_at']); $postprocessing_incomplete=$is_active&&!$this->mrm_tax_collection_activation_postprocessing_complete($current); if((!$was_active&&$is_active)||$missing_collection_start||$postprocessing_incomplete){$result=$this->mrm_tax_handle_verified_collection_activation($state,$previous,$current,$now);if(is_wp_error($result))return $failure('stripe_registration_activation_processing_failed',$result->get_error_message());}}
-      $this->mrm_tax_resolve_alert_type('stripe_registration_sync_failed');return array('synced_at'=>$now,'active_states'=>array_keys($active));
+      $current_rows = $wpdb->get_results("SELECT * FROM {$table}", ARRAY_A);
+      if ($wpdb->last_error !== '') {
+        return $failure('stripe_registration_committed_snapshot_failed', $wpdb->last_error);
+      }
+
+      /* The verified Stripe snapshot is committed; errors below are noncritical. */
+      $postprocessing_errors = array();
+      foreach ((array) $current_rows as $current) {
+        $state = $this->mrm_normalize_state_code($current['state_code'] ?? '');
+        if ($state === '') continue;
+        $previous = $previous_by_state[$state] ?? array();
+        $was_active = !empty($previous['collection_active']);
+        $is_active = !empty($current['collection_active']);
+        $missing_collection_start = $is_active && empty($current['stripe_collection_started_at']);
+        $postprocessing_incomplete = $is_active
+          && !$this->mrm_tax_collection_activation_postprocessing_complete($current);
+
+        if ((!$was_active && $is_active) || $missing_collection_start || $postprocessing_incomplete) {
+          $result = $this->mrm_tax_handle_verified_collection_activation($state, $previous, $current, $now);
+          if (is_wp_error($result)) {
+            $error_code = sanitize_key($result->get_error_code());
+            $error_message = sanitize_textarea_field($result->get_error_message());
+            $warning_type = $error_code === 'activation_email_pending'
+              ? 'stripe_activation_notification_pending'
+              : 'stripe_activation_postprocessing_failed';
+            $collection_started_at = sanitize_text_field(
+              $current['stripe_collection_started_at'] ?? $now
+            );
+            $warning_deduplication_key = sanitize_key(
+              $state . '_' . str_replace(array('-', ':', ' '), '', $collection_started_at) . '_' . $error_code
+            );
+            $warning_alert = $this->mrm_tax_create_alert(
+              $state,
+              $warning_type,
+              'stripe',
+              0,
+              array(
+                'message' => 'The Stripe registration snapshot was successfully verified and committed, but activation post-processing remains pending.' .
+                  "\n\nState: " . $state . "\nError code: " . $error_code . "\nDetails: " . $error_message,
+                'state' => $state,
+                'snapshot_committed' => true,
+                'synced_at' => $now,
+                'collection_started_at' => $collection_started_at,
+                'postprocessing_error_code' => $error_code,
+                'postprocessing_error_message' => $error_message,
+              ),
+              $warning_deduplication_key
+            );
+            if (is_wp_error($warning_alert)) {
+              error_log('MRM Stripe activation warning alert failed for ' . $state . ': ' . $warning_alert->get_error_message());
+            }
+            $postprocessing_errors[] = array(
+              'state' => $state,
+              'code' => $error_code,
+              'message' => $error_message,
+            );
+            continue;
+          }
+
+          $resolved_warnings = $this->mrm_tax_resolve_state_workflow_alerts(
+            $state,
+            array('stripe_activation_notification_pending', 'stripe_activation_postprocessing_failed')
+          );
+          if (is_wp_error($resolved_warnings)) {
+            $postprocessing_errors[] = array(
+              'state' => $state,
+              'code' => $resolved_warnings->get_error_code(),
+              'message' => $resolved_warnings->get_error_message(),
+            );
+            error_log('MRM Stripe activation warning resolution failed for ' . $state . ': ' . $resolved_warnings->get_error_message());
+          }
+        }
+      }
+
+      $resolved_sync_alerts = $this->mrm_tax_resolve_alert_type('stripe_registration_sync_failed');
+      if (is_wp_error($resolved_sync_alerts)) {
+        return $failure('stripe_registration_sync_alert_resolution_failed', $resolved_sync_alerts->get_error_message());
+      }
+
+      return array(
+        'snapshot_committed' => true,
+        'synced_at' => $now,
+        'active_states' => array_keys($active),
+        'postprocessing_errors' => $postprocessing_errors,
+      );
     } finally { $this->mrm_tax_release_registration_sync_lock($lock_token); }
   }
   private function mrm_tax_handle_verified_collection_activation($state, $previous_row, $current_row, $activation_time) {
@@ -20732,11 +20926,35 @@ MRM_TAX_RULES;
     $state=$this->mrm_normalize_state_code($state);
     if($state==='') return new WP_Error('activation_state_invalid','The activated state is invalid.');
     $table=$this->table_tax_state_status();
-    $collection_started_at=sanitize_text_field($current_row['stripe_collection_started_at']??'') ?: $activation_time;
-    $first_post_patch_verification = !empty($previous_row['collection_active']) && empty($previous_row['stripe_collection_started_at']);
+    $collection_started_at = sanitize_text_field($current_row['stripe_collection_started_at'] ?? '');
+    if ($collection_started_at === '') $collection_started_at = $activation_time;
+    $source_context = $this->mrm_tax_collection_activation_source_context($current_row, $collection_started_at);
+    $activation_detection_source = sanitize_key($source_context['source'] ?? '');
+    if ($activation_detection_source === '') {
+      $activation_detection_source = !empty($previous_row['collection_active'])
+        && empty($previous_row['stripe_collection_started_at'])
+          ? 'first_post_patch_verified_sync'
+          : 'inactive_to_active_transition';
+    }
+    $first_post_patch_verification = $activation_detection_source === 'first_post_patch_verified_sync';
     $tracking_started_at=sanitize_text_field($current_row['pending_tax_tracking_started_at']??$current_row['physical_activity_started_at']??'');
     $tracking_ended_at=sanitize_text_field($current_row['pending_tax_tracking_ended_at']??'');
     $updates=array('stripe_collection_started_at'=>$collection_started_at,'updated_at'=>$activation_time);
+    /* Persist the detection source before notification or reporting. */
+    if (empty($source_context['recorded'])) {
+      $updates['workflow_audit_json'] = $this->mrm_tax_append_workflow_audit(
+        $current_row['workflow_audit_json'] ?? '',
+        array(
+          'event' => 'stripe_collection_start_source_recorded',
+          'state' => $state,
+          'collection_started_at' => $collection_started_at,
+          'source' => $activation_detection_source,
+          'stripe_registration_id' => sanitize_text_field($current_row['stripe_registration_id'] ?? ''),
+          'administrator_id' => 0,
+          'recorded_at' => current_time('mysql'),
+        )
+      );
+    }
     if($tracking_started_at!=='') {
       $desired=$collection_started_at;
       try { if(new DateTimeImmutable($collection_started_at,wp_timezone()) < new DateTimeImmutable($tracking_started_at,wp_timezone())) $desired=$tracking_started_at; } catch(Throwable $error) { $desired=$tracking_started_at; }
@@ -20760,7 +20978,7 @@ MRM_TAX_RULES;
     if($frequency==='')$message.="\nWARNING: Filing frequency is missing."; if($due==='')$message.="\nWARNING: The next return due date is missing.";
     if(!in_array(sanitize_key($row['authority_registration_status']??''),array('approved','active','not_required_written_determination'),true)) $message.="\nWARNING: Stripe activation confirms collection only. The government permit status remains incomplete or requires review.";
     $dedup=$this->mrm_tax_collection_activation_deduplication_key($state,$collection_started_at);
-    $alert=$this->mrm_tax_create_alert($state,'stripe_collection_activated','stripe',0,array('message'=>$message,'state'=>$state,'stripe_registration_id'=>$row['stripe_registration_id']??'','collection_started_at'=>$collection_started_at,'summary'=>$summary),$dedup); if(is_wp_error($alert)) return $alert;
+    $alert=$this->mrm_tax_create_alert($state,'stripe_collection_activated','stripe',0,array('message'=>$message,'state'=>$state,'stripe_registration_id'=>$row['stripe_registration_id']??'','collection_started_at'=>$collection_started_at,'activation_detection_source'=>$activation_detection_source,'summary'=>$summary),$dedup); if(is_wp_error($alert)) return $alert;
     $activation_alert_id = absint($alert);
     if ($activation_alert_id <= 0) return new WP_Error('activation_alert_id_missing', 'The Stripe activation alert did not return a valid ID.');
     $wpdb->last_error = '';
@@ -20774,7 +20992,7 @@ MRM_TAX_RULES;
       } else {
         $audit = $row['workflow_audit_json'] ?? '';
       }
-      $audit=$this->mrm_tax_append_workflow_audit($audit,array('event'=>'stripe_collection_activation_processed','state'=>$state,'collection_started_at'=>$collection_started_at,'stripe_registration_id'=>sanitize_text_field($row['stripe_registration_id']??''),'activation_detection_source'=>$first_post_patch_verification?'first_post_patch_verified_sync':'inactive_to_active_transition','administrator_id'=>0,'recorded_at'=>current_time('mysql')));
+      $audit=$this->mrm_tax_append_workflow_audit($audit,array('event'=>'stripe_collection_activation_processed','state'=>$state,'collection_started_at'=>$collection_started_at,'stripe_registration_id'=>sanitize_text_field($row['stripe_registration_id']??''),'activation_detection_source'=>$activation_detection_source,'administrator_id'=>0,'recorded_at'=>current_time('mysql')));
       $wpdb->last_error=''; $audit_saved=$wpdb->update($table,array('workflow_audit_json'=>$audit,'updated_at'=>current_time('mysql')),array('state_code'=>$state));
       if($audit_saved===false||$wpdb->last_error!=='') return new WP_Error('activation_completion_marker_failed',$wpdb->last_error?:'The activation completion marker could not be saved.');
       $verified=$this->mrm_tax_get_state_row($state); if(is_wp_error($verified)||!$this->mrm_tax_collection_activation_postprocessing_complete($verified)) return new WP_Error('activation_completion_marker_unverified','The activation completion marker could not be verified.');
@@ -20782,8 +21000,37 @@ MRM_TAX_RULES;
     return array('state'=>$state,'summary'=>$summary);
   }
 
-  public function handle_tax_sync_stripe_registrations() { if(!current_user_can('manage_options')) wp_die('You do not have permission.'); check_admin_referer('mrm_tax_sync_stripe_registrations','mrm_tax_sync_nonce'); $result=$this->mrm_tax_sync_stripe_registrations(); $url=admin_url('admin.php?page='.self::TAX_MONITOR_MENU_SLUG); $url=is_wp_error($result)?add_query_arg('tax_error',rawurlencode($result->get_error_message()),$url):add_query_arg('stripe_sync','1',$url); wp_safe_redirect($url); exit; }
-  public function cron_tax_sync_registrations() { $result=$this->mrm_tax_sync_stripe_registrations(); if(is_wp_error($result)) error_log('MRM Stripe Tax registration sync failed: '.$result->get_error_message()); $this->mrm_tax_enforce_global_subscription_holds(); }
+  public function handle_tax_sync_stripe_registrations() {
+    if (!current_user_can('manage_options')) wp_die('You do not have permission.');
+    check_admin_referer('mrm_tax_sync_stripe_registrations', 'mrm_tax_sync_nonce');
+    $result = $this->mrm_tax_sync_stripe_registrations();
+    $url = admin_url('admin.php?page=' . self::TAX_MONITOR_MENU_SLUG);
+    if (is_wp_error($result)) {
+      $url = add_query_arg('tax_error', rawurlencode($result->get_error_message()), $url);
+    } elseif (!empty($result['postprocessing_errors'])) {
+      $url = add_query_arg('stripe_sync_warning', count($result['postprocessing_errors']), $url);
+    } else {
+      $url = add_query_arg('stripe_sync', '1', $url);
+    }
+    wp_safe_redirect($url);
+    exit;
+  }
+
+  public function cron_tax_sync_registrations() {
+    $result = $this->mrm_tax_sync_stripe_registrations();
+    if (is_wp_error($result)) {
+      error_log('MRM Stripe Tax registration sync failed: ' . $result->get_error_message());
+    } elseif (!empty($result['postprocessing_errors'])) {
+      foreach ($result['postprocessing_errors'] as $postprocessing_error) {
+        error_log(
+          'MRM Stripe Tax activation post-processing pending for ' .
+          sanitize_text_field($postprocessing_error['state'] ?? 'unknown state') . ': ' .
+          sanitize_textarea_field($postprocessing_error['message'] ?? 'Unknown post-processing error.')
+        );
+      }
+    }
+    $this->mrm_tax_enforce_global_subscription_holds();
+  }
   public function cron_tax_recompute_thresholds() { $result=$this->mrm_tax_recompute_all_thresholds(); if(is_wp_error($result)) error_log('MRM tax threshold recomputation failed: '.$result->get_error_message()); $this->mrm_tax_enforce_global_subscription_holds(); }
 
   public function register_external_physical_nexus_source($args) {
@@ -21034,6 +21281,21 @@ MRM_TAX_RULES;
       <?php if($reconciliation_error): ?><div class="notice notice-error"><p><strong>Tax-ledger reconciliation could not be loaded.</strong></p><p><?php echo esc_html($reconciliation_error->get_error_message()); ?></p></div><?php endif; ?>
       <?php if($critical_alert_error): ?><div class="notice notice-error"><p><strong>Critical tax alerts could not be loaded.</strong></p><p><?php echo esc_html($critical_alert_error->get_error_message()); ?></p></div><?php endif; ?>
       <?php if(isset($_GET['stripe_sync'])):?><div class="notice notice-success"><p>Stripe registrations synced.</p></div><?php endif; ?>
+      <?php
+      if (isset($_GET['stripe_sync_warning'])) :
+        $warning_count = max(1, absint($_GET['stripe_sync_warning']));
+      ?>
+        <div class="notice notice-warning">
+          <p>
+            Stripe registrations were successfully retrieved, verified, and committed. However,
+            <?php echo esc_html($warning_count); ?>
+            activation notification or reporting
+            <?php echo $warning_count === 1 ? 'task remains' : 'tasks remain'; ?>
+            pending. Review the open noncritical tax alerts. Customer checkout and subscription
+            processing are not blocked by this warning.
+          </p>
+        </div>
+      <?php endif; ?>
       <?php if(isset($_GET['thresholds_recomputed'])):?><div class="notice notice-success"><p>State thresholds recomputed.</p></div><?php endif; ?>
       <?php if(isset($_GET['state_saved'])):?><div class="notice notice-success"><p>Saved <?php echo esc_html(wp_unslash($_GET['state_saved'])); ?>.</p></div><?php endif; ?><?php if(isset($_GET['tax_reconciled'])):?><div class="notice notice-success"><p>Tax reconciliation completed for <code><?php echo esc_html(wp_unslash($_GET['tax_reconciled'])); ?></code>.</p></div><?php endif; ?>
       <p><strong>Stripe mode:</strong> <?php echo $live ? '<span style="color:#008a20;font-weight:700;">LIVE</span>' : '<span style="color:#b32d2e;font-weight:700;">TEST</span>'; ?></p>
@@ -22871,7 +23133,28 @@ MRM_TAX_RULES;
         if (!preg_match('/^[A-Z]{2}$/',$state)) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode('The profile state is missing or invalid.'))); exit; }
         $state_row = $this->mrm_tax_get_state_row($state);
         if (is_wp_error($state_row)) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($state_row->get_error_message()))); exit; }
-        $stripe_refresh_required=!$this->mrm_tax_global_registration_sync_is_fresh()||!$this->mrm_tax_stripe_sync_is_fresh($state_row); $stripe_refresh_result=true; if($stripe_refresh_required) $stripe_refresh_result=$this->mrm_tax_sync_stripe_registrations();
+        $stripe_refresh_required =
+          !$this->mrm_tax_global_registration_sync_is_fresh()
+          || !$this->mrm_tax_stripe_sync_is_fresh($state_row);
+        $stripe_refresh_result = true;
+        $stripe_basis_allowed = true;
+        if ($stripe_refresh_required) {
+          $stripe_refresh_result = $this->mrm_tax_sync_stripe_registrations();
+          if (is_wp_error($stripe_refresh_result)) {
+            $stripe_basis_allowed = false;
+          } else {
+            $refreshed_state_row = $this->mrm_tax_get_state_row($state);
+            if (is_wp_error($refreshed_state_row)) {
+              $stripe_basis_allowed = false;
+            } else {
+              $state_row = $refreshed_state_row;
+              $stripe_basis_allowed =
+                !empty($stripe_refresh_result['snapshot_committed'])
+                && $this->mrm_tax_global_registration_sync_is_fresh()
+                && $this->mrm_tax_stripe_sync_is_fresh($state_row);
+            }
+          }
+        }
         if (!empty($_POST['permit_application_submitted'])) {
           $permit_submitted_at = $this->mrm_tax_parse_admin_datetime(wp_unslash($_POST['authority_registration_submitted_at'] ?? ''),'Permit application submission date');
           if (is_wp_error($permit_submitted_at)) { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($permit_submitted_at->get_error_message()))); exit; }
@@ -22887,12 +23170,15 @@ MRM_TAX_RULES;
           $wpdb->last_error=''; $saved=$wpdb->update($this->table_tax_state_status(),array('authority_registration_status'=>$next,'authority_registration_submitted_at'=>$permit_submitted_at,'authority_registration_application_reference'=>$permit_reference,'workflow_audit_json'=>$audit,'updated_at'=>current_time('mysql')),array('state_code'=>$state));
           if ($saved === false || $wpdb->last_error !== '') { wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error='.rawurlencode($wpdb->last_error ?: 'The permit application evidence could not be saved.'))); exit; }
         }
-        $stripe_basis_allowed = !($stripe_refresh_required && is_wp_error($stripe_refresh_result));
         $eligibility = $this->mrm_tax_profile_approval_eligibility($state, $stripe_basis_allowed);
         if (empty($eligibility['allowed'])) {
           $message = $eligibility['message'] ?? 'The state approval requirements are incomplete.';
-          if (!$stripe_basis_allowed && is_wp_error($stripe_refresh_result)) {
-            $message = 'Stripe collection could not be freshly verified, and no independent permit application, no-general-sales-tax status, or written determination authorizes approval. ' . $stripe_refresh_result->get_error_message();
+          if (!$stripe_basis_allowed) {
+            if (is_wp_error($stripe_refresh_result)) {
+              $message = 'Stripe collection could not be freshly verified, and no independent permit application, no-general-sales-tax status, or written determination authorizes approval. ' . $stripe_refresh_result->get_error_message();
+            } else {
+              $message = 'The refreshed Stripe registration snapshot could not be verified as current for this state, and no independent permit application, no-general-sales-tax status, or written determination authorizes approval.';
+            }
           }
           wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-profile-card-creation&error=' . rawurlencode($message)));
           exit;
