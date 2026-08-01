@@ -2621,29 +2621,9 @@ function initRichTextToolbars(scope) {
             return false;
         }
 
-        // Pull lists from Payments Hub (legacy/option-based fallback)
-        $lists = get_option( 'mrm_pay_hub_access_lists', array() );
-        if ( ! is_array( $lists ) ) $lists = array();
-
-        $hash_of = function( $email ) {
-            return $this->hash_email( strtolower( trim( (string) $email ) ) );
-        };
-
         $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
         if ( $exists !== $table ) {
-            // fallback to option lists only
-            if ( isset( $lists['all-sheet-music'] ) && is_array( $lists['all-sheet-music'] ) ) {
-                foreach ( $lists['all-sheet-music'] as $em ) {
-                    $em = sanitize_email( $em );
-                    if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
-                }
-            }
-            if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
-                foreach ( $lists[ $sku ] as $em ) {
-                    $em = sanitize_email( $em );
-                    if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
-                }
-            }
+            /* Fail closed. Without the visible ledger there is no per-piece authorization. */
             return false;
         }
 
@@ -2771,14 +2751,6 @@ function initRichTextToolbars(scope) {
             }
         }
 
-        // Rule 3: per-product option list (fallback)
-        if ( isset( $lists[ $sku ] ) && is_array( $lists[ $sku ] ) ) {
-            foreach ( $lists[ $sku ] as $em ) {
-                $em = sanitize_email( $em );
-                if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) return true;
-            }
-        }
-
         if ( preg_match( '/^piece-(.+)-(fundamentals|trombone-euphonium|tuba|complete-package)$/', $sku, $m ) ) {
             $piece_slug = (string) $m[1];
             $package_sku = 'piece-' . $piece_slug . '-complete-package';
@@ -2800,14 +2772,6 @@ function initRichTextToolbars(scope) {
                     }
                 }
 
-                if ( isset( $lists[ $package_sku ] ) && is_array( $lists[ $package_sku ] ) ) {
-                    foreach ( $lists[ $package_sku ] as $em ) {
-                        $em = sanitize_email( $em );
-                        if ( $em && hash_equals( $email_hash, $hash_of( $em ) ) ) {
-                            return true;
-                        }
-                    }
-                }
             }
         }
 
