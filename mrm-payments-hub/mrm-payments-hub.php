@@ -30,6 +30,8 @@ class MRM_Payments_Hub_Single {
   const OPT_ACCESS_LISTS = 'mrm_pay_hub_access_lists';
   const OPT_EMAIL_LISTS = 'mrm_pay_hub_email_lists';
   const OPT_SHEET_MUSIC_BLOCKED_EMAILS = 'mrm_pay_hub_sheet_music_blocked_emails';
+  const OPT_LEGAL_LEDGER_RESET_AT = 'mrm_pay_hub_legal_ledger_reset_at';
+  const OPT_LEGACY_ACCESS_LISTS_REMOVED = 'mrm_pay_hub_legacy_access_lists_removed_v1';
   const OPT_TAX_COMPLIANCE_SETTINGS = 'mrm_pay_hub_tax_compliance_settings';
   const OPT_TAX_LAST_SUCCESSFUL_REGISTRATION_SYNC =
     'mrm_tax_last_successful_registration_sync_at';
@@ -68,6 +70,7 @@ class MRM_Payments_Hub_Single {
     add_action('admin_menu', array($this, 'admin_menu'));
     add_action('admin_init', array($this, 'handle_admin_post'));
     add_action('admin_post_mrm_export_legal_ledger', array($this, 'handle_export_legal_ledger'));
+    add_action('admin_post_mrm_reset_prelaunch_legal_ledger', array($this, 'handle_reset_prelaunch_legal_ledger'));
     add_action('admin_post_mrm_pay_hub_run_selected_payouts', array($this, 'handle_run_selected_payouts'));
     add_action('admin_post_mrm_pay_hub_run_all_payee_payouts', array($this, 'handle_run_all_payee_payouts'));
     add_action('admin_post_mrm_pay_hub_run_presenter_payout', array($this, 'handle_run_presenter_payout'));
@@ -558,6 +561,16 @@ class MRM_Payments_Hub_Single {
          SET sku = 'all-sheet-music'
          WHERE sku = 'piece-all-sheet-music-access-complete-package'"
       );
+    }
+
+    /*
+     * Per-piece access now comes only from the visible database ledger.
+     * Remove the old option-based email lists once so stale testing data
+     * cannot grant ownership or public downloads invisibly.
+     */
+    if (get_option(self::OPT_LEGACY_ACCESS_LISTS_REMOVED, '') !== 'yes') {
+      delete_option(self::OPT_ACCESS_LISTS);
+      update_option(self::OPT_LEGACY_ACCESS_LISTS_REMOVED, 'yes', false);
     }
 
     $this->mrm_ensure_payout_ledger_status_column_width();
@@ -2830,15 +2843,6 @@ private function all_products() {
     return $base + $this->mrm_get_in_person_travel_cents();
   }
 
-  private function all_access_lists() {
-    $x = get_option(self::OPT_ACCESS_LISTS, array());
-    return is_array($x) ? $x : array();
-  }
-
-  private function save_access_lists($lists) {
-    update_option(self::OPT_ACCESS_LISTS, $lists);
-  }
-
   private function mrm_sheet_music_blocked_emails() {
     $emails = get_option(self::OPT_SHEET_MUSIC_BLOCKED_EMAILS, array());
 
@@ -3555,13 +3559,13 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
   private function mrm_email_has_direct_sheet_music_product_access($email, $sku) {
     $email = sanitize_email((string)$email);
     $sku = $this->sanitize_sku((string)$sku);
-    if (!$email || !is_email($email) || !$sku) return false;
-    if ($this->has_sheet_music_access($this->email_hash($email), $sku)) return true;
-    $lists = $this->all_access_lists();
-    foreach ((array)($lists[$sku] ?? array()) as $saved_email) {
-      if (strtolower(sanitize_email((string)$saved_email)) === strtolower($email)) return true;
+
+    if (!$email || !is_email($email) || !$sku) {
+      return false;
     }
-    return false;
+
+    /* The visible mrm_sheet_music_access ledger is the only per-piece authority. */
+    return $this->has_sheet_music_access($this->email_hash($email), $sku);
   }
 
   private function mrm_email_already_has_piece_or_package_access($email, $sku) {
@@ -3610,18 +3614,6 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
       );
     }
 
-    /* Legacy/manual packet access is also valid current access. */
-    $lists = $this->all_access_lists();
-    foreach ((array)($lists[$packet_sku] ?? array()) as $saved_email) {
-      if (strtolower(sanitize_email((string)$saved_email)) === $email) {
-        return array(
-          'owned' => true,
-          'ownership_source' => 'fundamental_packet_legacy',
-          'ownership_sku' => $packet_sku,
-        );
-      }
-    }
-
     $packet_product = $this->get_product($packet_sku);
     if (!is_array($packet_product)) {
       return $result;
@@ -3660,15 +3652,6 @@ private function mrm_resolve_active_product_sku($incoming_sku, $context = array(
         );
       }
 
-      foreach ((array)($lists[$candidate_sku] ?? array()) as $saved_email) {
-        if (strtolower(sanitize_email((string)$saved_email)) === $email) {
-          return array(
-            'owned' => true,
-            'ownership_source' => 'complete_package_legacy',
-            'ownership_sku' => $candidate_sku,
-          );
-        }
-      }
     }
 
     return $result;
@@ -15991,11 +15974,6 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     ));
 
     if ($existing) {
-      // Back-compat mirror: ensure legacy email-based access list is also populated.
-      // DB ledger remains source of truth.
-      if ($email_plain && is_email($email_plain)) {
-        $this->add_email_to_access_list($sku, $email_plain);
-      }
       return true;
     }
 
@@ -16013,11 +15991,6 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     ), array('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s'));
 
     if ($ins) {
-      // Back-compat mirror: also write to email-based access list UI data.
-      // This keeps older UI paths and expectations in sync with DB ledger rows.
-      if ($email_plain && is_email($email_plain)) {
-        $this->add_email_to_access_list($sku, $email_plain);
-      }
       return true;
     }
 
@@ -16049,75 +16022,33 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
     $product_slug = $this->sanitize_product_slug($product_slug);
     if (!$product_slug) return false;
 
-    if ($this->mrm_sheet_music_email_is_blocked($email)) {
-      return false;
-    }
+    if ($this->mrm_sheet_music_email_is_blocked($email)) return false;
 
-    $lists = $this->all_access_lists();
-
-    // Rule 1: Stripe is source-of-truth for all-sheet-music subscription access.
+    /* Active Stripe subscriptions remain authoritative for all-sheet-music access. */
     $subscription_status = $this->mrm_get_sheet_music_subscription_access_status_by_email($email);
-    if (!empty($subscription_status['has_access'])) {
-      return true;
-    }
+    if (!empty($subscription_status['has_access'])) return true;
+    if ($product_slug === 'all-sheet-music') return false;
 
-    if ($product_slug === 'all-sheet-music') {
-      return false;
-    }
-
-    // Rule 2: per-product list
-    $per = isset($lists[$product_slug]) && is_array($lists[$product_slug])
-      ? $lists[$product_slug] : array();
-    if (in_array(strtolower($email), $per, true)) return true;
-
-    // Rule 3: DB table check (idempotent truth)
-    $email_hash = $this->email_hash($email);
-    return $this->has_sheet_music_access($email_hash, $product_slug);
-  }
-
-  public function add_email_to_access_list($product_slug, $email) {
-    $product_slug = $this->sanitize_product_slug($product_slug);
-    $email = sanitize_email((string)$email);
-    if (!$product_slug || !$email || !is_email($email)) return false;
-
-    $lists = $this->all_access_lists();
-    if (!isset($lists[$product_slug]) || !is_array($lists[$product_slug])) {
-      $lists[$product_slug] = array();
-    }
-    $lists[$product_slug][] = strtolower($email);
-    $lists[$product_slug] = array_values(array_unique($lists[$product_slug]));
-    $this->save_access_lists($lists);
-    return true;
-  }
-
-  private function mrm_remove_email_from_access_list($product_slug,$email) {
-    $product_slug=$this->sanitize_product_slug($product_slug); $email=strtolower(sanitize_email($email));
-    if (!$product_slug || !$email || !is_email($email)) return false;
-    $lists=$this->all_access_lists();
-    if (!isset($lists[$product_slug]) || !is_array($lists[$product_slug])) return true;
-    $lists[$product_slug]=array_values(array_filter($lists[$product_slug],function($saved) use($email){ return strtolower(sanitize_email($saved))!==$email; }));
-    $this->save_access_lists($lists); return true;
+    /* Per-piece access comes only from the visible access table. */
+    return $this->has_sheet_music_access($this->email_hash($email), $product_slug);
   }
 
   private function mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id) {
-    global $wpdb; $pi_id=sanitize_text_field($pi_id);
-    if (!$pi_id || strpos($pi_id,'pi_')!==0) return new WP_Error('invalid_refund_payment_intent','The refunded Payment Intent ID is invalid.');
+    global $wpdb;
+    $pi_id = sanitize_text_field($pi_id);
+    if (!$pi_id || strpos($pi_id, 'pi_') !== 0) {
+      return new WP_Error('invalid_refund_payment_intent', 'The refunded Payment Intent ID is invalid.');
+    }
+
     $table = $this->table_sheet_music_access();
     $wpdb->last_error = '';
-    $rows = $wpdb->get_results(
-      $wpdb->prepare(
-        "SELECT email_plain, sku
-         FROM {$table}
-         WHERE source_id = %s
-           AND revoked_at IS NULL",
-        $pi_id
-      ),
-      ARRAY_A
-    );
-    if ($wpdb->last_error !== '') return new WP_Error('refund_entitlement_lookup_failed',$wpdb->last_error);
-    $updated=$wpdb->query($wpdb->prepare("UPDATE {$table} SET revoked_at=%s WHERE source_id=%s AND revoked_at IS NULL",current_time('mysql'),$pi_id));
-    if ($updated===false) return new WP_Error('refund_entitlement_revoke_failed',$wpdb->last_error);
-    foreach((array)$rows as $row) $this->mrm_remove_email_from_access_list($row['sku']??'',$row['email_plain']??'');
+    $updated = $wpdb->query($wpdb->prepare(
+      "UPDATE {$table} SET revoked_at = %s WHERE source_id = %s AND revoked_at IS NULL",
+      current_time('mysql'), $pi_id
+    ));
+    if ($updated === false) {
+      return new WP_Error('refund_entitlement_revoke_failed', $wpdb->last_error);
+    }
     return true;
   }
 
@@ -25075,8 +25006,7 @@ MRM_TAX_RULES;
          FROM {$access_table}
          WHERE revoked_at IS NULL
            AND sku <> 'all-sheet-music'
-         ORDER BY granted_at DESC, id DESC
-         LIMIT 500",
+         ORDER BY granted_at DESC, id DESC",
         ARRAY_A
       );
     }
@@ -25092,8 +25022,7 @@ MRM_TAX_RULES;
         "SELECT id, email_plain, stripe_status, current_period_start, current_period_end, cancel_at_period_end, canceled_at, stripe_subscription_id, updated_at
          FROM {$subscriptions_table}
          WHERE email_plain <> ''
-         ORDER BY updated_at DESC, id DESC
-         LIMIT 500",
+         ORDER BY updated_at DESC, id DESC",
         ARRAY_A
       );
     }
@@ -25980,161 +25909,147 @@ MRM_TAX_RULES;
     echo '</form></div>';
   }
 
-  public function render_legal_ledger_page() {
-    if (!current_user_can('manage_options')) {
-      wp_die('You do not have permission to view this page.');
-    }
-
-    global $wpdb;
-
-    $orders = $this->table_orders();
-    $table_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $orders));
-
-    echo '<div class="wrap">';
-    echo '<h1>Legal Dispute Ledger</h1>';
-    echo '<p>This ledger exports payment/order records that may be useful for legal, refund, dispute, or account-history review.</p>';
-
-    echo '<p>';
-    echo '<a class="button button-primary" href="' . esc_url(
-      wp_nonce_url(
-        admin_url('admin-post.php?action=mrm_export_legal_ledger'),
-        'mrm_export_legal_ledger'
-      )
-    ) . '">Export Legal Ledger CSV</a>';
-    echo '</p>';
-
-    if ($table_exists !== $orders) {
-      echo '<div class="notice notice-error"><p>Orders table is missing.</p></div>';
-      echo '</div>';
-      return;
-    }
-
-    $rows = $wpdb->get_results(
-      "SELECT id, created_at, customer_email, sku, product_type, amount_cents, currency, status, stripe_payment_intent_id
-       FROM {$orders}
-       ORDER BY created_at DESC, id DESC
-       LIMIT 100",
-      ARRAY_A
+  private function mrm_legal_ledger_filter_state() {
+    $allowed = array(
+      'all', 'processing_lessons', 'completed_lessons',
+      'processing_sheet_music', 'completed_sheet_music', 'other',
     );
+    $view = isset($_GET['ledger_view']) ? sanitize_key(wp_unslash($_GET['ledger_view'])) : 'all';
+    return array(
+      'view' => in_array($view, $allowed, true) ? $view : 'all',
+      'unresolved_only' => !empty($_GET['unresolved_only']),
+    );
+  }
 
-    echo '<h2>Recent Orders</h2>';
+  private function mrm_legal_ledger_view_label($view) {
+    $labels = array(
+      'all' => 'All Order Records',
+      'processing_lessons' => 'Processing / Unfinished Lessons',
+      'completed_lessons' => 'Completed Lesson Orders',
+      'processing_sheet_music' => 'Processing / Unfinished Sheet Music',
+      'completed_sheet_music' => 'Completed Sheet Music Orders',
+      'other' => 'Failed, Canceled, and Other Records',
+    );
+    return $labels[$view] ?? $labels['all'];
+  }
 
-    if (empty($rows)) {
-      echo '<p>No order records found.</p>';
-      echo '</div>';
-      return;
+  private function mrm_legal_ledger_where_sql($view, $unresolved_only = false) {
+    $processing = "'created','processing'";
+    $completed = "'paid','refund_pending','partially_refunded','refunded'";
+    $where = '1=1';
+
+    if ($view === 'processing_lessons') {
+      $where = "o.product_type = 'lesson' AND o.status IN ({$processing})";
+    } elseif ($view === 'completed_lessons') {
+      $where = "o.product_type = 'lesson' AND o.status IN ({$completed})";
+    } elseif ($view === 'processing_sheet_music') {
+      $where = "o.product_type = 'sheet_music' AND o.status IN ({$processing})";
+    } elseif ($view === 'completed_sheet_music') {
+      $where = "o.product_type = 'sheet_music' AND o.status IN ({$completed})";
+    } elseif ($view === 'other') {
+      $where = "o.status NOT IN ({$processing},{$completed})";
     }
 
-    echo '<table class="widefat striped">';
-    echo '<thead><tr>';
-    echo '<th>Order ID</th>';
-    echo '<th>Created</th>';
-    echo '<th>Email</th>';
-    echo '<th>SKU</th>';
-    echo '<th>Type</th>';
-    echo '<th>Amount</th>';
-    echo '<th>Status</th>';
-    echo '<th>Stripe Payment Intent</th>';
-    echo '</tr></thead><tbody>';
+    if ($unresolved_only && in_array($view, array('processing_lessons', 'processing_sheet_music'), true)) {
+      $orders = $this->table_orders();
+      $where .= " AND NOT EXISTS (
+        SELECT 1 FROM {$orders} later
+        WHERE later.email_hash = o.email_hash
+          AND later.product_type = o.product_type
+          AND later.status IN ({$completed})
+          AND (later.created_at > o.created_at OR (later.created_at = o.created_at AND later.id > o.id))
+      )";
+    }
+    return $where;
+  }
 
-    foreach ($rows as $row) {
-      $amount = '$' . number_format(((int)($row['amount_cents'] ?? 0)) / 100, 2);
+  public function render_legal_ledger_page() {
+    if (!current_user_can('manage_options')) wp_die('You do not have permission to view this page.');
+    global $wpdb;
+    $orders = $this->table_orders();
+    $state = $this->mrm_legal_ledger_filter_state();
 
-      echo '<tr>';
-      echo '<td>' . esc_html((string)($row['id'] ?? '')) . '</td>';
-      echo '<td>' . esc_html((string)($row['created_at'] ?? '')) . '</td>';
-      echo '<td>' . esc_html((string)($row['customer_email'] ?? '')) . '</td>';
-      echo '<td>' . esc_html((string)($row['sku'] ?? '')) . '</td>';
-      echo '<td>' . esc_html((string)($row['product_type'] ?? '')) . '</td>';
-      echo '<td>' . esc_html($amount . ' ' . strtoupper((string)($row['currency'] ?? 'usd'))) . '</td>';
-      echo '<td>' . esc_html((string)($row['status'] ?? '')) . '</td>';
-      echo '<td>' . esc_html((string)($row['stripe_payment_intent_id'] ?? '')) . '</td>';
-      echo '</tr>';
+    echo '<div class="wrap"><h1>Legal Dispute Ledger</h1>';
+    if (isset($_GET['ledger_reset'])) echo '<div class="notice notice-success"><p>The pre-launch legal ledger was reset.</p></div>';
+    echo '<p>Order attempts are retained as evidence. Use the views below to organize completed and unfinished activity without deleting it.</p>';
+    if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $orders)) !== $orders) {
+      echo '<div class="notice notice-error"><p>Orders table is missing.</p></div></div>'; return;
     }
 
-    echo '</tbody></table>';
+    echo '<form method="get"><input type="hidden" name="page" value="mrm-pay-hub-legal-ledger">';
+    echo '<label for="mrm-ledger-view"><strong>View:</strong></label> <select id="mrm-ledger-view" name="ledger_view">';
+    foreach (array('all','processing_lessons','completed_lessons','processing_sheet_music','completed_sheet_music','other') as $view) {
+      echo '<option value="' . esc_attr($view) . '"' . selected($state['view'], $view, false) . '>' . esc_html($this->mrm_legal_ledger_view_label($view)) . '</option>';
+    }
+    echo '</select> <label><input type="checkbox" name="unresolved_only" value="1"' . checked($state['unresolved_only'], true, false) . '> For processing views, hide attempts followed by a later completed order</label> ';
+    echo '<button class="button">Apply</button></form>';
+
+    $export_url = add_query_arg(array('action'=>'mrm_export_legal_ledger','ledger_view'=>$state['view'],'unresolved_only'=>$state['unresolved_only'] ? 1 : 0), admin_url('admin-post.php'));
+    echo '<p><a class="button button-primary" href="' . esc_url(wp_nonce_url($export_url, 'mrm_export_legal_ledger')) . '">Export Current View CSV</a></p>';
+    $where = $this->mrm_legal_ledger_where_sql($state['view'], $state['unresolved_only']);
+    $rows = $wpdb->get_results("SELECT o.id,o.created_at,o.customer_email,o.sku,o.product_type,o.amount_cents,o.currency,o.status,o.stripe_payment_intent_id FROM {$orders} o WHERE {$where} ORDER BY o.created_at DESC,o.id DESC", ARRAY_A);
+    echo '<h2>' . esc_html($this->mrm_legal_ledger_view_label($state['view'])) . '</h2>';
+    if (!$rows) echo '<p>No order records found in this view.</p>';
+    else {
+      echo '<table class="widefat striped"><thead><tr><th>Order ID</th><th>Created</th><th>Email</th><th>SKU</th><th>Type</th><th>Amount</th><th>Status</th><th>Stripe Payment Intent</th></tr></thead><tbody>';
+      foreach ($rows as $row) {
+        $amount = '$' . number_format(((int)$row['amount_cents']) / 100, 2) . ' ' . strtoupper((string)$row['currency']);
+        echo '<tr><td>' . esc_html($row['id']) . '</td><td>' . esc_html($row['created_at']) . '</td><td>' . esc_html($row['customer_email']) . '</td><td>' . esc_html($row['sku']) . '</td><td>' . esc_html($row['product_type']) . '</td><td>' . esc_html($amount) . '</td><td>' . esc_html($row['status']) . '</td><td>' . esc_html($row['stripe_payment_intent_id']) . '</td></tr>';
+      }
+      echo '</tbody></table>';
+    }
+
+    echo '<hr><h2>One-Time Pre-Launch Reset</h2>';
+    $reset_at = get_option(self::OPT_LEGAL_LEDGER_RESET_AT, '');
+    if ($reset_at) echo '<p><strong>Reset permanently locked.</strong> Completed at ' . esc_html($reset_at) . '.</p>';
+    else {
+      echo '<p>Export the existing ledger first. This removes pre-launch order, payout, credit, promo-redemption, and Stripe-purchase entitlement records.</p>';
+      echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" onsubmit="return confirm(\'Permanently reset the pre-launch ledger?\');"><input type="hidden" name="action" value="mrm_reset_prelaunch_legal_ledger">';
+      wp_nonce_field('mrm_reset_prelaunch_legal_ledger');
+      echo '<label>Type <code>RESET PRELAUNCH LEDGER</code>: <input type="text" name="reset_confirmation" autocomplete="off"></label> <button class="button button-secondary">Reset Pre-Launch Ledger</button></form>';
+    }
     echo '</div>';
   }
 
   public function handle_export_legal_ledger() {
-    if (!is_admin()) {
-      wp_die('Invalid request.', 'Legal Ledger Export', array('response' => 400));
-    }
-
-    if (!current_user_can('manage_options')) {
-      wp_die('You do not have permission to export this ledger.', 'Legal Ledger Export', array('response' => 403));
-    }
-
+    if (!is_admin()) wp_die('Invalid request.', 'Legal Ledger Export', array('response'=>400));
+    if (!current_user_can('manage_options')) wp_die('You do not have permission to export this ledger.', 'Legal Ledger Export', array('response'=>403));
     check_admin_referer('mrm_export_legal_ledger');
+    global $wpdb;
+    $orders = $this->table_orders();
+    if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $orders)) !== $orders) wp_die('Orders table is missing.', 'Legal Ledger Export', array('response'=>500));
+    $state = $this->mrm_legal_ledger_filter_state();
+    $where = $this->mrm_legal_ledger_where_sql($state['view'], $state['unresolved_only']);
+    $rows = $wpdb->get_results("SELECT o.id,o.created_at,o.updated_at,o.customer_email,o.sku,o.product_type,o.amount_cents,o.currency,o.environment_mode,o.status,o.stripe_payment_intent_id,o.stripe_status,o.metadata_json FROM {$orders} o WHERE {$where} ORDER BY o.created_at DESC,o.id DESC", ARRAY_A);
+    $export_rows = array();
+    foreach ((array)$rows as $row) $export_rows[] = array($row['id'],$row['created_at'],$row['updated_at'],$row['customer_email'],$row['sku'],$row['product_type'],number_format(((int)$row['amount_cents'])/100,2,'.',''),$row['currency'],$row['environment_mode'],$row['status'],$row['stripe_payment_intent_id'],$row['stripe_status'],$row['metadata_json']);
+    $this->mrm_csv_send('low-brass-lessons-legal-ledger-' . $state['view'] . '-' . gmdate('Y-m-d') . '.csv', array('Order ID','Created At','Updated At','Customer Email','SKU','Product Type','Amount','Currency','Environment','Status','Stripe Payment Intent','Stripe Status','Metadata JSON'), $export_rows);
+  }
+
+  public function handle_reset_prelaunch_legal_ledger() {
+    if (!is_admin()) wp_die('Invalid request.', 'Legal Ledger Reset', array('response'=>400));
+    if (!current_user_can('manage_options')) wp_die('You do not have permission to reset this ledger.', 'Legal Ledger Reset', array('response'=>403));
+    check_admin_referer('mrm_reset_prelaunch_legal_ledger');
+    if (get_option(self::OPT_LEGAL_LEDGER_RESET_AT, '')) wp_die('The one-time pre-launch reset has already been used.', 'Legal Ledger Reset', array('response'=>409));
+    $confirmation = isset($_POST['reset_confirmation']) ? sanitize_text_field(wp_unslash($_POST['reset_confirmation'])) : '';
+    if ($confirmation !== 'RESET PRELAUNCH LEDGER') wp_die('The reset confirmation text did not match.', 'Legal Ledger Reset', array('response'=>400));
 
     global $wpdb;
-
-    $orders = $this->table_orders();
-
-    $table_exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $orders));
-    if ($table_exists !== $orders) {
-      wp_die('Orders table is missing.', 'Legal Ledger Export', array('response' => 500));
-    }
-
-    $rows = $wpdb->get_results(
-      "SELECT
-         id,
-         created_at,
-         updated_at,
-         customer_email,
-         sku,
-         product_type,
-         amount_cents,
-         currency,
-         environment_mode,
-         status,
-         stripe_payment_intent_id,
-         stripe_status,
-         metadata_json
-       FROM {$orders}
-       ORDER BY created_at DESC, id DESC",
-      ARRAY_A
+    $wpdb->query('START TRANSACTION');
+    $queries = array(
+      "DELETE FROM {$this->table_sheet_music_access()} WHERE source_id LIKE 'pi\\_%'",
+      "DELETE FROM {$this->table_links()}", "DELETE FROM {$this->table_payout_ledger()}",
+      "DELETE FROM {$this->table_lesson_credits()}", "DELETE FROM {$this->table_promo_redemptions()}",
+      "DELETE FROM {$this->table_orders()}",
     );
-
-    $export_rows = array();
-
-    foreach ((array)$rows as $row) {
-      $export_rows[] = array(
-        (string)($row['id'] ?? ''),
-        (string)($row['created_at'] ?? ''),
-        (string)($row['updated_at'] ?? ''),
-        (string)($row['customer_email'] ?? ''),
-        (string)($row['sku'] ?? ''),
-        (string)($row['product_type'] ?? ''),
-        number_format(((int)($row['amount_cents'] ?? 0)) / 100, 2, '.', ''),
-        (string)($row['currency'] ?? ''),
-        (string)($row['environment_mode'] ?? ''),
-        (string)($row['status'] ?? ''),
-        (string)($row['stripe_payment_intent_id'] ?? ''),
-        (string)($row['stripe_status'] ?? ''),
-        (string)($row['metadata_json'] ?? ''),
-      );
+    foreach ($queries as $query) {
+      if ($wpdb->query($query) === false) { $wpdb->query('ROLLBACK'); wp_die('The ledger reset failed; no database changes were committed.', 'Legal Ledger Reset', array('response'=>500)); }
     }
-
-    $this->mrm_csv_send(
-      'low-brass-lessons-legal-ledger-' . gmdate('Y-m-d') . '.csv',
-      array(
-        'Order ID',
-        'Created At',
-        'Updated At',
-        'Customer Email',
-        'SKU',
-        'Product Type',
-        'Amount',
-        'Currency',
-        'Environment',
-        'Status',
-        'Stripe Payment Intent',
-        'Stripe Status',
-        'Metadata JSON',
-      ),
-      $export_rows
-    );
+    delete_option(self::OPT_ACCESS_LISTS);
+    update_option(self::OPT_LEGAL_LEDGER_RESET_AT, current_time('mysql'), false);
+    $wpdb->query('COMMIT');
+    wp_safe_redirect(admin_url('admin.php?page=mrm-pay-hub-legal-ledger&ledger_reset=1'));
+    exit;
   }
 
   public function handle_admin_post() {
@@ -26444,26 +26359,6 @@ MRM_TAX_RULES;
             array('%d')
           );
         }
-      }
-
-      // Save Access Lists
-      if (isset($_POST['mrm_access_slug']) && is_array($_POST['mrm_access_slug'])
-          && isset($_POST['mrm_access_emails']) && is_array($_POST['mrm_access_emails'])) {
-
-        $new_lists = array();
-
-        foreach ($_POST['mrm_access_slug'] as $i => $slug_raw) {
-          $slug = $this->sanitize_product_slug($slug_raw);
-          if (!$slug) continue;
-
-          $emails_raw = isset($_POST['mrm_access_emails'][$i]) ? $_POST['mrm_access_emails'][$i] : '';
-          $new_lists[$slug] = $this->normalize_email_list_textarea($emails_raw);
-        }
-
-        // Force master subscription list to be Stripe-managed only
-        $new_lists['all-sheet-music'] = array();
-
-        $this->save_access_lists($new_lists);
       }
 
       if (!empty($_POST['mrm_run_payout_batch'])) {
