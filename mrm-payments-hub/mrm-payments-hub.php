@@ -1644,7 +1644,11 @@ private function mrm_promo_piece_display_label($piece_stem, $product_label = '')
   $piece_stem = $this->sanitize_sku($piece_stem);
   $label = sanitize_text_field((string)$product_label);
   if ($label !== '') {
-    $cleaned = preg_replace('/\s*(?:-|:)?\s*(?:fundamental packet|fundamentals?|trombone\s*\/\s*euphonium|trombone-euphonium|tuba|complete package|complete-package|full piece|full-piece|bundle)\s*$/i', '', $label);
+    $cleaned = preg_replace(
+      '/\s*(?:-|–|—|:)?\s*(?:fundamental packet|fundamentals?|trombone\s*\/\s*euphonium|trombone-euphonium|tuba|complete package|complete-package|full piece|full-piece|bundle)\s*$/iu',
+      '',
+      $label
+    );
     if (is_string($cleaned) && trim($cleaned) !== '') $label = trim($cleaned);
   }
   if ($label === '') $label = ucwords(str_replace(array('-', '_'), ' ', $piece_stem));
@@ -1846,7 +1850,7 @@ private function mrm_customer_has_used_promo($code, $email_hash, $promo = array(
     current_time('mysql'),
     $code,
     $email_hash,
-    gmdate('Y-m-d H:i:s', time() - HOUR_IN_SECONDS)
+    wp_date('Y-m-d H:i:s', time() - HOUR_IN_SECONDS, wp_timezone())
   ));
 
   $found = $wpdb->get_var($wpdb->prepare(
@@ -2001,10 +2005,17 @@ private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, 
   $discount_cents = min($discount_cents, $eligible_amount_cents);
 
   /*
-   * Avoid creating a $0 card PaymentIntent.
+   * Keep the complete checkout at or above Stripe's minimum charge while
+   * allowing the primary item to be fully discounted when a paid,
+   * non-discountable add-on remains on the order.
    */
-  $max_safe_discount = max(0, $base_amount_cents - 50);
-  $discount_cents = min($discount_cents, $max_safe_discount);
+  $non_discountable_amount_cents = max(0, (int)($context['non_discountable_amount_cents'] ?? 0));
+  $minimum_charge_cents = max(0, (int)($context['minimum_charge_cents'] ?? 50));
+  $max_safe_discount = max(
+    0,
+    $base_amount_cents + $non_discountable_amount_cents - $minimum_charge_cents
+  );
+  $discount_cents = min($discount_cents, $eligible_amount_cents, $max_safe_discount);
 
   return array(
     'ok' => true,
@@ -2106,30 +2117,141 @@ public function resolve_promo_discount($promo_code, $amount_cents, $context = ar
   ));
 }
 
+private function mrm_promo_redemption_lock_name($code, $email_hash) {
+  $code = $this->mrm_normalize_promo_code($code);
+  $email_hash = preg_replace('/[^a-f0-9]/i', '', (string)$email_hash);
+  if ($code === '' || $email_hash === '') return '';
+  return 'mrm_promo_' . substr(hash('sha256', $code . '|' . strtolower($email_hash)), 0, 48);
+}
+
+private function mrm_acquire_promo_redemption_lock($code, $email_hash) {
+  global $wpdb;
+  $lock_name = $this->mrm_promo_redemption_lock_name($code, $email_hash);
+  if ($lock_name === '') return '';
+  $acquired = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, %d)', $lock_name, 10));
+  return (int)$acquired === 1 ? $lock_name : '';
+}
+
+private function mrm_release_promo_redemption_lock($lock_name) {
+  global $wpdb;
+  $lock_name = sanitize_text_field((string)$lock_name);
+  if ($lock_name !== '') $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
+}
+
+private function mrm_expire_stale_pending_promo_redemptions($code, $email_hash) {
+  global $wpdb;
+  $wpdb->query($wpdb->prepare(
+    "UPDATE {$this->table_promo_redemptions()} SET status = 'expired', updated_at = %s WHERE promo_code = %s AND email_hash = %s AND status = 'pending' AND created_at < %s",
+    current_time('mysql'),
+    $this->mrm_normalize_promo_code($code),
+    (string)$email_hash,
+    wp_date('Y-m-d H:i:s', time() - HOUR_IN_SECONDS, wp_timezone())
+  ));
+}
+
+private function mrm_release_pending_promo_redemption($order_id = 0, $payment_intent_id = '') {
+  global $wpdb;
+  $order_id = absint($order_id);
+  $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
+  if ($order_id > 0) return $wpdb->delete($this->table_promo_redemptions(), array('order_id'=>$order_id,'status'=>'pending'), array('%d','%s')) !== false;
+  if ($payment_intent_id !== '') return $wpdb->delete($this->table_promo_redemptions(), array('stripe_payment_intent_id'=>$payment_intent_id,'status'=>'pending'), array('%s','%s')) !== false;
+  return false;
+}
+
 private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '', $customer_email = '', $promo = array()) {
   global $wpdb;
   $code = $this->mrm_normalize_promo_code($code);
   $email_hash = (string)$email_hash;
-  $order_id = (int)$order_id;
+  $order_id = absint($order_id);
+  $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
   $customer_email = sanitize_email((string)$customer_email);
   $promo = is_array($promo) ? $promo : array();
-  if ($code === '' || $email_hash === '' || $order_id <= 0) return false;
+  if ($code === '' || $email_hash === '' || ($order_id <= 0 && $payment_intent_id === '')) return false;
   $table = $this->table_promo_redemptions();
-  $existing_order_redemption = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE order_id = %d AND promo_code = %s LIMIT 1", $order_id, $code));
-  if (!empty($existing_order_redemption)) return true;
-  $found_table = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+  $found_table = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
   if ($found_table !== $table) $this->install_or_upgrade_db();
-  $is_reusable = !empty($promo['reusable_per_email']);
-  if (!$is_reusable) {
-    $paid_id = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE promo_code = %s AND email_hash = %s AND status = 'paid' LIMIT 1", $code, $email_hash));
-    if (!empty($paid_id)) return false;
+  $lock_name = $this->mrm_acquire_promo_redemption_lock($code, $email_hash);
+  if ($lock_name === '') return false;
+  try {
+    $this->mrm_expire_stale_pending_promo_redemptions($code, $email_hash);
+    $existing_reference = $order_id > 0
+      ? $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE order_id = %d AND promo_code = %s LIMIT 1", $order_id, $code))
+      : $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE stripe_payment_intent_id = %s AND promo_code = %s LIMIT 1", $payment_intent_id, $code));
+    if (!empty($existing_reference)) return true;
+    if (empty($promo['reusable_per_email'])) {
+      $active = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE promo_code = %s AND email_hash = %s AND status IN ('pending', 'paid') LIMIT 1", $code, $email_hash));
+      if (!empty($active)) return false;
+    }
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field((string)$_SERVER['REMOTE_ADDR']) : '';
+    $ua = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field((string)$_SERVER['HTTP_USER_AGENT']) : '';
+    $now = current_time('mysql');
+    $row = array('promo_code'=>$code,'email_hash'=>$email_hash,'customer_email'=>$customer_email !== '' ? $customer_email : null,'stripe_payment_intent_id'=>$payment_intent_id,'status'=>'pending','ip_hash'=>$ip !== '' ? hash('sha256',$ip) : null,'user_agent_hash'=>$ua !== '' ? hash('sha256',$ua) : null,'created_at'=>$now,'updated_at'=>$now);
+    $formats = array('%s','%s','%s','%s','%s','%s','%s','%s','%s');
+    if ($order_id > 0) { $row['order_id'] = $order_id; $formats[] = '%d'; }
+    return !empty($wpdb->insert($table, $row, $formats));
+  } finally {
+    $this->mrm_release_promo_redemption_lock($lock_name);
   }
-  $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field((string)$_SERVER['REMOTE_ADDR']) : '';
-  $ua = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field((string)$_SERVER['HTTP_USER_AGENT']) : '';
-  $now = current_time('mysql');
-  $row = array('promo_code'=>$code,'email_hash'=>$email_hash,'customer_email'=>$customer_email ?: null,'order_id'=>$order_id,'stripe_payment_intent_id'=>sanitize_text_field((string)$payment_intent_id),'status'=>'pending','ip_hash'=>$ip !== '' ? hash('sha256', $ip) : null,'user_agent_hash'=>$ua !== '' ? hash('sha256', $ua) : null,'created_at'=>$now,'updated_at'=>$now,);
-  $inserted = $wpdb->insert($table,$row,array('%s','%s','%s','%d','%s','%s','%s','%s','%s','%s'));
-  return !empty($inserted);
+}
+
+private function mrm_external_promo_reservation_token($source, $reference) {
+  $source = sanitize_key((string)$source);
+  $reference = sanitize_text_field((string)$reference);
+  if ($source === '' || $reference === '') return '';
+  return 'mrm_pending_' . substr($source, 0, 30) . '_' . hash('sha256', $source . '|' . $reference);
+}
+
+public function reserve_external_promo_redemption($promo_code, $email, $source, $reference) {
+  $promo_code = $this->mrm_normalize_promo_code($promo_code);
+  $email = sanitize_email((string)$email);
+  if ($promo_code === '' || !is_email($email)) return new WP_Error('external_promo_reservation_invalid', 'The promotional-code reservation data is invalid.');
+  $promo = $this->mrm_get_active_promo_code($promo_code);
+  if (!$promo) return new WP_Error('invalid_promo_code', 'This promotional code is invalid or expired.');
+  $token = $this->mrm_external_promo_reservation_token($source, $reference);
+  if ($token === '') return new WP_Error('external_promo_reference_invalid', 'The promotional-code reservation reference is invalid.');
+  if (!$this->mrm_reserve_promo_redemption($promo_code, $this->email_hash($email), 0, $token, $email, $promo)) return new WP_Error('promo_code_already_used', 'This email has already used or reserved this promotional code.');
+  return array('ok'=>true,'reservation_token'=>$token);
+}
+
+public function attach_external_promo_redemption($reservation_token, $payment_intent_id) {
+  global $wpdb;
+  $reservation_token = sanitize_text_field((string)$reservation_token);
+  $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
+  if ($reservation_token === '' || $payment_intent_id === '') return new WP_Error('external_promo_attachment_invalid', 'The promotional-code attachment data is invalid.');
+  $table = $this->table_promo_redemptions();
+  $updated = $wpdb->update($table, array('stripe_payment_intent_id'=>$payment_intent_id,'updated_at'=>current_time('mysql')), array('stripe_payment_intent_id'=>$reservation_token,'status'=>'pending'), array('%s','%s'), array('%s','%s'));
+  if ($updated === false) return new WP_Error('external_promo_attachment_failed', 'The promotional-code reservation could not be attached to the payment.');
+  if ((int)$updated === 0) {
+    $existing = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE stripe_payment_intent_id = %s AND status IN ('pending', 'paid') LIMIT 1", $payment_intent_id));
+    if (empty($existing)) return new WP_Error('external_promo_reservation_missing', 'The promotional-code reservation could not be found.');
+  }
+  return true;
+}
+
+public function release_external_promo_redemption($reservation_token) {
+  return $this->mrm_release_pending_promo_redemption(0, $reservation_token);
+}
+
+private function mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id) {
+  global $wpdb;
+  $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
+  if ($payment_intent_id === '') return false;
+  $table = $this->table_promo_redemptions();
+  $updated = $wpdb->update($table, array('status'=>'paid','updated_at'=>current_time('mysql')), array('stripe_payment_intent_id'=>$payment_intent_id,'status'=>'pending'), array('%s','%s'), array('%s','%s'));
+  if ($updated === false) return false;
+  if ((int)$updated > 0) return true;
+  return !empty($wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE stripe_payment_intent_id = %s AND status = 'paid' LIMIT 1", $payment_intent_id)));
+}
+
+public function mark_external_promo_redemption_paid($payment_intent_id, $reservation_token = '') {
+  $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
+  $reservation_token = sanitize_text_field((string)$reservation_token);
+  if ($payment_intent_id === '') return false;
+  if ($reservation_token !== '') {
+    $attached = $this->attach_external_promo_redemption($reservation_token, $payment_intent_id);
+    if (is_wp_error($attached) && $attached->get_error_code() !== 'external_promo_reservation_missing') return $attached;
+  }
+  return $this->mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id);
 }
 
 private function mrm_attach_payment_intent_to_promo_redemption($order_id, $payment_intent_id) {
@@ -5487,6 +5609,8 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       : sanitize_text_field($pi['latest_charge']);
   }
 
+  /* Mark reservations linked directly to this PaymentIntent before downstream finalization. */
+  $this->mrm_mark_promo_redemption_paid_by_payment_intent($pi_id);
   do_action('mrm_masterclass_payment_intent_succeeded', $pi);
 
   $order = $this->get_order_by_pi($pi_id);
@@ -13600,6 +13724,20 @@ private function charge_and_unlock_autopay($data) {
     $context['product_type'] = sanitize_key((string)($product['product_type'] ?? 'unknown'));
     $context['product_category'] = sanitize_key((string)($product['category'] ?? ''));
 
+    $fundamentals_requested = isset($data['fundamentals_addon']) && strtolower((string)$data['fundamentals_addon']) === 'yes';
+    $fundamentals_addon = $this->mrm_resolve_fundamentals_addon_selection($sku, $fundamentals_requested, $email);
+    if (is_wp_error($fundamentals_addon)) {
+      return new WP_REST_Response(array(
+        'ok' => false,
+        'code' => $fundamentals_addon->get_error_code(),
+        'message' => $fundamentals_addon->get_error_message(),
+      ), $fundamentals_addon->get_error_code() === 'fundamentals_addon_already_owned' ? 409 : 400);
+    }
+    $fundamentals_addon_amount_cents = !empty($fundamentals_addon['selected']) ? max(0, (int)($fundamentals_addon['offer_amount_cents'] ?? 0)) : 0;
+    $context['fundamentals_addon_selected'] = !empty($fundamentals_addon['selected']);
+    $context['fundamentals_addon_amount_cents'] = $fundamentals_addon_amount_cents;
+    $context['non_discountable_amount_cents'] = $fundamentals_addon_amount_cents;
+
     $base_amount_cents = (int)($product['amount_cents'] ?? 0);
 
     $lesson_count = isset($context['lesson_count']) ? max(1, absint($context['lesson_count'])) : 1;
@@ -14200,6 +14338,10 @@ private function charge_and_unlock_autopay($data) {
     $original_base_amount_cents = $base_amount_cents;
     $addon_amount_cents = $addon_selected ? 500 : 0;
 
+    $context['fundamentals_addon_selected'] = $fundamentals_selected;
+    $context['fundamentals_addon_amount_cents'] = $fundamentals_addon_amount_cents;
+    $context['non_discountable_amount_cents'] = $addon_amount_cents + $fundamentals_addon_amount_cents;
+
     $promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? '');
     $promo_discount_cents = 0;
     $promo_validation = null;
@@ -14230,10 +14372,9 @@ private function charge_and_unlock_autopay($data) {
       }
 
       $promo_discount_cents = max(0, (int)($promo_validation['discount_cents'] ?? 0));
-      $base_amount_cents = max(50, $base_amount_cents - $promo_discount_cents);
+      $base_amount_cents = max(0, $base_amount_cents - $promo_discount_cents);
     }
 
-    $context['fundamentals_addon_selected'] = $fundamentals_selected;
     $lesson_mode = sanitize_key($context['lesson_mode'] ?? '');
     if ($product_type === 'lesson' && $lesson_mode !== 'online') {
       $performance_location_id = $this->mrm_get_instructor_performance_location_id(absint($context['instructor_id'] ?? 0));
@@ -14742,6 +14883,10 @@ private function charge_and_unlock_autopay($data) {
     $original_base_amount_cents = $base_amount_cents;
     $addon_amount_cents = $addon_selected ? 500 : 0;
 
+    $context['fundamentals_addon_selected'] = $fundamentals_selected;
+    $context['fundamentals_addon_amount_cents'] = $fundamentals_addon_amount_cents;
+    $context['non_discountable_amount_cents'] = $addon_amount_cents + $fundamentals_addon_amount_cents;
+
     $promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? '');
     $promo_discount_cents = 0;
     $promo_validation = null;
@@ -14768,10 +14913,9 @@ private function charge_and_unlock_autopay($data) {
       }
 
       $promo_discount_cents = max(0, (int)($promo_validation['discount_cents'] ?? 0));
-      $base_amount_cents = max(50, $base_amount_cents - $promo_discount_cents);
+      $base_amount_cents = max(0, $base_amount_cents - $promo_discount_cents);
     }
 
-    $context['fundamentals_addon_selected'] = $fundamentals_selected;
     $lesson_mode = sanitize_key($context['lesson_mode'] ?? '');
     if ($product_type === 'lesson' && $lesson_mode !== 'online') {
       $performance_location_id = $this->mrm_get_instructor_performance_location_id(absint($context['instructor_id'] ?? 0));
@@ -14951,24 +15095,6 @@ private function charge_and_unlock_autopay($data) {
     }
     if ($order_id <= 0) return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_order_creation_failed', 'message'=>'The local checkout order could not be created.'), 500);
     $metadata['mrm_order_id'] = (string)$order_id;
-    if ($promo_code !== '' && $promo_discount_cents > 0) {
-      $reserved = $this->mrm_reserve_promo_redemption(
-  $promo_code,
-  $email_hash,
-  $order_id,
-  '',
-  $email,
-  is_array($promo_validation) && !empty($promo_validation['promo']) ? $promo_validation['promo'] : array()
-);
-      if (!$reserved) {
-        return new WP_REST_Response(array(
-          'ok' => false,
-          'code' => 'promo_code_already_used',
-          'message' => 'This email has already used this promotional code.',
-        ), 409);
-      }
-    }
-
     $description = ($product_type === 'lesson')
       ? 'Low Brass Lessons - Lesson Charge'
       : 'Low Brass Lessons - Sheet Music Charge';
@@ -15058,9 +15184,30 @@ private function charge_and_unlock_autopay($data) {
       ), 500);
     }
 
+    if ($promo_code !== '' && $promo_discount_cents > 0) {
+      $reserved = $this->mrm_reserve_promo_redemption(
+        $promo_code,
+        $email_hash,
+        $order_id,
+        '',
+        $email,
+        is_array($promo_validation) && !empty($promo_validation['promo']) ? $promo_validation['promo'] : array()
+      );
+      if (!$reserved) {
+        return new WP_REST_Response(array(
+          'ok' => false,
+          'code' => 'promo_code_already_used',
+          'message' => 'This email has already used or reserved this promotional code.',
+        ), 409);
+      }
+    }
+
     $stripe_idempotency_key = $checkout_request_id !== '' ? 'mrm-pi-' . hash('sha256', $checkout_request_id) : '';
     $pi = $this->stripe_create_payment_intent($final_amount_cents, $currency, $metadata, $description, $extra, $payment_method_types, $tax_calc_id, $stripe_idempotency_key);
     if (is_wp_error($pi)) {
+      if ($promo_code !== '' && $promo_discount_cents > 0) {
+        $this->mrm_release_pending_promo_redemption($order_id);
+      }
       $data = $pi->get_error_data();
       return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
     }
@@ -26108,7 +26255,36 @@ MRM_TAX_RULES;
       echo '<td><label><input type="checkbox" name="promo_reusable_per_email[' . esc_attr((string)$i) . ']" value="1"' . checked($reusable, true, false) . '> Reusable</label></td></tr>';
     }
     echo '</tbody></table><p class="description">Saved promo codes are followed by exactly one blank row. The blank row is ignored until a code is entered and saved.</p><p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>';
-    echo '<script>(function(){function syncPromoRow(row){var type=row.querySelector(".mrm-promo-discount-type"),percent=row.querySelector(".mrm-promo-percent-wrap"),amount=row.querySelector(".mrm-promo-amount-wrap"),rule=row.querySelector(".mrm-promo-rule"),occurrence=row.querySelector(".mrm-promo-occurrence-wrap");if(type&&percent&&amount){percent.hidden=type.value!=="percent";amount.hidden=type.value!=="amount"}if(rule&&occurrence)occurrence.hidden=!["first_n","after_n","first_n_months"].includes(rule.value)}document.querySelectorAll(".mrm-promo-row").forEach(function(row){syncPromoRow(row);row.addEventListener("change",function(event){if(event.target.matches(".mrm-promo-discount-type, .mrm-promo-rule"))syncPromoRow(row)})})})();</script>';
+    echo '<script>
+(function () {
+  function syncPromoRow(row) {
+    var type = row.querySelector(".mrm-promo-discount-type");
+    var percent = row.querySelector(".mrm-promo-percent-wrap");
+    var amount = row.querySelector(".mrm-promo-amount-wrap");
+    var target = row.querySelector(".mrm-promo-target");
+    var rule = row.querySelector(".mrm-promo-rule");
+    var occurrence = row.querySelector(".mrm-promo-occurrence-wrap");
+    if (type && percent && amount) {
+      percent.hidden = type.value !== "percent";
+      amount.hidden = type.value !== "amount";
+    }
+    if (!target || !rule || !occurrence) return;
+    var lessonOnly = String(target.value || "").indexOf("lesson:") === 0;
+    Array.prototype.forEach.call(rule.options, function (option) {
+      var occurrenceRule = ["first_n", "first_n_months", "after_n"].indexOf(option.value) !== -1;
+      if (occurrenceRule) { option.disabled = !lessonOnly; option.hidden = !lessonOnly; }
+    });
+    if (!lessonOnly && ["first_n", "first_n_months", "after_n"].indexOf(rule.value) !== -1) rule.value = "all";
+    occurrence.hidden = ["first_n", "first_n_months", "after_n"].indexOf(rule.value) === -1;
+  }
+  document.querySelectorAll(".mrm-promo-row").forEach(function (row) {
+    syncPromoRow(row);
+    row.addEventListener("change", function (event) {
+      if (event.target.matches(".mrm-promo-discount-type, .mrm-promo-target, .mrm-promo-rule")) syncPromoRow(row);
+    });
+  });
+})();
+</script>';
     echo '<h2>Completed Promo Redemptions</h2><p class="description">Remove completed redemption rows only when you intentionally want to allow an email to use a single-use promo again.</p>';
     if (empty($codes)) {
       echo '<p>No promo codes found.</p>';
@@ -26767,6 +26943,9 @@ MRM_TAX_RULES;
         $scope = count($scope_values) === 3 ? 'all' : (count($scope_values) === 1 ? $scope_values[0] : implode(',', $scope_values));
         $rule_mode = sanitize_key((string)($rule_modes[$i] ?? 'all'));
         if (!in_array($rule_mode, array('all','first_n','first_n_months','after_n','date_window'), true)) $rule_mode = 'all';
+        /* Occurrence-based rules are meaningful only for lesson-only targets. */
+        $lesson_rule_target = strpos($target, 'lesson:') === 0;
+        if (!$lesson_rule_target && in_array($rule_mode, array('first_n','first_n_months','after_n'), true)) $rule_mode = 'all';
         $count = max(0, absint($counts[$i] ?? 0));
         if (in_array($rule_mode, array('first_n','first_n_months','after_n'), true) && $count <= 0) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_occurrence_'.absint($i),$code.' requires an occurrence or month count greater than zero.','error'); continue; }
         if (in_array($rule_mode, array('all','date_window'), true)) $count = 0;
@@ -27304,6 +27483,33 @@ function mrm_payments_hub_create_taxed_payment_intent($args) {
     return new WP_Error('payments_hub_tax_unavailable','The shared tax service is unavailable.');
   }
   return $hub->create_external_taxed_payment_intent($args);
+}
+
+if (!function_exists('mrm_payments_hub_reserve_external_promo_redemption')) {
+  function mrm_payments_hub_reserve_external_promo_redemption($promo_code, $email, $source, $reference) {
+    $hub = mrm_pay_hub_singleton();
+    if (!$hub || !method_exists($hub, 'reserve_external_promo_redemption')) return new WP_Error('external_promo_service_unavailable', 'The promotional-code reservation service is unavailable.');
+    return $hub->reserve_external_promo_redemption($promo_code, $email, $source, $reference);
+  }
+}
+if (!function_exists('mrm_payments_hub_attach_external_promo_redemption')) {
+  function mrm_payments_hub_attach_external_promo_redemption($reservation_token, $payment_intent_id) {
+    $hub = mrm_pay_hub_singleton();
+    if (!$hub || !method_exists($hub, 'attach_external_promo_redemption')) return new WP_Error('external_promo_service_unavailable', 'The promotional-code attachment service is unavailable.');
+    return $hub->attach_external_promo_redemption($reservation_token, $payment_intent_id);
+  }
+}
+if (!function_exists('mrm_payments_hub_release_external_promo_redemption')) {
+  function mrm_payments_hub_release_external_promo_redemption($reservation_token) {
+    $hub = mrm_pay_hub_singleton();
+    return $hub && method_exists($hub, 'release_external_promo_redemption') ? $hub->release_external_promo_redemption($reservation_token) : false;
+  }
+}
+if (!function_exists('mrm_payments_hub_mark_external_promo_redemption_paid')) {
+  function mrm_payments_hub_mark_external_promo_redemption_paid($payment_intent_id, $reservation_token = '') {
+    $hub = mrm_pay_hub_singleton();
+    return $hub && method_exists($hub, 'mark_external_promo_redemption_paid') ? $hub->mark_external_promo_redemption_paid($payment_intent_id, $reservation_token) : false;
+  }
 }
 
 if (!function_exists('mrm_payments_hub_resolve_promo_discount')) {

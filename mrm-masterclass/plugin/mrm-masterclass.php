@@ -9389,6 +9389,7 @@ public function rest_apply_promo( WP_REST_Request $request ) {
 			absint( $event->price_cents ),
 			array(
 				'event_id'          => $event_id,
+				'masterclass_id' => $event_id,
 				'email'             => $email,
 				'product_type'      => 'masterclass',
 				'lesson_count'      => 1,
@@ -9591,6 +9592,7 @@ public function rest_create_payment_intent( $request ) {
 		$base_amount_cents,
 		array(
 			'event_id'          => $event_id,
+			'masterclass_id' => $event_id,
 			'email'             => $email,
 			'product_type'      => 'masterclass',
 			'lesson_count'      => 1,
@@ -9607,7 +9609,8 @@ public function rest_create_payment_intent( $request ) {
 	}
 
 	$discount_cents = absint( $promo['discount_cents'] ?? 0 );
-	$amount_cents   = max( 50, absint( $promo['final_amount_cents'] ?? $base_amount_cents ) );
+	$resolved_promo_code = $discount_cents > 0 ? strtoupper( trim( sanitize_text_field( (string) ( $promo['promo_code'] ?? $promo_code ) ) ) ) : '';
+	$amount_cents = max( 50, absint( $promo['final_amount_cents'] ?? $base_amount_cents ) );
 	$address_raw = $this->mrm_mc_get_rest_param_value( $request, 'billing_address', array() );
 	$address = array(
 		'line1' => sanitize_text_field( $address_raw['line1'] ?? '' ),
@@ -9655,6 +9658,24 @@ public function rest_create_payment_intent( $request ) {
 	}
 	$seat_hold_token = sanitize_text_field( $seat_hold['hold_token'] ?? '' );
 
+	$promo_reservation_token = '';
+	if ( $discount_cents > 0 && '' !== $resolved_promo_code ) {
+		if ( ! function_exists( 'mrm_payments_hub_reserve_external_promo_redemption' ) ) {
+			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', 'The promotional-code reservation service is unavailable.' );
+			return new WP_Error( 'mrm_masterclass_promo_reservation_unavailable', 'Promotional-code checkout is temporarily unavailable.', array( 'status' => 503 ) );
+		}
+		$promo_reservation = mrm_payments_hub_reserve_external_promo_redemption( $resolved_promo_code, $email, 'masterclass', $seat_hold_token );
+		if ( is_wp_error( $promo_reservation ) ) {
+			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', $promo_reservation->get_error_message() );
+			return new WP_Error( $promo_reservation->get_error_code(), $promo_reservation->get_error_message(), array( 'status' => 409 ) );
+		}
+		$promo_reservation_token = sanitize_text_field( (string) ( $promo_reservation['reservation_token'] ?? '' ) );
+		if ( '' === $promo_reservation_token ) {
+			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', 'The promotional-code reservation token was not returned.' );
+			return new WP_Error( 'mrm_masterclass_promo_reservation_failed', 'The promotional code could not be reserved for checkout.', array( 'status' => 503 ) );
+		}
+	}
+
 	$result = mrm_payments_hub_create_taxed_payment_intent(
 		array(
 			'amount_cents' => $subtotal_cents,
@@ -9681,9 +9702,10 @@ public function rest_create_payment_intent( $request ) {
 				'name' => $name,
 				'email' => $email,
 				'visitor_timezone' => $visitor_timezone,
-				'promo_code' => $promo_code,
+				'promo_code' => $resolved_promo_code,
 				'promo_status' => sanitize_key( $promo['promo_status'] ?? 'none' ),
 				'promo_discount_cents' => (string) $discount_cents,
+				'mrm_promo_reservation_token' => $promo_reservation_token,
 				'original_amount_cents' => (string) $base_amount_cents,
 				'billing_line1' => $address['line1'],
 				'billing_line2' => $address['line2'],
@@ -9698,6 +9720,7 @@ public function rest_create_payment_intent( $request ) {
 	);
 
 	if ( is_wp_error( $result ) ) {
+		if ( '' !== $promo_reservation_token && function_exists( 'mrm_payments_hub_release_external_promo_redemption' ) ) mrm_payments_hub_release_external_promo_redemption( $promo_reservation_token );
 		$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', $result->get_error_message() );
 		return new WP_Error( $result->get_error_code(), $result->get_error_message(), array( 'status' => 503 ) );
 	}
@@ -9708,25 +9731,43 @@ public function rest_create_payment_intent( $request ) {
 
 	if ( '' === $intent_id || '' === $client_secret ) {
 		$cleanup_message = 'Stripe returned an incomplete PaymentIntent response.';
-
+		$release_promo_reservation = true;
 		if ( '' !== $intent_id ) {
 			$cancel_result = $this->mrm_mc_cancel_unconfirmed_payment_intent( $intent_id );
 			if ( is_wp_error( $cancel_result ) ) {
 				$error_data = $cancel_result->get_error_data();
 				$payment_received = is_array( $error_data ) && ! empty( $error_data['payment_received'] );
-				$hold_status = $payment_received ? 'payment_received' : 'reserved';
-				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, $hold_status, '', $cancel_result->get_error_message() );
-				$cleanup_message .= ' The PaymentIntent cancellation could not be confirmed, so the seat hold was preserved. ' . $cancel_result->get_error_message();
+				$release_promo_reservation = false;
+				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, $payment_received ? 'payment_received' : 'reserved', '', $cancel_result->get_error_message() );
+				$cleanup_message .= ' The PaymentIntent cancellation could not be confirmed, so the seat hold and promotional-code reservation were preserved. ' . $cancel_result->get_error_message();
 			} else {
 				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', $cleanup_message );
 			}
 		} else {
 			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', $cleanup_message );
 		}
-
+		if ( $release_promo_reservation && '' !== $promo_reservation_token && function_exists( 'mrm_payments_hub_release_external_promo_redemption' ) ) mrm_payments_hub_release_external_promo_redemption( $promo_reservation_token );
 		$this->mrm_mc_debug_log( 'Stripe PaymentIntent response missing expected fields.', array( 'event_id' => $event_id, 'payment_intent_id' => $intent_id, 'has_client_secret' => '' !== $client_secret ? 'yes' : 'no', 'cleanup_message' => $cleanup_message ) );
-
 		return new WP_Error( 'mrm_masterclass_payment_intent_incomplete', 'Payment setup could not be completed. Please try again.', array( 'status' => 500 ) );
+	}
+
+	if ( '' !== $promo_reservation_token ) {
+		$promo_attach_result = function_exists( 'mrm_payments_hub_attach_external_promo_redemption' )
+			? mrm_payments_hub_attach_external_promo_redemption( $promo_reservation_token, $intent_id )
+			: new WP_Error( 'mrm_masterclass_promo_attachment_unavailable', 'The promotional-code attachment service is unavailable.' );
+		if ( is_wp_error( $promo_attach_result ) || true !== $promo_attach_result ) {
+			$attach_message = is_wp_error( $promo_attach_result ) ? $promo_attach_result->get_error_message() : 'The promotional-code reservation could not be attached to the payment.';
+			$cancel_result = $this->mrm_mc_cancel_unconfirmed_payment_intent( $intent_id );
+			if ( is_wp_error( $cancel_result ) ) {
+				$error_data = $cancel_result->get_error_data();
+				$payment_received = is_array( $error_data ) && ! empty( $error_data['payment_received'] );
+				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, $payment_received ? 'payment_received' : 'reserved', '', $attach_message . ' Payment cancellation could not be confirmed: ' . $cancel_result->get_error_message() );
+				return new WP_Error( $payment_received ? 'mrm_masterclass_payment_received_promo_attach_failed' : 'mrm_masterclass_promo_attach_cancel_uncertain', $payment_received ? 'Your payment was received, but promotional-code finalization requires administrative recovery. Do not submit another payment.' : 'Payment setup could not be completed safely. The seat and promotional code remain reserved while payment status is confirmed.', array( 'status' => $payment_received ? 409 : 503, 'payment_received' => $payment_received ) );
+			}
+			if ( function_exists( 'mrm_payments_hub_release_external_promo_redemption' ) ) mrm_payments_hub_release_external_promo_redemption( $promo_reservation_token );
+			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', $attach_message );
+			return new WP_Error( 'mrm_masterclass_promo_attach_failed', 'Payment setup could not be completed. Please try again.', array( 'status' => 503 ) );
+		}
 	}
 
 	$hold_attached = $this->mrm_mc_attach_payment_intent_to_seat_hold( $seat_hold_token, $intent['id'] );
@@ -9737,6 +9778,10 @@ public function rest_create_payment_intent( $request ) {
 			$payment_received = is_array( $error_data ) && ! empty( $error_data['payment_received'] );
 			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, $payment_received ? 'payment_received' : 'reserved', '', 'The PaymentIntent could not be attached to the seat hold, and its cancellation could not be confirmed: ' . $cancel_result->get_error_message() );
 			return new WP_Error( $payment_received ? 'mrm_masterclass_payment_received_hold_attach_failed' : 'mrm_masterclass_seat_hold_attach_cancel_uncertain', $payment_received ? 'Your payment was received, but registration finalization requires administrative recovery. Do not submit another payment.' : 'Payment setup could not be completed safely. The seat remains reserved while the payment status is confirmed.', array( 'status' => $payment_received ? 409 : 503, 'payment_received' => $payment_received ) );
+		}
+		if ( '' !== $promo_reservation_token && function_exists( 'mrm_payments_hub_release_external_promo_redemption' ) ) {
+			/* The reservation is attached, so release it using the PaymentIntent ID. */
+			mrm_payments_hub_release_external_promo_redemption( $intent_id );
 		}
 		$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', 'The PaymentIntent could not be attached to the seat hold and was canceled.' );
 		return new WP_Error( 'mrm_masterclass_seat_hold_attach_failed', 'Payment setup could not be completed. Please try again.', array( 'status' => 503 ) );
@@ -9915,6 +9960,11 @@ public function mrm_mc_finalize_from_payment_intent_webhook( $payment_intent ) {
 	$payment_intent_id = sanitize_text_field( $payment_intent['id'] ?? '' );
 	$event_id = absint( $metadata['mrm_masterclass_event_id'] ?? $metadata['masterclass_event_id'] ?? $metadata['event_id'] ?? 0 );
 	if ( '' === $payment_intent_id || $event_id <= 0 ) return;
+
+	$promo_reservation_token = sanitize_text_field( $metadata['mrm_promo_reservation_token'] ?? '' );
+	if ( function_exists( 'mrm_payments_hub_mark_external_promo_redemption_paid' ) ) {
+		mrm_payments_hub_mark_external_promo_redemption_paid( $payment_intent_id, $promo_reservation_token );
+	}
 
 	$request = new WP_REST_Request( 'POST', '/mrm-masterclass/v1/finalize-registration' );
 	$request->set_body_params( array( 'event_id' => $event_id, 'payment_intent_id' => $payment_intent_id, 'first_name' => sanitize_text_field( $metadata['first_name'] ?? '' ), 'last_name' => sanitize_text_field( $metadata['last_name'] ?? '' ), 'name' => sanitize_text_field( $metadata['name'] ?? '' ), 'email' => sanitize_email( $metadata['email'] ?? '' ), 'terms_accepted' => ! empty( $metadata['terms_accepted'] ), 'promo_code' => sanitize_text_field( $metadata['promo_code'] ?? '' ), 'visitor_timezone' => sanitize_text_field( $metadata['visitor_timezone'] ?? '' ) ) );
