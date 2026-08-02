@@ -4576,7 +4576,27 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       'mrm_checkout_invalidated_at' => current_time('mysql'),
     );
     if ($status === 'canceled') {
-      $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', $status_metadata);
+      $this->update_order_status_from_pi(
+        $payment_intent_id,
+        'canceled',
+        'canceled',
+        $status_metadata
+      );
+
+      $promo_released =
+        $this
+          ->mrm_release_pending_promo_redemption(
+            absint($order['id']),
+            $payment_intent_id
+          );
+
+      if (!$promo_released) {
+        return new WP_Error(
+          'piece_checkout_promo_release_failed',
+          'The obsolete payment session was canceled, but its promotional-code reservation could not be released.'
+        );
+      }
+
       return true;
     }
     $canceled = $this->stripe_api_request(
@@ -4600,9 +4620,29 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     $this->update_order_status_from_pi(
       $payment_intent_id,
       'canceled',
-      sanitize_key((string)($canceled['status'] ?? 'canceled')),
+      sanitize_key(
+        (string)(
+          $canceled['status'] ??
+          'canceled'
+        )
+      ),
       $status_metadata
     );
+
+    $promo_released =
+      $this
+        ->mrm_release_pending_promo_redemption(
+          absint($order['id']),
+          $payment_intent_id
+        );
+
+    if (!$promo_released) {
+      return new WP_Error(
+        'piece_checkout_promo_release_failed',
+        'The obsolete payment session was canceled, but its promotional-code reservation could not be released.'
+      );
+    }
+
     return true;
   }
 
@@ -5565,6 +5605,110 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     ), array('%s','%s','%s','%s','%s'));
   }
 
+  private function
+  mrm_finalize_succeeded_payment_intent_promo_redemption(
+    $payment_intent
+  ) {
+    if (!is_array($payment_intent)) {
+      return new WP_Error(
+        'promo_payment_intent_invalid',
+        'The successful PaymentIntent could not be read while finalizing its promotional code.'
+      );
+    }
+
+    $payment_intent_id = sanitize_text_field(
+      (string)($payment_intent['id'] ?? '')
+    );
+
+    if ($payment_intent_id === '') {
+      return new WP_Error(
+        'promo_payment_intent_id_missing',
+        'The successful PaymentIntent did not contain an ID while finalizing its promotional code.'
+      );
+    }
+
+    $metadata =
+      isset($payment_intent['metadata']) &&
+      is_array($payment_intent['metadata'])
+        ? $payment_intent['metadata']
+        : array();
+
+    $promo_code =
+      $this->mrm_normalize_promo_code(
+        $metadata['mrm_promo_code'] ??
+        $metadata['promo_code'] ??
+        ''
+      );
+
+    $promo_discount_cents = max(
+      0,
+      (int)(
+        $metadata['mrm_promo_discount_cents'] ??
+        $metadata['promo_discount_cents'] ??
+        0
+      )
+    );
+
+    $reservation_token = sanitize_text_field(
+      (string)(
+        $metadata[
+          'mrm_promo_reservation_token'
+        ] ?? ''
+      )
+    );
+
+    /* PaymentIntents without a discounted promo do not require a redemption transition. */
+    if ($promo_code === '' || $promo_discount_cents <= 0) {
+      return true;
+    }
+
+    if ($reservation_token !== '') {
+      $external_result =
+        $this->mark_external_promo_redemption_paid(
+          $payment_intent_id,
+          $reservation_token
+        );
+
+      if (is_wp_error($external_result)) {
+        return $external_result;
+      }
+
+      if ($external_result !== true) {
+        return new WP_Error(
+          'external_promo_redemption_not_finalized',
+          'The successful payment promotional-code reservation could not be marked paid.'
+        );
+      }
+
+      return true;
+    }
+
+    if ($this->mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id)) {
+      return true;
+    }
+
+    $order = $this->get_order_by_pi($payment_intent_id);
+
+    if (is_array($order) && !empty($order['id'])) {
+      $this->mrm_mark_promo_redemption_paid(
+        (int)$order['id'],
+        $payment_intent_id
+      );
+
+      if ($this->mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id)) {
+        return true;
+      }
+
+      return new WP_Error(
+        'internal_promo_redemption_not_finalized',
+        'The successful payment promotional-code reservation could not be marked paid.'
+      );
+    }
+
+    /* Older external intents might predate the central reservation table. */
+    return true;
+  }
+
   private function mrm_handle_payment_intent_succeeded_webhook(
   $pi
 ) {
@@ -5584,10 +5728,37 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   $pi_id = sanitize_text_field($pi['id'] ?? '');
 
   if ($pi_id === '') {
-    return new WP_Error('payment_intent_succeeded_id_missing', 'The payment_intent.succeeded event did not contain a PaymentIntent ID.');
+    return new WP_Error(
+      'payment_intent_succeeded_id_missing',
+      'The payment_intent.succeeded event did not contain a PaymentIntent ID.'
+    );
   }
 
-  $tax_sync_result = $this->mrm_tax_sync_payment_intent_ledger($pi, 0);
+  /* Permanently consume the promo before downstream processing can fail. */
+  $promo_redemption_result =
+    $this
+      ->mrm_finalize_succeeded_payment_intent_promo_redemption(
+        $pi
+      );
+
+  if (is_wp_error($promo_redemption_result)) {
+    $this->stripe_debug_log(
+      'Payment succeeded but promotional-code finalization failed.',
+      array(
+        'payment_intent_id' => $pi_id,
+        'code' => $promo_redemption_result->get_error_code(),
+        'message' => $promo_redemption_result->get_error_message(),
+      )
+    );
+
+    return $promo_redemption_result;
+  }
+
+  $tax_sync_result =
+    $this->mrm_tax_sync_payment_intent_ledger(
+      $pi,
+      0
+    );
 
   if (is_wp_error($tax_sync_result)) {
     $this->stripe_debug_log(
@@ -5609,9 +5780,10 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       : sanitize_text_field($pi['latest_charge']);
   }
 
-  /* Mark reservations linked directly to this PaymentIntent before downstream finalization. */
-  $this->mrm_mark_promo_redemption_paid_by_payment_intent($pi_id);
-  do_action('mrm_masterclass_payment_intent_succeeded', $pi);
+  do_action(
+    'mrm_masterclass_payment_intent_succeeded',
+    $pi
+  );
 
   $order = $this->get_order_by_pi($pi_id);
 
@@ -5693,27 +5865,54 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   return true;
 }
 
-  private function mrm_handle_payment_intent_failed_webhook($pi, $local_status = 'failed') {
-    if (!is_array($pi)) return;
+  private function
+  mrm_handle_payment_intent_failed_webhook(
+    $pi,
+    $local_status = 'failed'
+  ) {
+    if (!is_array($pi)) {
+      return new WP_Error(
+        'payment_intent_failure_object_invalid',
+        'The PaymentIntent failure event did not contain a valid PaymentIntent.'
+      );
+    }
 
-    $pi_id = (string)($pi['id'] ?? '');
-    if ($pi_id === '') return;
+    $pi_id = sanitize_text_field((string)($pi['id'] ?? ''));
+    if ($pi_id === '') {
+      return new WP_Error(
+        'payment_intent_failure_id_missing',
+        'The PaymentIntent failure event did not contain an ID.'
+      );
+    }
+
+    $local_status = sanitize_key((string)$local_status);
+    $stripe_status = sanitize_key((string)($pi['status'] ?? ''));
+    $is_canceled = ($local_status === 'canceled' || $stripe_status === 'canceled');
+
+    if ($is_canceled) {
+      $promo_released = $this->mrm_release_pending_promo_redemption(0, $pi_id);
+      if (!$promo_released) {
+        return new WP_Error(
+          'canceled_payment_promo_release_failed',
+          'The canceled PaymentIntent promotional-code reservation could not be released.'
+        );
+      }
+    }
 
     $order = $this->get_order_by_pi($pi_id);
-    if (!$order) return;
+    if (!$order) {
+      return true;
+    }
 
     $metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
     if (!empty($pi['latest_charge'])) {
-      $metadata['mrm_latest_charge_id'] = (string)$pi['latest_charge'];
+      $metadata['mrm_latest_charge_id'] = is_array($pi['latest_charge'])
+        ? sanitize_text_field((string)($pi['latest_charge']['id'] ?? ''))
+        : sanitize_text_field((string)$pi['latest_charge']);
     }
 
-    $this->update_order_status_from_pi($pi_id, $local_status, (string)($pi['status'] ?? ''), $metadata);
-
-    $lesson_id = 0;
-    if (!empty($metadata['mrm_lesson_id'])) {
-      $lesson_id = (int)$metadata['mrm_lesson_id'];
-    }
-
+    $this->update_order_status_from_pi($pi_id, $local_status, $stripe_status, $metadata);
+    $lesson_id = !empty($metadata['mrm_lesson_id']) ? (int)$metadata['mrm_lesson_id'] : 0;
     if ($lesson_id <= 0 && !empty($order['metadata_json'])) {
       $decoded = json_decode((string)$order['metadata_json'], true);
       if (is_array($decoded) && !empty($decoded['mrm_lesson_id'])) {
@@ -5722,9 +5921,11 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     }
 
     if ($lesson_id > 0 && (string)($order['sku'] ?? '') === 'autopay_lesson_charge') {
-      $message = 'Autopay webhook failure: ' . (string)($pi['status'] ?? $local_status);
+      $message = 'Autopay webhook failure: ' . ($stripe_status !== '' ? $stripe_status : $local_status);
       $this->mrm_finalize_autopay_lesson_failure($lesson_id, $message);
     }
+
+    return true;
   }
 
   private function mrm_void_standard_payouts_for_refunded_order($order_id, $pi_id = '', $reason = 'payment_refunded') {
@@ -7950,9 +8151,19 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $payment_intent = $this->stripe_create_payment_intent(
       $amount_cents, $currency, $metadata, 'Low Brass Lessons - Sheet Music Charge', array(), array('card'), $tax_calculation_id, $stripe_idempotency_key
     );
-    if (is_wp_error($payment_intent)) return $payment_intent;
+    if (is_wp_error($payment_intent)) {
+      if ($promo_code !== '' && $promo_discount_cents > 0) {
+        $this->mrm_release_pending_promo_redemption($order_id);
+      }
+      return $payment_intent;
+    }
     $payment_intent_id = sanitize_text_field((string)($payment_intent['id'] ?? ''));
-    if ($payment_intent_id === '') return new WP_Error('checkout_payment_intent_missing', 'Stripe did not return a Payment Intent ID.');
+    if ($payment_intent_id === '') {
+      if ($promo_code !== '' && $promo_discount_cents > 0) {
+        $this->mrm_release_pending_promo_redemption($order_id);
+      }
+      return new WP_Error('checkout_payment_intent_missing', 'Stripe did not return a Payment Intent ID.');
+    }
 
     $this->attach_payment_intent_to_order($order_id, $payment_intent_id, sanitize_key((string)($payment_intent['status'] ?? '')));
     if ($promo_code !== '' && $promo_discount_cents > 0) $this->mrm_attach_payment_intent_to_promo_redemption($order_id, $payment_intent_id);
@@ -13523,11 +13734,13 @@ private function charge_and_unlock_autopay($data) {
         break;
 
       case 'payment_intent.payment_failed':
-        $this->mrm_handle_payment_intent_failed_webhook($object, 'failed');
+        $required_processing_result =
+          $this->mrm_handle_payment_intent_failed_webhook($object, 'failed');
         break;
 
       case 'payment_intent.canceled':
-        $this->mrm_handle_payment_intent_failed_webhook($object, 'failed');
+        $required_processing_result =
+          $this->mrm_handle_payment_intent_failed_webhook($object, 'canceled');
         break;
 
       case 'charge.refunded':
