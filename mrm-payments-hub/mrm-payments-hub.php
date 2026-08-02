@@ -79,6 +79,7 @@ class MRM_Payments_Hub_Single {
      * Marketing Email Lists admin + unsubscribe actions.
      */
     add_action('admin_post_mrm_marketing_email_save_lists', array($this, 'handle_marketing_email_save_lists'));
+    add_action('admin_post_mrm_marketing_save_newsletter_welcome_email', array($this, 'handle_marketing_save_newsletter_welcome_email'));
     add_action('admin_post_mrm_marketing_email_send', array($this, 'handle_marketing_email_send'));
     add_action(
       'admin_post_mrm_marketing_delete_sent_log_item',
@@ -17151,9 +17152,9 @@ artsadmin@example.edu",
       'example' => '',
     ),
     'general_interest' => array(
-      'label' => 'General Interest',
+      'label' => 'Newsletter',
       'type' => 'manual',
-      'desc' => 'Manual list for general Low Brass Lessons updates, promo codes, masterclasses, sheet music releases, and studio announcements.',
+      'desc' => 'Newsletter subscribers who opted in to receive Low Brass Lessons updates, opportunities, offers, and announcements.',
       'example' => "parent@example.com
 studentfamily@example.com
 community@example.org",
@@ -17965,6 +17966,203 @@ community@example.org",
       . '</html>';
   }
 
+  private function mrm_marketing_newsletter_welcome_defaults() {
+    return array(
+      'enabled' => false,
+      'subject' => '',
+      'html' => '',
+      'attachment_id' => 0,
+      'updated_at' => '',
+      'last_attempt_at' => '',
+      'last_attempt_email' => '',
+      'last_attempt_status' => '',
+    );
+  }
+
+  private function mrm_marketing_get_newsletter_welcome_settings() {
+    $defaults = $this->mrm_marketing_newsletter_welcome_defaults();
+    $saved = get_option('mrm_pay_hub_newsletter_welcome_email', array());
+
+    if (!is_array($saved)) {
+      $saved = array();
+    }
+
+    $settings = wp_parse_args($saved, $defaults);
+
+    return array(
+      'enabled' => !empty($settings['enabled']),
+      'subject' => sanitize_text_field((string)$settings['subject']),
+      'html' => (string)$settings['html'],
+      'attachment_id' => absint($settings['attachment_id']),
+      'updated_at' => sanitize_text_field((string)$settings['updated_at']),
+      'last_attempt_at' => sanitize_text_field((string)$settings['last_attempt_at']),
+      'last_attempt_email' => sanitize_email((string)$settings['last_attempt_email']),
+      'last_attempt_status' => sanitize_key((string)$settings['last_attempt_status']),
+    );
+  }
+
+  private function mrm_marketing_save_newsletter_welcome_settings($settings) {
+    $defaults = $this->mrm_marketing_newsletter_welcome_defaults();
+    $settings = wp_parse_args(is_array($settings) ? $settings : array(), $defaults);
+
+    update_option(
+      'mrm_pay_hub_newsletter_welcome_email',
+      array(
+        'enabled' => !empty($settings['enabled']),
+        'subject' => sanitize_text_field((string)$settings['subject']),
+        'html' => (string)$settings['html'],
+        'attachment_id' => absint($settings['attachment_id']),
+        'updated_at' => sanitize_text_field((string)$settings['updated_at']),
+        'last_attempt_at' => sanitize_text_field((string)$settings['last_attempt_at']),
+        'last_attempt_email' => sanitize_email((string)$settings['last_attempt_email']),
+        'last_attempt_status' => sanitize_key((string)$settings['last_attempt_status']),
+      ),
+      false
+    );
+  }
+
+  private function mrm_marketing_upload_newsletter_welcome_attachment() {
+    $field = 'mrm_newsletter_welcome_attachment';
+
+    if (
+      empty($_FILES[$field]) ||
+      empty($_FILES[$field]['name']) ||
+      (int)($_FILES[$field]['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE
+    ) {
+      return 0;
+    }
+
+    $file = $_FILES[$field];
+
+    if ((int)($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+      return new WP_Error(
+        'mrm_newsletter_welcome_upload_error',
+        'The newsletter welcome attachment could not be uploaded.'
+      );
+    }
+
+    if ((int)($file['size'] ?? 0) > 10 * 1024 * 1024) {
+      return new WP_Error(
+        'mrm_newsletter_welcome_upload_too_large',
+        'The newsletter welcome attachment must be 10MB or smaller.'
+      );
+    }
+
+    if (!function_exists('media_handle_upload')) {
+      require_once ABSPATH . 'wp-admin/includes/file.php';
+      require_once ABSPATH . 'wp-admin/includes/media.php';
+      require_once ABSPATH . 'wp-admin/includes/image.php';
+    }
+
+    $allowed_mimes = array(
+      'pdf' => 'application/pdf',
+      'doc' => 'application/msword',
+      'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'jpg|jpeg|jpe' => 'image/jpeg',
+      'png' => 'image/png',
+    );
+
+    $attachment_id = media_handle_upload(
+      $field,
+      0,
+      array(),
+      array(
+        'test_form' => false,
+        'mimes' => $allowed_mimes,
+      )
+    );
+
+    if (is_wp_error($attachment_id)) {
+      return $attachment_id;
+    }
+
+    return absint($attachment_id);
+  }
+
+  private function mrm_marketing_record_newsletter_welcome_attempt($email, $status) {
+    $settings = $this->mrm_marketing_get_newsletter_welcome_settings();
+    $settings['last_attempt_at'] = current_time('mysql');
+    $settings['last_attempt_email'] = sanitize_email((string)$email);
+    $settings['last_attempt_status'] = sanitize_key((string)$status);
+    $this->mrm_marketing_save_newsletter_welcome_settings($settings);
+  }
+
+  private function mrm_marketing_send_newsletter_welcome_email($email) {
+    $email = strtolower(sanitize_email((string)$email));
+
+    if (!$email || !is_email($email)) {
+      return false;
+    }
+
+    $settings = $this->mrm_marketing_get_newsletter_welcome_settings();
+
+    if (empty($settings['enabled'])) {
+      return false;
+    }
+
+    $subject = sanitize_text_field((string)$settings['subject']);
+    $body_html = (string)$settings['html'];
+
+    if ($subject === '' || trim(wp_strip_all_tags($body_html)) === '') {
+      return false;
+    }
+
+    $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+
+    if (isset($unsubscribed[$email])) {
+      return false;
+    }
+
+    $mailing_address = (string)get_option(
+      'mrm_pay_hub_marketing_mailing_address',
+      ''
+    );
+
+    $final_html = $this->mrm_marketing_build_email_html(
+      $body_html,
+      $this->mrm_marketing_unsubscribe_url($email),
+      $mailing_address
+    );
+
+    $from_name = 'Low Brass Lessons';
+    $from_email = 'no-reply@lowbrass-lessons.com';
+    $headers = array(
+      'Content-Type: text/html; charset=UTF-8',
+      'From: ' . $from_name . ' <' . $from_email . '>',
+      'Reply-To: ' . $from_name . ' <' . $from_email . '>',
+    );
+
+    $attachments = array();
+    $attachment_id = absint($settings['attachment_id']);
+
+    if ($attachment_id > 0) {
+      $attachment_path = get_attached_file($attachment_id);
+
+      if (
+        is_string($attachment_path) &&
+        $attachment_path !== '' &&
+        file_exists($attachment_path)
+      ) {
+        $attachments[] = $attachment_path;
+      }
+    }
+
+    $sent = wp_mail(
+      $email,
+      $subject,
+      $final_html,
+      $headers,
+      $attachments
+    );
+
+    $this->mrm_marketing_record_newsletter_welcome_attempt(
+      $email,
+      $sent ? 'sent' : 'failed'
+    );
+
+    return (bool)$sent;
+  }
+
   private function mrm_marketing_sent_log() {
     $log = get_option('mrm_pay_hub_marketing_sent_log', array());
     return is_array($log) ? $log : array();
@@ -18181,7 +18379,7 @@ community@example.org",
     $lists = $this->mrm_marketing_manual_lists();
 
     /*
-     * Save normal manual lists, currently General Interest.
+     * Save normal manual lists, currently Newsletter.
      */
     foreach ($defs as $key => $def) {
       if (($def['type'] ?? '') !== 'manual') {
@@ -18374,6 +18572,109 @@ community@example.org",
         admin_url('admin.php')
       )
     );
+    exit;
+  }
+
+  public function handle_marketing_save_newsletter_welcome_email() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to save the newsletter welcome email.');
+    }
+
+    check_admin_referer(
+      'mrm_marketing_save_newsletter_welcome_email',
+      'mrm_marketing_newsletter_welcome_nonce'
+    );
+
+    $settings = $this->mrm_marketing_get_newsletter_welcome_settings();
+    $enabled = !empty($_POST['mrm_newsletter_welcome_enabled']);
+
+    $subject = isset($_POST['mrm_newsletter_welcome_subject'])
+      ? sanitize_text_field(
+          wp_unslash($_POST['mrm_newsletter_welcome_subject'])
+        )
+      : '';
+
+    $raw_html = isset($_POST['mrm_newsletter_welcome_html'])
+      ? wp_unslash($_POST['mrm_newsletter_welcome_html'])
+      : '';
+
+    $body_html = $this->mrm_marketing_allowed_html($raw_html);
+
+    $selected_state = isset($_POST['mrm_marketing_state'])
+      ? sanitize_key(wp_unslash($_POST['mrm_marketing_state']))
+      : '';
+
+    if (
+      $enabled &&
+      (
+        $subject === '' ||
+        trim(wp_strip_all_tags($body_html)) === ''
+      )
+    ) {
+      $args = array(
+        'page' => 'mrm-pay-hub-marketing-email-lists',
+        'mrm_marketing_error' => rawurlencode(
+          'A subject and email body are required before the newsletter welcome email can be enabled.'
+        ),
+      );
+
+      if ($selected_state !== '') {
+        $args['mrm_state'] = $selected_state;
+      }
+
+      wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
+      exit;
+    }
+
+    $old_attachment_id = absint($settings['attachment_id']);
+    $new_attachment_id = $this->mrm_marketing_upload_newsletter_welcome_attachment();
+
+    if (is_wp_error($new_attachment_id)) {
+      $args = array(
+        'page' => 'mrm-pay-hub-marketing-email-lists',
+        'mrm_marketing_error' => rawurlencode($new_attachment_id->get_error_message()),
+      );
+
+      if ($selected_state !== '') {
+        $args['mrm_state'] = $selected_state;
+      }
+
+      wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
+      exit;
+    }
+
+    $remove_attachment = !empty($_POST['mrm_newsletter_welcome_remove_attachment']);
+    $attachment_id = $old_attachment_id;
+
+    if ($new_attachment_id > 0) {
+      $attachment_id = absint($new_attachment_id);
+
+      if ($old_attachment_id > 0 && $old_attachment_id !== $attachment_id) {
+        wp_delete_attachment($old_attachment_id, true);
+      }
+    } elseif ($remove_attachment && $old_attachment_id > 0) {
+      wp_delete_attachment($old_attachment_id, true);
+      $attachment_id = 0;
+    }
+
+    $settings['enabled'] = $enabled;
+    $settings['subject'] = $subject;
+    $settings['html'] = $body_html;
+    $settings['attachment_id'] = $attachment_id;
+    $settings['updated_at'] = current_time('mysql');
+
+    $this->mrm_marketing_save_newsletter_welcome_settings($settings);
+
+    $args = array(
+      'page' => 'mrm-pay-hub-marketing-email-lists',
+      'mrm_newsletter_welcome_saved' => '1',
+    );
+
+    if ($selected_state !== '') {
+      $args['mrm_state'] = $selected_state;
+    }
+
+    wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
     exit;
   }
 
@@ -18700,6 +19001,7 @@ public function handle_marketing_general_interest_signup() {
     $lists['general_interest'] = array_values(array_unique($lists['general_interest']));
     sort($lists['general_interest']);
     $this->save_email_lists($lists);
+    $this->mrm_marketing_send_newsletter_welcome_email($email);
     $this->mrm_marketing_signup_redirect_back('joined');
   }
 
@@ -26049,6 +26351,28 @@ MRM_TAX_RULES;
     $this->mrm_marketing_save_sent_log($sent_log);
     $sent_log = $this->mrm_marketing_sent_log();
 
+    $newsletter_welcome =
+      $this->mrm_marketing_get_newsletter_welcome_settings();
+
+    $newsletter_attachment_id =
+      absint($newsletter_welcome['attachment_id']);
+
+    $newsletter_attachment_path =
+      $newsletter_attachment_id > 0
+        ? get_attached_file($newsletter_attachment_id)
+        : '';
+
+    $newsletter_attachment_url =
+      $newsletter_attachment_id > 0
+        ? wp_get_attachment_url($newsletter_attachment_id)
+        : '';
+
+    $newsletter_attachment_name =
+      is_string($newsletter_attachment_path) &&
+      $newsletter_attachment_path !== ''
+        ? basename($newsletter_attachment_path)
+        : '';
+
     $state_options = $this->mrm_marketing_state_options();
     $school_outreach_types = $this->mrm_marketing_school_outreach_types();
 
@@ -26074,6 +26398,7 @@ MRM_TAX_RULES;
     if (!empty($_GET['mrm_marketing_saved'])) echo '<div class="notice notice-success"><p>Marketing email lists saved.</p></div>';
     if (!empty($_GET['mrm_marketing_sent']) || isset($_GET['mrm_marketing_failed'])) echo '<div class="notice notice-success"><p>Marketing email send complete. Sent: ' . esc_html((string)($_GET['mrm_marketing_sent'] ?? '0')) . '. Failed: ' . esc_html((string)($_GET['mrm_marketing_failed'] ?? '0')) . '.</p></div>';
     if (!empty($_GET['mrm_marketing_resubscribed'])) echo '<div class="notice notice-success"><p>Re-subscribed ' . esc_html((string)$_GET['mrm_marketing_resubscribed']) . ' email(s).</p></div>';
+    if (!empty($_GET['mrm_newsletter_welcome_saved'])) echo '<div class="notice notice-success"><p>Newsletter welcome email settings saved.</p></div>';
     if (!empty($_GET['mrm_marketing_error'])) echo '<div class="notice notice-error"><p>' . esc_html(rawurldecode((string)$_GET['mrm_marketing_error'])) . '</p></div>';
 
     echo '<p>Use this page to manage manual marketing lists, review dynamic list counts, preview marketing emails, and send selected marketing messages.</p>';
@@ -26284,6 +26609,7 @@ MRM_TAX_RULES;
     echo '</form>';
     echo '</div>';
 
+    echo '<div style="display:grid;gap:20px;">';
     echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;"><h2>Preview and Send Email</h2>';
     echo '<p class="description">'
       . '<strong>Instructor correspondence:</strong> Emails sent exclusively to All Current Instructors or a state-specific instructor list are sent without the marketing footer or unsubscribe link. '
@@ -26464,8 +26790,23 @@ MRM_TAX_RULES;
       echo '</tr></thead><tbody>';
 
       foreach ((array)$sent_log as $item) {
-        $labels = isset($item['list_labels']) && is_array($item['list_labels']) ? $item['list_labels'] : array();
-        $history_send_mode = (string)($item['send_mode'] ?? 'marketing');
+        $labels = isset($item['list_labels']) &&
+          is_array($item['list_labels'])
+            ? $item['list_labels']
+            : array();
+
+        $labels = array_map(
+          static function($label) {
+            return sanitize_text_field((string)$label) ===
+              'General Interest'
+                ? 'Newsletter'
+                : sanitize_text_field((string)$label);
+          },
+          $labels
+        );
+
+        $history_send_mode =
+          (string)($item['send_mode'] ?? 'marketing');
 
         $history_type_label = $history_send_mode === 'instructor'
           ? 'Instructor Correspondence'
@@ -26513,6 +26854,105 @@ MRM_TAX_RULES;
       echo '</tbody></table>';
     }
 
+    echo '</div>';
+
+    echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;">';
+    echo '<h2>Newsletter Welcome Email</h2>';
+    echo '<p class="description">'
+      . 'This saved email is sent automatically once to each new newsletter subscriber. '
+      . 'The configured marketing mailing address and personalized unsubscribe link are appended automatically.'
+      . '</p>';
+    echo '<div style="border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;padding:14px;margin:16px 0 18px;">';
+    echo '<h3 style="margin-top:0;">Live Preview</h3>';
+    echo '<div><strong id="mrm-newsletter-welcome-preview-subject">'
+      . esc_html(
+          $newsletter_welcome['subject'] !== ''
+            ? $newsletter_welcome['subject']
+            : 'Subject preview will appear here.'
+        )
+      . '</strong></div>';
+    echo '<iframe id="mrm-newsletter-welcome-preview-frame" title="Newsletter welcome email preview" style="display:block;width:100%;height:520px;border:1px solid #dcdcde;border-radius:8px;background:#fff;margin-top:10px;"></iframe>';
+    echo '</div>';
+
+    echo '<form id="mrm-newsletter-welcome-form" method="post" enctype="multipart/form-data" action="'
+      . esc_url(admin_url('admin-post.php'))
+      . '">';
+    echo '<input type="hidden" name="action" value="mrm_marketing_save_newsletter_welcome_email">';
+    echo '<input type="hidden" name="mrm_marketing_state" value="'
+      . esc_attr($selected_state)
+      . '">';
+    wp_nonce_field(
+      'mrm_marketing_save_newsletter_welcome_email',
+      'mrm_marketing_newsletter_welcome_nonce'
+    );
+    echo '<table class="form-table">';
+    echo '<tr><th scope="row">Automatic Send</th><td><label>';
+    echo '<input type="checkbox" name="mrm_newsletter_welcome_enabled" value="1" '
+      . checked(!empty($newsletter_welcome['enabled']), true, false)
+      . '> Send this email automatically to new newsletter subscribers';
+    echo '</label></td></tr>';
+    echo '<tr><th scope="row"><label for="mrm_newsletter_welcome_subject">Subject</label></th><td>';
+    echo '<input type="text" id="mrm_newsletter_welcome_subject" name="mrm_newsletter_welcome_subject" class="large-text" value="'
+      . esc_attr((string)$newsletter_welcome['subject'])
+      . '">';
+    echo '</td></tr>';
+    echo '<tr><th scope="row"><label for="mrm_newsletter_welcome_html">Email Body</label></th><td>';
+    echo '<textarea id="mrm_newsletter_welcome_html" name="mrm_newsletter_welcome_html" rows="14" class="large-text code">'
+      . esc_textarea((string)$newsletter_welcome['html'])
+      . '</textarea>';
+    echo '<p class="description">'
+      . 'Enter the complete HTML body. Do not add a separate unsubscribe button; '
+      . 'the standard personalized marketing footer is added automatically.'
+      . '</p>';
+    echo '</td></tr>';
+    echo '<tr><th scope="row"><label for="mrm_newsletter_welcome_attachment">Attachment</label></th><td>';
+    echo '<input type="file" id="mrm_newsletter_welcome_attachment" name="mrm_newsletter_welcome_attachment" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png">';
+    echo '<p class="description">Optional. One PDF, DOC, DOCX, JPG, or PNG file up to 10MB.</p>';
+
+    if ($newsletter_attachment_id > 0) {
+      if (
+        $newsletter_attachment_name !== '' &&
+        is_string($newsletter_attachment_url) &&
+        $newsletter_attachment_url !== ''
+      ) {
+        echo '<p><strong>Saved attachment:</strong> <a href="'
+          . esc_url($newsletter_attachment_url)
+          . '" target="_blank" rel="noopener noreferrer">'
+          . esc_html($newsletter_attachment_name)
+          . '</a></p>';
+      } else {
+        echo '<p class="description"><strong>Saved attachment:</strong> The stored Media Library file is missing.</p>';
+      }
+
+      echo '<label><input type="checkbox" name="mrm_newsletter_welcome_remove_attachment" value="1"> Remove the saved attachment</label>';
+    }
+
+    echo '</td></tr>';
+    echo '</table>';
+
+    if ((string)$newsletter_welcome['updated_at'] !== '') {
+      echo '<p class="description"><strong>Last saved:</strong> '
+        . esc_html((string)$newsletter_welcome['updated_at'])
+        . '</p>';
+    }
+
+    if ((string)$newsletter_welcome['last_attempt_at'] !== '') {
+      $attempt_status = (string)$newsletter_welcome['last_attempt_status'] === 'sent'
+        ? 'Sent'
+        : 'Failed';
+      echo '<p class="description"><strong>Last automatic send attempt:</strong> '
+        . esc_html((string)$newsletter_welcome['last_attempt_at'])
+        . ' — '
+        . esc_html((string)$newsletter_welcome['last_attempt_email'])
+        . ' — '
+        . esc_html($attempt_status)
+        . '</p>';
+    }
+
+    echo '<p class="submit"><button type="submit" class="button button-primary">Save Newsletter Welcome Email</button></p>';
+    echo '</form>';
+    echo '</div>';
+
     echo '</div></div>';
     ?>
     <script>
@@ -26521,37 +26961,29 @@ MRM_TAX_RULES;
       var body = document.getElementById('mrm_marketing_html');
       var subjectPreview = document.getElementById('mrm-marketing-preview-subject');
       var frame = document.getElementById('mrm-marketing-preview-frame');
-      var recipientListCheckboxes = document.querySelectorAll(
-        '.mrm-marketing-recipient-list'
-      );
-      var selectionWarning = document.getElementById(
-        'mrm-marketing-selection-warning'
-      );
-      var marketingSendForm = document.getElementById(
-        'mrm-marketing-email-send-form'
-      );
+      var welcomeSubject = document.getElementById('mrm_newsletter_welcome_subject');
+      var welcomeBody = document.getElementById('mrm_newsletter_welcome_html');
+      var welcomeSubjectPreview = document.getElementById('mrm-newsletter-welcome-preview-subject');
+      var welcomeFrame = document.getElementById('mrm-newsletter-welcome-preview-frame');
+      var recipientListCheckboxes = document.querySelectorAll('.mrm-marketing-recipient-list');
+      var selectionWarning = document.getElementById('mrm-marketing-selection-warning');
+      var marketingSendForm = document.getElementById('mrm-marketing-email-send-form');
 
       function getSelectedEmailMode() {
         var hasInstructor = false;
         var hasMarketing = false;
 
-        Array.prototype.forEach.call(
-          recipientListCheckboxes,
-          function(checkbox) {
-            if (!checkbox.checked) {
-              return;
-            }
-
-            if (
-              String(checkbox.getAttribute('data-list-mode')) ===
-              'instructor'
-            ) {
-              hasInstructor = true;
-            } else {
-              hasMarketing = true;
-            }
+        Array.prototype.forEach.call(recipientListCheckboxes, function(checkbox) {
+          if (!checkbox.checked) {
+            return;
           }
-        );
+
+          if (String(checkbox.getAttribute('data-list-mode')) === 'instructor') {
+            hasInstructor = true;
+          } else {
+            hasMarketing = true;
+          }
+        });
 
         if (hasInstructor && hasMarketing) {
           return 'mixed';
@@ -26568,74 +27000,87 @@ MRM_TAX_RULES;
         var emailMode = getSelectedEmailMode();
 
         if (selectionWarning) {
-          selectionWarning.style.display =
-            emailMode === 'mixed'
-              ? 'block'
-              : 'none';
+          selectionWarning.style.display = emailMode === 'mixed' ? 'block' : 'none';
         }
       }
 
-      function escapeHtml(value) { return String(value || '').replace(/[&<>"']/g, function(ch){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]); }); }
-      function updatePreview(){
-        var s = subject ? subject.value : '';
-        var b = body ? body.value : '';
-        if (subjectPreview) subjectPreview.textContent = s || 'Subject preview will appear here.';
+      function getMarketingFooterPreview() {
+        return '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
+          + '<div>You are receiving this marketing email from Low Brass Lessons.</div>'
+          + '<div style="margin-top:8px;">The configured marketing mailing address will appear here.</div>'
+          + '<div style="margin-top:10px;"><a href="#" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div>'
+          + '</div>';
+      }
+
+      function buildPreviewHtml(bodyHtml, includeMarketingFooter) {
+        var footer = includeMarketingFooter ? getMarketingFooterPreview() : '';
+        var html = bodyHtml || '<p>Email body preview will appear here.</p>';
+
+        if (html.toLowerCase().indexOf('</body>') !== -1) {
+          return html.replace(/<\/body>/i, footer + '</body>');
+        }
+
+        if (html.toLowerCase().indexOf('<html') !== -1) {
+          return html + footer;
+        }
+
+        return '<!doctype html>'
+          + '<html><head><meta charset="utf-8">'
+          + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+          + '</head><body style="margin:0;padding:0;">'
+          + html + footer + '</body></html>';
+      }
+
+      function updatePreview() {
+        var currentSubject = subject ? subject.value : '';
+        var currentBody = body ? body.value : '';
+
+        if (subjectPreview) {
+          subjectPreview.textContent = currentSubject || 'Subject preview will appear here.';
+        }
+
         if (frame) {
-          var emailMode = getSelectedEmailMode();
-
-          var footer = '';
-
-          if (emailMode !== 'instructor') {
-            footer =
-              '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
-              + '<div>You are receiving this marketing email from Low Brass Lessons.</div>'
-              + '<div style="margin-top:8px;">The configured marketing mailing address will appear here.</div>'
-              + '<div style="margin-top:10px;"><a href="#" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div>'
-              + '</div>';
-          }
-
-          var html = b || '<p>Email body preview will appear here.</p>';
-
-          if (html.toLowerCase().indexOf('</body>') !== -1) {
-            html = html.replace(/<\/body>/i, footer + '</body>');
-          } else if (html.toLowerCase().indexOf('<html') !== -1) {
-            html = html + footer;
-          } else {
-            html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;">' + html + footer + '</body></html>';
-          }
-
-          frame.srcdoc = html;
+          frame.srcdoc = buildPreviewHtml(currentBody, getSelectedEmailMode() !== 'instructor');
         }
       }
-      Array.prototype.forEach.call(
-        recipientListCheckboxes,
-        function(checkbox) {
-          checkbox.addEventListener('change', function() {
-            updateSelectionWarning();
-            updatePreview();
-          });
+
+      function updateWelcomePreview() {
+        var currentSubject = welcomeSubject ? welcomeSubject.value : '';
+        var currentBody = welcomeBody ? welcomeBody.value : '';
+
+        if (welcomeSubjectPreview) {
+          welcomeSubjectPreview.textContent = currentSubject || 'Subject preview will appear here.';
         }
-      );
+
+        if (welcomeFrame) {
+          welcomeFrame.srcdoc = buildPreviewHtml(currentBody, true);
+        }
+      }
+
+      Array.prototype.forEach.call(recipientListCheckboxes, function(checkbox) {
+        checkbox.addEventListener('change', function() {
+          updateSelectionWarning();
+          updatePreview();
+        });
+      });
 
       if (marketingSendForm) {
-        marketingSendForm.addEventListener(
-          'submit',
-          function(event) {
-            if (getSelectedEmailMode() === 'mixed') {
-              event.preventDefault();
-
-              window.alert(
-                'Instructor correspondence lists cannot be combined with marketing or school outreach lists. Send them separately.'
-              );
-            }
+        marketingSendForm.addEventListener('submit', function(event) {
+          if (getSelectedEmailMode() === 'mixed') {
+            event.preventDefault();
+            window.alert('Instructor correspondence lists cannot be combined with marketing or school outreach lists. Send them separately.');
           }
-        );
+        });
       }
 
       if (subject) subject.addEventListener('input', updatePreview);
       if (body) body.addEventListener('input', updatePreview);
+      if (welcomeSubject) welcomeSubject.addEventListener('input', updateWelcomePreview);
+      if (welcomeBody) welcomeBody.addEventListener('input', updateWelcomePreview);
+
       updateSelectionWarning();
       updatePreview();
+      updateWelcomePreview();
     })();
     </script>
     <?php
