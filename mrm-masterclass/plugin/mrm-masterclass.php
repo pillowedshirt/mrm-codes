@@ -4668,6 +4668,34 @@ private function mrm_mc_cancel_unconfirmed_payment_intent( $payment_intent_id ) 
 	return new WP_Error( 'mrm_masterclass_payment_not_releasable', 'The payment is currently being processed and the seat hold cannot be released yet.', array( 'payment_status' => $status ) );
 }
 
+private function
+mrm_mc_release_promo_reservation_for_payment_intent(
+	$payment_intent_id
+) {
+	$payment_intent_id = sanitize_text_field( (string) $payment_intent_id );
+
+	if ( '' === $payment_intent_id ) {
+		return true;
+	}
+
+	if ( ! function_exists( 'mrm_payments_hub_release_external_promo_redemption' ) ) {
+		return true;
+	}
+
+	$released = mrm_payments_hub_release_external_promo_redemption( $payment_intent_id );
+
+	if ( ! $released ) {
+		$this->mrm_mc_debug_log(
+			'Masterclass promo reservation release failed.',
+			array( 'payment_intent_id' => $payment_intent_id )
+		);
+
+		return false;
+	}
+
+	return true;
+}
+
 private function mrm_mc_release_existing_customer_holds(
 	$event_id,
 	$email
@@ -4693,7 +4721,6 @@ private function mrm_mc_release_existing_customer_holds(
 					 WHERE event_id = %d
 					   AND email_hash = %s
 					   AND status = 'reserved'
-					   AND expires_at > UTC_TIMESTAMP()
 					 ORDER BY id ASC",
 					$event_id,
 					$email_hash
@@ -4748,6 +4775,26 @@ private function mrm_mc_release_existing_customer_holds(
 				$wpdb->update( $table, array( 'status' => $this_payment_received ? 'payment_received' : 'reserved', 'error_message' => $cancel_result->get_error_message(), 'updated_at' => $this->now() ), array( 'id' => $hold_id ) );
 			}
 			$errors[] = $cancel_result->get_error_message();
+			continue;
+		}
+
+		$promo_released = $this->mrm_mc_release_promo_reservation_for_payment_intent( $payment_intent_id );
+
+		if ( ! $promo_released ) {
+			$promo_error = 'The previous payment was canceled, but its promotional-code reservation could not be released.';
+			$restored = $this->mrm_mc_update_seat_hold_row(
+				$event_id,
+				$hold_id,
+				array( 'status' => 'reserved', 'error_message' => $promo_error )
+			);
+			if ( ! $restored ) {
+				$wpdb->update(
+					$table,
+					array( 'status' => 'reserved', 'error_message' => $promo_error, 'updated_at' => $this->now() ),
+					array( 'id' => $hold_id )
+				);
+			}
+			$errors[] = $promo_error;
 			continue;
 		}
 
@@ -9846,9 +9893,20 @@ public function rest_release_seat_hold( WP_REST_Request $request ) {
 	} );
 	if ( is_wp_error( $hold ) ) return $hold;
 	if ( ! $hold ) return rest_ensure_response( array( 'success' => true, 'already_released' => true ) );
+
 	$current_status = sanitize_key( $hold['status'] ?? '' );
-	if ( 'release_pending' !== $current_status ) return rest_ensure_response( array( 'success' => true, 'status' => $current_status ) );
 	$payment_intent_id = sanitize_text_field( $hold['payment_intent_id'] ?? '' );
+
+	if ( 'release_pending' !== $current_status ) {
+		if ( in_array( $current_status, array( 'released', 'expired' ), true ) && '' !== $payment_intent_id ) {
+			$promo_released = $this->mrm_mc_release_promo_reservation_for_payment_intent( $payment_intent_id );
+			if ( ! $promo_released ) {
+				return new WP_Error( 'mrm_masterclass_promo_release_failed', 'The seat was released, but its promotional-code reservation could not be released.', array( 'status' => 503 ) );
+			}
+		}
+		return rest_ensure_response( array( 'success' => true, 'status' => $current_status ) );
+	}
+
 	if ( '' !== $payment_intent_id ) {
 		$cancel_result = $this->mrm_mc_cancel_unconfirmed_payment_intent( $payment_intent_id );
 		if ( is_wp_error( $cancel_result ) ) {
@@ -9858,6 +9916,19 @@ public function rest_release_seat_hold( WP_REST_Request $request ) {
 			return new WP_Error( 'mrm_masterclass_hold_not_releasable', $cancel_result->get_error_message(), array( 'status' => 409 ) );
 		}
 	}
+
+	if ( '' !== $payment_intent_id ) {
+		$promo_released = $this->mrm_mc_release_promo_reservation_for_payment_intent( $payment_intent_id );
+		if ( ! $promo_released ) {
+			$promo_error = 'The payment was canceled, but its promotional-code reservation could not be released.';
+			$restored = $this->mrm_mc_update_seat_hold_row( $event_id, absint( $hold['id'] ), array( 'status' => 'reserved', 'error_message' => $promo_error ) );
+			if ( ! $restored ) {
+				$wpdb->update( $table, array( 'status' => 'reserved', 'error_message' => $promo_error, 'updated_at' => $this->now() ), array( 'id' => absint( $hold['id'] ) ) );
+			}
+			return new WP_Error( 'mrm_masterclass_promo_release_failed', $promo_error, array( 'status' => 503 ) );
+		}
+	}
+
 	if ( ! $this->mrm_mc_update_seat_hold_row( $event_id, absint( $hold['id'] ), array( 'status' => 'released', 'error_message' => '' ) ) ) return new WP_Error( 'mrm_masterclass_hold_release_failed', 'The seat hold could not be released.', array( 'status' => 500 ) );
 	return rest_ensure_response( array( 'success' => true, 'released' => true ) );
 }
