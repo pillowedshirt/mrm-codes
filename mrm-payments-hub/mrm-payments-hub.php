@@ -15902,85 +15902,91 @@ private function charge_and_unlock_autopay($data) {
     ), 200);
   }
 
+  private function mrm_resolve_autopay_enrollment_authority($payment_intent_id, $submitted_email, $submitted_context = array(), $submitted_promo_code = '') {
+    $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
+    $submitted_email = sanitize_email((string)$submitted_email);
+    $submitted_context = is_array($submitted_context) ? $submitted_context : array();
+    $submitted_promo_code = $this->mrm_normalize_promo_code($submitted_promo_code);
+    if ($payment_intent_id === '' || strpos($payment_intent_id, 'pi_') !== 0) return new WP_Error('autopay_payment_intent_invalid', 'A valid PaymentIntent is required.', array('status'=>400));
+    if ($submitted_email === '' || !is_email($submitted_email)) return new WP_Error('autopay_email_invalid', 'A valid email is required.', array('status'=>400));
+    $pi = $this->stripe_retrieve_payment_intent($payment_intent_id);
+    if (is_wp_error($pi)) return $pi;
+    if (sanitize_key((string)($pi['status'] ?? '')) !== 'succeeded') return new WP_Error('autopay_payment_not_succeeded', 'The first Auto-pay payment has not succeeded.', array('status'=>409));
+    $order = $this->get_order_by_pi($payment_intent_id);
+    if (!is_array($order) || empty($order['id'])) return new WP_Error('autopay_order_missing', 'The successful Auto-pay payment is not connected to a valid order.', array('status'=>409));
+    $pi_meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+    $metadata = array_merge($pi_meta, $this->mrm_get_order_meta_array($order));
+    $product_type = sanitize_key((string)($order['product_type'] ?? $metadata['mrm_product_type'] ?? ''));
+    if ($product_type !== 'lesson') return new WP_Error('autopay_product_invalid', 'This payment is not a lesson payment.', array('status'=>409));
+    if (sanitize_key((string)($metadata['mrm_autopay'] ?? '')) !== 'yes' || sanitize_key((string)($metadata['mrm_prepay'] ?? '')) === 'yes') return new WP_Error('autopay_payment_mode_invalid', 'This payment was not created as an Auto-pay first-payment checkout.', array('status'=>409));
+    $email = sanitize_email((string)($metadata['mrm_customer_email'] ?? ''));
+    if ($email === '' || !is_email($email)) return new WP_Error('autopay_payment_email_missing', 'The successful payment does not contain a valid customer email.', array('status'=>409));
+    if (!hash_equals(strtolower($email), strtolower($submitted_email))) return new WP_Error('autopay_payment_email_mismatch', 'The submitted email does not match the successful payment.', array('status'=>403));
+    $email_hash = $this->email_hash($email);
+    $order_hash = sanitize_text_field((string)($order['email_hash'] ?? ''));
+    $meta_hash = sanitize_text_field((string)($metadata['mrm_email_hash'] ?? ''));
+    if ($order_hash === '' || !hash_equals($order_hash, $email_hash) || ($meta_hash !== '' && !hash_equals($meta_hash, $email_hash))) return new WP_Error('autopay_payment_identity_mismatch', 'The successful payment customer identity could not be verified.', array('status'=>409));
+    $instructor_id = absint($metadata['mrm_instructor_id'] ?? 0);
+    $lesson_length = absint($metadata['mrm_lesson_length'] ?? 0);
+    $raw_mode = sanitize_key((string)($metadata['mrm_lesson_mode'] ?? ''));
+    $lesson_mode = in_array($raw_mode, array('in_person','inperson'), true) ? 'in_person' : ($raw_mode === 'online' ? 'online' : '');
+    $repeat_frequency = sanitize_key((string)($metadata['mrm_repeat_frequency'] ?? ''));
+    $repeat_duration = sanitize_key((string)($metadata['mrm_repeat_duration'] ?? ''));
+    $authorized_lesson_count = absint($metadata['mrm_authorized_lesson_count'] ?? 0);
+    if ($instructor_id <= 0) return new WP_Error('autopay_instructor_missing', 'The successful payment does not contain a valid instructor.', array('status'=>409));
+    if (!in_array($lesson_length, array(30,60), true)) return new WP_Error('autopay_lesson_length_invalid', 'The successful payment contains an invalid lesson length.', array('status'=>409));
+    if ($lesson_mode === '') return new WP_Error('autopay_lesson_mode_invalid', 'The successful payment contains an invalid lesson mode.', array('status'=>409));
+    if (!in_array($repeat_frequency, array('weekly','biweekly'), true)) return new WP_Error('autopay_frequency_invalid', 'The successful payment contains an invalid Auto-pay frequency.', array('status'=>409));
+    if (!in_array($repeat_duration, array('1_month','2_months','3_months','6_months','12_months','indefinitely'), true)) return new WP_Error('autopay_duration_invalid', 'The successful payment contains an invalid Auto-pay duration.', array('status'=>409));
+    if ($repeat_duration !== 'indefinitely' && $authorized_lesson_count <= 0) return new WP_Error('autopay_authorized_count_invalid', 'The successful bounded Auto-pay payment contains an invalid authorized lesson count.', array('status'=>409));
+    $sku = 'lesson_' . ($lesson_length === 60 ? '60' : '30') . '_' . ($lesson_mode === 'online' ? 'online' : 'inperson');
+    $stored_sku = $this->sanitize_sku((string)($order['sku'] ?? $metadata['mrm_sku'] ?? ''));
+    if ($stored_sku === '' || !hash_equals($stored_sku, $sku)) return new WP_Error('autopay_sku_mismatch', 'The successful payment lesson product does not match its lesson configuration.', array('status'=>409));
+    $discount = max(0, (int)($metadata['mrm_promo_discount_cents'] ?? 0));
+    $promo_code = $discount > 0 ? $this->mrm_normalize_promo_code($metadata['mrm_promo_code'] ?? '') : '';
+    if ($discount > 0 && $promo_code === '') return new WP_Error('autopay_promo_metadata_invalid', 'The successful payment contains an incomplete promotional-code record.', array('status'=>409));
+    if ($submitted_promo_code !== '' && !hash_equals($submitted_promo_code, $promo_code)) return new WP_Error('autopay_promo_mismatch', 'The submitted promotional code does not match the successful payment.', array('status'=>409));
+    foreach (array('instructor_id'=>$instructor_id,'lesson_length'=>$lesson_length,'authorized_lesson_count'=>$authorized_lesson_count) as $field=>$value) if (array_key_exists($field,$submitted_context) && absint($submitted_context[$field]) !== $value) return new WP_Error('autopay_context_mismatch', 'The submitted Auto-pay enrollment details do not match the successful payment.', array('status'=>409));
+    if (array_key_exists('lesson_mode',$submitted_context)) { $client_mode=sanitize_key((string)$submitted_context['lesson_mode']); if ($client_mode==='inperson') $client_mode='in_person'; if (!hash_equals($client_mode,$lesson_mode)) return new WP_Error('autopay_context_mismatch', 'The submitted Auto-pay lesson mode does not match the successful payment.', array('status'=>409)); }
+    foreach (array('repeat_frequency'=>$repeat_frequency,'repeat_duration'=>$repeat_duration) as $field=>$value) if (array_key_exists($field,$submitted_context) && !hash_equals(sanitize_key((string)$submitted_context[$field]),$value)) return new WP_Error('autopay_context_mismatch', 'The submitted Auto-pay enrollment details do not match the successful payment.', array('status'=>409));
+    $customer_id = is_array($pi['customer'] ?? null) ? sanitize_text_field((string)($pi['customer']['id'] ?? '')) : sanitize_text_field((string)($pi['customer'] ?? ''));
+    $payment_method_id = is_array($pi['payment_method'] ?? null) ? sanitize_text_field((string)($pi['payment_method']['id'] ?? '')) : sanitize_text_field((string)($pi['payment_method'] ?? ''));
+    if ($customer_id === '' || $payment_method_id === '') return new WP_Error('autopay_saved_card_missing', 'Saved card details were not attached to the successful payment.', array('status'=>409));
+    $product = $this->get_product($sku);
+    if (!$product || empty($product['active'])) return new WP_Error('autopay_product_inactive', 'The successful payment lesson product is no longer active.', array('status'=>404));
+    $base_amount = (int)($product['amount_cents'] ?? 0); $currency = strtolower((string)($product['currency'] ?? 'usd'));
+    if ($base_amount <= 0) return new WP_Error('autopay_price_invalid', 'The Auto-pay lesson price is invalid.', array('status'=>409));
+    $created=absint($pi['created']??0); $promo_started_at=$promo_code!==''?($created>0?wp_date('Y-m-d H:i:s',$created,wp_timezone()):current_time('mysql')):null;
+    return array('payment_intent'=>$pi,'order'=>$order,'email'=>$email,'email_hash'=>$email_hash,'instructor_id'=>$instructor_id,'lesson_length'=>$lesson_length,'lesson_mode'=>$lesson_mode,'repeat_frequency'=>$repeat_frequency,'repeat_duration'=>$repeat_duration,'authorized_lesson_count'=>$authorized_lesson_count,'promo_code'=>$promo_code,'promo_started_at'=>$promo_started_at,'customer_id'=>$customer_id,'payment_method_id'=>$payment_method_id,'sku'=>$sku,'product'=>$product,'base_amount'=>$base_amount,'currency'=>$currency,'plan_kind'=>$repeat_duration==='indefinitely'?'indefinite':'bounded');
+  }
+
   public function rest_create_autopay_enrollment(WP_REST_Request $req) {
     global $wpdb;
 
     $data = (array)$req->get_json_params();
     $payment_intent_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
-    $email = sanitize_email((string)($data['email'] ?? ''));
-    $context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
-
-    $instructor_id = isset($context['instructor_id']) ? absint($context['instructor_id']) : 0;
-    $lesson_length = isset($context['lesson_length']) ? absint($context['lesson_length']) : 60;
-    $lesson_mode = sanitize_text_field((string)($context['lesson_mode'] ?? 'online'));
-    $repeat_frequency = sanitize_text_field((string)($context['repeat_frequency'] ?? 'none'));
-    $repeat_duration = sanitize_text_field((string)($context['repeat_duration'] ?? 'indefinitely'));
-    $authorized_lesson_count = isset($context['authorized_lesson_count']) ? absint($context['authorized_lesson_count']) : 0;
-
-    $promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? ($context['promo_code'] ?? ''));
-    $promo_started_at = $promo_code !== '' ? current_time('mysql') : null;
-
-    if ($payment_intent_id === '') {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Missing payment_intent_id.'), 400);
+    $submitted_email = sanitize_email((string)($data['email'] ?? ''));
+    $submitted_context = isset($data['context']) && is_array($data['context']) ? $data['context'] : array();
+    $submitted_promo_code = $this->mrm_normalize_promo_code($data['promo_code'] ?? $submitted_context['promo_code'] ?? '');
+    $authority = $this->mrm_resolve_autopay_enrollment_authority($payment_intent_id, $submitted_email, $submitted_context, $submitted_promo_code);
+    if (is_wp_error($authority)) {
+      $error_data = $authority->get_error_data();
+      $status = is_array($error_data) && !empty($error_data['status']) ? absint($error_data['status']) : 400;
+      return new WP_REST_Response(array('ok'=>false,'code'=>$authority->get_error_code(),'message'=>$authority->get_error_message()), $status);
     }
-    if (!$email || !is_email($email)) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Valid email required.'), 400);
-    }
-    if ($instructor_id <= 0) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Valid instructor_id required.'), 400);
-    }
-
-    $pi = $this->stripe_retrieve_payment_intent($payment_intent_id);
-    if (is_wp_error($pi)) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>$pi->get_error_message()), 500);
-    }
-
-if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
-  $promo_code = $this->mrm_normalize_promo_code($pi['metadata']['mrm_promo_code']);
-  $promo_started_at = $promo_code !== '' ? current_time('mysql') : null;
-}
-
-    $status = (string)($pi['status'] ?? '');
-    $customer_id = (string)($pi['customer'] ?? '');
-    $payment_method_id = (string)($pi['payment_method'] ?? '');
-
-    if ($status !== 'succeeded') {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'PaymentIntent not succeeded.'), 400);
-    }
-    if ($customer_id === '' || $payment_method_id === '') {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Saved card details were not attached to the successful payment.'), 400);
-    }
-
-    $pm_ready = $this->mrm_ensure_customer_payment_method_ready($customer_id, $payment_method_id);
-    if (is_wp_error($pm_ready)) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()), 400);
-    }
-
-    $sku = 'lesson_' . ($lesson_length === 60 ? '60' : '30') . '_' . ($lesson_mode === 'online' ? 'online' : 'inperson');
-    $p = $this->get_product($sku);
-    if (!$p || empty($p['active'])) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Unknown or inactive lesson SKU.'), 404);
-    }
-
-    $base_amount = (int)($p['amount_cents'] ?? 0);
-    $currency = strtolower((string)($p['currency'] ?? 'usd'));
-    if ($base_amount <= 0) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Invalid lesson price.'), 400);
-    }
-
-    $plan_kind = ($repeat_duration === 'indefinitely') ? 'indefinite' : 'bounded';
-    if ($plan_kind === 'bounded' && $authorized_lesson_count <= 0) {
-      $authorized_lesson_count = 1;
-    }
-
-    $email_hash = $this->email_hash($email);
-    $now = current_time('mysql');
+    $pi=$authority['payment_intent']; $email=$authority['email']; $email_hash=$authority['email_hash'];
+    $instructor_id=$authority['instructor_id']; $lesson_length=$authority['lesson_length']; $lesson_mode=$authority['lesson_mode'];
+    $repeat_frequency=$authority['repeat_frequency']; $repeat_duration=$authority['repeat_duration']; $authorized_lesson_count=$authority['authorized_lesson_count'];
+    $promo_code=$authority['promo_code']; $promo_started_at=$authority['promo_started_at']; $customer_id=$authority['customer_id']; $payment_method_id=$authority['payment_method_id'];
+    $sku=$authority['sku']; $p=$authority['product']; $base_amount=$authority['base_amount']; $currency=$authority['currency']; $plan_kind=$authority['plan_kind'];
+    $existing_order_for_autopay=$authority['order']; $now=current_time('mysql');
+    $pm_ready=$this->mrm_ensure_customer_payment_method_ready($customer_id,$payment_method_id);
+    if (is_wp_error($pm_ready)) return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()),400);
 
     /*
      * Idempotency guard: do not create multiple autopay profiles for the same
      * successful first-payment order if the frontend retries or refreshes.
      */
-    $existing_order_for_autopay = $this->get_order_by_pi($payment_intent_id);
     if ($existing_order_for_autopay && !empty($existing_order_for_autopay['metadata_json'])) {
       $existing_meta = json_decode((string)$existing_order_for_autopay['metadata_json'], true);
       if (is_array($existing_meta) && !empty($existing_meta['mrm_autopay_profile_id'])) {
@@ -16074,7 +16080,7 @@ if ($promo_code === '' && !empty($pi['metadata']['mrm_promo_code'])) {
       );
     }
 
-    $order = $this->get_order_by_pi($payment_intent_id);
+    $order = $existing_order_for_autopay;
     if ($order) {
       $meta = array();
       if (!empty($order['metadata_json'])) {
