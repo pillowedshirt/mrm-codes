@@ -9776,6 +9776,30 @@ public function rest_create_payment_intent( $request ) {
 	$intent_id = sanitize_text_field( $intent['id'] ?? '' );
 	$client_secret = sanitize_text_field( $intent['client_secret'] ?? '' );
 
+
+	if ( '' !== $intent_id && '' !== $promo_reservation_token ) {
+		$reference_result = function_exists( 'mrm_payments_hub_record_external_promo_payment_reference' )
+			? mrm_payments_hub_record_external_promo_payment_reference( $promo_reservation_token, $intent_id )
+			: new WP_Error( 'mrm_masterclass_promo_reference_service_unavailable', 'The promotional-code payment-reference service is unavailable.' );
+		if ( is_wp_error( $reference_result ) ) {
+			$cancel_result = $this->mrm_mc_cancel_unconfirmed_payment_intent( $intent_id );
+			if ( is_wp_error( $cancel_result ) ) {
+				$error_data = $cancel_result->get_error_data();
+				$payment_received = is_array( $error_data ) && ! empty( $error_data['payment_received'] );
+				$this->mrm_mc_update_seat_hold_status( $seat_hold_token, $payment_received ? 'payment_received' : 'reserved', '', $reference_result->get_error_message() . ' Payment cancellation could not be confirmed: ' . $cancel_result->get_error_message() );
+				/* Keep the temporary promo token pending until reconciliation can resolve it. */
+				return new WP_Error(
+					$payment_received ? 'mrm_masterclass_payment_received_promo_reference_failed' : 'mrm_masterclass_promo_reference_cancel_uncertain',
+					$payment_received ? 'Your payment was received, but promotional-code finalization requires administrative recovery. Do not submit another payment.' : 'Payment setup could not be completed safely. The seat and promotional code remain reserved while payment status is confirmed.',
+					array( 'status' => $payment_received ? 409 : 503, 'payment_received' => $payment_received )
+				);
+			}
+			if ( function_exists( 'mrm_payments_hub_release_external_promo_redemption' ) ) mrm_payments_hub_release_external_promo_redemption( $promo_reservation_token );
+			$this->mrm_mc_update_seat_hold_status( $seat_hold_token, 'released', '', $reference_result->get_error_message() );
+			return new WP_Error( 'mrm_masterclass_promo_reference_failed', 'Payment setup could not be completed. Please try again.', array( 'status' => 503 ) );
+		}
+	}
+
 	if ( '' === $intent_id || '' === $client_secret ) {
 		$cleanup_message = 'Stripe returned an incomplete PaymentIntent response.';
 		$release_promo_reservation = true;

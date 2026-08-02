@@ -2159,7 +2159,14 @@ private function mrm_reconcile_stale_pending_promo_redemptions_locked($code, $em
     $payment_reference = sanitize_text_field((string)($row['stripe_payment_intent_id'] ?? ''));
     if ($redemption_id <= 0) continue;
     $order = $order_id > 0 ? $this->get_order($order_id) : null;
+    $external_reservation_token = '';
     $payment_intent_id = strpos($payment_reference, 'pi_') === 0 ? $payment_reference : '';
+    if ($payment_intent_id === '' && strpos($payment_reference, 'mrm_pending_') === 0) {
+      $external_reservation_token = $payment_reference;
+      $payment_intent_id = $this->mrm_get_external_promo_payment_reference($external_reservation_token);
+      /* Never expire an unresolved external reservation merely because it is old. */
+      if ($payment_intent_id === '') continue;
+    }
     if ($payment_intent_id === '' && is_array($order)) {
       $order_pi = sanitize_text_field((string)($order['stripe_payment_intent_id'] ?? ''));
       if (strpos($order_pi, 'pi_') === 0) $payment_intent_id = $order_pi;
@@ -2172,13 +2179,15 @@ private function mrm_reconcile_stale_pending_promo_redemptions_locked($code, $em
     if (is_wp_error($payment_intent)) continue;
     $stripe_status = sanitize_key((string)($payment_intent['status'] ?? ''));
     if ($stripe_status === 'succeeded') {
-      if ($order_id > 0) $this->mrm_mark_promo_redemption_paid($order_id, $payment_intent_id);
+      if ($external_reservation_token !== '') $this->mark_external_promo_redemption_paid($payment_intent_id, $external_reservation_token);
+      elseif ($order_id > 0) $this->mrm_mark_promo_redemption_paid($order_id, $payment_intent_id);
       else $this->mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id);
       continue;
     }
     if ($stripe_status === 'canceled') {
       if ($order_id > 0) $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', array('mrm_checkout_invalidated_reason'=>'stale_checkout_reconciliation','mrm_checkout_invalidated_at'=>current_time('mysql')));
       $this->mrm_update_pending_promo_redemption_status($redemption_id, 'expired');
+      if ($external_reservation_token !== '') $this->mrm_delete_external_promo_payment_reference($external_reservation_token);
       continue;
     }
     if (in_array($stripe_status, array('processing','requires_capture'), true)) continue;
@@ -2187,6 +2196,7 @@ private function mrm_reconcile_stale_pending_promo_redemptions_locked($code, $em
       if (is_wp_error($canceled) || sanitize_key((string)($canceled['status'] ?? '')) !== 'canceled') continue;
       if ($order_id > 0) $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', array('mrm_checkout_invalidated_reason'=>'stale_checkout_reconciliation','mrm_checkout_invalidated_at'=>current_time('mysql')));
       $this->mrm_update_pending_promo_redemption_status($redemption_id, 'expired');
+      if ($external_reservation_token !== '') $this->mrm_delete_external_promo_payment_reference($external_reservation_token);
     }
   }
   return true;
@@ -2247,6 +2257,39 @@ private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $pa
   }
 }
 
+private function mrm_external_promo_payment_reference_key($reservation_token) {
+  $reservation_token = sanitize_text_field((string)$reservation_token);
+  if ($reservation_token === '' || strpos($reservation_token, 'mrm_pending_') !== 0) return '';
+  return 'mrm_ext_promo_pi_' . substr(hash('sha256', $reservation_token), 0, 40);
+}
+
+private function mrm_get_external_promo_payment_reference($reservation_token) {
+  $key = $this->mrm_external_promo_payment_reference_key($reservation_token);
+  if ($key === '') return '';
+  $stored = get_transient($key);
+  if (!is_array($stored)) return '';
+  $stored_token = sanitize_text_field((string)($stored['reservation_token'] ?? ''));
+  $payment_intent_id = sanitize_text_field((string)($stored['payment_intent_id'] ?? ''));
+  if ($stored_token === '' || !hash_equals($stored_token, (string)$reservation_token) || strpos($payment_intent_id, 'pi_') !== 0) return '';
+  return $payment_intent_id;
+}
+
+private function mrm_delete_external_promo_payment_reference($reservation_token) {
+  $key = $this->mrm_external_promo_payment_reference_key($reservation_token);
+  return $key === '' ? false : delete_transient($key);
+}
+
+public function record_external_promo_payment_reference($reservation_token, $payment_intent_id) {
+  $reservation_token = sanitize_text_field((string)$reservation_token);
+  $payment_intent_id = sanitize_text_field((string)$payment_intent_id);
+  $key = $this->mrm_external_promo_payment_reference_key($reservation_token);
+  if ($key === '' || strpos($payment_intent_id, 'pi_') !== 0) return new WP_Error('external_promo_payment_reference_invalid', 'The external promotional-code payment reference is invalid.');
+  set_transient($key, array('reservation_token'=>$reservation_token, 'payment_intent_id'=>$payment_intent_id, 'recorded_at'=>current_time('mysql')), 7 * DAY_IN_SECONDS);
+  $stored_payment_intent_id = $this->mrm_get_external_promo_payment_reference($reservation_token);
+  if ($stored_payment_intent_id === '' || !hash_equals($payment_intent_id, $stored_payment_intent_id)) return new WP_Error('external_promo_payment_reference_not_saved', 'The external promotional-code payment reference could not be preserved.');
+  return true;
+}
+
 private function mrm_external_promo_reservation_token($source, $reference) {
   $source = sanitize_key((string)$source);
   $reference = sanitize_text_field((string)$reference);
@@ -2278,11 +2321,15 @@ public function attach_external_promo_redemption($reservation_token, $payment_in
     $existing = $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE stripe_payment_intent_id = %s AND status IN ('pending', 'paid') LIMIT 1", $payment_intent_id));
     if (empty($existing)) return new WP_Error('external_promo_reservation_missing', 'The promotional-code reservation could not be found.');
   }
+  $this->mrm_delete_external_promo_payment_reference($reservation_token);
   return true;
 }
 
 public function release_external_promo_redemption($reservation_token) {
-  return $this->mrm_release_pending_promo_redemption(0, $reservation_token);
+  $reservation_token = sanitize_text_field((string)$reservation_token);
+  $released = $this->mrm_release_pending_promo_redemption(0, $reservation_token);
+  if ($released) $this->mrm_delete_external_promo_payment_reference($reservation_token);
+  return $released;
 }
 
 private function mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id) {
@@ -2304,7 +2351,9 @@ public function mark_external_promo_redemption_paid($payment_intent_id, $reserva
     $attached = $this->attach_external_promo_redemption($reservation_token, $payment_intent_id);
     if (is_wp_error($attached) && $attached->get_error_code() !== 'external_promo_reservation_missing') return $attached;
   }
-  return $this->mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id);
+  $marked_paid = $this->mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id);
+  if ($marked_paid === true && $reservation_token !== '') $this->mrm_delete_external_promo_payment_reference($reservation_token);
+  return $marked_paid;
 }
 
 private function mrm_attach_payment_intent_to_promo_redemption($order_id, $payment_intent_id) {
@@ -27813,6 +27862,14 @@ function mrm_payments_hub_create_taxed_payment_intent($args) {
     return new WP_Error('payments_hub_tax_unavailable','The shared tax service is unavailable.');
   }
   return $hub->create_external_taxed_payment_intent($args);
+}
+
+if (!function_exists('mrm_payments_hub_record_external_promo_payment_reference')) {
+  function mrm_payments_hub_record_external_promo_payment_reference($reservation_token, $payment_intent_id) {
+    $hub = mrm_pay_hub_singleton();
+    if (!$hub || !method_exists($hub, 'record_external_promo_payment_reference')) return new WP_Error('external_promo_payment_reference_service_unavailable', 'The promotional-code payment-reference service is unavailable.');
+    return $hub->record_external_promo_payment_reference($reservation_token, $payment_intent_id);
+  }
 }
 
 if (!function_exists('mrm_payments_hub_reserve_external_promo_redemption')) {
