@@ -1587,6 +1587,179 @@ private function mrm_normalize_promo_code($code) {
   return substr($code, 0, 80);
 }
 
+private function mrm_normalize_promo_target($target) {
+  $target = strtolower(trim((string)$target));
+  $target = preg_replace('/[^a-z0-9:_,-]/', '', $target);
+  return substr($target, 0, 190);
+}
+
+private function mrm_promo_target_from_legacy($promo) {
+  $promo = is_array($promo) ? $promo : array();
+  $target = $this->mrm_normalize_promo_target($promo['promo_target'] ?? '');
+  if ($target !== '') return $target;
+
+  $scopes = array();
+  if (!empty($promo['scopes']) && is_array($promo['scopes'])) {
+    foreach ($promo['scopes'] as $scope) {
+      $scope = sanitize_key((string)$scope);
+      if (in_array($scope, array('lesson', 'sheet_music', 'masterclass'), true)) $scopes[] = $scope;
+    }
+  }
+  if (empty($scopes)) {
+    $legacy_scope = strtolower(trim((string)($promo['scope'] ?? 'all')));
+    if ($legacy_scope === 'all') {
+      $scopes = array('lesson', 'sheet_music', 'masterclass');
+    } else {
+      foreach (explode(',', $legacy_scope) as $scope) {
+        $scope = sanitize_key($scope);
+        if (in_array($scope, array('lesson', 'sheet_music', 'masterclass'), true)) $scopes[] = $scope;
+      }
+    }
+  }
+  $scopes = array_values(array_unique($scopes));
+  if (count($scopes) === 3) return 'all';
+  if (count($scopes) === 1) return $scopes[0] . ':all';
+  if (!empty($scopes)) return 'legacy:' . implode(',', $scopes);
+  return 'all';
+}
+
+private function mrm_promo_scope_values_for_target($target) {
+  $target = $this->mrm_normalize_promo_target($target);
+  if ($target === 'all') return array('lesson', 'sheet_music', 'masterclass');
+  foreach (array('lesson', 'sheet_music', 'masterclass') as $scope) {
+    if (strpos($target, $scope . ':') === 0) return array($scope);
+  }
+  if (strpos($target, 'legacy:') === 0) {
+    $scopes = array();
+    foreach (explode(',', substr($target, 7)) as $scope) {
+      $scope = sanitize_key($scope);
+      if (in_array($scope, array('lesson', 'sheet_music', 'masterclass'), true)) $scopes[] = $scope;
+    }
+    return array_values(array_unique($scopes));
+  }
+  return array();
+}
+
+private function mrm_promo_piece_display_label($piece_stem, $product_label = '') {
+  $piece_stem = $this->sanitize_sku($piece_stem);
+  $label = sanitize_text_field((string)$product_label);
+  if ($label !== '') {
+    $cleaned = preg_replace('/\s*(?:-|:)?\s*(?:fundamental packet|fundamentals?|trombone\s*\/\s*euphonium|trombone-euphonium|tuba|complete package|complete-package|full piece|full-piece|bundle)\s*$/i', '', $label);
+    if (is_string($cleaned) && trim($cleaned) !== '') $label = trim($cleaned);
+  }
+  if ($label === '') $label = ucwords(str_replace(array('-', '_'), ' ', $piece_stem));
+  return $label;
+}
+
+private function mrm_get_promo_target_option_groups() {
+  $groups = array(
+    'General' => array('all' => 'All Products'),
+    'Lessons' => array(
+      'lesson:all' => 'All Lessons',
+      'lesson:length:30' => 'All 30-Minute Lessons',
+      'lesson:length:60' => 'All 60-Minute Lessons',
+      'lesson:mode:online' => 'All Online Lessons',
+      'lesson:mode:inperson' => 'All In-Person Lessons',
+      'lesson:category:30_online' => '30-Minute Online Lessons',
+      'lesson:category:30_inperson' => '30-Minute In-Person Lessons',
+      'lesson:category:60_online' => '60-Minute Online Lessons',
+      'lesson:category:60_inperson' => '60-Minute In-Person Lessons',
+    ),
+    'Sheet Music' => array('sheet_music:all' => 'All Sheet Music'),
+    'Masterclasses' => array('masterclass:all' => 'All Masterclasses'),
+  );
+  $piece_rows = array();
+  $standalone = array();
+  $category_labels = array('fundamentals'=>'Fundamental Packet','trombone-euphonium'=>'Trombone/Euphonium','tuba'=>'Tuba','complete-package'=>'Complete Package');
+  foreach ($this->all_products() as $stored_sku => $product) {
+    if (!is_array($product) || empty($product['active']) || sanitize_key((string)($product['product_type'] ?? '')) !== 'sheet_music') continue;
+    $sku = $this->sanitize_sku($product['sku'] ?? $stored_sku);
+    if ($sku === '') continue;
+    $label = sanitize_text_field((string)($product['label'] ?? $sku));
+    $category = sanitize_key((string)($product['category'] ?? ''));
+    if ($category === '') $category = $this->mrm_infer_sheet_music_category_from_text($sku . ' ' . $label);
+    $piece_stem = $this->mrm_piece_stem_from_offer_slug($sku, $category);
+    if ($piece_stem === '' || !isset($category_labels[$category])) {
+      $standalone['sheet_music:sku:' . $sku] = $label;
+      continue;
+    }
+    if (!isset($piece_rows[$piece_stem])) $piece_rows[$piece_stem] = array('label'=>$this->mrm_promo_piece_display_label($piece_stem, $label),'offers'=>array());
+    $piece_rows[$piece_stem]['offers'][$sku] = array('label'=>$label,'category'=>$category);
+  }
+  ksort($piece_rows, SORT_NATURAL | SORT_FLAG_CASE);
+  $options = array();
+  foreach ($piece_rows as $piece_stem => $piece_data) {
+    $piece_label = sanitize_text_field((string)($piece_data['label'] ?? ''));
+    if ($piece_label === '') $piece_label = ucwords(str_replace(array('-', '_'), ' ', $piece_stem));
+    $options['sheet_music:piece:' . $piece_stem] = $piece_label . ' — All Offerings';
+    foreach ($piece_data['offers'] as $sku => $offer) {
+      $category = sanitize_key((string)($offer['category'] ?? ''));
+      $offer_label = $category_labels[$category] ?? sanitize_text_field((string)($offer['label'] ?? $sku));
+      $options['sheet_music:sku:' . $sku] = $piece_label . ' — ' . $offer_label;
+    }
+  }
+  asort($standalone, SORT_NATURAL | SORT_FLAG_CASE);
+  foreach ($standalone as $target => $label) $options[$target] = $label;
+  $groups['Sheet Music'] = array('sheet_music:all' => 'All Sheet Music') + $options;
+  return $groups;
+}
+
+private function mrm_promo_target_is_known($target) {
+  $target = $this->mrm_normalize_promo_target($target);
+  if (strpos($target, 'legacy:') === 0) return !empty($this->mrm_promo_scope_values_for_target($target));
+  foreach ($this->mrm_get_promo_target_option_groups() as $options) if (isset($options[$target])) return true;
+  return false;
+}
+
+private function mrm_promo_target_allows_purchase($promo, $product_type, $context = array()) {
+  $promo = is_array($promo) ? $promo : array();
+  $context = is_array($context) ? $context : array();
+  $product_type = sanitize_key((string)$product_type);
+  $target = $this->mrm_promo_target_from_legacy($promo);
+  if ($target === 'all') return in_array($product_type, array('lesson','sheet_music','masterclass'), true);
+  if (strpos($target, 'legacy:') === 0) return in_array($product_type, $this->mrm_promo_scope_values_for_target($target), true);
+  $sku = $this->sanitize_sku($context['sku'] ?? '');
+  $category = sanitize_key((string)($context['product_category'] ?? ''));
+  if ($sku !== '' && $category === '') {
+    $product = $this->get_product($sku);
+    if (is_array($product)) $category = sanitize_key((string)($product['category'] ?? ''));
+  }
+  if ($product_type === 'lesson') {
+    if ($target === 'lesson:all') return true;
+    if ($target === 'lesson:length:30') return strpos($category, '30_') === 0;
+    if ($target === 'lesson:length:60') return strpos($category, '60_') === 0;
+    if ($target === 'lesson:mode:online') return substr($category, -7) === '_online';
+    if ($target === 'lesson:mode:inperson') return substr($category, -9) === '_inperson';
+    if (strpos($target, 'lesson:category:') === 0) {
+      $wanted = sanitize_key(substr($target, strlen('lesson:category:')));
+      return $wanted !== '' && hash_equals($wanted, $category);
+    }
+    return false;
+  }
+  if ($product_type === 'sheet_music') {
+    if ($target === 'sheet_music:all') return true;
+    if (strpos($target, 'sheet_music:sku:') === 0) {
+      $wanted = $this->sanitize_sku(substr($target, strlen('sheet_music:sku:')));
+      return $wanted !== '' && $sku !== '' && hash_equals($wanted, $sku);
+    }
+    if (strpos($target, 'sheet_music:piece:') === 0) {
+      $wanted = $this->sanitize_sku(substr($target, strlen('sheet_music:piece:')));
+      $piece = $this->mrm_piece_stem_from_offer_slug($sku, $category);
+      return $wanted !== '' && $piece !== '' && hash_equals($wanted, $piece);
+    }
+    return false;
+  }
+  if ($product_type === 'masterclass') {
+    if ($target === 'masterclass:all') return true;
+    if (strpos($target, 'masterclass:id:') === 0) {
+      $wanted = sanitize_key(substr($target, strlen('masterclass:id:')));
+      $current = sanitize_key((string)($context['masterclass_id'] ?? ''));
+      return $wanted !== '' && $current !== '' && hash_equals($wanted, $current);
+    }
+  }
+  return false;
+}
+
 private function mrm_get_active_promo_code($code) {
   $code = $this->mrm_normalize_promo_code($code);
   if ($code === '') return null;
@@ -1773,10 +1946,10 @@ private function mrm_calculate_promo_discount_cents($promo, $base_amount_cents, 
     );
   }
 
-  if (!$this->mrm_scope_allows_promo_for_product($promo, $product_type)) {
+  if (!$this->mrm_promo_target_allows_purchase($promo, $product_type, $context)) {
     return array(
       'ok' => false,
-      'message' => 'This promotional code does not apply to this purchase type.',
+      'message' => 'This promotional code does not apply to this purchase.',
       'discount_cents' => 0,
     );
   }
@@ -11812,12 +11985,23 @@ private function mrm_tax_retry_or_alert_payment_intent(
    */
   $occurrence_number = max(1, (int)($profile['charged_lesson_count'] ?? 0) + 2);
 
+  $lesson_length = (int)($lesson['lesson_length'] ?? 60);
+  if (!in_array($lesson_length, array(30, 60), true)) $lesson_length = 60;
+  $lesson_mode = !empty($lesson['is_online']) ? 'online' : 'inperson';
+  $lesson_category = $lesson_length . '_' . $lesson_mode;
+  $lesson_sku = 'lesson_' . $lesson_category;
+
   $context = array(
     'lesson_count' => 1,
     'occurrence_number' => $occurrence_number,
     'promo_started_at' => (string)($profile['promo_started_at'] ?? ''),
     'autopay_profile_id' => (int)($profile['id'] ?? 0),
     'lesson_id' => (int)($lesson['id'] ?? 0),
+    'sku' => $lesson_sku,
+    'product_type' => 'lesson',
+    'product_category' => $lesson_category,
+    'lesson_length' => $lesson_length,
+    'lesson_mode' => $lesson_mode,
   );
 
   $calc = $this->mrm_calculate_promo_discount_cents(
@@ -13412,6 +13596,10 @@ private function charge_and_unlock_autopay($data) {
       ), 404);
     }
 
+    $context['sku'] = $sku;
+    $context['product_type'] = sanitize_key((string)($product['product_type'] ?? 'unknown'));
+    $context['product_category'] = sanitize_key((string)($product['category'] ?? ''));
+
     $base_amount_cents = (int)($product['amount_cents'] ?? 0);
 
     $lesson_count = isset($context['lesson_count']) ? max(1, absint($context['lesson_count'])) : 1;
@@ -13927,6 +14115,9 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $product_type = (string)($p['product_type'] ?? 'unknown');
+    $context['sku'] = $sku;
+    $context['product_type'] = sanitize_key($product_type);
+    $context['product_category'] = sanitize_key((string)($p['category'] ?? ''));
     $sheet_music_addon_requested = isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes';
 
     /* The monthly sheet-music subscription add-on belongs only to lesson checkout. */
@@ -14042,7 +14233,6 @@ private function charge_and_unlock_autopay($data) {
       $base_amount_cents = max(50, $base_amount_cents - $promo_discount_cents);
     }
 
-    $context['sku'] = $sku;
     $context['fundamentals_addon_selected'] = $fundamentals_selected;
     $lesson_mode = sanitize_key($context['lesson_mode'] ?? '');
     if ($product_type === 'lesson' && $lesson_mode !== 'online') {
@@ -14341,6 +14531,9 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $product_type = (string)($p['product_type'] ?? 'unknown');
+    $context['sku'] = $sku;
+    $context['product_type'] = sanitize_key($product_type);
+    $context['product_category'] = sanitize_key((string)($p['category'] ?? ''));
     $sheet_music_addon_requested = isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes';
 
     if ($sheet_music_addon_requested && $product_type !== 'lesson') {
@@ -14578,7 +14771,6 @@ private function charge_and_unlock_autopay($data) {
       $base_amount_cents = max(50, $base_amount_cents - $promo_discount_cents);
     }
 
-    $context['sku'] = $sku;
     $context['fundamentals_addon_selected'] = $fundamentals_selected;
     $lesson_mode = sanitize_key($context['lesson_mode'] ?? '');
     if ($product_type === 'lesson' && $lesson_mode !== 'online') {
@@ -25870,35 +26062,53 @@ MRM_TAX_RULES;
     settings_errors('mrm_pay_hub');
     echo '<p>Create and manage promotional codes for lessons, sheet music, and masterclasses.</p><form method="post" action="">';
     wp_nonce_field('mrm_pay_hub_save_promo_codes', 'mrm_pay_hub_promo_codes_nonce');
-    echo '<table class="widefat striped" style="max-width:1400px;"><thead><tr><th>Delete</th><th>Code</th><th>Label</th><th>Discount</th><th>Applies To</th><th>Rule</th><th>Occurrence / Months</th><th>Start Date</th><th>End Date</th><th>Reusable Per Email</th></tr></thead><tbody>';
+    $target_groups = $this->mrm_get_promo_target_option_groups();
+    echo '<style>.mrm-promo-discount-value{margin-top:6px}.mrm-promo-occurrence-wrap[hidden],.mrm-promo-discount-value[hidden]{display:none!important}.mrm-promo-target{min-width:260px;max-width:340px}.mrm-promo-rule{min-width:190px}</style>';
+    echo '<table class="widefat striped" style="max-width:1600px;"><thead><tr><th>Delete</th><th>Code</th><th>Label</th><th>Discount</th><th>Target</th><th>Rule</th><th>Occurrence / Months</th><th>Start Date</th><th>End Date</th><th>Reusable Per Email</th></tr></thead><tbody>';
     $rows = array_values($codes);
-    for ($i = 0; $i < 8; $i++) if (!isset($rows[$i])) $rows[$i] = array();
+    $rows[] = array();
     foreach ($rows as $i => $promo) {
       $promo = is_array($promo) ? $promo : array();
       $code = $this->mrm_normalize_promo_code($promo['code'] ?? '');
       $label = sanitize_text_field((string)($promo['label'] ?? ''));
-      $discount_type = sanitize_text_field((string)($promo['discount_type'] ?? 'percent'));
-      $percent_off = absint($promo['percent_off'] ?? 0);
+      $discount_type = sanitize_key((string)($promo['discount_type'] ?? 'percent'));
+      if (!in_array($discount_type, array('percent', 'amount'), true)) $discount_type = 'percent';
+      $percent_off = max(0, min(100, absint($promo['percent_off'] ?? 0)));
       $amount_off = number_format(((int)($promo['amount_off_cents'] ?? 0)) / 100, 2, '.', '');
-      $scopes = isset($promo['scopes']) && is_array($promo['scopes']) ? array_map('sanitize_key', $promo['scopes']) : array();
-      if (empty($scopes)) {
-        $legacy_scope = sanitize_key((string)($promo['scope'] ?? 'all'));
-        if ($legacy_scope === 'all') $scopes = array('lesson', 'sheet_music', 'masterclass'); elseif ($legacy_scope !== '') $scopes = array($legacy_scope);
-      }
-      $rule_mode = sanitize_text_field((string)($promo['rule_mode'] ?? 'all'));
+      $target = $this->mrm_promo_target_from_legacy($promo);
+      $rule_mode = sanitize_key((string)($promo['rule_mode'] ?? 'all'));
       $occurrence_count = absint($promo['occurrence_count'] ?? 0);
       $starts_at = sanitize_text_field((string)($promo['starts_at'] ?? ''));
       $expires_at = sanitize_text_field((string)($promo['expires_at'] ?? ''));
       $reusable = !empty($promo['reusable_per_email']);
-      echo '<tr><td><label><input type="checkbox" name="promo_delete[' . esc_attr((string)$i) . ']" value="1"> Delete</label></td>';
+      echo '<tr class="mrm-promo-row"><td><label><input type="checkbox" name="promo_delete[' . esc_attr((string)$i) . ']" value="1"> Delete</label></td>';
       echo '<td><input type="text" name="promo_code[]" value="' . esc_attr($code) . '" placeholder="SUMMER10" style="width:120px;text-transform:uppercase;"></td>';
-      echo '<td><input type="text" name="promo_label[]" value="' . esc_attr($label) . '" placeholder="Summer discount" style="width:180px;"></td>';
-      echo '<td><select name="promo_discount_type[]"><option value="percent"' . selected($discount_type, 'percent', false) . '>Percent</option><option value="amount"' . selected($discount_type, 'amount', false) . '>Dollar Amount</option></select><br><input type="number" min="0" max="100" name="promo_percent_off[]" value="' . esc_attr((string)$percent_off) . '" style="width:80px;"> %<br>$ <input type="text" name="promo_amount_off[]" value="' . esc_attr($amount_off) . '" style="width:80px;"></td><td>';
-      foreach (array('lesson' => 'Lessons', 'sheet_music' => 'Sheet Music', 'masterclass' => 'Masterclasses') as $scope_key => $scope_label) echo '<label style="display:block;"><input type="checkbox" name="promo_scopes[' . esc_attr((string)$i) . '][]" value="' . esc_attr($scope_key) . '"' . checked(in_array($scope_key, $scopes, true), true, false) . '> ' . esc_html($scope_label) . '</label>';
-      echo '</td><td><select name="promo_rule_mode[]"><option value="all"' . selected($rule_mode, 'all', false) . '>All eligible purchases</option><option value="first_n"' . selected($rule_mode, 'first_n', false) . '>First N occurrences</option><option value="after_n"' . selected($rule_mode, 'after_n', false) . '>After N occurrences</option><option value="first_n_months"' . selected($rule_mode, 'first_n_months', false) . '>First N months</option><option value="date_window"' . selected($rule_mode, 'date_window', false) . '>Date window only</option></select></td>';
-      echo '<td><input type="number" min="0" name="promo_occurrence_count[]" value="' . esc_attr((string)$occurrence_count) . '" style="width:90px;"></td><td><input type="date" name="promo_starts_at[]" value="' . esc_attr($starts_at) . '"></td><td><input type="date" name="promo_expires_at[]" value="' . esc_attr($expires_at) . '"></td><td><label><input type="checkbox" name="promo_reusable_per_email[' . esc_attr((string)$i) . ']" value="1"' . checked($reusable, true, false) . '> Reusable</label></td></tr>';
+      echo '<td><input type="text" name="promo_label[]" value="' . esc_attr($label) . '" placeholder="Summer discount" style="width:180px;"></td><td>';
+      echo '<select name="promo_discount_type[]" class="mrm-promo-discount-type"><option value="percent"' . selected($discount_type, 'percent', false) . '>Percent</option><option value="amount"' . selected($discount_type, 'amount', false) . '>Dollar Amount</option></select>';
+      echo '<div class="mrm-promo-discount-value mrm-promo-percent-wrap"><input type="number" min="0" max="100" name="promo_percent_off[]" value="' . esc_attr((string)$percent_off) . '" style="width:80px;"> %</div>';
+      echo '<div class="mrm-promo-discount-value mrm-promo-amount-wrap">$ <input type="text" name="promo_amount_off[]" value="' . esc_attr($amount_off) . '" style="width:80px;"></div></td><td>';
+      echo '<select name="promo_target[]" class="mrm-promo-target">';
+      $target_was_rendered = false;
+      foreach ($target_groups as $group_label => $options) {
+        echo '<optgroup label="' . esc_attr($group_label) . '">';
+        foreach ($options as $value => $option_label) {
+          $is_selected = hash_equals((string)$value, (string)$target);
+          if ($is_selected) $target_was_rendered = true;
+          echo '<option value="' . esc_attr($value) . '"' . selected($is_selected, true, false) . '>' . esc_html($option_label) . '</option>';
+        }
+        echo '</optgroup>';
+      }
+      if (!$target_was_rendered && $target !== '') echo '<option value="' . esc_attr($target) . '" selected>' . esc_html('Existing Saved Target — ' . $target) . '</option>';
+      echo '</select></td><td><select name="promo_rule_mode[]" class="mrm-promo-rule">';
+      if ($rule_mode === 'after_n') echo '<option value="after_n" selected>Legacy — After N Occurrences</option>';
+      if ($rule_mode === 'date_window') echo '<option value="date_window" selected>Legacy — Date Window Only</option>';
+      echo '<option value="all"' . selected($rule_mode, 'all', false) . '>All Eligible Purchases</option><option value="first_n"' . selected($rule_mode, 'first_n', false) . '>First N Lesson Occurrences</option><option value="first_n_months"' . selected($rule_mode, 'first_n_months', false) . '>First N Months</option></select></td>';
+      echo '<td><div class="mrm-promo-occurrence-wrap"><input type="number" min="1" name="promo_occurrence_count[]" value="' . esc_attr((string)$occurrence_count) . '" style="width:90px;"></div></td>';
+      echo '<td><input type="date" name="promo_starts_at[]" value="' . esc_attr($starts_at) . '"></td><td><input type="date" name="promo_expires_at[]" value="' . esc_attr($expires_at) . '"></td>';
+      echo '<td><label><input type="checkbox" name="promo_reusable_per_email[' . esc_attr((string)$i) . ']" value="1"' . checked($reusable, true, false) . '> Reusable</label></td></tr>';
     }
-    echo '</tbody></table><p class="description">Blank rows are ignored. Existing codes are preserved unless deleted. If no scope is selected, the code defaults to all purchase types.</p><p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>';
+    echo '</tbody></table><p class="description">Saved promo codes are followed by exactly one blank row. The blank row is ignored until a code is entered and saved.</p><p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>';
+    echo '<script>(function(){function syncPromoRow(row){var type=row.querySelector(".mrm-promo-discount-type"),percent=row.querySelector(".mrm-promo-percent-wrap"),amount=row.querySelector(".mrm-promo-amount-wrap"),rule=row.querySelector(".mrm-promo-rule"),occurrence=row.querySelector(".mrm-promo-occurrence-wrap");if(type&&percent&&amount){percent.hidden=type.value!=="percent";amount.hidden=type.value!=="amount"}if(rule&&occurrence)occurrence.hidden=!["first_n","after_n","first_n_months"].includes(rule.value)}document.querySelectorAll(".mrm-promo-row").forEach(function(row){syncPromoRow(row);row.addEventListener("change",function(event){if(event.target.matches(".mrm-promo-discount-type, .mrm-promo-rule"))syncPromoRow(row)})})})();</script>';
     echo '<h2>Completed Promo Redemptions</h2><p class="description">Remove completed redemption rows only when you intentionally want to allow an email to use a single-use promo again.</p>';
     if (empty($codes)) {
       echo '<p>No promo codes found.</p>';
@@ -26512,100 +26722,72 @@ MRM_TAX_RULES;
     }
 
     if (isset($_POST['mrm_pay_hub_promo_codes_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_promo_codes_nonce'], 'mrm_pay_hub_save_promo_codes')) {
-  $remove_redemption_ids = isset($_POST['promo_redemption_remove'])
-    ? array_map('absint', (array)$_POST['promo_redemption_remove'])
-    : array();
+      $remove_ids = isset($_POST['promo_redemption_remove']) ? array_map('absint', (array)$_POST['promo_redemption_remove']) : array();
+      $removed_redemptions = !empty($remove_ids) ? $this->mrm_delete_promo_redemption_rows($remove_ids) : 0;
+      $existing_codes = $this->mrm_get_promo_codes();
+      $codes = array();
+      $seen_codes = array();
+      $posted_codes = isset($_POST['promo_code']) ? (array)wp_unslash($_POST['promo_code']) : array();
+      $labels = isset($_POST['promo_label']) ? (array)wp_unslash($_POST['promo_label']) : array();
+      $discount_types = isset($_POST['promo_discount_type']) ? (array)wp_unslash($_POST['promo_discount_type']) : array();
+      $percent_offs = isset($_POST['promo_percent_off']) ? (array)wp_unslash($_POST['promo_percent_off']) : array();
+      $amount_offs = isset($_POST['promo_amount_off']) ? (array)wp_unslash($_POST['promo_amount_off']) : array();
+      $targets = isset($_POST['promo_target']) ? (array)wp_unslash($_POST['promo_target']) : array();
+      $rule_modes = isset($_POST['promo_rule_mode']) ? (array)wp_unslash($_POST['promo_rule_mode']) : array();
+      $counts = isset($_POST['promo_occurrence_count']) ? (array)wp_unslash($_POST['promo_occurrence_count']) : array();
+      $starts = isset($_POST['promo_starts_at']) ? (array)wp_unslash($_POST['promo_starts_at']) : array();
+      $expires = isset($_POST['promo_expires_at']) ? (array)wp_unslash($_POST['promo_expires_at']) : array();
+      $reusable = isset($_POST['promo_reusable_per_email']) ? (array)wp_unslash($_POST['promo_reusable_per_email']) : array();
+      $deletes = isset($_POST['promo_delete']) ? (array)wp_unslash($_POST['promo_delete']) : array();
 
-  $removed_redemptions = 0;
-
-  if (!empty($remove_redemption_ids)) {
-    $removed_redemptions = $this->mrm_delete_promo_redemption_rows($remove_redemption_ids);
-  }
-
-  $codes = array();
-
-  $posted_codes = isset($_POST['promo_code']) ? (array)$_POST['promo_code'] : array();
-  $labels = isset($_POST['promo_label']) ? (array)$_POST['promo_label'] : array();
-  $discount_types = isset($_POST['promo_discount_type']) ? (array)$_POST['promo_discount_type'] : array();
-  $percent_offs = isset($_POST['promo_percent_off']) ? (array)$_POST['promo_percent_off'] : array();
-  $amount_offs = isset($_POST['promo_amount_off']) ? (array)$_POST['promo_amount_off'] : array();
-  $posted_scopes = isset($_POST['promo_scopes']) && is_array($_POST['promo_scopes'])
-    ? wp_unslash($_POST['promo_scopes'])
-    : array();
-  $applies_to = isset($_POST['promo_applies_to']) ? (array)$_POST['promo_applies_to'] : array();
-  $rule_modes = isset($_POST['promo_rule_mode']) ? (array)$_POST['promo_rule_mode'] : array();
-  $occurrence_counts = isset($_POST['promo_occurrence_count']) ? (array)$_POST['promo_occurrence_count'] : array();
-    $starts = isset($_POST['promo_starts_at']) ? (array)$_POST['promo_starts_at'] : array();
-  $expires = isset($_POST['promo_expires_at']) ? (array)$_POST['promo_expires_at'] : array();
-  $reusable_per_email = isset($_POST['promo_reusable_per_email']) ? (array)$_POST['promo_reusable_per_email'] : array();
-  $deletes = isset($_POST['promo_delete']) ? (array)$_POST['promo_delete'] : array();
-
-  foreach ($posted_codes as $i => $raw_code) {
-    $code = $this->mrm_normalize_promo_code($raw_code);
-
-    if ($code === '') {
-      continue;
+      foreach ($posted_codes as $i => $raw_code) {
+        $code = $this->mrm_normalize_promo_code($raw_code);
+        if ($code === '' || !empty($deletes[$i])) continue;
+        if (isset($seen_codes[$code])) {
+          add_settings_error('mrm_pay_hub', 'duplicate_promo_code_' . absint($i), 'Duplicate promotional code ignored: ' . $code, 'error');
+          continue;
+        }
+        $seen_codes[$code] = true;
+        $preserve = function () use (&$codes, $existing_codes, $code) { if (isset($existing_codes[$code]) && is_array($existing_codes[$code])) $codes[$code] = $existing_codes[$code]; };
+        $discount_type = sanitize_key((string)($discount_types[$i] ?? 'percent'));
+        if (!in_array($discount_type, array('percent', 'amount'), true)) $discount_type = 'percent';
+        $percent = max(0, min(100, absint($percent_offs[$i] ?? 0)));
+        $amount_cents = $this->mrm_money_to_cents($amount_offs[$i] ?? '0.00', 0);
+        if ($discount_type === 'percent') {
+          $amount_cents = 0;
+          if ($percent <= 0) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_percent_'.absint($i),$code.' requires a percentage greater than zero.','error'); continue; }
+        } else {
+          $percent = 0;
+          if ($amount_cents <= 0) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_amount_'.absint($i),$code.' requires a dollar amount greater than zero.','error'); continue; }
+        }
+        $target = $this->mrm_normalize_promo_target($targets[$i] ?? 'all');
+        if ($target === '' || !$this->mrm_promo_target_is_known($target)) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_target_'.absint($i),$code.' has an invalid or unavailable target.','error'); continue; }
+        $scope_values = $this->mrm_promo_scope_values_for_target($target);
+        if (empty($scope_values)) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_scope_'.absint($i),$code.' could not resolve its purchase type.','error'); continue; }
+        $scope = count($scope_values) === 3 ? 'all' : (count($scope_values) === 1 ? $scope_values[0] : implode(',', $scope_values));
+        $rule_mode = sanitize_key((string)($rule_modes[$i] ?? 'all'));
+        if (!in_array($rule_mode, array('all','first_n','first_n_months','after_n','date_window'), true)) $rule_mode = 'all';
+        $count = max(0, absint($counts[$i] ?? 0));
+        if (in_array($rule_mode, array('first_n','first_n_months','after_n'), true) && $count <= 0) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_occurrence_'.absint($i),$code.' requires an occurrence or month count greater than zero.','error'); continue; }
+        if (in_array($rule_mode, array('all','date_window'), true)) $count = 0;
+        $starts_at = sanitize_text_field((string)($starts[$i] ?? ''));
+        $expires_at = sanitize_text_field((string)($expires[$i] ?? ''));
+        if ($starts_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $starts_at)) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_start_'.absint($i),$code.' has an invalid start date.','error'); continue; }
+        if ($expires_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $expires_at)) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_end_'.absint($i),$code.' has an invalid end date.','error'); continue; }
+        if ($starts_at !== '' && $expires_at !== '' && strtotime($starts_at) > strtotime($expires_at)) { $preserve(); add_settings_error('mrm_pay_hub','invalid_promo_date_range_'.absint($i),$code.' has an end date before its start date.','error'); continue; }
+        $codes[$code] = array(
+          'code'=>$code, 'label'=>sanitize_text_field((string)($labels[$i] ?? '')), 'discount_type'=>$discount_type,
+          'percent_off'=>$percent, 'amount_off_cents'=>max(0,(int)$amount_cents), 'promo_target'=>$target,
+          'scope'=>$scope, 'scopes'=>$scope_values, 'applies_to'=>'all_items', 'rule_mode'=>$rule_mode,
+          'occurrence_count'=>$count, 'after_occurrence'=>0, 'starts_at'=>$starts_at, 'expires_at'=>$expires_at,
+          'reusable_per_email'=>!empty($reusable[$i]) ? 1 : 0, 'active'=>1, 'updated_at'=>current_time('mysql'),
+        );
+      }
+      $this->mrm_save_promo_codes($codes);
+      $message = 'Promo codes saved.';
+      if ($removed_redemptions > 0) $message .= ' Removed ' . (int)$removed_redemptions . ' completed redemption' . ($removed_redemptions === 1 ? '' : 's') . '.';
+      add_settings_error('mrm_pay_hub', 'promo_codes_saved', $message, 'updated');
     }
-
-    if (!empty($deletes[$i])) {
-      continue;
-    }
-
-    $discount_type = sanitize_text_field((string)($discount_types[$i] ?? 'percent'));
-    if (!in_array($discount_type, array('percent', 'amount'), true)) {
-      $discount_type = 'percent';
-    }
-
-    $scope_values = array();
-    if (isset($posted_scopes[$i]) && is_array($posted_scopes[$i])) {
-      $scope_values = array_map('sanitize_key', (array)$posted_scopes[$i]);
-    }
-    $scope_values = array_values(array_intersect($scope_values, array('lesson', 'sheet_music', 'masterclass')));
-    if (empty($scope_values)) {
-      $scope_values = array('lesson', 'sheet_music', 'masterclass');
-    }
-    $scope = count($scope_values) === 3 ? 'all' : implode(',', $scope_values);
-
-    /*
- * Item Rule has been removed from the admin UI.
- * Keep the saved key for backward compatibility, but always use all_items.
- */
-    $apply = 'all_items';
-
-    $rule_mode = sanitize_text_field((string)($rule_modes[$i] ?? 'all'));
-    if (!in_array($rule_mode, array('all', 'first_n', 'after_n', 'first_n_months', 'date_window'), true)) {
-      $rule_mode = 'all';
-    }
-
-    $percent = max(0, min(100, absint($percent_offs[$i] ?? 0)));
-    $amount_cents = $this->mrm_money_to_cents($amount_offs[$i] ?? '0.00', 0);
-
-    $occurrence_count = max(0, absint($occurrence_counts[$i] ?? 0));
-
-    $starts_at = sanitize_text_field((string)($starts[$i] ?? ''));
-    if ($starts_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $starts_at)) {
-      $starts_at = '';
-    }
-
-    $expires_at = sanitize_text_field((string)($expires[$i] ?? ''));
-    if ($expires_at !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $expires_at)) {
-      $expires_at = '';
-    }
-
-    $codes[$code] = array( 'code' => $code, 'label' => sanitize_text_field((string)($labels[$i] ?? '')), 'discount_type' => $discount_type, 'percent_off' => $percent, 'amount_off_cents' => max(0, (int)$amount_cents), 'scope' => $scope, 'scopes' => $scope_values, 'applies_to' => $apply, 'rule_mode' => $rule_mode, 'occurrence_count' => $occurrence_count, 'after_occurrence' => 0, 'starts_at' => $starts_at, 'expires_at' => $expires_at, 'reusable_per_email' => !empty($reusable_per_email[$i]) ? 1 : 0, 'active' => 1, 'updated_at' => current_time('mysql'), );
-  }
-
-  $this->mrm_save_promo_codes($codes);
-
-  $message = 'Promo codes saved.';
-
-  if ($removed_redemptions > 0) {
-    $message .= ' Removed ' . (int)$removed_redemptions . ' completed redemption' . ($removed_redemptions === 1 ? '' : 's') . '.';
-  }
-
-  add_settings_error('mrm_pay_hub', 'promo_codes_saved', $message, 'updated');
-}
-
 
     if (isset($_POST['mrm_pay_hub_products_nonce']) && wp_verify_nonce($_POST['mrm_pay_hub_products_nonce'], 'mrm_pay_hub_save_products')) {
       $existing = $this->all_products();
