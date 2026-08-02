@@ -3748,7 +3748,7 @@ function mrmRenderLessonPaymentBreakdown(breakdown) {
   instructions.innerHTML = mrmRenderLessonPriceRows(breakdown);
 }
 
-function openPaymentModal(clientSecret, breakdown, allowedMethods){
+async function openPaymentModal(clientSecret, breakdown, allowedMethods){
   const overlay = document.getElementById('mrm-payment-overlay');
   const closeBtn = document.getElementById('mrm-payment-close');
   const payBtn = document.getElementById('mrm-pay-btn');
@@ -3779,24 +3779,8 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
   overlay.setAttribute('aria-hidden', 'false');
   document.body.classList.add('mrm-booking-modal-open');
 
-  if (!clientSecret || typeof clientSecret !== 'string') {
-    errorEl.textContent = 'Some payment details were missing. Please refresh the page and try again.';
-    payBtn.disabled = true;
-    return { payBtn, errorEl, closeModal };
-  }
-
-  if (!stripe || typeof stripe.elements !== 'function') {
-    errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
-    payBtn.disabled = true;
-    return { payBtn, errorEl, closeModal };
-  }
-
-  activeStripeElements = stripe.elements({ clientSecret });
-  activePaymentElement = activeStripeElements.create(
-    'payment',
-    mrmBuildPaymentElementOptions(allowedMethods)
-  );
-  activePaymentElement.mount('#mrm-payment-element');
+  mrmLessonPaymentCompleted = false;
+  mrmLessonPaymentConfirmationInProgress = false;
 
   const closeModal = async (opts = {}) => {
     const shouldClear = !!opts.clearSelection;
@@ -3838,6 +3822,32 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
       const closed = await closeModal({ clearSelection: false, reason: 'customer_returned_from_lesson_payment' });
       if (!closed) this.disabled = false;
     };
+  }
+
+  if (!clientSecret || typeof clientSecret !== 'string') {
+    const releaseResult = await mrmAbandonActiveLessonCheckout('lesson_client_secret_missing');
+    errorEl.textContent = releaseResult.ok ? 'Some payment details were missing, so the payment session was safely canceled. Please try again.' : releaseResult.message;
+    payBtn.disabled = true;
+    return { payBtn, errorEl, closeModal };
+  }
+
+  if (!stripe || typeof stripe.elements !== 'function') {
+    const releaseResult = await mrmAbandonActiveLessonCheckout('lesson_stripe_elements_unavailable');
+    errorEl.textContent = releaseResult.ok ? 'Checkout could not load, so the payment session was safely canceled. Please try again.' : releaseResult.message;
+    payBtn.disabled = true;
+    return { payBtn, errorEl, closeModal };
+  }
+
+  try {
+    activeStripeElements = stripe.elements({ clientSecret });
+    activePaymentElement = activeStripeElements.create('payment', mrmBuildPaymentElementOptions(allowedMethods));
+    activePaymentElement.mount('#mrm-payment-element');
+  } catch (mountError) {
+    const releaseResult = await mrmAbandonActiveLessonCheckout('lesson_payment_element_mount_failed');
+    activePaymentElement = null;
+    activeStripeElements = null;
+    errorEl.textContent = releaseResult.ok ? 'The secure payment form could not be loaded, so the payment session was safely canceled. Please try again.' : releaseResult.message;
+    payBtn.disabled = true;
   }
 
   return { payBtn, errorEl, closeModal };
@@ -4670,6 +4680,8 @@ function syncModalToLegacyFields(){
 let mrmAppliedPromoCode = '';
 let mrmAppliedPromoDiscountCents = 0;
 let mrmLessonPaymentReloadContext = null;
+let mrmLessonPaymentConfirmationInProgress = false;
+let mrmLessonPaymentCompleted = false;
 
 async function mrmAbandonLessonCheckoutData(paymentData, email, reason = 'customer_abandoned') {
   paymentData = paymentData && typeof paymentData === 'object' ? paymentData : {};
@@ -4697,6 +4709,36 @@ async function mrmAbandonActiveLessonCheckout(reason = 'customer_abandoned') {
   const requestBody = mrmLessonPaymentReloadContext.requestBody || {};
   const email = String(requestBody.email || mrmGetLessonPromoEmailValue() || '').trim();
   return mrmAbandonLessonCheckoutData(paymentData, email, reason);
+}
+
+
+function mrmAbandonLessonCheckoutOnPageExit() {
+  if (mrmLessonPaymentConfirmationInProgress || mrmLessonPaymentCompleted || !mrmLessonPaymentReloadContext) return;
+  const paymentData = mrmLessonPaymentReloadContext.currentData || {};
+  const requestBody = mrmLessonPaymentReloadContext.requestBody || {};
+  const paymentIntentId = String(paymentData.payment_intent_id || '').trim();
+  const orderId = Number(paymentData.order_id || 0);
+  const email = String(requestBody.email || mrmGetLessonPromoEmailValue() || '').trim();
+  if (!paymentIntentId || !orderId || !email) return;
+  const body = JSON.stringify({ payment_intent_id: paymentIntentId, order_id: orderId, email, reason: 'customer_left_lesson_checkout_page' });
+  const endpoint = '/wp-json/mrm-pay/v1/abandon-payment-intent';
+  if (navigator.sendBeacon && typeof Blob === 'function') {
+    try {
+      const blob = new Blob([body], { type: 'application/json' });
+      if (navigator.sendBeacon(endpoint, blob)) return;
+    } catch (error) {}
+  }
+  try { fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }); } catch (error) {}
+}
+
+window.addEventListener('pagehide', mrmAbandonLessonCheckoutOnPageExit);
+
+async function mrmReleaseLessonReplacementPayment(paymentData, email, reason) {
+  const releaseResult = await mrmAbandonLessonCheckoutData(paymentData, email, reason);
+  if (releaseResult.ok && mrmLessonPaymentReloadContext && mrmLessonPaymentReloadContext.currentData === paymentData) {
+    mrmLessonPaymentReloadContext.currentData = {};
+  }
+  return releaseResult;
 }
 
 function mrmGetActiveLessonPaymentData(fallbackData) {
@@ -4754,98 +4796,86 @@ function mrmGetLessonPromoEmailValue() {
 }
 
 async function mrmReloadLessonPaymentIntentWithPromo() {
-  if (!mrmLessonPaymentReloadContext || !mrmLessonPaymentReloadContext.requestBody) {
-    return false;
-  }
-
+  if (!mrmLessonPaymentReloadContext || !mrmLessonPaymentReloadContext.requestBody) return false;
   const overlay = document.getElementById('mrm-payment-overlay');
   const paymentMount = document.getElementById('mrm-payment-element');
   const payBtn = document.getElementById('mrm-pay-btn');
   const errorEl = document.getElementById('mrm-payment-error');
-
-  if (!overlay || overlay.style.display === 'none') {
-    return false;
-  }
-
+  if (!overlay || overlay.style.display === 'none') return false;
   const promoCode = mrmAppliedPromoCode || mrmGetPromoCodeInputValue();
   if (!promoCode) return false;
-
+  const requestBody = JSON.parse(JSON.stringify(mrmLessonPaymentReloadContext.requestBody));
+  requestBody.promo_code = promoCode;
+  if (!requestBody.context || typeof requestBody.context !== 'object') requestBody.context = {};
+  requestBody.context.promo_code = promoCode;
+  const email = String(requestBody.email || mrmGetLessonPromoEmailValue() || '').trim();
+  const previousPaymentData = mrmLessonPaymentReloadContext.currentData && typeof mrmLessonPaymentReloadContext.currentData === 'object'
+    ? { ...mrmLessonPaymentReloadContext.currentData } : {};
   try {
     if (payBtn) payBtn.disabled = true;
     if (errorEl) errorEl.textContent = '';
+    const previousRelease = await mrmAbandonLessonCheckoutData(previousPaymentData, email, 'lesson_promo_checkout_replaced');
+    if (!previousRelease.ok) {
+      if (errorEl) errorEl.textContent = previousRelease.message;
+      if (payBtn) payBtn.disabled = false;
+      return false;
+    }
+    mrmLessonPaymentReloadContext.currentData = {};
+    try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch (error) {}
+    if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
+    activePaymentElement = null;
+    activeStripeElements = null;
     if (paymentMount) paymentMount.innerHTML = '<div style="padding:12px">Updating tax and secure payment form…</div>';
-
-    const requestBody = JSON.parse(JSON.stringify(mrmLessonPaymentReloadContext.requestBody));
-    requestBody.promo_code = promoCode;
-
-    if (!requestBody.context || typeof requestBody.context !== 'object') {
-      requestBody.context = {};
-    }
-
-    requestBody.context.promo_code = promoCode;
-
-    /*
-     * Important:
-     * Do not unmount the existing Stripe Payment Element until the replacement
-     * discounted PaymentIntent has been successfully created.
-     */
-    const res = await fetch(mrmLessonPaymentReloadContext.payApiBase + '/create-payment-intent', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody)
+    const response = await fetch(mrmLessonPaymentReloadContext.payApiBase + '/create-payment-intent', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
     });
-
-    const data = await mrmReadJsonOrError(res);
-
-    if (!res.ok || !data.ok || !data.client_secret) {
-      if (errorEl) {
-        errorEl.textContent = data.message || 'Unable to apply promotional code to payment.';
-      }
+    const replacementData = await mrmReadJsonOrError(response);
+    if (!response.ok || !replacementData.ok || !replacementData.client_secret || !replacementData.payment_intent_id || !replacementData.order_id) {
+      if (errorEl) errorEl.textContent = replacementData.message || 'Unable to create the discounted payment session. Please try applying the code again.';
       if (payBtn) payBtn.disabled = false;
       return false;
     }
-
-    const stripeInstance = ensureStripe(data.publishableKey || '');
+    mrmLessonPaymentReloadContext.currentData = replacementData;
+    mrmLessonPaymentReloadContext.requestBody = requestBody;
+    mrmUpdateStoredSchedulerPaymentFromActiveData(replacementData);
+    const stripeInstance = ensureStripe(replacementData.publishableKey || '');
     if (!stripeInstance) {
-      if (errorEl) {
-        errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
-      }
+      const releaseResult = await mrmReleaseLessonReplacementPayment(replacementData, email, 'lesson_promo_stripe_frontend_unavailable');
+      if (errorEl) errorEl.textContent = releaseResult.ok ? 'The discounted payment session was safely canceled because Stripe could not load. Please try again.' : releaseResult.message;
       if (payBtn) payBtn.disabled = false;
       return false;
     }
-
-    const nextElements = stripeInstance.elements({ clientSecret: data.client_secret });
-    const nextPaymentElement = nextElements.create(
-      'payment',
-      mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card'])
-    );
-
-    if (activePaymentElement) {
-      try { activePaymentElement.unmount(); } catch (e) {}
+    let nextElements = null;
+    let nextPaymentElement = null;
+    try {
+      nextElements = stripeInstance.elements({ clientSecret: replacementData.client_secret });
+      nextPaymentElement = nextElements.create('payment', mrmBuildPaymentElementOptions(replacementData.allowed_payment_methods || ['card']));
+      if (paymentMount) paymentMount.innerHTML = '';
+      nextPaymentElement.mount('#mrm-payment-element');
+    } catch (mountError) {
+      if (nextPaymentElement) { try { nextPaymentElement.unmount(); } catch (error) {} }
+      const releaseResult = await mrmReleaseLessonReplacementPayment(replacementData, email, 'lesson_promo_payment_element_mount_failed');
+      if (errorEl) errorEl.textContent = releaseResult.ok ? 'The discounted payment form could not be loaded, so its payment session was safely canceled. Please try again.' : releaseResult.message;
+      if (payBtn) payBtn.disabled = false;
+      return false;
     }
-
-    if (paymentMount) {
-      paymentMount.innerHTML = '';
-    }
-
     stripe = stripeInstance;
     activeStripeElements = nextElements;
     activePaymentElement = nextPaymentElement;
-    activePaymentElement.mount('#mrm-payment-element');
-
-    Object.assign(mrmLessonPaymentReloadContext.currentData, data);
-    mrmLessonPaymentReloadContext.requestBody = requestBody;
-
-    mrmRenderLessonPaymentBreakdown(mrmLessonPaymentReloadContext.currentData);
-    mrmUpdateStoredSchedulerPaymentFromActiveData(mrmLessonPaymentReloadContext.currentData);
-
+    mrmLessonPaymentCompleted = false;
+    mrmLessonPaymentConfirmationInProgress = false;
+    mrmRenderLessonPaymentBreakdown(replacementData);
+    mrmUpdateStoredSchedulerPaymentFromActiveData(replacementData);
     if (payBtn) payBtn.disabled = false;
     return true;
-  } catch (err) {
-
-    if (errorEl) {
-      errorEl.textContent = 'Unable to reload payment form with promotional code. Please remove the code or refresh and try again.';
+  } catch (error) {
+    const activeReplacement = mrmLessonPaymentReloadContext && mrmLessonPaymentReloadContext.currentData && mrmLessonPaymentReloadContext.currentData.payment_intent_id
+      ? mrmLessonPaymentReloadContext.currentData : null;
+    if (activeReplacement) {
+      const releaseResult = await mrmReleaseLessonReplacementPayment(activeReplacement, email, 'lesson_promo_reload_exception');
+      if (errorEl && !releaseResult.ok) errorEl.textContent = releaseResult.message;
     }
+    if (errorEl && !errorEl.textContent) errorEl.textContent = 'Unable to reload the payment form with the promotional code. Please try again.';
     if (payBtn) payBtn.disabled = false;
     return false;
   }
@@ -5351,7 +5381,7 @@ function ensureLegacyBookingHandler(){
             currentData: createData
           };
 
-          const { payBtn, errorEl, closeModal } = openPaymentModal(
+          const { payBtn, errorEl, closeModal } = await openPaymentModal(
             createData.client_secret,
             createData,
             createData.allowed_payment_methods || ['card']
@@ -5378,6 +5408,7 @@ function ensureLegacyBookingHandler(){
             mrmShowPaymentLoading('Please wait while we confirm your payment and enable Auto-pay.');
 
             try {
+              mrmLessonPaymentConfirmationInProgress = true;
               const { error, paymentIntent } = await stripe.confirmPayment({
                 elements: activeStripeElements,
                 confirmParams: { return_url: window.location.href },
@@ -5385,6 +5416,7 @@ function ensureLegacyBookingHandler(){
               });
 
               if (error) {
+                mrmLessonPaymentConfirmationInProgress = false;
                 mrmHidePaymentLoading();
                 errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
                 payBtn.disabled = false;
@@ -5392,6 +5424,8 @@ function ensureLegacyBookingHandler(){
               }
 
               if (paymentIntent && paymentIntent.status === 'succeeded') {
+                mrmLessonPaymentCompleted = true;
+                mrmLessonPaymentConfirmationInProgress = false;
                 await verifyPaymentIntent(paymentIntent.id, email);
 
                 const latestPaymentData = mrmGetActiveLessonPaymentData(createData);
@@ -5438,6 +5472,7 @@ function ensureLegacyBookingHandler(){
               errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
               payBtn.disabled = false;
             } catch (err) {
+              mrmLessonPaymentConfirmationInProgress = false;
               mrmHidePaymentLoading();
               errorEl.textContent = (err && err.message) ? err.message : 'We could not complete this payment.';
               payBtn.disabled = false;
@@ -5533,7 +5568,7 @@ function ensureLegacyBookingHandler(){
           payment_mode: prepay ? 'prepay' : 'one_time'
         }));
 
-        const { payBtn, errorEl, closeModal } = openPaymentModal(
+        const { payBtn, errorEl, closeModal } = await openPaymentModal(
           createData.client_secret,
           createData,
           createData.allowed_payment_methods || ['card']
@@ -5560,6 +5595,7 @@ function ensureLegacyBookingHandler(){
           mrmShowPaymentLoading('Please wait while we confirm your payment and create your lesson.');
 
           try {
+            mrmLessonPaymentConfirmationInProgress = true;
             const { error, paymentIntent } = await stripe.confirmPayment({
               elements: activeStripeElements,
 
@@ -5571,6 +5607,7 @@ function ensureLegacyBookingHandler(){
             });
 
             if (error) {
+              mrmLessonPaymentConfirmationInProgress = false;
               mrmHidePaymentLoading();
               errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
               payBtn.disabled = false;
@@ -5578,6 +5615,8 @@ function ensureLegacyBookingHandler(){
             }
 
             if (paymentIntent && paymentIntent.status === 'succeeded') {
+              mrmLessonPaymentCompleted = true;
+              mrmLessonPaymentConfirmationInProgress = false;
               await verifyPaymentIntent(paymentIntent.id, email);
 
               const latestPaymentData = mrmGetActiveLessonPaymentData(createData);
@@ -5597,6 +5636,7 @@ function ensureLegacyBookingHandler(){
             errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
             payBtn.disabled = false;
           } catch (err) {
+            mrmLessonPaymentConfirmationInProgress = false;
             mrmHidePaymentLoading();
             errorEl.textContent = (err && err.message) ? err.message : 'We could not complete this payment.';
             payBtn.disabled = false;

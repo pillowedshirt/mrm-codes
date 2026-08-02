@@ -2499,6 +2499,8 @@ function mrmGetPiecePromoCodeInputValue() {
   let pendingPaymentIntentId = '';
   let pendingCheckoutRequestId = '';
   let pendingBreakdown = null;
+  let mrmPiecePaymentConfirmationInProgress = false;
+  let mrmPiecePaymentCompleted = false;
 
   function mrmClearPendingPiecePaymentIdentity() {
     pendingClientSecret = '';
@@ -2527,6 +2529,27 @@ function mrmGetPiecePromoCodeInputValue() {
       return { ok: false, code: 'piece_checkout_release_unavailable', message: 'The payment session could not be canceled because the server could not be reached.' };
     }
   }
+
+
+  function mrmAbandonPieceCheckoutOnPageExit() {
+    if (mrmPiecePaymentConfirmationInProgress || mrmPiecePaymentCompleted) return;
+    const paymentIntentId = String(pendingPaymentIntentId || '').trim();
+    const orderId = Number(pendingOrderId || 0);
+    const checkoutRequestId = String(pendingCheckoutRequestId || '').trim();
+    const email = String(mrmGetPiecePaymentEmailValue() || '').trim();
+    if (!paymentIntentId || !orderId || !checkoutRequestId || !email) return;
+    const body = JSON.stringify({ payment_intent_id: paymentIntentId, order_id: orderId, email, checkout_request_id: checkoutRequestId, reason: 'customer_left_piece_checkout_page' });
+    const endpoint = '/wp-json/mrm-pay/v1/abandon-payment-intent';
+    if (navigator.sendBeacon && typeof Blob === 'function') {
+      try {
+        const blob = new Blob([body], { type: 'application/json' });
+        if (navigator.sendBeacon(endpoint, blob)) return;
+      } catch (error) {}
+    }
+    try { fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }); } catch (error) {}
+  }
+
+  window.addEventListener('pagehide', mrmAbandonPieceCheckoutOnPageExit);
 
   document.addEventListener('DOMContentLoaded', () => {
     const pk = (window.__mrmStripePk || '').trim();
@@ -2944,6 +2967,9 @@ async function getOfferSkuCandidates(offerEl) {
   }
 
   function openPaymentModal(quoteData, priceDisplay) {
+    mrmPiecePaymentConfirmationInProgress = false;
+    mrmPiecePaymentCompleted = false;
+
     const modalRunId = ++mrmPieceModalRunId;
 
     if (mrmPieceModalEventsController) {
@@ -3715,37 +3741,54 @@ async function getOfferSkuCandidates(offerEl) {
             return;
           }
 
+          /* Save checkout identity before any Stripe.js operation. */
+          pendingClientSecret = String(data.client_secret || '');
+          pendingOrderId = Number(data.order_id || 0);
+          pendingPaymentIntentId = String(data.payment_intent_id || '');
+          pendingCheckoutRequestId = String(currentCheckoutRequestId || '');
+
           const stripeInstance = ensureStripe(data.publishableKey || window.__mrmStripePk || '');
           if (!stripeInstance) {
-            errorEl.textContent = 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
+            const releaseResult = await mrmAbandonPendingPieceCheckout('piece_stripe_frontend_unavailable');
+            errorEl.textContent = releaseResult.ok ? 'Checkout could not load, so the payment session was safely canceled. Please try again.' : releaseResult.message;
             payBtn.disabled = true;
             return;
           }
 
           stripe = stripeInstance;
           window.__mrmStripePk = data.publishableKey || window.__mrmStripePk || '';
-
-          pendingClientSecret = data.client_secret || '';
-          pendingOrderId = Number(data.order_id || 0);
-          pendingPaymentIntentId = String(data.payment_intent_id || '');
-          pendingCheckoutRequestId = String(currentCheckoutRequestId || '');
-
           applyServerBreakdown(data);
 
-          activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
-          activePaymentElement = activeStripeElements.create(
-            'payment',
-            mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card'])
-          );
-
-          paymentMount.innerHTML = '';
-          activePaymentElement.mount('#mrm-payment-element');
-
-          payBtn.disabled = false;
+          try {
+            activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
+            activePaymentElement = activeStripeElements.create('payment', mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card']));
+            paymentMount.innerHTML = '';
+            activePaymentElement.mount('#mrm-payment-element');
+            mrmPiecePaymentCompleted = false;
+            mrmPiecePaymentConfirmationInProgress = false;
+            payBtn.disabled = false;
+          } catch (mountError) {
+            if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
+            activePaymentElement = null;
+            activeStripeElements = null;
+            const releaseResult = await mrmAbandonPendingPieceCheckout('piece_payment_element_mount_failed');
+            errorEl.textContent = releaseResult.ok ? 'The secure payment form could not be loaded, so the payment session was safely canceled. Please try again.' : releaseResult.message;
+            payBtn.disabled = true;
+            return;
+          }
         } catch (error) {
           if (error && error.name === 'AbortError') return;
           if (!isCurrentPaymentModal() || paymentRequestSeq !== paymentIntentSeq) return;
-          errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
+          if (pendingPaymentIntentId && pendingOrderId) {
+            const releaseResult = await mrmAbandonPendingPieceCheckout('piece_checkout_initialization_exception');
+            if (!releaseResult.ok) {
+              errorEl.textContent = releaseResult.message;
+              renderCurrentSelectionBreakdown();
+              payBtn.disabled = true;
+              return;
+            }
+          }
+          errorEl.textContent = 'The payment session could not be loaded and was safely canceled. Please try again.';
           renderCurrentSelectionBreakdown();
           payBtn.disabled = true;
         } finally {
@@ -4815,6 +4858,7 @@ async function getOfferSkuCandidates(offerEl) {
             }));
           } catch (e) {}
 
+          mrmPiecePaymentConfirmationInProgress = true;
           const { error, paymentIntent } = await stripe.confirmPayment({
             elements: activeStripeElements,
             redirect: 'if_required',
@@ -4822,6 +4866,7 @@ async function getOfferSkuCandidates(offerEl) {
           });
 
           if (error) {
+            mrmPiecePaymentConfirmationInProgress = false;
             errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
             this.disabled = false;
             return;
@@ -4829,6 +4874,8 @@ async function getOfferSkuCandidates(offerEl) {
 
           // Immediate success path (most cards)
           if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'requires_capture')) {
+            mrmPiecePaymentCompleted = true;
+            mrmPiecePaymentConfirmationInProgress = false;
             try {
               await verifyAndGrant(paymentIntent.id, email, pendingSku);
               // success popup handles reload
@@ -4851,6 +4898,7 @@ async function getOfferSkuCandidates(offerEl) {
           this.disabled = false;
 
         } catch (e) {
+          mrmPiecePaymentConfirmationInProgress = false;
 
           errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
           this.disabled = false;
