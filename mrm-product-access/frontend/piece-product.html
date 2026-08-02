@@ -3658,6 +3658,13 @@ async function getOfferSkuCandidates(offerEl) {
         const paymentIntentSignal = paymentIntentAbortController.signal;
         paymentIntentInFlight = true;
 
+        /*
+         * Keep any returned checkout identifiers available to the
+         * exception handler. A malformed or interrupted response must
+         * still be releasable.
+         */
+        let responseData = null;
+
         try {
           const res = await fetch('/wp-json/mrm-pay/v1/create-payment-intent', {
             method: 'POST',
@@ -3680,7 +3687,11 @@ async function getOfferSkuCandidates(offerEl) {
             })
           });
 
-          const data = await res.json();
+          responseData =
+            await res.json();
+
+          const data =
+            responseData;
 
           if (!isCurrentPaymentModal()||paymentIntentSignal.aborted||paymentRequestSeq!==paymentIntentSeq||paymentRequestKey!==getPaymentIntentRequestKey()||currentCheckoutRequestId!==getOrCreateCheckoutRequestId()) {
             const cleanupResult=await mrmAttemptPieceCheckoutCleanup({paymentIntentId:data&&data.payment_intent_id?data.payment_intent_id:'',orderId:data&&data.order_id?data.order_id:0,checkoutRequestId:currentCheckoutRequestId,email,reason:'piece_checkout_response_superseded'});
@@ -3781,16 +3792,58 @@ async function getOfferSkuCandidates(offerEl) {
             const cleanupResult=await mrmAttemptPieceCheckoutCleanup({checkoutRequestId:currentCheckoutRequestId,email,reason:'piece_checkout_request_aborted'});
             retireCheckoutRequestId(currentCheckoutRequestId);if(!cleanupResult.ok)errorEl.textContent=cleanupResult.message;return;
           }
-          if (!isCurrentPaymentModal() || paymentRequestSeq !== paymentIntentSeq) return;
-          if (pendingPaymentIntentId && pendingOrderId) {
-            const releaseResult = await mrmAbandonPendingPieceCheckout('piece_checkout_initialization_exception');
-            if (!releaseResult.ok) {
-              errorEl.textContent = releaseResult.message;
+          /*
+           * A request can reach WordPress and Stripe even when the
+           * response body never reaches the browser. Always abandon the
+           * specific request ID before discarding the exception.
+           */
+          const cleanupReference = {
+            paymentIntentId:
+              responseData && responseData.payment_intent_id
+                ? String(responseData.payment_intent_id)
+                : (pendingCheckoutRequestId === currentCheckoutRequestId
+                    ? String(pendingPaymentIntentId || '')
+                    : ''),
+            orderId:
+              responseData && responseData.order_id
+                ? Number(responseData.order_id)
+                : (pendingCheckoutRequestId === currentCheckoutRequestId
+                    ? Number(pendingOrderId || 0)
+                    : 0),
+            checkoutRequestId: currentCheckoutRequestId,
+            email,
+            reason: 'piece_checkout_initialization_exception'
+          };
+
+          const cleanupResult =
+            await mrmAttemptPieceCheckoutCleanup(cleanupReference);
+
+          /*
+           * The deferred-cleanup registry retains the request and
+           * returned identifiers when cleanup fails.
+           */
+          retireCheckoutRequestId(currentCheckoutRequestId);
+
+          if (cleanupResult.ok && pendingCheckoutRequestId === currentCheckoutRequestId) {
+            mrmClearPendingPiecePaymentIdentity();
+          }
+
+          if (!cleanupResult.ok) {
+            if (isCurrentPaymentModal() && paymentRequestSeq === paymentIntentSeq) {
+              errorEl.textContent = cleanupResult.message;
               renderCurrentSelectionBreakdown();
               payBtn.disabled = true;
-              return;
             }
+            return;
           }
+
+          /*
+           * Cleanup must occur even when the response belongs to a
+           * superseded request. Only the visible message depends on the
+           * current modal/request state.
+           */
+          if (!isCurrentPaymentModal() || paymentRequestSeq !== paymentIntentSeq) return;
+
           errorEl.textContent = 'The payment session could not be loaded and was safely canceled. Please try again.';
           renderCurrentSelectionBreakdown();
           payBtn.disabled = true;

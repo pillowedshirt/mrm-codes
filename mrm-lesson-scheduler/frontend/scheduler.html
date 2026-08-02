@@ -4723,22 +4723,90 @@ async function mrmReleaseTrackedLessonCheckout(reason) {
   return releaseResult;
 }
 
-function mrmStoreSchedulerPaymentRecovery(recovery) {
-  if (!recovery || typeof recovery !== 'object') return { ok: false, message: 'The payment recovery information could not be created.' };
+function mrmStoreSchedulerPaymentRecovery(
+  recovery
+) {
+  if (
+    !recovery ||
+    typeof recovery !== 'object'
+  ) {
+    return {
+      ok: false,
+
+      message:
+        'The payment recovery information could not be created.'
+    };
+  }
+
   try {
-    const serialized = JSON.stringify(recovery);
-    sessionStorage.setItem('mrmSchedulerPayment', serialized);
-    const stored = sessionStorage.getItem('mrmSchedulerPayment');
-    if (!stored) throw new Error('Recovery data was not retained.');
-    const parsed = JSON.parse(stored);
+    const serialized =
+      JSON.stringify(recovery);
+
+    sessionStorage.setItem(
+      'mrmSchedulerPayment',
+      serialized
+    );
+
+    const stored =
+      sessionStorage.getItem(
+        'mrmSchedulerPayment'
+      );
+
+    if (!stored) {
+      throw new Error(
+        'Recovery data was not retained.'
+      );
+    }
+
+    const parsed =
+      JSON.parse(stored);
+
+    if (
+      !parsed ||
+      typeof parsed !== 'object'
+    ) {
+      throw new Error(
+        'The retained recovery data was invalid.'
+      );
+    }
+
     const expectedRequestId = String(recovery.checkout_request_id || '');
     const storedRequestId = String(parsed.checkout_request_id || '');
-    if (expectedRequestId && !storedRequestId) throw new Error('The checkout request ID was not retained.');
-    if (expectedRequestId && storedRequestId !== expectedRequestId) throw new Error('The retained checkout request ID did not match.');
-    return { ok: true };
+    if (expectedRequestId && storedRequestId !== expectedRequestId) {
+      throw new Error('The retained checkout request ID did not match.');
+    }
+
+    const expectedPaymentIntentId = String(recovery.payment_intent_id || '');
+    const storedPaymentIntentId = String(parsed.payment_intent_id || '');
+    if (expectedPaymentIntentId && storedPaymentIntentId !== expectedPaymentIntentId) {
+      throw new Error('The retained PaymentIntent ID did not match.');
+    }
+
+    const expectedOrderId = Number(recovery.order_id || 0);
+    const storedOrderId = Number(parsed.order_id || 0);
+    if (expectedOrderId > 0 && storedOrderId !== expectedOrderId) {
+      throw new Error('The retained order ID did not match.');
+    }
+
+    const expectedPaymentMode = String(recovery.payment_mode || '');
+    const storedPaymentMode = String(parsed.payment_mode || '');
+    if (expectedPaymentMode && storedPaymentMode !== expectedPaymentMode) {
+      throw new Error('The retained payment mode did not match.');
+    }
+
+    return {
+      ok: true,
+      recovery: parsed
+    };
   } catch (error) {
-    try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch (removeError) {}
-    return { ok: false, message: 'This browser could not preserve the payment recovery information.' };
+    try {
+      sessionStorage.removeItem('mrmSchedulerPayment');
+    } catch (removeError) {}
+
+    return {
+      ok: false,
+      message: 'This browser could not preserve the payment recovery information.'
+    };
   }
 }
 
@@ -4782,11 +4850,36 @@ function mrmAbandonLessonCheckoutOnPageExit() {
 
 window.addEventListener('pagehide', mrmAbandonLessonCheckoutOnPageExit);
 
-async function mrmReleaseLessonReplacementPayment(paymentData, email, reason) {
-  const releaseResult = await mrmAbandonLessonCheckoutData(paymentData, email, reason);
-  if (releaseResult.ok && mrmLessonPaymentReloadContext && mrmLessonPaymentReloadContext.currentData === paymentData) {
-    mrmLessonPaymentReloadContext.currentData = {};
+async function
+mrmReleaseLessonReplacementPayment(
+  paymentData,
+  email,
+  reason
+) {
+  const releaseResult =
+    await mrmAbandonLessonCheckoutData(
+      paymentData,
+      email,
+      reason
+    );
+
+  if (releaseResult.ok) {
+    if (
+      mrmLessonPaymentReloadContext &&
+      mrmLessonPaymentReloadContext.currentData === paymentData
+    ) {
+      mrmLessonPaymentReloadContext.currentData = {};
+    }
+
+    /*
+     * A canceled replacement must never remain as the Stripe
+     * redirect-recovery target.
+     */
+    try {
+      sessionStorage.removeItem('mrmSchedulerPayment');
+    } catch (error) {}
   }
+
   return releaseResult;
 }
 
@@ -4802,28 +4895,61 @@ function mrmGetActiveLessonPaymentData(fallbackData) {
   return fallbackData || {};
 }
 
-function mrmUpdateStoredSchedulerPaymentFromActiveData(activeData) {
-  if(!activeData||typeof activeData!=='object')return;
+function
+mrmUpdateStoredSchedulerPaymentFromActiveData(
+  activeData
+) {
+  if (!activeData || typeof activeData !== 'object') {
+    return { ok: false, message: 'The replacement payment information was invalid.' };
+  }
+
+  let stored = null;
   try {
-    let stored=null, raw=sessionStorage.getItem('mrmSchedulerPayment');
-    if(raw){try{stored=JSON.parse(raw);}catch(error){stored=null;}}
-    if(!stored||typeof stored!=='object'){
-      const recovery=mrmLessonPaymentReloadContext&&mrmLessonPaymentReloadContext.redirectRecovery&&typeof mrmLessonPaymentReloadContext.redirectRecovery==='object'?mrmLessonPaymentReloadContext.redirectRecovery:null;
-      if(!recovery)return; stored=JSON.parse(JSON.stringify(recovery));
+    const raw = sessionStorage.getItem('mrmSchedulerPayment');
+    if (raw) {
+      try { stored = JSON.parse(raw); } catch (error) { stored = null; }
     }
-    if(activeData.payment_intent_id)stored.payment_intent_id=activeData.payment_intent_id;
-    if(activeData.order_id)stored.order_id=activeData.order_id;
-    if(Object.prototype.hasOwnProperty.call(activeData,'promo_code')){
-      const activePromoCode=String(activeData.promo_code||''); stored.promo_code=activePromoCode;
-      if(stored.autopay_enrollment&&typeof stored.autopay_enrollment==='object'){
-        stored.autopay_enrollment.promo_code=activePromoCode;
-        if(!stored.autopay_enrollment.context||typeof stored.autopay_enrollment.context!=='object')stored.autopay_enrollment.context={};
-        stored.autopay_enrollment.context.promo_code=activePromoCode;
-      }
+  } catch (error) {
+    return { ok: false, message: 'This browser could not access the payment recovery information.' };
+  }
+
+  if (!stored || typeof stored !== 'object') {
+    const recovery =
+      mrmLessonPaymentReloadContext &&
+      mrmLessonPaymentReloadContext.redirectRecovery &&
+      typeof mrmLessonPaymentReloadContext.redirectRecovery === 'object'
+        ? mrmLessonPaymentReloadContext.redirectRecovery
+        : null;
+    if (!recovery) {
+      return { ok: false, message: 'The lesson payment recovery record was unavailable.' };
     }
-    if(activeData.checkout_request_id)stored.checkout_request_id=activeData.checkout_request_id;
-    sessionStorage.setItem('mrmSchedulerPayment',JSON.stringify(stored));
-  } catch(error) {}
+    stored = JSON.parse(JSON.stringify(recovery));
+  }
+
+  if (activeData.payment_intent_id) stored.payment_intent_id = String(activeData.payment_intent_id);
+  if (activeData.order_id) stored.order_id = Number(activeData.order_id);
+  if (Object.prototype.hasOwnProperty.call(activeData, 'promo_code')) {
+    stored.promo_code = String(activeData.promo_code || '');
+  }
+  if (activeData.checkout_request_id) {
+    stored.checkout_request_id = String(activeData.checkout_request_id);
+  }
+
+  const storageResult = mrmStoreSchedulerPaymentRecovery(stored);
+  if (!storageResult.ok) return storageResult;
+
+  /*
+   * Keep the in-memory recovery template synchronized with
+   * the verified session-storage record. If the record later
+   * needs to be recreated, it will use the replacement
+   * PaymentIntent rather than the canceled original.
+   */
+  if (mrmLessonPaymentReloadContext) {
+    mrmLessonPaymentReloadContext.redirectRecovery =
+      JSON.parse(JSON.stringify(storageResult.recovery || stored));
+  }
+
+  return { ok: true, recovery: storageResult.recovery || stored };
 }
 
 function mrmGetLessonPromoEmailValue() {
@@ -4854,6 +4980,8 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
     if(payBtn)payBtn.disabled=true; if(errorEl)errorEl.textContent='';
     const previousRelease=await mrmAbandonLessonCheckoutData(previousPaymentData,email,'lesson_promo_checkout_replaced',mrmLessonPaymentReloadContext.requestBody.checkout_request_id||'');
     if(!previousRelease.ok){if(errorEl)errorEl.textContent=previousRelease.message;if(payBtn)payBtn.disabled=false;return false;}
+    /* The canceled original must not remain the redirect-recovery target. */
+    try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch (error) {}
     mrmLessonPaymentReloadContext.currentData={}; mrmLessonPaymentReloadContext.pendingCheckoutRequestId=requestBody.checkout_request_id; mrmLessonPaymentReloadContext.requestBody=requestBody;
     if(activePaymentElement){try{activePaymentElement.unmount();}catch(error){}} activePaymentElement=null;activeStripeElements=null;
     if(paymentMount)paymentMount.innerHTML='<div style="padding:12px">Updating tax and secure payment form…</div>';
@@ -4865,19 +4993,35 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
       const releaseResult=await mrmAbandonLessonCheckoutData(replacementReference,email,'lesson_promo_replacement_incomplete',requestBody.checkout_request_id);mrmLessonPaymentReloadContext.pendingCheckoutRequestId='';if(releaseResult.ok)mrmLessonPaymentReloadContext.currentData={};
       if(errorEl)errorEl.textContent=releaseResult.ok?(replacementData.message||'Unable to create the discounted payment session. Please try applying the code again.'):releaseResult.message;if(payBtn)payBtn.disabled=false;return false;
     }
-    replacementData.checkout_request_id=requestBody.checkout_request_id;mrmLessonPaymentReloadContext.currentData=replacementData;mrmLessonPaymentReloadContext.pendingCheckoutRequestId='';mrmUpdateStoredSchedulerPaymentFromActiveData(replacementData);
+    replacementData.checkout_request_id=requestBody.checkout_request_id;
+    mrmLessonPaymentReloadContext.currentData=replacementData;
+    mrmLessonPaymentReloadContext.pendingCheckoutRequestId='';
+    /* The replacement must be verified as the redirect target before display. */
+    const recoveryUpdateResult=mrmUpdateStoredSchedulerPaymentFromActiveData(replacementData);
+    if(!recoveryUpdateResult.ok){
+      const releaseResult=await mrmReleaseLessonReplacementPayment(replacementData,email,'lesson_promo_recovery_storage_failed');
+      if(errorEl)errorEl.textContent=releaseResult.ok?recoveryUpdateResult.message+' The discounted payment session was safely canceled. Please try applying the code again.':releaseResult.message;
+      if(payBtn)payBtn.disabled=false;
+      return false;
+    }
     const stripeInstance=ensureStripe(replacementData.publishableKey||'');
     if(!stripeInstance){const rr=await mrmReleaseLessonReplacementPayment(replacementData,email,'lesson_promo_stripe_frontend_unavailable');if(errorEl)errorEl.textContent=rr.ok?'The discounted payment session was safely canceled because Stripe could not load. Please try again.':rr.message;if(payBtn)payBtn.disabled=false;return false;}
     let nextElements=null,nextPaymentElement=null;
     try{nextElements=stripeInstance.elements({clientSecret:replacementData.client_secret});nextPaymentElement=nextElements.create('payment',mrmBuildPaymentElementOptions(replacementData.allowed_payment_methods||['card']));if(paymentMount)paymentMount.innerHTML='';nextPaymentElement.mount('#mrm-payment-element');}
     catch(mountError){if(nextPaymentElement){try{nextPaymentElement.unmount();}catch(error){}}const rr=await mrmReleaseLessonReplacementPayment(replacementData,email,'lesson_promo_payment_element_mount_failed');if(errorEl)errorEl.textContent=rr.ok?'The discounted payment form could not be loaded, so its payment session was safely canceled. Please try again.':rr.message;if(payBtn)payBtn.disabled=false;return false;}
-    stripe=stripeInstance;activeStripeElements=nextElements;activePaymentElement=nextPaymentElement;mrmLessonPaymentCompleted=false;mrmLessonPaymentConfirmationInProgress=false;mrmRenderLessonPaymentBreakdown(replacementData);mrmUpdateStoredSchedulerPaymentFromActiveData(replacementData);if(payBtn)payBtn.disabled=false;return true;
+    stripe=stripeInstance;activeStripeElements=nextElements;activePaymentElement=nextPaymentElement;mrmLessonPaymentCompleted=false;mrmLessonPaymentConfirmationInProgress=false;mrmRenderLessonPaymentBreakdown(replacementData);if(payBtn)payBtn.disabled=false;return true;
   } catch(error) {
     const rb=mrmLessonPaymentReloadContext&&mrmLessonPaymentReloadContext.requestBody?mrmLessonPaymentReloadContext.requestBody:{};
     const active=mrmLessonPaymentReloadContext&&mrmLessonPaymentReloadContext.currentData?mrmLessonPaymentReloadContext.currentData:{};
     const pending=String(mrmLessonPaymentReloadContext&&mrmLessonPaymentReloadContext.pendingCheckoutRequestId?mrmLessonPaymentReloadContext.pendingCheckoutRequestId:rb.checkout_request_id||'');
     const rr=await mrmAbandonLessonCheckoutData(active,email,'lesson_promo_reload_exception',pending);
-    if(mrmLessonPaymentReloadContext){mrmLessonPaymentReloadContext.pendingCheckoutRequestId='';if(rr.ok)mrmLessonPaymentReloadContext.currentData={};}
+    if(mrmLessonPaymentReloadContext){
+      mrmLessonPaymentReloadContext.pendingCheckoutRequestId='';
+      if(rr.ok){
+        mrmLessonPaymentReloadContext.currentData={};
+        try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch(storageError) {}
+      }
+    }
     if(errorEl)errorEl.textContent=rr.ok?'Unable to reload the payment form with the promotional code. Please try again.':rr.message;if(payBtn)payBtn.disabled=false;return false;
   }
 }
