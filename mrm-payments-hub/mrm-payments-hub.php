@@ -7876,6 +7876,86 @@ private function mrm_tax_retry_or_alert_payment_intent(
     return $request_id;
   }
 
+  private function mrm_checkout_abandonment_transient_key($checkout_request_id) {
+    $checkout_request_id = $this->mrm_sanitize_checkout_request_id($checkout_request_id);
+    if ($checkout_request_id === '') return '';
+    return 'mrm_checkout_abandon_' . substr(hash('sha256', $checkout_request_id), 0, 40);
+  }
+
+  private function mrm_mark_checkout_request_abandoned($checkout_request_id, $email_hash, $reason) {
+    $checkout_request_id = $this->mrm_sanitize_checkout_request_id($checkout_request_id);
+    $email_hash = sanitize_text_field((string)$email_hash);
+    $reason = sanitize_key((string)$reason);
+    $transient_key = $this->mrm_checkout_abandonment_transient_key($checkout_request_id);
+    if ($transient_key === '' || $email_hash === '') return false;
+    if ($reason === '') $reason = 'customer_abandoned';
+    return set_transient($transient_key, array(
+      'checkout_request_id' => $checkout_request_id,
+      'email_hash' => $email_hash,
+      'reason' => $reason,
+      'abandoned_at' => current_time('mysql'),
+    ), 2 * HOUR_IN_SECONDS);
+  }
+
+  private function mrm_get_checkout_request_abandonment($checkout_request_id) {
+    $checkout_request_id = $this->mrm_sanitize_checkout_request_id($checkout_request_id);
+    $transient_key = $this->mrm_checkout_abandonment_transient_key($checkout_request_id);
+    if ($transient_key === '') return array();
+    $stored = get_transient($transient_key);
+    if (!is_array($stored)) return array();
+    $stored_request_id = $this->mrm_sanitize_checkout_request_id($stored['checkout_request_id'] ?? '');
+    if ($stored_request_id === '' || !hash_equals($stored_request_id, $checkout_request_id)) return array();
+    return $stored;
+  }
+
+  private function mrm_checkout_request_is_abandoned($checkout_request_id, $email_hash) {
+    $abandonment = $this->mrm_get_checkout_request_abandonment($checkout_request_id);
+    if (empty($abandonment)) return false;
+    $stored_email_hash = sanitize_text_field((string)($abandonment['email_hash'] ?? ''));
+    $email_hash = sanitize_text_field((string)$email_hash);
+    return $stored_email_hash !== '' && $email_hash !== '' && hash_equals($stored_email_hash, $email_hash);
+  }
+
+  private function mrm_get_checkout_abandonment_reason($checkout_request_id) {
+    $abandonment = $this->mrm_get_checkout_request_abandonment($checkout_request_id);
+    $reason = sanitize_key((string)($abandonment['reason'] ?? 'customer_abandoned'));
+    return $reason !== '' ? $reason : 'customer_abandoned';
+  }
+
+  private function mrm_cancel_unattached_checkout_order($order_id, $reason) {
+    global $wpdb;
+    $order_id = absint($order_id);
+    $reason = sanitize_key((string)$reason);
+    if ($order_id <= 0) return false;
+    if ($reason === '') $reason = 'customer_abandoned';
+    $updated = $wpdb->update($this->table_orders(), array(
+      'status' => 'canceled', 'stripe_status' => 'canceled', 'updated_at' => current_time('mysql'),
+    ), array('id' => $order_id), array('%s', '%s', '%s'), array('%d'));
+    $this->mrm_release_pending_promo_redemption($order_id);
+    $this->stripe_debug_log('Checkout order canceled before PaymentIntent attachment.', array('order_id' => $order_id, 'reason' => $reason));
+    return $updated !== false;
+  }
+
+  private function mrm_cancel_abandoned_created_payment_intent($order_id, $payment_intent, $reason) {
+    $order_id = absint($order_id);
+    $payment_intent = is_array($payment_intent) ? $payment_intent : array();
+    $payment_intent_id = sanitize_text_field((string)($payment_intent['id'] ?? ''));
+    $stripe_status = sanitize_key((string)($payment_intent['status'] ?? ''));
+    $reason = sanitize_key((string)$reason);
+    if ($order_id <= 0 || $payment_intent_id === '') return new WP_Error('abandoned_checkout_payment_invalid', 'The abandoned payment session could not be identified.');
+    if ($reason === '') $reason = 'customer_abandoned';
+    if (in_array($stripe_status, array('succeeded', 'processing', 'requires_capture'), true)) return new WP_Error('abandoned_checkout_payment_uncertain', 'The abandoned payment is already completed or processing and cannot be canceled safely.');
+    if ($stripe_status !== 'canceled') {
+      if (!in_array($stripe_status, array('requires_payment_method', 'requires_confirmation', 'requires_action'), true)) return new WP_Error('abandoned_checkout_status_invalid', 'The abandoned payment is not in a safely cancelable state.');
+      $canceled = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($payment_intent_id) . '/cancel', array('cancellation_reason' => 'abandoned'));
+      if (is_wp_error($canceled)) return $canceled;
+      if (sanitize_key((string)($canceled['status'] ?? '')) !== 'canceled') return new WP_Error('abandoned_checkout_cancel_unconfirmed', 'Stripe did not confirm cancellation of the abandoned payment.');
+    }
+    $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', array('mrm_checkout_invalidated_reason' => $reason, 'mrm_checkout_invalidated_at' => current_time('mysql')));
+    $this->mrm_release_pending_promo_redemption($order_id, $payment_intent_id);
+    return true;
+  }
+
   private function mrm_checkout_lock_name($request_id) {
     $request_id = $this->mrm_sanitize_checkout_request_id($request_id);
     return $request_id === '' ? '' : 'mrm_checkout_' . substr(hash('sha256', $request_id), 0, 48);
@@ -14957,54 +15037,47 @@ private function charge_and_unlock_autopay($data) {
     $checkout_request_id = $this->mrm_sanitize_checkout_request_id($data['checkout_request_id'] ?? '');
     $reason = sanitize_key((string)($data['reason'] ?? 'customer_abandoned'));
     if ($reason === '') $reason = 'customer_abandoned';
-    if ($payment_intent_id === '' || strpos($payment_intent_id, 'pi_') !== 0 || $order_id <= 0 || $email === '' || !is_email($email)) {
-      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_invalid','message'=>'The payment session could not be identified safely.'), 400);
+    $has_direct_identity = $payment_intent_id !== '' && strpos($payment_intent_id, 'pi_') === 0 && $order_id > 0;
+    if ($email === '' || !is_email($email) || (!$has_direct_identity && $checkout_request_id === '')) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_invalid','message'=>'The payment session could not be identified safely.'), 400);
+    $email_hash = $this->email_hash($email);
+    /* Record abandonment first, protecting against an in-flight create request. */
+    if ($checkout_request_id !== '' && !$this->mrm_mark_checkout_request_abandoned($checkout_request_id, $email_hash, $reason)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_marker_failed','message'=>'The payment session could not be marked for safe cancellation.'), 503);
+    $checkout_lock_name = '';
+    if ($checkout_request_id !== '') {
+      $lock_result = $this->mrm_acquire_checkout_lock($checkout_request_id);
+      if (!is_wp_error($lock_result)) $checkout_lock_name = $lock_result;
     }
-    $order = $this->get_order_by_pi($payment_intent_id);
-    if (!is_array($order) || empty($order['id']) || absint($order['id']) !== $order_id) {
-      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_order_mismatch','message'=>'The payment session did not match the requested order.'), 409);
-    }
-    $submitted_email_hash = $this->email_hash($email);
-    $stored_email_hash = sanitize_text_field((string)($order['email_hash'] ?? ''));
-    if ($submitted_email_hash === '' || $stored_email_hash === '' || !hash_equals($stored_email_hash, $submitted_email_hash)) {
-      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_email_mismatch','message'=>'The payment session could not be verified for this email.'), 403);
-    }
-    $product_type = sanitize_key((string)($order['product_type'] ?? ''));
-    if (!in_array($product_type, array('lesson','sheet_music'), true)) {
-      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_product_invalid','message'=>'This payment session cannot be abandoned through this checkout flow.'), 409);
-    }
-    $order_metadata = $this->mrm_get_order_meta_array($order);
-    if ($product_type === 'sheet_music') {
-      $stored_request_id = $this->mrm_sanitize_checkout_request_id($order_metadata['mrm_checkout_request_id'] ?? '');
-      if ($checkout_request_id === '' || $stored_request_id === '' || !hash_equals($stored_request_id, $checkout_request_id)) {
-        return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_request_mismatch','message'=>'The sheet-music checkout request could not be verified.'), 409);
+    try {
+      $order = null;
+      if ($has_direct_identity) $order = $this->get_order_by_pi($payment_intent_id);
+      elseif ($checkout_request_id !== '') {
+        $order = $this->get_order_by_meta_value('mrm_checkout_request_id', $checkout_request_id);
+        if (!is_array($order)) return new WP_REST_Response(array('ok'=>true,'status'=>'abandonment_recorded','checkout_request_id'=>$checkout_request_id), 200);
+        $order_id = absint($order['id'] ?? 0);
+        $payment_intent_id = sanitize_text_field((string)($order['stripe_payment_intent_id'] ?? ''));
       }
-    }
-    $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id);
-    if (is_wp_error($payment_intent)) {
-      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_status_unavailable','message'=>'The payment status could not be confirmed, so the payment session was preserved.'), 503);
-    }
-    $stripe_status = sanitize_key((string)($payment_intent['status'] ?? ''));
-    if (in_array($stripe_status, array('succeeded','processing','requires_capture'), true)) {
-      return new WP_REST_Response(array('ok'=>false,'code'=>$stripe_status === 'succeeded' ? 'checkout_already_paid' : 'checkout_payment_status_uncertain','message'=>$stripe_status === 'succeeded' ? 'This payment has already completed and cannot be abandoned.' : 'This payment is currently being processed and cannot be abandoned safely.'), 409);
-    }
-    if ($stripe_status !== 'canceled') {
-      if (!in_array($stripe_status, array('requires_payment_method','requires_confirmation','requires_action'), true)) {
-        return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_status_invalid','message'=>'The payment session is not currently in a safely cancelable state.'), 409);
+      if (!is_array($order) || empty($order['id']) || absint($order['id']) !== $order_id) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_order_mismatch','message'=>'The payment session did not match the requested order.'), 409);
+      $stored_email_hash = sanitize_text_field((string)($order['email_hash'] ?? ''));
+      if ($email_hash === '' || $stored_email_hash === '' || !hash_equals($stored_email_hash, $email_hash)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_email_mismatch','message'=>'The payment session could not be verified for this email.'), 403);
+      $product_type = sanitize_key((string)($order['product_type'] ?? ''));
+      if (!in_array($product_type, array('lesson','sheet_music'), true)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_product_invalid','message'=>'This payment session cannot be abandoned through this checkout flow.'), 409);
+      $order_metadata = $this->mrm_get_order_meta_array($order);
+      if ($checkout_request_id !== '') {
+        $stored_request_id = $this->mrm_sanitize_checkout_request_id($order_metadata['mrm_checkout_request_id'] ?? '');
+        if ($stored_request_id === '' || !hash_equals($stored_request_id, $checkout_request_id)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_request_mismatch','message'=>'The checkout request could not be verified.'), 409);
       }
-      $canceled = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($payment_intent_id) . '/cancel', array('cancellation_reason'=>'abandoned'));
-      if (is_wp_error($canceled)) {
-        return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_cancel_failed','message'=>'The payment session could not be canceled safely, so it was preserved.'), 503);
+      if ($payment_intent_id === '' || strpos($payment_intent_id, 'pi_') !== 0) {
+        $this->mrm_cancel_unattached_checkout_order($order_id, $reason);
+        return new WP_REST_Response(array('ok'=>true,'order_id'=>$order_id,'status'=>'canceled_before_payment_intent'), 200);
       }
-      if (sanitize_key((string)($canceled['status'] ?? '')) !== 'canceled') {
-        return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_not_confirmed','message'=>'Stripe did not confirm that the payment session was canceled.'), 503);
-      }
+      $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id);
+      if (is_wp_error($payment_intent)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_status_unavailable','message'=>'The payment status could not be confirmed, so the payment session was preserved.'), 503);
+      $cancel_result = $this->mrm_cancel_abandoned_created_payment_intent($order_id, $payment_intent, $reason);
+      if (is_wp_error($cancel_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$cancel_result->get_error_code(),'message'=>$cancel_result->get_error_message()), 409);
+      return new WP_REST_Response(array('ok'=>true,'payment_intent_id'=>$payment_intent_id,'order_id'=>$order_id,'status'=>'canceled'), 200);
+    } finally {
+      if ($checkout_lock_name !== '') $this->mrm_release_checkout_lock($checkout_lock_name);
     }
-    $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', array('mrm_checkout_invalidated_reason'=>$reason,'mrm_checkout_invalidated_at'=>current_time('mysql')));
-    if (!$this->mrm_release_pending_promo_redemption($order_id, $payment_intent_id)) {
-      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_promo_release_failed','message'=>'The payment was canceled, but its promotional-code reservation could not be released.'), 503);
-    }
-    return new WP_REST_Response(array('ok'=>true,'payment_intent_id'=>$payment_intent_id,'order_id'=>$order_id,'status'=>'canceled'), 200);
   }
 
   public function rest_create_payment_intent(WP_REST_Request $req) {
@@ -15111,6 +15184,7 @@ private function charge_and_unlock_autopay($data) {
 
 
     $request_email_hash = $this->email_hash($email);
+    if ($checkout_request_id !== '' && $this->mrm_checkout_request_is_abandoned($checkout_request_id, $request_email_hash)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_request_abandoned','message'=>'This checkout request was canceled before payment creation completed.'), 409);
     $incoming_checkout_state_fingerprint = $checkout_request_id !== ''
       ? $this->mrm_build_piece_checkout_state_fingerprint(
           $checkout_request_id,
@@ -15157,6 +15231,7 @@ private function charge_and_unlock_autopay($data) {
       if (is_wp_error($checkout_lock_result)) return new WP_REST_Response(array('ok'=>false, 'code'=>$checkout_lock_result->get_error_code(), 'message'=>$checkout_lock_result->get_error_message()), 409);
       $checkout_lock_name = $checkout_lock_result;
       register_shutdown_function(function() use ($checkout_lock_name) { $this->mrm_release_checkout_lock($checkout_lock_name); });
+      if ($this->mrm_checkout_request_is_abandoned($checkout_request_id, $request_email_hash)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_request_abandoned','message'=>'This checkout request was canceled before payment creation completed.'), 409);
 
       /* Recheck after locking because an identical request may have just completed. */
       $existing_checkout_order = $this->get_order_by_meta_value('mrm_checkout_request_id', $checkout_request_id);
@@ -15459,6 +15534,8 @@ private function charge_and_unlock_autopay($data) {
       }
     }
 
+    if ($checkout_request_id !== '' && $this->mrm_checkout_request_is_abandoned($checkout_request_id, $email_hash)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_request_abandoned','message'=>'This checkout request was canceled before payment creation completed.'), 409);
+
     // Create or reuse one internal order for this checkout request.
     $existing_checkout_order = $checkout_request_id !== '' ? $this->get_order_by_meta_value('mrm_checkout_request_id', $checkout_request_id) : null;
     if (is_array($existing_checkout_order)) {
@@ -15555,6 +15632,11 @@ private function charge_and_unlock_autopay($data) {
       ));
     }
 
+    if ($checkout_request_id !== '' && $this->mrm_checkout_request_is_abandoned($checkout_request_id, $email_hash)) {
+      $this->mrm_cancel_unattached_checkout_order($order_id, $this->mrm_get_checkout_abandonment_reason($checkout_request_id));
+      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_request_abandoned','message'=>'This checkout request was canceled before payment creation completed.'), 409);
+    }
+
     $publishable_key = $this->publishable_key();
     if ($publishable_key === '') {
       return new WP_REST_Response(array(
@@ -15592,8 +15674,11 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $this->attach_payment_intent_to_order($order_id, (string)$pi['id'], (string)($pi['status'] ?? ''));
-    if ($promo_code !== '' && $promo_discount_cents > 0) {
-      $this->mrm_attach_payment_intent_to_promo_redemption($order_id, (string)$pi['id']);
+    if ($promo_code !== '' && $promo_discount_cents > 0) $this->mrm_attach_payment_intent_to_promo_redemption($order_id, (string)$pi['id']);
+    if ($checkout_request_id !== '' && $this->mrm_checkout_request_is_abandoned($checkout_request_id, $email_hash)) {
+      $cancel_result = $this->mrm_cancel_abandoned_created_payment_intent($order_id, $pi, $this->mrm_get_checkout_abandonment_reason($checkout_request_id));
+      if (is_wp_error($cancel_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$cancel_result->get_error_code(),'message'=>$cancel_result->get_error_message()), 409);
+      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_request_abandoned','message'=>'This checkout request was canceled before the payment form was displayed.'), 409);
     }
 
     return new WP_REST_Response(array(
