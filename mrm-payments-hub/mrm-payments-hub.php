@@ -27096,7 +27096,7 @@ MRM_TAX_RULES;
     ksort($codes);
     echo '<div class="wrap"><h1>Promo Codes</h1>';
     settings_errors('mrm_pay_hub');
-    echo '<p>Create and manage promotional codes for lessons, sheet music, and masterclasses.</p><form method="post" action="">';
+    echo '<p>Create and manage promotional codes for lessons, sheet music, and masterclasses.</p><form method="post" action="" id="mrm-promo-codes-form">';
     wp_nonce_field('mrm_pay_hub_save_promo_codes', 'mrm_pay_hub_promo_codes_nonce');
     $target_groups = $this->mrm_get_promo_target_option_groups();
     echo '<style>.mrm-promo-discount-value{margin-top:6px}.mrm-promo-occurrence-wrap[hidden],.mrm-promo-discount-value[hidden]{display:none!important}.mrm-promo-target{min-width:260px;max-width:340px}.mrm-promo-rule{min-width:190px}</style>';
@@ -27139,39 +27139,224 @@ MRM_TAX_RULES;
       if ($rule_mode === 'after_n') echo '<option value="after_n" selected>Legacy — After N Occurrences</option>';
       if ($rule_mode === 'date_window') echo '<option value="date_window" selected>Legacy — Date Window Only</option>';
       echo '<option value="all"' . selected($rule_mode, 'all', false) . '>All Eligible Purchases</option><option value="first_n"' . selected($rule_mode, 'first_n', false) . '>First N Lesson Occurrences</option><option value="first_n_months"' . selected($rule_mode, 'first_n_months', false) . '>First N Months</option></select></td>';
-      echo '<td><div class="mrm-promo-occurrence-wrap"><input type="number" min="1" name="promo_occurrence_count[]" value="' . esc_attr((string)$occurrence_count) . '" style="width:90px;"></div></td>';
+      echo '<td><div class="mrm-promo-occurrence-wrap"><input type="number" min="0" name="promo_occurrence_count[]" value="' . esc_attr((string)$occurrence_count) . '" style="width:90px;"></div></td>';
       echo '<td><input type="date" name="promo_starts_at[]" value="' . esc_attr($starts_at) . '"></td><td><input type="date" name="promo_expires_at[]" value="' . esc_attr($expires_at) . '"></td>';
       echo '<td><label><input type="checkbox" name="promo_reusable_per_email[' . esc_attr((string)$i) . ']" value="1"' . checked($reusable, true, false) . '> Reusable</label></td></tr>';
     }
     echo '</tbody></table><p class="description">Saved promo codes are followed by exactly one blank row. The blank row is ignored until a code is entered and saved.</p><p class="submit"><button type="submit" class="button button-primary">Save Promo Codes</button></p>';
     echo '<script>
 (function () {
-  function syncPromoRow(row) {
-    var type = row.querySelector(".mrm-promo-discount-type");
-    var percent = row.querySelector(".mrm-promo-percent-wrap");
-    var amount = row.querySelector(".mrm-promo-amount-wrap");
-    var target = row.querySelector(".mrm-promo-target");
-    var rule = row.querySelector(".mrm-promo-rule");
-    var occurrence = row.querySelector(".mrm-promo-occurrence-wrap");
-    if (type && percent && amount) {
-      percent.hidden = type.value !== "percent";
-      amount.hidden = type.value !== "amount";
-    }
-    if (!target || !rule || !occurrence) return;
-    var lessonOnly = String(target.value || "").indexOf("lesson:") === 0;
-    Array.prototype.forEach.call(rule.options, function (option) {
-      var occurrenceRule = ["first_n", "first_n_months", "after_n"].indexOf(option.value) !== -1;
-      if (occurrenceRule) { option.disabled = !lessonOnly; option.hidden = !lessonOnly; }
-    });
-    if (!lessonOnly && ["first_n", "first_n_months", "after_n"].indexOf(rule.value) !== -1) rule.value = "all";
-    occurrence.hidden = ["first_n", "first_n_months", "after_n"].indexOf(rule.value) === -1;
+  var occurrenceRuleValues = [
+    "first_n",
+    "first_n_months",
+    "after_n"
+  ];
+
+  function isOccurrenceRule(ruleValue) {
+    return occurrenceRuleValues.indexOf(
+      String(ruleValue || "")
+    ) !== -1;
   }
-  document.querySelectorAll(".mrm-promo-row").forEach(function (row) {
-    syncPromoRow(row);
-    row.addEventListener("change", function (event) {
-      if (event.target.matches(".mrm-promo-discount-type, .mrm-promo-target, .mrm-promo-rule")) syncPromoRow(row);
-    });
-  });
+
+  function syncPromoRow(row) {
+    var type =
+      row.querySelector(
+        ".mrm-promo-discount-type"
+      );
+
+    var percent =
+      row.querySelector(
+        ".mrm-promo-percent-wrap"
+      );
+
+    var amount =
+      row.querySelector(
+        ".mrm-promo-amount-wrap"
+      );
+
+    var target =
+      row.querySelector(
+        ".mrm-promo-target"
+      );
+
+    var rule =
+      row.querySelector(
+        ".mrm-promo-rule"
+      );
+
+    var occurrence =
+      row.querySelector(
+        ".mrm-promo-occurrence-wrap"
+      );
+
+    var occurrenceInput =
+      occurrence
+        ? occurrence.querySelector(
+            "input[name=\"promo_occurrence_count[]\"]"
+          )
+        : null;
+
+    /*
+     * Show only the value field that belongs to the selected
+     * discount type.
+     */
+    if (
+      type &&
+      percent &&
+      amount
+    ) {
+      percent.hidden =
+        type.value !== "percent";
+
+      amount.hidden =
+        type.value !== "amount";
+    }
+
+    if (
+      !target ||
+      !rule ||
+      !occurrence
+    ) {
+      return;
+    }
+
+    var lessonOnly =
+      String(
+        target.value || ""
+      ).indexOf("lesson:") === 0;
+
+    /*
+     * Occurrence rules are available only for lesson targets.
+     */
+    Array.prototype.forEach.call(
+      rule.options,
+      function (option) {
+        if (
+          isOccurrenceRule(
+            option.value
+          )
+        ) {
+          option.disabled =
+            !lessonOnly;
+
+          option.hidden =
+            !lessonOnly;
+        }
+      }
+    );
+
+    /*
+     * Reset an occurrence rule if the target was changed from
+     * a lesson target to sheet music, Masterclass, or all
+     * products.
+     */
+    if (
+      !lessonOnly &&
+      isOccurrenceRule(
+        rule.value
+      )
+    ) {
+      rule.value = "all";
+    }
+
+    var occurrenceRuleSelected =
+      lessonOnly &&
+      isOccurrenceRule(
+        rule.value
+      );
+
+    occurrence.hidden =
+      !occurrenceRuleSelected;
+
+    if (!occurrenceInput) {
+      return;
+    }
+
+    if (occurrenceRuleSelected) {
+      /*
+       * A visible occurrence rule requires at least one
+       * occurrence or month.
+       */
+      occurrenceInput.min = "1";
+
+      var currentValue =
+        parseInt(
+          occurrenceInput.value,
+          10
+        );
+
+      if (
+        !Number.isFinite(
+          currentValue
+        ) ||
+        currentValue < 1
+      ) {
+        occurrenceInput.value = "1";
+      }
+    } else {
+      /*
+       * Inactive occurrence fields must remain valid so that
+       * browser constraint validation does not block the form.
+       *
+       * Keep the input enabled so the parallel POST arrays
+       * remain aligned by row.
+       */
+      occurrenceInput.min = "0";
+      occurrenceInput.value = "0";
+    }
+  }
+
+  var rows =
+    document.querySelectorAll(
+      ".mrm-promo-row"
+    );
+
+  Array.prototype.forEach.call(
+    rows,
+    function (row) {
+      syncPromoRow(row);
+
+      row.addEventListener(
+        "change",
+        function (event) {
+          if (
+            event.target.matches(
+              ".mrm-promo-discount-type, " +
+              ".mrm-promo-target, " +
+              ".mrm-promo-rule"
+            )
+          ) {
+            syncPromoRow(row);
+          }
+        }
+      );
+    }
+  );
+
+  /*
+   * Normalize every row one final time immediately before the
+   * browser performs native form validation.
+   */
+  var promoForm =
+    document.getElementById(
+      "mrm-promo-codes-form"
+    );
+
+  if (promoForm) {
+    promoForm.addEventListener(
+      "submit",
+      function () {
+        Array.prototype.forEach.call(
+          document.querySelectorAll(
+            ".mrm-promo-row"
+          ),
+          function (row) {
+            syncPromoRow(row);
+          }
+        );
+      }
+    );
+  }
 })();
 </script>';
     echo '<h2>Completed Promo Redemptions</h2><p class="description">Remove completed redemption rows only when you intentionally want to allow an email to use a single-use promo again.</p>';
