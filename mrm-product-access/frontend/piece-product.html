@@ -2452,6 +2452,10 @@ function mrmGetPiecePromoCodeInputValue() {
             promo_code: code,
             sku: pendingSku,
             email: email,
+            fundamentals_addon:
+              mrmPieceFundamentalsAddonSelected
+                ? 'yes'
+                : 'no',
             context: {
               piece_slug: typeof getPieceSlugFromUrl === 'function' ? getPieceSlugFromUrl() : '',
               source_flow: 'piece_product_purchase'
