@@ -2176,6 +2176,7 @@ protected function mrm_get_google_service_account_json() {
 
         add_action( 'admin_init', array( $this, 'register_settings' ) );
         add_action( 'admin_init', array( $this, 'mrm_maybe_ensure_tax_payroll_imports_table' ) );
+        add_action( 'init', array( $this, 'mrm_maybe_migrate_newsletter_contact_form_copy' ), 5 );
         add_shortcode( 'mrm_contact_form', array( $this, 'render_contact_form_shortcode' ) );
 
         // add_action( 'mrm_scheduler_send_lesson_reminder', array( $this, 'cron_send_lesson_reminder' ), 10, 1 );
@@ -12456,6 +12457,76 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
         );
     }
 
+    protected function mrm_apply_newsletter_contact_form_copy( $html ) {
+        return str_replace(
+            array(
+                'General Interest List',
+                'Join the general interest list to receive occasional updates about promo codes,',
+                'Join the Email List',
+            ),
+            array(
+                'Newsletter',
+                'Join the newsletter to receive occasional updates about promo codes,',
+                'Join the Newsletter',
+            ),
+            (string) $html
+        );
+    }
+
+    public function mrm_maybe_migrate_newsletter_contact_form_copy() {
+        $migration_version = '2026-08-02-v1';
+
+        if (
+            get_option(
+                'mrm_scheduler_newsletter_copy_version',
+                ''
+            ) === $migration_version
+        ) {
+            return;
+        }
+
+        $opts = get_option(
+            $this->option_key,
+            array()
+        );
+
+        if ( ! is_array( $opts ) ) {
+            $opts = array();
+        }
+
+        if (
+            isset( $opts['contact_form_html'] ) &&
+            is_string( $opts['contact_form_html'] )
+        ) {
+            $updated_html =
+                $this->mrm_apply_newsletter_contact_form_copy(
+                    $opts['contact_form_html']
+                );
+
+            if (
+                $updated_html !==
+                $opts['contact_form_html']
+            ) {
+                $opts['contact_form_html'] =
+                    $updated_html;
+
+                update_option(
+                    $this->option_key,
+                    $opts,
+                    'no'
+                );
+
+                $this->options = $opts;
+            }
+        }
+
+        update_option(
+            'mrm_scheduler_newsletter_copy_version',
+            $migration_version,
+            false
+        );
+    }
+
     protected function mrm_get_default_contact_form_html() {
     return <<<'HTML'
 <section class="mrm-contact-section" id="mrm-contact-form-section">
@@ -12546,7 +12617,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
 
       <div class="mrm-email-list-compact-layout">
         <div class="mrm-email-list-heading">
-          <p class="mrm-email-list-eyebrow">General Interest List</p>
+          <p class="mrm-email-list-eyebrow">Newsletter</p>
           <h2>Stay connected with Low Brass Lessons.</h2>
           <p class="mrm-email-list-subtitle">
             Online and in-person low brass lessons, sheet music, and masterclass updates.
@@ -12560,7 +12631,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
             student resources, and music masterclass opportunities.
           </p>
           <p>
-            Join the general interest list to receive occasional updates about promo codes,
+            Join the newsletter to receive occasional updates about promo codes,
             new masterclasses, new sheet music releases, and studio announcements.
           </p>
         </div>
@@ -12582,7 +12653,7 @@ protected function mrm_generate_1099_nec_preparation_pdf( $pdf_path, $payee, $ta
           </div>
 
           <div class="mrm-email-list-actions">
-            <button type="submit">Join the Email List</button>
+            <button type="submit">Join the Newsletter</button>
           </div>
         </div>
 
@@ -13099,6 +13170,8 @@ public function render_admin_contact_form_page() {
         ? (string) $opts['contact_form_html']
         : $this->mrm_get_default_contact_form_html();
 
+    $html = $this->mrm_apply_newsletter_contact_form_copy( $html );
+
     ?>
     <div class="wrap">
         <h1>Contact Form</h1>
@@ -13260,6 +13333,8 @@ public function handle_save_contact_form_settings() {
         $html = $this->mrm_get_default_contact_form_html();
     }
 
+    $html = $this->mrm_apply_newsletter_contact_form_copy( $html );
+
     $opts['contact_form_recipient_email']      = $recipient;
     $opts['contact_form_recaptcha_site_key']   = $recaptcha_site_key;
     $opts['contact_form_recaptcha_secret_key'] = $recaptcha_secret_key;
@@ -13278,6 +13353,8 @@ public function render_contact_form_shortcode() {
     $html = isset( $opts['contact_form_html'] ) && trim( (string) $opts['contact_form_html'] ) !== ''
         ? (string) $opts['contact_form_html']
         : $this->mrm_get_default_contact_form_html();
+
+    $html = $this->mrm_apply_newsletter_contact_form_copy( $html );
 
     $recaptcha_site_key = isset( $opts['contact_form_recaptcha_site_key'] )
         ? trim( (string) $opts['contact_form_recaptcha_site_key'] )
@@ -13298,9 +13375,9 @@ public function render_contact_form_shortcode() {
         : '';
 
     if ( $marketing_status === 'joined' ) {
-        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Thanks for joining the Low Brass Lessons general interest list.</div>';
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Thanks for joining the Low Brass Lessons newsletter.</div>';
     } elseif ( $marketing_status === 'already' ) {
-        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">This email is already on the Low Brass Lessons general interest list.</div>';
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">This email is already subscribed to the Low Brass Lessons newsletter.</div>';
     } elseif ( $marketing_status === 'unsubscribed' ) {
         $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">This email was previously unsubscribed from marketing emails. Please contact Low Brass Lessons if you would like to re-subscribe.</div>';
     } elseif ( $marketing_status === 'recaptcha' ) {
