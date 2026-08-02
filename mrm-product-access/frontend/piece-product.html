@@ -2511,28 +2511,40 @@ function mrmGetPiecePromoCodeInputValue() {
     pendingCheckoutRequestId = '';
   }
 
-  async function mrmAbandonPieceCheckoutReference({paymentIntentId='',orderId=0,checkoutRequestId='',email='',reason='customer_abandoned'}={}) {
+  async function mrmAbandonPieceCheckoutReference({paymentIntentId='',orderId=0,checkoutRequestId='',email='',reason='customer_abandoned'}
+={}) {
     paymentIntentId=String(paymentIntentId||'').trim();orderId=Number(orderId||0);checkoutRequestId=String(checkoutRequestId||'').trim();email=String(email||'').trim();
     if(!paymentIntentId&&!orderId&&!checkoutRequestId)return {ok:true,status:'nothing_to_release'};
     if(!email)return {ok:false,message:'The active payment session could not be identified safely.'};
     try{const response=await fetch('/wp-json/mrm-pay/v1/abandon-payment-intent',{method:'POST',headers:{'Content-Type':'application/json'},keepalive:true,body:JSON.stringify({payment_intent_id:paymentIntentId,order_id:orderId,checkout_request_id:checkoutRequestId,email,reason})});let data={};try{data=await response.json();}catch(error){}if(!response.ok||!data.ok)return {ok:false,code:data.code||'piece_checkout_release_failed',message:data.message||'The payment session could not be canceled safely.'};return {ok:true,status:data.status||'canceled'};}catch(error){return {ok:false,code:'piece_checkout_release_unavailable',message:'The payment session could not be canceled because the server could not be reached.'};}
   }
+  const mrmPieceDeferredCleanupReferences = new Map();
+  function mrmNormalizePieceCleanupReference(reference={}) {
+    const paymentIntentId=String(reference.paymentIntentId||'').trim(), orderId=Number(reference.orderId||0), checkoutRequestId=String(reference.checkoutRequestId||'').trim(), email=String(reference.email||'').trim(), reason=String(reference.reason||'customer_abandoned').trim();
+    const cleanupKey=checkoutRequestId?'request:'+checkoutRequestId:paymentIntentId?'payment:'+paymentIntentId:orderId>0?'order:'+String(orderId):'';
+    return cleanupKey?{cleanupKey,paymentIntentId,orderId,checkoutRequestId,email,reason}:null;
+  }
+  function mrmRememberPieceCleanupReference(reference) { const normalized=mrmNormalizePieceCleanupReference(reference); if(normalized)mrmPieceDeferredCleanupReferences.set(normalized.cleanupKey,normalized); return normalized; }
+  function mrmForgetPieceCleanupReference(reference) { const normalized=mrmNormalizePieceCleanupReference(reference); if(normalized)mrmPieceDeferredCleanupReferences.delete(normalized.cleanupKey); }
+  async function mrmAttemptPieceCheckoutCleanup(reference) { const normalized=mrmRememberPieceCleanupReference(reference); if(!normalized)return {ok:true,status:'nothing_to_release'}; const result=await mrmAbandonPieceCheckoutReference(normalized); if(result.ok)mrmForgetPieceCleanupReference(normalized); return result; }
+  async function mrmFlushDeferredPieceCheckoutCleanups() { const pendingReferences=Array.from(mrmPieceDeferredCleanupReferences.values()); let firstFailure=null; for(const reference of pendingReferences){const result=await mrmAttemptPieceCheckoutCleanup(reference);if(!result.ok&&!firstFailure)firstFailure=result;} return firstFailure||{ok:true,status:'cleanup_complete'}; }
 
   async function mrmAbandonPendingPieceCheckout(reason='customer_abandoned') {
-    const releaseResult=await mrmAbandonPieceCheckoutReference({paymentIntentId:pendingPaymentIntentId,orderId:pendingOrderId,checkoutRequestId:pendingCheckoutRequestId,email:mrmGetPiecePaymentEmailValue(),reason});
-    if(releaseResult.ok)mrmClearPendingPiecePaymentIdentity();return releaseResult;
+    const activeResult=await mrmAttemptPieceCheckoutCleanup({paymentIntentId:pendingPaymentIntentId,orderId:pendingOrderId,checkoutRequestId:pendingCheckoutRequestId,email:mrmGetPiecePaymentEmailValue(),reason});
+    if(!activeResult.ok)return activeResult;
+    mrmClearPendingPiecePaymentIdentity();
+    return await mrmFlushDeferredPieceCheckoutCleanups();
   }
 
 
   function mrmAbandonPieceCheckoutOnPageExit() {
     if(mrmPiecePaymentConfirmationInProgress||mrmPiecePaymentCompleted)return;
-    const paymentIntentId=String(pendingPaymentIntentId||'').trim(),orderId=Number(pendingOrderId||0);
-    const exitCheckoutRequestId=String(pendingCheckoutRequestId||(paymentIntentInFlight?checkoutRequestId:'')||'').trim();
-    const email=String(mrmGetPiecePaymentEmailValue()||'').trim();
-    if(!email||(!paymentIntentId&&!orderId&&!exitCheckoutRequestId))return;
-    const body=JSON.stringify({payment_intent_id:paymentIntentId,order_id:orderId,checkout_request_id:exitCheckoutRequestId,email,reason:'customer_left_piece_checkout_page'}),endpoint='/wp-json/mrm-pay/v1/abandon-payment-intent';
-    if(navigator.sendBeacon&&typeof Blob==='function'){try{if(navigator.sendBeacon(endpoint,new Blob([body],{type:'application/json'})))return;}catch(error){}}
-    try{fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body,keepalive:true});}catch(error){}
+    const email=String(mrmGetPiecePaymentEmailValue()||'').trim(); if(!email)return;
+    const references=[]; const activePaymentIntentId=String(pendingPaymentIntentId||'').trim(), activeOrderId=Number(pendingOrderId||0), activeRequestId=String(pendingCheckoutRequestId||(paymentIntentInFlight?checkoutRequestId:'')||'').trim();
+    if(activePaymentIntentId||activeOrderId||activeRequestId)references.push({paymentIntentId:activePaymentIntentId,orderId:activeOrderId,checkoutRequestId:activeRequestId,email,reason:'customer_left_piece_checkout_page'});
+    for(const deferredReference of mrmPieceDeferredCleanupReferences.values())references.push({...deferredReference,email:deferredReference.email||email,reason:deferredReference.reason||'customer_left_piece_checkout_page'});
+    const sentKeys=new Set(),endpoint='/wp-json/mrm-pay/v1/abandon-payment-intent';
+    references.forEach(function(reference){const normalized=mrmNormalizePieceCleanupReference(reference);if(!normalized||sentKeys.has(normalized.cleanupKey)||!normalized.email)return;sentKeys.add(normalized.cleanupKey);const body=JSON.stringify({payment_intent_id:normalized.paymentIntentId,order_id:normalized.orderId,checkout_request_id:normalized.checkoutRequestId,email:normalized.email,reason:normalized.reason||'customer_left_piece_checkout_page'});if(navigator.sendBeacon&&typeof Blob==='function'){try{if(navigator.sendBeacon(endpoint,new Blob([body],{type:'application/json'})))return;}catch(error){}}try{fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body,keepalive:true});}catch(error){}});
   }
 
   window.addEventListener('pagehide', mrmAbandonPieceCheckoutOnPageExit);
@@ -3393,12 +3405,10 @@ async function getOfferSkuCandidates(offerEl) {
     };
 
     const invalidatePaymentIntentRequest = function(reason='piece_checkout_request_replaced') {
-      const requestId=String(checkoutRequestId||'');
-      const requestEmail=String(emailInput&&emailInput.value?emailInput.value:'').trim();
-      paymentIntentSeq+=1;
-      if(paymentIntentInFlight&&requestId&&requestEmail)void mrmAbandonPieceCheckoutReference({checkoutRequestId:requestId,email:requestEmail,reason});
+      const requestId=String(checkoutRequestId||''),requestEmail=String(emailInput&&emailInput.value?emailInput.value:'').trim(); paymentIntentSeq+=1;
+      if(paymentIntentInFlight&&requestId&&requestEmail)mrmRememberPieceCleanupReference({checkoutRequestId:requestId,email:requestEmail,reason});
       if(paymentIntentAbortController){try{paymentIntentAbortController.abort();}catch(error){}paymentIntentAbortController=null;}
-      paymentIntentInFlight=false;retireCheckoutRequestId(requestId);
+      paymentIntentInFlight=false; retireCheckoutRequestId(requestId);
     };
 
     const applyServerBreakdown = (data) => {
@@ -3557,6 +3567,9 @@ async function getOfferSkuCandidates(offerEl) {
        */
       invalidatePaymentIntentRequest();
 
+      const deferredCleanupResult = await mrmFlushDeferredPieceCheckoutCleanups();
+      if (!deferredCleanupResult.ok) { errorEl.textContent=deferredCleanupResult.message||'The previous payment session could not be canceled safely. Please try again.'; payBtn.disabled=true; setContinueButtonIdle(); return; }
+
       taxPreviewSeq += 1;
       if (taxPreviewAbortController) {
         try { taxPreviewAbortController.abort(); } catch (error) {}
@@ -3670,8 +3683,8 @@ async function getOfferSkuCandidates(offerEl) {
           const data = await res.json();
 
           if (!isCurrentPaymentModal()||paymentIntentSignal.aborted||paymentRequestSeq!==paymentIntentSeq||paymentRequestKey!==getPaymentIntentRequestKey()||currentCheckoutRequestId!==getOrCreateCheckoutRequestId()) {
-            await mrmAbandonPieceCheckoutReference({paymentIntentId:data&&data.payment_intent_id?data.payment_intent_id:'',orderId:data&&data.order_id?data.order_id:0,checkoutRequestId:currentCheckoutRequestId,email,reason:'piece_checkout_response_superseded'});
-            retireCheckoutRequestId(currentCheckoutRequestId);return;
+            const cleanupResult=await mrmAttemptPieceCheckoutCleanup({paymentIntentId:data&&data.payment_intent_id?data.payment_intent_id:'',orderId:data&&data.order_id?data.order_id:0,checkoutRequestId:currentCheckoutRequestId,email,reason:'piece_checkout_response_superseded'});
+            retireCheckoutRequestId(currentCheckoutRequestId);if(!cleanupResult.ok)errorEl.textContent=cleanupResult.message;return;
           }
 
           if (!res.ok || !data.ok) {
@@ -3765,8 +3778,8 @@ async function getOfferSkuCandidates(offerEl) {
           }
         } catch (error) {
           if(error&&error.name==='AbortError'){
-            await mrmAbandonPieceCheckoutReference({checkoutRequestId:currentCheckoutRequestId,email,reason:'piece_checkout_request_aborted'});
-            retireCheckoutRequestId(currentCheckoutRequestId);return;
+            const cleanupResult=await mrmAttemptPieceCheckoutCleanup({checkoutRequestId:currentCheckoutRequestId,email,reason:'piece_checkout_request_aborted'});
+            retireCheckoutRequestId(currentCheckoutRequestId);if(!cleanupResult.ok)errorEl.textContent=cleanupResult.message;return;
           }
           if (!isCurrentPaymentModal() || paymentRequestSeq !== paymentIntentSeq) return;
           if (pendingPaymentIntentId && pendingOrderId) {

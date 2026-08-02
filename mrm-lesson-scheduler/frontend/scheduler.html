@@ -4761,7 +4761,14 @@ function mrmUpdateStoredSchedulerPaymentFromActiveData(activeData) {
     }
     if(activeData.payment_intent_id)stored.payment_intent_id=activeData.payment_intent_id;
     if(activeData.order_id)stored.order_id=activeData.order_id;
-    if(activeData.promo_code)stored.promo_code=activeData.promo_code;
+    if(Object.prototype.hasOwnProperty.call(activeData,'promo_code')){
+      const activePromoCode=String(activeData.promo_code||''); stored.promo_code=activePromoCode;
+      if(stored.autopay_enrollment&&typeof stored.autopay_enrollment==='object'){
+        stored.autopay_enrollment.promo_code=activePromoCode;
+        if(!stored.autopay_enrollment.context||typeof stored.autopay_enrollment.context!=='object')stored.autopay_enrollment.context={};
+        stored.autopay_enrollment.context.promo_code=activePromoCode;
+      }
+    }
     if(activeData.checkout_request_id)stored.checkout_request_id=activeData.checkout_request_id;
     sessionStorage.setItem('mrmSchedulerPayment',JSON.stringify(stored));
   } catch(error) {}
@@ -5318,10 +5325,14 @@ function ensureLegacyBookingHandler(){
 
           persistSelectedSlots();
 
-          mrmLessonPaymentReloadContext = {
-            payApiBase, requestBody: autopayPaymentRequestBody, currentData: createData,
-            pendingCheckoutRequestId: '', redirectRecovery: null
+          const autopayRedirectRecovery = {
+            payload: JSON.parse(JSON.stringify(payload)), email,
+            payment_intent_id:createData.payment_intent_id, order_id:createData.order_id,
+            checkout_request_id:autopayPaymentRequestBody.checkout_request_id, payment_mode:'autopay',
+            autopay_enrollment:{promo_code:createData.promo_code||mrmAppliedPromoCode||'',context:{instructor_id:instrId,lesson_length:len,lesson_mode:lessonType,repeat_frequency:frequency,repeat_duration:reserveDuration,authorized_lesson_count:authorizedLessonCount,promo_code:createData.promo_code||mrmAppliedPromoCode||''}}
           };
+          mrmLessonPaymentReloadContext = {payApiBase,requestBody:autopayPaymentRequestBody,currentData:createData,pendingCheckoutRequestId:'',redirectRecovery:autopayRedirectRecovery};
+          sessionStorage.setItem('mrmSchedulerPayment',JSON.stringify(autopayRedirectRecovery));
 
           const { payBtn, errorEl, closeModal } = await openPaymentModal(
             createData.client_secret,
@@ -5406,6 +5417,7 @@ function ensureLegacyBookingHandler(){
 
                 await closeModal({ clearSelection: false, releaseCheckout: false });
                 await submitBooking(payload, setMsg);
+                try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch (error) {}
                 mrmHidePaymentLoading();
                 return;
               }
@@ -5572,6 +5584,7 @@ function ensureLegacyBookingHandler(){
               await closeModal({ clearSelection: false, releaseCheckout: false });
 
               await submitBooking(payload, setMsg);
+                try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch (error) {}
               mrmHidePaymentLoading();
               return;
             }
@@ -5607,40 +5620,32 @@ function ensureLegacyBookingHandler(){
   });
 }
 
-async function checkReturnFromStripe(){
-  const params = new URLSearchParams(window.location.search);
-  const piId = params.get('payment_intent');
-  if (!piId) return;
-  const stored = sessionStorage.getItem('mrmSchedulerPayment');
-  if (!stored) return;
-  let ctx = null;
-  try {
-    ctx = JSON.parse(stored);
-  } catch (e) {
-    sessionStorage.removeItem('mrmSchedulerPayment');
-    return;
-  }
-  if (!ctx || !ctx.payload || !ctx.email) {
-    sessionStorage.removeItem('mrmSchedulerPayment');
-    return;
-  }
-  const msgEl = document.getElementById('booking-message');
-  const modalMsg = document.getElementById('modal-booking-message');
-  const setMsg = (t)=>{
-    msgEl.textContent = t || '';
-    if(modalMsg) modalMsg.textContent = t || '';
-  };
+async function checkReturnFromStripe() {
+  const params=new URLSearchParams(window.location.search),paymentIntentId=params.get('payment_intent'); if(!paymentIntentId)return;
+  const stored=sessionStorage.getItem('mrmSchedulerPayment'); if(!stored)return; let context=null;
+  try{context=JSON.parse(stored);}catch(error){sessionStorage.removeItem('mrmSchedulerPayment');return;}
+  if(!context||!context.payload||!context.email){sessionStorage.removeItem('mrmSchedulerPayment');return;}
+  const messageElement=document.getElementById('booking-message'),modalMessageElement=document.getElementById('modal-booking-message');
+  const setMessage=function(message){if(messageElement)messageElement.textContent=message||'';if(modalMessageElement)modalMessageElement.textContent=message||'';};
+  let recoveryCompleted=false;
   try{
-    await verifyPaymentIntent(piId, ctx.email);
-    if (ctx.order_id) ctx.payload.order_id = ctx.order_id;
-    if (!ctx.payload.payment_mode) ctx.payload.payment_mode = (ctx.payment_mode || 'one_time');
-    if (typeof ctx.payload.autopay_profile_id === 'undefined') ctx.payload.autopay_profile_id = null;
-    await submitBooking(ctx.payload, setMsg);
-  }catch(err){
-    setMsg(err.message || 'Payment verification failed.');
-  }finally{
-    sessionStorage.removeItem('mrmSchedulerPayment');
-  }
+    await verifyPaymentIntent(paymentIntentId,context.email);
+    const paymentMode=String(context.payment_mode||context.payload.payment_mode||'one_time');
+    if(paymentMode==='autopay'){
+      const enrollment=context.autopay_enrollment&&typeof context.autopay_enrollment==='object'?context.autopay_enrollment:{};
+      const enrollmentContext=enrollment.context&&typeof enrollment.context==='object'?enrollment.context:{};
+      const enrollmentResponse=await fetch('/wp-json/mrm-pay/v1/create-autopay-enrollment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_intent_id:paymentIntentId,email:context.email,promo_code:enrollment.promo_code||context.promo_code||'',context:enrollmentContext})});
+      const enrollmentData=await mrmReadJsonOrError(enrollmentResponse);
+      if(!enrollmentResponse.ok||!enrollmentData.ok)throw new Error(enrollmentData.message||'Unable to finalize Auto-pay enrollment.');
+      context.payload.payment_mode='autopay'; context.payload.autopay_profile_id=enrollmentData.autopay_profile_id; context.payload.order_id=context.order_id||null;
+    }else{
+      if(context.order_id)context.payload.order_id=context.order_id;
+      if(!context.payload.payment_mode)context.payload.payment_mode=paymentMode;
+      if(typeof context.payload.autopay_profile_id==='undefined')context.payload.autopay_profile_id=null;
+    }
+    await submitBooking(context.payload,setMessage); recoveryCompleted=true;
+  }catch(error){setMessage(error&&error.message?error.message:'Payment verification failed.');}
+  finally{if(recoveryCompleted)sessionStorage.removeItem('mrmSchedulerPayment');}
 }
 
 function monthKey(y,m){

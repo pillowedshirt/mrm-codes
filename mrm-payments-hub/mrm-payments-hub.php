@@ -7980,70 +7980,46 @@ private function mrm_tax_retry_or_alert_payment_intent(
     return is_array($order) && hash_equals((string)($order['email_hash'] ?? ''), (string)$email_hash) && $this->sanitize_sku((string)($order['sku'] ?? '')) === $this->sanitize_sku((string)$sku);
   }
 
-  private function mrm_build_piece_checkout_state_fingerprint(
-    $checkout_request_id,
-    $email_hash,
-    $sku,
-    $data,
-    $context,
-    $terms_version,
-    $source_flow
+  private function mrm_build_checkout_state_fingerprint(
+    $checkout_request_id, $email_hash, $sku, $data, $context, $terms_version, $source_flow
   ) {
     $checkout_request_id = $this->mrm_sanitize_checkout_request_id($checkout_request_id);
     $email_hash = sanitize_text_field((string)$email_hash);
     $sku = $this->sanitize_sku((string)$sku);
     $data = is_array($data) ? $data : array();
     $context = is_array($context) ? $context : array();
-    $address = $this->mrm_normalize_tax_address(
-      isset($data['address']) && is_array($data['address']) ? $data['address'] : array()
-    );
-
+    $address = $this->mrm_normalize_tax_address(isset($data['address']) && is_array($data['address']) ? $data['address'] : array());
+    /* Every field that could change product, charge, tax, promo eligibility, enrollment, or stored context. */
     $state = array(
-      'checkout_request_id' => $checkout_request_id,
-      'email_hash' => $email_hash,
-      'sku' => $sku,
-      'promo_code' => $this->mrm_normalize_promo_code($data['promo_code'] ?? ''),
-      'fundamentals_addon' => isset($data['fundamentals_addon']) && strtolower((string)$data['fundamentals_addon']) === 'yes' ? 'yes' : 'no',
-      'sheet_music_addon' => isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon']) === 'yes' ? 'yes' : 'no',
-      'save_card' => !empty($data['save_card']) ? 'yes' : 'no',
-      'amount_override_cents' => max(0, (int)($data['amount_override_cents'] ?? 0)),
-      'terms_accepted' => !empty($context['terms_accepted']) ? 'yes' : 'no',
-      'terms_version' => sanitize_text_field((string)$terms_version),
-      'source_flow' => sanitize_key((string)$source_flow),
-      'piece_slug' => sanitize_title((string)($context['piece_slug'] ?? '')),
-      'address' => array(
-        'line1' => (string)($address['line1'] ?? ''),
-        'line2' => (string)($address['line2'] ?? ''),
-        'city' => (string)($address['city'] ?? ''),
-        'state' => (string)($address['state'] ?? ''),
-        'postal_code' => (string)($address['postal_code'] ?? ''),
-        'country' => (string)($address['country'] ?? 'US'),
-      ),
+      'checkout_request_id'=>$checkout_request_id, 'email_hash'=>$email_hash, 'sku'=>$sku,
+      'product_type'=>sanitize_key((string)($context['product_type'] ?? '')),
+      'product_category'=>sanitize_key((string)($context['product_category'] ?? '')),
+      'promo_code'=>$this->mrm_normalize_promo_code($data['promo_code'] ?? ''),
+      'fundamentals_addon'=>isset($data['fundamentals_addon']) && strtolower((string)$data['fundamentals_addon'])==='yes'?'yes':'no',
+      'sheet_music_addon'=>isset($data['sheet_music_addon']) && strtolower((string)$data['sheet_music_addon'])==='yes'?'yes':'no',
+      'save_card'=>!empty($data['save_card'])?'yes':'no', 'amount_override_cents'=>max(0,(int)($data['amount_override_cents'] ?? 0)),
+      'terms_accepted'=>!empty($context['terms_accepted'])?'yes':'no', 'terms_version'=>sanitize_text_field((string)$terms_version), 'source_flow'=>sanitize_key((string)$source_flow),
+      'piece_slug'=>sanitize_title((string)($context['piece_slug'] ?? '')),
+      'subscription_purchase_acknowledged'=>!empty($context['subscription_purchase_acknowledged'])?'yes':'no',
+      'instructor_id'=>absint($context['instructor_id'] ?? 0), 'lesson_length'=>absint($context['lesson_length'] ?? 0),
+      'lesson_mode'=>sanitize_key((string)($context['lesson_mode'] ?? '')), 'lesson_count'=>absint($context['lesson_count'] ?? 0),
+      'prepay'=>sanitize_key((string)($context['prepay'] ?? 'no')), 'autopay'=>sanitize_key((string)($context['autopay'] ?? 'no')),
+      'repeat_frequency'=>sanitize_key((string)($context['repeat_frequency'] ?? '')), 'repeat_duration'=>sanitize_key((string)($context['repeat_duration'] ?? '')),
+      'authorized_lesson_count'=>absint($context['authorized_lesson_count'] ?? 0), 'occurrence_number'=>absint($context['occurrence_number'] ?? 0),
+      'student_name'=>sanitize_text_field((string)($context['student_name'] ?? '')),
+      'address'=>array('line1'=>(string)($address['line1']??''),'line2'=>(string)($address['line2']??''),'city'=>(string)($address['city']??''),'state'=>(string)($address['state']??''),'postal_code'=>(string)($address['postal_code']??''),'country'=>(string)($address['country']??'US')),
     );
-
     return hash('sha256', wp_json_encode($state));
   }
 
-  private function mrm_validate_existing_piece_checkout_state($order, $email_hash, $sku, $incoming_state_fingerprint) {
-    if (!$this->mrm_checkout_order_matches_customer($order, $email_hash, $sku)) {
-      return new WP_Error('checkout_request_mismatch', 'This checkout request does not match the current customer or product.');
-    }
-    if (sanitize_key((string)($order['product_type'] ?? '')) !== 'sheet_music') {
-      return new WP_Error('checkout_request_product_mismatch', 'This checkout request does not belong to a sheet-music purchase.');
-    }
-
-    /* Prevent reuse after pricing, tax registrations, or customer details may have changed. */
-    $created_timestamp = strtotime((string)($order['created_at'] ?? ''));
-    if ($created_timestamp && (current_time('timestamp') - $created_timestamp) > 1800) {
-      return new WP_Error('checkout_request_expired', 'This checkout session has expired. Please close checkout and begin again.');
-    }
-
-    $metadata = $this->mrm_get_order_meta_array($order);
-    $stored_state_fingerprint = sanitize_text_field((string)($metadata['mrm_checkout_state_fingerprint'] ?? ''));
-    $incoming_state_fingerprint = sanitize_text_field((string)$incoming_state_fingerprint);
-    if ($stored_state_fingerprint === '' || $incoming_state_fingerprint === '' || !hash_equals($stored_state_fingerprint, $incoming_state_fingerprint)) {
-      return new WP_Error('checkout_request_parameters_changed', 'The checkout details changed during payment creation. Please close checkout and begin again.');
-    }
+  private function mrm_validate_existing_checkout_state($order, $email_hash, $sku, $product_type, $incoming_state_fingerprint) {
+    if (!$this->mrm_checkout_order_matches_customer($order,$email_hash,$sku)) return new WP_Error('checkout_request_mismatch','This checkout request does not match the current customer or product.');
+    $stored_product_type=sanitize_key((string)($order['product_type']??'')); $product_type=sanitize_key((string)$product_type);
+    if (!in_array($stored_product_type,array('lesson','sheet_music'),true) || $product_type==='' || !hash_equals($stored_product_type,$product_type)) return new WP_Error('checkout_request_product_mismatch','This checkout request does not belong to the selected purchase type.');
+    $created_timestamp=strtotime((string)($order['created_at']??''));
+    if ($created_timestamp && (current_time('timestamp')-$created_timestamp)>1800) return new WP_Error('checkout_request_expired','This checkout session has expired. Please close checkout and begin again.');
+    $metadata=$this->mrm_get_order_meta_array($order); $stored_state_fingerprint=sanitize_text_field((string)($metadata['mrm_checkout_state_fingerprint']??'')); $incoming_state_fingerprint=sanitize_text_field((string)$incoming_state_fingerprint);
+    if ($stored_state_fingerprint==='' || $incoming_state_fingerprint==='' || !hash_equals($stored_state_fingerprint,$incoming_state_fingerprint)) return new WP_Error('checkout_request_parameters_changed','The checkout details changed during payment creation. Please close checkout and begin again.');
     return true;
   }
 
@@ -8387,6 +8363,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
     return new WP_REST_Response(array(
       'ok'=>true, 'reused_checkout_request'=>true, 'publishableKey'=>$key, 'client_secret'=>$client_secret,
       'payment_intent_id'=>$payment_intent_id, 'allowed_payment_methods'=>$methods, 'order_id'=>(int)$order['id'],
+      'checkout_request_id'=>$this->mrm_sanitize_checkout_request_id($metadata['mrm_checkout_request_id'] ?? ''),
       'customer_id'=>is_array($pi['customer'] ?? null) ? sanitize_text_field((string)($pi['customer']['id'] ?? '')) : sanitize_text_field((string)($pi['customer'] ?? '')),
       'sku'=>$sku, 'label'=>sanitize_text_field((string)(is_array($product) ? ($product['label'] ?? $sku) : $sku)),
       'amount_cents'=>$amount, 'total_cents'=>$amount,
@@ -14933,10 +14910,10 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $email_hash = $this->email_hash($email);
-    $incoming_state_fingerprint = $this->mrm_build_piece_checkout_state_fingerprint(
+    $incoming_state_fingerprint = $this->mrm_build_checkout_state_fingerprint(
       $checkout_request_id, $email_hash, $sku, $data, $context, $terms_version, $source_flow
     );
-    $state_validation = $this->mrm_validate_existing_piece_checkout_state($order, $email_hash, $sku, $incoming_state_fingerprint);
+    $state_validation = $this->mrm_validate_existing_checkout_state($order, $email_hash, $sku, 'sheet_music', $incoming_state_fingerprint);
     if (is_wp_error($state_validation)) {
       return $this->mrm_checkout_wp_error_response($state_validation, 409);
     }
@@ -15178,7 +15155,7 @@ private function charge_and_unlock_autopay($data) {
     }
 
     $checkout_request_id = $this->mrm_sanitize_checkout_request_id($data['checkout_request_id'] ?? '');
-    if ($source_flow === 'piece_product_purchase' && $checkout_request_id === '') {
+    if (in_array($product_type, array('lesson', 'sheet_music'), true) && $checkout_request_id === '') {
       return new WP_REST_Response(array('ok'=>false, 'code'=>'checkout_request_id_required', 'message'=>'Checkout could not be initialized securely. Please close the payment window and try again.'), 400);
     }
 
@@ -15186,7 +15163,7 @@ private function charge_and_unlock_autopay($data) {
     $request_email_hash = $this->email_hash($email);
     if ($checkout_request_id !== '' && $this->mrm_checkout_request_is_abandoned($checkout_request_id, $request_email_hash)) return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_request_abandoned','message'=>'This checkout request was canceled before payment creation completed.'), 409);
     $incoming_checkout_state_fingerprint = $checkout_request_id !== ''
-      ? $this->mrm_build_piece_checkout_state_fingerprint(
+      ? $this->mrm_build_checkout_state_fingerprint(
           $checkout_request_id,
           $request_email_hash,
           $sku,
@@ -15214,7 +15191,7 @@ private function charge_and_unlock_autopay($data) {
 
       /* A completed attachment can be reused only after validating the complete client state. */
       if (is_array($existing_checkout_order) && !empty($existing_checkout_order['stripe_payment_intent_id'])) {
-        $state_validation = $this->mrm_validate_existing_piece_checkout_state($existing_checkout_order, $request_email_hash, $sku, $incoming_checkout_state_fingerprint);
+        $state_validation = $this->mrm_validate_existing_checkout_state($existing_checkout_order, $request_email_hash, $sku, $product_type, $incoming_checkout_state_fingerprint);
         if (is_wp_error($state_validation)) return new WP_REST_Response(array('ok'=>false, 'code'=>$state_validation->get_error_code(), 'message'=>$state_validation->get_error_message()), 409);
         $reused_response = $this->mrm_build_reused_checkout_response($existing_checkout_order);
         if (is_wp_error($reused_response)) {
@@ -15236,7 +15213,7 @@ private function charge_and_unlock_autopay($data) {
       /* Recheck after locking because an identical request may have just completed. */
       $existing_checkout_order = $this->get_order_by_meta_value('mrm_checkout_request_id', $checkout_request_id);
       if (is_array($existing_checkout_order)) {
-        $state_validation = $this->mrm_validate_existing_piece_checkout_state($existing_checkout_order, $request_email_hash, $sku, $incoming_checkout_state_fingerprint);
+        $state_validation = $this->mrm_validate_existing_checkout_state($existing_checkout_order, $request_email_hash, $sku, $product_type, $incoming_checkout_state_fingerprint);
         if (is_wp_error($state_validation)) return new WP_REST_Response(array('ok'=>false, 'code'=>$state_validation->get_error_code(), 'message'=>$state_validation->get_error_message()), 409);
         if (!empty($existing_checkout_order['stripe_payment_intent_id'])) {
           $reused_response = $this->mrm_build_reused_checkout_response($existing_checkout_order);
@@ -15250,16 +15227,13 @@ private function charge_and_unlock_autopay($data) {
           return $reused_response;
         }
 
-        /* Resume the stored calculation when the prior response ended before local PI attachment. */
-        $resume_response = $this->mrm_resume_unattached_piece_checkout_order($existing_checkout_order, $checkout_request_id);
-        if (is_wp_error($resume_response)) {
-          return $this
-            ->mrm_checkout_wp_error_response(
-              $resume_response,
-              500
-            );
+        /* Sheet music can reuse its fixed stored pricing snapshot. Lessons must rebuild customer, AutoPay, add-on, and lesson metadata below. */
+        if ($product_type === 'sheet_music') {
+          $resume_response = $this->mrm_resume_unattached_piece_checkout_order($existing_checkout_order, $checkout_request_id);
+          if (is_wp_error($resume_response)) return $this->mrm_checkout_wp_error_response($resume_response, 500);
+          return $resume_response;
         }
-        return $resume_response;
+        /* Continue through the standard calculation and order-update path for lessons. */
       }
     }
 
