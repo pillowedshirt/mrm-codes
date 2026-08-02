@@ -2238,24 +2238,19 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
     return true;
   }
 
-  function mrmResetPiecePaymentElement(message) {
-    mrmClearPendingPiecePaymentIdentity();
-
-  if (activePaymentElement) {
-    try { activePaymentElement.unmount(); } catch (e) {}
-  }
-
-  activePaymentElement = null;
-  activeStripeElements = null;
-
-  const paymentMount = document.getElementById('mrm-payment-element');
-  if (paymentMount) {
-    paymentMount.innerHTML = `
-      <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
-        ${message || 'Enter your email and ZIP to load the secure payment form.'}
-      </div>
-    `;
-  }
+  async function mrmResetPiecePaymentElement(message, reason = 'piece_checkout_replaced') {
+    const releaseResult = await mrmAbandonPendingPieceCheckout(reason);
+    if (!releaseResult.ok) {
+      const errorEl = document.getElementById('mrm-payment-error');
+      if (errorEl) errorEl.textContent = releaseResult.message;
+      return false;
+    }
+    if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
+    activePaymentElement = null;
+    activeStripeElements = null;
+    const paymentMount = document.getElementById('mrm-payment-element');
+    if (paymentMount) paymentMount.innerHTML = `<div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">${message || 'Enter your email and ZIP to load the secure payment form.'}</div>`;
+    return true;
   }
 
   function mrmPieceMoney(cents) {
@@ -2406,17 +2401,14 @@ function mrmGetPiecePromoCodeInputValue() {
 
     if (!input || !btn) return;
 
-    input.addEventListener('input', function () {
+    input.addEventListener('input', async function () {
+      const resetCompleted = await mrmResetPiecePaymentElement('Enter your email and ZIP to load the secure payment form.', 'promo_code_changed');
+      if (!resetCompleted) return;
       mrmPieceAppliedPromoCode = '';
       mrmPieceAppliedPromoDiscountCents = 0;
       mrmUpdatePiecePromoTopBreakdown();
       btn.style.display = input.value.trim() ? 'inline-flex' : 'none';
-      mrmResetPiecePaymentElement('Enter your email and ZIP to load the secure payment form.');
-
-      if (typeof mrmPieceSchedulePaymentLoad === 'function') {
-        mrmPieceSchedulePaymentLoad();
-      }
-
+      if (typeof mrmPieceSchedulePaymentLoad === 'function') mrmPieceSchedulePaymentLoad();
       mrmSetPiecePromoMessage('', false);
     });
 
@@ -2472,12 +2464,15 @@ function mrmGetPiecePromoCodeInputValue() {
           return;
         }
 
+        const resetCompleted = await mrmResetPiecePaymentElement('Promotional code applied. Enter or confirm your billing ZIP to update tax and reload the secure payment form.', 'promo_code_applied');
+        if (!resetCompleted) {
+          mrmSetPiecePromoMessage('The previous payment session could not be canceled safely. Please try again.', true);
+          return;
+        }
         mrmPieceAppliedPromoCode = data.promo_code || code;
         mrmPieceAppliedPromoDiscountCents = Number(data.discount_cents || data.promo_discount_cents || 0);
         mrmSetPiecePromoMessage(data.promo_success_message || 'Promotional code applied.', false);
         mrmUpdatePiecePromoTopBreakdown();
-
-        mrmResetPiecePaymentElement('Promotional code applied. Enter or confirm your billing ZIP to update tax and reload the secure payment form.');
 
         const paymentEmail = document.getElementById('mrm-payment-email');
         if (paymentEmail && email && !paymentEmail.value) {
@@ -2510,6 +2505,27 @@ function mrmGetPiecePromoCodeInputValue() {
     pendingOrderId = 0;
     pendingPaymentIntentId = '';
     pendingCheckoutRequestId = '';
+  }
+
+  async function mrmAbandonPendingPieceCheckout(reason = 'customer_abandoned') {
+    const paymentIntentId = String(pendingPaymentIntentId || '').trim();
+    const orderId = Number(pendingOrderId || 0);
+    const checkoutRequestId = String(pendingCheckoutRequestId || '').trim();
+    if (!paymentIntentId || !orderId) return { ok: true, status: 'nothing_to_release' };
+    const email = String(mrmGetPiecePaymentEmailValue() || '').trim();
+    if (!email || !checkoutRequestId) return { ok: false, message: 'The active payment session could not be identified safely.' };
+    try {
+      const response = await fetch('/wp-json/mrm-pay/v1/abandon-payment-intent', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ payment_intent_id: paymentIntentId, order_id: orderId, email, checkout_request_id: checkoutRequestId, reason })
+      });
+      let data = {}; try { data = await response.json(); } catch (error) {}
+      if (!response.ok || !data.ok) return { ok: false, code: data.code || 'piece_checkout_release_failed', message: data.message || 'The payment session could not be canceled safely.' };
+      mrmClearPendingPiecePaymentIdentity();
+      return { ok: true, status: data.status || 'canceled' };
+    } catch (error) {
+      return { ok: false, code: 'piece_checkout_release_unavailable', message: 'The payment session could not be canceled because the server could not be reached.' };
+    }
   }
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -3127,7 +3143,15 @@ async function getOfferSkuCandidates(offerEl) {
       </div>
     `;
 
-    document.getElementById('payment-close').onclick = function () {
+    document.getElementById('payment-close').onclick = async function () {
+      const closeButton = this;
+      closeButton.disabled = true;
+      const releaseResult = await mrmAbandonPendingPieceCheckout('customer_closed_payment_modal');
+      if (!releaseResult.ok) {
+        errorEl.textContent = releaseResult.message;
+        closeButton.disabled = false;
+        return;
+      }
       overlay.style.display = 'none';
       overlay.setAttribute('aria-hidden', 'true');
 
@@ -3169,7 +3193,15 @@ async function getOfferSkuCandidates(offerEl) {
     };
 
     const paymentBack = document.getElementById('mrm-payment-back');
-    if (paymentBack) paymentBack.onclick = () => {
+    if (paymentBack) {
+      paymentBack.onclick = async function () {
+      this.disabled = true;
+      const releaseResult = await mrmAbandonPendingPieceCheckout('customer_returned_to_checkout_details');
+      if (!releaseResult.ok) {
+        errorEl.textContent = releaseResult.message;
+        this.disabled = false;
+        return;
+      }
       mrmPiecePaymentStepRequested = false;
       clearTimeout(loadTimer);
       invalidatePaymentIntentRequest();
@@ -3192,7 +3224,9 @@ async function getOfferSkuCandidates(offerEl) {
 
       payBtn.disabled = true;
       errorEl.textContent = '';
-    };
+      this.disabled = false;
+      };
+    }
 
     const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
     const isPostalLike = (v) => String(v || '').trim().length >= 4;
@@ -3233,23 +3267,15 @@ async function getOfferSkuCandidates(offerEl) {
       );
     };
 
-    const resetLoadedPaymentForBillingChange = (message) => {
-      if (activePaymentElement) {
-        try { activePaymentElement.unmount(); } catch (e) {}
-      }
-
+    const resetLoadedPaymentForBillingChange = async (message, reason = 'piece_checkout_details_changed') => {
+      const releaseResult = await mrmAbandonPendingPieceCheckout(reason);
+      if (!releaseResult.ok) { errorEl.textContent = releaseResult.message; payBtn.disabled = true; return false; }
+      if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
       activePaymentElement = null;
       activeStripeElements = null;
-      mrmClearPendingPiecePaymentIdentity();
       payBtn.disabled = true;
-
-      if (paymentMount) {
-        paymentMount.innerHTML = `
-          <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
-            ${message || 'Review the tax breakdown above, then accept the Terms of Service to load the secure payment form.'}
-          </div>
-        `;
-      }
+      if (paymentMount) paymentMount.innerHTML = `<div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">${message || 'Review the tax breakdown above, then accept the Terms of Service to load the secure payment form.'}</div>`;
+      return true;
     };
 
     const setContinueButtonIdle = function() {
@@ -3460,7 +3486,7 @@ async function getOfferSkuCandidates(offerEl) {
       taxPreviewTimer = setTimeout(requestTaxPreview, 350);
     };
 
-    const handleFundamentalsAlreadyOwned = function(data) {
+    const handleFundamentalsAlreadyOwned = async function(data) {
       const source = String(data && data.ownership_source ? data.ownership_source : '');
       let message = data && data.message
         ? String(data.message)
@@ -3483,7 +3509,8 @@ async function getOfferSkuCandidates(offerEl) {
       /* Remove only the duplicate packet; keep the Full Piece selected. */
       mrmSetFundamentalsSelection(pendingSku, false);
       lastTaxPreviewKey = '';
-      resetLoadedPaymentForBillingChange(message);
+      const resetCompleted = await resetLoadedPaymentForBillingChange(message, 'fundamentals_addon_already_owned');
+      if (!resetCompleted) return false;
       renderCurrentSelectionBreakdown('Sales tax will update for the revised order.');
 
       mrmPiecePaymentStepRequested = false;
@@ -3498,11 +3525,12 @@ async function getOfferSkuCandidates(offerEl) {
       payBtn.disabled = true;
       setContinueButtonIdle();
       scheduleTaxPreview();
+      return true;
     };
 
     mrmPieceHandleFundamentalsAlreadyOwned = handleFundamentalsAlreadyOwned;
 
-    const scheduleLoad = () => {
+    const scheduleLoad = async () => {
       clearTimeout(loadTimer);
 
       /*
@@ -3524,7 +3552,8 @@ async function getOfferSkuCandidates(offerEl) {
       }
 
       if (pendingClientSecret || activePaymentElement) {
-        resetLoadedPaymentForBillingChange('Billing details changed. Review the updated tax breakdown, then accept the Terms of Service to reload the secure payment form.');
+        const resetCompleted = await resetLoadedPaymentForBillingChange('Billing details changed. Review the updated tax breakdown, then accept the Terms of Service to reload the secure payment form.', 'billing_details_changed');
+        if (!resetCompleted) return;
       }
 
       scheduleTaxPreview();
@@ -3634,7 +3663,7 @@ async function getOfferSkuCandidates(offerEl) {
 
           if (!res.ok || !data.ok) {
             if (data && data.code === 'fundamentals_addon_already_owned') {
-              handleFundamentalsAlreadyOwned(data);
+              await handleFundamentalsAlreadyOwned(data);
               return;
             }
             /*
@@ -3730,7 +3759,7 @@ async function getOfferSkuCandidates(offerEl) {
     };
 
     if (fundamentalsCheckoutCheckbox) {
-      fundamentalsCheckoutCheckbox.onchange = function() {
+      fundamentalsCheckoutCheckbox.onchange = async function() {
         const selected = fundamentalsAvailable && this.checked;
 
         taxPreviewSeq += 1;
@@ -3742,7 +3771,8 @@ async function getOfferSkuCandidates(offerEl) {
         mrmSetFundamentalsSelection(pendingSku, selected);
         lastTaxPreviewKey = '';
         renderCurrentSelectionBreakdown();
-        resetLoadedPaymentForBillingChange('Your add-on selection changed. Review the updated total, then continue to payment.');
+        const resetCompleted = await resetLoadedPaymentForBillingChange('Your add-on selection changed. Review the updated total, then continue to payment.', 'fundamentals_addon_changed');
+        if (!resetCompleted) { this.checked = mrmPieceFundamentalsAddonSelected; return; }
 
         scheduleTaxPreview();
 
@@ -4753,7 +4783,7 @@ async function getOfferSkuCandidates(offerEl) {
               preconfirm.code === 'fundamentals_addon_already_owned' &&
               typeof mrmPieceHandleFundamentalsAlreadyOwned === 'function'
             ) {
-              mrmPieceHandleFundamentalsAlreadyOwned(preconfirm);
+              await mrmPieceHandleFundamentalsAlreadyOwned(preconfirm);
               return;
             }
 

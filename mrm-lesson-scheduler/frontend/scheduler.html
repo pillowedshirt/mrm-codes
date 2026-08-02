@@ -3798,50 +3798,47 @@ function openPaymentModal(clientSecret, breakdown, allowedMethods){
   );
   activePaymentElement.mount('#mrm-payment-element');
 
-  const closeModal = (opts = {}) => {
+  const closeModal = async (opts = {}) => {
     const shouldClear = !!opts.clearSelection;
-
-    if (shouldClear) {
-      clearSelectedSlots();
+    const shouldReleaseCheckout = opts.releaseCheckout !== false;
+    if (shouldReleaseCheckout) {
+      const releaseResult = await mrmAbandonActiveLessonCheckout(opts.reason || 'customer_closed_lesson_checkout');
+      if (!releaseResult.ok) { errorEl.textContent = releaseResult.message; return false; }
+      try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch (error) {}
     }
-
+    if (shouldClear) clearSelectedSlots();
     overlay.style.display = 'none';
     overlay.setAttribute('aria-hidden', 'true');
-
-    // Only remove the body lock if the Confirm Booking modal is not still open
     const bookingOverlay = document.getElementById('booking-modal');
     const bookingStillOpen = bookingOverlay && bookingOverlay.getAttribute('aria-hidden') === 'false';
-    if (!bookingStillOpen) {
-      document.body.classList.remove('mrm-booking-modal-open');
-    }
-
-    if (activePaymentElement) {
-      activePaymentElement.unmount();
-    }
+    if (!bookingStillOpen) document.body.classList.remove('mrm-booking-modal-open');
+    if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
     activePaymentElement = null;
     activeStripeElements = null;
     mrmLessonPaymentReloadContext = null;
-
     mrmAppliedPromoCode = '';
     mrmAppliedPromoDiscountCents = 0;
-
     const promoInput = document.getElementById('mrm-promo-code-input');
     const promoBtn = document.getElementById('mrm-promo-code-apply');
-
-    if (promoInput) {
-      promoInput.value = '';
-    }
-
-    if (promoBtn) {
-      promoBtn.style.display = 'none';
-    }
-
+    if (promoInput) promoInput.value = '';
+    if (promoBtn) promoBtn.style.display = 'none';
     mrmSetPromoMessage('', false);
+    return true;
   };
 
-  closeBtn.onclick = () => closeModal({ clearSelection: false });
+  closeBtn.onclick = async function () {
+    this.disabled = true;
+    const closed = await closeModal({ clearSelection: false, reason: 'customer_closed_lesson_payment_modal' });
+    if (!closed) this.disabled = false;
+  };
   const backBtn = document.getElementById('mrm-payment-back');
-  if (backBtn) backBtn.onclick = () => closeModal({ clearSelection: false });
+  if (backBtn) {
+    backBtn.onclick = async function () {
+      this.disabled = true;
+      const closed = await closeModal({ clearSelection: false, reason: 'customer_returned_from_lesson_payment' });
+      if (!closed) this.disabled = false;
+    };
+  }
 
   return { payBtn, errorEl, closeModal };
 }
@@ -4674,6 +4671,34 @@ let mrmAppliedPromoCode = '';
 let mrmAppliedPromoDiscountCents = 0;
 let mrmLessonPaymentReloadContext = null;
 
+async function mrmAbandonLessonCheckoutData(paymentData, email, reason = 'customer_abandoned') {
+  paymentData = paymentData && typeof paymentData === 'object' ? paymentData : {};
+  const paymentIntentId = String(paymentData.payment_intent_id || '').trim();
+  const orderId = Number(paymentData.order_id || 0);
+  email = String(email || '').trim();
+  if (!paymentIntentId || !orderId) return { ok: true, status: 'nothing_to_release' };
+  if (!email) return { ok: false, message: 'The active lesson payment session could not be identified safely.' };
+  try {
+    const response = await fetch('/wp-json/mrm-pay/v1/abandon-payment-intent', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+      body: JSON.stringify({ payment_intent_id: paymentIntentId, order_id: orderId, email, reason })
+    });
+    let data = {}; try { data = await response.json(); } catch (error) {}
+    if (!response.ok || !data.ok) return { ok: false, code: data.code || 'lesson_checkout_release_failed', message: data.message || 'The lesson payment session could not be canceled safely.' };
+    return { ok: true, status: data.status || 'canceled' };
+  } catch (error) {
+    return { ok: false, code: 'lesson_checkout_release_unavailable', message: 'The lesson payment session could not be canceled because the server could not be reached.' };
+  }
+}
+
+async function mrmAbandonActiveLessonCheckout(reason = 'customer_abandoned') {
+  if (!mrmLessonPaymentReloadContext) return { ok: true, status: 'nothing_to_release' };
+  const paymentData = mrmLessonPaymentReloadContext.currentData || {};
+  const requestBody = mrmLessonPaymentReloadContext.requestBody || {};
+  const email = String(requestBody.email || mrmGetLessonPromoEmailValue() || '').trim();
+  return mrmAbandonLessonCheckoutData(paymentData, email, reason);
+}
+
 function mrmGetActiveLessonPaymentData(fallbackData) {
   if (
     mrmLessonPaymentReloadContext &&
@@ -5303,14 +5328,16 @@ function ensureLegacyBookingHandler(){
 
           const shouldContinueWithResume = await showSheetMusicResumePromptIfNeeded(createData);
           if (!shouldContinueWithResume) {
-            setMsg('Checkout cancelled.');
+            const releaseResult = await mrmAbandonLessonCheckoutData(createData, email, 'sheet_music_subscription_resume_declined');
+            setMsg(releaseResult.ok ? 'Checkout cancelled.' : releaseResult.message);
             btn.disabled = false;
             return;
           }
 
           const stripeInstance = ensureStripe(createData.publishableKey || '');
           if (!stripeInstance) {
-            setMsg('Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
+            const releaseResult = await mrmAbandonLessonCheckoutData(createData, email, 'stripe_frontend_unavailable');
+            setMsg(releaseResult.ok ? 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.' : releaseResult.message);
             btn.disabled = false;
             return;
           }
@@ -5401,7 +5428,7 @@ function ensureLegacyBookingHandler(){
                 payload.autopay_profile_id = enrollData.autopay_profile_id;
                 payload.order_id = latestPaymentData.order_id || createData.order_id;
 
-                closeModal({ clearSelection: false });
+                await closeModal({ clearSelection: false, releaseCheckout: false });
                 await submitBooking(payload, setMsg);
                 mrmHidePaymentLoading();
                 return;
@@ -5475,14 +5502,17 @@ function ensureLegacyBookingHandler(){
 
         const shouldContinueWithResume = await showSheetMusicResumePromptIfNeeded(createData);
         if (!shouldContinueWithResume) {
-          setMsg('Checkout cancelled.');
+          const releaseResult = await mrmAbandonLessonCheckoutData(createData, email, 'sheet_music_subscription_resume_declined');
+          setMsg(releaseResult.ok ? 'Checkout cancelled.' : releaseResult.message);
           btn.disabled = false;
           return;
         }
 
         const stripeInstance = ensureStripe(createData.publishableKey || '');
         if (!stripeInstance) {
-          setMsg('Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.');
+          const releaseResult = await mrmAbandonLessonCheckoutData(createData, email, 'stripe_frontend_unavailable');
+          setMsg(releaseResult.ok ? 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.' : releaseResult.message);
+          btn.disabled = false;
           return;
         }
         stripe = stripeInstance;
@@ -5556,7 +5586,7 @@ function ensureLegacyBookingHandler(){
               payload.autopay_profile_id = null;
 
               // Close Stripe payment modal first so the normal booking success popup displays cleanly
-              closeModal({ clearSelection: false });
+              await closeModal({ clearSelection: false, releaseCheckout: false });
 
               await submitBooking(payload, setMsg);
               mrmHidePaymentLoading();

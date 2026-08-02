@@ -1840,18 +1840,8 @@ private function mrm_customer_has_used_promo($code, $email_hash, $promo = array(
     $this->install_or_upgrade_db();
   }
 
-  $wpdb->query($wpdb->prepare(
-    "UPDATE {$table}
-     SET status = 'expired', updated_at = %s
-     WHERE promo_code = %s
-       AND email_hash = %s
-       AND status = 'pending'
-       AND created_at < %s",
-    current_time('mysql'),
-    $code,
-    $email_hash,
-    wp_date('Y-m-d H:i:s', time() - HOUR_IN_SECONDS, wp_timezone())
-  ));
+  /* Age alone must never make a code reusable. */
+  $this->mrm_reconcile_stale_pending_promo_redemptions($code, $email_hash);
 
   $found = $wpdb->get_var($wpdb->prepare(
     "SELECT id FROM {$table}
@@ -2138,15 +2128,78 @@ private function mrm_release_promo_redemption_lock($lock_name) {
   if ($lock_name !== '') $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
 }
 
-private function mrm_expire_stale_pending_promo_redemptions($code, $email_hash) {
+private function mrm_update_pending_promo_redemption_status($redemption_id, $status) {
   global $wpdb;
-  $wpdb->query($wpdb->prepare(
-    "UPDATE {$this->table_promo_redemptions()} SET status = 'expired', updated_at = %s WHERE promo_code = %s AND email_hash = %s AND status = 'pending' AND created_at < %s",
-    current_time('mysql'),
-    $this->mrm_normalize_promo_code($code),
-    (string)$email_hash,
-    wp_date('Y-m-d H:i:s', time() - HOUR_IN_SECONDS, wp_timezone())
-  ));
+  $redemption_id = absint($redemption_id);
+  $status = sanitize_key((string)$status);
+  if ($redemption_id <= 0 || !in_array($status, array('paid', 'expired'), true)) return false;
+  return $wpdb->update(
+    $this->table_promo_redemptions(),
+    array('status'=>$status, 'updated_at'=>current_time('mysql')),
+    array('id'=>$redemption_id, 'status'=>'pending'),
+    array('%s','%s'), array('%d','%s')
+  ) !== false;
+}
+
+private function mrm_reconcile_stale_pending_promo_redemptions_locked($code, $email_hash) {
+  global $wpdb;
+  $code = $this->mrm_normalize_promo_code($code);
+  $email_hash = sanitize_text_field((string)$email_hash);
+  if ($code === '' || $email_hash === '') return false;
+  $table = $this->table_promo_redemptions();
+  $cutoff = wp_date('Y-m-d H:i:s', time() - HOUR_IN_SECONDS, wp_timezone());
+  $rows = $wpdb->get_results($wpdb->prepare(
+    "SELECT id, order_id, stripe_payment_intent_id FROM {$table} WHERE promo_code = %s AND email_hash = %s AND status = 'pending' AND created_at < %s ORDER BY id ASC",
+    $code, $email_hash, $cutoff
+  ), ARRAY_A);
+  if (!is_array($rows)) return false;
+  foreach ($rows as $row) {
+    $redemption_id = absint($row['id'] ?? 0);
+    $order_id = absint($row['order_id'] ?? 0);
+    $payment_reference = sanitize_text_field((string)($row['stripe_payment_intent_id'] ?? ''));
+    if ($redemption_id <= 0) continue;
+    $order = $order_id > 0 ? $this->get_order($order_id) : null;
+    $payment_intent_id = strpos($payment_reference, 'pi_') === 0 ? $payment_reference : '';
+    if ($payment_intent_id === '' && is_array($order)) {
+      $order_pi = sanitize_text_field((string)($order['stripe_payment_intent_id'] ?? ''));
+      if (strpos($order_pi, 'pi_') === 0) $payment_intent_id = $order_pi;
+    }
+    if ($payment_intent_id === '') {
+      $this->mrm_update_pending_promo_redemption_status($redemption_id, 'expired');
+      continue;
+    }
+    $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id);
+    if (is_wp_error($payment_intent)) continue;
+    $stripe_status = sanitize_key((string)($payment_intent['status'] ?? ''));
+    if ($stripe_status === 'succeeded') {
+      if ($order_id > 0) $this->mrm_mark_promo_redemption_paid($order_id, $payment_intent_id);
+      else $this->mrm_mark_promo_redemption_paid_by_payment_intent($payment_intent_id);
+      continue;
+    }
+    if ($stripe_status === 'canceled') {
+      if ($order_id > 0) $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', array('mrm_checkout_invalidated_reason'=>'stale_checkout_reconciliation','mrm_checkout_invalidated_at'=>current_time('mysql')));
+      $this->mrm_update_pending_promo_redemption_status($redemption_id, 'expired');
+      continue;
+    }
+    if (in_array($stripe_status, array('processing','requires_capture'), true)) continue;
+    if (in_array($stripe_status, array('requires_payment_method','requires_confirmation','requires_action'), true)) {
+      $canceled = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($payment_intent_id) . '/cancel', array('cancellation_reason'=>'abandoned'));
+      if (is_wp_error($canceled) || sanitize_key((string)($canceled['status'] ?? '')) !== 'canceled') continue;
+      if ($order_id > 0) $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', array('mrm_checkout_invalidated_reason'=>'stale_checkout_reconciliation','mrm_checkout_invalidated_at'=>current_time('mysql')));
+      $this->mrm_update_pending_promo_redemption_status($redemption_id, 'expired');
+    }
+  }
+  return true;
+}
+
+private function mrm_reconcile_stale_pending_promo_redemptions($code, $email_hash) {
+  $lock_name = $this->mrm_acquire_promo_redemption_lock($code, $email_hash);
+  if ($lock_name === '') return false;
+  try {
+    return $this->mrm_reconcile_stale_pending_promo_redemptions_locked($code, $email_hash);
+  } finally {
+    $this->mrm_release_promo_redemption_lock($lock_name);
+  }
 }
 
 private function mrm_release_pending_promo_redemption($order_id = 0, $payment_intent_id = '') {
@@ -2173,7 +2226,7 @@ private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $pa
   $lock_name = $this->mrm_acquire_promo_redemption_lock($code, $email_hash);
   if ($lock_name === '') return false;
   try {
-    $this->mrm_expire_stale_pending_promo_redemptions($code, $email_hash);
+    $this->mrm_reconcile_stale_pending_promo_redemptions_locked($code, $email_hash);
     $existing_reference = $order_id > 0
       ? $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE order_id = %d AND promo_code = %s LIMIT 1", $order_id, $code))
       : $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE stripe_payment_intent_id = %s AND promo_code = %s LIMIT 1", $payment_intent_id, $code));
@@ -13631,6 +13684,12 @@ private function charge_and_unlock_autopay($data) {
       'permission_callback' => '__return_true',
     ));
 
+    register_rest_route('mrm-pay/v1', '/abandon-payment-intent', array(
+      'methods' => WP_REST_Server::CREATABLE,
+      'callback' => array($this, 'rest_abandon_payment_intent'),
+      'permission_callback' => '__return_true',
+    ));
+
     register_rest_route('mrm-pay/v1', '/update-tax', array(
       'methods' => WP_REST_Server::CREATABLE,
       'callback' => array($this, 'rest_update_tax'),
@@ -14839,6 +14898,64 @@ private function charge_and_unlock_autopay($data) {
       'active_subscription'=>!empty($subscription_purchase_check['active_subscription']),
       'subscription_purchase_acknowledged'=>!empty($subscription_purchase_check['acknowledged']),
     ), 200);
+  }
+
+  public function rest_abandon_payment_intent(WP_REST_Request $req) {
+    $data = (array)$req->get_json_params();
+    $payment_intent_id = sanitize_text_field((string)($data['payment_intent_id'] ?? ''));
+    $order_id = absint($data['order_id'] ?? 0);
+    $email = sanitize_email((string)($data['email'] ?? ''));
+    $checkout_request_id = $this->mrm_sanitize_checkout_request_id($data['checkout_request_id'] ?? '');
+    $reason = sanitize_key((string)($data['reason'] ?? 'customer_abandoned'));
+    if ($reason === '') $reason = 'customer_abandoned';
+    if ($payment_intent_id === '' || strpos($payment_intent_id, 'pi_') !== 0 || $order_id <= 0 || $email === '' || !is_email($email)) {
+      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_invalid','message'=>'The payment session could not be identified safely.'), 400);
+    }
+    $order = $this->get_order_by_pi($payment_intent_id);
+    if (!is_array($order) || empty($order['id']) || absint($order['id']) !== $order_id) {
+      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_order_mismatch','message'=>'The payment session did not match the requested order.'), 409);
+    }
+    $submitted_email_hash = $this->email_hash($email);
+    $stored_email_hash = sanitize_text_field((string)($order['email_hash'] ?? ''));
+    if ($submitted_email_hash === '' || $stored_email_hash === '' || !hash_equals($stored_email_hash, $submitted_email_hash)) {
+      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_email_mismatch','message'=>'The payment session could not be verified for this email.'), 403);
+    }
+    $product_type = sanitize_key((string)($order['product_type'] ?? ''));
+    if (!in_array($product_type, array('lesson','sheet_music'), true)) {
+      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_product_invalid','message'=>'This payment session cannot be abandoned through this checkout flow.'), 409);
+    }
+    $order_metadata = $this->mrm_get_order_meta_array($order);
+    if ($product_type === 'sheet_music') {
+      $stored_request_id = $this->mrm_sanitize_checkout_request_id($order_metadata['mrm_checkout_request_id'] ?? '');
+      if ($checkout_request_id === '' || $stored_request_id === '' || !hash_equals($stored_request_id, $checkout_request_id)) {
+        return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_request_mismatch','message'=>'The sheet-music checkout request could not be verified.'), 409);
+      }
+    }
+    $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id);
+    if (is_wp_error($payment_intent)) {
+      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_status_unavailable','message'=>'The payment status could not be confirmed, so the payment session was preserved.'), 503);
+    }
+    $stripe_status = sanitize_key((string)($payment_intent['status'] ?? ''));
+    if (in_array($stripe_status, array('succeeded','processing','requires_capture'), true)) {
+      return new WP_REST_Response(array('ok'=>false,'code'=>$stripe_status === 'succeeded' ? 'checkout_already_paid' : 'checkout_payment_status_uncertain','message'=>$stripe_status === 'succeeded' ? 'This payment has already completed and cannot be abandoned.' : 'This payment is currently being processed and cannot be abandoned safely.'), 409);
+    }
+    if ($stripe_status !== 'canceled') {
+      if (!in_array($stripe_status, array('requires_payment_method','requires_confirmation','requires_action'), true)) {
+        return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_status_invalid','message'=>'The payment session is not currently in a safely cancelable state.'), 409);
+      }
+      $canceled = $this->stripe_api_request('POST', '/v1/payment_intents/' . rawurlencode($payment_intent_id) . '/cancel', array('cancellation_reason'=>'abandoned'));
+      if (is_wp_error($canceled)) {
+        return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_cancel_failed','message'=>'The payment session could not be canceled safely, so it was preserved.'), 503);
+      }
+      if (sanitize_key((string)($canceled['status'] ?? '')) !== 'canceled') {
+        return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_not_confirmed','message'=>'Stripe did not confirm that the payment session was canceled.'), 503);
+      }
+    }
+    $this->update_order_status_from_pi($payment_intent_id, 'canceled', 'canceled', array('mrm_checkout_invalidated_reason'=>$reason,'mrm_checkout_invalidated_at'=>current_time('mysql')));
+    if (!$this->mrm_release_pending_promo_redemption($order_id, $payment_intent_id)) {
+      return new WP_REST_Response(array('ok'=>false,'code'=>'checkout_abandonment_promo_release_failed','message'=>'The payment was canceled, but its promotional-code reservation could not be released.'), 503);
+    }
+    return new WP_REST_Response(array('ok'=>true,'payment_intent_id'=>$payment_intent_id,'order_id'=>$order_id,'status'=>'canceled'), 200);
   }
 
   public function rest_create_payment_intent(WP_REST_Request $req) {
