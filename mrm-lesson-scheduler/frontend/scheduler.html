@@ -4690,6 +4690,58 @@ function mrmCreateLessonCheckoutRequestId() {
   return 'mrm_lesson_' + String(uniquePart).replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
+function mrmTrackInitialLessonCheckout(payApiBase, requestBody) {
+  requestBody = requestBody && typeof requestBody === 'object' ? requestBody : {};
+  const checkoutRequestId = String(requestBody.checkout_request_id || '').trim();
+  mrmLessonPaymentReloadContext = {
+    payApiBase: String(payApiBase || ''),
+    requestBody: JSON.parse(JSON.stringify(requestBody)),
+    /* Store the ID before fetch so page-exit cleanup can cancel in-flight work. */
+    currentData: { checkout_request_id: checkoutRequestId },
+    pendingCheckoutRequestId: checkoutRequestId,
+    redirectRecovery: null
+  };
+}
+
+function mrmAdoptCreatedLessonCheckout(createData, requestBody) {
+  createData = createData && typeof createData === 'object' ? createData : {};
+  requestBody = requestBody && typeof requestBody === 'object' ? requestBody : {};
+  const checkoutRequestId = String(requestBody.checkout_request_id || createData.checkout_request_id || '').trim();
+  const normalizedData = { ...createData, checkout_request_id: checkoutRequestId };
+  if (!mrmLessonPaymentReloadContext) {
+    mrmLessonPaymentReloadContext = { payApiBase: '', requestBody: JSON.parse(JSON.stringify(requestBody)), currentData: {}, pendingCheckoutRequestId: '', redirectRecovery: null };
+  }
+  mrmLessonPaymentReloadContext.requestBody = JSON.parse(JSON.stringify(requestBody));
+  mrmLessonPaymentReloadContext.currentData = normalizedData;
+  mrmLessonPaymentReloadContext.pendingCheckoutRequestId = '';
+  return normalizedData;
+}
+
+async function mrmReleaseTrackedLessonCheckout(reason) {
+  const releaseResult = await mrmAbandonActiveLessonCheckout(reason);
+  if (releaseResult.ok) mrmLessonPaymentReloadContext = null;
+  return releaseResult;
+}
+
+function mrmStoreSchedulerPaymentRecovery(recovery) {
+  if (!recovery || typeof recovery !== 'object') return { ok: false, message: 'The payment recovery information could not be created.' };
+  try {
+    const serialized = JSON.stringify(recovery);
+    sessionStorage.setItem('mrmSchedulerPayment', serialized);
+    const stored = sessionStorage.getItem('mrmSchedulerPayment');
+    if (!stored) throw new Error('Recovery data was not retained.');
+    const parsed = JSON.parse(stored);
+    const expectedRequestId = String(recovery.checkout_request_id || '');
+    const storedRequestId = String(parsed.checkout_request_id || '');
+    if (expectedRequestId && !storedRequestId) throw new Error('The checkout request ID was not retained.');
+    if (expectedRequestId && storedRequestId !== expectedRequestId) throw new Error('The retained checkout request ID did not match.');
+    return { ok: true };
+  } catch (error) {
+    try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch (removeError) {}
+    return { ok: false, message: 'This browser could not preserve the payment recovery information.' };
+  }
+}
+
 async function mrmAbandonLessonCheckoutData(paymentData, email, reason = 'customer_abandoned', checkoutRequestId = '') {
   paymentData = paymentData && typeof paymentData === 'object' ? paymentData : {};
   const paymentIntentId = String(paymentData.payment_intent_id || '').trim();
@@ -5225,8 +5277,9 @@ function ensureLegacyBookingHandler(){
 
       setMsg('Preparing payment…');
       btn.disabled = true;
+      let lessonCheckoutSetupStarted = false;
 
-      try{
+      try {
         const quoteRes = await fetch(`${payApiBase}/quote?sku=${encodeURIComponent(sku)}`);
         const quote = await quoteRes.json();
         if(!quoteRes.ok || !quote.ok){
@@ -5287,28 +5340,34 @@ function ensureLegacyBookingHandler(){
             }
           };
 
+          mrmTrackInitialLessonCheckout(payApiBase, autopayPaymentRequestBody);
+          lessonCheckoutSetupStarted = true;
+
           const createRes = await fetch(payApiBase + '/create-payment-intent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(autopayPaymentRequestBody)
           });
 
-          const createData = await createRes.json();
-
+          const createData = await mrmReadJsonOrError(createRes);
+          const activeCreateData = mrmAdoptCreatedLessonCheckout(createData, autopayPaymentRequestBody);
           if (!createRes.ok || !createData.ok) {
-            if (handleExistingSheetMusicSubscriptionGuard(createData, setMsg)) {
-              btn.disabled = false;
-              return;
-            }
-
-            setMsg(createData.message || 'Unable to start first auto-pay charge.');
+            const guardHandled = handleExistingSheetMusicSubscriptionGuard(createData, setMsg);
+            const releaseResult = await mrmReleaseTrackedLessonCheckout('autopay_initial_creation_failed');
+            lessonCheckoutSetupStarted = false;
+            if (!releaseResult.ok) setMsg(releaseResult.message);
+            else if (!guardHandled) setMsg(createData.message || 'Unable to start first auto-pay charge.');
             btn.disabled = false;
             return;
           }
+          createData.checkout_request_id = autopayPaymentRequestBody.checkout_request_id;
+          mrmLessonPaymentReloadContext.currentData = activeCreateData;
+          mrmLessonPaymentReloadContext.pendingCheckoutRequestId = '';
 
           const shouldContinueWithResume = await showSheetMusicResumePromptIfNeeded(createData);
           if (!shouldContinueWithResume) {
-            const releaseResult = await mrmAbandonLessonCheckoutData(createData, email, 'sheet_music_subscription_resume_declined');
+            const releaseResult = await mrmAbandonLessonCheckoutData(activeCreateData, email, 'sheet_music_subscription_resume_declined', autopayPaymentRequestBody.checkout_request_id);
+            if (releaseResult.ok) mrmLessonPaymentReloadContext = null;
             setMsg(releaseResult.ok ? 'Checkout cancelled.' : releaseResult.message);
             btn.disabled = false;
             return;
@@ -5316,7 +5375,8 @@ function ensureLegacyBookingHandler(){
 
           const stripeInstance = ensureStripe(createData.publishableKey || '');
           if (!stripeInstance) {
-            const releaseResult = await mrmAbandonLessonCheckoutData(createData, email, 'stripe_frontend_unavailable');
+            const releaseResult = await mrmAbandonLessonCheckoutData(activeCreateData, email, 'stripe_frontend_unavailable', autopayPaymentRequestBody.checkout_request_id);
+            if (releaseResult.ok) mrmLessonPaymentReloadContext = null;
             setMsg(releaseResult.ok ? 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.' : releaseResult.message);
             btn.disabled = false;
             return;
@@ -5325,14 +5385,16 @@ function ensureLegacyBookingHandler(){
 
           persistSelectedSlots();
 
-          const autopayRedirectRecovery = {
-            payload: JSON.parse(JSON.stringify(payload)), email,
-            payment_intent_id:createData.payment_intent_id, order_id:createData.order_id,
-            checkout_request_id:autopayPaymentRequestBody.checkout_request_id, payment_mode:'autopay',
-            autopay_enrollment:{promo_code:createData.promo_code||mrmAppliedPromoCode||'',context:{instructor_id:instrId,lesson_length:len,lesson_mode:lessonType,repeat_frequency:frequency,repeat_duration:reserveDuration,authorized_lesson_count:authorizedLessonCount,promo_code:createData.promo_code||mrmAppliedPromoCode||''}}
-          };
-          mrmLessonPaymentReloadContext = {payApiBase,requestBody:autopayPaymentRequestBody,currentData:createData,pendingCheckoutRequestId:'',redirectRecovery:autopayRedirectRecovery};
-          sessionStorage.setItem('mrmSchedulerPayment',JSON.stringify(autopayRedirectRecovery));
+          const autopayRedirectRecovery = { payload: JSON.parse(JSON.stringify(payload)), email, payment_intent_id: activeCreateData.payment_intent_id, order_id: activeCreateData.order_id, checkout_request_id: autopayPaymentRequestBody.checkout_request_id, payment_mode: 'autopay' };
+          mrmLessonPaymentReloadContext = { payApiBase, requestBody: autopayPaymentRequestBody, currentData: activeCreateData, pendingCheckoutRequestId: '', redirectRecovery: autopayRedirectRecovery };
+          const recoveryStorageResult = mrmStoreSchedulerPaymentRecovery(autopayRedirectRecovery);
+          if (!recoveryStorageResult.ok) {
+            const releaseResult = await mrmReleaseTrackedLessonCheckout('autopay_recovery_storage_failed');
+            lessonCheckoutSetupStarted = false;
+            setMsg(releaseResult.ok ? recoveryStorageResult.message + ' The payment session was safely canceled. Please try again.' : releaseResult.message);
+            btn.disabled = false;
+            return;
+          }
 
           const { payBtn, errorEl, closeModal } = await openPaymentModal(
             createData.client_secret,
@@ -5382,26 +5444,8 @@ function ensureLegacyBookingHandler(){
                 await verifyPaymentIntent(paymentIntent.id, email);
 
                 const latestPaymentData = mrmGetActiveLessonPaymentData(createData);
-                const activePromoCode = latestPaymentData.promo_code || mrmAppliedPromoCode || '';
 
-                const enrollRes = await fetch(payApiBase + '/create-autopay-enrollment', {
-                  method:'POST',
-                  headers:{'Content-Type':'application/json'},
-                  body: JSON.stringify({
-                    payment_intent_id: paymentIntent.id,
-                    email: email,
-                    promo_code: activePromoCode,
-                    context: {
-                      instructor_id: instrId,
-                      lesson_length: len,
-                      lesson_mode: lessonType,
-                      repeat_frequency: frequency,
-                      repeat_duration: reserveDuration,
-                      authorized_lesson_count: authorizedLessonCount,
-                      promo_code: activePromoCode
-                    }
-                  })
-                });
+                const enrollRes = await fetch(payApiBase + '/create-autopay-enrollment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payment_intent_id: paymentIntent.id, email }) });
 
                 const enrollData = await enrollRes.json();
                 if (!enrollRes.ok || !enrollData.ok) {
@@ -5433,6 +5477,7 @@ function ensureLegacyBookingHandler(){
             }
           };
 
+          lessonCheckoutSetupStarted = false;
           btn.disabled = false;
           return;
         }
@@ -5473,26 +5518,33 @@ function ensureLegacyBookingHandler(){
             country: addressCountry
           }
         };
+        mrmTrackInitialLessonCheckout(payApiBase, lessonPaymentRequestBody);
+        lessonCheckoutSetupStarted = true;
+
         const createRes = await fetch(payApiBase + '/create-payment-intent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(lessonPaymentRequestBody)
         });
-        const createData = await createRes.json();
-        if(!createRes.ok || !createData.ok){
-          if (handleExistingSheetMusicSubscriptionGuard(createData, setMsg)) {
-            btn.disabled = false;
-            return;
-          }
-
-          setMsg(createData.message || 'Payment error.');
+        const createData = await mrmReadJsonOrError(createRes);
+        const activeCreateData = mrmAdoptCreatedLessonCheckout(createData, lessonPaymentRequestBody);
+        if (!createRes.ok || !createData.ok) {
+          const guardHandled = handleExistingSheetMusicSubscriptionGuard(createData, setMsg);
+          const releaseResult = await mrmReleaseTrackedLessonCheckout('lesson_initial_creation_failed');
+          lessonCheckoutSetupStarted = false;
+          if (!releaseResult.ok) setMsg(releaseResult.message);
+          else if (!guardHandled) setMsg(createData.message || 'Payment error.');
           btn.disabled = false;
           return;
         }
+        createData.checkout_request_id = lessonPaymentRequestBody.checkout_request_id;
+        mrmLessonPaymentReloadContext.currentData = activeCreateData;
+        mrmLessonPaymentReloadContext.pendingCheckoutRequestId = '';
 
         const shouldContinueWithResume = await showSheetMusicResumePromptIfNeeded(createData);
         if (!shouldContinueWithResume) {
-          const releaseResult = await mrmAbandonLessonCheckoutData(createData, email, 'sheet_music_subscription_resume_declined');
+          const releaseResult = await mrmAbandonLessonCheckoutData(activeCreateData, email, 'sheet_music_subscription_resume_declined', lessonPaymentRequestBody.checkout_request_id);
+            if (releaseResult.ok) mrmLessonPaymentReloadContext = null;
           setMsg(releaseResult.ok ? 'Checkout cancelled.' : releaseResult.message);
           btn.disabled = false;
           return;
@@ -5500,7 +5552,8 @@ function ensureLegacyBookingHandler(){
 
         const stripeInstance = ensureStripe(createData.publishableKey || '');
         if (!stripeInstance) {
-          const releaseResult = await mrmAbandonLessonCheckoutData(createData, email, 'stripe_frontend_unavailable');
+          const releaseResult = await mrmAbandonLessonCheckoutData(activeCreateData, email, 'stripe_frontend_unavailable', lessonPaymentRequestBody.checkout_request_id);
+            if (releaseResult.ok) mrmLessonPaymentReloadContext = null;
           setMsg(releaseResult.ok ? 'Checkout is temporarily unavailable. Please contact Low Brass Lessons for assistance.' : releaseResult.message);
           btn.disabled = false;
           return;
@@ -5509,20 +5562,16 @@ function ensureLegacyBookingHandler(){
 
         persistSelectedSlots();
 
-        mrmLessonPaymentReloadContext = {
-          payApiBase, requestBody: lessonPaymentRequestBody, currentData: createData,
-          pendingCheckoutRequestId: '',
-          redirectRecovery: { payload, email, payment_intent_id:createData.payment_intent_id, order_id:createData.order_id, checkout_request_id:lessonPaymentRequestBody.checkout_request_id, payment_mode:prepay?'prepay':'one_time' }
-        };
-
-        sessionStorage.setItem('mrmSchedulerPayment', JSON.stringify({
-          payload,
-          email,
-          payment_intent_id: createData.payment_intent_id,
-          order_id: createData.order_id,
-          checkout_request_id: lessonPaymentRequestBody.checkout_request_id,
-          payment_mode: prepay ? 'prepay' : 'one_time'
-        }));
+        const lessonRedirectRecovery = { payload: JSON.parse(JSON.stringify(payload)), email, payment_intent_id: activeCreateData.payment_intent_id, order_id: activeCreateData.order_id, checkout_request_id: lessonPaymentRequestBody.checkout_request_id, payment_mode: prepay ? 'prepay' : 'one_time' };
+        mrmLessonPaymentReloadContext = { payApiBase, requestBody: lessonPaymentRequestBody, currentData: activeCreateData, pendingCheckoutRequestId: '', redirectRecovery: lessonRedirectRecovery };
+        const recoveryStorageResult = mrmStoreSchedulerPaymentRecovery(lessonRedirectRecovery);
+        if (!recoveryStorageResult.ok) {
+          const releaseResult = await mrmReleaseTrackedLessonCheckout('lesson_recovery_storage_failed');
+          lessonCheckoutSetupStarted = false;
+          setMsg(releaseResult.ok ? recoveryStorageResult.message + ' The payment session was safely canceled. Please try again.' : releaseResult.message);
+          btn.disabled = false;
+          return;
+        }
 
         const { payBtn, errorEl, closeModal } = await openPaymentModal(
           createData.client_secret,
@@ -5599,9 +5648,17 @@ function ensureLegacyBookingHandler(){
             payBtn.disabled = false;
           }
         };
-      }catch(err){
-        setMsg('We could not complete this payment. Please try again.');
-      }finally{
+
+        lessonCheckoutSetupStarted = false;
+      } catch (err) {
+        if (lessonCheckoutSetupStarted && mrmLessonPaymentReloadContext) {
+          const releaseResult = await mrmReleaseTrackedLessonCheckout('lesson_checkout_initialization_exception');
+          lessonCheckoutSetupStarted = false;
+          setMsg(releaseResult.ok ? 'The payment session could not be initialized and was safely canceled. Please try again.' : releaseResult.message);
+        } else {
+          setMsg(err && err.message ? err.message : 'We could not complete this payment. Please try again.');
+        }
+      } finally {
         btn.disabled = false;
       }
       return;
@@ -5632,9 +5689,11 @@ async function checkReturnFromStripe() {
     await verifyPaymentIntent(paymentIntentId,context.email);
     const paymentMode=String(context.payment_mode||context.payload.payment_mode||'one_time');
     if(paymentMode==='autopay'){
-      const enrollment=context.autopay_enrollment&&typeof context.autopay_enrollment==='object'?context.autopay_enrollment:{};
-      const enrollmentContext=enrollment.context&&typeof enrollment.context==='object'?enrollment.context:{};
-      const enrollmentResponse=await fetch('/wp-json/mrm-pay/v1/create-autopay-enrollment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_intent_id:paymentIntentId,email:context.email,promo_code:enrollment.promo_code||context.promo_code||'',context:enrollmentContext})});
+      const enrollmentResponse = await fetch('/wp-json/mrm-pay/v1/create-autopay-enrollment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payment_intent_id: paymentIntentId, email: context.email })
+      });
       const enrollmentData=await mrmReadJsonOrError(enrollmentResponse);
       if(!enrollmentResponse.ok||!enrollmentData.ok)throw new Error(enrollmentData.message||'Unable to finalize Auto-pay enrollment.');
       context.payload.payment_mode='autopay'; context.payload.autopay_profile_id=enrollmentData.autopay_profile_id; context.payload.order_id=context.order_id||null;
