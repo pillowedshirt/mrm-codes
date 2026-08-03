@@ -13378,8 +13378,11 @@ public function render_contact_form_shortcode() {
         $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Thanks for joining the Low Brass Lessons newsletter.</div>';
     } elseif ( $marketing_status === 'already' ) {
         $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">This email is already subscribed to the Low Brass Lessons newsletter.</div>';
+    } elseif ( $marketing_status === 'resubscribed' ) {
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-success">Welcome back. Your email has been re-subscribed to the Low Brass Lessons newsletter.</div>';
     } elseif ( $marketing_status === 'unsubscribed' ) {
-        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">This email was previously unsubscribed from marketing emails. Please contact Low Brass Lessons if you would like to re-subscribe.</div>';
+        /* Legacy fallback for older Payments Hub versions. */
+        $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">This email could not be restored automatically. Please contact Low Brass Lessons for assistance.</div>';
     } elseif ( $marketing_status === 'recaptcha' ) {
         $marketing_notice = '<div class="mrm-contact-notice mrm-contact-notice-error">Please complete the reCAPTCHA verification and try again.</div>';
     } elseif ( $marketing_status === 'error' ) {

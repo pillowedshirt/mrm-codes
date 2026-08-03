@@ -17231,6 +17231,27 @@ community@example.org",
     update_option('mrm_pay_hub_marketing_unsubscribed', $final, false);
   }
 
+  private function mrm_marketing_newsletter_unsubscribed_emails() {
+    $emails = get_option('mrm_pay_hub_newsletter_unsubscribed', array());
+    $out = array();
+    foreach ((array)$emails as $email) {
+      $email = strtolower(sanitize_email((string)$email));
+      if ($email && is_email($email)) $out[$email] = true;
+    }
+    return $out;
+  }
+
+  private function mrm_marketing_save_newsletter_unsubscribed_emails($emails) {
+    $out = array();
+    foreach ((array)$emails as $email) {
+      $email = strtolower(sanitize_email((string)$email));
+      if ($email && is_email($email)) $out[$email] = true;
+    }
+    $final = array_keys($out);
+    sort($final);
+    update_option('mrm_pay_hub_newsletter_unsubscribed', $final, false);
+  }
+
   private function mrm_marketing_add_unsubscribe($email) {
     $email = strtolower(sanitize_email((string)$email));
     if (!$email || !is_email($email)) return false;
@@ -17243,6 +17264,23 @@ community@example.org",
     foreach ($lists as $key => $emails) {
       $lists[$key] = array_values(array_diff((array)$emails, array($email)));
     }
+    $this->save_email_lists($lists);
+    return true;
+  }
+
+  private function mrm_marketing_add_newsletter_unsubscribe($email) {
+    $email = strtolower(sanitize_email((string)$email));
+    if (!$email || !is_email($email)) return false;
+
+    $unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
+    $unsubscribed[$email] = true;
+    $this->mrm_marketing_save_newsletter_unsubscribed_emails(array_keys($unsubscribed));
+
+    $lists = $this->mrm_marketing_manual_lists();
+    if (!isset($lists['general_interest'])) $lists['general_interest'] = array();
+    $lists['general_interest'] = array_values(
+      array_diff((array)$lists['general_interest'], array($email))
+    );
     $this->save_email_lists($lists);
     return true;
   }
@@ -17606,8 +17644,13 @@ community@example.org",
     }
 
     if ($apply_suppression) {
-      $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
-      foreach (array_keys($unsubscribed) as $email) unset($out[$email]);
+      $marketing_unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+      foreach (array_keys($marketing_unsubscribed) as $email) unset($out[$email]);
+
+      if ($list_key === 'general_interest') {
+        $newsletter_unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
+        foreach (array_keys($newsletter_unsubscribed) as $email) unset($out[$email]);
+      }
     }
 
     $final = array_keys($out);
@@ -17638,29 +17681,73 @@ community@example.org",
     return $final;
   }
 
-  private function mrm_marketing_token_for_email($email) {
+  private function mrm_marketing_get_recipient_delivery_map(
+    $list_keys,
+    $apply_suppression = true
+  ) {
+    $delivery_map = array();
+    foreach ((array)$list_keys as $list_key) {
+      $list_key = sanitize_key((string)$list_key);
+      foreach ($this->mrm_marketing_get_list_recipients($list_key, $apply_suppression) as $email) {
+        if (!isset($delivery_map[$email])) {
+          $delivery_map[$email] = array(
+            'email' => $email,
+            'source_lists' => array(),
+            'unsubscribe_scope' => 'newsletter',
+          );
+        }
+        $delivery_map[$email]['source_lists'][$list_key] = true;
+        if ($list_key !== 'general_interest') {
+          $delivery_map[$email]['unsubscribe_scope'] = 'marketing';
+        }
+      }
+    }
+    ksort($delivery_map);
+    foreach ($delivery_map as $email => $delivery) {
+      $source_lists = array_keys((array)$delivery['source_lists']);
+      sort($source_lists);
+      $delivery_map[$email]['source_lists'] = $source_lists;
+    }
+    return $delivery_map;
+  }
+
+  private function mrm_marketing_token_for_email($email, $scope = 'marketing') {
     $email = strtolower(sanitize_email((string)$email));
+    $scope = sanitize_key((string)$scope);
     if (!$email || !is_email($email)) return '';
+    if (!in_array($scope, array('newsletter', 'marketing'), true)) $scope = 'marketing';
     $secret = defined('AUTH_SALT') ? AUTH_SALT : wp_salt('auth');
-    $payload = $email . '|' . hash_hmac('sha256', $email, $secret);
+    $signed_value = $email . '|' . $scope;
+    $signature = hash_hmac('sha256', $signed_value, $secret);
+    $payload = $signed_value . '|' . $signature;
     return rtrim(strtr(base64_encode($payload), '+/', '-_'), '=');
   }
 
-  private function mrm_marketing_email_from_token($token) {
+  private function mrm_marketing_unsubscribe_data_from_token($token) {
     $token = preg_replace('/[^A-Za-z0-9\-_]/', '', (string)$token);
-    if ($token === '') return '';
+    if ($token === '') return array();
     $padded = strtr($token, '-_', '+/');
     $padded .= str_repeat('=', (4 - strlen($padded) % 4) % 4);
     $decoded = base64_decode($padded, true);
-    if (!$decoded || strpos($decoded, '|') === false) return '';
-
-    list($email, $sig) = explode('|', $decoded, 2);
-    $email = strtolower(sanitize_email((string)$email));
-    if (!$email || !is_email($email)) return '';
-
+    if (!$decoded || strpos($decoded, '|') === false) return array();
+    $parts = explode('|', $decoded);
+    if (count($parts) === 2) {
+      $email = strtolower(sanitize_email((string)$parts[0]));
+      $scope = 'marketing';
+      $signature = (string)$parts[1];
+      $signed_value = $email;
+    } elseif (count($parts) === 3) {
+      $email = strtolower(sanitize_email((string)$parts[0]));
+      $scope = sanitize_key((string)$parts[1]);
+      $signature = (string)$parts[2];
+      if (!in_array($scope, array('newsletter', 'marketing'), true)) return array();
+      $signed_value = $email . '|' . $scope;
+    } else return array();
+    if (!$email || !is_email($email)) return array();
     $secret = defined('AUTH_SALT') ? AUTH_SALT : wp_salt('auth');
-    $expected = hash_hmac('sha256', $email, $secret);
-    return hash_equals($expected, (string)$sig) ? $email : '';
+    $expected = hash_hmac('sha256', $signed_value, $secret);
+    if (!hash_equals($expected, $signature)) return array();
+    return array('email' => $email, 'scope' => $scope);
   }
 
   public function register_marketing_unsubscribe_endpoint() {
@@ -17744,97 +17831,50 @@ community@example.org",
     exit;
   }
 
-  private function mrm_marketing_unsubscribe_url($email) {
-    $token = $this->mrm_marketing_token_for_email($email);
-
-    if ($token === '') {
-      return '';
-    }
-
-    return add_query_arg(
-      array('token' => $token),
-      home_url('/marketing-unsubscribe/')
-    );
+  private function mrm_marketing_unsubscribe_url($email, $scope = 'marketing') {
+    $token = $this->mrm_marketing_token_for_email($email, $scope);
+    if ($token === '') return '';
+    return add_query_arg(array('token' => $token), home_url('/marketing-unsubscribe/'));
   }
 
   // BEGIN PAYMENT HUB MARKETING UNSUBSCRIBE FIX
   public function handle_marketing_unsubscribe_confirm() {
     $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
-    $email = $this->mrm_marketing_email_from_token($token);
-
-    if (!$email) {
-      $this->mrm_marketing_render_unsubscribe_page(
-        'Invalid unsubscribe link',
-        'This unsubscribe link is invalid or expired. Please contact Low Brass Lessons if you still need help unsubscribing.',
-        ''
-      );
-      exit;
+    $data = $this->mrm_marketing_unsubscribe_data_from_token($token);
+    if (empty($data)) {
+      $this->mrm_marketing_render_unsubscribe_page('Invalid unsubscribe link', 'This unsubscribe link is invalid. Please contact Low Brass Lessons if you still need help unsubscribing.', ''); exit;
     }
-
-    $unsubscribe_action_url = home_url('/marketing-unsubscribe/');
-
-    $form = '<form method="post" action="' . esc_url($unsubscribe_action_url) . '" style="margin-top:20px;">'
+    $email = (string)$data['email']; $scope = (string)$data['scope'];
+    $is_newsletter = $scope === 'newsletter';
+    $title = $is_newsletter ? 'Confirm Newsletter Unsubscribe' : 'Confirm Marketing Unsubscribe';
+    $message = $is_newsletter
+      ? 'You are unsubscribing ' . esc_html($email) . ' from the Low Brass Lessons newsletter. You may still receive other Low Brass Lessons marketing emails when applicable.'
+      : 'You are unsubscribing ' . esc_html($email) . ' from Low Brass Lessons marketing emails.';
+    $label = $is_newsletter ? 'Unsubscribe from Newsletter' : 'Unsubscribe from Marketing Emails';
+    $form = '<form method="post" action="' . esc_url(home_url('/marketing-unsubscribe/')) . '" style="margin-top:20px;">'
       . '<input type="hidden" name="token" value="' . esc_attr($token) . '">'
-      . wp_nonce_field(
-          'mrm_marketing_unsubscribe_do_' . $email,
-          'mrm_marketing_unsubscribe_nonce',
-          true,
-          false
-        )
-      . '<button type="submit" style="appearance:none;background:#111;color:#fff;border:0;border-radius:999px;padding:13px 22px;cursor:pointer;font-weight:800;">Remove me from marketing emails</button>'
-      . '</form>';
-
-    $this->mrm_marketing_render_unsubscribe_page(
-      'Confirm unsubscribe',
-      'You are unsubscribing ' . esc_html($email) . ' from Low Brass Lessons marketing emails.',
-      $form
-    );
-    exit;
+      . wp_nonce_field('mrm_marketing_unsubscribe_do_' . $scope . '_' . $email, 'mrm_marketing_unsubscribe_nonce', true, false)
+      . '<button type="submit" style="appearance:none;background:#111;color:#fff;border:0;border-radius:999px;padding:13px 22px;cursor:pointer;font-weight:800;">' . esc_html($label) . '</button></form>';
+    $this->mrm_marketing_render_unsubscribe_page($title, $message, $form); exit;
   }
 
   public function handle_marketing_unsubscribe_do() {
-    $token = isset($_POST['token'])
-      ? sanitize_text_field(wp_unslash($_POST['token']))
-      : '';
-
-    $email = $this->mrm_marketing_email_from_token($token);
-
-    if (!$email) {
-      $this->mrm_marketing_render_unsubscribe_page(
-        'Invalid unsubscribe request',
-        'This unsubscribe request could not be verified. Please contact Low Brass Lessons if you still need help unsubscribing.',
-        ''
-      );
-      exit;
+    $token = isset($_POST['token']) ? sanitize_text_field(wp_unslash($_POST['token'])) : '';
+    $data = $this->mrm_marketing_unsubscribe_data_from_token($token);
+    if (empty($data)) {
+      $this->mrm_marketing_render_unsubscribe_page('Invalid unsubscribe request', 'This unsubscribe request could not be verified. Please contact Low Brass Lessons if you still need help unsubscribing.', ''); exit;
     }
-
-    $nonce = isset($_POST['mrm_marketing_unsubscribe_nonce'])
-      ? sanitize_text_field(wp_unslash($_POST['mrm_marketing_unsubscribe_nonce']))
-      : '';
-
-    if (
-      !$nonce ||
-      !wp_verify_nonce(
-        $nonce,
-        'mrm_marketing_unsubscribe_do_' . $email
-      )
-    ) {
-      $this->mrm_marketing_render_unsubscribe_page(
-        'Unsubscribe request expired',
-        'Please reopen the unsubscribe link from your email and try again.',
-        ''
-      );
-      exit;
+    $email = (string)$data['email']; $scope = (string)$data['scope'];
+    $nonce = isset($_POST['mrm_marketing_unsubscribe_nonce']) ? sanitize_text_field(wp_unslash($_POST['mrm_marketing_unsubscribe_nonce'])) : '';
+    if (!$nonce || !wp_verify_nonce($nonce, 'mrm_marketing_unsubscribe_do_' . $scope . '_' . $email)) {
+      $this->mrm_marketing_render_unsubscribe_page('Unsubscribe request expired', 'Please reopen the unsubscribe link from your email and try again.', ''); exit;
     }
-
+    if ($scope === 'newsletter') {
+      $this->mrm_marketing_add_newsletter_unsubscribe($email);
+      $this->mrm_marketing_render_unsubscribe_page('You are unsubscribed from the newsletter', esc_html($email) . ' has been removed from the Low Brass Lessons newsletter.', '<p style="margin-top:18px;color:#555;">You may still receive other Low Brass Lessons marketing emails and transactional messages when applicable.</p>'); exit;
+    }
     $this->mrm_marketing_add_unsubscribe($email);
-
-    $this->mrm_marketing_render_unsubscribe_page(
-      'You are unsubscribed',
-      esc_html($email) . ' has been removed from Low Brass Lessons marketing emails.',
-      '<p style="margin-top:18px;color:#555;">You may still receive transactional emails related to purchases, lessons, masterclasses, access links, receipts, reminders, safety, or legal/account records.</p>'
-    );
-    exit;
+    $this->mrm_marketing_render_unsubscribe_page('You are unsubscribed from marketing emails', esc_html($email) . ' has been removed from Low Brass Lessons marketing emails.', '<p style="margin-top:18px;color:#555;">You may still receive transactional emails related to purchases, lessons, masterclasses, access links, receipts, reminders, safety, or legal/account records.</p>'); exit;
   }
 
   private function mrm_marketing_render_unsubscribe_page($title, $message, $extra_html = '') {
@@ -17907,37 +17947,23 @@ community@example.org",
     return wp_kses($html, $allowed);
   }
 
-  private function mrm_marketing_email_footer_html($unsubscribe_url, $mailing_address = '') {
+  private function mrm_marketing_email_footer_html($unsubscribe_url, $unsubscribe_scope = 'marketing', $mailing_address = '') {
     $site = esc_html(get_bloginfo('name') ? get_bloginfo('name') : 'Low Brass Lessons');
-    $address_html = trim((string)$mailing_address) !== ''
-      ? '<div style="margin-top:8px;">' . nl2br(esc_html((string)$mailing_address)) . '</div>'
-      : '';
-
+    $address_html = trim((string)$mailing_address) !== '' ? '<div style="margin-top:8px;">' . nl2br(esc_html((string)$mailing_address)) . '</div>' : '';
     if (!$unsubscribe_url) return '';
-
+    $unsubscribe_scope = sanitize_key((string)$unsubscribe_scope);
+    $label = $unsubscribe_scope === 'newsletter' ? 'Unsubscribe from Newsletter' : 'Unsubscribe from Marketing Emails';
     return '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
-      . '<div>You are receiving this marketing email from ' . $site . '.</div>'
-      . $address_html
-      . '<div style="margin-top:10px;"><a href="' . esc_url($unsubscribe_url) . '" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div>'
-      . '</div>';
+      . '<div>You are receiving this marketing email from ' . $site . '.</div>' . $address_html
+      . '<div style="margin-top:10px;"><a href="' . esc_url($unsubscribe_url) . '" style="color:#555;text-decoration:underline;">' . esc_html($label) . '</a></div></div>';
   }
 
-  private function mrm_marketing_build_email_html($body_html, $unsubscribe_url, $mailing_address = '') {
+  private function mrm_marketing_build_email_html($body_html, $unsubscribe_url, $unsubscribe_scope = 'marketing', $mailing_address = '') {
     $body_html = (string)$body_html;
-    $footer_html = $this->mrm_marketing_email_footer_html($unsubscribe_url, $mailing_address);
-
-    if (stripos($body_html, '</body>') !== false) {
-      return preg_replace('/<\/body>/i', $footer_html . '</body>', $body_html, 1);
-    }
-
-    if (stripos($body_html, '<html') !== false) {
-      return $body_html . $footer_html;
-    }
-
-    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;">'
-      . $body_html
-      . $footer_html
-      . '</body></html>';
+    $footer_html = $this->mrm_marketing_email_footer_html($unsubscribe_url, $unsubscribe_scope, $mailing_address);
+    if (stripos($body_html, '</body>') !== false) return preg_replace('/<\/body>/i', $footer_html . '</body>', $body_html, 1);
+    if (stripos($body_html, '<html') !== false) return $body_html . $footer_html;
+    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;">' . $body_html . $footer_html . '</body></html>';
   }
 
   private function mrm_instructor_correspondence_build_email_html($body_html) {
@@ -18107,9 +18133,10 @@ community@example.org",
       return false;
     }
 
-    $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+    $marketing_unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+    $newsletter_unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
 
-    if (isset($unsubscribed[$email])) {
+    if (isset($marketing_unsubscribed[$email]) || isset($newsletter_unsubscribed[$email])) {
       return false;
     }
 
@@ -18120,7 +18147,8 @@ community@example.org",
 
     $final_html = $this->mrm_marketing_build_email_html(
       $body_html,
-      $this->mrm_marketing_unsubscribe_url($email),
+      $this->mrm_marketing_unsubscribe_url($email, 'newsletter'),
+      'newsletter',
       $mailing_address
     );
 
@@ -18747,11 +18775,16 @@ community@example.org",
   }
 
   $apply_unsubscribe_suppression = $send_mode !== 'instructor';
-
-  $recipients = $this->mrm_marketing_get_combined_recipients(
-    $selected_lists,
-    $apply_unsubscribe_suppression
-  );
+  $delivery_map = array();
+  if ($send_mode === 'instructor') {
+    $recipients = $this->mrm_marketing_get_combined_recipients($selected_lists, false);
+  } else {
+    $delivery_map = $this->mrm_marketing_get_recipient_delivery_map(
+      $selected_lists,
+      $apply_unsubscribe_suppression
+    );
+    $recipients = array_keys($delivery_map);
+  }
   if (empty($recipients)) {
     $no_recipients_message = $send_mode === 'instructor'
       ? 'No recipients found after deduplication.'
@@ -18823,11 +18856,15 @@ community@example.org",
        * All customer, student, general-interest, purchaser,
        * subscriber, and school-outreach sends remain marketing sends.
        */
-      $unsubscribe_url = $this->mrm_marketing_unsubscribe_url($email);
+      $unsubscribe_scope = isset($delivery_map[$email]['unsubscribe_scope'])
+        ? sanitize_key((string)$delivery_map[$email]['unsubscribe_scope'])
+        : 'marketing';
+      $unsubscribe_url = $this->mrm_marketing_unsubscribe_url($email, $unsubscribe_scope);
 
       $final_html = $this->mrm_marketing_build_email_html(
         $body_html,
         $unsubscribe_url,
+        $unsubscribe_scope,
         $mailing_address
       );
     }
@@ -18962,6 +18999,13 @@ public function handle_marketing_general_interest_signup() {
     $this->mrm_marketing_signup_redirect_back('error');
   }
 
+  $list_key = isset($_POST['mrm_marketing_list'])
+    ? sanitize_key(wp_unslash($_POST['mrm_marketing_list']))
+    : '';
+  if ($list_key !== 'general_interest') {
+    $this->mrm_marketing_signup_redirect_back('error');
+  }
+
   $email = isset($_POST['mrm_marketing_email'])
     ? strtolower(sanitize_email(wp_unslash($_POST['mrm_marketing_email'])))
     : '';
@@ -18982,11 +19026,12 @@ public function handle_marketing_general_interest_signup() {
     $this->mrm_marketing_signup_redirect_back('recaptcha');
   }
 
-  $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
-
-  if (isset($unsubscribed[$email])) {
-    $this->mrm_marketing_signup_redirect_back('unsubscribed');
-  }
+  $marketing_unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+  $newsletter_unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
+  $was_unsubscribed = isset($marketing_unsubscribed[$email]) || isset($newsletter_unsubscribed[$email]);
+  unset($marketing_unsubscribed[$email], $newsletter_unsubscribed[$email]);
+  $this->mrm_marketing_save_unsubscribed_emails(array_keys($marketing_unsubscribed));
+  $this->mrm_marketing_save_newsletter_unsubscribed_emails(array_keys($newsletter_unsubscribed));
 
   $lists = $this->mrm_marketing_manual_lists();
 
@@ -19001,6 +19046,14 @@ public function handle_marketing_general_interest_signup() {
     $lists['general_interest'] = array_values(array_unique($lists['general_interest']));
     sort($lists['general_interest']);
     $this->save_email_lists($lists);
+  }
+
+  if ($was_unsubscribed) {
+    $this->mrm_marketing_send_newsletter_welcome_email($email);
+    $this->mrm_marketing_signup_redirect_back('resubscribed');
+  }
+
+  if (!$already_exists) {
     $this->mrm_marketing_send_newsletter_welcome_email($email);
     $this->mrm_marketing_signup_redirect_back('joined');
   }
@@ -19009,37 +19062,33 @@ public function handle_marketing_general_interest_signup() {
 }
 
 public function handle_marketing_resubscribe() {
-  if (!current_user_can('manage_options')) {
-    wp_die('You do not have permission to update marketing unsubscribes.');
-  }
-
+  if (!current_user_can('manage_options')) wp_die('You do not have permission to update marketing unsubscribes.');
   check_admin_referer('mrm_marketing_resubscribe', 'mrm_marketing_resubscribe_nonce');
-
+  $scope = isset($_POST['mrm_marketing_resubscribe_scope']) ? sanitize_key(wp_unslash($_POST['mrm_marketing_resubscribe_scope'])) : 'marketing';
+  if (!in_array($scope, array('newsletter', 'marketing'), true)) $scope = 'marketing';
   $raw = isset($_POST['mrm_marketing_resubscribe_emails']) ? wp_unslash($_POST['mrm_marketing_resubscribe_emails']) : '';
-  $emails_to_restore = $this->mrm_marketing_normalize_emails_from_text($raw);
-
-  if (empty($emails_to_restore)) {
-    wp_safe_redirect(add_query_arg(array(
-      'page' => 'mrm-pay-hub-marketing-email-lists',
-      'mrm_marketing_error' => rawurlencode('No valid emails were entered for re-subscribe.'),
-    ), admin_url('admin.php')));
-    exit;
+  $emails = $this->mrm_marketing_normalize_emails_from_text($raw);
+  if (empty($emails)) {
+    wp_safe_redirect(add_query_arg(array('page' => 'mrm-pay-hub-marketing-email-lists', 'mrm_marketing_error' => rawurlencode('No valid emails were entered for restoration.')), admin_url('admin.php'))); exit;
   }
-
-  $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
-
-  foreach ($emails_to_restore as $email) {
-    unset($unsubscribed[$email]);
+  $marketing = $this->mrm_marketing_unsubscribed_emails();
+  $newsletter = $this->mrm_marketing_newsletter_unsubscribed_emails();
+  $lists = $this->mrm_marketing_manual_lists();
+  if (!isset($lists['general_interest'])) $lists['general_interest'] = array();
+  foreach ($emails as $email) {
+    unset($marketing[$email]);
+    if ($scope === 'newsletter') {
+      unset($newsletter[$email]);
+      $lists['general_interest'][] = $email;
+    }
   }
-
-  $this->mrm_marketing_save_unsubscribed_emails(array_keys($unsubscribed));
-
-  wp_safe_redirect(add_query_arg(array(
-    'page' => 'mrm-pay-hub-marketing-email-lists',
-    'mrm_marketing_saved' => '1',
-    'mrm_marketing_resubscribed' => (string)count($emails_to_restore),
-  ), admin_url('admin.php')));
-  exit;
+  $this->mrm_marketing_save_unsubscribed_emails(array_keys($marketing));
+  if ($scope === 'newsletter') {
+    $this->mrm_marketing_save_newsletter_unsubscribed_emails(array_keys($newsletter));
+    $lists['general_interest'] = array_values(array_unique($lists['general_interest']));
+    sort($lists['general_interest']); $this->save_email_lists($lists);
+  }
+  wp_safe_redirect(add_query_arg(array('page' => 'mrm-pay-hub-marketing-email-lists', 'mrm_marketing_saved' => '1', 'mrm_marketing_resubscribed' => (string)count($emails), 'mrm_marketing_resubscribe_scope' => $scope), admin_url('admin.php'))); exit;
 }
 
 
@@ -26346,7 +26395,8 @@ MRM_TAX_RULES;
     $defs = $this->mrm_marketing_default_lists();
     $manual_lists = $this->mrm_marketing_manual_lists();
     $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
-    $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+    $marketing_unsubscribed = $this->mrm_marketing_unsubscribed_emails();
+    $newsletter_unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
     $sent_log = $this->mrm_marketing_sent_log();
     $this->mrm_marketing_save_sent_log($sent_log);
     $sent_log = $this->mrm_marketing_sent_log();
@@ -26397,7 +26447,11 @@ MRM_TAX_RULES;
     }
     if (!empty($_GET['mrm_marketing_saved'])) echo '<div class="notice notice-success"><p>Marketing email lists saved.</p></div>';
     if (!empty($_GET['mrm_marketing_sent']) || isset($_GET['mrm_marketing_failed'])) echo '<div class="notice notice-success"><p>Marketing email send complete. Sent: ' . esc_html((string)($_GET['mrm_marketing_sent'] ?? '0')) . '. Failed: ' . esc_html((string)($_GET['mrm_marketing_failed'] ?? '0')) . '.</p></div>';
-    if (!empty($_GET['mrm_marketing_resubscribed'])) echo '<div class="notice notice-success"><p>Re-subscribed ' . esc_html((string)$_GET['mrm_marketing_resubscribed']) . ' email(s).</p></div>';
+    if (!empty($_GET['mrm_marketing_resubscribed'])) {
+      $restored_scope = isset($_GET['mrm_marketing_resubscribe_scope']) ? sanitize_key(wp_unslash($_GET['mrm_marketing_resubscribe_scope'])) : 'marketing';
+      $restored_label = $restored_scope === 'newsletter' ? 'newsletter subscription(s)' : 'marketing eligibility record(s)';
+      echo '<div class="notice notice-success"><p>Restored ' . esc_html((string)$_GET['mrm_marketing_resubscribed']) . ' ' . esc_html($restored_label) . '.</p></div>';
+    }
     if (!empty($_GET['mrm_newsletter_welcome_saved'])) echo '<div class="notice notice-success"><p>Newsletter welcome email settings saved.</p></div>';
     if (!empty($_GET['mrm_marketing_error'])) echo '<div class="notice notice-error"><p>' . esc_html(rawurldecode((string)$_GET['mrm_marketing_error'])) . '</p></div>';
 
@@ -26613,7 +26667,7 @@ MRM_TAX_RULES;
     echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;"><h2>Preview and Send Email</h2>';
     echo '<p class="description">'
       . '<strong>Instructor correspondence:</strong> Emails sent exclusively to All Current Instructors or a state-specific instructor list are sent without the marketing footer or unsubscribe link. '
-      . '<strong>All other recipient lists:</strong> The normal marketing footer, mailing address, unsubscribe link, and suppression rules remain active. '
+      . '<strong>Newsletter recipients:</strong> Newsletter-only recipients receive an Unsubscribe from Newsletter link. <strong>Other marketing recipients:</strong> Recipients included through any non-newsletter marketing list receive an Unsubscribe from Marketing Emails link. '
       . 'Instructor lists cannot be combined with marketing or school outreach lists in one send.'
       . '</p>';
     echo '<div style="border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;padding:14px;margin-bottom:18px;"><h3 style="margin-top:0;">Live Preview</h3><div><strong id="mrm-marketing-preview-subject">Subject preview will appear here.</strong></div><iframe id="mrm-marketing-preview-frame" title="Marketing email preview" style="display:block;width:100%;height:520px;border:1px solid #dcdcde;border-radius:8px;background:#fff;margin-top:10px;"></iframe></div>';
@@ -26647,9 +26701,13 @@ MRM_TAX_RULES;
       $list_mode = $this->mrm_marketing_is_instructor_list($key)
         ? 'instructor'
         : 'marketing';
+      $unsubscribe_scope = $list_mode === 'instructor'
+        ? 'none'
+        : ($key === 'general_interest' ? 'newsletter' : 'marketing');
 
       echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="'
         . esc_attr($list_mode)
+        . '" data-unsubscribe-scope="' . esc_attr($unsubscribe_scope)
         . '" name="mrm_marketing_lists[]" value="'
         . esc_attr($key)
         . '"> ';
@@ -26686,7 +26744,7 @@ MRM_TAX_RULES;
       . esc_html($state_options[$selected_state])
       . '</strong>';
     echo '<label style="display:block;margin:8px 0;">';
-    echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="instructor" name="mrm_marketing_lists[]" value="'
+    echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="instructor" data-unsubscribe-scope="none" name="mrm_marketing_lists[]" value="'
       . esc_attr($state_instructor_list_key)
       . '"> ';
     echo 'Instructors in ' . esc_html($state_options[$selected_state]);
@@ -26713,7 +26771,7 @@ MRM_TAX_RULES;
       . esc_html($state_options[$selected_state])
       . '</strong>';
     echo '<label style="display:block;margin:8px 0;">';
-    echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" name="mrm_marketing_lists[]" value="'
+    echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" data-unsubscribe-scope="marketing" name="mrm_marketing_lists[]" value="'
       . esc_attr($state_professor_list_key)
       . '"> ';
     echo 'College Professors in ' . esc_html($state_options[$selected_state]);
@@ -26746,7 +26804,7 @@ MRM_TAX_RULES;
       );
 
       echo '<label style="display:block;margin:8px 0;">';
-      echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" name="mrm_marketing_lists[]" value="'
+      echo '<input type="checkbox" class="mrm-marketing-recipient-list" data-list-mode="marketing" data-unsubscribe-scope="marketing" name="mrm_marketing_lists[]" value="'
         . esc_attr($list_key)
         . '"> ';
       echo esc_html(
@@ -26764,13 +26822,18 @@ MRM_TAX_RULES;
     echo '<div id="mrm-marketing-selection-warning" class="notice notice-warning inline" style="display:none;margin:12px 0 0;">';
     echo '<p>Instructor correspondence lists cannot be combined with marketing or school outreach lists. Clear one group before sending.</p>';
     echo '</div>';
+    echo '<div id="mrm-marketing-footer-scope-note" class="notice notice-info inline" style="display:none;margin:12px 0 0;"><p>This mixed marketing send uses recipient-specific unsubscribe links. Newsletter-only recipients receive Unsubscribe from Newsletter. Anyone included through another selected marketing list receives Unsubscribe from Marketing Emails.</p></div>';
     echo '</td></tr><tr><th scope="row"><label for="mrm_marketing_attachments">Attachments</label></th><td><input type="file" id="mrm_marketing_attachments" name="mrm_marketing_attachments[]" multiple><p class="description">Optional attachments.</p></td></tr></table>';
     echo '<p class="submit"><button type="submit" class="button button-primary">Send Marketing Email</button></p></form><hr>';
-    echo '<h2>Re-subscribe Emails</h2><p class="description">Use this only when someone asks to be added back after unsubscribing.</p>';
-    echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_resubscribe">';
-    wp_nonce_field('mrm_marketing_resubscribe', 'mrm_marketing_resubscribe_nonce');
-    echo '<textarea name="mrm_marketing_resubscribe_emails" rows="4" class="large-text" placeholder="person@example.com"></textarea><p class="submit"><button type="submit" class="button">Re-subscribe</button></p></form>';
-    echo '<p><strong>Currently unsubscribed:</strong> ' . esc_html((string)count($unsubscribed)) . '</p>';
+    foreach (array('newsletter' => 'Newsletter Subscription', 'marketing' => 'Marketing Eligibility') as $scope => $label) {
+      echo '<h2>Restore ' . esc_html($label) . '</h2>';
+      echo '<p class="description">' . ($scope === 'newsletter' ? 'Removes the address from both suppression lists and adds it to the Newsletter list.' : 'Removes the address from the all-marketing suppression list. It does not reconstruct deleted manual-list memberships or add the address to the Newsletter.') . '</p>';
+      echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="mrm_marketing_resubscribe"><input type="hidden" name="mrm_marketing_resubscribe_scope" value="' . esc_attr($scope) . '">';
+      wp_nonce_field('mrm_marketing_resubscribe', 'mrm_marketing_resubscribe_nonce');
+      echo '<textarea name="mrm_marketing_resubscribe_emails" rows="4" class="large-text" placeholder="person@example.com"></textarea><p class="submit"><button type="submit" class="button">Restore ' . esc_html($label) . '</button></p></form>';
+    }
+    echo '<p><strong>Newsletter unsubscribed:</strong> ' . esc_html((string)count($newsletter_unsubscribed)) . '</p>';
+    echo '<p><strong>Marketing unsubscribed:</strong> ' . esc_html((string)count($marketing_unsubscribed)) . '</p>';
 
     echo '<hr><h2>Previously Sent Marketing Emails</h2>';
     echo '<p class="description">Most recent marketing sends, organized by recipient list and timestamp. Removing an entry deletes only this local history record; it cannot recall an email that was already delivered.</p>';
@@ -26860,7 +26923,7 @@ MRM_TAX_RULES;
     echo '<h2>Newsletter Welcome Email</h2>';
     echo '<p class="description">'
       . 'This saved email is sent automatically once to each new newsletter subscriber. '
-      . 'The configured marketing mailing address and personalized unsubscribe link are appended automatically.'
+      . 'The configured marketing mailing address and personalized Unsubscribe from Newsletter link are appended automatically.'
       . '</p>';
     echo '<div style="border:1px solid #dcdcde;border-radius:10px;background:#f6f7f7;padding:14px;margin:16px 0 18px;">';
     echo '<h3 style="margin-top:0;">Live Preview</h3>';
@@ -26902,7 +26965,7 @@ MRM_TAX_RULES;
       . '</textarea>';
     echo '<p class="description">'
       . 'Enter the complete HTML body. Do not add a separate unsubscribe button; '
-      . 'the standard personalized marketing footer is added automatically.'
+      . 'the personalized newsletter unsubscribe footer is added automatically.'
       . '</p>';
     echo '</td></tr>';
     echo '<tr><th scope="row"><label for="mrm_newsletter_welcome_attachment">Attachment</label></th><td>';
@@ -26967,6 +27030,7 @@ MRM_TAX_RULES;
       var welcomeFrame = document.getElementById('mrm-newsletter-welcome-preview-frame');
       var recipientListCheckboxes = document.querySelectorAll('.mrm-marketing-recipient-list');
       var selectionWarning = document.getElementById('mrm-marketing-selection-warning');
+      var footerScopeNote = document.getElementById('mrm-marketing-footer-scope-note');
       var marketingSendForm = document.getElementById('mrm-marketing-email-send-form');
 
       function getSelectedEmailMode() {
@@ -26998,22 +27062,44 @@ MRM_TAX_RULES;
 
       function updateSelectionWarning() {
         var emailMode = getSelectedEmailMode();
+        var unsubscribeMode = getSelectedUnsubscribeMode();
 
         if (selectionWarning) {
           selectionWarning.style.display = emailMode === 'mixed' ? 'block' : 'none';
         }
+        if (footerScopeNote) {
+          footerScopeNote.style.display = emailMode !== 'mixed' && unsubscribeMode === 'mixed' ? 'block' : 'none';
+        }
       }
 
-      function getMarketingFooterPreview() {
+      function getSelectedUnsubscribeMode() {
+        var hasNewsletter = false;
+        var hasMarketing = false;
+        Array.prototype.forEach.call(recipientListCheckboxes, function(checkbox) {
+          if (!checkbox.checked) return;
+          var scope = String(checkbox.getAttribute('data-unsubscribe-scope') || '');
+          if (scope === 'newsletter') hasNewsletter = true;
+          if (scope === 'marketing') hasMarketing = true;
+        });
+        if (hasNewsletter && hasMarketing) return 'mixed';
+        if (hasNewsletter) return 'newsletter';
+        if (hasMarketing) return 'marketing';
+        return 'none';
+      }
+
+      function getMarketingFooterPreview(unsubscribeScope) {
+        var unsubscribeLabel = unsubscribeScope === 'newsletter'
+          ? 'Unsubscribe from Newsletter'
+          : 'Unsubscribe from Marketing Emails';
         return '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
           + '<div>You are receiving this marketing email from Low Brass Lessons.</div>'
           + '<div style="margin-top:8px;">The configured marketing mailing address will appear here.</div>'
-          + '<div style="margin-top:10px;"><a href="#" style="color:#555;text-decoration:underline;">Remove me from marketing emails</a></div>'
+          + '<div style="margin-top:10px;"><a href="#" style="color:#555;text-decoration:underline;">' + unsubscribeLabel + '</a></div>'
           + '</div>';
       }
 
-      function buildPreviewHtml(bodyHtml, includeMarketingFooter) {
-        var footer = includeMarketingFooter ? getMarketingFooterPreview() : '';
+      function buildPreviewHtml(bodyHtml, unsubscribeScope) {
+        var footer = unsubscribeScope === 'none' ? '' : getMarketingFooterPreview(unsubscribeScope);
         var html = bodyHtml || '<p>Email body preview will appear here.</p>';
 
         if (html.toLowerCase().indexOf('</body>') !== -1) {
@@ -27040,7 +27126,12 @@ MRM_TAX_RULES;
         }
 
         if (frame) {
-          frame.srcdoc = buildPreviewHtml(currentBody, getSelectedEmailMode() !== 'instructor');
+          var emailMode = getSelectedEmailMode();
+          var unsubscribeMode = getSelectedUnsubscribeMode();
+          var previewScope = emailMode !== 'instructor' && unsubscribeMode !== 'none'
+            ? (unsubscribeMode === 'newsletter' ? 'newsletter' : 'marketing')
+            : 'none';
+          frame.srcdoc = buildPreviewHtml(currentBody, previewScope);
         }
       }
 
@@ -27053,7 +27144,7 @@ MRM_TAX_RULES;
         }
 
         if (welcomeFrame) {
-          welcomeFrame.srcdoc = buildPreviewHtml(currentBody, true);
+          welcomeFrame.srcdoc = buildPreviewHtml(currentBody, 'newsletter');
         }
       }
 
