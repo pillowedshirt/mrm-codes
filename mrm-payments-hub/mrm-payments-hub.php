@@ -17954,7 +17954,7 @@ community@example.org",
     $unsubscribe_scope = sanitize_key((string)$unsubscribe_scope);
     $label = $unsubscribe_scope === 'newsletter' ? 'Unsubscribe from Newsletter' : 'Unsubscribe from Marketing Emails';
     return '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
-      . '<div>You are receiving this marketing email from ' . $site . '.</div>' . $address_html
+      . '<div>You are receiving this email from ' . $site . '.</div>' . $address_html
       . '<div style="margin-top:10px;"><a href="' . esc_url($unsubscribe_url) . '" style="color:#555;text-decoration:underline;">' . esc_html($label) . '</a></div></div>';
   }
 
@@ -27092,7 +27092,7 @@ MRM_TAX_RULES;
           ? 'Unsubscribe from Newsletter'
           : 'Unsubscribe from Marketing Emails';
         return '<div class="mrm-marketing-email-footer" style="margin-top:28px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:12px;line-height:1.6;color:#777;text-align:center;font-family:Arial,Helvetica,sans-serif;">'
-          + '<div>You are receiving this marketing email from Low Brass Lessons.</div>'
+          + '<div>You are receiving this email from Low Brass Lessons.</div>'
           + '<div style="margin-top:8px;">The configured marketing mailing address will appear here.</div>'
           + '<div style="margin-top:10px;"><a href="#" style="color:#555;text-decoration:underline;">' + unsubscribeLabel + '</a></div>'
           + '</div>';
