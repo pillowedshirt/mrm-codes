@@ -39,7 +39,7 @@ class MRM_Lesson_Scheduler {
     protected $option_key = 'mrm_scheduler_settings';
     protected $options = array();
     protected $mrm_secret_diagnostics = array();
-    const DB_VERSION = '1.5.9';
+    const DB_VERSION = '1.6.0';
     const CAPABILITY = 'manage_options';
     const TERMS_VERSION = '2026-04-25';
     // Google endpoints
@@ -605,6 +605,11 @@ protected function mrm_get_google_service_account_json() {
                 'hook'     => 'mrm_scheduler_send_meeting_reminders',
                 'schedule' => 'mrm_5min',
                 'offset'   => 180,
+            ),
+            array(
+                'hook'     => 'mrm_scheduler_retry_initial_booking_emails',
+                'schedule' => 'mrm_5min',
+                'offset'   => 210,
             ),
         );
 
@@ -2192,6 +2197,7 @@ protected function mrm_get_google_service_account_json() {
         add_action( 'mrm_scheduler_check_safety_exceptions', array( $this, 'cron_check_safety_exceptions' ) );
         add_action( 'mrm_scheduler_send_feedback_requests', array( $this, 'cron_send_feedback_requests' ) );
         add_action( 'mrm_scheduler_send_meeting_reminders', array( $this, 'cron_send_meeting_reminders' ) );
+        add_action( 'mrm_scheduler_retry_initial_booking_emails', array( $this, 'cron_retry_initial_booking_emails' ) );
 
         $this->maybe_log_safety_boot( 'safety_system_constructor_loaded', array(
             'file' => __FILE__,
@@ -2234,6 +2240,7 @@ protected function mrm_get_google_service_account_json() {
             'mrm_scheduler_check_safety_exceptions',
             'mrm_scheduler_send_feedback_requests',
             'mrm_scheduler_send_meeting_reminders',
+            'mrm_scheduler_retry_initial_booking_emails',
         );
 
         foreach ( $hooks as $hook ) {
@@ -2268,6 +2275,7 @@ protected function mrm_get_google_service_account_json() {
         wp_clear_scheduled_hook( 'mrm_scheduler_check_safety_exceptions' );
         wp_clear_scheduled_hook( 'mrm_scheduler_send_feedback_requests' );
         wp_clear_scheduled_hook( 'mrm_scheduler_send_meeting_reminders' );
+        wp_clear_scheduled_hook( 'mrm_scheduler_retry_initial_booking_emails' );
     }
 
     public function mrm_maybe_ensure_tax_payroll_imports_table() {
@@ -2409,6 +2417,12 @@ protected function mrm_get_google_service_account_json() {
     reminder_token_hash CHAR(64) DEFAULT NULL,
     reminder_scheduled_at DATETIME DEFAULT NULL,
     reminder_sent_at DATETIME DEFAULT NULL,
+    instructor_scheduled_email_sent_at DATETIME DEFAULT NULL,
+    instructor_scheduled_email_attempts INT NOT NULL DEFAULT 0,
+    instructor_scheduled_email_last_error TEXT NULL,
+    consultation_confirmation_sent_at DATETIME DEFAULT NULL,
+    consultation_confirmation_attempts INT NOT NULL DEFAULT 0,
+    consultation_confirmation_last_error TEXT NULL,
     PRIMARY KEY (id),
     KEY instructor_idx (instructor_id),
     KEY student_email_idx (student_email),
@@ -2419,7 +2433,9 @@ protected function mrm_get_google_service_account_json() {
     KEY charge_status_idx (charge_status),
     KEY charge_due_at_idx (charge_due_at),
     KEY reminder_token_hash_idx (reminder_token_hash),
-    KEY reminder_sent_at_idx (reminder_sent_at)
+    KEY reminder_sent_at_idx (reminder_sent_at),
+    KEY instructor_scheduled_email_idx (instructor_scheduled_email_sent_at),
+    KEY consultation_confirmation_idx (consultation_confirmation_sent_at)
 ) {$charset_collate};";
         $table_agreements = $wpdb->prefix . 'mrm_agreements';
         $table_attendance = $wpdb->prefix . 'mrm_lesson_attendance';
@@ -2540,6 +2556,12 @@ protected function mrm_get_google_service_account_json() {
             'address_city' => "ALTER TABLE {$table_lessons} ADD COLUMN address_city varchar(100) NOT NULL DEFAULT ''",
             'address_state' => "ALTER TABLE {$table_lessons} ADD COLUMN address_state varchar(64) NOT NULL DEFAULT ''",
             'address_postal' => "ALTER TABLE {$table_lessons} ADD COLUMN address_postal varchar(32) NOT NULL DEFAULT ''",
+            'instructor_scheduled_email_sent_at' => "ALTER TABLE {$table_lessons} ADD COLUMN instructor_scheduled_email_sent_at DATETIME NULL",
+            'instructor_scheduled_email_attempts' => "ALTER TABLE {$table_lessons} ADD COLUMN instructor_scheduled_email_attempts INT NOT NULL DEFAULT 0",
+            'instructor_scheduled_email_last_error' => "ALTER TABLE {$table_lessons} ADD COLUMN instructor_scheduled_email_last_error TEXT NULL",
+            'consultation_confirmation_sent_at' => "ALTER TABLE {$table_lessons} ADD COLUMN consultation_confirmation_sent_at DATETIME NULL",
+            'consultation_confirmation_attempts' => "ALTER TABLE {$table_lessons} ADD COLUMN consultation_confirmation_attempts INT NOT NULL DEFAULT 0",
+            'consultation_confirmation_last_error' => "ALTER TABLE {$table_lessons} ADD COLUMN consultation_confirmation_last_error TEXT NULL",
         );
 
         foreach ( $lesson_required_columns as $col_name => $alter_sql ) {
@@ -2757,7 +2779,7 @@ protected function mrm_get_google_service_account_json() {
 
         $lesson_cols = $wpdb->get_col( "DESC {$lessons}", 0 );
         $need_lessons = array(
-            'google_original_start_time', 'delivered_at', 'finalized_at', 'charge_due_at', 'charge_status', 'charge_attempts', 'charge_last_attempt_at', 'charge_last_error', 'google_event_id', 'google_instance_event_id', 'google_meet_url', 'order_id', 'payment_mode', 'payout_unlocked_at', 'autopay_profile_id', 'agreement_id', 'reminder_token', 'reminder_token_hash', 'reminder_scheduled_at', 'reminder_sent_at',
+            'google_original_start_time', 'delivered_at', 'finalized_at', 'charge_due_at', 'charge_status', 'charge_attempts', 'charge_last_attempt_at', 'charge_last_error', 'google_event_id', 'google_instance_event_id', 'google_meet_url', 'order_id', 'payment_mode', 'payout_unlocked_at', 'autopay_profile_id', 'agreement_id', 'reminder_token', 'reminder_token_hash', 'reminder_scheduled_at', 'reminder_sent_at', 'instructor_scheduled_email_sent_at', 'instructor_scheduled_email_attempts', 'instructor_scheduled_email_last_error', 'consultation_confirmation_sent_at', 'consultation_confirmation_attempts', 'consultation_confirmation_last_error',
         );
 
         foreach ( $need_lessons as $col ) {
@@ -6302,51 +6324,59 @@ protected function mrm_get_google_service_account_json() {
      * @return false|WP_Error false if ok, WP_Error if conflict/invalid.
      */
     protected function slot_conflicts( $instructor_id, $block_cal_ids, $start_iso, $end_iso, $is_online ) {
+        global $wpdb;
+
         $start_ts = strtotime( (string) $start_iso );
         $end_ts   = strtotime( (string) $end_iso );
-        if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
-            return new WP_Error( 'invalid_slot', 'Invalid slot start/end.' );
-        }
-        $buffer = $is_online ? 0 : ( 30 * 60 );
-        $check_min = gmdate( 'c', $start_ts - $buffer );
-        $check_max = gmdate( 'c', $end_ts + $buffer );
-        $busy = array();
 
-        // Busy from Google FreeBusy (calendar events)
-        if ( ! empty( $block_cal_ids ) && $this->google_is_configured() ) {
-            $fb = $this->google_freebusy( $block_cal_ids, $check_min, $check_max );
-            if ( ! is_wp_error( $fb ) ) {
-                foreach ( $fb as $b ) {
-                    if ( empty( $b['start'] ) || empty( $b['end'] ) ) continue;
-                    $bs = strtotime( $b['start'] );
-                    $be = strtotime( $b['end'] );
-                    if ( ! $bs || ! $be || $be <= $bs ) continue;
-                    $busy[] = array(
-                        'start'    => (string) $b['start'],
-                        'end'      => (string) $b['end'],
-                        'start_ts' => $bs,
-                        'end_ts'   => $be,
-                        'source'   => 'google',
-                    );
+        if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
+            return new WP_Error( 'invalid_slot', 'Invalid slot start or end.' );
+        }
+
+        $proposed_buffer = $is_online ? 0 : 30 * MINUTE_IN_SECONDS;
+        $proposed_start  = $start_ts - $proposed_buffer;
+        $proposed_end    = $end_ts + $proposed_buffer;
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $database_conflict = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT id, start_time, end_time
+                 FROM {$lessons_table}
+                 WHERE instructor_id = %d
+                   AND status = 'scheduled'
+                   AND %d < (UNIX_TIMESTAMP(end_time) + IF(is_online = 0, 1800, 0))
+                   AND %d > (UNIX_TIMESTAMP(start_time) - IF(is_online = 0, 1800, 0))
+                 ORDER BY start_time ASC
+                 LIMIT 1",
+                absint( $instructor_id ),
+                $proposed_start,
+                $proposed_end
+            ),
+            ARRAY_A
+        );
+
+        if ( is_array( $database_conflict ) ) {
+            return new WP_Error( 'slot_conflict', 'The selected lesson time is no longer available.', array( 'conflicting_lesson_id' => absint( $database_conflict['id'] ?? 0 ) ) );
+        }
+
+        $calendar_ids = array_values( array_filter( array_map( 'trim', (array) $block_cal_ids ) ) );
+        if ( ! empty( $calendar_ids ) ) {
+            if ( ! $this->google_is_configured() ) {
+                return new WP_Error( 'availability_check_unavailable', 'Calendar availability could not be verified.' );
+            }
+            $freebusy = $this->google_freebusy( $calendar_ids, gmdate( 'c', $proposed_start ), gmdate( 'c', $proposed_end ) );
+            if ( is_wp_error( $freebusy ) ) {
+                return new WP_Error( 'availability_check_unavailable', 'Calendar availability could not be verified.', array( 'internal_error' => $freebusy->get_error_message() ) );
+            }
+            foreach ( (array) $freebusy as $busy ) {
+                $busy_start = strtotime( (string) ( $busy['start'] ?? '' ) );
+                $busy_end   = strtotime( (string) ( $busy['end'] ?? '' ) );
+                if ( $busy_start && $busy_end && $proposed_start < $busy_end && $proposed_end > $busy_start ) {
+                    return new WP_Error( 'slot_conflict', 'The selected lesson time is no longer available.' );
                 }
             }
         }
 
-        $busy = $this->merge_intervals( $busy );
-
-        $slot_check_start = $start_ts - $buffer;
-        $slot_check_end   = $end_ts + $buffer;
-
-        foreach ( $busy as $b ) {
-            $bs = isset( $b['start_ts'] ) ? (int) $b['start_ts'] : 0;
-            $be = isset( $b['end_ts'] ) ? (int) $b['end_ts'] : 0;
-            if ( $bs && $be && $slot_check_start < $be && $slot_check_end > $bs ) {
-                return new WP_Error( 'slot_conflict', 'Selected time is no longer available.', array(
-                    'conflict_start' => gmdate( 'c', $bs ),
-                    'conflict_end'   => gmdate( 'c', $be ),
-                ) );
-            }
-        }
         return false;
     }
 
@@ -15590,14 +15620,46 @@ protected function parse_service_account_json( $json ) {
         return '';
     }
 
+    protected function mrm_claim_initial_email( $lesson_id, $email_type ) {
+        $lesson_id = absint( $lesson_id );
+        $email_type = sanitize_key( $email_type );
+        if ( $lesson_id <= 0 || '' === $email_type ) return false;
+        $option_name = sprintf( 'mrm_initial_email_%s_%d', $email_type, $lesson_id );
+        $claimed_at = absint( get_option( $option_name, 0 ) );
+        if ( $claimed_at > 0 && time() - $claimed_at < 10 * MINUTE_IN_SECONDS ) return false;
+        if ( $claimed_at > 0 ) delete_option( $option_name );
+        return add_option( $option_name, time(), '', false );
+    }
+
+    protected function mrm_release_initial_email( $lesson_id, $email_type ) {
+        delete_option( sprintf( 'mrm_initial_email_%s_%d', sanitize_key( $email_type ), absint( $lesson_id ) ) );
+    }
+
+    public function cron_retry_initial_booking_emails() {
+        global $wpdb;
+        $lessons = $wpdb->prefix . 'mrm_lessons';
+        $since = gmdate( 'Y-m-d H:i:s', time() - 7 * DAY_IN_SECONDS );
+        $instructor_rows = $wpdb->get_results( $wpdb->prepare( "SELECT l.id FROM {$lessons} l WHERE l.status = 'scheduled' AND l.created_at >= %s AND l.instructor_scheduled_email_sent_at IS NULL AND (l.series_id IS NULL OR l.id = (SELECT MIN(l2.id) FROM {$lessons} l2 WHERE l2.series_id = l.series_id AND l2.status <> 'series')) ORDER BY l.id ASC LIMIT 25", $since ), ARRAY_A );
+        foreach ( (array) $instructor_rows as $row ) $this->send_instructor_scheduled_notification_for_lesson( absint( $row['id'] ) );
+        $consultation_rows = $wpdb->get_results( $wpdb->prepare( "SELECT id FROM {$lessons} WHERE status = 'scheduled' AND is_consultation = 1 AND created_at >= %s AND consultation_confirmation_sent_at IS NULL ORDER BY id ASC LIMIT 25", $since ), ARRAY_A );
+        foreach ( (array) $consultation_rows as $row ) $this->send_consultation_confirmation_for_lesson( absint( $row['id'] ) );
+    }
+
     protected function send_instructor_scheduled_notification_for_lesson( $lesson_id, $options = array() ) {
         $lesson = $this->get_lesson_with_instructor( $lesson_id );
         if ( ! is_array( $lesson ) || empty( $lesson ) ) {
             return false;
         }
+        if ( ! empty( $lesson['instructor_scheduled_email_sent_at'] ) ) {
+            return true;
+        }
+        if ( ! $this->mrm_claim_initial_email( $lesson_id, 'instructor' ) ) {
+            return false;
+        }
 
         $instructor_email = sanitize_email( (string) ( $lesson['instructor_email'] ?? '' ) );
         if ( ! is_email( $instructor_email ) ) {
+            $this->mrm_release_initial_email( $lesson_id, 'instructor' );
             return false;
         }
 
@@ -15663,7 +15725,16 @@ protected function parse_service_account_json( $json ) {
         );
 
 
-        return $sent;
+        global $wpdb;
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        if ( $sent ) {
+            $wpdb->update( $lessons_table, array( 'instructor_scheduled_email_sent_at' => current_time( 'mysql', true ), 'instructor_scheduled_email_last_error' => '', 'updated_at' => current_time( 'mysql', true ) ), array( 'id' => absint( $lesson_id ) ), array( '%s', '%s', '%s' ), array( '%d' ) );
+        } else {
+            $wpdb->query( $wpdb->prepare( "UPDATE {$lessons_table} SET instructor_scheduled_email_attempts = instructor_scheduled_email_attempts + 1, instructor_scheduled_email_last_error = %s, updated_at = %s WHERE id = %d", 'wp_mail() returned false.', current_time( 'mysql', true ), absint( $lesson_id ) ) );
+        }
+        $this->mrm_release_initial_email( $lesson_id, 'instructor' );
+
+        return (bool) $sent;
     }
 
     protected function send_consultation_confirmation_for_lesson( $lesson_id ) {
@@ -15675,9 +15746,16 @@ protected function parse_service_account_json( $json ) {
         if ( ! $this->mrm_is_consultation_lesson( $lesson ) ) {
             return false;
         }
+        if ( ! empty( $lesson['consultation_confirmation_sent_at'] ) ) {
+            return true;
+        }
+        if ( ! $this->mrm_claim_initial_email( $lesson_id, 'consultation' ) ) {
+            return false;
+        }
 
         $student_email    = sanitize_email( (string) ( $lesson['student_email'] ?? '' ) );
         if ( ! is_email( $student_email ) ) {
+            $this->mrm_release_initial_email( $lesson_id, 'consultation' );
             return false;
         }
 
@@ -15706,7 +15784,7 @@ protected function parse_service_account_json( $json ) {
             ''
         );
 
-        return wp_mail(
+        $sent = wp_mail(
             $student_email,
             'Consultation Confirmation',
             $html,
@@ -15715,6 +15793,17 @@ protected function parse_service_account_json( $json ) {
                 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
             )
         );
+
+        global $wpdb;
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        if ( $sent ) {
+            $wpdb->update( $lessons_table, array( 'consultation_confirmation_sent_at' => current_time( 'mysql', true ), 'consultation_confirmation_last_error' => '', 'updated_at' => current_time( 'mysql', true ) ), array( 'id' => absint( $lesson_id ) ), array( '%s', '%s', '%s' ), array( '%d' ) );
+        } else {
+            $wpdb->query( $wpdb->prepare( "UPDATE {$lessons_table} SET consultation_confirmation_attempts = consultation_confirmation_attempts + 1, consultation_confirmation_last_error = %s, updated_at = %s WHERE id = %d", 'wp_mail() returned false.', current_time( 'mysql', true ), absint( $lesson_id ) ) );
+        }
+        $this->mrm_release_initial_email( $lesson_id, 'consultation' );
+
+        return (bool) $sent;
     }
 
     protected function mrm_wrap_email_html( $title, $intro_html, $details_html, $button_url, $button_text, $options = array() ) {

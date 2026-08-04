@@ -22,6 +22,7 @@ use Aws\Exception\AwsException;
 
 class MRM_Payments_Hub_Single {
   const VERSION = '1.0.0';
+  const CORE_SCHEMA_VERSION = '2026-08-04-1';
 
   // Options keys
   const OPT_SETTINGS = 'mrm_pay_hub_settings';
@@ -431,6 +432,13 @@ class MRM_Payments_Hub_Single {
     $needs_upgrade = false;
 
     if (
+      (string) get_option('mrm_pay_hub_core_schema_version', '') !==
+      (string) self::CORE_SCHEMA_VERSION
+    ) {
+      $needs_upgrade = true;
+    }
+
+    if (
       (string) get_option('mrm_tax_schema_version', '') !==
       (string) self::TAX_SCHEMA_VERSION
     ) {
@@ -485,6 +493,7 @@ class MRM_Payments_Hub_Single {
         'authorized_lesson_count',
         'charged_lesson_count',
         'detached_at',
+        'source_order_id',
       );
 
       $existing_autopay_cols = array();
@@ -499,6 +508,31 @@ class MRM_Payments_Hub_Single {
 
       foreach ($required_autopay_columns as $col) {
         if (!in_array($col, $existing_autopay_cols, true)) {
+          $needs_upgrade = true;
+          break;
+        }
+      }
+    }
+
+    if (!$needs_upgrade) {
+      $required_payout_columns = array(
+        'transfer_idempotency_key',
+        'payout_claim_key',
+        'payout_idempotency_key',
+        'processing_started_at',
+      );
+
+      $existing_payout_columns = $wpdb->get_col(
+        "SHOW COLUMNS FROM {$payouts}",
+        0
+      );
+
+      $existing_payout_columns = is_array($existing_payout_columns)
+        ? $existing_payout_columns
+        : array();
+
+      foreach ($required_payout_columns as $column) {
+        if (!in_array($column, $existing_payout_columns, true)) {
           $needs_upgrade = true;
           break;
         }
@@ -584,6 +618,7 @@ class MRM_Payments_Hub_Single {
     }
 
     $this->mrm_ensure_payout_ledger_status_column_width();
+    $this->mrm_ensure_masterclass_presenter_payout_columns();
     $this->mrm_ensure_subscription_portal_tokens();
 
     $unsubscribe_route_version = '1.1';
@@ -729,6 +764,7 @@ class MRM_Payments_Hub_Single {
 
     $sql_autopay = "CREATE TABLE {$autopay} (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  source_order_id BIGINT UNSIGNED DEFAULT NULL,
   instructor_id BIGINT UNSIGNED NOT NULL,
   email_hash CHAR(64) NOT NULL,
   customer_id VARCHAR(255) NOT NULL,
@@ -753,6 +789,7 @@ class MRM_Payments_Hub_Single {
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
   PRIMARY KEY (id),
+  UNIQUE KEY source_order_id_uniq (source_order_id),
   KEY email_hash_idx (email_hash),
   KEY instructor_idx (instructor_id),
   KEY active_idx (active)
@@ -1058,6 +1095,10 @@ class MRM_Payments_Hub_Single {
       }
     }
 
+    if (!in_array('source_order_id', $autopay_column_names, true)) {
+      $wpdb->query("ALTER TABLE {$autopay} ADD source_order_id BIGINT UNSIGNED DEFAULT NULL AFTER id");
+    }
+
     if (!in_array('promo_code', $autopay_column_names, true)) {
       $wpdb->query("ALTER TABLE {$autopay} ADD promo_code VARCHAR(80) DEFAULT NULL AFTER charged_lesson_count");
     }
@@ -1065,8 +1106,18 @@ class MRM_Payments_Hub_Single {
     if (!in_array('promo_started_at', $autopay_column_names, true)) {
       $wpdb->query("ALTER TABLE {$autopay} ADD promo_started_at DATETIME DEFAULT NULL AFTER promo_code");
     }
+    $autopay_source_order_index_exists = $wpdb->get_var($wpdb->prepare(
+      "SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = %s AND index_name = 'source_order_id_uniq'",
+      $autopay
+    ));
+    if ((int)$autopay_source_order_index_exists <= 0) {
+      $wpdb->query("ALTER TABLE {$autopay} ADD UNIQUE KEY source_order_id_uniq (source_order_id)");
+    }
+
     $this->mrm_tax_run_schema_migrations();
     $this->mrm_tax_seed_state_rows();
+
+    update_option('mrm_pay_hub_core_schema_version', self::CORE_SCHEMA_VERSION, false);
   }
 
   private function mrm_tax_require_innodb_table(
@@ -5559,7 +5610,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     return $this->stripe_api_request('POST', '/v1/payment_methods/' . rawurlencode($payment_method_id) . '/detach', array());
   }
 
-  private function stripe_create_refund($payment_intent_id, $amount_cents = null, $reason = 'requested_by_customer') {
+  private function stripe_create_refund($payment_intent_id, $amount_cents = null, $reason = 'requested_by_customer', $idempotency_key = '') {
     $payment_intent_id = sanitize_text_field($payment_intent_id);
     if ($payment_intent_id === '') return new WP_Error('stripe_invalid_args', 'Missing PaymentIntent ID.');
     $payment_intent = $this->stripe_api_request('GET', '/v1/payment_intents/' . rawurlencode($payment_intent_id), array('expand'=>array('latest_charge')));
@@ -5576,7 +5627,11 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     }
     $params = array('payment_intent'=>$payment_intent_id,'reason'=>$reason);
     if ($amount_cents !== null && (int)$amount_cents > 0) $params['amount'] = (int)$amount_cents;
-    return $this->stripe_api_request('POST', '/v1/refunds', $params);
+    $headers = array();
+    if ('' !== $idempotency_key) {
+      $headers['Idempotency-Key'] = sanitize_text_field($idempotency_key);
+    }
+    return $this->stripe_api_request('POST', '/v1/refunds', $params, $headers);
   }
 
   private function stripe_find_or_create_customer($email) {
@@ -13291,8 +13346,27 @@ private function charge_and_unlock_autopay($data) {
     }
   }
 
-  public function mrm_retry_payout_batch() { return $this->mrm_run_payout_batch(true); }
-  public function mrm_retry_presenter_payout_batch() { return $this->mrm_run_presenter_payouts(array(), true); }
+  public function mrm_retry_payout_batch() { return $this->mrm_run_payout_batch(true, array(), '', true); }
+  public function mrm_retry_presenter_payout_batch() { return $this->mrm_run_presenter_payouts(array(), true, true); }
+
+  private function mrm_schedule_payout_retry() {
+    if (!wp_next_scheduled('mrm_pay_hub_retry_payout_batch')) {
+      wp_schedule_single_event(time() + 5 * MINUTE_IN_SECONDS, 'mrm_pay_hub_retry_payout_batch');
+    }
+  }
+
+  private function mrm_schedule_presenter_payout_retry() {
+    if (!wp_next_scheduled('mrm_pay_hub_retry_presenter_payout_batch')) {
+      wp_schedule_single_event(time() + 5 * MINUTE_IN_SECONDS, 'mrm_pay_hub_retry_presenter_payout_batch');
+    }
+  }
+
+  private function mrm_stripe_error_is_definitive($error) {
+    if (!is_wp_error($error)) return false;
+    $data = $error->get_error_data();
+    $http_code = is_array($data) ? absint($data['http_code'] ?? 0) : 0;
+    return ('stripe_error' === $error->get_error_code() && $http_code >= 400 && $http_code < 500);
+  }
 
   private function mrm_acquire_runtime_lock($name, $ttl = 900) {
     $option_name = 'mrm_runtime_lock_' . sanitize_key($name);
@@ -13308,7 +13382,7 @@ private function charge_and_unlock_autopay($data) {
     $this->mrm_run_presenter_payouts(array(), false);
   }
 
-  public function mrm_run_payout_batch($force = false, $only_ids = array(), $only_payee_type = '') {
+  public function mrm_run_payout_batch($force = false, $only_ids = array(), $only_payee_type = '', $recovery_only = false) {
     $runtime_lock = $this->mrm_acquire_runtime_lock('standard_payout_batch', 15 * MINUTE_IN_SECONDS);
     if (!$runtime_lock) return new WP_Error('payout_batch_already_running', 'A payout batch is already running.');
     register_shutdown_function(array($this, 'mrm_release_runtime_lock'), $runtime_lock);
@@ -13356,9 +13430,13 @@ private function charge_and_unlock_autopay($data) {
 
     $period = $force ? null : $this->mrm_get_completed_payout_period_for_today();
 
-    $payable_statuses = $force
-      ? "'pending','transferred','error','blocked'"
-      : "'pending','transferred'";
+    if ($recovery_only) {
+      $payable_statuses = "'transfer_processing','payout_processing'";
+    } else {
+      $payable_statuses = $force
+        ? "'pending','transferred','error','blocked','transfer_processing','payout_processing'"
+        : "'pending','transferred','transfer_processing','payout_processing'";
+    }
 
     $where = "WHERE status IN ({$payable_statuses})
       AND connected_account_id IS NOT NULL
@@ -13508,16 +13586,17 @@ private function charge_and_unlock_autopay($data) {
           $wpdb->update(
             $table,
             array(
-              'status' => $is_balance_wait_condition ? 'pending' : 'error',
-              'notes' => $is_balance_wait_condition
-                ? ('Waiting for platform available balance before transfer: ' . $transfer_error_message)
-                : $transfer_error_message,
-              'updated_at' => current_time('mysql'),
+              'status' => $is_balance_wait_condition ? 'pending' : ($this->mrm_stripe_error_is_definitive($transfer) ? 'error' : 'transfer_processing'),
+              'notes' => $transfer_error_message,
+              'updated_at' => current_time('mysql', true),
             ),
             array('id' => (int)$row['id']),
             array('%s','%s','%s'),
             array('%d')
           );
+          if (!$is_balance_wait_condition && !$this->mrm_stripe_error_is_definitive($transfer)) {
+            $this->mrm_schedule_payout_retry();
+          }
           continue;
         }
 
@@ -16120,8 +16199,22 @@ private function charge_and_unlock_autopay($data) {
     $promo_code=$authority['promo_code']; $promo_started_at=$authority['promo_started_at']; $customer_id=$authority['customer_id']; $payment_method_id=$authority['payment_method_id'];
     $sku=$authority['sku']; $p=$authority['product']; $base_amount=$authority['base_amount']; $currency=$authority['currency']; $plan_kind=$authority['plan_kind'];
     $existing_order_for_autopay=$authority['order']; $now=current_time('mysql');
+    $source_order_id = absint($existing_order_for_autopay['id'] ?? 0);
+    if ($source_order_id <= 0) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'The initial AutoPay order could not be identified.'), 409);
+    }
+    $autopay_lock_name = 'mrm_autopay_order_' . $source_order_id;
+    $autopay_lock_acquired = 1 === (int)$wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 15)', $autopay_lock_name));
+    if (!$autopay_lock_acquired) {
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Your payment was received and AutoPay is still being finalized. Do not submit another payment.'), 409);
+    }
+    $existing_profile_id = absint($wpdb->get_var($wpdb->prepare("SELECT id FROM {$this->table_autopay_profiles()} WHERE source_order_id = %d LIMIT 1", $source_order_id)));
+    if ($existing_profile_id > 0) {
+      $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
+      return new WP_REST_Response(array('ok'=>true,'autopay_profile_id'=>$existing_profile_id,'customer_id'=>$customer_id,'payment_method_id'=>$payment_method_id,'plan_kind'=>$plan_kind,'authorized_lesson_count'=>(int)$authorized_lesson_count,'already_created'=>true), 200);
+    }
     $pm_ready=$this->mrm_ensure_customer_payment_method_ready($customer_id,$payment_method_id);
-    if (is_wp_error($pm_ready)) return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()),400);
+    if (is_wp_error($pm_ready)) { $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name)); return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()),400); }
 
     /*
      * Idempotency guard: do not create multiple autopay profiles for the same
@@ -16132,6 +16225,7 @@ private function charge_and_unlock_autopay($data) {
       if (is_array($existing_meta) && !empty($existing_meta['mrm_autopay_profile_id'])) {
         $existing_profile_id = absint($existing_meta['mrm_autopay_profile_id']);
         if ($existing_profile_id > 0) {
+          $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
           return new WP_REST_Response(array(
             'ok' => true,
             'autopay_profile_id' => $existing_profile_id,
@@ -16154,6 +16248,7 @@ private function charge_and_unlock_autopay($data) {
     );
 
     $wpdb->insert($this->table_autopay_profiles(), array(
+      'source_order_id' => $source_order_id,
       'instructor_id' => (int)$instructor_id,
       'email_hash' => (string)$email_hash,
       'customer_id' => (string)$customer_id,
@@ -16178,6 +16273,7 @@ private function charge_and_unlock_autopay($data) {
       'created_at' => $now,
       'updated_at' => $now,
     ), array(
+  '%d',
   '%d',
   '%s',
   '%s',
@@ -16205,7 +16301,11 @@ private function charge_and_unlock_autopay($data) {
 
     $autopay_profile_id = (int)$wpdb->insert_id;
     if ($autopay_profile_id <= 0) {
-      return new WP_REST_Response(array('ok'=>false,'message'=>'Unable to create autopay profile.'), 500);
+      $autopay_profile_id = absint($wpdb->get_var($wpdb->prepare("SELECT id FROM {$this->table_autopay_profiles()} WHERE source_order_id = %d LIMIT 1", $source_order_id)));
+    }
+    if ($autopay_profile_id <= 0) {
+      $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
+      return new WP_REST_Response(array('ok'=>false,'message'=>'Unable to create the AutoPay profile.'), 500);
     }
 
     $validated_profile = $this->mrm_validate_autopay_profile_for_charge(
@@ -16213,6 +16313,7 @@ private function charge_and_unlock_autopay($data) {
     );
 
     if ( is_wp_error($validated_profile) ) {
+      $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
       return new WP_Error(
         'mrm_autopay_profile_incomplete',
         $validated_profile->get_error_message(),
@@ -16237,6 +16338,8 @@ private function charge_and_unlock_autopay($data) {
       $this->update_order_status_from_pi($payment_intent_id, (string)($order['status'] ?? 'paid'), 'succeeded', $meta);
     }
 
+
+    $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
 
     return new WP_REST_Response(array(
       'ok' => true,
@@ -21178,7 +21281,7 @@ public function handle_marketing_resubscribe() {
       'payment_method_attention_admin' => array('Payment information update required for ','Payment method update needed','<p>The system detected a need for payment information to be updated for <strong></strong> before their upcoming lesson time with <strong></strong> and <strong></strong>.</p>','<div><strong>Student:</strong> </div><div><strong>Student email:</strong> </div><div><strong>Student phone:</strong> </div><div><strong>Instructor:</strong> </div><div><strong>Instructor email:</strong> </div><div><strong>Instructor phone:</strong> </div><div><strong>Payment update portal:</strong> </div>',''),
       'purchase_receipt_sheet_music' => array('Purchase Confirmation - ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> </div><div><strong>Base:</strong> </div><div><strong>Promo code:</strong> </div><div><strong>Tax:</strong> </div><div><strong>Total paid:</strong> </div><div style="margin-top:12px;"><strong>How to access your sheet music:</strong></div><ol style="margin:8px 0 0 18px;padding:0;"><li>Return to the piece page on the website.</li><li>Click the access button for your purchased category.</li><li>Enter your purchase email address.</li><li>Request your one-time access code and enter it to open the content.</li></ol>',array(array('url'=>'#','label'=>'View Your Piece','variant'=>'primary'),array('url'=>$contact_url,'label'=>'Contact Support','variant'=>'primary'))),
       'purchase_receipt_online_lesson' => array('Purchase Confirmation - Online Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> Online lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to access online lessons</strong></div><p>Your meeting link will become available 10 minutes before your lesson time and will remain available until 10 minutes after your lesson time. Please make sure your camera, microphone, and internet connection are working before joining the call.</p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p><div style="margin-top:14px;"><strong>How to access your sheet music</strong></div><p>Please check your email for the subscription confirmation.</p>',array(array('url'=>'#','label'=>'Join Lesson','variant'=>'primary'),array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
-      'purchase_receipt_in_person_lesson' => array('Purchase Confirmation - In-Person Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> In-person lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p><div style="margin-top:14px;"><strong>Lessons outside the home</strong></div><p>If the lesson will take place at a school, church, or other community location, please complete the required approval form before the lesson begins.</p><p><a href="https://www.docusign.com/" target="_blank" rel="noopener">Placeholder DocuSign location approval link</a></p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p>',array(array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
+      'purchase_receipt_in_person_lesson' => array('Purchase Confirmation - In-Person Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> In-person lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p>',array(array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
 
       'sheet_music_subscription_enrollment' => array('Subscription Confirmation - Sheet Music Access','Subscription Confirmation - Sheet Music Access','<p>You have successfully enrolled in the sheet music subscription service.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Renews on:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your subscription has been created successfully in our billing system.</div>' . '<div style="margin-top:12px;">You will be billed again on or about <strong></strong>, and then monthly thereafter while the subscription remains active.</div>','Contact Support',$this->mrm_email_cancel_subscription_text_link_html('#')),
       'sheet_music_subscription_renewal' => array('Subscription Renewal - Sheet Music Access','Subscription Renewal - Sheet Music Access','<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount Charged:</strong> </div>' . '<div><strong>Next renewal date:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your sheet music subscription remains active.</div>' . '<div><strong>Invoice ID:</strong> </div>' . '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong></strong>.</div>','Contact Support',$this->mrm_email_cancel_subscription_text_link_html('#')),
@@ -25640,6 +25743,7 @@ MRM_TAX_RULES;
       'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
       'stripe_payout_id'   => "ALTER TABLE {$ledger_table} ADD stripe_payout_id VARCHAR(191) NULL",
       'transfer_idempotency_key' => "ALTER TABLE {$ledger_table} ADD transfer_idempotency_key VARCHAR(191) NULL",
+      'payout_claim_key' => "ALTER TABLE {$ledger_table} ADD payout_claim_key VARCHAR(191) NULL",
       'payout_idempotency_key' => "ALTER TABLE {$ledger_table} ADD payout_idempotency_key VARCHAR(191) NULL",
       'processing_started_at' => "ALTER TABLE {$ledger_table} ADD processing_started_at DATETIME NULL",
     );
@@ -25649,9 +25753,21 @@ MRM_TAX_RULES;
         $wpdb->query($sql);
       }
     }
+
+    $indexes = $wpdb->get_results("SHOW INDEX FROM {$ledger_table}", ARRAY_A);
+    $has_claim_index = false;
+    foreach ((array)$indexes as $index) {
+      if ('payout_claim_key' === (string)($index['Key_name'] ?? '')) {
+        $has_claim_index = true;
+        break;
+      }
+    }
+    if (!$has_claim_index) {
+      $wpdb->query("ALTER TABLE {$ledger_table} ADD INDEX payout_claim_key (payout_claim_key)");
+    }
   }
 
-  private function mrm_run_presenter_payouts($only_ledger_ids = array(), $force = false) {
+  private function mrm_run_presenter_payouts($only_ledger_ids = array(), $force = false, $recovery_only = false) {
     $runtime_lock = $this->mrm_acquire_runtime_lock('presenter_payout_batch', 15 * MINUTE_IN_SECONDS);
     if (!$runtime_lock) return new WP_Error('payout_batch_already_running', 'A presenter payout batch is already running.');
     register_shutdown_function(array($this, 'mrm_release_runtime_lock'), $runtime_lock);
