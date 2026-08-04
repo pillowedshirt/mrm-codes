@@ -3936,6 +3936,26 @@ async function verifyPaymentIntent(piId, email){
   }
   return vData;
 }
+
+function handleRefundedBookingResult(data, setMsg) {
+  const message =
+    data && data.message
+      ? data.message
+      : 'The selected lesson time became unavailable. A full refund has been submitted. Please select another time.';
+
+  clearSelectedSlots();
+
+  try {
+    sessionStorage.removeItem('mrmSchedulerPayment');
+  } catch (error) {}
+
+  if (typeof setMsg === 'function') {
+    setMsg(message);
+  }
+
+  window.alert(message);
+}
+
 function mrmGetBrowserTimezone() {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
@@ -5586,7 +5606,14 @@ function ensureLegacyBookingHandler(){
               if (paymentIntent && paymentIntent.status === 'succeeded') {
                 mrmLessonPaymentCompleted = true;
                 mrmLessonPaymentConfirmationInProgress = false;
-                await verifyPaymentIntent(paymentIntent.id, email);
+                const verification = await verifyPaymentIntent(paymentIntent.id, email);
+
+                if (verification.booking_refunded) {
+                  await closeModal({ clearSelection: true, releaseCheckout: false });
+                  handleRefundedBookingResult(verification, setMsg);
+                  mrmHidePaymentLoading();
+                  return;
+                }
 
                 const latestPaymentData = mrmGetActiveLessonPaymentData(createData);
 
@@ -5770,7 +5797,14 @@ function ensureLegacyBookingHandler(){
             if (paymentIntent && paymentIntent.status === 'succeeded') {
               mrmLessonPaymentCompleted = true;
               mrmLessonPaymentConfirmationInProgress = false;
-              await verifyPaymentIntent(paymentIntent.id, email);
+              const verification = await verifyPaymentIntent(paymentIntent.id, email);
+
+              if (verification.booking_refunded) {
+                await closeModal({ clearSelection: true, releaseCheckout: false });
+                handleRefundedBookingResult(verification, setMsg);
+                mrmHidePaymentLoading();
+                return;
+              }
 
               const latestPaymentData = mrmGetActiveLessonPaymentData(createData);
               payload.order_id = latestPaymentData.order_id || createData.order_id;
@@ -5836,7 +5870,12 @@ async function checkReturnFromStripe() {
   const setMessage=function(message){if(messageElement)messageElement.textContent=message||'';if(modalMessageElement)modalMessageElement.textContent=message||'';};
   let recoveryCompleted=false;
   try{
-    await verifyPaymentIntent(paymentIntentId,context.email);
+    const verification = await verifyPaymentIntent(paymentIntentId,context.email);
+    if(verification.booking_refunded){
+      handleRefundedBookingResult(verification,setMessage);
+      recoveryCompleted=true;
+      return;
+    }
     const paymentMode=String(context.payment_mode||context.payload.payment_mode||'one_time');
     if(paymentMode==='autopay'){
       const enrollmentResponse = await fetch('/wp-json/mrm-pay/v1/create-autopay-enrollment', {

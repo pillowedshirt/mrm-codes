@@ -5882,6 +5882,77 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     return true;
   }
 
+
+  private function mrm_deactivate_autopay_after_booking_failure($autopay_profile_id) {
+    global $wpdb;
+    $autopay_profile_id = absint($autopay_profile_id);
+    if ($autopay_profile_id <= 0) return true;
+    $profile = $this->mrm_get_autopay_profile($autopay_profile_id);
+    if (!is_array($profile)) return true;
+    $wpdb->update($this->table_autopay_profiles(), array('active'=>0,'updated_at'=>current_time('mysql', true)), array('id'=>$autopay_profile_id), array('%d','%s'), array('%d'));
+    $payment_method_id = sanitize_text_field($profile['payment_method_id'] ?? '');
+    if ('' === $payment_method_id) return true;
+    $detached = $this->stripe_detach_payment_method($payment_method_id);
+    if (is_wp_error($detached)) {
+      $wpdb->update($this->table_autopay_profiles(), array('pm_attention_status'=>'detach_failed','pm_attention_reason'=>$detached->get_error_message(),'updated_at'=>current_time('mysql', true)), array('id'=>$autopay_profile_id));
+      error_log('[MRM Payments] AutoPay was disabled after a failed booking, but its payment method could not be detached. Profile ' . $autopay_profile_id . ': ' . $detached->get_error_message());
+      return false;
+    }
+    $wpdb->update($this->table_autopay_profiles(), array('detached_at'=>current_time('mysql', true),'pm_attention_status'=>'disabled','pm_attention_reason'=>'Initial paid booking could not be completed.','updated_at'=>current_time('mysql', true)), array('id'=>$autopay_profile_id));
+    return true;
+  }
+
+  private function mrm_claim_booking_conflict_email($order_id) {
+    $order_id = absint($order_id); if ($order_id <= 0) return false;
+    $key = 'mrm_booking_conflict_email_' . $order_id;
+    $claimed_at = absint(get_option($key, 0));
+    if ($claimed_at > 0 && time() - $claimed_at < 10 * MINUTE_IN_SECONDS) return false;
+    if ($claimed_at > 0) delete_option($key);
+    return add_option($key, time(), '', false);
+  }
+
+  private function mrm_release_booking_conflict_email($order_id) {
+    delete_option('mrm_booking_conflict_email_' . absint($order_id));
+  }
+
+  private function mrm_send_booking_conflict_refund_email(array $order) {
+    $order_id = absint($order['id'] ?? 0); if ($order_id <= 0) return false;
+    $meta = $this->mrm_get_order_meta_array($order);
+    if (!empty($meta['mrm_booking_conflict_email_sent_at'])) return true;
+    if (!$this->mrm_claim_booking_conflict_email($order_id)) return false;
+    $email = sanitize_email($order['customer_email'] ?? $meta['mrm_customer_email'] ?? '');
+    if (!$email || !is_email($email)) { $this->mrm_release_booking_conflict_email($order_id); return false; }
+    $refund_id = sanitize_text_field($meta['mrm_booking_conflict_refund_id'] ?? '');
+    $details = '<div><strong>Order:</strong> #' . esc_html($order_id) . '</div>' . '<div><strong>Refund reference:</strong> ' . esc_html($refund_id ? $refund_id : 'Pending') . '</div>' . '<div style="margin-top:12px;">The selected lesson time became unavailable before the booking could be finalized. The lesson was not scheduled.</div>' . '<div style="margin-top:12px;">A full refund request has been submitted to Stripe. Depending on the card issuer, the funds may take several business days to appear.</div>' . '<div style="margin-top:12px;"><strong>Please select a different lesson time. Do not treat this message as a lesson confirmation.</strong></div>';
+    $html = $this->mrm_email_wrap_html('Lesson time unavailable', '<p>We received your payment, but the selected lesson time was no longer available when the booking was finalized.</p>', $details, $this->mrm_get_contact_url(), 'Contact Support');
+    $sent = wp_mail($email, 'Lesson update — Time unavailable and refund submitted', $html, array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>'));
+    if ($sent) $this->mrm_set_order_meta_flag($order_id, 'mrm_booking_conflict_email_sent_at', current_time('mysql', true));
+    $this->mrm_release_booking_conflict_email($order_id);
+    return (bool)$sent;
+  }
+
+  private function mrm_refund_conflicting_paid_lesson(array $pi, array $order, array $booking_payload, $booking_error) {
+    $order_id = absint($order['id'] ?? 0); $payment_intent_id = sanitize_text_field($pi['id'] ?? '');
+    if ($order_id <= 0 || '' === $payment_intent_id) return new WP_Error('booking_conflict_refund_reference_missing','The conflicting lesson payment could not be identified.');
+    $meta = $this->mrm_get_order_meta_array($order);
+    $existing_refund_id = sanitize_text_field($meta['mrm_booking_conflict_refund_id'] ?? '');
+    if ('' !== $existing_refund_id) return array('ok'=>false,'booking_refunded'=>true,'refund_id'=>$existing_refund_id,'message'=>'The selected lesson time became unavailable. A full refund has been submitted. Please select a different lesson time.');
+    $idempotency_key = 'mrm_lesson_conflict_refund_' . hash('sha256', home_url() . '|' . $order_id . '|' . $payment_intent_id);
+    $refund = $this->stripe_create_refund($payment_intent_id, null, 'requested_by_customer', $idempotency_key);
+    if (is_wp_error($refund)) return $refund;
+    $refund_id = sanitize_text_field($refund['id'] ?? ''); $refund_status = sanitize_key($refund['status'] ?? 'pending');
+    if ('' === $refund_id) return new WP_Error('booking_conflict_refund_id_missing','Stripe returned a refund without a refund ID.');
+    $this->update_order_status_from_pi($payment_intent_id, 'refund_pending', $refund_status, array('mrm_booking_conflict_refund_id'=>$refund_id,'mrm_booking_conflict_refund_status'=>$refund_status,'mrm_booking_conflict_refund_requested_at'=>current_time('mysql', true),'mrm_booking_conflict_reason'=>is_wp_error($booking_error) ? $booking_error->get_error_message() : 'The selected lesson time was unavailable.'));
+    $lifecycle = $this->mrm_handle_refund_lifecycle_webhook($refund, 0);
+    if (is_wp_error($lifecycle)) $this->stripe_debug_log('Booking-conflict refund is awaiting lifecycle reconciliation.', array('order_id'=>$order_id,'refund_id'=>$refund_id,'message'=>$lifecycle->get_error_message()));
+    $autopay_profile_id = absint($booking_payload['autopay_profile_id'] ?? $meta['mrm_autopay_profile_id'] ?? 0);
+    if ($autopay_profile_id > 0) $this->mrm_deactivate_autopay_after_booking_failure($autopay_profile_id);
+    $this->mrm_release_pending_promo_redemption($order_id, $payment_intent_id);
+    $updated_order = $this->get_order_by_pi($payment_intent_id);
+    if (is_array($updated_order)) $this->mrm_send_booking_conflict_refund_email($updated_order);
+    return array('ok'=>false,'booking_refunded'=>true,'refund_id'=>$refund_id,'message'=>'The selected lesson time became unavailable. A full refund has been submitted. Please select a different lesson time.');
+  }
+
   private function mrm_finalize_paid_lesson_booking(array $pi, array $order) {
     if (sanitize_key($order['product_type'] ?? '') !== 'lesson') return true;
     $order_id = absint($order['id'] ?? 0);
@@ -5908,7 +5979,12 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     $request = new WP_REST_Request('POST', '/mrm-schedule/v1/book');
     $request->set_json_params($booking_payload);
     $response = MRM_Lesson_Scheduler::get_instance()->rest_book_lesson($request);
-    if (is_wp_error($response)) return $response;
+    if (is_wp_error($response)) {
+      if ('slot_conflict' === $response->get_error_code()) {
+        return $this->mrm_refund_conflicting_paid_lesson($pi, $order, $booking_payload, $response);
+      }
+      return $response;
+    }
     $booking_data = $response instanceof WP_REST_Response ? $response->get_data() : $response;
     if (empty($booking_data['ok'])) return new WP_Error('lesson_booking_not_completed', 'The payment succeeded, but the lesson booking was not completed.');
     $lesson_ids = array_values(array_filter(array_map('absint', (array)($booking_data['lesson_ids'] ?? array()))));
@@ -5922,9 +5998,13 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
 
   public function mrm_retry_purchase_receipts() {
     global $wpdb;
-    $orders = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->table_orders()} WHERE status=%s AND created_at >= %s ORDER BY id ASC LIMIT 25", 'paid', gmdate('Y-m-d H:i:s', time() - 7 * DAY_IN_SECONDS)), ARRAY_A);
+    $orders = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->table_orders()} WHERE status IN ('paid','refund_pending','refunded') AND created_at >= %s ORDER BY id ASC LIMIT 25", gmdate('Y-m-d H:i:s', time() - 7 * DAY_IN_SECONDS)), ARRAY_A);
     foreach ((array)$orders as $order) {
       $metadata = $this->mrm_get_order_meta_array($order);
+      if (!empty($metadata['mrm_booking_conflict_refund_id'])) {
+        if (empty($metadata['mrm_booking_conflict_email_sent_at'])) $this->mrm_send_booking_conflict_refund_email($order);
+        continue;
+      }
       if (!empty($metadata['mrm_receipt_sent_at']) || empty($order['stripe_payment_intent_id'])) continue;
       $pi = $this->stripe_retrieve_payment_intent($order['stripe_payment_intent_id']);
       if (is_wp_error($pi) || ($pi['status'] ?? '') !== 'succeeded') continue;
@@ -6046,6 +6126,9 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       if (is_wp_error($booking_result)) {
         error_log('[MRM Payments] Paid lesson booking finalization failed for order ' . absint($order['id']) . ': ' . $booking_result->get_error_message());
         return $booking_result;
+      }
+      if (is_array($booking_result) && !empty($booking_result['booking_refunded'])) {
+        return true;
       }
       $order = $this->get_order_by_pi($pi_id);
     }
@@ -13382,6 +13465,57 @@ private function charge_and_unlock_autopay($data) {
     $this->mrm_run_presenter_payouts(array(), false);
   }
 
+
+  private function mrm_claim_standard_payout_rows($table, $connected_account_id, $currency, array $ledger_ids, $batch_key) {
+    global $wpdb;
+    $ledger_ids = array_values(array_unique(array_filter(array_map('absint', $ledger_ids))));
+    sort($ledger_ids, SORT_NUMERIC);
+    if (empty($ledger_ids)) return new WP_Error('empty_standard_payout_claim', 'No payout ledger rows were available to claim.');
+    $placeholders = implode(',', array_fill(0, count($ledger_ids), '%d'));
+    $wpdb->query('START TRANSACTION');
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT id, net_cents, status, payout_claim_key FROM {$table} WHERE id IN ({$placeholders}) AND connected_account_id = %s AND currency = %s ORDER BY id ASC FOR UPDATE", array_merge($ledger_ids, array(sanitize_text_field($connected_account_id), strtolower(sanitize_text_field($currency))))), ARRAY_A);
+    if (count($rows) !== count($ledger_ids)) { $wpdb->query('ROLLBACK'); return new WP_Error('standard_payout_claim_rows_changed', 'The payout rows changed before they could be claimed.'); }
+    $total_cents = 0;
+    foreach ($rows as $row) {
+      if ('transferred' !== (string)($row['status'] ?? '') || !empty($row['payout_claim_key'])) { $wpdb->query('ROLLBACK'); return new WP_Error('standard_payout_claim_unavailable', 'One or more payout rows are no longer available.'); }
+      $total_cents += max(0, (int)($row['net_cents'] ?? 0));
+    }
+    if ($total_cents <= 0) { $wpdb->query('ROLLBACK'); return new WP_Error('standard_payout_claim_invalid_total', 'The payout claim total is invalid.'); }
+    $claim_key = 'mrm_payout_claim_' . hash('sha256', implode('|', array(home_url(), sanitize_text_field($connected_account_id), strtolower(sanitize_text_field($currency)), implode(',', $ledger_ids), $total_cents)));
+    $idempotency_key = 'mrm_payout_' . hash('sha256', $claim_key . '|' . $total_cents);
+    $now = current_time('mysql', true);
+    $updated = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = 'payout_processing', payout_claim_key = %s, payout_idempotency_key = %s, processing_started_at = %s, batch_key = %s, updated_at = %s WHERE id IN ({$placeholders}) AND status = 'transferred' AND (payout_claim_key IS NULL OR payout_claim_key = '')", array_merge(array($claim_key, $idempotency_key, $now, sanitize_text_field($batch_key), $now), $ledger_ids)));
+    if (count($ledger_ids) !== (int)$updated) { $wpdb->query('ROLLBACK'); return new WP_Error('standard_payout_claim_update_failed', 'The exact payout group could not be claimed.'); }
+    $wpdb->query('COMMIT');
+    return array('claim_key' => $claim_key, 'idempotency_key' => $idempotency_key, 'total_cents' => $total_cents, 'ledger_ids' => $ledger_ids);
+  }
+
+  private function mrm_process_standard_payout_claim($table, $claim_key, $connected_account_id, $currency, $batch_key) {
+    global $wpdb;
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE payout_claim_key = %s AND status = 'payout_processing' ORDER BY id ASC", sanitize_text_field($claim_key)), ARRAY_A);
+    if (empty($rows)) return array('already_complete' => true, 'rows' => array());
+    $idempotency_keys = array_values(array_unique(array_filter(array_map('strval', wp_list_pluck($rows, 'payout_idempotency_key')))));
+    if (1 !== count($idempotency_keys)) return new WP_Error('standard_payout_claim_key_mismatch', 'The payout claim contains inconsistent idempotency keys.');
+    $total_cents = 0;
+    foreach ($rows as $row) {
+      if (sanitize_text_field($row['connected_account_id'] ?? '') !== sanitize_text_field($connected_account_id)) return new WP_Error('standard_payout_claim_account_mismatch', 'The payout claim contains an incorrect connected account.');
+      if (strtolower((string)($row['currency'] ?? '')) !== strtolower((string)$currency)) return new WP_Error('standard_payout_claim_currency_mismatch', 'The payout claim contains an incorrect currency.');
+      $total_cents += max(0, (int)($row['net_cents'] ?? 0));
+    }
+    if ($total_cents <= 0) return new WP_Error('standard_payout_claim_invalid_total', 'The payout claim total is invalid.');
+    $connected_balance = $this->stripe_retrieve_connected_account_balance($connected_account_id);
+    if (is_wp_error($connected_balance)) { $message = 'Unable to retrieve the connected-account balance: ' . $connected_balance->get_error_message(); $wpdb->query($wpdb->prepare("UPDATE {$table} SET notes = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $message, current_time('mysql', true), $claim_key)); $this->mrm_schedule_payout_retry(); return new WP_Error('standard_payout_balance_unavailable', $message); }
+    $connected_available = $this->mrm_balance_available_for_currency($connected_balance, $currency);
+    if ((int)$connected_available['total'] < $total_cents) { $message = sprintf('Waiting for connected-account funds. Needed %s %0.2f, but %s %0.2f is currently available.', strtoupper($currency), $total_cents / 100, strtoupper($currency), (int)$connected_available['total'] / 100); $wpdb->query($wpdb->prepare("UPDATE {$table} SET notes = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $message, current_time('mysql', true), $claim_key)); $this->mrm_schedule_payout_retry(); return new WP_Error('standard_payout_balance_pending', $message); }
+    $payout = $this->stripe_create_connected_account_payout($connected_account_id, $total_cents, $currency, array('mrm_batch_key' => $batch_key, 'mrm_payout_claim_key' => $claim_key), $idempotency_keys[0]);
+    if (is_wp_error($payout)) { $wpdb->query($wpdb->prepare("UPDATE {$table} SET notes = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $payout->get_error_message(), current_time('mysql', true), $claim_key)); $this->mrm_schedule_payout_retry(); return $payout; }
+    $payout_id = sanitize_text_field($payout['id'] ?? '');
+    if ('' === $payout_id) { $this->mrm_schedule_payout_retry(); return new WP_Error('standard_payout_id_missing', 'Stripe returned a payout without a payout ID.'); }
+    $updated = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = 'paid_out', payout_id = %s, processing_started_at = NULL, notes = '', updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $payout_id, current_time('mysql', true), $claim_key));
+    if (count($rows) !== (int)$updated) { $this->mrm_schedule_payout_retry(); return new WP_Error('standard_payout_local_update_failed', 'Stripe returned a payout, but the complete local claim was not updated.'); }
+    return array('already_complete' => false, 'payout' => $payout, 'rows' => $rows);
+  }
+
   public function mrm_run_payout_batch($force = false, $only_ids = array(), $only_payee_type = '', $recovery_only = false) {
     $runtime_lock = $this->mrm_acquire_runtime_lock('standard_payout_batch', 15 * MINUTE_IN_SECONDS);
     if (!$runtime_lock) return new WP_Error('payout_batch_already_running', 'A payout batch is already running.');
@@ -13509,15 +13643,25 @@ private function charge_and_unlock_autopay($data) {
 
       $pending_rows = array();
       $already_transferred_rows = array();
+      $existing_payout_claim_keys = array();
 
       foreach ($group_rows as $group_row) {
         $row_status = (string)($group_row['status'] ?? '');
-        if ($row_status === 'transferred') {
+        if ('payout_processing' === $row_status) {
+          $claim_key = sanitize_text_field($group_row['payout_claim_key'] ?? '');
+          if ('' !== $claim_key) $existing_payout_claim_keys[] = $claim_key;
+          continue;
+        }
+        if ('transferred' === $row_status) {
           $already_transferred_rows[] = $group_row;
-        } else {
+          continue;
+        }
+        if (in_array($row_status, array('pending','error','blocked','transfer_processing'), true)) {
           $pending_rows[] = $group_row;
         }
       }
+
+      $existing_payout_claim_keys = array_values(array_unique($existing_payout_claim_keys));
 
       $newly_transferred_total = 0;
       $newly_transferred_ids = array();
@@ -13558,6 +13702,11 @@ private function charge_and_unlock_autopay($data) {
           $transfer_idempotency_key, current_time('mysql', true), current_time('mysql', true), absint($row['id'])
         ));
         if (false === $claimed) continue;
+
+        $claimed_row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id = %d LIMIT 1", absint($row['id'])), ARRAY_A);
+        if (!is_array($claimed_row) || 'transfer_processing' !== (string)($claimed_row['status'] ?? '') || !hash_equals($transfer_idempotency_key, (string)($claimed_row['transfer_idempotency_key'] ?? ''))) continue;
+        $row = $claimed_row;
+        $amount = (int)$row['net_cents'];
 
         $transfer = $this->stripe_create_transfer(
           $amount,
@@ -13636,106 +13785,34 @@ private function charge_and_unlock_autopay($data) {
         }
       }
 
-      $payout_candidate_rows = array();
-      $payout_total = 0;
-      $payout_ledger_ids = array();
-
-      foreach ($already_transferred_rows as $row) {
-        $ledger_id = (int)($row['id'] ?? 0);
-        $amount = (int)($row['net_cents'] ?? 0);
-        if ($ledger_id <= 0 || $amount <= 0) {
-          continue;
+      foreach ($existing_payout_claim_keys as $existing_claim_key) {
+        $claim_result = $this->mrm_process_standard_payout_claim($table, $existing_claim_key, $acct, $currency, $batch_key);
+        if (is_wp_error($claim_result)) { $summary['errors']++; $summary['last_error'] = $claim_result->get_error_message(); continue; }
+        if (empty($claim_result['already_complete']) && !empty($claim_result['payout']) && !empty($claim_result['rows'])) {
+          $summary['payouts_created']++;
+          $owner_item = $this->mrm_send_standard_payout_summary_for_rows($claim_result['rows'], $claim_result['payout'], $period, $batch_key);
+          if (!empty($owner_item)) $owner_summary_items[] = $owner_item;
         }
-
-        $payout_candidate_rows[] = $row;
-        $payout_total += $amount;
-        $payout_ledger_ids[] = $ledger_id;
       }
 
-      if ($payout_total <= 0 || empty($payout_candidate_rows)) {
-        continue;
+      $fresh_ledger_ids = array();
+      foreach ($already_transferred_rows as $row) {
+        $ledger_id = absint($row['id'] ?? 0);
+        if ($ledger_id > 0 && (int)($row['net_cents'] ?? 0) > 0 && empty($row['payout_claim_key'])) $fresh_ledger_ids[] = $ledger_id;
       }
-
-      $connected_balance = $this->stripe_retrieve_connected_account_balance($acct);
-      if (is_wp_error($connected_balance)) {
-        $summary['errors']++;
-        $summary['last_error'] = 'Unable to retrieve connected account balance before payout: ' . $connected_balance->get_error_message();
-        $this->mrm_mark_group_transferred_balance_wait(
-          $table,
-          $payout_candidate_rows,
-          'Waiting for connected account balance visibility before payout: ' . $connected_balance->get_error_message()
-        );
-        continue;
-      }
-
-      $connected_available = $this->mrm_balance_available_for_currency($connected_balance, $currency);
-
-      if ((int)$connected_available['total'] < $payout_total) {
-        $msg = sprintf(
-          'Waiting for connected account available balance. Needed %s %0.2f, but only %s %0.2f is currently available on the connected account.',
-          strtoupper($currency),
-          $payout_total / 100,
-          strtoupper($currency),
-          ((int)$connected_available['total']) / 100
-        );
-
-        $this->mrm_mark_group_transferred_balance_wait($table, $payout_candidate_rows, $msg);
-        $summary['errors']++;
-        $summary['last_error'] = $msg;
-        continue;
-      }
-
-      if (defined('WP_DEBUG') && WP_DEBUG) {
-      }
-
-      $payout = $this->stripe_create_connected_account_payout(
-        $acct,
-        $payout_total,
-        $currency,
-        array(
-          'mrm_batch_key' => $batch_key,
-        ),
-        'mrm_payout_' . hash('sha256', home_url() . '|' . $acct . '|' . $currency . '|' . implode(',', array_map('absint', $payout_ledger_ids)) . '|' . $payout_total)
-      );
-
-      if (is_wp_error($payout)) {
-        $summary['errors']++;
-        $summary['last_error'] = $payout->get_error_message();
-
-        $this->mrm_mark_group_transferred_balance_wait(
-          $table,
-          $payout_candidate_rows,
-          'Connected account payout failed and will be retried: ' . $payout->get_error_message()
-        );
-        continue;
-      }
-
-      foreach ($payout_ledger_ids as $ledger_id) {
-        $wpdb->update(
-          $table,
-          array(
-            'status' => 'paid_out',
-            'payout_id' => (string)($payout['id'] ?? ''),
-            'notes' => '',
-            'updated_at' => current_time('mysql'),
-          ),
-          array('id' => (int)$ledger_id),
-          array('%s','%s','%s','%s'),
-          array('%d')
-        );
-      }
-
-      $summary['payouts_created']++;
-
-      $owner_item = $this->mrm_send_standard_payout_summary_for_rows(
-        $payout_candidate_rows,
-        $payout,
-        $period,
-        $batch_key
-      );
-
-      if (!empty($owner_item)) {
-        $owner_summary_items[] = $owner_item;
+      $fresh_ledger_ids = array_values(array_unique($fresh_ledger_ids));
+      if (!empty($fresh_ledger_ids)) {
+        $claim = $this->mrm_claim_standard_payout_rows($table, $acct, $currency, $fresh_ledger_ids, $batch_key);
+        if (is_wp_error($claim)) { $summary['errors']++; $summary['last_error'] = $claim->get_error_message(); }
+        else {
+          $claim_result = $this->mrm_process_standard_payout_claim($table, $claim['claim_key'], $acct, $currency, $batch_key);
+          if (is_wp_error($claim_result)) { $summary['errors']++; $summary['last_error'] = $claim_result->get_error_message(); }
+          elseif (empty($claim_result['already_complete'])) {
+            $summary['payouts_created']++;
+            $owner_item = $this->mrm_send_standard_payout_summary_for_rows($claim_result['rows'], $claim_result['payout'], $period, $batch_key);
+            if (!empty($owner_item)) $owner_summary_items[] = $owner_item;
+          }
+        }
       }
     }
 
@@ -16696,6 +16773,9 @@ private function charge_and_unlock_autopay($data) {
         if (is_wp_error($booking_result)) {
           error_log('[MRM Payments] Verification booking recovery failed for order ' . absint($order['id']) . ': ' . $booking_result->get_error_message());
           return new WP_Error('payment_received_booking_pending', 'Your payment was received. Your lesson is still being finalized. Do not submit another payment. Please check your email shortly.', array('status'=>503, 'payment_received'=>true));
+        }
+        if (is_array($booking_result) && !empty($booking_result['booking_refunded'])) {
+          return new WP_REST_Response(array('ok'=>true,'status'=>'refund_pending','payment_received'=>true,'booking_refunded'=>true,'refund_id'=>sanitize_text_field($booking_result['refund_id'] ?? ''),'message'=>$booking_result['message']), 200);
         }
         $order = $this->get_order_by_pi($pi_id);
       }
@@ -25767,6 +25847,46 @@ MRM_TAX_RULES;
     }
   }
 
+
+  private function mrm_claim_presenter_payout_rows($ledger_table, $connected_account_id, $currency, array $ledger_ids, $batch_key) {
+    global $wpdb;
+    $ledger_ids = array_values(array_unique(array_filter(array_map('absint', $ledger_ids)))); sort($ledger_ids, SORT_NUMERIC);
+    if (empty($ledger_ids)) return new WP_Error('empty_presenter_payout_claim', 'No presenter payout ledger rows were available to claim.');
+    $ph = implode(',', array_fill(0, count($ledger_ids), '%d'));
+    $wpdb->query('START TRANSACTION');
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT id, presenter_share_cents, status, payout_claim_key FROM {$ledger_table} WHERE id IN ({$ph}) ORDER BY id ASC FOR UPDATE", $ledger_ids), ARRAY_A);
+    if (count($rows) !== count($ledger_ids)) { $wpdb->query('ROLLBACK'); return new WP_Error('presenter_payout_claim_rows_changed', 'The presenter payout rows changed before they could be claimed.'); }
+    $total_cents=0; foreach($rows as $row){ if('transferred' !== (string)($row['status'] ?? '') || !empty($row['payout_claim_key'])) { $wpdb->query('ROLLBACK'); return new WP_Error('presenter_payout_claim_unavailable','One or more presenter payout rows are no longer available.'); } $total_cents += max(0,(int)($row['presenter_share_cents'] ?? 0)); }
+    if($total_cents<=0){ $wpdb->query('ROLLBACK'); return new WP_Error('presenter_payout_claim_invalid_total','The presenter payout claim total is invalid.'); }
+    $claim_key='mrm_presenter_payout_claim_'.hash('sha256', implode('|', array(home_url(), sanitize_text_field($connected_account_id), strtolower(sanitize_text_field($currency)), implode(',', $ledger_ids), $total_cents)));
+    $idempotency_key='mrm_presenter_payout_'.hash('sha256', $claim_key.'|'.$total_cents);
+    $now=current_time('mysql', true);
+    $updated=$wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET status = 'payout_processing', payout_claim_key = %s, payout_idempotency_key = %s, processing_started_at = %s, payout_batch_id = %s, payout_attempted_at = %s, updated_at = %s WHERE id IN ({$ph}) AND status = 'transferred' AND (payout_claim_key IS NULL OR payout_claim_key = '')", array_merge(array($claim_key,$idempotency_key,$now,sanitize_text_field($batch_key),$now,$now), $ledger_ids)));
+    if(count($ledger_ids)!==(int)$updated){ $wpdb->query('ROLLBACK'); return new WP_Error('presenter_payout_claim_update_failed','The exact presenter payout group could not be claimed.'); }
+    $wpdb->query('COMMIT'); return array('claim_key'=>$claim_key,'idempotency_key'=>$idempotency_key,'total_cents'=>$total_cents,'ledger_ids'=>$ledger_ids);
+  }
+
+  private function mrm_process_presenter_payout_claim($ledger_table, $claim_key, $connected_account_id, $currency, $batch_key) {
+    global $wpdb;
+    $rows=$wpdb->get_results($wpdb->prepare("SELECT * FROM {$ledger_table} WHERE payout_claim_key = %s AND status = 'payout_processing' ORDER BY id ASC", sanitize_text_field($claim_key)), ARRAY_A);
+    if(empty($rows)) return array('already_complete'=>true,'rows'=>array());
+    $keys=array_values(array_unique(array_filter(array_map('strval', wp_list_pluck($rows,'payout_idempotency_key')))));
+    if(1!==count($keys)) return new WP_Error('presenter_payout_claim_key_mismatch','The presenter payout claim contains inconsistent idempotency keys.');
+    $total_cents=0; foreach($rows as $row){ $total_cents += max(0,(int)($row['presenter_share_cents'] ?? 0)); }
+    if($total_cents<=0) return new WP_Error('presenter_payout_claim_invalid_total','The presenter payout claim total is invalid.');
+    $bal=$this->stripe_retrieve_connected_account_balance($connected_account_id);
+    if(is_wp_error($bal)){ $msg='Unable to retrieve the presenter connected-account balance: '.$bal->get_error_message(); $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET payout_error = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $msg,current_time('mysql',true),$claim_key)); $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_balance_unavailable',$msg); }
+    $available=$this->mrm_balance_available_for_currency($bal,$currency);
+    if((int)$available['total']<$total_cents){ $msg=sprintf('Waiting for presenter connected-account funds. Needed %s %0.2f, but %s %0.2f is currently available.', strtoupper($currency), $total_cents/100, strtoupper($currency), (int)$available['total']/100); $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET payout_error = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $msg,current_time('mysql',true),$claim_key)); $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_balance_pending',$msg); }
+    $payout=$this->stripe_create_connected_account_payout($connected_account_id,$total_cents,$currency,array('mrm_presenter_batch_key'=>$batch_key,'mrm_payout_claim_key'=>$claim_key,'mrm_payout_type'=>'masterclass_presenter'),$keys[0]);
+    if(is_wp_error($payout)){ $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET payout_error = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $payout->get_error_message(),current_time('mysql',true),$claim_key)); $this->mrm_schedule_presenter_payout_retry(); return $payout; }
+    $payout_id=sanitize_text_field($payout['id'] ?? ''); if(''===$payout_id){ $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_id_missing','Stripe returned a presenter payout without a payout ID.'); }
+    $now=current_time('mysql', true);
+    $updated=$wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET status = 'paid_out', stripe_payout_id = %s, paid_at = %s, paid_out_at = %s, payout_attempted_at = %s, processing_started_at = NULL, payout_error = '', updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $payout_id,$now,$now,$now,$now,$claim_key));
+    if(count($rows)!==(int)$updated){ $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_local_update_failed','Stripe returned a payout, but the complete presenter claim was not updated.'); }
+    return array('already_complete'=>false,'payout'=>$payout,'rows'=>$rows);
+  }
+
   private function mrm_run_presenter_payouts($only_ledger_ids = array(), $force = false, $recovery_only = false) {
     $runtime_lock = $this->mrm_acquire_runtime_lock('presenter_payout_batch', 15 * MINUTE_IN_SECONDS);
     if (!$runtime_lock) return new WP_Error('payout_batch_already_running', 'A presenter payout batch is already running.');
@@ -25811,17 +25931,21 @@ MRM_TAX_RULES;
 
     $only_ledger_ids = array_values(array_filter(array_unique(array_map('absint', (array)$only_ledger_ids))));
 
+    $presenter_statuses = $recovery_only
+      ? "'transfer_processing','payout_processing'"
+      : "'payable','payout_failed','transferred','transfer_processing','payout_processing'";
+
     $where = "WHERE l.ledger_type = 'registration_payment'
-      AND l.status IN ('payable','payout_failed','transferred')
+      AND l.status IN ({$presenter_statuses})
       AND l.presenter_share_cents > 0
       AND p.stripe_connected_account_id IS NOT NULL
       AND p.stripe_connected_account_id <> ''";
 
     $args = array();
 
-    if (!$force) {
+    if (!$force && !$recovery_only) {
       $where .= " AND (
-        l.status = 'transferred'
+        l.status IN ('transferred','transfer_processing','payout_processing')
         OR COALESCE(l.payout_eligible_at, DATE_ADD(l.created_at, INTERVAL 7 DAY)) <= UTC_TIMESTAMP()
       )";
     }
@@ -25883,105 +26007,78 @@ MRM_TAX_RULES;
       $acct = (string)$group['acct'];
       $currency = strtolower((string)$group['currency']);
 
-      $payout_candidate_rows = array();
-      $payout_total = 0;
+      $already_transferred_rows = array();
+      $pending_rows = array();
+      $existing_payout_claim_keys = array();
 
       foreach ((array)$group['rows'] as $row) {
+        $status = (string)($row['status'] ?? '');
+        if ('payout_processing' === $status) {
+          $claim_key = sanitize_text_field($row['payout_claim_key'] ?? '');
+          if ('' !== $claim_key) $existing_payout_claim_keys[] = $claim_key;
+          continue;
+        }
+        if ('transferred' === $status) { $already_transferred_rows[] = $row; continue; }
+        if (in_array($status, array('payable','payout_failed','transfer_processing'), true)) $pending_rows[] = $row;
+      }
+      $existing_payout_claim_keys = array_values(array_unique($existing_payout_claim_keys));
+
+      foreach ($pending_rows as $row) {
         $ledger_id = (int)($row['id'] ?? 0);
         $amount = (int)($row['presenter_share_cents'] ?? 0);
-        $status = (string)($row['status'] ?? '');
-        $existing_transfer_id = (string)($row['stripe_transfer_id'] ?? '');
-
-        if ($ledger_id <= 0 || $amount <= 0 || $acct === '') {
-          continue;
+        if ($ledger_id <= 0 || $amount <= 0 || $acct === '') continue;
+        $transfer_idempotency_key = sanitize_text_field($row['transfer_idempotency_key'] ?? '');
+        if ('' === $transfer_idempotency_key) {
+          $transfer_idempotency_key = 'mrm_presenter_transfer_' . hash('sha256', implode('|', array(home_url(), $ledger_id, absint($row['registration_id'] ?? 0), absint($row['presenter_id'] ?? 0), $acct, $currency, $amount)));
         }
-
-        if ($status === 'transferred' && $existing_transfer_id !== '') {
-          $payout_candidate_rows[] = $row;
-          $payout_total += $amount;
-          continue;
-        }
-
-        $transfer = $this->stripe_create_transfer($amount, $currency, $acct, 'MRM_MC_LEDGER_' . $ledger_id, array(
-          'mrm_masterclass_ledger_id' => (string)$ledger_id,
-          'mrm_event_id' => (string)($row['event_id'] ?? ''),
-          'mrm_presenter_id' => (string)($row['presenter_id'] ?? ''),
-          'mrm_presenter_batch_key' => $batch_key,
-          'mrm_transfer_funding_mode' => 'platform_available_balance_only',
-        ));
-
+        $now = current_time('mysql', true);
+        $claimed = $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET status = 'transfer_processing', transfer_idempotency_key = %s, processing_started_at = %s, payout_attempted_at = %s, updated_at = %s WHERE id = %d AND status IN ('payable','payout_failed','transfer_processing')", $transfer_idempotency_key, $now, $now, $now, $ledger_id));
+        if (false === $claimed) continue;
+        $claimed_row = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$ledger_table} WHERE id = %d LIMIT 1", $ledger_id), ARRAY_A);
+        if (!is_array($claimed_row) || 'transfer_processing' !== (string)($claimed_row['status'] ?? '') || !hash_equals($transfer_idempotency_key, (string)($claimed_row['transfer_idempotency_key'] ?? ''))) continue;
+        $row = array_merge($row, $claimed_row);
+        $transfer = $this->stripe_create_transfer($amount, $currency, $acct, 'MRM_MC_LEDGER_' . $ledger_id, array('mrm_masterclass_ledger_id' => (string)$ledger_id, 'mrm_event_id' => (string)($row['event_id'] ?? ''), 'mrm_presenter_id' => (string)($row['presenter_id'] ?? ''), 'mrm_presenter_batch_key' => $batch_key, 'mrm_transfer_funding_mode' => 'platform_available_balance_only'), '', $transfer_idempotency_key);
         if (is_wp_error($transfer)) {
-          $summary['errors']++;
-          $summary['last_error'] = $transfer->get_error_message();
-          $wpdb->update($ledger_table, array('status' => 'payout_failed', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => $transfer->get_error_message(), 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
+          $summary['errors']++; $summary['last_error'] = $transfer->get_error_message();
+          $definitive = $this->mrm_stripe_error_is_definitive($transfer);
+          $wpdb->update($ledger_table, array('status' => $definitive ? 'payout_failed' : 'transfer_processing', 'payout_attempted_at' => current_time('mysql', true), 'payout_error' => $transfer->get_error_message(), 'updated_at' => current_time('mysql', true)), array('id' => $ledger_id));
+          if (!$definitive) $this->mrm_schedule_presenter_payout_retry();
           continue;
         }
-
         $transfer_id = (string)($transfer['id'] ?? '');
-        $wpdb->update($ledger_table, array('status' => 'transferred', 'stripe_transfer_id' => $transfer_id, 'payout_batch_id' => $batch_key, 'payout_attempted_at' => current_time('mysql'), 'payout_error' => '', 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
-
+        $wpdb->update($ledger_table, array('status' => 'transferred', 'stripe_transfer_id' => $transfer_id, 'payout_batch_id' => $batch_key, 'payout_attempted_at' => current_time('mysql', true), 'processing_started_at' => null, 'payout_error' => '', 'updated_at' => current_time('mysql', true)), array('id' => $ledger_id));
         $summary['transfers_created']++;
-        $row['status'] = 'transferred';
-        $row['stripe_transfer_id'] = $transfer_id;
-        $row['payout_batch_id'] = $batch_key;
-        $payout_candidate_rows[] = $row;
-        $payout_total += $amount;
+        $row['status'] = 'transferred'; $row['stripe_transfer_id'] = $transfer_id; $row['payout_batch_id'] = $batch_key;
+        $already_transferred_rows[] = $row;
       }
 
-      if ($payout_total <= 0 || empty($payout_candidate_rows)) {
-        continue;
-      }
-
-      $connected_balance = $this->stripe_retrieve_connected_account_balance($acct);
-
-      if (is_wp_error($connected_balance)) {
-        $summary['errors']++;
-        $summary['last_error'] = 'Unable to retrieve presenter connected account balance before payout: ' . $connected_balance->get_error_message();
-        foreach ($payout_candidate_rows as $row) {
-          $wpdb->update($ledger_table, array('status' => 'transferred', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => 'Waiting for presenter connected account balance visibility before payout: ' . $connected_balance->get_error_message(), 'updated_at' => current_time('mysql')), array('id' => (int)$row['id']));
+      foreach ($existing_payout_claim_keys as $existing_claim_key) {
+        $claim_result = $this->mrm_process_presenter_payout_claim($ledger_table, $existing_claim_key, $acct, $currency, $batch_key);
+        if (is_wp_error($claim_result)) { $summary['errors']++; $summary['last_error'] = $claim_result->get_error_message(); continue; }
+        if (empty($claim_result['already_complete']) && !empty($claim_result['rows'])) {
+          foreach ($claim_result['rows'] as $paid_row) { $paid_row['status'] = 'paid_out'; $paid_presenter_rows[] = $paid_row; $summary['paid']++; }
+          $summary['payouts_created']++;
         }
-        continue;
       }
 
-      $connected_available = $this->mrm_balance_available_for_currency($connected_balance, $currency);
-
-      if ((int)$connected_available['total'] < $payout_total) {
-        $msg = sprintf('Waiting for presenter connected account available balance. Needed %s %0.2f, but only %s %0.2f is currently available on the connected account.', strtoupper($currency), $payout_total / 100, strtoupper($currency), ((int)$connected_available['total']) / 100);
-        $summary['errors']++;
-        $summary['last_error'] = $msg;
-        foreach ($payout_candidate_rows as $row) {
-          $wpdb->update($ledger_table, array('status' => 'transferred', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => $msg, 'updated_at' => current_time('mysql')), array('id' => (int)$row['id']));
+      $fresh_ledger_ids = array();
+      foreach ($already_transferred_rows as $row) {
+        $ledger_id = absint($row['id'] ?? 0);
+        if ($ledger_id > 0 && (int)($row['presenter_share_cents'] ?? 0) > 0 && empty($row['payout_claim_key'])) $fresh_ledger_ids[] = $ledger_id;
+      }
+      $fresh_ledger_ids = array_values(array_unique($fresh_ledger_ids));
+      if (!empty($fresh_ledger_ids)) {
+        $claim = $this->mrm_claim_presenter_payout_rows($ledger_table, $acct, $currency, $fresh_ledger_ids, $batch_key);
+        if (is_wp_error($claim)) { $summary['errors']++; $summary['last_error'] = $claim->get_error_message(); }
+        else {
+          $claim_result = $this->mrm_process_presenter_payout_claim($ledger_table, $claim['claim_key'], $acct, $currency, $batch_key);
+          if (is_wp_error($claim_result)) { $summary['errors']++; $summary['last_error'] = $claim_result->get_error_message(); }
+          elseif (empty($claim_result['already_complete'])) {
+            foreach ($claim_result['rows'] as $paid_row) { $paid_row['status'] = 'paid_out'; $paid_presenter_rows[] = $paid_row; $summary['paid']++; }
+            $summary['payouts_created']++;
+          }
         }
-        continue;
       }
-
-      $payout = $this->stripe_create_connected_account_payout($acct, $payout_total, $currency, array('mrm_presenter_batch_key' => $batch_key, 'mrm_payout_type' => 'masterclass_presenter'));
-
-      if (is_wp_error($payout)) {
-        $summary['errors']++;
-        $summary['last_error'] = $payout->get_error_message();
-        foreach ($payout_candidate_rows as $row) {
-          $wpdb->update($ledger_table, array('status' => 'transferred', 'payout_attempted_at' => current_time('mysql'), 'payout_error' => 'Presenter connected-account payout failed and will be retried: ' . $payout->get_error_message(), 'updated_at' => current_time('mysql')), array('id' => (int)$row['id']));
-        }
-        continue;
-      }
-
-      $payout_id = (string)($payout['id'] ?? '');
-
-      foreach ($payout_candidate_rows as $row) {
-        $ledger_id = (int)($row['id'] ?? 0);
-        if ($ledger_id <= 0) {
-          continue;
-        }
-        $wpdb->update($ledger_table, array('status' => 'paid_out', 'stripe_payout_id' => $payout_id, 'paid_at' => current_time('mysql'), 'paid_out_at' => current_time('mysql'), 'payout_attempted_at' => current_time('mysql'), 'payout_error' => '', 'updated_at' => current_time('mysql')), array('id' => $ledger_id));
-        $row['status'] = 'paid_out';
-        $row['stripe_payout_id'] = $payout_id;
-        $row['presenter_batch_key'] = $batch_key;
-        $paid_presenter_rows[] = $row;
-        $summary['paid']++;
-      }
-
-      $summary['payouts_created']++;
     }
 
     if (!empty($paid_presenter_rows)) {
@@ -26020,7 +26117,7 @@ MRM_TAX_RULES;
 
     $summary = $wpdb->get_results(
       "SELECT p.id, p.name, p.email, p.stripe_connected_account_id,
-              COALESCE(SUM(CASE WHEN l.status IN ('payable','payout_failed','transferred') THEN l.presenter_share_cents ELSE 0 END),0) AS unpaid_cents,
+              COALESCE(SUM(CASE WHEN l.status IN ('payable','payout_failed','transferred','transfer_processing','payout_processing') THEN l.presenter_share_cents ELSE 0 END),0) AS unpaid_cents,
               COALESCE(SUM(CASE WHEN l.status = 'paid_out' THEN l.presenter_share_cents ELSE 0 END),0) AS paid_out_cents,
               COUNT(DISTINCT l.event_id) AS event_count
        FROM {$presenters_table} p

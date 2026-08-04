@@ -3285,7 +3285,6 @@ protected function mrm_get_google_service_account_json() {
         }
 
         $now = current_time( 'mysql' );
-        $created_ids = array();
         $google_messages = array();
 
         // Fetch instructor calendar + timezone (required for Google event insert)
@@ -3311,6 +3310,60 @@ protected function mrm_get_google_service_account_json() {
         }
         $slots = is_array( $slots ) ? array_values( $slots ) : array();
         if ( empty( $slots ) ) return new WP_REST_Response( array( 'ok' => false, 'message' => 'The selected lesson times could not be interpreted.' ), 400 );
+
+        $instructor_lock_name = 'mrm_instructor_booking_' . absint( $instructor_id );
+        $instructor_lock_acquired = 1 === (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 20)', $instructor_lock_name ) );
+        if ( ! $instructor_lock_acquired ) {
+            if ( $paid_order_lock_acquired && $paid_order_lock_name ) {
+                $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $paid_order_lock_name ) );
+            }
+            return new WP_Error( 'instructor_booking_locked', 'The selected lesson time is currently being processed. Your payment has not been lost. Please check your email shortly.', array( 'status' => 409 ) );
+        }
+        register_shutdown_function( static function () use ( $wpdb, $instructor_lock_name ) {
+            $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $instructor_lock_name ) );
+        } );
+        $release_booking_locks = static function () use ( $wpdb, &$instructor_lock_acquired, &$instructor_lock_name, &$paid_order_lock_acquired, &$paid_order_lock_name ) {
+            if ( $instructor_lock_acquired && $instructor_lock_name ) {
+                $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $instructor_lock_name ) );
+                $instructor_lock_acquired = false;
+            }
+            if ( $paid_order_lock_acquired && $paid_order_lock_name ) {
+                $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $paid_order_lock_name ) );
+                $paid_order_lock_acquired = false;
+            }
+        };
+
+        $prepared_slots = array();
+        foreach ( $slots as $slot_index => $slot ) {
+            $start_ts = $this->mrm_scheduler_parse_utc_timestamp( $slot['start'] ?? '' );
+            $end_ts = $this->mrm_scheduler_parse_utc_timestamp( $slot['end'] ?? '' );
+            if ( $start_ts <= 0 || $end_ts <= $start_ts ) {
+                $release_booking_locks();
+                return new WP_Error( 'invalid_booking_slot', 'One or more selected lesson times are invalid.', array( 'status' => 400 ) );
+            }
+            $conflict = $this->slot_conflicts( $instructor_id, '' !== $calendar_id ? array( $calendar_id ) : array(), gmdate( 'c', $start_ts ), gmdate( 'c', $end_ts ), (bool) $is_online );
+            if ( is_wp_error( $conflict ) ) {
+                $release_booking_locks();
+                $error_data = $conflict->get_error_data();
+                $status = 'availability_check_unavailable' === $conflict->get_error_code() ? 503 : 409;
+                return new WP_Error( $conflict->get_error_code(), $conflict->get_error_message(), array_merge( is_array( $error_data ) ? $error_data : array(), array( 'status' => $status ) ) );
+            }
+            $prepared_slots[] = array(
+                'slot_index' => absint( $slot_index ),
+                'start_ts' => $start_ts,
+                'end_ts' => $end_ts,
+                'start_mysql' => gmdate( 'Y-m-d H:i:s', $start_ts ),
+                'end_mysql' => gmdate( 'Y-m-d H:i:s', $end_ts ),
+            );
+        }
+        if ( count( $prepared_slots ) !== count( $slots ) ) {
+            $release_booking_locks();
+            return new WP_Error( 'booking_slot_validation_incomplete', 'The complete lesson series could not be validated.', array( 'status' => 409 ) );
+        }
+
+        $wpdb->query( 'START TRANSACTION' );
+        $created_ids = array();
+        $post_commit_jobs = array();
 
         $is_recurring_booking = (
             in_array( strtolower( (string) $repeat_frequency ), array( 'weekly', 'biweekly' ), true ) &&
@@ -3396,7 +3449,10 @@ protected function mrm_get_google_service_account_json() {
 
             $series_id = (int) $wpdb->insert_id;
             if ( $series_id <= 0 ) {
-                $series_id = null;
+                $database_error = $wpdb->last_error;
+                $wpdb->query( 'ROLLBACK' );
+                $release_booking_locks();
+                return new WP_Error( 'series_parent_insert_failed', $database_error ? $database_error : 'The recurring lesson series could not be created.', array( 'status' => 500 ) );
             }
         }
 
@@ -3410,19 +3466,12 @@ protected function mrm_get_google_service_account_json() {
             $series_shared_token_hash = hash( 'sha256', $series_shared_token );
         }
 
-        foreach ( $slots as $slot_index => $slot ) {
-            $start_raw = (string) ( $slot['start'] ?? '' );
-            $end_raw   = (string) ( $slot['end'] ?? '' );
-
-            $start_ts = $this->mrm_scheduler_parse_utc_timestamp( $start_raw );
-            $end_ts = $this->mrm_scheduler_parse_utc_timestamp( $end_raw );
-
-            if ( ! $start_ts || ! $end_ts || $end_ts <= $start_ts ) {
-                continue;
-            }
-
-            $start_mysql = gmdate( 'Y-m-d H:i:s', $start_ts );
-            $end_mysql   = gmdate( 'Y-m-d H:i:s', $end_ts );
+        foreach ( $prepared_slots as $prepared_slot ) {
+            $slot_index = (int) $prepared_slot['slot_index'];
+            $start_ts = (int) $prepared_slot['start_ts'];
+            $end_ts = (int) $prepared_slot['end_ts'];
+            $start_mysql = (string) $prepared_slot['start_mysql'];
+            $end_mysql = (string) $prepared_slot['end_mysql'];
 
             if ( $is_recurring_booking ) {
                 $token = $series_shared_token;
@@ -3519,9 +3568,61 @@ protected function mrm_get_google_service_account_json() {
                 '%s', // reminder_sent_at
             ) );
 
-            if ( $ok ) {
-                $booking_id = (int) $wpdb->insert_id;
-                $created_ids[] = $booking_id;
+            if ( ! $ok ) {
+                $database_error = $wpdb->last_error;
+                $wpdb->query( 'ROLLBACK' );
+                $release_booking_locks();
+                return new WP_Error( 'lesson_series_insert_failed', $database_error ? $database_error : 'The complete lesson series could not be saved.', array( 'status' => 500 ) );
+            }
+
+            $booking_id = (int) $wpdb->insert_id;
+            if ( $booking_id <= 0 ) {
+                $wpdb->query( 'ROLLBACK' );
+                $release_booking_locks();
+                return new WP_Error( 'lesson_insert_id_missing', 'The saved lesson could not be identified.', array( 'status' => 500 ) );
+            }
+
+            $created_ids[] = $booking_id;
+            $post_commit_jobs[] = array(
+                'booking_id' => $booking_id,
+                'slot_index' => $slot_index,
+                'token' => $token,
+                'token_hash' => $token_hash,
+                'start_ts' => $start_ts,
+                'end_ts' => $end_ts,
+                'start_mysql' => $start_mysql,
+                'end_mysql' => $end_mysql,
+            );
+        }
+
+        $expected_lesson_count = count( $prepared_slots );
+        if ( count( $created_ids ) !== $expected_lesson_count ) {
+            $wpdb->query( 'ROLLBACK' );
+            $release_booking_locks();
+            return new WP_Error( 'lesson_series_incomplete', 'The complete lesson series could not be created.', array( 'status' => 500 ) );
+        }
+
+        $commit_result = $wpdb->query( 'COMMIT' );
+        if ( false === $commit_result ) {
+            $wpdb->query( 'ROLLBACK' );
+            $release_booking_locks();
+            return new WP_Error( 'lesson_booking_commit_failed', 'The lesson booking could not be finalized.', array( 'status' => 500 ) );
+        }
+
+        if ( $instructor_lock_acquired && $instructor_lock_name ) {
+            $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $instructor_lock_name ) );
+            $instructor_lock_acquired = false;
+        }
+
+        foreach ( $post_commit_jobs as $job ) {
+            $booking_id = absint( $job['booking_id'] );
+            $slot_index = absint( $job['slot_index'] );
+            $token = (string) $job['token'];
+            $token_hash = (string) $job['token_hash'];
+            $start_ts = (int) $job['start_ts'];
+            $end_ts = (int) $job['end_ts'];
+            $start_mysql = (string) $job['start_mysql'];
+            $end_mysql = (string) $job['end_mysql'];
 
                 if ( (int) $is_consultation === 1 ) {
                     $this->send_consultation_confirmation_for_lesson( $booking_id );
@@ -3825,13 +3926,13 @@ protected function mrm_get_google_service_account_json() {
                         } else {
                             $msg = is_wp_error( $ins ) ? $ins->get_error_message() : 'Unknown insert response.';
                             $google_messages[] = 'Calendar event was not created: ' . $msg;
-                            error_log( '[MRM Scheduler] Google Calendar event creation failed for lesson ' . absint( $lesson_id ) . ': ' . sanitize_text_field( $msg ) );
+                            error_log( '[MRM Scheduler] Google Calendar event creation failed for lesson ' . absint( $booking_id ) . ': ' . sanitize_text_field( $msg ) );
                             wp_mail(
                                 get_option( 'admin_email' ),
                                 'Lesson booking requires calendar review',
                                 sprintf(
                                     "Lesson ID: %d\nStudent: %s\nInstructor ID: %d\n\nThe lesson was booked, but its Google Calendar event was not created. Review the lesson immediately.",
-                                    absint( $lesson_id ), sanitize_text_field( $student_name ), absint( $instructor_id )
+                                    absint( $booking_id ), sanitize_text_field( $student_name ), absint( $instructor_id )
                                 )
                             );
                         }
@@ -3840,8 +3941,6 @@ protected function mrm_get_google_service_account_json() {
                         $google_messages[] = 'Calendar event was not created because time conversion failed.';
                     }
                 }
-            } else {
-            }
         }
 
         $this->bump_cache_bust_token();
@@ -3856,10 +3955,7 @@ protected function mrm_get_google_service_account_json() {
         // Removed: lesson purchases should NOT grant "all sheet music" access.
         // Only the $5 sheet-music add-on payment grants ledger access.
 
-        if ( $paid_order_lock_acquired && $paid_order_lock_name ) {
-            $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $paid_order_lock_name ) );
-            $paid_order_lock_acquired = false;
-        }
+        $release_booking_locks();
         return rest_ensure_response( array(
             'ok' => true,
             'success' => true,
@@ -5339,7 +5435,7 @@ protected function mrm_get_google_service_account_json() {
         return;
 
         global $wpdb;
-        $lesson_id = absint( $lesson_id );
+        $lesson_id = absint( $booking_id );
         if ( ! $lesson_id ) return;
 
         $table_lessons = $wpdb->prefix . 'mrm_lessons';
@@ -15621,7 +15717,7 @@ protected function parse_service_account_json( $json ) {
     }
 
     protected function mrm_claim_initial_email( $lesson_id, $email_type ) {
-        $lesson_id = absint( $lesson_id );
+        $lesson_id = absint( $booking_id );
         $email_type = sanitize_key( $email_type );
         if ( $lesson_id <= 0 || '' === $email_type ) return false;
         $option_name = sprintf( 'mrm_initial_email_%s_%d', $email_type, $lesson_id );
@@ -15632,7 +15728,7 @@ protected function parse_service_account_json( $json ) {
     }
 
     protected function mrm_release_initial_email( $lesson_id, $email_type ) {
-        delete_option( sprintf( 'mrm_initial_email_%s_%d', sanitize_key( $email_type ), absint( $lesson_id ) ) );
+        delete_option( sprintf( 'mrm_initial_email_%s_%d', sanitize_key( $email_type ), absint( $booking_id ) ) );
     }
 
     public function cron_retry_initial_booking_emails() {
@@ -15728,9 +15824,9 @@ protected function parse_service_account_json( $json ) {
         global $wpdb;
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         if ( $sent ) {
-            $wpdb->update( $lessons_table, array( 'instructor_scheduled_email_sent_at' => current_time( 'mysql', true ), 'instructor_scheduled_email_last_error' => '', 'updated_at' => current_time( 'mysql', true ) ), array( 'id' => absint( $lesson_id ) ), array( '%s', '%s', '%s' ), array( '%d' ) );
+            $wpdb->update( $lessons_table, array( 'instructor_scheduled_email_sent_at' => current_time( 'mysql', true ), 'instructor_scheduled_email_last_error' => '', 'updated_at' => current_time( 'mysql', true ) ), array( 'id' => absint( $booking_id ) ), array( '%s', '%s', '%s' ), array( '%d' ) );
         } else {
-            $wpdb->query( $wpdb->prepare( "UPDATE {$lessons_table} SET instructor_scheduled_email_attempts = instructor_scheduled_email_attempts + 1, instructor_scheduled_email_last_error = %s, updated_at = %s WHERE id = %d", 'wp_mail() returned false.', current_time( 'mysql', true ), absint( $lesson_id ) ) );
+            $wpdb->query( $wpdb->prepare( "UPDATE {$lessons_table} SET instructor_scheduled_email_attempts = instructor_scheduled_email_attempts + 1, instructor_scheduled_email_last_error = %s, updated_at = %s WHERE id = %d", 'wp_mail() returned false.', current_time( 'mysql', true ), absint( $booking_id ) ) );
         }
         $this->mrm_release_initial_email( $lesson_id, 'instructor' );
 
@@ -15797,9 +15893,9 @@ protected function parse_service_account_json( $json ) {
         global $wpdb;
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
         if ( $sent ) {
-            $wpdb->update( $lessons_table, array( 'consultation_confirmation_sent_at' => current_time( 'mysql', true ), 'consultation_confirmation_last_error' => '', 'updated_at' => current_time( 'mysql', true ) ), array( 'id' => absint( $lesson_id ) ), array( '%s', '%s', '%s' ), array( '%d' ) );
+            $wpdb->update( $lessons_table, array( 'consultation_confirmation_sent_at' => current_time( 'mysql', true ), 'consultation_confirmation_last_error' => '', 'updated_at' => current_time( 'mysql', true ) ), array( 'id' => absint( $booking_id ) ), array( '%s', '%s', '%s' ), array( '%d' ) );
         } else {
-            $wpdb->query( $wpdb->prepare( "UPDATE {$lessons_table} SET consultation_confirmation_attempts = consultation_confirmation_attempts + 1, consultation_confirmation_last_error = %s, updated_at = %s WHERE id = %d", 'wp_mail() returned false.', current_time( 'mysql', true ), absint( $lesson_id ) ) );
+            $wpdb->query( $wpdb->prepare( "UPDATE {$lessons_table} SET consultation_confirmation_attempts = consultation_confirmation_attempts + 1, consultation_confirmation_last_error = %s, updated_at = %s WHERE id = %d", 'wp_mail() returned false.', current_time( 'mysql', true ), absint( $booking_id ) ) );
         }
         $this->mrm_release_initial_email( $lesson_id, 'consultation' );
 
