@@ -2287,6 +2287,22 @@ private function mrm_release_pending_promo_redemption($order_id = 0, $payment_in
   return false;
 }
 
+private function mrm_release_refunded_booking_promo_redemption($order_id, $payment_intent_id) {
+  global $wpdb;
+  $order_id = absint($order_id);
+  $payment_intent_id = sanitize_text_field($payment_intent_id);
+  if ($order_id <= 0 && '' === $payment_intent_id) return false;
+  $table = $this->table_promo_redemptions();
+  if ($order_id > 0 && '' !== $payment_intent_id) {
+    $result = $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE (order_id = %d OR stripe_payment_intent_id = %s) AND status IN ('pending','paid')", $order_id, $payment_intent_id));
+  } elseif ($order_id > 0) {
+    $result = $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE order_id = %d AND status IN ('pending','paid')", $order_id));
+  } else {
+    $result = $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE stripe_payment_intent_id = %s AND status IN ('pending','paid')", $payment_intent_id));
+  }
+  return false !== $result;
+}
+
 private function mrm_reserve_promo_redemption($code, $email_hash, $order_id, $payment_intent_id = '', $customer_email = '', $promo = array()) {
   global $wpdb;
   $code = $this->mrm_normalize_promo_code($code);
@@ -5931,12 +5947,36 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     return (bool)$sent;
   }
 
+  private function mrm_complete_booking_conflict_cleanup(array $order, $payment_intent_id, array $booking_payload = array()) {
+    $order_id = absint($order['id'] ?? 0);
+    $payment_intent_id = sanitize_text_field($payment_intent_id);
+    if ($order_id <= 0 || '' === $payment_intent_id) return new WP_Error('booking_conflict_cleanup_reference_missing','The refunded booking cleanup reference is missing.');
+    $metadata = $this->mrm_get_order_meta_array($order);
+    $autopay_profile_id = absint($booking_payload['autopay_profile_id'] ?? $metadata['mrm_autopay_profile_id'] ?? 0);
+    if ($autopay_profile_id > 0) $this->mrm_deactivate_autopay_after_booking_failure($autopay_profile_id);
+    $promo_released = $this->mrm_release_refunded_booking_promo_redemption($order_id, $payment_intent_id);
+    if (!$promo_released) return new WP_Error('booking_conflict_promo_cleanup_failed','The refunded booking promotional-code record could not be released.');
+    $addon_selected = isset($metadata['mrm_sheet_music_addon']) && 'yes' === strtolower((string)$metadata['mrm_sheet_music_addon']);
+    if ($addon_selected) {
+      $revoke_result = $this->mrm_revoke_sheet_music_entitlements_for_payment_intent($payment_intent_id);
+      if (is_wp_error($revoke_result)) return $revoke_result;
+    }
+    $updated_order = $this->get_order_by_pi($payment_intent_id);
+    if (is_array($updated_order)) $this->mrm_send_booking_conflict_refund_email($updated_order);
+    $this->mrm_set_order_meta_flag($order_id, 'mrm_booking_conflict_cleanup_completed_at', current_time('mysql', true));
+    return true;
+  }
+
   private function mrm_refund_conflicting_paid_lesson(array $pi, array $order, array $booking_payload, $booking_error) {
     $order_id = absint($order['id'] ?? 0); $payment_intent_id = sanitize_text_field($pi['id'] ?? '');
     if ($order_id <= 0 || '' === $payment_intent_id) return new WP_Error('booking_conflict_refund_reference_missing','The conflicting lesson payment could not be identified.');
     $meta = $this->mrm_get_order_meta_array($order);
     $existing_refund_id = sanitize_text_field($meta['mrm_booking_conflict_refund_id'] ?? '');
-    if ('' !== $existing_refund_id) return array('ok'=>false,'booking_refunded'=>true,'refund_id'=>$existing_refund_id,'message'=>'The selected lesson time became unavailable. A full refund has been submitted. Please select a different lesson time.');
+    if ('' !== $existing_refund_id) {
+      $cleanup_result = $this->mrm_complete_booking_conflict_cleanup($order, $payment_intent_id, $booking_payload);
+      if (is_wp_error($cleanup_result)) { $this->stripe_debug_log('Existing booking-conflict refund cleanup remains incomplete.', array('order_id'=>$order_id,'payment_intent_id'=>$payment_intent_id,'refund_id'=>$existing_refund_id,'message'=>$cleanup_result->get_error_message())); $this->mrm_schedule_purchase_receipt_retry(); }
+      return array('ok'=>false,'booking_refunded'=>true,'refund_id'=>$existing_refund_id,'message'=>'The selected lesson time became unavailable. A full refund has been submitted. Please select a different lesson time.');
+    }
     $idempotency_key = 'mrm_lesson_conflict_refund_' . hash('sha256', home_url() . '|' . $order_id . '|' . $payment_intent_id);
     $refund = $this->stripe_create_refund($payment_intent_id, null, 'requested_by_customer', $idempotency_key);
     if (is_wp_error($refund)) return $refund;
@@ -5945,11 +5985,11 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     $this->update_order_status_from_pi($payment_intent_id, 'refund_pending', $refund_status, array('mrm_booking_conflict_refund_id'=>$refund_id,'mrm_booking_conflict_refund_status'=>$refund_status,'mrm_booking_conflict_refund_requested_at'=>current_time('mysql', true),'mrm_booking_conflict_reason'=>is_wp_error($booking_error) ? $booking_error->get_error_message() : 'The selected lesson time was unavailable.'));
     $lifecycle = $this->mrm_handle_refund_lifecycle_webhook($refund, 0);
     if (is_wp_error($lifecycle)) $this->stripe_debug_log('Booking-conflict refund is awaiting lifecycle reconciliation.', array('order_id'=>$order_id,'refund_id'=>$refund_id,'message'=>$lifecycle->get_error_message()));
-    $autopay_profile_id = absint($booking_payload['autopay_profile_id'] ?? $meta['mrm_autopay_profile_id'] ?? 0);
-    if ($autopay_profile_id > 0) $this->mrm_deactivate_autopay_after_booking_failure($autopay_profile_id);
-    $this->mrm_release_pending_promo_redemption($order_id, $payment_intent_id);
     $updated_order = $this->get_order_by_pi($payment_intent_id);
-    if (is_array($updated_order)) $this->mrm_send_booking_conflict_refund_email($updated_order);
+    if (is_array($updated_order)) {
+      $cleanup_result = $this->mrm_complete_booking_conflict_cleanup($updated_order, $payment_intent_id, $booking_payload);
+      if (is_wp_error($cleanup_result)) { $this->stripe_debug_log('New booking-conflict refund cleanup remains incomplete.', array('order_id'=>$order_id,'payment_intent_id'=>$payment_intent_id,'refund_id'=>$refund_id,'message'=>$cleanup_result->get_error_message())); $this->mrm_schedule_purchase_receipt_retry(); }
+    }
     return array('ok'=>false,'booking_refunded'=>true,'refund_id'=>$refund_id,'message'=>'The selected lesson time became unavailable. A full refund has been submitted. Please select a different lesson time.');
   }
 
@@ -6002,7 +6042,8 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     foreach ((array)$orders as $order) {
       $metadata = $this->mrm_get_order_meta_array($order);
       if (!empty($metadata['mrm_booking_conflict_refund_id'])) {
-        if (empty($metadata['mrm_booking_conflict_email_sent_at'])) $this->mrm_send_booking_conflict_refund_email($order);
+        $cleanup_result = $this->mrm_complete_booking_conflict_cleanup($order, sanitize_text_field($order['stripe_payment_intent_id'] ?? ''));
+        if (is_wp_error($cleanup_result)) { error_log('[MRM Payments] Booking-conflict cleanup retry failed for order ' . absint($order['id']) . ': ' . $cleanup_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); }
         continue;
       }
       if (!empty($metadata['mrm_receipt_sent_at']) || empty($order['stripe_payment_intent_id'])) continue;
@@ -6011,6 +6052,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       if (sanitize_key($order['product_type'] ?? '') === 'lesson') {
         $result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
         if (is_wp_error($result)) { error_log('[MRM Payments] Receipt retry could not finalize lesson order ' . absint($order['id']) . ': ' . $result->get_error_message()); continue; }
+        if (is_array($result) && !empty($result['booking_refunded'])) continue;
         $order = $this->get_order_by_pi($order['stripe_payment_intent_id']);
       }
       $result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
@@ -6131,6 +6173,10 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
         return true;
       }
       $order = $this->get_order_by_pi($pi_id);
+      if (is_array($order)) {
+        $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
+        if (is_wp_error($addon_grant_result)) return $addon_grant_result;
+      }
     }
     $receipt_result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
     if (is_wp_error($receipt_result)) return $receipt_result;
@@ -6649,7 +6695,7 @@ private function mrm_apply_successful_refund_business_effects($refund, $charge) 
     $pi_id=$this->mrm_stripe_expandable_id($refund['payment_intent'] ?? ''); $order=array(); $order_id=0;
     if($pi_id!==''){ $order=$this->get_order_by_pi($pi_id); if(is_array($order) && !empty($order['id'])){ $order_id=absint($order['id']); $addon_refund_id=sanitize_text_field($this->mrm_get_order_meta_value($order,'mrm_subscription_addon_refund_id','')); if($addon_refund_id!=='' && hash_equals($addon_refund_id,$refund_id)){ $this->mrm_set_order_meta_flag($order_id,'mrm_subscription_addon_refund_status','succeeded'); $this->mrm_set_order_meta_flag($order_id,'mrm_sheet_music_subscription_status','activation_failed_addon_refund_succeeded'); } } }
     if($apply_full_transition){
-      if($order_id>0){ $this->update_order_status_from_pi($pi_id,'refunded','refunded',array('mrm_refunded_at'=>current_time('mysql'),'mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); $this->mrm_void_standard_payouts_for_refunded_order($order_id,$pi_id,'stripe_cumulative_full_refund'); $product_type=sanitize_key($order['product_type'] ?? ''); if($product_type==='sheet_music'){ $revoke_result=$this->mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id); if(is_wp_error($revoke_result)) return $revoke_result; } $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('partial_refund_business_review_required')); if(is_wp_error($resolved)) return $resolved; }
+      if($order_id>0){ $this->update_order_status_from_pi($pi_id,'refunded','refunded',array('mrm_refunded_at'=>current_time('mysql'),'mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); $this->mrm_void_standard_payouts_for_refunded_order($order_id,$pi_id,'stripe_cumulative_full_refund'); $product_type=sanitize_key($order['product_type'] ?? ''); $order_meta=$this->mrm_get_order_meta_array($order); $lesson_has_sheet_music_addon='lesson'===$product_type && isset($order_meta['mrm_sheet_music_addon']) && 'yes'===strtolower((string)$order_meta['mrm_sheet_music_addon']); if($product_type==='sheet_music' || $lesson_has_sheet_music_addon){ $revoke_result=$this->mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id); if(is_wp_error($revoke_result)) return $revoke_result; } $conflict_refund_id=sanitize_text_field($order_meta['mrm_booking_conflict_refund_id'] ?? ''); if(''!==$conflict_refund_id && hash_equals($conflict_refund_id,$refund_id)){ $cleanup_result=$this->mrm_complete_booking_conflict_cleanup($order,$pi_id); if(is_wp_error($cleanup_result)) return $cleanup_result; } $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('partial_refund_business_review_required')); if(is_wp_error($resolved)) return $resolved; }
       $this->mrm_void_subscription_composer_payout_from_refunded_charge($charge,'stripe_cumulative_full_refund'); do_action('mrm_payments_hub_refund_succeeded',$refund,$charge,$summary);
     } elseif(empty($summary['is_full_refund']) && !$refund_already_applied) {
       if($order_id>0){ $this->update_order_status_from_pi($pi_id,'partially_refunded','partially_refunded',array('mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'],'mrm_charge_amount_cents'=>(string)$summary['charge_amount_cents'])); $alert_result=$this->mrm_tax_create_alert('', 'partial_refund_business_review_required','refund',0,array('message'=>'A partial refund succeeded. Access remains active and the full payout was not voided. Review the proportional payout, accounting, and customer records.','refund_id'=>$refund_id,'payment_intent_id'=>$pi_id,'charge_id'=>$summary['charge_id'],'succeeded_refund_cents'=>$summary['succeeded_refund_cents'],'charge_amount_cents'=>$summary['charge_amount_cents']),sanitize_key($refund_id)); if(is_wp_error($alert_result)) return $alert_result; }
@@ -13490,7 +13536,7 @@ private function charge_and_unlock_autopay($data) {
     return array('claim_key' => $claim_key, 'idempotency_key' => $idempotency_key, 'total_cents' => $total_cents, 'ledger_ids' => $ledger_ids);
   }
 
-  private function mrm_process_standard_payout_claim($table, $claim_key, $connected_account_id, $currency, $batch_key) {
+  private function mrm_process_standard_payout_claim($table, $claim_key, $connected_account_id, $currency, $batch_key, $is_recovery = false) {
     global $wpdb;
     $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE payout_claim_key = %s AND status = 'payout_processing' ORDER BY id ASC", sanitize_text_field($claim_key)), ARRAY_A);
     if (empty($rows)) return array('already_complete' => true, 'rows' => array());
@@ -13503,10 +13549,12 @@ private function charge_and_unlock_autopay($data) {
       $total_cents += max(0, (int)($row['net_cents'] ?? 0));
     }
     if ($total_cents <= 0) return new WP_Error('standard_payout_claim_invalid_total', 'The payout claim total is invalid.');
-    $connected_balance = $this->stripe_retrieve_connected_account_balance($connected_account_id);
-    if (is_wp_error($connected_balance)) { $message = 'Unable to retrieve the connected-account balance: ' . $connected_balance->get_error_message(); $wpdb->query($wpdb->prepare("UPDATE {$table} SET notes = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $message, current_time('mysql', true), $claim_key)); $this->mrm_schedule_payout_retry(); return new WP_Error('standard_payout_balance_unavailable', $message); }
-    $connected_available = $this->mrm_balance_available_for_currency($connected_balance, $currency);
-    if ((int)$connected_available['total'] < $total_cents) { $message = sprintf('Waiting for connected-account funds. Needed %s %0.2f, but %s %0.2f is currently available.', strtoupper($currency), $total_cents / 100, strtoupper($currency), (int)$connected_available['total'] / 100); $wpdb->query($wpdb->prepare("UPDATE {$table} SET notes = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $message, current_time('mysql', true), $claim_key)); $this->mrm_schedule_payout_retry(); return new WP_Error('standard_payout_balance_pending', $message); }
+    if (!$is_recovery) {
+      $connected_balance = $this->stripe_retrieve_connected_account_balance($connected_account_id);
+      if (is_wp_error($connected_balance)) { $message = 'Unable to retrieve the connected-account balance: ' . $connected_balance->get_error_message(); $wpdb->query($wpdb->prepare("UPDATE {$table} SET notes = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $message, current_time('mysql', true), $claim_key)); $this->mrm_schedule_payout_retry(); return new WP_Error('standard_payout_balance_unavailable', $message); }
+      $connected_available = $this->mrm_balance_available_for_currency($connected_balance, $currency);
+      if ((int)$connected_available['total'] < $total_cents) { $message = sprintf('Waiting for connected-account funds. Needed %s %0.2f, but %s %0.2f is currently available.', strtoupper($currency), $total_cents / 100, strtoupper($currency), (int)$connected_available['total'] / 100); $wpdb->query($wpdb->prepare("UPDATE {$table} SET notes = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $message, current_time('mysql', true), $claim_key)); $this->mrm_schedule_payout_retry(); return new WP_Error('standard_payout_balance_pending', $message); }
+    }
     $payout = $this->stripe_create_connected_account_payout($connected_account_id, $total_cents, $currency, array('mrm_batch_key' => $batch_key, 'mrm_payout_claim_key' => $claim_key), $idempotency_keys[0]);
     if (is_wp_error($payout)) { $wpdb->query($wpdb->prepare("UPDATE {$table} SET notes = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $payout->get_error_message(), current_time('mysql', true), $claim_key)); $this->mrm_schedule_payout_retry(); return $payout; }
     $payout_id = sanitize_text_field($payout['id'] ?? '');
@@ -13615,12 +13663,8 @@ private function charge_and_unlock_autopay($data) {
 
     if (!$rows) return $summary;
 
-    $platform_balance = $this->stripe_retrieve_balance();
-    if (is_wp_error($platform_balance)) {
-      $summary['errors']++;
-      $summary['last_error'] = 'Unable to retrieve Stripe balance before payout batch: ' . $platform_balance->get_error_message();
-      return $summary;
-    }
+    $platform_balance = null;
+    $platform_balance_error = null;
 
     // Available-funds-only payout model:
     // do not build an order -> charge map, because instructor transfers
@@ -13641,7 +13685,8 @@ private function charge_and_unlock_autopay($data) {
       $acct = (string)$first['connected_account_id'];
       $currency = strtolower((string)$first['currency']);
 
-      $pending_rows = array();
+      $fresh_transfer_rows = array();
+      $transfer_recovery_rows = array();
       $already_transferred_rows = array();
       $existing_payout_claim_keys = array();
 
@@ -13656,8 +13701,12 @@ private function charge_and_unlock_autopay($data) {
           $already_transferred_rows[] = $group_row;
           continue;
         }
-        if (in_array($row_status, array('pending','error','blocked','transfer_processing'), true)) {
-          $pending_rows[] = $group_row;
+        if ('transfer_processing' === $row_status) {
+          $transfer_recovery_rows[] = $group_row;
+          continue;
+        }
+        if (in_array($row_status, array('pending','error','blocked'), true)) {
+          $fresh_transfer_rows[] = $group_row;
         }
       }
 
@@ -13666,29 +13715,29 @@ private function charge_and_unlock_autopay($data) {
       $newly_transferred_total = 0;
       $newly_transferred_ids = array();
 
-      $group_required_total = $this->mrm_sum_group_transfer_amount($pending_rows);
-      $available = $this->mrm_balance_available_for_currency($platform_balance, $currency);
-
+      $group_required_total = $this->mrm_sum_group_transfer_amount($fresh_transfer_rows);
       if ($group_required_total > 0) {
-        if (defined('WP_DEBUG') && WP_DEBUG) {
+        if (null === $platform_balance && null === $platform_balance_error) {
+          $platform_balance = $this->stripe_retrieve_balance();
+          if (is_wp_error($platform_balance)) { $platform_balance_error = $platform_balance; $platform_balance = null; }
         }
-
-        if ((int)$available['total'] < $group_required_total) {
-          $msg = sprintf(
-            'Waiting for Stripe available balance. Needed %s %0.2f, but only %s %0.2f is currently available.',
-            strtoupper($currency),
-            $group_required_total / 100,
-            strtoupper($currency),
-            ((int)$available['total']) / 100
-          );
-
-          $this->mrm_mark_group_pending_balance_wait($table, $pending_rows, $msg);
-          $summary['errors']++;
-          $summary['last_error'] = $msg;
-          continue;
+        if (is_wp_error($platform_balance_error)) {
+          $msg = 'Unable to retrieve Stripe balance before creating new transfers: ' . $platform_balance_error->get_error_message();
+          $this->mrm_mark_group_pending_balance_wait($table, $fresh_transfer_rows, $msg);
+          $summary['errors']++; $summary['last_error'] = $msg;
+          $fresh_transfer_rows = array();
+        } else {
+          $available = $this->mrm_balance_available_for_currency($platform_balance, $currency);
+          if ((int)$available['total'] < $group_required_total) {
+            $msg = sprintf('Waiting for Stripe available balance. Needed %s %0.2f, but only %s %0.2f is currently available.', strtoupper($currency), $group_required_total / 100, strtoupper($currency), ((int)$available['total']) / 100);
+            $this->mrm_mark_group_pending_balance_wait($table, $fresh_transfer_rows, $msg);
+            $summary['errors']++; $summary['last_error'] = $msg;
+            $fresh_transfer_rows = array();
+          }
         }
-
       }
+
+      $pending_rows = array_merge($transfer_recovery_rows, $fresh_transfer_rows);
 
       foreach ($pending_rows as $row) {
         $amount = (int)$row['net_cents'];
@@ -13786,7 +13835,7 @@ private function charge_and_unlock_autopay($data) {
       }
 
       foreach ($existing_payout_claim_keys as $existing_claim_key) {
-        $claim_result = $this->mrm_process_standard_payout_claim($table, $existing_claim_key, $acct, $currency, $batch_key);
+        $claim_result = $this->mrm_process_standard_payout_claim($table, $existing_claim_key, $acct, $currency, $batch_key, true);
         if (is_wp_error($claim_result)) { $summary['errors']++; $summary['last_error'] = $claim_result->get_error_message(); continue; }
         if (empty($claim_result['already_complete']) && !empty($claim_result['payout']) && !empty($claim_result['rows'])) {
           $summary['payouts_created']++;
@@ -13805,7 +13854,7 @@ private function charge_and_unlock_autopay($data) {
         $claim = $this->mrm_claim_standard_payout_rows($table, $acct, $currency, $fresh_ledger_ids, $batch_key);
         if (is_wp_error($claim)) { $summary['errors']++; $summary['last_error'] = $claim->get_error_message(); }
         else {
-          $claim_result = $this->mrm_process_standard_payout_claim($table, $claim['claim_key'], $acct, $currency, $batch_key);
+          $claim_result = $this->mrm_process_standard_payout_claim($table, $claim['claim_key'], $acct, $currency, $batch_key, false);
           if (is_wp_error($claim_result)) { $summary['errors']++; $summary['last_error'] = $claim_result->get_error_message(); }
           elseif (empty($claim_result['already_complete'])) {
             $summary['payouts_created']++;
@@ -16626,6 +16675,25 @@ private function charge_and_unlock_autopay($data) {
     $this->mrm_attempt_sheet_music_subscription_activation($order_id, $pi, 'initial_payment_intent_helper');
   }
 
+  private function mrm_grant_lesson_sheet_music_addon_after_booking(array $pi, array $order) {
+    $payment_intent_id = sanitize_text_field($pi['id'] ?? '');
+    if ('' === $payment_intent_id || 'lesson' !== sanitize_key($order['product_type'] ?? '')) return true;
+    if (in_array(sanitize_key($order['status'] ?? ''), array('refund_pending','refunded'), true)) return true;
+    $order_meta = $this->mrm_get_order_meta_array($order);
+    $pi_meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+    $metadata = array_merge($order_meta, $pi_meta);
+    $addon_selected = isset($metadata['mrm_sheet_music_addon']) && 'yes' === strtolower((string)$metadata['mrm_sheet_music_addon']);
+    if (!$addon_selected) return true;
+    $lesson_id = absint($order_meta['mrm_lesson_id'] ?? 0);
+    if ($lesson_id <= 0) return new WP_Error('lesson_addon_booking_not_ready','Sheet-music add-on access cannot be granted before the lesson is created.');
+    $email = sanitize_email($metadata['mrm_customer_email'] ?? $order['customer_email'] ?? '');
+    if (!$email || !is_email($email)) return new WP_Error('lesson_addon_email_invalid','The sheet-music add-on email is invalid.');
+    $start_timestamp = absint($pi['created'] ?? time());
+    $granted = $this->mrm_grant_all_sheet_music_ledger($email, $start_timestamp, 'stripe_pi_addon', $payment_intent_id);
+    if (!$granted) return new WP_Error('lesson_addon_access_not_granted','The lesson was created, but its sheet-music add-on access could not be granted.');
+    return true;
+  }
+
   private function mrm_retry_sheet_music_subscription_creation_for_order($order_id) {
     $order_id = (int)$order_id;
     if ($order_id <= 0) return false;
@@ -16726,14 +16794,6 @@ private function charge_and_unlock_autopay($data) {
       $start_ts = time();
     }
 
-    // Scheduler lesson addon path (existing behavior)
-    if ($ok && $addon_yes) {
-      $email = sanitize_email((string)($meta['mrm_customer_email'] ?? ''));
-      if ($email && is_email($email)) {
-        $this->mrm_grant_all_sheet_music_ledger($email, $start_ts, 'stripe_pi_addon', $pi_id);
-      }
-    }
-
     // Piece-product path: trusted metadata grants all purchased products.
     if ($ok && sanitize_key((string)($meta['mrm_product_type'] ?? '')) === 'sheet_music') {
       $pi_sku=$this->sanitize_sku($meta['mrm_sku']??'');
@@ -16778,6 +16838,10 @@ private function charge_and_unlock_autopay($data) {
           return new WP_REST_Response(array('ok'=>true,'status'=>'refund_pending','payment_received'=>true,'booking_refunded'=>true,'refund_id'=>sanitize_text_field($booking_result['refund_id'] ?? ''),'message'=>$booking_result['message']), 200);
         }
         $order = $this->get_order_by_pi($pi_id);
+        if (is_array($order)) {
+          $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
+          if (is_wp_error($addon_grant_result)) return new WP_REST_Response(array('ok'=>false,'payment_received'=>true,'addon_activation_pending'=>true,'message'=>'Your lesson was booked, but the sheet-music add-on is still being activated. You do not need to submit another payment.'), 503);
+        }
       }
 
       /*
@@ -25866,7 +25930,7 @@ MRM_TAX_RULES;
     $wpdb->query('COMMIT'); return array('claim_key'=>$claim_key,'idempotency_key'=>$idempotency_key,'total_cents'=>$total_cents,'ledger_ids'=>$ledger_ids);
   }
 
-  private function mrm_process_presenter_payout_claim($ledger_table, $claim_key, $connected_account_id, $currency, $batch_key) {
+  private function mrm_process_presenter_payout_claim($ledger_table, $claim_key, $connected_account_id, $currency, $batch_key, $is_recovery = false) {
     global $wpdb;
     $rows=$wpdb->get_results($wpdb->prepare("SELECT * FROM {$ledger_table} WHERE payout_claim_key = %s AND status = 'payout_processing' ORDER BY id ASC", sanitize_text_field($claim_key)), ARRAY_A);
     if(empty($rows)) return array('already_complete'=>true,'rows'=>array());
@@ -25874,10 +25938,12 @@ MRM_TAX_RULES;
     if(1!==count($keys)) return new WP_Error('presenter_payout_claim_key_mismatch','The presenter payout claim contains inconsistent idempotency keys.');
     $total_cents=0; foreach($rows as $row){ $total_cents += max(0,(int)($row['presenter_share_cents'] ?? 0)); }
     if($total_cents<=0) return new WP_Error('presenter_payout_claim_invalid_total','The presenter payout claim total is invalid.');
-    $bal=$this->stripe_retrieve_connected_account_balance($connected_account_id);
-    if(is_wp_error($bal)){ $msg='Unable to retrieve the presenter connected-account balance: '.$bal->get_error_message(); $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET payout_error = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $msg,current_time('mysql',true),$claim_key)); $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_balance_unavailable',$msg); }
-    $available=$this->mrm_balance_available_for_currency($bal,$currency);
-    if((int)$available['total']<$total_cents){ $msg=sprintf('Waiting for presenter connected-account funds. Needed %s %0.2f, but %s %0.2f is currently available.', strtoupper($currency), $total_cents/100, strtoupper($currency), (int)$available['total']/100); $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET payout_error = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $msg,current_time('mysql',true),$claim_key)); $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_balance_pending',$msg); }
+    if (!$is_recovery) {
+      $bal=$this->stripe_retrieve_connected_account_balance($connected_account_id);
+      if(is_wp_error($bal)){ $msg='Unable to retrieve the presenter connected-account balance: '.$bal->get_error_message(); $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET payout_error = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $msg,current_time('mysql',true),$claim_key)); $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_balance_unavailable',$msg); }
+      $available=$this->mrm_balance_available_for_currency($bal,$currency);
+      if((int)$available['total']<$total_cents){ $msg=sprintf('Waiting for presenter connected-account funds. Needed %s %0.2f, but %s %0.2f is currently available.', strtoupper($currency), $total_cents/100, strtoupper($currency), (int)$available['total']/100); $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET payout_error = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $msg,current_time('mysql',true),$claim_key)); $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_balance_pending',$msg); }
+    }
     $payout=$this->stripe_create_connected_account_payout($connected_account_id,$total_cents,$currency,array('mrm_presenter_batch_key'=>$batch_key,'mrm_payout_claim_key'=>$claim_key,'mrm_payout_type'=>'masterclass_presenter'),$keys[0]);
     if(is_wp_error($payout)){ $wpdb->query($wpdb->prepare("UPDATE {$ledger_table} SET payout_error = %s, updated_at = %s WHERE payout_claim_key = %s AND status = 'payout_processing'", $payout->get_error_message(),current_time('mysql',true),$claim_key)); $this->mrm_schedule_presenter_payout_retry(); return $payout; }
     $payout_id=sanitize_text_field($payout['id'] ?? ''); if(''===$payout_id){ $this->mrm_schedule_presenter_payout_retry(); return new WP_Error('presenter_payout_id_missing','Stripe returned a presenter payout without a payout ID.'); }
@@ -26053,7 +26119,7 @@ MRM_TAX_RULES;
       }
 
       foreach ($existing_payout_claim_keys as $existing_claim_key) {
-        $claim_result = $this->mrm_process_presenter_payout_claim($ledger_table, $existing_claim_key, $acct, $currency, $batch_key);
+        $claim_result = $this->mrm_process_presenter_payout_claim($ledger_table, $existing_claim_key, $acct, $currency, $batch_key, true);
         if (is_wp_error($claim_result)) { $summary['errors']++; $summary['last_error'] = $claim_result->get_error_message(); continue; }
         if (empty($claim_result['already_complete']) && !empty($claim_result['rows'])) {
           foreach ($claim_result['rows'] as $paid_row) { $paid_row['status'] = 'paid_out'; $paid_presenter_rows[] = $paid_row; $summary['paid']++; }
@@ -26071,7 +26137,7 @@ MRM_TAX_RULES;
         $claim = $this->mrm_claim_presenter_payout_rows($ledger_table, $acct, $currency, $fresh_ledger_ids, $batch_key);
         if (is_wp_error($claim)) { $summary['errors']++; $summary['last_error'] = $claim->get_error_message(); }
         else {
-          $claim_result = $this->mrm_process_presenter_payout_claim($ledger_table, $claim['claim_key'], $acct, $currency, $batch_key);
+          $claim_result = $this->mrm_process_presenter_payout_claim($ledger_table, $claim['claim_key'], $acct, $currency, $batch_key, false);
           if (is_wp_error($claim_result)) { $summary['errors']++; $summary['last_error'] = $claim_result->get_error_message(); }
           elseif (empty($claim_result['already_complete'])) {
             foreach ($claim_result['rows'] as $paid_row) { $paid_row['status'] = 'paid_out'; $paid_presenter_rows[] = $paid_row; $summary['paid']++; }
