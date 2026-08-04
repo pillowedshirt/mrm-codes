@@ -5453,6 +5453,7 @@ function ensureLegacyBookingHandler(){
 
 
           const autopayPaymentRequestBody = {
+            booking_payload: payload,
             checkout_request_id: mrmCreateLessonCheckoutRequestId(),
             sku: sku,
             email: email,
@@ -5616,7 +5617,9 @@ function ensureLegacyBookingHandler(){
             } catch (err) {
               mrmLessonPaymentConfirmationInProgress = false;
               mrmHidePaymentLoading();
-              errorEl.textContent = (err && err.message) ? err.message : 'We could not complete this payment.';
+              errorEl.textContent = mrmLessonPaymentCompleted
+                ? 'Your payment was received. Do not submit another payment. We are finalizing your lesson now. Please check your email. If confirmation does not arrive within 10 minutes, contact us.'
+                : ((err && err.message) ? err.message : 'The payment could not be completed. Please review your information and try again.');
               payBtn.disabled = false;
             }
           };
@@ -5633,6 +5636,7 @@ function ensureLegacyBookingHandler(){
   }
 
         const lessonPaymentRequestBody = {
+          booking_payload: payload,
           checkout_request_id: mrmCreateLessonCheckoutRequestId(),
           sku: sku,
           email: email,
@@ -5788,7 +5792,9 @@ function ensureLegacyBookingHandler(){
           } catch (err) {
             mrmLessonPaymentConfirmationInProgress = false;
             mrmHidePaymentLoading();
-            errorEl.textContent = (err && err.message) ? err.message : 'We could not complete this payment.';
+            errorEl.textContent = mrmLessonPaymentCompleted
+                ? 'Your payment was received. Do not submit another payment. We are finalizing your lesson now. Please check your email. If confirmation does not arrive within 10 minutes, contact us.'
+                : ((err && err.message) ? err.message : 'The payment could not be completed. Please review your information and try again.');
             payBtn.disabled = false;
           }
         };

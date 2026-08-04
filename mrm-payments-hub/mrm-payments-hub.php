@@ -151,6 +151,9 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_retry_subscription_invoice_lifecycle', array($this, 'mrm_tax_retry_subscription_invoice_lifecycle'), 10, 2);
     add_action('mrm_pay_hub_tax_filing_deadline_check', array($this, 'cron_tax_filing_deadline_check'));
     add_action('mrm_pay_hub_tax_enforce_subscription_holds', array($this, 'cron_tax_enforce_subscription_holds'));
+    add_action('mrm_pay_hub_retry_purchase_receipts', array($this, 'mrm_retry_purchase_receipts'));
+    add_action('mrm_pay_hub_retry_payout_batch', array($this, 'mrm_retry_payout_batch'));
+    add_action('mrm_pay_hub_retry_presenter_payout_batch', array($this, 'mrm_retry_presenter_payout_batch'));
 
     add_action('mrm_lesson_charge_due', array($this, 'on_lesson_charge_due'), 10, 1);
     add_action('mrm_lesson_delivered', array($this, 'on_lesson_delivered'), 10, 1);
@@ -174,6 +177,9 @@ class MRM_Payments_Hub_Single {
   }
 
   public function ensure_runtime_cron_schedules() {
+    if (!wp_next_scheduled('mrm_pay_hub_retry_purchase_receipts')) {
+      wp_schedule_event(time() + 2 * MINUTE_IN_SECONDS, 'mrm_10min', 'mrm_pay_hub_retry_purchase_receipts');
+    }
     if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
       wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
     }
@@ -235,6 +241,9 @@ class MRM_Payments_Hub_Single {
   public function on_activate() {
     $this->install_or_upgrade_db();
     $this->ensure_default_products();
+    if (!wp_next_scheduled('mrm_pay_hub_retry_purchase_receipts')) {
+      wp_schedule_event(time() + 2 * MINUTE_IN_SECONDS, 'mrm_10min', 'mrm_pay_hub_retry_purchase_receipts');
+    }
 
     if (!wp_next_scheduled('mrm_pay_hub_cleanup_access')) {
       wp_schedule_event(time() + 300, 'hourly', 'mrm_pay_hub_cleanup_access');
@@ -685,6 +694,10 @@ class MRM_Payments_Hub_Single {
       transfer_id VARCHAR(255) DEFAULT NULL,
       payout_id VARCHAR(255) DEFAULT NULL,
       batch_key VARCHAR(80) DEFAULT NULL,
+      transfer_idempotency_key VARCHAR(191) DEFAULT NULL,
+      payout_claim_key VARCHAR(191) DEFAULT NULL,
+      payout_idempotency_key VARCHAR(191) DEFAULT NULL,
+      processing_started_at DATETIME DEFAULT NULL,
       notes TEXT DEFAULT NULL,
       created_at DATETIME NOT NULL,
       updated_at DATETIME NOT NULL,
@@ -693,6 +706,7 @@ class MRM_Payments_Hub_Single {
       KEY status_idx (status),
       KEY acct_idx (connected_account_id),
       KEY pi_idx (stripe_payment_intent_id)
+      ,KEY payout_claim_key (payout_claim_key)
     ) {$charset};";
 
 
@@ -4493,6 +4507,7 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     if ($is_local_order_checkout) {
       $local_only_keys =
         array(
+          'mrm_booking_payload_json',
           'mrm_tax_policy_message',
           'mrm_tax_rollout_mode',
           'mrm_tax_calculation_requested',
@@ -5812,6 +5827,62 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     return true;
   }
 
+  private function mrm_finalize_paid_lesson_booking(array $pi, array $order) {
+    if (sanitize_key($order['product_type'] ?? '') !== 'lesson') return true;
+    $order_id = absint($order['id'] ?? 0);
+    if (!$order_id) return new WP_Error('missing_lesson_order', 'The paid lesson order could not be identified.');
+    $metadata = $this->mrm_get_order_meta_array($order);
+    if (!empty($metadata['mrm_lesson_id'])) return true;
+    $booking_payload = json_decode((string)($metadata['mrm_booking_payload_json'] ?? ''), true);
+    if (!is_array($booking_payload) || empty($booking_payload)) return new WP_Error('missing_paid_booking_payload', 'The payment succeeded, but the lesson booking information is unavailable.');
+    $booking_payload['order_id'] = $order_id;
+    if (!empty($metadata['mrm_autopay'])) {
+      $autopay_request = new WP_REST_Request('POST', '/mrm-payments/v1/create-autopay-enrollment');
+      $autopay_request->set_json_params(array('payment_intent_id' => sanitize_text_field($pi['id'] ?? ''), 'order_id' => $order_id));
+      $autopay_response = $this->rest_create_autopay_enrollment($autopay_request);
+      if (is_wp_error($autopay_response)) return $autopay_response;
+      $autopay_data = $autopay_response instanceof WP_REST_Response ? $autopay_response->get_data() : $autopay_response;
+      $profile_id = absint($autopay_data['autopay_profile_id'] ?? 0);
+      if (!$profile_id) return new WP_Error('autopay_profile_not_created', 'The recurring-payment profile could not be created.');
+      $booking_payload['payment_mode'] = 'autopay';
+      $booking_payload['autopay_profile_id'] = $profile_id;
+    } else {
+      $booking_payload['payment_mode'] = !empty($metadata['mrm_prepay']) ? 'prepay' : 'one_time';
+    }
+    if (!class_exists('MRM_Lesson_Scheduler')) return new WP_Error('scheduler_unavailable', 'The lesson scheduler is temporarily unavailable.');
+    $request = new WP_REST_Request('POST', '/mrm-schedule/v1/book');
+    $request->set_json_params($booking_payload);
+    $response = MRM_Lesson_Scheduler::get_instance()->rest_book_lesson($request);
+    if (is_wp_error($response)) return $response;
+    $booking_data = $response instanceof WP_REST_Response ? $response->get_data() : $response;
+    if (empty($booking_data['ok'])) return new WP_Error('lesson_booking_not_completed', 'The payment succeeded, but the lesson booking was not completed.');
+    $lesson_ids = array_values(array_filter(array_map('absint', (array)($booking_data['lesson_ids'] ?? array()))));
+    if (!empty($lesson_ids)) $this->mrm_set_order_meta_flag($order_id, 'mrm_lesson_id', $lesson_ids[0]);
+    return $booking_data;
+  }
+
+  private function mrm_schedule_purchase_receipt_retry() {
+    if (!wp_next_scheduled('mrm_pay_hub_retry_purchase_receipts')) wp_schedule_single_event(time() + 5 * MINUTE_IN_SECONDS, 'mrm_pay_hub_retry_purchase_receipts');
+  }
+
+  public function mrm_retry_purchase_receipts() {
+    global $wpdb;
+    $orders = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->table_orders()} WHERE status=%s AND created_at >= %s ORDER BY id ASC LIMIT 25", 'paid', gmdate('Y-m-d H:i:s', time() - 7 * DAY_IN_SECONDS)), ARRAY_A);
+    foreach ((array)$orders as $order) {
+      $metadata = $this->mrm_get_order_meta_array($order);
+      if (!empty($metadata['mrm_receipt_sent_at']) || empty($order['stripe_payment_intent_id'])) continue;
+      $pi = $this->stripe_retrieve_payment_intent($order['stripe_payment_intent_id']);
+      if (is_wp_error($pi) || ($pi['status'] ?? '') !== 'succeeded') continue;
+      if (sanitize_key($order['product_type'] ?? '') === 'lesson') {
+        $result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
+        if (is_wp_error($result)) { error_log('[MRM Payments] Receipt retry could not finalize lesson order ' . absint($order['id']) . ': ' . $result->get_error_message()); continue; }
+        $order = $this->get_order_by_pi($order['stripe_payment_intent_id']);
+      }
+      $result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
+      if (is_wp_error($result)) error_log('[MRM Payments] Receipt retry failed for order ' . absint($order['id']) . ': ' . $result->get_error_message());
+    }
+  }
+
   private function mrm_handle_payment_intent_succeeded_webhook(
   $pi
 ) {
@@ -5915,7 +5986,16 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       $grant_result = $this->mrm_grant_sheet_music_purchase_entitlements($pi, 'stripe_pi_webhook');
       if (is_wp_error($grant_result)) return $grant_result;
     }
-    $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
+    if (sanitize_key((string)($order['product_type'] ?? '')) === 'lesson') {
+      $booking_result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
+      if (is_wp_error($booking_result)) {
+        error_log('[MRM Payments] Paid lesson booking finalization failed for order ' . absint($order['id']) . ': ' . $booking_result->get_error_message());
+        return $booking_result;
+      }
+      $order = $this->get_order_by_pi($pi_id);
+    }
+    $receipt_result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
+    if (is_wp_error($receipt_result)) return $receipt_result;
     $payout_result = $this->mrm_maybe_create_payout_ledger_for_order($order);
     if (is_wp_error($payout_result)) {
       $this->stripe_debug_log('Payment succeeded but payout-ledger persistence failed.', array(
@@ -10377,17 +10457,13 @@ private function mrm_tax_retry_or_alert_payment_intent(
   }
 
   private function mrm_claim_purchase_receipt_send($order_id) {
-    $order_id = (int)$order_id;
-    if ($order_id <= 0) return false;
-
+    $order_id = absint($order_id);
+    if (!$order_id) return false;
     $lock_key = 'mrm_receipt_claim_order_' . $order_id;
-
-    if (get_option($lock_key, null)) {
-      return false;
-    }
-
-    $added = add_option($lock_key, current_time('mysql'), '', 'no');
-    return (bool)$added;
+    $claimed_at = (int)get_option($lock_key, 0);
+    if ($claimed_at && (time() - $claimed_at) < 10 * MINUTE_IN_SECONDS) return false;
+    if ($claimed_at) delete_option($lock_key);
+    return add_option($lock_key, time(), '', false);
   }
 
   private function mrm_release_purchase_receipt_claim($order_id) {
@@ -10444,7 +10520,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
   }
 
   private function mrm_maybe_send_purchase_receipt_email($pi, $order_row) {
-    if (!is_array($pi) || !is_array($order_row)) return;
+    if (!is_array($pi) || !is_array($order_row)) return new WP_Error('invalid_receipt_data', 'The purchase receipt data is invalid.');
 
     $pi_id = (string)($pi['id'] ?? '');
     $pi_meta = (isset($pi['metadata']) && is_array($pi['metadata'])) ? $pi['metadata'] : array();
@@ -10467,7 +10543,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
         if ($decoded) $email = $decoded;
       }
     }
-    if (!$email || !is_email($email)) return;
+    if (!$email || !is_email($email)) return new WP_Error('invalid_receipt_email', 'The purchase receipt email is invalid.');
 
     // Idempotency + race-condition lock
     $existing_meta = array();
@@ -10476,16 +10552,16 @@ private function mrm_tax_retry_or_alert_payment_intent(
       if (is_array($decoded)) $existing_meta = $decoded;
     }
     if (!empty($existing_meta['mrm_receipt_sent_at'])) {
-      return;
+      return true;
     }
 
     $order_id_for_claim = (int)($order_row['id'] ?? 0);
     if ($order_id_for_claim <= 0) {
-      return;
+      return new WP_Error('missing_receipt_order', 'The purchase receipt order is unavailable.');
     }
 
     if (!$this->mrm_claim_purchase_receipt_send($order_id_for_claim)) {
-      return;
+      return true;
     }
 
     $sku = (string)($meta['mrm_sku'] ?? ($order_row['sku'] ?? ''));
@@ -10515,10 +10591,19 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $piece_page_url = $product_type === 'sheet_music' ? $this->mrm_get_piece_page_url_from_sku($sku) : '';
     $lesson_id = (int)($meta['mrm_lesson_id'] ?? 0);
     $lesson_row = $product_type === 'lesson' ? $this->mrm_get_lesson_row_for_receipt($lesson_id) : array();
+    if ($product_type === 'lesson' && !$lesson_id) {
+      $this->mrm_release_purchase_receipt_claim($order_id_for_claim);
+      return new WP_Error('lesson_not_ready_for_receipt', 'The lesson has not yet been created.');
+    }
+    if ($product_type === 'lesson' && empty($lesson_row)) {
+      $this->mrm_release_purchase_receipt_claim($order_id_for_claim);
+      return new WP_Error('lesson_record_not_found', 'The lesson record could not be loaded for the receipt.');
+    }
     $iid = (int)($meta['mrm_instructor_id'] ?? 0);
     if ($iid <= 0 && !empty($lesson_row['instructor_id'])) $iid = (int)$lesson_row['instructor_id'];
     $instructor = $iid ? $this->mrm_get_instructor_contact_from_id($iid) : array('name' => '', 'email' => '');
     $instructor_name = trim((string)($instructor['name'] ?? ''));
+    $instructor_display_name = $instructor_name !== '' ? $instructor_name : 'your instructor';
     $is_online_lesson = !empty($lesson_row['is_online']);
     $join_url = '';
     if (!empty($lesson_row['reminder_token'])) {
@@ -10547,14 +10632,14 @@ private function mrm_tax_retry_or_alert_payment_intent(
     } elseif ($product_type === 'lesson') {
       $lesson_type_label = $is_online_lesson ? 'online lesson' : 'in-person lesson';
       $title = 'Purchase Confirmation';
-      $subject = 'Purchase Confirmation - ' . ucwords($lesson_type_label) . ' with ' . $instructor_name;
+      $subject = 'Purchase Confirmation - ' . ucwords($lesson_type_label) . ' with ' . $instructor_display_name;
       $intro = '<p>We’ve received your payment successfully.</p>';
-      $details = '<div><strong>Item:</strong> ' . esc_html($lesson_type_label . ' with ' . $instructor_name) . '</div>';
+      $details = '<div><strong>Item:</strong> ' . esc_html($lesson_type_label . ' with ' . $instructor_display_name) . '</div>';
       $details .= $has_sheet_music_addon ? $this->mrm_purchase_receipt_payment_breakdown_html($meta, $amount_cents, $product_type) : '<div><strong>Total paid:</strong> ' . esc_html($this->mrm_receipt_format_money($amount_cents)) . '</div>';
       if ($is_online_lesson) {
         $details .= '<div style="margin-top:14px;"><strong>How to access online lessons</strong></div><p>Your meeting link will become available 10 minutes before your lesson time and will remain available until 10 minutes after your lesson time. Please make sure your camera, microphone, and internet connection are working before joining the call.</p>';
       } else {
-        $details .= '<div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p><div style="margin-top:14px;"><strong>Lessons outside the home</strong></div><p>If the lesson will take place at a school, church, or other community location, please complete the required approval form before the lesson begins.</p><p><a href="https://www.docusign.com/" target="_blank" rel="noopener">Placeholder DocuSign location approval link</a></p>';
+        $details .= '<div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p>';
       }
       $details .= '<p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p>';
       if ($has_sheet_music_addon) $details .= '<div style="margin-top:14px;"><strong>How to access your sheet music</strong></div><p>Please check your email for the subscription confirmation.</p>';
@@ -10579,12 +10664,15 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
     if ($sent && !empty($order_row['id'])) {
       $this->mrm_set_order_meta_flag((int)$order_row['id'], 'mrm_receipt_sent_at', current_time('mysql'));
-      return;
+      $this->mrm_release_purchase_receipt_claim((int)$order_row['id']);
+      return true;
     }
 
     if (!empty($order_row['id'])) {
       $this->mrm_release_purchase_receipt_claim((int)$order_row['id']);
     }
+    $this->mrm_schedule_purchase_receipt_retry();
+    return new WP_Error('purchase_receipt_send_failed', 'The purchase receipt could not be sent.');
   }
 
 
@@ -11234,7 +11322,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
     return $owner_items;
   }
 
-  private function stripe_create_transfer($amount_cents, $currency, $destination_account_id, $transfer_group = '', $metadata = array(), $source_transaction = '') {
+  private function stripe_create_transfer($amount_cents, $currency, $destination_account_id, $transfer_group = '', $metadata = array(), $source_transaction = '', $idempotency_key = '') {
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => strtolower((string)$currency),
@@ -11243,7 +11331,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
     if ($transfer_group !== '') $params['transfer_group'] = $transfer_group;
     if (!empty($metadata)) $params['metadata'] = $metadata;
     if ($source_transaction !== '') $params['source_transaction'] = (string)$source_transaction;
-    return $this->stripe_api_request('POST', '/v1/transfers', $params);
+    return $this->stripe_api_request('POST', '/v1/transfers', $params, $idempotency_key !== '' ? array('Idempotency-Key' => sanitize_text_field($idempotency_key)) : array());
   }
 
   private function stripe_reverse_transfer($transfer_id, $amount_cents = null, $metadata = array()) {
@@ -11270,15 +11358,15 @@ private function mrm_tax_retry_or_alert_payment_intent(
     );
   }
 
-  private function stripe_create_connected_account_payout($connected_account_id, $amount_cents, $currency, $metadata = array()) {
+  private function stripe_create_connected_account_payout($connected_account_id, $amount_cents, $currency, $metadata = array(), $idempotency_key = '') {
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => strtolower((string)$currency),
     );
     if (!empty($metadata)) $params['metadata'] = $metadata;
-    return $this->stripe_api_request('POST', '/v1/payouts', $params, array(
-      'Stripe-Account' => (string)$connected_account_id,
-    ));
+    $headers = array('Stripe-Account' => (string)$connected_account_id);
+    if ($idempotency_key !== '') $headers['Idempotency-Key'] = sanitize_text_field($idempotency_key);
+    return $this->stripe_api_request('POST', '/v1/payouts', $params, $headers);
   }
 
   private function mrm_insert_payout_ledger_row($order_id, $pi_id, $payee_type, $payee_ref, $connected_account_id, $currency, $gross_cents, $net_cents, $status = 'pending', $notes = '') {
@@ -13203,11 +13291,27 @@ private function charge_and_unlock_autopay($data) {
     }
   }
 
+  public function mrm_retry_payout_batch() { return $this->mrm_run_payout_batch(true); }
+  public function mrm_retry_presenter_payout_batch() { return $this->mrm_run_presenter_payouts(array(), true); }
+
+  private function mrm_acquire_runtime_lock($name, $ttl = 900) {
+    $option_name = 'mrm_runtime_lock_' . sanitize_key($name);
+    $started_at = (int)get_option($option_name, 0);
+    if ($started_at && (time() - $started_at) < $ttl) return false;
+    if ($started_at) delete_option($option_name);
+    return add_option($option_name, time(), '', false) ? $option_name : false;
+  }
+
+  public function mrm_release_runtime_lock($option_name) { if ($option_name) delete_option($option_name); }
+
   public function cron_daily_presenter_payout_check() {
     $this->mrm_run_presenter_payouts(array(), false);
   }
 
   public function mrm_run_payout_batch($force = false, $only_ids = array(), $only_payee_type = '') {
+    $runtime_lock = $this->mrm_acquire_runtime_lock('standard_payout_batch', 15 * MINUTE_IN_SECONDS);
+    if (!$runtime_lock) return new WP_Error('payout_batch_already_running', 'A payout batch is already running.');
+    register_shutdown_function(array($this, 'mrm_release_runtime_lock'), $runtime_lock);
     $summary = array(
       'transfers_created' => 0,
       'payouts_created' => 0,
@@ -13367,6 +13471,15 @@ private function charge_and_unlock_autopay($data) {
       foreach ($pending_rows as $row) {
         $amount = (int)$row['net_cents'];
         if ($amount <= 0) continue;
+        $transfer_idempotency_key = (string)($row['transfer_idempotency_key'] ?? '');
+        if ($transfer_idempotency_key === '') {
+          $transfer_idempotency_key = 'mrm_transfer_' . hash('sha256', implode('|', array(home_url(), absint($row['id']), absint($row['order_id']), sanitize_text_field($acct), $currency, $amount)));
+        }
+        $claimed = $wpdb->query($wpdb->prepare(
+          "UPDATE {$table} SET status='transfer_processing', transfer_idempotency_key=%s, processing_started_at=%s, updated_at=%s WHERE id=%d AND status IN ('pending','error','blocked','transfer_processing')",
+          $transfer_idempotency_key, current_time('mysql', true), current_time('mysql', true), absint($row['id'])
+        ));
+        if (false === $claimed) continue;
 
         $transfer = $this->stripe_create_transfer(
           $amount,
@@ -13378,7 +13491,9 @@ private function charge_and_unlock_autopay($data) {
             'mrm_payee_type' => (string)$row['payee_type'],
             'mrm_batch_key' => $batch_key,
             'mrm_transfer_funding_mode' => 'platform_available_balance_only',
-          )
+          ),
+          '',
+          $transfer_idempotency_key
         );
 
         if (is_wp_error($transfer)) {
@@ -13412,6 +13527,7 @@ private function charge_and_unlock_autopay($data) {
             'status' => 'transferred',
             'transfer_id' => (string)($transfer['id'] ?? ''),
             'batch_key' => $batch_key,
+            'processing_started_at' => null,
             'updated_at' => current_time('mysql'),
           ),
           array('id' => (int)$row['id']),
@@ -13499,7 +13615,8 @@ private function charge_and_unlock_autopay($data) {
         $currency,
         array(
           'mrm_batch_key' => $batch_key,
-        )
+        ),
+        'mrm_payout_' . hash('sha256', home_url() . '|' . $acct . '|' . $currency . '|' . implode(',', array_map('absint', $payout_ledger_ids)) . '|' . $payout_total)
       );
 
       if (is_wp_error($payout)) {
@@ -15058,6 +15175,23 @@ private function charge_and_unlock_autopay($data) {
     }
   }
 
+  private function mrm_prepare_lesson_booking_payload($raw_payload, $customer_email) {
+    if (!is_array($raw_payload)) return new WP_Error('invalid_booking_payload', 'The lesson booking information was not supplied.');
+    $payload = map_deep($raw_payload, 'sanitize_text_field');
+    $payload['instructor_id'] = absint($raw_payload['instructor_id'] ?? 0);
+    $payload['lesson_length'] = absint($raw_payload['lesson_length'] ?? 0);
+    $payload['student_email'] = sanitize_email($raw_payload['student_email'] ?? '');
+    $payload['online'] = !empty($raw_payload['online']);
+    $payload['slots'] = isset($raw_payload['slots']) && is_array($raw_payload['slots']) ? map_deep($raw_payload['slots'], 'sanitize_text_field') : array();
+    if (!$payload['instructor_id']) return new WP_Error('missing_instructor', 'The selected instructor could not be identified.');
+    if (!in_array($payload['lesson_length'], array(30, 60), true)) return new WP_Error('invalid_lesson_length', 'The selected lesson length is invalid.');
+    if (!$payload['student_email'] || !is_email($payload['student_email'])) return new WP_Error('invalid_student_email', 'The student email address is invalid.');
+    if (sanitize_email($customer_email) !== sanitize_email($payload['student_email'])) return new WP_Error('booking_email_mismatch', 'The booking email does not match the payment email.');
+    if (empty($payload['slots']) || count($payload['slots']) > 60) return new WP_Error('invalid_lesson_slots', 'The selected lesson dates are invalid.');
+    unset($payload['order_id'], $payload['payment_mode'], $payload['autopay_profile_id']);
+    return $payload;
+  }
+
   public function rest_create_payment_intent(WP_REST_Request $req) {
     $data = (array) $req->get_json_params();
     $exemption_check = $this->mrm_tax_reject_unsupported_exemption_claim($data);
@@ -15466,6 +15600,11 @@ private function charge_and_unlock_autopay($data) {
     $metadata['mrm_customer_state'] = (string)$address['state'];
     $metadata['mrm_customer_country'] = (string)$address['country'];
     $metadata['mrm_tax_lines_json'] = (string)($tax_result['metadata_line_items_json'] ?? '[]');
+    if ($product_type === 'lesson') {
+      $booking_payload = $this->mrm_prepare_lesson_booking_payload($data['booking_payload'] ?? array(), $email);
+      if (is_wp_error($booking_payload)) return $booking_payload;
+      $metadata['mrm_booking_payload_json'] = wp_json_encode($booking_payload, JSON_UNESCAPED_SLASHES);
+    }
 
     $checkout_fingerprint = hash('sha256', wp_json_encode(array(
       'checkout_request_id'=>$checkout_request_id, 'email_hash'=>$email_hash, 'sku'=>$sku, 'product_type'=>$product_type,
@@ -16448,6 +16587,15 @@ private function charge_and_unlock_autopay($data) {
     // for lesson purchase confirmation emails.
     if ($ok && $order) {
       $order = $this->get_order_by_pi($pi_id);
+
+      if (is_array($order) && sanitize_key($order['product_type'] ?? '') === 'lesson') {
+        $booking_result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
+        if (is_wp_error($booking_result)) {
+          error_log('[MRM Payments] Verification booking recovery failed for order ' . absint($order['id']) . ': ' . $booking_result->get_error_message());
+          return new WP_Error('payment_received_booking_pending', 'Your payment was received. Your lesson is still being finalized. Do not submit another payment. Please check your email shortly.', array('status'=>503, 'payment_received'=>true));
+        }
+        $order = $this->get_order_by_pi($pi_id);
+      }
 
       /*
        * Payout-ledger creation is intentionally handled only by payment_intent.succeeded.
@@ -25491,6 +25639,9 @@ MRM_TAX_RULES;
       'payout_batch_id'    => "ALTER TABLE {$ledger_table} ADD payout_batch_id VARCHAR(64) NULL",
       'stripe_transfer_id' => "ALTER TABLE {$ledger_table} ADD stripe_transfer_id VARCHAR(191) NULL",
       'stripe_payout_id'   => "ALTER TABLE {$ledger_table} ADD stripe_payout_id VARCHAR(191) NULL",
+      'transfer_idempotency_key' => "ALTER TABLE {$ledger_table} ADD transfer_idempotency_key VARCHAR(191) NULL",
+      'payout_idempotency_key' => "ALTER TABLE {$ledger_table} ADD payout_idempotency_key VARCHAR(191) NULL",
+      'processing_started_at' => "ALTER TABLE {$ledger_table} ADD processing_started_at DATETIME NULL",
     );
 
     foreach ($adds as $column => $sql) {
@@ -25501,6 +25652,9 @@ MRM_TAX_RULES;
   }
 
   private function mrm_run_presenter_payouts($only_ledger_ids = array(), $force = false) {
+    $runtime_lock = $this->mrm_acquire_runtime_lock('presenter_payout_batch', 15 * MINUTE_IN_SECONDS);
+    if (!$runtime_lock) return new WP_Error('payout_batch_already_running', 'A presenter payout batch is already running.');
+    register_shutdown_function(array($this, 'mrm_release_runtime_lock'), $runtime_lock);
     global $wpdb;
 
     $ledger_table = $this->mrm_pay_table_masterclass_ledger();

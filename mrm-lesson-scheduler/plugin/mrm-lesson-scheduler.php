@@ -3240,6 +3240,28 @@ protected function mrm_get_google_service_account_json() {
             return new WP_REST_Response( array( 'ok' => false, 'message' => 'Lessons table missing.' ), 500 );
         }
 
+        $paid_order_lock_name = '';
+        $paid_order_lock_acquired = false;
+        if ( $requires_paid_order && $order_id > 0 ) {
+            $paid_order_lock_name = 'mrm_lesson_order_' . absint( $order_id );
+            $paid_order_lock_acquired = 1 === (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 10)', $paid_order_lock_name ) );
+            if ( ! $paid_order_lock_acquired ) {
+                return new WP_Error( 'booking_temporarily_locked', 'Your payment was received and your lesson is still being finalized. Please check your email shortly.', array( 'status' => 409 ) );
+            }
+            register_shutdown_function( static function () use ( $wpdb, $paid_order_lock_name ) {
+                $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $paid_order_lock_name ) );
+            } );
+            $existing_lesson_ids = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$lessons_table} WHERE order_id = %d ORDER BY id ASC", $order_id ) );
+            if ( ! empty( $existing_lesson_ids ) ) {
+                return rest_ensure_response( array(
+                    'ok' => true,
+                    'already_booked' => true,
+                    'lesson_ids' => array_map( 'absint', $existing_lesson_ids ),
+                    'message' => 'Booking confirmed! Please check your email for confirmation.',
+                ) );
+            }
+        }
+
         $now = current_time( 'mysql' );
         $created_ids = array();
         $google_messages = array();
@@ -3781,6 +3803,15 @@ protected function mrm_get_google_service_account_json() {
                         } else {
                             $msg = is_wp_error( $ins ) ? $ins->get_error_message() : 'Unknown insert response.';
                             $google_messages[] = 'Calendar event was not created: ' . $msg;
+                            error_log( '[MRM Scheduler] Google Calendar event creation failed for lesson ' . absint( $lesson_id ) . ': ' . sanitize_text_field( $msg ) );
+                            wp_mail(
+                                get_option( 'admin_email' ),
+                                'Lesson booking requires calendar review',
+                                sprintf(
+                                    "Lesson ID: %d\nStudent: %s\nInstructor ID: %d\n\nThe lesson was booked, but its Google Calendar event was not created. Review the lesson immediately.",
+                                    absint( $lesson_id ), sanitize_text_field( $student_name ), absint( $instructor_id )
+                                )
+                            );
                         }
 
                     } else {
@@ -3803,18 +3834,16 @@ protected function mrm_get_google_service_account_json() {
         // Removed: lesson purchases should NOT grant "all sheet music" access.
         // Only the $5 sheet-music add-on payment grants ledger access.
 
-        $response_message = 'Booking confirmed!';
-        if ( ! empty( $google_messages ) ) {
-            $response_message .= ' ' . implode( ' ', array_unique( $google_messages ) );
+        if ( $paid_order_lock_acquired && $paid_order_lock_name ) {
+            $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $paid_order_lock_name ) );
+            $paid_order_lock_acquired = false;
         }
-
-        return new WP_REST_Response( array(
+        return rest_ensure_response( array(
             'ok' => true,
             'success' => true,
-            'message' => $response_message,
-            'lesson_ids' => $created_ids,
-            'google_messages' => array_values( array_unique( $google_messages ) ),
-        ), 200 );
+            'message' => 'Booking confirmed! Please check your email for confirmation.',
+            'lesson_ids' => array_map( 'absint', $created_ids ),
+        ) );
     }
 
     /* =========================================================
