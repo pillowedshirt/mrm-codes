@@ -12163,6 +12163,73 @@ private function mrm_tax_retry_or_alert_payment_intent(
     return ((string)($lesson['status'] ?? '') === 'finalized');
   }
 
+  /**
+   * Determine whether a scheduler row represents a consultation.
+   */
+  private function mrm_is_consultation_lesson_record($lesson) {
+    if (!is_array($lesson) || empty($lesson)) {
+      return false;
+    }
+
+    if ((int)($lesson['is_consultation'] ?? 0) === 1) {
+      return true;
+    }
+
+    $appointment_type = strtolower(
+      trim((string)($lesson['appointment_type'] ?? ''))
+    );
+
+    if ($appointment_type === 'consultation') {
+      return true;
+    }
+
+    $lesson_type = strtolower(
+      trim((string)($lesson['lesson_type'] ?? ''))
+    );
+
+    return $lesson_type === 'consultation'
+      || strpos($lesson_type, 'consultation') !== false;
+  }
+
+  /**
+   * Send the customer a simple consultation cancellation email.
+   */
+  private function mrm_send_consultation_cancellation_email($lesson) {
+    if (!is_array($lesson) || empty($lesson)) {
+      return false;
+    }
+
+    $email = sanitize_email(
+      (string)($lesson['student_email'] ?? '')
+    );
+
+    if (!$email || !is_email($email)) {
+      return false;
+    }
+
+    $intro = '<p>Your consultation has been cancelled.</p>';
+
+    $details = '<div>If you have any questions, please contact support.</div>';
+
+    $headers = array(
+      'Content-Type: text/html; charset=UTF-8',
+      'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>',
+    );
+
+    return wp_mail(
+      $email,
+      'Consultation update — Cancellation',
+      $this->mrm_email_wrap_html(
+        'Consultation cancelled',
+        $intro,
+        $details,
+        $this->mrm_get_contact_url(),
+        'Contact Support'
+      ),
+      $headers
+    );
+  }
+
   private function mrm_lesson_cancellation_refund_guard($lesson) {
     if (!is_array($lesson) || empty($lesson)) {
       return array(
@@ -12216,6 +12283,10 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $lesson_id
     ), ARRAY_A);
 
+    if (!is_array($lesson) || empty($lesson)) {
+      return;
+    }
+
     if ($this->mrm_is_lesson_refund_locked($lesson)) {
       $this->mrm_finalization_debug_log('refund_and_cancellation_email_blocked_finalized_lesson', array(
         'lesson_id' => $lesson_id,
@@ -12224,6 +12295,16 @@ private function mrm_tax_retry_or_alert_payment_intent(
       ));
       return;
     }
+
+    /*
+     * Consultations are free appointments.
+     * Send the cancellation email and stop before refund processing.
+     */
+    if ($this->mrm_is_consultation_lesson_record($lesson)) {
+      $this->mrm_send_consultation_cancellation_email($lesson);
+      return;
+    }
+
     $refund_guard = $this->mrm_lesson_cancellation_refund_guard($lesson);
 
     if ($payment_mode === 'autopay') {
@@ -17992,6 +18073,22 @@ community@example.org",
       . '</html>';
   }
 
+  /**
+   * Return the configured From and Reply-To address for marketing emails.
+   */
+  private function mrm_marketing_sender_email() {
+    $email = sanitize_email(
+      (string)get_option(
+        'mrm_pay_hub_marketing_sender_email',
+        'no-reply@lowbrass-lessons.com'
+      )
+    );
+
+    return is_email($email)
+      ? $email
+      : 'no-reply@lowbrass-lessons.com';
+  }
+
   private function mrm_marketing_newsletter_welcome_defaults() {
     return array(
       'enabled' => false,
@@ -18153,7 +18250,7 @@ community@example.org",
     );
 
     $from_name = 'Low Brass Lessons';
-    $from_email = 'no-reply@lowbrass-lessons.com';
+    $from_email = $this->mrm_marketing_sender_email();
     $headers = array(
       'Content-Type: text/html; charset=UTF-8',
       'From: ' . $from_name . ' <' . $from_email . '>',
@@ -18403,6 +18500,40 @@ community@example.org",
       'mrm_marketing_email_lists_nonce'
     );
 
+    $sender_email = isset($_POST['mrm_marketing_sender_email'])
+      ? sanitize_email(
+          wp_unslash($_POST['mrm_marketing_sender_email'])
+        )
+      : '';
+
+    if ($sender_email === '' || !is_email($sender_email)) {
+      $redirect_args = array(
+        'page' => 'mrm-pay-hub-marketing-email-lists',
+        'mrm_marketing_error' => rawurlencode(
+          'Enter a valid marketing sending address before saving.'
+        ),
+      );
+
+      $requested_state = isset($_POST['mrm_marketing_state'])
+        ? sanitize_key(
+            wp_unslash($_POST['mrm_marketing_state'])
+          )
+        : '';
+
+      if ($requested_state !== '') {
+        $redirect_args['mrm_state'] = $requested_state;
+      }
+
+      wp_safe_redirect(
+        add_query_arg(
+          $redirect_args,
+          admin_url('admin.php')
+        )
+      );
+
+      exit;
+    }
+
     $defs = $this->mrm_marketing_default_lists();
     $lists = $this->mrm_marketing_manual_lists();
 
@@ -18517,6 +18648,12 @@ community@example.org",
     $mailing_address = isset($_POST['mrm_marketing_mailing_address'])
       ? wp_kses_post(wp_unslash($_POST['mrm_marketing_mailing_address']))
       : '';
+
+    update_option(
+      'mrm_pay_hub_marketing_sender_email',
+      $sender_email,
+      false
+    );
 
     update_option(
       'mrm_pay_hub_marketing_mailing_address',
@@ -18811,9 +18948,20 @@ community@example.org",
     exit;
   }
 
-  $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
+  $mailing_address = (string)get_option(
+    'mrm_pay_hub_marketing_mailing_address',
+    ''
+  );
+
   $from_name = 'Low Brass Lessons';
-  $from_email = 'no-reply@lowbrass-lessons.com';
+
+  /*
+   * Instructor correspondence continues using the no-reply address.
+   * All marketing sends use the configurable marketing address.
+   */
+  $from_email = $send_mode === 'instructor'
+    ? 'no-reply@lowbrass-lessons.com'
+    : $this->mrm_marketing_sender_email();
   $headers = array(
     'Content-Type: text/html; charset=UTF-8',
     'From: ' . $from_name . ' <' . $from_email . '>',
@@ -26394,7 +26542,11 @@ MRM_TAX_RULES;
 
     $defs = $this->mrm_marketing_default_lists();
     $manual_lists = $this->mrm_marketing_manual_lists();
-    $mailing_address = (string)get_option('mrm_pay_hub_marketing_mailing_address', '');
+    $sender_email = $this->mrm_marketing_sender_email();
+    $mailing_address = (string)get_option(
+      'mrm_pay_hub_marketing_mailing_address',
+      ''
+    );
     $marketing_unsubscribed = $this->mrm_marketing_unsubscribed_emails();
     $newsletter_unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
     $sent_log = $this->mrm_marketing_sent_log();
@@ -26653,8 +26805,36 @@ MRM_TAX_RULES;
 
     echo '</div>';
 
-    echo '<h3 style="margin-top:20px;">Mailing Address / Footer Text</h3><p class="description">Shown in the footer of marketing emails.</p>';
-    echo '<textarea name="mrm_marketing_mailing_address" rows="4" class="large-text">' . esc_textarea($mailing_address) . '</textarea>';
+    echo '<h3 style="margin-top:20px;">Sending Address</h3>';
+
+    echo '<p class="description">'
+      . 'Used as the From and Reply-To address for marketing emails '
+      . 'and the automated newsletter welcome email. Replies will be '
+      . 'sent directly to this address.'
+      . '</p>';
+
+    echo '<input'
+      . ' type="email"'
+      . ' name="mrm_marketing_sender_email"'
+      . ' class="regular-text"'
+      . ' value="' . esc_attr($sender_email) . '"'
+      . ' placeholder="marketing@lowbrass-lessons.com"'
+      . ' required'
+      . '>';
+
+    echo '<h3 style="margin-top:20px;">Mailing Address / Footer Text</h3>';
+
+    echo '<p class="description">'
+      . 'Shown in the footer of marketing emails.'
+      . '</p>';
+
+    echo '<textarea'
+      . ' name="mrm_marketing_mailing_address"'
+      . ' rows="4"'
+      . ' class="large-text"'
+      . '>'
+      . esc_textarea($mailing_address)
+      . '</textarea>';
     echo '<p class="submit">';
     echo '<button type="submit" class="button button-primary">';
     echo 'Save All Marketing Lists';
