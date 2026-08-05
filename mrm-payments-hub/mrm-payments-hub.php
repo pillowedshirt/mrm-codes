@@ -2530,20 +2530,24 @@ private function mrm_attach_payment_intent_to_promo_redemption($order_id, $payme
 private function mrm_mark_promo_redemption_paid($order_id, $payment_intent_id) {
   global $wpdb;
 
-  $order_id = (int)$order_id;
-  if ($order_id <= 0 || $payment_intent_id === '') return;
+  $order_id = absint($order_id);
+  $payment_intent_id = sanitize_text_field($payment_intent_id);
 
-  $wpdb->update(
+  if ($order_id <= 0 || '' === $payment_intent_id) return false;
+
+  $updated = $wpdb->update(
     $this->table_promo_redemptions(),
     array(
-      'status' => $order_state['status'],
-      'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
+      'status' => 'paid',
+      'stripe_payment_intent_id' => $payment_intent_id,
       'updated_at' => current_time('mysql'),
     ),
     array('order_id' => $order_id),
     array('%s','%s','%s'),
     array('%d')
   );
+
+  return false !== $updated;
 }
 
 private function mrm_get_redemptions_for_promo_code($code, $limit = 25) {
@@ -6197,7 +6201,8 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
         if ($order_state['other_partial_refund']) continue;
         if (!$order_state['can_run_primary_fulfillment']) continue;
 
-        if (!empty($metadata['mrm_receipt_sent_at']) || empty($order['stripe_payment_intent_id'])) continue;
+        $receipt_already_sent = !empty($metadata['mrm_receipt_sent_at']);
+        if (empty($order['stripe_payment_intent_id'])) continue;
         $pi = $this->stripe_retrieve_payment_intent($order['stripe_payment_intent_id']);
         if (is_wp_error($pi) || ($pi['status'] ?? '') !== 'succeeded') continue;
         if (sanitize_key($order['product_type'] ?? '') === 'lesson') {
@@ -6228,6 +6233,12 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
             if ('' !== $addon_refund_id && 'succeeded' === $addon_refund_status) $this->mrm_complete_subscription_addon_refund_cleanup($order, sanitize_text_field($order['stripe_payment_intent_id'] ?? ''), $addon_refund_id);
           }
         }
+        $bookkeeping_result = $this->mrm_reconcile_required_order_bookkeeping($order);
+        if (is_wp_error($bookkeeping_result)) {
+          error_log('[MRM Payments] Bookkeeping recovery failed for order ' . absint($order['id'] ?? 0) . ': ' . $bookkeeping_result->get_error_message());
+          $this->mrm_schedule_purchase_receipt_retry();
+        }
+        if ($receipt_already_sent) continue;
         $result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
         if (is_wp_error($result)) error_log('[MRM Payments] Receipt retry failed for order ' . absint($order['id']) . ': ' . $result->get_error_message());
       }
@@ -6245,200 +6256,101 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   private function mrm_handle_payment_intent_succeeded_webhook(
   $pi
 ) {
-  $this->stripe_debug_log(
-    'payment_intent.succeeded handler entered',
-    array(
-      'pi_id' => (string)($pi['id'] ?? ''),
-      'customer_id' => (string)($pi['customer'] ?? ''),
-      'payment_method_id' => (string)($pi['payment_method'] ?? ''),
-    )
-  );
-
-  if (!is_array($pi)) {
-    return new WP_Error('payment_intent_succeeded_object_invalid', 'The payment_intent.succeeded event did not contain a valid PaymentIntent.');
-  }
-
+  $this->stripe_debug_log('payment_intent.succeeded handler entered', array('pi_id'=>(string)($pi['id'] ?? ''),'customer_id'=>(string)($pi['customer'] ?? ''),'payment_method_id'=>(string)($pi['payment_method'] ?? '')));
+  if (!is_array($pi)) return new WP_Error('payment_intent_succeeded_object_invalid', 'The payment_intent.succeeded event did not contain a valid PaymentIntent.');
   $pi_id = sanitize_text_field($pi['id'] ?? '');
-
-  if ($pi_id === '') {
-    return new WP_Error(
-      'payment_intent_succeeded_id_missing',
-      'The payment_intent.succeeded event did not contain a PaymentIntent ID.'
-    );
-  }
+  if ($pi_id === '') return new WP_Error('payment_intent_succeeded_id_missing','The payment_intent.succeeded event did not contain a PaymentIntent ID.');
 
   $order = $this->get_order_by_pi($pi_id);
-  $order_state = is_array($order) ? $this->mrm_classify_order_success_state($order) : array();
-
-  if (is_array($order)) {
-    /*
-     * Tax synchronization may still be appropriate because the original
-     * PaymentIntent did succeed, but no business fulfillment may restart
-     * after a complete refund or an unrelated partial refund.
-     */
-    if (!empty($order_state['terminal_refund']) || !empty($order_state['other_partial_refund']) || empty($order_state['can_run_primary_fulfillment'])) {
-      $tax_sync_result = $this->mrm_tax_sync_payment_intent_ledger($pi, 0);
-      if (is_wp_error($tax_sync_result)) return $tax_sync_result;
-      $this->stripe_debug_log('Delayed payment success preserved protected local order state.', array('payment_intent_id'=>$pi_id,'order_id'=>absint($order['id'] ?? 0),'local_status'=>$order_state['status'] ?? ''));
-      return true;
-    }
-  }
-
-  /* Permanently consume the promo before downstream processing can fail. */
-  $promo_redemption_result =
-    $this
-      ->mrm_finalize_succeeded_payment_intent_promo_redemption(
-        $pi
-      );
-
-  if (is_wp_error($promo_redemption_result)) {
-    $this->stripe_debug_log(
-      'Payment succeeded but promotional-code finalization failed.',
-      array(
-        'payment_intent_id' => $pi_id,
-        'code' => $promo_redemption_result->get_error_code(),
-        'message' => $promo_redemption_result->get_error_message(),
-      )
-    );
-
-    return $promo_redemption_result;
-  }
-
-  $tax_sync_result =
-    $this->mrm_tax_sync_payment_intent_ledger(
-      $pi,
-      0
-    );
-
+  $tax_sync_result = $this->mrm_tax_sync_payment_intent_ledger($pi, 0);
   if (is_wp_error($tax_sync_result)) {
-    $this->stripe_debug_log(
-      'Payment succeeded but required tax-ledger synchronization failed.',
-      array(
-        'payment_intent_id' => $pi_id,
-        'message' => $tax_sync_result->get_error_message(),
-      )
-    );
-
+    $this->stripe_debug_log('Payment succeeded but required tax-ledger synchronization failed.', array('payment_intent_id'=>$pi_id,'message'=>$tax_sync_result->get_error_message()));
     return $tax_sync_result;
   }
 
   $latest_charge = '';
-
-  if (!empty($pi['latest_charge'])) {
-    $latest_charge = is_array($pi['latest_charge'])
-      ? sanitize_text_field($pi['latest_charge']['id'] ?? '')
-      : sanitize_text_field($pi['latest_charge']);
-  }
-
-  do_action(
-    'mrm_masterclass_payment_intent_succeeded',
-    $pi
-  );
+  if (!empty($pi['latest_charge'])) $latest_charge = is_array($pi['latest_charge']) ? sanitize_text_field($pi['latest_charge']['id'] ?? '') : sanitize_text_field($pi['latest_charge']);
 
   if (!is_array($order)) {
     /*
-     * Preserve the existing non-order behavior, including Masterclass hooks
-     * that may not use the standard orders table.
+     * Masterclass payments use their own registration ledger and may not
+     * have a standard Payments Hub order row.
      */
+    do_action('mrm_masterclass_payment_intent_succeeded', $pi);
     return true;
   }
 
   $metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
   $metadata['mrm_latest_charge_id'] = $latest_charge;
-
   $order = $this->mrm_apply_payment_success_without_status_regression($pi, $order, $metadata);
-
-  if (is_wp_error($order)) {
-    return $order;
-  }
+  if (is_wp_error($order)) return $order;
 
   $order_state = $this->mrm_classify_order_success_state($order);
+  if (!empty($order_state['terminal_refund']) || !empty($order_state['other_partial_refund']) || empty($order_state['can_run_primary_fulfillment'])) {
+    $this->stripe_debug_log('Payment success processing stopped because a protected order state won the atomic update race.', array('order_id'=>absint($order['id'] ?? 0),'payment_intent_id'=>$pi_id,'order_status'=>$order_state['status']));
+    return true;
+  }
 
-  $this->mrm_subscription_debug_log(
-    'order updated after payment success',
-    array(
-      'order_id' => (int)($order['id'] ?? 0),
-      'payment_intent_id' => $pi_id,
-      'status' => $order_state['status'],
-    )
-  );
+  $promo_redemption_result = $this->mrm_finalize_succeeded_payment_intent_promo_redemption($pi);
+  if (is_wp_error($promo_redemption_result)) {
+    $this->stripe_debug_log('Payment succeeded but promotional-code finalization failed.', array('payment_intent_id'=>$pi_id,'code'=>$promo_redemption_result->get_error_code(),'message'=>$promo_redemption_result->get_error_message()));
+    return $promo_redemption_result;
+  }
 
-  if (is_array($order)) {
-    if ($order_state['can_run_primary_fulfillment'] && sanitize_key($order['product_type'] ?? '') === 'sheet_music') {
-      $grant_result = $this->mrm_grant_sheet_music_purchase_entitlements($pi, 'stripe_pi_webhook');
-      if (is_wp_error($grant_result)) return $grant_result;
-    }
-    if (sanitize_key((string)($order['product_type'] ?? '')) === 'lesson') {
-      $booking_result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
-      if (is_wp_error($booking_result)) {
-        error_log('[MRM Payments] Paid lesson booking finalization failed for order ' . absint($order['id']) . ': ' . $booking_result->get_error_message());
-        return $booking_result;
-      }
-      if (is_array($booking_result) && !empty($booking_result['booking_refunded'])) {
-        return true;
-      }
-      $order = $this->get_order_by_pi($pi_id);
-      if (is_array($order)) {
-        $order_state = $this->mrm_classify_order_success_state($order);
-        if ($order_state['can_run_addon_fulfillment']) {
-          $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
-          if (is_wp_error($addon_grant_result)) return $addon_grant_result;
-        }
-      }
-    }
-    $receipt_result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
-    if (is_wp_error($receipt_result)) return $receipt_result;
-    $payout_result = $this->mrm_maybe_create_payout_ledger_for_order($order);
-    if (is_wp_error($payout_result)) {
-      $this->stripe_debug_log('Payment succeeded but payout-ledger persistence failed.', array(
-        'order_id'=>(int)($order['id'] ?? 0), 'payment_intent_id'=>$pi_id,
-        'message'=>$payout_result->get_error_message(), 'code'=>$payout_result->get_error_code(),
-      ));
-      return $payout_result;
-    }
-    if (in_array(sanitize_key((string)($order['product_type'] ?? '')), array('sheet_music', 'lesson'), true) && $payout_result !== true) {
-      return new WP_Error('payout_ledger_not_created', 'The required payout ledger was not created for the paid order.');
-    }
+  do_action('mrm_masterclass_payment_intent_succeeded', $pi);
 
-    $promo_code_from_meta = '';
+  $this->mrm_subscription_debug_log('order updated after payment success', array('order_id'=>(int)($order['id'] ?? 0),'payment_intent_id'=>$pi_id,'status'=>$order_state['status']));
 
-    if (!empty($metadata['mrm_promo_code'])) {
-      $promo_code_from_meta = $this->mrm_normalize_promo_code($metadata['mrm_promo_code']);
-    }
+  if ($order_state['can_run_primary_fulfillment'] && sanitize_key($order['product_type'] ?? '') === 'sheet_music') {
+    $grant_result = $this->mrm_grant_sheet_music_purchase_entitlements($pi, 'stripe_pi_webhook');
+    if (is_wp_error($grant_result)) return $grant_result;
+  }
 
-    if ($promo_code_from_meta !== '') {
-      $this->mrm_mark_promo_redemption_paid((int)$order['id'], $pi_id);
-    }
-
-    $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
-    $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
-    $product_type = (string)($order['product_type'] ?? '');
-
+  if (!empty($order_state['can_run_primary_fulfillment']) && 'lesson' === sanitize_key($order['product_type'] ?? '')) {
+    $booking_result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
+    if (is_wp_error($booking_result)) { error_log('[MRM Payments] Paid lesson booking finalization failed for order ' . absint($order['id']) . ': ' . $booking_result->get_error_message()); return $booking_result; }
+    if (is_array($booking_result) && !empty($booking_result['booking_refunded'])) return true;
+    $order = $this->get_order_by_pi($pi_id);
+    if (!is_array($order)) return new WP_Error('paid_lesson_order_reload_failed', 'The paid lesson order could not be reloaded after booking finalization.');
     $order_state = $this->mrm_classify_order_success_state($order);
-
-    if ($addon_yes && 'lesson' === $product_type && !empty($order['id']) && $order_state['can_run_addon_fulfillment']) {
-      $this->mrm_attempt_sheet_music_subscription_activation((int)$order['id'], $pi, 'payment_intent_succeeded_webhook');
-    }
-
-    $lesson_id = 0;
-
-    if (!empty($metadata['mrm_lesson_id'])) {
-      $lesson_id = (int)$metadata['mrm_lesson_id'];
-    }
-
-    if ($lesson_id <= 0 && !empty($order['metadata_json'])) {
-      $decoded = json_decode((string)$order['metadata_json'], true);
-
-      if (is_array($decoded) && !empty($decoded['mrm_lesson_id'])) {
-        $lesson_id = (int)$decoded['mrm_lesson_id'];
-      }
-    }
-
-    if ($lesson_id > 0 && (string)($order['sku'] ?? '') === 'autopay_lesson_charge') {
-      $this->mrm_finalize_autopay_lesson_success($lesson_id, $order, $pi_id, true);
+    if (!empty($order_state['terminal_refund']) || !empty($order_state['other_partial_refund']) || empty($order_state['can_run_primary_fulfillment'])) return true;
+    if ($order_state['can_run_addon_fulfillment']) {
+      $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
+      if (is_wp_error($addon_grant_result)) return $addon_grant_result;
     }
   }
 
+  $bookkeeping_error = null;
+  $bookkeeping_result = $this->mrm_reconcile_required_order_bookkeeping($order);
+  if (is_wp_error($bookkeeping_result)) {
+    $bookkeeping_error = $bookkeeping_result;
+    $this->stripe_debug_log('Payment succeeded but required financial bookkeeping is still pending.', array('order_id'=>absint($order['id'] ?? 0),'payment_intent_id'=>$pi_id,'code'=>$bookkeeping_result->get_error_code(),'message'=>$bookkeeping_result->get_error_message()));
+    $this->mrm_schedule_purchase_receipt_retry();
+  }
+
+  /*
+   * Receipt delivery is intentionally independent from payout and credit
+   * persistence. A temporary SMTP failure must not prevent bookkeeping,
+   * and a temporary bookkeeping failure must not suppress the customer’s
+   * valid receipt.
+   */
+  $receipt_result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
+  if (is_wp_error($receipt_result)) return $receipt_result;
+  if (is_wp_error($bookkeeping_error)) return $bookkeeping_error;
+
+  $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+  $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
+  $product_type = (string)($order['product_type'] ?? '');
+  $order_state = $this->mrm_classify_order_success_state($order);
+  if ($addon_yes && 'lesson' === $product_type && !empty($order['id']) && $order_state['can_run_addon_fulfillment']) $this->mrm_attempt_sheet_music_subscription_activation((int)$order['id'], $pi, 'payment_intent_succeeded_webhook');
+
+  $lesson_id = 0;
+  if (!empty($metadata['mrm_lesson_id'])) $lesson_id = (int)$metadata['mrm_lesson_id'];
+  if ($lesson_id <= 0 && !empty($order['metadata_json'])) {
+    $decoded = json_decode((string)$order['metadata_json'], true);
+    if (is_array($decoded) && !empty($decoded['mrm_lesson_id'])) $lesson_id = (int)$decoded['mrm_lesson_id'];
+  }
+  if ($lesson_id > 0 && (string)($order['sku'] ?? '') === 'autopay_lesson_charge') $this->mrm_finalize_autopay_lesson_success($lesson_id, $order, $pi_id, true);
   return true;
 }
 
@@ -6519,9 +6431,12 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     $payment_intent_id = sanitize_text_field($payment_intent_id);
     $refund_id = sanitize_text_field($refund_id);
     if ($order_id <= 0 || '' === $payment_intent_id) return new WP_Error('addon_payout_cleanup_reference_missing','The refunded add-on payout reference is missing.');
+    $order_metadata = $this->mrm_get_order_meta_array($order);
+    $addon_amount_cents = max(0, absint($order_metadata['mrm_addon_amount_cents'] ?? 0));
+    if ($addon_amount_cents <= 0) return true;
     $table = $this->table_payout_ledger();
     if (false === $wpdb->query('START TRANSACTION')) return new WP_Error('addon_payout_cleanup_transaction_failed','The add-on payout cleanup transaction could not be started.');
-    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE order_id = %d AND stripe_payment_intent_id = %s AND payee_type = 'composer' AND payee_ref = 'composer' AND notes LIKE %s ORDER BY id ASC FOR UPDATE", $order_id, $payment_intent_id, '%Add-on payout (subscription upcharge)%'), ARRAY_A);
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE order_id = %d AND stripe_payment_intent_id = %s AND payee_type = 'composer' AND payee_ref = 'composer' AND gross_cents = %d AND net_cents = %d ORDER BY id ASC FOR UPDATE", $order_id, $payment_intent_id, $addon_amount_cents, $addon_amount_cents), ARRAY_A);
     if (empty($rows)) { $wpdb->query('COMMIT'); return true; }
     $critical_rows = array();
     foreach ($rows as $row) {
@@ -6534,7 +6449,12 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
         continue;
       }
       if (in_array($status, array('transfer_processing','payout_processing','transferred','paid_out'), true)) {
-        $wpdb->update($table, array('status'=>'refund_after_payout_needs_recovery','notes'=>'The add-on was refunded after payout processing began. Immediate reconciliation is required. Refund: '.$refund_id,'updated_at'=>current_time('mysql')), array('id'=>$ledger_id), array('%s','%s','%s'), array('%d'));
+        $critical_updated = $wpdb->update($table, array('status'=>'refund_after_payout_needs_recovery','notes'=>'The add-on was refunded after payout processing began. Immediate reconciliation is required. Refund: '.$refund_id,'updated_at'=>current_time('mysql')), array('id'=>$ledger_id), array('%s','%s','%s'), array('%d'));
+        if (false === $critical_updated) {
+          $database_error = $wpdb->last_error;
+          $wpdb->query('ROLLBACK');
+          return new WP_Error('addon_payout_recovery_state_failed', $database_error ? $database_error : 'The refunded add-on payout could not be moved into financial recovery.');
+        }
         $critical_rows[] = array('ledger_id'=>$ledger_id,'previous_status'=>$status,'transfer_id'=>sanitize_text_field($row['transfer_id'] ?? ''),'payout_id'=>sanitize_text_field($row['payout_id'] ?? ''),'amount_cents'=>absint($row['net_cents'] ?? 0));
       }
     }
@@ -10951,6 +10871,20 @@ private function mrm_tax_retry_or_alert_payment_intent(
     );
   }
 
+
+  private function mrm_get_protected_verification_response(array $order_state) {
+    if (!empty($order_state['terminal_refund'])) {
+      return new WP_REST_Response(array('ok'=>true,'status'=>$order_state['status'],'payment_received'=>true,'order_refunded'=>true,'fulfillment_blocked'=>true,'message'=>'This payment has entered the refund process. No new booking, AutoPay enrollment, product access, or payout fulfillment will be created.'), 200);
+    }
+    if (!empty($order_state['other_partial_refund'])) {
+      return new WP_REST_Response(array('ok'=>true,'status'=>'partially_refunded','payment_received'=>true,'manual_reconciliation_required'=>true,'fulfillment_blocked'=>true,'message'=>'This order has been partially refunded and requires reconciliation. No additional fulfillment was created.'), 200);
+    }
+    if (empty($order_state['can_run_primary_fulfillment'])) {
+      return new WP_REST_Response(array('ok'=>true,'status'=>$order_state['status'],'payment_received'=>true,'fulfillment_blocked'=>true,'message'=>'The payment succeeded, but this order is not eligible for automatic fulfillment. Do not submit another payment.'), 200);
+    }
+    return null;
+  }
+
   private function mrm_atomic_update_order_if_status_allowed($payment_intent_id, $new_status, $new_stripe_status, array $incoming_metadata, array $allowed_current_statuses) {
     global $wpdb;
 
@@ -12179,8 +12113,18 @@ private function mrm_tax_retry_or_alert_payment_intent(
   }
 
   private function mrm_maybe_create_payout_ledger_for_order($order) {
-    if (!$order || empty($order['id'])) return false;
-    if ((string)($order['status'] ?? '') !== 'paid') return false;
+    if (!is_array($order) || empty($order['id'])) return false;
+
+    $order_state = $this->mrm_classify_order_success_state($order);
+    $product_type = sanitize_key($order['product_type'] ?? '');
+    $is_paid = !empty($order_state['is_paid']);
+    $is_valid_addon_partial_lesson = 'lesson' === $product_type && !empty($order_state['addon_only_partial_refund']);
+
+    /*
+     * A valid lesson remains payable after only its optional sheet-music
+     * add-on was refunded. All other protected states remain ineligible.
+     */
+    if (!$is_paid && !$is_valid_addon_partial_lesson) return false;
 
     $meta = array();
     if (!empty($order['metadata_json'])) {
@@ -12191,57 +12135,25 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $order_id = (int)$order['id'];
     $pi_id = (string)($order['stripe_payment_intent_id'] ?? '');
     $currency = strtolower((string)($order['currency'] ?? 'usd'));
-    $product_type = (string)($order['product_type'] ?? ($meta['mrm_product_type'] ?? ''));
+    if ('' === $product_type) $product_type = sanitize_key($meta['mrm_product_type'] ?? '');
     $base_cents = isset($meta['mrm_base_amount_cents']) ? (int)$meta['mrm_base_amount_cents'] : (int)($order['amount_cents'] ?? 0);
     $addon_cents = isset($meta['mrm_addon_amount_cents']) ? (int)$meta['mrm_addon_amount_cents'] : 0;
     $fundamentals_addon_cents = max(0,(int)($meta['mrm_fundamentals_addon_amount_cents'] ?? 0));
 
     if ($product_type === 'sheet_music') {
-      $composer_pct = $this->mrm_sanitize_percent_setting(
-        $meta['mrm_composer_pct'] ?? $this->mrm_get_one_time_sheet_music_composer_pct(),
-        $this->mrm_get_one_time_sheet_music_composer_pct()
-      );
-
+      $composer_pct = $this->mrm_sanitize_percent_setting($meta['mrm_composer_pct'] ?? $this->mrm_get_one_time_sheet_music_composer_pct(), $this->mrm_get_one_time_sheet_music_composer_pct());
       $composer_eligible_cents = max(0, $base_cents) + max(0, $fundamentals_addon_cents);
       $composer_share = (int)round($composer_eligible_cents * ($composer_pct / 100));
       $platform_share = max(0, $composer_eligible_cents - $composer_share) + max(0, $addon_cents);
       $composer_payout_note='Centralized one-time sheet music composer payout'.($fundamentals_addon_cents>0?' including the Fundamental Packet add-on':'');
       $composer_acct = sanitize_text_field((string)($meta['mrm_composer_account_id'] ?? ''));
-      /* Backward compatibility for paid orders created before account capture. */
-      if ($composer_acct === '') {
-        $composer_acct = $this->composer_connected_account_id();
-      }
-
+      if ($composer_acct === '') $composer_acct = $this->composer_connected_account_id();
       if ($composer_share > 0) {
-        $composer_row_id = $this->mrm_insert_payout_ledger_row(
-          $order_id,
-          $pi_id,
-          'composer',
-          'composer',
-          $composer_acct,
-          $currency,
-          $composer_share,
-          $composer_share,
-          $composer_acct ? 'pending' : 'blocked',
-          $composer_acct ? $composer_payout_note : 'Missing composer connected account ID'
-        );
+        $composer_row_id = $this->mrm_insert_payout_ledger_row($order_id,$pi_id,'composer','composer',$composer_acct,$currency,$composer_share,$composer_share,$composer_acct ? 'pending' : 'blocked',$composer_acct ? $composer_payout_note : 'Missing composer connected account ID');
         if ($composer_row_id <= 0) return new WP_Error('composer_payout_ledger_insert_failed', 'The composer payout record could not be saved.', array('order_id'=>$order_id, 'payment_intent_id'=>$pi_id, 'expected_cents'=>$composer_share));
       }
-
-      $platform_row_id = $this->mrm_insert_payout_ledger_row(
-        $order_id,
-        $pi_id,
-        'platform',
-        'platform',
-        '',
-        $currency,
-        $platform_share,
-        $platform_share,
-        'retained',
-        'Retained by platform'
-      );
+      $platform_row_id = $this->mrm_insert_payout_ledger_row($order_id,$pi_id,'platform','platform','',$currency,$platform_share,$platform_share,'retained','Retained by platform');
       if ($platform_row_id <= 0) return new WP_Error('platform_payout_ledger_insert_failed', 'The platform payout record could not be saved.', array('order_id'=>$order_id, 'payment_intent_id'=>$pi_id, 'expected_cents'=>$platform_share));
-
       return true;
     }
 
@@ -12249,33 +12161,29 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $instructor_id = (int)($meta['mrm_instructor_id'] ?? 0);
       $lesson_count = max(1, (int)($meta['mrm_lesson_count'] ?? 1));
       $email_hash = (string)($order['email_hash'] ?? '');
-
-      if ($instructor_id > 0) {
-        $this->mrm_create_or_update_credits_for_order($order_id, $instructor_id, $email_hash, $currency, $base_cents, $lesson_count);
-      }
-
+      if ($instructor_id > 0) $this->mrm_create_or_update_credits_for_order($order_id, $instructor_id, $email_hash, $currency, $base_cents, $lesson_count);
       $composer_addon_share = max(0, (int)$addon_cents);
+      $addon_refund_started = !empty($order_state['addon_refund_started']);
       $composer_acct = $this->composer_connected_account_id();
-
-      if ($composer_addon_share > 0) {
-        $this->mrm_insert_payout_ledger_row(
-          $order_id,
-          $pi_id,
-          'composer',
-          'composer',
-          $composer_acct,
-          $currency,
-          $composer_addon_share,
-          $composer_addon_share,
-          $composer_acct ? 'pending' : 'blocked',
-          $composer_acct ? 'Add-on payout (subscription upcharge)' : 'Missing composer connected account ID'
-        );
+      if ($composer_addon_share > 0 && !$addon_refund_started) {
+        $composer_row_id = $this->mrm_insert_payout_ledger_row($order_id,$pi_id,'composer','composer',$composer_acct,$currency,$composer_addon_share,$composer_addon_share,$composer_acct ? 'pending' : 'blocked',$composer_acct ? 'Add-on payout (subscription upcharge)' : 'Missing composer connected account ID');
+        if ($composer_row_id <= 0) return new WP_Error('lesson_addon_payout_ledger_insert_failed', 'The lesson sheet-music add-on payout record could not be saved.', array('order_id'=>$order_id,'payment_intent_id'=>$pi_id,'expected_cents'=>$composer_addon_share));
       }
-
       return true;
     }
 
     return false;
+  }
+
+  private function mrm_reconcile_required_order_bookkeeping(array $order) {
+    $order_state = $this->mrm_classify_order_success_state($order);
+    if (!empty($order_state['terminal_refund']) || !empty($order_state['other_partial_refund']) || empty($order_state['can_run_primary_fulfillment'])) return true;
+    $product_type = sanitize_key($order['product_type'] ?? '');
+    if (!in_array($product_type, array('lesson','sheet_music'), true)) return true;
+    $result = $this->mrm_maybe_create_payout_ledger_for_order($order);
+    if (is_wp_error($result)) return $result;
+    if (true !== $result) return new WP_Error('required_order_bookkeeping_missing','The required payout or lesson-credit bookkeeping was not created.', array('order_id'=>absint($order['id'] ?? 0),'product_type'=>$product_type,'order_status'=>$order_state['status']));
+    return true;
   }
 
 
@@ -17306,9 +17214,10 @@ private function charge_and_unlock_autopay($data) {
       }
     }
 
-    if ($ok && $order_state['terminal_refund']) return new WP_REST_Response(array('ok'=>true,'status'=>$order_state['status'],'payment_received'=>true,'order_refunded'=>true,'fulfillment_blocked'=>true,'message'=>'This payment has entered the refund process. No new booking or product access will be created.'), 200);
-    if ($ok && $order_state['other_partial_refund']) return new WP_REST_Response(array('ok'=>true,'status'=>'partially_refunded','payment_received'=>true,'manual_reconciliation_required'=>true,'fulfillment_blocked'=>true,'message'=>'This order has been partially refunded and requires reconciliation. No additional fulfillment was created.'), 200);
-    if ($ok && !$order_state['can_run_primary_fulfillment']) return new WP_REST_Response(array('ok'=>true,'status'=>$order_state['status'],'payment_received'=>true,'fulfillment_blocked'=>true,'message'=>'The payment succeeded, but this order is not eligible for automatic fulfillment. Support has been notified.'), 200);
+    if ($ok) {
+      $protected_response = $this->mrm_get_protected_verification_response($order_state);
+      if ($protected_response instanceof WP_REST_Response) return $protected_response;
+    }
 
     $piece_auto_grant_attempted = false;
     $piece_auto_grant_success = false;
@@ -17346,6 +17255,10 @@ private function charge_and_unlock_autopay($data) {
 
     if (!is_array($order)) return new WP_REST_Response(array('ok'=>false,'payment_received'=>$ok,'order_reconciliation_pending'=>true,'message'=>'The local order could not be reloaded.'), 503);
     $order_state = $this->mrm_classify_order_success_state($order);
+    if ($ok) {
+      $protected_response = $this->mrm_get_protected_verification_response($order_state);
+      if ($protected_response instanceof WP_REST_Response) return $protected_response;
+    }
 
     if ($ok && $order_state['can_run_primary_fulfillment'] && sanitize_key($order['product_type'] ?? '') === 'sheet_music') {
       $pi_sku = $this->sanitize_sku($meta['mrm_sku'] ?? '');
@@ -17392,7 +17305,7 @@ private function charge_and_unlock_autopay($data) {
       }
     }
 
-    return new WP_REST_Response(array('ok'=>$ok,'status'=>$status,'amount_cents'=>(int)($pi['amount'] ?? 0),'currency'=>(string)($pi['currency'] ?? 'usd'),'metadata'=>(array)($pi['metadata'] ?? array()),'piece_auto_grant_attempted'=>(bool)$piece_auto_grant_attempted,'piece_auto_grant_success'=>(bool)$piece_auto_grant_success,'piece_auto_grant_skus'=>$piece_auto_grant_skus), 200);
+    return new WP_REST_Response(array('ok'=>$ok,'status'=>sanitize_key($order_state['status'] ?? $status),'stripe_status'=>sanitize_key($status),'amount_cents'=>(int)($pi['amount'] ?? 0),'currency'=>(string)($pi['currency'] ?? 'usd'),'metadata'=>(array)($pi['metadata'] ?? array()),'piece_auto_grant_attempted'=>(bool)$piece_auto_grant_attempted,'piece_auto_grant_success'=>(bool)$piece_auto_grant_success,'piece_auto_grant_skus'=>$piece_auto_grant_skus), 200);
   }
 
   private function mrm_wrap_transactional_email_html($title, $intro_html, $details_html, $button_url = '', $button_text = '', $options = array()) {
