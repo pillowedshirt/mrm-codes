@@ -22,7 +22,7 @@ use Aws\Exception\AwsException;
 
 class MRM_Payments_Hub_Single {
   const VERSION = '1.0.0';
-  const CORE_SCHEMA_VERSION = '2026-08-04-1';
+  const CORE_SCHEMA_VERSION = '2026-08-04-2';
 
   // Options keys
   const OPT_SETTINGS = 'mrm_pay_hub_settings';
@@ -45,6 +45,8 @@ class MRM_Payments_Hub_Single {
     'mrm_tax_last_successful_subscription_inventory_sync_at';
   const OPT_TAX_SUBSCRIPTION_INVENTORY_SNAPSHOT =
     'mrm_tax_subscription_inventory_snapshot_v2';
+  const OPT_RECEIPT_RETRY_CURSOR =
+    'mrm_pay_hub_receipt_retry_cursor';
 
   // Admin menu
   const MENU_SLUG = 'mrm-payments-hub';
@@ -153,6 +155,7 @@ class MRM_Payments_Hub_Single {
     add_action('mrm_pay_hub_tax_filing_deadline_check', array($this, 'cron_tax_filing_deadline_check'));
     add_action('mrm_pay_hub_tax_enforce_subscription_holds', array($this, 'cron_tax_enforce_subscription_holds'));
     add_action('mrm_pay_hub_retry_purchase_receipts', array($this, 'mrm_retry_purchase_receipts'));
+    add_action('mrm_pay_hub_retry_payout_summary_emails', array($this, 'cron_retry_payout_summary_emails'));
     add_action('mrm_pay_hub_retry_payout_batch', array($this, 'mrm_retry_payout_batch'));
     add_action('mrm_pay_hub_retry_presenter_payout_batch', array($this, 'mrm_retry_presenter_payout_batch'));
 
@@ -228,6 +231,10 @@ class MRM_Payments_Hub_Single {
       wp_schedule_event(time() + 120, 'mrm_10min', 'mrm_pay_hub_tax_enforce_subscription_holds');
     }
 
+    if (!wp_next_scheduled('mrm_pay_hub_retry_payout_summary_emails')) {
+      wp_schedule_event(time() + 270, 'mrm_10min', 'mrm_pay_hub_retry_payout_summary_emails');
+    }
+
     $this->register_marketing_unsubscribe_endpoint();
   }
 
@@ -283,6 +290,10 @@ class MRM_Payments_Hub_Single {
 
     if (!wp_next_scheduled('mrm_pay_hub_tax_enforce_subscription_holds')) {
       wp_schedule_event(time() + 120, 'mrm_10min', 'mrm_pay_hub_tax_enforce_subscription_holds');
+    }
+
+    if (!wp_next_scheduled('mrm_pay_hub_retry_payout_summary_emails')) {
+      wp_schedule_event(time() + 270, 'mrm_10min', 'mrm_pay_hub_retry_payout_summary_emails');
     }
   }
 
@@ -341,6 +352,12 @@ class MRM_Payments_Hub_Single {
   private function table_payout_ledger() {
     global $wpdb;
     return $wpdb->prefix . 'mrm_payout_ledger';
+  }
+
+  private function table_payout_email_queue() {
+    global $wpdb;
+
+    return $wpdb->prefix . 'mrm_payout_email_queue';
   }
 
   private function mrm_ensure_payout_ledger_status_column_width() {
@@ -419,6 +436,7 @@ class MRM_Payments_Hub_Single {
     $links   = $this->table_links();
     $access  = $this->table_sheet_music_access();
     $payouts = $this->table_payout_ledger();
+    $payout_email_queue = $this->table_payout_email_queue();
     $credits = $this->table_lesson_credits();
     $autopay = $this->table_autopay_profiles();
     $webhooks = $this->table_webhook_events();
@@ -446,7 +464,7 @@ class MRM_Payments_Hub_Single {
     }
 
     // 1) Table existence check
-    foreach (array($orders, $links, $access, $payouts, $credits, $autopay, $webhooks, $subs, $promo_redemptions, $profile_requests, $tax_states, $tax_sales, $tax_alerts) as $t) {
+    foreach (array($orders, $links, $access, $payouts, $payout_email_queue, $credits, $autopay, $webhooks, $subs, $promo_redemptions, $profile_requests, $tax_states, $tax_sales, $tax_alerts) as $t) {
       $found = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $t));
       if ($found !== $t) {
         $needs_upgrade = true;
@@ -648,6 +666,7 @@ class MRM_Payments_Hub_Single {
     $links   = $this->table_links();
     $access  = $this->table_sheet_music_access();
     $payouts = $this->table_payout_ledger();
+    $payout_email_queue = $this->table_payout_email_queue();
     $credits = $this->table_lesson_credits();
     $autopay = $this->table_autopay_profiles();
     $webhooks = $this->table_webhook_events();
@@ -894,7 +913,35 @@ class MRM_Payments_Hub_Single {
     dbDelta($sql_orders);
     dbDelta($sql_links);
     dbDelta($sql_access);
+
+    $sql_payout_email_queue = "CREATE TABLE {$payout_email_queue} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        dedupe_key VARCHAR(191) NOT NULL,
+        email_type VARCHAR(60) NOT NULL,
+        reference_key VARCHAR(191) DEFAULT NULL,
+        recipient_email VARCHAR(190) NOT NULL,
+        subject VARCHAR(255) NOT NULL,
+        body_html LONGTEXT NOT NULL,
+        status VARCHAR(30) NOT NULL DEFAULT 'pending',
+        attempt_count INT NOT NULL DEFAULT 0,
+        last_error TEXT DEFAULT NULL,
+        claim_token VARCHAR(64) DEFAULT NULL,
+        claimed_at DATETIME DEFAULT NULL,
+        next_attempt_at DATETIME DEFAULT NULL,
+        sent_at DATETIME DEFAULT NULL,
+        created_at DATETIME NOT NULL,
+        updated_at DATETIME NOT NULL,
+        PRIMARY KEY (id),
+        UNIQUE KEY dedupe_key_uniq (dedupe_key),
+        KEY status_due_idx (
+            status,
+            next_attempt_at,
+            id
+        ),
+        KEY reference_key_idx (reference_key)
+    ) {$charset};";
     dbDelta($sql_payouts);
+    dbDelta($sql_payout_email_queue);
     dbDelta($sql_credits);
     dbDelta($sql_autopay);
     dbDelta($sql_webhooks);
@@ -5970,17 +6017,37 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
   private function mrm_send_subscription_addon_refund_email(array $order) {
     $order_id = absint($order['id'] ?? 0); if ($order_id <= 0) return false;
     $metadata = $this->mrm_get_order_meta_array($order);
+    $order_status = sanitize_key($order['status'] ?? '');
+
+    if (in_array($order_status, array('refund_pending', 'refunded'), true)) {
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_subscription_addon_refund_email_suppressed_at', current_time('mysql', true));
+      return true;
+    }
+
     if (!empty($metadata['mrm_subscription_addon_refund_email_sent_at'])) return true;
     if (!$this->mrm_claim_subscription_addon_refund_email($order_id)) return false;
     $email = sanitize_email($order['customer_email'] ?? $metadata['mrm_customer_email'] ?? '');
     if (!$email || !is_email($email)) { $this->mrm_release_subscription_addon_refund_email($order_id); return false; }
+
+    global $wpdb;
+    $lesson_id = absint($metadata['mrm_lesson_id'] ?? 0);
+    $lesson_status = '';
+    if ($lesson_id > 0) {
+      $lesson_status = sanitize_key($wpdb->get_var($wpdb->prepare("SELECT status FROM {$this->table_lessons()} WHERE id = %d LIMIT 1", $lesson_id)));
+    }
+    $lesson_is_confirmed = in_array($order_status, array('paid', 'partially_refunded'), true) && 'scheduled' === $lesson_status;
+
     $refund_id = sanitize_text_field($metadata['mrm_subscription_addon_refund_id'] ?? '');
     $refund_amount_cents = absint($metadata['mrm_subscription_addon_refund_amount_cents'] ?? 0);
     $currency = strtoupper(sanitize_text_field($order['currency'] ?? $metadata['mrm_currency'] ?? 'USD'));
     $refund_amount = sprintf('%s %0.2f', $currency, $refund_amount_cents / 100);
-    $details = '<div><strong>Order:</strong> #' . esc_html($order_id) . '</div>' . '<div><strong>Refund amount:</strong> ' . esc_html($refund_amount) . '</div>' . '<div><strong>Refund reference:</strong> ' . esc_html($refund_id ? $refund_id : 'Pending') . '</div>' . '<div style="margin-top:14px;">Your private lesson remains confirmed. Only the sheet-music subscription add-on was refunded.</div>' . '<div style="margin-top:14px;">The sheet-music subscription could not be activated, so access associated with that add-on has been removed.</div>' . '<div style="margin-top:14px;">Depending on your card issuer, the refund may take several business days to appear.</div>';
+    $lesson_status_html = $lesson_is_confirmed
+      ? '<div style="margin-top:14px;">Your private lesson remains confirmed. Only the sheet-music subscription add-on was refunded.</div>'
+      : '<div style="margin-top:14px;">This refund applies only to the optional sheet-music subscription add-on. Please refer to your separate lesson communications for the current lesson status.</div>';
+    $details = '<div><strong>Order:</strong> #' . esc_html($order_id) . '</div>' . '<div><strong>Refund amount:</strong> ' . esc_html($refund_amount) . '</div>' . '<div><strong>Refund reference:</strong> ' . esc_html($refund_id ? $refund_id : 'Pending') . '</div>' . $lesson_status_html . '<div style="margin-top:14px;">The sheet-music subscription could not be activated, so access associated with that add-on has been removed.</div>' . '<div style="margin-top:14px;">Depending on your card issuer, the refund may take several business days to appear.</div>';
     $html = $this->mrm_email_wrap_html('Sheet-music add-on refund', '<p>Your lesson booking was completed successfully, but we could not activate the optional sheet-music subscription.</p>', $details, $this->mrm_get_contact_url(), 'Contact Support');
-    $sent = wp_mail($email, 'Lesson confirmed — Sheet-music add-on refund submitted', $html, array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>'));
+    $subject = $lesson_is_confirmed ? 'Lesson confirmed — Sheet-music add-on refund submitted' : 'Sheet-music add-on refund submitted';
+    $sent = wp_mail($email, $subject, $html, array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>'));
     if ($sent) $this->mrm_set_order_meta_flag($order_id, 'mrm_subscription_addon_refund_email_sent_at', current_time('mysql', true)); else $this->mrm_schedule_purchase_receipt_retry();
     $this->mrm_release_subscription_addon_refund_email($order_id);
     return (bool)$sent;
@@ -6094,47 +6161,77 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
 
   public function mrm_retry_purchase_receipts() {
     global $wpdb;
-    $orders = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->table_orders()} WHERE status IN ('paid','refund_pending','partially_refunded','refunded') AND created_at >= %s ORDER BY id ASC LIMIT 25", gmdate('Y-m-d H:i:s', time() - 7 * DAY_IN_SECONDS)), ARRAY_A);
-    foreach ((array)$orders as $order) {
-      $metadata = $this->mrm_get_order_meta_array($order);
-      $subscription_addon_refund_id = sanitize_text_field($metadata['mrm_subscription_addon_refund_id'] ?? '');
-      $subscription_addon_refund_status = sanitize_key($metadata['mrm_subscription_addon_refund_status'] ?? '');
-      if ('' !== $subscription_addon_refund_id && 'succeeded' === $subscription_addon_refund_status) {
-        $addon_cleanup_result = $this->mrm_complete_subscription_addon_refund_cleanup($order, sanitize_text_field($order['stripe_payment_intent_id'] ?? ''), $subscription_addon_refund_id);
-        if (is_wp_error($addon_cleanup_result)) { error_log('[MRM Payments] Add-on refund cleanup retry failed for order ' . absint($order['id']) . ': ' . $addon_cleanup_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); }
+
+    $orders_table = $this->table_orders();
+    $cursor = absint(get_option(self::OPT_RECEIPT_RETRY_CURSOR, 0));
+    $minimum_created_at = gmdate('Y-m-d H:i:s', time() - 7 * DAY_IN_SECONDS);
+
+    for ($page = 0; $page < 8; $page++) {
+      $orders = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$orders_table} WHERE id > %d AND status IN ('paid','refund_pending','partially_refunded','refunded') AND created_at >= %s ORDER BY id ASC LIMIT 25", $cursor, $minimum_created_at), ARRAY_A);
+
+      if (empty($orders)) {
+        update_option(self::OPT_RECEIPT_RETRY_CURSOR, 0, false);
+        break;
       }
-      if (!empty($metadata['mrm_booking_conflict_refund_id'])) {
-        $cleanup_result = $this->mrm_complete_booking_conflict_cleanup($order, sanitize_text_field($order['stripe_payment_intent_id'] ?? ''));
-        if (is_wp_error($cleanup_result)) { error_log('[MRM Payments] Booking-conflict cleanup retry failed for order ' . absint($order['id']) . ': ' . $cleanup_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); }
-        continue;
-      }
-      if (!empty($metadata['mrm_receipt_sent_at']) || empty($order['stripe_payment_intent_id'])) continue;
-      $pi = $this->stripe_retrieve_payment_intent($order['stripe_payment_intent_id']);
-      if (is_wp_error($pi) || ($pi['status'] ?? '') !== 'succeeded') continue;
-      if (sanitize_key($order['product_type'] ?? '') === 'lesson') {
-        $result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
-        if (is_wp_error($result)) { error_log('[MRM Payments] Receipt retry could not finalize lesson order ' . absint($order['id']) . ': ' . $result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); continue; }
-        if (is_array($result) && !empty($result['booking_refunded'])) continue;
-        $order = $this->get_order_by_pi($order['stripe_payment_intent_id']);
-        if (!is_array($order)) { $this->mrm_schedule_purchase_receipt_retry(); continue; }
-        $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
-        if (is_wp_error($addon_grant_result)) { error_log('[MRM Payments] Receipt retry could not grant the lesson add-on for order ' . absint($order['id']) . ': ' . $addon_grant_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); continue; }
-        $order_metadata = $this->mrm_get_order_meta_array($order);
-        $pi_metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
-        $combined_metadata = array_merge($order_metadata, $pi_metadata);
-        $addon_selected = isset($combined_metadata['mrm_sheet_music_addon']) && 'yes' === strtolower((string)$combined_metadata['mrm_sheet_music_addon']);
-        if ($addon_selected && !empty($order['id'])) {
-          $this->mrm_attempt_sheet_music_subscription_activation(absint($order['id']), $pi, 'purchase_receipt_retry');
+
+      foreach ($orders as $order) {
+        $metadata = $this->mrm_get_order_meta_array($order);
+        $subscription_addon_refund_id = sanitize_text_field($metadata['mrm_subscription_addon_refund_id'] ?? '');
+        $subscription_addon_refund_status = sanitize_key($metadata['mrm_subscription_addon_refund_status'] ?? '');
+        if ('' !== $subscription_addon_refund_id && 'succeeded' === $subscription_addon_refund_status) {
+          $addon_cleanup_result = $this->mrm_complete_subscription_addon_refund_cleanup($order, sanitize_text_field($order['stripe_payment_intent_id'] ?? ''), $subscription_addon_refund_id);
+          if (is_wp_error($addon_cleanup_result)) { error_log('[MRM Payments] Add-on refund cleanup retry failed for order ' . absint($order['id']) . ': ' . $addon_cleanup_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); }
+        }
+        if (!empty($metadata['mrm_booking_conflict_refund_id'])) {
+          $cleanup_result = $this->mrm_complete_booking_conflict_cleanup($order, sanitize_text_field($order['stripe_payment_intent_id'] ?? ''));
+          if (is_wp_error($cleanup_result)) { error_log('[MRM Payments] Booking-conflict cleanup retry failed for order ' . absint($order['id']) . ': ' . $cleanup_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); }
+          continue;
+        }
+
+        $order_status = sanitize_key($order['status'] ?? '');
+        $is_addon_only_partial_refund = 'partially_refunded' === $order_status && '' !== $subscription_addon_refund_id && in_array($subscription_addon_refund_status, array('pending', 'succeeded'), true);
+        if (in_array($order_status, array('refund_pending', 'refunded'), true)) continue;
+        if ('partially_refunded' === $order_status && !$is_addon_only_partial_refund) continue;
+        if (!in_array($order_status, array('paid', 'partially_refunded'), true)) continue;
+
+        if (!empty($metadata['mrm_receipt_sent_at']) || empty($order['stripe_payment_intent_id'])) continue;
+        $pi = $this->stripe_retrieve_payment_intent($order['stripe_payment_intent_id']);
+        if (is_wp_error($pi) || ($pi['status'] ?? '') !== 'succeeded') continue;
+        if (sanitize_key($order['product_type'] ?? '') === 'lesson') {
+          $result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
+          if (is_wp_error($result)) { error_log('[MRM Payments] Receipt retry could not finalize lesson order ' . absint($order['id']) . ': ' . $result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); continue; }
+          if (is_array($result) && !empty($result['booking_refunded'])) continue;
           $order = $this->get_order_by_pi($order['stripe_payment_intent_id']);
           if (!is_array($order)) { $this->mrm_schedule_purchase_receipt_retry(); continue; }
+          $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
+          if (is_wp_error($addon_grant_result)) { error_log('[MRM Payments] Receipt retry could not grant the lesson add-on for order ' . absint($order['id']) . ': ' . $addon_grant_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); continue; }
           $order_metadata = $this->mrm_get_order_meta_array($order);
-          $addon_refund_id = sanitize_text_field($order_metadata['mrm_subscription_addon_refund_id'] ?? '');
-          $addon_refund_status = sanitize_key($order_metadata['mrm_subscription_addon_refund_status'] ?? '');
-          if ('' !== $addon_refund_id && 'succeeded' === $addon_refund_status) $this->mrm_complete_subscription_addon_refund_cleanup($order, sanitize_text_field($order['stripe_payment_intent_id'] ?? ''), $addon_refund_id);
+          $pi_metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+          $combined_metadata = array_merge($order_metadata, $pi_metadata);
+          $addon_selected = isset($combined_metadata['mrm_sheet_music_addon']) && 'yes' === strtolower((string)$combined_metadata['mrm_sheet_music_addon']);
+          if ($addon_selected && !empty($order['id'])) {
+            $this->mrm_attempt_sheet_music_subscription_activation(absint($order['id']), $pi, 'purchase_receipt_retry');
+            $order = $this->get_order_by_pi($order['stripe_payment_intent_id']);
+            if (!is_array($order)) { $this->mrm_schedule_purchase_receipt_retry(); continue; }
+            $reloaded_status = sanitize_key($order['status'] ?? '');
+            if (in_array($reloaded_status, array('refund_pending', 'refunded'), true)) continue;
+            $order_metadata = $this->mrm_get_order_meta_array($order);
+            $addon_refund_id = sanitize_text_field($order_metadata['mrm_subscription_addon_refund_id'] ?? '');
+            $addon_refund_status = sanitize_key($order_metadata['mrm_subscription_addon_refund_status'] ?? '');
+            if ('' !== $addon_refund_id && 'succeeded' === $addon_refund_status) $this->mrm_complete_subscription_addon_refund_cleanup($order, sanitize_text_field($order['stripe_payment_intent_id'] ?? ''), $addon_refund_id);
+          }
         }
+        $result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
+        if (is_wp_error($result)) error_log('[MRM Payments] Receipt retry failed for order ' . absint($order['id']) . ': ' . $result->get_error_message());
       }
-      $result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
-      if (is_wp_error($result)) error_log('[MRM Payments] Receipt retry failed for order ' . absint($order['id']) . ': ' . $result->get_error_message());
+
+      $last_order = end($orders);
+      $cursor = absint($last_order['id'] ?? $cursor);
+      update_option(self::OPT_RECEIPT_RETRY_CURSOR, $cursor, false);
+      if (count($orders) < 25) {
+        update_option(self::OPT_RECEIPT_RETRY_CURSOR, 0, false);
+        break;
+      }
     }
   }
 
@@ -6800,7 +6897,7 @@ private function mrm_apply_failed_refund_recovery($refund, $charge) {
     $charge_lock=$this->mrm_claim_charge_refund_effects_lock($charge_id); if(is_wp_error($charge_lock)) return $charge_lock; $charge_locked=true;
     $summary=$this->mrm_refund_charge_summary($charge); if(is_wp_error($summary)) return $summary;
     $charge_state=$this->mrm_get_charge_refund_effects_state($charge_id); $pi_id=$this->mrm_stripe_expandable_id($refund['payment_intent'] ?? '');
-    if($pi_id!==''){ $order=$this->get_order_by_pi($pi_id); if(is_array($order) && !empty($order['id'])){ $order_id=absint($order['id']); $addon_refund_id=sanitize_text_field($this->mrm_get_order_meta_value($order,'mrm_subscription_addon_refund_id','')); if($addon_refund_id!=='' && hash_equals($addon_refund_id,$refund_id)){ $this->mrm_set_order_meta_flag($order_id,'mrm_subscription_addon_refund_status',$refund_status); $this->mrm_set_order_meta_flag($order_id,'mrm_sheet_music_subscription_status','activation_failed_addon_refund_failed'); } if(!empty($summary['is_full_refund'])){ $new_order_status='refunded'; $new_stripe_status='refunded'; } elseif(!empty($summary['is_partial_refund'])){ $new_order_status='partially_refunded'; $new_stripe_status='partially_refunded'; } else { $new_order_status='paid'; $new_stripe_status='succeeded'; } $this->update_order_status_from_pi($pi_id,$new_order_status,$new_stripe_status,array('mrm_refund_id'=>$refund_id,'mrm_refund_status'=>$refund_status,'mrm_refund_failed_at'=>current_time('mysql'),'mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); $wpdb->update($this->table_sheet_music_access(),array('revoked_at'=>!empty($summary['is_full_refund'])?current_time('mysql'):null),array('source_id'=>$pi_id)); } }
+    if($pi_id!==''){ $order=$this->get_order_by_pi($pi_id); if(is_array($order) && !empty($order['id'])){ $order_id=absint($order['id']); $addon_refund_id=sanitize_text_field($this->mrm_get_order_meta_value($order,'mrm_subscription_addon_refund_id','')); if($addon_refund_id!=='' && hash_equals($addon_refund_id,$refund_id)){ $this->mrm_set_order_meta_flag($order_id,'mrm_subscription_addon_refund_status',$refund_status); $this->mrm_set_order_meta_flag($order_id,'mrm_sheet_music_subscription_status','activation_failed_addon_refund_failed'); } if(!empty($summary['is_full_refund'])){ $new_order_status='refunded'; $new_stripe_status='refunded'; } elseif(!empty($summary['is_partial_refund'])){ $new_order_status='partially_refunded'; $new_stripe_status='partially_refunded'; } else { $new_order_status='paid'; $new_stripe_status='succeeded'; } $this->update_order_status_from_pi($pi_id,$new_order_status,$new_stripe_status,array('mrm_refund_id'=>$refund_id,'mrm_refund_status'=>$refund_status,'mrm_refund_failed_at'=>current_time('mysql'),'mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); /* A failed or canceled refund must not alter entitlement state. A prior successful partial refund may already have correctly revoked the sheet-music add-on. Only successful refund processing is allowed to grant or revoke access. */ } }
     do_action('mrm_payments_hub_refund_failed',$refund,$charge,$summary);
     $alert_result=$this->mrm_tax_create_alert('', 'refund_failure_recovery_required','refund',0,array('message'=>'Refund '.$refund_id.' entered status '.$refund_status.'. The tax ledger was restored, but order, access, payout, registration, and accounting records require review.','refund_id'=>$refund_id,'payment_intent_id'=>$pi_id,'charge_id'=>$charge_id,'refund_status'=>$refund_status,'failure_reason'=>sanitize_text_field($refund['failure_reason'] ?? ''),'remaining_successful_refund_cents'=>$summary['succeeded_refund_cents'],'charge_amount_cents'=>$summary['charge_amount_cents']),sanitize_key($refund_id)); if(is_wp_error($alert_result)) return $alert_result;
     $charge_state_result=$this->mrm_store_charge_refund_effects_state($charge_id,$summary,!empty($summary['is_full_refund']) ? !empty($charge_state['full_effects_applied']) : false,!empty($summary['is_full_refund']) ? sanitize_text_field($charge_state['full_transition_refund_id'] ?? '') : ''); if(is_wp_error($charge_state_result)) return $charge_state_result;
@@ -11505,11 +11602,76 @@ private function mrm_tax_retry_or_alert_payment_intent(
     return wp_date('m/d/Y', $start_ts, wp_timezone()) . ' - ' . wp_date('m/d/Y', $end_ts, wp_timezone());
   }
 
-  private function mrm_send_wrapped_summary_email($to, $subject, $title, $intro_html, $details_html, $cta_url = '', $cta_label = '') {
+  private function mrm_queue_payout_summary_email($dedupe_key, $email_type, $reference_key, $recipient_email, $subject, $body_html) {
+    global $wpdb;
+    $table = $this->table_payout_email_queue();
+    $dedupe_key = sanitize_text_field($dedupe_key);
+    $email_type = sanitize_key($email_type);
+    $reference_key = sanitize_text_field($reference_key);
+    $recipient_email = sanitize_email($recipient_email);
+    $subject = sanitize_text_field($subject);
+    if ('' === $dedupe_key || !$recipient_email || !is_email($recipient_email) || '' === $subject || '' === trim($body_html)) return false;
+    $existing = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE dedupe_key = %s LIMIT 1", $dedupe_key), ARRAY_A);
+    if (is_array($existing)) {
+      $status = sanitize_key($existing['status'] ?? '');
+      if ('sent' === $status) return true;
+      if (in_array($status, array('uncertain', 'manual_review'), true)) return false;
+      $job_id = absint($existing['id'] ?? 0);
+    } else {
+      $now = current_time('mysql', true);
+      $inserted = $wpdb->insert($table, array('dedupe_key'=>$dedupe_key,'email_type'=>$email_type,'reference_key'=>$reference_key,'recipient_email'=>$recipient_email,'subject'=>$subject,'body_html'=>$body_html,'status'=>'pending','attempt_count'=>0,'created_at'=>$now,'updated_at'=>$now), array('%s','%s','%s','%s','%s','%s','%s','%d','%s','%s'));
+      $job_id = false === $inserted ? absint($wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE dedupe_key = %s LIMIT 1", $dedupe_key))) : absint($wpdb->insert_id);
+    }
+    if ($job_id <= 0) return false;
+    $this->mrm_send_payout_summary_email_job($job_id);
+    return true;
+  }
+
+  private function mrm_send_payout_summary_email_job($job_id) {
+    global $wpdb;
+    $job_id = absint($job_id); if ($job_id <= 0) return false;
+    $table = $this->table_payout_email_queue();
+    $claim_token = wp_generate_password(48, false, false);
+    $now = current_time('mysql', true);
+    $claimed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = 'sending', claim_token = %s, claimed_at = %s, attempt_count = attempt_count + 1, updated_at = %s WHERE id = %d AND status IN ('pending','failed') AND (next_attempt_at IS NULL OR next_attempt_at <= %s)", $claim_token, $now, $now, $job_id, $now));
+    if (1 !== (int)$claimed) {
+      $existing_status = sanitize_key($wpdb->get_var($wpdb->prepare("SELECT status FROM {$table} WHERE id = %d", $job_id)));
+      return 'sent' === $existing_status;
+    }
+    $job = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE id = %d AND claim_token = %s LIMIT 1", $job_id, $claim_token), ARRAY_A);
+    if (!is_array($job)) return false;
+    $sent = wp_mail(sanitize_email($job['recipient_email'] ?? ''), (string)($job['subject'] ?? ''), (string)($job['body_html'] ?? ''), array('Content-Type: text/html; charset=UTF-8'));
+    if (!$sent) {
+      $attempt_count = absint($job['attempt_count'] ?? 1);
+      $next_status = $attempt_count >= 6 ? 'manual_review' : 'failed';
+      $next_attempt_at = $attempt_count >= 6 ? null : gmdate('Y-m-d H:i:s', time() + 15 * MINUTE_IN_SECONDS);
+      $wpdb->update($table, array('status'=>$next_status,'last_error'=>'wp_mail() returned false.','claim_token'=>null,'claimed_at'=>null,'next_attempt_at'=>$next_attempt_at,'updated_at'=>current_time('mysql', true)), array('id'=>$job_id,'claim_token'=>$claim_token));
+      if ('manual_review' === $next_status) error_log('[MRM Payments] Payout-summary email requires manual review. Queue job ' . $job_id);
+      return false;
+    }
+    $updated = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = 'sent', sent_at = %s, last_error = NULL, claim_token = NULL, claimed_at = NULL, next_attempt_at = NULL, updated_at = %s WHERE id = %d AND status = 'sending' AND claim_token = %s", current_time('mysql', true), current_time('mysql', true), $job_id, $claim_token));
+    if (1 !== (int)$updated) {
+      $wpdb->update($table, array('status'=>'uncertain','last_error'=>'wp_mail() returned true, but the sent-state update could not be confirmed. Automatic resend was suppressed.','claim_token'=>null,'claimed_at'=>null,'updated_at'=>current_time('mysql', true)), array('id'=>$job_id));
+      error_log('[MRM Payments] Payout-summary email delivery is uncertain. Queue job ' . $job_id);
+      return false;
+    }
+    return true;
+  }
+
+  public function cron_retry_payout_summary_emails() {
+    global $wpdb;
+    $table = $this->table_payout_email_queue();
+    $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = 'uncertain', last_error = %s, claim_token = NULL, claimed_at = NULL, updated_at = %s WHERE status = 'sending' AND claimed_at < %s", 'The previous send process stopped before delivery could be confirmed. Automatic resend was suppressed.', current_time('mysql', true), gmdate('Y-m-d H:i:s', time() - 15 * MINUTE_IN_SECONDS)));
+    $job_ids = $wpdb->get_col($wpdb->prepare("SELECT id FROM {$table} WHERE status IN ('pending','failed') AND attempt_count < 6 AND (next_attempt_at IS NULL OR next_attempt_at <= %s) ORDER BY id ASC LIMIT 25", current_time('mysql', true)));
+    foreach ((array)$job_ids as $job_id) $this->mrm_send_payout_summary_email_job(absint($job_id));
+  }
+
+  private function mrm_send_wrapped_summary_email($to, $subject, $title, $intro_html, $details_html, $cta_url = '', $cta_label = '', $dedupe_key = '', $email_type = 'payout_summary', $reference_key = '') {
     $to = sanitize_email((string)$to);
     if (!$to || !is_email($to)) return false;
     $body = $this->mrm_email_wrap_html($title, $intro_html, $details_html, $cta_url, $cta_label);
-    return wp_mail($to, $subject, $body, array('Content-Type: text/html; charset=UTF-8'));
+    if ('' === $dedupe_key) $dedupe_key = 'payout_summary_' . hash('sha256', implode('|', array(strtolower($to), $subject, $body)));
+    return $this->mrm_queue_payout_summary_email($dedupe_key, $email_type, $reference_key, $to, $subject, $body);
   }
 
   private function mrm_sum_platform_retained_for_order_ids($order_ids) {
@@ -11536,7 +11698,9 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $details = '<div><strong>Pay period:</strong> ' . esc_html($this->mrm_payout_period_label_from_rows($rows, $period)) . '</div><div><strong>Stripe payout:</strong> ' . esc_html((string)($payout['id'] ?? '')) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Lesson Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Count</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payout</th></tr></thead><tbody>';
     foreach ($summary as $row) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($row['label']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$row['count']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($row['cents'])) . '</td></tr>';
     $details .= '</tbody></table><div style="margin-top:14px;font-size:17px;"><strong>Total payout:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
-    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons payout summary ' . $this->mrm_payout_period_label_from_rows($rows, $period), 'Payout Summary', '<p>Your instructor payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support');
+    $payout_id = sanitize_text_field($payout['id'] ?? '');
+    $email_dedupe_key = 'instructor_payout_summary|' . $payout_id . '|' . hash('sha256', strtolower($to));
+    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons payout summary ' . $this->mrm_payout_period_label_from_rows($rows, $period), 'Payout Summary', '<p>Your instructor payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support', $email_dedupe_key, 'instructor_payout_summary', $payout_id);
     return array('type'=>'instructor','name'=>$name,'email'=>$to,'paid_cents'=>$total,'platform_cents'=>$this->mrm_sum_platform_retained_for_order_ids($order_ids),'promo_loss_cents'=>0);
   }
 
@@ -11553,7 +11717,9 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $details = '<div><strong>Pay period:</strong> ' . esc_html($this->mrm_payout_period_label_from_rows($rows, $period)) . '</div><div><strong>Stripe payout:</strong> ' . esc_html((string)($payout['id'] ?? '')) . '</div><div><strong>Subscriptions paid in this window:</strong> ' . esc_html((string)$subscription_count) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Product</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Quantity</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo Reduction</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Composer Payout</th></tr></thead><tbody>';
     foreach ($items as $item) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['label']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($item['kind']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$item['count']) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($item['promo_loss_cents'])) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($item['payout_cents'])) . '</td></tr>';
     $details .= '</tbody></table><div style="margin-top:14px;"><strong>Total promo reduction affecting composer content:</strong> -' . esc_html($this->mrm_summary_money($promo_loss)) . '</div><div style="margin-top:8px;font-size:17px;"><strong>Total composer payout:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
-    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons payout summary ' . $this->mrm_payout_period_label_from_rows($rows, $period), 'Payout Summary', '<p>Your composer payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support');
+    $payout_id = sanitize_text_field($payout['id'] ?? '');
+    $email_dedupe_key = 'composer_payout_summary|' . $payout_id . '|' . hash('sha256', strtolower($to));
+    $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons payout summary ' . $this->mrm_payout_period_label_from_rows($rows, $period), 'Payout Summary', '<p>Your composer payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support', $email_dedupe_key, 'composer_payout_summary', $payout_id);
     return array('type'=>'composer','name'=>'Composer','email'=>$to,'paid_cents'=>$total,'platform_cents'=>$this->mrm_sum_platform_retained_for_order_ids($order_ids),'promo_loss_cents'=>$promo_loss);
   }
 
@@ -11570,7 +11736,8 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $details = '<div><strong>Batch:</strong> ' . esc_html($batch_key) . '</div>' . ($period_label !== '' ? '<div><strong>Pay period:</strong> ' . esc_html($period_label) . '</div>' : '') . '<table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payee Type</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payee</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Paid Out</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Promo Reduction</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Company Retained</th></tr></thead><tbody>';
     foreach ((array)$items as $item) { if (empty($item) || !is_array($item)) continue; $type = sanitize_key((string)($item['type'] ?? '')); $paid = (int)($item['paid_cents'] ?? 0); $platform = (int)($item['platform_cents'] ?? 0); $promo_loss = (int)($item['promo_loss_cents'] ?? 0); if (isset($totals[$type])) $totals[$type] += $paid; $totals['platform'] += max(0, $platform - $promo_loss); $totals['promo_loss'] += $promo_loss; $display_platform = max(0, $platform - $promo_loss); $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html(ucfirst($type)) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)($item['name'] ?? '—')) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($paid)) . '</td><td style="border:1px solid #ddd;padding:8px;">-' . esc_html($this->mrm_summary_money($promo_loss)) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($display_platform)) . '</td></tr>'; }
     $details .= '</tbody></table><div style="margin-top:14px;"><strong>Instructor payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['instructor'])) . '</div><div><strong>Presenter payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['presenter'])) . '</div><div><strong>Composer payouts:</strong> ' . esc_html($this->mrm_summary_money($totals['composer'])) . '</div><div><strong>Promo-code reductions:</strong> -' . esc_html($this->mrm_summary_money($totals['promo_loss'])) . '</div><div style="margin-top:8px;font-size:17px;"><strong>Company retained / netted:</strong> ' . esc_html($this->mrm_summary_money($totals['platform'])) . '</div>';
-    return $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons owner payout batch summary', 'Owner Payout Batch Summary', '<p>A payout batch has been processed. Here is the owner/company summary.</p>', $details);
+    $email_dedupe_key = 'owner_payout_summary|' . sanitize_text_field($batch_key) . '|' . hash('sha256', $details);
+    return $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons owner payout batch summary', 'Owner Payout Batch Summary', '<p>A payout batch has been processed. Here is the owner/company summary.</p>', $details, '', '', $email_dedupe_key, 'owner_payout_summary', sanitize_text_field($batch_key));
   }
 
   private function mrm_send_presenter_payout_summaries_for_rows($rows, $batch_key) {
@@ -11582,7 +11749,9 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $details = '<div><strong>Masterclass:</strong> ' . esc_html((string)($first['event_title'] ?? '')) . '</div><table style="width:100%;border-collapse:collapse;margin-top:14px;"><thead><tr><th style="text-align:left;border:1px solid #ddd;padding:8px;">Payout Per Student</th><th style="text-align:left;border:1px solid #ddd;padding:8px;">Number of Students Enrolled</th></tr></thead><tbody>';
       foreach ($event_groups as $event) $details .= '<tr><td style="border:1px solid #ddd;padding:8px;">' . esc_html($this->mrm_summary_money($event['per_student_cents'])) . '</td><td style="border:1px solid #ddd;padding:8px;">' . esc_html((string)$event['students']) . '</td></tr>';
       $details .= '</tbody></table><div style="margin-top:14px;font-size:17px;"><strong>Payout Total:</strong> ' . esc_html($this->mrm_summary_money($total)) . '</div>';
-      $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons masterclass payout summary', 'Payout Summary', '<p>Your presenter payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support');
+      $presenter_id = absint($first['presenter_id'] ?? 0);
+      $email_dedupe_key = 'presenter_payout_summary|' . sanitize_text_field($batch_key) . '|' . $presenter_id;
+      $this->mrm_send_wrapped_summary_email($to, 'Low Brass Lessons masterclass payout summary', 'Payout Summary', '<p>Your presenter payout has been processed successfully. Here is the summary:</p>', $details, $this->mrm_get_contact_url(), 'Contact Support', $email_dedupe_key, 'presenter_payout_summary', sanitize_text_field($batch_key));
       $owner_items[] = array('type'=>'presenter','name'=>$name,'email'=>$to,'paid_cents'=>$total,'platform_cents'=>$platform_total,'promo_loss_cents'=>0);
     }
     return $owner_items;
@@ -29240,8 +29409,9 @@ register_activation_hook(__FILE__, function() {
 });
 
 register_deactivation_hook(__FILE__, function() {
-  $hooks = array('mrm_pay_hub_cleanup_access','mrm_pay_hub_daily_payout_check','mrm_pay_hub_daily_presenter_payout_check','mrm_pay_hub_retry_autopay_charges','mrm_pay_hub_discover_missed_autopay_lessons','mrm_pay_hub_reset_stuck_autopay_lessons','mrm_pay_hub_check_upcoming_payment_methods','mrm_pay_hub_retry_sheet_music_subscriptions','mrm_sheet_music_subscription_renewal_reminder_cron','mrm_pay_hub_tax_sync_registrations','mrm_pay_hub_tax_recompute_thresholds','mrm_pay_hub_tax_filing_deadline_check','mrm_pay_hub_tax_enforce_subscription_holds','mrm_pay_hub_tax_retry_association','mrm_pay_hub_tax_retry_refund_association','mrm_pay_hub_retry_refund_lifecycle','mrm_pay_hub_retry_subscription_invoice_refunds','mrm_pay_hub_retry_subscription_invoice_lifecycle');
+  $hooks = array('mrm_pay_hub_cleanup_access','mrm_pay_hub_daily_payout_check','mrm_pay_hub_daily_presenter_payout_check','mrm_pay_hub_retry_autopay_charges','mrm_pay_hub_discover_missed_autopay_lessons','mrm_pay_hub_reset_stuck_autopay_lessons','mrm_pay_hub_check_upcoming_payment_methods','mrm_pay_hub_retry_sheet_music_subscriptions','mrm_sheet_music_subscription_renewal_reminder_cron','mrm_pay_hub_tax_sync_registrations','mrm_pay_hub_tax_recompute_thresholds','mrm_pay_hub_tax_filing_deadline_check','mrm_pay_hub_tax_enforce_subscription_holds','mrm_pay_hub_tax_retry_association','mrm_pay_hub_tax_retry_refund_association','mrm_pay_hub_retry_refund_lifecycle','mrm_pay_hub_retry_subscription_invoice_refunds','mrm_pay_hub_retry_subscription_invoice_lifecycle','mrm_pay_hub_retry_payout_summary_emails');
   foreach ($hooks as $hook) wp_clear_scheduled_hook($hook);
+  delete_option(MRM_Payments_Hub_Single::OPT_RECEIPT_RETRY_CURSOR);
 });
 
 /**
