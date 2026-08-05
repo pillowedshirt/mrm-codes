@@ -2536,7 +2536,7 @@ private function mrm_mark_promo_redemption_paid($order_id, $payment_intent_id) {
   $wpdb->update(
     $this->table_promo_redemptions(),
     array(
-      'status' => 'paid',
+      'status' => $order_state['status'],
       'stripe_payment_intent_id' => sanitize_text_field((string)$payment_intent_id),
       'updated_at' => current_time('mysql'),
     ),
@@ -6188,11 +6188,12 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
           continue;
         }
 
-        $order_status = sanitize_key($order['status'] ?? '');
-        $is_addon_only_partial_refund = 'partially_refunded' === $order_status && '' !== $subscription_addon_refund_id && in_array($subscription_addon_refund_status, array('pending', 'succeeded'), true);
-        if (in_array($order_status, array('refund_pending', 'refunded'), true)) continue;
-        if ('partially_refunded' === $order_status && !$is_addon_only_partial_refund) continue;
-        if (!in_array($order_status, array('paid', 'partially_refunded'), true)) continue;
+        $order_state = $this->mrm_classify_order_success_state($order);
+        $order_status = $order_state['status'];
+        $is_addon_only_partial_refund = $order_state['addon_only_partial_refund'];
+        if ($order_state['terminal_refund']) continue;
+        if ($order_state['other_partial_refund']) continue;
+        if (!$order_state['can_run_primary_fulfillment']) continue;
 
         if (!empty($metadata['mrm_receipt_sent_at']) || empty($order['stripe_payment_intent_id'])) continue;
         $pi = $this->stripe_retrieve_payment_intent($order['stripe_payment_intent_id']);
@@ -6203,18 +6204,22 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
           if (is_array($result) && !empty($result['booking_refunded'])) continue;
           $order = $this->get_order_by_pi($order['stripe_payment_intent_id']);
           if (!is_array($order)) { $this->mrm_schedule_purchase_receipt_retry(); continue; }
-          $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
-          if (is_wp_error($addon_grant_result)) { error_log('[MRM Payments] Receipt retry could not grant the lesson add-on for order ' . absint($order['id']) . ': ' . $addon_grant_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); continue; }
+          $order_state = $this->mrm_classify_order_success_state($order);
+          if ($order_state['terminal_refund'] || $order_state['other_partial_refund']) continue;
+          if ($order_state['can_run_addon_fulfillment']) {
+            $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
+            if (is_wp_error($addon_grant_result)) { error_log('[MRM Payments] Receipt retry could not grant the lesson add-on for order ' . absint($order['id']) . ': ' . $addon_grant_result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); continue; }
+          }
           $order_metadata = $this->mrm_get_order_meta_array($order);
           $pi_metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
           $combined_metadata = array_merge($order_metadata, $pi_metadata);
           $addon_selected = isset($combined_metadata['mrm_sheet_music_addon']) && 'yes' === strtolower((string)$combined_metadata['mrm_sheet_music_addon']);
-          if ($addon_selected && !empty($order['id'])) {
+          if ($addon_selected && !empty($order['id']) && $order_state['can_run_addon_fulfillment']) {
             $this->mrm_attempt_sheet_music_subscription_activation(absint($order['id']), $pi, 'purchase_receipt_retry');
             $order = $this->get_order_by_pi($order['stripe_payment_intent_id']);
             if (!is_array($order)) { $this->mrm_schedule_purchase_receipt_retry(); continue; }
-            $reloaded_status = sanitize_key($order['status'] ?? '');
-            if (in_array($reloaded_status, array('refund_pending', 'refunded'), true)) continue;
+            $order_state = $this->mrm_classify_order_success_state($order);
+            if ($order_state['terminal_refund'] || $order_state['other_partial_refund']) continue;
             $order_metadata = $this->mrm_get_order_meta_array($order);
             $addon_refund_id = sanitize_text_field($order_metadata['mrm_subscription_addon_refund_id'] ?? '');
             $addon_refund_status = sanitize_key($order_metadata['mrm_subscription_addon_refund_status'] ?? '');
@@ -6258,6 +6263,23 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       'payment_intent_succeeded_id_missing',
       'The payment_intent.succeeded event did not contain a PaymentIntent ID.'
     );
+  }
+
+  $order = $this->get_order_by_pi($pi_id);
+  $order_state = is_array($order) ? $this->mrm_classify_order_success_state($order) : array();
+
+  if (is_array($order)) {
+    /*
+     * Tax synchronization may still be appropriate because the original
+     * PaymentIntent did succeed, but no business fulfillment may restart
+     * after a complete refund or an unrelated partial refund.
+     */
+    if (!empty($order_state['terminal_refund']) || !empty($order_state['other_partial_refund']) || empty($order_state['can_run_primary_fulfillment'])) {
+      $tax_sync_result = $this->mrm_tax_sync_payment_intent_ledger($pi, 0);
+      if (is_wp_error($tax_sync_result)) return $tax_sync_result;
+      $this->stripe_debug_log('Delayed payment success preserved protected local order state.', array('payment_intent_id'=>$pi_id,'order_id'=>absint($order['id'] ?? 0),'local_status'=>$order_state['status'] ?? ''));
+      return true;
+    }
   }
 
   /* Permanently consume the promo before downstream processing can fail. */
@@ -6311,30 +6333,36 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     $pi
   );
 
-  $order = $this->get_order_by_pi($pi_id);
-
-  if (!$order) {
+  if (!is_array($order)) {
+    /*
+     * Preserve the existing non-order behavior, including Masterclass hooks
+     * that may not use the standard orders table.
+     */
     return true;
   }
 
   $metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
   $metadata['mrm_latest_charge_id'] = $latest_charge;
 
-  $this->update_order_status_from_pi($pi_id, 'paid', (string)($pi['status'] ?? 'succeeded'), $metadata);
+  $order = $this->mrm_apply_payment_success_without_status_regression($pi, $order, $metadata);
+
+  if (is_wp_error($order)) {
+    return $order;
+  }
+
+  $order_state = $this->mrm_classify_order_success_state($order);
 
   $this->mrm_subscription_debug_log(
     'order updated after payment success',
     array(
       'order_id' => (int)($order['id'] ?? 0),
       'payment_intent_id' => $pi_id,
-      'status' => 'paid',
+      'status' => $order_state['status'],
     )
   );
 
-  $order = $this->get_order_by_pi($pi_id);
-
-  if ($order) {
-    if (sanitize_key((string)($order['product_type'] ?? '')) === 'sheet_music') {
+  if (is_array($order)) {
+    if ($order_state['can_run_primary_fulfillment'] && sanitize_key($order['product_type'] ?? '') === 'sheet_music') {
       $grant_result = $this->mrm_grant_sheet_music_purchase_entitlements($pi, 'stripe_pi_webhook');
       if (is_wp_error($grant_result)) return $grant_result;
     }
@@ -6349,8 +6377,11 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       }
       $order = $this->get_order_by_pi($pi_id);
       if (is_array($order)) {
-        $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
-        if (is_wp_error($addon_grant_result)) return $addon_grant_result;
+        $order_state = $this->mrm_classify_order_success_state($order);
+        if ($order_state['can_run_addon_fulfillment']) {
+          $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
+          if (is_wp_error($addon_grant_result)) return $addon_grant_result;
+        }
       }
     }
     $receipt_result = $this->mrm_maybe_send_purchase_receipt_email($pi, $order);
@@ -6381,7 +6412,9 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
     $product_type = (string)($order['product_type'] ?? '');
 
-    if ($addon_yes && $product_type === 'lesson' && !empty($order['id'])) {
+    $order_state = $this->mrm_classify_order_success_state($order);
+
+    if ($addon_yes && 'lesson' === $product_type && !empty($order['id']) && $order_state['can_run_addon_fulfillment']) {
       $this->mrm_attempt_sheet_music_subscription_activation((int)$order['id'], $pi, 'payment_intent_succeeded_webhook');
     }
 
@@ -9863,7 +9896,23 @@ private function mrm_tax_retry_or_alert_payment_intent(
       ));
 
       $order = $this->get_order($order_id);
-      if (!is_array($order) || empty($order)) {
+      if (!is_array($order)) {
+        $this->mrm_release_subscription_activation($order_id);
+        return false;
+      }
+
+      $order_state = $this->mrm_classify_order_success_state($order);
+      if (!$order_state['can_run_addon_fulfillment']) {
+        $this->mrm_subscription_debug_log(
+          'Subscription activation skipped because the order or add-on is in a protected refund state.',
+          array(
+            'context' => $context,
+            'order_id' => $order_id,
+            'order_status' => $order_state['status'],
+            'addon_refund_id' => $order_state['addon_refund_id'],
+            'addon_refund_status' => $order_state['addon_refund_status'],
+          )
+        );
         $this->mrm_release_subscription_activation($order_id);
         return false;
       }
@@ -10808,6 +10857,87 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
     $decoded = json_decode($raw, true);
     return is_array($decoded) ? $decoded : array();
+  }
+
+  private function mrm_classify_order_success_state(array $order) {
+    $status = sanitize_key($order['status'] ?? '');
+    $metadata = $this->mrm_get_order_meta_array($order);
+    $addon_refund_id = sanitize_text_field($metadata['mrm_subscription_addon_refund_id'] ?? '');
+    $addon_refund_status = sanitize_key($metadata['mrm_subscription_addon_refund_status'] ?? '');
+
+    /*
+     * The add-on refund begins as soon as a Refund ID exists with a pending
+     * or successful state. The lesson itself can remain valid, but
+     * sheet-music add-on fulfillment must stop permanently.
+     */
+    $addon_refund_started = '' !== $addon_refund_id && in_array($addon_refund_status, array('pending', 'succeeded'), true);
+    $terminal_refund = in_array($status, array('refund_pending', 'refunded'), true);
+    $addon_only_partial_refund = 'partially_refunded' === $status && $addon_refund_started;
+    $other_partial_refund = 'partially_refunded' === $status && !$addon_only_partial_refund;
+    $can_promote_to_paid = in_array($status, array('created', 'processing', 'failed'), true);
+    $is_paid = 'paid' === $status;
+
+    /*
+     * Primary fulfillment means the actual purchased lesson or sheet-music
+     * product. A valid lesson can remain active after only its optional
+     * add-on was refunded.
+     */
+    $can_run_primary_fulfillment = $is_paid || $can_promote_to_paid || $addon_only_partial_refund;
+
+    /*
+     * Add-on fulfillment is more restrictive. Once an add-on refund starts,
+     * access and subscription activation must never restart.
+     */
+    $can_run_addon_fulfillment = ($is_paid || $can_promote_to_paid) && !$addon_refund_started && !$terminal_refund && !$other_partial_refund;
+
+    return array(
+      'status' => $status,
+      'stripe_status' => sanitize_key($order['stripe_status'] ?? ''),
+      'metadata' => $metadata,
+      'addon_refund_id' => $addon_refund_id,
+      'addon_refund_status' => $addon_refund_status,
+      'addon_refund_started' => $addon_refund_started,
+      'terminal_refund' => $terminal_refund,
+      'addon_only_partial_refund' => $addon_only_partial_refund,
+      'other_partial_refund' => $other_partial_refund,
+      'can_promote_to_paid' => $can_promote_to_paid,
+      'is_paid' => $is_paid,
+      'can_run_primary_fulfillment' => $can_run_primary_fulfillment,
+      'can_run_addon_fulfillment' => $can_run_addon_fulfillment,
+    );
+  }
+
+  private function mrm_apply_payment_success_without_status_regression(array $pi, array $order, array $extra_metadata = array()) {
+    $payment_intent_id = sanitize_text_field($pi['id'] ?? '');
+
+    if ('' === $payment_intent_id || empty($order['id'])) {
+      return new WP_Error('payment_success_order_reference_missing', 'The successful payment order could not be identified.');
+    }
+
+    $state = $this->mrm_classify_order_success_state($order);
+    $pi_metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
+    $metadata = array_merge($pi_metadata, $extra_metadata);
+
+    /* Only pre-payment states can advance to paid. */
+    if ($state['can_promote_to_paid'] || $state['is_paid']) {
+      $this->update_order_status_from_pi($payment_intent_id, 'paid', 'succeeded', $metadata);
+    } else {
+      /*
+       * Merge useful Stripe metadata while preserving both the local order
+       * status and its current Stripe/refund status.
+       */
+      $preserved_status = '' !== $state['status'] ? $state['status'] : 'created';
+      $preserved_stripe_status = '' !== $state['stripe_status'] ? $state['stripe_status'] : $preserved_status;
+      $this->update_order_status_from_pi($payment_intent_id, $preserved_status, $preserved_stripe_status, $metadata);
+    }
+
+    $updated_order = $this->get_order_by_pi($payment_intent_id);
+
+    if (!is_array($updated_order)) {
+      return new WP_Error('payment_success_order_reload_failed', 'The successful payment order could not be reloaded.');
+    }
+
+    return $updated_order;
   }
 
   private function mrm_get_order_meta_value($order_row, $key, $default = '') {
@@ -16929,7 +17059,15 @@ private function charge_and_unlock_autopay($data) {
   private function mrm_grant_lesson_sheet_music_addon_after_booking(array $pi, array $order) {
     $payment_intent_id = sanitize_text_field($pi['id'] ?? '');
     if ('' === $payment_intent_id || 'lesson' !== sanitize_key($order['product_type'] ?? '')) return true;
-    if (in_array(sanitize_key($order['status'] ?? ''), array('refund_pending','refunded'), true)) return true;
+
+    $order_state = $this->mrm_classify_order_success_state($order);
+
+    /*
+     * Add-on access can be granted only while the complete order remains
+     * paid and no add-on refund has started.
+     */
+    if (!$order_state['can_run_addon_fulfillment']) return true;
+
     $order_meta = $this->mrm_get_order_meta_array($order);
     $pi_meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
     $metadata = array_merge($order_meta, $pi_meta);
@@ -17000,8 +17138,13 @@ private function charge_and_unlock_autopay($data) {
     $status = (string)($pi['status'] ?? '');
     $terminal_statuses = array('succeeded');
     $fail_statuses = array('requires_payment_method', 'canceled');
-
     $ok = in_array($status, $terminal_statuses, true);
+
+    $order = $this->get_order_by_pi($pi_id);
+    if (!is_array($order)) {
+      return new WP_REST_Response(array('ok'=>false,'status'=>$status,'payment_received'=>$ok,'order_reconciliation_pending'=>true,'message'=>'The payment status was received, but the local order is still being reconciled. Do not submit another payment.'), 503);
+    }
+    $order_state = $this->mrm_classify_order_success_state($order);
 
     if ($ok) {
       $tax_sync_result = $this->mrm_tax_sync_payment_intent_ledger($pi, 0);
@@ -17010,160 +17153,93 @@ private function charge_and_unlock_autopay($data) {
       }
     }
 
+    if ($ok && $order_state['terminal_refund']) return new WP_REST_Response(array('ok'=>true,'status'=>$order_state['status'],'payment_received'=>true,'order_refunded'=>true,'fulfillment_blocked'=>true,'message'=>'This payment has entered the refund process. No new booking or product access will be created.'), 200);
+    if ($ok && $order_state['other_partial_refund']) return new WP_REST_Response(array('ok'=>true,'status'=>'partially_refunded','payment_received'=>true,'manual_reconciliation_required'=>true,'fulfillment_blocked'=>true,'message'=>'This order has been partially refunded and requires reconciliation. No additional fulfillment was created.'), 200);
+    if ($ok && !$order_state['can_run_primary_fulfillment']) return new WP_REST_Response(array('ok'=>true,'status'=>$order_state['status'],'payment_received'=>true,'fulfillment_blocked'=>true,'message'=>'The payment succeeded, but this order is not eligible for automatic fulfillment. Support has been notified.'), 200);
+
     $piece_auto_grant_attempted = false;
     $piece_auto_grant_success = false;
     $piece_auto_grant_skus = array();
 
-    // If this PaymentIntent was created with a customer + setup_future_usage,
-    // Stripe should attach the payment method to the customer.
-    // We log proof and force-set default PM for off-session charges.
     if ($ok) {
       $customer_id = isset($pi['customer']) ? (string)$pi['customer'] : '';
       $pm_id = isset($pi['payment_method']) ? (string)$pi['payment_method'] : '';
-      $sfu = isset($pi['setup_future_usage']) ? (string)$pi['setup_future_usage'] : '';
-
       if ($customer_id && $pm_id) {
-
         $pm_ready = $this->mrm_ensure_customer_payment_method_ready($customer_id, $pm_id);
         if (is_wp_error($pm_ready)) {
         } else {
         }
-      } else {
-        // If user expected autopay but no customer/pm is present, log it loudly
       }
     }
 
     $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
     $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
 
-    $start_ts = 0;
-    if (isset($pi['charges']['data'][0]['created'])) {
-      $start_ts = (int)$pi['charges']['data'][0]['created'];
-    } elseif (isset($pi['created'])) {
-      $start_ts = (int)$pi['created'];
-    } else {
-      $start_ts = time();
-    }
-
-    // Piece-product path: trusted metadata grants all purchased products.
-    if ($ok && sanitize_key((string)($meta['mrm_product_type'] ?? '')) === 'sheet_music') {
-      $pi_sku=$this->sanitize_sku($meta['mrm_sku']??'');
-      if ($pi_sku && $pi_sku !== $this->master_sheet_music_sku()) {
-        $piece_auto_grant_attempted=true;
-        $grant_result=$this->mrm_grant_sheet_music_purchase_entitlements($pi,'stripe_pi_verify');
-        if (!is_wp_error($grant_result)) { $piece_auto_grant_success=true; $piece_auto_grant_skus=array_values((array)($grant_result['skus']??array())); }
-      }
-    }
-
-    // Update local order status if it exists
     $latest_charge = '';
     if (!empty($pi['latest_charge'])) {
-      $latest_charge = (string)$pi['latest_charge'];
+      $latest_charge = is_array($pi['latest_charge']) ? sanitize_text_field($pi['latest_charge']['id'] ?? '') : sanitize_text_field($pi['latest_charge']);
     }
 
-    $order = $this->get_order_by_pi($pi_id);
-    if ($order) {
-      $new_status = $ok ? 'paid' : (in_array($status, $fail_statuses, true) ? 'failed' : 'created');
-      $metadata = $pi['metadata'] ?? null;
-      if (is_array($metadata)) {
-        $metadata['mrm_latest_charge_id'] = $latest_charge;
-      } else {
-        $metadata = array('mrm_latest_charge_id' => $latest_charge);
+    if ($ok) {
+      $order = $this->mrm_apply_payment_success_without_status_regression($pi, $order, array('mrm_latest_charge_id' => $latest_charge));
+      if (is_wp_error($order)) return new WP_REST_Response(array('ok'=>false,'payment_received'=>true,'order_reconciliation_pending'=>true,'message'=>$order->get_error_message()), 503);
+    } elseif (in_array($status, $fail_statuses, true)) {
+      $order_state = $this->mrm_classify_order_success_state($order);
+      if (!$order_state['terminal_refund'] && !$order_state['addon_only_partial_refund'] && !$order_state['other_partial_refund']) {
+        $this->update_order_status_from_pi($pi_id, 'failed', $status, array('mrm_latest_charge_id' => $latest_charge));
+        $order = $this->get_order_by_pi($pi_id);
       }
-      $this->update_order_status_from_pi($pi_id, $new_status, $status, $metadata);
     }
 
-    // Do not send the purchase receipt from the verify endpoint.
-    // The Stripe payment_intent.succeeded webhook is the sole sender
-    // for lesson purchase confirmation emails.
-    if ($ok && $order) {
-      $order = $this->get_order_by_pi($pi_id);
+    if (!is_array($order)) return new WP_REST_Response(array('ok'=>false,'payment_received'=>$ok,'order_reconciliation_pending'=>true,'message'=>'The local order could not be reloaded.'), 503);
+    $order_state = $this->mrm_classify_order_success_state($order);
 
-      if (is_array($order) && sanitize_key($order['product_type'] ?? '') === 'lesson') {
+    if ($ok && $order_state['can_run_primary_fulfillment'] && sanitize_key($order['product_type'] ?? '') === 'sheet_music') {
+      $pi_sku = $this->sanitize_sku($meta['mrm_sku'] ?? '');
+      if ($pi_sku && $pi_sku !== $this->master_sheet_music_sku()) {
+        $piece_auto_grant_attempted = true;
+        $grant_result = $this->mrm_grant_sheet_music_purchase_entitlements($pi, 'stripe_pi_verify');
+        if (!is_wp_error($grant_result)) {
+          $piece_auto_grant_success = true;
+          $piece_auto_grant_skus = array_values((array)($grant_result['skus'] ?? array()));
+        }
+      }
+    }
+
+    if ($ok && is_array($order) && $order_state['can_run_primary_fulfillment']) {
+      if (sanitize_key($order['product_type'] ?? '') === 'lesson') {
         $booking_result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
         if (is_wp_error($booking_result)) {
           error_log('[MRM Payments] Verification booking recovery failed for order ' . absint($order['id']) . ': ' . $booking_result->get_error_message());
           return new WP_Error('payment_received_booking_pending', 'Your payment was received. Your lesson is still being finalized. Do not submit another payment. Please check your email shortly.', array('status'=>503, 'payment_received'=>true));
         }
-        if (is_array($booking_result) && !empty($booking_result['booking_refunded'])) {
-          return new WP_REST_Response(array('ok'=>true,'status'=>'refund_pending','payment_received'=>true,'booking_refunded'=>true,'refund_id'=>sanitize_text_field($booking_result['refund_id'] ?? ''),'message'=>$booking_result['message']), 200);
-        }
+        if (is_array($booking_result) && !empty($booking_result['booking_refunded'])) return new WP_REST_Response(array('ok'=>true,'status'=>'refund_pending','payment_received'=>true,'booking_refunded'=>true,'refund_id'=>sanitize_text_field($booking_result['refund_id'] ?? ''),'message'=>$booking_result['message']), 200);
         $order = $this->get_order_by_pi($pi_id);
         if (is_array($order)) {
-          $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
-          if (is_wp_error($addon_grant_result)) return new WP_REST_Response(array('ok'=>false,'payment_received'=>true,'addon_activation_pending'=>true,'message'=>'Your lesson was booked, but the sheet-music add-on is still being activated. You do not need to submit another payment.'), 503);
+          $order_state = $this->mrm_classify_order_success_state($order);
+          if ($order_state['can_run_addon_fulfillment']) {
+            $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
+            if (is_wp_error($addon_grant_result)) return new WP_REST_Response(array('ok'=>false,'payment_received'=>true,'addon_activation_pending'=>true,'message'=>'Your lesson was booked, but the sheet-music add-on is still being activated. You do not need to submit another payment.'), 503);
+          }
         }
       }
 
-      /*
-       * Payout-ledger creation is intentionally handled only by payment_intent.succeeded.
-       * The webhook returns persistence errors so Stripe can retry; browser verification
-       * must not independently create or silently ignore payout records.
-       */
-
-      $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
-      $addon_yes = (isset($meta['mrm_sheet_music_addon']) && strtolower((string)$meta['mrm_sheet_music_addon']) === 'yes');
       $product_type = (string)($order['product_type'] ?? '');
+      $order_state = $this->mrm_classify_order_success_state($order);
+      $this->mrm_subscription_debug_log('verify endpoint loaded order before activation', array('order_id'=>(int)($order['id'] ?? 0),'order_status'=>(string)($order['status'] ?? ''),'order_payment_intent_id'=>(string)($order['stripe_payment_intent_id'] ?? ($order['payment_intent_id'] ?? '')),'passed_pi_id'=>(string)($pi['id'] ?? '')));
 
-      $this->mrm_subscription_debug_log('verify endpoint loaded order before activation', array(
-        'order_id' => (int)($order['id'] ?? 0),
-        'order_status' => (string)($order['status'] ?? ''),
-        'order_payment_intent_id' => (string)($order['stripe_payment_intent_id'] ?? ($order['payment_intent_id'] ?? '')),
-        'passed_pi_id' => (string)($pi['id'] ?? ''),
-      ));
-
-      if ($addon_yes && $product_type === 'lesson' && !empty($order['id'])) {
+      if ($addon_yes && 'lesson' === $product_type && !empty($order['id']) && $order_state['can_run_addon_fulfillment']) {
         $order_id = (int)($order['id'] ?? 0);
         $order_meta = $this->mrm_get_order_meta_array($order);
-
         $existing_subscription_id = (string)($order_meta['mrm_sheet_music_subscription_id'] ?? '');
-        $existing_created_at = (string)($order_meta['mrm_sheet_music_subscription_created_at'] ?? '');
         $email = sanitize_email((string)($order_meta['mrm_customer_email'] ?? ($pi['metadata']['mrm_customer_email'] ?? '')));
-
         $existing_active = array();
-        if ($email && is_email($email)) {
-          $existing_active = $this->mrm_get_active_sheet_music_subscription_by_email($email);
-        }
-
-        $this->mrm_subscription_debug_log('verify endpoint guarded activation check', array(
-          'order_id' => $order_id,
-          'payment_intent_id' => (string)($pi['id'] ?? ''),
-          'existing_subscription_id' => $existing_subscription_id,
-          'existing_created_at' => $existing_created_at,
-          'existing_active_found' => (!empty($existing_active['id']) ? 'yes' : 'no'),
-          'context' => 'verify_endpoint',
-        ));
-
-        if ($existing_subscription_id === '' && empty($existing_active['id'])) {
-          $this->mrm_subscription_debug_log('verify endpoint invoking guarded fallback activation', array(
-            'order_id' => $order_id,
-            'payment_intent_id' => (string)($pi['id'] ?? ''),
-            'context' => 'verify_endpoint',
-          ));
-
-          $this->mrm_attempt_sheet_music_subscription_activation($order_id, $pi, 'verify_endpoint_fallback');
-        } else {
-          $this->mrm_subscription_debug_log('verify endpoint skipped fallback activation because subscription already exists or is already active', array(
-            'order_id' => $order_id,
-            'payment_intent_id' => (string)($pi['id'] ?? ''),
-            'existing_subscription_id' => $existing_subscription_id,
-            'existing_active_subscription_id' => (string)($existing_active['stripe_subscription_id'] ?? ''),
-            'context' => 'verify_endpoint',
-          ));
-        }
+        if ($email && is_email($email)) $existing_active = $this->mrm_get_active_sheet_music_subscription_by_email($email);
+        if ($existing_subscription_id === '' && empty($existing_active['id'])) $this->mrm_attempt_sheet_music_subscription_activation($order_id, $pi, 'verify_endpoint_fallback');
       }
     }
 
-    return new WP_REST_Response(array(
-      'ok' => $ok,
-      'status' => $status,
-      'amount_cents' => (int)($pi['amount'] ?? 0),
-      'currency' => (string)($pi['currency'] ?? 'usd'),
-      'metadata' => (array)($pi['metadata'] ?? array()),
-      'piece_auto_grant_attempted' => (bool)$piece_auto_grant_attempted,
-      'piece_auto_grant_success' => (bool)$piece_auto_grant_success,
-      'piece_auto_grant_skus' => $piece_auto_grant_skus,
-    ), 200);
+    return new WP_REST_Response(array('ok'=>$ok,'status'=>$status,'amount_cents'=>(int)($pi['amount'] ?? 0),'currency'=>(string)($pi['currency'] ?? 'usd'),'metadata'=>(array)($pi['metadata'] ?? array()),'piece_auto_grant_attempted'=>(bool)$piece_auto_grant_attempted,'piece_auto_grant_success'=>(bool)$piece_auto_grant_success,'piece_auto_grant_skus'=>$piece_auto_grant_skus), 200);
   }
 
   private function mrm_wrap_transactional_email_html($title, $intro_html, $details_html, $button_url = '', $button_text = '', $options = array()) {
