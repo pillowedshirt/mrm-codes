@@ -3932,9 +3932,47 @@ async function verifyPaymentIntent(piId, email){
   });
   const vData = await vRes.json();
   if(!vRes.ok || !vData.ok){
+    if (mrmVerificationBlocksContinuation(vData)) {
+      return vData;
+    }
     throw new Error(vData.message || 'Payment not completed.');
   }
   return vData;
+}
+
+function mrmVerificationBlocksContinuation(data) {
+  return Boolean(
+    data &&
+    (
+      data.booking_refunded ||
+      data.order_refunded ||
+      data.fulfillment_blocked ||
+      data.manual_reconciliation_required
+    )
+  );
+}
+
+function mrmHandleBlockedVerification(data, setMsg) {
+  if (!mrmVerificationBlocksContinuation(data)) {
+    return false;
+  }
+
+  const message =
+    data && data.message
+      ? data.message
+      : 'This order cannot continue because its payment or refund status has changed. Do not submit another payment.';
+
+  if (typeof setMsg === 'function') {
+    setMsg(message);
+  }
+
+  try {
+    sessionStorage.removeItem(
+      'mrmSchedulerPayment'
+    );
+  } catch (error) {}
+
+  return true;
 }
 
 function handleRefundedBookingResult(data, setMsg) {
@@ -5608,9 +5646,8 @@ function ensureLegacyBookingHandler(){
                 mrmLessonPaymentConfirmationInProgress = false;
                 const verification = await verifyPaymentIntent(paymentIntent.id, email);
 
-                if (verification.booking_refunded) {
+                if (mrmHandleBlockedVerification(verification, setMsg)) {
                   await closeModal({ clearSelection: true, releaseCheckout: false });
-                  handleRefundedBookingResult(verification, setMsg);
                   mrmHidePaymentLoading();
                   return;
                 }
@@ -5799,9 +5836,8 @@ function ensureLegacyBookingHandler(){
               mrmLessonPaymentConfirmationInProgress = false;
               const verification = await verifyPaymentIntent(paymentIntent.id, email);
 
-              if (verification.booking_refunded) {
+              if (mrmHandleBlockedVerification(verification, setMsg)) {
                 await closeModal({ clearSelection: true, releaseCheckout: false });
-                handleRefundedBookingResult(verification, setMsg);
                 mrmHidePaymentLoading();
                 return;
               }
@@ -5871,8 +5907,7 @@ async function checkReturnFromStripe() {
   let recoveryCompleted=false;
   try{
     const verification = await verifyPaymentIntent(paymentIntentId,context.email);
-    if(verification.booking_refunded){
-      handleRefundedBookingResult(verification,setMessage);
+    if(mrmHandleBlockedVerification(verification,setMessage)){
       recoveryCompleted=true;
       return;
     }

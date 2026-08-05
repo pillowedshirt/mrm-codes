@@ -6063,6 +6063,8 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
     if ('' !== $stored_refund_id && !hash_equals($stored_refund_id, $refund_id)) return new WP_Error('subscription_addon_refund_id_mismatch','The add-on refund ID does not match the order.');
     $revoke_result = $this->mrm_revoke_sheet_music_entitlements_for_payment_intent($payment_intent_id);
     if (is_wp_error($revoke_result)) return $revoke_result;
+    $payout_cleanup_result = $this->mrm_void_refunded_lesson_addon_payout($order, $payment_intent_id, $refund_id);
+    if (is_wp_error($payout_cleanup_result)) return $payout_cleanup_result;
     $updated_order = $this->get_order_by_pi($payment_intent_id); if (!is_array($updated_order)) $updated_order = $order;
     $email_sent = $this->mrm_send_subscription_addon_refund_email($updated_order);
     if (!$email_sent) { $this->mrm_schedule_purchase_receipt_retry(); return new WP_Error('subscription_addon_refund_email_pending','The add-on refund was completed, but its customer email is still pending.'); }
@@ -6500,6 +6502,48 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
       $this->mrm_finalize_autopay_lesson_failure($lesson_id, $message);
     }
 
+    return true;
+  }
+
+  private function mrm_autopay_protected_order_error(array $order) {
+    $state = $this->mrm_classify_order_success_state($order);
+    if ($state['terminal_refund'] || $state['addon_only_partial_refund'] || $state['other_partial_refund'] || !$state['can_run_primary_fulfillment']) {
+      return new WP_Error('autopay_charge_order_protected', 'The AutoPay lesson charge is refunded, partially refunded, cancelled, or otherwise protected from finalization.', array('order_status'=>$state['status']));
+    }
+    return false;
+  }
+
+  private function mrm_void_refunded_lesson_addon_payout(array $order, $payment_intent_id, $refund_id) {
+    global $wpdb;
+    $order_id = absint($order['id'] ?? 0);
+    $payment_intent_id = sanitize_text_field($payment_intent_id);
+    $refund_id = sanitize_text_field($refund_id);
+    if ($order_id <= 0 || '' === $payment_intent_id) return new WP_Error('addon_payout_cleanup_reference_missing','The refunded add-on payout reference is missing.');
+    $table = $this->table_payout_ledger();
+    if (false === $wpdb->query('START TRANSACTION')) return new WP_Error('addon_payout_cleanup_transaction_failed','The add-on payout cleanup transaction could not be started.');
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE order_id = %d AND stripe_payment_intent_id = %s AND payee_type = 'composer' AND payee_ref = 'composer' AND notes LIKE %s ORDER BY id ASC FOR UPDATE", $order_id, $payment_intent_id, '%Add-on payout (subscription upcharge)%'), ARRAY_A);
+    if (empty($rows)) { $wpdb->query('COMMIT'); return true; }
+    $critical_rows = array();
+    foreach ($rows as $row) {
+      $ledger_id = absint($row['id'] ?? 0);
+      $status = sanitize_key($row['status'] ?? '');
+      if (in_array($status, array('refunded_void','refunded_reversed','refund_after_payout_needs_recovery'), true)) continue;
+      if (in_array($status, array('pending','error','blocked'), true)) {
+        $updated = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status = 'refunded_void', notes = %s, updated_at = %s WHERE id = %d AND status IN ('pending','error','blocked')", 'The initial sheet-music add-on was refunded. Refund: ' . $refund_id, current_time('mysql'), $ledger_id));
+        if (false === $updated) { $wpdb->query('ROLLBACK'); return new WP_Error('addon_payout_void_failed', $wpdb->last_error ? $wpdb->last_error : 'The refunded add-on payout could not be voided.'); }
+        continue;
+      }
+      if (in_array($status, array('transfer_processing','payout_processing','transferred','paid_out'), true)) {
+        $wpdb->update($table, array('status'=>'refund_after_payout_needs_recovery','notes'=>'The add-on was refunded after payout processing began. Immediate reconciliation is required. Refund: '.$refund_id,'updated_at'=>current_time('mysql')), array('id'=>$ledger_id), array('%s','%s','%s'), array('%d'));
+        $critical_rows[] = array('ledger_id'=>$ledger_id,'previous_status'=>$status,'transfer_id'=>sanitize_text_field($row['transfer_id'] ?? ''),'payout_id'=>sanitize_text_field($row['payout_id'] ?? ''),'amount_cents'=>absint($row['net_cents'] ?? 0));
+      }
+    }
+    if (false === $wpdb->query('COMMIT')) { $wpdb->query('ROLLBACK'); return new WP_Error('addon_payout_cleanup_commit_failed','The refunded add-on payout cleanup could not be committed.'); }
+    if (!empty($critical_rows)) {
+      $alert_result = $this->mrm_tax_create_alert('', 'refunded_addon_payout_reconciliation_required', 'payout', $order_id, array('message'=>'A refunded lesson add-on had already entered transfer or payout processing. Manual financial reconciliation is required immediately.','order_id'=>$order_id,'payment_intent_id'=>$payment_intent_id,'refund_id'=>$refund_id,'ledger_rows'=>$critical_rows), sanitize_key('addon_refund_payout_'.$order_id.'_'.$refund_id));
+      if (is_wp_error($alert_result)) return $alert_result;
+      error_log('[MRM Payments] CRITICAL: Refunded add-on payout requires reconciliation for order '.$order_id.', refund '.$refund_id);
+    }
     return true;
   }
 
@@ -10907,6 +10951,69 @@ private function mrm_tax_retry_or_alert_payment_intent(
     );
   }
 
+  private function mrm_atomic_update_order_if_status_allowed($payment_intent_id, $new_status, $new_stripe_status, array $incoming_metadata, array $allowed_current_statuses) {
+    global $wpdb;
+
+    $payment_intent_id = sanitize_text_field($payment_intent_id);
+    $new_status = sanitize_key($new_status);
+    $new_stripe_status = sanitize_key($new_stripe_status);
+    $allowed_current_statuses = array_values(array_unique(array_filter(array_map('sanitize_key', $allowed_current_statuses))));
+
+    if ('' === $payment_intent_id || empty($allowed_current_statuses)) {
+      return new WP_Error('atomic_order_update_invalid', 'The conditional order update is invalid.');
+    }
+
+    $orders_table = $this->table_orders();
+
+    if (false === $wpdb->query('START TRANSACTION')) {
+      return new WP_Error('atomic_order_transaction_failed', 'The order transaction could not be started.');
+    }
+
+    $order = $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM {$orders_table} WHERE stripe_payment_intent_id = %s LIMIT 1 FOR UPDATE",
+      $payment_intent_id
+    ), ARRAY_A);
+
+    if (!is_array($order)) {
+      $wpdb->query('ROLLBACK');
+      return new WP_Error('atomic_order_missing', 'The payment order could not be found.');
+    }
+
+    $current_status = sanitize_key($order['status'] ?? '');
+    $existing_metadata = $this->mrm_get_order_meta_array($order);
+    $merged_metadata = array_merge($existing_metadata, $incoming_metadata);
+    $data = array('metadata_json' => wp_json_encode($merged_metadata), 'updated_at' => current_time('mysql'));
+    $formats = array('%s', '%s');
+    $status_changed = false;
+
+    if (in_array($current_status, $allowed_current_statuses, true)) {
+      $data['status'] = $new_status;
+      $data['stripe_status'] = $new_stripe_status;
+      $formats[] = '%s';
+      $formats[] = '%s';
+      $status_changed = true;
+    }
+
+    $updated = $wpdb->update($orders_table, $data, array('id' => absint($order['id'])), $formats, array('%d'));
+    if (false === $updated) {
+      $database_error = $wpdb->last_error;
+      $wpdb->query('ROLLBACK');
+      return new WP_Error('atomic_order_update_failed', $database_error ? $database_error : 'The conditional order update failed.');
+    }
+
+    if (false === $wpdb->query('COMMIT')) {
+      $wpdb->query('ROLLBACK');
+      return new WP_Error('atomic_order_commit_failed', 'The conditional order update could not be committed.');
+    }
+
+    $fresh_order = $this->get_order_by_pi($payment_intent_id);
+    if (!is_array($fresh_order)) {
+      return new WP_Error('atomic_order_reload_failed', 'The updated order could not be reloaded.');
+    }
+
+    return array('order' => $fresh_order, 'previous_status' => $current_status, 'status_changed' => $status_changed);
+  }
+
   private function mrm_apply_payment_success_without_status_regression(array $pi, array $order, array $extra_metadata = array()) {
     $payment_intent_id = sanitize_text_field($pi['id'] ?? '');
 
@@ -10914,30 +11021,20 @@ private function mrm_tax_retry_or_alert_payment_intent(
       return new WP_Error('payment_success_order_reference_missing', 'The successful payment order could not be identified.');
     }
 
-    $state = $this->mrm_classify_order_success_state($order);
     $pi_metadata = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
-    $metadata = array_merge($pi_metadata, $extra_metadata);
+    $result = $this->mrm_atomic_update_order_if_status_allowed(
+      $payment_intent_id,
+      'paid',
+      'succeeded',
+      array_merge($pi_metadata, $extra_metadata),
+      array('created', 'processing', 'failed', 'paid')
+    );
 
-    /* Only pre-payment states can advance to paid. */
-    if ($state['can_promote_to_paid'] || $state['is_paid']) {
-      $this->update_order_status_from_pi($payment_intent_id, 'paid', 'succeeded', $metadata);
-    } else {
-      /*
-       * Merge useful Stripe metadata while preserving both the local order
-       * status and its current Stripe/refund status.
-       */
-      $preserved_status = '' !== $state['status'] ? $state['status'] : 'created';
-      $preserved_stripe_status = '' !== $state['stripe_status'] ? $state['stripe_status'] : $preserved_status;
-      $this->update_order_status_from_pi($payment_intent_id, $preserved_status, $preserved_stripe_status, $metadata);
+    if (is_wp_error($result)) {
+      return $result;
     }
 
-    $updated_order = $this->get_order_by_pi($payment_intent_id);
-
-    if (!is_array($updated_order)) {
-      return new WP_Error('payment_success_order_reload_failed', 'The successful payment order could not be reloaded.');
-    }
-
-    return $updated_order;
+    return $result['order'];
   }
 
   private function mrm_get_order_meta_value($order_row, $key, $default = '') {
@@ -12197,6 +12294,20 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $order = is_array($order) ? $order : array();
     $pi_id = sanitize_text_field($pi_id !== '' ? $pi_id : ($order['stripe_payment_intent_id'] ?? ''));
     $order_id = absint($order['id'] ?? 0);
+    if ($pi_id !== '') {
+      $fresh_order = $this->get_order_by_pi($pi_id);
+      if (is_array($fresh_order)) {
+        $order = $fresh_order;
+        $order_id = absint($order['id'] ?? 0);
+      }
+    }
+    $protected_error = is_array($order) && !empty($order) ? $this->mrm_autopay_protected_order_error($order) : new WP_Error('autopay_charge_order_missing','The AutoPay charge order is missing.');
+    if (is_wp_error($protected_error)) {
+      if ($lesson_id > 0) {
+        $wpdb->update($this->table_lessons(), array('status'=>'payment_due','charge_status'=>'refunded','payout_unlocked_at'=>null,'charge_last_error'=>$protected_error->get_error_message(),'updated_at'=>current_time('mysql')), array('id'=>$lesson_id), array('%s','%s','%s','%s','%s'), array('%d'));
+      }
+      return $protected_error;
+    }
     $order_meta = array();
 
     if (!empty($order['metadata_json'])) {
@@ -12260,10 +12371,10 @@ private function mrm_tax_retry_or_alert_payment_intent(
         : ('The AutoPay PaymentIntent has not reached succeeded status. Current status: ' . ($status !== '' ? $status : 'unknown') . '.');
 
       if ($order_id > 0) {
-        $this->update_order_status_from_pi($pi_id, 'processing', $status, array_merge($metadata, array(
+        $this->mrm_atomic_update_order_if_status_allowed($pi_id, 'processing', $status, array_merge($metadata, array(
           'mrm_tax_reconciliation_status' => 'waiting_for_payment_success',
           'mrm_tax_reconciliation_message' => $message,
-        )));
+        )), array('created','processing','failed'));
       }
 
       if ($lesson_id > 0) {
@@ -12288,10 +12399,10 @@ private function mrm_tax_retry_or_alert_payment_intent(
        * until the authoritative tax ledger is complete.
        */
       if ($order_id > 0) {
-        $this->update_order_status_from_pi($pi_id, 'processing', 'succeeded', array_merge($metadata, array(
+        $this->mrm_atomic_update_order_if_status_allowed($pi_id, 'processing', 'succeeded', array_merge($metadata, array(
           'mrm_tax_reconciliation_status' => 'pending',
           'mrm_tax_reconciliation_message' => $message,
-        )));
+        )), array('created','processing','failed'));
       }
 
       if ($lesson_id > 0) {
@@ -12314,10 +12425,11 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $metadata['mrm_tax_reconciled_at'] = current_time('mysql');
     $metadata['mrm_tax_reconciliation_message'] = '';
 
-    $this->update_order_status_from_pi($pi_id, 'paid', 'succeeded', $metadata);
-    $fresh_order = $this->get_order_by_pi($pi_id);
-
-    return is_array($fresh_order) ? $fresh_order : $order;
+    $fresh_order = $this->mrm_apply_payment_success_without_status_regression($payment_intent, $order, $metadata);
+    if (is_wp_error($fresh_order)) return $fresh_order;
+    $protected_error = $this->mrm_autopay_protected_order_error($fresh_order);
+    if (is_wp_error($protected_error)) return $protected_error;
+    return $fresh_order;
   }
 
   private function mrm_finalize_autopay_lesson_success($lesson_id, $order = array(), $pi_id = '', $tax_already_reconciled = false) {
@@ -12343,15 +12455,19 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $pi_id = sanitize_text_field($order['stripe_payment_intent_id'] ?? $pi_id);
     }
 
+    $orders_table = $this->table_orders();
     $lessons_table = $this->table_lessons();
-    $lesson = $wpdb->get_row($wpdb->prepare(
-      "SELECT * FROM {$lessons_table} WHERE id=%d LIMIT 1",
-      $lesson_id
-    ), ARRAY_A);
-
-    if (!$lesson) return;
+    if (false === $wpdb->query('START TRANSACTION')) return;
+    $locked_order = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$orders_table} WHERE stripe_payment_intent_id = %s LIMIT 1 FOR UPDATE", $pi_id), ARRAY_A);
+    if (!is_array($locked_order)) { $wpdb->query('ROLLBACK'); return; }
+    $protected_error = $this->mrm_autopay_protected_order_error($locked_order);
+    if (is_wp_error($protected_error)) { $wpdb->query('ROLLBACK'); return; }
+    $order = $locked_order;
+    $lesson = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$lessons_table} WHERE id = %d LIMIT 1 FOR UPDATE", $lesson_id), ARRAY_A);
+    if (!is_array($lesson)) { $wpdb->query('ROLLBACK'); return; }
 
     if ((string)($lesson['charge_status'] ?? '') === 'paid' && (string)($lesson['status'] ?? '') === 'delivered') {
+      $wpdb->query('COMMIT');
       return;
     }
 
@@ -12376,6 +12492,8 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $this->mrm_increment_autopay_charge_count($autopay_profile_id);
       $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
     }
+
+    if (false === $wpdb->query('COMMIT')) { $wpdb->query('ROLLBACK'); return; }
 
     if (!is_array($order) || empty($order['id'])) {
       return;
@@ -14515,13 +14633,13 @@ private function charge_and_unlock_autopay($data) {
 
     register_rest_route('mrm-pay/v1', '/create-setup-intent', array(
       'methods' => WP_REST_Server::CREATABLE,
-      'callback' => array($this, 'rest_create_setup_intent'),
+      'callback' => array($this, 'rest_disabled_legacy_autopay_route'),
       'permission_callback' => '__return_true',
     ));
 
     register_rest_route('mrm-pay/v1', '/finalize-autopay', array(
       'methods' => WP_REST_Server::CREATABLE,
-      'callback' => array($this, 'rest_finalize_autopay'),
+      'callback' => array($this, 'rest_disabled_legacy_autopay_route'),
       'permission_callback' => '__return_true',
     ));
 
@@ -16446,6 +16564,10 @@ private function charge_and_unlock_autopay($data) {
   }
 
 
+  public function rest_disabled_legacy_autopay_route(WP_REST_Request $req) {
+    return new WP_REST_Response(array('ok'=>false,'code'=>'legacy_autopay_route_disabled','message'=>'This legacy AutoPay endpoint is no longer available.'), 410);
+  }
+
   public function rest_create_setup_intent(WP_REST_Request $req) {
     global $wpdb;
 
@@ -16640,6 +16762,10 @@ private function charge_and_unlock_autopay($data) {
     if (sanitize_key((string)($pi['status'] ?? '')) !== 'succeeded') return new WP_Error('autopay_payment_not_succeeded', 'The first Auto-pay payment has not succeeded.', array('status'=>409));
     $order = $this->get_order_by_pi($payment_intent_id);
     if (!is_array($order) || empty($order['id'])) return new WP_Error('autopay_order_missing', 'The successful Auto-pay payment is not connected to a valid order.', array('status'=>409));
+    $order_state = $this->mrm_classify_order_success_state($order);
+    if ($order_state['terminal_refund'] || $order_state['other_partial_refund'] || !$order_state['can_run_primary_fulfillment']) {
+      return new WP_Error('autopay_order_refund_blocked', 'This lesson order is not eligible for AutoPay enrollment.', array('status'=>409,'order_status'=>$order_state['status'],'fulfillment_blocked'=>true));
+    }
     $pi_meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
     $metadata = array_merge($pi_meta, $this->mrm_get_order_meta_array($order));
     $product_type = sanitize_key((string)($order['product_type'] ?? $metadata['mrm_product_type'] ?? ''));
@@ -16715,13 +16841,32 @@ private function charge_and_unlock_autopay($data) {
     if (!$autopay_lock_acquired) {
       return new WP_REST_Response(array('ok'=>false,'message'=>'Your payment was received and AutoPay is still being finalized. Do not submit another payment.'), 409);
     }
+    $orders_table = $this->table_orders();
+    if (false === $wpdb->query('START TRANSACTION')) {
+      $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
+      return new WP_REST_Response(array('ok'=>false,'message'=>'AutoPay enrollment could not be locked.'), 500);
+    }
+    $locked_order = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$orders_table} WHERE id = %d LIMIT 1 FOR UPDATE", $source_order_id), ARRAY_A);
+    if (!is_array($locked_order)) {
+      $wpdb->query('ROLLBACK');
+      $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
+      return new WP_REST_Response(array('ok'=>false,'message'=>'The lesson order could not be reloaded.'), 409);
+    }
+    $locked_order_state = $this->mrm_classify_order_success_state($locked_order);
+    if ($locked_order_state['terminal_refund'] || $locked_order_state['other_partial_refund'] || !$locked_order_state['can_run_primary_fulfillment']) {
+      $wpdb->query('ROLLBACK');
+      $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
+      return new WP_REST_Response(array('ok'=>false,'fulfillment_blocked'=>true,'order_refunded'=>$locked_order_state['terminal_refund'],'message'=>'This refunded or protected lesson order cannot create an AutoPay profile.'), 409);
+    }
+    $existing_order_for_autopay = $locked_order;
     $existing_profile_id = absint($wpdb->get_var($wpdb->prepare("SELECT id FROM {$this->table_autopay_profiles()} WHERE source_order_id = %d LIMIT 1", $source_order_id)));
     if ($existing_profile_id > 0) {
+      $wpdb->query('COMMIT');
       $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
       return new WP_REST_Response(array('ok'=>true,'autopay_profile_id'=>$existing_profile_id,'customer_id'=>$customer_id,'payment_method_id'=>$payment_method_id,'plan_kind'=>$plan_kind,'authorized_lesson_count'=>(int)$authorized_lesson_count,'already_created'=>true), 200);
     }
     $pm_ready=$this->mrm_ensure_customer_payment_method_ready($customer_id,$payment_method_id);
-    if (is_wp_error($pm_ready)) { $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name)); return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()),400); }
+    if (is_wp_error($pm_ready)) { $wpdb->query('ROLLBACK'); $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name)); return new WP_REST_Response(array('ok'=>false,'message'=>$pm_ready->get_error_message()),400); }
 
     /*
      * Idempotency guard: do not create multiple autopay profiles for the same
@@ -16732,6 +16877,7 @@ private function charge_and_unlock_autopay($data) {
       if (is_array($existing_meta) && !empty($existing_meta['mrm_autopay_profile_id'])) {
         $existing_profile_id = absint($existing_meta['mrm_autopay_profile_id']);
         if ($existing_profile_id > 0) {
+          $wpdb->query('COMMIT');
           $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
           return new WP_REST_Response(array(
             'ok' => true,
@@ -16746,13 +16892,7 @@ private function charge_and_unlock_autopay($data) {
       }
     }
 
-    $pm_live = $this->stripe_retrieve_payment_method($payment_method_id);
-    $pm_snap = !is_wp_error($pm_live) ? $this->mrm_extract_card_snapshot_from_payment_method($pm_live) : array(
-      'brand' => '',
-      'last4' => '',
-      'exp_month' => 0,
-      'exp_year' => 0,
-    );
+    $pm_snap = array('brand'=>'','last4'=>'','exp_month'=>0,'exp_year'=>0);
 
     $wpdb->insert($this->table_autopay_profiles(), array(
       'source_order_id' => $source_order_id,
@@ -16811,6 +16951,7 @@ private function charge_and_unlock_autopay($data) {
       $autopay_profile_id = absint($wpdb->get_var($wpdb->prepare("SELECT id FROM {$this->table_autopay_profiles()} WHERE source_order_id = %d LIMIT 1", $source_order_id)));
     }
     if ($autopay_profile_id <= 0) {
+      $wpdb->query('ROLLBACK');
       $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
       return new WP_REST_Response(array('ok'=>false,'message'=>'Unable to create the AutoPay profile.'), 500);
     }
@@ -16820,6 +16961,7 @@ private function charge_and_unlock_autopay($data) {
     );
 
     if ( is_wp_error($validated_profile) ) {
+      $wpdb->query('ROLLBACK');
       $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
       return new WP_Error(
         'mrm_autopay_profile_incomplete',
@@ -16845,6 +16987,17 @@ private function charge_and_unlock_autopay($data) {
       $this->update_order_status_from_pi($payment_intent_id, (string)($order['status'] ?? 'paid'), 'succeeded', $meta);
     }
 
+
+    if (false === $wpdb->query('COMMIT')) {
+      $wpdb->query('ROLLBACK');
+      $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
+      return new WP_REST_Response(array('ok'=>false,'message'=>'AutoPay enrollment could not be committed.'), 500);
+    }
+
+    $pm_live = $this->stripe_retrieve_payment_method($payment_method_id);
+    if (!is_wp_error($pm_live)) {
+      $this->mrm_store_autopay_payment_method_snapshot($autopay_profile_id, $payment_method_id, $pm_live, 'ok', '', false);
+    }
 
     $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $autopay_lock_name));
 
@@ -17300,6 +17453,18 @@ private function charge_and_unlock_autopay($data) {
 
       $meta = isset($pi['metadata']) && is_array($pi['metadata']) ? $pi['metadata'] : array();
       if (sanitize_key((string)($meta['mrm_product_type'] ?? '')) === 'sheet_music') {
+        $order = $this->get_order_by_pi($pi_id);
+        if (!is_array($order)) {
+          return new WP_REST_Response(array('ok'=>false,'order_reconciliation_pending'=>true,'message'=>'The payment was received, but the order is still being reconciled.'), 503);
+        }
+        $order = $this->mrm_apply_payment_success_without_status_regression($pi, $order);
+        if (is_wp_error($order)) {
+          return new WP_REST_Response(array('ok'=>false,'message'=>$order->get_error_message()), 503);
+        }
+        $order_state = $this->mrm_classify_order_success_state($order);
+        if ('paid' !== $order_state['status'] || 'sheet_music' !== sanitize_key($order['product_type'] ?? '')) {
+          return new WP_REST_Response(array('ok'=>false,'fulfillment_blocked'=>true,'status'=>$order_state['status'],'message'=>'This order is not eligible for a new sheet-music access grant.'), 409);
+        }
         $grant_result=$this->mrm_grant_sheet_music_purchase_entitlements($pi,'stripe_pi_rest');
         if (is_wp_error($grant_result)) return new WP_REST_Response(array('ok'=>false,'code'=>$grant_result->get_error_code(),'message'=>$grant_result->get_error_message()),$grant_result->get_error_code()==='sheet_music_email_blocked'?403:500);
         return new WP_REST_Response(array('ok'=>true,'granted'=>true,'email_hash'=>$grant_result['email_hash'],'sku'=>$grant_result['base_sku'],'skus'=>$grant_result['skus'],'payment_intent_id'=>$grant_result['payment_intent_id']),200);
@@ -17447,27 +17612,59 @@ private function charge_and_unlock_autopay($data) {
   private function mrm_grant_sheet_music_purchase_entitlements($pi, $source = 'stripe_pi') {
     if (!is_array($pi) || strpos((string)($pi['id']??''),'pi_') !== 0) return new WP_Error('invalid_payment_intent','The Stripe Payment Intent could not be read.');
     if (sanitize_key($pi['status']??'') !== 'succeeded') return new WP_Error('payment_not_succeeded','The payment has not completed successfully.');
+
+    global $wpdb;
+
+    $payment_intent_id = sanitize_text_field($pi['id'] ?? '');
+    $orders_table = $this->table_orders();
+
+    if (false === $wpdb->query('START TRANSACTION')) {
+      return new WP_Error('sheet_music_grant_transaction_failed', 'The sheet-music access transaction could not be started.');
+    }
+
+    $order = $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM {$orders_table} WHERE stripe_payment_intent_id = %s LIMIT 1 FOR UPDATE",
+      $payment_intent_id
+    ), ARRAY_A);
+
+    if (!is_array($order)) {
+      $wpdb->query('ROLLBACK');
+      return new WP_Error('sheet_music_grant_order_missing', 'The sheet-music order could not be identified.');
+    }
+
+    $order_state = $this->mrm_classify_order_success_state($order);
+    if ('paid' !== $order_state['status'] || 'sheet_music' !== sanitize_key($order['product_type'] ?? '')) {
+      $wpdb->query('ROLLBACK');
+      return new WP_Error('sheet_music_grant_refund_blocked', 'This order is not eligible for sheet-music fulfillment.');
+    }
+
     $meta=is_array($pi['metadata']??null)?$pi['metadata']:array();
-    if (sanitize_key($meta['mrm_product_type']??'') !== 'sheet_music') return new WP_Error('not_sheet_music_purchase','This payment is not a sheet-music purchase.');
+    if (sanitize_key($meta['mrm_product_type']??'') !== 'sheet_music') { $wpdb->query('ROLLBACK'); return new WP_Error('not_sheet_music_purchase','This payment is not a sheet-music purchase.'); }
     $email=sanitize_email($meta['mrm_customer_email']??'');
-    if (!$email || !is_email($email)) return new WP_Error('invalid_customer_email','The payment does not contain a valid customer email.');
-    if ($this->mrm_sheet_music_email_is_blocked($email)) return new WP_Error('sheet_music_email_blocked','This email is currently restricted from accessing sheet music.');
+    if (!$email || !is_email($email)) { $wpdb->query('ROLLBACK'); return new WP_Error('invalid_customer_email','The payment does not contain a valid customer email.'); }
+    if ($this->mrm_sheet_music_email_is_blocked($email)) { $wpdb->query('ROLLBACK'); return new WP_Error('sheet_music_email_blocked','This email is currently restricted from accessing sheet music.'); }
     $base_sku=$this->sanitize_sku($meta['mrm_sku']??''); $base=$this->get_product($base_sku);
-    if (!$base_sku || !is_array($base) || sanitize_key($base['product_type']??'')!=='sheet_music' || $base_sku===$this->master_sheet_music_sku()) return new WP_Error('invalid_base_entitlement','The purchased sheet-music product could not be resolved.');
+    if (!$base_sku || !is_array($base) || sanitize_key($base['product_type']??'')!=='sheet_music' || $base_sku===$this->master_sheet_music_sku()) { $wpdb->query('ROLLBACK'); return new WP_Error('invalid_base_entitlement','The purchased sheet-music product could not be resolved.'); }
     $skus=array($base_sku);
     if (strtolower((string)($meta['mrm_fundamentals_addon']??'no'))==='yes') {
       $addon_sku=$this->sanitize_sku($meta['mrm_fundamentals_addon_sku']??''); $addon=$this->get_product($addon_sku);
-      if (!$addon_sku || !is_array($addon) || sanitize_key($addon['product_type']??'')!=='sheet_music' || sanitize_key($addon['category']??'')!=='fundamentals') return new WP_Error('invalid_fundamentals_entitlement','The purchased Fundamental Packet could not be resolved.');
+      if (!$addon_sku || !is_array($addon) || sanitize_key($addon['product_type']??'')!=='sheet_music' || sanitize_key($addon['category']??'')!=='fundamentals') { $wpdb->query('ROLLBACK'); return new WP_Error('invalid_fundamentals_entitlement','The purchased Fundamental Packet could not be resolved.'); }
       $category=sanitize_key($base['category']??'');
-      if ($this->mrm_piece_stem_from_offer_slug($base_sku,$category)==='' || $this->mrm_piece_stem_from_offer_slug($base_sku,$category)!==$this->mrm_piece_stem_from_offer_slug($addon_sku,'fundamentals')) return new WP_Error('fundamentals_entitlement_piece_mismatch','The purchased Fundamental Packet does not match the Full Piece.');
+      if ($this->mrm_piece_stem_from_offer_slug($base_sku,$category)==='' || $this->mrm_piece_stem_from_offer_slug($base_sku,$category)!==$this->mrm_piece_stem_from_offer_slug($addon_sku,'fundamentals')) { $wpdb->query('ROLLBACK'); return new WP_Error('fundamentals_entitlement_piece_mismatch','The purchased Fundamental Packet does not match the Full Piece.'); }
       $skus[]=$addon_sku;
     }
     $created=(int)($pi['charges']['data'][0]['created']??($pi['created']??time())); $hash=$this->email_hash($email); $granted=array();
     foreach(array_unique($skus) as $sku) {
-      if (!$this->grant_sheet_music_access($hash,$email,$sku,sanitize_text_field($source),(string)$pi['id'],$created)) return new WP_Error('sheet_music_entitlement_grant_failed','One or more purchased sheet-music entitlements could not be granted.');
+      if (!$this->grant_sheet_music_access($hash,$email,$sku,sanitize_text_field($source),$payment_intent_id,$created)) { $wpdb->query('ROLLBACK'); return new WP_Error('sheet_music_entitlement_grant_failed','One or more purchased sheet-music entitlements could not be granted.'); }
       $granted[]=$sku;
     }
-    return array('ok'=>true,'email_hash'=>$hash,'email'=>$email,'base_sku'=>$base_sku,'skus'=>$granted,'payment_intent_id'=>(string)$pi['id']);
+
+    if (false === $wpdb->query('COMMIT')) {
+      $wpdb->query('ROLLBACK');
+      return new WP_Error('sheet_music_grant_commit_failed', 'The sheet-music access grant could not be committed.');
+    }
+
+    return array('ok'=>true,'email_hash'=>$hash,'email'=>$email,'base_sku'=>$base_sku,'skus'=>$granted,'payment_intent_id'=>$payment_intent_id);
   }
 
   private function grant_sheet_music_access($email_hash, $email_plain, $sku, $source = null, $source_id = null, $start_ts = null) {
