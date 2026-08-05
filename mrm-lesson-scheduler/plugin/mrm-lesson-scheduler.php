@@ -3273,6 +3273,36 @@ protected function mrm_get_google_service_account_json() {
             register_shutdown_function( static function () use ( $wpdb, $paid_order_lock_name ) {
                 $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $paid_order_lock_name ) );
             } );
+
+            /*
+             * The initial payment check occurred before the named lock was acquired.
+             * Reload the order now so a refund that began during that interval
+             * prevents booking.
+             */
+            $locked_order_check = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT id, customer_email, email_hash, product_type, status, metadata_json
+                     FROM {$orders_table}
+                     WHERE id = %d
+                     LIMIT 1",
+                    $order_id
+                ),
+                ARRAY_A
+            );
+
+            if (
+                ! is_array( $locked_order_check )
+                || empty( $locked_order_check['id'] )
+                || 'lesson' !== sanitize_key( $locked_order_check['product_type'] ?? '' )
+                || ! in_array( sanitize_key( $locked_order_check['status'] ?? '' ), array( 'paid', 'completed', 'succeeded' ), true )
+            ) {
+                $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $paid_order_lock_name ) );
+                $paid_order_lock_acquired = false;
+
+                return new WP_Error( 'paid_lesson_order_refund_protected', 'This lesson order is refunded, partially refunded, cancelled, or otherwise unavailable for booking.', array( 'status' => 409 ) );
+            }
+
+            $order = $locked_order_check;
             $existing_lesson_ids = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$lessons_table} WHERE order_id = %d ORDER BY id ASC", $order_id ) );
             if ( ! empty( $existing_lesson_ids ) ) {
                 return rest_ensure_response( array(
@@ -3361,7 +3391,47 @@ protected function mrm_get_google_service_account_json() {
             return new WP_Error( 'booking_slot_validation_incomplete', 'The complete lesson series could not be validated.', array( 'status' => 409 ) );
         }
 
-        $wpdb->query( 'START TRANSACTION' );
+        $transaction_started = false !== $wpdb->query( 'START TRANSACTION' );
+
+        if ( ! $transaction_started ) {
+            $release_booking_locks();
+
+            return new WP_Error( 'lesson_booking_transaction_failed', 'The lesson booking transaction could not be started.', array( 'status' => 500 ) );
+        }
+
+        /*
+         * Lock the paid order row for the duration of lesson insertion.
+         *
+         * A refund update that begins after this point must wait for the booking
+         * transaction. A refund that already updated the order is detected here
+         * and prevents lesson insertion.
+         */
+        if ( $requires_paid_order && $order_id > 0 ) {
+            $transaction_order = $wpdb->get_row(
+                $wpdb->prepare(
+                    "SELECT id, product_type, status, metadata_json
+                     FROM {$orders_table}
+                     WHERE id = %d
+                     LIMIT 1
+                     FOR UPDATE",
+                    $order_id
+                ),
+                ARRAY_A
+            );
+
+            if (
+                ! is_array( $transaction_order )
+                || empty( $transaction_order['id'] )
+                || 'lesson' !== sanitize_key( $transaction_order['product_type'] ?? '' )
+                || ! in_array( sanitize_key( $transaction_order['status'] ?? '' ), array( 'paid', 'completed', 'succeeded' ), true )
+            ) {
+                $wpdb->query( 'ROLLBACK' );
+                $release_booking_locks();
+
+                return new WP_Error( 'paid_lesson_order_changed', 'The lesson order changed before booking could be completed. No lesson was scheduled.', array( 'status' => 409 ) );
+            }
+        }
+
         $created_ids = array();
         $post_commit_jobs = array();
 
@@ -5962,6 +6032,42 @@ protected function mrm_get_google_service_account_json() {
             'google_event_id' => (string) ( $lesson_row['google_event_id'] ?? '' ),
             'cancel_reason' => (string) $reason,
         ) );
+    }
+
+
+
+    public function cancel_order_lessons_after_full_refund( $order_id ) {
+        global $wpdb;
+
+        $order_id = absint( $order_id );
+
+        if ( $order_id <= 0 ) {
+            return new WP_Error( 'refunded_lesson_order_missing', 'The refunded lesson order could not be identified.' );
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+
+        $lessons = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT *
+                 FROM {$lessons_table}
+                 WHERE order_id = %d
+                   AND status NOT IN ( 'cancelled', 'finalized', 'series' )
+                 ORDER BY id ASC",
+                $order_id
+            ),
+            ARRAY_A
+        );
+
+        if ( empty( $lessons ) ) {
+            return true;
+        }
+
+        foreach ( $lessons as $lesson ) {
+            $this->cancel_lesson_and_notify( $lesson, 'payment_refund_already_completed' );
+        }
+
+        return true;
     }
 
     public function cron_reconcile_completed_lessons( $skip_initial_sync = false ) {

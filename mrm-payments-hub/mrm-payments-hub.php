@@ -6205,7 +6205,16 @@ private function mrm_tax_calculate_for_items($address, $line_items, $currency = 
         if (empty($order['stripe_payment_intent_id'])) continue;
         $pi = $this->stripe_retrieve_payment_intent($order['stripe_payment_intent_id']);
         if (is_wp_error($pi) || ($pi['status'] ?? '') !== 'succeeded') continue;
-        if (sanitize_key($order['product_type'] ?? '') === 'lesson') {
+        $product_type = sanitize_key($order['product_type'] ?? '');
+        if ('sheet_music' === $product_type) {
+          $grant_result = $this->mrm_grant_sheet_music_purchase_entitlements($pi, 'stripe_pi_receipt_recovery');
+          if (is_wp_error($grant_result)) {
+            error_log('[MRM Payments] Sheet-music access recovery failed for order ' . absint($order['id'] ?? 0) . ': ' . $grant_result->get_error_message());
+            $this->mrm_schedule_purchase_receipt_retry();
+            continue;
+          }
+        }
+        if ($product_type === 'lesson') {
           $result = $this->mrm_finalize_paid_lesson_booking($pi, $order);
           if (is_wp_error($result)) { error_log('[MRM Payments] Receipt retry could not finalize lesson order ' . absint($order['id']) . ': ' . $result->get_error_message()); $this->mrm_schedule_purchase_receipt_retry(); continue; }
           if (is_array($result) && !empty($result['booking_refunded'])) continue;
@@ -6842,6 +6851,32 @@ private function mrm_claim_charge_refund_effects_lock($charge_id) { $lock_key=$t
 private function mrm_release_charge_refund_effects_lock($charge_id) { delete_option($this->mrm_charge_refund_effects_lock_key($charge_id)); }
 private function mrm_store_charge_refund_effects_state($charge_id,$summary,$full_effects_applied,$transition_refund_id='') { $charge_id=sanitize_text_field($charge_id); $summary=is_array($summary)?$summary:array(); if($charge_id==='') return new WP_Error('charge_refund_state_id_missing','The Charge ID required for cumulative refund state is missing.'); $value=array('charge_id'=>$charge_id,'charge_amount_cents'=>absint($summary['charge_amount_cents'] ?? 0),'succeeded_refund_cents'=>absint($summary['succeeded_refund_cents'] ?? 0),'is_full_refund'=>!empty($summary['is_full_refund'])?1:0,'full_effects_applied'=>$full_effects_applied?1:0,'full_transition_refund_id'=>sanitize_text_field($transition_refund_id),'updated_at'=>current_time('mysql')); update_option($this->mrm_charge_refund_effects_state_key($charge_id),$value,false); $stored=$this->mrm_get_charge_refund_effects_state($charge_id); foreach(array('charge_id','charge_amount_cents','succeeded_refund_cents','is_full_refund','full_effects_applied','full_transition_refund_id') as $key){ if(!array_key_exists($key,$stored) || (string)$stored[$key] !== (string)$value[$key]) return new WP_Error('charge_refund_state_save_failed','The cumulative Charge refund-effects state could not be verified.'); } return true; }
 
+
+private function mrm_paid_lesson_order_lock_name($order_id) { return 'mrm_lesson_order_' . absint($order_id); }
+private function mrm_acquire_paid_lesson_order_lock($order_id, $timeout_seconds = 20) {
+  global $wpdb;
+  $order_id=absint($order_id);
+  if($order_id<=0) return new WP_Error('lesson_order_lock_reference_missing','The lesson order lock reference is missing.');
+  $lock_name=$this->mrm_paid_lesson_order_lock_name($order_id);
+  $acquired=1 === (int)$wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, %d)', $lock_name, max(1, absint($timeout_seconds))));
+  if(!$acquired) return new WP_Error('lesson_order_lock_unavailable','The lesson order is currently being processed by another request.');
+  return $lock_name;
+}
+private function mrm_release_paid_lesson_order_lock($lock_name) {
+  global $wpdb;
+  $lock_name=sanitize_text_field($lock_name);
+  if(''===$lock_name) return;
+  $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
+}
+private function mrm_cancel_order_lessons_after_full_refund(array $order) {
+  $order_id=absint($order['id'] ?? 0);
+  if($order_id<=0 || 'lesson' !== sanitize_key($order['product_type'] ?? '')) return true;
+  if(!class_exists('MRM_Lesson_Scheduler')) return new WP_Error('scheduler_refund_cleanup_unavailable','The Scheduler was unavailable while canceling lessons for a fully refunded order.');
+  $scheduler=MRM_Lesson_Scheduler::get_instance();
+  if(!method_exists($scheduler,'cancel_order_lessons_after_full_refund')) return new WP_Error('scheduler_refund_cleanup_method_missing','The Scheduler does not support refunded-order lesson cleanup.');
+  return $scheduler->cancel_order_lessons_after_full_refund($order_id);
+}
+
 private function mrm_refund_effects_state_key($refund_id) { return 'mrm_refund_effects_'.substr(hash('sha256',sanitize_text_field($refund_id)),0,40); }
 private function mrm_refund_effects_lock_key($refund_id) { return 'mrm_refund_effects_lock_'.substr(hash('sha256',sanitize_text_field($refund_id)),0,40); }
 private function mrm_refund_effects_status_applied($refund_id, $status) { $state=get_option($this->mrm_refund_effects_state_key($refund_id),array()); return is_array($state) && sanitize_key($state['last_status'] ?? '')===sanitize_key($status); }
@@ -6867,8 +6902,27 @@ private function mrm_apply_successful_refund_business_effects($refund, $charge) 
     $pi_id=$this->mrm_stripe_expandable_id($refund['payment_intent'] ?? ''); $order=array(); $order_id=0; $is_subscription_addon_refund=false;
     if($pi_id!==''){ $order=$this->get_order_by_pi($pi_id); if(is_array($order) && !empty($order['id'])){ $order_id=absint($order['id']); $addon_refund_id=sanitize_text_field($this->mrm_get_order_meta_value($order,'mrm_subscription_addon_refund_id','')); $is_subscription_addon_refund = $addon_refund_id!=='' && hash_equals($addon_refund_id,$refund_id); if($is_subscription_addon_refund){ $this->mrm_set_order_meta_flag($order_id,'mrm_subscription_addon_refund_status','succeeded'); $this->mrm_set_order_meta_flag($order_id,'mrm_sheet_music_subscription_status','activation_failed_addon_refund_succeeded'); } } }
     if($apply_full_transition){
-      if($order_id>0){ $this->update_order_status_from_pi($pi_id,'refunded','refunded',array('mrm_refunded_at'=>current_time('mysql'),'mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'])); $this->mrm_void_standard_payouts_for_refunded_order($order_id,$pi_id,'stripe_cumulative_full_refund'); $product_type=sanitize_key($order['product_type'] ?? ''); $order_meta=$this->mrm_get_order_meta_array($order); $lesson_has_sheet_music_addon='lesson'===$product_type && isset($order_meta['mrm_sheet_music_addon']) && 'yes'===strtolower((string)$order_meta['mrm_sheet_music_addon']); if($product_type==='sheet_music' || $lesson_has_sheet_music_addon){ $revoke_result=$this->mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id); if(is_wp_error($revoke_result)) return $revoke_result; } $conflict_refund_id=sanitize_text_field($order_meta['mrm_booking_conflict_refund_id'] ?? ''); if(''!==$conflict_refund_id && hash_equals($conflict_refund_id,$refund_id)){ $cleanup_result=$this->mrm_complete_booking_conflict_cleanup($order,$pi_id); if(is_wp_error($cleanup_result)) return $cleanup_result; } $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('partial_refund_business_review_required')); if(is_wp_error($resolved)) return $resolved; }
-      $this->mrm_void_subscription_composer_payout_from_refunded_charge($charge,'stripe_cumulative_full_refund'); do_action('mrm_payments_hub_refund_succeeded',$refund,$charge,$summary);
+      $lesson_order_lock_name='';
+      if($order_id>0 && 'lesson' === sanitize_key($order['product_type'] ?? '')){
+        $lesson_order_lock_name=$this->mrm_acquire_paid_lesson_order_lock($order_id,20);
+        if(is_wp_error($lesson_order_lock_name)) return $lesson_order_lock_name;
+      }
+      try {
+        if($order_id>0){
+          $this->update_order_status_from_pi($pi_id,'refunded','refunded',array('mrm_refunded_at'=>current_time('mysql'),'mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents']));
+          $order=$this->get_order_by_pi($pi_id);
+          if(!is_array($order)) return new WP_Error('refunded_order_reload_failed','The fully refunded order could not be reloaded.');
+          $this->mrm_void_standard_payouts_for_refunded_order($order_id,$pi_id,'stripe_cumulative_full_refund');
+          $product_type=sanitize_key($order['product_type'] ?? ''); $order_meta=$this->mrm_get_order_meta_array($order); $lesson_has_sheet_music_addon='lesson'===$product_type && isset($order_meta['mrm_sheet_music_addon']) && 'yes'===strtolower((string)$order_meta['mrm_sheet_music_addon']);
+          if($product_type==='sheet_music' || $lesson_has_sheet_music_addon){ $revoke_result=$this->mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id); if(is_wp_error($revoke_result)) return $revoke_result; }
+          $conflict_refund_id=sanitize_text_field($order_meta['mrm_booking_conflict_refund_id'] ?? ''); if(''!==$conflict_refund_id && hash_equals($conflict_refund_id,$refund_id)){ $cleanup_result=$this->mrm_complete_booking_conflict_cleanup($order,$pi_id); if(is_wp_error($cleanup_result)) return $cleanup_result; }
+          $lesson_cleanup_result=$this->mrm_cancel_order_lessons_after_full_refund($order); if(is_wp_error($lesson_cleanup_result)) return $lesson_cleanup_result;
+          $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('partial_refund_business_review_required')); if(is_wp_error($resolved)) return $resolved;
+        }
+        $this->mrm_void_subscription_composer_payout_from_refunded_charge($charge,'stripe_cumulative_full_refund'); do_action('mrm_payments_hub_refund_succeeded',$refund,$charge,$summary);
+      } finally {
+        if(is_string($lesson_order_lock_name) && '' !== $lesson_order_lock_name) $this->mrm_release_paid_lesson_order_lock($lesson_order_lock_name);
+      }
     } elseif(empty($summary['is_full_refund']) && !$refund_already_applied) {
       if($order_id>0){ $this->update_order_status_from_pi($pi_id,'partially_refunded','partially_refunded',array('mrm_refund_id'=>$refund_id,'mrm_refund_status'=>'succeeded','mrm_cumulative_refund_cents'=>(string)$summary['succeeded_refund_cents'],'mrm_charge_amount_cents'=>(string)$summary['charge_amount_cents'])); if($is_subscription_addon_refund && is_array($order)){ $addon_cleanup_result=$this->mrm_complete_subscription_addon_refund_cleanup($order,$pi_id,$refund_id); if(is_wp_error($addon_cleanup_result)) return $addon_cleanup_result; } $partial_refund_alert_message=$is_subscription_addon_refund ? 'The sheet-music add-on refund succeeded. Its PaymentIntent-based sheet-music access was revoked. Review the proportional payout and accounting records.' : 'A partial refund succeeded. Access remains active and the full payout was not voided. Review the proportional payout, accounting, and customer records.'; $alert_result=$this->mrm_tax_create_alert('', 'partial_refund_business_review_required','refund',0,array('message'=>$partial_refund_alert_message,'refund_id'=>$refund_id,'payment_intent_id'=>$pi_id,'charge_id'=>$summary['charge_id'],'succeeded_refund_cents'=>$summary['succeeded_refund_cents'],'charge_amount_cents'=>$summary['charge_amount_cents']),sanitize_key($refund_id)); if(is_wp_error($alert_result)) return $alert_result; }
       do_action('mrm_payments_hub_refund_partially_succeeded',$refund,$charge,$summary);
@@ -8966,33 +9020,20 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
   private function mrm_create_or_update_credits_for_order($order_id, $instructor_id, $email_hash, $currency, $base_cents, $lesson_count) {
     global $wpdb;
-    $table = $this->table_lesson_credits();
-    $now = current_time('mysql');
-
-    $lesson_count = max(1, (int)$lesson_count);
-    $unit = (int) floor(((int)$base_cents) / $lesson_count);
-
-    $exists = $wpdb->get_var($wpdb->prepare(
-      "SELECT id FROM {$table} WHERE order_id=%d AND instructor_id=%d LIMIT 1",
-      (int)$order_id,
-      (int)$instructor_id
-    ));
-
-    if ($exists) return (int)$exists;
-
-    $wpdb->insert($table, array(
-      'order_id' => (int)$order_id,
-      'instructor_id' => (int)$instructor_id,
-      'email_hash' => (string)$email_hash,
-      'currency' => strtolower((string)$currency),
-      'unit_base_cents' => (int)$unit,
-      'total_credits' => (int)$lesson_count,
-      'remaining_credits' => (int)$lesson_count,
-      'created_at' => $now,
-      'updated_at' => $now,
-    ), array('%d','%d','%s','%s','%d','%d','%d','%s','%s'));
-
-    return (int)$wpdb->insert_id;
+    $order_id=absint($order_id); $instructor_id=absint($instructor_id);
+    if($order_id<=0 || $instructor_id<=0) return 0;
+    $table=$this->table_lesson_credits(); $now=current_time('mysql');
+    $lesson_count=max(1, absint($lesson_count));
+    $unit=(int)floor(max(0,(int)$base_cents) / $lesson_count);
+    $existing_id=absint($wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE order_id = %d AND instructor_id = %d LIMIT 1", $order_id, $instructor_id)));
+    if($existing_id>0) return $existing_id;
+    $inserted=$wpdb->insert($table,array('order_id'=>$order_id,'instructor_id'=>$instructor_id,'email_hash'=>sanitize_text_field($email_hash),'currency'=>strtolower(sanitize_text_field($currency)),'unit_base_cents'=>$unit,'total_credits'=>$lesson_count,'remaining_credits'=>$lesson_count,'created_at'=>$now,'updated_at'=>$now),array('%d','%d','%s','%s','%d','%d','%d','%s','%s'));
+    if(false !== $inserted) return absint($wpdb->insert_id);
+    /* Another webhook or recovery request may have inserted the same unique credit row concurrently. */
+    $concurrent_id=absint($wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE order_id = %d AND instructor_id = %d LIMIT 1", $order_id, $instructor_id)));
+    if($concurrent_id>0) return $concurrent_id;
+    error_log('[MRM Payments] Lesson-credit insertion failed for order ' . $order_id . ', instructor ' . $instructor_id . ': ' . ($wpdb->last_error ? $wpdb->last_error : 'Unknown database error.'));
+    return 0;
   }
 
   private function mrm_get_autopay_profile($autopay_profile_id) {
@@ -12158,10 +12199,12 @@ private function mrm_tax_retry_or_alert_payment_intent(
     }
 
     if ($product_type === 'lesson') {
-      $instructor_id = (int)($meta['mrm_instructor_id'] ?? 0);
-      $lesson_count = max(1, (int)($meta['mrm_lesson_count'] ?? 1));
-      $email_hash = (string)($order['email_hash'] ?? '');
-      if ($instructor_id > 0) $this->mrm_create_or_update_credits_for_order($order_id, $instructor_id, $email_hash, $currency, $base_cents, $lesson_count);
+      $instructor_id = absint($meta['mrm_instructor_id'] ?? 0);
+      $lesson_count = max(1, absint($meta['mrm_lesson_count'] ?? 1));
+      $email_hash = sanitize_text_field($order['email_hash'] ?? '');
+      if ($instructor_id <= 0) return new WP_Error('lesson_bookkeeping_instructor_missing', 'The paid lesson order is missing its instructor reference.', array('order_id'=>$order_id, 'payment_intent_id'=>$pi_id));
+      $credit_id = $this->mrm_create_or_update_credits_for_order($order_id, $instructor_id, $email_hash, $currency, $base_cents, $lesson_count);
+      if ($credit_id <= 0) return new WP_Error('lesson_credit_insert_failed', 'The paid lesson credit record could not be saved.', array('order_id'=>$order_id, 'payment_intent_id'=>$pi_id, 'instructor_id'=>$instructor_id, 'lesson_count'=>$lesson_count));
       $composer_addon_share = max(0, (int)$addon_cents);
       $addon_refund_started = !empty($order_state['addon_refund_started']);
       $composer_acct = $this->composer_connected_account_id();
@@ -12895,6 +12938,19 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $lesson_id
     ), ARRAY_A);
 
+    $cancel_reason = sanitize_key($data['cancel_reason'] ?? '');
+
+    /*
+     * The original payment has already completed a full refund. The Scheduler
+     * is only removing the now-invalid lesson. Do not request another refund.
+     */
+    if ('payment_refund_already_completed' === $cancel_reason) {
+      if ($autopay_profile_id > 0) {
+        $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
+      }
+      return;
+    }
+
     if ($this->mrm_is_lesson_refund_locked($lesson)) {
       $this->mrm_finalization_debug_log('refund_and_cancellation_email_blocked_finalized_lesson', array(
         'lesson_id' => $lesson_id,
@@ -12907,8 +12963,6 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
     if ($payment_mode === 'autopay') {
       $lesson_order = $this->mrm_find_lesson_charge_order($lesson_id);
-      $cancel_reason = (string)($data['cancel_reason'] ?? '');
-
       // Refund only if this specific lesson already has its own completed lesson-level charge.
       if ($lesson_order) {
         if (empty($refund_guard['allowed'])) {
@@ -17265,10 +17319,13 @@ private function charge_and_unlock_autopay($data) {
       if ($pi_sku && $pi_sku !== $this->master_sheet_music_sku()) {
         $piece_auto_grant_attempted = true;
         $grant_result = $this->mrm_grant_sheet_music_purchase_entitlements($pi, 'stripe_pi_verify');
-        if (!is_wp_error($grant_result)) {
-          $piece_auto_grant_success = true;
-          $piece_auto_grant_skus = array_values((array)($grant_result['skus'] ?? array()));
+        if (is_wp_error($grant_result)) {
+          $this->mrm_schedule_purchase_receipt_retry();
+          error_log('[MRM Payments] Verification could not grant sheet-music access for order ' . absint($order['id'] ?? 0) . ': ' . $grant_result->get_error_message());
+          return new WP_REST_Response(array('ok'=>false,'payment_received'=>true,'access_reconciliation_pending'=>true,'fulfillment_blocked'=>true,'status'=>$order_state['status'],'stripe_status'=>$status,'message'=>'Your payment was received, but your sheet-music access is still being activated. Do not submit another payment. Please check your email shortly.'), 503);
         }
+        $piece_auto_grant_success = true;
+        $piece_auto_grant_skus = array_values((array)($grant_result['skus'] ?? array()));
       }
     }
 
@@ -17283,6 +17340,8 @@ private function charge_and_unlock_autopay($data) {
         $order = $this->get_order_by_pi($pi_id);
         if (is_array($order)) {
           $order_state = $this->mrm_classify_order_success_state($order);
+          $protected_response = $this->mrm_get_protected_verification_response($order_state);
+          if ($protected_response instanceof WP_REST_Response) return $protected_response;
           if ($order_state['can_run_addon_fulfillment']) {
             $addon_grant_result = $this->mrm_grant_lesson_sheet_music_addon_after_booking($pi, $order);
             if (is_wp_error($addon_grant_result)) return new WP_REST_Response(array('ok'=>false,'payment_received'=>true,'addon_activation_pending'=>true,'message'=>'Your lesson was booked, but the sheet-music add-on is still being activated. You do not need to submit another payment.'), 503);
