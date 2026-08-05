@@ -6917,6 +6917,7 @@ private function mrm_apply_successful_refund_business_effects($refund, $charge) 
           if($product_type==='sheet_music' || $lesson_has_sheet_music_addon){ $revoke_result=$this->mrm_revoke_sheet_music_entitlements_for_payment_intent($pi_id); if(is_wp_error($revoke_result)) return $revoke_result; }
           $conflict_refund_id=sanitize_text_field($order_meta['mrm_booking_conflict_refund_id'] ?? ''); if(''!==$conflict_refund_id && hash_equals($conflict_refund_id,$refund_id)){ $cleanup_result=$this->mrm_complete_booking_conflict_cleanup($order,$pi_id); if(is_wp_error($cleanup_result)) return $cleanup_result; }
           $lesson_cleanup_result=$this->mrm_cancel_order_lessons_after_full_refund($order); if(is_wp_error($lesson_cleanup_result)) return $lesson_cleanup_result;
+          $lesson_notice_result=$this->mrm_send_completed_refund_lesson_notices_for_order($order); if(is_wp_error($lesson_notice_result)) return $lesson_notice_result;
           $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('partial_refund_business_review_required')); if(is_wp_error($resolved)) return $resolved;
         }
         $this->mrm_void_subscription_composer_payout_from_refunded_charge($charge,'stripe_cumulative_full_refund'); do_action('mrm_payments_hub_refund_succeeded',$refund,$charge,$summary);
@@ -11426,6 +11427,78 @@ private function mrm_tax_retry_or_alert_payment_intent(
     );
   }
 
+  private function mrm_completed_refund_notice_option_key($order_id, $lesson_id, $audience, $type) {
+    return 'mrm_completed_refund_notice_' . md5(implode('|', array(home_url(), absint($order_id), absint($lesson_id), sanitize_key($audience), sanitize_key($type))));
+  }
+
+  private function mrm_claim_completed_refund_notice($order_id, $lesson_id, $audience) {
+    $uncertain_key = $this->mrm_completed_refund_notice_option_key($order_id, $lesson_id, $audience, 'uncertain');
+    if (get_option($uncertain_key, '')) return new WP_Error('completed_refund_notice_delivery_uncertain', 'A previous cancellation notice may have been delivered, but its sent state could not be confirmed. Automatic resending was suppressed.');
+    $sent_key = $this->mrm_completed_refund_notice_option_key($order_id, $lesson_id, $audience, 'sent');
+    if (get_option($sent_key, '')) return true;
+    $claim_key = $this->mrm_completed_refund_notice_option_key($order_id, $lesson_id, $audience, 'claim');
+    $claimed_at = absint(get_option($claim_key, 0));
+    if ($claimed_at > 0 && time() - $claimed_at < 10 * MINUTE_IN_SECONDS) return new WP_Error('completed_refund_notice_in_progress', 'The cancellation notice is already being processed.');
+    if ($claimed_at > 0) delete_option($claim_key);
+    $claimed = add_option($claim_key, time(), '', false);
+    if (!$claimed) return new WP_Error('completed_refund_notice_claim_failed', 'The cancellation notice could not be claimed for delivery.');
+    return $claim_key;
+  }
+
+  private function mrm_send_completed_refund_notice_once($order_id, $lesson_id, $audience, $recipient, $subject, $html) {
+    $recipient = sanitize_email($recipient);
+    if (!$recipient || !is_email($recipient)) return new WP_Error('completed_refund_notice_recipient_missing', 'A required completed-refund cancellation notice has no valid recipient email address.');
+    $claim_result = $this->mrm_claim_completed_refund_notice($order_id, $lesson_id, $audience);
+    if (true === $claim_result) return true;
+    if (is_wp_error($claim_result)) return $claim_result;
+    $claim_key = $claim_result;
+    $sent = wp_mail($recipient, $subject, $html, array('Content-Type: text/html; charset=UTF-8', 'From: Low Brass Lessons <no-reply@lowbrass-lessons.com>'));
+    if (!$sent) { delete_option($claim_key); return new WP_Error('completed_refund_notice_send_failed', 'The completed-refund cancellation notice could not be sent.'); }
+    $sent_key = $this->mrm_completed_refund_notice_option_key($order_id, $lesson_id, $audience, 'sent');
+    update_option($sent_key, current_time('mysql', true), false);
+    if (!get_option($sent_key, '')) {
+      $uncertain_key = $this->mrm_completed_refund_notice_option_key($order_id, $lesson_id, $audience, 'uncertain');
+      update_option($uncertain_key, current_time('mysql', true), false);
+      error_log('[MRM Payments] Completed-refund cancellation notice delivery is uncertain for order ' . absint($order_id) . ', lesson ' . absint($lesson_id) . ', audience ' . sanitize_key($audience));
+      return new WP_Error('completed_refund_notice_state_uncertain', 'The cancellation notice may have been delivered, but its sent state could not be saved. Automatic resending was suppressed.');
+    }
+    delete_option($claim_key);
+    return true;
+  }
+
+  private function mrm_send_completed_refund_lesson_notices_for_order(array $order) {
+    global $wpdb;
+    $order_id = absint($order['id'] ?? 0);
+    if ($order_id <= 0 || 'lesson' !== sanitize_key($order['product_type'] ?? '')) return true;
+    $lessons_table = $this->table_lessons();
+    $instructors_table = $wpdb->prefix . 'mrm_instructors';
+    $lessons = $wpdb->get_results($wpdb->prepare("SELECT l.*, i.name AS instructor_name, i.email AS instructor_email, i.timezone AS instructor_profile_timezone FROM {$lessons_table} l LEFT JOIN {$instructors_table} i ON i.id = l.instructor_id WHERE l.order_id = %d AND l.status = 'cancelled' ORDER BY l.id ASC", $order_id), ARRAY_A);
+    if (empty($lessons)) return true;
+    $currency = strtoupper(sanitize_text_field($order['currency'] ?? 'USD'));
+    $refund_amount_cents = absint($order['amount_cents'] ?? 0);
+    $refund_amount_label = sprintf('%s %0.2f', $currency, $refund_amount_cents / 100);
+    foreach ($lessons as $lesson) {
+      $lesson_id = absint($lesson['id'] ?? 0); if ($lesson_id <= 0) continue;
+      $student_email = sanitize_email($lesson['student_email'] ?? '');
+      $instructor_email = sanitize_email($lesson['instructor_email'] ?? '');
+      $student_time = $this->mrm_lesson_time_label($lesson['start_time'] ?? '', $lesson['parent_timezone'] ?? '', 'America/Phoenix', 'F j, Y \a\t g:i A T');
+      $instructor_timezone = $this->mrm_lesson_normalize_timezone($lesson['instructor_profile_timezone'] ?? '', 'America/Phoenix');
+      $instructor_time = $this->mrm_lesson_time_label($lesson['start_time'] ?? '', $instructor_timezone, 'America/Phoenix', 'F j, Y \a\t g:i A T');
+      $autopay_continues = absint($lesson['autopay_profile_id'] ?? 0) > 0 || 'autopay' === sanitize_key($lesson['payment_mode'] ?? '') || absint($lesson['series_id'] ?? 0) > 0;
+      $student_continuation_html = $autopay_continues ? '<div style="margin-top:14px;"><strong>Your remaining scheduled AutoPay lessons are unchanged.</strong> Only the lesson listed above was cancelled. Your AutoPay authorization remains active for your existing future lessons.</div>' : '';
+      $student_details = '<div><strong>Cancelled lesson:</strong> ' . esc_html($student_time) . '</div>' . '<div><strong>Refund status:</strong> Completed</div>' . '<div><strong>Refund amount:</strong> ' . esc_html($refund_amount_label) . '</div>' . $student_continuation_html . '<div style="margin-top:14px;">Depending on your bank or card issuer, the completed refund may take several business days to appear on your statement.</div>';
+      $student_html = $this->mrm_email_wrap_html('Lesson cancelled and refund completed', '<p>Stripe has confirmed the refund, and the lesson below has been cancelled.</p>', $student_details, $this->mrm_get_contact_url(), 'Contact Support');
+      $student_result = $this->mrm_send_completed_refund_notice_once($order_id, $lesson_id, 'student', $student_email, 'Lesson cancelled — Refund completed', $student_html);
+      if (is_wp_error($student_result)) return $student_result;
+      $instructor_continuation_html = $autopay_continues ? '<div style="margin-top:14px;"><strong>Only this occurrence was cancelled.</strong> The student’s remaining scheduled AutoPay lessons remain active.</div>' : '';
+      $instructor_details = '<div><strong>Cancelled lesson:</strong> ' . esc_html($instructor_time) . '</div>' . '<div><strong>Student:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Refund status:</strong> Completed</div>' . $instructor_continuation_html . '<div style="margin-top:14px;">The affected Google Calendar occurrence has been removed. No action is required for the student’s other scheduled lessons.</div>';
+      $instructor_html = $this->mrm_email_wrap_html('Lesson cancelled after completed refund', '<p>A student lesson was cancelled because its payment was fully refunded.</p>', $instructor_details, '', '');
+      $instructor_result = $this->mrm_send_completed_refund_notice_once($order_id, $lesson_id, 'instructor', $instructor_email, 'Lesson cancelled after completed refund', $instructor_html);
+      if (is_wp_error($instructor_result)) return $instructor_result;
+    }
+    return true;
+  }
+
   private function mrm_send_lesson_cancellation_refund_email($lesson, $refund_amount_cents = 0) {
     if (!is_array($lesson)) return false;
 
@@ -12945,9 +13018,17 @@ private function mrm_tax_retry_or_alert_payment_intent(
      * is only removing the now-invalid lesson. Do not request another refund.
      */
     if ('payment_refund_already_completed' === $cancel_reason) {
-      if ($autopay_profile_id > 0) {
-        $this->mrm_maybe_deactivate_and_detach_autopay($autopay_profile_id, false);
-      }
+      /*
+       * Stripe has already confirmed the refund. This action exists only
+       * to synchronize the affected lesson and its Google occurrence.
+       *
+       * Do not:
+       * - request another refund;
+       * - cancel future lessons;
+       * - deactivate AutoPay;
+       * - detach the saved payment method;
+       * - close the recurring series.
+       */
       return;
     }
 

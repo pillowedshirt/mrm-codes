@@ -5992,6 +5992,131 @@ protected function mrm_get_google_service_account_json() {
     }
 
 
+    protected function delete_google_occurrence_for_completed_refund( array $lesson_row ) {
+        $calendar_id = trim( (string) ( $lesson_row['calendar_id'] ?? '' ) );
+        $series_id = absint( $lesson_row['series_id'] ?? 0 );
+        $stored_master_event_id = trim( (string) ( $lesson_row['google_event_id'] ?? '' ) );
+        $stored_instance_event_id = trim( (string) ( $lesson_row['google_instance_event_id'] ?? '' ) );
+        $has_google_reference = '' !== $stored_master_event_id || '' !== $stored_instance_event_id;
+
+        if ( ! $has_google_reference ) {
+            return true;
+        }
+
+        if ( '' === $calendar_id ) {
+            return new WP_Error( 'refunded_lesson_calendar_missing', 'The refunded lesson has a Google event reference but no instructor calendar ID.' );
+        }
+
+        $resolved = $this->resolve_google_event_for_lesson_row( $lesson_row, $calendar_id, 120 );
+
+        if ( is_array( $resolved ) && 'cancelled' === sanitize_key( $resolved['status'] ?? '' ) ) {
+            return true;
+        }
+
+        $target_event_id = '';
+
+        if ( is_array( $resolved ) && 'resolved' === sanitize_key( $resolved['status'] ?? '' ) && is_array( $resolved['event'] ?? null ) ) {
+            $target_event_id = trim( (string) ( $resolved['event']['id'] ?? '' ) );
+        }
+
+        if ( '' === $target_event_id && '' !== $stored_instance_event_id ) {
+            $target_event_id = $stored_instance_event_id;
+        }
+
+        if ( '' === $target_event_id && $series_id <= 0 && '' !== $stored_master_event_id ) {
+            $target_event_id = $stored_master_event_id;
+        }
+
+        if ( '' === $target_event_id ) {
+            return new WP_Error( 'refunded_lesson_google_occurrence_unresolved', 'The exact Google Calendar occurrence for the refunded lesson could not be resolved. The recurring master event was not deleted.' );
+        }
+
+        if ( $series_id > 0 && '' !== $stored_master_event_id && hash_equals( $stored_master_event_id, $target_event_id ) ) {
+            return new WP_Error( 'refunded_lesson_google_master_protected', 'The Google event resolved to the recurring series master. The master event was preserved to protect future lessons.' );
+        }
+
+        $deleted = $this->google_delete_event( $calendar_id, $target_event_id );
+
+        if ( is_wp_error( $deleted ) ) {
+            return $deleted;
+        }
+
+        return true;
+    }
+
+    protected function cancel_single_lesson_after_completed_refund( array $lesson_row ) {
+        global $wpdb;
+
+        $lesson_id = absint( $lesson_row['id'] ?? 0 );
+
+        if ( $lesson_id <= 0 ) {
+            return new WP_Error( 'refunded_lesson_id_missing', 'The refunded lesson could not be identified.' );
+        }
+
+        $original_status = sanitize_key( $lesson_row['status'] ?? '' );
+
+        if ( in_array( $original_status, array( 'finalized', 'series' ), true ) ) {
+            return true;
+        }
+
+        $calendar_result = $this->delete_google_occurrence_for_completed_refund( $lesson_row );
+
+        if ( is_wp_error( $calendar_result ) ) {
+            return $calendar_result;
+        }
+
+        $lessons_table = $wpdb->prefix . 'mrm_lessons';
+
+        if ( 'cancelled' !== $original_status ) {
+            $updated = $wpdb->query(
+                $wpdb->prepare(
+                    "UPDATE {$lessons_table}
+                     SET status = 'cancelled',
+                         updated_at = %s
+                     WHERE id = %d
+                       AND status NOT IN ( 'cancelled', 'finalized', 'series' )",
+                    current_time( 'mysql' ),
+                    $lesson_id
+                )
+            );
+
+            if ( false === $updated ) {
+                return new WP_Error( 'refunded_lesson_status_update_failed', $wpdb->last_error ? $wpdb->last_error : 'The refunded lesson could not be marked cancelled.' );
+            }
+        }
+
+        $fresh_lesson = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$lessons_table} WHERE id = %d LIMIT 1", $lesson_id ), ARRAY_A );
+
+        if ( ! is_array( $fresh_lesson ) ) {
+            return new WP_Error( 'refunded_lesson_reload_failed', 'The refunded lesson could not be reloaded after cancellation.' );
+        }
+
+        $fresh_status = sanitize_key( $fresh_lesson['status'] ?? '' );
+
+        if ( ! in_array( $fresh_status, array( 'cancelled', 'finalized' ), true ) ) {
+            return new WP_Error( 'refunded_lesson_cancellation_unconfirmed', 'The refunded lesson did not persist in the expected cancelled state.' );
+        }
+
+        if ( 'cancelled' !== $original_status && 'cancelled' === $fresh_status ) {
+            do_action( 'mrm_lesson_cancelled', array(
+                'lesson_id' => $lesson_id,
+                'instructor_id' => absint( $fresh_lesson['instructor_id'] ?? 0 ),
+                'student_email' => sanitize_email( $fresh_lesson['student_email'] ?? '' ),
+                'lesson_length' => absint( $fresh_lesson['lesson_length'] ?? 0 ),
+                'is_online' => absint( $fresh_lesson['is_online'] ?? 0 ),
+                'order_id' => absint( $fresh_lesson['order_id'] ?? 0 ),
+                'payment_mode' => sanitize_key( $fresh_lesson['payment_mode'] ?? 'none' ),
+                'autopay_profile_id' => absint( $fresh_lesson['autopay_profile_id'] ?? 0 ),
+                'series_id' => absint( $fresh_lesson['series_id'] ?? 0 ),
+                'google_event_id' => sanitize_text_field( $fresh_lesson['google_event_id'] ?? '' ),
+                'google_instance_event_id' => sanitize_text_field( $fresh_lesson['google_instance_event_id'] ?? '' ),
+                'cancel_reason' => 'payment_refund_already_completed',
+            ) );
+        }
+
+        return true;
+    }
+
     protected function cancel_lesson_and_notify( $lesson_row, $reason = '' ) {
         global $wpdb;
 
@@ -6046,14 +6171,22 @@ protected function mrm_get_google_service_account_json() {
         }
 
         $lessons_table = $wpdb->prefix . 'mrm_lessons';
+        $instructors_table = $wpdb->prefix . 'mrm_instructors';
 
         $lessons = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT *
-                 FROM {$lessons_table}
-                 WHERE order_id = %d
-                   AND status NOT IN ( 'cancelled', 'finalized', 'series' )
-                 ORDER BY id ASC",
+                "SELECT
+                    l.*,
+                    i.name AS instructor_name,
+                    i.email AS instructor_email,
+                    i.timezone AS instructor_profile_timezone,
+                    i.calendar_id AS calendar_id
+                 FROM {$lessons_table} l
+                 LEFT JOIN {$instructors_table} i
+                   ON i.id = l.instructor_id
+                 WHERE l.order_id = %d
+                   AND l.status NOT IN ( 'finalized', 'series' )
+                 ORDER BY l.id ASC",
                 $order_id
             ),
             ARRAY_A
@@ -6064,7 +6197,11 @@ protected function mrm_get_google_service_account_json() {
         }
 
         foreach ( $lessons as $lesson ) {
-            $this->cancel_lesson_and_notify( $lesson, 'payment_refund_already_completed' );
+            $result = $this->cancel_single_lesson_after_completed_refund( $lesson );
+
+            if ( is_wp_error( $result ) ) {
+                return $result;
+            }
         }
 
         return true;
