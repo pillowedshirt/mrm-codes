@@ -11466,6 +11466,45 @@ private function mrm_tax_retry_or_alert_payment_intent(
     return true;
   }
 
+  private function mrm_get_completed_refund_autopay_continuation(array $lesson) {
+    global $wpdb;
+
+    $lesson_id = absint($lesson['id'] ?? 0);
+    $autopay_profile_id = absint($lesson['autopay_profile_id'] ?? 0);
+    $lesson_start = sanitize_text_field($lesson['start_time'] ?? '');
+
+    if ($lesson_id <= 0 || $autopay_profile_id <= 0 || '' === $lesson_start) {
+      return array('continues' => false, 'future_count' => 0, 'profile_active' => false);
+    }
+
+    $profile = $this->mrm_get_autopay_profile($autopay_profile_id);
+    $profile_active = is_array($profile) && !empty($profile['active']);
+
+    if (!$profile_active) {
+      return array('continues' => false, 'future_count' => 0, 'profile_active' => false);
+    }
+
+    /*
+     * Require an actual future scheduled AutoPay lesson associated with
+     * the same active profile. Merely having a historical series ID or
+     * AutoPay payment mode is not enough to claim that lessons continue.
+     */
+    $future_count = absint($wpdb->get_var($wpdb->prepare(
+      "SELECT COUNT(*)
+       FROM {$this->table_lessons()}
+       WHERE id <> %d
+         AND autopay_profile_id = %d
+         AND payment_mode = 'autopay'
+         AND status = 'scheduled'
+         AND start_time > %s",
+      $lesson_id,
+      $autopay_profile_id,
+      $lesson_start
+    )));
+
+    return array('continues' => $future_count > 0, 'future_count' => $future_count, 'profile_active' => true);
+  }
+
   private function mrm_send_completed_refund_lesson_notices_for_order(array $order) {
     global $wpdb;
     $order_id = absint($order['id'] ?? 0);
@@ -11484,14 +11523,26 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $student_time = $this->mrm_lesson_time_label($lesson['start_time'] ?? '', $lesson['parent_timezone'] ?? '', 'America/Phoenix', 'F j, Y \a\t g:i A T');
       $instructor_timezone = $this->mrm_lesson_normalize_timezone($lesson['instructor_profile_timezone'] ?? '', 'America/Phoenix');
       $instructor_time = $this->mrm_lesson_time_label($lesson['start_time'] ?? '', $instructor_timezone, 'America/Phoenix', 'F j, Y \a\t g:i A T');
-      $autopay_continues = absint($lesson['autopay_profile_id'] ?? 0) > 0 || 'autopay' === sanitize_key($lesson['payment_mode'] ?? '') || absint($lesson['series_id'] ?? 0) > 0;
-      $student_continuation_html = $autopay_continues ? '<div style="margin-top:14px;"><strong>Your remaining scheduled AutoPay lessons are unchanged.</strong> Only the lesson listed above was cancelled. Your AutoPay authorization remains active for your existing future lessons.</div>' : '';
+      $autopay_continuation = $this->mrm_get_completed_refund_autopay_continuation($lesson);
+      $autopay_continues = !empty($autopay_continuation['continues']);
+      $future_autopay_count = absint($autopay_continuation['future_count'] ?? 0);
+      $student_continuation_html = '';
+      if ($autopay_continues) {
+        $student_continuation_html = '<div style="margin-top:14px;">' . '<strong>Your ' . esc_html(number_format_i18n($future_autopay_count)) . ' remaining scheduled AutoPay ' . (1 === $future_autopay_count ? 'lesson is' : 'lessons are') . ' unchanged.</strong> ' . 'Only the lesson listed above was cancelled. Your AutoPay authorization remains active for those scheduled lessons.' . '</div>';
+      }
       $student_details = '<div><strong>Cancelled lesson:</strong> ' . esc_html($student_time) . '</div>' . '<div><strong>Refund status:</strong> Completed</div>' . '<div><strong>Refund amount:</strong> ' . esc_html($refund_amount_label) . '</div>' . $student_continuation_html . '<div style="margin-top:14px;">Depending on your bank or card issuer, the completed refund may take several business days to appear on your statement.</div>';
       $student_html = $this->mrm_email_wrap_html('Lesson cancelled and refund completed', '<p>Stripe has confirmed the refund, and the lesson below has been cancelled.</p>', $student_details, $this->mrm_get_contact_url(), 'Contact Support');
       $student_result = $this->mrm_send_completed_refund_notice_once($order_id, $lesson_id, 'student', $student_email, 'Lesson cancelled — Refund completed', $student_html);
       if (is_wp_error($student_result)) return $student_result;
-      $instructor_continuation_html = $autopay_continues ? '<div style="margin-top:14px;"><strong>Only this occurrence was cancelled.</strong> The student’s remaining scheduled AutoPay lessons remain active.</div>' : '';
-      $instructor_details = '<div><strong>Cancelled lesson:</strong> ' . esc_html($instructor_time) . '</div>' . '<div><strong>Student:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Refund status:</strong> Completed</div>' . $instructor_continuation_html . '<div style="margin-top:14px;">The affected Google Calendar occurrence has been removed. No action is required for the student’s other scheduled lessons.</div>';
+      $instructor_continuation_html = '';
+      if ($autopay_continues) {
+        $instructor_continuation_html = '<div style="margin-top:14px;">' . '<strong>Only this occurrence was cancelled.</strong> ' . 'The student has ' . esc_html(number_format_i18n($future_autopay_count)) . ' later scheduled AutoPay ' . (1 === $future_autopay_count ? 'lesson that remains' : 'lessons that remain') . ' active.' . '</div>';
+      }
+      $instructor_final_html = '<div style="margin-top:14px;">The affected Google Calendar occurrence has been removed.</div>';
+      if ($autopay_continues) {
+        $instructor_final_html .= '<div style="margin-top:14px;">No action is required for the student’s remaining scheduled AutoPay lessons.</div>';
+      }
+      $instructor_details = '<div><strong>Cancelled lesson:</strong> ' . esc_html($instructor_time) . '</div>' . '<div><strong>Student:</strong> ' . esc_html($student_email) . '</div>' . '<div><strong>Refund status:</strong> Completed</div>' . $instructor_continuation_html . $instructor_final_html;
       $instructor_html = $this->mrm_email_wrap_html('Lesson cancelled after completed refund', '<p>A student lesson was cancelled because its payment was fully refunded.</p>', $instructor_details, '', '');
       $instructor_result = $this->mrm_send_completed_refund_notice_once($order_id, $lesson_id, 'instructor', $instructor_email, 'Lesson cancelled after completed refund', $instructor_html);
       if (is_wp_error($instructor_result)) return $instructor_result;

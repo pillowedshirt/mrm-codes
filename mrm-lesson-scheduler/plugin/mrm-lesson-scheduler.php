@@ -5992,15 +5992,79 @@ protected function mrm_get_google_service_account_json() {
     }
 
 
+    protected function mrm_refund_google_cleanup_option_key( $lesson_id ) {
+        return 'mrm_refund_google_cleanup_' . md5( implode( '|', array( home_url(), absint( $lesson_id ) ) ) );
+    }
+
+    protected function mrm_get_refund_google_cleanup_state( $lesson_id ) {
+        $lesson_id = absint( $lesson_id );
+
+        if ( $lesson_id <= 0 ) {
+            return array();
+        }
+
+        $state = get_option( $this->mrm_refund_google_cleanup_option_key( $lesson_id ), array() );
+
+        return is_array( $state ) ? $state : array();
+    }
+
+    protected function mrm_mark_refund_google_cleanup_complete( $lesson_id, $calendar_id = '', $event_id = '' ) {
+        $lesson_id = absint( $lesson_id );
+
+        if ( $lesson_id <= 0 ) {
+            return new WP_Error( 'refunded_google_cleanup_lesson_missing', 'The refunded lesson Google cleanup marker is missing its lesson ID.' );
+        }
+
+        $key = $this->mrm_refund_google_cleanup_option_key( $lesson_id );
+        $value = array(
+            'completed_at' => current_time( 'mysql', true ),
+            'calendar_id'   => sanitize_text_field( $calendar_id ),
+            'event_id'      => sanitize_text_field( $event_id ),
+        );
+
+        update_option( $key, $value, false );
+
+        $saved = get_option( $key, array() );
+
+        if ( ! is_array( $saved ) || empty( $saved['completed_at'] ) ) {
+            return new WP_Error( 'refunded_google_cleanup_marker_failed', 'The refunded lesson Google cleanup completed, but its local completion marker could not be saved.' );
+        }
+
+        return true;
+    }
+
     protected function delete_google_occurrence_for_completed_refund( array $lesson_row ) {
+        global $wpdb;
+
+        $lesson_id = absint( $lesson_row['id'] ?? 0 );
+
+        if ( $lesson_id <= 0 ) {
+            return new WP_Error( 'refunded_lesson_id_missing', 'The refunded lesson could not be identified for Google Calendar cleanup.' );
+        }
+
+        /*
+         * Google cleanup already succeeded during an earlier refund-cleanup
+         * attempt. Do not resolve or delete the occurrence again merely
+         * because a later customer or instructor email needs retrying.
+         */
+        $completed_state = $this->mrm_get_refund_google_cleanup_state( $lesson_id );
+
+        if ( ! empty( $completed_state['completed_at'] ) ) {
+            return true;
+        }
+
         $calendar_id = trim( (string) ( $lesson_row['calendar_id'] ?? '' ) );
         $series_id = absint( $lesson_row['series_id'] ?? 0 );
         $stored_master_event_id = trim( (string) ( $lesson_row['google_event_id'] ?? '' ) );
         $stored_instance_event_id = trim( (string) ( $lesson_row['google_instance_event_id'] ?? '' ) );
         $has_google_reference = '' !== $stored_master_event_id || '' !== $stored_instance_event_id;
 
+        /*
+         * This lesson never received a Google event. Mark Google cleanup
+         * complete so future refund retries do not repeat the same check.
+         */
         if ( ! $has_google_reference ) {
-            return true;
+            return $this->mrm_mark_refund_google_cleanup_complete( $lesson_id );
         }
 
         if ( '' === $calendar_id ) {
@@ -6009,8 +6073,14 @@ protected function mrm_get_google_service_account_json() {
 
         $resolved = $this->resolve_google_event_for_lesson_row( $lesson_row, $calendar_id, 120 );
 
+        /*
+         * Google already reports the exact event or occurrence as cancelled.
+         * Store that result locally so email retries skip Calendar cleanup.
+         */
         if ( is_array( $resolved ) && 'cancelled' === sanitize_key( $resolved['status'] ?? '' ) ) {
-            return true;
+            $resolved_event_id = is_array( $resolved['event'] ?? null ) ? sanitize_text_field( $resolved['event']['id'] ?? '' ) : $stored_instance_event_id;
+
+            return $this->mrm_mark_refund_google_cleanup_complete( $lesson_id, $calendar_id, $resolved_event_id );
         }
 
         $target_event_id = '';
@@ -6019,10 +6089,20 @@ protected function mrm_get_google_service_account_json() {
             $target_event_id = trim( (string) ( $resolved['event']['id'] ?? '' ) );
         }
 
+        /*
+         * When a prior attempt resolved and persisted the exact recurring
+         * instance ID but stopped before saving the completion marker, use
+         * that ID directly.
+         */
         if ( '' === $target_event_id && '' !== $stored_instance_event_id ) {
             $target_event_id = $stored_instance_event_id;
         }
 
+        /*
+         * A standalone lesson may safely use google_event_id. A recurring
+         * lesson must never use that field as an unresolved fallback because
+         * it may represent the recurring master.
+         */
         if ( '' === $target_event_id && $series_id <= 0 && '' !== $stored_master_event_id ) {
             $target_event_id = $stored_master_event_id;
         }
@@ -6031,8 +6111,37 @@ protected function mrm_get_google_service_account_json() {
             return new WP_Error( 'refunded_lesson_google_occurrence_unresolved', 'The exact Google Calendar occurrence for the refunded lesson could not be resolved. The recurring master event was not deleted.' );
         }
 
+        /*
+         * Defense in depth: never delete the stored recurring master.
+         */
         if ( $series_id > 0 && '' !== $stored_master_event_id && hash_equals( $stored_master_event_id, $target_event_id ) ) {
             return new WP_Error( 'refunded_lesson_google_master_protected', 'The Google event resolved to the recurring series master. The master event was preserved to protect future lessons.' );
+        }
+
+        /*
+         * Persist the exact recurring instance ID before deleting it.
+         *
+         * If Google deletion succeeds but a later email or option write
+         * fails, the retry can target this exact occurrence. Google may then
+         * return 410, which google_delete_event() now treats as success.
+         */
+        if ( $series_id > 0 && ! hash_equals( $stored_instance_event_id, $target_event_id ) ) {
+            $instance_saved = $wpdb->update(
+                $wpdb->prefix . 'mrm_lessons',
+                array(
+                    'google_instance_event_id' => $target_event_id,
+                    'updated_at'               => current_time( 'mysql' ),
+                ),
+                array( 'id' => $lesson_id ),
+                array( '%s', '%s' ),
+                array( '%d' )
+            );
+
+            if ( false === $instance_saved ) {
+                return new WP_Error( 'refunded_google_instance_persist_failed', $wpdb->last_error ? $wpdb->last_error : 'The exact refunded Google occurrence ID could not be saved before deletion.' );
+            }
+
+            $lesson_row['google_instance_event_id'] = $target_event_id;
         }
 
         $deleted = $this->google_delete_event( $calendar_id, $target_event_id );
@@ -6041,7 +6150,12 @@ protected function mrm_get_google_service_account_json() {
             return $deleted;
         }
 
-        return true;
+        /*
+         * A successful 2xx, 404, or 410 result means that the occurrence is
+         * absent from Google Calendar. Persist that result before proceeding
+         * to customer and instructor notices.
+         */
+        return $this->mrm_mark_refund_google_cleanup_complete( $lesson_id, $calendar_id, $target_event_id );
     }
 
     protected function cancel_single_lesson_after_completed_refund( array $lesson_row ) {
@@ -16358,7 +16472,15 @@ protected function parse_service_account_json( $json ) {
         }
 
         $code = (int) wp_remote_retrieve_response_code( $response );
-        if ( 404 === $code || ( $code >= 200 && $code < 300 ) ) {
+
+        /*
+         * A 404 means the event no longer exists.
+         *
+         * Google can return 410 when the exact event or recurring occurrence
+         * was already deleted. Both responses mean that the desired final
+         * calendar state has been reached.
+         */
+        if ( in_array( $code, array( 404, 410 ), true ) || ( $code >= 200 && $code < 300 ) ) {
             return true;
         }
 
