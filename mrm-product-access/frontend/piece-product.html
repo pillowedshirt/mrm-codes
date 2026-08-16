@@ -2611,6 +2611,17 @@ function mrmGetPiecePromoCodeInputValue() {
     return stripe;
   }
 
+  function mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, message = '') {
+    if (!expressCheckoutEvent || typeof expressCheckoutEvent.paymentFailed !== 'function') return;
+    const payload = { reason: 'fail' };
+    if (message) payload.message = String(message);
+    try {
+      expressCheckoutEvent.paymentFailed(payload);
+    } catch (error) {
+      /* Do not let wallet error reporting create an additional checkout failure. */
+    }
+  }
+
   function mrmBuildExpressCheckoutOptions() {
   return {
     paymentMethods: { applePay: 'auto', googlePay: 'auto', amazonPay: 'auto', link: 'never', paypal: 'never', klarna: 'never' },
@@ -2632,8 +2643,12 @@ function mrmMountPieceExpressCheckout(elements) {
   element.on('availablepaymentmethodschange', ({ paymentMethods }) => {
     wrap.hidden = !(paymentMethods && (paymentMethods.applePay?.available || paymentMethods.googlePay?.available || paymentMethods.amazonPay?.available));
   });
-  element.on('confirm', async () => {
-    if (typeof activeExpressCheckoutConfirmHandler === 'function') await activeExpressCheckoutConfirmHandler();
+  element.on('confirm', async (event) => {
+    if (typeof activeExpressCheckoutConfirmHandler === 'function') {
+      await activeExpressCheckoutConfirmHandler(event);
+      return;
+    }
+    mrmNotifyExpressCheckoutPaymentFailed(event, 'Payment confirmation is temporarily unavailable. Please try again.');
   });
   element.mount('#mrm-piece-express-checkout-element');
   return element;
@@ -4885,7 +4900,8 @@ async function getOfferSkuCandidates(offerEl) {
 
     const payBtn = document.getElementById('mrm-pay-btn');
     if (payBtn) {
-      const confirmPiecePayment = async function (showFinalTotalConfirmation = true) {
+      const confirmPiecePayment = async function (showFinalTotalConfirmation = true, expressCheckoutEvent = null) {
+        let paymentWasConfirmed = false;
 
         const errorEl = document.getElementById('mrm-payment-error');
         const email = (document.getElementById('mrm-payment-email').value || '').trim();
@@ -4893,16 +4909,22 @@ async function getOfferSkuCandidates(offerEl) {
         errorEl.textContent = '';
 
         if (!pendingSku) {
-          errorEl.textContent = 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
+          const failureMessage = 'This offer is temporarily unavailable. Please contact Low Brass Lessons for assistance.';
+          errorEl.textContent = failureMessage;
+          mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
           return;
         }
         if (!document.getElementById('mrm-piece-payment-terms')?.checked) {
-          errorEl.textContent = 'Please agree to the Terms of Service before payment.';
+          const failureMessage = 'Please agree to the Terms of Service before payment.';
+          errorEl.textContent = failureMessage;
+          mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
           return;
         }
 
         if (!pendingClientSecret || !activeStripeElements) {
-          errorEl.textContent = 'Some payment details were missing. Please refresh the page and try again.';
+          const failureMessage = 'Some payment details were missing. Please refresh the page and try again.';
+          errorEl.textContent = failureMessage;
+          mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
           return;
         }
 
@@ -4934,6 +4956,7 @@ async function getOfferSkuCandidates(offerEl) {
               typeof mrmPieceHandleFundamentalsAlreadyOwned === 'function'
             ) {
               await mrmPieceHandleFundamentalsAlreadyOwned(preconfirm);
+              mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, preconfirm.message || 'No new payment was submitted.');
               return;
             }
 
@@ -4946,12 +4969,17 @@ async function getOfferSkuCandidates(offerEl) {
               typeof mrmPieceHandleCheckoutRecovery === 'function'
             ) {
               const recovered = mrmPieceHandleCheckoutRecovery(preconfirm);
-              if (recovered) return;
+              if (recovered) {
+                mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, preconfirm.message || 'No new payment was submitted.');
+                return;
+              }
             }
 
-            errorEl.textContent = preconfirm && preconfirm.message
+            const failureMessage = preconfirm && preconfirm.message
               ? preconfirm.message
               : 'The payment session could not be revalidated. No payment has been submitted. Please try again.';
+            errorEl.textContent = failureMessage;
+            mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
             /* Temporary lookup failures leave the Payment Element retryable. */
             payBtn.disabled = false;
             return;
@@ -4974,13 +5002,16 @@ async function getOfferSkuCandidates(offerEl) {
 
           if (error) {
             mrmPiecePaymentConfirmationInProgress = false;
-            errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
+            const failureMessage = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
+            errorEl.textContent = failureMessage;
+            mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
             payBtn.disabled = false;
             return;
           }
 
           // Immediate success path (most cards)
           if (paymentIntent && (paymentIntent.status === 'succeeded' || paymentIntent.status === 'requires_capture')) {
+            paymentWasConfirmed = true;
             mrmPiecePaymentCompleted = true;
             mrmPiecePaymentConfirmationInProgress = false;
             try {
@@ -5007,16 +5038,20 @@ async function getOfferSkuCandidates(offerEl) {
         } catch (e) {
           mrmPiecePaymentConfirmationInProgress = false;
 
-          errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
+          const failureMessage = 'We could not complete this payment. Please review your details and try again.';
+          errorEl.textContent = failureMessage;
+          if (!paymentWasConfirmed) {
+            mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
+          }
           payBtn.disabled = false;
         }
       };
 
       payBtn.onclick = async function (evt) {
         if (evt && typeof evt.preventDefault === 'function') evt.preventDefault();
-        await confirmPiecePayment(true);
+        await confirmPiecePayment(true, null);
       };
-      activeExpressCheckoutConfirmHandler = () => confirmPiecePayment(false);
+      activeExpressCheckoutConfirmHandler = (event) => confirmPiecePayment(false, event);
     }
 
     piece.querySelectorAll('.mrm-purchaseBtn').forEach(btn => {

@@ -3720,6 +3720,17 @@ function ensureStripe(publishableKey){
   return stripe;
 }
 
+function mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, message = '') {
+  if (!expressCheckoutEvent || typeof expressCheckoutEvent.paymentFailed !== 'function') return;
+  const payload = { reason: 'fail' };
+  if (message) payload.message = String(message);
+  try {
+    expressCheckoutEvent.paymentFailed(payload);
+  } catch (error) {
+    /* Wallet failure signaling should never create a second checkout error. */
+  }
+}
+
 function mrmBuildExpressCheckoutOptions() {
   return {
     paymentMethods: { applePay: 'auto', googlePay: 'auto', amazonPay: 'auto', link: 'never', paypal: 'never', klarna: 'never' },
@@ -3741,8 +3752,12 @@ function mrmMountLessonExpressCheckout(elements) {
   element.on('availablepaymentmethodschange', ({ paymentMethods }) => {
     wrap.hidden = !(paymentMethods && (paymentMethods.applePay?.available || paymentMethods.googlePay?.available || paymentMethods.amazonPay?.available));
   });
-  element.on('confirm', async () => {
-    if (typeof activeExpressCheckoutConfirmHandler === 'function') await activeExpressCheckoutConfirmHandler();
+  element.on('confirm', async (event) => {
+    if (typeof activeExpressCheckoutConfirmHandler === 'function') {
+      await activeExpressCheckoutConfirmHandler(event);
+      return;
+    }
+    mrmNotifyExpressCheckoutPaymentFailed(event, 'Payment confirmation is temporarily unavailable. Please try again.');
   });
   element.mount('#mrm-express-checkout-element');
   return element;
@@ -5611,7 +5626,8 @@ function ensureLegacyBookingHandler(){
             createData.allowed_payment_methods || ['card', 'amazon_pay']
           );
 
-          const confirmLessonPayment = async function (showFinalTotalConfirmation = true) {
+          const confirmLessonPayment = async function (showFinalTotalConfirmation = true, expressCheckoutEvent = null) {
+            let paymentWasConfirmed = false;
             payBtn.disabled = true;
             errorEl.textContent = '';
 
@@ -5626,7 +5642,9 @@ function ensureLegacyBookingHandler(){
             const activePaymentData = mrmGetActiveLessonPaymentData(createData);
 
             if (!stripe || !activeStripeElements) {
-              errorEl.textContent = 'Payment confirmation is temporarily unavailable. Please close this payment window and try again.';
+              const failureMessage = 'Payment confirmation is temporarily unavailable. Please close this payment window and try again.';
+              errorEl.textContent = failureMessage;
+              mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
               payBtn.disabled = false;
               return;
             }
@@ -5644,12 +5662,17 @@ function ensureLegacyBookingHandler(){
               if (error) {
                 mrmLessonPaymentConfirmationInProgress = false;
                 mrmHidePaymentLoading();
-                errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
+                const failureMessage = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
+
+                errorEl.textContent = failureMessage;
+
+                mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
                 payBtn.disabled = false;
                 return;
               }
 
               if (paymentIntent && paymentIntent.status === 'succeeded') {
+                paymentWasConfirmed = true;
                 mrmLessonPaymentCompleted = true;
                 mrmLessonPaymentConfirmationInProgress = false;
                 await verifyPaymentIntent(paymentIntent.id, email);
@@ -5678,18 +5701,24 @@ function ensureLegacyBookingHandler(){
               }
 
               mrmHidePaymentLoading();
-              errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
+              const failureMessage = 'We could not complete this payment. Please review your details and try again.';
+              errorEl.textContent = failureMessage;
+              mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
               payBtn.disabled = false;
             } catch (err) {
               mrmLessonPaymentConfirmationInProgress = false;
               mrmHidePaymentLoading();
-              errorEl.textContent = (err && err.message) ? err.message : 'We could not complete this payment.';
+              const failureMessage = (err && err.message) ? err.message : 'We could not complete this payment.';
+              errorEl.textContent = failureMessage;
+              if (!paymentWasConfirmed) {
+                mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
+              }
               payBtn.disabled = false;
             }
           };
 
-          payBtn.onclick = () => confirmLessonPayment(true);
-          activeExpressCheckoutConfirmHandler = () => confirmLessonPayment(false);
+          payBtn.onclick = () => confirmLessonPayment(true, null);
+          activeExpressCheckoutConfirmHandler = (event) => confirmLessonPayment(false, event);
 
           lessonCheckoutSetupStarted = false;
           btn.disabled = false;
@@ -5793,7 +5822,8 @@ function ensureLegacyBookingHandler(){
           createData.allowed_payment_methods || ['card', 'amazon_pay']
         );
 
-        const confirmLessonPayment = async function (showFinalTotalConfirmation = true) {
+        const confirmLessonPayment = async function (showFinalTotalConfirmation = true, expressCheckoutEvent = null) {
+          let paymentWasConfirmed = false;
           payBtn.disabled = true;
           errorEl.textContent = '';
 
@@ -5808,7 +5838,9 @@ function ensureLegacyBookingHandler(){
           const activePaymentData = mrmGetActiveLessonPaymentData(createData);
 
           if (!stripe || !activeStripeElements) {
-            errorEl.textContent = 'Payment confirmation is temporarily unavailable. Please close this payment window and try again.';
+            const failureMessage = 'Payment confirmation is temporarily unavailable. Please close this payment window and try again.';
+            errorEl.textContent = failureMessage;
+            mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
             payBtn.disabled = false;
             return;
           }
@@ -5830,12 +5862,17 @@ function ensureLegacyBookingHandler(){
             if (error) {
               mrmLessonPaymentConfirmationInProgress = false;
               mrmHidePaymentLoading();
-              errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
+              const failureMessage = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
+
+              errorEl.textContent = failureMessage;
+
+              mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
               payBtn.disabled = false;
               return;
             }
 
             if (paymentIntent && paymentIntent.status === 'succeeded') {
+              paymentWasConfirmed = true;
               mrmLessonPaymentCompleted = true;
               mrmLessonPaymentConfirmationInProgress = false;
               await verifyPaymentIntent(paymentIntent.id, email);
@@ -5855,18 +5892,24 @@ function ensureLegacyBookingHandler(){
             }
 
             mrmHidePaymentLoading();
-            errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
+            const failureMessage = 'We could not complete this payment. Please review your details and try again.';
+            errorEl.textContent = failureMessage;
+            mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
             payBtn.disabled = false;
           } catch (err) {
             mrmLessonPaymentConfirmationInProgress = false;
             mrmHidePaymentLoading();
-            errorEl.textContent = (err && err.message) ? err.message : 'We could not complete this payment.';
+            const failureMessage = (err && err.message) ? err.message : 'We could not complete this payment.';
+            errorEl.textContent = failureMessage;
+            if (!paymentWasConfirmed) {
+              mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
+            }
             payBtn.disabled = false;
           }
         };
 
-        payBtn.onclick = () => confirmLessonPayment(true);
-        activeExpressCheckoutConfirmHandler = () => confirmLessonPayment(false);
+        payBtn.onclick = () => confirmLessonPayment(true, null);
+        activeExpressCheckoutConfirmHandler = (event) => confirmLessonPayment(false, event);
 
         lessonCheckoutSetupStarted = false;
       } catch (err) {

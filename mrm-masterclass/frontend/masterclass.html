@@ -2288,6 +2288,17 @@ body,
     }
   }
 
+  function mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, message = '') {
+    if (!expressCheckoutEvent || typeof expressCheckoutEvent.paymentFailed !== 'function') return;
+    const payload = { reason: 'fail' };
+    if (message) payload.message = String(message);
+    try {
+      expressCheckoutEvent.paymentFailed(payload);
+    } catch (error) {
+      /* Failure reporting to the wallet must never create a second checkout failure. */
+    }
+  }
+
   function clearPendingMasterclassFinalization() {
     try {
       sessionStorage.removeItem(MASTERCLASS_PENDING_FINALIZATION_KEY);
@@ -3961,7 +3972,7 @@ body,
         if (!expressWrap) return;
         expressWrap.hidden = !(paymentMethods && (paymentMethods.applePay?.available || paymentMethods.googlePay?.available || paymentMethods.amazonPay?.available));
       });
-      expressCheckoutElement.on('confirm', async () => { await confirmFinalPayment(true); });
+      expressCheckoutElement.on('confirm', async (event) => { await confirmFinalPayment(true, event); });
 
       const paymentElement = elements.create('payment', {
         layout: {
@@ -4329,7 +4340,7 @@ body,
     }
   }
 
-  async function confirmFinalPayment(fromExpressCheckout = false) {
+  async function confirmFinalPayment(fromExpressCheckout = false, expressCheckoutEvent = null) {
     const state = window.MRM_MASTERCLASS_PAYMENT_STATE;
     const registrationMessage = byId('modalMessage');
     const finalMessage = byId('finalConfirmationMessage');
@@ -4339,9 +4350,9 @@ body,
     let paymentWasConfirmed = false;
 
     if (!state || !state.stripe || !state.elements || !state.event || !state.checkout) {
-      if (message) {
-        message.textContent = 'Payment is not ready yet.';
-      }
+      const failureMessage = 'Payment is not ready yet.';
+      if (message) message.textContent = failureMessage;
+      mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
       return;
     }
 
@@ -4469,12 +4480,12 @@ body,
        */
       clearPendingMasterclassFinalization();
 
-      if (message) {
-        message.textContent =
-          error && error.message
-            ? error.message
-            : 'We could not complete this payment. Please review your card details and try again.';
-      }
+      const failureMessage = error && error.message
+        ? error.message
+        : 'We could not complete this payment. Please review your payment details and try again.';
+
+      if (message) message.textContent = failureMessage;
+      mrmNotifyExpressCheckoutPaymentFailed(expressCheckoutEvent, failureMessage);
 
       if (confirmButton) {
         confirmButton.disabled = false;
