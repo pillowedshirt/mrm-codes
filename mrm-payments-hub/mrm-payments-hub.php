@@ -7465,6 +7465,85 @@ private function mrm_tax_retry_or_alert_payment_intent(
     if(is_wp_error($alert))error_log('Fallback tax alert could not be created for '.$pi_id.': '.$alert->get_error_message()); return true;
   }
 
+  private function mrm_tax_sync_payment_intent_ledger($payment_intent, $attempt = 0) {
+    if (!is_array($payment_intent)) return new WP_Error('invalid_payment_intent', 'Invalid PaymentIntent.'); $pi_id = sanitize_text_field($payment_intent['id'] ?? ''); if ($pi_id === '') return new WP_Error('missing_payment_intent_id', 'Missing PaymentIntent ID.');
+    $metadata = is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : array();
+    if (sanitize_key($metadata['mrm_taxability_reason'] ?? '') === 'fallback_pending_review') return $this->mrm_tax_record_fallback_payment_intent_ledger($payment_intent);
+    $metadata_state = $this->mrm_normalize_state_code($metadata['mrm_tax_state'] ?? ($metadata['mrm_customer_state'] ?? ''));
+    $metadata_country = strtoupper(sanitize_text_field((string)($metadata['mrm_tax_country'] ?? ($metadata['mrm_customer_country'] ?? 'US'))));
+    if ($metadata_country === '') $metadata_country = 'US';
+    $customer_state_from_meta = $metadata_state;
+    $committed = $this->mrm_tax_commit_payment_intent_transaction($payment_intent);
+    if (is_wp_error($committed)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The stable Stripe Tax Transaction could not be committed: ' . $committed->get_error_message());
+    $payment_intent = is_array($committed['payment_intent'] ?? null) ? $committed['payment_intent'] : $payment_intent;
+    $metadata = is_array($payment_intent['metadata'] ?? null) ? $payment_intent['metadata'] : $metadata;
+    $parsed = is_array($committed['parsed'] ?? null) ? $committed['parsed'] : array();
+    $transaction = is_array($committed['transaction'] ?? null) ? $committed['transaction'] : array();
+    $original_lines = is_array($committed['line_items'] ?? null) ? $committed['line_items'] : array();
+    if (empty($parsed['original_transaction_id'])) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'No committed original Stripe Tax Transaction was found.');
+    if (sanitize_key($transaction['type'] ?? '') !== 'transaction') return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The committed original Stripe Tax object is not a sale transaction.');
+    $transaction_posted_at = absint($transaction['posted_at'] ?? 0); if ($transaction_posted_at <= 0) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The committed Stripe Tax Transaction has no valid posted_at timestamp.');
+    $transaction_occurred_at = $this->mrm_tax_utc_mysql_from_timestamp($transaction_posted_at); $metadata['mrm_tax_transaction_posted_at']=$transaction_posted_at; $metadata['mrm_payment_intent_created_at']=absint($payment_intent['created'] ?? 0);
+    $reversal_transaction_ids = array_values(array_unique(array_filter(array_map('sanitize_text_field', (array)($parsed['reversal_transaction_ids'] ?? array())))));
+    $refunds_by_original_line = $this->mrm_tax_net_reversals_by_original_line($parsed['original_transaction_id'], $original_lines, $reversal_transaction_ids); if (is_wp_error($refunds_by_original_line)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id, $attempt, $customer_state_from_meta, 'The Stripe Tax refund-reversal chain could not be reconciled: ' . $refunds_by_original_line->get_error_message());
+    $transaction_address = is_array($transaction['customer_details']['address'] ?? null) ? $transaction['customer_details']['address'] : array();
+    $transaction_state = $this->mrm_normalize_state_code($transaction_address['state'] ?? '');
+    $fallback_state = $transaction_state !== '' ? $transaction_state : $metadata_state;
+    $transaction_country = strtoupper(sanitize_text_field((string)($transaction_address['country'] ?? '')));
+    $fallback_country = $transaction_country !== '' ? $transaction_country : $metadata_country;
+    $calculation_lines = $this->mrm_tax_decode_line_items_metadata($metadata['mrm_tax_lines_json'] ?? '');
+    $calculation_by_reference=array(); foreach($calculation_lines as $calculation_line){ if(!is_array($calculation_line)) continue; $calculation_reference=sanitize_key($calculation_line['reference'] ?? ''); if($calculation_reference==='') continue; if(isset($calculation_by_reference[$calculation_reference])) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id,$attempt,$fallback_state,'The saved Stripe Tax calculation contains duplicate line references.'); $calculation_by_reference[$calculation_reference]=$calculation_line; }
+    $ledger_write_errors=array(); $states_written=array(); $transaction_states_counted=array(); $index=0;
+    foreach ((array)($original_lines['data'] ?? array()) as $line) {
+      $line_id=sanitize_text_field($line['id'] ?? ''); $reference=sanitize_key($line['reference'] ?? 'item_'.$index); $calculation_line=$calculation_by_reference[$reference] ?? array(); if(empty($calculation_line)){ $ledger_write_errors[]='No saved Stripe Tax calculation line matches reference '.$reference.'.'; $index++; continue; }
+      $line_amount=abs((int)($line['amount'] ?? 0)); $line_tax=abs((int)($line['amount_tax'] ?? 0));
+      if(absint($calculation_line['amount_cents'] ?? -1) !== $line_amount || absint($calculation_line['tax_cents'] ?? -1) !== $line_tax){ $ledger_write_errors[]='The saved calculation amounts do not match committed Tax Transaction line '.$reference.'.'; $index++; continue; }
+      $line_state=$this->mrm_normalize_state_code($calculation_line['jurisdiction_state'] ?? ''); $line_country=$fallback_country; $line_sourcing=sanitize_key($calculation_line['sourcing'] ?? ''); $is_performance_line=$line_sourcing==='performance' || strpos($reference,'private_lesson_in_person')!==false;
+      if($is_performance_line && $line_state===''){ $ledger_write_errors[]='The in-person lesson line has no Stripe performance-jurisdiction state.'; $index++; continue; }
+      if($line_state==='') $line_state=$fallback_state; if($line_state===''){ $ledger_write_errors[]='Tax Transaction line '.$reference.' has no usable state jurisdiction.'; $index++; continue; }
+      $taxability_reason=sanitize_key($calculation_line['taxability_reason'] ?? $metadata['mrm_taxability_reason'] ?? '');
+      $taxable_sales=min($line_amount,max(0,(int)($calculation_line['taxable_sales_cents'] ?? (in_array($taxability_reason,array('not_subject_to_tax','product_exempt','customer_exempt'),true)?0:$line_amount))));
+      $refund=$refunds_by_original_line[$line_id] ?? array('sales'=>0,'tax'=>0,'transactions'=>array()); $refund['sales']=min($line_amount,max(0,(int)$refund['sales'])); $refund['tax']=min($line_tax,max(0,(int)$refund['tax']));
+      $transaction_count=0; if(empty($transaction_states_counted[$line_state])){ $transaction_count=1; $transaction_states_counted[$line_state]=true; }
+      $row_metadata=$metadata; $row_metadata['mrm_tax_line_reference']=$reference; $row_metadata['mrm_tax_line_jurisdiction_state']=$line_state; $row_metadata['mrm_tax_line_jurisdiction_country']=$line_country; $row_metadata['mrm_tax_line_sourcing']=$line_sourcing;
+      $ledger_write_result=$this->mrm_tax_upsert_ledger_row(array('external_id'=>'payment_intent:'.$pi_id.':'.($line_id!==''?$line_id:$reference),'source_type'=>'payment_intent','payment_intent_id'=>$pi_id,'customer_state'=>$line_state,'customer_country'=>$line_country,'product_type'=>$this->mrm_tax_product_from_reference($reference,$metadata),'threshold_category'=>$this->mrm_tax_category_from_reference($reference,$metadata),'gross_sales_cents'=>$line_amount,'retail_sales_cents'=>$line_amount,'taxable_sales_cents'=>$taxable_sales,'tax_cents'=>$line_tax,'refunded_sales_cents'=>$refund['sales'],'refunded_tax_cents'=>$refund['tax'],'transaction_count'=>$transaction_count,'currency'=>$payment_intent['currency'] ?? 'usd','tax_code'=>sanitize_text_field($line['tax_code'] ?? ''),'taxability_reason'=>$taxability_reason,'tax_calculation_id'=>$parsed['calculation_id'],'tax_association_id'=>$parsed['association_id'],'tax_transaction_id'=>$parsed['original_transaction_id'],'stripe_tax_line_item_id'=>$line_id,'tax_reversals'=>array_values(array_unique($refund['transactions'])),'calculation_line_items'=>$calculation_lines,'tax_transaction_status'=>'committed','occurred_at'=>$transaction_occurred_at,'metadata'=>$row_metadata));
+      if(is_wp_error($ledger_write_result)) $ledger_write_errors[]=$ledger_write_result->get_error_message(); else $states_written[$line_state]=true; $index++;
+    }
+    if(!empty($ledger_write_errors)) return $this->mrm_tax_retry_or_alert_payment_intent($pi_id,$attempt,$fallback_state,'One or more tax-ledger rows failed: '.implode(' | ',array_values(array_unique($ledger_write_errors))));
+    if(!empty($states_written)){ $threshold_result=$this->mrm_tax_recompute_all_thresholds(); if(is_wp_error($threshold_result)){ $alert_state=sanitize_key(array_key_first($states_written)); $this->mrm_tax_create_alert($alert_state,'threshold_recompute_failed','payment_intent',0,array('message'=>$threshold_result->get_error_message(),'payment_intent_id'=>$pi_id),sanitize_key($pi_id)); return $threshold_result; } }
+    $resolved=$this->mrm_tax_resolve_alerts_by_reference('payment_intent_id',$pi_id,array('tax_ledger_sync_failed')); if(is_wp_error($resolved)) return $resolved; return true;
+  }
+
+  public function mrm_tax_retry_association($payment_intent_id, $attempt) { $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id); if (is_wp_error($payment_intent)) return $payment_intent; return $this->mrm_tax_sync_payment_intent_ledger($payment_intent, absint($attempt)); }
+
+  private function mrm_tax_resync_payment_intent_id($payment_intent_id) { $payment_intent_id = sanitize_text_field($payment_intent_id); if ($payment_intent_id === '') return; $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id); if (!is_wp_error($payment_intent)) return $this->mrm_tax_sync_payment_intent_ledger($payment_intent, 0); return $payment_intent; }
+
+  public function sync_external_payment_intent_tax_ledger($payment_intent_id) { $payment_intent = $this->stripe_retrieve_payment_intent($payment_intent_id); if (is_wp_error($payment_intent)) return $payment_intent; return $this->mrm_tax_sync_payment_intent_ledger($payment_intent, 0); }
+
+  private function mrm_verify_sheet_music_subscription_tax_configuration($price_id) {
+    $price_id=sanitize_text_field($price_id); $expected_tax_code=$this->mrm_expected_subscription_tax_code();
+    if($expected_tax_code==='') return new WP_Error('subscription_tax_model_invalid','The sheet-music subscription tax model is invalid.');
+    if($price_id==='') return new WP_Error('subscription_price_id_missing','The configured Stripe subscription Price ID is missing.');
+    $price=$this->stripe_retrieve_price($price_id); if(is_wp_error($price)) return $price;
+    if(empty($price['active'])) return new WP_Error('subscription_price_inactive','The configured Stripe Price is inactive.');
+    if(sanitize_key($price['type'] ?? '')!=='recurring') return new WP_Error('subscription_price_not_recurring','The configured Stripe Price is not recurring.');
+    $interval=sanitize_key($price['recurring']['interval'] ?? ''); $interval_count=max(1,absint($price['recurring']['interval_count'] ?? 1));
+    if($interval!=='month' || $interval_count!==1) return new WP_Error('subscription_interval_invalid','The configured Stripe Price must recur once every month.');
+    $currency=strtolower(sanitize_text_field($price['currency'] ?? '')); if($currency!=='usd') return new WP_Error('subscription_currency_invalid','The configured Stripe Price is not USD.');
+    $price_tax_behavior=sanitize_key($price['tax_behavior'] ?? ''); $effective_tax_behavior=$price_tax_behavior;
+    if($effective_tax_behavior==='' || $effective_tax_behavior==='unspecified') { $tax_settings=$this->stripe_api_request('GET','/v1/tax/settings',array(),$this->mrm_stripe_tax_headers()); if(is_wp_error($tax_settings)) return new WP_Error('subscription_tax_settings_unavailable','The Stripe Price does not specify tax behavior and the Stripe Tax default could not be retrieved: '.$tax_settings->get_error_message()); $default_tax_behavior=sanitize_key($tax_settings['defaults']['tax_behavior'] ?? ''); if($default_tax_behavior==='exclusive' || ($default_tax_behavior==='inferred_by_currency' && $currency==='usd')) $effective_tax_behavior='exclusive'; }
+    if($effective_tax_behavior!=='exclusive') return new WP_Error('subscription_tax_behavior_invalid','The subscription must use tax-exclusive pricing. Set the Price to exclusive or set the Stripe Tax default behavior to exclusive.');
+    $product_id=is_array($price['product'] ?? null)?sanitize_text_field($price['product']['id'] ?? ''):sanitize_text_field($price['product'] ?? '');
+    if($product_id==='') return new WP_Error('subscription_product_id_missing','The configured Stripe Price has no Product ID.');
+    $product=$this->stripe_retrieve_product($product_id); if(is_wp_error($product)) return $product;
+    if(empty($product['active'])) return new WP_Error('subscription_product_inactive','The configured Stripe Product is inactive.');
+    $actual_tax_code=is_array($product['tax_code'] ?? null)?sanitize_text_field($product['tax_code']['id'] ?? ''):sanitize_text_field($product['tax_code'] ?? '');
+    if($actual_tax_code!==$expected_tax_code) return new WP_Error('subscription_tax_code_mismatch','The Stripe Product tax code is '.($actual_tax_code!==''?$actual_tax_code:'missing').', but the site requires '.$expected_tax_code.'.');
+    $profile=array('profile_version'=>self::TAX_SUBSCRIPTION_CONFIG_PROFILE_VERSION,'price_id'=>$price_id,'product_id'=>$product_id,'price_active'=>!empty($price['active'])?1:0,'product_active'=>!empty($product['active'])?1:0,'price_type'=>sanitize_key($price['type'] ?? ''),'currency'=>$currency,'price_tax_behavior'=>$price_tax_behavior,'effective_tax_behavior'=>$effective_tax_behavior,'recurring_interval'=>$interval,'recurring_interval_count'=>$interval_count,'expected_tax_code'=>$expected_tax_code,'actual_tax_code'=>$actual_tax_code);
+    $configuration_fingerprint=hash('sha256',wp_json_encode($profile));
+    return array('price'=>$price,'product'=>$product,'tax_code'=>$expected_tax_code,'profile'=>$profile,'configuration_fingerprint'=>$configuration_fingerprint);
+  }
+
   private function mrm_tax_record_fallback_subscription_invoice($invoice,$subscription,$reason='') {
     if(!is_array($invoice)||!is_array($subscription))return new WP_Error('fallback_subscription_invoice_invalid','Invalid fallback subscription invoice.');
     $invoice_id=sanitize_text_field($invoice['id'] ?? ''); if($invoice_id==='')return new WP_Error('fallback_subscription_invoice_id_missing','Missing fallback subscription Invoice ID.');
