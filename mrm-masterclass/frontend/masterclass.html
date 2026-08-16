@@ -2294,6 +2294,22 @@ body,
     } catch (error) {}
   }
 
+  function mrmMasterclassFinalizationErrorMeansPaymentNotSucceeded(
+    error
+  ) {
+    const code =
+      error &&
+      error.data &&
+      error.data.code
+        ? String(error.data.code)
+        : '';
+
+    return (
+      code ===
+      'mrm_masterclass_payment_not_succeeded'
+    );
+  }
+
   function showError(message) {
     const msg = message || 'We could not load Masterclass registration right now. Please refresh the page or contact Low Brass Lessons for help.';
     const loading = byId('mrm-masterclass-loading');
@@ -4181,8 +4197,17 @@ body,
     const finalMessage = byId('finalConfirmationMessage');
     const cancelButton = byId('cancelFinalPayment');
 
-    if (finalMessage) finalMessage.textContent = '';
-    if (cancelButton) cancelButton.hidden = false;
+    if (finalMessage) {
+      finalMessage.textContent = '';
+    }
+
+    if (cancelButton) {
+      cancelButton.hidden = false;
+      cancelButton.textContent = 'Go Back';
+
+      delete cancelButton.dataset
+        .mrmRecoveryUnpaid;
+    }
 
     if (details && state.event) {
       details.textContent = (state.event.title || 'Masterclass') + ' • ' + formatDateTime(eventStart(state.event)) + ' • ' + money(state.amountCents || state.event.price_cents || 0);
@@ -4248,6 +4273,42 @@ body,
       openSuccessPopup(finalData, { event: { title: pending.event_title || 'Masterclass' } });
       window.setTimeout(function () { loadEvents(); }, 1000);
     } catch (error) {
+      if (
+        mrmMasterclassFinalizationErrorMeansPaymentNotSucceeded(
+          error
+        )
+      ) {
+        /*
+         * The browser returned from a wallet flow,
+         * but Stripe says payment was never completed.
+         *
+         * Therefore this is NOT a paid registration
+         * waiting for finalization.
+         */
+        clearPendingMasterclassFinalization();
+
+        if (finalMessage) {
+          finalMessage.textContent =
+            'Payment was not completed. No registration payment was finalized. Close this window and select the Masterclass again if you would like to retry.';
+        }
+
+        if (confirmButton) {
+          confirmButton.disabled = true;
+          confirmButton.textContent =
+            'Payment Not Completed';
+        }
+
+        if (cancelButton) {
+          cancelButton.hidden = false;
+          cancelButton.textContent = 'Close';
+
+          cancelButton.dataset
+            .mrmRecoveryUnpaid = '1';
+        }
+
+        return;
+      }
+
       const responseData = error && error.data && error.data.data ? error.data.data : {};
       if (responseData.payment_refunded) {
         clearPendingMasterclassFinalization();
@@ -4396,6 +4457,18 @@ body,
         return;
       }
 
+      /*
+       * Stripe never confirmed this payment.
+       *
+       * The pending-finalization record was saved before
+       * confirmation so redirect payment methods such as
+       * Amazon Pay could recover after leaving the site.
+       *
+       * Because confirmation failed without a redirect,
+       * this record is no longer valid and must be removed.
+       */
+      clearPendingMasterclassFinalization();
+
       if (message) {
         message.textContent =
           error && error.message
@@ -4464,13 +4537,64 @@ body,
       });
     }
 
-    if (cancelFinal && !cancelFinal.dataset.mrmBound) {
+    if (
+      cancelFinal &&
+      !cancelFinal.dataset.mrmBound
+    ) {
       cancelFinal.dataset.mrmBound = '1';
-      cancelFinal.addEventListener('click', function () {
-        closeModal('finalConfirmationModal');
-        openModal('masterclassPaymentModal');
-        window.__mrmMasterclassCheckoutInProgress = true;
-      });
+
+      cancelFinal.addEventListener(
+        'click',
+        function () {
+
+          /*
+           * This state occurs after returning from a
+           * canceled/failed redirect wallet payment.
+           *
+           * The old payment state belongs to the
+           * previous page load, so return the customer
+           * to the Masterclass listing instead of
+           * reopening an obsolete payment window.
+           */
+          if (
+            cancelFinal.dataset
+              .mrmRecoveryUnpaid === '1'
+          ) {
+            delete cancelFinal.dataset
+              .mrmRecoveryUnpaid;
+
+            cancelFinal.textContent =
+              'Go Back';
+
+            closeModal(
+              'finalConfirmationModal'
+            );
+
+            window
+              .__mrmMasterclassCheckoutInProgress =
+              false;
+
+            loadEvents();
+
+            return;
+          }
+
+          /*
+           * Normal pre-payment "Go Back" behavior.
+           */
+          closeModal(
+            'finalConfirmationModal'
+          );
+
+          openModal(
+            'masterclassPaymentModal'
+          );
+
+          window
+            .__mrmMasterclassCheckoutInProgress =
+            true;
+        }
+      );
     }
 
     if (confirmFinal && !confirmFinal.dataset.mrmBound) {
