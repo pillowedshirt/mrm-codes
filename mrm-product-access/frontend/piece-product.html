@@ -1504,7 +1504,8 @@ audio.mrm-audio{
 
 .mrm-piece-field-subcaption {
   display: block;
-  margin-top: 3px;
+  margin-top: -1px;
+  margin-bottom: 5px;
   font-size: 12px;
   line-height: 1.35;
   color: var(--color-text-muted);
@@ -1960,6 +1961,9 @@ audio.mrm-audio{
                 <label class="mrm-piece-field-label" for="mrm-payment-email">
                   Email
                 </label>
+                <span class="mrm-piece-field-subcaption">
+                  Access codes for your purchased content will be sent to this email address.
+                </span>
                 <input
                   class="mrm-piece-field-input"
                   type="email"
@@ -1968,9 +1972,6 @@ audio.mrm-audio{
                   placeholder="you@example.com"
                   required
                 />
-                <span class="mrm-piece-field-subcaption">
-                  Access codes for your purchased content will be sent to this email address.
-                </span>
               </div>
 
               <div class="mrm-piece-field-row">
@@ -1998,7 +1999,7 @@ audio.mrm-audio{
                     type="text"
                     id="mrm-billing-postal"
                     autocomplete="postal-code"
-                    placeholder="85201"
+                    placeholder="12345"
                     required
                   />
                 </div>
@@ -2027,7 +2028,7 @@ audio.mrm-audio{
                   id="mrm-billing-city"
                   type="text"
                   autocomplete="address-level2"
-                  placeholder="Mesa"
+                  placeholder="City"
                   required
                 />
               </div>
