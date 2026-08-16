@@ -1434,12 +1434,92 @@ audio.mrm-audio{
   display: none !important;
 }
 
-.mrm-piece-payment-step-heading {
-  margin: 0 0 14px 0;
-  font-family: var(--mrm-font-heading, "Academico", Georgia, "Times New Roman", serif) !important;
-  font-size: clamp(26px, 4vw, 38px);
-  line-height: 1;
-  color: #171512;
+/* =========================================================
+   Sheet-music checkout field styling
+   Matches the private-lesson booking modal structure while
+   retaining useful placeholder text inside each field.
+   ========================================================= */
+
+.mrm-piece-product-page .mrm-piece-modal-title {
+  margin: 0 !important;
+  font-family: var(
+    --mrm-font-heading,
+    "Academico",
+    Georgia,
+    "Times New Roman",
+    serif
+  ) !important;
+  font-size: 18px !important;
+  line-height: 1.2 !important;
+  font-weight: 800 !important;
+}
+
+.mrm-piece-field {
+  margin-bottom: 12px;
+}
+
+.mrm-piece-field-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.mrm-piece-field-row .mrm-piece-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.mrm-piece-field-label {
+  display: block;
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 700;
+  color: #5f5851;
+}
+
+.mrm-piece-product-page
+#mrm-payment-overlay
+.mrm-piece-field-input,
+.mrm-piece-product-page
+#mrm-payment-overlay
+.mrm-piece-field-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px !important;
+  margin: 0 !important;
+  border: 1px solid #d9cfbe !important;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+  color: #171512 !important;
+  box-shadow: none !important;
+}
+
+.mrm-piece-product-page
+#mrm-payment-overlay
+.mrm-piece-field-input::placeholder {
+  color: #8b8178;
+  opacity: 1;
+}
+
+.mrm-piece-field-subcaption {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 640px) {
+  .mrm-piece-product-page .mrm-piece-modal-title {
+    font-size: 16px !important;
+  }
+
+  .mrm-piece-field-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
 }
 
 .mrm-piece-payment-step-note {
@@ -1868,67 +1948,100 @@ audio.mrm-audio{
         <div id="mrm-payment-overlay" class="modal-overlay" aria-hidden="true" style="display:none;">
           <div class="modal" role="dialog" aria-modal="true">
             <div class="modal-header">
-              <h2>Complete Your Purchase</h2>
+              <h2 class="mrm-piece-modal-title">
+                Complete Your Purchase
+              </h2>
               <button id="payment-close" class="mrm-xbtn" type="button" aria-label="Close">×</button>
             </div>
             <div class="modal-body">
               <div id="mrm-piece-details-step" class="mrm-piece-step">
 
-              <input
-                type="email"
-                id="mrm-payment-email"
-                placeholder="Your email"
-                required
-                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
-              />
-
-              <div style="display:flex;gap:10px;margin-bottom:12px;">
+              <div class="mrm-piece-field">
+                <label class="mrm-piece-field-label" for="mrm-payment-email">
+                  Email
+                </label>
                 <input
-                  type="text"
-                  id="mrm-billing-state"
-                  maxlength="2"
-                  autocomplete="address-level1"
-                  autocapitalize="characters"
-                  placeholder="AZ"
+                  class="mrm-piece-field-input"
+                  type="email"
+                  id="mrm-payment-email"
+                  autocomplete="email"
+                  placeholder="you@example.com"
                   required
-                  style="flex:1;padding:10px 12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
                 />
+                <span class="mrm-piece-field-subcaption">
+                  Access codes for your purchased content will be sent to this email address.
+                </span>
+              </div>
+
+              <div class="mrm-piece-field-row">
+                <div class="mrm-piece-field">
+                  <label class="mrm-piece-field-label" for="mrm-billing-state">
+                    State
+                  </label>
+                  <input
+                    class="mrm-piece-field-input"
+                    type="text"
+                    id="mrm-billing-state"
+                    maxlength="2"
+                    autocomplete="address-level1"
+                    autocapitalize="characters"
+                    placeholder="AZ"
+                    required
+                  />
+                </div>
+                <div class="mrm-piece-field">
+                  <label class="mrm-piece-field-label" for="mrm-billing-postal">
+                    ZIP Code
+                  </label>
+                  <input
+                    class="mrm-piece-field-input"
+                    type="text"
+                    id="mrm-billing-postal"
+                    autocomplete="postal-code"
+                    placeholder="85201"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div class="mrm-piece-field">
+                <label class="mrm-piece-field-label" for="mrm-billing-line1">
+                  Street Address
+                </label>
                 <input
+                  class="mrm-piece-field-input"
                   type="text"
-                  id="mrm-billing-postal"
-                  placeholder="ZIP"
+                  id="mrm-billing-line1"
+                  autocomplete="address-line1"
+                  placeholder="123 Main St"
                   required
-                  style="flex:1;padding:10px 12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
                 />
               </div>
 
-              <input
-                type="text"
-                id="mrm-billing-line1"
-                autocomplete="address-line1"
-                required
-                placeholder="Street address"
-                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
-              />
+              <div class="mrm-piece-field">
+                <label class="mrm-piece-field-label" for="mrm-billing-city">
+                  City
+                </label>
+                <input
+                  class="mrm-piece-field-input"
+                  id="mrm-billing-city"
+                  type="text"
+                  autocomplete="address-level2"
+                  placeholder="Mesa"
+                  required
+                />
+              </div>
 
-              <label for="mrm-billing-city" style="display:block;font-weight:700;margin:10px 0 6px;">
-                City
-              </label>
-              <input
-                id="mrm-billing-city"
-                type="text"
-                autocomplete="address-level2"
-                required
-                placeholder="City"
-                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);background:#fff;"
-              />
-
-              <select
-                id="mrm-billing-country"
-                style="width:100%;padding:10px 12px;margin-bottom:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);background:#fff;"
-              >
-                <option value="US" selected>United States</option>
-              </select>
+              <div class="mrm-piece-field">
+                <label class="mrm-piece-field-label" for="mrm-billing-country">
+                  Country
+                </label>
+                <select class="mrm-piece-field-select" id="mrm-billing-country">
+                  <option value="US" selected>
+                    United States
+                  </option>
+                </select>
+              </div>
 
               <label id="mrm-piece-fundamentals-addon-checkout-row" class="mrm-piece-checkout-addon-row" hidden><input type="checkbox" id="mrm-piece-fundamentals-addon-checkout"/><span class="mrm-piece-checkout-addon-copy"><strong>Add the Fundamental Packet</strong><small id="mrm-piece-fundamentals-addon-checkout-description">Normally $10.00 — add it to this Full Piece for $5.00.</small></span></label>
               <div class="mrm-piece-terms-row mrm-piece-terms-modal-row">
@@ -1956,7 +2069,6 @@ audio.mrm-audio{
 
               <div id="mrm-piece-card-step" class="mrm-piece-step mrm-piece-card-payment-step" hidden>
                 <div class="mrm-piece-card-scroll">
-                  <h3 class="mrm-piece-payment-step-heading">Submit Payment</h3>
                   <p class="mrm-piece-payment-step-note">
                     Review your total below, enter any promotional code, and choose a payment method to complete secure checkout.
                   </p>

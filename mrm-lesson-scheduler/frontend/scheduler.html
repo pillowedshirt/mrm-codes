@@ -926,6 +926,20 @@ h1 {
   border-radius: var(--radius-sm);
 }
 
+.modal-form .mrm-field-subcaption {
+  display: block;
+  margin-top: -1px;
+  margin-bottom: 5px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #666;
+}
+
+.modal-form input::placeholder {
+  color: #8b8178;
+  opacity: 1;
+}
+
 .terms-row{
   display: flex;
   align-items: center;
@@ -2968,13 +2982,13 @@ body {
         <div class="modal-section-title">Complete your booking</div>
         <div class="modal-form">
           <label for="modal-first-name">First Name</label>
-          <input id="modal-first-name" autocomplete="given-name">
+          <input id="modal-first-name" autocomplete="given-name" placeholder="Jane">
 
           <label for="modal-last-name">Last Name</label>
-          <input id="modal-last-name" autocomplete="family-name">
+          <input id="modal-last-name" autocomplete="family-name" placeholder="Doe">
 
           <label for="modal-student-name">Student Name</label>
-          <input id="modal-student-name" autocomplete="name">
+          <input id="modal-student-name" autocomplete="name" placeholder="Student name">
 
           <label for="modal-instrument">Instrument</label>
           <select id="modal-instrument" disabled aria-disabled="true">
@@ -2985,22 +2999,25 @@ body {
           </select>
 
           <label for="modal-student-email">Email</label>
-          <input id="modal-student-email" type="email" autocomplete="email">
+          <span class="mrm-field-subcaption">
+            If you add the sheet music subscription, access codes for your sheet music content will be sent to this email address.
+          </span>
+          <input id="modal-student-email" type="email" autocomplete="email" placeholder="you@example.com">
 
-          <label for="modal-address">Address</label>
-          <input id="modal-address" autocomplete="street-address">
+          <label for="modal-address">Street Address</label>
+          <input id="modal-address" autocomplete="street-address" placeholder="123 Main St">
 
           <label for="modal-city">City</label>
-          <input id="modal-city" autocomplete="address-level2">
+          <input id="modal-city" autocomplete="address-level2" placeholder="Mesa">
 
           <label for="modal-state">State</label>
           <input id="modal-state" type="text" maxlength="2" autocomplete="address-level1" autocapitalize="characters" placeholder="AZ" required>
 
-          <label for="modal-postal-code">Postal Code</label>
-          <input id="modal-postal-code" autocomplete="postal-code">
+          <label for="modal-postal-code">ZIP Code</label>
+          <input id="modal-postal-code" autocomplete="postal-code" placeholder="85201">
 
           <label for="modal-phone">Phone</label>
-          <input id="modal-phone" autocomplete="tel">
+          <input id="modal-phone" autocomplete="tel" placeholder="(480) 555-1234">
 
           <label for="modal-length">Lesson length</label>
           <select id="modal-length" disabled>
