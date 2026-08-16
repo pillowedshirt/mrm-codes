@@ -1859,7 +1859,11 @@ audio.mrm-audio{
                 <input
                   type="text"
                   id="mrm-billing-state"
-                  placeholder="State (e.g., AZ)"
+                  maxlength="2"
+                  autocomplete="address-level1"
+                  autocapitalize="characters"
+                  placeholder="AZ"
+                  required
                   style="flex:1;padding:10px 12px;border-radius:12px;border:1px solid rgba(0,0,0,0.18);"
                 />
                 <input
