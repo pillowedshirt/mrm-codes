@@ -2778,6 +2778,33 @@ body {
   display: none !important;
 }
 
+
+.mrm-express-checkout-wrap {
+  width: 100%;
+  margin: 18px 0 16px;
+}
+
+.mrm-payment-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  color: rgba(47, 47, 47, 0.68);
+  font-size: 0.86rem;
+  line-height: 1;
+  text-align: center;
+}
+
+.mrm-payment-divider::before,
+.mrm-payment-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: rgba(47, 47, 47, 0.18);
+}
+
+.mrm-payment-divider span { flex: 0 0 auto; }
+
 </style>
 </head>
 
@@ -3028,7 +3055,7 @@ body {
 
               <div id="mrm-autopay-visual-note" style="display:none; margin-top:10px; font-size:12.5px; line-height:1.45;"></div>
 
-              <div style="margin-top:8px;">By selecting auto-pay, you authorize Low Brass Lessons to store your card and charge for future lessons.</div>
+              <div style="margin-top:8px;">By selecting auto-pay, you authorize Low Brass Lessons to save your selected payment method for authorized future payments.</div>
             </div>
 
             <div class="mrm-check-row">
@@ -3061,6 +3088,10 @@ body {
           <input id="mrm-promo-code-input" type="text" autocomplete="off" placeholder="Enter code" style="width:100%;max-width:320px;padding:10px 12px;border-radius:10px;border:1px solid rgba(0,0,0,0.18);" />
           <button id="mrm-promo-code-apply" type="button" style="display:none;margin-top:8px;padding:9px 14px;border:0;border-radius:999px;background:var(--color-accent,#7c4a2d);color:#fff;font-weight:700;">Apply Promotional Code</button>
           <div id="mrm-promo-code-message" style="margin-top:8px;font-size:0.92rem;"></div>
+        </div>
+        <div id="mrm-express-checkout-wrap" class="mrm-express-checkout-wrap" hidden>
+          <div id="mrm-express-checkout-element"></div>
+          <div class="mrm-payment-divider"><span>or pay with card</span></div>
         </div>
         <div id="mrm-payment-element"></div>
         <div class="mrm-payment-security-badge" aria-label="Secure payment information">
@@ -3460,6 +3491,8 @@ async function mrmInitPricingUI(){
 let stripe = null;
 let activeStripeElements = null;
 let activePaymentElement = null;
+let activeExpressCheckoutElement = null;
+let activeExpressCheckoutConfirmHandler = null;
 
 /* =========================================================
    Calendar Success Popup (Event Created)
@@ -3669,9 +3702,9 @@ function updateAutopayVisualNote() {
   }
 
   if (authorized > 0) {
-    noteEl.textContent = `Auto-pay enrollment: the first lesson is prepaid now, and your card will remain on file for up to ${authorized} total lesson charge${authorized === 1 ? '' : 's'} under this enrollment. Remaining lessons are charged automatically after delivery.`;
+    noteEl.textContent = `Auto-pay enrollment: the first lesson is prepaid now, and your selected payment method will be saved for authorized future payments for up to ${authorized} total lesson charge${authorized === 1 ? '' : 's'} under this enrollment. Remaining lessons are charged automatically after delivery.`;
   } else {
-    noteEl.textContent = 'Auto-pay enrollment: the first lesson is prepaid now, and future recurring lessons are charged automatically after delivery while lessons remain scheduled. Your saved card will be removed automatically when recurring lessons are canceled.';
+    noteEl.textContent = 'Auto-pay enrollment: the first lesson is prepaid now, and future recurring lessons are charged automatically after delivery while lessons remain scheduled. Your saved payment method will be removed automatically when recurring lessons are canceled.';
   }
 
   noteEl.style.display = 'block';
@@ -3687,6 +3720,34 @@ function ensureStripe(publishableKey){
   return stripe;
 }
 
+function mrmBuildExpressCheckoutOptions() {
+  return {
+    paymentMethods: { applePay: 'auto', googlePay: 'auto', amazonPay: 'auto', link: 'never', paypal: 'never', klarna: 'never' },
+    paymentMethodOrder: ['applePay', 'googlePay', 'amazonPay'],
+    layout: { maxColumns: 1, overflow: 'never' },
+    buttonHeight: 48,
+    buttonType: { applePay: 'plain', googlePay: 'plain' },
+    billingAddressRequired: false
+  };
+}
+
+function mrmMountLessonExpressCheckout(elements) {
+  const wrap = document.getElementById('mrm-express-checkout-wrap');
+  const mount = document.getElementById('mrm-express-checkout-element');
+  if (!elements || !wrap || !mount) return null;
+  mount.innerHTML = '';
+  wrap.hidden = true;
+  const element = elements.create('expressCheckout', mrmBuildExpressCheckoutOptions());
+  element.on('availablepaymentmethodschange', ({ paymentMethods }) => {
+    wrap.hidden = !(paymentMethods && (paymentMethods.applePay?.available || paymentMethods.googlePay?.available || paymentMethods.amazonPay?.available));
+  });
+  element.on('confirm', async () => {
+    if (typeof activeExpressCheckoutConfirmHandler === 'function') await activeExpressCheckoutConfirmHandler();
+  });
+  element.mount('#mrm-express-checkout-element');
+  return element;
+}
+
 function mrmBuildPaymentElementOptions(allowedMethods){
   const methods = Array.isArray(allowedMethods) && allowedMethods.length
     ? allowedMethods.filter(Boolean)
@@ -3695,8 +3756,8 @@ function mrmBuildPaymentElementOptions(allowedMethods){
   return {
     paymentMethodOrder: methods,
     wallets: {
-      applePay: 'auto',
-      googlePay: 'auto',
+      applePay: 'never',
+      googlePay: 'never',
       link: 'never'
     },
     layout: {
@@ -3796,9 +3857,12 @@ async function openPaymentModal(clientSecret, breakdown, allowedMethods){
     const bookingOverlay = document.getElementById('booking-modal');
     const bookingStillOpen = bookingOverlay && bookingOverlay.getAttribute('aria-hidden') === 'false';
     if (!bookingStillOpen) document.body.classList.remove('mrm-booking-modal-open');
+    if (activeExpressCheckoutElement) { try { activeExpressCheckoutElement.unmount(); } catch (error) {} }
     if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
+    activeExpressCheckoutElement = null;
     activePaymentElement = null;
     activeStripeElements = null;
+    activeExpressCheckoutConfirmHandler = null;
     mrmLessonPaymentReloadContext = null;
     mrmAppliedPromoCode = '';
     mrmAppliedPromoDiscountCents = 0;
@@ -3840,6 +3904,7 @@ async function openPaymentModal(clientSecret, breakdown, allowedMethods){
 
   try {
     activeStripeElements = stripe.elements({ clientSecret });
+    activeExpressCheckoutElement = mrmMountLessonExpressCheckout(activeStripeElements);
     activePaymentElement = activeStripeElements.create('payment', mrmBuildPaymentElementOptions(allowedMethods));
     activePaymentElement.mount('#mrm-payment-element');
   } catch (mountError) {
@@ -4983,7 +5048,7 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
     /* The canceled original must not remain the redirect-recovery target. */
     try { sessionStorage.removeItem('mrmSchedulerPayment'); } catch (error) {}
     mrmLessonPaymentReloadContext.currentData={}; mrmLessonPaymentReloadContext.pendingCheckoutRequestId=requestBody.checkout_request_id; mrmLessonPaymentReloadContext.requestBody=requestBody;
-    if(activePaymentElement){try{activePaymentElement.unmount();}catch(error){}} activePaymentElement=null;activeStripeElements=null;
+    if(activeExpressCheckoutElement){try{activeExpressCheckoutElement.unmount();}catch(error){}}if(activePaymentElement){try{activePaymentElement.unmount();}catch(error){}} activeExpressCheckoutElement=null;activePaymentElement=null;activeStripeElements=null;activeExpressCheckoutConfirmHandler=null;
     if(paymentMount)paymentMount.innerHTML='<div style="padding:12px">Updating tax and secure payment form…</div>';
     const response=await fetch(mrmLessonPaymentReloadContext.payApiBase+'/create-payment-intent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(requestBody)});
     const replacementData=await mrmReadJsonOrError(response);
@@ -5006,10 +5071,10 @@ async function mrmReloadLessonPaymentIntentWithPromo() {
     }
     const stripeInstance=ensureStripe(replacementData.publishableKey||'');
     if(!stripeInstance){const rr=await mrmReleaseLessonReplacementPayment(replacementData,email,'lesson_promo_stripe_frontend_unavailable');if(errorEl)errorEl.textContent=rr.ok?'The discounted payment session was safely canceled because Stripe could not load. Please try again.':rr.message;if(payBtn)payBtn.disabled=false;return false;}
-    let nextElements=null,nextPaymentElement=null;
-    try{nextElements=stripeInstance.elements({clientSecret:replacementData.client_secret});nextPaymentElement=nextElements.create('payment',mrmBuildPaymentElementOptions(replacementData.allowed_payment_methods||['card']));if(paymentMount)paymentMount.innerHTML='';nextPaymentElement.mount('#mrm-payment-element');}
+    let nextElements=null,nextPaymentElement=null,nextExpressCheckoutElement=null;
+    try{nextElements=stripeInstance.elements({clientSecret:replacementData.client_secret});nextExpressCheckoutElement=mrmMountLessonExpressCheckout(nextElements);nextPaymentElement=nextElements.create('payment',mrmBuildPaymentElementOptions(replacementData.allowed_payment_methods||['card','amazon_pay']));if(paymentMount)paymentMount.innerHTML='';nextPaymentElement.mount('#mrm-payment-element');}
     catch(mountError){if(nextPaymentElement){try{nextPaymentElement.unmount();}catch(error){}}const rr=await mrmReleaseLessonReplacementPayment(replacementData,email,'lesson_promo_payment_element_mount_failed');if(errorEl)errorEl.textContent=rr.ok?'The discounted payment form could not be loaded, so its payment session was safely canceled. Please try again.':rr.message;if(payBtn)payBtn.disabled=false;return false;}
-    stripe=stripeInstance;activeStripeElements=nextElements;activePaymentElement=nextPaymentElement;mrmLessonPaymentCompleted=false;mrmLessonPaymentConfirmationInProgress=false;mrmRenderLessonPaymentBreakdown(replacementData);if(payBtn)payBtn.disabled=false;return true;
+    stripe=stripeInstance;activeStripeElements=nextElements;activeExpressCheckoutElement=nextExpressCheckoutElement;activePaymentElement=nextPaymentElement;mrmLessonPaymentCompleted=false;mrmLessonPaymentConfirmationInProgress=false;mrmRenderLessonPaymentBreakdown(replacementData);if(payBtn)payBtn.disabled=false;return true;
   } catch(error) {
     const rb=mrmLessonPaymentReloadContext&&mrmLessonPaymentReloadContext.requestBody?mrmLessonPaymentReloadContext.requestBody:{};
     const active=mrmLessonPaymentReloadContext&&mrmLessonPaymentReloadContext.currentData?mrmLessonPaymentReloadContext.currentData:{};
@@ -5543,17 +5608,19 @@ function ensureLegacyBookingHandler(){
           const { payBtn, errorEl, closeModal } = await openPaymentModal(
             createData.client_secret,
             createData,
-            createData.allowed_payment_methods || ['card']
+            createData.allowed_payment_methods || ['card', 'amazon_pay']
           );
 
-          payBtn.onclick = async () => {
+          const confirmLessonPayment = async function (showFinalTotalConfirmation = true) {
             payBtn.disabled = true;
             errorEl.textContent = '';
 
-            const okToPay = await showConfirmTotal(mrmGetActiveLessonPaymentData(createData));
-            if (!okToPay) {
-              payBtn.disabled = false;
-              return;
+            if (showFinalTotalConfirmation) {
+              const okToPay = await showConfirmTotal(mrmGetActiveLessonPaymentData(createData));
+              if (!okToPay) {
+                payBtn.disabled = false;
+                return;
+              }
             }
 
             const activePaymentData = mrmGetActiveLessonPaymentData(createData);
@@ -5620,6 +5687,9 @@ function ensureLegacyBookingHandler(){
               payBtn.disabled = false;
             }
           };
+
+          payBtn.onclick = () => confirmLessonPayment(true);
+          activeExpressCheckoutConfirmHandler = () => confirmLessonPayment(false);
 
           lessonCheckoutSetupStarted = false;
           btn.disabled = false;
@@ -5720,17 +5790,19 @@ function ensureLegacyBookingHandler(){
         const { payBtn, errorEl, closeModal } = await openPaymentModal(
           createData.client_secret,
           createData,
-          createData.allowed_payment_methods || ['card']
+          createData.allowed_payment_methods || ['card', 'amazon_pay']
         );
 
-        payBtn.onclick = async () => {
+        const confirmLessonPayment = async function (showFinalTotalConfirmation = true) {
           payBtn.disabled = true;
           errorEl.textContent = '';
 
-          const okToPay = await showConfirmTotal(mrmGetActiveLessonPaymentData(createData));
-          if (!okToPay) {
-            payBtn.disabled = false;
-            return;
+          if (showFinalTotalConfirmation) {
+            const okToPay = await showConfirmTotal(mrmGetActiveLessonPaymentData(createData));
+            if (!okToPay) {
+              payBtn.disabled = false;
+              return;
+            }
           }
 
           const activePaymentData = mrmGetActiveLessonPaymentData(createData);
@@ -5792,6 +5864,9 @@ function ensureLegacyBookingHandler(){
             payBtn.disabled = false;
           }
         };
+
+        payBtn.onclick = () => confirmLessonPayment(true);
+        activeExpressCheckoutConfirmHandler = () => confirmLessonPayment(false);
 
         lessonCheckoutSetupStarted = false;
       } catch (err) {

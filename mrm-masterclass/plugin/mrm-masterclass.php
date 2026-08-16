@@ -9893,7 +9893,7 @@ public function rest_create_payment_intent( $request ) {
 			 */
 			'tax_calculation_id'      => $result['calculation_id'],
 			'taxability_reason'       => $result['taxability_reason'],
-			'allowed_payment_methods' => array( 'card' ),
+			'allowed_payment_methods' => array( 'card', 'amazon_pay' ),
 		)
 	);
 }
