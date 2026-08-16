@@ -1677,6 +1677,33 @@ audio.mrm-audio{
 
 
 .mrm-fundamentals-addon-banner,.mrm-piece-checkout-addon-row{display:flex;align-items:center;gap:14px;width:100%;box-sizing:border-box;padding:16px 18px;border:1px solid rgba(110,100,63,.22);background:linear-gradient(135deg,#f8f1e5,#fffdf9);cursor:pointer}.mrm-fundamentals-addon-banner{margin:14px 0 0;border-width:1px 0 0}.mrm-fundamentals-addon-banner[hidden],.mrm-piece-checkout-addon-row[hidden]{display:none!important}.mrm-fundamentals-addon-copy,.mrm-piece-checkout-addon-copy{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}.mrm-fundamentals-addon-copy small,.mrm-piece-checkout-addon-copy small{color:#62483a;font-size:14px;line-height:1.4}.mrm-fundamentals-addon-price{padding:8px 12px;border:1px solid rgba(110,100,63,.25);border-radius:999px;background:#fff;font-weight:900;white-space:nowrap}.mrm-piece-checkout-addon-row{margin:0 0 14px;border-radius:14px}
+
+.mrm-express-checkout-wrap {
+  width: 100%;
+  margin: 18px 0 16px;
+}
+
+.mrm-payment-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  color: rgba(47, 47, 47, 0.68);
+  font-size: 0.86rem;
+  line-height: 1;
+  text-align: center;
+}
+
+.mrm-payment-divider::before,
+.mrm-payment-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: rgba(47, 47, 47, 0.18);
+}
+
+.mrm-payment-divider span { flex: 0 0 auto; }
+
 </style>
 
 <main class="mrm-piece-product-page page">
@@ -1931,7 +1958,7 @@ audio.mrm-audio{
                 <div class="mrm-piece-card-scroll">
                   <h3 class="mrm-piece-payment-step-heading">Submit Payment</h3>
                   <p class="mrm-piece-payment-step-note">
-                    Review your total below, enter any promotional code, enter your card information, and submit your secure payment.
+                    Review your total below, enter any promotional code, and choose a payment method to complete secure checkout.
                   </p>
 
                   <div id="payment-instructions"></div>
@@ -1969,6 +1996,10 @@ audio.mrm-audio{
                     ></div>
                   </div>
 
+                  <div id="mrm-piece-express-checkout-wrap" class="mrm-express-checkout-wrap" hidden>
+                    <div id="mrm-piece-express-checkout-element"></div>
+                    <div class="mrm-payment-divider"><span>or pay with card</span></div>
+                  </div>
                   <div id="mrm-payment-element"></div>
 
                   <div class="mrm-payment-security-badge" aria-label="Secure payment information">
@@ -2188,6 +2219,17 @@ audio.mrm-audio{
   let stripe = null;
   let activePaymentElement = null;
   let activeStripeElements = null;
+  let activeExpressCheckoutElement = null;
+  let activeExpressCheckoutConfirmHandler = null;
+  function mrmUnmountPiecePaymentElements() {
+    if (activeExpressCheckoutElement) { try { activeExpressCheckoutElement.unmount(); } catch (error) {} }
+    if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
+    activeExpressCheckoutElement = null;
+    activePaymentElement = null;
+    activeStripeElements = null;
+    activeExpressCheckoutConfirmHandler = null;
+  }
+
   let pendingSku = '';
 const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
 
@@ -2249,9 +2291,7 @@ const MRM_PIECE_PAYMENT_EMAIL_KEY = 'mrmPiecePaymentEmail';
       if (errorEl) errorEl.textContent = releaseResult.message;
       return false;
     }
-    if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
-    activePaymentElement = null;
-    activeStripeElements = null;
+    mrmUnmountPiecePaymentElements();
     const paymentMount = document.getElementById('mrm-payment-element');
     if (paymentMount) paymentMount.innerHTML = `<div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">${message || 'Enter your email and ZIP to load the secure payment form.'}</div>`;
     return true;
@@ -2571,7 +2611,35 @@ function mrmGetPiecePromoCodeInputValue() {
     return stripe;
   }
 
-  function mrmBuildPaymentElementOptions(allowedMethods){
+  function mrmBuildExpressCheckoutOptions() {
+  return {
+    paymentMethods: { applePay: 'auto', googlePay: 'auto', amazonPay: 'auto', link: 'never', paypal: 'never', klarna: 'never' },
+    paymentMethodOrder: ['applePay', 'googlePay', 'amazonPay'],
+    layout: { maxColumns: 1, overflow: 'never' },
+    buttonHeight: 48,
+    buttonType: { applePay: 'plain', googlePay: 'plain' },
+    billingAddressRequired: false
+  };
+}
+
+function mrmMountPieceExpressCheckout(elements) {
+  const wrap = document.getElementById('mrm-piece-express-checkout-wrap');
+  const mount = document.getElementById('mrm-piece-express-checkout-element');
+  if (!elements || !wrap || !mount) return null;
+  mount.innerHTML = '';
+  wrap.hidden = true;
+  const element = elements.create('expressCheckout', mrmBuildExpressCheckoutOptions());
+  element.on('availablepaymentmethodschange', ({ paymentMethods }) => {
+    wrap.hidden = !(paymentMethods && (paymentMethods.applePay?.available || paymentMethods.googlePay?.available || paymentMethods.amazonPay?.available));
+  });
+  element.on('confirm', async () => {
+    if (typeof activeExpressCheckoutConfirmHandler === 'function') await activeExpressCheckoutConfirmHandler();
+  });
+  element.mount('#mrm-piece-express-checkout-element');
+  return element;
+}
+
+function mrmBuildPaymentElementOptions(allowedMethods){
     const methods = Array.isArray(allowedMethods) && allowedMethods.length
       ? allowedMethods.filter(Boolean)
       : ['card'];
@@ -2579,8 +2647,8 @@ function mrmGetPiecePromoCodeInputValue() {
     return {
       paymentMethodOrder: methods,
       wallets: {
-        applePay: 'auto',
-        googlePay: 'auto',
+        applePay: 'never',
+        googlePay: 'never',
         link: 'never'
       },
       layout: {
@@ -3159,11 +3227,7 @@ async function getOfferSkuCandidates(offerEl) {
     if (termsCheck) termsCheck.checked = false;
 
     mrmClearPendingPiecePaymentIdentity();
-    if (activePaymentElement) {
-      try { activePaymentElement.unmount(); } catch (e) {}
-    }
-    activePaymentElement = null;
-    activeStripeElements = null;
+    mrmUnmountPiecePaymentElements();
 
     paymentMount.innerHTML = `
       <div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">
@@ -3203,12 +3267,7 @@ async function getOfferSkuCandidates(offerEl) {
         taxPreviewAbortController = null;
       }
       invalidatePaymentIntentRequest();
-
-      if (activePaymentElement) {
-        try { activePaymentElement.unmount(); } catch (e) {}
-      }
-      activePaymentElement = null;
-      activeStripeElements = null;
+    mrmUnmountPiecePaymentElements();
 
       pendingSku = '';
       mrmClearPendingPiecePaymentIdentity();
@@ -3234,13 +3293,7 @@ async function getOfferSkuCandidates(offerEl) {
       clearTimeout(loadTimer);
       invalidatePaymentIntentRequest();
       setContinueButtonIdle();
-
-      if (activePaymentElement) {
-        try { activePaymentElement.unmount(); } catch (e) {}
-      }
-
-      activePaymentElement = null;
-      activeStripeElements = null;
+    mrmUnmountPiecePaymentElements();
       mrmClearPendingPiecePaymentIdentity();
 
       if (paymentMount) {
@@ -3298,9 +3351,7 @@ async function getOfferSkuCandidates(offerEl) {
     const resetLoadedPaymentForBillingChange = async (message, reason = 'piece_checkout_details_changed') => {
       const releaseResult = await mrmAbandonPendingPieceCheckout(reason);
       if (!releaseResult.ok) { errorEl.textContent = releaseResult.message; payBtn.disabled = true; return false; }
-      if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
-      activePaymentElement = null;
-      activeStripeElements = null;
+    mrmUnmountPiecePaymentElements();
       payBtn.disabled = true;
       if (paymentMount) paymentMount.innerHTML = `<div style="padding:12px;border:1px solid rgba(0,0,0,0.12);border-radius:14px;">${message || 'Review the tax breakdown above, then accept the Terms of Service to load the secure payment form.'}</div>`;
       return true;
@@ -3342,11 +3393,7 @@ async function getOfferSkuCandidates(offerEl) {
 
       /* Remove every frontend reference to the obsolete Payment Intent. */
       mrmClearPendingPiecePaymentIdentity();
-      if (activePaymentElement) {
-        try { activePaymentElement.unmount(); } catch (error) {}
-      }
-      activePaymentElement = null;
-      activeStripeElements = null;
+    mrmUnmountPiecePaymentElements();
       if (paymentMount) paymentMount.innerHTML = '';
 
       /* A new email address requires a new subscriber acknowledgement. */
@@ -3776,16 +3823,15 @@ async function getOfferSkuCandidates(offerEl) {
 
           try {
             activeStripeElements = stripe.elements({ clientSecret: pendingClientSecret });
-            activePaymentElement = activeStripeElements.create('payment', mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card']));
+            activeExpressCheckoutElement = mrmMountPieceExpressCheckout(activeStripeElements);
+            activePaymentElement = activeStripeElements.create('payment', mrmBuildPaymentElementOptions(data.allowed_payment_methods || ['card', 'amazon_pay']));
             paymentMount.innerHTML = '';
             activePaymentElement.mount('#mrm-payment-element');
             mrmPiecePaymentCompleted = false;
             mrmPiecePaymentConfirmationInProgress = false;
             payBtn.disabled = false;
           } catch (mountError) {
-            if (activePaymentElement) { try { activePaymentElement.unmount(); } catch (error) {} }
-            activePaymentElement = null;
-            activeStripeElements = null;
+    mrmUnmountPiecePaymentElements();
             const releaseResult = await mrmAbandonPendingPieceCheckout('piece_payment_element_mount_failed');
             errorEl.textContent = releaseResult.ok ? 'The secure payment form could not be loaded, so the payment session was safely canceled. Please try again.' : releaseResult.message;
             payBtn.disabled = true;
@@ -4839,8 +4885,7 @@ async function getOfferSkuCandidates(offerEl) {
 
     const payBtn = document.getElementById('mrm-pay-btn');
     if (payBtn) {
-      payBtn.onclick = async function (evt) {
-        if (evt && typeof evt.preventDefault === 'function') evt.preventDefault();
+      const confirmPiecePayment = async function (showFinalTotalConfirmation = true) {
 
         const errorEl = document.getElementById('mrm-payment-error');
         const email = (document.getElementById('mrm-payment-email').value || '').trim();
@@ -4861,20 +4906,22 @@ async function getOfferSkuCandidates(offerEl) {
           return;
         }
 
-        this.disabled = true;
+        payBtn.disabled = true;
 
         try {
-          const okToPay = await showConfirmTotal(pendingBreakdown);
-          if (!okToPay) {
-            this.disabled = false;
-            return;
+          if (showFinalTotalConfirmation) {
+            const okToPay = await showConfirmTotal(pendingBreakdown);
+            if (!okToPay) {
+              payBtn.disabled = false;
+              return;
+            }
           }
 
           let preconfirm = await mrmPreconfirmPiecePayment();
           if (preconfirm && preconfirm.code === 'sheet_music_subscription_purchase_ack_required') {
             const confirmed = await mrmShowSubscriptionPurchaseWarning(preconfirm.message);
             if (!confirmed) {
-              this.disabled = false;
+              payBtn.disabled = false;
               return;
             }
             mrmPieceRecordSubscriptionPurchaseAcknowledgement(email, pendingSku);
@@ -4906,7 +4953,7 @@ async function getOfferSkuCandidates(offerEl) {
               ? preconfirm.message
               : 'The payment session could not be revalidated. No payment has been submitted. Please try again.';
             /* Temporary lookup failures leave the Payment Element retryable. */
-            this.disabled = false;
+            payBtn.disabled = false;
             return;
           }
 
@@ -4928,7 +4975,7 @@ async function getOfferSkuCandidates(offerEl) {
           if (error) {
             mrmPiecePaymentConfirmationInProgress = false;
             errorEl.textContent = (error && error.type === 'card_error') ? 'This payment could not be completed. Please try another payment method or contact your card issuer.' : 'We could not complete this payment. Please review your details and try again.';
-            this.disabled = false;
+            payBtn.disabled = false;
             return;
           }
 
@@ -4945,7 +4992,7 @@ async function getOfferSkuCandidates(offerEl) {
               errorEl.textContent = (e && e.message)
                 ? e.message
                 : 'Payment succeeded, but access setup did not finish. Please refresh and try Access, or contact support.';
-              this.disabled = false;
+              payBtn.disabled = false;
               return;
             }
           }
@@ -4955,15 +5002,21 @@ async function getOfferSkuCandidates(offerEl) {
           if (paymentIntent && paymentIntent.status) {
 
           }
-          this.disabled = false;
+          payBtn.disabled = false;
 
         } catch (e) {
           mrmPiecePaymentConfirmationInProgress = false;
 
           errorEl.textContent = 'We could not complete this payment. Please review your details and try again.';
-          this.disabled = false;
+          payBtn.disabled = false;
         }
       };
+
+      payBtn.onclick = async function (evt) {
+        if (evt && typeof evt.preventDefault === 'function') evt.preventDefault();
+        await confirmPiecePayment(true);
+      };
+      activeExpressCheckoutConfirmHandler = () => confirmPiecePayment(false);
     }
 
     piece.querySelectorAll('.mrm-purchaseBtn').forEach(btn => {
@@ -5034,10 +5087,7 @@ async function getOfferSkuCandidates(offerEl) {
         pendingSku = sku;
 
         mrmClearPendingPiecePaymentIdentity();
-        if (activePaymentElement) {
-          try { activePaymentElement.unmount(); } catch (e) {}
-          activePaymentElement = null;
-        }
+        mrmUnmountPiecePaymentElements();
         openPaymentModal(quoteData, priceDisplay);
       });
     });

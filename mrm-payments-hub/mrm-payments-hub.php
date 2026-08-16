@@ -4890,6 +4890,12 @@ private function mrm_tax_calculate_for_checkout($address, $line_items, $currency
   }
 
   private function stripe_create_offsession_payment_intent($amount_cents, $currency, $customer_id, $payment_method_id, $metadata = array(), $description = '', $tax_calculation_id = '') {
+    $payment_method = $this->stripe_retrieve_payment_method($payment_method_id);
+    if (is_wp_error($payment_method)) return $payment_method;
+    $payment_method_type = sanitize_key($payment_method['type'] ?? '');
+    if (!in_array($payment_method_type, array('card', 'amazon_pay'), true)) {
+      return new WP_Error('unsupported_saved_payment_method', 'This saved payment method cannot be used for this automatic payment.');
+    }
     $params = array(
       'amount' => (int)$amount_cents,
       'currency' => strtolower((string)$currency),
@@ -4897,7 +4903,7 @@ private function mrm_tax_calculate_for_checkout($address, $line_items, $currency
       'payment_method' => (string)$payment_method_id,
       'off_session' => 'true',
       'confirm' => 'true',
-      'payment_method_types[0]' => 'card',
+      'payment_method_types[0]' => $payment_method_type,
     );
     $tax_calculation_id = sanitize_text_field($tax_calculation_id);
     if ($tax_calculation_id !== '') $metadata['mrm_tax_calculation_id'] = $tax_calculation_id;
@@ -8453,7 +8459,7 @@ private function mrm_tax_retry_or_alert_payment_intent(
 
     $stripe_idempotency_key = 'mrm-pi-' . hash('sha256', $checkout_request_id);
     $payment_intent = $this->stripe_create_payment_intent(
-      $amount_cents, $currency, $metadata, 'Low Brass Lessons - Sheet Music Charge', array(), array('card'), $tax_calculation_id, $stripe_idempotency_key
+      $amount_cents, $currency, $metadata, 'Low Brass Lessons - Sheet Music Charge', array(), array('card', 'amazon_pay'), $tax_calculation_id, $stripe_idempotency_key
     );
     if (is_wp_error($payment_intent)) {
       if ($promo_code !== '' && $promo_discount_cents > 0) {
@@ -15758,16 +15764,14 @@ private function charge_and_unlock_autopay($data) {
     $extra = array();
     $customer_id = '';
 
-    // Default safe method set
-    $payment_method_types = array('card');
+    /*
+     * Public checkout payment methods. Card supplies manual card entry,
+     * Apple Pay, and Google Pay. Amazon Pay is its own Stripe method type.
+     */
+    $payment_method_types = array('card', 'amazon_pay');
 
-    // Keep card-only so the Payment Element can show:
-    // - card entry
-    // - Apple Pay (when available)
-    // - Google Pay (when available)
-    // We intentionally do NOT include us_bank_account here.
     if (!$save_card && !$requires_customer_for_subscription && !$requires_customer_for_piece_purchase) {
-      $payment_method_types = array('card');
+      $payment_method_types = array('card', 'amazon_pay');
     }
 
     /*
@@ -28937,7 +28941,7 @@ MRM_TAX_RULES;
     $metadata['mrm_tax_lines_json'] = (string)($tax['metadata_line_items_json'] ?? '[]');
     $extra = array();
     if (is_email($args['receipt_email'])) $extra['receipt_email'] = sanitize_email($args['receipt_email']);
-    $intent = $this->stripe_create_payment_intent($tax['amount_total_cents'], $args['currency'], $metadata, $args['description'], $extra, array('card'), $tax['calculation_id']);
+    $intent = $this->stripe_create_payment_intent($tax['amount_total_cents'], $args['currency'], $metadata, $args['description'], $extra, array('card', 'amazon_pay'), $tax['calculation_id']);
     if (is_wp_error($intent)) return $intent;
     return array('payment_intent'=>$intent,'subtotal_cents'=>$tax['subtotal_cents'],'tax_cents'=>$tax['tax_cents'],'amount_total_cents'=>$tax['amount_total_cents'],'calculation_id'=>$tax['calculation_id'],'taxability_reason'=>$tax['taxability_reason']);
   }

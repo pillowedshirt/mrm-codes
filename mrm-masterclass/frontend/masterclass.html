@@ -1875,6 +1875,12 @@ body,
   }
 }
 
+
+.mrm-express-checkout-wrap { width: 100%; margin: 18px 0 16px; }
+.mrm-payment-divider { display:flex; align-items:center; gap:12px; margin:18px 0; color:rgba(47,47,47,.68); font-size:.86rem; line-height:1; text-align:center; }
+.mrm-payment-divider::before, .mrm-payment-divider::after { content:""; flex:1 1 auto; height:1px; background:rgba(47,47,47,.18); }
+.mrm-payment-divider span { flex:0 0 auto; }
+
 </style>
   <div id="mrm-masterclass-root" class="mrm-masterclass-root">
   <main class="mc-wrap">
@@ -1996,11 +2002,15 @@ body,
       <div class="mrm-modal-content">
         <h2 id="masterclassPaymentTitle">Complete Payment</h2>
         <p class="modal-meta">
-          Review your registration total, enter your card information, and complete secure checkout.
+          Review your registration total and choose a payment method to complete secure checkout.
         </p>
 
         <div id="mrm-masterclass-checkout-summary" class="mrm-checkout-summary" hidden></div>
 
+        <div id="masterclassExpressCheckoutWrap" class="mrm-express-checkout-wrap" hidden>
+          <div id="masterclassExpressCheckoutElement"></div>
+          <div class="mrm-payment-divider"><span>or pay with card</span></div>
+        </div>
         <div id="paymentElement" class="mrm-masterclass-payment-element"></div>
 
         <div id="mrm-masterclass-security-badge" class="mrm-payment-security-badge" aria-label="Secure payment information" hidden>
@@ -2023,7 +2033,7 @@ body,
       <div class="mrm-modal-content">
       <h2 id="finalConfirmationTitle">Confirm Registration</h2>
       <p id="finalConfirmationDetails" class="modal-meta"></p>
-      <p>Please confirm that you want to complete this Masterclass registration and submit your card payment.</p>
+      <p>Please confirm that you want to complete this Masterclass registration and submit your payment.</p>
       <p id="finalConfirmationMessage" class="message" role="status" aria-live="polite"></p>
       <div class="mrm-confirmation-actions">
         <button id="confirmFinalPayment" class="mrm-primary-btn" type="button">Complete Registration</button>
@@ -2183,6 +2193,7 @@ body,
     stripe: null,
     elements: null,
     paymentElement: null,
+    expressCheckoutElement: null,
     checkout: null,
     promo: null,
     calendarDate: new Date()
@@ -3920,6 +3931,22 @@ body,
         }
       });
 
+      const expressCheckoutElement = elements.create('expressCheckout', {
+        paymentMethods: { applePay: 'auto', googlePay: 'auto', amazonPay: 'auto', link: 'never', paypal: 'never', klarna: 'never' },
+        paymentMethodOrder: ['applePay', 'googlePay', 'amazonPay'],
+        layout: { maxColumns: 1, overflow: 'never' },
+        buttonHeight: 48,
+        buttonType: { applePay: 'plain', googlePay: 'plain' },
+        billingAddressRequired: false
+      });
+      const expressWrap = byId('masterclassExpressCheckoutWrap');
+      if (expressWrap) expressWrap.hidden = true;
+      expressCheckoutElement.on('availablepaymentmethodschange', ({ paymentMethods }) => {
+        if (!expressWrap) return;
+        expressWrap.hidden = !(paymentMethods && (paymentMethods.applePay?.available || paymentMethods.googlePay?.available || paymentMethods.amazonPay?.available));
+      });
+      expressCheckoutElement.on('confirm', async () => { await confirmFinalPayment(true); });
+
       const paymentElement = elements.create('payment', {
         layout: {
           type: 'tabs',
@@ -3943,11 +3970,13 @@ body,
         }
       });
 
+      expressCheckoutElement.mount('#masterclassExpressCheckoutElement');
       paymentElement.mount('#paymentElement');
 
       state.stripe = stripe;
       state.elements = elements;
       state.paymentElement = paymentElement;
+      state.expressCheckoutElement = expressCheckoutElement;
       state.checkout = data;
 
       renderMasterclassCheckoutSummary(event, payload, data);
@@ -3979,7 +4008,7 @@ body,
       };
 
       if (message) {
-        message.textContent = 'Payment form loaded. Review your card details, then submit payment.';
+        message.textContent = 'Payment form loaded. Choose a payment method, then submit payment.';
       }
 
       if (payButton) {
@@ -4163,7 +4192,7 @@ body,
       closeOtherMasterclassModals('finalConfirmationModal');
       openModal('finalConfirmationModal');
     } else {
-      confirmFinalPayment();
+      confirmFinalPayment(false);
     }
   }
 
@@ -4239,7 +4268,7 @@ body,
     }
   }
 
-  async function confirmFinalPayment() {
+  async function confirmFinalPayment(fromExpressCheckout = false) {
     const state = window.MRM_MASTERCLASS_PAYMENT_STATE;
     const registrationMessage = byId('modalMessage');
     const finalMessage = byId('finalConfirmationMessage');
@@ -4261,9 +4290,24 @@ body,
     }
 
     try {
+      const pendingFinalization = {
+        event_id: state.event.id,
+        event_title: state.event.title || 'Masterclass',
+        payment_intent_id: state.paymentIntentId,
+        first_name: state.checkout.firstName,
+        last_name: state.checkout.lastName,
+        name: state.checkout.name,
+        email: state.checkout.email,
+        terms_accepted: state.checkout.termsAccepted,
+        promo_code: state.checkout.promoCode,
+        visitor_timezone: state.checkout.visitorTimezone
+      };
+      savePendingMasterclassFinalization(pendingFinalization);
+
       const confirmResult = await state.stripe.confirmPayment({
         elements: state.elements,
         confirmParams: {
+          return_url: window.location.href,
           payment_method_data: {
             billing_details: {
               name: state.checkout && state.checkout.name ? state.checkout.name : '',
@@ -4299,19 +4343,7 @@ body,
         ? confirmResult.paymentIntent.id
         : state.paymentIntentId;
 
-      const pendingFinalization = {
-        event_id: state.event.id,
-        event_title: state.event.title || 'Masterclass',
-        payment_intent_id: paymentIntentId,
-        first_name: state.checkout.firstName,
-        last_name: state.checkout.lastName,
-        name: state.checkout.name,
-        email: state.checkout.email,
-        terms_accepted: state.checkout.termsAccepted,
-        promo_code: state.checkout.promoCode,
-        visitor_timezone: state.checkout.visitorTimezone
-      };
-
+      pendingFinalization.payment_intent_id = paymentIntentId;
       savePendingMasterclassFinalization(pendingFinalization);
 
       const finalData = await submitMasterclassFinalization(pendingFinalization);
@@ -4450,7 +4482,7 @@ body,
           retryPendingMasterclassFinalization(true);
           return;
         }
-        confirmFinalPayment();
+        confirmFinalPayment(false);
       });
     }
 
