@@ -6670,6 +6670,52 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     return ($source === 'sheet_music_addon_initial_checkout');
   }
 
+  private function mrm_check_sheet_music_renewal_lesson_eligibility($email, $renewal_ts) {
+    global $wpdb;
+
+    $email = sanitize_email((string)$email);
+    $renewal_ts = absint($renewal_ts);
+    if (!$email || !is_email($email)) {
+      return new WP_Error('sheet_music_renewal_email_missing', 'The sheet-music subscription email could not be determined.');
+    }
+    if ($renewal_ts <= 0) {
+      return new WP_Error('sheet_music_renewal_timestamp_missing', 'The sheet-music renewal timestamp could not be determined.');
+    }
+
+    /* Future lessons do not count toward the current renewal. */
+    $window_start_ts = $renewal_ts - (28 * DAY_IN_SECONDS);
+    $window_start_mysql = gmdate('Y-m-d H:i:s', $window_start_ts);
+    $window_end_mysql = gmdate('Y-m-d H:i:s', $renewal_ts);
+    $lessons_table = $this->table_lessons();
+    $wpdb->last_error = '';
+    $lesson = $wpdb->get_row(
+      $wpdb->prepare(
+        "SELECT id, start_time, status
+         FROM {$lessons_table}
+         WHERE LOWER(TRIM(student_email)) = %s
+           AND is_consultation = 0
+           AND status NOT IN ('cancelled', 'canceled', 'series')
+           AND start_time >= %s
+           AND start_time <= %s
+         ORDER BY start_time DESC
+         LIMIT 1",
+        strtolower($email),
+        $window_start_mysql,
+        $window_end_mysql
+      ),
+      ARRAY_A
+    );
+    if ($wpdb->last_error !== '') {
+      return new WP_Error('sheet_music_renewal_lesson_lookup_failed', $wpdb->last_error);
+    }
+    return array(
+      'eligible' => is_array($lesson) && !empty($lesson['id']),
+      'lesson' => is_array($lesson) ? $lesson : array(),
+      'window_start_ts' => $window_start_ts,
+      'window_end_ts' => $renewal_ts,
+    );
+  }
+
   private function mrm_stripe_list_all_managed_sheet_music_subscriptions() {
     $managed = array(); $starting_after = ''; $pagination_guard = 0;
     do {
@@ -6955,6 +7001,89 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     return array('start'=>!empty($starts)?min($starts):0,'end'=>!empty($ends)?max($ends):0);
   }
 
+  private function mrm_end_sheet_music_subscription_for_lesson_inactivity($subscription, $invoice, $email) {
+    if (!is_array($subscription) || !is_array($invoice)) {
+      return new WP_Error('sheet_music_inactivity_cancel_invalid', 'The Stripe subscription or renewal invoice was invalid.');
+    }
+    $subscription_id = sanitize_text_field($subscription['id'] ?? '');
+    $invoice_id = sanitize_text_field($invoice['id'] ?? '');
+    $email = sanitize_email((string)$email);
+    if ($subscription_id === '') {
+      return new WP_Error('sheet_music_inactivity_subscription_missing', 'The Stripe subscription ID could not be determined.');
+    }
+
+    $marked = $this->stripe_update_subscription($subscription_id, array(
+      'metadata[mrm_end_reason]' => 'lesson_inactivity_28d',
+    ));
+    if (is_wp_error($marked)) return $marked;
+
+    $cancelled = $this->stripe_api_request('DELETE', '/v1/subscriptions/' . rawurlencode($subscription_id));
+    if (is_wp_error($cancelled)) return $cancelled;
+
+    $this->mrm_sync_local_sheet_music_subscription_from_stripe($cancelled, $email);
+    $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+    $renewal_ts = absint($invoice['period_start'] ?? 0);
+    if ($renewal_ts <= 0 && !empty($invoice['lines']['data'][0]['period']['start'])) {
+      $renewal_ts = absint($invoice['lines']['data'][0]['period']['start']);
+    }
+    $email_sent = is_array($local)
+      ? $this->mrm_send_sheet_music_subscription_lesson_inactivity_ended_email($local, $renewal_ts)
+      : false;
+
+    $order = $this->get_order_by_meta_value('mrm_sheet_music_subscription_id', $subscription_id);
+    if (is_array($order) && !empty($order['id'])) {
+      $order_id = absint($order['id']);
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'ended_lesson_inactivity');
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_end_reason', 'lesson_inactivity_28d');
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_ended_at', current_time('mysql'));
+    }
+
+    $this->mrm_subscription_debug_log('sheet music subscription ended by renewal lesson eligibility gate', array(
+      'subscription_id' => $subscription_id,
+      'invoice_id' => $invoice_id,
+      'email' => $email,
+      'email_sent' => $email_sent ? 'yes' : 'no',
+    ));
+    return true;
+  }
+
+  private function mrm_handle_invoice_created_webhook($invoice) {
+    if (!is_array($invoice) || sanitize_key($invoice['billing_reason'] ?? '') !== 'subscription_cycle') return true;
+    $subscription_id = $this->mrm_stripe_invoice_subscription_id($invoice);
+    if ($subscription_id === '') return true;
+    $subscription = $this->stripe_retrieve_subscription($subscription_id);
+    if (is_wp_error($subscription)) return $subscription;
+    if (!$this->mrm_is_managed_sheet_music_subscription($subscription)) return true;
+
+    $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
+    if (!$email || !is_email($email)) {
+      $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
+      $email = sanitize_email((string)($local['email_plain'] ?? ''));
+    }
+    $renewal_ts = absint($invoice['period_start'] ?? 0);
+    if ($renewal_ts <= 0 && !empty($invoice['lines']['data'][0]['period']['start'])) {
+      $renewal_ts = absint($invoice['lines']['data'][0]['period']['start']);
+    }
+    if ($renewal_ts <= 0) {
+      $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
+      $renewal_ts = absint($period_bounds['start'] ?? 0);
+    }
+    $eligibility = $this->mrm_check_sheet_music_renewal_lesson_eligibility($email, $renewal_ts);
+    if (is_wp_error($eligibility)) return $eligibility;
+
+    $this->mrm_subscription_debug_log('sheet music renewal lesson eligibility checked', array(
+      'subscription_id' => $subscription_id,
+      'invoice_id' => sanitize_text_field($invoice['id'] ?? ''),
+      'email' => $email,
+      'renewal_ts' => $renewal_ts,
+      'eligible' => !empty($eligibility['eligible']) ? 'yes' : 'no',
+      'qualifying_lesson_id' => !empty($eligibility['lesson']['id']) ? absint($eligibility['lesson']['id']) : 0,
+      'qualifying_lesson_time' => (string)($eligibility['lesson']['start_time'] ?? ''),
+    ));
+    if (!empty($eligibility['eligible'])) return true;
+    return $this->mrm_end_sheet_music_subscription_for_lesson_inactivity($subscription, $invoice, $email);
+  }
+
   private function mrm_handle_invoice_upcoming_webhook($invoice) {
     $subscription_id = $this->mrm_stripe_invoice_subscription_id($invoice); if ($subscription_id === '') return true;
     $subscription = $this->stripe_retrieve_subscription($subscription_id);
@@ -7021,6 +7150,8 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
   private function mrm_handle_customer_subscription_deleted_webhook($subscription) {
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
     $subscription_id = (string)($subscription['id'] ?? '');
+    $end_reason = sanitize_key($subscription['metadata']['mrm_end_reason'] ?? '');
+    $is_lesson_inactivity_end = ($end_reason === 'lesson_inactivity_28d');
 
     $this->stripe_debug_log('customer.subscription.deleted handler entered', array(
       'subscription_id' => $subscription_id,
@@ -7036,6 +7167,24 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($subscription, $email);
 
     $order = $this->get_order_by_meta_value('mrm_sheet_music_subscription_id', $subscription_id);
+    /* Intentional inactivity endings must not reopen the original lesson order. */
+    if ($is_lesson_inactivity_end) {
+      if (is_array($order) && !empty($order)) {
+        $order_id = absint($order['id'] ?? 0);
+        if ($order_id > 0) {
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'ended_lesson_inactivity');
+          $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_end_reason', 'lesson_inactivity_28d');
+          if (!$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_ended_at', '')) {
+            $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_ended_at', current_time('mysql'));
+          }
+        }
+      }
+      $this->mrm_subscription_debug_log('intentional lesson-inactivity subscription deletion acknowledged without reopening activation', array(
+        'subscription_id' => $subscription_id,
+        'email' => $email,
+      ));
+      return;
+    }
     if (is_array($order) && !empty($order)) {
       $order_id = (int)($order['id'] ?? 0);
       if ($order_id > 0) {
@@ -9590,6 +9739,17 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $order_meta = $this->mrm_get_order_meta_array($order);
       $product_type = (string)($order['product_type'] ?? '');
 
+      $subscription_end_reason = sanitize_key($order_meta['mrm_sheet_music_subscription_end_reason'] ?? '');
+      $subscription_status = sanitize_key($order_meta['mrm_sheet_music_subscription_status'] ?? '');
+      if ($subscription_end_reason === 'lesson_inactivity_28d' || $subscription_status === 'ended_lesson_inactivity') {
+        $this->mrm_subscription_debug_log('subscription activation skipped because the original subscription intentionally ended for lesson inactivity', array(
+          'context' => $context,
+          'order_id' => $order_id,
+        ));
+        $this->mrm_release_subscription_activation($order_id);
+        return false;
+      }
+
       $already_created_at = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_created_at', '');
       $already_subscription_id = (string)$this->mrm_get_order_meta_value($order, 'mrm_sheet_music_subscription_id', '');
 
@@ -10769,7 +10929,8 @@ private function mrm_tax_retry_or_alert_payment_intent(
       $this->mrm_get_sheet_music_access_section_html() .
       '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' .
       '<div>Your subscription has been created successfully in our billing system.</div>' .
-      '<div style="margin-top:12px;">You will be billed again on or about <strong>' . esc_html($anchor_label) . '</strong>, and then monthly thereafter while the subscription remains active.</div>';
+      '<div style="margin-top:12px;">You will be billed again on or about <strong>' . esc_html($anchor_label) . '</strong>, and then monthly thereafter while the subscription remains active.</div>' .
+      '<div style="margin-top:12px;"><strong>Private lesson eligibility:</strong> At each monthly renewal, the subscription remains active only if a qualifying private lesson associated with this email address occurred during the previous 28 days. If no qualifying lesson is found, the subscription will end before the next monthly renewal charge.</div>';
 
     $after_cta_html = '';
     if ($manage_url !== '') {
@@ -10876,7 +11037,12 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $renewal_label = $renewal_ts > 0 ? wp_date('F j, Y \a\t g:i A', $renewal_ts, wp_timezone()) : '';
     $title = 'Subscription Renewal Reminder - Sheet Music Access';
     $intro = '<p>This is a reminder that your sheet music subscription renewal is scheduled to occur on <strong>' . esc_html($renewal_label) . '</strong>.</p>';
-    $details = '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Renewal date:</strong> ' . esc_html($renewal_label) . '</div>' . $this->mrm_get_sheet_music_access_section_html();
+    $details =
+      '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' .
+      '<div><strong>Amount:</strong> $5.00 Per Month</div>' .
+      '<div><strong>Renewal date:</strong> ' . esc_html($renewal_label) . '</div>' .
+      $this->mrm_get_sheet_music_access_section_html() .
+      '<div style="margin-top:12px;"><strong>Private lesson eligibility:</strong> Renewal occurs only if a qualifying private lesson associated with this email address occurred during the previous 28 days.</div>';
     $after_cta_html = $manage_url !== '' ? '<div style="margin-top:14px;text-align:right;"><a href="' . esc_url($manage_url) . '" style="color:#111;text-decoration:underline;">Cancel Subscription</a></div>' : '';
     return wp_mail($email, 'Subscription Renewal Reminder - Sheet Music Access', $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support', $after_cta_html), array('Content-Type: text/html; charset=UTF-8','From: LowBrass Lessons <no-reply@lowbrass-lessons.com>'));
   }
@@ -10894,6 +11060,29 @@ private function mrm_tax_retry_or_alert_payment_intent(
         $wpdb->update($table, array('renewal_reminder_24h_sent_at' => current_time('mysql')), array('id' => absint($row['id'])));
       }
     }
+  }
+
+  private function mrm_send_sheet_music_subscription_lesson_inactivity_ended_email($sub_row, $renewal_ts) {
+    if (!is_array($sub_row)) return false;
+    $email = sanitize_email((string)($sub_row['email_plain'] ?? ''));
+    if (!$email || !is_email($email)) return false;
+    $renewal_ts = absint($renewal_ts);
+    $renewal_label = $renewal_ts > 0 ? wp_date('F j, Y', $renewal_ts, wp_timezone()) : 'today';
+    $contact_url = $this->mrm_get_contact_url();
+    $title = 'Your Sheet Music Subscription Has Ended';
+    $intro = '<p>Your sheet music subscription has ended because no qualifying private lesson associated with this email address was found during the 28 days before your monthly renewal.</p>';
+    $details =
+      '<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' .
+      '<div><strong>Status:</strong> Ended</div>' .
+      '<div><strong>Scheduled renewal date:</strong> ' . esc_html($renewal_label) . '</div>' .
+      '<div style="margin-top:12px;">No new monthly subscription charge will be made for this renewal period.</div>' .
+      '<div style="margin-top:12px;">Sheet music subscription access is available to students who remain actively enrolled in private lessons through Low Brass Lessons.</div>' .
+      '<div style="margin-top:12px;">To restart your subscription, schedule another private lesson and select the sheet music subscription during checkout.</div>';
+    $html = $this->mrm_email_wrap_html($title, $intro, $details, $contact_url, 'Contact Support');
+    return wp_mail($email, 'Sheet Music Subscription Ended', $html, array(
+      'Content-Type: text/html; charset=UTF-8',
+      'From: LowBrass Lessons <no-reply@lowbrass-lessons.com>',
+    ));
   }
 
   private function mrm_send_sheet_music_subscription_cancelled_email($sub_row, $subscription) {
@@ -14182,6 +14371,10 @@ private function charge_and_unlock_autopay($data) {
 
       case 'customer.subscription.deleted':
         $this->mrm_handle_customer_subscription_deleted_webhook($object);
+        break;
+
+      case 'invoice.created':
+        $required_processing_result = $this->mrm_handle_invoice_created_webhook($object);
         break;
 
       case 'invoice.upcoming':
@@ -19554,6 +19747,7 @@ public function handle_marketing_resubscribe() {
       'sheet_music_subscription_enrollment' => array('label' => 'Sheet music subscription enrollment confirmation', 'description' => 'Normally triggered when a customer successfully enrolls in the monthly sheet music subscription.', 'plugin' => 'payments'),
       'sheet_music_subscription_renewal_reminder' => array('label' => 'Sheet music subscription renewal reminder', 'description' => 'Sent 24 hours before a sheet music subscription renewal.', 'plugin' => 'payments'),
       'sheet_music_subscription_renewal' => array('label' => 'Sheet music subscription renewal receipt', 'description' => 'Normally triggered after a successful recurring monthly sheet music subscription charge.', 'plugin' => 'payments'),
+      'sheet_music_subscription_lesson_inactivity_ended' => array('label' => 'Sheet music subscription ended — lesson inactivity', 'description' => 'Sent when a monthly sheet music subscription ends at renewal because no qualifying private lesson was found during the previous 28 days.', 'plugin' => 'payments'),
       'sheet_music_subscription_cancelled' => array('label' => 'Sheet music subscription cancelled', 'description' => 'Normally triggered when a sheet music subscription is cancelled.', 'plugin' => 'payments'),
       'lesson_cancellation_refund' => array('label' => 'Lesson cancellation refund', 'description' => 'Normally triggered when a lesson is cancelled and a refund is issued.', 'plugin' => 'payments'),
       'lesson_cancellation_no_refund' => array('label' => 'Lesson cancellation', 'description' => 'Sent when a lesson is cancelled without qualifying for a refund.', 'plugin' => 'payments'),
@@ -21323,10 +21517,11 @@ public function handle_marketing_resubscribe() {
       'purchase_receipt_online_lesson' => array('Purchase Confirmation - Online Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> Online lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to access online lessons</strong></div><p>Your meeting link will become available 10 minutes before your lesson time and will remain available until 10 minutes after your lesson time. Please make sure your camera, microphone, and internet connection are working before joining the call.</p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p><div style="margin-top:14px;"><strong>How to access your sheet music</strong></div><p>Please check your email for the subscription confirmation.</p>',array(array('url'=>'#','label'=>'Join Lesson','variant'=>'primary'),array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
       'purchase_receipt_in_person_lesson' => array('Purchase Confirmation - In-Person Lesson with ','Purchase Confirmation','<p>We’ve received your payment successfully.</p>','<div><strong>Item:</strong> In-person lesson with </div><div><strong>Total paid:</strong> </div><div style="margin-top:14px;"><strong>How to prepare for in-person lessons</strong></div><p>Please prepare a comfortable shared space for the lesson, such as a living room or family room. The space should include two chairs, a music stand, and as little background noise as possible from TVs, conversations, or other activity.</p><div style="margin-top:14px;"><strong>Lessons outside the home</strong></div><p>If the lesson will take place at a school, church, or other community location, please complete the required approval form before the lesson begins.</p><p><a href="https://www.docusign.com/" target="_blank" rel="noopener">Placeholder DocuSign location approval link</a></p><p style="margin-top:14px;"><strong>Cancellations must be submitted at least 24 hours in advance to receive a refund. Refunds will not be issued for cancellations that occur within 24 hours of the lesson time.</strong></p>',array(array('url'=>'#','label'=>'Cancel Lesson','variant'=>'cancel'))),
 
-      'sheet_music_subscription_enrollment' => array('Subscription Confirmation - Sheet Music Access','Subscription Confirmation - Sheet Music Access','<p>You have successfully enrolled in the sheet music subscription service.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Renews on:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your subscription has been created successfully in our billing system.</div>' . '<div style="margin-top:12px;">You will be billed again on or about <strong></strong>, and then monthly thereafter while the subscription remains active.</div>','Contact Support',$this->mrm_email_cancel_subscription_text_link_html('#')),
+      'sheet_music_subscription_enrollment' => array('Subscription Confirmation - Sheet Music Access','Subscription Confirmation - Sheet Music Access','<p>You have successfully enrolled in the sheet music subscription service.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount:</strong> $5.00 Per Month</div>' . '<div><strong>Renews on:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your subscription has been created successfully in our billing system.</div>' . '<div style="margin-top:12px;">You will be billed again on or about <strong></strong>, and then monthly thereafter while the subscription remains active.</div>' . '<div style="margin-top:12px;"><strong>Private lesson eligibility:</strong> At each monthly renewal, the subscription remains active only if a qualifying private lesson associated with this email address occurred during the previous 28 days. If no qualifying lesson is found, the subscription will end before the next monthly renewal charge.</div>','Contact Support',$this->mrm_email_cancel_subscription_text_link_html('#')),
       'sheet_music_subscription_renewal' => array('Subscription Renewal - Sheet Music Access','Subscription Renewal - Sheet Music Access','<p>Your saved card has been successfully charged for your sheet music subscription renewal.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Amount Charged:</strong> </div>' . '<div><strong>Next renewal date:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Purchase Details</strong></div>' . '<div>Your sheet music subscription remains active.</div>' . '<div><strong>Invoice ID:</strong> </div>' . '<div style="margin-top:12px;">Your next monthly billing date will be on or about <strong></strong>.</div>','Contact Support',$this->mrm_email_cancel_subscription_text_link_html('#')),
       'sheet_music_subscription_cancelled' => array('Subscription Update - Sheet Music Access Cancelled','Subscription Cancelled','<p>Your sheet music subscription has been cancelled.</p>','<div><strong>Subscription:</strong> Monthly sheet music access</div>' . '<div><strong>Status:</strong> Cancelled</div>' . '<div><strong>Cancellation date:</strong> </div>' . '<div style="margin-top:12px;">You will not be charged again unless you subscribe again in the future. You will have access to sheet music products throughout the remainder of your subscription period which ends on: </div>','Contact Support'),
-      'sheet_music_subscription_renewal_reminder' => array('Subscription Renewal Reminder - Sheet Music Access','Subscription Renewal Reminder - Sheet Music Access','<p>This is a reminder that your sheet music subscription renewal is scheduled to occur on <strong></strong>.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div><div><strong>Amount:</strong> $5.00 Per Month</div><div><strong>Renewal date:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html(),'Contact Support',$this->mrm_email_cancel_subscription_text_link_html('#')),
+      'sheet_music_subscription_lesson_inactivity_ended' => array('Sheet Music Subscription Ended','Your Sheet Music Subscription Has Ended','<p>Your sheet music subscription has ended because no qualifying private lesson associated with this email address was found during the 28 days before your monthly renewal.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div>' . '<div><strong>Status:</strong> Ended</div>' . '<div><strong>Scheduled renewal date:</strong> </div>' . '<div style="margin-top:12px;">No new monthly subscription charge will be made for this renewal period.</div>' . '<div style="margin-top:12px;">Sheet music subscription access is available to students who remain actively enrolled in private lessons through Low Brass Lessons.</div>' . '<div style="margin-top:12px;">To restart your subscription, schedule another private lesson and select the sheet music subscription during checkout.</div>','Contact Support'),
+      'sheet_music_subscription_renewal_reminder' => array('Subscription Renewal Reminder - Sheet Music Access','Subscription Renewal Reminder - Sheet Music Access','<p>This is a reminder that your sheet music subscription renewal is scheduled to occur on <strong></strong>.</p>','<div><strong>Subscription:</strong> Monthly Sheet Music Access</div><div><strong>Amount:</strong> $5.00 Per Month</div><div><strong>Renewal date:</strong> </div>' . $this->mrm_get_sheet_music_access_section_html() . '<div style="margin-top:12px;"><strong>Private lesson eligibility:</strong> Renewal occurs only if a qualifying private lesson associated with this email address occurred during the previous 28 days.</div>','Contact Support',$this->mrm_email_cancel_subscription_text_link_html('#')),
       'lesson_cancellation_no_refund' => array('Lesson update — Cancellation','Lesson cancelled','<p>Your lesson has been cancelled and it does not qualify for a refund as the lesson was not cancelled the minimum 24 hours in advance.</p>','<div><strong>Cancelled lesson:</strong> </div><div><strong>Amount paid:</strong> </div><div style="margin-top:12px;">If you believe this to be a mistake please contact support.</div>','Contact Support'),
       'lesson_cancellation_refund' => array('Lesson update — Cancellation and refund submitted','Lesson cancelled and refund submitted','<p>Your lesson has been cancelled and your refund request has been submitted to Stripe. The refund is not treated as complete until Stripe confirms final success.</p>','<div><strong>Cancelled lesson:</strong> </div>' . '<div><strong>Refund amount:</strong> </div>' . '<div style="margin-top:12px;">After Stripe confirms the refund, the funds may take several business days to appear in your account, depending on your bank or card issuer.</div>','Contact Support'),
     );
