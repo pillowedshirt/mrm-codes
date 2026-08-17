@@ -5218,7 +5218,21 @@ private function mrm_tax_calculate_for_checkout($address, $line_items, $currency
         if (!is_array($subscription)) continue;
         $status = sanitize_key((string)($subscription['status'] ?? ''));
         $subscription_id = sanitize_text_field((string)($subscription['id'] ?? ''));
-        if ($subscription_id === '') continue;
+        if ($subscription_id === '') {
+          continue;
+        }
+
+        /*
+         * An inactivity-ended subscription is a hard eligibility stop, not an
+         * ordinary paid-through customer cancellation.
+         */
+        $end_reason = sanitize_key(
+          (string)($subscription['metadata']['mrm_end_reason'] ?? '')
+        );
+        if ($end_reason === 'lesson_inactivity_28d') {
+          continue;
+        }
+
         $cancel_at_period_end = !empty($subscription['cancel_at_period_end']);
         $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
         $current_period_end = max(0, (int)($period_bounds['end'] ?? 0));
@@ -6987,6 +7001,93 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     return '';
   }
 
+  private function mrm_stripe_sheet_music_renewal_timestamp($invoice) {
+    if (!is_array($invoice)) {
+      return new WP_Error(
+        'sheet_music_renewal_invoice_invalid',
+        'The Stripe renewal invoice was invalid.'
+      );
+    }
+
+    $configured_price_id = sanitize_text_field($this->subscription_price_id());
+    if ($configured_price_id === '') {
+      return new WP_Error(
+        'sheet_music_renewal_price_missing',
+        'The configured sheet-music subscription Price ID is missing.'
+      );
+    }
+
+    $matched_price = false;
+    foreach ((array)($invoice['lines']['data'] ?? array()) as $line) {
+      $price_id = sanitize_text_field(
+        $this->mrm_stripe_invoice_line_price_id($line)
+      );
+      if ($price_id !== $configured_price_id) {
+        continue;
+      }
+
+      $matched_price = true;
+      $period = is_array($line['period'] ?? null) ? $line['period'] : array();
+      $period_start = absint($period['start'] ?? 0);
+      if ($period_start > 0) {
+        return $period_start;
+      }
+    }
+
+    if ($matched_price) {
+      return new WP_Error(
+        'sheet_music_renewal_line_period_missing',
+        'The sheet-music renewal invoice line did not contain a valid service-period start.'
+      );
+    }
+
+    return new WP_Error(
+      'sheet_music_renewal_line_missing',
+      'The renewal invoice did not contain the configured sheet-music subscription line.'
+    );
+  }
+
+  private function mrm_revoke_sheet_music_subscription_ledger_access($email) {
+    global $wpdb;
+
+    $email = sanitize_email((string)$email);
+    if (!$email || !is_email($email)) {
+      return new WP_Error(
+        'sheet_music_access_revoke_email_invalid',
+        'The subscription email was invalid while revoking sheet-music subscription access.'
+      );
+    }
+
+    $table = $this->table_sheet_music_access();
+    $email_hash = $this->email_hash($email);
+    $now = current_time('mysql');
+    $wpdb->last_error = '';
+    $updated = $wpdb->query(
+      $wpdb->prepare(
+        "UPDATE {$table}
+         SET revoked_at = %s
+         WHERE email_hash = %s
+           AND sku = %s
+           AND revoked_at IS NULL
+           AND source IN (%s, %s)",
+        $now,
+        $email_hash,
+        $this->mrm_master_all_sheet_music_sku(),
+        'stripe_pi_addon',
+        'stripe_subscription_invoice'
+      )
+    );
+
+    if ($updated === false || $wpdb->last_error !== '') {
+      return new WP_Error(
+        'sheet_music_subscription_access_revoke_failed',
+        $wpdb->last_error ?: 'Subscription-derived sheet-music access could not be revoked.'
+      );
+    }
+
+    return true;
+  }
+
   private function mrm_stripe_subscription_period_bounds($subscription) {
     if (!is_array($subscription)) return array('start'=>0,'end'=>0);
     $starts = array(); $ends = array();
@@ -7001,19 +7102,27 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     return array('start'=>!empty($starts)?min($starts):0,'end'=>!empty($ends)?max($ends):0);
   }
 
-  private function mrm_end_sheet_music_subscription_for_lesson_inactivity($subscription, $invoice, $email) {
+  private function mrm_end_sheet_music_subscription_for_lesson_inactivity($subscription, $invoice, $email, $renewal_ts) {
     if (!is_array($subscription) || !is_array($invoice)) {
       return new WP_Error('sheet_music_inactivity_cancel_invalid', 'The Stripe subscription or renewal invoice was invalid.');
     }
     $subscription_id = sanitize_text_field($subscription['id'] ?? '');
     $invoice_id = sanitize_text_field($invoice['id'] ?? '');
     $email = sanitize_email((string)$email);
+    $renewal_ts = absint($renewal_ts);
     if ($subscription_id === '') {
       return new WP_Error('sheet_music_inactivity_subscription_missing', 'The Stripe subscription ID could not be determined.');
     }
+    if ($renewal_ts <= 0) {
+      return new WP_Error('sheet_music_inactivity_renewal_missing', 'The renewal service-period timestamp could not be determined.');
+    }
+
+    $access_revoke = $this->mrm_revoke_sheet_music_subscription_ledger_access($email);
+    if (is_wp_error($access_revoke)) return $access_revoke;
 
     $marked = $this->stripe_update_subscription($subscription_id, array(
       'metadata[mrm_end_reason]' => 'lesson_inactivity_28d',
+      'metadata[mrm_access_end_ts]' => (string)$renewal_ts,
     ));
     if (is_wp_error($marked)) return $marked;
 
@@ -7022,10 +7131,6 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
 
     $this->mrm_sync_local_sheet_music_subscription_from_stripe($cancelled, $email);
     $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
-    $renewal_ts = absint($invoice['period_start'] ?? 0);
-    if ($renewal_ts <= 0 && !empty($invoice['lines']['data'][0]['period']['start'])) {
-      $renewal_ts = absint($invoice['lines']['data'][0]['period']['start']);
-    }
     $email_sent = is_array($local)
       ? $this->mrm_send_sheet_music_subscription_lesson_inactivity_ended_email($local, $renewal_ts)
       : false;
@@ -7036,12 +7141,14 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_status', 'ended_lesson_inactivity');
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_end_reason', 'lesson_inactivity_28d');
       $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_ended_at', current_time('mysql'));
+      $this->mrm_set_order_meta_flag($order_id, 'mrm_sheet_music_subscription_end_invoice_id', $invoice_id);
     }
 
     $this->mrm_subscription_debug_log('sheet music subscription ended by renewal lesson eligibility gate', array(
       'subscription_id' => $subscription_id,
       'invoice_id' => $invoice_id,
       'email' => $email,
+      'renewal_ts' => $renewal_ts,
       'email_sent' => $email_sent ? 'yes' : 'no',
     ));
     return true;
@@ -7055,19 +7162,17 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     if (is_wp_error($subscription)) return $subscription;
     if (!$this->mrm_is_managed_sheet_music_subscription($subscription)) return true;
 
+    /* A retried invoice.created delivery must not cancel the subscription twice. */
+    if (sanitize_key($subscription['status'] ?? '') === 'canceled') return true;
+
     $email = sanitize_email((string)($subscription['metadata']['mrm_customer_email'] ?? ''));
     if (!$email || !is_email($email)) {
       $local = $this->mrm_get_sheet_music_subscription_by_stripe_id($subscription_id);
       $email = sanitize_email((string)($local['email_plain'] ?? ''));
     }
-    $renewal_ts = absint($invoice['period_start'] ?? 0);
-    if ($renewal_ts <= 0 && !empty($invoice['lines']['data'][0]['period']['start'])) {
-      $renewal_ts = absint($invoice['lines']['data'][0]['period']['start']);
-    }
-    if ($renewal_ts <= 0) {
-      $period_bounds = $this->mrm_stripe_subscription_period_bounds($subscription);
-      $renewal_ts = absint($period_bounds['start'] ?? 0);
-    }
+    $renewal_ts_result = $this->mrm_stripe_sheet_music_renewal_timestamp($invoice);
+    if (is_wp_error($renewal_ts_result)) return $renewal_ts_result;
+    $renewal_ts = absint($renewal_ts_result);
     $eligibility = $this->mrm_check_sheet_music_renewal_lesson_eligibility($email, $renewal_ts);
     if (is_wp_error($eligibility)) return $eligibility;
 
@@ -7081,7 +7186,7 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
       'qualifying_lesson_time' => (string)($eligibility['lesson']['start_time'] ?? ''),
     ));
     if (!empty($eligibility['eligible'])) return true;
-    return $this->mrm_end_sheet_music_subscription_for_lesson_inactivity($subscription, $invoice, $email);
+    return $this->mrm_end_sheet_music_subscription_for_lesson_inactivity($subscription, $invoice, $email, $renewal_ts);
   }
 
   private function mrm_handle_invoice_upcoming_webhook($invoice) {
@@ -7169,6 +7274,23 @@ private function mrm_handle_refund_failed_webhook($refund) { return $this->mrm_h
     $order = $this->get_order_by_meta_value('mrm_sheet_music_subscription_id', $subscription_id);
     /* Intentional inactivity endings must not reopen the original lesson order. */
     if ($is_lesson_inactivity_end) {
+      /*
+       * Idempotent safety net: the direct cancellation path normally revokes
+       * this access first, but the deleted webhook repeats the operation in
+       * case that request was interrupted.
+       */
+      $access_revoke = $this->mrm_revoke_sheet_music_subscription_ledger_access($email);
+      if (is_wp_error($access_revoke)) {
+        $this->mrm_subscription_debug_log(
+          'lesson-inactivity deleted webhook could not revoke subscription-derived access',
+          array(
+            'subscription_id' => $subscription_id,
+            'email' => $email,
+            'message' => $access_revoke->get_error_message(),
+          )
+        );
+      }
+
       if (is_array($order) && !empty($order)) {
         $order_id = absint($order['id'] ?? 0);
         if ($order_id > 0) {
@@ -10477,6 +10599,25 @@ private function mrm_tax_retry_or_alert_payment_intent(
     $period_start = $period_bounds['start'] > 0 ? $this->mrm_mysql_from_ts($period_bounds['start']) : null;
     $period_end = $period_bounds['end'] > 0 ? $this->mrm_mysql_from_ts($period_bounds['end']) : null;
     $canceled_at = !empty($subscription['canceled_at']) ? $this->mrm_mysql_from_ts((int)$subscription['canceled_at']) : null;
+    /*
+     * Ordinary customer cancellations retain their paid-through period. The
+     * lesson-inactivity renewal gate instead hard-ends access at its renewal
+     * checkpoint.
+     */
+    $end_reason = sanitize_key($subscription['metadata']['mrm_end_reason'] ?? '');
+    if ($end_reason === 'lesson_inactivity_28d') {
+      $hard_end_ts = absint($subscription['metadata']['mrm_access_end_ts'] ?? 0);
+      /* Older or malformed records fall back to Stripe's cancellation time. */
+      if ($hard_end_ts <= 0 && !empty($subscription['canceled_at'])) {
+        $hard_end_ts = absint($subscription['canceled_at']);
+      }
+      if ($hard_end_ts <= 0) {
+        $hard_end_ts = time();
+      }
+      /* Never preserve a future paid-through value after a hard ending. */
+      $hard_end_ts = min($hard_end_ts, time());
+      $period_end = $this->mrm_mysql_from_ts($hard_end_ts);
+    }
     $email = sanitize_email($subscription['metadata']['mrm_customer_email'] ?? $fallback_email);
     if ((!$email || !is_email($email)) && !empty($subscription['customer'])) {
       $order = $this->get_order_by_meta_value('mrm_sheet_music_subscription_id', $subscription_id);
