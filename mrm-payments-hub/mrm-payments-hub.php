@@ -66,10 +66,11 @@ class MRM_Payments_Hub_Single {
   private const MRM_PM_LOOKAHEAD_HOURS = 72;
   private const MRM_PM_SAME_MONTH_REQUIRES_UPDATE = true;
 
-  const MARKETING_QUEUE_SCHEMA_VERSION = '2026-09-02-1';
+  const MARKETING_QUEUE_SCHEMA_VERSION = '2026-09-02-2';
 
   private $mrm_marketing_mail_capture_active = false;
   private $mrm_marketing_current_mail_error = '';
+  private $mrm_marketing_sender_force_active = false;
 
   public function __construct() {
     add_action('admin_menu', array($this, 'admin_menu'));
@@ -18583,8 +18584,76 @@ community@example.org",
     return $wpdb->prefix . 'mrm_marketing_email_queue';
   }
 
+  private function mrm_marketing_queue_schema_ready() {
+    global $wpdb;
+
+    $campaigns = $this->table_marketing_campaigns();
+    $queue = $this->table_marketing_queue();
+
+    if (
+      !$this->mrm_marketing_table_exists($campaigns) ||
+      !$this->mrm_marketing_table_exists($queue)
+    ) {
+      return false;
+    }
+
+    $campaign_columns = array_map(
+      'strtolower',
+      (array)$wpdb->get_col("SHOW COLUMNS FROM {$campaigns}", 0)
+    );
+
+    $queue_columns = array_map(
+      'strtolower',
+      (array)$wpdb->get_col("SHOW COLUMNS FROM {$queue}", 0)
+    );
+
+    $required_campaign_columns = array(
+      'id',
+      'created_at',
+      'updated_at',
+      'completed_at',
+      'subject',
+      'body_html',
+      'list_keys',
+      'send_mode',
+      'mailing_address',
+      'from_email',
+      'attachments',
+      'status',
+      'recipient_count',
+      'sent_count',
+      'failed_count',
+      'suppressed_count'
+    );
+
+    $required_queue_columns = array(
+      'id',
+      'campaign_id',
+      'recipient_email',
+      'unsubscribe_scope',
+      'status',
+      'attempts',
+      'available_at',
+      'claimed_at',
+      'sent_at',
+      'last_error'
+    );
+
+    return !array_diff(
+      $required_campaign_columns,
+      $campaign_columns
+    ) && !array_diff(
+      $required_queue_columns,
+      $queue_columns
+    );
+  }
+
   public function mrm_marketing_maybe_install_queue_tables() {
-    if (get_option('mrm_marketing_queue_schema_version') !== self::MARKETING_QUEUE_SCHEMA_VERSION) {
+    if (
+      get_option('mrm_marketing_queue_schema_version')
+        !== self::MARKETING_QUEUE_SCHEMA_VERSION
+      || !$this->mrm_marketing_queue_schema_ready()
+    ) {
       $this->mrm_marketing_install_queue_tables();
     }
   }
@@ -18608,7 +18677,7 @@ community@example.org",
       mailing_address text NOT NULL,
       from_email varchar(190) NOT NULL,
       attachments longtext NOT NULL,
-      status varchar(20) NOT NULL DEFAULT 'queued',
+      status varchar(32) NOT NULL DEFAULT 'queued',
       recipient_count bigint(20) unsigned NOT NULL DEFAULT 0,
       sent_count bigint(20) unsigned NOT NULL DEFAULT 0,
       failed_count bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -18635,7 +18704,19 @@ community@example.org",
       KEY campaign_status (campaign_id,status)
     ) {$charset_collate};");
 
-    update_option('mrm_marketing_queue_schema_version', self::MARKETING_QUEUE_SCHEMA_VERSION, false);
+    if ($this->mrm_marketing_queue_schema_ready()) {
+      update_option(
+        'mrm_marketing_queue_schema_version',
+        self::MARKETING_QUEUE_SCHEMA_VERSION,
+        false
+      );
+    } else {
+      delete_option('mrm_marketing_queue_schema_version');
+
+      error_log(
+        'MRM marketing queue schema installation did not complete successfully.'
+      );
+    }
   }
 
   public function mrm_marketing_capture_wp_mail_error($error) {
@@ -18685,6 +18766,32 @@ community@example.org",
         return new WP_Error('mrm_marketing_queue_insert_failed', 'The recipient queue could not be saved.');
       }
     }
+    $queued_count = (int)$wpdb->get_var(
+      $wpdb->prepare(
+        "SELECT COUNT(*) FROM {$queue} WHERE campaign_id = %d",
+        $campaign_id
+      )
+    );
+
+    if ($queued_count !== count($recipients)) {
+      $wpdb->delete(
+        $queue,
+        array('campaign_id' => $campaign_id),
+        array('%d')
+      );
+
+      $wpdb->delete(
+        $campaigns,
+        array('id' => $campaign_id),
+        array('%d')
+      );
+
+      return new WP_Error(
+        'mrm_marketing_queue_count_mismatch',
+        'The campaign was not queued because the saved recipient count did not match the intended recipient count.'
+      );
+    }
+
     return $campaign_id;
   }
 
@@ -18726,19 +18833,81 @@ community@example.org",
     $done = $totals['pending'] === 0;
     $campaign = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$campaigns} WHERE id = %d", $campaign_id), ARRAY_A);
     if (!$campaign) return;
+    $final_status = !$done
+      ? 'processing'
+      : (
+          $totals['failed'] > 0
+            ? 'completed_with_failures'
+            : 'completed'
+        );
+
     $wpdb->update($campaigns, array(
       'updated_at' => current_time('mysql', true),
       'completed_at' => $done ? current_time('mysql', true) : null,
-      'status' => $done ? 'completed' : 'processing',
+      'status' => $final_status,
       'sent_count' => $totals['sent'],
       'failed_count' => $totals['failed'],
       'suppressed_count' => $totals['suppressed'],
     ), array('id' => $campaign_id));
-    if ($done && (string)$campaign['status'] !== 'completed') {
+    if (
+      $done &&
+      !in_array(
+        (string)$campaign['status'],
+        array(
+          'completed',
+          'completed_with_failures'
+        ),
+        true
+      )
+    ) {
       $this->mrm_marketing_queue_delete_campaign_attachments($campaign);
       $lists = json_decode((string)$campaign['list_keys'], true);
       $this->mrm_marketing_add_sent_log_item($campaign['subject'], is_array($lists) ? $lists : array(), (int)$campaign['recipient_count'], $totals['sent'], $totals['failed'], $campaign['send_mode']);
     }
+  }
+
+  private function mrm_marketing_sender_force_begin() {
+    $this->mrm_marketing_sender_force_active = true;
+
+    add_filter(
+      'wp_mail_from',
+      array($this, 'mrm_marketing_force_wp_mail_from'),
+      PHP_INT_MAX
+    );
+
+    add_filter(
+      'wp_mail_from_name',
+      array($this, 'mrm_marketing_force_wp_mail_from_name'),
+      PHP_INT_MAX
+    );
+  }
+
+  private function mrm_marketing_sender_force_end() {
+    remove_filter(
+      'wp_mail_from',
+      array($this, 'mrm_marketing_force_wp_mail_from'),
+      PHP_INT_MAX
+    );
+
+    remove_filter(
+      'wp_mail_from_name',
+      array($this, 'mrm_marketing_force_wp_mail_from_name'),
+      PHP_INT_MAX
+    );
+
+    $this->mrm_marketing_sender_force_active = false;
+  }
+
+  public function mrm_marketing_force_wp_mail_from($email) {
+    return $this->mrm_marketing_sender_force_active
+      ? $this->mrm_marketing_sender_email()
+      : $email;
+  }
+
+  public function mrm_marketing_force_wp_mail_from_name($name) {
+    return $this->mrm_marketing_sender_force_active
+      ? 'Low Brass Lessons'
+      : $name;
   }
 
   public function mrm_marketing_process_queue() {
@@ -18758,7 +18927,7 @@ community@example.org",
         "SELECT q.*, c.subject, c.body_html, c.send_mode, c.mailing_address, c.from_email, c.attachments
          FROM {$queue} q INNER JOIN {$campaigns} c ON c.id=q.campaign_id
          WHERE q.status IN ('queued','retry') AND q.available_at <= %s
-         ORDER BY q.id ASC LIMIT 50",
+         ORDER BY q.id ASC LIMIT 20",
         $now
       ), ARRAY_A);
       $campaign_ids = array();
@@ -18789,8 +18958,26 @@ community@example.org",
         $attachments = is_array($attachments) ? array_values(array_filter($attachments, 'file_exists')) : array();
         $this->mrm_marketing_current_mail_error = '';
         $this->mrm_marketing_mail_capture_active = true;
-        $ok = wp_mail($email, $job['subject'], $html, $headers, $attachments);
-        $this->mrm_marketing_mail_capture_active = false;
+
+        if ($send_mode !== 'instructor') {
+          $this->mrm_marketing_sender_force_begin();
+        }
+
+        try {
+          $ok = wp_mail(
+            $email,
+            $job['subject'],
+            $html,
+            $headers,
+            $attachments
+          );
+        } finally {
+          if ($send_mode !== 'instructor') {
+            $this->mrm_marketing_sender_force_end();
+          }
+
+          $this->mrm_marketing_mail_capture_active = false;
+        }
         if ($ok) {
           $wpdb->update($queue, array('status' => 'sent', 'sent_at' => current_time('mysql', true), 'claimed_at' => null, 'last_error' => ''), array('id' => $job['id']));
         } else {
@@ -18807,6 +18994,10 @@ community@example.org",
       }
       foreach (array_keys($campaign_ids) as $campaign_id) $this->mrm_marketing_queue_finalize_campaign($campaign_id);
     } finally {
+      if ($this->mrm_marketing_sender_force_active) {
+        $this->mrm_marketing_sender_force_end();
+      }
+
       $this->mrm_marketing_mail_capture_active = false;
       $this->mrm_marketing_queue_lock_release();
     }
@@ -19009,13 +19200,19 @@ community@example.org",
       }
     }
 
-    $sent = wp_mail(
-      $email,
-      $subject,
-      $final_html,
-      $headers,
-      $attachments
-    );
+    $this->mrm_marketing_sender_force_begin();
+
+    try {
+      $sent = wp_mail(
+        $email,
+        $subject,
+        $final_html,
+        $headers,
+        $attachments
+      );
+    } finally {
+      $this->mrm_marketing_sender_force_end();
+    }
 
     $this->mrm_marketing_record_newsletter_welcome_attempt(
       $email,
